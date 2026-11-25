@@ -330,7 +330,7 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-pub(crate) fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
+fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
     u64::try_from(seconds)
         .ok()?
         .checked_mul(1_000_000_000)?
@@ -460,10 +460,7 @@ struct ControlRequest {
 }
 
 #[cfg(unix)]
-pub(crate) fn dispatch_control(
-    peer: std::net::SocketAddr,
-    body: &[u8],
-) -> Result<serde_json::Value, String> {
+fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
     let response = prepare_control(peer, body)?;
     let instance = super::current()?.ok_or_else(rejected)?;
     let run = RUN.lock().map_err(|_| rejected())?;
@@ -481,10 +478,7 @@ pub(crate) fn dispatch_control(
 }
 
 #[cfg(unix)]
-pub(crate) fn prepare_control(
-    peer: std::net::SocketAddr,
-    body: &[u8],
-) -> Result<serde_json::Value, String> {
+fn prepare_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
     let request: ControlRequest = serde_json::from_slice(body).map_err(|_| rejected())?;
     let instance = super::current()?.ok_or_else(rejected)?;
     let run = RUN.lock().map_err(|_| rejected())?;
@@ -594,9 +588,7 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-pub(crate) fn derive_control_key<'a>(
-    credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>,
-) -> [u8; 32] {
+fn derive_control_key<'a>(credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> [u8; 32] {
     use sha2::Digest;
     let mut digest = sha2::Sha256::new();
     digest.update(b"agentdesk-test-control-key-v1\0");
@@ -610,7 +602,7 @@ pub(crate) fn derive_control_key<'a>(
 }
 
 #[cfg(unix)]
-pub(crate) fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut inner = [0x36; 64];
     let mut outer = [0x5c; 64];
@@ -629,12 +621,12 @@ pub(crate) fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(unix)]
-pub(crate) fn hex_digest(digest: [u8; 32]) -> String {
+fn hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(unix)]
-pub(crate) fn signed_control(
+fn signed_control(
     key: &[u8; 32],
     domain: &[u8],
     value: &serde_json::Value,
@@ -750,4 +742,52 @@ fn open_control(root: &std::path::Path) -> Result<std::fs::File, String> {
         return Err(rejected());
     }
     Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+// Test seams over the private control-channel helpers, for the lifecycle tests in the root test host.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn nanoseconds_for_test(seconds: i64, nanos: i64) -> Option<u64> {
+    nanoseconds(seconds, nanos)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn dispatch_control_for_test(
+    peer: std::net::SocketAddr,
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
+    dispatch_control(peer, body)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn prepare_control_for_test(
+    peer: std::net::SocketAddr,
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
+    prepare_control(peer, body)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn derive_control_key_for_test<'a>(
+    credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> [u8; 32] {
+    derive_control_key(credentials)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn control_hmac_for_test(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+    control_hmac(key, bytes)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn hex_digest_for_test(digest: [u8; 32]) -> String {
+    hex_digest(digest)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn signed_control_for_test(
+    key: &[u8; 32],
+    domain: &[u8],
+    value: &serde_json::Value,
+) -> Result<String, String> {
+    signed_control(key, domain, value)
 }

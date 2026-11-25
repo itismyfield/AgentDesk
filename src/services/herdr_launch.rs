@@ -46,7 +46,7 @@ pub(crate) use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
-pub(crate) const HOST_KIND_TEMP_EXT: &str = "host_kind";
+const HOST_KIND_TEMP_EXT: &str = "host_kind";
 /// What Herdr gives every pane process (same set through 0.9.5); a provider that sees them may
 /// report to Herdr.
 pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
@@ -83,11 +83,7 @@ pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
 
 /// O owns the channel's output, its writer accepts work, and its store holds a binding
 /// checkpoint, which only a found baseline or an applied binding writes; the store is not opened.
-pub(crate) fn o_ready_at(
-    runtime_root: Option<&Path>,
-    channel: u64,
-    kind: RuntimeHandoffKind,
-) -> bool {
+fn o_ready_at(runtime_root: Option<&Path>, channel: u64, kind: RuntimeHandoffKind) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     READINESS_READS.with(|reads| reads.set(reads.get() + 1));
     o_owns_seeded(runtime_root, channel, kind, || writer_accepts(channel))
@@ -305,6 +301,30 @@ impl Drop for WriterAcceptsGuard {
     fn drop(&mut self) {
         WRITER_ACCEPTS.with(|cell| cell.set(self.0));
     }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn host_kind_temp_ext_for_test() -> &'static str {
+    HOST_KIND_TEMP_EXT
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn o_ready_at_for_test(
+    runtime_root: Option<&Path>,
+    channel: u64,
+    kind: RuntimeHandoffKind,
+) -> bool {
+    o_ready_at(runtime_root, channel, kind)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn retire_unsent_for_test(
+    pool: &PgPool,
+    owner: &HostedOwner,
+    nonce: &str,
+    error: HerdrLaunchError,
+) -> HerdrLaunchError {
+    retire_unsent(pool, owner, nonce, error).await
 }
 
 #[cfg(test)]
@@ -644,9 +664,9 @@ pub(crate) async fn launch_herdr_session(
     })
 }
 
-/// Retires this launch's own Pending once no create left for it; a row that moved on or names a
-/// pane is kept. Returns `error`, the failure that proved nothing was sent.
-pub(crate) async fn retire_unsent(
+/// Retires this launch's own Pending, then its runtime hint, once no create left for it; a row that
+/// moved on or names a pane is kept. Returns `error`, the failure that proved nothing was sent.
+async fn retire_unsent(
     pool: &PgPool,
     owner: &HostedOwner,
     nonce: &str,
@@ -655,6 +675,8 @@ pub(crate) async fn retire_unsent(
     let retired = retire_own_unplaced(pool, owner, nonce).await;
     if retired != Ok(HostedCasOutcome::Written) {
         tracing::warn!(nonce, ?retired, ?error, "herdr launch: unsent Pending kept");
+    } else if let Err(why) = runtime_marker::clear(owner, nonce).await {
+        tracing::warn!(nonce, %why, "herdr launch: unsent retire kept its runtime hint");
     }
     error
 }

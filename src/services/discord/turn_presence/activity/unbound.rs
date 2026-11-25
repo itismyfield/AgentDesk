@@ -362,7 +362,8 @@ fn local_owner(
         && !owner.runtime_root.trim().is_empty()
 }
 
-/// Whether `found` is a self-consistent record in `state`, owned by `owner` at `endpoint`.
+/// Whether `found` is a self-consistent record in `state`, owned by `owner` at `endpoint`, or a
+/// retired one that never had a pane or evidence.
 fn herdr_record_at(
     found: &HostedObservation,
     state: HostedState,
@@ -375,13 +376,18 @@ fn herdr_record_at(
     HostedRecord::decode(serde_json::to_value(record).ok().as_ref()) == found.record
         && record.state == state
         && record.owner == *owner
-        && record.location.as_ref().is_some_and(|at| {
-            at.host == "herdr"
-                && at.execution_node == endpoint.execution_node
-                && at.endpoint_config_key == endpoint.key
-                && at.socket_addr == endpoint.socket_path.to_string_lossy()
-                && at.named_session == endpoint.herdr_session
-        })
+        && match (&record.location, &record.expected) {
+            (Some(at), _) => {
+                at.host == "herdr"
+                    && at.execution_node == endpoint.execution_node
+                    && at.endpoint_config_key == endpoint.key
+                    && at.socket_addr == endpoint.socket_path.to_string_lossy()
+                    && at.named_session == endpoint.herdr_session
+            }
+            // A create proven unsent retires its execution before any pane existed.
+            (None, None) => state == HostedState::Retired,
+            (None, Some(_)) => false,
+        }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

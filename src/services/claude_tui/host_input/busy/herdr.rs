@@ -169,24 +169,94 @@ fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget
 
 #[derive(Clone)]
 pub(crate) struct Source {
-    pub(crate) id: SourceId,
-    pub(crate) offset: u64,
+    pub(super) id: SourceId,
+    pub(super) offset: u64,
 }
 
 pub(crate) struct Context {
-    pub(crate) channel: u64,
-    pub(crate) logical: String,
-    pub(crate) nonce: String,
-    pub(crate) output_ready: fn(u64) -> bool,
-    pub(crate) target: HerdrTarget,
-    pub(crate) writer: String,
-    pub(crate) attempt_target: serde_json::Value,
+    channel: u64,
+    pub(super) logical: String,
+    nonce: String,
+    output_ready: fn(u64) -> bool,
+    pub(super) target: HerdrTarget,
+    pub(super) writer: String,
+    pub(super) attempt_target: serde_json::Value,
 }
 
 pub(crate) struct Reading {
-    pub(crate) state: BusyState,
+    pub(super) state: BusyState,
     pub(super) source: Option<Source>,
-    pub(crate) idle_verified: bool,
+    pub(super) idle_verified: bool,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Source {
+    /// The bound transcript source, for tests outside this module.
+    pub(crate) fn id_for_test(&self) -> SourceId {
+        self.id.clone()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Context {
+    /// A read context built field by field, for tests outside this module.
+    pub(crate) fn for_test(
+        channel: u64,
+        logical: String,
+        nonce: String,
+        output_ready: fn(u64) -> bool,
+        target: HerdrTarget,
+        writer: String,
+        attempt_target: serde_json::Value,
+    ) -> Self {
+        Self {
+            channel,
+            logical,
+            nonce,
+            output_ready,
+            target,
+            writer,
+            attempt_target,
+        }
+    }
+
+    pub(crate) fn output_ready_for_test(&self) -> fn(u64) -> bool {
+        self.output_ready
+    }
+
+    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+        &self.target
+    }
+
+    pub(crate) fn writer_for_test(&self) -> &str {
+        &self.writer
+    }
+
+    pub(crate) fn attempt_target_for_test(&self) -> &serde_json::Value {
+        &self.attempt_target
+    }
+
+    pub(crate) fn read_for_test(&self) -> Reading {
+        self.read()
+    }
+
+    pub(crate) fn current_source_for_test(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> Option<Source> {
+        self.current_source(authority)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Reading {
+    pub(crate) fn state_for_test(&self) -> BusyState {
+        self.state
+    }
+
+    pub(crate) fn idle_verified_for_test(&self) -> bool {
+        self.idle_verified
+    }
 }
 
 impl Reading {
@@ -230,7 +300,7 @@ pub(crate) fn observe(
 }
 
 impl Context {
-    pub(crate) fn read(&self) -> Reading {
+    pub(super) fn read(&self) -> Reading {
         if !self.target.execution_alive() {
             return Reading::held();
         }
@@ -326,7 +396,7 @@ impl Context {
             .is_some()
     }
 
-    pub(crate) fn current_source(
+    fn current_source(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> Option<Source> {

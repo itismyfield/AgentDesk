@@ -10,16 +10,17 @@ use crate::config::session_hosts::{
 use crate::services::discord::health::{
     observe_operator_notice, restart_operator_notice_for_test, send_operator_notices_on_this_thread,
 };
-use crate::services::session_host::herdr::managed_config::ManagedHome;
-use crate::services::session_host::herdr::managed_config::maintenance::*;
-use crate::services::session_host::herdr::managed_config::path::PersonalPaths;
-use crate::services::session_host::herdr::managed_config::publication::STATE_FILE;
-use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
-use crate::services::session_host::herdr::observe::{RestoreResume, RestoreUnverified};
+use crate::services::session_host::herdr_for_test::managed_config::ManagedHome;
+use crate::services::session_host::herdr_for_test::managed_config::maintenance::*;
+use crate::services::session_host::herdr_for_test::managed_config::path::PersonalPaths;
+use crate::services::session_host::herdr_for_test::managed_config::publication::STATE_FILE;
+use crate::services::session_host::herdr_for_test::observe::CANONICAL_CONFIG;
+use crate::services::session_host::herdr_for_test::observe::{RestoreResume, RestoreUnverified};
 use crate::services::session_host::herdr_socket_rig_tests::{
     NativeHerdrRig, native_registry_on_this_thread, native_server_child,
 };
 
+const RESTART: &str = restart_cause_for_test();
 const UNSAFE: &[u8] = b"[session]\nresume_agents_on_restore = true\n";
 
 struct Fixture {
@@ -505,10 +506,12 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
             Ok(())
         }
     });
-    let witness = crate::services::session_host::herdr::contract::ServerWitness {
+    let witness = crate::services::session_host::herdr_for_test::contract::ServerWitness {
         socket: home.join("herdr.sock"),
         pid: 1,
-        start: crate::services::session_host::herdr::provenance::StartIdentity::LinuxTicks(1),
+        start: crate::services::session_host::herdr_for_test::provenance::StartIdentity::LinuxTicks(
+            1,
+        ),
     };
     let restart = RestoreResume::Unverified(RestoreUnverified::ConfigChangedSinceStart);
     let unverified = RestoreResume::Unverified(RestoreUnverified::NoPeer);
@@ -518,9 +521,9 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
     let receipts = f.root.path().join("receipts");
     paused().block_on(async {
         let tick = |e7: &RestoreResume| {
-            let mut faults = pass_with(&boot, &f.personal, &|_| Some(e7.clone()));
-            for notice in faults.iter_mut().filter_map(|fault| fault.notice.as_mut()) {
-                notice.root = Some(receipts.clone());
+            let mut faults = pass_with_for_test(&boot, &f.personal, &|_| Some(e7.clone()));
+            for fault in &mut faults {
+                fault.set_notice_receipt_root_for_test(&receipts);
             }
             notify(faults, observe_operator_notice)
         };
@@ -554,7 +557,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
         );
 
         // A new process keeps only the receipt, and its first reading proves nothing.
-        RECORDS.lock().unwrap().remove("episode");
+        forget_record_for_test("episode");
         let posted = OperatorNotice {
             root: Some(receipts.clone()),
             ..OperatorNotice::herdr_home("episode-node", &home, 7_189_041)
@@ -597,7 +600,7 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
     paused().block_on(async {
         for _ in 0..3 {
             notify(
-                pass_with(&boot, &f.personal, &|_| Some(restart.clone())),
+                pass_with_for_test(&boot, &f.personal, &|_| Some(restart.clone())),
                 observe_operator_notice,
             )
             .await;

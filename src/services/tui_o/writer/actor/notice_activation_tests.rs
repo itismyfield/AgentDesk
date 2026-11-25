@@ -30,11 +30,11 @@ fn begin(runtime: &std::path::Path, path: &std::path::Path, logical: &str) -> (O
 /// The previous build captured and delivered without any notice projection.
 async fn old_build(o: &OStore, port: &Arc<Port>) {
     let mut actor = host(o, port.clone(), Alarms::default(), u64::MAX);
-    actor.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     resume(&mut actor);
-    actor.read_sources();
+    actor.read_sources_for_test();
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
 }
 
 /// A notice the legacy hook posted for `prompt`.
@@ -120,7 +120,7 @@ async fn rerendered_notice_synced_collision_boots_and_drains_without_ledger_viol
     let mut raw = current.raw_record.clone();
     raw.push(b'\n');
     actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .append_spool(
             &crate::services::tui_o::shadow::CaptureBatch {
@@ -139,7 +139,7 @@ async fn rerendered_notice_synced_collision_boots_and_drains_without_ledger_viol
     original.payload = Some(OLD_NOTICE_PAYLOAD.into());
     for input in [original.clone(), current] {
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .append_ledger(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::Materialized {
@@ -155,15 +155,16 @@ async fn rerendered_notice_synced_collision_boots_and_drains_without_ledger_viol
         crate::services::tui_o::writer::boot::capture();
         let actor = host(&o, port.clone(), alarms.clone(), u64::MAX);
         assert!(
-            !actor.writer.is_stopped(),
+            !actor.writer_for_test().is_stopped(),
             "a synced renderer collision must recover at writer construction"
         );
+        let (writer, bindings) = actor.into_writer_and_bindings_for_test();
         let (stop, stopped) = watch::channel(false);
         let (cause, ()) = tokio::join!(
             crate::services::tui_o::writer::actor::run_channel_at(
-                actor.writer,
+                writer,
                 ShadowProvider::Claude,
-                actor.bindings,
+                bindings,
                 stopped,
                 chrono::Utc::now(),
             ),
@@ -440,8 +441,8 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
     });
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 snapshot: MigrationSnapshot {
                     sources: vec![MigrationSource {
@@ -460,14 +461,14 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
         })
         .unwrap();
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     let key = input_key("frozen");
     assert_eq!(notice_evidence(&mut actor, &key), 1);
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .input_notices()
@@ -481,10 +482,10 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
         abandon_rival(&registry, &keys, &prompt);
         ambiguous_receipt(&registry, &keys[0], &path, "frozen", &prompt);
     }
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
-    let state = actor.writer.store().ledger().input_notices();
+    actor.deliver_owed_for_test(&progress).await;
+    let state = actor.writer_mut_for_test().store().ledger().input_notices();
     assert!(state.imported.is_empty());
     if withdrawn {
         assert_eq!(
@@ -496,14 +497,14 @@ async fn pending_in_frozen_cohort(withdrawn: bool) {
             [vec![11]],
             "a withdrawn registration takes the ordinary legacy judgment"
         );
-        assert_eq!(actor.notice_debt_extra(), 1);
+        assert_eq!(actor.notice_debt_extra_for_test(), 1);
     } else {
         assert!(state.unresolved.is_empty());
         assert_eq!(
-            actor.writer.store().ledger().excluded(&key),
+            actor.writer_mut_for_test().store().ledger().excluded(&key),
             Some("input_notice_source")
         );
-        assert_eq!(actor.notice_debt_extra(), 0);
+        assert_eq!(actor.notice_debt_extra_for_test(), 0);
     }
     assert!(port.posts.lock().unwrap().is_empty());
 }
@@ -597,10 +598,10 @@ async fn retired_before_the_deploy(released: bool, back: Return) {
         "73320000000000000000000000000097",
     );
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
-    actor.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
+    *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     resume(&mut actor);
-    actor.read_sources();
-    (actor.writer.store())
+    actor.read_sources_for_test();
+    (actor.writer_mut_for_test().store())
         .set_retired(&source_of(&path), true)
         .unwrap();
     if released {
@@ -619,8 +620,8 @@ async fn retired_before_the_deploy(released: bool, back: Return) {
         };
         let entry = Box::new(NoticeEntry::MigrationStarted { snapshot });
         actor
-            .writer
-            .record(LedgerEntry::InputNotice { entry })
+            .writer_mut_for_test()
+            .record_for_test(LedgerEntry::InputNotice { entry })
             .unwrap();
     }
     drop(actor);

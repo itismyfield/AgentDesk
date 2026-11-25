@@ -85,11 +85,11 @@ async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() 
         turns: Arc::clone(&turns),
     })));
     writer
-        .suspension
+        .suspension_for_test()
         .extend(current.execution_nonce, [old.clone()]);
-    assert!(!writer.suspension.is_empty());
-    assert!(writer.suspension.contains(&old));
-    assert!(!writer.suspension.contains(&fresh));
+    assert!(!writer.suspension_for_test().is_empty());
+    assert!(writer.suspension_for_test().contains(&old));
+    assert!(!writer.suspension_for_test().contains(&fresh));
     for _ in 0..2 {
         tokio::time::timeout(Duration::from_secs(10), writer.repost_turn())
             .await

@@ -60,6 +60,14 @@ impl<B: BindingEvents> Sources<B> {
                     if verified && kind == SourceAnomalyKind::Replaced {
                         return Ok(());
                     }
+                    // The file no longer holds the prefix this source's native seed was read from.
+                    if matches!(
+                        kind,
+                        SourceAnomalyKind::Shrunk | SourceAnomalyKind::PrefixMismatch
+                    ) && let Some(native) = &mut self.native
+                    {
+                        native.end(&self.readers[index].source);
+                    }
                     return Err(halt(format!("source {kind:?}: {detail}")));
                 }
             },

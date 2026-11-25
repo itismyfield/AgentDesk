@@ -1,7 +1,6 @@
 //! A first input whose quiet idle source proves no boundary ends retained with a resend ask; one
 //! that saw the session's own turn waits for its end, as a running turn does.
-use crate::services::claude::herdr_turn::first_input::*;
-use crate::services::claude::herdr_turn::{Attached, composer};
+use crate::services::claude::herdr_turn::{Attached, composer, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::discord::{
@@ -303,15 +302,15 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             })
         });
         let (_, target) = bound_target(&rig, &logical, 1);
-        let attached = Attached {
-            nonce: NONCE.into(),
-            session_id: native.clone(),
-            transcript: path.clone(),
+        let attached = Attached::for_test(
+            NONCE.into(),
+            native.clone(),
+            path.clone(),
             target,
-            bound: true,
-            awaiting_clear: false,
-            physical: None,
-        };
+            true,
+            false,
+            None,
+        );
         let session = logical.clone();
         let leaf = effect::created(
             Box::new(move |frame: String| {
@@ -320,7 +319,8 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 composer::READY_WAIT_FOR_TESTS.with(|wait| wait.set(budget));
                 let result = guarded_outcome::capture_preparation(|| {
                     let (sender, receiver) = std::sync::mpsc::channel();
-                    let result = write(&session, None, attached, &frame, &sender, None).map(drop);
+                    let result =
+                        write_for_test(&session, None, attached, &frame, &sender, None).map(drop);
                     drop(receiver);
                     result
                 });
@@ -376,15 +376,15 @@ fn owner_outcome(cases: &[(Case, u64)]) {
             assert!(held_watch::armed(channel), "{case:?}: its watch is left");
             if matches!(case, Case::Continuing | Moved) {
                 let (_, target) = bound_target(&rig, &logical, 1);
-                let second = Attached {
-                    nonce: NONCE.into(),
-                    session_id: native.clone(),
-                    transcript: path.clone(),
+                let second = Attached::for_test(
+                    NONCE.into(),
+                    native.clone(),
+                    path.clone(),
                     target,
-                    bound: true,
-                    awaiting_clear: false,
-                    physical: None,
-                };
+                    true,
+                    false,
+                    None,
+                );
                 let (mailbox, _registry) = match case {
                     Moved => {
                         drop((mailbox, registry));
@@ -407,7 +407,7 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 let again = (channel, attempt.clone(), case == Moved);
                 let result = runtime.block_on(delivered(&mailbox, again, move |frame| {
                     let (sender, _receiver) = std::sync::mpsc::channel();
-                    write(&session, None, second, &frame, &sender, None).map(drop)
+                    write_for_test(&session, None, second, &frame, &sender, None).map(drop)
                 }));
                 assert_eq!(result, effect::Completion::Submitted, "{case:?}");
                 assert_eq!(rig.sends().len(), 2, "{case:?}: one paste and one Enter");
@@ -728,14 +728,16 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
         None => screen("a person's draft"),
     };
     rig.answer("pane.read", held_screen);
-    let attached = |target: HerdrTarget| Attached {
-        nonce: NONCE.into(),
-        session_id: native.clone(),
-        transcript: path.clone(),
-        target,
-        bound: true,
-        awaiting_clear: false,
-        physical: None,
+    let attached = |target: HerdrTarget| {
+        Attached::for_test(
+            NONCE.into(),
+            native.clone(),
+            path.clone(),
+            target,
+            true,
+            false,
+            None,
+        )
     };
     let (_, target) = bound_target(&rig, &logical, 1);
     let first = attached(target.clone());
@@ -745,7 +747,7 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
         Box::new(move |frame: String| {
             guarded_outcome::capture_preparation(|| {
                 let (sender, _receiver) = std::sync::mpsc::channel();
-                write(&session, None, first, &frame, &sender, None).map(drop)
+                write_for_test(&session, None, first, &frame, &sender, None).map(drop)
             })
         }),
         Some(writer.clone()),
@@ -819,7 +821,8 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
                     Box::new(move |frame| {
                         guarded_outcome::capture_preparation(|| {
                             let (sender, _receiver) = std::sync::mpsc::channel();
-                            write(&session, None, attached, &frame, &sender, None).map(drop)
+                            write_for_test(&session, None, attached, &frame, &sender, None)
+                                .map(drop)
                         })
                     }),
                     Some(writer),

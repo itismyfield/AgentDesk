@@ -1,5 +1,8 @@
 use crate::config::Config;
 use crate::config_live_reload::*;
+use crate::config_live_reload::{
+    DEBOUNCE_FOR_TEST as DEBOUNCE, POLL_INTERVAL_FOR_TEST as POLL_INTERVAL,
+};
 use std::path::Path;
 use std::time::Duration;
 

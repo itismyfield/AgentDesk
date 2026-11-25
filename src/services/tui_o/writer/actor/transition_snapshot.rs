@@ -273,7 +273,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     /// What the actor and the channel's POSTs still owe; an unread POST count is an error.
-    pub(crate) fn obligations(&mut self) -> Result<Obligations, String> {
+    pub(super) fn obligations(&mut self) -> Result<Obligations, String> {
         let channel = self.writer.channel();
         let posting = super::super::deliver::posts_in_flight(channel)
             .ok_or("the channel's POSTs in flight are not counted")?;
@@ -296,6 +296,14 @@ fn home_now(gate: &OwnershipGate) -> Home {
         Home::Settled
     } else {
         Home::Moving
+    }
+}
+
+// Test seam for the notice tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    pub(in crate::services) fn obligations_for_test(&mut self) -> Result<Obligations, String> {
+        self.obligations()
     }
 }
 

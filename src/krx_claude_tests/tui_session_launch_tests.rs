@@ -5,7 +5,7 @@
 fn claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_mark_still_launches()
 {
     use crate::config::TestEnvVarGuard as Guard;
-    use crate::services::claude::tui_session_launch::prepare_and_create_claude_tui_session as launch;
+    use crate::services::claude::tui_session_launch::prepare_and_create_claude_tui_session_for_test as launch;
     use crate::services::discord::session_identity::tmux_name_from_session_key;
     use crate::services::session_host::HostKind;
     use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
@@ -37,22 +37,7 @@ fn claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_ma
     let session_key = format!("claude/token-hash/mac-mini:{tmux}");
     let witness_name = tmux_name_from_session_key(&session_key).unwrap();
     assert_eq!(read_host_kind_marker(&witness_name), HostKindMarker::Absent);
-    launch(
-        tmux,
-        dir,
-        root.path(),
-        (id, None),
-        None,
-        Default::default(),
-        "".into(),
-        false,
-        "",
-        None,
-        Some(42),
-        false,
-        None,
-    )
-    .unwrap();
+    launch(tmux, dir, root.path(), id, 42).unwrap();
     assert!(std::fs::read_to_string(&calls).unwrap().contains(tmux));
     assert_eq!(
         read_host_kind_marker(&witness_name),
@@ -63,23 +48,9 @@ fn claude_launch_marks_its_tmux_host_where_session_cleanup_looks_and_a_failed_ma
     let blocked = "AgentDesk-claude-host-marker-blocked";
     let marker = crate::services::tmux_common::session_temp_path(blocked, "host_kind");
     std::fs::create_dir(&marker).unwrap();
-    launch(
-        blocked,
-        dir,
-        root.path(),
-        (id, None),
-        None,
-        Default::default(),
-        "".into(),
-        false,
-        "",
-        None,
-        Some(43),
-        false,
-        None,
-    )
-    .err()
-    .expect("unreadable host evidence cannot authorize a publisher");
+    launch(blocked, dir, root.path(), id, 43)
+        .err()
+        .expect("unreadable host evidence cannot authorize a publisher");
     assert!(!std::fs::read_to_string(&calls).unwrap().contains(blocked));
     assert!(std::path::Path::new(&marker).is_dir());
     assert!(

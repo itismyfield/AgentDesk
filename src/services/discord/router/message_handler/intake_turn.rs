@@ -2105,6 +2105,7 @@ pub(super) async fn handle_text_message(
         let first_admission = matches!(turn_host, crate::services::turn_host::TurnHost::Tmux).then(|| {
             crate::services::tui_o::cutover::admit_codex_first(channel_id.get(), &provider, session_id.as_deref(), &context_prompt, &cancel_token, tmux_session_name.as_deref())
         }).flatten();
+        crate::logging::intake_stage::mark(user_msg_id.get(), "turn_start", None);
         tokio::task::spawn_blocking(move || {
             let mut first_admission = first_admission;
             let _original_registration = producer_registration;

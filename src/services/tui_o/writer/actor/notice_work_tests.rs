@@ -18,7 +18,6 @@ use crate::services::tui_o::writer::{
     pieces::PieceWork,
 };
 use sha2::{Digest, Sha256};
-use std::collections::VecDeque;
 use std::sync::Arc;
 use std::{future::Future, io::Write, sync::Mutex};
 use tokio::sync::watch;
@@ -172,37 +171,20 @@ fn host(o: &OStore, port: Arc<Port>, alarms: Alarms, cap: u64) -> Host {
     gate.acquired();
     let writer = ChannelWriter::new(store, gate, port, Lease, alarms);
     let bindings = Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude));
-    Actor {
-        replay_deferred: false,
+    Actor::new_for_test(
         writer,
-        deriver: UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
+        UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
             .with_input_notices(Projection::for_tests()),
-        owed: VecDeque::new(),
-        verified: None,
-        sources: Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone()),
+        Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone()),
         bindings,
-        transitions: transition::Transitions::new(None, watch::channel(false).1),
-        notice: None,
-        waiting: Waiting::default(),
-        clock: (tokio::time::Instant::now(), chrono::Utc::now()),
-        scope_hold: None,
-        boot_previous_nonce: None,
-    }
+    )
 }
 fn resume(actor: &mut Host) {
-    futures::FutureExt::now_or_never(crate::services::tui_o::writer::restart_end::refresh(
-        &mut actor.writer,
-        &mut actor.deriver,
-        actor.bindings.as_ref(),
-        ShadowProvider::Claude,
-    ))
-    .expect("empty restart history refreshes synchronously")
-    .unwrap();
-    actor
-        .sources
-        .resume(&mut actor.writer, &mut actor.deriver, &mut actor.owed)
+    futures::FutureExt::now_or_never(actor.refresh_for_test(ShadowProvider::Claude))
+        .expect("empty restart history refreshes synchronously")
         .unwrap();
-    actor.persist_notice_evidence();
+    actor.resume_sources_for_test().unwrap();
+    actor.persist_notice_evidence_for_test();
 }
 
 const OLD_NOTICE_PAYLOAD: &str = "-# ⌨️ first\n-# \n-# https://example\\.com/a\\_b";
@@ -236,15 +218,18 @@ fn rerender_fixture(
         end: bytes.len() as u64,
         line: bytes[..bytes.len() - 1].to_vec(),
     };
-    let origin = actor.sources.notice_origin(&source, &record).unwrap();
-    actor.deriver.derive_scoped(
+    let origin = actor
+        .sources_for_test()
+        .notice_origin(&source, &record)
+        .unwrap();
+    actor.deriver_mut_for_test().derive_scoped(
         &record,
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin),
         || None,
     );
-    let mut pending = actor.deriver.take_notice_evidence();
+    let mut pending = actor.deriver_mut_for_test().take_notice_evidence();
     assert_eq!(pending.len(), 1);
     let evidence = pending.pop().unwrap();
     assert_ne!(evidence.payload.as_deref(), Some(OLD_NOTICE_PAYLOAD));
@@ -265,14 +250,14 @@ fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
     let (o, evidence, _binding) = rerender_fixture(runtime.path());
     let mut actor = host(&o, Arc::new(Port::default()), Alarms::default(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(evidence.clone()),
             }),
         })
         .unwrap();
-    let snapshot = actor.undelivered(1).unwrap();
+    let snapshot = actor.undelivered_for_test(1).unwrap();
     assert_eq!((snapshot.owed, snapshot.notice_owed), (1, 1));
 
     let mut piece = PieceWork {
@@ -282,8 +267,10 @@ fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
         payload: evidence.payload.unwrap(),
         notice_origin: evidence.origin,
     };
-    actor.owed.push_back(Derived::Piece(piece.clone()));
-    let snapshot = actor.undelivered(2).unwrap();
+    actor
+        .owed_mut_for_test()
+        .push_back(Derived::Piece(piece.clone()));
+    let snapshot = actor.undelivered_for_test(2).unwrap();
     assert_eq!(
         (snapshot.owed, snapshot.notice_owed),
         (1, 1),
@@ -292,14 +279,16 @@ fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
 
     piece.unit_key.native_key = "queued-only-notice".into();
     piece.notice_origin = None;
-    actor.owed.push_back(Derived::Piece(piece.clone()));
-    let snapshot = actor.undelivered(3).unwrap();
+    actor
+        .owed_mut_for_test()
+        .push_back(Derived::Piece(piece.clone()));
+    let snapshot = actor.undelivered_for_test(3).unwrap();
     assert_eq!((snapshot.owed, snapshot.notice_owed), (2, 2));
 
     piece.unit_key.kind = crate::services::tui_o::shadow::UnitKind::Body;
     piece.unit_key.native_key = "pending-answer".into();
-    actor.owed.push_back(Derived::Piece(piece));
-    let snapshot = actor.undelivered(4).unwrap();
+    actor.owed_mut_for_test().push_back(Derived::Piece(piece));
+    let snapshot = actor.undelivered_for_test(4).unwrap();
     assert_eq!(
         (snapshot.owed, snapshot.notice_owed),
         (3, 2),
@@ -317,8 +306,8 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
     let mut kept = next.clone();
     kept.payload = Some(OLD_NOTICE_PAYLOAD.into());
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(kept.clone()),
             }),
@@ -326,9 +315,9 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
         .unwrap();
     let before = std::fs::read(notice_ledger(runtime.path())).unwrap();
     for _ in 0..2 {
-        actor.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
+        *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
             .with_input_notices(Projection::for_tests());
-        let derived = actor.deriver.derive_scoped(
+        let derived = actor.deriver_mut_for_test().derive_scoped(
             &crate::services::tui_o::shadow::CapturedRecord {
                 start: next.record.start,
                 end: next.record.end,
@@ -339,19 +328,19 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
             Ok(*next.origin.clone().unwrap()),
             || None,
         );
-        actor.owed = derived.into();
+        *actor.owed_mut_for_test() = derived.into();
         assert_eq!(
-            actor.persist_notice_evidence(),
+            actor.persist_notice_evidence_for_test(),
             [next.unit_key.clone().unwrap()]
         );
         assert_eq!(
             std::fs::read(notice_ledger(runtime.path())).unwrap(),
             before
         );
-        assert!(!actor.writer.is_stopped());
+        assert!(!actor.writer_for_test().is_stopped());
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .input_notices()
@@ -360,8 +349,10 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
                 .next(),
             Some(&kept)
         );
-        assert!(matches!(actor.owed.front(), Some(Derived::Piece(piece))
-            if piece.payload == OLD_NOTICE_PAYLOAD));
+        assert!(
+            matches!(actor.owed_for_test().front(), Some(Derived::Piece(piece))
+            if piece.payload == OLD_NOTICE_PAYLOAD)
+        );
     }
     assert!(alarms.0.lock().unwrap().is_empty());
 }
@@ -377,14 +368,14 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
     kept.payload = Some(OLD_NOTICE_PAYLOAD.into());
     kept.origin = None;
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::Materialized {
                 evidence: Box::new(kept.clone()),
             }),
         })
         .unwrap();
-    actor.deriver.derive_scoped(
+    actor.deriver_mut_for_test().derive_scoped(
         &crate::services::tui_o::shadow::CapturedRecord {
             start: next.record.start,
             end: next.record.end,
@@ -395,7 +386,7 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
         Ok(*next.origin.clone().unwrap()),
         || None,
     );
-    actor.persist_notice_evidence();
+    actor.persist_notice_evidence_for_test();
     let bytes = std::fs::read_to_string(notice_ledger(runtime.path())).unwrap();
     let rows: Vec<serde_json::Value> = bytes
         .lines()
@@ -408,7 +399,7 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
         kept, written,
         "the appended row itself must retain the original rendering"
     );
-    assert!(!actor.writer.is_stopped());
+    assert!(!actor.writer_for_test().is_stopped());
     assert!(alarms.0.lock().unwrap().is_empty());
 }
 #[tokio::test(start_paused = true)]
@@ -455,8 +446,8 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
     let alarms = Alarms::default();
     let mut actor = host(&o, port.clone(), alarms.clone(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 snapshot: MigrationSnapshot {
                     sources: vec![MigrationSource {
@@ -475,11 +466,11 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
         })
         .unwrap();
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     assert_eq!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .input_notices()
@@ -488,9 +479,12 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
         2,
         "ambiguous inputs must become durable migration debt"
     );
-    let cap = actor.writer.store().spool_bytes();
+    let cap = actor.writer_mut_for_test().store().spool_bytes();
     assert!(cap > 0);
-    actor.writer.store().set_limits_for_test(1, cap);
+    actor
+        .writer_mut_for_test()
+        .store()
+        .set_limits_for_test(1, cap);
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     for cycle in 0..3 {
         let bytes = [
@@ -501,15 +495,15 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
         assert!((bytes.len() as u64) < cap);
         append(&path, &bytes);
         let before = actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .cursor(&source)
             .unwrap()
             .captured_through;
-        actor.read_sources();
+        actor.read_sources_for_test();
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .cursor(&source)
                 .unwrap()
@@ -517,33 +511,33 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
             before,
             "small cap must really hold the cumulative raw batch"
         );
-        actor.collect_settled();
-        let fresh = actor.read_sources();
-        actor.prepare_notices(&fresh).await;
-        actor.deliver_owed(&progress).await;
-        actor.collect_settled();
+        actor.collect_settled_for_test();
+        let fresh = actor.read_sources_for_test();
+        actor.prepare_notices_for_test(&fresh).await;
+        actor.deliver_owed_for_test(&progress).await;
+        actor.collect_settled_for_test();
         assert!(
-            !actor.writer.is_stopped(),
+            !actor.writer_for_test().is_stopped(),
             "later output must progress while legacy debt stays"
         );
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .cursor(&source)
                 .unwrap()
                 .captured_through,
             std::fs::metadata(&path).unwrap().len()
         );
-        assert_eq!(actor.notice_debt_extra(), 2);
-        let snapshot = actor.undelivered(9).unwrap();
+        assert_eq!(actor.notice_debt_extra_for_test(), 2);
+        let snapshot = actor.undelivered_for_test(9).unwrap();
         assert_eq!((snapshot.owed, snapshot.notice_owed), (2, 2));
         // Migration debt stays audited but is no delivery work that stalls a turn or holds a source.
-        assert_eq!(actor.progress().debt, 0);
-        assert_eq!(actor.obligations().unwrap().owed, 0);
+        assert_eq!(actor.progress_for_test().debt, 0);
+        assert_eq!(actor.obligations_for_test().unwrap().owed, 0);
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .input_notices()
@@ -551,8 +545,8 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
                 .len(),
             2
         );
-        assert!(actor.writer.store().spool_bytes() <= cap);
-        let ledger = actor.writer.store().ledger();
+        assert!(actor.writer_mut_for_test().store().spool_bytes() <= cap);
+        let ledger = actor.writer_mut_for_test().store().ledger();
         assert!(ledger.gc_segments(&source).len() > cycle);
         let raw: Vec<_> = ledger
             .input_notices()
@@ -568,7 +562,7 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
         assert_eq!(raw.len(), 2);
         let mut old_raw = 0;
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .for_each_frame(&source, |frame, _| {
                 if frame.start() < old.len() as u64 {
@@ -580,9 +574,9 @@ async fn same_source_over_cap_reclaims_raw_and_keeps_debt_after_actor_recreation
         drop(actor);
         actor = host(&o, port.clone(), alarms.clone(), cap);
         resume(&mut actor);
-        actor.prepare_notices(&[]).await;
+        actor.prepare_notices_for_test(&[]).await;
         assert_eq!(
-            actor.notice_debt_extra(),
+            actor.notice_debt_extra_for_test(),
             2,
             "recreation must retain ledger debt with the same small cap"
         );
@@ -635,7 +629,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
         native_key: id.into(),
         kind,
     };
-    actor.owed.push_back(Derived::Piece(
+    actor.owed_mut_for_test().push_back(Derived::Piece(
         crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: key(
@@ -649,7 +643,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
     ));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     for pass in 0..2 {
-        actor.owed.push_back(Derived::Piece(
+        actor.owed_mut_for_test().push_back(Derived::Piece(
             crate::services::tui_o::writer::pieces::PieceWork {
                 output_origin: None,
                 unit_key: key(
@@ -662,28 +656,31 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
             },
         ));
         VISITS.with(|visits| visits.set((0, Some(2))));
-        actor.deliver_owed(&progress).await;
+        actor.deliver_owed_for_test(&progress).await;
         assert_eq!(
             VISITS.with(|visits| visits.get().0),
             2,
             "each of the two initial items is visited once"
         );
         assert_eq!(
-            actor.owed.len(),
+            actor.owed_for_test().len(),
             1,
             "the held input stays owed while the Body finishes"
         );
         assert_eq!(
-            actor.writer.boot.done(),
+            actor.writer_for_test().boot_done_for_test(),
             pass + 1,
             "Withheld is never a notice completion"
         );
-        assert_eq!(actor.progress().debt, 1);
-        assert_eq!(actor.writer.store().ledger().next_serial(), pass + 1);
+        assert_eq!(actor.progress_for_test().debt, 1);
+        assert_eq!(
+            actor.writer_mut_for_test().store().ledger().next_serial(),
+            pass + 1
+        );
     }
     assert_eq!(*port.posts.lock().unwrap(), ["answer-0", "answer-1"]);
     assert!(
-        !actor.notice_raw_independent(),
+        !actor.notice_raw_independent_for_test(),
         "missing materialization must still protect raw"
     );
 }
@@ -725,8 +722,8 @@ async fn queued_unresolved_notice_releases_its_raw_and_survives_recreation_besid
     let port = Arc::new(Port::default());
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 // Frozen before the binding log named the source, so all of it is new.
                 snapshot: MigrationSnapshot {
@@ -741,20 +738,29 @@ async fn queued_unresolved_notice_releases_its_raw_and_survives_recreation_besid
         })
         .unwrap();
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     port.unreadable
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
-    assert_eq!(actor.owed.len(), 1);
-    assert_eq!(actor.writer.boot.done(), 0);
+    actor.deliver_owed_for_test(&progress).await;
+    assert_eq!(actor.owed_for_test().len(), 1);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 0);
     assert!(matches!(
-        actor.writer.store().ledger().piece(0).unwrap().outcome,
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .piece(0)
+            .unwrap()
+            .outcome,
         Some(crate::services::tui_o::store::ledger::PieceOutcome::Unresolved(_))
     ));
-    let cap = actor.writer.store().spool_bytes();
-    actor.writer.store().set_limits_for_test(1, cap);
+    let cap = actor.writer_mut_for_test().store().spool_bytes();
+    actor
+        .writer_mut_for_test()
+        .store()
+        .set_limits_for_test(1, cap);
     port.unreadable
         .store(false, std::sync::atomic::Ordering::SeqCst);
     let next = [
@@ -764,52 +770,58 @@ async fn queued_unresolved_notice_releases_its_raw_and_survives_recreation_besid
     .concat();
     assert!((next.len() as u64) < cap);
     append(&path, &next);
-    actor.read_sources();
+    actor.read_sources_for_test();
     assert_eq!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .cursor(&source)
             .unwrap()
             .captured_through,
         original.len() as u64
     );
-    assert!(actor.notice_raw_independent());
-    actor.collect_settled();
+    assert!(actor.notice_raw_independent_for_test());
+    actor.collect_settled_for_test();
     assert_eq!(
-        actor.writer.store().retained_segments(&source),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .retained_segments(&source),
         0,
         "an unacked but materialized notice must permit actual raw collection"
     );
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
-    actor.deliver_owed(&progress).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .cursor(&source)
             .unwrap()
             .captured_through,
         std::fs::metadata(&path).unwrap().len()
     );
-    assert_eq!(actor.owed.len(), 1);
-    assert_eq!(actor.progress().debt, 1);
-    assert_eq!(actor.writer.boot.done(), 2);
+    assert_eq!(actor.owed_for_test().len(), 1);
+    assert_eq!(actor.progress_for_test().debt, 1);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 2);
     assert_eq!(port.posts.lock().unwrap().len(), 3);
     drop(actor);
     actor = host(&o, port.clone(), Alarms::default(), cap);
     resume(&mut actor);
-    actor.prepare_notices(&[]).await;
-    actor.deliver_owed(&progress).await;
-    assert_eq!(actor.progress().debt, 1);
-    assert_eq!(actor.obligations().unwrap().owed, 1);
+    actor.prepare_notices_for_test(&[]).await;
+    actor.deliver_owed_for_test(&progress).await;
+    assert_eq!(actor.progress_for_test().debt, 1);
+    assert_eq!(actor.obligations_for_test().unwrap().owed, 1);
     assert_eq!(
         port.posts.lock().unwrap().len(),
         3,
         "reopening never republishes the uncertain input or old Body"
     );
-    assert_eq!(actor.writer.store().ledger().next_serial(), 3);
+    assert_eq!(
+        actor.writer_mut_for_test().store().ledger().next_serial(),
+        3
+    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -840,8 +852,8 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
         kind: crate::services::tui_o::shadow::UnitKind::InputNotice,
     };
     actor
-        .writer
-        .record(LedgerEntry::Prepared {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::Prepared {
             serial: 0,
             unit_key: key.clone(),
             piece_index: 0,
@@ -852,7 +864,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             notice_origin: None,
         })
         .unwrap();
-    actor.owed.push_back(Derived::Piece(
+    actor.owed_mut_for_test().push_back(Derived::Piece(
         crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: key,
@@ -861,7 +873,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             notice_origin: None,
         },
     ));
-    actor.owed.push_back(Derived::Piece(
+    actor.owed_mut_for_test().push_back(Derived::Piece(
         crate::services::tui_o::writer::pieces::PieceWork {
             output_origin: None,
             unit_key: UnitKey {
@@ -875,24 +887,30 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             notice_origin: None,
         },
     ));
-    actor.replay_deferred = true;
+    actor.set_replay_deferred_for_test(true);
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     VISITS.with(|visits| visits.set((0, Some(0))));
-    actor.deliver_owed(&progress).await;
-    assert!(!actor.replay_deferred);
-    assert_eq!(actor.owed.len(), 2);
-    assert_eq!(actor.writer.boot.done(), 0);
+    actor.deliver_owed_for_test(&progress).await;
+    assert!(!actor.replay_deferred_for_test());
+    assert_eq!(actor.owed_for_test().len(), 2);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 0);
     assert!(port.posts.lock().unwrap().is_empty());
     assert!(matches!(
-        actor.writer.store().ledger().piece(0).unwrap().outcome,
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .piece(0)
+            .unwrap()
+            .outcome,
         Some(crate::services::tui_o::store::ledger::PieceOutcome::Unresolved(_))
     ));
     VISITS.with(|visits| visits.set((0, Some(1))));
-    actor.deliver_owed(&progress).await;
-    assert_eq!(actor.owed.len(), 1);
+    actor.deliver_owed_for_test(&progress).await;
+    assert_eq!(actor.owed_for_test().len(), 1);
     assert_eq!(*port.posts.lock().unwrap(), ["later answer"]);
-    assert_eq!(actor.writer.boot.done(), 1);
-    assert_eq!(actor.progress().debt, 1);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 1);
+    assert_eq!(actor.progress_for_test().debt, 1);
 }
 
 fn era(o: &OStore, source: &crate::services::tui_o::shadow::SourceId) {
@@ -914,8 +932,8 @@ fn era(o: &OStore, source: &crate::services::tui_o::shadow::SourceId) {
 }
 fn start_migration(actor: &mut Host) {
     actor
-        .writer
-        .record(LedgerEntry::InputNotice {
+        .writer_mut_for_test()
+        .record_for_test(LedgerEntry::InputNotice {
             entry: Box::new(NoticeEntry::MigrationStarted {
                 // Frozen before the binding log named the source, so all of it is new.
                 snapshot: MigrationSnapshot {
@@ -939,7 +957,7 @@ fn input_key(id: &str) -> UnitKey {
     }
 }
 fn notice_evidence(actor: &mut Host, key: &UnitKey) -> usize {
-    let ledger = actor.writer.store().ledger();
+    let ledger = actor.writer_mut_for_test().store().ledger();
     let evidence = ledger.input_notices().evidence.values();
     evidence
         .filter(|e| e.unit_key.as_ref() == Some(key))
@@ -989,37 +1007,47 @@ async fn ambiguous_ownership_after_raw_release_is_excluded_after_rival_abandoned
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     start_migration(&mut actor);
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     let key = input_key("pending");
     assert_eq!(*port.posts.lock().unwrap(), ["pending answer"]);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .latest_piece(&key, 0)
             .is_none()
     );
-    assert!(actor.writer.store().ledger().excluded(&key).is_none());
+    assert!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .excluded(&key)
+            .is_none()
+    );
     assert_eq!(
         notice_evidence(&mut actor, &key),
         1,
         "unconfirmed ownership must keep its native row as evidence"
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
-    assert_eq!(actor.progress().debt, 1);
-    assert_eq!(actor.writer.boot.done(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
+    assert_eq!(actor.progress_for_test().debt, 1);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 1);
 
-    let cap = actor.writer.store().spool_bytes();
-    actor.writer.store().set_limits_for_test(1, cap);
+    let cap = actor.writer_mut_for_test().store().spool_bytes();
+    actor
+        .writer_mut_for_test()
+        .store()
+        .set_limits_for_test(1, cap);
     append(&path, &body("later-body", &"later answer".repeat(40)));
-    actor.read_sources();
+    actor.read_sources_for_test();
     assert_eq!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .cursor(&source)
             .unwrap()
@@ -1027,22 +1055,28 @@ async fn ambiguous_ownership_after_raw_release_is_excluded_after_rival_abandoned
         original.len() as u64,
         "small cap must really hold the next batch"
     );
-    assert!(actor.notice_raw_independent());
-    actor.collect_settled();
-    assert_eq!(actor.writer.store().retained_segments(&source), 0);
+    assert!(actor.notice_raw_independent_for_test());
+    actor.collect_settled_for_test();
+    assert_eq!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .retained_segments(&source),
+        0
+    );
     drop(actor);
     let mut actor = host(&o, port.clone(), Alarms::default(), cap);
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
-    actor.deliver_owed(&progress).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(
         notice_evidence(&mut actor, &key),
         1,
         "evidence must outlive its raw segment and the reopened actor"
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
-    assert_eq!(actor.obligations().unwrap().owed, 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
+    assert_eq!(actor.obligations_for_test().unwrap().owed, 1);
 
     {
         let posts = port.posts.lock().unwrap();
@@ -1051,13 +1085,13 @@ async fn ambiguous_ownership_after_raw_release_is_excluded_after_rival_abandoned
     }
     abandon_rival(&registry, &keys, &prompt);
     ambiguous_receipt(&registry, &keys[0], &path, "pending", &prompt);
-    actor.prepare_notices(&[]).await;
-    actor.deliver_owed(&progress).await;
+    actor.prepare_notices_for_test(&[]).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(
-        actor.writer.store().ledger().excluded(&key),
+        actor.writer_mut_for_test().store().ledger().excluded(&key),
         Some("input_notice_source")
     );
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     assert_eq!(notice_evidence(&mut actor, &key), 1);
 }
 
@@ -1091,10 +1125,10 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
     start_migration(&mut actor);
     resume(&mut actor);
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     let key = input_key("busy");
-    let order: Vec<_> = (actor.owed.iter())
+    let order: Vec<_> = (actor.owed_for_test().iter())
         .map(|item| match item {
             Derived::Piece(piece) => Some(piece.unit_key.clone()),
             _ => None,
@@ -1108,7 +1142,7 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     );
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
     crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.set((0, 0)));
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert!(
         crate::services::tmux_common::try_with_tmux_source_authority(logical, |_| ()).is_none(),
         "the notice's source authority is held by another task"
@@ -1119,19 +1153,23 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     );
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .latest_piece(&key, 0)
             .is_none()
     );
-    assert_eq!(actor.owed.len(), 1);
-    assert_eq!(actor.progress().debt, 1);
-    assert_eq!(actor.writer.boot.done(), 2, "only the two Bodies drained");
+    assert_eq!(actor.owed_for_test().len(), 1);
+    assert_eq!(actor.progress_for_test().debt, 1);
+    assert_eq!(
+        actor.writer_for_test().boot_done_for_test(),
+        2,
+        "only the two Bodies drained"
+    );
 
     for _ in 0..4 {
         tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        actor.deliver_owed(&progress).await;
+        actor.deliver_owed_for_test(&progress).await;
     }
     assert_eq!(
         crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get()),
@@ -1139,7 +1177,7 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
         "final admission and withheld log stay bounded during contention"
     );
     tokio::time::advance(std::time::Duration::from_secs(1)).await;
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     assert_eq!(
         crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get()),
         (2, 2)
@@ -1148,13 +1186,13 @@ async fn notice_admission_contention_after_preflight_still_lets_the_later_body_p
     release.send(()).unwrap();
     thread.join().unwrap();
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
-    actor.deliver_owed(&progress).await;
+    actor.deliver_owed_for_test(&progress).await;
     let posts = port.posts.lock().unwrap();
     assert_eq!(posts.len(), 3);
     assert!(posts[2].starts_with("-# ⌨️"));
-    assert!(actor.owed.is_empty());
-    assert_eq!(actor.progress().debt, 0);
-    assert_eq!(actor.writer.boot.done(), 3);
+    assert!(actor.owed_for_test().is_empty());
+    assert_eq!(actor.progress_for_test().debt, 0);
+    assert_eq!(actor.writer_for_test().boot_done_for_test(), 3);
 }
 
 #[path = "notice_activation_tests.rs"]

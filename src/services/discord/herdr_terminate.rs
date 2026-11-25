@@ -2,6 +2,7 @@
 //! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
 pub(crate) mod restart_recovery;
+mod retired_wake;
 pub(crate) mod root_replaced;
 
 pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
@@ -228,14 +229,12 @@ pub(super) async fn retire_confirmed(
 ) -> Result<(), TerminationResult> {
     match hosted_execution::retire_pg(pool, row, &record.owner, &record.execution_nonce).await {
         Ok(HostedCasOutcome::Written) => {
-            // A retired Codex execution stays listed but no longer admitted (Claude's move back
-            // releases its own); a newer listing is kept.
-            if record.owner.provider == "codex" {
-                crate::services::tui_prompt_dedupe::withhold_herdr_execution(
-                    &record.owner.logical_key,
-                    Some(&record.execution_nonce),
-                );
-            }
+            // A retired execution stays listed but no longer admitted (Claude's move back to tmux
+            // releases its listing); a newer listing is kept.
+            crate::services::tui_prompt_dedupe::withhold_herdr_execution(
+                &record.owner.logical_key,
+                Some(&record.execution_nonce),
+            );
             Ok(())
         }
         Ok(HostedCasOutcome::Stale) => {
@@ -420,12 +419,16 @@ pub(in crate::services::discord) async fn terminate_explicit_herdr(
     } = request.into();
     let resume_retired = after.is_some();
     match terminate_scoped(request, shared, pool, None, resume_retired, by_pane).await {
-        Ok(exclusion) => {
-            if let Some(after) = after {
-                return after(exclusion).await;
-            }
-            drop(exclusion);
-            TerminationResult::Retired
+        Ok((exclusion, wake)) => {
+            let result = match after {
+                Some(after) => after(exclusion).await,
+                None => {
+                    drop(exclusion);
+                    TerminationResult::Retired
+                }
+            };
+            wake.after_release().await;
+            result
         }
         Err(result) => result,
     }
@@ -451,7 +454,7 @@ async fn terminate_scoped(
     expected: Option<http_force::Expected>,
     resume_retired: bool,
     by_pane: bool,
-) -> Result<RetiredExclusion, TerminationResult> {
+) -> Result<(RetiredExclusion, retired_wake::RetiredWake), TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
         return Err(TerminationResult::Disabled);
@@ -612,7 +615,7 @@ async fn terminate_scoped(
     let (transition, fence) =
         settle_and_release(&shared, &provider, &nonce, turn, exclusion).await?;
     let parts = (transition, fence, actor, token);
-    Ok(RetiredExclusion::new(
+    let held = RetiredExclusion::new(
         parts,
         row,
         expected
@@ -620,7 +623,9 @@ async fn terminate_scoped(
             .and_then(|e| e.dispatch),
         provider,
         channel,
-    ))
+    );
+    let wake = retired_wake::RetiredWake::clear_under(&shared, &held, !retired).await;
+    Ok((held, wake))
 }
 /// The service's one close. A close that cannot have reached Herdr reopens the fence; the socket
 /// work stays off the async executor.

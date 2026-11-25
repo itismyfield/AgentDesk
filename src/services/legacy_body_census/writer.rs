@@ -16,8 +16,8 @@ pub(super) struct Options {
     pub(super) host: Option<String>,
     pub(super) timeout: Duration,
     pub(super) before_write: Hook,
-    #[cfg(test)]
-    pub(super) after_ack: Hook,
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) after_ack: Hook,
     pub(super) sync_parent: Option<SyncParent>,
 }
 
@@ -28,7 +28,7 @@ impl Default for Options {
             host: None,
             timeout: Duration::from_secs(2),
             before_write: Arc::new(|| {}),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             after_ack: Arc::new(|| {}),
             sync_parent: None,
         }
@@ -173,7 +173,7 @@ impl Writer {
                     let drained =
                         gate.is_some() && write_drain(&mut file, &shared, message.cut, false);
                     last_cut = message.cut;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     let acknowledged = message.ack.is_some();
                     if let Some(ack) = message.ack
                         && ack.send(written && drained).is_err()
@@ -183,7 +183,7 @@ impl Writer {
                             persist_invalid(file, &shared, &mut persisted);
                         }
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     if acknowledged {
                         (options.after_ack)();
                     }

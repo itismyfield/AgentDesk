@@ -119,7 +119,7 @@ pub(crate) fn spawn_auth_overlay(
 
 /// The account a launch for the channel and agent is configured to use: a recovery pin first,
 /// then the channel or agent setting, then the provider primary; `true` when a pin chose it.
-pub(crate) fn configured_launch_profile(
+fn configured_launch_profile(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -210,7 +210,7 @@ type LaunchParts = (
     Option<(u64, FallbackPolicy)>,
 );
 
-pub(crate) fn launch_overlay_parts(
+fn launch_overlay_parts(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -234,6 +234,27 @@ pub(crate) fn launch_overlay_parts(
         (channel, policy)
     });
     Ok((primary, route))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn configured_launch_profile_for_test(
+    schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+) -> Result<(Option<String>, bool), String> {
+    configured_launch_profile(schema, provider, channel_id, agent_id)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn launch_overlay_parts_for_test(
+    schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
+    provider: &ProviderKind,
+    channel_id: Option<u64>,
+    agent_id: Option<&str>,
+    catalog: &HashMap<String, ProviderAuthProfileDef>,
+) -> Result<LaunchParts, String> {
+    launch_overlay_parts(schema, provider, channel_id, agent_id, catalog)
 }
 
 fn fallback_selects(provider: &ProviderKind, policy: &FallbackPolicy) -> bool {

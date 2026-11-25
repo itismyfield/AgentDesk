@@ -27,15 +27,17 @@ use crate::services::herdr_launch::{
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchOutcome, launch_herdr_session, workspace_marker,
 };
-use crate::services::session_host::herdr::contract::{HerdrTransport, ServerWitness};
-use crate::services::session_host::herdr::launch_host::tests::*;
-use crate::services::session_host::herdr::model::HerdrEndpoint;
-use crate::services::session_host::herdr::observe::{
+use crate::services::session_host::herdr_for_test::contract::{HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr_for_test::launch_host::tests::*;
+use crate::services::session_host::herdr_for_test::model::HerdrEndpoint;
+use crate::services::session_host::herdr_for_test::observe::{
     RestoreResume, RestoreUnverified, read_restore_resume_with,
 };
-use crate::services::session_host::herdr::pane_probe::{EvidenceGap, ProcessOs};
-use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
-use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
+use crate::services::session_host::herdr_for_test::pane_probe::{EvidenceGap, ProcessOs};
+use crate::services::session_host::herdr_for_test::provenance::{ProcessStart, StartIdentity};
+use crate::services::session_host::herdr_registry_for_test::{
+    self as herdr_registry, HerdrRegistry,
+};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use poise::serenity_prelude::ChannelId;
 
@@ -351,8 +353,10 @@ impl Rig {
 
     fn host(&self) -> Arc<dyn HerdrLaunchHost> {
         let mut host = launch_host(&self.server);
-        host.os = Box::new(RigOs(self.herdr.clone()));
-        host.provider_window = Duration::from_millis(500);
+        host.set_process_os_for_test(
+            Box::new(RigOs(self.herdr.clone())),
+            Duration::from_millis(500),
+        );
         Arc::new(host)
     }
 
@@ -588,7 +592,7 @@ async fn a_pre_marker_launch_whose_provider_started_is_adopted_after_a_restart_p
 /// This node's registry over the rig's server and process table, as the terminate service reads it.
 fn registry(rig: &Rig) -> HerdrRegistry {
     let mut host = launch_host(&rig.server);
-    let (endpoint, transport) = host.endpoints.pop().unwrap();
+    let (endpoint, transport) = host.pop_endpoint_for_test().unwrap();
     let os: Arc<dyn ProcessOs> = Arc::new(RigOs(rig.herdr.clone()));
     HerdrRegistry::with_transport(endpoint, transport).with_reads((bootstrapped_e7, os))
 }

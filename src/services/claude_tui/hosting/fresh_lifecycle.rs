@@ -23,6 +23,31 @@ pub(crate) fn fresh_hold_for_tests(
     )
 }
 
+/// A fresh Claude TUI turn through finalize, for tests outside `claude`.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn run_claude_tui_fresh_turn_and_finalize_for_test(
+    (transcript_path, transcript_path_string): (&std::path::Path, &str),
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+    (tmux_session_name, resolved_session_id): (&str, &str),
+    teardown: Option<&TeardownClearance>,
+    report_channel_id: Option<u64>,
+    (prompt, owner_path): (&str, &str),
+) -> Result<(), String> {
+    run_claude_tui_fresh_turn_and_finalize(
+        transcript_path,
+        transcript_path_string,
+        sender,
+        cancel_token,
+        tmux_session_name,
+        teardown,
+        resolved_session_id,
+        report_channel_id,
+        prompt,
+        owner_path,
+    )
+}
+
 pub(super) struct FreshTurn<'a> {
     pub(super) transcript_path: &'a std::path::Path,
     pub(super) transcript_path_string: &'a str,

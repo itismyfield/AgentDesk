@@ -1246,3 +1246,6 @@ mod e08;
 
 #[path = "http_force_v2_tests.rs"]
 mod v2;
+
+#[path = "http_force_retired_wake_tests.rs"]
+mod retired_wake;

@@ -630,11 +630,17 @@ async fn restart_replay_deferred_filter_is_once_and_keeps_nonposted_settlement()
             _ => LedgerEntry::NotFound { serial: 2 },
         };
         writer.store().append_ledger(entry).unwrap();
-        assert!(replay::after_open(&mut pending, writer.store().ledger()));
+        assert!(replay::after_open_for_test(
+            &mut pending,
+            writer.store().ledger()
+        ));
         let summary = items.finish_replay(writer.store().ledger());
         assert_eq!(summary.posted + summary.excluded, 2);
         assert_eq!(items, [Derived::Piece(piece)]);
-        assert!(!replay::after_open(&mut pending, writer.store().ledger()));
+        assert!(!replay::after_open_for_test(
+            &mut pending,
+            writer.store().ledger()
+        ));
         p5::set_test_root(None);
     }
 }

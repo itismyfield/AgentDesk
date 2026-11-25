@@ -156,7 +156,7 @@ impl Case {
     fn open(&self) -> Host {
         let mut actor = host(&self.o, self.port.clone(), Alarms::default(), u64::MAX);
         if actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .input_notices()
@@ -170,18 +170,14 @@ impl Case {
     }
 
     async fn run(&self, actor: &mut Host) {
-        crate::services::tui_o::writer::restart_end::refresh(
-            &mut actor.writer,
-            &mut actor.deriver,
-            actor.bindings.as_ref(),
-            ShadowProvider::Claude,
-        )
-        .await
-        .unwrap();
-        let fresh = actor.read_sources();
-        actor.prepare_notices(&fresh).await;
         actor
-            .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+            .refresh_for_test(ShadowProvider::Claude)
+            .await
+            .unwrap();
+        let fresh = actor.read_sources_for_test();
+        actor.prepare_notices_for_test(&fresh).await;
+        actor
+            .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
                 CHANNEL,
             ))
             .await;
@@ -199,11 +195,15 @@ impl Case {
 
     fn excluded(&self, actor: &mut Host, id: &str) {
         assert_eq!(
-            actor.writer.store().ledger().excluded(&input_key(id)),
+            actor
+                .writer_mut_for_test()
+                .store()
+                .ledger()
+                .excluded(&input_key(id)),
             Some("input_notice_source")
         );
         assert_eq!(self.notices(), 0);
-        assert_eq!(actor.notice_debt_extra(), 0);
+        assert_eq!(actor.notice_debt_extra_for_test(), 0);
     }
 
     fn collector_ends(&self, frame: &str, enqueue: bool) {
@@ -267,26 +267,29 @@ async fn notice_owner_settles_restored_materialized_debt_after_raw_release() {
     c.register(&frame);
     c.input("restored", &frame);
     let mut actor = c.open();
-    actor.read_sources();
+    actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
-    assert_eq!(actor.notice_debt_extra(), 1);
-    assert!(actor.notice_raw_independent());
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
+    assert!(actor.notice_raw_independent_for_test());
     std::fs::rename(&parked, &c.path).unwrap();
     let through = std::fs::metadata(&c.path).unwrap().len();
-    let cap = actor.writer.store().spool_bytes();
-    actor.writer.store().set_limits_for_test(1, cap);
+    let cap = actor.writer_mut_for_test().store().spool_bytes();
+    actor
+        .writer_mut_for_test()
+        .store()
+        .set_limits_for_test(1, cap);
     append(&c.path, &body("later-body", &"later answer".repeat(40)));
-    actor.read_sources();
+    actor.read_sources_for_test();
     assert_eq!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .cursor(&c.source)
             .unwrap()
@@ -294,15 +297,21 @@ async fn notice_owner_settles_restored_materialized_debt_after_raw_release() {
         through,
         "small cap must hold the next batch before raw collection"
     );
-    actor.collect_settled();
-    assert_eq!(actor.writer.store().retained_segments(&c.source), 0);
+    actor.collect_settled_for_test();
+    assert_eq!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .retained_segments(&c.source),
+        0
+    );
     drop(actor);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     assert!(!fresh.contains(&input_key("restored")));
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
@@ -317,14 +326,14 @@ async fn notice_owner_keeps_pending_without_native_census() {
     c.register(&frame);
     c.input("missing", &frame);
     let mut actor = c.open();
-    actor.read_sources();
+    actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&[]).await;
-    assert_eq!(actor.notice_debt_extra(), 1);
+    actor.prepare_notices_for_test(&[]).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("missing"))
@@ -344,7 +353,7 @@ async fn notice_owner_keeps_pending_without_native_census() {
         Some(true)
     );
     std::fs::rename(&c.path, parked).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     c.excluded(&mut actor, "missing");
 }
 
@@ -361,14 +370,14 @@ async fn direct_twin_of_registered_frame_posts_once() {
     assert_eq!(c.notices(), 1);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("direct"))
             .is_none()
     );
     assert!(
-        matches!(actor.writer.store().ledger().latest_piece(&input_key("direct"), 0),
+        matches!(actor.writer_mut_for_test().store().ledger().latest_piece(&input_key("direct"), 0),
         Some((_, record)) if matches!(record.outcome, Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(_))))
     );
 }
@@ -387,13 +396,13 @@ async fn direct_full_frame_twin_after_registered_owner_posts_once() {
     assert_eq!(c.notices(), 1);
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("direct"))
             .is_none()
     );
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -417,14 +426,14 @@ async fn notice_owner_never_reuses_occupied_attempt() {
     c.run(&mut actor).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("direct"))
             .is_none()
     );
     assert_eq!(c.notices(), 1);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -463,7 +472,7 @@ async fn notice_owner_rejects_other_source_registration() {
         c.run(&mut actor).await;
         assert!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(&input_key("foreign"))
@@ -471,7 +480,7 @@ async fn notice_owner_rejects_other_source_registration() {
             "{wrong}"
         );
         assert_eq!(c.notices(), 0, "{wrong}");
-        assert_eq!(actor.notice_debt_extra(), 1, "{wrong}");
+        assert_eq!(actor.notice_debt_extra_for_test(), 1, "{wrong}");
     }
 }
 
@@ -482,10 +491,10 @@ async fn legacy_imessage_debt_outside_snapshot_settles_without_post() {
     c.v2(&frame, 8812, false);
     c.input("outside-snapshot", &frame);
     let mut actor = c.open();
-    actor.read_sources();
-    actor.prepare_notices(&[]).await;
+    actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
@@ -526,7 +535,7 @@ async fn typed_imessage_text_without_registration_posts_once() {
     let mut actor = c.open();
     c.run(&mut actor).await;
     assert_eq!(c.notices(), 1);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -581,11 +590,11 @@ async fn notice_owner_v2_exact_receipt_settles_without_current_native_file() {
     let (registry, key) = c.v2(&frame, 8819, false);
     c.input("historical-v2", &frame);
     let mut actor = c.open();
-    actor.read_sources();
+    actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&[]).await;
-    assert_eq!(actor.notice_debt_extra(), 1);
+    actor.prepare_notices_for_test(&[]).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     std::fs::rename(&parked, &c.path).unwrap();
     assert_eq!(
         registry.receipt(
@@ -596,7 +605,7 @@ async fn notice_owner_v2_exact_receipt_settles_without_current_native_file() {
         Some(true)
     );
     std::fs::rename(&c.path, parked).unwrap();
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     c.excluded(&mut actor, "historical-v2");
 }
 
@@ -625,7 +634,7 @@ async fn known_discord_input_writes_no_notice_evidence() {
     c.run(&mut actor).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .input_notices()
@@ -643,7 +652,7 @@ async fn undecidable_ownership_keeps_notice_debt_while_rival_is_unresolved() {
     c.input("ambiguous", &frame);
     let mut actor = c.open();
     c.run(&mut actor).await;
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     for key in &keys {
         assert_eq!(
             registry.receipt(
@@ -654,21 +663,21 @@ async fn undecidable_ownership_keeps_notice_debt_while_rival_is_unresolved() {
             None
         );
     }
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("ambiguous"))
             .is_none()
     );
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
     assert_eq!(notice_evidence(&mut actor, &input_key("ambiguous")), 1);
     assert_eq!(c.notices(), 0);
 }
@@ -682,15 +691,15 @@ async fn notice_owner_batch_scans_each_source_once_for_all_evidence() {
         c.input(id, &frame);
     }
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     history::notice_owner::CENSUS_READS.with(|count| count.set(0));
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     assert_eq!(
         history::notice_owner::CENSUS_READS.with(|count| count.get()),
         1
     );
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
@@ -700,11 +709,15 @@ async fn notice_owner_batch_scans_each_source_once_for_all_evidence() {
         "final admission consumes the cache"
     );
     assert_eq!(
-        actor.writer.store().ledger().excluded(&input_key("owned")),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .excluded(&input_key("owned")),
         Some("input_notice_source")
     );
     assert_eq!(c.notices(), 2);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -725,8 +738,8 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
     );
     c.input("direct", &frame);
     let mut actor = c.open();
-    let fresh = actor.read_sources();
-    actor.prepare_notices(&fresh).await;
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
     history::register(
         ("claude", &c.logical, "future-attempt", "1"),
         &c.path,
@@ -735,27 +748,27 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
     )
     .unwrap();
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     assert_eq!(c.notices(), 0);
     assert_eq!(
-        actor.progress().debt,
+        actor.progress_for_test().debt,
         1,
         "the withheld notice stays owed in the queue"
     );
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .latest_piece(&input_key("direct"), 0)
             .is_none()
     );
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
@@ -764,21 +777,22 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
         0,
         "the final-refusal retry deadline still holds"
     );
-    assert_eq!(actor.progress().debt, 1);
+    assert_eq!(actor.progress_for_test().debt, 1);
     tokio::time::advance(std::time::Duration::from_secs(5)).await;
-    actor.prepare_notices(&[]).await;
+    actor.prepare_notices_for_test(&[]).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
-    let decision = actor.owed.iter().find_map(|item| match item {
+    let decision = actor.owed_for_test().iter().find_map(|item| match item {
         Derived::Piece(piece) if piece.unit_key.kind == UnitKind::InputNotice => {
             piece.notice_origin.as_deref().map(|o| {
-                actor
-                    .writer
-                    .notice_owners
-                    .decision(o, &piece.unit_key.native_key, &frame)
+                actor.writer_for_test().notice_owners_for_test().decision(
+                    o,
+                    &piece.unit_key.native_key,
+                    &frame,
+                )
             })
         }
         _ => None,
@@ -787,11 +801,11 @@ async fn notice_owner_history_change_after_preflight_defers_until_next_batch() {
         c.notices(),
         1,
         "owed={} pending={:?} decision={decision:?} calls={:?}",
-        actor.owed.len(),
-        actor.writer.notice_pending,
+        actor.owed_for_test().len(),
+        actor.writer_for_test().notice_pending_for_test(),
         crate::services::tui_o::writer::input_notices::admission::NOTICE_CALLS.with(|c| c.get())
     );
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -820,38 +834,44 @@ async fn legacy_imessage_twenty_one_materialized_debts_exclude_on_reopen_without
         append(&c.path, &row(&format!("legacy-{n}"), &frame));
     }
     let mut actor = c.open();
-    actor.read_sources();
+    actor.read_sources_for_test();
     let parked = c.path.with_extension("parked");
     std::fs::rename(&c.path, &parked).unwrap();
-    actor.prepare_notices(&[]).await;
-    assert_eq!(actor.notice_debt_extra(), 21);
+    actor.prepare_notices_for_test(&[]).await;
+    assert_eq!(actor.notice_debt_extra_for_test(), 21);
     assert_eq!(
-        actor.writer.store().ledger().input_notices().evidence.len(),
+        actor
+            .writer_mut_for_test()
+            .store()
+            .ledger()
+            .input_notices()
+            .evidence
+            .len(),
         21
     );
     assert!(c.port.posts.lock().unwrap().is_empty());
     drop(actor);
     std::fs::rename(parked, &c.path).unwrap();
     let mut actor = c.open();
-    let fresh = actor.read_sources();
+    let fresh = actor.read_sources_for_test();
     assert!(!fresh.iter().any(|key| key.kind == UnitKind::InputNotice));
-    actor.prepare_notices(&fresh).await;
+    actor.prepare_notices_for_test(&fresh).await;
     actor
-        .deliver_owed(&crate::services::tui_o::writer::progress::Publisher::new(
+        .deliver_owed_for_test(&crate::services::tui_o::writer::progress::Publisher::new(
             CHANNEL,
         ))
         .await;
     for n in 0..21 {
         assert_eq!(
             actor
-                .writer
+                .writer_mut_for_test()
                 .store()
                 .ledger()
                 .excluded(&input_key(&format!("legacy-{n}"))),
             Some("input_notice_source")
         );
     }
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     assert!(
         c.port.posts.lock().unwrap().is_empty(),
         "21/21 Excluded and POST 0"
@@ -859,7 +879,7 @@ async fn legacy_imessage_twenty_one_materialized_debts_exclude_on_reopen_without
     drop(actor);
     let mut actor = c.open();
     c.run(&mut actor).await;
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
     assert!(c.port.posts.lock().unwrap().is_empty());
 }
 

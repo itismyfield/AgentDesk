@@ -308,7 +308,7 @@ async fn first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_
     let harness = Harness::build_channel(CANARY_CHANNEL, |_| Vec::new());
     harness.gate.acquired();
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test().clone();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(
@@ -451,7 +451,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
         .unwrap();
     let (n3_context, n3) = proven(root.path());
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test().clone();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let task = tokio::spawn(run_channel(
@@ -550,7 +550,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
                 router,
             },
         );
-        let boot_selection = writer.suspension.clone();
+        let boot_selection = writer.suspension_for_test().clone();
         let (boot_stop, boot_stopped) = watch::channel(false);
         let (boot_resumed, _boot_ready) = watch::channel(false);
         let boot = tokio::spawn(run_channel(
@@ -682,7 +682,7 @@ async fn held_work(retired: bool, unsealed: bool, restart_before_replay: bool) {
 
         // The installed N4 selection is an ordinary same-nonce restart, with no new warning.
         let writer = harness.writer();
-        let restored_selection = writer.suspension.clone();
+        let restored_selection = writer.suspension_for_test().clone();
         let (same_stop, same_stopped) = watch::channel(false);
         let (same_resumed, same_ready) = watch::channel(false);
         let same = tokio::spawn(run_channel(
@@ -844,7 +844,7 @@ async fn scope_during_transition(inspect: bool) {
     });
     answer(&n3, "Q1 before transition");
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test().clone();
     let alarm_count = || {
         harness
             .alarms
@@ -981,7 +981,7 @@ async fn selection_install_fault(after_rename: bool) {
     let (current, source) = proven(root.path());
     answer(&source, "answer after durable selection");
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test().clone();
     let dir = harness
         ._runtime
         .path()
@@ -1097,7 +1097,7 @@ async fn selection_install_fault(after_rename: bool) {
             None,
         );
         let writer = harness.writer();
-        let restored_selection = writer.suspension.clone();
+        let restored_selection = writer.suspension_for_test().clone();
         assert_eq!(restored_selection.nonce(), None);
         let (restart_stop, restart_stopped) = watch::channel(false);
         let (restart_resumed, restart_ready) = watch::channel(false);

@@ -67,7 +67,7 @@ impl Seen {
 pub(crate) struct RawObservation {
     receipt_id: i64,
     nonce: String,
-    pub(crate) seen: Vec<Seen>,
+    seen: Vec<Seen>,
     seal: seal::Seal,
 }
 
@@ -103,7 +103,7 @@ impl RawObservation {
         self.seal.closed || self.seen.contains(&Seen::Broken)
     }
 
-    pub(crate) fn complete(&self) -> bool {
+    fn complete(&self) -> bool {
         self.seal.complete()
             && [
                 Seen::StdoutEof,
@@ -122,8 +122,23 @@ impl RawObservation {
         self.seen.iter().filter_map(Seen::terminal).collect()
     }
 
-    pub(crate) fn active(&self) -> bool {
+    fn active(&self) -> bool {
         self.seen.iter().any(Seen::activity)
+    }
+
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(crate) fn seen_for_test(&self) -> &[Seen] {
+        &self.seen
+    }
+
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(crate) fn complete_for_test(&self) -> bool {
+        self.complete()
+    }
+
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(crate) fn active_for_test(&self) -> bool {
+        self.active()
     }
 
     /// Normal-classification evidence: a complete observation with exactly one provider terminal.
@@ -172,8 +187,8 @@ pub(crate) enum Verdict {
 /// spent its start permit carries one, so a restored or foreign turn never decides with it.
 #[derive(Debug)]
 pub(crate) struct LiveAttempt {
-    pub(crate) attempt: Mutex<Option<ExactAttempt>>,
-    pub(crate) observation: Mutex<RawObservation>,
+    attempt: Mutex<Option<ExactAttempt>>,
+    observation: Mutex<RawObservation>,
     recorded: tokio::sync::Notify,
     verdict: Mutex<Option<Verdict>>,
     /// The bridge saw a stale resume; only the stale-resume decision may judge this attempt.
@@ -279,9 +294,23 @@ impl LiveAttempt {
     pub(crate) fn stale(&self) -> bool {
         self.stale.load(std::sync::atomic::Ordering::Acquire)
     }
+
+    /// A copy of what the reader recorded so far.
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(crate) fn observation_for_test(&self) -> RawObservation {
+        lock(&self.observation).clone()
+    }
+
+    /// The receipt ID and nonce of the attempt not yet handed to a decision, if any.
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub(crate) fn attempt_identity_for_test(&self) -> Option<(i64, String)> {
+        lock(&self.attempt)
+            .as_ref()
+            .map(|attempt| (attempt.receipt_id(), attempt.nonce().to_string()))
+    }
 }
 
-pub(crate) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
