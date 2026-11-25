@@ -176,8 +176,15 @@ fn a_compaction_hides_the_terminal_beneath_it_until_its_notice_closes_it() {
         end_turn(),
         json!({"type":"system","subtype":"turn_duration"}),
     ];
-    let mut closed = false;
+    let (mut closed, torn) = (false, tempfile::NamedTempFile::new().unwrap());
     for record in compacted_tail() {
+        if records.len() > 2 && !closed {
+            // The next record half-written after the boundary is the compaction still running.
+            let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+            std::fs::write(torn.path(), text + &record.to_string()[..4]).unwrap();
+            let state = observe_claude_jsonl_turn_state(torn.path());
+            assert_ne!(state, TuiTurnState::Idle, "torn after {}", records.len());
+        }
         closed |= record["subtype"] == "informational";
         // A session-state block would end the walk before the compaction; leave it out.
         if record["type"] != "permission-mode" {

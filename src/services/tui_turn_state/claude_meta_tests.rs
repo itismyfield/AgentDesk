@@ -194,14 +194,26 @@ fn a_finished_reply_stays_idle_past_its_recap_but_not_past_a_scheduled_task() {
     let recap = r#"{"type":"system","subtype":"away_summary","content":"recap","uuid":"s3"}"#;
     let derived = r#"{"type":"derived-from","sessions":["s0"],"v":1}"#;
     let task = r#"{"type":"system","subtype":"scheduled_task_fire","uuid":"s4"}"#;
+    let compacted = [
+        r#"{"type":"system","subtype":"turn_duration"}"#,
+        r#"{"type":"system","subtype":"compact_boundary"}"#,
+        r#"{"type":"user","isCompactSummary":true,"message":{"content":"summary"}}"#,
+        r#"{"type":"system","subtype":"informational","content":"\"idleCompaction\": false"}"#,
+        task,
+    ];
     for (tail, idle) in [
         (&[data_flow, derived][..], true),
         (&[data_flow, recap], true),
         (&[recap, task], false),
+        (&compacted, false),
     ] {
         let file = transcript(&[&[PROMPT, END_TURN], tail]);
         let state = observe_claude_jsonl_turn_state(file.path());
         assert_eq!(state == TuiTurnState::Idle, idle, "{tail:?}");
+        assert!(
+            idle || observe_running(file.path()) != TuiTurnState::Idle,
+            "{tail:?}"
+        );
     }
 }
 
