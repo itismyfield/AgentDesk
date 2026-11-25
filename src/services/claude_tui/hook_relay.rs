@@ -42,6 +42,16 @@ const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
 const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER";
 const NON_WAIT_RELAY_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER";
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn failure_marker_worker_env_for_test() -> &'static str {
+    FAILURE_MARKER_WORKER_ENV
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn non_wait_relay_worker_env_for_test() -> &'static str {
+    NON_WAIT_RELAY_WORKER_ENV
+}
+
 #[cfg(test)]
 const FAILURE_MARKER_PARENT_TEST_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST";
 #[cfg(test)]
@@ -1120,6 +1130,12 @@ mod tests {
         assert!(path.exists(), "timed out waiting to release marker worker");
     }
 
+    // The worker half of `run_from_args`: the test-instance check, then the env-selected worker.
+    fn run_worker_handoff_from_env() -> Result<(), String> {
+        crate::config::test_instance::initialize()?;
+        run_failure_marker_worker_from_env().expect("the entry checked its worker env")
+    }
+
     #[test]
     fn hook_url_routes_to_provider_event_with_session_query() {
         let url = hook_url(
@@ -1783,7 +1799,7 @@ mod tests {
         if let Some(release_path) = std::env::var_os(FAILURE_MARKER_TEST_RELEASE_PATH_ENV) {
             wait_for_test_release(Path::new(&release_path));
         }
-        crate::run_from_args().expect("marker worker entrypoint writes durable marker");
+        run_worker_handoff_from_env().expect("marker worker entrypoint writes durable marker");
     }
 
     #[test]
@@ -1794,7 +1810,8 @@ mod tests {
         }
         #[cfg(target_os = "linux")]
         super::reaping_tests::record_worker_pid();
-        crate::run_from_args().expect("non-wait relay worker delivers event or durable marker");
+        run_worker_handoff_from_env()
+            .expect("non-wait relay worker delivers event or durable marker");
     }
 
     #[cfg(unix)]

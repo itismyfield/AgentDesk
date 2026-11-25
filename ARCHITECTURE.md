@@ -624,6 +624,7 @@ src/
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
+│   ├── intake_stage.rs
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
 ├── runtime_layout/
@@ -1378,6 +1379,7 @@ src/
 │   │   │   │   ├── fallback.rs
 │   │   │   │   ├── input_start.rs
 │   │   │   │   ├── output.rs
+│   │   │   │   ├── output_fixture_tests.rs
 │   │   │   │   ├── output_tests.rs
 │   │   │   │   ├── plan.rs
 │   │   │   │   ├── snapshot.rs
@@ -1400,6 +1402,8 @@ src/
 │   │   │   ├── consent_scope_tests.rs
 │   │   │   ├── dispatch_stamp_tests.rs
 │   │   │   ├── drain_tests.rs
+│   │   │   ├── host.rs
+│   │   │   ├── host_tests.rs
 │   │   │   ├── o_input.rs
 │   │   │   ├── o_route_tests.rs
 │   │   │   ├── owner_fence_pg_tests.rs
@@ -1471,6 +1475,7 @@ src/
 │   │   │   ├── first_input/
 │   │   │   │   ├── pg_tests/
 │   │   │   │   │   └── pending_lookup_tests.rs
+│   │   │   │   ├── pending_lookup_probe_tests.rs
 │   │   │   │   └── pg_tests.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
@@ -1499,6 +1504,7 @@ src/
 │   │   ├── followup_reader.rs
 │   │   ├── herdr_guard_tests.rs
 │   │   ├── herdr_turn.rs
+│   │   ├── launch_script.rs
 │   │   ├── process_session_launch.rs
 │   │   ├── startup_update_tests.rs
 │   │   └── tui_session_launch.rs
@@ -2134,6 +2140,7 @@ src/
 │   │   ├── inject_disposition/
 │   │   │   └── dispatched.rs
 │   │   ├── krx_claude_tests/
+│   │   │   ├── claude_readiness_tests.rs
 │   │   │   ├── herdr_first_input_tests.rs
 │   │   │   ├── herdr_handoff_tests.rs
 │   │   │   └── pinned_tmux_tests.rs
@@ -2667,7 +2674,8 @@ src/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
-│   │   │   │   │   │   └── native_input.rs
+│   │   │   │   │   │   ├── native_input.rs
+│   │   │   │   │   │   └── pending_attached.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2685,6 +2693,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_common_operation_tests.rs
 │   │   │   │   │   ├── owner_input_effort_refused_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_attached_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
@@ -2926,6 +2935,7 @@ src/
 │   │   ├── session_canonical_identity/
 │   │   │   ├── krx_services_dl_tests/
 │   │   │   │   ├── intake_worker_executor_tests.rs
+│   │   │   │   ├── krx_dedupe_dl_tests.rs
 │   │   │   │   └── message_outbox_source_contract_tests.rs
 │   │   │   └── krx_services_dl_tests.rs
 │   │   ├── session_notice/
@@ -2967,6 +2977,9 @@ src/
 │   │   │   ├── channel_routing.rs
 │   │   │   ├── restore_cwd.rs
 │   │   │   └── worktree.rs
+│   │   ├── session_transition/
+│   │   │   ├── host_tests.rs
+│   │   │   └── registry_tests.rs
 │   │   ├── settings/
 │   │   │   ├── content.rs
 │   │   │   ├── content_snapshot_tests.rs
@@ -2974,6 +2987,9 @@ src/
 │   │   │   ├── read.rs
 │   │   │   ├── validation.rs
 │   │   │   └── write.rs
+│   │   ├── shared_state/
+│   │   │   ├── g7_host.rs
+│   │   │   └── g7_host_tests.rs
 │   │   ├── standby_relay/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
@@ -3616,6 +3632,7 @@ src/
 │   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
 │   │   │   ├── native_key_tests.rs
+│   │   │   ├── native_memo_port_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_receipt_tests.rs
@@ -4405,6 +4422,7 @@ src/
 │   │   └── terminal_usage.rs
 │   ├── session_forwarding/
 │   │   ├── probe/
+│   │   │   ├── fixture_tests.rs
 │   │   │   └── tests.rs
 │   │   ├── trusted_target/
 │   │   │   └── loopback_seam_tests.rs
@@ -4630,6 +4648,8 @@ src/
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_receipt.rs
 │   │   │   │   │   ├── native_tests.rs
+│   │   │   │   │   ├── read_stamp.rs
+│   │   │   │   │   ├── read_stamp_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs
 │   │   │   │   ├── append_tests.rs
@@ -4759,7 +4779,8 @@ src/
 │   │   │   │   ├── input_notices/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
-│   │   │   │   └── input_notices.rs
+│   │   │   │   ├── input_notices.rs
+│   │   │   │   └── test_access.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4823,6 +4844,7 @@ src/
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
 │   │   │   │   ├── scoped_transition_tests.rs
+│   │   │   │   ├── test_access.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
@@ -4844,6 +4866,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
+│   │   │   │   ├── test_access.rs
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
 │   │   │   │   └── authority_contention_tests.rs
@@ -4898,6 +4921,9 @@ src/
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
 │   │   │   ├── rotation/
+│   │   │   │   ├── owe/
+│   │   │   │   │   ├── observe_memo.rs
+│   │   │   │   │   └── observe_memo_tests.rs
 │   │   │   │   ├── archive_eof.rs
 │   │   │   │   ├── archive_eof_tests.rs
 │   │   │   │   ├── claude_boundary.rs
@@ -4994,6 +5020,7 @@ src/
 │   │   │   ├── local_retry_repost_tests.rs
 │   │   │   ├── local_retry_tests.rs
 │   │   │   ├── mod.rs
+│   │   │   ├── native_memo_actor_tests.rs
 │   │   │   ├── notice_retry_tests.rs
 │   │   │   ├── operator_resume_actor_tests.rs
 │   │   │   ├── operator_resume_delivery_tests.rs

@@ -21,23 +21,23 @@ export function DashboardAuthGate({ children }: { children: ReactNode }) {
 
   if (auth.phase === "authenticated") return <>{children}</>;
   return (
-    <main className="flex min-h-dvh items-center justify-center bg-gray-950 p-5 text-gray-100">
-      <form className="w-full max-w-sm rounded-xl border border-gray-700 bg-gray-900 p-6 shadow-xl"
+    <main className="flex min-h-dvh items-center justify-center bg-[var(--bg)] p-5 text-[var(--fg)]">
+      <form className="w-full max-w-sm rounded-xl border border-[var(--line)] bg-[var(--bg-2)] p-6 text-[var(--fg)] shadow-[var(--shadow-md)]"
         onSubmit={(event) => { event.preventDefault(); beginAuthentication(input); setInput(""); }}>
         <h1 className="mb-3 text-xl font-semibold">AgentDesk 로그인</h1>
-        <p className="mb-5 text-sm text-gray-300" role="status">
+        <p className="mb-5 text-sm text-[var(--fg-muted)]" role="status">
           {auth.phase === "checking" ? "서버 인증을 확인하고 있습니다…" : auth.message}
         </p>
         <label className="mb-2 block text-sm" htmlFor="dashboard-token">서버 토큰</label>
         <input id="dashboard-token" type="password" autoComplete="off" spellCheck={false}
-          className="mb-4 w-full rounded border border-gray-600 bg-gray-950 p-3"
+          className="mb-4 w-full rounded border border-[var(--line)] bg-[var(--bg)] p-3 text-[var(--fg)]"
           value={input} onChange={(event) => setInput(event.target.value)}
           disabled={auth.phase === "checking"} required={auth.phase === "required"} />
         <button type="submit" disabled={auth.phase === "checking"}
-          className="w-full rounded bg-blue-600 px-4 py-3 font-medium disabled:opacity-50">
+          className="w-full rounded bg-blue-600 px-4 py-3 font-medium text-white disabled:opacity-50">
           {auth.phase === "unavailable" ? "다시 연결" : "로그인"}
         </button>
-        <p className="mt-4 text-xs leading-relaxed text-gray-400">토큰은 현재 탭에서만 사용합니다. 페이지를 새로고침하면 다시 로그인해야 합니다.</p>
+        <p className="mt-4 text-xs leading-relaxed text-[var(--fg-muted)]">토큰은 현재 탭에서만 사용합니다. 페이지를 새로고침하면 다시 로그인해야 합니다.</p>
       </form>
     </main>
   );

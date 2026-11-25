@@ -6,9 +6,19 @@ import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { Button } from "../../kit/free/button-clean";
 import { CodeBlock } from "../../kit/free/code-block-clean";
+import { ContextCompaction } from "../../kit/pro/context-compaction";
 import { Cap } from "../common/KitPrimitives";
 import type { Translator } from "../agent-manager/types";
 import { fetchSessionOutput, normalizeTimestamp, sessionStateText, type SessionOutputSnapshot } from "./SessionPanelModel";
+
+/** Infers model context window size from model identifier, defaulting to 200K. */
+export function inferSessionContextLimit(model: string | null | undefined): number {
+  const normalized = (model ?? "").toLowerCase();
+  if (/\[1m\]|-1m\b|\b1m\b|1000k|gemini/.test(normalized)) return 1_000_000;
+  if (/256k|qwen/.test(normalized)) return 256_000;
+  if (/128k|gpt-4o\b/.test(normalized)) return 128_000;
+  return 200_000;
+}
 
 /** What the server sends about one unlinked session, under its row: state, Provider, summary, signals, key and live output preview. */
 export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo }: {
@@ -34,9 +44,10 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
   const department = departments.find((entry) => entry.id === s.department_id);
   const lastSeen = normalizeTimestamp(s.last_seen_at), connected = normalizeTimestamp(s.connected_at);
   const at = (time: number) => new Date(time).toLocaleString(isKo ? "ko-KR" : "en-US");
+  const providerLabel = getProviderMeta(s.provider).label;
   const rows = ([
     [tr("상태", "State"), `${sessionStateText(s, tr)} (${s.status})`],
-    ["Provider", getProviderMeta(s.provider).label],
+    ["Provider", providerLabel],
     [tr("모델", "Model"), s.model],
     [tr("세션 요약", "Summary"), s.session_info, "whitespace-pre-line"],
     [tr("마지막 신호", "Last signal"), lastSeen && `${formatRelativeTime(lastSeen, isKo)} · ${at(lastSeen)}`],
@@ -47,6 +58,7 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
   ] satisfies Array<[string, ReactNode, string?]>).filter(([, value]) => value);
 
   const outputText = output?.available ? output.recent_output.trim() : "";
+  const hasTokenMetrics = typeof s.tokens === "number" && Number.isFinite(s.tokens) && s.tokens > 0;
 
   return (
     <div id={id} className="flex min-w-0 flex-col gap-3 border-t border-(--line-soft) bg-(--bg-1) px-3 py-3 text-[13px] leading-5 sm:px-4">
@@ -58,6 +70,24 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
           </div>
         ))}
       </dl>
+      {hasTokenMetrics ? (
+        <div data-testid={`session-context-${s.id}`} className="min-w-0">
+          <ContextCompaction
+            title={tr("컨텍스트 사용량", "Context usage")}
+            model={s.model || providerLabel}
+            limit={inferSessionContextLimit(s.model)}
+            threshold={0.8}
+            items={[
+              {
+                id: `session-${s.id}-active`,
+                kind: "assistant",
+                label: tr("활성 세션 토큰", "Active session tokens"),
+                tokens: s.tokens,
+              },
+            ]}
+          />
+        </div>
+      ) : null}
       <div className="flex min-w-0 flex-col gap-1.5 border-t border-(--line-soft) pt-2.5" data-testid={`session-output-${s.id}`}>
         <div className="flex items-center justify-between gap-2">
           <Cap>{tr("실시간 출력 미리보기 (최근 80줄)", "Live output preview (last 80 lines)")}</Cap>

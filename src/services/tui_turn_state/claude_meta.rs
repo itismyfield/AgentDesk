@@ -2,37 +2,58 @@
 //! a busy writer's walk also reaches a prompt or tool result still owed a reply.
 use super::*;
 
-/// A completed reply survives a non-conversation tail; old terminals across a session marker
-/// still cannot prove Idle, while a pending tool call remains Streaming.
+/// A completed reply survives a non-conversation tail or finished idle compaction; old terminals
+/// across a session marker still cannot prove Idle, while a pending tool call remains Streaming.
 pub(super) fn observe(path: &Path) -> TuiTurnState {
-    let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
+    let Some((window, open)) = window(path) else {
+        return TuiTurnState::Unknown;
+    };
+    let state = match walk(
+        &window,
+        claude_envelope_turn_state,
+        claude_partial_turn_state,
+    ) {
+        // A terminal beneath a compaction its notice has not closed yet proves nothing.
+        TuiTurnState::Idle if open => TuiTurnState::Unknown,
+        state => state,
+    };
     if matches!(
         state,
         TuiTurnState::Unknown | TuiTurnState::Streaming | TuiTurnState::UserSubmitted
-    ) && completed_tail(path)
+    ) && completed_tail(&window)
     {
         return TuiTurnState::Idle;
     }
     if state != TuiTurnState::Unknown {
         return state;
     }
-    match walk(path, past_marker_envelope, past_marker_partial) {
+    match walk(&window, past_marker_envelope, past_marker_partial) {
         TuiTurnState::Streaming => TuiTurnState::Streaming,
         _ => TuiTurnState::Unknown,
     }
 }
 
-fn completed_tail(path: &Path) -> bool {
-    let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
-        return false;
-    };
-    let mut metadata = false;
-    for line in window
+/// The recent records with each idle compaction its notice closed taken out, and whether one is
+/// still open; `None` when nothing but closed compactions was read.
+fn window(path: &Path) -> Option<(JsonlTailWindow, bool)> {
+    let mut window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
+    window.lines.retain(|line| !line.trim().is_empty());
+    let records: Vec<Value> = window
         .lines
         .iter()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-    {
+        .map(|line| serde_json::from_str(line).unwrap_or(Value::Null))
+        .collect();
+    // A torn last line cannot close a compaction it may belong to, so it is read after it.
+    let torn = records.last().is_some_and(Value::is_null);
+    let (closed, open) = closed_compactions(&records[..records.len() - usize::from(torn)]);
+    let mut closed = closed.into_iter();
+    window.lines.retain(|_| closed.next() != Some(true));
+    (window.lines.is_empty() == records.is_empty()).then_some((window, open))
+}
+
+fn completed_tail(window: &JsonlTailWindow) -> bool {
+    let mut metadata = false;
+    for line in window.lines.iter().rev() {
         let Ok(record) = serde_json::from_str::<Value>(line) else {
             return false;
         };
@@ -45,6 +66,76 @@ fn completed_tail(path: &Path) -> bool {
         metadata = true;
     }
     false
+}
+
+/// Which `records` belong to an idle compaction its notice closed, up to that notice itself, which
+/// stays as metadata; and whether one is still open after the last record.
+pub(crate) fn closed_compactions(records: &[Value]) -> (Vec<bool>, bool) {
+    let (mut compaction, mut open) = (IdleCompaction::default(), None);
+    let mut closed = vec![false; records.len()];
+    for (index, record) in records.iter().enumerate() {
+        match compaction.step(record) {
+            CompactionStep::Open => open = Some(index),
+            CompactionStep::Closed => closed[open.take().unwrap_or(index)..index].fill(true),
+            CompactionStep::Broken => open = None,
+            CompactionStep::Outside | CompactionStep::Inside => {}
+        }
+    }
+    (closed, open.is_some())
+}
+
+/// A record's place in an idle compaction read forward: its boundary opens it, and only its
+/// summary and idle metadata may follow until the idle-compaction notice closes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompactionStep {
+    Outside,
+    Open,
+    Inside,
+    Closed,
+    Broken,
+}
+
+/// Both Claude readers share this, so a compaction no notice closed stays conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum IdleCompaction {
+    #[default]
+    Outside,
+    Boundary,
+    Summary,
+}
+
+impl IdleCompaction {
+    pub(crate) fn step(&mut self, record: &Value) -> CompactionStep {
+        let (next, step) = match *self {
+            Self::Outside
+                if record["type"] == "system" && record["subtype"] == "compact_boundary" =>
+            {
+                (Self::Boundary, CompactionStep::Open)
+            }
+            Self::Outside => (Self::Outside, CompactionStep::Outside),
+            Self::Boundary if record["isCompactSummary"] == true => {
+                (Self::Summary, CompactionStep::Inside)
+            }
+            Self::Summary if idle_compaction_notice(record) => {
+                (Self::Outside, CompactionStep::Closed)
+            }
+            open if record["type"] != "permission-mode" && idle_metadata(record) => {
+                (open, CompactionStep::Inside)
+            }
+            _ => (Self::Outside, CompactionStep::Broken),
+        };
+        *self = next;
+        step
+    }
+}
+
+/// Claude appends this notice only after an idle or away compaction has finished.
+fn idle_compaction_notice(record: &Value) -> bool {
+    record["type"] == "system"
+        && record["subtype"] == "informational"
+        && record["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("\"idleCompaction\""))
 }
 
 pub(crate) fn completed_reply(record: &Value) -> bool {
@@ -70,9 +161,15 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "tools-used"
             | "pr-link"
             | "frame-link"
-            | "repl-mode",
+            | "repl-mode"
+            | "data-flow-records"
+            | "derived-from",
         ) => true,
-        Some("system") => record["subtype"] == "informational",
+        // An away recap is Claude's out-of-turn summary of a long idle, not a turn record.
+        Some("system") => matches!(
+            record["subtype"].as_str(),
+            Some("informational" | "away_summary")
+        ),
         Some("attachment") => {
             let attachment = &record["attachment"];
             // Stop can persist added context before its next user record reaches the log.
@@ -87,6 +184,7 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                                 .as_str()
                                 .is_some_and(|context| !context.is_empty())
                     });
+            // Files and skills a compaction or resume re-attaches carry no turn of their own.
             !continues
                 && matches!(
                     attachment["type"].as_str(),
@@ -100,6 +198,9 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                             | "hook_success"
                             | "todo_reminder"
                             | "queued_command"
+                            | "file"
+                            | "compact_file_reference"
+                            | "invoked_skills"
                     )
                 )
         }
@@ -110,11 +211,21 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
 /// For a writer that adds input to a running turn: past the markers Claude writes after each
 /// prompt, a typed prompt or tool result is also still running. Never a new Idle.
 pub(super) fn observe_running(path: &Path) -> TuiTurnState {
-    let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
+    let Some((window, open)) = window(path) else {
+        return TuiTurnState::Unknown;
+    };
+    let state = match walk(
+        &window,
+        claude_envelope_turn_state,
+        claude_partial_turn_state,
+    ) {
+        TuiTurnState::Idle if open => TuiTurnState::Unknown,
+        state => state,
+    };
     if state != TuiTurnState::Unknown {
         return state;
     }
-    match walk(path, past_marker_running, past_marker_partial) {
+    match walk(&window, past_marker_running, past_marker_partial) {
         state if state.is_busy() => state,
         _ => TuiTurnState::Unknown,
     }
@@ -139,12 +250,12 @@ fn past_marker_running(json: &Value) -> Option<TuiTurnState> {
 }
 
 fn walk(
-    path: &Path,
+    window: &JsonlTailWindow,
     classify: fn(&Value) -> Option<TuiTurnState>,
     classify_partial: fn(&str) -> Option<TuiTurnState>,
 ) -> TuiTurnState {
-    observe_jsonl_turn_state(
-        path,
+    observe_jsonl_window_turn_state(
+        window,
         classify,
         classify_partial,
         MalformedJsonlLinePolicy::FallbackToPrevious,

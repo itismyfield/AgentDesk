@@ -410,7 +410,7 @@ async fn codex_input_on_a_listed_herdr_channel_stays_refused() {
     assert!(queued(ChannelId::new(ch), None));
     let pane = CodexPane::new(ch, &steerable(), RuntimeHandoffKind::CodexTui);
     test_hook::set(ch, InjectMode::All, pane.path("tmux"));
-    let transition = shared.session_transition_lock(ChannelId::new(ch));
+    let transition = shared.session_transition_locks.lock(ChannelId::new(ch));
     let _held = transition.try_lock_owned().expect("transition free");
     assert_eq!(
         (pane.attempt(&shared).await, pane.tmux_calls()),
@@ -437,7 +437,7 @@ async fn codex_input_is_refused_as_before_until_codex_is_enabled() {
             "parent admits intake"
         );
         assert!(!covers(ChannelId::new(ch), None), "child is not listed");
-        let transition = shared.session_transition_lock(ChannelId::new(ch));
+        let transition = shared.session_transition_locks.lock(ChannelId::new(ch));
         let _held = transition.try_lock_owned().expect("transition free");
         assert_eq!(
             (pane.attempt(&shared).await, pane.tmux_calls()),
@@ -485,7 +485,7 @@ async fn an_enabled_codex_channel_refuses_unsteerable_turns_before_the_lock() {
     for (ch, rollout, runtime, veto) in cases {
         let pane = CodexPane::new(ch, &rollout, runtime);
         test_hook::enable_codex(ch);
-        let transition = shared.session_transition_lock(ChannelId::new(ch));
+        let transition = shared.session_transition_locks.lock(ChannelId::new(ch));
         let _held = transition.try_lock_owned().expect("transition free");
         let refused = InjectAttempt::NotSent(veto);
         assert_eq!(

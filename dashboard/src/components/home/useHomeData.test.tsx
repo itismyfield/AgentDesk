@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { request } from "../../api/httpClient";
 import { getServerCampaignSummaries } from "../../api/serverCampaigns";
 import { todoStatus, type HomeTurn } from "./homeModel";
-import { AgentTurnsProvider, campaignTodoSource, loadHomeCampaigns, useAgentTurns, usePolled, type Loaded } from "./useHomeData";
+import { AgentTurnsProvider, campaignTodoSource, cleanupStaleIdleSession, loadHomeCampaigns, loadHomeMemento, useAgentTurns, usePolled, type Loaded } from "./useHomeData";
 
 vi.mock("../../api/httpClient", () => ({ ApiRequestError: class extends Error {}, request: vi.fn(async () => ({ status: "working" })) }));
 vi.mock("../../api/campaigns", () => ({ getCampaigns: vi.fn(async () => ({ campaigns: [] })) }));
@@ -120,5 +120,34 @@ describe("home data", () => {
     expect(reads()).toEqual(["b"]);
     expect(latest.get("a")).toEqual({ status: "working" });
     await act(async () => root.unmount());
+  });
+
+  it("disconnects a tmuxless stale idle session in one kill-tmux call and follows up once after killing live tmux", async () => {
+    const key = "antigravity/discord_fb5/MacBook-Pro-14:AgentDesk-antigravity-게임-ag";
+    vi.mocked(request).mockResolvedValueOnce({ ok: true, tmux_was_alive: false, session_row_disconnected: true });
+    expect(await cleanupStaleIdleSession(key)).toEqual({ disconnected: true, reason: undefined });
+    expect(vi.mocked(request)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(request).mock.calls[0][0]).toBe(`/api/sessions/${encodeURIComponent(key)}/kill-tmux`);
+
+    vi.mocked(request).mockClear();
+    vi.mocked(request)
+      .mockResolvedValueOnce({ ok: true, tmux_was_alive: true, tmux_killed: true, session_row_disconnected: false })
+      .mockResolvedValueOnce({ ok: true, tmux_was_alive: false, session_row_disconnected: true });
+    expect(await cleanupStaleIdleSession(key)).toEqual({ disconnected: true, reason: undefined });
+    expect(vi.mocked(request)).toHaveBeenCalledTimes(2);
+
+    vi.mocked(request).mockClear();
+    vi.mocked(request).mockResolvedValueOnce({ ok: true, tmux_killed: false, session_row_disconnected: false, preserved_reason: "host_not_legacy_tmux" });
+    expect(await cleanupStaleIdleSession(key)).toEqual({ disconnected: false, reason: "host_not_legacy_tmux" });
+  });
+
+  it("probes live Memento connection status from the first bound non-test agent's anchors endpoint", async () => {
+    vi.mocked(request).mockClear().mockResolvedValueOnce({ memento: { status: "connected" } });
+    const status = await loadHomeMemento([
+      { id: "relay-e2e", discord_channel_cc: "9" } as never,
+      { id: "adk-dashboard", discord_channel_cc: "1" } as never,
+    ]);
+    expect(status).toEqual({ connected: true, status: "connected" });
+    expect(vi.mocked(request).mock.calls[0][0]).toBe("/api/agents/adk-dashboard/anchors?provider=claude");
   });
 });

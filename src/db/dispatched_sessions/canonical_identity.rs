@@ -14,7 +14,13 @@ use crate::db::dispatched_sessions::HookSessionUpsert;
 
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
 const SCHEDULED_SNAPSHOT_KIND: &str = "scheduled_snapshot";
-pub(crate) const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
+const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
+
+/// Test seam: the advisory-lock namespace the identity fence takes.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) const fn advisory_lock_namespace_for_test() -> i32 {
+    ADVISORY_LOCK_NAMESPACE
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum SessionIdentityKind {

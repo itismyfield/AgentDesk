@@ -60,7 +60,7 @@ fn snapshot(evidence: &NoticeEvidence) -> MigrationSnapshot {
 }
 
 fn apply(state: &mut LedgerState, entry: NoticeEntry) {
-    state.apply(
+    state.apply_for_test(
         Utc::now(),
         LedgerEntry::InputNotice {
             entry: Box::new(entry),
@@ -89,16 +89,16 @@ fn materialized_unresolved_input_replays_raw_evidence_without_a_receipt() {
             candidates: vec![40, 50],
         },
     ];
-    let mut expected = LedgerState::starting_at(100);
+    let mut expected = LedgerState::starting_at_for_test(100);
     for entry in entries {
         let entry = LedgerEntry::InputNotice {
             entry: Box::new(entry),
         };
         let at = Utc::now();
-        crate::services::tui_o::store::ledger::append(&path, at, &entry).unwrap();
-        expected.apply(at, entry);
+        crate::services::tui_o::store::ledger::append_for_test(&path, at, &entry).unwrap();
+        expected.apply_for_test(at, entry);
     }
-    let replay = crate::services::tui_o::store::ledger::recover(&path, 100).unwrap();
+    let replay = crate::services::tui_o::store::ledger::recover_for_test(&path, 100).unwrap();
     assert_eq!(replay, expected);
     assert!(replay.violation().is_none());
     assert_eq!(
@@ -110,7 +110,7 @@ fn materialized_unresolved_input_replays_raw_evidence_without_a_receipt() {
         replay.input_notices().reserved_ids,
         BTreeSet::from([40, 50])
     );
-    assert!(replay.excluded.is_empty());
+    assert!(replay.excluded_for_test().is_empty());
     assert_eq!((replay.anchor(), replay.next_serial()), (100, 0));
 }
 
@@ -119,7 +119,7 @@ fn replay_materialized(inputs: &[NoticeEvidence]) -> LedgerState {
     let path = dir.path().join("ledger.jsonl");
     std::fs::File::create(&path).unwrap();
     for input in inputs {
-        crate::services::tui_o::store::ledger::append(
+        crate::services::tui_o::store::ledger::append_for_test(
             &path,
             Utc::now(),
             &LedgerEntry::InputNotice {
@@ -130,7 +130,7 @@ fn replay_materialized(inputs: &[NoticeEvidence]) -> LedgerState {
         )
         .unwrap();
     }
-    crate::services::tui_o::store::ledger::recover(&path, 10).unwrap()
+    crate::services::tui_o::store::ledger::recover_for_test(&path, 10).unwrap()
 }
 
 #[test]
@@ -223,7 +223,7 @@ fn rerendered_materialized_replay_still_rejects_source_field_conflicts() {
 fn legacy_import_is_one_atomic_receipt_without_moving_body_frontiers() {
     let first = evidence("p", "same", 0);
     let second = evidence("q", "same", 1_000);
-    let mut state = LedgerState::starting_at(100);
+    let mut state = LedgerState::starting_at_for_test(100);
     apply(
         &mut state,
         NoticeEntry::MigrationStarted {
@@ -310,7 +310,7 @@ fn frozen_cohort_does_not_expand_or_import_outside_evidence_and_history() {
     assert_eq!(state.input_notices().migration.as_ref(), Some(&initial));
     let mut straddling = initial;
     straddling.sources[0].upper = 1;
-    assert!(straddling.contains(&input.record));
+    assert!(straddling.contains_for_test(&input.record));
 }
 
 #[test]
@@ -371,7 +371,7 @@ fn incomplete_evidence_cannot_import_and_unresolved_candidates_stay_reserved() {
         },
     );
     assert!(state.violation().is_some());
-    assert!(state.excluded.is_empty());
+    assert!(state.excluded_for_test().is_empty());
 }
 
 #[test]
@@ -470,8 +470,8 @@ fn prepared_legacy_default_and_notice_origin_roundtrip_preserve_retry_identity()
         }
     ));
     let mut root = LedgerState::default();
-    root.apply(Utc::now(), entry.clone());
-    root.apply(Utc::now(), LedgerEntry::NotFound { serial: 0 });
+    root.apply_for_test(Utc::now(), entry.clone());
+    root.apply_for_test(Utc::now(), LedgerEntry::NotFound { serial: 0 });
     assert!(root.piece(0).unwrap().notice_origin.is_some());
     for retain_origin in [true, false] {
         let mut state = root.clone();
@@ -489,7 +489,7 @@ fn prepared_legacy_default_and_notice_origin_roundtrip_preserve_retry_identity()
                 *notice_origin = None;
             }
         }
-        state.apply(Utc::now(), child);
+        state.apply_for_test(Utc::now(), child);
         assert_eq!(state.violation().is_none(), retain_origin);
     }
 }
@@ -507,7 +507,7 @@ fn native_key_partial_evidence_cannot_bypass_conflicts_in_either_order() {
             let mut state = NoticeState::default();
             if !partial_first {
                 state
-                    .apply(NoticeEntry::Materialized {
+                    .apply_for_test(NoticeEntry::Materialized {
                         evidence: Box::new(complete.clone()),
                     })
                     .unwrap();
@@ -515,7 +515,7 @@ fn native_key_partial_evidence_cannot_bypass_conflicts_in_either_order() {
             let before = state.clone();
             assert!(
                 state
-                    .apply(NoticeEntry::Materialized {
+                    .apply_for_test(NoticeEntry::Materialized {
                         evidence: Box::new(partial.clone()),
                     })
                     .is_err(),
@@ -524,7 +524,7 @@ fn native_key_partial_evidence_cannot_bypass_conflicts_in_either_order() {
             assert_eq!(state, before);
             if partial_first {
                 state
-                    .apply(NoticeEntry::Materialized {
+                    .apply_for_test(NoticeEntry::Materialized {
                         evidence: Box::new(complete.clone()),
                     })
                     .unwrap();
@@ -548,7 +548,7 @@ fn native_key_only_enrichment_requires_the_retained_canonical_prompt() {
     raw_only.origin = None;
     let mut state = NoticeState::default();
     state
-        .apply(NoticeEntry::Materialized {
+        .apply_for_test(NoticeEntry::Materialized {
             evidence: Box::new(raw_only.clone()),
         })
         .unwrap();
@@ -557,7 +557,7 @@ fn native_key_only_enrichment_requires_the_retained_canonical_prompt() {
     let before = state.clone();
     assert!(
         state
-            .apply(NoticeEntry::Materialized {
+            .apply_for_test(NoticeEntry::Materialized {
                 evidence: Box::new(key_only.clone()),
             })
             .is_err()
@@ -566,12 +566,12 @@ fn native_key_only_enrichment_requires_the_retained_canonical_prompt() {
     raw_only.prompt = complete.prompt.clone();
     raw_only.prompt_sha256 = complete.prompt_sha256.clone();
     state
-        .apply(NoticeEntry::Materialized {
+        .apply_for_test(NoticeEntry::Materialized {
             evidence: Box::new(raw_only),
         })
         .unwrap();
     state
-        .apply(NoticeEntry::Materialized {
+        .apply_for_test(NoticeEntry::Materialized {
             evidence: Box::new(key_only),
         })
         .unwrap();
@@ -579,7 +579,7 @@ fn native_key_only_enrichment_requires_the_retained_canonical_prompt() {
     assert_eq!(stored.unit_key, complete.unit_key);
     assert_eq!(stored.prompt, complete.prompt);
     assert_eq!(stored.prompt_sha256, complete.prompt_sha256);
-    assert!(!stored.complete());
+    assert!(!stored.complete_for_test());
 }
 
 #[test]
@@ -595,18 +595,18 @@ fn legacy_import_rejects_any_noncanonical_or_conflicting_same_key_evidence() {
         for already_imported in [false, true] {
             let mut state = NoticeState::default();
             state
-                .apply(NoticeEntry::MigrationStarted {
+                .apply_for_test(NoticeEntry::MigrationStarted {
                     snapshot: snapshot(&complete),
                 })
                 .unwrap();
             state
-                .apply(NoticeEntry::Materialized {
+                .apply_for_test(NoticeEntry::Materialized {
                     evidence: Box::new(complete.clone()),
                 })
                 .unwrap();
             if already_imported {
                 state
-                    .apply(NoticeEntry::LegacyImported {
+                    .apply_for_test(NoticeEntry::LegacyImported {
                         input_key: key.clone(),
                         msg_id: 40,
                     })
@@ -614,11 +614,11 @@ fn legacy_import_rejects_any_noncanonical_or_conflicting_same_key_evidence() {
             }
             state
                 .evidence
-                .insert(record_id(&invalid.record), invalid.clone());
+                .insert(record_id_for_test(&invalid.record), invalid.clone());
             let before = state.clone();
             assert!(
                 state
-                    .apply(NoticeEntry::LegacyImported {
+                    .apply_for_test(NoticeEntry::LegacyImported {
                         input_key: key.clone(),
                         msg_id: 40,
                     })
@@ -649,7 +649,7 @@ fn owned_settlement(input: &NoticeEvidence) -> NoticeEntry {
 fn settled_ownership_rejects_changed_uuid_source_digest_and_boundary() {
     for change in ["uuid", "source", "digest", "boundary"] {
         let input = evidence("owned", "registered frame", 0);
-        let mut state = LedgerState::starting_at(0);
+        let mut state = LedgerState::starting_at_for_test(0);
         apply(
             &mut state,
             NoticeEntry::Materialized {
@@ -677,7 +677,7 @@ fn settled_ownership_rejects_changed_uuid_source_digest_and_boundary() {
         apply(&mut state, entry);
         assert!(state.violation().is_some(), "{change}");
         assert!(state.input_notices().settled.is_empty());
-        assert!(state.excluded.is_empty());
+        assert!(state.excluded_for_test().is_empty());
     }
 }
 
@@ -685,14 +685,14 @@ fn settled_ownership_rejects_changed_uuid_source_digest_and_boundary() {
 fn settled_ownership_never_overrides_prepared_or_uncertain_send() {
     for not_found in [false, true] {
         let input = evidence("owned", "registered frame", 0);
-        let mut state = LedgerState::starting_at(0);
+        let mut state = LedgerState::starting_at_for_test(0);
         apply(
             &mut state,
             NoticeEntry::Materialized {
                 evidence: Box::new(input.clone()),
             },
         );
-        state.apply(
+        state.apply_for_test(
             Utc::now(),
             LedgerEntry::Prepared {
                 serial: 0,
@@ -706,7 +706,7 @@ fn settled_ownership_never_overrides_prepared_or_uncertain_send() {
             },
         );
         if not_found {
-            state.apply(Utc::now(), LedgerEntry::NotFound { serial: 0 });
+            state.apply_for_test(Utc::now(), LedgerEntry::NotFound { serial: 0 });
         }
         assert!(state.violation().is_none());
         apply(&mut state, owned_settlement(&input));
@@ -744,7 +744,7 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
         input.origin = None;
         input.unit_key = None;
         input.payload = None;
-        let mut state = LedgerState::starting_at(0);
+        let mut state = LedgerState::starting_at_for_test(0);
         apply(
             &mut state,
             NoticeEntry::Materialized {
@@ -789,7 +789,7 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
                     ),
                 },
             ] {
-                crate::services::tui_o::store::ledger::append(
+                crate::services::tui_o::store::ledger::append_for_test(
                     &path,
                     Utc::now(),
                     &LedgerEntry::InputNotice {
@@ -799,7 +799,7 @@ fn settled_policy_replays_without_origin_and_never_accepts_a_human_header() {
                 .unwrap();
             }
             let bytes = std::fs::read(&path).unwrap();
-            let replay = crate::services::tui_o::store::ledger::recover(&path, 0).unwrap();
+            let replay = crate::services::tui_o::store::ledger::recover_for_test(&path, 0).unwrap();
             assert_eq!(replay.input_notices(), state.input_notices());
             assert_eq!(std::fs::read(path).unwrap(), bytes);
         }
@@ -812,7 +812,7 @@ fn unknown_complete_notice_entry_is_rejected_without_cutting_ledger_bytes() {
     let path = dir.path().join("ledger.jsonl");
     std::fs::File::create(&path).unwrap();
     let input = evidence("old", "retained", 0);
-    crate::services::tui_o::store::ledger::append(
+    crate::services::tui_o::store::ledger::append_for_test(
         &path,
         Utc::now(),
         &LedgerEntry::InputNotice {
@@ -828,7 +828,7 @@ fn unknown_complete_notice_entry_is_rejected_without_cutting_ledger_bytes() {
     let mut unsupported = serde_json::to_vec(&line).unwrap();
     unsupported.push(b'\n');
     std::fs::write(&path, &unsupported).unwrap();
-    assert!(crate::services::tui_o::store::ledger::recover(&path, 0).is_err());
+    assert!(crate::services::tui_o::store::ledger::recover_for_test(&path, 0).is_err());
     assert_eq!(std::fs::read(&path).unwrap(), unsupported);
 }
 
@@ -840,7 +840,7 @@ fn terminal_partial_evidence_stays_excluded_when_its_native_key_is_enriched() {
     partial.unit_key = None;
     partial.payload = None;
     partial.origin = None;
-    let mut state = LedgerState::starting_at(0);
+    let mut state = LedgerState::starting_at_for_test(0);
     apply(
         &mut state,
         NoticeEntry::Materialized {

@@ -6,35 +6,37 @@ import path from "path";
 import { readFileSync } from "fs";
 
 // Single source of truth for port/host defaults (shared with Rust backend & scripts)
-const defaults = JSON.parse(readFileSync(path.resolve(__dirname, "../defaults.json"), "utf-8"));
+const defaults = JSON.parse(readFileSync(path.resolve(import.meta.dirname, "../defaults.json"), "utf-8"));
 
-function manualChunks(id: string) {
-  if (!id.includes("node_modules")) return undefined;
+function manualChunks(rawId: string) {
+  const id = rawId.replace(/\0/g, "");
+  const marker = "/node_modules/";
+  const idx = id.lastIndexOf(marker);
+  if (idx === -1) return undefined;
+  const pkg = id.slice(idx + marker.length);
 
-  if (id.includes("react-dom") || id.includes("/react/")) {
+  if (
+    pkg.startsWith("react/")
+    || pkg.startsWith("react-dom/")
+    || pkg.startsWith("scheduler/")
+  ) {
     return "react";
   }
 
-  if (id.includes("/react-router/")) {
+  if (pkg.startsWith("react-router/")) {
     return "router";
   }
 
-  if (
-    id.includes("react-markdown")
-    || id.includes("remark-gfm")
-    || id.includes("/remark-")
-    || id.includes("/rehype-")
-    || id.includes("/micromark")
-    || id.includes("/mdast")
-    || id.includes("/hast")
-    || id.includes("/unist")
-    || id.includes("/vfile")
-  ) {
-    return "markdown";
+  if (pkg.startsWith("lucide-react/")) {
+    return "icons";
   }
 
-  if (id.includes("lucide-react")) {
-    return "icons";
+  if (pkg.startsWith("@xyflow/")) {
+    return "flow";
+  }
+
+  if (pkg.startsWith("recharts/") || pkg.startsWith("d3-")) {
+    return "charts";
   }
 
   return undefined;
@@ -42,11 +44,11 @@ function manualChunks(id: string) {
 
 export default defineConfig({
   test: {
-    exclude: ["e2e/**", "node_modules/**"],
+    exclude: ["node_modules/**"],
   },
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },
   server: {
     port: 5173,

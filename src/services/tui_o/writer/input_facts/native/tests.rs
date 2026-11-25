@@ -7,14 +7,14 @@ use serde_json::json;
 use sha2::Digest;
 use std::io::Write;
 
-struct Fixture {
+pub(crate) struct Fixture {
     _runtime: crate::config::TestRuntimeRootGuard,
     root: tempfile::TempDir,
-    binding: SourceBinding,
-    history: Registry,
+    pub(crate) binding: SourceBinding,
+    pub(crate) history: Registry,
 }
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let runtime = crate::config::TestRuntimeRootGuard::new();
         let base = runtime.path().join("runtime");
         std::fs::create_dir_all(&base).unwrap();
@@ -39,7 +39,7 @@ impl Fixture {
             },
         }
     }
-    fn register(&self, nonce: &str, body: &str) -> Ticket {
+    pub(crate) fn register(&self, nonce: &str, body: &str) -> Ticket {
         self.register_as(nonce, body, false)
     }
     fn register_as(&self, nonce: &str, body: &str, primary: bool) -> Ticket {
@@ -80,7 +80,7 @@ impl Fixture {
         self.history.prepare_native("native-b1", &ticket).unwrap();
         ticket
     }
-    fn append(&self, rows: &[Value]) {
+    pub(crate) fn append(&self, rows: &[Value]) {
         let mut file = std::fs::OpenOptions::new()
             .append(true)
             .open(&self.binding.source.path)
@@ -107,13 +107,13 @@ impl Fixture {
         expected
     }
 }
-fn queue(operation: &str, body: &str) -> Value {
+pub(crate) fn queue(operation: &str, body: &str) -> Value {
     json!({"type":"queue-operation","operation":operation,"content":body})
 }
-fn user(id: &str, body: &str) -> Value {
+pub(crate) fn user(id: &str, body: &str) -> Value {
     json!({"type":"user","uuid":id,"sessionId":"parent","message":{"content":body}})
 }
-fn close() -> Value {
+pub(crate) fn close() -> Value {
     json!({"type":"system","subtype":"turn_duration"})
 }
 fn command(id: &str, body: &str) -> Value {
@@ -1074,7 +1074,7 @@ impl Fixture {
         assert_eq!(actual, expected, "B1 batch and compact barrier must agree");
         actual
     }
-    fn receipt(&self, ticket: &Ticket, row: &str, body: &str) {
+    pub(crate) fn receipt(&self, ticket: &Ticket, row: &str, body: &str) {
         assert_eq!(
             self.history.receipt(
                 "native-b1",
@@ -1341,4 +1341,4 @@ fn native_8148_receipt_current_remove_keeps_the_next_dequeue_with_its_input() {
     assert_eq!(receipts[0].record().1, "second");
 }
 
-mod terminal_tests;
+pub(crate) mod terminal_tests;

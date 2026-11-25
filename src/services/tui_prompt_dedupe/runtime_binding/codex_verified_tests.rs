@@ -1,11 +1,12 @@
 #![cfg(unix)]
 
-use super::codex_verified::{self, DeliveryPermission};
-use super::*;
 use crate::config::TestEnvVarGuard;
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, observe_binding_hook,
 };
+use crate::services::tui_prompt_dedupe::codex_verified::{self, DeliveryPermission};
+use crate::services::tui_prompt_dedupe::*;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe,
     binding_context::{
@@ -153,12 +154,9 @@ impl Fixture {
         binding_events::codex::read_ownership(&self.context).unwrap()
     }
     fn raw(&self) -> Option<TuiRuntimeBinding> {
-        STATE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_by_tmux
-            .get(&self.context.tmux_session)
-            .map(|b| b.value.clone())
+        dedupe::with_tmux_entries_for_tests(&self.context.tmux_session, |binding, _| {
+            binding.clone().map(|entry| entry.0)
+        })
     }
     fn marker(&self) -> PathBuf {
         PathBuf::from(crate::services::tmux_common::session_temp_path(
@@ -703,17 +701,10 @@ fn cancelled_and_unknown_episode_permission_allow_verified_source_publication() 
         );
         assert!(h.fold().verified.is_some());
         h.assert_proof();
-        STATE
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .runtime_by_tmux
-            .insert(
-                h.context.tmux_session.clone(),
-                TimedValue {
-                    value: h.binding(),
-                    recorded_at: Instant::now(),
-                },
-            );
+        let cached = (h.binding(), Instant::now());
+        dedupe::with_tmux_entries_for_tests(&h.context.tmux_session, |binding, _| {
+            *binding = Some(cached)
+        });
         assert!(h.consumer().is_some());
         crate::services::tmux_common::with_tmux_source_authority(&h.context.tmux_session, |a| {
             assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_some())
@@ -746,8 +737,12 @@ fn production_default_permission_reaches_claim_publication_and_getters() {
     crate::services::tmux_common::with_tmux_source_authority(
         &h.context.tmux_session,
         |authority| {
-            assert!(codex_verified::proof_for_binding(authority, &h.context, &binding).is_ok());
-            assert!(codex_verified::publication_allowed(authority, &binding));
+            assert!(
+                codex_verified::proof_for_binding_for_test(authority, &h.context, &binding).is_ok()
+            );
+            assert!(codex_verified::publication_allowed_for_test(
+                authority, &binding
+            ));
             assert!(runtime_binding_for_tmux_session_under_source_authority(authority).is_some());
         },
     );
@@ -1046,7 +1041,10 @@ fn episode_permission_does_not_block_getters_with_an_intact_proof_and_marker() {
         assert!(h.consumer().is_some());
         crate::services::tmux_common::with_tmux_source_authority(&h.context.tmux_session, |a| {
             assert!(runtime_binding_for_tmux_session_under_source_authority(a).is_some());
-            assert!(codex_verified::publication_allowed(a, &h.binding()));
+            assert!(codex_verified::publication_allowed_for_test(
+                a,
+                &h.binding()
+            ));
         });
         assert!(!runtime_bindings_for_kind(RuntimeHandoffKind::CodexTui).is_empty());
         assert!(
@@ -1068,21 +1066,17 @@ fn episode_permission_does_not_block_getters_with_an_intact_proof_and_marker() {
 fn cached_generic_binding_and_forged_marker_cannot_satisfy_a_getter() {
     let h = Fixture::new("fresh", None);
     h.header(ID, false);
-    STATE
-        .lock()
-        .unwrap_or_else(|p| p.into_inner())
-        .runtime_by_tmux
-        .insert(
-            h.context.tmux_session.clone(),
-            TimedValue {
-                value: TuiRuntimeBinding {
-                    last_offset: u64::MAX,
-                    relay_last_offset: Some(u64::MAX),
-                    ..h.binding()
-                },
-                recorded_at: Instant::now(),
-            },
-        );
+    let cached = (
+        TuiRuntimeBinding {
+            last_offset: u64::MAX,
+            relay_last_offset: Some(u64::MAX),
+            ..h.binding()
+        },
+        Instant::now(),
+    );
+    dedupe::with_tmux_entries_for_tests(&h.context.tmux_session, |binding, _| {
+        *binding = Some(cached)
+    });
     fs::write(
         h.marker(),
         serde_json::to_vec(

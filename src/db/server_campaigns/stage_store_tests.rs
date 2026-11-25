@@ -118,7 +118,7 @@ async fn stored_v_origin_filled_slots_prerequisites_and_pins_cannot_be_rewritten
         };
         let mut tx = h.pool.begin().await.unwrap();
         assert!(matches!(
-            write::persist(&mut tx, Some(&state), &decision).await,
+            persist_for_test(&mut tx, Some(&state), &decision).await,
             Err(StoreError::InconsistentState)
         ));
         tx.rollback().await.unwrap();

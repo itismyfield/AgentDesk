@@ -90,7 +90,10 @@ pub(super) async fn mend(
     let persistence = discord(shared, &request.provider, channel);
     mailbox.unknown_queued_head(persistence.clone()).await?;
     // Held from the head and transcript read to the commit, as a paste's owner holds it.
-    let transition = shared.session_transition_lock(channel).try_lock_owned();
+    let transition = shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned();
     let _transition = transition.ok()?;
     let head = mailbox.unknown_queued_head(persistence.clone()).await?;
     let bound = bound_transcript(shared, request).await?;

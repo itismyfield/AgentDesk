@@ -1,14 +1,17 @@
-import { useEffect, useId, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Bot, Brain, CircleAlert, Copy, CornerDownRight, RefreshCw, Wrench, type LucideIcon } from "lucide-react";
+import { Bot, Brain, ChevronDown, CircleAlert, Copy, CornerDownRight, RefreshCw, Wrench, type LucideIcon } from "lucide-react";
 import { formatElapsedCompact } from "../../agent-insights";
 import * as api from "../../api";
 import { Badge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
+import { AgentTiming, type TimingActor, type TimingKind, type TimingSpan } from "../../kit/pro/agent-timing";
+import { AgentToolCalls, type CallStatus, type DeskCall, type DeskTool } from "../../kit/screens/agent-tool-calls";
 import { CopyWell, DetailHeading, KIT_TOUCH_BUTTON, PropList } from "./CardDetailParts";
 import {
   formatTranscriptTimestamp,
   normalizeActiveEventIndex,
+  parseTranscriptDate,
   transcriptSelectionLabel,
 } from "./turn-transcript-utils";
 
@@ -32,6 +35,107 @@ import {
   type TranscriptSource,
   type TranscriptTone,
 } from "./TurnTranscriptModel";
+
+/** Maps turn events into proportional actor timing spans for AgentTiming. */
+export function buildTurnTiming(
+  transcript: api.SessionTranscript,
+  events: api.SessionTranscriptEvent[],
+  tr: (ko: string, en: string) => string,
+): { actors: TimingActor[]; spans: TimingSpan[]; duration: number } {
+  const actorId = transcript.agent_id?.trim() || transcript.provider?.trim() || "agent";
+  const actorName = transcript.agent_id?.trim() || (transcript.provider ? transcript.provider.toUpperCase() : tr("에이전트", "Agent"));
+  const duration =
+    transcript.duration_ms != null && transcript.duration_ms > 0
+      ? Math.max(1, transcript.duration_ms / 1000)
+      : Math.max(60, events.length * 15);
+  const groups: { kind: TimingKind; weight: number; label: string }[] = [];
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (event.kind === "tool_use") {
+      const next = events[i + 1];
+      const paired = next?.kind === "tool_result" && (!next.tool_name || !event.tool_name || next.tool_name === event.tool_name);
+      groups.push({ kind: "tool", weight: paired ? 2 : 1, label: eventTitle(event, tr) });
+      if (paired) i += 1;
+    } else if (event.kind === "tool_result") {
+      groups.push({ kind: "tool", weight: 1, label: eventTitle(event, tr) });
+    } else if (event.kind === "thinking") {
+      groups.push({ kind: "thinking", weight: 1, label: eventTitle(event, tr) });
+    } else {
+      groups.push({ kind: "waiting", weight: 1, label: eventTitle(event, tr) });
+    }
+  }
+  const totalWeight = groups.reduce((sum, item) => sum + item.weight, 0) || 1;
+  let cursor = 0;
+  const spans: TimingSpan[] = groups.map((group) => {
+    const start = Number(cursor.toFixed(4));
+    cursor += (group.weight / totalWeight) * duration;
+    return { actor: actorId, kind: group.kind, start, end: Number(cursor.toFixed(4)), label: group.label };
+  });
+  return { actors: [{ id: actorId, name: actorName, kind: "agent" }], spans, duration };
+}
+
+function resolveCallStatus(event: api.SessionTranscriptEvent, result?: api.SessionTranscriptEvent | null): CallStatus {
+  const raw = `${event.status ?? ""} ${result?.status ?? ""}`.toLowerCase();
+  if (event.is_error || result?.is_error || event.kind === "error" || /fail|error|err|reject|denied|timeout/.test(raw)) return "failed";
+  if (/wait|ask|pending|approval|confirm|queued/.test(raw)) return "waiting";
+  if (/run|active|in_progress|progress|working/.test(raw)) return "running";
+  return "done";
+}
+
+/** Aggregates tool_use/tool_result events for AgentToolCalls summary inspection. */
+export function buildTurnToolSummary(
+  transcript: api.SessionTranscript,
+  events: api.SessionTranscriptEvent[],
+  tr: (ko: string, en: string) => string,
+): { tools: DeskTool[]; calls: DeskCall[] } {
+  const parsed = parseTranscriptDate(transcript.created_at);
+  const timePrefix = parsed ? parsed.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null;
+  const usedResults = new Set<number>();
+  const calls: DeskCall[] = [];
+
+  for (let i = 0; i < events.length; i += 1) {
+    const event = events[i];
+    if (event.kind === "tool_use") {
+      let resultIndex: number | null = null;
+      for (let j = i + 1; j < events.length; j += 1) {
+        const candidate = events[j];
+        if (candidate.kind === "tool_use" && candidate.tool_name === event.tool_name) break;
+        if (candidate.kind === "tool_result" && !usedResults.has(j) && (!candidate.tool_name || !event.tool_name || candidate.tool_name === event.tool_name)) {
+          resultIndex = j;
+          usedResults.add(j);
+          break;
+        }
+      }
+      const paired = resultIndex != null ? events[resultIndex] : null;
+      const name = event.tool_name || paired?.tool_name || tr("도구", "Tool");
+      const input = (event.summary || event.content || paired?.summary || paired?.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
+      calls.push({
+        id: `${transcript.turn_id}-call-${calls.length + 1}`,
+        toolId: name,
+        at: timePrefix ? `${timePrefix} #${calls.length + 1}` : `#${calls.length + 1}`,
+        status: resolveCallStatus(event, paired),
+        input,
+        run: transcript.turn_id,
+      });
+    } else if (event.kind === "tool_result" && !usedResults.has(i)) {
+      const name = event.tool_name || tr("도구", "Tool");
+      const input = (event.summary || event.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
+      calls.push({
+        id: `${transcript.turn_id}-call-${calls.length + 1}`,
+        toolId: name,
+        at: timePrefix ? `${timePrefix} #${calls.length + 1}` : `#${calls.length + 1}`,
+        status: resolveCallStatus(event),
+        input,
+        run: transcript.turn_id,
+      });
+    }
+  }
+
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(call.toolId, (counts.get(call.toolId) ?? 0) + 1);
+  const tools: DeskTool[] = Array.from(counts, ([name, count]) => ({ id: name, name, calls: count, connected: true }));
+  return { tools, calls };
+}
 
 interface TurnTranscriptPanelProps {
   source: TranscriptSource;
@@ -146,6 +250,7 @@ export default function TurnTranscriptPanel({
   const [copyState, setCopyState] = useState<"idle" | "done" | "error">("idle");
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [activeEventIndex, setActiveEventIndex] = useState<number | null>(null);
+  const [showToolCalls, setShowToolCalls] = useState(false);
   const requestSeqRef = useRef(0);
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -229,6 +334,14 @@ export default function TurnTranscriptPanel({
   );
   const toolCount = events.filter((event) => event.kind === "tool_use").length;
   const errorCount = toneCounts.error;
+  const timing = useMemo(
+    () => (selectedTranscript ? buildTurnTiming(selectedTranscript, events, tr) : null),
+    [selectedTranscript, events, tr],
+  );
+  const toolSummary = useMemo(
+    () => (selectedTranscript ? buildTurnToolSummary(selectedTranscript, events, tr) : { tools: [], calls: [] }),
+    [selectedTranscript, events, tr],
+  );
 
   useEffect(() => {
     setActiveEventIndex(events.length > 0 ? 0 : null);
@@ -378,6 +491,54 @@ export default function TurnTranscriptPanel({
               </dl>
 
               {prompt && <CopyWell title={tr("사용자 요청", "Prompt")} value={prompt} tr={tr} testId="turn-transcript-prompt" />}
+
+              {timing && events.length > 0 && (
+                <div data-testid="turn-transcript-timing" className="min-w-0">
+                  <AgentTiming
+                    title={tr("실행 타이밍", "Execution timing")}
+                    actors={timing.actors}
+                    spans={timing.spans}
+                    duration={timing.duration}
+                    className="mt-0!"
+                  />
+                </div>
+              )}
+
+              {toolSummary.calls.length > 0 && (
+                <section className="flex min-w-0 flex-col gap-2" data-testid="turn-transcript-tool-calls-section">
+                  <DetailHeading
+                    aside={
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        className={KIT_TOUCH_BUTTON}
+                        icon={<Wrench />}
+                        iconRight={<ChevronDown className={showToolCalls ? "rotate-180 transition-transform" : "transition-transform"} />}
+                        aria-expanded={showToolCalls}
+                        data-testid="turn-transcript-tool-calls-toggle"
+                        onClick={() => setShowToolCalls((prev) => !prev)}
+                      >
+                        {tr(`도구 호출 요약 (${toolSummary.calls.length})`, `Tool call summary (${toolSummary.calls.length})`)}
+                      </Button>
+                    }
+                  >
+                    {tr("도구 호출", "Tool calls")}
+                  </DetailHeading>
+                  {showToolCalls && (
+                    <div data-testid="turn-transcript-tool-calls" className="min-w-0 overflow-hidden rounded-xl border border-th-border-subtle">
+                      <AgentToolCalls
+                        live={false}
+                        workspace="AgentDesk"
+                        agent={selectedTranscript.agent_id || transcriptSelectionLabel(selectedTranscript, isKo)}
+                        model={(selectedTranscript.provider ?? "unknown").toUpperCase()}
+                        tools={toolSummary.tools}
+                        calls={toolSummary.calls}
+                        style={{ minHeight: 0 }}
+                      />
+                    </div>
+                  )}
+                </section>
+              )}
 
               <section className="flex min-w-0 flex-col gap-1.5" aria-labelledby={`${id}-steps`}>
                 <DetailHeading id={`${id}-steps`} aside={

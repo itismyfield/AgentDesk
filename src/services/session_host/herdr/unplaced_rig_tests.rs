@@ -17,7 +17,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedOwner, HostedRecord, HostedState,
 };
 use crate::services::discord::herdr_terminate::route_tests::{current_thread, in_child, switch};
-use crate::services::discord::{UnplacedLease, make_shared_data_for_tests};
+use crate::services::discord::make_shared_data_for_tests;
+use crate::services::discord::session_transition::UnplacedLease;
 use crate::services::herdr_launch::unplaced::{ChannelPane, Residue};
 use crate::services::herdr_launch::unplaced::{Resolution, Unplaced, resolve_unplaced};
 use crate::services::herdr_launch::{
@@ -26,15 +27,17 @@ use crate::services::herdr_launch::{
 use crate::services::herdr_launch::{
     HerdrLaunch, HerdrLaunchCommand, HerdrLaunchOutcome, launch_herdr_session, workspace_marker,
 };
-use crate::services::session_host::herdr::contract::{HerdrTransport, ServerWitness};
-use crate::services::session_host::herdr::launch_host::tests::*;
-use crate::services::session_host::herdr::model::HerdrEndpoint;
-use crate::services::session_host::herdr::observe::{
+use crate::services::session_host::herdr_for_test::contract::{HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr_for_test::launch_host::tests::*;
+use crate::services::session_host::herdr_for_test::model::HerdrEndpoint;
+use crate::services::session_host::herdr_for_test::observe::{
     RestoreResume, RestoreUnverified, read_restore_resume_with,
 };
-use crate::services::session_host::herdr::pane_probe::{EvidenceGap, ProcessOs};
-use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
-use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
+use crate::services::session_host::herdr_for_test::pane_probe::{EvidenceGap, ProcessOs};
+use crate::services::session_host::herdr_for_test::provenance::{ProcessStart, StartIdentity};
+use crate::services::session_host::herdr_registry_for_test::{
+    self as herdr_registry, HerdrRegistry,
+};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use poise::serenity_prelude::ChannelId;
 
@@ -350,8 +353,10 @@ impl Rig {
 
     fn host(&self) -> Arc<dyn HerdrLaunchHost> {
         let mut host = launch_host(&self.server);
-        host.os = Box::new(RigOs(self.herdr.clone()));
-        host.provider_window = Duration::from_millis(500);
+        host.set_process_os_for_test(
+            Box::new(RigOs(self.herdr.clone())),
+            Duration::from_millis(500),
+        );
         Arc::new(host)
     }
 
@@ -386,7 +391,7 @@ impl Rig {
 
     async fn resolve(&self, host: &Arc<dyn HerdrLaunchHost>, nonce: &str) -> Resolution {
         let shared = make_shared_data_for_tests();
-        let lease = UnplacedLease::try_acquire(&shared, ChannelId::new(CHANNEL)).unwrap();
+        let lease = UnplacedLease::try_acquire(shared.as_ref(), ChannelId::new(CHANNEL)).unwrap();
         let endpoint = launch_endpoint(&self.server);
         let target = Unplaced {
             pool: &self.pool,
@@ -587,7 +592,7 @@ async fn a_pre_marker_launch_whose_provider_started_is_adopted_after_a_restart_p
 /// This node's registry over the rig's server and process table, as the terminate service reads it.
 fn registry(rig: &Rig) -> HerdrRegistry {
     let mut host = launch_host(&rig.server);
-    let (endpoint, transport) = host.endpoints.pop().unwrap();
+    let (endpoint, transport) = host.pop_endpoint_for_test().unwrap();
     let os: Arc<dyn ProcessOs> = Arc::new(RigOs(rig.herdr.clone()));
     HerdrRegistry::with_transport(endpoint, transport).with_reads((bootstrapped_e7, os))
 }
@@ -803,7 +808,7 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
     });
     let shared = make_shared_data_for_tests();
     let channel = ChannelId::new(CHANNEL);
-    let lease = UnplacedLease::try_acquire(&shared, channel).unwrap();
+    let lease = UnplacedLease::try_acquire(shared.as_ref(), channel).unwrap();
     let holder = {
         let (pool, owner, endpoint, nonce) = (
             rig.pool.clone(),
@@ -828,7 +833,7 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
         .await
         .unwrap();
     let requests = rig.server.methods().len();
-    let next = UnplacedLease::acquire(&shared, channel).await;
+    let next = UnplacedLease::acquire(shared.as_ref(), channel).await;
     assert!(
         next.is_err(),
         "R1 entered the critical section while R2 held the lease"

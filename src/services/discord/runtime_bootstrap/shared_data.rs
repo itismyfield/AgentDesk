@@ -391,19 +391,10 @@ mod tests {
         assert!(shared.engine.pg_pool.is_none());
         assert!(shared.engine.policy.engine.is_none());
         let channel = ChannelId::new(8192);
-        let lock = Arc::new(tokio::sync::Mutex::new(()));
-        shared
-            .session_transition_locks
-            .insert(channel, Arc::downgrade(&lock));
+        let lock = shared.session_transition_locks.lock(channel);
         assert!(Arc::ptr_eq(
             &lock,
-            &shared
-                .engine
-                .session_transition_locks
-                .get(&channel)
-                .unwrap()
-                .upgrade()
-                .unwrap()
+            &shared.engine.session_transition_locks.lock(channel)
         ));
         shared
             .skills_cache

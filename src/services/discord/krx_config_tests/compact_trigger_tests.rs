@@ -5,6 +5,11 @@ use crate::services::claude_compact_trigger::tests::{armed_state, pane, panes_is
 use crate::services::claude_compact_trigger::tests::{observe_and_decide, threshold_for};
 use crate::services::claude_compact_trigger::*;
 #[cfg(unix)]
+use crate::services::claude_compact_trigger::{
+    pane_still_disarmed_for_send_for_test as pane_still_disarmed_for_send,
+    submit_under_composer_lock_for_test as submit_under_composer_lock,
+};
+#[cfg(unix)]
 use crate::services::claude_tui::readiness::compact::Outcome;
 use crate::services::discord::ManagedCompactTurnIdentity;
 use crate::services::provider::ProviderKind;
@@ -90,7 +95,8 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
         let pane = pane();
         let threshold = threshold_for(1_000_000);
         let generation = observe_and_decide(&pane, 500_000, threshold).expect("crossing injects");
-        let expected_turn = ManagedCompactTurnIdentity::test_fixture(42, &pane.tmux_session_name);
+        let expected_turn =
+            ManagedCompactTurnIdentity::test_fixture(42, pane.tmux_session_name_for_test());
         let authority_is_managed = Arc::new(AtomicBool::new(true));
         let sends = Arc::new(AtomicUsize::new(0));
         let (queued_tx, queued_rx) = mpsc::channel();
@@ -100,7 +106,7 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
         let worker_sends = Arc::clone(&sends);
 
         let worker = crate::services::claude_tui::composer_lock::with_composer_mutation_lock(
-            &pane.tmux_session_name,
+            pane.tmux_session_name_for_test(),
             || {
                 let worker = std::thread::spawn(move || {
                     queued_tx.send(()).expect("signal queued compact worker");
@@ -151,7 +157,7 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
             fresh_generation,
             threshold
         ));
-        clear_for_tmux(&pane.tmux_session_name);
+        clear_for_tmux(pane.tmux_session_name_for_test());
     }
 }
 
@@ -163,7 +169,10 @@ fn maybe_inject_degrades_safely_without_touching_the_flag() {
     let _guard = state_test_guard();
     let pane = pane();
     maybe_inject_compact(
-        ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
+        ManagedCompactTurnIdentity::test_fixture(
+            pane.channel_id_for_test(),
+            pane.tmux_session_name_for_test(),
+        ),
         &ProviderKind::Codex,
         600_000,
         Some(1_000_000),
@@ -172,7 +181,10 @@ fn maybe_inject_degrades_safely_without_touching_the_flag() {
     );
     assert!(armed_state(&pane).is_none());
     maybe_inject_compact(
-        ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
+        ManagedCompactTurnIdentity::test_fixture(
+            pane.channel_id_for_test(),
+            pane.tmux_session_name_for_test(),
+        ),
         &ProviderKind::Claude,
         600_000,
         None,
@@ -181,7 +193,10 @@ fn maybe_inject_degrades_safely_without_touching_the_flag() {
     );
     assert!(armed_state(&pane).is_none());
     maybe_inject_compact(
-        ManagedCompactTurnIdentity::test_fixture(pane.channel_id, &pane.tmux_session_name),
+        ManagedCompactTurnIdentity::test_fixture(
+            pane.channel_id_for_test(),
+            pane.tmux_session_name_for_test(),
+        ),
         &ProviderKind::Claude,
         600_000,
         Some(1_000_000),

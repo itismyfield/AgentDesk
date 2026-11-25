@@ -13,6 +13,7 @@ pub(crate) mod native;
 mod native_binding;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
+mod read_stamp;
 
 pub(crate) use crate::domain::human_input::native_source::Source;
 
@@ -237,7 +238,7 @@ enum Ledger<'a> {
 #[derive(Clone)]
 pub(crate) struct Registry {
     path: PathBuf,
-    cached: Arc<Mutex<Option<(String, Snapshot)>>>,
+    cached: Arc<Mutex<read_stamp::Cache>>,
     /// (old, candidate) of a publication whose durability is unconfirmed.
     pending: Arc<Mutex<Option<(String, String)>>>,
     encode_fault: Arc<std::sync::atomic::AtomicBool>,
@@ -246,7 +247,7 @@ impl Registry {
     pub(crate) fn at(path: PathBuf) -> Self {
         Self {
             path,
-            cached: Arc::new(Mutex::new(None)),
+            cached: Arc::default(),
             pending: Arc::new(Mutex::new(None)),
             encode_fault: Arc::default(),
         }
@@ -322,13 +323,13 @@ impl Registry {
             && !compat::v2_head(raw.as_bytes())
             && matches!(migration::decode(&raw)?, migration::Decoded::Legacy(_))
         {
-            *cached = None;
+            cached.clear();
             return apply(Ledger::V1);
         }
-        if cached.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
-            *cached = Some((raw.clone(), migration::restore(&raw)?));
+        if cached.raw() != Some(raw.as_str()) {
+            cached.replace(raw.clone(), migration::restore(&raw)?);
         }
-        let (_, state) = cached.as_mut().ok_or("history cache unavailable")?;
+        let state = cached.state_mut().ok_or("history cache unavailable")?;
         let encoded = apply(Ledger::V2(state)).and_then(|result| {
             if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("history encoding failed".to_string());
@@ -338,7 +339,7 @@ impl Registry {
         let (result, candidate) = match encoded {
             Ok(value) => value,
             Err(error) => {
-                *cached = None;
+                cached.clear();
                 return Err(error);
             }
         };
@@ -349,11 +350,11 @@ impl Registry {
         super::stamped::published();
         match published {
             Ok(FlushStatus::Flushed) => {
-                cached.as_mut().ok_or("history cache disappeared")?.0 = candidate;
+                cached.published(candidate)?;
                 Ok(result)
             }
             status => {
-                *cached = None;
+                cached.clear();
                 if status.is_ok() {
                     *pending = Some((raw, candidate));
                 }
@@ -574,6 +575,13 @@ impl Registry {
         })
     }
     fn inspect<T>(&self, apply: impl FnOnce(&Snapshot) -> Result<T, String>) -> Result<T, String> {
+        self.inspect_cache(|cache| apply(cache.state().ok_or("history cache missing")?))
+    }
+    /// `apply` over the cache once it holds the file's current history, under the history lock.
+    fn inspect_cache<T>(
+        &self,
+        apply: impl FnOnce(&mut read_stamp::Cache) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut cache = self.cached.lock().unwrap_or_else(|e| e.into_inner());
         let lock = std::fs::OpenOptions::new()
             .read(true)
@@ -583,14 +591,8 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
-        let raw = std::fs::read_to_string(&self.path).map_err(|e| e.to_string())?;
-        if cache.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
-            let migration::Decoded::V2(snapshot) = migration::decode(&raw)? else {
-                return Err("V2 registration missing".into());
-            };
-            *cache = Some((raw, snapshot));
-        }
-        apply(&cache.as_ref().ok_or("history cache missing")?.1)
+        cache.refresh(&self.path, std::time::SystemTime::now(), read_stamp::fstat)?;
+        apply(&mut cache)
     }
     pub(crate) fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {
         self.inspect(|state| {

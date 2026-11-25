@@ -239,7 +239,11 @@ async fn try_close(
     }
     o_delivered_through(channel, &end).await.map_err(kept)?;
     // Injection holds this lock through its paste and settlement; a busy lock is this tick's no-op.
-    let Ok(transition) = shared.session_transition_lock(channel).try_lock_owned() else {
+    let Ok(transition) = shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned()
+    else {
         return Err(kept("transition_lock_busy"));
     };
     #[cfg(test)]

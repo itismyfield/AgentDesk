@@ -1,5 +1,7 @@
 //! Complete, bounded transcript evidence; shared turn-state classification stays unchanged.
-use crate::services::tui_turn_state::{claude_completed_reply, claude_idle_metadata};
+use crate::services::tui_turn_state::{
+    CompactionStep, IdleCompaction, claude_completed_reply, claude_idle_metadata,
+};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -40,6 +42,7 @@ pub(super) enum End {
     Summary,
     Reply,
 }
+#[derive(Clone)]
 pub(super) struct Tail {
     pub stamp: Stamp,
     pub end: End,
@@ -53,6 +56,8 @@ pub(super) struct Tail {
     /// Where the read began, and the end of the newest `permission-mode` record.
     pub from: u64,
     pub barrier: u64,
+    /// The newest record that cleared an end, logged when an unproven wait retains its input.
+    pub cleared_by: Option<String>,
 }
 impl Tail {
     /// A resumed start stays open while nothing after `floor` is a turn record or a barrier:
@@ -88,8 +93,10 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
         native: None,
         from: offset,
         barrier: 0,
+        cleared_by: None,
     };
     let mut after_mode = false;
+    let (mut compaction, mut before) = (IdleCompaction::default(), None);
     while reader.read_until(b'\n', &mut line).ok()? > 0 {
         let record_start = offset;
         offset += line.len() as u64;
@@ -97,6 +104,18 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
             return None;
         }
         let record: Value = serde_json::from_slice(&line).ok()?;
+        // A compaction its idle notice closes leaves the tail as it was before the boundary.
+        match compaction.step(&record) {
+            CompactionStep::Open => before = Some(tail.clone()),
+            CompactionStep::Closed => {
+                // Only the turn state goes back; a session id read inside still binds the notice.
+                let native = tail.native.take();
+                tail = before.take().unwrap_or(tail);
+                tail.native = native;
+            }
+            CompactionStep::Broken => before = None,
+            CompactionStep::Outside | CompactionStep::Inside => {}
+        }
         if let Some(native) = record["sessionId"]
             .as_str()
             .or_else(|| record["session_id"].as_str())
@@ -106,6 +125,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
             }
             tail.native = Some(native.into());
         }
+        let ended = tail.end != End::None;
         match record["type"].as_str()? {
             "result" => {
                 tail.end = End::Hard;
@@ -126,7 +146,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 Some("init") => {
                     tail.end = End::None;
                 }
-                Some("informational") if claude_idle_metadata(&record) => {}
+                _ if claude_idle_metadata(&record) => {}
                 _ => {
                     tail.end = End::None;
                     tail.empty = false;
@@ -192,6 +212,10 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
                 tail.end = End::None;
                 tail.empty = false;
             }
+        }
+        if ended && tail.end == End::None {
+            let kind = |key: &str| record[key].as_str().unwrap_or("-").to_owned();
+            tail.cleared_by = Some(format!("{}/{}", kind("type"), kind("subtype")));
         }
         after_mode = record["type"] == "mode";
         line.clear();

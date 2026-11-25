@@ -1,6 +1,6 @@
 //! Runtime-validation tests that drive root boot and the KE audit loader, moved out of KRX config.
 
-use crate::config::runtime_validation::tests::{REMOVED, ResetHosting, fixture, write_config};
+use crate::config::runtime_validation_fixtures::{REMOVED, ResetHosting, fixture, write_config};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_hosting;
 

@@ -209,11 +209,14 @@ impl HerdrTurnPorts for Ports<'_> {
     fn unplaced_lease(
         &self,
         _: &HostedOwner,
-    ) -> Result<crate::services::discord::UnplacedLease, String> {
+    ) -> Result<crate::services::discord::session_transition::UnplacedLease, String> {
         let shared = self.lease.ok_or("no channel lease")?;
         let channel = poise::serenity_prelude::ChannelId::new(CHANNEL);
-        crate::services::discord::UnplacedLease::try_acquire(shared, channel)
-            .map_err(|_| "transition_busy".to_string())
+        crate::services::discord::session_transition::UnplacedLease::try_acquire(
+            shared.as_ref(),
+            channel,
+        )
+        .map_err(|_| "transition_busy".to_string())
     }
 }
 

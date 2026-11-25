@@ -45,7 +45,7 @@ services::provider::cancel_watchdog::tests
 
 [High-risk recovery: Cancel-preserved queue observation regression]
 verified_codex_queued_followup_waits_before_dequeue_with_unknown_permission
-services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::hold_detail_tests
+services::discord::session_canonical_identity::krx_services_dl_tests::krx_dedupe_dl_tests::codex_verified::hold_detail_tests
 
 [High-risk recovery: Local model durable queue wake regression]
 services::discord::tui_prompt_relay::local_model_queue_wake_e2e
@@ -61,7 +61,7 @@ services::discord::router::message_handler::intake_turn::race_loss::
 services::discord::queue_io::
 
 [High-risk recovery: Codex resume ownership regressions]
-services::tui_prompt_dedupe::runtime_binding::codex_verified_tests::executed_resume::
+services::discord::session_canonical_identity::krx_services_dl_tests::krx_dedupe_dl_tests::codex_verified::executed_resume::
 services::discord::router::message_handler::codex_resume_companion_queue_tests::
 services::discord::tmux::watcher_lifecycle::resume_companion_restore_tests::
 services::tui_o::writer::binding::terminal_tests::
@@ -88,6 +88,7 @@ services::discord::tmux::tmux_watcher::discrete_trigger_marker::tests
 
 [Fast targeted tests: Trusted session forwarding tests]
 services::session_forwarding
+krx_services_tests::session_forwarding_probe::
 
 [Fast targeted tests: Terminal delivery evidence regressions]
 =services::tui_o::store::ledger::tests::i7441d5_post_confirmation_preserves_both_ledger_format_directions

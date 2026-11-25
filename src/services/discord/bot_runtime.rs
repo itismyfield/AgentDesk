@@ -201,7 +201,7 @@ pub(in crate::services) struct Data {
     pub(in crate::services) provider: ProviderKind,
 }
 
-pub(crate) fn mark_reconcile_complete(shared: &SharedData) {
+pub(in crate::services) fn mark_reconcile_complete(shared: &SharedData) {
     let duration_ms = shared.restart.recovery_started_at.elapsed().as_millis();
     let duration_ms = duration_ms.min(u64::MAX as u128) as u64;
     let _ = shared.restart.recovery_duration_ms.compare_exchange(
@@ -214,6 +214,12 @@ pub(crate) fn mark_reconcile_complete(shared: &SharedData) {
         .restart
         .reconcile_done
         .store(true, std::sync::atomic::Ordering::Release);
+}
+
+/// `mark_reconcile_complete`, for tests outside `services`.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn mark_reconcile_complete_for_test(shared: &SharedData) {
+    mark_reconcile_complete(shared);
 }
 
 pub(in crate::services) type Error = Box<dyn std::error::Error + Send + Sync>;

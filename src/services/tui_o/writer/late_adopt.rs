@@ -12,7 +12,7 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceId};
 use crate::services::tui_o::store::OStore;
 
 pub(super) mod child_run;
-pub(in crate::services) mod claude;
+pub(super) mod claude;
 pub(super) mod codex;
 
 /// Subscribe before reading; a closed notice still gets the bounded disk fallback.
@@ -45,7 +45,7 @@ impl Wake {
     }
 }
 
-pub(in crate::services) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
+pub(super) fn first_bound(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
     events.iter().find_map(|event| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -57,10 +57,7 @@ pub(in crate::services) fn first_bound(events: &[BindingEvent]) -> Option<(Sourc
 }
 
 /// The source last bound at or before `boundary`, else the first bound after it, with its seq.
-pub(in crate::services) fn baseline(
-    events: &[BindingEvent],
-    boundary: u64,
-) -> Option<(SourceId, u64)> {
+pub(super) fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
     let binds = events.iter().filter_map(|event| match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -72,6 +69,27 @@ pub(in crate::services) fn baseline(
     let within = binds.clone().take_while(|(_, seq)| *seq <= boundary).last();
     let bound = within.or_else(|| binds.clone().find(|(_, seq)| *seq > boundary));
     bound.map(|(source, seq)| (source.clone(), seq))
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn first_bound_for_test(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
+    first_bound(events)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn baseline_for_test(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
+    baseline(events, boundary)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn thread_plan_for_test(
+    events: &[BindingEvent],
+    parent: u64,
+) -> Option<(
+    (SourceId, u64),
+    Vec<crate::services::tui_o::store::InitSource>,
+)> {
+    claude::thread::plan(events, parent)
 }
 
 /// The reservation's boundary: its first read's end if Legacy had sent no body and held no custody,

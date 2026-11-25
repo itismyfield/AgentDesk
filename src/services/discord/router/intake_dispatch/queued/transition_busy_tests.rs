@@ -300,7 +300,8 @@ async fn t1_a_busy_restores_original_uploads_and_new_lease() {
     let admitted = f.admit(&taken).await;
     let held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     let (entered, release) = pause_upload_take(f.channel);
@@ -532,7 +533,8 @@ async fn t1_c_restore_arms_only_sixty_second_wake_with_real_take() {
     let admitted = f.admit(&taken).await;
     let held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     let kicks = Arc::new(AtomicUsize::new(0));
@@ -578,7 +580,8 @@ async fn t1_c_restore_arms_only_sixty_second_wake_with_real_take() {
     drop(held);
     assert!(
         f.shared
-            .session_transition_lock(channel)
+            .session_transition_locks
+            .lock(channel)
             .try_lock_owned()
             .is_ok(),
         "busy intake adds no transition waiter"
@@ -623,7 +626,8 @@ async fn t4_failed_restore_holds_payload_until_sixty_second_retry() {
     drop(taken);
     let _held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     let (entered, release) = pause_upload_take(f.channel);
@@ -724,7 +728,8 @@ async fn t2_fresh_busy_keeps_tail_order() {
     f.enqueue(item(8_005_003)).await;
     let _held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     let submission = IntakeSubmission {
@@ -926,7 +931,8 @@ async fn t5_old_lease_cleanup_preserves_new_reservation_and_marker() {
     let admitted = f.admit(&old).await;
     let held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     let result = finish_admitted_queued_intake(&f.deps(), admitted)
@@ -1039,7 +1045,8 @@ async fn s2b_on_bidirectional_claims_and_reserved_front_protection() {
     let admitted = f.admit(&taken).await;
     let held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     // No session attachment may make the eligible original ineligible on restore.
@@ -1145,7 +1152,12 @@ async fn p2_b_actual_redirect_busy_restores_origin_channel() {
     f.enqueue(item(8_012_003)).await;
     let taken = f.take().await;
     let admitted = f.admit(&taken).await;
-    let _held = f.shared.session_transition_lock(target).lock_owned().await;
+    let _held = f
+        .shared
+        .session_transition_locks
+        .lock(target)
+        .lock_owned()
+        .await;
     let result = tokio::time::timeout(
         Duration::from_secs(10),
         finish_admitted_queued_intake(&f.deps(), admitted),
@@ -1228,7 +1240,8 @@ async fn t5_kickoff_busy_reports_no_start_after_durable_restore() {
         entered.await.unwrap();
         let held = f
             .shared
-            .session_transition_lock(f.channel)
+            .session_transition_locks
+            .lock(f.channel)
             .lock_owned()
             .await;
         release.send(()).unwrap();
@@ -1289,7 +1302,8 @@ async fn t5_gateway_busy_returns_ok_after_durable_restore() {
     );
     let _held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     gateway
@@ -1364,7 +1378,8 @@ async fn legacy_array_bot_busy_preserves_restored_original() {
     let admitted = f.admit(&taken).await;
     let _held = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     assert!(matches!(

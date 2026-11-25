@@ -23,7 +23,6 @@ use crate::db::intake_outbox::{
 };
 use crate::db::intake_outbox_dispatch_stamp::observe_status;
 use crate::db::intake_outbox_status::IntakeOutboxStatus;
-use crate::services::discord::SharedData;
 use crate::services::tui_o::cutover::intake_route;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
@@ -32,38 +31,18 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
+mod host;
 mod o_input;
 #[cfg(unix)]
 pub(crate) use crate::intake_consent_authority::BeforeEffects;
+pub(crate) use host::{
+    CheckpointWaits, ExecuteIntakeTurn, IntakeHost, IntakeTurnFuture, IntakeTurnPort,
+    IntakeWorkerRuntime, ResolveRuntimeFuture, ShutdownProbe,
+};
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[cfg(unix)]
 pub(crate) use o_input::{scope_key::WorkerScopeKey, take_before_effects};
 
-/// The router's admission check for a channel, consulted before replay sources are trusted.
-pub(crate) type CheckpointWaits = fn(ChannelId) -> bool;
-pub(crate) type IntakeTurnFuture<'a> = std::pin::Pin<
-    Box<
-        dyn std::future::Future<
-                Output = Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>>,
-            > + Send
-            + 'a,
-    >,
->;
-/// Runs one claimed request as a Discord turn.
-pub(crate) type ExecuteIntakeTurn = for<'a> fn(
-    &'a Arc<serenity::http::Http>,
-    &'a Arc<SharedData>,
-    &'a str,
-    IntakeRequest,
-    super::attachment_transfer::uploads::PendingUploads,
-) -> IntakeTurnFuture<'a>;
-
-/// Router decisions the worker needs; the Discord runtime hands them in when it starts the loop.
-#[derive(Clone, Copy)]
-pub(crate) struct IntakeTurnPort {
-    pub(crate) checkpoint_waits: CheckpointWaits,
-    pub(crate) execute: ExecuteIntakeTurn,
-}
 #[derive(Default)]
 struct MarkDoneMissCounters {
     stamp_handoff_observed: AtomicU64,
@@ -288,16 +267,16 @@ pub(crate) enum TickOutcome {
 ///
 /// This is the unit a poll loop schedules — extracted so tests can
 /// drive single-tick scenarios without spawning a long-running task.
-pub(crate) async fn run_intake_worker_tick(
+pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
     pool: &PgPool,
-    shared: &Arc<SharedData>,
+    shared: &Arc<S>,
     target_instance_id: &str,
     provider: &str,
     claim_owner: &str,
     cancelled: &(dyn Fn() -> bool + Sync),
-    port: IntakeTurnPort,
+    port: IntakeTurnPort<S>,
 ) -> Result<TickOutcome, sqlx::Error> {
-    let Some(_active_tick) = shared.restart.intake_worker_lifecycle.try_begin_tick() else {
+    let Some(_active_tick) = shared.intake_lifecycle().try_begin_tick() else {
         return Ok(TickOutcome::Cancelled);
     };
 
@@ -305,7 +284,7 @@ pub(crate) async fn run_intake_worker_tick(
     // retained as a belt-and-suspenders fence for signal-driven shutdown.
     if admission_action(
         cancelled,
-        &shared.restart.intake_worker_lifecycle,
+        shared.intake_lifecycle(),
         AdmissionCheckpoint::BeforeClaim,
     ) == AdmissionAction::StopBeforeClaim
     {
@@ -332,7 +311,7 @@ pub(crate) async fn run_intake_worker_tick(
     // this worker's row to pending and stop before payload work or spawning.
     if admission_action(
         cancelled,
-        &shared.restart.intake_worker_lifecycle,
+        shared.intake_lifecycle(),
         AdmissionCheckpoint::AfterClaim,
     ) == AdmissionAction::ReleaseClaim
     {
@@ -374,12 +353,7 @@ pub(crate) async fn run_intake_worker_tick(
         return Ok(TickOutcome::Held);
     }
 
-    let runtime = match crate::services::discord::health::resolve_intake_worker_runtime(
-        shared,
-        request.channel_id,
-    )
-    .await
-    {
+    let runtime = match (port.resolve_runtime)(shared.as_ref(), request.channel_id).await {
         Ok(runtime) => runtime,
         Err(reason) => {
             mark_failed_pre_accept(
@@ -393,21 +367,13 @@ pub(crate) async fn run_intake_worker_tick(
         }
     };
     // Both the queue poller and selected channel owner must drain on restart.
-    let Some(_owner_tick) = runtime
-        .shared
-        .restart
-        .intake_worker_lifecycle
-        .try_begin_tick()
-    else {
+    let Some(_owner_tick) = runtime.shared.intake_lifecycle().try_begin_tick() else {
         release_cancelled_claim(pool, &row, claim_owner).await?;
         return Ok(TickOutcome::Cancelled);
     };
-    let owner_shutdown = runtime.shared.restart.shutdown_reader();
-    let owner_cancelled = || {
-        cancelled()
-            || shared.restart.intake_worker_lifecycle.admission_is_fenced()
-            || owner_shutdown.load(Ordering::Acquire)
-    };
+    let owner_shutdown = runtime.shared.shutdown_probe();
+    let owner_cancelled =
+        || cancelled() || shared.intake_lifecycle().admission_is_fenced() || owner_shutdown();
 
     if let Err(reason) = super::execution_requirements::validate_worker(&row) {
         mark_failed_pre_accept(
@@ -434,7 +400,7 @@ pub(crate) async fn run_intake_worker_tick(
     // acknowledgement wait for execute/final DB transition to drain.
     if admission_action(
         &owner_cancelled,
-        &runtime.shared.restart.intake_worker_lifecycle,
+        runtime.shared.intake_lifecycle(),
         AdmissionCheckpoint::AfterClaim,
     ) == AdmissionAction::ReleaseClaim
     {
@@ -588,27 +554,25 @@ async fn release_cancelled_claim(
 ///   DB transition to drain. Operators with a stuck turn should use Phase 5's
 ///   force-fail CLI rather than relying on cancel-mid-execute.
 ///
-/// What flips the cancel flag (codex Phase 5 P1 #3): the loop reads
-/// `SharedData.restart.shutting_down` through a #5485 S2a `ShutdownReader`,
-/// which is a read-only view of that flag rather than a writable `Arc` clone.
+/// What flips the cancel flag: the loop reads its host's shutdown flag through
+/// `IntakeHost::shutdown_probe`, a read-only view that cannot set the flag.
 /// Both the signal path and the shared gateway/standby restart-marker poller
 /// set it before restart acknowledgement, fencing new poll ticks while an
 /// active tick drains to completion.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_intake_worker_loop(
+pub(crate) async fn run_intake_worker_loop<S: IntakeHost>(
     pool: PgPool,
-    shared: Arc<SharedData>,
+    shared: Arc<S>,
     target_instance_id: String,
     provider: String,
     claim_owner: String,
     config: IntakeWorkerConfig,
-    port: IntakeTurnPort,
+    port: IntakeTurnPort<S>,
 ) {
-    // Own the reader for the lifetime of the loop; `cancelled` is the single
+    // Own the probe for the lifetime of the loop; `cancelled` is the single
     // live probe handed to every checkpoint, so the loop and the tick can never
     // read different snapshots of the same flag.
-    let reader = shared.restart.shutdown_reader();
-    let cancelled = || reader.load(Ordering::Acquire);
+    let cancelled = shared.shutdown_probe();
     tracing::info!(
         target_instance_id,
         provider,

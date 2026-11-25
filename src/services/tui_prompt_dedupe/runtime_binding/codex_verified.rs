@@ -105,13 +105,13 @@ pub(crate) fn set_permission_for_tests(context: &BindingContext, permission: Del
     });
 }
 #[cfg(test)]
-pub(super) fn clear_permissions_for_tests() {
+pub(crate) fn clear_permissions_for_tests() {
     PERMISSIONS.with(|values| values.borrow_mut().clear());
     BEFORE_COMMIT.with(|action| action.borrow_mut().take());
 }
 
 #[cfg(test)]
-pub(super) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
+pub(crate) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
@@ -378,6 +378,23 @@ pub(super) fn publication_allowed(
     binding: &TuiRuntimeBinding,
 ) -> bool {
     publication_decision(authority, binding) == OwnershipPublicationDecision::Permitted
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn proof_for_binding_for_test(
+    authority: &TmuxSourceAuthority<'_>,
+    context: &BindingContext,
+    binding: &TuiRuntimeBinding,
+) -> io::Result<VerifiedProof> {
+    proof_for_binding(authority, context, binding)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn publication_allowed_for_test(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> bool {
+    publication_allowed(authority, binding)
 }
 
 fn publication_decision(

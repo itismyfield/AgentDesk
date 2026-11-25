@@ -6,8 +6,8 @@ use crate::db::dispatched_sessions::hosted_execution::{self, HostedObservation};
 use crate::krx_session_host_tests::herdr_terminate_real_tests as real;
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::root_replaced::{self as recovery, CAS_ATTEMPTS};
-use crate::services::session_host::herdr::model::HerdrRequest;
-use crate::services::session_host::herdr::wire::LineJsonFraming;
+use crate::services::session_host::herdr_for_test::model::HerdrRequest;
+use crate::services::session_host::herdr_for_test::wire::LineJsonFraming;
 use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 use crate::services::tui_prompt_dedupe as dedupe;
 pub(crate) const CHANNEL: u64 = 78_780_031;
@@ -136,8 +136,10 @@ impl Case {
         ));
         let mut shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-        Arc::get_mut(&mut shared).unwrap().token_hash = TOKEN.into();
-        crate::services::discord::mark_reconcile_complete(&shared);
+        Arc::get_mut(&mut shared)
+            .unwrap()
+            .set_token_hash_for_test(TOKEN);
+        crate::services::discord::mark_reconcile_complete_for_test(&shared);
         recovery::prune(&[]);
         CAS_ATTEMPTS.with(|count| count.set(0));
         Self {

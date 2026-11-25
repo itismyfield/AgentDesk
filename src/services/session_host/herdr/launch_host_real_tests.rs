@@ -13,19 +13,25 @@ use crate::services::herdr_launch::unset_herdr_env_before_exec;
 use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
 };
-use crate::services::session_host::herdr::contract::{self, HerdrTransport, ServerWitness};
-use crate::services::session_host::herdr::launch_host::*;
-use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
-use crate::services::session_host::herdr::model::{HerdrResult, HerdrSnapshot};
-use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
-use crate::services::session_host::herdr::observe::{
+use crate::services::session_host::HerdrHost;
+use crate::services::session_host::InteractiveSessionHost;
+use crate::services::session_host::herdr_for_test::contract::{
+    self, HerdrTransport, ServerWitness,
+};
+use crate::services::session_host::herdr_for_test::launch_host::*;
+use crate::services::session_host::herdr_for_test::model::{
+    HerdrCall, HerdrEndpoint, HerdrRequest,
+};
+use crate::services::session_host::herdr_for_test::model::{HerdrResult, HerdrSnapshot};
+use crate::services::session_host::herdr_for_test::observe::CANONICAL_CONFIG;
+use crate::services::session_host::herdr_for_test::observe::{
     self, RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified,
 };
-use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
-use crate::services::session_host::herdr::wire::LineJsonFraming;
-use crate::services::session_host::herdr_host::HerdrHost;
-use crate::services::session_host::model::{HostMutation, HostRefusal, HostSessionRef};
-use crate::services::session_host::traits::InteractiveSessionHost;
+use crate::services::session_host::herdr_for_test::transport::{
+    HerdrSocketConfig, HerdrSocketTransport,
+};
+use crate::services::session_host::herdr_for_test::wire::LineJsonFraming;
+use crate::services::session_host::{HostMutation, HostRefusal, HostSessionRef};
 
 const BASE: &str = "/private/tmp/herdr-093-p9a";
 
@@ -280,8 +286,8 @@ fn herdr_real_server_launch_input_bytes_and_refusals() {
     let dir = server.dir.clone();
     let mut host =
         SocketHerdrLaunchHost::new(vec![server.endpoint()], HerdrSocketConfig::default());
-    host.read_restore = hooked_e7;
-    let transport = &host.endpoints[0].1;
+    host.set_read_restore_for_test(hooked_e7);
+    let transport = host.endpoint_transport_for_test(0);
 
     // E7 names the server process, and each new connection to it names the same one.
     let first = off(&host, &server);
@@ -403,7 +409,7 @@ fn herdr_real_server_launch_input_bytes_and_refusals() {
         "{outcome:?}"
     );
     assert_eq!(server.panes(transport), panes, "nothing created");
-    let outcome = host.create_eligible(&lost);
+    let outcome = host.create_eligible_for_test(&lost);
     let home_pane = unconfirmed(&outcome);
     assert!(server.panes(transport).contains(&home_pane));
 

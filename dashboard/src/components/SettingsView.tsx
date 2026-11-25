@@ -253,9 +253,11 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
     .filter((entry) => entry.id !== "other" || counts.byCategory.other)
     .map((entry) => ({ id: entry.id, label: tr(entry.ko, entry.en), count: counts.byCategory[entry.id] ?? 0 }));
   const filterWords = [filters.differs ? tr("기본값과 다른 것만", "differing only") : null, filters.restart ? tr("재시작이 필요한 것만", "restart needed only") : null].filter(Boolean);
-  const caption = narrowed
-    ? [tr(`${counts.total}개 중 ${filtered.length}개`, `${filtered.length} of ${counts.total}`), ...filterWords].join(" · ")
-    : tr(`설정 ${filtered.length}개`, `${filtered.length} settings`);
+  const caption = loading
+    ? tr("설정을 불러오는 중…", "Loading settings…")
+    : narrowed
+      ? [tr(`${counts.total}개 중 ${filtered.length}개`, `${filtered.length} of ${counts.total}`), ...filterWords].join(" · ")
+      : tr(`설정 ${filtered.length}개`, `${filtered.length} settings`);
 
   const failedSources = config.error || runtime.error || connectors.isError || retention.isError;
   const notice = failedSources ? (

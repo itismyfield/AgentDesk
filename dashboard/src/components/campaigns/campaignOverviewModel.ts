@@ -156,19 +156,20 @@ const LEDGER_APPROVAL_RE = /\bLAND_READY\b|착지\s*승인\s*대기|사용자\s*
 /** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
   const status = node.status !== "completed" && node.status !== "skipped" && liveIsWorking(live) ? "running" : node.status;
+  const stageText = typeof node.stage === "string" ? node.stage : "";
   const blocker = cleanBlocker(node.blocker);
-  const step = campaignStageStep(node.stage).index;
+  const step = campaignStageStep(stageText).index;
   const title = campaignTaskTitle(node);
   const canAwaitApproval = status === "running" || status === "pending";
-  const textBlob = [node.stage, node.next_action].filter(Boolean).join(" ");
+  const textBlob = [stageText, node.next_action].filter(Boolean).join(" ");
   const gate: PendingGate | null = canAwaitApproval && LEDGER_APPROVAL_RE.test(textBlob)
-    ? { gate: "landing", openedAt: node.updated_at, evidenceNote: node.evidence.at(-1) ?? (node.summary?.trim() || null) }
+    ? { gate: "landing", openedAt: node.updated_at ?? null, evidenceNote: (node.evidence ?? []).at(-1) ?? (node.summary?.trim() || null) }
     : null;
   return {
-    id: node.id, title, number: campaignTaskNumber(node), status, marker: nodeMarker(status, node.stage),
-    stage: node.stage.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
-    summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker, group: node.group,
-    updatedAt: node.updated_at, session: node.session_id, agent: node.assignee, prUrl: safeCampaignLink(node.pr_url) ?? null,
+    id: node.id ?? "", title, number: campaignTaskNumber(node), status, marker: nodeMarker(status, stageText),
+    stage: stageText.trim(), step: step < 0 ? null : CAMPAIGN_STAGES[step].label,
+    summary: node.summary?.trim() && node.summary.trim() !== title ? node.summary.trim() : null, benefit: node.benefit?.trim() || null, blocker, group: node.group ?? null,
+    updatedAt: node.updated_at ?? null, session: node.session_id ?? null, agent: node.assignee ?? null, prUrl: safeCampaignLink(node.pr_url) ?? null,
     attention: needsSomeone(status, blocker), gate, progress: null, sessionNow: null,
   };
 }
@@ -239,6 +240,26 @@ export function taskCounts(tasks: OverviewTask[]) {
     running: count((task) => task.status === "running"), approvals: count((task) => !!task.gate), failed: count((task) => task.status === "failed"),
     blocked: count((task) => task.attention && !task.gate && task.status !== "failed"), done: count((task) => task.status === "completed"),
     withPr: count((task) => task.status === "running" && !!task.prUrl),
+  };
+}
+
+/** Computes node counts with live card state and real blockers so relations views match the campaign header. */
+export function effectiveRelationCounts(nodes: ReadonlyArray<CampaignNode>, live?: Record<string, CampaignNodeLive>) {
+  const tasks = nodes.map((node) => legacyTask(node, live?.[node.id]));
+  const counts = taskCounts(tasks);
+  const total = nodes.length;
+  return {
+    total,
+    percent: total ? Math.floor((100 * counts.done) / total) : 0,
+    blockedIds: new Set(tasks.filter((task) => task.attention && !task.gate && task.status !== "failed").map((task) => task.id)),
+    counts: {
+      completed: counts.done,
+      running: counts.running,
+      blocked: counts.blocked,
+      failed: counts.failed,
+      pending: tasks.filter((task) => task.status === "pending").length,
+      skipped: tasks.filter((task) => task.status === "skipped").length,
+    },
   };
 }
 

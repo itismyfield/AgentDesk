@@ -1,11 +1,22 @@
 //! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
-pub(crate) mod first_input;
-pub(crate) mod handoff;
+mod first_input;
+mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
+#[cfg(all(test, unix))]
+pub(crate) use first_input::owned_pending_prompt_for_tests;
+#[cfg(test)]
+pub(crate) use first_input::regression_tests::regression_attached;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use first_input::{
+    Notice, held_record_for_test, record_outcome_for_test, submit_for_test, submit_owned_for_test,
+    write_for_test,
+};
 use handoff::launched_source;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use handoff::launched_source_for_test;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -203,16 +214,26 @@ pub(crate) trait HerdrTurnPorts {
 /// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
 pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
-/// The source a prompt goes to.
-pub(crate) struct Attached {
-    pub(crate) nonce: String,
-    pub(crate) session_id: String,
-    pub(crate) transcript: PathBuf,
-    pub(crate) target: HerdrTarget,
-    pub(crate) bound: bool,
-    pub(crate) awaiting_clear: bool,
-    /// The record's socket and pane, which the gate fences as `socket#pane`.
-    pub(crate) physical: Option<(String, String)>,
+#[cfg(not(any(test, feature = "test-support")))]
+use attached::Attached;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use attached::Attached;
+
+/// Defined once here; the uses above name it only inside `herdr_turn` outside test builds.
+mod attached {
+    use super::{HerdrTarget, PathBuf};
+
+    /// The source a prompt goes to.
+    pub(crate) struct Attached {
+        pub(super) nonce: String,
+        pub(super) session_id: String,
+        pub(super) transcript: PathBuf,
+        pub(super) target: HerdrTarget,
+        pub(super) bound: bool,
+        pub(super) awaiting_clear: bool,
+        /// The record's socket and pane, which the gate fences as `socket#pane`.
+        pub(super) physical: Option<(String, String)>,
+    }
 }
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
@@ -302,10 +323,9 @@ pub(crate) fn execute(
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
                 legacy_not_held(&record.execution_nonce)?;
-                (
-                    pending_source(&turn, &runtime, ports, record)?,
-                    Lineage::Pending,
-                )
+                first_input::pending_handover(record, |record| {
+                    pending_source(&turn, &runtime, ports, record)
+                })?
             }
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());

@@ -364,8 +364,10 @@ fn resolve_unplaced_rows(
             return;
         };
         let channel = crate::services::discord::ChannelId::new(channel);
-        let Ok(lease) = crate::services::discord::UnplacedLease::try_acquire(shared, channel)
-        else {
+        let Ok(lease) = crate::services::discord::session_transition::UnplacedLease::try_acquire(
+            shared.as_ref(),
+            channel,
+        ) else {
             continue;
         };
         let target = Unplaced {
@@ -422,7 +424,7 @@ fn reconnect_unless_pending(
         }
         let Ok(_transition) =
             crate::services::discord::session_transition::SessionTransitionLease::try_acquire(
-                shared,
+                shared.as_ref(),
                 crate::services::discord::ChannelId::new(channel),
             )
         else {

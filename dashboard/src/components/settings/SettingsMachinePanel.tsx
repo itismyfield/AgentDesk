@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
 import { AlertTriangle, RefreshCw } from "lucide-react";
+import { useNow } from "../../lib/useNow";
 import { useMachineNodes } from "./useMachineNodes";
 import { StatusBadge } from "../common/StatusBadge";
 import { SettingsMachineCard, machineTimestamp } from "./SettingsMachineCard";
@@ -13,11 +13,7 @@ import { SettingsAction, SettingsNotice, SettingsSectionHead } from "./SettingsP
 /** Hub and Runner machines with their resources; shown under the catalog's system category. */
 export function SettingsMachinePanel({ tr }: { tr: SettingsTr }) {
   const nodes = useMachineNodes();
-  const [now, setNow] = useState(Date.now);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), MACHINE_CLOCK_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, []);
+  const now = useNow(MACHINE_CLOCK_INTERVAL_MS);
   const stale = nodes.isError || !nodes.dataUpdatedAt || now - nodes.dataUpdatedAt >= MACHINE_SNAPSHOT_MAX_AGE_MS;
   const cluster = nodes.data?.cluster;
   const machines = cluster?.enabled ? [...(nodes.data?.nodes ?? [])].sort((a, b) => {

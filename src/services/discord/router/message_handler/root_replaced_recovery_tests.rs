@@ -394,7 +394,7 @@ fn rr_01_restart_retires_the_proven_old_execution_and_fresh_turn_binds_n2_once_p
             Box::pin(async move {
                 assert!(
                     shared
-                        .session_transition_lock(ChannelId::new(CHANNEL))
+                        .session_transition_locks.lock(ChannelId::new(CHANNEL))
                         .try_lock_owned()
                         .is_err(),
                     "recovery holds the common session transition"
@@ -595,7 +595,8 @@ fn refuses_change_at(change: Change, tag: &str, after_final_proof: bool) {
                 stage_tx.send(()).unwrap();
                 assert!(
                     probe_shared
-                        .session_transition_lock(ChannelId::new(CHANNEL))
+                        .session_transition_locks
+                        .lock(ChannelId::new(CHANNEL))
                         .try_lock_owned()
                         .is_err(),
                     "recovery holds the common session transition before CAS"

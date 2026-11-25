@@ -44,7 +44,10 @@ pub(super) async fn acquire_after_redirect_or_requeue(
                 // An owner's front stays queued and its owner looks again once this holder
                 // releases; a legacy queue parks no transition waiter and keeps its backstop.
                 #[cfg(unix)]
-                let (waker, lock) = (shared.clone(), shared.session_transition_lock(channel_id));
+                let (waker, lock) = (
+                    shared.clone(),
+                    shared.session_transition_locks.lock(channel_id),
+                );
                 #[cfg(unix)]
                 crate::services::discord::task_supervisor::spawn_observed(
                     "transition_busy_owner_wake",
@@ -131,7 +134,7 @@ mod tests {
         // State arriving after R1 belongs to the session, not this handoff.
         *core.sessions.get_mut(&channel).unwrap() = session_with(&["U2"], true);
         drop(core);
-        let _held = shared.session_transition_lock(channel).lock_owned().await;
+        let _held = shared.session_transition_locks.lock(channel).lock_owned().await;
         let http = Arc::new(serenity::HttpBuilder::new("test-token")
             .proxy("http://127.0.0.1:1").ratelimiter_disabled(true).build());
         // S3-19b: the held transition must reach the real busy enqueue path.
@@ -155,7 +158,11 @@ mod tests {
     #[tokio::test]
     async fn queued_busy_returns_only_owned_vector_and_keeps_later_session_uploads() {
         let (shared, channel) = fixture(Some(session_with(&["U2"], true))).await;
-        let _held = shared.session_transition_lock(channel).lock_owned().await;
+        let _held = shared
+            .session_transition_locks
+            .lock(channel)
+            .lock_owned()
+            .await;
         let http = Arc::new(serenity::Http::new("test-token"));
         let mut owned = vec!["U1".into(), "Q".into()];
         let result = acquire_after_redirect_or_requeue(
@@ -225,7 +232,11 @@ mod tests {
             .unwrap();
             let admitted = admission::admit(&mailbox, &original, admission::AdmissionTicket::new());
             assert!(matches!(admitted.await, admission::Admission::Accepted(_)));
-            let guard = shared.session_transition_lock(channel).lock_owned().await;
+            let guard = shared
+                .session_transition_locks
+                .lock(channel)
+                .lock_owned()
+                .await;
             let held = Arc::new(Mutex::new(Some(guard)));
             let (started, mut starts) = events();
             let (woke, wakes) = events();

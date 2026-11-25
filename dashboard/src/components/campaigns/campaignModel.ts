@@ -12,16 +12,19 @@ export function campaignIssueNumber(node: CampaignNode): string | null {
 const TITLE_NUMBER = /^#(\d+)\b[\s:·-]*/;
 /** The issue number shown once per task: the linked issue, else a leading "#123" in the title, else an "i123" node id. */
 export function campaignTaskNumber(node: CampaignNode): string | null {
-  const number = campaignIssueNumber(node)?.slice(1) ?? node.title.match(TITLE_NUMBER)?.[1] ?? node.id.match(/^i(\d+)(?:_|$)/)?.[1];
+  const title = node.title ?? "";
+  const id = node.id ?? "";
+  const number = campaignIssueNumber(node)?.slice(1) ?? title.match(TITLE_NUMBER)?.[1] ?? id.match(/^i(\d+)(?:_|$)/)?.[1];
   return number ? `#${number}` : null;
 }
 /** The title without a leading copy of the task number. */
 export function campaignTaskTitle(node: CampaignNode): string {
-  const match = node.title.match(TITLE_NUMBER);
-  const stripped = match && `#${match[1]}` === campaignTaskNumber(node) ? node.title.slice(match[0].length).trim() : "";
-  return stripped || node.title;
+  const title = node.title ?? "";
+  const match = title.match(TITLE_NUMBER);
+  const stripped = match && `#${match[1]}` === campaignTaskNumber(node) ? title.slice(match[0].length).trim() : "";
+  return stripped || title;
 }
-export function campaignIssueLabel(node: CampaignNode): string { return campaignTaskNumber(node) ?? node.id; }
+export function campaignIssueLabel(node: CampaignNode): string { return campaignTaskNumber(node) ?? (node.id ?? ""); }
 export function groupCampaignNodes(nodes: CampaignNode[]) {
   const groups = new Map<string, CampaignNode[]>();
   for (const node of nodes) {
@@ -39,8 +42,8 @@ export function groupCampaignNodes(nodes: CampaignNode[]) {
 export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string, perSide = 8) {
   const byId = new Map(nodes.map((node) => [node.id, node]));
   const selected = byId.get(selectedId);
-  const upstream = selected?.dependencies.flatMap((id) => byId.has(id) ? [byId.get(id)!] : []) ?? [];
-  const downstream = nodes.filter((node) => node.dependencies.includes(selectedId));
+  const upstream = (selected?.dependencies ?? []).flatMap((id) => byId.has(id) ? [byId.get(id)!] : []);
+  const downstream = nodes.filter((node) => (node.dependencies ?? []).includes(selectedId));
   const visibleUpstream = upstream.slice(0, perSide);
   const visibleDownstream = downstream.slice(0, perSide);
   const visible = selected ? [...visibleUpstream, selected, ...visibleDownstream] : [];
@@ -54,17 +57,17 @@ export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string
     hiddenEdges: edgesOf(upstream.slice(perSide), downstream.slice(perSide)),
     omittedUpstream: upstream.length - visibleUpstream.length,
     omittedDownstream: downstream.length - visibleDownstream.length,
-    externalDependencies: new Map(visible.map((node) => [node.id, node.dependencies.filter((id) => byId.has(id) && !visibleIds.has(id))])),
+    externalDependencies: new Map(visible.map((node) => [node.id, (node.dependencies ?? []).filter((id) => byId.has(id) && !visibleIds.has(id))])),
   };
 }
 
-export function campaignProgress(nodes: CampaignNode[]) {
+export function campaignProgress(nodes: ReadonlyArray<Pick<CampaignNode, "status">>) {
   const counts = Object.fromEntries(NODE_STATUSES.map((status) => [status, 0])) as Record<CampaignNodeStatus, number>;
   for (const node of nodes) counts[node.status]++;
   return { counts, total: nodes.length, percent: nodes.length ? Math.floor(100 * counts.completed / nodes.length) : 0 };
 }
 
-export function safeCampaignLink(value: string | null): string | undefined {
+export function safeCampaignLink(value: string | null | undefined): string | undefined {
   if (!value) return undefined;
   try {
     const url = new URL(value);
@@ -83,8 +86,9 @@ export const CAMPAIGN_STAGES: Array<{ key: string; label: [string, string]; keyw
 ];
 
 /** Stage is free text: the stage keyword written first wins, and a longer keyword wins a tie. */
-export function campaignStageStep(stage: string): { index: number; raw: string } {
-  const text = stage.toLocaleLowerCase();
+export function campaignStageStep(stage?: string | null): { index: number; raw: string } {
+  const raw = typeof stage === "string" ? stage : "";
+  const text = raw.toLocaleLowerCase();
   let best = { index: -1, at: Infinity, length: 0 };
   CAMPAIGN_STAGES.forEach(({ keywords }, index) => {
     for (const keyword of keywords) {
@@ -93,7 +97,7 @@ export function campaignStageStep(stage: string): { index: number; raw: string }
       if (at >= 0 && (at < best.at || (at === best.at && keyword.length > best.length))) best = { index, at, length: keyword.length };
     }
   });
-  const plain = stage.replace(/\b[0-9a-f]{7,40}\b/gi, "").replace(/\s+/g, " ").trim();
+  const plain = raw.replace(/\b[0-9a-f]{7,40}\b/gi, "").replace(/\s+/g, " ").trim();
   return { index: best.index, raw: plain.length > 28 ? `${plain.slice(0, 27)}…` : plain };
 }
 

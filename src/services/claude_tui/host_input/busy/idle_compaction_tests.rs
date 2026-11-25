@@ -2,7 +2,7 @@ use super::*;
 use crate::services::claude_tui::busy_inject::Request;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
-use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use crate::services::tui_turn_state::idle_compaction_tests::{compacted_tail, end_turn, tail};
 
 struct ReadinessScope;
 
@@ -41,19 +41,19 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         false,
     );
     let hosted = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
-    let context = hosted.context.as_ref().unwrap();
-    let observation = crate::services::claude_tui::host_input::busy::herdr::observe(
+    let context = hosted.context_for_test().unwrap();
+    let observation = crate::services::claude_tui::host_input::busy::observe_herdr(
         (CHANNEL, LOGICAL, N1),
         (
-            context.target.clone(),
-            context.writer.clone(),
-            context.attempt_target.clone(),
+            context.target_for_test().clone(),
+            context.writer_for_test().to_owned(),
+            context.attempt_target_for_test().clone(),
         ),
         |_| true,
     );
     assert_eq!(observation.state(), BusyState::Busy);
-    let context = observation.context.as_ref().unwrap();
-    assert!(!context.read().idle_verified);
+    let context = observation.context_for_test().unwrap();
+    assert!(!context.read_for_test().idle_verified_for_test());
     assert!(readiness::observe(LOGICAL, Some(&source.path)).is_none());
     let request = Request {
         session: LOGICAL,
@@ -64,7 +64,7 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         nonce: "a8214001",
         text: "the held input",
     };
-    assert!(observation.admits(&request));
+    assert!(observation.admits_for_test(&request));
     let mut probe = observation.probe();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -74,27 +74,30 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         record["sessionId"] = json!(source.session_id);
         writeln!(file, "{record}").unwrap();
     }
-    assert_eq!(context.read().state, BusyState::Held);
-    assert!(!context.read().idle_verified);
+    assert_eq!(context.read_for_test().state_for_test(), BusyState::Held);
+    assert!(!context.read_for_test().idle_verified_for_test());
     assert!(readiness::observe(LOGICAL, Some(&source.path)).is_none());
     assert!(
         matches!(probe(), Screen::Unknown),
         "metadata without a completed reply cannot wake the captured probe"
     );
-    for mut record in std::iter::once(end_turn()).chain(tail()) {
+    for mut record in std::iter::once(end_turn()).chain(compacted_tail()) {
         record["sessionId"] = json!(source.session_id);
         writeln!(file, "{record}").unwrap();
     }
-    assert_eq!(current(context).unwrap().id, source);
-    let reading = context.read();
-    assert_eq!(reading.state, BusyState::Idle);
-    assert!(reading.idle_verified, "the same source has verified Idle");
+    assert_eq!(current(context).unwrap().id_for_test(), source);
+    let reading = context.read_for_test();
+    assert_eq!(reading.state_for_test(), BusyState::Idle);
+    assert!(
+        reading.idle_verified_for_test(),
+        "the same source has verified Idle"
+    );
     assert!(
         matches!(probe(), Screen::Ready),
         "the captured probe wakes for Idle delegation after the completed tail"
     );
     assert!(
-        !observation.admits(&request),
+        !observation.admits_for_test(&request),
         "the captured Busy writer delegates verified Idle instead of injecting into it"
     );
     assert!(rig.sends().is_empty(), "the observer itself sends no keys");

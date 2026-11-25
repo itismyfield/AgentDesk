@@ -1,6 +1,6 @@
 //! Boot evidence is independent of output authority; failed observation cannot authorize a send.
 use serde_json::{Value, json};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::time::Duration;
 use std::{
     path::PathBuf,
@@ -14,24 +14,30 @@ mod evidence;
 mod history;
 mod manifest;
 pub(crate) mod request_context;
-#[cfg(test)]
-#[path = "entry_tests.rs"]
-mod tests;
 pub(crate) mod transport;
 mod window;
 mod writer;
 
 type Shared = Arc<Mutex<State>>;
 
-struct State {
-    header: Value,
-    ready: bool,
-    invalid: bool,
-    own_reasons: Vec<String>,
-    history_problems: Vec<Value>,
-    window: window::Window,
-    predecessor_window: Value,
+// Defined in a private child so default builds name it only inside this module, as before.
+mod state {
+    use serde_json::Value;
+
+    pub(crate) struct State {
+        pub(super) header: Value,
+        pub(super) ready: bool,
+        pub(super) invalid: bool,
+        pub(super) own_reasons: Vec<String>,
+        pub(super) history_problems: Vec<Value>,
+        pub(super) window: super::window::Window,
+        pub(super) predecessor_window: Value,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+use state::State;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use state::State;
 
 impl State {
     fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {
@@ -125,8 +131,8 @@ impl Journal {
         value
     }
 
-    #[cfg(test)]
-    async fn open(
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn open(
         root: &std::path::Path,
         boot: &crate::services::process_boot::Boot,
         doctor: Option<String>,
@@ -265,7 +271,7 @@ pub(crate) fn detail_json() -> Value {
 
 #[cfg(test)]
 pub(crate) use cache::ProjectionCache;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use collector::Collector;
 pub(crate) use evaluation::evaluate;
 #[cfg(test)]
@@ -277,4 +283,67 @@ pub(crate) async fn with_projection_for_test<T>(
     next: impl std::future::Future<Output = T>,
 ) -> T {
     TEST_PROJECTION.scope((cache, now), next).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use history::{append_line_for_test, prepare_with_sync_for_test};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use manifest::packaged_for_test;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use manifest::{inspect_for_test, inspect_with_evidence_for_test};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use window::{Window, valid_chain_for_test};
+
+#[cfg(any(test, feature = "test-support"))]
+impl State {
+    pub(crate) fn new_for_test(
+        boot: &crate::services::process_boot::Boot,
+        host: Option<String>,
+    ) -> Self {
+        Self::new(boot, host)
+    }
+
+    pub(crate) fn mark_for_test(&mut self, reason: &str) {
+        self.mark(reason);
+    }
+
+    pub(crate) fn window_for_test(&self) -> &window::Window {
+        &self.window
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn invalidate_for_test(state: &Shared, reason: &str) {
+    invalidate(state, reason);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Journal {
+    pub(crate) fn spawn_for_test(
+        root: Option<PathBuf>,
+        boot: crate::services::process_boot::Boot,
+        doctor: Option<String>,
+        host: Option<String>,
+        sync_parent: Option<writer::SyncParent>,
+        after_ack: Option<writer::Hook>,
+    ) -> Self {
+        let mut options = writer::Options {
+            doctor,
+            host,
+            sync_parent,
+            ..Default::default()
+        };
+        if let Some(after_ack) = after_ack {
+            options.after_ack = after_ack;
+        }
+        Self(writer::Writer::spawn(root, boot, options))
+    }
+
+    pub(crate) fn state_for_test(&self) -> &Shared {
+        &self.0.state
+    }
+
+    pub(crate) fn try_append_for_test(&self, record: Value) {
+        self.0.try_append(record);
+    }
 }

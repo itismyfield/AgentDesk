@@ -1,8 +1,6 @@
 use crate::config::TestEnvVarGuard as Guard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::replay_disposition::write::{
-    self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt,
-};
+use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::replay_policy::live::*;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -259,10 +257,10 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
             _ => unreachable!(),
         }
         std::thread::sleep(Duration::from_millis(40));
-        let observation = lock(&live.observation).clone();
+        let observation = live.observation_for_test();
         if index + 1 < order.len() {
             assert!(
-                !observation.complete(),
+                !observation.complete_for_test(),
                 "missing physical barrier cannot be complete"
             );
             assert!(observation.no_effect_evidence().is_none());
@@ -279,7 +277,7 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
         .unwrap();
     reader.join().unwrap();
     let messages: Vec<_> = rx.try_iter().collect();
-    let observed = lock(&live.observation).clone();
+    let observed = live.observation_for_test();
     let c = counts(&messages);
     if mode == "text" {
         assert!(c["text"].as_u64().unwrap() > 0);
@@ -423,19 +421,19 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
             tap.see(fact);
         }
         assert!(
-            lock(&live.observation).no_effect_evidence().is_none(),
+            live.observation_for_test().no_effect_evidence().is_none(),
             "physical facts cannot replace owner close"
         );
         match label {
             "finish" => {
                 tap.finish(true, Seen::StderrDrained);
-                assert!(lock(&live.observation).no_effect_evidence().is_some());
+                assert!(live.observation_for_test().no_effect_evidence().is_some());
             }
             "duplicate" => {
                 let duplicate = RawTap::for_codex(Some(&tok));
                 assert!(!duplicate.active());
                 tap.finish(true, Seen::StderrDrained);
-                assert!(lock(&live.observation).no_effect_evidence().is_none());
+                assert!(live.observation_for_test().no_effect_evidence().is_none());
             }
             "timeout" => {
                 let (_, observed) = live.take_for_decision(Duration::ZERO).await.unwrap();
@@ -445,7 +443,7 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
             }
             _ => {
                 drop(tap);
-                assert!(lock(&live.observation).no_effect_evidence().is_none());
+                assert!(live.observation_for_test().no_effect_evidence().is_none());
             }
         }
     }
@@ -507,7 +505,7 @@ fn inflight(live: &LiveAttempt) -> crate::services::discord::inflight::InflightT
         None,
         0,
     );
-    state.replay_receipt_id = lock(&live.attempt).as_ref().map(ExactAttempt::receipt_id);
+    state.replay_receipt_id = live.attempt_identity_for_test().map(|(receipt, _)| receipt);
     state
 }
 
@@ -518,12 +516,12 @@ async fn p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg() {
     let pool = db.connect_and_migrate_with_max_connections(4).await;
     let observed = live(&pool, "claude", "file").await;
     file_backend(&host, "tool", Arc::clone(&observed));
-    let facts = lock(&observed.observation).clone();
+    let facts = observed.observation_for_test();
     assert!(
-        facts.active(),
+        facts.active_for_test(),
         "actual tool must be observed before the normalized callback"
     );
-    assert!(facts.seen.contains(&Seen::Broken));
+    assert!(facts.seen_for_test().contains(&Seen::Broken));
     assert!(facts.no_effect_evidence().is_none());
     pool.close().await;
     db.drop().await;
@@ -607,7 +605,7 @@ fn file_backend(host: &Host, mode: &str, live: Arc<LiveAttempt>) {
     assert!(!stderr_captured);
     println!(
         "U4_RESULT {}",
-        json!({"runtime":"ProcessBackend","mode":mode,"starts":case.starts().len(),"stderr_captured":stderr_captured,"read_result":format!("{:?}",result.0),"source_identity":format!("{:?}",result.1.source_file),"late_growth":after-before,"messages":counts(&messages),"facts":format!("{:?}",lock(&live.observation))})
+        json!({"runtime":"ProcessBackend","mode":mode,"starts":case.starts().len(),"stderr_captured":stderr_captured,"read_result":format!("{:?}",result.0),"source_identity":format!("{:?}",result.1.source_file),"late_growth":after-before,"messages":counts(&messages),"facts":format!("{:?}",live.observation_for_test())})
     );
 }
 
@@ -630,7 +628,7 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
         let tok = token(&first);
         let state = inflight(&first);
         let id = state.replay_receipt_id.unwrap();
-        let nonce = lock(&first.attempt).as_ref().unwrap().nonce().to_string();
+        let (_, nonce) = first.attempt_identity_for_test().unwrap();
         let session = format!("p2-retry-{success}");
         sqlx::query("INSERT INTO sessions (session_key,channel_id,provider,status,current_replay_receipt_id,replay_episode_nonce,claude_session_id) VALUES ($1,'7330','codex','turn_active',$2,$3,'stale')").bind(&session).bind(id).bind(&nonce).execute(&pool).await.unwrap();
         direct(
@@ -750,7 +748,7 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
             case.release("record_go");
             case.wait("ready");
             until(
-                || lock(&observed.observation).active(),
+                || observed.observation_for_test().active_for_test(),
                 "raw output before terminal wait",
             );
         }
@@ -761,7 +759,12 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
             futures::poll!(&mut normal).is_pending(),
             "unsealed reader must keep terminal pending"
         );
-        assert!(lock(&observed.observation).no_effect_evidence().is_none());
+        assert!(
+            observed
+                .observation_for_test()
+                .no_effect_evidence()
+                .is_none()
+        );
         if before {
             case.release("record_go");
             case.wait("ready");

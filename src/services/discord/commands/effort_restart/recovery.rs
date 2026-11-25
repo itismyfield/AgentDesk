@@ -30,7 +30,7 @@ async fn resolve(shared: &Arc<SharedData>, channel: ChannelId) -> bool {
 
 /// The owed steps proper, re-read once the transition guard is held; `true` when it cancelled.
 async fn resolve_held(shared: &Arc<SharedData>, channel: ChannelId) -> bool {
-    let Ok(_transition) = shared.acquire_session_transition(channel).await else {
+    let Ok(_transition) = shared.session_transition_locks.acquire(channel).await else {
         return false;
     };
     let (intent, released) = super::tmux::owed(shared, channel).await;

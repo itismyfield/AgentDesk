@@ -2982,7 +2982,7 @@ async fn assert_concurrent_identity_promotion(
     let mut barrier = control_pool.begin().await.unwrap();
     // Hold only the identity fence so neither call can hide behind a shared locator.
     sqlx::query("SELECT pg_advisory_xact_lock($1, hashtext($2))")
-        .bind(crate::db::dispatched_session_canonical_identity::ADVISORY_LOCK_NAMESPACE)
+        .bind(crate::db::dispatched_session_canonical_identity::advisory_lock_namespace_for_test())
         .bind(format!("identity:discord_channel:claude:{TOKEN}:{channel}"))
         .execute(&mut *barrier)
         .await

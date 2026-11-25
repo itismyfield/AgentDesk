@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getAgentWarnings, getAgentWorkSummary } from "../../agent-insights";
-import type { Agent, Department } from "../../types";
+import type { Agent, Department, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import AgentPersona from "../AgentPersona";
@@ -8,11 +8,29 @@ import * as api from "../../api";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import { useKanban } from "../../contexts/KanbanContext";
 import { Button } from "../../kit/free/button-clean";
+import { AlertDialog } from "../../kit/free/dialog-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { buildTodoItems, monitorView, type HomeAgentState, type HomeTurn } from "../home/homeModel";
 import { useAgentTurns } from "../home/useHomeData";
 import type { Translator } from "./types";
+
+/** Prefers live session/agent provider over Postgres sessions.provider DEFAULT 'claude' when no -cc channel exists. */
+export function resolveActiveAgentProvider(
+  agent: Pick<Agent, "cli_provider" | "discord_channel_cc"> & { provider?: string | null },
+  workingSessions: readonly Pick<DispatchedSession, "provider">[],
+  turnProvider?: string | null,
+): string | null {
+  const configured = (agent.cli_provider || agent.provider)?.trim().toLowerCase() || null;
+  const allowClaudeOverride = !configured || configured === "claude" || Boolean(agent.discord_channel_cc);
+  const fromSession = workingSessions
+    .map((session) => session.provider?.trim().toLowerCase())
+    .find((provider) => provider && (provider !== "claude" || allowClaudeOverride));
+  if (fromSession) return fromSession;
+  const fromTurn = turnProvider?.trim().toLowerCase() || null;
+  if (fromTurn && (fromTurn !== "claude" || allowClaudeOverride)) return fromTurn;
+  return configured ?? fromTurn ?? workingSessions[0]?.provider?.trim().toLowerCase() ?? null;
+}
 import { buildAttention, type AttentionReason } from "./agentsAttention";
 import { AgentNowSection, AgentRunSettingsSection } from "./AgentInfoProfileSections";
 import { AgentConnectionSection, AgentSourceSection } from "./AgentInfoRoutingSections";
@@ -92,7 +110,8 @@ export function AgentInfoCardContent({
   const [savingAlias, setSavingAlias] = useState(false);
   const [selectedDeptId, setSelectedDeptId] = useState(agent.department_id ?? "");
   const [savingDept, setSavingDept] = useState(false);
-  const [selectedProvider, setSelectedProvider] = useState<string>(agent.cli_provider ?? "claude");
+  const configuredProvider = (agent.cli_provider || (agent as { provider?: string }).provider)?.trim() || "claude";
+  const [selectedProvider, setSelectedProvider] = useState<string>(configuredProvider);
   const providerCatalog = useProviderCatalog(selectedProvider);
   const [savingProvider, setSavingProvider] = useState(false);
   const [selectedAuthProfile, setSelectedAuthProfile] = useState("__primary__");
@@ -103,8 +122,8 @@ export function AgentInfoCardContent({
     setAliasValue(agent.alias ?? "");
     setEditingAlias(false);
     setSelectedDeptId(agent.department_id ?? "");
-    setSelectedProvider(agent.cli_provider ?? "claude");
-  }, [agent.alias, agent.department_id, agent.cli_provider, agent.id]);
+    setSelectedProvider((agent.cli_provider || (agent as { provider?: string }).provider)?.trim() || "claude");
+  }, [agent, agent.alias, agent.department_id, agent.cli_provider, agent.id]);
 
   // An override belongs to one Provider, so another Provider (switched here or in the edit form) shows the primary account.
   useEffect(() => {
@@ -215,9 +234,11 @@ export function AgentInfoCardContent({
   );
 
   const [stoppingTurn, setStoppingTurn] = useState(false);
+  const [confirmStopOpen, setConfirmStopOpen] = useState(false);
   const [stopFeedback, setStopFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   useEffect(() => {
     setStopFeedback(null);
+    setConfirmStopOpen(false);
   }, [agent.id, state, agent.status]);
 
   // Phones read no turns (as home); a caller that already polls the list's working agents hands its map over.
@@ -225,10 +246,11 @@ export function AgentInfoCardContent({
   const ownTurns = useAgentTurns(turns || isMobile || !working ? [] : [agent.id]);
   const liveTurn = (turns ?? ownTurns).get(agent.id);
   const summary = getAgentWorkSummary(agent, { linkedSessions: workingSessions });
-  const monitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
+  const rawMonitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
+  const activeProvider = resolveActiveAgentProvider(agent, workingSessions, rawMonitor?.role ?? liveTurn?.provider);
+  const monitor = rawMonitor ? { ...rawMonitor, role: activeProvider } : null;
   const monitorSteps = useMemo(() => turnMonitorSteps(liveTurn, tr), [liveTurn, tr]);
-  const handleStopTurn = async () => {
-    if (window.confirm?.(tr("지금 진행 중인 턴을 중단할까요?", "Stop the running turn now?")) === false) return;
+  const confirmStopTurn = async () => {
     setStoppingTurn(true);
     setStopFeedback(null);
     const res = await stopAgentTurn(agent.id);
@@ -246,7 +268,6 @@ export function AgentInfoCardContent({
     requestAnimationFrame(() => root.current?.querySelector('[data-testid="agent-detail-turns"]')?.scrollIntoView({ block: "nearest" }));
   };
 
-  const department = departments.find((entry) => entry.id === selectedDeptId);
   // Counts show once read, so an unread list never reads as zero.
   const routeCount = shared.bindings === undefined ? null : bindings.length;
   const liveCount = sessions ? live.length : null;
@@ -316,18 +337,28 @@ export function AgentInfoCardContent({
         monitor={monitor}
         steps={monitorSteps}
         onOpenLog={openTurns}
-        onStopTurn={working ? () => void handleStopTurn() : undefined}
+        onStopTurn={working ? () => setConfirmStopOpen(true) : undefined}
         stoppingTurn={stoppingTurn}
         stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}
-        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions })}
+        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions }).filter((warning) => warning.code !== "unassigned")}
+      />
+      <AlertDialog
+        open={confirmStopOpen}
+        onOpenChange={setConfirmStopOpen}
+        danger
+        title={tr("지금 진행 중인 턴을 중단할까요?", "Stop the running turn now?")}
+        description={tr("현재 실행을 멈추고 대기 중인 메시지는 유지해요.", "Stops the active turn while keeping queued messages.")}
+        confirmLabel={tr("턴 중단", "Stop turn")}
+        cancelLabel={tr("취소", "Cancel")}
+        onConfirm={confirmStopTurn}
       />
 
       <AgentRunSettingsSection
         tr={tr}
         locale={locale}
         fold={fold("run")}
-        summary={[department ? localeName(locale, department) : tr("미배정", "Unassigned"), getProviderMeta(selectedProvider).label].join(" · ")}
+        summary={getProviderMeta(selectedProvider).label}
         departments={departments}
         selectedDeptId={selectedDeptId}
         savingDept={savingDept}

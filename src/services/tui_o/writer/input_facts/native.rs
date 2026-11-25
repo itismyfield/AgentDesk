@@ -167,7 +167,7 @@ pub(crate) struct Analysis {
 pub(super) use tests::fold;
 
 #[cfg(all(test, unix))]
-mod tests;
+pub(crate) mod tests;
 
 #[cfg(unix)]
 pub(crate) type Projection = projection::Projection;
@@ -594,8 +594,8 @@ mod projection {
                             let Some(pending) = &input.pending else {
                                 continue;
                             };
-                            let prompt_matches = record.event.clone()
-                            .is_some_and(|event| matches!(event, Event::Prompt(body) if same_body(&body, &input.body)));
+                            let prompt_matches = record.event.as_ref()
+                            .is_some_and(|event| matches!(event, Event::Prompt(body) if same_body(body, &input.body)));
                             member[owner] = Some(Member {
                                 run: opened.clone(),
                                 range: if prompt_matches {
@@ -675,17 +675,17 @@ mod projection {
                     None
                 }
             };
-            let Some(event) = record.event.clone() else {
+            let Some(event) = &record.event else {
                 continue;
             };
             match event {
                 Event::Enqueue(body) => {
-                    let owner = candidate(&body, false).filter(|i| {
+                    let owner = candidate(body, false).filter(|i| {
                     records.iter().filter(|r| r.range.0 >= registered[*i].ticket.source.as_ref().map_or(u64::MAX, |s| s.offset))
-                        .filter(|r| matches!(r.event.clone(), Some(Event::Enqueue(ref b)) if same_body(b, &body))).count() == 1
+                        .filter(|r| matches!(&r.event, Some(Event::Enqueue(b)) if same_body(b, body))).count() == 1
                 });
                     inputs.push(Input {
-                        body,
+                        body: body.clone(),
                         owner,
                         start: record.range.0,
                         stage: Stage::Waiting,
@@ -724,12 +724,12 @@ mod projection {
                     }
                 }
                 Event::Withdraw(body) | Event::Delivered(body) => {
-                    let delivered = matches!(record.event.clone(), Some(Event::Delivered(_)));
+                    let delivered = matches!(event, Event::Delivered(_));
                     let matches: Vec<_> = inputs
                         .iter()
                         .enumerate()
                         .filter(|(_, i)| {
-                            same_body(&i.body, &body)
+                            same_body(&i.body, body)
                                 && matches!(
                                     i.stage,
                                     Stage::Waiting | Stage::Taken | Stage::Attached
@@ -758,19 +758,17 @@ mod projection {
                 | Event::Human(body)
                 | Event::Command(body)
                 | Event::Prompt(body) => {
-                    let kind = record.event.clone();
-                    let absorption = matches!(kind, Some(Event::Absorbed(_)));
-                    let command = matches!(kind, Some(Event::Human(_) | Event::Command(_)));
-                    let receipt = candidate(&body, true);
-                    if receipt.is_none() && (matches!(kind, Some(Event::Command(_))) || record.meta)
-                    {
+                    let absorption = matches!(event, Event::Absorbed(_));
+                    let command = matches!(event, Event::Human(_) | Event::Command(_));
+                    let receipt = candidate(body, true);
+                    if receipt.is_none() && (matches!(event, Event::Command(_)) || record.meta) {
                         continue;
                     }
                     let matches: Vec<_> = inputs
                         .iter()
                         .enumerate()
                         .filter(|(_, i)| {
-                            same_body(&i.body, &body)
+                            same_body(&i.body, body)
                                 && i.stage != Stage::Removed
                                 && if absorption {
                                     !i.absorbed
@@ -796,9 +794,9 @@ mod projection {
                             (matches.is_empty()
                                 && !absorption
                                 && !unmatched_dequeue
-                                && !inputs.iter().any(|input| same_body(&input.body, &body)))
+                                && !inputs.iter().any(|input| same_body(&input.body, body)))
                             .then(|| {
-                                candidate(&body, false)
+                                candidate(body, false)
                                     .filter(|i| registered[*i].receipts.is_empty())
                             })
                             .flatten()
@@ -826,13 +824,13 @@ mod projection {
                     }
                     if let Some(record_member) = membership.as_mut() {
                         let receipt_owner = owner.or_else(|| {
-                            if !matches!(kind, Some(Event::Prompt(_))) {
+                            if !matches!(event, Event::Prompt(_)) {
                                 return None;
                             }
                             let candidates: Vec<_> = inputs
                                 .iter()
                                 .filter(|i| {
-                                    same_body(&i.body, &body)
+                                    same_body(&i.body, body)
                                         && i.stage == Stage::Running
                                         && i.command
                                 })

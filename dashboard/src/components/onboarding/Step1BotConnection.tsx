@@ -1,5 +1,6 @@
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { CSSProperties, Dispatch, RefObject, SetStateAction } from "react";
 
+import { IntegrationFlow, type IntegrationFlowItem } from "../../kit/illustrations/integration-flow";
 import type { BotInfo, CommandBotEntry } from "../onboardingDraft";
 import {
   COMMAND_PROVIDERS,
@@ -12,6 +13,38 @@ import {
 } from "./OnboardingWizardSections";
 
 type Tr = (ko: string, en: string) => string;
+
+const STEP1_FLOW_HUB_CSS = `
+.adk-step1-flow .aui-integration-flow-hub {
+  padding-left: 32px;
+}
+.adk-step1-flow .aui-integration-flow-hub .aui-integration-flow-copy strong,
+.adk-step1-flow .aui-integration-flow-hub .aui-integration-flow-copy small {
+  font-size: 0;
+  line-height: 0;
+  max-width: 100%;
+}
+.adk-step1-flow .aui-integration-flow-hub .aui-integration-flow-copy strong::after {
+  content: var(--adk-hub-title);
+  display: block;
+  overflow: hidden;
+  font-size: 37px;
+  line-height: 40px;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.adk-step1-flow .aui-integration-flow-hub .aui-integration-flow-copy small::after {
+  content: var(--adk-hub-sub);
+  display: block;
+  overflow: hidden;
+  font-size: 27px;
+  line-height: 36px;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+`;
 
 const TOKEN_INPUT_SEMANTICS = {
   autoCapitalize: "none",
@@ -82,6 +115,19 @@ export function Step1BotConnection({
   validateStep1,
   goToStep,
 }: Step1BotConnectionProps) {
+  const hubTitle = tr("AgentDesk 허브", "AgentDesk Hub");
+  const hubSub = tr("Discord 실행·통신 봇 오케스트레이션", "Discord Command & Comms Orchestration");
+  const hubStyle = {
+    "--adk-hub-title": JSON.stringify(hubTitle),
+    "--adk-hub-sub": JSON.stringify(hubSub),
+  } as CSSProperties;
+  const integrationItems: IntegrationFlowItem[] = [
+    { name: "Discord", title: tr("봇·채널 허브", "Bots & Channels") },
+    { name: "Claude", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Codex", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Antigravity", title: tr("클라우드 에이전트", "Cloud Agent") },
+  ];
+
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
@@ -94,6 +140,22 @@ export function Step1BotConnection({
             "AgentDesk runs AI agents through Discord bots. You need at least 2 bots (Command + Communication).",
           )}
         </p>
+      </div>
+
+      <div
+        data-testid="step1-integration-flow"
+        style={hubStyle}
+        className="adk-step1-flow mx-auto w-full max-w-[440px] overflow-hidden rounded-xl border border-[var(--th-border-subtle)] bg-[var(--th-overlay-subtle)]"
+      >
+        <style>{STEP1_FLOW_HUB_CSS}</style>
+        <span className="sr-only">{`${hubTitle} — ${hubSub}`}</span>
+        <IntegrationFlow
+          label={tr(
+            "Discord 봇과 AgentDesk, AI 프로바이더 연동 흐름",
+            "Discord bots, AgentDesk, and AI provider integration flow",
+          )}
+          items={integrationItems}
+        />
       </div>
 
       <div

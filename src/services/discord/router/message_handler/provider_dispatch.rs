@@ -600,11 +600,11 @@ mod herdr {
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
     use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
-    use crate::services::discord::UnplacedLease;
     use crate::services::discord::recovery_engine::host_reconcile::{
         HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
         reconcile_hosted_session_pg,
     };
+    use crate::services::discord::session_transition::UnplacedLease;
     use crate::services::discord::tui_prompt_relay::herdr_source::{
         HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
     };
@@ -811,7 +811,7 @@ mod herdr {
             let shared = self.shared.ok_or("no channel lease")?;
             let channel = crate::services::discord::ChannelId::new(self.channel_id);
             Handle::current()
-                .block_on(UnplacedLease::acquire(shared, channel))
+                .block_on(UnplacedLease::acquire(shared.as_ref(), channel))
                 .map_err(|_| "transition_busy".to_string())
         }
 

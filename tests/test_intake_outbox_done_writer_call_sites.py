@@ -52,7 +52,7 @@ class SourceContractTests(unittest.TestCase):
 
     def test_allowlisted_symbol_is_imported_by_its_owner_function_file(self):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
-        self.assertIn("pub(crate) async fn run_intake_worker_tick(", worker)
+        self.assertIn("pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(", worker)
         self.assertIn("mark_done(pool, row.id, claim_owner)", worker)
 
 
@@ -352,6 +352,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
 
     WORKER = ROOT / "src/services/cluster/intake_worker.rs"
     OWNER = ROOT / "src/services/discord/shared_state.rs"
+    HOST = ROOT / "src/services/discord/shared_state/g7_host.rs"
     BOOTSTRAP = ROOT / "src/services/discord/runtime_bootstrap"
     RAW_STORE = re.compile(r"(shutting_down|restart_pending)\s*\.store\(")
     ADAPTER_STORE = re.compile(
@@ -367,8 +368,8 @@ class TransportLegacyInventoryTests(unittest.TestCase):
     READER_DECL = re.compile(r"struct ShutdownReader\((?P<field>.*)\);")
     RAW_HANDLE = re.compile(r"self\.0(?!\.load\()")
     CHECKPOINT = re.compile(
-        r"admission_action\(\s*(cancelled|&owner_cancelled),\s*&"
-        r"(shared|runtime\.shared)\.restart\.intake_worker_lifecycle,"
+        r"admission_action\(\s*(cancelled|&owner_cancelled),\s*"
+        r"(shared|runtime\.shared)\.intake_lifecycle\(\),"
         r"\s*AdmissionCheckpoint::(\w+),"
     )
     # "<adapter> <caller basename> <field>=<value>..." in exact store order.
@@ -390,7 +391,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         worker = self.WORKER.read_text(encoding="utf-8")
         owner = self.OWNER.read_text(encoding="utf-8")
 
-        tick = self.item(worker, "pub(crate) async fn run_intake_worker_tick(")
+        tick = self.item(worker, "pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(")
         self.assertIn("cancelled: &(dyn Fn() -> bool + Sync),", tick)
         self.assertEqual(
             self.CHECKPOINT.findall(tick),
@@ -402,14 +403,24 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         )
         self.assertEqual(tick.count("admission_action("), 3)
         self.assertEqual(tick.count("release_cancelled_claim(pool, &row, claim_owner)"), 3)
-        self.assertIn("let owner_shutdown = runtime.shared.restart.shutdown_reader();", tick)
-        self.assertIn("shared.restart.intake_worker_lifecycle.admission_is_fenced()", tick)
-        self.assertIn("owner_shutdown.load(Ordering::Acquire)", tick)
+        self.assertIn("let owner_shutdown = runtime.shared.shutdown_probe();", tick)
+        self.assertIn("shared.intake_lifecycle().admission_is_fenced()", tick)
+        self.assertIn("|| owner_shutdown();", tick)
+        self.assertNotIn(".restart.", tick)
 
-        loop_body = self.item(worker, "pub(crate) async fn run_intake_worker_loop(")
+        loop_body = self.item(
+            worker, "pub(crate) async fn run_intake_worker_loop<S: IntakeHost>("
+        )
         self.assertNotIn("cancel: Arc<AtomicBool>", loop_body)
-        self.assertIn("let reader = shared.restart.shutdown_reader();", loop_body)
-        self.assertIn("let cancelled = || reader.load(Ordering::Acquire);", loop_body)
+        self.assertIn("let cancelled = shared.shutdown_probe();", loop_body)
+        self.assertNotIn(".restart.", loop_body)
+
+        # The worker's host hands out the reader only as a closure that loads it.
+        host = self.HOST.read_text(encoding="utf-8")
+        probe = self.item(host, "fn shutdown_probe(&self) -> ShutdownProbe {")
+        self.assertIn("let reader = self.restart.shutdown_reader();", probe)
+        self.assertIn("Box::new(move || reader.load(Ordering::Acquire))", probe)
+        self.assertNotIn("shutting_down", host)
         self.assertEqual(loop_body.count("if cancelled() {"), 2)
         self.assertIn("&cancelled,", loop_body)
 

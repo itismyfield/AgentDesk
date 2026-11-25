@@ -33,9 +33,11 @@ export const campaignNodeSchema = z.looseObject({
   status: campaignNodeStatusSchema,
   stage: z
     .string()
-    .min(1)
     .max(128)
-    .refine((value) => value.trim().length > 0),
+    .refine((value) => value === "" || value.trim().length > 0)
+    .nullable()
+    .default("")
+    .transform((value) => value ?? ""),
   group: nullableText,
   round: roundSchema,
   assignee: nullableText,
@@ -121,6 +123,40 @@ export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
 export type CampaignNode = z.infer<typeof campaignNodeSchema>;
 export type Campaign = z.infer<typeof campaignSchema>;
 export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
+
+export interface HomeCampaignNodeSummary {
+  status: CampaignNodeStatus;
+}
+
+export interface HomeLegacyCampaignSummary {
+  id: string;
+  title: string;
+  status: CampaignStatus;
+  auto_queue: boolean;
+  nodes: HomeCampaignNodeSummary[];
+  updated_at: string;
+}
+
+const homeCampaignSummarySchema = z.looseObject({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  status: campaignStatusSchema,
+  auto_queue: z.boolean().default(false),
+  nodes: z.array(z.looseObject({ status: campaignNodeStatusSchema })).default([]),
+  updated_at: z.string(),
+});
+
+const homeCampaignListResponseSchema = z.looseObject({
+  campaigns: z.array(homeCampaignSummarySchema),
+});
+const parsedListPages = new WeakSet<object>();
+const campaignListParser = {
+  parse(value: unknown) {
+    const parsed = campaignListResponseSchema.parse(value);
+    parsedListPages.add(parsed);
+    return parsed;
+  },
+};
 export type CampaignHandoff = z.infer<typeof campaignHandoffSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
@@ -132,17 +168,42 @@ export function campaignReadMark(): number {
 }
 
 // Reads never join a GET already in flight, so a read's number says when its data was fetched.
-export async function getCampaigns(): Promise<{
+export async function getCampaigns(options: { view: "home" }): Promise<{
+  campaigns: HomeLegacyCampaignSummary[];
+  live: CampaignLive;
+  read: number;
+}>;
+export async function getCampaigns(options?: { view?: "summary" }): Promise<{
   campaigns: Campaign[];
+  live: CampaignLive;
+  read: number;
+}>;
+export async function getCampaigns(options?: { view?: "summary" | "home" }): Promise<{
+  campaigns: Campaign[] | HomeLegacyCampaignSummary[];
   live: CampaignLive;
   read: number;
 }> {
   const read = ++readsStarted;
+  if (options?.view === "home") {
+    const campaigns = new Map<string, HomeLegacyCampaignSummary>();
+    const limit = 100;
+    for (let offset = 0; ; offset += limit) {
+      const result = await request(
+        `/api/campaigns?limit=${limit}&offset=${offset}&view=summary`,
+        { suppressErrorToast: true },
+        homeCampaignListResponseSchema,
+      );
+      for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
+      if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live: {}, read };
+    }
+  }
   const campaigns = new Map<string, Campaign>();
   const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
-    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}&view=summary`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
+    const raw = await request(`/api/campaigns?limit=${limit}&offset=${offset}&view=summary`, { suppressErrorToast: true, shareInflight: false }, campaignListParser);
+    // Re-parse when a 304 ETag hit returned a payload cached by the lightweight home parser.
+    const result = parsedListPages.has(raw) ? raw : campaignListParser.parse(raw);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
     Object.assign(live, result.live);
     if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live, read };

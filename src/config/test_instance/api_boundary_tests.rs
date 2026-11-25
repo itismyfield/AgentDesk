@@ -1,4 +1,5 @@
 use crate::config::test_instance::*;
+use crate::config::test_instance::{MARKER_FOR_TEST as MARKER, read_json_for_test as read_json};
 use serde_json::Value;
 use serde_json::json;
 use std::io::{Read, Write};

@@ -13,6 +13,8 @@ use crate::services::krx_db_tests::server_campaigns_storage::Harness;
 use sqlx::PgPool;
 use sqlx::types::Json;
 
+type Result<T> = std::result::Result<T, EvidenceStoreError>;
+
 fn envelope(output: &str) -> EvidenceEnvelope {
     claim(&domain::binding(&domain::running()), output)
 }

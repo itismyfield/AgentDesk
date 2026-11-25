@@ -231,6 +231,17 @@ pub(crate) async fn acquire_unstamped(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Origin {
+    pub(crate) fn channel_for_test(&self) -> &str {
+        &self.channel
+    }
+
+    pub(crate) fn receipt_for_test(&self) -> i64 {
+        self.receipt
+    }
+}
+
 #[cfg(test)]
-#[path = "output_tests.rs"]
+#[path = "output_fixture_tests.rs"]
 pub(crate) mod tests;

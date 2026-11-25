@@ -448,7 +448,9 @@ pub(crate) use bot_runtime::has_fresh_inflight_for_channel;
 use bot_runtime::increment_counter;
 pub(in crate::services::discord) use bot_runtime::increment_global_active;
 pub(crate) use bot_runtime::inflight_state_allows_idle_tmux_repair_for_channel;
-pub(crate) use bot_runtime::mark_reconcile_complete;
+pub(super) use bot_runtime::mark_reconcile_complete;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use bot_runtime::mark_reconcile_complete_for_test;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_counter;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_global_active;
 pub(super) use bot_runtime::single_message_panel_enabled;
@@ -665,10 +667,6 @@ pub(crate) use shared_data::make_shared_data_for_tests;
 pub(super) use shared_data::make_shared_data_for_tests_with_barrier;
 #[cfg(test)]
 pub(crate) use shared_data::make_shared_data_for_tests_with_storage;
-
-#[cfg(unix)]
-pub(crate) use session_transition::UnplacedLease;
-pub(crate) use session_transition::{SESSION_TRANSITION_LOCK_WAIT_TIMEOUT, SessionTransitionBusy};
 
 use queue_dispatch::persistence_context as queue_persistence_context;
 
@@ -1257,7 +1255,8 @@ mod idle_queue_background_supersede_tests {
             .await;
 
         let transition_guard = shared
-            .session_transition_lock(channel_id)
+            .session_transition_locks
+            .lock(channel_id)
             .lock_owned()
             .await;
         let blocked = idle_queue_take_next_soft_if_ready(&shared, &provider, channel_id).await;

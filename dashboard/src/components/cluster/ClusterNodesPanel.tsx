@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getClusterNodes, getNodeSessions, getNodeSessionOutput, nodeControlUnavailable, stopNodeSession, type NodeSession } from "../../api/clusterNodes";
 import { StatusBadge } from "../common/StatusBadge";
 import { FreshnessIndicator } from "../common/FreshnessIndicator";
 import { nodePlatformLabel, nodeRoleLabel, runtimeModeLabel } from "../../lib/nodeLabels";
+import { useNow } from "../../lib/useNow";
 
 const reasons: Record<string, [string, string]> = {
   node_offline: ["노드 오프라인", "Node offline"],
@@ -22,8 +23,7 @@ export default function ClusterNodesPanel({ isKo }: { isKo: boolean }) {
   const sessions = useQuery({ queryKey: ["cluster-node-sessions"], queryFn: ({ signal }) => getNodeSessions(signal), refetchInterval: 5_000, enabled: Boolean(nodes.data?.cluster.enabled) });
   const [selected, setSelected] = useState<NodeSession | null>(null);
   const [confirmStop, setConfirmStop] = useState<string | null>(null);
-  const [now, setNow] = useState(Date.now());
-  useEffect(() => { const timer = window.setInterval(() => setNow(Date.now()), 1_000); return () => window.clearInterval(timer); }, []);
+  const now = useNow(1_000);
   const stale = nodes.isError || !nodes.dataUpdatedAt || now - nodes.dataUpdatedAt > 15_000;
   const selectedNode = nodes.data?.nodes.find(node => node.instance_id === selected?.instance_id);
   const canControlSelected = nodes.data?.cluster.enabled && selectedNode && !nodeControlUnavailable(selectedNode, nodes.data.cluster.local_instance_id, stale);

@@ -1,14 +1,20 @@
-use super::*;
+use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOwner, HostedState};
 use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, SourceRef};
+use crate::services::claude::herdr_turn::not_held;
+use crate::services::claude_tui::guarded_outcome::SubmissionError;
+use crate::services::codex::herdr_turn::pending_lookup_probe;
+use crate::services::codex::herdr_turn::{
+    CodexHerdrTurn, logged_source_for_test as logged_source, submit_for_test as submit,
+    submit_owned_for_test as submit_owned,
+};
+use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
+use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use serde_json::json;
+use std::sync::Arc;
 
 #[path = "pg_tests/pending_lookup_tests.rs"]
 mod pending_lookup;
-
-pub(super) fn before_pending_lookup(logical: &str) {
-    pending_lookup::before_pending_lookup(logical);
-}
 
 #[test]
 fn cold_codex_herdr_submit_keeps_hold_and_returns_before_session_start_pg() {
@@ -257,7 +263,7 @@ fn run_case(case: Case) {
                 } else {
                     let submit = || submit(&turn, &tokio::runtime::Handle::current(), nonce);
                     let result = if case == Case::PendingLookup {
-                        pending_lookup::check_unlocked(&turn.owner.logical_key, submit)
+                        pending_lookup_probe::check_unlocked(&turn.owner.logical_key, submit)
                     } else {
                         submit()
                     };
@@ -384,7 +390,7 @@ fn run_case(case: Case) {
     );
     assert_eq!(sends[1], json!({"pane_id": PANE, "keys": ["enter"]}));
     assert!(
-        !matches!(submitted.logged.has_changed(), Ok(true)),
+        !matches!(submitted.logged_for_test().has_changed(), Ok(true)),
         "no invented SessionStart wakes the observer"
     );
     assert!(

@@ -81,7 +81,10 @@ async fn pending_worker_owns_transition_between_actor_admission_and_inflight_sav
         inflight::load_inflight_state_read_only(&provider, channel.get()).is_none(),
         "the hook must run before the durable save"
     );
-    let recovery_attempt = shared.session_transition_lock(channel).try_lock_owned();
+    let recovery_attempt = shared
+        .session_transition_locks
+        .lock(channel)
+        .try_lock_owned();
     let recovery_was_excluded = recovery_attempt.is_err();
     drop(recovery_attempt);
     resume.notify_one();

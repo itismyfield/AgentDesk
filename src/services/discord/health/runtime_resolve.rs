@@ -8,6 +8,7 @@ use poise::serenity_prelude as serenity;
 use serenity::ChannelId;
 
 use super::HealthRegistry;
+use crate::services::cluster::intake_worker::IntakeWorkerRuntime;
 use crate::services::discord::SharedData;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::provider::ProviderKind;
@@ -267,19 +268,13 @@ pub(super) async fn resolve_direct_channel_runtime(
     Ok((http, shared))
 }
 
-pub(crate) struct IntakeWorkerRuntime {
-    pub(crate) http: Arc<serenity::Http>,
-    pub(crate) shared: Arc<SharedData>,
-    pub(crate) token: String,
-}
-
 /// A provider queue may be polled by several bots. The claimant is not the
 /// channel owner: all execution state and REST credentials must come from the
 /// same channel-resolved runtime before the worker accepts the row.
 pub(crate) async fn resolve_intake_worker_runtime(
     claimant: &SharedData,
     channel_id: ChannelId,
-) -> Result<IntakeWorkerRuntime, String> {
+) -> Result<IntakeWorkerRuntime<SharedData>, String> {
     let registry = claimant
         .health_registry
         .upgrade()

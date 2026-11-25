@@ -51,6 +51,17 @@ export interface CommandPaletteProps {
 
 const OVERLAY_STYLE = { "--aui-overlay": "var(--th-modal-overlay)" } as CSSProperties;
 
+const PALETTE_LIST_MASK_CSS = `
+.adk-command-palette .aui-command-menu-list {
+  scroll-padding-bottom: 20px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 18px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 18px), transparent 100%);
+}
+.adk-command-palette .aui-command-menu-list-content {
+  padding-bottom: 18px;
+}
+`;
+
 const INDEXED_SETTING_KEYS = [
   "dispatchRateLimitGateEnabled",
   "dispatchRateLimitGateDangerPct",
@@ -388,10 +399,12 @@ export default function CommandPalette({
         if (event.target instanceof HTMLInputElement) setQuery(event.target.value);
       }}
     >
+      <style>{PALETTE_LIST_MASK_CSS}</style>
       <CommandMenu
         open
         modal
         autoFocus
+        className="adk-command-palette"
         groups={filterCommandGroups(groups, query)}
         onClose={onClose}
         label={tr("명령 팔레트", "Command Palette")}

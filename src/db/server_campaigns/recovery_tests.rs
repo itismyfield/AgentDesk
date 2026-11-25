@@ -736,7 +736,7 @@ async fn replaced_current_run_does_not_erase_old_attempt_action_or_runtime_pg() 
         event_sequence: 2,
         control: CampaignControl::Running,
     };
-    write::persist(
+    persist_for_test(
         &mut tx,
         Some(&original),
         &Decision {
