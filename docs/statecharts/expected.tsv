@@ -162,9 +162,11 @@ claude-stop/ClaudeStopOpenTailOnly.cfg	ClaudeStop	ActiveScreenStops	-
 claude-stop/ClaudeStopUnreadEnded.cfg	ClaudeStop	UnreadFooterStops	-
 claude-stop/ClaudeStopUnreadSpinner.cfg	ClaudeStop	UnreadNeedsFooter	-
 claude-stop/ClaudeStopWideReader.cfg	ClaudeStop	NoEscapeOnIdleScreen,UnreadNeedsFooter	-
+decision-request/ActivateUnwired.cfg	DecisionRequest	NoUnwiredButtons	-
 decision-request/Auth.cfg	DecisionRequest	OperatorOnly	-
 decision-request/BindOnlySweep.cfg	DecisionRequest	NoDecisionNotice	-
 decision-request/BootRePost.cfg	DecisionRequest	OnePost	-
+decision-request/BootResend.cfg	DecisionRequest	NoDuplicate	-
 decision-request/BusyForever.cfg	DecisionRequest	-	EventuallySettled
 decision-request/DiscussionClassify.cfg	DecisionDiscussion	ClassMatches	-
 decision-request/DiscussionClosedAdmission.cfg	DecisionDiscussion	NoClosedAdmission	-
@@ -195,13 +197,17 @@ decision-request/ForumUnknown.cfg	DecisionForum	NoDuplicateForum	-
 decision-request/Gone.cfg	DecisionRequest	-	-
 decision-request/GuardByThread.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/Handoff.cfg	DecisionRequest	ExecutionAuthorized	-
+decision-request/LateChoice.cfg	DecisionRequest	NoChoiceAfterEnd	-
 decision-request/Lost.cfg	DecisionRequest	ChoiceRecorded	-
+decision-request/NoBootStart.cfg	DecisionRequest	-	EventuallySettled
+decision-request/NoChoiceCas.cfg	DecisionRequest	OneStoredChoice,FirstChoiceWins	-
 decision-request/NoClaimCas.cfg	DecisionRequest	AttemptOnce	-
 decision-request/NoDiscard.cfg	DecisionRequest	NoFailureQueue	-
 decision-request/NoIntakeGuard.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/NoJournal.cfg	DecisionRequest	JournalBeforeWrite	-
 decision-request/NoOfflineSettle.cfg	DecisionRequest	-	AbandonedEnds
 decision-request/NoRecovery.cfg	DecisionRequest	-	EventuallySettled
+decision-request/NoSeal.cfg	DecisionRequest	-	EndedSealed
 decision-request/NoSweep.cfg	DecisionRequest	-	ClosedLeavesNothing
 decision-request/NoSweepNotice.cfg	DecisionRequest	NoDecisionNotice	-
 decision-request/NoUnarchive.cfg	DecisionRequest	-	EventuallySettled
@@ -215,6 +221,7 @@ decision-request/PreservedReach.cfg	DecisionRequest	NeverPreserved	-
 decision-request/Provenance.cfg	DecisionRequest	PreservedNeedsApproval	-
 decision-request/RePost.cfg	DecisionRequest	OnePost	-
 decision-request/RetryClosed.cfg	DecisionRequest	NoRearmAfterClose	-
+decision-request/RunBeforeStore.cfg	DecisionRequest	StoredBeforeRun	-
 decision-request/SnapshotRegister.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/TempHolderId.cfg	DecisionRequest	LiveHolderKeeps	-
 decision-request/TimeOnlyRecovery.cfg	DecisionRequest	LiveHolderKeeps	-
