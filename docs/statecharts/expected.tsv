@@ -586,7 +586,7 @@ input-single-path/HerdrSyntheticStartRetireOnHeld.cfg	HerdrSyntheticStart	NoAuto
 input-single-path/HerdrSyntheticStartRetireUnderTurn.cfg	HerdrSyntheticStart	NoAutoRetireUnderTurn	-
 input-single-path/HerdrSyntheticStartTmuxBusy.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartTmuxDead.cfg	HerdrSyntheticStart	-	-
-input-single-path/HerdrSyntheticStartTmuxNoPresenceWake.cfg	HerdrSyntheticStart	-	SyntheticSettles
+input-single-path/HerdrSyntheticStartTmuxNoPresenceWake.cfg	HerdrSyntheticStart	NoDeadlock	SyntheticSettles
 input-single-path/HerdrColdIdleBusyFixed.cfg	HerdrColdIdle	-	-
 input-single-path/HerdrColdIdleColdBefore.cfg	HerdrColdIdle	-	HealthyIdleProgress
 input-single-path/HerdrColdIdleColdFixed.cfg	HerdrColdIdle	-	-
