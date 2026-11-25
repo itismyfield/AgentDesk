@@ -13,14 +13,15 @@
 \* A person's input reaches the same recovery after claim (owned_busy.rs:99-339); "Before" for a
 \* person is #8212 (Scope::Missing only).
 EXTENDS Naturals
-CONSTANTS Policy, Host, Provider, Origin, Exec0, Turn0, Inflight0, Foreign, Race, InflightRace,
-          Mutant
+CONSTANTS Policy, Host, Provider, Origin, Exec0, Rollout0, Turn0, Inflight0, Foreign, Race,
+          InflightRace, Mutant
 
 VARIABLE s
 vars == <<s>>
 
 Init == s = [front |-> "queued", awake |-> TRUE, watch |-> FALSE,
-             row |-> "Bound", exec |-> Exec0, turn |-> Turn0, inflight |-> Inflight0,
+             row |-> "Bound", exec |-> Exec0, rollout |-> Rollout0, turn |-> Turn0,
+             inflight |-> Inflight0,
              lease |-> FALSE, turnStarted |-> FALSE, inflightStarted |-> FALSE,
              autoRetired |-> FALSE, badRetire |-> FALSE, turnRetire |-> FALSE,
              cold |-> FALSE, refusing |-> FALSE, outcome |-> "none"]
@@ -48,8 +49,16 @@ NoTurn == /\ (s.turn = "none" \/ Mutant = "RetireUnderTurn")
 \* The lease: try_acquire for a synthetic start, borrow for a person already in transition.
 LeaseOk == ~(Origin = "person" /\ Mutant = "noBorrow")
 
-\* One Herdr read of the channel execution (Claude busy reader or Codex activity).
+\* The physical execution (exec) and a Codex rollout's last turn (rollout) are separate axes: a
+\* closed rollout reads Idle whatever happened to the execution since (activity.rs:723-738).
+Alive == s.exec \in {"idle", "busy"}
+RolloutRead == IF s.rollout = "idle" THEN "Ready" ELSE "Blocked"
+\* One Herdr read of the channel execution (Claude busy reader or Codex activity). Fixed joins a
+\* Codex rollout read with the exact execution's liveness; mutant unknownOnly is impl-w1.
 HerdrRead == IF s.row # "Bound" THEN "Ready"
+             ELSE IF Provider = "codex" /\ s.rollout # "none"
+             THEN IF Policy = "Fixed" /\ Mutant # "unknownOnly" /\ ~Alive
+                  THEN "Unknown" ELSE RolloutRead
              ELSE CASE s.exec = "idle" -> "Ready"
                     [] s.exec = "busy" -> "Blocked"
                     [] s.exec = "unreadable" -> "Unknown"
@@ -118,6 +127,9 @@ Launch == /\ s.front = "claimed"
                   ELSE IF Host = "tmux" /\ Dead
                   THEN [s EXCEPT !.front = "delivered", !.exec = "idle", !.cold = TRUE,
                                  !.outcome = "completed"]
+                  \* A follow-up into a dead Bound execution fails its start (retained Failed).
+                  ELSE IF Host = "herdr" /\ s.row = "Bound" /\ Dead
+                  THEN [s EXCEPT !.front = "rejected", !.outcome = "failed"]
                   ELSE [s EXCEPT !.front = "delivered", !.outcome = "completed"]
 
 Woken(t) == IF t.front \in {"queued", "held"}
@@ -163,6 +175,8 @@ NoAutoRetireLive == ~s.badRetire
 NoAutoRetireUnderTurn == ~s.turnRetire
 RetiredStartIsCold == (s.front = "delivered" /\ s.autoRetired) => s.cold
 RejectedIsFailed == s.front = "rejected" => s.outcome = "failed"
+\* A delivery needs a live existing execution or a new cold one.
+DeliveredNeedsExecution == (Host = "herdr" /\ s.front = "delivered") => (s.cold \/ ~Dead)
 TypeOK == s.front \in {"queued", "held", "retiring", "claimed", "delivered", "rejected"}
 
 \* Liveness: the start is delivered or explicitly refused; a start whose owner matches is delivered.
