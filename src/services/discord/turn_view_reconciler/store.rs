@@ -361,6 +361,10 @@ impl TurnViewReconciler {
             identity_label: applied.identity.label.clone(),
             token_hash: applied.identity.token_hash.clone(),
             start_attempt_id: applied.start_attempt.map(TurnStartAttempt::get),
+            accept_attempt_id: applied
+                .start_attempt
+                .filter(|attempt| self.accept_pending_recorded_is(target, *attempt))
+                .map(TurnStartAttempt::get),
         };
         let Ok(json) = serde_json::to_string_pretty(&record) else {
             return;

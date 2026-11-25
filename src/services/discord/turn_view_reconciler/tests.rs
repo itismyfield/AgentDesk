@@ -80,6 +80,7 @@ fn persisted_record_with_version(
         identity_label: target.kind.identity_label().to_string(),
         token_hash: Some(shared.token_hash.clone()),
         start_attempt_id: None,
+        accept_attempt_id: None,
     }
 }
 

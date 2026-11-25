@@ -204,6 +204,11 @@ pub(super) async fn recover(shared: &Shared, channel: ChannelId) {
     };
     match recovered {
         Ok((history, namespace)) => {
+            // An early ⏳ whose input boot no longer holds never reaches a handoff to settle it.
+            crate::services::discord::queue_io::input_owner::early_pending::sweep_boot(
+                shared, channel,
+            )
+            .await;
             release_unkeyed_sources(shared, channel, history, namespace).await;
             claude_handoff::recover(shared.clone(), channel);
             crate::services::discord::commands::effort_restart::resume_owed(shared, channel).await;

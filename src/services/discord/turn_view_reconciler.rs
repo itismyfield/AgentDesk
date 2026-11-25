@@ -27,6 +27,7 @@ mod accept_pending;
 mod api;
 mod apply;
 mod injected;
+pub(in crate::services::discord) use accept_pending::AcceptSettle;
 pub(in crate::services::discord) use api::*;
 mod queue_repair;
 mod reaction_set;
@@ -350,6 +351,9 @@ struct PersistedTargetState {
     token_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     start_attempt_id: Option<u64>,
+    /// The start attempt when it is still the early ⏳ an idle owner put on at acceptance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    accept_attempt_id: Option<u64>,
 }
 
 #[derive(Default)]

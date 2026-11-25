@@ -132,6 +132,18 @@ pub(super) async fn apply_queue_exit_feedback(
     if queue_exit_events.is_empty() {
         return;
     }
+    // An input that left the queue before any handoff owes its early ⏳ a clear.
+    #[cfg(unix)]
+    crate::services::discord::queue_io::input_owner::early_pending::clear_left(
+        shared,
+        channel_id,
+        queue_exit_events.iter().flat_map(|event| {
+            let sources = event.intervention.source_message_ids.iter().copied();
+            std::iter::once(event.intervention.message_id).chain(sources)
+        }),
+        "queue_exit_accept_pending",
+    )
+    .await;
 
     // #1332: drop stale `📬 메시지 대기 중` placeholder mappings + controller
     // entries up front (Queued rows are exempt from the standard eviction

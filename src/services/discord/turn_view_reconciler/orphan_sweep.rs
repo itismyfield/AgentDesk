@@ -389,6 +389,7 @@ mod tests {
             identity_label: target.kind.identity_label().to_string(),
             token_hash: Some(shared.token_hash.clone()),
             start_attempt_id: None,
+            accept_attempt_id: None,
         };
         let path = TurnViewReconciler::persisted_target_path(target).expect("persisted path");
         let json = serde_json::to_string_pretty(&record).expect("serialize persisted anchor");
@@ -450,6 +451,7 @@ mod tests {
             identity_label: completed.kind.identity_label().to_string(),
             token_hash: Some(shared.token_hash.clone()),
             start_attempt_id: None,
+            accept_attempt_id: None,
         };
         let path = TurnViewReconciler::persisted_target_path(completed).expect("path");
         crate::services::discord::runtime_store::atomic_write(

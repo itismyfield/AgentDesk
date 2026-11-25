@@ -1,12 +1,14 @@
-//! An idle owner puts ⏳ on a person's input at acceptance; the return of its one handoff keeps
-//! it for a start and otherwise rolls it back to 📬 or clears it, covering every other exit.
+//! An idle owner puts ⏳ on a person's input at acceptance; its handoff, a queue exit or a boot
+//! disposition that removed it later rolls it back to 📬 or clears it unless a start took it.
 
 use std::future::Future;
 use std::sync::Arc;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use crate::services::discord::turn_view_reconciler::{TurnViewIdentity, TurnViewTarget};
+use crate::services::discord::turn_view_reconciler::{
+    AcceptSettle, TurnViewIdentity, TurnViewTarget,
+};
 use crate::services::discord::{Intervention, SharedData};
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
@@ -21,23 +23,11 @@ pub(crate) fn eligible(raw: &Intervention) -> bool {
         && !crate::services::discord::is_internal_message_id(raw.message_id)
 }
 
-/// No turn runs and the owner holds no input yet, so the input admitted next starts next.
-pub(crate) async fn idle(handle: &ChannelMailboxHandle) -> bool {
-    let empty = handle
-        .v2_request(|slot| {
-            Ok(slot.as_ref().is_some_and(|owner| {
-                owner.snapshot.items.is_empty() && owner.snapshot.head_injection.is_none()
-            }))
-        })
-        .await
-        .unwrap_or(false);
-    empty && matches!(handle.has_active_turn().await, Ok(false))
-}
-
-/// Puts the early ⏳ on an accepted input; a target that already has a turn view keeps it.
+/// Puts the early ⏳ on the input the owner just opened its idle head with. The record lands only
+/// after the reaction, so a cancel during that call is caught here by reading custody again.
 pub(crate) async fn note(shared: &SharedData, channel: ChannelId, message: MessageId) -> bool {
     let target = TurnViewTarget::intake_user_message(channel, message);
-    shared
+    let noted = shared
         .turn_view_reconciler
         .note_accept_pending(
             shared,
@@ -46,7 +36,11 @@ pub(crate) async fn note(shared: &SharedData, channel: ChannelId, message: Messa
             "owner_accept_pending",
         )
         .await
-        .is_some()
+        .is_some();
+    if noted {
+        clear_if_gone(shared, channel, message, "owner_accept_pending_left").await;
+    }
+    noted
 }
 
 /// Runs one owner handoff, then settles the early ⏳ of its front that no start took over.
@@ -69,19 +63,71 @@ where
     result
 }
 
-/// Settles `message`'s untaken early ⏳; returns whether it rolled back or cleared one.
-pub(crate) async fn settle(shared: &SharedData, channel: ChannelId, message: MessageId) -> bool {
+/// Settles `message`'s untaken early ⏳ after its handoff: 📬 while held, else cleared.
+pub(crate) async fn settle(
+    shared: &SharedData,
+    channel: ChannelId,
+    message: MessageId,
+) -> AcceptSettle {
     let target = TurnViewTarget::intake_user_message(channel, message);
     let handle = shared.mailbox(channel);
-    shared
+    let held = owner_holds(&handle, message.get());
+    let source = "owner_handoff_accept_pending_settle";
+    let settled = shared
         .turn_view_reconciler
-        .settle_accept_pending(
-            shared,
-            target,
-            owner_holds(&handle, message.get()),
-            "owner_handoff_accept_pending_settle",
-        )
-        .await
+        .settle_accept_pending(shared, target, held, source)
+        .await;
+    warn_kept(channel, message, settled, source);
+    settled
+}
+
+/// Clears the untaken early ⏳ of each id a queue exit or a boot disposition removed.
+pub(crate) async fn clear_left(
+    shared: &SharedData,
+    channel: ChannelId,
+    ids: impl IntoIterator<Item = MessageId>,
+    source: &'static str,
+) {
+    for message in ids {
+        clear_if_gone(shared, channel, message, source).await;
+    }
+}
+
+/// At boot, clears every persisted early ⏳ of `channel` whose input the owner no longer holds:
+/// dropped by a boot disposition, or gone before a restart cut its settle short.
+pub(crate) async fn sweep_boot(shared: &SharedData, channel: ChannelId) {
+    let early = shared
+        .turn_view_reconciler
+        .persisted_accept_pending(shared, channel);
+    clear_left(shared, channel, early, "boot_accept_pending_sweep").await;
+}
+
+async fn clear_if_gone(
+    shared: &SharedData,
+    channel: ChannelId,
+    message: MessageId,
+    source: &'static str,
+) {
+    if message.get() == 0 || owner_holds(&shared.mailbox(channel), message.get()).await {
+        return;
+    }
+    let target = TurnViewTarget::intake_user_message(channel, message);
+    let settled = shared
+        .turn_view_reconciler
+        .settle_accept_pending(shared, target, std::future::ready(false), source)
+        .await;
+    warn_kept(channel, message, settled, source);
+}
+
+fn warn_kept(channel: ChannelId, message: MessageId, settled: AcceptSettle, source: &str) {
+    if settled == AcceptSettle::Kept {
+        tracing::warn!(
+            channel_id = channel.get(),
+            message = message.get(),
+            source,
+            "early ⏳ settle failed; the record stays for the next settle"
+        );
+    }
 }
 
 /// Whether the owner still holds `message`, queued or merged as a source, or in its head.
