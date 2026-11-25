@@ -1562,12 +1562,13 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
             watcher_tui_gate_outcome,
             terminal_delivery_committed,
         );
-        // The receipt commits before the pre-panel release or the epilogue can drop the row.
+        // The receipt commits before the pre-panel release or the epilogue can drop the row; a held
+        // Herdr turn's ending is not its receipt.
         let receipt_kept = path_b_record::record_receipt(
             shared.pg_pool.as_ref(),
             inflight_before_relay
                 .as_ref()
-                .filter(|_| terminal_output_committed && !lifecycle_stage_paused),
+                .filter(|_| terminal_output_committed && !lifecycle_stage_paused && !herdr_held),
             (&tmux_session_name, current_offset),
             crate::services::discord::receipt_settle::watcher_outcome(
                 summary_was_cancelled,
@@ -2292,6 +2293,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
                             completion_range: (&tmux_session_name, current_offset),
                             settle_pin: inflight_before_relay.as_ref(),
                             native_held: (pin_held, late_held),
+                            herdr_held,
                         },
                         || async {
                             crate::services::discord::adk_session::lookup_pending_dispatch_for_thread(
