@@ -5,7 +5,7 @@ mod first_input;
 mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::regression_tests::regression_attached;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::{

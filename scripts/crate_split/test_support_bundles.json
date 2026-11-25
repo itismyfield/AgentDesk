@@ -304,9 +304,11 @@
    {"file": "src/services/tui_o/writer/replay.rs", "item": "fn filter > stmt SNAPSHOTS.with_borrow(|snapshots| {", "cfg": "test"},
    {"file": "src/services/tui_o/writer/replay.rs", "item": "fn filter > stmt SNAPSHOTS.with_borrow_mut(|snapshots| {", "cfg": "test"}
   ]},
-  {"name": "owe+observe_memo:reduced", "class": "A", "why": "step-e on main b43352611e: rotation/owe.rs:408 E0599 `observe_memo::Seed::reduced` (new on main after 1124f)", "items": [
+  {"name": "owe+observe_memo:reduced", "class": "A", "why": "step-e on main b43352611e: rotation/owe.rs:408 E0599 `observe_memo::Seed::reduced` (new on main after 1124f); the reader also needs Memo.reduced and its counting block (step e on the regenerated head)", "items": [
    {"file": "src/services/tui_o/writer/rotation/owe.rs", "item": "impl Sources > fn native_reductions", "cfg": "all(test, unix)"},
-   {"file": "src/services/tui_o/writer/rotation/owe/observe_memo.rs", "item": "impl Seed > fn reduced", "cfg": "test"}
+   {"file": "src/services/tui_o/writer/rotation/owe/observe_memo.rs", "item": "impl Seed > fn reduced", "cfg": "test"},
+   {"file": "src/services/tui_o/writer/rotation/owe/observe_memo.rs", "item": "struct Memo > field reduced", "cfg": "test"},
+   {"file": "src/services/tui_o/writer/rotation/owe/observe_memo.rs", "item": "impl Seed > fn analyzed > stmt { memo.reduced += 1;", "cfg": "test"}
   ]}
  ]
 }

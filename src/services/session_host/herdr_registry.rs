@@ -451,7 +451,7 @@ thread_local! {
 }
 
 /// Installs `registry` on this thread until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct ForcedRegistry(Option<&'static HerdrRegistry>);
 
 #[cfg(any(test, feature = "test-support"))]
