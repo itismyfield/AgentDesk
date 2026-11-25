@@ -149,34 +149,6 @@ pub(super) fn sweep_recorded(path: &Path) -> Result<(), String> {
 
 #[cfg(unix)]
 fn sweep_group(record: &Record) -> Result<(), String> {
-    use crate::services::process::{
-        ProcessGroupProbe as Group, ProcessIdentityProbe as Leader, kill_pid_tree,
-        kill_pid_tree_if_identity_matches, process_group_probe, unix_process_presence,
-    };
-    use std::time::{Duration, Instant};
     let identity = ProcessIdentity::from_persisted(record.starttime, record.macos_lstart_hash);
-    match identity.probe(record.pid) {
-        Leader::Same => {
-            kill_pid_tree_if_identity_matches(record.pid, identity);
-        }
-        Leader::GoneOrReused => match unix_process_presence(record.pid) {
-            // A live group keeps its number from being reissued, so it is still the old child's.
-            Group::Gone if process_group_probe(record.pgid) == Group::Live => {
-                kill_pid_tree(record.pgid)
-            }
-            Group::Gone => {}
-            // A reused PID means the old group had already vanished.
-            Group::Live => return Ok(()),
-            Group::ProbeError => return Err("could not probe the previous agy process".into()),
-        },
-        Leader::ProbeError => return Err("could not verify the previous agy process".into()),
-    }
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while process_group_probe(record.pgid) != Group::Gone {
-        if Instant::now() >= deadline {
-            return Err("the previous agy process group is still alive".into());
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    Ok(())
+    crate::services::process::orphan_group::end_recorded_group(record.pid, record.pgid, identity)
 }

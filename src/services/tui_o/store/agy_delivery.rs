@@ -28,6 +28,7 @@ pub(crate) struct PlanStamp {
     pub fingerprint: Hash,
     pub last_seq: u64,
     pub pieces: usize,
+    pub binding: Option<AgyBinding>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,6 +135,24 @@ pub(crate) fn read_binding(
     destination: u64,
     id: u64,
 ) -> Result<Option<(TurnKey, AgyBinding)>, StoreError> {
+    let saved = read_saved(runtime_root, destination, id)?;
+    Ok(saved.and_then(|saved| saved.binding.map(|binding| (saved.key, binding))))
+}
+
+/// What a saved journal names and how far it got, read without its lock.
+pub(crate) struct Saved {
+    pub key: TurnKey,
+    pub revision: NonZeroU64,
+    pub fingerprint: Hash,
+    pub ended: Option<Stage>,
+    pub binding: Option<AgyBinding>,
+}
+
+pub(crate) fn read_saved(
+    runtime_root: &Path,
+    destination: u64,
+    id: u64,
+) -> Result<Option<Saved>, StoreError> {
     let path = runtime_root
         .join(STORE_DIR_NAME)
         .join(destination.to_string())
@@ -141,8 +160,45 @@ pub(crate) fn read_binding(
         .join(format!("{id}.json"));
     match durable::read_json::<State>(&path)? {
         Some(state) if state.version != 1 => Err(damage("agy delivery journal version unknown")),
-        saved => Ok(saved.and_then(|state| state.binding.map(|binding| (state.key, binding)))),
+        saved => Ok(saved.map(|state| Saved {
+            key: state.key,
+            revision: state.revision,
+            fingerprint: state.fingerprint,
+            ended: state.ended,
+            binding: state.binding,
+        })),
     }
+}
+
+/// Every saved journal short of `Complete`; one that cannot be read is named by its path.
+pub(crate) fn unfinished(runtime_root: &Path) -> Vec<Result<Saved, String>> {
+    let store = runtime_root.join(STORE_DIR_NAME);
+    let ids = |dir: &Path| -> Vec<u64> {
+        let entries = fs::read_dir(dir).into_iter().flatten().flatten();
+        let names = entries.filter_map(|entry| entry.file_name().into_string().ok());
+        names
+            .filter_map(|name| name.strip_suffix(".json")?.parse().ok())
+            .collect()
+    };
+    let mut found = Vec::new();
+    for destination in fs::read_dir(&store).into_iter().flatten().flatten() {
+        let Some(destination) = destination
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        else {
+            continue;
+        };
+        let dir = store.join(destination.to_string()).join("agy-delivery");
+        for id in ids(&dir) {
+            match read_saved(runtime_root, destination, id) {
+                Ok(Some(saved)) if saved.ended != Some(Stage::Complete) => found.push(Ok(saved)),
+                Ok(_) => {}
+                Err(error) => found.push(Err(format!("{}/{id}.json: {error:?}", dir.display()))),
+            }
+        }
+    }
+    found
 }
 
 pub(crate) struct Journal<'a> {
@@ -215,7 +271,7 @@ impl<'a> Journal<'a> {
                 footer: None,
                 attempt: None,
                 ended: None,
-                binding: None,
+                binding: plan.binding,
             },
         };
         Ok(Self {

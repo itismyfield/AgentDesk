@@ -8,6 +8,7 @@ use super::*;
 use crate::services::discord::inflight::agy_end_authority_tests::{row, write};
 use crate::services::discord::inflight::{AgyCustodyField, InflightTurnState};
 use crate::services::process::{ProcessIdentity, configure_child_process_group};
+use crate::services::tui_o::store::agy_delivery::{Stage, read_saved};
 use crate::services::tui_o::store::agy_spool::{AgyReservation, AgySpool};
 use crate::services::tui_o::store::{OStore, StoreConfig};
 use crate::services::tui_o::writer::agy_delivery::{Evidence, Piece, Post, Transport};
@@ -87,7 +88,16 @@ impl Boot {
 
     async fn recover(&self) -> BTreeSet<String> {
         let (port, projection) = (&self.wire, &self.shared);
-        recover(&self.root, &self.gate, port, &Lease, projection, &self.holds, None).await
+        recover(
+            &self.root,
+            &self.gate,
+            port,
+            &Lease,
+            projection,
+            &self.holds,
+            None,
+        )
+        .await
     }
 
     fn posts(&self) -> Vec<String> {
@@ -118,7 +128,10 @@ async fn owner_ends_a_no_slot_route_once() {
     assert_eq!(boot.posts(), [FAILED]);
     assert!(!path.exists(), "the owner ends its own route row");
     let saved = boot.saved(key(&state));
-    assert_eq!((saved.ended, saved.revision), (Some(Stage::Complete), NonZeroU64::MIN));
+    assert_eq!(
+        (saved.ended, saved.revision),
+        (Some(Stage::Complete), NonZeroU64::MIN)
+    );
     assert!(boot.recover().await.is_empty());
     assert_eq!(boot.posts().len(), 1);
 }
@@ -136,7 +149,10 @@ async fn no_checkpoint_slot_is_not_started_and_set_aside() {
     std::fs::write(slot.join("0000.jsonl"), b"").unwrap();
     assert!(boot.recover().await.is_empty());
     assert_eq!(boot.posts(), [FAILED]);
-    assert!(!slot.exists(), "the empty slot no longer holds its destination");
+    assert!(
+        !slot.exists(),
+        "the empty slot no longer holds its destination"
+    );
     let not_started = Plan::abandoned(key(&state), Abandon::NotStarted).fingerprint;
     assert_eq!(boot.saved(key(&state)).fingerprint, not_started);
 }
@@ -194,7 +210,10 @@ async fn journal_left_after_clear_inflight_finishes_without_reposting() {
             };
             let mut replay = Replay::open(&mut store, &boot.gate, epoch, lease, &plan).unwrap();
             for _ in 0..steps {
-                replay.advance(&boot.wire, &Lease, &boot.shared).await.unwrap();
+                replay
+                    .advance(&boot.wire, &Lease, &boot.shared)
+                    .await
+                    .unwrap();
             }
         }
         assert_eq!(boot.posts(), [FAILED], "{steps}");

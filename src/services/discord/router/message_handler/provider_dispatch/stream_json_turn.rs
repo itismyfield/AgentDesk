@@ -8,13 +8,16 @@ use uuid::Uuid;
 
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::agy_acp;
-use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::inflight::{
+    AgyCustodyField, AgyCustodyRoute, AgyProducer, InflightTurnState,
+};
 use crate::services::discord::router::TurnKind;
 use crate::services::imsg_reply::agy_input;
 use crate::services::provider::{CancelToken, ProviderKind, StreamJsonDialectId};
 use crate::services::stream_json_cli::{
     ConfiguredToolPolicy, ProviderTurnRequest, dialects::agy, execute_streaming,
 };
+use crate::services::tui_o::store::agy_delivery::AgyOriginal;
 use crate::services::tui_o::store::agy_spool::{AgyReservation, AgySpool, ImessageSource};
 
 use super::StreamingTurn;
@@ -32,6 +35,8 @@ pub(in crate::services::discord::router::message_handler) struct AgyForeground {
     human: bool,
     /// `None` starts the installed `agy acp`.
     acp_launch: Option<agy_acp::Launch>,
+    /// The custody route the first save wrote; such a turn runs only recorded.
+    route: Option<AgyCustodyRoute>,
 }
 
 #[derive(Clone)]
@@ -42,7 +47,28 @@ struct ReadyWriter {
     generation: NonZeroU64,
 }
 
+impl From<agy_input::WriterSelection> for ReadyWriter {
+    fn from(selection: agy_input::WriterSelection) -> Self {
+        Self {
+            runtime_root: selection.root,
+            destination: selection.destination,
+            logical_channel: selection.logical_channel,
+            generation: selection.generation,
+        }
+    }
+}
+
 impl AgyForeground {
+    /// The first save's AGY fields: the HTTP claim's, then the route when a ready writer records it.
+    pub(in crate::services::discord::router::message_handler) fn stamp_custody(
+        state: &mut InflightTurnState,
+        source: Option<MessageId>,
+        kind: TurnKind,
+    ) {
+        Self::stamp_http(state);
+        state.agy_custody = custody_route(state, source, kind).map(AgyCustodyField::Route);
+    }
+
     pub(in crate::services::discord::router::message_handler) fn stamp_http(
         state: &mut InflightTurnState,
     ) {
@@ -54,6 +80,39 @@ impl AgyForeground {
     }
 
     pub(in crate::services::discord::router::message_handler) fn from_claim(
+        source: Option<MessageId>,
+        kind: TurnKind,
+        inflight_saved: bool,
+        state: &InflightTurnState,
+        cancel: &CancelToken,
+        human_author: bool,
+    ) -> Option<Self> {
+        let route = saved_route(state);
+        let claim = Self::discord_claim(source, kind, inflight_saved, state, cancel, human_author);
+        let Some(mut input) = claim else {
+            // A route row whose claim no longer matches still never runs unrecorded.
+            return route.map(|route| Self {
+                destination: route.destination,
+                logical_channel: route.logical_channel,
+                message: route.message,
+                nonce: route.nonce,
+                session_key: String::new(),
+                ready: None,
+                imessage: Ok(None),
+                human: false,
+                acp_launch: None,
+                route: Some(route),
+            });
+        };
+        if route.is_some() {
+            input.ready =
+                agy_input::ready(&ProviderKind::Antigravity, state.channel_id).map(Into::into);
+            input.route = route;
+        }
+        Some(input)
+    }
+
+    fn discord_claim(
         source: Option<MessageId>,
         kind: TurnKind,
         inflight_saved: bool,
@@ -83,6 +142,7 @@ impl AgyForeground {
             imessage: Ok(None),
             human: human_author,
             acp_launch: None,
+            route: None,
         })
     }
 
@@ -117,22 +177,18 @@ impl AgyForeground {
             message: state.user_msg_id,
             nonce,
             session_key,
-            ready: Some(ReadyWriter {
-                runtime_root: ready.root,
-                destination: ready.destination,
-                logical_channel: ready.logical_channel,
-                generation: ready.generation,
-            }),
+            ready: Some(ready.into()),
             imessage: exact
                 .then_some(Some(claim.source))
                 .ok_or("agy iMessage claim is not durable or exact"),
             human: exact,
             acp_launch: None,
+            route: saved_route(state),
         })
     }
 
     pub(super) fn requires_agy(&self) -> bool {
-        !matches!(self.imessage, Ok(None))
+        !matches!(self.imessage, Ok(None)) || self.route.is_some()
     }
 
     fn reserve(
@@ -154,6 +210,15 @@ impl AgyForeground {
                 != Some(self.nonce)
         {
             return Err("agy recording permit does not match the channel claim".into());
+        }
+        if let Some(route) = &self.route
+            && (route.destination != self.destination
+                || route.logical_channel != ready.logical_channel
+                || route.message != self.message
+                || route.nonce != self.nonce
+                || route.writer_generation != ready.generation)
+        {
+            return Err("agy recording permit differs from the custody route".into());
         }
         let resume = request
             .session
@@ -194,6 +259,20 @@ fn execute_request(
     request: ProviderTurnRequest,
     sender: Sender<StreamMessage>,
 ) -> Result<(), String> {
+    // A route row runs only on the recorded `-p` producer, so its owner can prove how it ended.
+    if let Some(input) = turn
+        .agy_foreground
+        .as_ref()
+        .filter(|input| input.route.is_some())
+    {
+        if acp_selected(dialect, turn) || !matches!(dialect, StreamJsonDialectId::Agy) {
+            return Err("agy custody route runs only on the recorded -p producer".into());
+        }
+        let mut spool = input
+            .reserve(turn, &request)?
+            .ok_or("agy custody route has no recording permit")?;
+        return agy::execute_recorded(request, sender, &mut spool);
+    }
     if acp_selected(dialect, turn)
         && let Some(input) = &turn.agy_foreground
     {
@@ -219,6 +298,52 @@ fn execute_request(
         return agy::execute_recorded(request, sender, &mut spool);
     }
     execute_streaming(dialect, request, sender)
+}
+
+fn saved_route(state: &InflightTurnState) -> Option<AgyCustodyRoute> {
+    match &state.agy_custody {
+        Some(AgyCustodyField::Route(route)) => Some(route.clone()),
+        _ => None,
+    }
+}
+
+/// The route for a turn a ready writer will record on `-p`; unix only, as the launch gate is.
+fn custody_route(
+    state: &InflightTurnState,
+    source: Option<MessageId>,
+    kind: TurnKind,
+) -> Option<AgyCustodyRoute> {
+    let provider = ProviderKind::Antigravity;
+    if !cfg!(unix)
+        || state.provider_kind() != Some(ProviderKind::Antigravity)
+        || agy_acp::ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+        || state.session_key.as_deref().is_none_or(str::is_empty)
+    {
+        return None;
+    }
+    let ready = agy_input::ready(&provider, state.channel_id)?;
+    let message = state.user_msg_id;
+    let original = match agy_input::claimed() {
+        Some(claim) => {
+            (claim.selection == ready && claim.message == message).then(|| AgyOriginal::Imessage {
+                digest: claim.source.digest().to_owned(),
+            })
+        }
+        None => (kind == TurnKind::Foreground
+            && source.map(MessageId::get) == Some(message)
+            && crate::services::tui_input::input_key::is_discord_key(message))
+        .then_some(AgyOriginal::Discord { message }),
+    }?;
+    Some(AgyCustodyRoute {
+        v: 1,
+        producer: AgyProducer::Print,
+        destination: state.channel_id,
+        logical_channel: state.logical_channel_id?,
+        message,
+        nonce: Uuid::parse_str(state.turn_nonce.as_deref()?).ok()?,
+        writer_generation: ready.generation,
+        original,
+    })
 }
 
 /// The boot-time switch is read first, so a turn that stays on `-p` locks or spawns nothing extra.

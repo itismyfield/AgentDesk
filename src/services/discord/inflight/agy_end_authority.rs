@@ -1,8 +1,10 @@
 //! Who may end an inflight row: the one durable predicate every generic end consults.
 
+use std::fs;
+
 use uuid::Uuid;
 
-use super::{AgyCustodyField, InflightTurnState};
+use super::{AgyCustodyField, AgyCustodyRoute, InflightTurnState};
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::store::agy_delivery::AgyOriginal;
 
@@ -65,4 +67,77 @@ pub(super) fn raw_names_custody(content: &str) -> bool {
             .is_some_and(|object| object.contains_key("agy_custody")),
         Err(_) => content.contains("\"agy_custody\""),
     }
+}
+
+/// A row in AGY custody as the boot owner finds it: its own route, or a row it may only hold.
+#[cfg(unix)]
+pub(in crate::services::discord) enum CustodyRow {
+    Owned(AgyCustodyRoute),
+    Held(u64),
+}
+
+/// Every row that names a custody route, whatever the current writer selection is.
+#[cfg(unix)]
+pub(in crate::services::discord) fn custody_rows(
+    provider: &ProviderKind,
+) -> Result<Vec<CustodyRow>, String> {
+    let root = super::inflight_runtime_root().ok_or("inflight root unavailable")?;
+    let dir = super::store::inflight_provider_dir(&root, provider);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut rows = Vec::new();
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        let Some(channel) = path
+            .file_stem()
+            .and_then(|stem| stem.to_str()?.parse().ok())
+        else {
+            continue;
+        };
+        let content = match fs::read_to_string(&path) {
+            Ok(content) if raw_names_custody(&content) => content,
+            Ok(_) => continue,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let state = serde_json::from_str::<InflightTurnState>(&content).ok();
+        let owned = state.filter(|state| end_authority(state) == EndAuthority::Agy);
+        rows.push(match owned.and_then(|state| state.agy_custody) {
+            Some(AgyCustodyField::Route(route)) => CustodyRow::Owned(route),
+            _ => CustodyRow::Held(channel),
+        });
+    }
+    Ok(rows)
+}
+
+/// The owner's end of the route row naming exactly this execution; any other row stays.
+pub(in crate::services::discord) fn owner_clear(
+    provider: &ProviderKind,
+    destination: u64,
+    message: u64,
+    nonce: Uuid,
+) -> Result<bool, String> {
+    let root = super::inflight_runtime_root().ok_or("inflight root unavailable")?;
+    let path = super::inflight_state_path(&root, provider, destination);
+    let _lock = super::lock_inflight_state_path(&path)?;
+    let content = match fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.to_string()),
+    };
+    let Ok(state) = serde_json::from_str::<InflightTurnState>(&content) else {
+        return Ok(false);
+    };
+    let owned = end_authority(&state) == EndAuthority::Agy
+        && matches!(&state.agy_custody, Some(AgyCustodyField::Route(route))
+            if route.destination == destination && route.message == message && route.nonce == nonce);
+    if !owned {
+        return Ok(false);
+    }
+    super::row_removed::unlink_owned(&path, || fs::remove_file(&path))
+        .map(|()| true)
+        .map_err(|error| error.to_string())
 }

@@ -1,3 +1,5 @@
+#[cfg(unix)]
+pub(crate) mod orphan_group;
 pub(crate) mod reaping;
 pub(crate) mod stream_child;
 

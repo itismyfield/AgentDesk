@@ -98,6 +98,10 @@ impl Projection for Arc<SharedData> {
         match effect {
             Effect::ClearInflight => {
                 use inflight::GuardedClearOutcome::*;
+                // A route row naming this execution is the owner's to end; generic clears keep it.
+                if inflight::owner_clear(&provider, channel.get(), id, lease.key.nonce)? {
+                    return Ok(());
+                }
                 let Some(row) =
                     inflight::load_inflight_state_read_only_result(&provider, channel.get())?
                 else {

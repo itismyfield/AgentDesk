@@ -69,7 +69,11 @@ impl Request<'_> {
     ) -> Result<Option<super::super::provider_dispatch::AgyForeground>, HeadlessTurnStartError>
     {
         use super::super::provider_dispatch::AgyForeground;
-        AgyForeground::stamp_http(state);
+        AgyForeground::stamp_custody(
+            state,
+            None,
+            crate::services::discord::router::TurnKind::Foreground,
+        );
         let created = crate::services::discord::inflight::save_inflight_state_create_new(state);
         let saved = super::super::foreign_row::admit_headless(
             self.shared,

@@ -157,6 +157,33 @@ impl AgySpool {
         self.resume
     }
 
+    /// Spawn may follow only this record; the gate keeps input from running until `started`.
+    pub(crate) fn launch(&mut self) -> io::Result<()> {
+        self.append("launch", json!({}))
+    }
+
+    /// The gated child's identity. Without one its end can never be proven, so nothing runs.
+    #[cfg(unix)]
+    pub(crate) fn started(
+        &mut self,
+        pid: u32,
+        identity: &crate::services::process::ProcessIdentity,
+    ) -> io::Result<()> {
+        let starttime = identity
+            .persisted_starttime()
+            .map(|value| value.to_string());
+        let lstart = identity
+            .persisted_macos_lstart_hash()
+            .map(|value| value.to_string());
+        if starttime.is_none() && lstart.is_none() {
+            return Err(io::Error::other("agy child identity is unreadable"));
+        }
+        self.append(
+            "started",
+            json!({"pid": pid, "pgid": pid, "starttime": starttime, "macos_lstart_hash": lstart}),
+        )
+    }
+
     pub(crate) fn init(&mut self, conversation: Uuid) -> io::Result<()> {
         self.append("init", json!({"conversation_id": conversation}))
     }

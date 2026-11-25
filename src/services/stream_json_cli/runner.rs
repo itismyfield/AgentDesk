@@ -101,7 +101,15 @@ fn run_prepared_with_clock(
         "stream_json_cli spawn"
     );
 
-    let mut command = Command::new(&prepared.executable);
+    // A recorded child runs behind the launch gate on unix, so its input runs only once started.
+    let gated = cfg!(unix) && recording.is_some();
+    let mut command = if gated {
+        agy_recording::gated(&prepared.executable, &prepared.args)
+    } else {
+        let mut command = Command::new(&prepared.executable);
+        command.args(&prepared.args);
+        command
+    };
     apply_binary_resolution(&mut command, &prepared.resolution);
     configure_child_process_group(&mut command);
     for key in &prepared.unset_env {
@@ -112,15 +120,21 @@ fn run_prepared_with_clock(
     }
     // Inside a test instance the CLI gets only declared env, never the dcserver's own.
     crate::config::test_instance::environment::configure_child_command(&mut command)?;
+    if gated && let Some(recording) = &mut recording {
+        recording.launch(&prepared.executable)?;
+    }
     let mut child = command
-        .args(&prepared.args)
         .current_dir(&prepared.current_dir)
-        .stdin(Stdio::null())
+        .stdin(if gated { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn_reaping()
         .map_err(|error| format!("Failed to start StreamJson CLI: {error}"))?;
 
+    #[cfg(unix)]
+    if gated && let Some(recording) = &mut recording {
+        recording.start(&mut child)?;
+    }
     if let Some(recording) = &mut recording {
         recording.failure = Failure::Child;
     }

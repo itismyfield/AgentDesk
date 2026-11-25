@@ -1,3 +1,6 @@
+use std::path::Path;
+use std::process::Command;
+
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::tui_o::store::agy_spool::{AgySpool, Failure};
 use uuid::Uuid;
@@ -19,6 +22,42 @@ impl<'a> Recording<'a> {
             failure: Failure::Spawn,
             storage_failed: false,
         }
+    }
+
+    /// Commits `launch` before spawn; a missing executable stays a spawn failure with no launch.
+    pub(super) fn launch(&mut self, executable: &Path) -> Result<(), String> {
+        if !executable.is_file() {
+            return Err(format!(
+                "Failed to start StreamJson CLI: {} is not a file",
+                executable.display()
+            ));
+        }
+        self.spool
+            .launch()
+            .map_err(|error| format!("agy launch was not recorded: {error}"))
+    }
+
+    /// Commits the child's identity, then lets the gate exec; a failed commit ends the group.
+    #[cfg(unix)]
+    pub(super) fn start(&mut self, child: &mut std::process::Child) -> Result<(), String> {
+        use std::io::Write;
+        let pid = child.id();
+        let identity = crate::services::process::ProcessIdentity::capture(pid);
+        let go = self
+            .spool
+            .started(pid, &identity)
+            .map_err(|error| format!("agy start was not recorded: {error}"))
+            .and_then(|()| {
+                let mut stdin = child.stdin.take().ok_or("agy gate stdin is missing")?;
+                stdin
+                    .write_all(b"go\n")
+                    .map_err(|error| format!("agy gate did not take go: {error}"))
+            });
+        if go.is_err() {
+            self.failure = Failure::Spawn;
+            crate::services::process::kill_pid_tree(pid);
+        }
+        go
     }
 
     pub(super) fn message(&mut self, message: &StreamMessage) {
@@ -66,4 +105,14 @@ impl Drop for Recording<'_> {
         let result = self.spool.fail(self.failure);
         self.record(result);
     }
+}
+
+/// The recorded child waits for one stdin line before exec; EOF instead exits 75 and runs nothing.
+pub(super) fn gated(executable: &Path, args: &[String]) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", "IFS= read -r _ || exit 75; exec \"$0\" \"$@\""])
+        .arg(executable)
+        .args(args);
+    command
 }

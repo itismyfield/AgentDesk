@@ -1968,7 +1968,7 @@ pub(super) async fn handle_text_message(
                 };
             }
         };
-        super::provider_dispatch::AgyForeground::stamp_http(&mut inflight_state);
+        super::provider_dispatch::AgyForeground::stamp_custody(&mut inflight_state, discord_message, turn_kind);
         inflight_create_log::record_turn_start_origin(shared, &provider, channel_id, &inflight_state).await;
         let mut inflight_saved = false;
         let create = context::track_inflight_create(&mut inflight_saved, |state| save_intake_inflight(codex_seed.as_ref(), state));

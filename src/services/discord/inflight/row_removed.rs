@@ -94,6 +94,14 @@ pub(super) fn unlink(
     if super::agy_end_authority::generic_end_keeps(&String::from_utf8_lossy(&bytes)) {
         return Err(std::io::Error::other("AGY custody row kept for its owner"));
     }
+    unlink_owned(path, remove)
+}
+
+/// The AGY owner's delete of a route row it verified under the row lock.
+pub(super) fn unlink_owned(
+    path: &Path,
+    remove: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
     #[cfg(unix)]
     let pin = capture(path);
     #[cfg(not(unix))]

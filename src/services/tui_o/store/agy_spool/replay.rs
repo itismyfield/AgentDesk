@@ -96,6 +96,25 @@ pub(crate) struct AgyReplay {
     pub(crate) open: AgyOpen,
     pub(crate) frontier: AgyFrontier,
     pub(crate) outcome: AgyOutcome,
+    pub(crate) launch: AgyLaunch,
+}
+
+/// What the gate records prove: no launch, a launch whose input never ran, or a started child.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) enum AgyLaunch {
+    #[default]
+    Unrecorded,
+    Launched,
+    Started(AgyStarted),
+}
+
+/// The started child's identity; the times are decimal strings, as JSON numbers cannot hold u128.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+pub(crate) struct AgyStarted {
+    pub(crate) pid: u32,
+    pub(crate) pgid: u32,
+    pub(crate) starttime: Option<String>,
+    pub(crate) macos_lstart_hash: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -150,6 +169,8 @@ struct Record {
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
 enum Data {
     Open(AgyOpen),
+    Launch {},
+    Started(AgyStarted),
     Init {
         conversation_id: Uuid,
     },
@@ -283,6 +304,7 @@ pub(crate) fn replay(
         open: state.open,
         frontier,
         outcome: state.outcome,
+        launch: state.launch,
     })
 }
 
@@ -322,6 +344,7 @@ struct ReplayState {
     body: String,
     first_part: Option<u64>,
     outcome: AgyOutcome,
+    launch: AgyLaunch,
 }
 
 impl ReplayState {
@@ -357,6 +380,7 @@ impl ReplayState {
             first_part: None,
             body: String::new(),
             outcome: AgyOutcome::Pending,
+            launch: AgyLaunch::Unrecorded,
         })
     }
 
@@ -370,6 +394,11 @@ impl ReplayState {
             ));
         }
         match record.data {
+            // The gate writes these two before any record the child can cause.
+            Data::Launch {} if record.seq == 1 => self.launch = AgyLaunch::Launched,
+            Data::Started(started) if record.seq == 2 && self.launch == AgyLaunch::Launched => {
+                self.launch = AgyLaunch::Started(started);
+            }
             Data::Init { conversation_id } if self.first_part.is_none() => {
                 self.check_conversation(conversation_id)?;
                 self.conversation = Some(conversation_id);

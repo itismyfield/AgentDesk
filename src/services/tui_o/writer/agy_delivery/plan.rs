@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::message_split::split_with_source_ranges;
-use crate::services::tui_o::store::agy_delivery::{Hash, PlanStamp, TurnKey};
+use crate::services::tui_o::store::agy_delivery::{AgyBinding, Hash, PlanStamp, TurnKey};
 
 /// Terminal output after the spool reader verifies custody and the committed prefix.
 pub(crate) struct Seal {
@@ -29,6 +29,16 @@ pub(crate) struct Plan {
     pub fingerprint: Hash,
     pub body: Vec<Piece>,
     pub footer: Piece,
+    /// Written into a new journal so its execution stays named once the inflight row is gone.
+    pub binding: Option<AgyBinding>,
+}
+
+/// Why the owner ended an execution that left no seal; it fixes the plan in place of a sequence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abandon {
+    NoSlot,
+    NotStarted,
+    ProducerLost,
 }
 
 pub(crate) struct Piece {
@@ -45,6 +55,7 @@ impl Plan {
             fingerprint: self.fingerprint,
             last_seq: self.last_seq,
             pieces: self.body.len(),
+            binding: self.binding.clone(),
         }
     }
 
@@ -69,13 +80,31 @@ impl Plan {
             Terminal::Done { .. } => return Err("invalid or unsupported agy Done"),
             Terminal::Failed => (Vec::new(), "-# Antigravity 실행 실패"),
         };
+        let terminal: Hash = fingerprint.finalize().into();
+        Ok(Self::build(seal.key, seal.last_seq, terminal, body, footer))
+    }
+
+    /// A failure footer for an execution that left no seal; the reason fixes its fingerprint.
+    pub(crate) fn abandoned(key: TurnKey, reason: Abandon) -> Self {
+        let mut terminal = Sha256::new();
+        terminal.update(b"agy-abandoned-v1");
+        terminal.update([reason as u8]);
+        let footer = "-# Antigravity 실행 실패";
+        Self::build(key, 0, terminal.finalize().into(), Vec::new(), footer)
+    }
+
+    fn build(
+        key: TurnKey,
+        last_seq: u64,
+        terminal: Hash,
+        body: Vec<(String, Range<usize>)>,
+        footer: &str,
+    ) -> Self {
         let mut identity = Sha256::new();
         identity.update(b"agy-delivery-v1");
-        identity.update(seal.key.destination.get().to_be_bytes());
-        identity.update(seal.key.id.get().to_be_bytes());
-        identity.update(seal.key.nonce.as_bytes());
-
-        let terminal: Hash = fingerprint.finalize().into();
+        identity.update(key.destination.get().to_be_bytes());
+        identity.update(key.id.get().to_be_bytes());
+        identity.update(key.nonce.as_bytes());
         identity.update(terminal);
         let body: Vec<_> = body
             .into_iter()
@@ -95,13 +124,14 @@ impl Plan {
             fingerprint.update((piece.source.end as u64).to_be_bytes());
             fingerprint.update(piece.payload_hash);
         }
-        Ok(Self {
-            key: seal.key,
-            last_seq: seal.last_seq,
+        Self {
+            key,
+            last_seq,
             fingerprint: fingerprint.finalize().into(),
             body,
             footer,
-        })
+            binding: None,
+        }
     }
 }
 

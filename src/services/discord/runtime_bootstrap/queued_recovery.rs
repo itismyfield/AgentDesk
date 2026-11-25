@@ -4,6 +4,8 @@ use super::*;
 mod native_input;
 pub(super) use native_input::prepare_native_boot;
 
+#[cfg(unix)]
+mod agy_recovery;
 mod agy_shadow;
 
 #[cfg(all(test, unix))]
@@ -37,6 +39,8 @@ pub(super) async fn restore_queued_and_inflight_work(
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
     agy_shadow::observe(http, shared.pg_pool.as_ref(), provider).await;
+    #[cfg(unix)]
+    agy_recovery::run(http, shared, provider).await;
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
     #[cfg(unix)]
     {
