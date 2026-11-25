@@ -14,6 +14,8 @@ use std::sync::atomic::AtomicUsize;
 
 #[path = "drive_tests/claimed_followers_tests.rs"]
 mod claimed_followers_tests;
+#[path = "drive_tests/retry_wait_tests.rs"]
+mod retry_wait_tests;
 
 fn original(channel: u64, n: u64) -> PendingQueueItem {
     let id = 8_000_000_000_000_006_000 + channel % 100 * 10 + n;

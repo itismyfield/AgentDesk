@@ -2310,7 +2310,8 @@ src/
 │   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── drive_tests/
-│   │   │   │   │   └── claimed_followers_tests.rs
+│   │   │   │   │   ├── claimed_followers_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2737,6 +2738,7 @@ src/
 │   │   │   │   │   ├── handoff_launch_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
+│   │   │   │   │   ├── preclaim_retry_wait_tests.rs
 │   │   │   │   │   ├── preclaim_tests.rs
 │   │   │   │   │   ├── recheck_tests.rs
 │   │   │   │   │   └── wake_tests.rs
