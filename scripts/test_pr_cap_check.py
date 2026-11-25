@@ -380,14 +380,77 @@ class PrCapCheckTest(unittest.TestCase):
         for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py", "scripts/pg_test_lane_manifest.txt"):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("test\n" * 900)
+            path.write_text("def test_a():\n" + "    x = 1\n" * 899)
         (self.repo / "src/prod.rs").write_text("// comment\n\nfn prod() {}\n#[cfg(test)]\nmod tests {\n" + "    fn t() {}\n" * 900 + "}\n")
         self.commit()
         self.assert_pass(self.check_cap(), "1 files net +1 code")
 
+    def test_generated_data_list_excludes_only_listed_files(self):
+        (self.repo / "data").mkdir()
+        (self.repo / "data/rows.json").write_text("{}\n" * 900)
+        (self.repo / "config.json").write_text("{}\n" * 2)
+        self.commit()
+        result = self.check_cap()
+        self.assert_pass(result, "2 files net +902 code")
+        self.assertNotIn("GENERATED_DATA", result.stdout)
+        (self.repo / "scripts").mkdir()
+        rejected = {"src/a.json": "src/**\tg\tv", "lib/a.rs": "lib/*\tg\tv", "tools/a.py": "tools/*\tg\tv",
+                    "bare/a.json": "bare/*", "empty/a.json": "empty/*\t\tv"}
+        for name in rejected:
+            (self.repo / name).parent.mkdir(exist_ok=True)
+            (self.repo / name).write_text("x = 1\n")
+        rows = ["data/*.json\tpython3 gen.py\tpython3 gen.py --check", "scripts/*.tsv\tg\tv", *rejected.values()]
+        (self.repo / "scripts/cap_generated_data.tsv").write_text("\n".join(rows) + "\n")
+        self.commit()
+        result = self.check_cap()
+        self.assert_pass(result, "7 files net +14 code")
+        self.assertIn("GENERATED_DATA 1 files +900 lines not counted", result.stdout)
+        self.assertIn("  data/rows.json +900 generate: python3 gen.py verify: python3 gen.py --check", result.stdout)
+        for name, reason in (("src/a.json", "source-path"), ("lib/a.rs", "not-data-extension"), ("tools/a.py", "not-data-extension"),
+                             ("bare/a.json", "missing-fields"), ("empty/a.json", "missing-fields"), ("scripts/cap_generated_data.tsv", "list-file")):
+            self.assertIn(f"GENERATED_DATA_REJECTED {name} {reason}", result.stdout)
+
+    def test_test_named_python_counts_unless_it_defines_tests(self):
+        (self.repo / "scripts").mkdir()
+        for name, body in (("support_x", "x = 1\n" * 3), ("doc", '"""\nimport unittest\n"""\nx = 1\n'), ("helpers", "import unittest_helpers\n"),
+                           ("import_only", "import unittest\nx = 1\n"), ("broken", "def test_a(:\n"),
+                           ("real", "def test_a():\n    assert True\n" * 300), ("case", "import unittest\nclass T(unittest.TestCase):\n    pass\n" * 300),
+                           ("method", "class TestX:\n    async def test_a(self):\n        assert True\n" * 300)):
+            (self.repo / f"scripts/test_{name}.py").write_text(body)
+        self.commit()
+        self.assert_pass(self.check_cap(), "5 files net +11 code")
+
+    def test_test_to_tool_conversion_counts_each_side_by_its_own_class(self):
+        (self.producer / "test_conv.py").write_text("def test_a():\n" + "    x = 1\n" * 1799)
+        (self.producer / "test_tool.py").write_text("x = 1\n" * 1000)
+        (self.producer / "scripts").mkdir()
+        (self.producer / "scripts/cap_generated_data.tsv").write_text("*.json\tg\tv\n")
+        (self.producer / "big.json").write_text("{}\n" * 1800)
+        self.commit(self.producer)
+        self.git(self.producer, "push", "origin", "main")
+        self.git(self.repo, "fetch", "origin", "main")
+        self.git(self.repo, "checkout", "-B", "feature", "origin/main")
+        (self.repo / "test_conv.py").write_text("x = 1\n" * 1501)
+        self.commit()
+        self.assertIn("+1501/-0 code lines", self.check_cap().stdout)
+        self.assert_fail(self.check_cap())
+        (self.repo / "test_tool.py").write_text("def test_a():\n    assert True\n")
+        self.commit()
+        self.assert_pass(self.check_cap(), "2 files net +501 code (+1501/-1000")
+        (self.repo / "scripts/cap_generated_data.tsv").unlink()
+        (self.repo / "big.json").write_text("[]\n" * 1501)
+        self.commit()
+        self.assertIn("4 files net +2001 code (+3002/-1001", self.check_cap().stdout)
+
+    def test_non_utf8_excluded_document_passes(self):
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs/notes.md").write_bytes(b"\xff\xfe bad\n")
+        self.commit()
+        self.assert_pass(self.check_cap(), "0 files net +0 code")
+
     def test_canonical_snapshot(self):
         digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
-        self.assertEqual(digest, "8ecaf5d34d6f4b6045052e1aabcc69edcc26bd678c795f0640ed38da13157c1d")
+        self.assertEqual(digest, "7d1843bcd61f937229ad91a5a04fff37b4bc59ffa21e6f54ffddd36d60819b28")
 
 if __name__ == "__main__":
     unittest.main()
