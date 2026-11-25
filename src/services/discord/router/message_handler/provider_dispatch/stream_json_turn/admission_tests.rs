@@ -367,7 +367,9 @@ async fn a_route_row_never_runs_unrecorded() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let request = read_only_request(root.path(), &cancel);
         let result = execute_request(StreamJsonDialectId::Agy, &turn, request, tx);
-        assert!(result.is_err(), "{case}");
+        // Refused for the route itself, not by a later spawn failure.
+        let refused = result.unwrap_err();
+        assert!(refused.contains("custody route"), "{case}: {refused}");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0, "{case}");
     }
 }
