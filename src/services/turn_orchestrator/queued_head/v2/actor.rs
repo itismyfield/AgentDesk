@@ -14,7 +14,7 @@ impl Message {
 }
 
 impl ChannelMailboxHandle {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn v2_adopt(&self, path: PathBuf, namespace: String) -> Result<(), String> {
         self.v2_request(move |slot| {
             *slot = Some(Owner::adopt(path, namespace)?);

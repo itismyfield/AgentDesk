@@ -103,7 +103,7 @@ pub(crate) use v2::routine_settlement::Disposition as RoutineInputSettlement;
 pub(crate) use v2::source_admission::TurnBind;
 pub(crate) use v2::source_admission::restart_seed::{SOURCE as RESTART_SEED_SOURCE, SeedStatus};
 pub(crate) use v2_types::OwedDrop;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use v2_types::cold_source::BindingIntent;
 #[cfg(unix)]
 pub(crate) use v2_types::cold_source::PreKeyPin;
@@ -778,7 +778,7 @@ mod claim {
     }
 
     impl ChannelMailboxHandle {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(crate) async fn claim_queued_head(
             &self,
             expected: QueueIdentity,

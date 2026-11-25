@@ -60,7 +60,7 @@ use active_source_dedup::{
     purge_active_source_from_queue, strip_source_message_id_from_intervention, take_unsettled,
 };
 pub(crate) use claim_observation::ClaimObservation;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use claim_observation::RECENT_CLAIMS_CAP;
 pub(crate) use dispatch_reservation::{
     PENDING_USER_DISPATCH_LEASE_ORPHAN_AFTER, VALVE_CLEARED_DISPATCH_MARKER_GRACE, is_queue_unread,
@@ -92,9 +92,9 @@ use lease_release::release_active_turn_anchor;
 pub(crate) use overflow::SoftInterventionProbe;
 use overflow::drain_head_overflow;
 use pending_queue_persistence::channel_queue_files_present;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use pending_queue_persistence::load_channel_pending_queue;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use pending_queue_persistence::save_channel_queue;
 #[cfg(unix)]
 pub(crate) use pending_queue_persistence::v2_channels;
@@ -118,9 +118,9 @@ use queue_cancellation::{
     has_soft_intervention,
 };
 use queue_enqueue::enqueue_behind;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use queue_enqueue::enqueue_intervention;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use queued_head::BindingIntent;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;
@@ -144,7 +144,7 @@ pub(crate) mod restart_operation;
 pub(crate) type OwnerFront = (Option<String>, PendingQueueItem);
 #[derive(Clone, Debug)]
 pub(crate) enum TakeHeadCondition {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Unchecked,
     Observed(Option<QueueIdentity>),
 }
@@ -310,7 +310,7 @@ pub(crate) struct HydratePendingQueueResult {
     pub(crate) persistence_error: Option<String>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn load_channel_pending_queue_for_tests(
     provider: &ProviderKind,
     token_hash: &str,
@@ -876,7 +876,7 @@ impl ChannelMailboxHandle {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn take_next_soft(
         &self,
         persistence: QueuePersistenceContext,
@@ -884,7 +884,7 @@ impl ChannelMailboxHandle {
         self.take_soft_matching(persistence, None).await
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn take_soft_matching(
         &self,
         persistence: QueuePersistenceContext,
@@ -945,7 +945,7 @@ impl ChannelMailboxHandle {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn hard_stop(&self) -> FinishTurnResult {
         self.request(|reply| ChannelMailboxMsg::HardStop { reply })
             .await
@@ -1003,7 +1003,7 @@ impl ChannelMailboxHandle {
     }
 
     // #3864: test-only queue seeding; production uses the race-safe merge.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn replace_queue(
         &self,
         queue: Vec<Intervention>,
@@ -1040,7 +1040,7 @@ impl ChannelMailboxHandle {
             .unwrap_or_default()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn merge_restored_dispatch_marker(
         &self,
         marker: Intervention,
@@ -1064,7 +1064,7 @@ impl ChannelMailboxHandle {
             })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn age_active_turn_for_test(&self, age: Duration) {
         let _ = self
             .request(|reply| ChannelMailboxMsg::AgeActiveTurnForTest { age, reply })
@@ -1074,7 +1074,7 @@ impl ChannelMailboxHandle {
     /// Wind both inbound waits back by `age`: the dequeue→claim reservation and
     /// the #5937 free-slot stall clock. Both are `Instant`-based thresholds no
     /// test can reach by waiting.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn age_inbound_waits_for_test(&self, age: Duration) {
         let _ = self
             .request(|reply| ChannelMailboxMsg::AgeInboundWaitsForTest { age, reply })
@@ -1425,7 +1425,7 @@ enum ChannelMailboxMsg {
     },
     ClaimPolicyTail(policy_close::tail::TailClaim),
     ControlCustody(Box<policy_close::InstallCustody>),
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     HardStop {
         reply: oneshot::Sender<FinishTurnResult>,
     },
@@ -1467,7 +1467,7 @@ enum ChannelMailboxMsg {
     /// production caller and survives ONLY as a `#[cfg(test)]` queue-seeding
     /// primitive used across the queue / turn_finalizer / turn_orchestrator
     /// test modules.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ReplaceQueue {
         queue: Vec<Intervention>,
         persistence: QueuePersistenceContext,
@@ -1499,12 +1499,12 @@ enum ChannelMailboxMsg {
         persistence: QueuePersistenceContext,
         reply: oneshot::Sender<RestartDrainResult>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AgeActiveTurnForTest {
         age: Duration,
         reply: oneshot::Sender<()>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AgeInboundWaitsForTest {
         age: Duration,
         reply: oneshot::Sender<()>,
@@ -2220,7 +2220,7 @@ fn input_mailbox_step(
                 TakeHeadCondition::Observed(expected) => {
                     state.intervention_queue.first().map(QueueIdentity::of) != expected
                 }
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 TakeHeadCondition::Unchecked => false,
             };
             if selection_stale {
@@ -2470,7 +2470,7 @@ fn input_mailbox_step(
         | ChannelMailboxMsg::ControlCustody(_)) => {
             policy_close::answer(&mut state, channel_id, msg, own_recovery_done);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::HardStop { reply } => {
             let persistence = state.last_persistence.clone();
             let _ = reply.send(finalize_turn_state(
@@ -2508,7 +2508,7 @@ fn input_mailbox_step(
         ChannelMailboxMsg::PurgeQueueIfUnchanged(request) => request.run(&mut state, channel_id),
         #[cfg(unix)]
         ChannelMailboxMsg::CaptureOwnQueue(request) => request.run(&mut state, channel_id),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::ReplaceQueue {
             queue,
             persistence,
@@ -2618,7 +2618,7 @@ fn input_mailbox_step(
                 &persistence,
             ));
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::AgeActiveTurnForTest { age, reply } => {
             if state.cancel_token.is_some() {
                 let wall_age = chrono::Duration::from_std(age)
@@ -2628,7 +2628,7 @@ fn input_mailbox_step(
             }
             let _ = reply.send(());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         ChannelMailboxMsg::AgeInboundWaitsForTest { age, reply } => {
             if state.pending_user_dispatch.is_some() {
                 state.pending_user_dispatch_since = Some(Instant::now() - age);

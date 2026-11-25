@@ -59,12 +59,13 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
         #[cfg(unix)]
         M::CaptureOwnQueue(request) => request.refuse_v2(),
         #[cfg(test)]
-        M::CancelActiveTurnIfUserMessageWithReason { .. }
-        | M::HardStop { .. } => return Some(msg),
+        M::CancelActiveTurnIfUserMessageWithReason { .. } => return Some(msg),
+        #[cfg(any(test, feature = "test-support"))]
+        M::HardStop { .. } => return Some(msg),
+        #[cfg(any(test, feature = "test-support"))]
+        M::AgeActiveTurnForTest { .. } | M::AgeInboundWaitsForTest { .. } => return Some(msg),
         #[cfg(test)]
-        M::AgeActiveTurnForTest { .. }
-        | M::AgeInboundWaitsForTest { .. }
-        | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
+        M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
         M::Enqueue {
             intervention,
             persistence,
@@ -126,7 +127,7 @@ pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg:
             });
         }
         // Dropping the reply is the refusal its caller observes.
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::ReplaceQueue { .. } => {}
     }
     None
@@ -275,7 +276,7 @@ mod tests;
 #[path = "requeue_tests.rs"]
 mod requeue_tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl Owner {
     pub(crate) fn cancel_sequence_for_tests(&self) -> u64 {
         self.last_success_sequence
