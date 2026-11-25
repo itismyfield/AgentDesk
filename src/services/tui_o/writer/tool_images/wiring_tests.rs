@@ -261,21 +261,28 @@ fn derive_from(
 }
 
 /// An Unresolved image found behind a newer body posts nothing again, keeps the body's anchor
-/// and leaves the channel running, now and on replay.
+/// and leaves the channel running, now and on replay. One that never arrived is NotFound past
+/// that body, and ends in one omission notice after its allowed retry.
 #[tokio::test(start_paused = true)]
 async fn unresolved_image_reconfirmed_behind_newer_anchor_without_stopping() {
+    for arrived in [true, false] {
+        reconfirmed_behind_newer_anchor(arrived).await;
+    }
+}
+
+async fn reconfirmed_behind_newer_anchor(arrived: bool) {
     let (harness, path, source) = switched_over(b"");
     harness.gate.acquired();
     let mut writer = harness.writer();
     let mut deriver = images(&mut writer);
     append(&path, &[prompt("t1"), png("r1", "c1", 1)].concat());
     let derived = derive(&mut writer, &mut deriver, &source, 0);
-    harness
-        .port
-        .replies
-        .lock()
-        .unwrap()
-        .push_back(Reply::CreatedUnseen);
+    let first = if arrived {
+        Reply::CreatedUnseen
+    } else {
+        Reply::Unsent
+    };
+    harness.port.replies.lock().unwrap().push_back(first);
     harness.port.unreadable.store(true, Ordering::SeqCst);
     deliver_all(&mut writer, &derived).await;
     let key = image_key(&mut writer);
@@ -290,6 +297,26 @@ async fn unresolved_image_reconfirmed_behind_newer_anchor_without_stopping() {
     let body_anchor = writer.store().ledger().anchor();
     let later = Utc::now() + chrono::Duration::minutes(6);
     assert_eq!(writer.select_images(later).await, Step::Done);
+    if !arrived {
+        harness
+            .port
+            .replies
+            .lock()
+            .unwrap()
+            .push_back(Reply::Unsent);
+        for minutes in [12, 18, 24] {
+            writer
+                .select_images(Utc::now() + chrono::Duration::minutes(minutes))
+                .await;
+        }
+        let posts = harness.port.posts();
+        let notices = posts
+            .iter()
+            .filter(|post| post.starts_with("-# 이미지 1장 생략"));
+        let open = open_count(writer.store().ledger());
+        assert_eq!((notices.count(), open, attachments(&harness)), (1, 0, 2));
+        return;
+    }
     let ledger = writer.store().ledger();
     assert_eq!(
         ledger.piece(serial).unwrap().outcome,
@@ -351,6 +378,17 @@ async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
             "{status}"
         );
         if status == 400 {
+            // Crash after the Rejected append, before the ImageOmitted one: restart completes it.
+            let ledger = ledger_path(&harness);
+            let text = std::fs::read_to_string(&ledger).unwrap();
+            let (prefix, last) = text.trim_end().rsplit_once('\n').unwrap();
+            assert!(last.contains("\"image_omitted\""), "{last}");
+            std::fs::write(&ledger, format!("{prefix}\n")).unwrap();
+            let mut writer = harness.writer();
+            assert!(
+                !writer.is_stopped(),
+                "a 400 prefix is not a blocked channel"
+            );
             assert_eq!(writer.select_images(Utc::now()).await, Step::Done);
             let notice = harness.port.posts().last().cloned().unwrap();
             assert!(
@@ -587,6 +625,7 @@ fn image_less_results_derive_unchanged_and_queue_nothing() {
     let a = derive_from(&mut plain, &path, &source, 0);
     let b = derive_from(&mut with, &path, &source, 0);
     assert_eq!(a, b);
+    assert!(!b.iter().any(|item| matches!(item, Derived::Blocked { .. })));
     assert!(with.images().unwrap().take_entries().is_empty());
 }
 
@@ -618,7 +657,7 @@ async fn image_turn_closes_at_a_verified_end_without_its_opener() {
 
 fn tool_use(id: &str, call: &str) -> Vec<u8> {
     line(
-        json!({"type": "assistant", "uuid": format!("u-{id}"), "message": {"id": id,
+        json!({"type": "assistant", "uuid": format!("u-{id}"), "apiBlockIndex": 0, "message": {"id": id,
         "content": [{"type": "tool_use", "id": call, "name": "Read", "input": {}}]}}),
     )
 }
