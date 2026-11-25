@@ -278,6 +278,33 @@ fn identity_archive_keeps_custody_row() {
     }
 }
 
+// A planned restart's marker passes only under the owner's permit for the exact route on disk.
+#[tokio::test(flavor = "current_thread")]
+async fn restart_marker_keeps_every_row_the_owner_permit_does_not_name() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (routed, legacy) = (row(6_325_610_027, true), row(6_325_610_028, false));
+    let root = inflight_root();
+    let (routed_path, legacy_path) = (write(&root, &routed), write(&root, &legacy));
+    mark_restart_mode_blocking(ProviderKind::Antigravity, InflightRestartMode::DrainRestart).await;
+    let provider = ProviderKind::Antigravity;
+    let clear = |state: &InflightTurnState| {
+        let identity = InflightTurnIdentity::from_state(state);
+        let nonce = state.turn_nonce.as_deref();
+        clear_inflight_state_for_captured_episode(&provider, state.channel_id, &identity, nonce)
+    };
+    let skipped = GuardedClearOutcome::PlannedRestartSkipped;
+    assert_eq!(clear(&legacy), skipped);
+    let nonce = Uuid::parse_str(routed.turn_nonce.as_deref().unwrap()).unwrap();
+    let mut other_generation = routed.clone();
+    if let Some(AgyCustodyField::Route(route)) = &mut other_generation.agy_custody {
+        route.writer_generation = NonZeroU64::new(2).unwrap();
+    }
+    let other_nonce = as_route_owner(&provider, &routed, Uuid::new_v4(), || clear(&routed));
+    let stale = as_route_owner(&provider, &other_generation, nonce, || clear(&routed));
+    assert_eq!((other_nonce, stale), (skipped, skipped));
+    assert!(routed_path.exists() && legacy_path.exists());
+}
+
 async fn outcome(pool: &sqlx::PgPool, channel: u64) -> Option<String> {
     let sql =
         "SELECT terminal_outcome FROM turns WHERE turn_id = $1 AND terminal_outcome IS NOT NULL";
