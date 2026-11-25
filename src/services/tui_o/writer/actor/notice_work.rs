@@ -210,7 +210,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         Ok(())
     }
 
-    pub(crate) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
+    pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
         }
@@ -282,7 +282,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         fresh
     }
 
-    pub(crate) async fn prepare_notices(&mut self, fresh: &[UnitKey]) {
+    pub(super) async fn prepare_notices(&mut self, fresh: &[UnitKey]) {
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return;
         }
@@ -494,7 +494,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .retain(|key| queued.contains(key));
     }
 
-    pub(crate) fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
+    fn defer_notice(&mut self, id: (SourceId, u64, u64), reason: &str) {
         if reason != "registration_source_mismatch" {
             let transient = self.writer.notice_owners.transient(&id.0);
             self.writer.notice_cache.retry(&id, transient);
@@ -515,7 +515,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         }
     }
 
-    pub(crate) fn notice_debt_extra(&mut self) -> usize {
+    pub(super) fn notice_debt_extra(&mut self) -> usize {
         self.notice_debt(true)
     }
 
@@ -550,7 +550,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .count()
     }
 
-    pub(crate) fn notice_raw_independent(&mut self) -> bool {
+    pub(super) fn notice_raw_independent(&mut self) -> bool {
         if !self.deriver.input_notices_enabled() {
             return self.owed.is_empty();
         }
@@ -578,5 +578,33 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return self.owed.is_empty();
         }
         self.owed.iter().all(|item| notice(item).is_some())
+    }
+}
+
+// Test seams for the notice tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    pub(in crate::services) fn persist_notice_evidence_for_test(&mut self) -> Vec<UnitKey> {
+        self.persist_notice_evidence()
+    }
+
+    pub(in crate::services) async fn prepare_notices_for_test(&mut self, fresh: &[UnitKey]) {
+        self.prepare_notices(fresh).await;
+    }
+
+    pub(in crate::services) fn defer_notice_for_test(
+        &mut self,
+        id: (SourceId, u64, u64),
+        reason: &str,
+    ) {
+        self.defer_notice(id, reason);
+    }
+
+    pub(in crate::services) fn notice_debt_extra_for_test(&mut self) -> usize {
+        self.notice_debt_extra()
+    }
+
+    pub(in crate::services) fn notice_raw_independent_for_test(&mut self) -> bool {
+        self.notice_raw_independent()
     }
 }

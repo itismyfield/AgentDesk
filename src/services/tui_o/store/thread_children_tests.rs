@@ -112,7 +112,7 @@ fn init_child(store: &OStore, parent: bool, enabled: bool, proof: bool) -> Resul
         init.policy_parent = Some(42);
     }
     let verified = surface(poise::serenity_prelude::ChannelType::PublicThread).unwrap();
-    store.init_channel_checked(
+    store.init_channel_checked_for_test(
         &init,
         InitOrigin::Fresh,
         &boot().init_scope_view(),
@@ -289,7 +289,7 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
         init.policy_parent = Some(parent);
         assert!(
             store
-                .init_channel_checked(
+                .init_channel_checked_for_test(
                     &init,
                     InitOrigin::Fresh,
                     &boot().init_scope_view(),
@@ -312,7 +312,7 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
     init.policy_parent = Some(42);
     assert!(
         store
-            .init_channel_checked(
+            .init_channel_checked_for_test(
                 &init,
                 InitOrigin::Fresh,
                 &boot().init_scope_view(),
