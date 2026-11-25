@@ -60,19 +60,26 @@ pub struct DispatchTerminalEntrySyncResult {
     pub finalized_run_ids: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct EntryStatusRow {
-    run_id: String,
-    card_id: String,
-    agent_id: String,
-    status: String,
-    dispatch_id: Option<String>,
-    retry_count: i64,
-    slot_index: Option<i64>,
-    thread_group: i64,
-    batch_phase: i64,
-    completed_at: Option<String>,
+// Defined in a private child so default builds name it only inside `entries`, as before.
+mod entry_status_row {
+    #[derive(Debug, Clone)]
+    pub(crate) struct EntryStatusRow {
+        pub(super) run_id: String,
+        pub(super) card_id: String,
+        pub(super) agent_id: String,
+        pub(super) status: String,
+        pub(super) dispatch_id: Option<String>,
+        pub(super) retry_count: i64,
+        pub(super) slot_index: Option<i64>,
+        pub(super) thread_group: i64,
+        pub(super) batch_phase: i64,
+        pub(super) completed_at: Option<String>,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+use entry_status_row::EntryStatusRow;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use entry_status_row::EntryStatusRow;
 
 #[cfg(any(test, feature = "test-support"))]
 impl EntryStatusRow {
