@@ -365,6 +365,9 @@ pub(crate) fn record_decision(
 ) {
     let telemetry = telemetry_for_decision(decision);
     RECENT_DECISION_COUNT.fetch_add(1, Ordering::Relaxed);
+    if let Ok(message) = user_msg_id.parse() {
+        crate::logging::intake_stage::mark(message, "route", None);
+    }
     tracing::info!(
         event = "intake_routing_decision",
         mode = mode.as_str(),

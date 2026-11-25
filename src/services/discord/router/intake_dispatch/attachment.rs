@@ -22,6 +22,17 @@ pub(crate) fn resolve_attachment_admission(admission: IntakeAdmission) -> Attach
     resolve_attachment_admission_with(admission, std::convert::identity)
 }
 
+/// A non-local attachment is received here once its outbox row hands it to the owning node.
+pub(super) fn mark_forwarded_recv(
+    admission: &IntakeAdmission,
+    submission: &super::IntakeSubmission,
+) {
+    if matches!(admission, IntakeAdmission::Forwarded { .. }) {
+        let message = submission.request.user_msg_id.get();
+        crate::logging::intake_stage::mark(message, "recv", None);
+    }
+}
+
 async fn record_upload_history(
     shared: &std::sync::Arc<crate::services::discord::SharedData>,
     channel_id: serenity::ChannelId,
