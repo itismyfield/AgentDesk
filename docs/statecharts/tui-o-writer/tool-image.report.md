@@ -63,6 +63,19 @@ Counterexamples checked against the w2 code:
 - Foreign idle: `observe` mapped every `Idle(_)` to `end`, closing the parent on a child's
   `turn_aborted`.
 
+## S2b wiring: GC of openers and calls
+
+S2b adds `GcRule = "persist"` and `MissedEndCloses`. GC keeps no turn opener; before it
+collects an open turn's opener or a pending call, the writer records that turn's span or the
+call's turn (`ImageTurnOpened`, `ImageCall`). A verified end that the restart projection
+cannot apply for lack of its opener still closes the image turn, after row preparation.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bPersistA/B/C/E/EFail/F, MidPrompt, LateCall, ForeignIdle, Unresolved | persist + cut | - | the wired rule |
+| ToolImageS2bPersistMutNoCut | persist, no cut | NoSilentLoss | the cut is required once openers are collected |
+| ToolImageS2bSpanE / S2bSpanMidPrompt | S2b w1 rule: only a turn with an image span keeps its opener | AttributionTrue (+AtMostOnce) | opener collected before the first image, restart: the image falls to the edge turn |
+
 ## Limits
 
 Spool segments are one record each. History is truthful unless `Lag` hides one arrived post

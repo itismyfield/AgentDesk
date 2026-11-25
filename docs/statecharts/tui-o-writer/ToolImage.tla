@@ -17,11 +17,14 @@ CONSTANTS Rec,            \* records: "o1"/"o2" opener, "p" prompt (ignored insi
           Lag,            \* history may miss an arrived post once (policy-(a) limit)
           ClosedOffset,   \* replay applies a restored span's Closed end_offset first (FALSE = mutant)
           GcRule,         \* "closed" (opener kept until a durable Closed) | "opened" (d3 rule, mutant)
+                          \* | "span" (S2b w1: only a turn with an image span keeps its opener)
+                          \* | "persist" (no opener kept; GC first records a live turn's span)
           SharedPrepared, \* notices wait for an image Prepared and vice versa (FALSE = mutant)
           BytesRule,      \* "all" (every open obligation keeps bytes) | "images" (d3 NeedsBytes, mutant)
           RowPrep,        \* row preparation restores a durable span before the row's facts (FALSE = S2a w2)
           DurableCall,    \* a call pending at its turn's end is attributed durably (FALSE = S2a w2)
           NamedIdleGuard, \* a named idle of another turn leaves the open turn (FALSE = S2a w2)
+          MissedEndCloses, \* S2b: a verified end without this run's opener closes the prepared image turn
           MaxRestarts, MaxFail, MaxHFail
 
 N == Len(Rec)
@@ -92,7 +95,9 @@ Derive ==
                  ELSE /\ ts' = OpenerOf(r) /\ openPos' = i
               /\ UNCHANGED <<spanFrom, spanTo, st, keyRec, ns>> /\ KeepCalls
           \* restart_end projection applies a physical end only with this run's opener evidence.
-          [] r = "i" \/ (r = "e" /\ PhysEndForward /\ openPos > 0) \/ (r = "x" /\ ~NamedIdleGuard) ->
+          \* The S2b cut runs after row preparation, so it sees a turn restored from its span.
+          [] r = "i" \/ (r = "e" /\ PhysEndForward /\ (openPos > 0 \/ (MissedEndCloses /\ ts0 \in Turns)))
+                     \/ (r = "x" /\ ~NamedIdleGuard) ->
               /\ ts' = "idle" /\ Close(ts0, i)
               \* A call still waiting for its result is attributed durably at its turn's end.
               /\ dcall' = IF DurableCall /\ pending /\ callTurn \in Turns /\ dcall = "none"
@@ -142,16 +147,24 @@ NeedsBytes(i) == (\E k \in Keys : keyRec[k] = i /\ st[k] \in ImgOpen)
 OpenerPos(t) == FirstOpener(CASE t = "t1" -> "o1" [] t = "t2" -> "o2" [] OTHER -> "p", 1)
 OpenerProtected(r) ==
   \E t \in Turns : r = OpenerPos(t) /\
-     IF GcRule = "closed" THEN ts = t \/ (spanFrom[t] > 0 /\ spanTo[t] = 0)
-     ELSE ts = t /\ spanFrom[t] = 0
+     CASE GcRule = "closed" -> ts = t \/ (spanFrom[t] > 0 /\ spanTo[t] = 0)
+       [] GcRule = "span" -> spanFrom[t] > 0 /\ spanTo[t] = 0
+       [] GcRule = "persist" -> FALSE
+       [] OTHER -> ts = t /\ spanFrom[t] = 0
 \* GC removes the oldest retained record (one record = one segment here).
 Gc ==
   /\ ~retired /\ rstart <= saved
   /\ ~OpenerProtected(rstart)
   /\ ~NeedsBytes(rstart)
   /\ rstart' = rstart + 1
-  /\ UNCHANGED <<cursor, saved, ts, openPos, spanFrom, spanTo, st, unknown, att, keyRec, ns,
-                 arrived, nArr, hidden, restarts, fails, hfails, retired, callTurn, pending, dcall, viol>>
+  \* "persist": collecting a live turn's opener first records its span, and collecting a
+  \* pending call first records the call's turn, so neither needs the collected bytes again.
+  /\ IF GcRule = "persist" /\ ts \in Turns /\ OpenerPos(ts) = rstart /\ spanFrom[ts] = 0
+     THEN spanFrom' = [spanFrom EXCEPT ![ts] = rstart] ELSE UNCHANGED spanFrom
+  /\ IF GcRule = "persist" /\ pending /\ callTurn \in Turns /\ CallPos = rstart /\ dcall = "none"
+     THEN dcall' = callTurn ELSE UNCHANGED dcall
+  /\ UNCHANGED <<cursor, saved, ts, openPos, spanTo, st, unknown, att, keyRec, ns,
+                 arrived, nArr, hidden, restarts, fails, hfails, retired, callTurn, pending, viol>>
 
 OthersV == <<cursor, saved, rstart, ts, openPos, spanFrom, spanTo, keyRec, ns, nArr, restarts, retired, callTurn, pending, dcall, viol>>
 
