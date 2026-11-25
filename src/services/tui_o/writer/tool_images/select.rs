@@ -144,7 +144,7 @@ pub(crate) fn kept_sources(
 }
 
 /// The upload for an image attempt, else the ordinary unit post.
-pub(in crate::services::tui_o::writer) fn request<P: DiscordPort>(
+pub(in crate::services::tui_o::writer) fn unit_post<P: DiscordPort>(
     port: &P,
     channel: u64,
     piece: &PieceWork,

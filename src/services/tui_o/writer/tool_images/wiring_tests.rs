@@ -211,7 +211,7 @@ async fn image_closed_physical_turn_tail_replay_after_opener_gc_then_new_turn() 
     run(&mut writer, &mut again, &source, &records);
     assert!(again.end_projection(&ended).is_empty());
     assert!(again.images().unwrap().take_entries().is_empty());
-    // The opener's segment is gone: the restarted deriver reads from r2.
+    // The opener's segment is gone: the restarted deriver starts at the second result.
     append(
         &path,
         &[prompt("t2"), png("r3", "c3", 1), png("r4", "c4", 1)].concat(),

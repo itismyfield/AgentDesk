@@ -590,7 +590,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        let post = select::request(&*port, channel, piece, attachment.take());
+                        let post = select::unit_post(&*port, channel, piece, attachment.take());
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
                             Some(running) => Box::pin(post.map(move |outcome| {
