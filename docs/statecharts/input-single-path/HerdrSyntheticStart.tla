@@ -107,7 +107,10 @@ TurnEnd == s.turn # "none" /\ s' = Woken([s EXCEPT !.turn = "none"])
 OperatorRetire == /\ Host = "herdr" /\ s.row = "Bound" /\ s.exec = "dead"
                   /\ s' = Woken([s EXCEPT !.row = "Retired"])
 
-Next == Drive \/ Launch \/ WatchLook \/ NativeEnds \/ Readable \/ Die \/ TurnEnd \/ OperatorRetire
+\* A settled start stays settled.
+Done == s.front \in {"delivered", "rejected"} /\ UNCHANGED vars
+
+Next == Done \/ Drive \/ Launch \/ WatchLook \/ NativeEnds \/ Readable \/ Die \/ TurnEnd \/ OperatorRetire
 Spec == Init /\ [][Next]_vars /\ WF_vars(Drive) /\ WF_vars(Launch) /\ WF_vars(WatchLook)
         /\ WF_vars(NativeEnds) /\ WF_vars(Readable) /\ WF_vars(TurnEnd)
 
