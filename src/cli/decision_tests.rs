@@ -110,8 +110,8 @@ fn decision_get_presents_the_capability_its_request_was_asked_under() {
     assert!(remember(root.path(), &json!({"ok": false}), Some(&asked)).is_err());
 }
 
-/// A stored request is linked to its capability before its answer is shown, and an answer whose
-/// link cannot be written is never shown as a success.
+/// A stored request is linked before its answer is shown, also when Discord refused it, and an
+/// answer whose link cannot be written is never shown as a success.
 #[test]
 fn decision_ask_answer_is_shown_only_once_its_request_is_linked() {
     let root = tempfile::tempdir().unwrap();
@@ -128,6 +128,11 @@ fn decision_ask_answer_is_shown_only_once_its_request_is_linked() {
         panic!("a success shown without its link")
     });
     assert!(unlinked.is_err());
+    // A stored request Discord refused is still linked, so its refusal can be read back.
+    let refused = (uuid::Uuid::new_v4(), json!("decision_post_forbidden"));
+    let reply = json!({"ok": false, "error": refused.1, "request_id": refused.0});
+    assert!(settle(root.path(), 502, &reply, Some(&capability), |_| {}).is_err());
+    assert!(owner_cache::of_request(root.path(), refused.0).is_ok());
 }
 
 /// One channel is one scope however its id is spelled, and a name that is no id is refused

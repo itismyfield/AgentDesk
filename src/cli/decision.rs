@@ -74,8 +74,8 @@ fn ask<T>(
     send(&capability)
 }
 
-/// An answered ask. A stored request is linked to its capability before its answer is shown, so
-/// an id on stdout can always be read back; any other answer is shown as the error it is.
+/// An answered ask. Any answer naming a request is linked to its capability before it is shown,
+/// so its id can be read back; only 201 and 202 are success, a link failure included.
 fn settle(
     root: &std::path::Path,
     status: u16,
@@ -83,13 +83,17 @@ fn settle(
     capability: Option<&str>,
     show: impl FnOnce(&Value),
 ) -> Result<(), String> {
-    if !matches!(status, 201 | 202) {
+    let linked = remember(root, reply, capability);
+    if matches!(status, 201 | 202) {
+        linked?;
         show(reply);
-        return Err(format!("decision ask: HTTP {status}"));
+        return Ok(());
     }
-    remember(root, reply, capability)?;
     show(reply);
-    Ok(())
+    match (reply["request_id"].is_string(), linked) {
+        (true, Err(error)) => Err(format!("decision ask: HTTP {status}; {error}")),
+        _ => Err(format!("decision ask: HTTP {status}")),
+    }
 }
 
 /// Links the request an ask's answer names to the capability it was asked under.
