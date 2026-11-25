@@ -39,6 +39,22 @@ pub(crate) fn tail() -> Vec<Value> {
     records
 }
 
+/// A synthetic idle compaction: boundary, summary and re-attachments, then `tail`.
+fn compacted_tail() -> Vec<Value> {
+    let mut records = vec![
+        json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}),
+        json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}),
+        json!({"type":"derived-from"}),
+    ];
+    for kind in ["file", "compact_file_reference", "invoked_skills"] {
+        records.push(json!({"type":"attachment","attachment":{"type":kind}}));
+    }
+    records.push(json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":"SessionStart"}}));
+    records.push(json!({"type":"data-flow-records"}));
+    records.extend(tail());
+    records
+}
+
 fn observe(records: Vec<Value>) -> TuiTurnState {
     let file = tempfile::NamedTempFile::new().unwrap();
     let text = records
@@ -100,4 +116,34 @@ fn idle_compaction_tail_does_not_cross_an_old_terminal_or_unknown_record() {
         observe_claude_jsonl_turn_state(file.path()),
         TuiTurnState::Idle
     );
+}
+
+#[test]
+fn a_finished_idle_compaction_preserves_the_completed_reply() {
+    assert_eq!(
+        observe([vec![end_turn()], compacted_tail()].concat()),
+        TuiTurnState::Idle
+    );
+}
+
+#[test]
+fn a_compaction_without_its_notice_or_with_work_around_it_is_not_idle() {
+    let unclosed = compacted_tail()
+        .into_iter()
+        .filter(|r| r["subtype"] != "informational");
+    let prompt = json!({"type":"user","message":{"content":"next prompt"}});
+    let mut cases = vec![
+        [vec![end_turn()], unclosed.collect()].concat(),
+        [vec![end_turn(), prompt.clone()], compacted_tail()].concat(),
+    ];
+    for after in [
+        prompt,
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":"done"}]}}),
+        json!({"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"Working"}]}}),
+    ] {
+        cases.push([vec![end_turn()], compacted_tail(), vec![after]].concat());
+    }
+    for records in cases {
+        assert_ne!(observe(records.clone()), TuiTurnState::Idle, "{records:?}");
+    }
 }

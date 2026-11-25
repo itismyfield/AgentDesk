@@ -2,8 +2,9 @@
 //! a busy writer's walk also reaches a prompt or tool result still owed a reply.
 use super::*;
 
-/// A completed reply survives a non-conversation tail; old terminals across a session marker
-/// still cannot prove Idle, while a pending tool call remains Streaming.
+/// A completed reply survives a non-conversation tail, including a finished idle compaction; old
+/// terminals across a session marker still cannot prove Idle, while a pending tool call remains
+/// Streaming.
 pub(super) fn observe(path: &Path) -> TuiTurnState {
     let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
     if matches!(
@@ -26,7 +27,7 @@ fn completed_tail(path: &Path) -> bool {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return false;
     };
-    let mut metadata = false;
+    let (mut metadata, mut segment) = (false, Compaction::Outside);
     for line in window
         .lines
         .iter()
@@ -37,14 +38,36 @@ fn completed_tail(path: &Path) -> bool {
             return false;
         };
         if completed_reply(&record) {
-            return metadata;
+            return metadata && segment != Compaction::Summary;
         }
-        if !idle_metadata(&record) {
-            return false;
-        }
+        segment = match segment {
+            Compaction::Notice if record["isCompactSummary"] == true => Compaction::Summary,
+            Compaction::Summary if record["subtype"] == "compact_boundary" => Compaction::Outside,
+            _ if !idle_metadata(&record) => return false,
+            Compaction::Outside if idle_compaction_notice(&record) => Compaction::Notice,
+            segment => segment,
+        };
         metadata = true;
     }
     false
+}
+
+/// Walking back, an idle-compaction notice admits one summary and then its boundary; a summary
+/// without its boundary, or a compaction no notice closed, is still conversation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Compaction {
+    Outside,
+    Notice,
+    Summary,
+}
+
+/// Claude appends this notice only after an idle or away compaction has finished.
+fn idle_compaction_notice(record: &Value) -> bool {
+    record["type"] == "system"
+        && record["subtype"] == "informational"
+        && record["content"]
+            .as_str()
+            .is_some_and(|content| content.contains("\"idleCompaction\""))
 }
 
 pub(crate) fn completed_reply(record: &Value) -> bool {
