@@ -164,6 +164,7 @@ claude-stop/ClaudeStopUnreadSpinner.cfg	ClaudeStop	UnreadNeedsFooter	-
 claude-stop/ClaudeStopWideReader.cfg	ClaudeStop	NoEscapeOnIdleScreen,UnreadNeedsFooter	-
 decision-request/Auth.cfg	DecisionRequest	OperatorOnly	-
 decision-request/BindOnlySweep.cfg	DecisionRequest	NoDecisionNotice	-
+decision-request/BootRePost.cfg	DecisionRequest	OnePost	-
 decision-request/BusyForever.cfg	DecisionRequest	-	EventuallySettled
 decision-request/DiscussionClassify.cfg	DecisionDiscussion	ClassMatches	-
 decision-request/DiscussionClosedAdmission.cfg	DecisionDiscussion	NoClosedAdmission	-
@@ -213,8 +214,10 @@ decision-request/PreservedReach.cfg	DecisionRequest	NeverPreserved	-
 decision-request/Provenance.cfg	DecisionRequest	PreservedNeedsApproval	-
 decision-request/RePost.cfg	DecisionRequest	OnePost	-
 decision-request/RetryClosed.cfg	DecisionRequest	NoRearmAfterClose	-
+decision-request/SnapshotRegister.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/TempHolderId.cfg	DecisionRequest	LiveHolderKeeps	-
 decision-request/TimeOnlyRecovery.cfg	DecisionRequest	LiveHolderKeeps	-
+decision-request/TtlGuard.cfg	DecisionRequest	NoIntakeLeak	-
 decision-request/WideSweep.cfg	DecisionRequest	OthersKept	-
 deploy-restart/PeerDeployRestart.cfg	PeerDeployRestart	-	-
 deploy-restart/PeerDeployRestartAnyProof.cfg	PeerDeployRestart	AckRequiresOwnProof	-
