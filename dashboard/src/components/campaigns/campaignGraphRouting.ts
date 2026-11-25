@@ -66,11 +66,11 @@ export function rawEdgeId(edge: RawEdgeKey): string {
 }
 
 /** Each dependency between two existing tasks once, dependency first. */
-export function campaignRawEdges(nodes: ReadonlyArray<{ id: string; dependencies: readonly string[] }>): RawEdgeKey[] {
+export function campaignRawEdges(nodes: ReadonlyArray<{ id: string; dependencies?: readonly string[] }>): RawEdgeKey[] {
   const ids = new Set(nodes.map((node) => node.id));
   const edges = new Map<string, RawEdgeKey>();
   for (const node of nodes) {
-    for (const dependency of node.dependencies) {
+    for (const dependency of node.dependencies ?? []) {
       const edge: RawEdgeKey = [dependency, node.id];
       if (ids.has(dependency)) edges.set(rawEdgeId(edge), edges.get(rawEdgeId(edge)) ?? edge);
     }

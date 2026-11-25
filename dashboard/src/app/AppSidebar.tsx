@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type Dispatch, type SetStateAction } from "react";
+import type { CSSProperties, Dispatch, SetStateAction } from "react";
 import { Link } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { PanelLeftClose, PanelLeftOpen, type LucideIcon } from "lucide-react";
@@ -6,6 +6,7 @@ import { getServerVersion } from "../api/settingsRuntime";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
 import { Cap, CountBadge, ROW_HOVER_CLASS, StatusDot, cn } from "../components/common/KitPrimitives";
 import { Separator } from "../kit/free/separator-clean";
+import { useNow } from "../lib/useNow";
 import type { AppRouteEntry, AppRouteId, AppSectionId } from "./routes";
 import { formatRelativeTime } from "./shellFormatting";
 
@@ -47,16 +48,6 @@ const COLLAPSED_BADGE_STYLE = {
   boxShadow: "0 0 0 2px var(--bg-1)",
 } as CSSProperties;
 
-function useNow(active: boolean, tickMs = 5_000): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    const id = window.setInterval(() => setNow(Date.now()), tickMs);
-    return () => window.clearInterval(id);
-  }, [active, tickMs]);
-  return now;
-}
-
 export function AppSidebar({
   collapsed = false,
   onToggleCollapsed,
@@ -72,7 +63,7 @@ export function AppSidebar({
 }: AppSidebarProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
   const version = useQuery({ queryKey: ["shell", "server-version"], queryFn: getServerVersion, staleTime: Infinity, retry: false }).data;
-  useNow(wsConnected && wsLastEventTs != null);
+  useNow(5_000, wsConnected && wsLastEventTs != null);
   const lastEvent = wsConnected && wsLastEventTs != null ? formatRelativeTime(wsLastEventTs, isKo) : null;
   const statusText = wsConnected
     ? lastEvent

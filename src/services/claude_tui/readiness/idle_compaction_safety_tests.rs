@@ -1,7 +1,7 @@
 #![cfg(unix)]
 use super::super::*;
 use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
-use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use crate::services::tui_turn_state::idle_compaction_tests::{compacted_tail, end_turn, tail};
 use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
 
 fn append_completion(r: &Rig, at: DateTime<Utc>) {
@@ -168,6 +168,7 @@ fn each_compaction_attachment_and_notice_preserves_only_an_already_completed_rep
         "message":{"role":"user","content":"summary in progress"}}));
     let tmux = ScriptedTmux::new(&view("", false));
     tmux.set_dead(false);
+    let mut notified = false;
     for record in tail() {
         closed.append(record.clone());
         compacting.append(record.clone());
@@ -180,14 +181,81 @@ fn each_compaction_attachment_and_notice_preserves_only_an_already_completed_rep
             closed.ready(),
             "the same canonical completion proves readiness"
         );
+        // Only the idle-compaction notice closes the compaction; until then it holds.
+        notified |= record["subtype"] == "informational";
+        if notified {
+            assert_eq!(
+                observe_claude_jsonl_turn_state(&compacting.path),
+                TuiTurnState::Idle
+            );
+            assert!(
+                compacting.ready(),
+                "a closed compaction is not activity: {record}"
+            );
+            continue;
+        }
         assert_ne!(
             observe_claude_jsonl_turn_state(&compacting.path),
             TuiTurnState::Idle,
-            "an attachment or completion notice cannot finish newer activity: {record}"
+            "an attachment cannot finish a compaction no notice closed: {record}"
         );
         held_without_keys(&compacting, &tmux);
     }
+    let hard = Rig::new();
+    hard.append(end_turn());
+    hard.terminal();
+    compacted_tail()
+        .into_iter()
+        .for_each(|record| hard.append(record));
+    assert!(hard.ready(), "a hard terminal survives a closed compaction");
     append_completion(&compacting, Utc::now());
     assert_eq!(super::send_with_budget(&compacting), Ok(()));
     assert_eq!(tmux.sends(), ["load", "paste", "Enter"]);
+}
+
+#[test]
+fn a_compaction_no_idle_notice_closed_or_that_work_follows_holds_both_readings() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let unclosed = |trigger: &str| {
+        let mut records = compacted_tail();
+        records.retain(|record| record["subtype"] != "informational");
+        records[0]["compactMetadata"]["trigger"] = json!(trigger);
+        records
+    };
+    let mut cases = vec![unclosed("auto"), unclosed("manual")];
+    for work in [
+        json!({"type":"assistant","message":{"stop_reason":null,"content":[{"type":"text","text":"working"}]}}),
+        json!({"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tool","content":"done"}]}}),
+        json!({"type":"user","message":{"content":"next prompt"}}),
+    ] {
+        cases.push([compacted_tail(), vec![work]].concat());
+    }
+    for records in cases {
+        let r = Rig::new();
+        r.append(end_turn());
+        records.iter().for_each(|record| r.append(record.clone()));
+        assert!(!r.ready(), "{records:?}");
+        let state = observe_claude_jsonl_turn_state(&r.path);
+        assert_ne!(state, TuiTurnState::Idle, "{records:?}");
+    }
+}
+
+#[test]
+fn a_closed_compaction_keeps_the_session_id_read_inside_it() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut records = [vec![end_turn()], compacted_tail()].concat();
+    records[2]["sessionId"] = json!("inside");
+    let read = |records: &[Value]| {
+        let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::write(file.path(), text).unwrap();
+        super::super::evidence::read(file.path()).map(|tail| tail.native)
+    };
+    assert_eq!(read(&records), Some(Some("inside".into())));
+    let notice = records.iter().position(|r| r["subtype"] == "informational");
+    records[notice.unwrap()]["sessionId"] = json!("another");
+    assert_eq!(
+        read(&records),
+        None,
+        "the notice of another session cannot close it"
+    );
 }

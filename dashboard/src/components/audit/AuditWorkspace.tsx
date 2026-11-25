@@ -2,6 +2,7 @@ import { ArrowLeft, ChevronRight, CloudOff, FileQuestion, Search, Unplug } from 
 import { useState, type ReactNode } from "react";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
+import { Checkbox } from "../../kit/free/checkbox-clean";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
@@ -30,7 +31,8 @@ interface AuditWorkspaceProps {
 export function AuditWorkspace({ selection, phone, isKo, tr, caption, warning, children }: AuditWorkspaceProps) {
   const [query, setQuery] = useState("");
   const { list, agent } = selection;
-  if (list.length === 0) {
+  const testCount = selection.testCount ?? 0;
+  if (list.length === 0 && testCount === 0) {
     return (
       <EmptyState
         icon={<Unplug aria-hidden />}
@@ -61,6 +63,16 @@ export function AuditWorkspace({ selection, phone, isKo, tr, caption, warning, c
             value={query}
             onChange={(event) => setQuery(event.target.value)}
           />
+          {testCount > 0 ? (
+            <div className="mt-2 flex items-center">
+              <Checkbox
+                data-testid="audit-include-tests"
+                checked={Boolean(selection.includeTests)}
+                onChange={(event) => selection.setIncludeTests?.(event.target.checked)}
+                label={tr(`테스트 포함 (${testCount})`, `Tests (${testCount})`)}
+              />
+            </div>
+          ) : null}
         </div>
         <ul className="m-0 min-h-0 list-none overflow-y-auto p-0">
           {rows.map((item) => {
@@ -86,7 +98,13 @@ export function AuditWorkspace({ selection, phone, isKo, tr, caption, warning, c
             );
           })}
         </ul>
-        {rows.length === 0 ? <CardNote className="border-t-0">{tr("맞는 에이전트가 없어요.", "No matching agents.")}</CardNote> : null}
+        {rows.length === 0 ? (
+          <CardNote className="border-t-0">
+            {list.length === 0 && testCount > 0
+              ? tr("테스트 에이전트만 있어요. 테스트 포함을 켜면 보여요.", "Only test agents are bound; enable Tests above.")
+              : tr("맞는 에이전트가 없어요.", "No matching agents.")}
+          </CardNote>
+        ) : null}
       </KitCard>
     </nav>
   );

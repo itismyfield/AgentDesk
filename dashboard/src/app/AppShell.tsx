@@ -1,4 +1,14 @@
-import { Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { Agent, CompanySettings } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
@@ -7,6 +17,7 @@ import { useWorkspace } from "../contexts/WorkspaceContext";
 import { useSettings } from "../contexts/SettingsContext";
 import type { Notification } from "../components/NotificationCenter";
 import { useFocusTrap } from "../components/common/overlay";
+import { AlertDialog } from "../kit/free/dialog-clean";
 import { agentName, buildRunningNowTasks, classifyAgents } from "../components/home/homeModel";
 import { AgentTurnsProvider, reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
 import { MOBILE_LAYOUT_MEDIA_QUERY, TABLET_RAIL_MEDIA_QUERY } from "./breakpoints";
@@ -18,11 +29,11 @@ import {
   DEFAULT_ACCENT_PRESET,
   THEME_STORAGE_KEY,
   applyThemeAccentDataset,
+  isThemePreference,
   persistAccentPreset,
   persistThemePreference,
   readStoredAccentPreset,
   readStoredThemePreference,
-  readThemePreferenceFromPatch,
   resolveThemePreference,
   type AccentPreset,
   type ThemePreference,
@@ -30,10 +41,15 @@ import {
 import AppShellRoutes from "./AppShellRoutes";
 import AppShellOverlays from "./AppShellOverlays";
 import AppViewSkeleton from "./AppViewSkeleton";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { ShellFocusContext, ShellWindowFocusContext, type ShellFocus } from "./shellFocus";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
+
+type StopTaskPrompt =
+  | { kind: "agent"; agentId: string; label: string }
+  | { kind: "session"; sessionKey: string };
 
 interface AppShellProps {
   wsConnected: boolean;
@@ -86,15 +102,80 @@ export default function AppShell({
 
   const mainRef = useRef<HTMLElement>(null);
   const [agentInfoAgent, setAgentInfoAgent] = useState<Agent | null>(null);
-  const [showCommandPalette, setShowCommandPalette] = useState(false);
-  const [showShortcutHelp, setShowShortcutHelp] = useState(false);
-  const [showNotificationPanel, setShowNotificationPanel] = useState(false);
-  const [showTweaksPanel, setShowTweaksPanel] = useState(false);
+  const [showCommandPalette, setShowCommandPaletteState] = useState(false);
+  const [showShortcutHelp, setShowShortcutHelpState] = useState(false);
+  const [showNotificationPanel, setShowNotificationPanelState] = useState(false);
+  const [showTweaksPanel, setShowTweaksPanelState] = useState(false);
   const [showMobileMoreMenu, setShowMobileMoreMenu] = useState(false);
+  const overlayOpenRef = useRef({
+    commandPalette: false,
+    shortcutHelp: false,
+    notificationPanel: false,
+    tweaksPanel: false,
+  });
+  overlayOpenRef.current = {
+    commandPalette: showCommandPalette,
+    shortcutHelp: showShortcutHelp,
+    notificationPanel: showNotificationPanel,
+    tweaksPanel: showTweaksPanel,
+  };
+
+  const setShowCommandPalette = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.commandPalette) : action;
+    overlayOpenRef.current.commandPalette = next;
+    setShowCommandPaletteState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      overlayOpenRef.current.notificationPanel = false;
+      setShowTweaksPanelState(false);
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
+  const setShowShortcutHelp = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.shortcutHelp) : action;
+    overlayOpenRef.current.shortcutHelp = next;
+    setShowShortcutHelpState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      overlayOpenRef.current.notificationPanel = false;
+      setShowTweaksPanelState(false);
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
+  const setShowNotificationPanel = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.notificationPanel) : action;
+    overlayOpenRef.current.notificationPanel = next;
+    setShowNotificationPanelState(next);
+    if (next) {
+      overlayOpenRef.current.tweaksPanel = false;
+      setShowTweaksPanelState(false);
+    }
+  }, []);
+
+  const setShowTweaksPanel = useCallback<Dispatch<SetStateAction<boolean>>>((action) => {
+    const next = typeof action === "function" ? action(overlayOpenRef.current.tweaksPanel) : action;
+    overlayOpenRef.current.tweaksPanel = next;
+    setShowTweaksPanelState(next);
+    if (next) {
+      overlayOpenRef.current.notificationPanel = false;
+      setShowNotificationPanelState(false);
+    }
+  }, []);
+
   const mobileMoreMenuRef = useFocusTrap(showMobileMoreMenu);
   const [agentsPageTab, setAgentsPageTab] = useState<AgentManagerTab>("agents");
+  const hadStoredThemeAtBootRef = useRef(
+    typeof window !== "undefined" &&
+      typeof window.localStorage?.getItem === "function" &&
+      isThemePreference(window.localStorage.getItem(THEME_STORAGE_KEY)),
+  );
   const [themePreference, setThemePreference] = useState<ThemePreference>(() =>
-    readStoredThemePreference(window.localStorage, settings.theme),
+    readStoredThemePreference(
+      window.localStorage,
+      isThemePreference(settings.theme) ? settings.theme : DEFAULT_SETTINGS.theme,
+    ),
   );
   const [accentPreset, setAccentPreset] = useState<AccentPreset>(() =>
     readStoredAccentPreset(window.localStorage, DEFAULT_ACCENT_PRESET),
@@ -166,8 +247,15 @@ export default function AppShell({
     return () => query.removeListener(listener);
   }, []);
 
+  const themePreferenceRef = useRef(themePreference);
+  themePreferenceRef.current = themePreference;
+  const initialSettingsThemeRef = useRef(settings.theme);
+
   useEffect(() => {
-    if (typeof window.localStorage?.getItem === "function" && window.localStorage.getItem(THEME_STORAGE_KEY) == null) {
+    if (hadStoredThemeAtBootRef.current || settings.theme === initialSettingsThemeRef.current) return;
+    hadStoredThemeAtBootRef.current = true;
+    if (isThemePreference(settings.theme)) {
+      themePreferenceRef.current = settings.theme;
       setThemePreference(settings.theme);
     }
   }, [settings.theme]);
@@ -257,7 +345,7 @@ export default function AppShell({
       const latest = await api.getSettings();
       await api.saveSettings({ ...latest, ...patch } as CompanySettings);
       const refreshed = await api.getSettings();
-      setSettings({ ...DEFAULT_SETTINGS, ...refreshed } as CompanySettings);
+      setSettings({ ...DEFAULT_SETTINGS, ...patch, ...refreshed } as CompanySettings);
     },
     [setSettings],
   );
@@ -275,18 +363,25 @@ export default function AppShell({
 
   const handleSettingsSave = useCallback(
     async (patch: Record<string, unknown>) => {
-      const requestedThemePreference = readThemePreferenceFromPatch(patch);
-      await persistSettingsPatch(patch);
-      if (requestedThemePreference) {
-        setThemePreference(requestedThemePreference);
+      if (typeof patch.theme === "string" && isThemePreference(patch.theme)) {
+        const nextTheme = patch.theme;
+        hadStoredThemeAtBootRef.current = true;
+        themePreferenceRef.current = nextTheme;
+        setThemePreference(nextTheme);
+        setSettings((prev) =>
+          prev.theme === nextTheme ? prev : { ...prev, theme: nextTheme },
+        );
       }
+      await persistSettingsPatch(patch);
     },
-    [persistSettingsPatch],
+    [persistSettingsPatch, setSettings],
   );
 
   const openDefaultAgentInfo = useCallback((agent: Agent) => {
+    setShowTweaksPanel(false);
+    setShowNotificationPanel(false);
     setAgentInfoAgent(agent);
-  }, []);
+  }, [setShowNotificationPanel, setShowTweaksPanel]);
 
   const closeAgentInfo = useCallback(() => {
     setAgentInfoAgent(null);
@@ -295,24 +390,42 @@ export default function AppShell({
   const handleOpenRunningTask = useCallback((taskId: string) => {
     if (taskId.startsWith("agent:")) {
       const targetId = taskId.slice("agent:".length);
-      const found = agents.find((agent) => agent.id === targetId);
+      const found =
+        agents.find((agent) => agent.id === targetId) ??
+        agentsWithDispatched.find((agent) => agent.id === targetId);
       if (found) {
         openDefaultAgentInfo(found);
         return;
       }
     }
-    navigateToRoute("/agents");
-  }, [agents, navigateToRoute, openDefaultAgentInfo]);
+    navigateToRoute("/agents", { agentsTab: "agents" });
+  }, [agents, agentsWithDispatched, navigateToRoute, openDefaultAgentInfo]);
 
-  const handleStopRunningTask = useCallback(async (taskId: string) => {
+  const [stopTaskPrompt, setStopTaskPrompt] = useState<StopTaskPrompt | null>(null);
+  const lastStopTaskPromptRef = useRef<StopTaskPrompt | null>(null);
+  if (stopTaskPrompt) {
+    lastStopTaskPromptRef.current = stopTaskPrompt;
+  }
+  const activeStopTaskPrompt = stopTaskPrompt ?? lastStopTaskPromptRef.current;
+
+  const handleStopRunningTask = useCallback((taskId: string) => {
     if (taskId.startsWith("agent:")) {
       const agentId = taskId.slice("agent:".length);
       const target = agents.find((agent) => agent.id === agentId);
       const label = target ? agentName(target, isKo) : agentId;
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm(tr(`${label}의 실행 중인 턴을 중단할까요?`, `Stop ${label}'s running turn?`));
-      if (!confirmed) return;
+      setStopTaskPrompt({ kind: "agent", agentId, label });
+      return;
+    }
+    if (taskId.startsWith("session:")) {
+      const sessionKey = taskId.slice("session:".length);
+      setStopTaskPrompt({ kind: "session", sessionKey });
+    }
+  }, [agents, isKo]);
+
+  const confirmStopRunningTask = useCallback(async () => {
+    if (!stopTaskPrompt) return;
+    if (stopTaskPrompt.kind === "agent") {
+      const { agentId, label } = stopTaskPrompt;
       try {
         const res = await stopAgentTurn(agentId);
         if (res.session_key) {
@@ -330,42 +443,53 @@ export default function AppShell({
       }
       return;
     }
-    if (taskId.startsWith("session:")) {
-      const sessionKey = taskId.slice("session:".length);
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm(tr("이 미연결 세션의 멈춘 턴 정리를 시도할까요?", "Try reconciling this unlinked session's turn?"));
-      if (!confirmed) return;
-      try {
-        const res = await reconcileStaleSessionTurn(sessionKey);
-        if (res.reconciled) {
-          setSessions((prev) =>
-            prev.map((s) => (s.session_key === sessionKey ? { ...s, status: "idle", last_seen_at: Date.now() } : s)),
-          );
-          pushNotification(tr("세션 턴을 정리했어요.", "Reconciled session turn."), "success");
-        } else {
-          pushNotification(
-            tr("현재 살아 있는 미연결 세션이에요. 에이전트 화면에서 확인해요.", "This unlinked lane is actively running; opening Agents."),
-            "info",
-          );
-          navigateToRoute("/agents");
-        }
-      } catch (error) {
-        pushNotification(
-          error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
-          "error",
+    const { sessionKey } = stopTaskPrompt;
+    try {
+      const res = await reconcileStaleSessionTurn(sessionKey);
+      if (res.reconciled) {
+        setSessions((prev) =>
+          prev.map((s) => (s.session_key === sessionKey ? { ...s, status: "idle", last_seen_at: Date.now() } : s)),
         );
+        pushNotification(tr("세션 턴을 정리했어요.", "Reconciled session turn."), "success");
+      } else {
+        pushNotification(
+          tr("현재 살아 있는 미연결 세션이에요. 에이전트 화면에서 확인해요.", "This unlinked lane is actively running; opening Agents."),
+          "info",
+        );
+        navigateToRoute("/agents");
       }
+    } catch (error) {
+      pushNotification(
+        error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
+        "error",
+      );
     }
-  }, [agents, isKo, navigateToRoute, pushNotification, refreshAgents, setSessions, tr]);
+  }, [navigateToRoute, pushNotification, refreshAgents, setSessions, stopTaskPrompt, tr]);
+
+  const applyShellThemePreference = useCallback<Dispatch<SetStateAction<ThemePreference>>>(
+    (action) => {
+      const current = themePreferenceRef.current;
+      const next = typeof action === "function" ? action(current) : action;
+      if (next === current) return;
+      hadStoredThemeAtBootRef.current = true;
+      themePreferenceRef.current = next;
+      setThemePreference(next);
+      setSettings((prev) => (prev.theme === next ? prev : { ...prev, theme: next }));
+      void persistSettingsPatch({ theme: next }).catch(() => {});
+    },
+    [persistSettingsPatch, setSettings],
+  );
 
   const toggleShellTheme = useCallback(() => {
-    setThemePreference((currentPreference) => {
-      const activeTheme =
-        currentPreference === "auto" ? resolvedTheme : currentPreference;
-      return activeTheme === "dark" ? "light" : "dark";
-    });
-  }, [resolvedTheme]);
+    const current = themePreferenceRef.current;
+    const activeTheme = current === "auto" ? resolvedTheme : current;
+    applyShellThemePreference(activeTheme === "dark" ? "light" : "dark");
+  }, [applyShellThemePreference, resolvedTheme]);
+
+  const syncedSettings = useMemo(
+    () => (settings.theme === themePreference ? settings : { ...settings, theme: themePreference }),
+    [settings, themePreference],
+  );
 
   const toggleSidebarCollapsed = useCallback(() => {
     setSidebarOverride((prev) => {
@@ -485,7 +609,7 @@ export default function AppShell({
               resolvedTheme={resolvedTheme}
               runningTasks={runningTasks}
               onOpenRunningTask={handleOpenRunningTask}
-              onStopRunningTask={(taskId) => void handleStopRunningTask(taskId)}
+              onStopRunningTask={handleStopRunningTask}
               onViewAllRunning={() => navigateToRoute(currentRoute?.id === "home" ? "/agents" : "/home")}
               setShowCommandPalette={setShowCommandPalette}
               setShowNotificationPanel={setShowNotificationPanel}
@@ -505,48 +629,54 @@ export default function AppShell({
                 : undefined,
             }}
           >
-            <Suspense
-              fallback={
-                <AppViewSkeleton
-                  label={
-                    currentRoute
-                      ? isKo
-                        ? currentRoute.labelKo
-                        : currentRoute.labelEn
-                      : tr("로딩 중...", "Loading...")
-                  }
-                />
-              }
+            <RouteErrorBoundary
+              resetKey={location.pathname}
+              isKo={isKo}
+              onGoHome={() => navigateToRoute("/home")}
             >
-              <ShellFocusContext.Provider value={setFocusRequest}>
-                <ShellWindowFocusContext.Provider value={focused}>
-                  <AppShellRoutes
-                    ctx={{
-                      agents,
-                      agentsPageTab,
-                      agentsWithDispatched,
-                      departments,
-                      handleSettingsSave,
-                      isKo,
-                      isMobileViewport,
-                      navigateToRoute,
-                      notifications,
-                      openDefaultAgentInfo,
-                      pushNotification,
-                      setAgentsPageTab,
-                      settings,
-                      stats,
-                      updateNotification,
-                      visibleDispatchedSessions,
-                      wsConnected,
-                      wsLastEventTs,
-                      refreshAgents,
-                      refreshDepartments,
-                    }}
+              <Suspense
+                fallback={
+                  <AppViewSkeleton
+                    label={
+                      currentRoute
+                        ? isKo
+                          ? currentRoute.labelKo
+                          : currentRoute.labelEn
+                        : tr("로딩 중...", "Loading...")
+                    }
                   />
-                </ShellWindowFocusContext.Provider>
-              </ShellFocusContext.Provider>
-            </Suspense>
+                }
+              >
+                <ShellFocusContext.Provider value={setFocusRequest}>
+                  <ShellWindowFocusContext.Provider value={focused}>
+                    <AppShellRoutes
+                      ctx={{
+                        agents,
+                        agentsPageTab,
+                        agentsWithDispatched,
+                        departments,
+                        handleSettingsSave,
+                        isKo,
+                        isMobileViewport,
+                        navigateToRoute,
+                        notifications,
+                        openDefaultAgentInfo,
+                        pushNotification,
+                        setAgentsPageTab,
+                        settings: syncedSettings,
+                        stats,
+                        updateNotification,
+                        visibleDispatchedSessions,
+                        wsConnected,
+                        wsLastEventTs,
+                        refreshAgents,
+                        refreshDepartments,
+                      }}
+                    />
+                  </ShellWindowFocusContext.Provider>
+                </ShellFocusContext.Provider>
+              </Suspense>
+            </RouteErrorBoundary>
           </main>
         </div>
       </div>
@@ -594,7 +724,7 @@ export default function AppShell({
           setShowCommandPalette,
           setShowShortcutHelp,
           setShowTweaksPanel,
-          setThemePreference,
+          setThemePreference: applyShellThemePreference,
           showCommandPalette,
           showShortcutHelp,
           showTweaksPanel,
@@ -602,6 +732,44 @@ export default function AppShell({
           tr,
           wsConnected,
         }}
+      />
+
+      <AlertDialog
+        open={stopTaskPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) setStopTaskPrompt(null);
+        }}
+        danger={activeStopTaskPrompt?.kind === "agent"}
+        title={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr(
+                `${activeStopTaskPrompt.label}의 실행 중인 턴을 중단할까요?`,
+                `Stop ${activeStopTaskPrompt.label}'s running turn?`,
+              )
+            : tr(
+                "이 미연결 세션의 멈춘 턴 정리를 시도할까요?",
+                "Try reconciling this unlinked session's turn?",
+              )
+        }
+        description={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr(
+                "현재 진행 중인 응답 생성을 즉시 멈춥니다. 대기열에 남은 작업은 유지됩니다.",
+                "Immediately stops the current turn in progress. Queued items remain intact.",
+              )
+            : tr(
+                "실제로 멈춘 세션이면 유휴 상태로 되돌리고, 아직 실행 중이면 에이전트 화면으로 이동합니다.",
+                "Marks the session idle if its turn is stale, or opens Agents if it is still actively running.",
+              )
+        }
+        confirmLabel={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr("턴 중단", "Stop turn")
+            : tr("세션 정리", "Reconcile")
+        }
+        cancelLabel={tr("취소", "Cancel")}
+        onConfirm={confirmStopRunningTask}
+        onCancel={() => setStopTaskPrompt(null)}
       />
     </div>
     </AgentTurnsProvider>

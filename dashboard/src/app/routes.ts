@@ -53,8 +53,8 @@ export const APP_ROUTES: AppRouteEntry[] = [
     section: "workspace",
     labelKo: "에이전트",
     labelEn: "Agents",
-    descriptionKo: "에이전트, 부서, 스킬을 관리해요.",
-    descriptionEn: "Manage agents, departments and skills.",
+    descriptionKo: "에이전트와 스킬, 연결 세션을 관리해요.",
+    descriptionEn: "Manage agents, skills, and sessions.",
     shortcutKey: "3",
   },
   {

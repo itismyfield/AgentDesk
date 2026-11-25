@@ -83,3 +83,46 @@ it("reports an empty card and a failed read", async () => {
   await act(async () => root.render(<TurnTranscriptPanel source={{ type: "card", id: "card-2" }} tr={tr} isKo={false} />));
   expect(container.querySelector('[role="alert"]')?.textContent).toBe("offline");
 });
+
+it("renders AgentTiming spans and toggles AgentToolCalls summary when tool events exist", async () => {
+  const richTranscripts = [
+    transcript("turn-tools", "2026-11-17T11:00:00Z", 120_000, {
+      agent_id: "adk-cc",
+      provider: "claude",
+      events: [
+        { kind: "thinking", tool_name: null, summary: null, content: "Inspect failing test", status: null, is_error: false },
+        { kind: "tool_use", tool_name: "Bash", summary: "cargo test", content: "cargo test", status: "done", is_error: false },
+        { kind: "tool_result", tool_name: "Bash", summary: null, content: "ok", status: "done", is_error: false },
+        { kind: "tool_use", tool_name: "Write", summary: "patch helper", content: "patch", status: "pending", is_error: false },
+        { kind: "assistant", tool_name: null, summary: null, content: "All set.", status: null, is_error: false },
+      ],
+    }),
+    TRANSCRIPTS[1],
+  ];
+  getCardTranscripts.mockResolvedValueOnce(richTranscripts);
+  await act(async () => root.render(<TurnTranscriptPanel source={{ type: "card", id: "card-1" }} tr={tr} isKo={false} />));
+
+  const timing = byTestId("turn-transcript-timing")!;
+  expect(timing.querySelector(".aui-agent-timing")).not.toBeNull();
+  const kinds = [...timing.querySelectorAll<HTMLElement>(".aui-agent-timing-span")].map((el) => el.dataset.kind);
+  expect(kinds).toEqual(["thinking", "tool", "tool", "waiting"]);
+
+  const toggle = byTestId("turn-transcript-tool-calls-toggle") as HTMLButtonElement;
+  expect(toggle.textContent).toContain("Tool call summary (2)");
+  expect(byTestId("turn-transcript-tool-calls")).toBeNull();
+
+  await act(async () => toggle.click());
+  const toolCalls = byTestId("turn-transcript-tool-calls")!;
+  expect(toolCalls.querySelector(".aui-agent-tool-calls")).not.toBeNull();
+  expect(toolCalls.querySelector(".aui-agent-tool-calls-live")).toBeNull();
+  expect(toolCalls.textContent).toContain("Bash");
+  expect(toolCalls.textContent).toContain("Write");
+  const statuses = [...toolCalls.querySelectorAll<HTMLElement>(".aui-agent-tool-calls-status")].map((el) => el.dataset.status);
+  expect(statuses).toContain("done");
+  expect(statuses).toContain("waiting");
+
+  // Switching to a turn with no tool events hides the tool summary section.
+  const secondTurn = container.querySelectorAll<HTMLButtonElement>("[data-turn]")[1]!;
+  await act(async () => secondTurn.click());
+  expect(byTestId("turn-transcript-tool-calls-section")).toBeNull();
+});

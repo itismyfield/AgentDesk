@@ -1,4 +1,4 @@
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, X } from "lucide-react";
 import { useState } from "react";
 import { updateCampaignNode, type Campaign, type CampaignNode, type CampaignNodeLive } from "../../api/campaigns";
 import { ApiRequestError } from "../../api/httpClient";
@@ -78,7 +78,7 @@ export default function CampaignNodeDetails({
           <div className="campaign-edit-grid grid grid-cols-1 gap-3 text-sm sm:grid-cols-2">
             <div className="grid gap-1.5">
               <Eyebrow>{tr("상태", "Status")}</Eyebrow>
-              <Select aria-label={tr("상태", "Status")} size="lg" value={draft.status}
+              <Select aria-label={tr("상태", "Status")} size="lg" disabled={saving} value={draft.status}
                 options={NODE_STATUSES.map((status) => ({ value: status, label: tr(...LABELS[status]) }))}
                 onChange={(value) => patch({ status: value as CampaignNode["status"] })} />
             </div>
@@ -107,20 +107,58 @@ export default function CampaignNodeDetails({
               <TextField size="lg" value={draft.provider ?? ""} onChange={(event) => patch({ provider: event.target.value || null })} />
             </label>
           </div>
-          <label className="grid gap-1.5">
-            <Eyebrow>{tr("선행 작업 (여러 개 선택 가능)", "Dependencies (multiple selection)")}</Eyebrow>
-            <select
-              multiple
-              size={Math.min(5, Math.max(2, campaign.nodes.length - 1))}
-              value={draft.dependencies}
-              onChange={(event) => patch({ dependencies: Array.from(event.target.selectedOptions, (option) => option.value) })}
-              className="min-h-11 w-full rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--bg-2)] p-2 text-sm text-[var(--fg)]"
-            >
-              {campaign.nodes.filter((candidate) => candidate.id !== node.id).map((candidate) => (
-                <option key={candidate.id} value={candidate.id}>{candidate.title}</option>
-              ))}
-            </select>
-          </label>
+          {(() => {
+            const dependencyCandidates = campaign.nodes.filter(
+              (candidate) => candidate.id !== node.id && !draft.dependencies.includes(candidate.id),
+            );
+            return (
+              <div className="grid gap-1.5">
+                <Eyebrow>{tr("선행 작업 (여러 개 선택 가능)", "Dependencies (multiple selection)")}</Eyebrow>
+                {draft.dependencies.length > 0 && (
+                  <div role="list" aria-label={tr("선택된 선행 작업", "Selected dependencies")} className="flex flex-wrap gap-1.5">
+                    {draft.dependencies.map((depId) => {
+                      const depTitle = campaign.nodes.find((candidate) => candidate.id === depId)?.title || depId;
+                      return (
+                        <span
+                          key={depId}
+                          role="listitem"
+                          className="inline-flex min-h-7 max-[899px]:min-h-11 [@media(pointer:coarse)]:min-h-11 max-w-full items-center gap-1 rounded-full border border-[var(--line)] bg-[var(--bg-2)] py-0.5 pl-2.5 pr-1 text-xs font-medium text-[var(--fg)]"
+                        >
+                          <span className="min-w-0 truncate">{depTitle}</span>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            aria-label={tr(`선행 ${depTitle} 빼기`, `Remove dependency ${depTitle}`)}
+                            onClick={() => patch({ dependencies: draft.dependencies.filter((id) => id !== depId) })}
+                            className="!m-0 grid size-6 max-[899px]:!size-11 [@media(pointer:coarse)]:!size-11 shrink-0 cursor-pointer place-items-center !rounded-full !border-0 !bg-transparent !p-0 text-[var(--fg-muted)] hover:!bg-[color-mix(in_oklch,var(--fg)_10%,transparent)]"
+                          >
+                            <X aria-hidden className="size-3.5" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                <Select
+                  aria-label={tr("선행 작업 (여러 개 선택 가능)", "Dependencies (multiple selection)")}
+                  size="lg"
+                  value={null}
+                  disabled={saving || dependencyCandidates.length === 0}
+                  placeholder={
+                    dependencyCandidates.length === 0
+                      ? tr("추가할 선행 작업 없음", "No dependencies available")
+                      : tr("+ 선행 작업 추가", "+ Add dependency")
+                  }
+                  options={dependencyCandidates.map((candidate) => ({ value: candidate.id, label: candidate.title }))}
+                  onChange={(value) => {
+                    if (value && !draft.dependencies.includes(value)) {
+                      patch({ dependencies: [...draft.dependencies, value] });
+                    }
+                  }}
+                />
+              </div>
+            );
+          })()}
           <label className="grid gap-1.5">
             <Eyebrow>{tr("다음 행동", "Next action")}</Eyebrow>
             <TextArea minRows={3} value={draft.next_action ?? ""} onChange={(event) => patch({ next_action: event.target.value || null })} />
