@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useNow } from "../../lib/useNow";
 import { getSystemHealthTone, type SystemHealthTone } from "../../theme/statusTokens";
 
 interface FreshnessIndicatorProps {
@@ -84,13 +85,7 @@ export function FreshnessIndicator({
   compact = false,
   announceToneChange = false,
 }: FreshnessIndicatorProps) {
-  const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    if (timestamp == null) return;
-    const id = window.setInterval(() => setNow(Date.now()), tickMs);
-    return () => window.clearInterval(id);
-  }, [timestamp, tickMs]);
+  const now = useNow(tickMs, timestamp != null);
 
   const ms = toMs(timestamp);
   const currentTone: FreshnessTone | "empty" =

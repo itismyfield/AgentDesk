@@ -1,8 +1,9 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useId, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorLabels } from "../../kit/pro/agent-monitor";
+import { useNow } from "../../lib/useNow";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
 import {
@@ -401,12 +402,8 @@ function AgentMonitors({
   onOpen: (entry: HomeAgent) => void;
   onStopTurn?: (agent: Agent) => void;
 }) {
-  const [now, setNow] = useState(() => Date.now());
+  const now = useNow(1_000);
   const labels = useMemo(() => monitorLabels(tr), [tr]);
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(timer);
-  }, []);
   return (
     <ul className="m-0 grid list-none gap-2 border-t border-[var(--line-soft)] p-3 sm:grid-cols-2 sm:gap-3 sm:px-4">
       {items.map(({ entry, view }) => {
