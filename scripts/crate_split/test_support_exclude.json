@@ -1,5 +1,5 @@
 {
- "about": "#7353 KRX-TS: gates test_support_codemod.py leaves as they are, keyed by file and item label (`impl Runner > fn probes_mut`, never a line number). The exception slice and the M-KRX split commit own them. `cfg` lists the gate of every item an entry must match (count and kind); `bundles` are items that open or hold together; each member records its cfg, and a member whose cfg drifted holds the bundle.",
+ "about": "#7353 KRX-TS: gates test_support_codemod.py leaves as they are, keyed by file and item label (`impl Runner > fn probes_mut`, never a line number). The exception slice and the M-KRX split commit own them. `cfg` lists the gate of every item an entry must match (count and kind); Dependency bundles live in test_support_bundles.json.",
  "reasons": {
   "drop_guard": "gated `impl Drop` of a guard whose type the codemod opens; opening it changes restore behaviour, so it goes with its slice",
   "not_test_twin": "a `cfg(not(test))` item of the same name; both sides must flip together (`not(any(test, feature = \"test-support\"))`)",
@@ -566,27 +566,6 @@
    "cfg": [
     "test"
    ]
-  }
- ],
- "bundles": [
-  {
-   "name": "claims_judged",
-   "file": "src/services/tui_o/cutover/channel_gate.rs",
-   "items": [
-    {
-     "item": "fn claims_judged",
-     "cfg": "test"
-    },
-    {
-     "item": "static CLAIMS",
-     "cfg": "test"
-    },
-    {
-     "item": "fn reserve_body > stmt CLAIMS",
-     "cfg": "test"
-    }
-   ],
-   "why": "claims_judged reads CLAIMS, which only the gated record in reserve_body fills (Sol review krxts-1 P1); opening the reader alone builds but records nothing"
   }
  ]
 }

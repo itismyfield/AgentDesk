@@ -183,6 +183,18 @@ pub(crate) fn attr_twin() {}
 #[cfg(test)]
 pub(crate) fn attr_twin() {}
 """
+# A re-export whose module exists but whose target is a static inside a gated `thread_local!`.
+TLS_REEXPORT = """
+pub(crate) mod clear {
+    #[cfg(test)]
+    thread_local! {
+        pub(crate) static AFTER: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
+    }
+}
+
+#[cfg(test)]
+pub(crate) use clear::AFTER;
+"""
 # A glob target and a macro-built path: the tool cannot follow them, so the declaration holds whole.
 GLOB_USE = """#[cfg(test)]
 pub(crate) mod extra {
@@ -276,7 +288,8 @@ class Fixture:
     def codemod(self, *args):
         out = io.StringIO()
         with redirect_stdout(out):
-            rc = codemod.main(["--tree", str(self.repo), "--exclude", str(self.repo / verify.EXCLUDE), *args])
+            rc = codemod.main(["--tree", str(self.repo), "--exclude", str(self.repo / verify.EXCLUDE),
+                               "--bundles", str(self.repo / verify.BUNDLES), *args])
         return rc, out.getvalue()
 
     def verify(self, base, head, compile_package=None):
@@ -399,6 +412,24 @@ class Codemod(unittest.TestCase):
                      "    #[cfg(test)]\n    pub(crate) fn third()"):
             self.assertIn(kept, fx.core())
         self.assertIn("#[cfg(test)]\npub(crate) use gate::{", fx.core())
+
+    def test_a_target_in_a_macro_body_holds_the_reexport_even_though_its_module_exists(self):
+        # krxts-3 P1-1 (readiness/source.rs:119 `clear::AFTER_PUBLICATION`): the module resolves, the static does not.
+        app = APP.replace("seeded();", "seeded();\n        crate::core::AFTER.with(|after| after.get());")
+        fx = Fixture(self.tmp.name, core=CORE + TLS_REEXPORT, app=app)
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("use declaration: in a macro body for `core::clear::AFTER`", out)
+        self.assertTrue(fx.core().endswith(TLS_REEXPORT), fx.core()[-400:])
+
+    def test_a_direct_reference_alone_still_holds_a_group_with_an_excluded_sibling(self):
+        # krxts-3 P1-2: no upper test names the re-export; `second` is excluded and was never a hit.
+        app = APP.replace("seeded();", "seeded();\n        crate::core::gate::first();")
+        fx = Fixture(self.tmp.name, core=CORE + REEXPORT, app=app,
+                     exclude=("fn kept", ("mod gate > fn second", ["all(test, unix)"])))
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(fx.core().endswith(REEXPORT), fx.core()[-400:])
 
     def test_a_comment_semicolon_inside_the_use_does_not_end_it(self):
         # Sol krxts-2 P1: `first, // note;` ended the declaration at the comment, so two targets stayed shut.
@@ -535,10 +566,12 @@ class Verify(unittest.TestCase):
             path.write_text(edit(path.read_text()))
         return self.fx.commit("convert")
 
-    def test_codemod_output_passes(self):
+    def test_codemod_output_is_only_a_structural_pass_without_step_e(self):
+        # krxts-3 P2-1: a-d alone never print the full PASS nor exit 0.
         rc, out = self.fx.verify(self.base, self.converted())
-        self.assertEqual(rc, 0, out)
-        self.assertTrue(out.startswith("TS_VERIFY PASS subs=11 scanned=12 excluded=1 idem=0"), out)
+        self.assertEqual(rc, 3, out)
+        self.assertTrue(out.startswith("TS_VERIFY STRUCTURAL_PASS subs=11 scanned=12 excluded=1 idem=0"), out)
+        self.assertNotIn("TS_VERIFY PASS", out)
 
     def test_one_extra_character_fails_a(self):
         rc, out = self.fx.verify(self.base, self.converted(lambda t: t.replace("fn helper() {}", "fn helper() { }")))
@@ -560,9 +593,9 @@ class Verify(unittest.TestCase):
     def test_changing_an_excluded_item_fails_b_and_c(self):
         rc, out = self.fx.verify(self.base, self.converted(
             lambda t: t.replace("#[cfg(test)]\npub(crate) fn kept", f"#[cfg({TS})]\npub(crate) fn kept")))
-        self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL c,b,d"), out)
+        # c and b catch it; d does not (an entry still matches its item once opened, for the manual commit).
+        self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL c,b"), out)
         self.assertIn("excluded item changed or missing: src/core.rs :: fn kept", out)
-        self.assertIn("d  codemod on head failed (code 2)", out)
         gate = CORE.split("\n").index("pub(crate) fn kept() {}")  # 0-based item line = 1-based gate line
         self.assertIn(f"diff line the codemod does not make: src/core.rs:{gate}", out)
 
@@ -587,6 +620,7 @@ import json, os, sys
 from pathlib import Path
 core = Path("src/core.rs")
 json.dump({"argv": sys.argv[1:], "cwd": os.getcwd(), "target": os.environ.get("CARGO_TARGET_DIR"),
+           "color": os.environ.get("CARGO_TERM_COLOR"),
            "core": core.read_text() if core.is_file() else None}, open(os.environ["FAKE_LOG"], "w"))
 sys.stderr.write(os.environ.get("FAKE_STDERR", ""))
 sys.exit(int(os.environ.get("FAKE_RC", "0")))
@@ -618,23 +652,26 @@ class Compile(unittest.TestCase):
         rc, out = self.run_e()
         self.assertEqual(rc, 0, out)
         self.assertTrue(out.startswith("TS_VERIFY PASS subs=11 scanned=12 excluded=1 idem=0 compile=0"), out)
-        self.assertIn("| e compile | PASS | rc=0 errors=0 cmd=`rustc -p fx --lib --profile check -- --cfg "
-                      "feature=\"test-support\"`", out)
+        self.assertIn("| e compile | PASS | rc=0 errors=0 cmd=`check -p fx --lib --features test-support "
+                      "--message-format short --color never`", out)
         call = json.loads(self.log.read_text())
-        self.assertEqual(call["argv"], ["rustc", "-p", "fx", "--lib", "--profile", "check", "--", "--cfg",
-                                        'feature="test-support"'])
+        # krxts-3 P2-2: the real Cargo feature (optional dependencies on), no colour codes in the diagnostics.
+        self.assertEqual(call["argv"], ["check", "-p", "fx", "--lib", "--features", "test-support",
+                                        "--message-format", "short", "--color", "never"])
+        self.assertEqual(call["color"], "never")
         self.assertEqual(call["target"], self.env["TS_VERIFY_TARGET_DIR"])
         # The head commit's tree, not the working tree: a later uncommitted edit is not what gets built.
         self.assertNotEqual(Path(call["cwd"]).resolve(), self.fx.repo.resolve())
         self.assertIn(f"#[cfg({TS})]\npub(crate) fn helper()", call["core"])
 
     def test_a_failed_build_or_an_error_line_fails_e(self):
-        stderr = "error[E0432]: unresolved import `gate::second`\nerror: could not compile `fx`\n"
+        stderr = ("src/core.rs:9:5: error[E0432]: unresolved import `gate::second`\n"
+                  "error: could not compile `fx` (lib) due to 1 previous error\n")
         for rc_text, want in (("101", "rc=101 errors=1"), ("0", "rc=0 errors=1")):
             rc, out = self.run_e(FAKE_RC=rc_text, FAKE_STDERR=stderr)
             self.assertEqual((rc, out.split("\n")[0]), (1, "TS_VERIFY FAIL e"), out)
             self.assertIn(f"| e compile | FAIL | {want} ", out)
-            self.assertIn("e  error[E0432]: unresolved import `gate::second`", out)
+            self.assertIn("e  src/core.rs:9:5: error[E0432]: unresolved import `gate::second`", out)
         rc, out = self.run_e(FAKE_RC="1", FAKE_STDERR="warning: only a warning\n")
         self.assertIn("| e compile | FAIL | rc=1 errors=0 ", out)
 
@@ -644,7 +681,7 @@ class Compile(unittest.TestCase):
         self.assertIn("cargo did not start", out)
         with mock.patch.dict(os.environ, self.env):
             rc, out = self.fx.verify(self.base, self.head)
-        self.assertEqual(rc, 0, out)
+        self.assertEqual(rc, 3, out)
         self.assertNotIn("e compile", out)
         self.assertFalse(self.log.exists())
 
