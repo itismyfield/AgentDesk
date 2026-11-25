@@ -2420,3 +2420,6 @@ async fn reg_7832_waiting_input_uses_soon_then_turn_start_uses_hourglass() {
 
 #[path = "previous_v3_reader_tests.rs"]
 mod previous_v3_reader;
+
+#[path = "accept_pending_tests.rs"]
+mod accept_pending_cases;

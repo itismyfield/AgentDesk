@@ -4,6 +4,8 @@ pub(crate) mod admission;
 pub(crate) mod claude_handoff;
 pub(crate) mod closed;
 pub(crate) mod drive;
+#[cfg(unix)]
+pub(crate) mod early_pending;
 pub(crate) mod effect;
 pub(crate) mod effort_continue;
 pub(crate) mod held_watch;
