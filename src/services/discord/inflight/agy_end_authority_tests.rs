@@ -254,6 +254,30 @@ async fn next_admission_never_settles_a_marked_route_row() {
     assert!(path.exists());
 }
 
+// An identity-matched archive removes the row too: the custody row stays, its Legacy twin moves.
+#[test]
+fn identity_archive_keeps_custody_row() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    for (state, custody) in [
+        (row(6_325_610_025, true), true),
+        (row(6_325_610_026, false), false),
+    ] {
+        let path = write(&inflight_root(), &state);
+        let archived = super::archive_inflight_state_if_matches_identity_generation(
+            &ProviderKind::Antigravity,
+            state.channel_id,
+            &InflightTurnIdentity::from_state(&state),
+            &state.updated_at,
+            state.save_generation,
+            "custody",
+        );
+        assert_eq!(
+            (path.exists(), archived == GuardedClearOutcome::Cleared),
+            (custody, !custody)
+        );
+    }
+}
+
 async fn outcome(pool: &sqlx::PgPool, channel: u64) -> Option<String> {
     let sql =
         "SELECT terminal_outcome FROM turns WHERE turn_id = $1 AND terminal_outcome IS NOT NULL";
