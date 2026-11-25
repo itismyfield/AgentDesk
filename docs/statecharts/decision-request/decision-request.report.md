@@ -249,15 +249,15 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 
 | 모델 전이·변수 | 코드 | 메모 |
 |---|---|---|
-| Activate(`wired`) · ActivateUnwired(대조) | `src/services/discord/decisions/publication.rs` `activate`(:107) · `unwired`(:89) → `src/services/discord/health/turn_deliver/decision_target.rs` `start_refusal`(:53), `src/db/decisions/selection.rs` `open`(:187) | 대상이 agent 본 채널이고 그 채널의 시작 경로가 거절되지 않을 때만 버튼을 켠다. thread 대상과 host가 시작을 거절하는 채널(Herdr `executor_not_wired` 포함)은 비활성 글에 사유를 적는다. 카드 편집이 먼저, PG `open`이 나중이다 |
+| Activate(`wired`) · ActivateUnwired(대조) | `src/services/discord/decisions/publication.rs` `activate`(:118) · `wiring`(:99) → `src/services/discord/health/turn_deliver/decision_target.rs` `start_check`(:63), `src/db/decisions/selection.rs` `open`(:187) | 대상이 agent 본 채널이고 그 채널의 시작 경로가 거절되지 않을 때만 버튼을 켠다. thread 대상과 host가 시작을 거절하는 채널(Herdr `executor_not_wired` 포함)은 비활성 글에 사유를 적는다. 카드 편집이 먼저, PG `open`이 나중이다 |
 | Click(`stored`) · Reclick(대조 NoChoiceCas·LateChoice) | `src/services/discord/router/intake_gate/component_events.rs:17` → `src/services/discord/decisions/component.rs` `component`(:16) · `click`(:35) → `selection.rs` `choose_once`(:60) | 빠른 deferred ACK 뒤 owner(:43) 확인, request row lock(:83) 아래에서 기존 choice 확인(:114) → `open` 확인(:121) → event·attempt·choice를 한 transaction으로 저장하고 `selecting`으로 봉인한다. 같은 선택 재클릭은 저장된 선택을 알리고, 다른 선택은 거절한다. 글·봇 바인딩이 다른 클릭은 남의 것이다 |
-| StoreLate(대조 RunBeforeStore) · Claim | `component.rs` `accepted`(:79) → `src/services/discord/decisions/lifecycle.rs` `deliver`(:52) → `decision_target.rs` `deliver_once` | 전달은 commit 뒤에만 시작한다. live session 검사는 저장 조건이 아니다 |
-| Crash/Boot 뒤 Claim · NoBootStart(대조) | `lifecycle.rs` `spawn_worker`(:143, 호출 `runtime_bootstrap/spawns.rs:217`) → `converge`(:78) → `selection.rs` `unstarted`(:294) | 저장됐으나 시작 못 한 선택은 그 채널을 가진 process가 한 번 시작한다(not_started CAS). 다른 process는 건드리지 않는다 |
-| CloseUnknown · BootResend(대조) | `converge`(:78) → `src/services/discord/queue_io/decision_drain.rs` `settle_abandoned`(:505) | 결과 불명 시도는 증거로만 정산한다(재전송 0). 한가한 채널의 시도도 이 pass에서 끝에 닿는다 |
-| Seal · NoSeal(대조) | `lifecycle.rs` `close`(:101) → `show`(:22), `selection.rs` `close`(:315) | 전달이 끝나면 PG에서 먼저 `closed`, 그다음 provider 봇이 결과를 카드에 쓰고 announce 봇이 archive+lock한다. 확정 거절은 `moderation_error`로 남기고 멈춘다 |
+| StoreLate(대조 RunBeforeStore) · Claim | `component.rs` `accepted`(:79) → `src/services/discord/decisions/lifecycle.rs` `deliver`(:112) → `decision_target.rs` `deliver_once` | 전달은 commit 뒤에만 시작한다. live session 검사는 저장 조건이 아니다 |
+| Crash/Boot 뒤 Claim · NoBootStart(대조) | `lifecycle.rs` `spawn_worker`(:203, 호출 `runtime_bootstrap/spawns.rs:217`) → `converge`(:128) → `selection.rs` `unstarted`(:342) | 저장됐으나 시작 못 한 선택은 그 채널을 가진 process가 한 번 시작한다(not_started CAS). 다른 process는 건드리지 않는다 |
+| CloseUnknown · BootResend(대조) | `converge`(:128) → `src/services/discord/queue_io/decision_drain.rs` `settle_abandoned`(:505) | 결과 불명 시도는 증거로만 정산한다(재전송 0). 한가한 채널의 시도도 이 pass에서 끝에 닿는다 |
+| Seal · NoSeal(대조) | `lifecycle.rs` `close`(:153) → `show`(:40), `selection.rs` `close`(:363) | 전달이 끝나면 PG에서 먼저 `closed`, 그다음 provider 봇이 결과를 카드에 쓰고 announce 봇이 archive+lock한다. 확정 거절은 `moderation_error`로 남기고 멈춘다 |
 | Bootstrap · TempHolderId(대조, P2 ①) | `decision_drain.rs` `run`(:54) · `node`(:73) · `spawn_boot_recovery`(:481) | cluster bootstrap이 등록한 이름이 있어야 실행 경계를 고정한다. 그 전에는 시도를 옮기지 않는다 |
 | MarkOffline → OfflineSettle · NoOfflineSettle(대조, P2 ②) | `src/services/cluster/node_registry.rs:518`(등록된 hook, `decision_drain.rs` `settle_on_offline`:496) → `settle_abandoned`(:505) | 노드를 offline으로 표시한 그 유지보수 pass가, runtime이 시작 때 등록한 hook으로 정산을 부른다(cluster 계층은 discord 계층을 직접 부르지 않는다) |
-| ReleaseHeld(non-owner)의 원본 복귀(P2 ③④) | `decision_drain/queued.rs` `started_under`(:85) · `keep_origin`(:112), 호출 `router/response_format.rs:212`·`busy_followup_retry_store.rs:308`, 판정 `router/intake_dispatch/queued.rs:432`, receipt origin `provider_dispatch/stream_json_turn.rs:55` | 본문으로 다시 만든 큐 항목이 event origin을 유지하고, origin을 유지한 복귀만 다시 기다린다. 그 밖의 Deferred는 unknown으로 닫는다 |
+| ReleaseHeld(non-owner)의 원본 복귀(P2 ③④) | `decision_drain/queued.rs` `started_under`(:85) · `keep_origin`(:119), 호출 `router/response_format.rs:212`·`busy_followup_retry_store.rs:308`, 판정 `router/intake_dispatch/queued.rs` `decision_end`:436, receipt origin `provider_dispatch/stream_json_turn.rs:55` | 본문으로 다시 만든 큐 항목이 event origin을 유지한다. 항목을 만든 것만으로는 복귀가 아니고, 큐가 그 항목을 실제로 받았을 때(`requeued`)와 원본 restore가 성공했을 때만 다시 기다린다. 그 밖의 Deferred는 unknown으로 닫는다 |
 | Sweep · BindOnlySweep(대조, P2 ⑤) | `src/services/turn_orchestrator/queued_head/v2/decision.rs` `decision_tickets`(:56) | bind가 지워진 refusal도 receipt의 ticket으로 후보에 든다 |
 | RefusalFinal(D2, P2 ⑥) | `provider_dispatch/owner_input_start_wait.rs:106` → `owner_input.rs:791`·`:993` → `decision_drain.rs:295` | Bound execution의 확정 부재만 종결한다. 판독 실패와 정상 busy는 그대로 기다린다 |
 
@@ -277,7 +277,23 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 
 모델과 코드가 다른 곳(조각 4):
 
-- 모델의 `wired`는 target 종류의 상수다. 코드는 게시 시점에 그 채널의 시작 거절 여부(`start_refusal`)를 읽는다. runtime이 잠시 없어서 생긴 사유도 비활성으로 남고, 같은 ask를 다시 보내면 다시 판정한다.
+- 모델의 `wired`는 target 종류의 상수다. 코드는 게시 시점에 그 채널의 시작 거절 여부(`start_check`)를 읽는다. runtime이 잠시 없어서 생긴 사유도 비활성으로 남고, 같은 ask를 다시 보내면 다시 판정한다.
 - Seal은 모델에서 한 전이지만 코드는 카드 편집 → archive+lock 두 REST 호출이다. 사이에 실패하면 다음 pass가 편집부터 다시 한다(입력은 다시 보내지 않는다).
 - 선택 직후의 버튼 비활성 표시(`selecting`)는 클릭을 받은 process가 한 번 시도한다. 실패해도 PG는 이미 봉인돼 있어 뒤의 클릭은 저장되지 않는다.
 - owner 클릭 판정은 봇별 `owner_user_id`(`check_owner`)다. 모델의 OperatorOnly(대조 `Auth.cfg`)에 대응한다.
+
+### 조각 4 리뷰 수리 — gateway Ready 전 부팅 선점, 카드 표시 순서 (모델 먼저)
+
+리뷰가 찾은 두 상태 경로를 모델에 넣었다. TLC 1.7.4 `--base 6d1997f46f --jobs 4` → `PASS: 48/48 configs; elapsed 369.8s`(Fixed 196.0s, Sealed 130.6s).
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| GatewayReady(`ready`) · Claim의 `ready` 조건 · EarlyStart(대조, `burned`) | `lifecycle.rs` `deliver`(:112) → `owner`(:96)의 `ready`(:101) | 부팅 뒤 gateway Context와 연결이 있어야 그 process가 not_started CAS를 잡는다. 토큰만으로 얻는 REST client는 카드 편집에만 쓴다. 준비 전 pass는 event를 not_started로 둔다 |
+| StaleShow(대조, `reopened`) | `lifecycle.rs` `under_card_lock`(:26), 그 안에서 읽는 `selection.rs` `card`(:233) · `publication.rs` `activate`(:118) · `lifecycle.rs` `show_selecting`(:70) · `close`(:153) | 한 요청의 카드 편집(활성화·선택 중·종결)은 request별 PG advisory lock 안에서 lifecycle을 다시 읽고 한다. 활성화 편집은 `disabled`로 읽힌 요청에만 나가므로 종결 표시 뒤에 올 수 없다. lock session은 transaction을 열지 않는다 |
+
+| cfg | Mode(그 결함을 가진 구현) | 수정 전(RED) | 수정 후 |
+|---|---|---|---|
+| EarlyBootStart | gateway Ready 전 pass가 저장된 선택을 선점해 실패로 닫음 | `ReadyBeforeStart` 반례 | Fixed PASS. 기다려도 시작이 끝내 일어남은 `Sealed.cfg`의 liveness `StoredStarts`(accepted ∧ ~begun ~> begun ∨ closed ∨ gone) PASS |
+| StaleActivate | 다른 ask의 오래된 "open" 편집이 종결 표시 뒤에 적용 | `EndedCardStaysEnded` 반례 | Fixed PASS |
+
+모델의 한계: `ready`는 부팅 때 시작 못 한 선택이 있을 때만 FALSE로 둔다(상태 수). 모델의 Render는 어긋난 표시를 계속 고치므로 StaleActivate는 "끝을 보인 카드가 다시 open을 보인 적이 있다"(`reopened`)로만 잡는다. 코드에서는 `sealed_at` 뒤 표시를 다시 맞추지 않으므로 순서 보장이 유일한 방어다.

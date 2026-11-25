@@ -177,7 +177,7 @@ agent_handoff의 source=decision 거절과 owner 경로 안의 claude_handoff �
 - 조각 3은 단독으로 기능 완료를 주장하지 않는다. 조각 4 뒤에 활성 버튼, 조각 5 뒤에 자유 의견 안내를 노출한다(§13 P2-3).
 - 조각 3은 3a(요청 저장·API·CLI·requester cap·intake 차단, 게시 없이 202 `publication: pending`)와 3b(게시·회수·비활성 버튼)로 나눈다. intake 차단은 저장된 thread id가 아니라 부모가 Decision 포럼인 thread를 기준으로 한다. 게시 응답을 잃어 thread id가 아직 없는 구간에도 막기 위해서다.
 - 3b는 N06·N08을 `src/services/discord/decisions/publication.rs`(게시·회수)·`card.rs`(글·비활성 버튼)와 `src/services/manual_steer/action_handle.rs`의 `decision:v1` custom-id로 둔다. 게시 process는 첫 게시 전에 포럼을 intake 차단 등록 집합에 넣는다. 차단의 판독과 miss 조회는 ready 포럼 행과 journal된 `decision_requests.forum_id`를 보므로, 설정 override 포럼을 포함해 다른 process가 방금 게시를 준비한 포럼도 곧바로 막는다. provider 봇의 gateway가 이 process에 지금 연결되어 있지 않으면(Context만 남은 handback 뒤 포함) `decision_bot_unavailable`(503)이다.
-- 조각 4는 N05의 choose_once를 `src/db/decisions/selection.rs`, N07을 `src/services/discord/decisions/component.rs`, N09~N11·N26의 선택 몫을 `lifecycle.rs`(전달 1회·주기 표시 수렴·archive+lock)에 둔다. 활성 조건은 "대상이 agent 본 채널이고 그 채널의 시작 경로(#8125가 연결한 preflight)가 거절하지 않음"이다. #8125는 별도 정상화 helper를 내놓지 않았으므로 정상화는 같은 시작 경로를 한 번 더 타는 `StartPath`가 맡고, thread 대상과 host가 시작을 거절하는 채널은 비활성 글과 사유를 유지한다(thread는 조각 6). 선택 lifecycle은 `open` → `selecting` → `closed`이고 archive+lock 결과는 `sealed_at`·`moderation_error`에 남긴다.
+- 조각 4는 N05의 choose_once를 `src/db/decisions/selection.rs`, N07을 `src/services/discord/decisions/component.rs`, N09~N11·N26의 선택 몫을 `lifecycle.rs`(전달 1회·주기 표시 수렴·archive+lock)에 둔다. 활성 조건은 "대상이 agent 본 채널이고 그 채널의 시작 경로(#8125가 연결한 preflight)가 거절하지 않음"이다. 활성을 확인했을 때만 201 `open`이고, 카드 편집이나 PG open이 끝나지 않았으면 202 `activating`이다(같은 ask가 같은 글에서 잇는다). 한 요청의 카드 편집은 request별 advisory lock 안에서 lifecycle을 다시 읽고 하며, 저장된 선택의 시작은 gateway가 준비된 process만 잡는다. #8125는 별도 정상화 helper를 내놓지 않았으므로 정상화는 같은 시작 경로를 한 번 더 타는 `StartPath`가 맡고, thread 대상과 host가 시작을 거절하는 채널은 비활성 글과 사유를 유지한다(thread는 조각 6). 선택 lifecycle은 `open` → `selecting` → `closed`이고 archive+lock 결과는 `sealed_at`·`moderation_error`에 남긴다.
 
 수정 전 RED→GREEN 계획:
 
@@ -303,7 +303,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 
 ## 상태 모델
 
-[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 66개(정상 9, 의도한 반례 57)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
+[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 68개(정상 9, 의도한 반례 59)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
 
 ## 미확인
 
