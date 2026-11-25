@@ -1111,4 +1111,21 @@ mod tests {
             assert_eq!(other.judged((0, 0), Some(&retired)), refused);
         }
     }
+
+    #[test]
+    fn resume_start_only_then_explicit_terminate_resumes_with_closing_tombstone() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let session = uuid::Uuid::new_v4().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut start = ResumeStart::new(&session);
+        start.nonce.clone_from(&nonce);
+        start.marker.clone_from(&nonce);
+        start.logged_nonce = Some(nonce.clone());
+        // The terminate that retired it left its nonce shut for good.
+        crate::services::session_host::shut_execution_for_test(&nonce);
+        let retired = hosted_row(owner(), &nonce, HostedState::Retired);
+        let resumed = Ok(Some(session.clone()));
+        assert_eq!(start.judged((0, 0), Some(&retired)), resumed);
+        assert!(crate::services::session_host::execution_closing(&nonce));
+    }
 }

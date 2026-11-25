@@ -55,7 +55,7 @@ fn wait(owner: &Owner) -> RetryWait {
 }
 
 /// The waiting original keeps its slot, body and ticket, and nothing was retained or refused.
-fn assert_original_and_ticket_kept(owner: &Owner, front: &Front) {
+pub(crate) fn assert_original_and_ticket_kept(owner: &Owner, front: &Front) {
     let now = owner.front().expect("the original still leads");
     assert!(now.0.is_some() && now.0 == front.0, "ticket {:?}", now.0);
     assert!(same(&now.1, &front.1), "original changed");
@@ -349,5 +349,39 @@ fn own_launch_timeout_keeps_opaque_count_original_ticket_and_no_handoff_before_d
     );
     assert!(!owner.front_outstanding());
     assert!(!owner.grant_front(&front).unwrap());
+    assert_original_and_ticket_kept(&owner, &front);
+}
+
+#[test]
+fn stale_claim_cannot_request_auto_terminate() {
+    let _root = TestRuntimeRootGuard::new();
+    let dir = queue_dir();
+    let mut owner = adopt(&dir);
+    admit(&mut owner, 21);
+    refuse(&mut owner, unstarted("n1"), 0);
+    owner.tick(30_000).unwrap();
+    let (front, stale) = claim(&mut owner);
+    assert_eq!(
+        owner.never_started_close_claimed((&front, stale)),
+        Some("n1".to_string())
+    );
+    owner.revoke_front();
+    assert_eq!(owner.never_started_close_claimed((&front, stale)), None);
+    let (front, current) = claim(&mut owner);
+    assert_ne!(current, stale);
+    assert_eq!(owner.never_started_close_claimed((&front, stale)), None);
+    assert!(
+        owner
+            .never_started_close_claimed((&front, current))
+            .is_some()
+    );
+    assert!(!owner.end_never_started_wait(&front, "n2").unwrap());
+    assert!(owner.end_never_started_wait(&front, "n1").unwrap());
+    assert!(
+        owner.snapshot.retry.wait.is_none(),
+        "the closed wait is gone"
+    );
+    assert_eq!(owner.never_started_close_claimed((&front, current)), None);
+    assert!(owner.claimed(front.1.message_id, &front), "the claim stays");
     assert_original_and_ticket_kept(&owner, &front);
 }

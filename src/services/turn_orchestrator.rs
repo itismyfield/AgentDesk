@@ -128,6 +128,8 @@ pub(crate) use queued_head::HandoffHeld;
 pub(crate) use queued_head::PreKeyPin;
 #[cfg(unix)]
 pub(crate) use queued_head::RetryWaitCause;
+#[cfg(all(test, unix))]
+pub(crate) use queued_head::assert_original_and_ticket_kept;
 pub(crate) use queued_head::effort_intent;
 #[cfg(unix)]
 pub(crate) use queued_head::proves_not_sent;
