@@ -2,7 +2,7 @@ use super::*;
 use crate::services::claude_tui::busy_inject::Request;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
-use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use crate::services::tui_turn_state::idle_compaction_tests::{compacted_tail, end_turn, tail};
 
 struct ReadinessScope;
 
@@ -81,7 +81,7 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         matches!(probe(), Screen::Unknown),
         "metadata without a completed reply cannot wake the captured probe"
     );
-    for mut record in std::iter::once(end_turn()).chain(tail()) {
+    for mut record in std::iter::once(end_turn()).chain(compacted_tail()) {
         record["sessionId"] = json!(source.session_id);
         writeln!(file, "{record}").unwrap();
     }

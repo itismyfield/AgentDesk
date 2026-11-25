@@ -64,7 +64,7 @@ export default function App() {
 
   if (bootstrapQuery.isError) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-300">
+      <div className="flex h-screen items-center justify-center bg-[var(--bg)] text-[var(--fg-muted)]">
         <div role="alert" data-testid="bootstrap-error" className="max-w-md px-6 text-center">
           <p className="m-0 text-sm">
             {t({
@@ -75,7 +75,7 @@ export default function App() {
           <button
             type="button"
             data-testid="bootstrap-retry"
-            className="mt-4 inline-flex min-h-11 items-center justify-center rounded-md border border-gray-600 px-4 text-sm text-gray-100"
+            className="mt-4 inline-flex min-h-11 items-center justify-center rounded-md border border-[var(--line)] bg-[var(--bg-2)] px-4 text-sm text-[var(--fg)]"
             disabled={bootstrapQuery.isFetching}
             onClick={() => { void bootstrapQuery.refetch(); }}
           >
@@ -88,7 +88,7 @@ export default function App() {
 
   if (!data) {
     return (
-      <div className="flex h-screen items-center justify-center bg-gray-900 text-gray-400">
+      <div className="flex h-screen items-center justify-center bg-[var(--bg)] text-[var(--fg-muted)]">
         <div role="status" data-testid="bootstrap-loading" className="text-center">
           {t({
             ko: "AgentDesk 대시보드 로딩 중...",

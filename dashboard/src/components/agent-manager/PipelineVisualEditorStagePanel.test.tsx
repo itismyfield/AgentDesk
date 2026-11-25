@@ -5,12 +5,12 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 
 import * as api from "../../api";
 import type { PipelineConfigFull, PipelineStage } from "../../types";
-import PipelineVisualEditor from "./PipelineVisualEditor";
+import PipelineVisualEditor, { type PipelineEditorActions, type PipelineEditorCtx } from "./PipelineVisualEditor";
 import PipelineVisualEditorStagePanel from "./PipelineVisualEditorStagePanel";
 
 // Keep the real stage controls and save action while omitting unrelated graph UI.
 vi.mock("./PipelineVisualEditorView", () => ({
-  default: (props: { ctx: any; actions: any }) => (
+  default: (props: { ctx: PipelineEditorCtx; actions: PipelineEditorActions }) => (
     <>
       <PipelineVisualEditorStagePanel {...props} />
       <button onClick={() => void props.actions.handleSave()}>Save</button>
@@ -31,6 +31,9 @@ let container: HTMLDivElement;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  if (!Element.prototype.scrollIntoView) {
+    Element.prototype.scrollIntoView = () => {};
+  }
   const storage = new Map<string, string>();
   Object.defineProperty(window, "localStorage", {
     configurable: true,
@@ -63,7 +66,8 @@ async function mountStage(values?: Partial<PipelineStage>) {
 }
 
 function field(label: string) {
-  const element = [...container.querySelectorAll("label")].find((entry) => entry.textContent === label)?.parentElement;
+  const lbl = [...container.querySelectorAll("label")].find((entry) => entry.textContent === label);
+  const element = lbl?.closest(".aui-select-clean") ?? lbl?.parentElement;
   expect(element).toBeTruthy();
   return element!;
 }
@@ -75,11 +79,13 @@ async function clickButton(text: string) {
 }
 
 async function saveTriggerEdit(values: Partial<PipelineStage>) {
-  const trigger = field("Trigger").querySelector("select")!;
-  await act(async () => {
-    trigger.value = "ready";
-    trigger.dispatchEvent(new Event("change", { bubbles: true }));
-  });
+  expect(container.querySelector("select")).toBeNull();
+  const trigger = field("Trigger").querySelector<HTMLButtonElement>('[role="combobox"]')!;
+  await act(async () => trigger.click());
+  const readyOption = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) =>
+    entry.textContent?.includes("On ready"),
+  )!;
+  await act(async () => readyOption.click());
   await clickButton("Save");
   expect(api.savePipelineStages).toHaveBeenCalledExactlyOnceWith(REPO, [{
     stage_name: "qa", provider: null, skip_condition: null, agent_override_id: null,
@@ -91,9 +97,11 @@ it("offers no counter provider or conditional skip for a new stage", async () =>
   await mountStage();
   await clickButton("+ Stage");
 
-  expect(field("Provider").querySelector("select")).toBeNull();
+  expect(container.querySelector("select")).toBeNull();
+  expect(field("Trigger").querySelector('[role="combobox"]')).not.toBeNull();
+  expect(field("Provider").querySelector('select, [role="combobox"]')).toBeNull();
   expect(field("Provider").textContent).toContain("Assigned agent");
-  expect(field("Skip").querySelector("select")).toBeNull();
+  expect(field("Skip").querySelector('select, [role="combobox"]')).toBeNull();
   expect(field("Skip").textContent).toContain("Never");
 });
 
@@ -105,9 +113,9 @@ it.each([
   await mountStage(values);
   await saveTriggerEdit(values);
 
-  expect(field("Provider").querySelector("select")).toBeNull();
+  expect(field("Provider").querySelector('select, [role="combobox"]')).toBeNull();
   expect(field("Provider").textContent).toContain("Counter model");
-  expect(field("Agent override").querySelector("select")).toBeNull();
+  expect(field("Agent override").querySelector('select, [role="combobox"]')).toBeNull();
   expect(field("Agent override").textContent).toContain(values.agent_override_id || "Card assignee");
 });
 
@@ -116,7 +124,7 @@ it("shows a stored conditional skip read-only and preserves it on save", async (
   await mountStage(values);
   await saveTriggerEdit(values);
 
-  expect(field("Skip").querySelector("select")).toBeNull();
+  expect(field("Skip").querySelector('select, [role="combobox"]')).toBeNull();
   expect(field("Skip").textContent).toContain("When no Rust files changed");
 });
 
@@ -130,6 +138,6 @@ it.each([
 
   expect(field("Provider").textContent).toContain(values.provider);
   expect(field("Skip").textContent).toContain(values.skip_condition);
-  expect(field("Provider").querySelector("select")).toBeNull();
-  expect(field("Skip").querySelector("select")).toBeNull();
+  expect(field("Provider").querySelector('select, [role="combobox"]')).toBeNull();
+  expect(field("Skip").querySelector('select, [role="combobox"]')).toBeNull();
 });

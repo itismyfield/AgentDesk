@@ -15,8 +15,9 @@ export function useFocusTrap(active: boolean) {
     const container = containerRef.current;
     if (!container) return;
 
+    const autoFocus = container.querySelector<HTMLElement>("[data-autofocus]:not([disabled])");
     const focusables = container.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR);
-    const first = focusables[0];
+    const first = autoFocus ?? focusables[0];
     if (first) first.focus();
     else container.focus();
 

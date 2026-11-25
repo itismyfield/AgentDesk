@@ -110,4 +110,16 @@ describe("first-screen glance", () => {
     const status = (value: CampaignNode, running: boolean) => legacyTask(value, live(running)).status;
     expect([status(node("p-live"), true), status(node("p-quiet"), false), status(node("c-live", [], "completed"), true)]).toEqual(["running", "pending", "completed"]);
   });
+  it("never throws when partial summary nodes omit stage, title or dependencies", () => {
+    expect(campaignStageStep(undefined as unknown as string)).toEqual({ index: -1, raw: "" });
+    expect(campaignStageStep(null)).toEqual({ index: -1, raw: "" });
+    const partial = {
+      ...node("i42"),
+      stage: undefined as unknown as string,
+      title: undefined as unknown as string,
+      dependencies: undefined as unknown as string[],
+    };
+    expect(campaignIssueLabel(partial)).toBe("#42");
+    expect(dependencyNeighborhood([partial], "i42").visible).toHaveLength(1);
+  });
 });

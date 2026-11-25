@@ -4,7 +4,6 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { getAgentAnchors, type AgentAnchor, type AgentAnchors, type AuditProvider } from "../../api/promptAudit";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
-import { CodeBlock } from "../../kit/free/code-block-clean";
 import type { Agent } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { formatTranscriptTimestamp } from "../agent-manager/turn-transcript-utils";
@@ -124,6 +123,8 @@ function AnchorDetailSections({
   const marks = anchorFlags(anchor, tr);
   const reader = (id: string) => agents.find((item) => item.id === id) ?? { id, name: id };
   const extraReaders = Math.max(0, anchor.receiving_agents.length - AVATAR_STACK_LIMIT);
+  const trimmedText = anchor.text.trim();
+  const heading = anchorTitle(anchor.text);
 
   return (
     <>
@@ -135,14 +136,15 @@ function AnchorDetailSections({
             {!phone ? marks : null}
           </div>
         ) : null}
-        {!phone ? <h3 className="m-0 text-base leading-6 font-semibold text-[var(--fg)]">{anchorTitle(anchor.text)}</h3> : null}
-        <CodeBlock
-          code={anchor.text}
-          filename={anchor.scope || anchor.type || tr(`앵커 ${index + 1}`, `Anchor ${index + 1}`)}
-          showLineNumbers
-          wrap
-          maxHeight={280}
-        />
+        {!phone && trimmedText !== heading ? (
+          <h3 className="m-0 text-base leading-6 font-semibold text-[var(--fg)]">{heading}</h3>
+        ) : null}
+        <Well
+          data-testid="audit-anchor-text"
+          className="max-h-80 overflow-y-auto px-3.5 py-3 pr-4 text-[13px] leading-relaxed whitespace-pre-wrap text-[var(--fg)] [overflow-wrap:anywhere]"
+        >
+          {trimmedText}
+        </Well>
         <div className="flex items-center gap-2">
           {anchor.limit != null ? (
             <MeterBar

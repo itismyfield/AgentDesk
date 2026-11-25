@@ -3,7 +3,7 @@ use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 use crate::services::tui_prompt_dedupe::binding_events;
-use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use crate::services::tui_turn_state::idle_compaction_tests::{compacted_tail, end_turn};
 use std::io::Write;
 
 #[test]
@@ -43,7 +43,7 @@ fn an_idle_compaction_tail_wakes_and_delivers_the_actual_held_front_pg() {
     );
     let intake = Intake::with_expected_pin(&fx, &started, ExpectedPin::Verified);
     let compaction_tail = || {
-        tail()
+        compacted_tail()
             .into_iter()
             .map(|mut record| {
                 record["sessionId"] = json!(started.session);

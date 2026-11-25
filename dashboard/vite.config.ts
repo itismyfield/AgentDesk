@@ -6,7 +6,7 @@ import path from "path";
 import { readFileSync } from "fs";
 
 // Single source of truth for port/host defaults (shared with Rust backend & scripts)
-const defaults = JSON.parse(readFileSync(path.resolve(__dirname, "../defaults.json"), "utf-8"));
+const defaults = JSON.parse(readFileSync(path.resolve(import.meta.dirname, "../defaults.json"), "utf-8"));
 
 function manualChunks(rawId: string) {
   const id = rawId.replace(/\0/g, "");
@@ -31,6 +31,14 @@ function manualChunks(rawId: string) {
     return "icons";
   }
 
+  if (pkg.startsWith("@xyflow/")) {
+    return "flow";
+  }
+
+  if (pkg.startsWith("recharts/") || pkg.startsWith("d3-")) {
+    return "charts";
+  }
+
   return undefined;
 }
 
@@ -40,7 +48,7 @@ export default defineConfig({
   },
   plugins: [react(), tailwindcss()],
   resolve: {
-    alias: { "@": path.resolve(__dirname, "src") },
+    alias: { "@": path.resolve(import.meta.dirname, "./src") },
   },
   server: {
     port: 5173,

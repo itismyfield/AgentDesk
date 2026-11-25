@@ -160,16 +160,22 @@ export function reconcileStop(intent: StopIntent | null, view: View, events: Ser
   return view.run_id !== intent.command.expected_run ? null : intent;
 }
 
+export type CampaignDetailView = "overview" | "relations" | "board" | "pipeline";
+const SUB_VIEWS = new Set<CampaignDetailView>(["relations", "board", "pipeline"]);
+
 export interface CampaignLocation {
   mode: "legacy" | "server";
   campaign: string;
   node: string | null;
+  /** Active detail sub-tab; omitted when on default "overview". */
+  view?: CampaignDetailView;
   /** The relations editor's scope while it is open. */
   edit?: EditScope;
 }
 
-export function campaignLocationQuery({ mode, campaign, node, edit }: CampaignLocation): string {
+export function campaignLocationQuery({ mode, campaign, node, view, edit }: CampaignLocation): string {
   const query = new URLSearchParams({ mode, campaign });
+  if (view && view !== "overview") query.set("view", view);
   if (node) query.set("node", node);
   if (edit) for (const [name, value] of Object.entries({ edit: "relations", ...scopeParams(edit) })) query.set(name, value);
   return `?${query}`;
@@ -180,8 +186,10 @@ export function parseCampaignLocation(search: string): CampaignLocation | null {
   const mode = query.get("mode");
   const campaign = query.get("campaign");
   if ((mode !== "legacy" && mode !== "server") || !campaign) return null;
+  const rawView = query.get("view");
+  const view = rawView && SUB_VIEWS.has(rawView as CampaignDetailView) ? (rawView as CampaignDetailView) : null;
   const edit = query.get("edit") === "relations" ? parseScope(query.get("scope"), query.get("depth")) : null;
-  return { mode, campaign, node: query.get("node") || null, ...edit ? { edit } : {} };
+  return { mode, campaign, node: query.get("node") || null, ...(view ? { view } : {}), ...(edit ? { edit } : {}) };
 }
 
 /** Feedback carries the link and what the screen showed; no tokens, logs or definitions. */

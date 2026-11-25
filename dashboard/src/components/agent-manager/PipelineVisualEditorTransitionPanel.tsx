@@ -1,10 +1,11 @@
+import { Select } from "../../kit/free/select-clean";
 import type { PipelineConfigFull } from "../../types";
 import { ActionMenu } from "../common/ActionMenu";
+import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import {
   BUTTON_NEUTRAL_STYLE,
   BUTTON_WARN_STYLE,
   FSM_DETAIL_PANEL_STYLE,
-  FSM_INPUT_STYLE,
   INPUT_CLASS,
   INPUT_STYLE,
   MUTED_TEXT_STYLE,
@@ -12,8 +13,8 @@ import {
 } from "./pipeline-visual-editor-ui";
 
 interface Props {
-  ctx: any;
-  actions: any;
+  ctx: PipelineEditorCtx;
+  actions: PipelineEditorActions;
 }
 
 export default function PipelineVisualEditorTransitionPanel({ ctx, actions }: Props) {
@@ -29,8 +30,8 @@ export default function PipelineVisualEditorTransitionPanel({ ctx, actions }: Pr
 }
 
 function FsmTransitionPanel({ ctx, actions }: Props) {
-  const tr = ctx.tr;
-  const selectedTransition = ctx.selectedTransition;
+  const { selectedTransition, tr } = ctx;
+  if (!selectedTransition) return null;
 
   return (
     <div className="rounded-lg border p-4 space-y-4" style={FSM_DETAIL_PANEL_STYLE}>
@@ -104,8 +105,9 @@ function FsmTransitionPanel({ ctx, actions }: Props) {
 }
 
 function AdvancedTransitionPanel({ ctx, actions }: Props) {
-  const tr = ctx.tr;
-  const selectedTransition = ctx.selectedTransition;
+  const { pipelineDraft, selectedTransition, tr } = ctx;
+  if (!pipelineDraft || !selectedTransition) return null;
+  const stateIds = pipelineDraft.states.map((state) => state.id);
 
   return (
     <>
@@ -114,13 +116,13 @@ function AdvancedTransitionPanel({ ctx, actions }: Props) {
           label={tr("시작 상태", "From")}
           value={selectedTransition.from}
           onChange={(value) => actions.updateTransition(ctx.selectedTransitionIndex, { from: value })}
-          options={ctx.pipelineDraft.states.map((state: any) => state.id)}
+          options={stateIds}
         />
         <SelectField
           label={tr("도착 상태", "To")}
           value={selectedTransition.to}
           onChange={(value) => actions.updateTransition(ctx.selectedTransitionIndex, { to: value })}
-          options={ctx.pipelineDraft.states.map((state: any) => state.id)}
+          options={stateIds}
         />
       </div>
 
@@ -164,8 +166,9 @@ function AdvancedTransitionPanel({ ctx, actions }: Props) {
 
 /** Destructive transition actions live behind a menu with a confirmation step. */
 export function PipelineTransitionMenu({ ctx, actions }: Props) {
-  const tr = ctx.tr;
-  const { from, to } = ctx.selectedTransition;
+  const { selectedTransition, tr } = ctx;
+  if (!selectedTransition) return null;
+  const { from, to } = selectedTransition;
   return (
     <ActionMenu
       label={tr("전환 메뉴", "Transition menu")}
@@ -186,8 +189,9 @@ export function PipelineTransitionMenu({ ctx, actions }: Props) {
 }
 
 function GateToggleList({ ctx, actions, fsm }: Props & { fsm?: boolean }) {
-  const tr = ctx.tr;
-  const names = Array.from(new Set([...Object.keys(ctx.pipelineDraft.gates), ...ctx.selectedTransitionGates]));
+  const { pipelineDraft, tr } = ctx;
+  if (!pipelineDraft) return null;
+  const names = Array.from(new Set([...Object.keys(pipelineDraft.gates), ...ctx.selectedTransitionGates]));
 
   return (
     <div>
@@ -195,7 +199,7 @@ function GateToggleList({ ctx, actions, fsm }: Props & { fsm?: boolean }) {
         {tr("게이트 / 조건", "Gates / conditions")}
       </label>
       <div className="flex flex-wrap gap-1.5">
-        {names.map((name: string) => {
+        {names.map((name) => {
           const active = ctx.selectedTransitionGates.includes(name);
           return (
             <button
@@ -203,7 +207,7 @@ function GateToggleList({ ctx, actions, fsm }: Props & { fsm?: boolean }) {
               type="button"
               onClick={() => {
                 const next = active
-                  ? ctx.selectedTransitionGates.filter((gate: string) => gate !== name)
+                  ? ctx.selectedTransitionGates.filter((gate) => gate !== name)
                   : [...ctx.selectedTransitionGates, name];
                 actions.updateTransitionGates(ctx.selectedTransitionIndex, next.join(", "));
               }}
@@ -226,7 +230,8 @@ function GateToggleList({ ctx, actions, fsm }: Props & { fsm?: boolean }) {
 }
 
 function GateDefinitionList({ ctx, actions }: Props) {
-  const tr = ctx.tr;
+  const { pipelineDraft, tr } = ctx;
+  if (!pipelineDraft) return null;
 
   if (ctx.selectedTransitionGates.length === 0) {
     return (
@@ -239,9 +244,22 @@ function GateDefinitionList({ ctx, actions }: Props) {
     );
   }
 
+  const gateEntries = Object.values(pipelineDraft.gates);
+  const gateTypeOptions = Array.from(
+    new Set(["builtin", ...gateEntries.map((gate) => gate.type).filter((value): value is string => Boolean(value))]),
+  );
+  const gateCheckOptions = Array.from(
+    new Set([
+      "has_active_dispatch",
+      "review_verdict_pass",
+      "review_verdict_rework",
+      ...gateEntries.map((gate) => gate.check).filter((value): value is string => Boolean(value)),
+    ]),
+  );
+
   return (
     <>
-      {ctx.selectedTransitionGates.map((gateName: string) => (
+      {ctx.selectedTransitionGates.map((gateName) => (
         <div key={gateName} className="rounded-xl border p-3 space-y-2" style={PANEL_SOFT_STYLE}>
           <div className="text-xs font-mono" style={{ color: "var(--th-text-primary)" }}>
             {gateName}
@@ -249,21 +267,16 @@ function GateDefinitionList({ ctx, actions }: Props) {
           <div className="grid gap-3 sm:grid-cols-2">
             <SelectField
               label={tr("게이트 타입", "Gate type")}
-              value={ctx.pipelineDraft.gates[gateName]?.type ?? ""}
+              value={pipelineDraft.gates[gateName]?.type ?? ""}
               onChange={(value) => actions.updateGate(gateName, { type: value })}
-              options={Array.from(new Set(["builtin", ...Object.values(ctx.pipelineDraft.gates).map((gate: any) => gate?.type).filter(Boolean)]))}
+              options={gateTypeOptions}
               emptyLabel="-"
             />
             <SelectField
               label={tr("체크", "Check")}
-              value={ctx.pipelineDraft.gates[gateName]?.check ?? ""}
+              value={pipelineDraft.gates[gateName]?.check ?? ""}
               onChange={(value) => actions.updateGate(gateName, { check: value || undefined })}
-              options={Array.from(new Set([
-                "has_active_dispatch",
-                "review_verdict_pass",
-                "review_verdict_rework",
-                ...Object.values(ctx.pipelineDraft.gates).map((gate: any) => gate?.check).filter(Boolean),
-              ]))}
+              options={gateCheckOptions}
               emptyLabel="-"
             />
           </div>
@@ -272,7 +285,7 @@ function GateDefinitionList({ ctx, actions }: Props) {
               {tr("설명", "Description")}
             </label>
             <input
-              value={ctx.pipelineDraft.gates[gateName]?.description ?? ""}
+              value={pipelineDraft.gates[gateName]?.description ?? ""}
               onChange={(event) => actions.updateGate(gateName, { description: event.target.value || undefined })}
               className={INPUT_CLASS}
               style={INPUT_STYLE}
@@ -293,24 +306,21 @@ function SelectField(props: {
   emptyLabel?: string;
   fsm?: boolean;
 }) {
+  const selectOptions = [
+    ...(props.emptyLabel !== undefined ? [{ value: "", label: props.emptyLabel }] : []),
+    ...props.options
+      .filter((option) => props.emptyLabel === undefined || option !== "")
+      .map((option) => ({ value: option, label: option })),
+  ];
   return (
-    <div>
-      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-        {props.label}
-      </label>
-      <select
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-        className={INPUT_CLASS}
-        style={props.fsm ? FSM_INPUT_STYLE : INPUT_STYLE}
-      >
-        {props.emptyLabel !== undefined && <option value="">{props.emptyLabel}</option>}
-        {props.options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </div>
+    <Select
+      label={props.label}
+      aria-label={props.label}
+      value={props.value}
+      onChange={(value) => props.onChange(value)}
+      options={selectOptions}
+      placeholder="-"
+      className={props.fsm ? "font-mono" : undefined}
+    />
   );
 }

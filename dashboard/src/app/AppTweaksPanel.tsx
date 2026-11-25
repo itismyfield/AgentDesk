@@ -1,5 +1,5 @@
 import { X } from "lucide-react";
-import type { Dispatch, SetStateAction } from "react";
+import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import type { AccentPreset, ThemePreference } from "./themePreferences";
 
 const THEME_OPTIONS: Array<{
@@ -45,6 +45,34 @@ export function AppTweaksPanel({
   themePreference,
 }: AppTweaksPanelProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setShowTweaksPanel(false);
+      }
+    };
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Element | null;
+      if (!target || panelRef.current?.contains(target)) return;
+      if (
+        target.closest?.(
+          '[data-testid="topbar"] button[aria-label="화면 꾸미기"], [data-testid="topbar"] button[aria-label="Appearance"], [data-testid="app-mobile-more-tweaks"]',
+        )
+      ) {
+        return;
+      }
+      setShowTweaksPanel(false);
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [setShowTweaksPanel]);
 
   return (
     <div
@@ -52,6 +80,10 @@ export function AppTweaksPanel({
       style={{ zIndex: popoverZIndex }}
     >
       <div
+        ref={panelRef}
+        role="dialog"
+        aria-label={tr("디자인", "Appearance")}
+        data-testid="tweaks-panel"
         className="pointer-events-auto max-h-[calc(100dvh-10rem)] overflow-auto rounded-lg border p-4 shadow-lg"
         style={{
           borderColor: "var(--th-border-subtle)",

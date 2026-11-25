@@ -372,15 +372,25 @@ describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prom
       .find((b) => /취소|중단|Cancel/i.test(b.textContent ?? b.getAttribute("aria-label") ?? ""))!;
     expect(cancelBtn).toBeDefined();
 
-    // Declining confirm does NOT call turn/stop
+    // Declining AlertDialog does NOT call turn/stop
     await act(async () => { cancelBtn.click(); });
-    expect(confirmMock).toHaveBeenCalledTimes(1);
+    const stopDialog = document.body.querySelector<HTMLDialogElement>('dialog[role="alertdialog"][open]')!;
+    expect(stopDialog).not.toBeNull();
+    expect(confirmMock).not.toHaveBeenCalled();
+    await act(async () => {
+      stopDialog.querySelector<HTMLButtonElement>(".aui-dialog-clean__btn:not([data-tone])")!.click();
+    });
+    await flush();
     expect(vi.mocked(request)).not.toHaveBeenCalled();
 
-    // Accepting confirm calls POST /api/agents/agent-ada/turn/stop
+    // Accepting AlertDialog calls POST /api/agents/agent-ada/turn/stop
     await act(async () => { cancelBtn.click(); });
+    const stopDialog2 = document.body.querySelector<HTMLDialogElement>('dialog[role="alertdialog"][open]')!;
+    expect(stopDialog2).not.toBeNull();
+    await act(async () => {
+      stopDialog2.querySelector<HTMLButtonElement>('.aui-dialog-clean__btn[data-tone="danger"]')!.click();
+    });
     await flush();
-    expect(confirmMock).toHaveBeenCalledTimes(2);
     expect(vi.mocked(request)).toHaveBeenCalledWith(
       "/api/agents/agent-ada/turn/stop",
       expect.objectContaining({ method: "POST" }),
@@ -544,16 +554,26 @@ describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prom
     const saveBtn = Array.from(document.body.querySelectorAll<HTMLButtonElement>('button[type="submit"]'))[0]!;
     expect(saveBtn.disabled).toBe(true);
 
-    // Clicking audit jump while dirty prompts confirm: declining stays on /agents, accepting navigates
+    // Clicking audit jump while dirty opens AlertDialog: declining stays on /agents, accepting navigates
     const auditBtn = document.body.querySelector<HTMLButtonElement>('[data-testid="prompt-open-audit"]')!;
     act(() => auditBtn.click());
-    expect(confirmMock).toHaveBeenCalledTimes(1);
+    const auditDialog = document.body.querySelector<HTMLDialogElement>('dialog[role="alertdialog"][open]')!;
+    expect(auditDialog).not.toBeNull();
+    expect(confirmMock).not.toHaveBeenCalled();
+    act(() => {
+      auditDialog.querySelector<HTMLButtonElement>(".aui-dialog-clean__btn:not([data-tone])")!.click();
+    });
+    await flush();
     expect(onClose).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="router-loc"]')?.textContent).toBe("/agents");
 
     act(() => auditBtn.click());
+    const auditDialog2 = document.body.querySelector<HTMLDialogElement>('dialog[role="alertdialog"][open]')!;
+    expect(auditDialog2).not.toBeNull();
+    act(() => {
+      auditDialog2.querySelector<HTMLButtonElement>('.aui-dialog-clean__btn[data-tone="danger"]')!.click();
+    });
     await flush();
-    expect(confirmMock).toHaveBeenCalledTimes(2);
     expect(onClose).toHaveBeenCalledTimes(1);
     expect(container.querySelector('[data-testid="router-loc"]')?.textContent).toBe("/audit?agent=agent-ada");
   });

@@ -35,8 +35,8 @@ const clock = (date: Date, seconds = false) => date.toLocaleTimeString("en-GB", 
 const when = (value: string) => { const date = new Date(value); return date.toDateString() === new Date().toDateString() ? clock(date) : `${date.getMonth() + 1}/${date.getDate()} ${clock(date)}`; };
 
 /** The 현황 tab: landing approval banner, summary numbers, what needs someone, running work as cards, the other statuses as lists, recent changes. */
-export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryExtra, recent, footer, selectedId, controls, onOpen, campaignId = null, connection = "live", onApproved, language, tr }: {
-  tasks: TaskView[]; limit: number | null; showPr: boolean; asOf: string | null; summaryExtra?: ReactNode;
+export default function CampaignOverview({ tasks, limit, showPr, hasTracker = false, asOf, summaryExtra, recent, footer, selectedId, controls, onOpen, campaignId = null, connection = "live", onApproved, language, tr }: {
+  tasks: TaskView[]; limit: number | null; showPr: boolean; hasTracker?: boolean; asOf: string | null; summaryExtra?: ReactNode;
   recent: { title: string; entries: RecentEntry[] | null; note?: string | null }; footer?: ReactNode;
   selectedId: string | null; controls?: string; onOpen: (id: string) => void;
   campaignId?: string | null; connection?: Connection; onApproved?: () => void;
@@ -105,8 +105,8 @@ export default function CampaignOverview({ tasks, limit, showPr, asOf, summaryEx
 
     <Well as="section" aria-label={tr("요약", "Summary")} className="flex min-w-0 flex-wrap items-center gap-x-6 gap-y-3 px-4 py-3 max-[899px]:order-last">
       {stat(tr("진행 작업", "Running"), limit ? `${counts.running} / ${limit}` : String(counts.running))}
-      {showPr && stat(tr("PR 연결", "With PR"), `${counts.withPr} / ${counts.running}`)}
-      {stat(tr("완료", "Done"), `${counts.done} / ${tasks.length}`)}
+      {showPr && stat(tr("진행 중 PR", "Running with PR"), `${counts.withPr} / ${counts.running}`)}
+      {!hasTracker && stat(tr("완료", "Done"), `${counts.done} / ${tasks.length}`)}
       {summaryExtra && <div className="flex min-w-0 flex-wrap items-center gap-3 @[36rem]/overview:border-l @[36rem]/overview:border-[var(--line-soft)] @[36rem]/overview:pl-6">{summaryExtra}</div>}
     </Well>
 

@@ -28,7 +28,7 @@ fn claim(owner: &HerdrOwner) -> FrontClaim {
         let granted = owner.mailbox.v2_request(|slot| {
             let v2 = slot.as_mut().ok_or("V2 not adopted")?;
             let front = v2.front().ok_or("no front")?;
-            v2.grant_front(&front).map(|_| front)
+            v2.grant_front(&front).map(|()| front)
         });
         let front = granted.await.unwrap();
         let claimed = drive::claim_turn(&owner.mailbox, front.1.message_id, &front).await;

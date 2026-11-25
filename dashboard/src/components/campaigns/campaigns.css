@@ -27,19 +27,17 @@
 .campaign-node-detail :is(ul, ol) { padding-left: 16px; list-style: disc; font-size: 11px; }
 .campaign-node-detail code { overflow-wrap: anywhere; }
 .campaign-node-detail form { display: grid; gap: 12px; }
-.campaign-neighborhood { display: grid; gap: 10px; font-size: 11px; }
-.campaign-graph-scroll { overflow-x: auto; border: 1px solid var(--th-border); border-radius: 9px; }
-.campaign-graph { min-width: 620px; background: var(--th-bg-surface); }
-.campaign-graph .react-flow__controls-button { color: var(--th-text-primary); padding: 5px; }
-.campaign-graph .react-flow__controls-button svg { fill: currentColor; }
-.campaign-graph-node { display: grid; gap: 3px; text-align: left; font-size: 11px; }
-.campaign-graph-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
-.campaign-graph-node > span, .campaign-graph-node small { color: var(--th-text-muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.campaign-neighborhood { display: grid; gap: 12px; font-size: 12px; }
+.campaign-graph-scroll { overflow-x: auto; border: 1px solid var(--line-soft); border-radius: var(--r-md, 14px); background: var(--bg); }
+.campaign-graph { min-width: 680px; background: var(--bg); }
+.campaign-graph-node { display: grid; gap: 4px; text-align: left; font-size: 12px; }
+.campaign-graph-node strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; font-weight: 600; }
+.campaign-graph-node > span, .campaign-graph-node small { color: var(--fg-muted); font-size: 12px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .campaign-connections summary { cursor: pointer; padding: 8px 0; }
 .campaign-connections > div { max-height: 220px; overflow-y: auto; display: grid; gap: 4px; }
 .campaign-connections button { display: flex; align-items: center; gap: 8px; text-align: left; }
 .campaign-connections button strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.campaign-connections button :is(span, small) { flex-shrink: 0; font-size: 10px; color: var(--th-text-muted); }
+.campaign-connections button :is(span, small) { flex-shrink: 0; font-size: 12px; color: var(--fg-muted); }
 .campaign-server-detail, .campaign-server-controls, .campaign-server-check, .campaign-server-form, .campaign-server-task { display: grid; gap: 10px; min-width: 0; }
 .campaign-server-title { min-width: 0; margin-right: auto; }
 .campaign-server-reasons, .campaign-server-check ul, .campaign-inspector ul, .campaign-connections ol { padding-left: 16px; list-style: disc; font-size: 11px; overflow-wrap: anywhere; }
@@ -56,7 +54,7 @@
 .campaign-server-latest dt { color: var(--th-text-muted); overflow-wrap: anywhere; }
 .campaign-server-latest dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 @media (prefers-reduced-motion: reduce) { .campaign-graph :is(.react-flow__edge-path, .react-flow__node) { transition: none; animation: none; } }
-@media (max-width: 900px) { .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaign-graph .react-flow__controls-button { min-height: 26px; } .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; } .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; } .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); } }
+@media (max-width: 900px) { .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; } .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; } .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); } }
 @media (max-width: 600px) {
   .campaigns-panel { gap: 10px; }
   .campaigns-panel .campaign-inspector-header button { min-height: 44px; }
@@ -66,4 +64,9 @@
 }
 }
 /* A relations card the keyboard reached: React Flow clears its node's outline, so the card draws one, 2px on screen at any zoom. */
-@layer components { .campaign-relations :is(.react-flow__node-relationsGroup, .react-flow__node-relationsTask, .react-flow__node-relationsTail):focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); } }
+@layer components {
+  .campaign-relations :is(.react-flow__node-relationsGroup, .react-flow__node-relationsTask, .react-flow__node-relationsTail):focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); }
+  :is(.campaign-relations, .campaign-relations-editor) .campaign-edge-handle-left { left: -5px; right: auto; top: 50%; transform: translateY(-50%); }
+  :is(.campaign-relations, .campaign-relations-editor) .campaign-edge-handle-right { right: -5px; left: auto; top: 50%; transform: translateY(-50%); }
+  :is(.campaign-relations, .campaign-relations-editor) .react-flow__minimap { right: 1rem; bottom: 4rem; margin: 0; }
+}

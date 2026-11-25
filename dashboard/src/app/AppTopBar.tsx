@@ -1,5 +1,5 @@
 import { Bell, Moon, Palette, Search, Sun, WifiOff, X } from "lucide-react";
-import { useMemo, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
+import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { Cap, CardNote, CountBadge, Row, StatusDot } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 import { IconButton } from "../kit/free/icon-button-clean";
@@ -113,6 +113,13 @@ export function AppTopBar({
 }: AppTopBarProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
   const routeLabel = currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : tr("홈", "Home");
+  const routeDescription = currentRoute ? (isKo ? currentRoute.descriptionKo : currentRoute.descriptionEn) : "";
+  const [runningOpen, setRunningOpen] = useState(false);
+
+  useEffect(() => {
+    setRunningOpen(false);
+  }, [currentRoute?.path]);
+
   const themeLabel = tr(
     resolvedTheme === "dark" ? "밝은 화면으로 전환" : "어두운 화면으로 전환",
     resolvedTheme === "dark" ? "Switch to light theme" : "Switch to dark theme",
@@ -137,17 +144,23 @@ export function AppTopBar({
       resume: tr("재개", "Resume"),
       empty: tr("지금 작업 중인 에이전트나 레인이 없어요.", "No agents or lanes are running right now."),
       idle: isMobileViewport ? "0" : tr("실행 없음", "0 running"),
-      viewAll: tr("홈에서 모두 보기", "See all on Home"),
+      viewAll:
+        currentRoute?.id === "home"
+          ? tr("에이전트에서 모두 보기", "See all in Agents")
+          : tr("홈에서 모두 보기", "See all on Home"),
       close: tr("닫기", "Close"),
       steps: (done, total) => tr(`단계 ${done}/${total} 완료`, `Step ${done}/${total} done`),
     }),
-    [isKo, isMobileViewport],
+    [currentRoute?.id, isKo, isMobileViewport],
   );
 
   const openCommandPalette = (event: MouseEvent<HTMLButtonElement>) => {
     event.currentTarget.focus();
+    setRunningOpen(false);
     setShowCommandPalette(true);
   };
+
+  const openRunningTaskHandler = onOpenRunningTask ?? (onViewAllRunning ? () => onViewAllRunning() : undefined);
 
   return (
     <header
@@ -168,18 +181,48 @@ export function AppTopBar({
             data-testid="topbar-breadcrumb"
             className="flex min-w-0 flex-1 items-center gap-2 truncate text-[13px] leading-5 text-[var(--fg-muted)]"
           >
-            <b className="truncate font-medium text-[var(--fg)]">{routeLabel}</b>
+            <span className="sr-only">{routeLabel}</span>
+            {routeDescription ? <span className="truncate">{routeDescription}</span> : null}
           </div>
         )}
 
         <div data-testid="topbar-running-now" className="flex shrink-0 items-center">
           <RunningNow
             tasks={runningTasks}
+            open={runningOpen}
+            onOpenChange={(next) => {
+              setRunningOpen(next);
+              if (next) {
+                setShowNotificationPanel(false);
+                setShowTweaksPanel(false);
+              }
+            }}
             align="end"
             labels={runningLabels}
-            onOpenTask={onOpenRunningTask}
-            onPause={onStopRunningTask}
-            onViewAll={onViewAllRunning}
+            onOpenTask={
+              openRunningTaskHandler
+                ? (taskId) => {
+                    setRunningOpen(false);
+                    openRunningTaskHandler(taskId);
+                  }
+                : undefined
+            }
+            onPause={
+              onStopRunningTask
+                ? (taskId) => {
+                    setRunningOpen(false);
+                    onStopRunningTask(taskId);
+                  }
+                : undefined
+            }
+            onViewAll={
+              onViewAllRunning
+                ? () => {
+                    setRunningOpen(false);
+                    onViewAllRunning();
+                  }
+                : undefined
+            }
             style={RUNNING_NOW_STYLE}
           />
         </div>
@@ -227,12 +270,13 @@ export function AppTopBar({
             aria-expanded={showNotificationPanel}
             icon={<Bell />}
             style={iconButtonStyle}
-            onClick={() =>
+            onClick={() => {
+              setRunningOpen(false);
               setShowNotificationPanel((prev) => {
                 if (!prev) setShowTweaksPanel(false);
                 return !prev;
-              })
-            }
+              });
+            }}
           />
           {notificationBadgeCount > 0 ? (
             <span aria-hidden className="pointer-events-none absolute -top-1 -right-1 flex">
@@ -298,12 +342,13 @@ export function AppTopBar({
             label={tr("화면 꾸미기", "Appearance")}
             icon={<Palette />}
             style={DESKTOP_ICON_BUTTON_STYLE}
-            onClick={() =>
+            onClick={() => {
+              setRunningOpen(false);
               setShowTweaksPanel((prev) => {
                 if (!prev) setShowNotificationPanel(false);
                 return !prev;
-              })
-            }
+              });
+            }}
           />
         ) : null}
       </div>

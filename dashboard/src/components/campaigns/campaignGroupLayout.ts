@@ -3,18 +3,18 @@ import { NODE_WIDTH } from "./relationsEditorModel";
 
 /** A group or task card on the relations view in graph units; its pins sit `GROUP_PIN_Y` below its top edge. */
 export const GROUP_WIDTH = NODE_WIDTH;
-export const GROUP_HEIGHT = 172;
-export const TASK_HEIGHT = 148;
-export const GROUP_PIN_Y = 74;
-/** A column per dependency depth, with room between columns for a curve and its count. */
-export const LAYER = GROUP_WIDTH + 64;
-const ROW_GAP = 16;
+export const GROUP_HEIGHT = 188;
+export const TASK_HEIGHT = 164;
+export const GROUP_PIN_Y = 82;
+/** A column per dependency depth, with room between columns for outer handles, a curve and its count. */
+export const LAYER = GROUP_WIDTH + 88;
+const ROW_GAP = 24;
 /** Cards with no line to another sit closer together, under the linked ones, in rows shaped for a portrait canvas. */
-const SHELF = GROUP_WIDTH + 24;
+const SHELF = GROUP_WIDTH + 64;
 const SHELF_ASPECT = 0.9;
-const SECTION_GAP = 64;
+const SECTION_GAP = 72;
 /** A line running backwards loops under the linked cards, each in its own lane this far apart. */
-const LOOP_LANE = 18;
+const LOOP_LANE = 20;
 /** A tie node is 44 units square; its lines meet at its centre. */
 const TIE_HALF = 22;
 

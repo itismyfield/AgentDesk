@@ -5,12 +5,13 @@ import type { Edge, Node, NodeChange, NodeProps } from "@xyflow/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { campaignNodeSchema, setCampaignAutoQueue, updateCampaignNode } from "../../api/campaigns";
 import { createServerCampaign, editServerCampaignDefinition, sendServerCampaignCommand } from "../../api/serverCampaigns";
+import { GRAPH_DIM_OPACITY, computeConnectedSubgraph, getGraphStatusTone } from "../common/graph/GraphChrome";
 import { campaignRawEdges, type RawEdgeKey } from "./campaignGraphRouting";
 import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGroupOverview";
 import { TAIL_HEIGHT, buildGroupTasks } from "./CampaignGroupTasks";
 import { GROUP_WIDTH, TASK_HEIGHT } from "./campaignGroupLayout";
 import type { LineData } from "./RelationsCanvasChrome";
-import { RelationsGroupNode, type GroupNodeData } from "./RelationsTaskNode";
+import { RelationsGroupNode, ViewTaskNode, type GroupNodeData, type ViewTaskData } from "./RelationsTaskNode";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
@@ -117,15 +118,28 @@ it("draws every line inside a looped part of the groups red, labels the part onc
   expect(container.querySelector('[aria-label="Selected group"]')?.textContent).toContain("Cycle · A → B → A");
 });
 
-it("covers a group card with its name and pins past 75% out, keeping the red edge inside the blue band when it is chosen and blocked", async () => {
-  const data: GroupNodeData = { title: "Relay", meta: "", tone: "warn", ratio: 0.5, pins: ["Needs", "Next"], summary: "", blocked: "1 blocked tasks", far: "50% · 1 blocked" };
+it("covers a group card with its name past 75% out, keeping the red edge inside the blue band when chosen and blocked, and opens via its button", async () => {
+  const onOpen = vi.fn();
+  const data: GroupNodeData = { title: "Relay", meta: "", tone: "warn", ratio: 0.5, summary: "", blocked: "1 blocked tasks", far: "50% · 1 blocked", openLabel: "Open →", onOpen };
   const draw = async (zoom: number) => { view.zoom = zoom; await act(async () => root.render(<RelationsGroupNode {...{ id: "g", data, selected: true } as unknown as NodeProps} />)); };
   await draw(0.8);
   expect(container.querySelector("[data-far]")).toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>("[data-open-group]")!.click());
+  expect(onOpen).toHaveBeenCalledOnce();
   await draw(0.7);
-  expect(container.querySelector("[data-far]")?.textContent).toBe("RelayNeedsNext50% · 1 blocked");
+  expect(container.querySelector("[data-far]")?.textContent).toBe("Relay50% · 1 blocked");
   await draw(0.5);
   expect((container.firstElementChild as HTMLElement).style.boxShadow).toMatch(/^0 0 0 2px var\(--err\), 0 0 0 6px var\(--info\)/);
+});
+
+it("computes connected upstream/downstream causal chains and quiet vs active status tones", () => {
+  const edges: [string, string][] = [["a", "b"], ["b", "c"], ["c", "d"], ["a", "sib"], ["iso1", "iso2"], ["x", "y"], ["y", "x"]];
+  expect(computeConnectedSubgraph(null, edges)).toEqual(new Set());
+  expect(computeConnectedSubgraph("b", edges)).toEqual(new Set(["a", "b", "c", "d"]));
+  expect(computeConnectedSubgraph("x", edges)).toEqual(new Set(["x", "y"]));
+  expect(GRAPH_DIM_OPACITY).toBe(0.24);
+  expect([getGraphStatusTone("completed").quiet, getGraphStatusTone("skipped").quiet]).toEqual([true, true]);
+  expect([getGraphStatusTone("running").accent, getGraphStatusTone("blocked").accent, getGraphStatusTone("failed").accent]).toEqual(["var(--info)", "var(--warn)", "var(--err)"]);
 });
 
 it("names a group by its key, so adding another group does not rename it", () => {
@@ -172,4 +186,33 @@ it("keeps every card clear of the others when tails stack past the linked tasks 
   const box = ([id, { x, y }]: [string, { x: number; y: number }]) => ({ id, x, y, bottom: y + (id.startsWith("tail:") ? TAIL_HEIGHT : TASK_HEIGHT) });
   const boxes = [...graph.positions].map(box);
   expect(boxes.flatMap((a, index) => boxes.slice(index + 1).filter((b) => Math.abs(a.x - b.x) < GROUP_WIDTH && a.y < b.bottom && b.y < a.bottom).map((b) => `${a.id}/${b.id}`))).toEqual([]);
+});
+
+it("renders ViewTaskNode with the unified 3-row editor card and reflects live/running blockers in the inspector", async () => {
+  view.zoom = 0.4;
+  const taskData: ViewTaskData = {
+    title: "Unify group task card without shrinking",
+    code: "#7991",
+    meta: "Gateway",
+    status: "running",
+    statusLabel: "Running",
+    tone: "progress",
+    ratio: 0.5,
+    summary: "Review · 2 deps",
+    note: { tone: "warn", text: "Blocked" },
+    locked: false,
+    error: false,
+    picked: false,
+  };
+  await act(async () => root.render(<ViewTaskNode {...{ id: "i7991", data: taskData, selected: false } as unknown as NodeProps} />));
+  expect(container.querySelector("[data-far]")).toBeNull();
+  expect(container.textContent).toContain("#7991");
+  expect(container.textContent).toContain("Unify group task card without shrinking");
+  expect(container.textContent).toContain("Review · 2 deps");
+  view.zoom = 1;
+
+  const runningBlocked = { ...node("r1", "A", [], "pending"), blocker: "Waiting on CI" };
+  const live = { r1: { card_id: "c1", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: null, running: true, queue_status: null } };
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={[runningBlocked]} live={live} chosen={null} onChoose={vi.fn()} onOpenGroup={vi.fn()} onOpenTask={vi.fn()} tr={en} />));
+  expect(container.querySelector('[aria-label="Campaign summary"]')?.textContent).toContain("A1 blocked");
 });
