@@ -492,8 +492,6 @@ pub(crate) fn spawn_boot_recovery(pool: Option<PgPool>) {
     });
 }
 
-/// Settles every unsettled attempt from its evidence, without another write: asked when the
-/// registry lists a node offline, and by the selection pass for attempts on idle channels.
 /// Has the registry's offline listing settle what those nodes held; asked at a runtime's start.
 pub(crate) fn settle_on_offline() {
     fn settle(pool: PgPool) -> futures::future::BoxFuture<'static, ()> {
@@ -502,6 +500,8 @@ pub(crate) fn settle_on_offline() {
     let _ = crate::services::cluster::node_registry::ON_NODES_OFFLINE.set(settle);
 }
 
+/// Settles every unsettled attempt from its evidence, without another write: asked when the
+/// registry lists a node offline, and by the selection pass for attempts on idle channels.
 pub(crate) async fn settle_abandoned(pool: &PgPool) {
     let settled = match run(pool).await {
         Ok(run) => recover_before(pool, run.boot, global_mailbox).await,
