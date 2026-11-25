@@ -107,7 +107,12 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
         // A compaction its idle notice closes leaves the tail as it was before the boundary.
         match compaction.step(&record) {
             CompactionStep::Open => before = Some(tail.clone()),
-            CompactionStep::Closed => tail = before.take().unwrap_or(tail),
+            CompactionStep::Closed => {
+                // Only the turn state goes back; a session id read inside still binds the notice.
+                let native = tail.native.take();
+                tail = before.take().unwrap_or(tail);
+                tail.native = native;
+            }
             CompactionStep::Broken => before = None,
             CompactionStep::Outside | CompactionStep::Inside => {}
         }

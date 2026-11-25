@@ -5,11 +5,16 @@ use super::*;
 /// A completed reply survives a non-conversation tail or finished idle compaction; old terminals
 /// across a session marker still cannot prove Idle, while a pending tool call remains Streaming.
 pub(super) fn observe(path: &Path) -> TuiTurnState {
-    let state = walk(path, claude_envelope_turn_state, claude_partial_turn_state);
+    let (completed, compacting) = completed_tail(path);
+    let state = match walk(path, claude_envelope_turn_state, claude_partial_turn_state) {
+        // A terminal beneath a compaction its notice has not closed yet proves nothing.
+        TuiTurnState::Idle if compacting => TuiTurnState::Unknown,
+        state => state,
+    };
     if matches!(
         state,
         TuiTurnState::Unknown | TuiTurnState::Streaming | TuiTurnState::UserSubmitted
-    ) && completed_tail(path)
+    ) && completed
     {
         return TuiTurnState::Idle;
     }
@@ -22,9 +27,10 @@ pub(super) fn observe(path: &Path) -> TuiTurnState {
     }
 }
 
-fn completed_tail(path: &Path) -> bool {
+/// Whether metadata alone follows the newest completed reply, and whether a compaction is open.
+fn completed_tail(path: &Path) -> (bool, bool) {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
-        return false;
+        return (false, false);
     };
     // Whether metadata followed the newest completed reply; `None` once anything else did.
     let (mut after, mut segment) = (None, IdleCompaction::default());
@@ -41,7 +47,8 @@ fn completed_tail(path: &Path) -> bool {
         });
         after = after.filter(|_| keeps).map(|_| true);
     }
-    after == Some(true) && segment == IdleCompaction::Outside
+    let open = segment != IdleCompaction::Outside;
+    (after == Some(true) && !open, open)
 }
 
 /// A record's place in an idle compaction read forward: its boundary opens it, and only its

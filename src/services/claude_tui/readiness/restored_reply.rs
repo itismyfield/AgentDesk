@@ -1,7 +1,9 @@
 //! A completed reply of this launch, over the exact pinned source and an audited quiet suffix.
 mod source;
 use super::{closed_turn, evidence::Stamp, source::Source};
-use crate::services::tui_turn_state::{claude_completed_reply, claude_idle_metadata};
+use crate::services::tui_turn_state::{
+    CompactionStep, IdleCompaction, claude_completed_reply, claude_idle_metadata,
+};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -13,9 +15,10 @@ pub(super) fn current(source: &Source, stamp: &Stamp) -> bool {
 fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
     let launched = source::launched(source, stamp)?;
     let records = records(source, stamp)?;
+    let compacted = closed_compactions(&records);
     let mut summaries = HashSet::new();
     let mut stops = HashSet::new();
-    for record in records.iter().rev() {
+    for (record, compacted) in records.iter().zip(compacted).rev() {
         let native = record["sessionId"]
             .as_str()
             .or_else(|| record["session_id"].as_str());
@@ -33,6 +36,15 @@ fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
             return summaries.is_subset(&stops).then_some(());
         }
         let attachment = &record["attachment"];
+        // A closed idle compaction passes its boundary, summary and its quiet `SessionStart`.
+        if compacted
+            && (record["type"] != "attachment"
+                || (attachment["hookEvent"] == "SessionStart"
+                    && attachment["stdout"].as_str().map(str::trim)
+                        == Some(r#"{"suppressOutput":true}"#)))
+        {
+            continue;
+        }
         let stop = attachment["hookEvent"] == "Stop"
             || attachment["hookName"] == "Stop"
             || attachment["stdout"]
@@ -72,6 +84,20 @@ fn checked(source: &Source, stamp: &Stamp) -> Option<()> {
         }
     }
     None
+}
+/// Which records belong to an idle compaction its notice closed, read forward.
+fn closed_compactions(records: &[Value]) -> Vec<bool> {
+    let (mut compaction, mut open) = (IdleCompaction::default(), None);
+    let mut closed = vec![false; records.len()];
+    for (index, record) in records.iter().enumerate() {
+        match compaction.step(record) {
+            CompactionStep::Open => open = Some(index),
+            CompactionStep::Closed => closed[open.take().unwrap_or(index)..=index].fill(true),
+            CompactionStep::Broken => open = None,
+            CompactionStep::Outside | CompactionStep::Inside => {}
+        }
+    }
+    closed
 }
 fn records(source: &Source, stamp: &Stamp) -> Option<Vec<Value>> {
     let mut file = std::fs::File::open(&source.path).ok()?;
