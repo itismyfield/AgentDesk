@@ -334,6 +334,7 @@ pub(in crate::services::discord) async fn handle_event(
                 );
                 return Ok(());
             }
+            crate::logging::intake_stage::mark(new_message.id.get(), "intake", None);
 
             let (announce_resolution, notify_resolution) =
                 if let Some(registry) = data.shared.health_registry() {
@@ -1268,6 +1269,7 @@ pub(in crate::services::discord) async fn handle_event(
             let ts = chrono::Local::now().format("%H:%M:%S");
             let preview = truncate_str(text, 60);
             tracing::info!("  [{ts}] ◀ [{user_name}] {preview}");
+            crate::logging::intake_stage::mark(new_message.id.get(), "recv", None);
             let trace = crate::logging::intake_timing::begin(new_message.id.get(), event_started);
 
             // Checkpoint: message about to be processed as a turn

@@ -350,6 +350,7 @@ where
     let options = request.options;
     let intervention = request.intervention.mark_raw();
     let mailbox_outcome = effects.enqueue_soft_intervention(intervention).await;
+    crate::logging::intake_stage::mark(message_id.get(), "queued", None);
 
     let status = classify_mailbox_outcome(&mailbox_outcome);
     let mut outcome = IntakeQueueCommitOutcome {

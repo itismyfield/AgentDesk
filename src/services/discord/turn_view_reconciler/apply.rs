@@ -170,6 +170,7 @@ impl TurnViewReconciler {
         );
         #[cfg(not(test))]
         {
+            let started = std::time::Instant::now();
             let result = if add {
                 reaction_lifecycle::try_add_reaction_raw_with_shared_detailed(
                     &identity.http,
@@ -202,6 +203,10 @@ impl TurnViewReconciler {
                     "turn view reaction apply failed"
                 );
                 return TurnViewDelivery::from_reaction_error_status(error.status());
+            }
+            if add && emoji == '⏳' && target.kind == TurnViewTargetKind::IntakeUserMessage {
+                let wait_ms = Some(started.elapsed().as_millis() as u64);
+                crate::logging::intake_stage::mark(target.message_id.get(), "hourglass", wait_ms);
             }
         }
         #[cfg(test)]
