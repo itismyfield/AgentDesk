@@ -789,8 +789,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         let collectable = self.sources.collectable().into_iter();
         let mut collectable = collectable.filter(|(source, _)| {
-            let key = source_key(source);
-            !images.contains(&key) && !protected.as_ref().is_some_and(|keys| keys.contains(&key))
+            !protected
+                .as_ref()
+                .is_some_and(|keys| keys.contains(&source_key(source)))
         });
         for (source, keep) in collectable.by_ref() {
             if !crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(
@@ -799,7 +800,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             ) {
                 continue;
             }
-            while self.writer.store().retained_segments(&source) > keep {
+            let floor = images.get(&source_key(&source)).copied();
+            while self.writer.store().retained_segments(&source) > keep
+                && super::tool_images::select::below(self.writer.store(), &source, floor)
+            {
                 if let Err(error) = self.writer.store().gc_oldest_segment(&source) {
                     let violation = self.writer.store().ledger().violation().map(str::to_string);
                     let alarm = match violation {

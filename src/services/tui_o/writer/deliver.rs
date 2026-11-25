@@ -22,7 +22,7 @@ use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
-use crate::services::tui_o::shadow::{SourceId, UnitKey, UnitKind};
+use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
     LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord,
@@ -515,15 +515,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 self.record(LedgerEntry::Excluded { unit_key, reason })
                     .map_or_else(|step| step, |()| Step::Done)
             }
-            Derived::Piece(piece) if piece.unit_key.kind == UnitKind::ToolImage => {
-                self.deliver_image(piece, admission).await
-            }
             Derived::Piece(piece) => self.deliver_piece(piece, admission).await,
         }
     }
 
-    /// Originals and the single local retry share the lease, durable prepare and first POST poll;
-    /// `attachment` (bytes, file name) goes up under the payload as its caption.
+    /// Originals and the single local retry share the lease, durable prepare and first POST poll.
     pub(super) async fn send_piece(
         &mut self,
         piece: &PieceWork,

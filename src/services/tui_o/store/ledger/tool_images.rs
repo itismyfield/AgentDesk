@@ -1,7 +1,7 @@
 //! Tool-image ledger entries: native turn spans and image obligations, replayed with the rest
 //! of the ledger. The writer appends them as it derives images and settles their posts.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 
@@ -271,30 +271,20 @@ impl ImageState {
         self.omitted.contains_key(key) || ledger.latest_piece(key, 0).is_some()
     }
 
-    /// The omission reasons of one notice's group, one per omitted image.
-    pub(crate) fn group_omissions(&self, notice: &UnitKey) -> Vec<&str> {
-        let group = self
-            .obligations
-            .iter()
-            .filter(|(_, o)| notice_key(o) == *notice);
-        group.filter_map(|(key, _)| self.omitted(key)).collect()
-    }
-
-    /// Spool keys GC keeps: a source with an unclosed span, or the record of an open image or
-    /// of an image whose notice is still owed.
-    pub(crate) fn kept_sources(&self, ledger: &LedgerState) -> HashSet<String> {
-        let unclosed = self
-            .spans
-            .iter()
-            .filter(|(_, spans)| spans.iter().any(|span| span.end_offset.is_none()));
-        let mut kept: HashSet<String> = unclosed.map(|(source, _)| source_key(source)).collect();
-        for open in self.open_obligations(ledger) {
-            let (OpenObligation::Image { key, .. } | OpenObligation::Notice { key, .. }) = open;
-            let records = self
-                .obligations
-                .iter()
-                .filter(|(image, obligation)| **image == key || notice_key(obligation) == key);
-            kept.extend(records.map(|(_, obligation)| source_key(&obligation.source)));
+    /// Per spool key, the lowest offset GC must keep: an unclosed span's opener and the start of
+    /// every `protected_ranges` record.
+    pub(crate) fn kept_from(&self, ledger: &LedgerState) -> HashMap<String, u64> {
+        let unclosed = self.spans.iter().flat_map(|(source, spans)| {
+            let open = spans.iter().filter(|span| span.end_offset.is_none());
+            open.map(move |span| (source_key(source), span.opener_offset))
+        });
+        let ranges = self.protected_ranges(ledger).into_iter();
+        let mut kept: HashMap<String, u64> = HashMap::new();
+        for (key, from) in
+            unclosed.chain(ranges.map(|(source, start, _)| (source_key(&source), start)))
+        {
+            let floor = kept.entry(key).or_insert(from);
+            *floor = (*floor).min(from);
         }
         kept
     }

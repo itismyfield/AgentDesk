@@ -178,12 +178,13 @@ impl UnitDeriver {
         };
         let ended = self.restart.before(&binding, record);
         let out = ended.map_or_else(Vec::new, |ended| self.end_projection(&ended));
-        // A verified end this run cannot apply for lack of its opener still ends the image turn.
+        // A verified end this run cannot apply for lack of its opener still ends the image turn,
+        // once this record's row preparation has restored that turn.
         if let (Some(images), Some(turn)) = (
             self.images.as_mut(),
             self.restart.cutoff_turn(source, record.start),
         ) {
-            images.verified_cut(source, record.start, turn);
+            images.cut_at(source, record.start, turn);
         }
         out
     }

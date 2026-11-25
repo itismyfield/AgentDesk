@@ -26,6 +26,9 @@ pub(crate) struct ImageRun {
     turns: HashMap<String, ImageTurns>,
     source: Option<SourceId>,
     queued: Vec<ImageEntry>,
+    /// A verified end the restart projection could not apply: `(source key, cutoff, turn)`,
+    /// applied by the record at the cutoff right after its row preparation.
+    cut: Option<(String, u64, Option<String>)>,
 }
 
 impl ImageRun {
@@ -46,6 +49,7 @@ impl ImageRun {
             turns: HashMap::new(),
             source: None,
             queued: Vec::new(),
+            cut: None,
         }
     }
 
@@ -62,28 +66,21 @@ impl ImageRun {
         !self.queued.is_empty()
     }
 
-    /// Spool keys whose open image turn still needs its opener: GC waits for its durable Closed.
-    /// A turn without an image keeps nothing, so image-less output collects as before.
-    pub(crate) fn live_openers(&self, durable: &ImageState) -> Vec<String> {
-        let open = self.turns.iter().filter(|(_, turns)| {
-            turns.open_turn().is_some_and(|turn| {
-                durable.span_of(turns.source(), turn.as_str()).is_some()
-                    && !turns.opener_collectable(durable, turn)
-            })
+    /// `(spool key, opener offset)` of each open image turn that still needs its opener: GC
+    /// waits for its durable Closed. A turn without an image keeps nothing.
+    pub(crate) fn live_openers(&self, durable: &ImageState) -> Vec<(String, u64)> {
+        let open = self.turns.iter().filter_map(|(key, turns)| {
+            let turn = turns.open_turn()?;
+            let span = durable.span_of(turns.source(), turn.as_str())?;
+            (!turns.opener_collectable(durable, turn)).then(|| (key.clone(), span.opener_offset))
         });
-        open.map(|(key, _)| key.clone()).collect()
+        open.collect()
     }
 
-    /// A verified physical end at `at` that the restart projection could not apply: the open
-    /// image turn it names (or any, when the end names none) closes there.
-    pub(crate) fn verified_cut(&mut self, source: &SourceId, at: u64, turn: Option<&str>) {
-        let Some(turns) = self.turns.get(&source_key(source)) else {
-            return;
-        };
-        let named = |open: &NativeTurn| turn.is_none_or(|turn| turn == open.as_str());
-        if turns.open_turn().is_some_and(named) {
-            self.physical_end(source, at);
-        }
+    /// Reserves a verified physical end at `at` that the restart projection could not apply;
+    /// the open image turn it names (any, when it names none) closes there after row preparation.
+    pub(crate) fn cut_at(&mut self, source: &SourceId, at: u64, turn: Option<&str>) {
+        self.cut = Some((source_key(source), at, turn.map(str::to_owned)));
     }
 
     /// One record's turn facts and images; returns a marker per image owed from this record.
@@ -98,20 +95,33 @@ impl ImageRun {
         };
         let key = source_key(&source);
         let origin = self.origins.get(&key).copied().unwrap_or(0);
+        let cut = (self.cut.take()).filter(|(cut, at, _)| *cut == key && *at == record.start);
         let turns = (self.turns.entry(key))
             .or_insert_with(|| ImageTurns::starting_at(source.clone(), record.start, origin));
-        turns.before_offset(record.start);
-        let row = row_key(value);
+        // Row preparation, then the cut, then the row's facts, calls and results, then images.
+        turns.before_offset(record.start, &self.known);
         let mut edges = Vec::new();
+        if let Some((_, at, named)) = cut {
+            let names = |open: &NativeTurn| named.as_deref().is_none_or(|n| n == open.as_str());
+            if turns.open_turn().is_some_and(names) {
+                edges.extend(turns.physical_end(at));
+            }
+        }
+        let row = row_key(value);
         for fact in facts {
             edges.extend(turns.observe(fact, row.as_deref(), record.start));
         }
         for call in call_ids(self.provider, value) {
             turns.note_call(call);
         }
+        for fact in facts {
+            if let RecordFact::Unit(call, UnitKind::ToolResult, _) = fact {
+                turns.note_result(call);
+            }
+        }
         let mut images = Vec::new();
         for image in super::extract(self.provider, value) {
-            let found = turns.turn_for_image(&image.call_id, record.start, &self.known);
+            let found = turns.turn_for_image(&image.call_id, &self.known);
             images.push((image, found));
         }
         for edge in edges {
@@ -147,12 +157,28 @@ impl ImageRun {
         }
     }
 
-    /// Records a turn's Closed only when it has a span; a replayed close of a closed span is
-    /// already known and not queued again.
+    /// Records each unanswered call's turn, then the Closed when the turn has a span; what the
+    /// ledger already holds, as on replay, is not queued again.
     fn close(&mut self, source: &SourceId, edge: TurnEdge) {
-        let TurnEdge::Closed { turn, end_offset } = edge else {
+        let TurnEdge::Closed {
+            turn,
+            end_offset,
+            pending_calls,
+        } = edge
+        else {
             return;
         };
+        for call_id in pending_calls {
+            if self.known.call_turn(source, &call_id) != Some(turn.as_str()) {
+                let turn = turn.as_str().to_owned();
+                let source = source.clone();
+                self.queue(ImageEntry::ImageCall {
+                    source,
+                    call_id,
+                    turn,
+                });
+            }
+        }
         let Some(span) = self.known.span_of(source, turn.as_str()) else {
             return;
         };

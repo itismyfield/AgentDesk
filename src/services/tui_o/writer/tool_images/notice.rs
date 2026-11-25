@@ -30,10 +30,10 @@ pub(crate) fn caption(display_name: &str, marker: &str) -> String {
 /// One line for a result's omitted images, rebuilt from the ledger so every attempt matches.
 /// It never claims an image did not arrive: `not_confirmed` reads as an unconfirmed delivery.
 pub(crate) fn payload(images: &ImageState, notice: &UnitKey) -> String {
-    let reasons = images.group_omissions(notice);
+    let reasons = images.notice_members(notice);
     let mut counts = std::collections::BTreeMap::<&str, usize>::new();
-    for reason in &reasons {
-        *counts.entry(label(reason)).or_default() += 1;
+    for member in &reasons {
+        *counts.entry(label(&member.reason)).or_default() += 1;
     }
     let parts: Vec<String> = counts
         .iter()

@@ -1,14 +1,15 @@
 //! The next step of each image and omission notice the ledger owes, one per poll. A marker places
 //! the first attempt in the owed order; every later step bypasses the ordinary disposition.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 
 use super::{ImageBody, OmitReason, notice};
-use crate::services::tui_o::shadow::{ShadowProvider, UnitKey};
+use crate::services::tui_o::shadow::{ShadowProvider, SourceId, UnitKey};
+use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::tool_images::{
     ImageEntry, ImageObligation, ImageStep, NoticeStep, OpenObligation, Waiting,
 };
@@ -126,19 +127,22 @@ pub(crate) fn open_count(ledger: &LedgerState) -> usize {
     ledger.tool_images().open_obligations(ledger).len()
 }
 
-/// Spool keys GC leaves alone: open obligations, unclosed spans, live open turns, and every
-/// source while derived entries still wait to be appended.
+/// Per spool key, the lowest offset GC keeps: open obligations and notices' records, unclosed
+/// spans, live open image turns; `None` while derived entries still wait to be appended.
 pub(crate) fn kept_sources(
     ledger: &LedgerState,
     deriver: &mut UnitDeriver,
-) -> Option<HashSet<String>> {
+) -> Option<HashMap<String, u64>> {
     let durable = ledger.tool_images();
-    let mut kept = durable.kept_sources(ledger);
+    let mut kept = durable.kept_from(ledger);
     if let Some(run) = deriver.images() {
         if run.has_queued() {
             return None;
         }
-        kept.extend(run.live_openers(durable));
+        for (key, from) in run.live_openers(durable) {
+            let floor = kept.entry(key).or_insert(from);
+            *floor = (*floor).min(from);
+        }
     }
     Some(kept)
 }
@@ -161,6 +165,12 @@ pub(in crate::services::tui_o::writer) fn unit_post<P: DiscordPort>(
         }
         None => Box::pin(port.post_unit(channel, payload, origin, kind)),
     }
+}
+
+/// Whether the oldest segment of `source` lies wholly below the offset GC keeps from.
+pub(crate) fn below(store: &ChannelStore, source: &SourceId, floor: Option<u64>) -> bool {
+    let end = || store.oldest_segment_end(source);
+    floor.is_none_or(|from| end().is_some_and(|end| end <= from))
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
@@ -235,6 +245,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     .map_or_else(|step| step, |()| Step::Done)
             }
             Action::Notice(unit_key) => {
+                let images = self.store().ledger().tool_images();
+                let members = images.notice_members(&unit_key).into_iter();
+                let omitted: Vec<String> = members.map(|m| m.key.native_key).collect();
+                tracing::info!(unit_key = ?unit_key, ?omitted, "[tui_o] omission notice attempt");
                 let payload = notice::payload(self.store().ledger().tool_images(), &unit_key);
                 let piece = PieceWork {
                     unit_key,
