@@ -1,5 +1,6 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
+import { Select } from "../../kit/free/select-clean";
 import type { ChannelAssignment } from "../onboardingDraft";
 import {
   ChecklistPanel,
@@ -49,7 +50,6 @@ export function Step4ChannelSetup({
   guild,
   guilds,
   hasSelectedGuild,
-  inputStyle,
   labelStyle,
   selectedGuild,
   setChannelAssignments,
@@ -75,26 +75,30 @@ export function Step4ChannelSetup({
 
       {guilds.length > 0 && (
         <div>
-          <label className={labelStyle} style={{ color: "var(--th-text-secondary)" }}>
-            {tr("Discord 서버", "Discord Server")}
-          </label>
           {guilds.length === 1 ? (
-            <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
-              {guilds[0].name}
-            </div>
+            <>
+              <div className={labelStyle} style={{ color: "var(--th-text-secondary)" }}>
+                {tr("Discord 서버", "Discord Server")}
+              </div>
+              <div className="text-sm" style={{ color: "var(--th-text-primary)" }}>
+                {guilds[0].name}
+              </div>
+            </>
           ) : (
-            <select
+            <Select
+              id="onboarding-discord-guild"
+              label={tr("Discord 서버", "Discord Server")}
               aria-label={tr("Discord 서버", "Discord server")}
+              size="lg"
+              className="w-full"
               value={selectedGuild}
-              onChange={(event) => setSelectedGuild(event.target.value)}
-              className={inputStyle}
-              style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-            >
-              <option value="">{tr("서버 선택", "Select server")}</option>
-              {guilds.map((item) => (
-                <option key={item.id} value={item.id}>{item.name}</option>
-              ))}
-            </select>
+              placeholder={tr("서버 선택", "Select server")}
+              onChange={(value) => setSelectedGuild(value)}
+              options={[
+                { value: "", label: tr("서버 선택", "Select server") },
+                ...guilds.map((item) => ({ value: item.id, label: item.name })),
+              ]}
+            />
           )}
         </div>
       )}
@@ -119,32 +123,37 @@ export function Step4ChannelSetup({
             </div>
             <div className="flex flex-col sm:flex-row gap-2">
               {guild && guild.channels.length > 0 ? (
-                <select
+                <Select
                   aria-label={tr(
                     `${assignment.agentName} 채널`,
                     `Channel for ${assignment.agentName}`,
                   )}
+                  size="lg"
+                  className="min-w-0 flex-1"
                   value={assignment.channelId}
-                  onChange={(event) => {
-                    const channel = guild.channels.find((candidate) => candidate.id === event.target.value);
+                  onChange={(nextChannelId) => {
+                    const channel = guild.channels.find((candidate) => candidate.id === nextChannelId);
                     setChannelAssignments((current) => {
                       const copy = [...current];
                       copy[index] = {
                         ...assignment,
-                        channelId: event.target.value,
+                        channelId: nextChannelId,
                         channelName: channel?.name || assignment.recommendedName,
                       };
                       return copy;
                     });
                   }}
-                  className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
-                  style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
-                >
-                  <option value="">{tr(`새 채널: #${assignment.recommendedName}`, `New: #${assignment.recommendedName}`)}</option>
-                  {guild.channels.map((channel) => (
-                    <option key={channel.id} value={channel.id}>#{channel.name}</option>
-                  ))}
-                </select>
+                  options={[
+                    {
+                      value: "",
+                      label: tr(`새 채널: #${assignment.recommendedName}`, `New: #${assignment.recommendedName}`),
+                    },
+                    ...guild.channels.map((channel) => ({
+                      value: channel.id,
+                      label: `#${channel.name}`,
+                    })),
+                  ]}
+                />
               ) : (
                 <input
                   type="text"

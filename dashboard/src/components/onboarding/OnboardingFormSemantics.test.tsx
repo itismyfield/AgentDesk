@@ -210,8 +210,9 @@ describe("onboarding form semantics", () => {
     const selectMode = render(
       <Step4ChannelSetup {...commonProps} guild={selectedGuild} />,
     );
+    expect(selectMode.querySelectorAll("select")).toHaveLength(0);
     expect(
-      Array.from(selectMode.querySelectorAll("select"), (select) =>
+      Array.from(selectMode.querySelectorAll('[role="combobox"]'), (select) =>
         select.getAttribute("aria-label"),
       ),
     ).toEqual(["Discord server", "Channel for Reviewer"]);
