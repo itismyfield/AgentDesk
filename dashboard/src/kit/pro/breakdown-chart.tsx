@@ -1,4 +1,3 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Check, ChevronDown, CircleSlash, Clock3, Eye, Inbox, Square, SquareCheck, X } from 'lucide-react';
@@ -27,9 +26,6 @@ export interface BreakdownChartProps {
   style?: CSSProperties;
 }
 const palette = ['#4fb0fe', '#a651f0', '#ee3e9e', '#7bc4fe', '#d7bcf6', '#a3a3a3', '#f6abd4'];
-/** Narrowest column. Seven days still fit a 390px phone; longer ranges scroll inside the plot. */
-const BAR_MIN_PX = 32;
-const BAR_GAP_PX = 4;
 const oneDecimal = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
 /** Table, total and tooltip numbers: grouping, at most one decimal, and <0.1 for tiny positives. */
 const format = (value: number) => value > 0 && value < 0.05 ? '<0.1' : oneDecimal.format(value);
@@ -116,7 +112,7 @@ function Picker({ label, value, options, onChange, disabled }: { label: string; 
   }
   return <div className="aui-breakdown-chart-picker">
     <span id={id + '-label'} title={label}>{label}</span>
-    <button ref={trigger} className="aui-breakdown-chart-picker-button" type="button" aria-labelledby={id + '-label ' + id + '-value'} aria-haspopup="listbox" aria-controls={open ? id + '-panel' : undefined} aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
+    <button ref={trigger} data-hit-slop="5" className="aui-breakdown-chart-picker-button" type="button" aria-labelledby={id + '-label ' + id + '-value'} aria-haspopup="listbox" aria-controls={open ? id + '-panel' : undefined} aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
       <span id={id + '-value'} dir="auto" title={options.find(option => option.id === value)?.label ?? value}>{(options.find(option => option.id === value)?.label ?? value) || '설정 없음'}</span><ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
     </button>
     {open && createPortal(<div className={'aui-breakdown-chart aui-breakdown-chart-overlay' + (mobile ? ' aui-breakdown-chart-overlay-mobile' : '')} style={themeStyle} onKeyDown={keyDown}>
@@ -251,7 +247,7 @@ function BreakdownChartBody({ records, dimensions, measures, title = '에이전�
           {!records.length && <p className="aui-breakdown-chart-zero-note">실행 기록을 기다리는 중입니다. 정의된 분류의 0값을 표시합니다.</p>}
           <div className="aui-breakdown-chart-chart">
             <div className="aui-breakdown-chart-scroll">
-              <div className="aui-breakdown-chart-plot" ref={plot} style={{ minWidth: (rows.length * BAR_MIN_PX + Math.max(0, rows.length - 1) * BAR_GAP_PX) + 'px' }}>
+              <div className="aui-breakdown-chart-plot" ref={plot} style={{ minWidth: (rows.length * 44 + Math.max(0, rows.length - 1) * 4) + 'px' }}>
                 <div className="aui-breakdown-chart-grid" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <span key={index} style={{ top: (index * 20) + '%' }} />)}</div>
                 <div className="aui-breakdown-chart-bars" onPointerLeave={() => { if (!pinned) setSelected(null); }}>
                   {rows.map((row, index) => {
@@ -289,7 +285,6 @@ function BreakdownChartBody({ records, dimensions, measures, title = '에이전�
 }
 
 const styles = `
-@layer kit {
 .aui-breakdown-chart { --aui-breakdown-chart-tray:var(--aui-bg-2,#f0f0f0); --aui-breakdown-chart-card:var(--aui-bg-1,#fff); --aui-breakdown-chart-line:var(--aui-line-soft,#ececec); --aui-breakdown-chart-border:var(--aui-line,#e5e5e5); --aui-breakdown-chart-grid:var(--aui-line-soft,#ebebeb); --aui-breakdown-chart-zero:var(--aui-line,#dcdcdc); --aui-breakdown-chart-fg:var(--aui-fg,#171717); --aui-breakdown-chart-body:var(--aui-fg-dim,#404040); --aui-breakdown-chart-muted:var(--aui-fg-muted,#8f8f8f); --aui-breakdown-chart-accent:var(--aui-accent,#4fb0fe); --aui-breakdown-chart-focus:var(--aui-focus,rgb(0 96 226 / .7)); --aui-breakdown-chart-restore-hover:rgb(1 144 254 / .08); --aui-breakdown-chart-r:var(--aui-r-lg,16px); --aui-breakdown-chart-m:var(--aui-r-md,10px); --aui-breakdown-chart-s:var(--aui-r-sm,7px); --aui-breakdown-chart-button:var(--aui-bg-1,#fff); --aui-breakdown-chart-hover:var(--aui-bg-2,#f8f8f8); --aui-breakdown-chart-option-hover:var(--aui-bg-2,#f5f5f5); --aui-breakdown-chart-empty:var(--aui-bg-2,#f2f2f2); --aui-breakdown-chart-head:var(--aui-bg-1,#fcfcfc); --aui-breakdown-chart-row:var(--aui-bg-2,#f6f6f6); --aui-breakdown-chart-legend-hover:#0000000d; --aui-breakdown-chart-float:var(--aui-bg-1,#fff); --aui-breakdown-chart-shadow:0 10px 28px -8px #0000002e; --aui-breakdown-chart-card-shadow:0 1px 2px #0000000f; --aui-breakdown-chart-button-shadow:0 1px 2px #0000000a; --aui-breakdown-chart-pill-shadow:0 2px 6px #0000000f; --aui-breakdown-chart-ease:var(--aui-ease,cubic-bezier(.22,1,.36,1)); width:100%; max-width:560px; min-width:0; container-type:inline-size; color:var(--aui-breakdown-chart-body); font:13px/1.4 var(--aui-font-sans,Inter,ui-sans-serif,system-ui,sans-serif); font-variant-numeric:tabular-nums; word-break:keep-all; overflow-wrap:anywhere; }
 :where(.dark,[data-theme="dark"]) .aui-breakdown-chart { --aui-breakdown-chart-tray:var(--aui-bg-2,#161618); --aui-breakdown-chart-card:var(--aui-bg-1,#232326); --aui-breakdown-chart-line:var(--aui-line-soft,#ffffff14); --aui-breakdown-chart-border:var(--aui-line,#ffffff14); --aui-breakdown-chart-grid:var(--aui-line-soft,#ffffff17); --aui-breakdown-chart-zero:var(--aui-line,#ffffff29); --aui-breakdown-chart-fg:var(--aui-fg,#ededed); --aui-breakdown-chart-body:var(--aui-fg-dim,#c4c4c4); --aui-breakdown-chart-muted:var(--aui-fg-muted,#8f8f8f); --aui-breakdown-chart-accent:var(--aui-accent,#4fb0fe); --aui-breakdown-chart-focus:var(--aui-focus,rgb(77 141 255 / .8)); --aui-breakdown-chart-restore-hover:rgb(79 176 254 / .16); --aui-breakdown-chart-button:var(--aui-bg-2,#2a2a2d); --aui-breakdown-chart-hover:var(--aui-bg-3,#313135); --aui-breakdown-chart-option-hover:var(--aui-bg-3,#313135); --aui-breakdown-chart-empty:var(--aui-bg-2,#ffffff0f); --aui-breakdown-chart-head:var(--aui-bg-1,#262629); --aui-breakdown-chart-row:var(--aui-bg-2,#2a2a2d); --aui-breakdown-chart-legend-hover:#ffffff0f; --aui-breakdown-chart-float:var(--aui-bg-2,#2a2a2d); --aui-breakdown-chart-shadow:0 12px 30px -8px #00000080; --aui-breakdown-chart-card-shadow:0 1px 2px #00000066; --aui-breakdown-chart-button-shadow:0 1px 2px #00000059; --aui-breakdown-chart-pill-shadow:0 12px 30px -8px #00000080; }
 .aui-breakdown-chart *, .aui-breakdown-chart *::before, .aui-breakdown-chart *::after { box-sizing:border-box; }
@@ -325,8 +320,8 @@ const styles = `
 .aui-breakdown-chart-grid { position:absolute; top:0; width:100%; height:200px; pointer-events:none; }
 .aui-breakdown-chart-grid > span { position:absolute; width:100%; border-top:1px dashed var(--aui-breakdown-chart-grid); }
 .aui-breakdown-chart-grid > span:last-child { border-top:1px solid var(--aui-breakdown-chart-zero); }
-.aui-breakdown-chart-bars { position:relative; display:flex; gap:${BAR_GAP_PX}px; height:200px; }
-.aui-breakdown-chart-bar-button { position:relative; flex:1 0 ${BAR_MIN_PX}px; min-width:${BAR_MIN_PX}px; height:200px; border:0; padding:0; background:none; transition:opacity 200ms ease; touch-action:pan-x pan-y!important; }
+.aui-breakdown-chart-bars { position:relative; display:flex; gap:4px; height:200px; }
+.aui-breakdown-chart-bar-button { position:relative; flex:1 0 44px; min-width:44px; height:200px; border:0; padding:0; background:none; transition:opacity 200ms ease; touch-action:pan-x pan-y!important; }
 .aui-breakdown-chart-bar-button:focus-visible { outline-offset:2px!important; }
 .aui-breakdown-chart-bar-button[data-dim="true"] { opacity:.38; }
 .aui-breakdown-chart-stack { position:absolute; bottom:0; left:50%; translate:-50% 0; display:flex; flex-direction:column-reverse; gap:1px; width:min(10px,100%); overflow:hidden; transition:height 520ms var(--aui-breakdown-chart-ease); }
@@ -335,8 +330,8 @@ const styles = `
 .aui-breakdown-chart-bar-button[data-active="true"] .aui-breakdown-chart-empty-bar { opacity:1; }
 .aui-breakdown-chart-ticks { position:absolute; top:0; right:0; width:26px; height:200px; color:var(--aui-breakdown-chart-muted); font-size:11px; line-height:16px; }
 .aui-breakdown-chart-ticks > span { position:absolute; right:0; white-space:nowrap; }
-.aui-breakdown-chart-axis { display:flex; gap:${BAR_GAP_PX}px; margin-top:8px; height:24px; color:var(--aui-breakdown-chart-muted); font-size:11px; }
-.aui-breakdown-chart-axis > div { position:relative; flex:1 0 ${BAR_MIN_PX}px; min-width:${BAR_MIN_PX}px; text-align:center; }
+.aui-breakdown-chart-axis { display:flex; gap:4px; margin-top:8px; height:24px; color:var(--aui-breakdown-chart-muted); font-size:11px; }
+.aui-breakdown-chart-axis > div { position:relative; flex:1 0 44px; min-width:44px; text-align:center; }
 .aui-breakdown-chart-axis-base { display:block; height:24px; line-height:24px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .aui-breakdown-chart-axis-pill { position:absolute; z-index:2; left:0; top:0; display:flex; align-items:center; gap:6px; max-width:min(220px,80cqw); height:24px; padding:0 10px 0 7px; border-radius:999px; background:var(--aui-breakdown-chart-float); color:var(--aui-breakdown-chart-fg); box-shadow:0 0 0 1px var(--aui-breakdown-chart-border),var(--aui-breakdown-chart-pill-shadow); font-size:12px; font-weight:500; white-space:nowrap; animation:aui-breakdown-chart-pill-in 200ms var(--aui-breakdown-chart-ease); }
 .aui-breakdown-chart-icon { display:inline-flex; flex:none; align-items:center; justify-content:center; width:15px; height:15px; }
@@ -400,7 +395,8 @@ const styles = `
  .aui-breakdown-chart-mobile-row dd { flex:none; margin:0; }
  .aui-breakdown-chart-footer { flex-wrap:wrap; }
 }
-@media (pointer:coarse) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
+@media (pointer:coarse) and (min-width:900px) { .aui-breakdown-chart-picker-button { position:relative; z-index:2; min-width:44px; } .aui-breakdown-chart-picker-button::before { content:''; position:absolute; inset:-7px 0; } .aui-breakdown-chart-option { min-width:44px; min-height:44px; } .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; margin-block:-8px; } }
+@media (pointer:coarse) and (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
 .aui-breakdown-chart-overlay-mobile { pointer-events:auto; }
 .aui-breakdown-chart-backdrop { position:absolute; inset:0; background:var(--aui-breakdown-chart-backdrop,#0006); }
 .aui-breakdown-chart-overlay-mobile .aui-breakdown-chart-menu { top:auto; left:max(8px,env(safe-area-inset-left)); right:max(8px,env(safe-area-inset-right)); bottom:0; max-height:calc(100dvh - env(safe-area-inset-top) - 24px); padding:8px 8px max(12px,env(safe-area-inset-bottom)); border-radius:18px 18px 0 0; }
@@ -411,5 +407,66 @@ const styles = `
 @keyframes aui-breakdown-chart-tooltip-in { from { opacity:0; } to { opacity:1; } }
 @keyframes aui-breakdown-chart-pill-in { from { opacity:0; scale:.92; } to { opacity:1; scale:1; } }
 @media (prefers-reduced-motion:reduce) { .aui-breakdown-chart *, .aui-breakdown-chart *::before, .aui-breakdown-chart *::after { transition:none!important; animation:none!important; } }
-}
 `;
+
+type DemoState = 'default' | 'empty' | 'long' | 'classification' | 'filtered' | 'monochrome' | 'icons' | 'decimals' | 'empty-values' | 'setup' | 'mobile-320' | 'mobile-400' | 'numeric-negative' | 'retired-legend';
+export function BreakdownChartDemo({ state = 'default' }: { state?: DemoState }) {
+  const host = useRef<HTMLDivElement>(null);
+  const filteredInitialized = useRef(false);
+  const [axisCase, setAxisCase] = useState('mixed');
+  const [retired, setRetired] = useState(false);
+  const long = state === 'long';
+  const steps = ['대기열', '시작 전', '실행 중', '검토 중', '완료', '취소'];
+  const icons = [<Inbox />, <Square />, <Clock3 />, <Eye />, <SquareCheck fill="#4fb0fe" color="#fff" />, <CircleSlash />];
+  const agents = long ? Array.from({ length: 14 }, (_, index) => 'agent_' + (index + 1) + '_relay_delivery_verification_campaign_identifier') : ['Codex', 'Claude', 'Gemini', 'Relay'];
+  const channels = ['개발 작업', '긴 한국어 채널 이름 · 배포 준비와 실행 결과를 함께 확인하는 공간', '운영 알림'];
+  const dimensions: BreakdownDimension[] = [
+    { id:'agent', label:'에이전트', values:agents.map(value => ({ id:value, label:value })) },
+    { id:'step', label:'작업 단계', values:(long ? [...steps, '릴레이 재검수', '보관 대기'] : steps).map((value, index) => ({ id:value, label:value, icon:icons[index] })) },
+    { id:'channel', label:'Discord 채널', values:channels.map(value => ({ id:value, label:value })) },
+  ];
+  let records: BreakdownRecord[] = state === 'empty' ? [] : Array.from({ length:long ? 176 : 96 }, (_, index) => ({ agent:agents[index % agents.length], step:steps[(Math.floor(index / agents.length) + index) % 6], channel:channels[index % 3], duration:String(2.5 + (index * 7) % 31) }));
+  if (state === 'decimals') {
+    const values = axisCase === 'mixed' ? [.025, 2.5, 12.5, 12480.25] : [Number(axisCase), 0, 0, 0];
+    records = values.flatMap((value, index) => value === 0 && index > 0 ? [] : [{ agent:agents[index], step:steps[0], duration:String(value) }, ...(index === 3 && axisCase === 'mixed' ? [{ agent:agents[index], step:steps[1], duration:'.001' }] : [])]);
+    records.push({ agent:'undeclared-agent', step:steps[0], duration:'10000' }, { agent:agents[0], step:steps[0], duration:'invalid' }, { agent:agents[0], step:steps[0], duration:'' }, { agent:agents[0], step:steps[0] }, { agent:agents[0], step:'undeclared-step', duration:'10000' });
+  }
+  if (state === 'empty-values') dimensions[0] = { ...dimensions[0], values:[] };
+  if (state === 'numeric-negative') {
+    // Numeric record categories land on the declared string values; bad amounts count as 0 and negatives stay in the table.
+    dimensions[0] = { id:'shard', label:'실행 샤드', values:['1', '2', '3'].map(value => ({ id:value, label:'샤드 ' + value })) };
+    records = [
+      { shard:1, step:steps[0], duration:12 }, { shard:'1', step:steps[2], duration:8 }, { shard:2, step:steps[2], duration:-15 },
+      { shard:2, step:steps[4], duration:6 }, { shard:3, step:steps[4], duration:'Infinity' }, { shard:3, step:steps[0], duration:'not-a-number' },
+      { shard:3, step:steps[2], duration:4.25 }, { shard:null, step:steps[0], duration:99 }, { shard:1, step:null, duration:99 },
+    ];
+  }
+  if (state === 'default') {
+    const teams = ['알파', '베타', '감마'];
+    const kinds = ['계획', '작성', '검토'];
+    const grid: Record<string, Record<string, number>> = { 알파: { 계획: 8, 작성: 12, 검토: 0 }, 베타: { 계획: 0, 작성: 7, 검토: 5 }, 감마: { 계획: 3, 작성: 0, 검토: 9 } };
+    dimensions[0] = { id: 'team', label: '팀', values: teams.map((value) => ({ id: value, label: value })) };
+    dimensions[1] = { id: 'kind', label: '구분', values: kinds.map((value) => ({ id: value, label: value })) };
+    records = teams.flatMap((team) => kinds.flatMap((kind) => Array.from({ length: grid[team][kind] }, () => ({ team, kind }))));
+  }
+  if (state === 'retired-legend') {
+    // The host swaps the stage list in place under the same segment id: '구현' leaves both the definition and the records.
+    const stages = retired ? ['리뷰', '배포'] : ['구현', '리뷰', '배포'];
+    dimensions[1] = { id:'step', label:'작업 단계', values:stages.map(value => ({ id:value, label:value })) };
+    records = Array.from({ length:24 }, (_, index) => ({ agent:agents[index % agents.length], step:stages[index % stages.length], channel:channels[index % 3] }));
+  }
+  useEffect(() => {
+    if ((state !== 'filtered' && state !== 'retired-legend') || filteredInitialized.current) return;
+    if (state === 'retired-legend') { filteredInitialized.current = true; host.current?.querySelector<HTMLButtonElement>('.aui-breakdown-chart-legend button')?.click(); return; }
+    filteredInitialized.current = true;
+    const buttons = host.current?.querySelectorAll<HTMLButtonElement>('.aui-breakdown-chart-legend button');
+    buttons?.[0]?.click(); buttons?.[1]?.click();
+  }, [state]);
+  return <div ref={host} style={{ width:'100%', maxWidth:state === 'mobile-320' ? 320 : state === 'mobile-400' ? 400 : 560 }}>
+    {state === 'decimals' && <label style={{ display:'flex', flexWrap:'wrap', alignItems:'center', gap:8, marginBottom:12 }}>축 경계 입력<select aria-label="축 경계 입력" value={axisCase} onChange={event => setAxisCase(event.target.value)} style={{ minHeight:44, minWidth:100, fontSize:16 }}><option value="mixed">소수·극소 조각</option>{['0','0.5','26','51','125','12500000'].map(value => <option key={value} value={value}>최댓값 {value}</option>)}</select></label>}
+    {state === 'classification' && <p style={{ fontSize:13 }}>구분을 감춘 뒤 가로축을 ‘Discord 채널’, 이어 ‘작업 단계’로 바꾸면 단색 전환과 복원을 확인할 수 있습니다.</p>}
+    {state === 'retired-legend' && <div style={{ display:'flex', flexWrap:'wrap', alignItems:'center', gap:8, marginBottom:12, fontSize:13 }}><button type="button" aria-pressed={retired} onClick={() => setRetired(current => !current)} style={{ minHeight:44, padding:'8px 12px', borderRadius:8, border:'1px solid currentColor', background:'transparent', color:'inherit', font:'inherit', cursor:'pointer' }}>{retired ? '구현 단계 다시 추가' : '구현 단계 정의에서 제거'}</button><span>처음에는 ‘구현’을 감춘 상태입니다. 정의에서 제거하면 남은 두 단계가 모두 보이고 전체 복원이 사라집니다.</span></div>}
+    {state === 'setup' && <p role="status" style={{ margin: '0 0 12px', fontSize: 13 }}>분류·집계 정의가 비어 차트를 그리지 않았습니다. 호스트가 정의를 연결하면 아래 자리에 차트가 나타납니다.</p>}
+    <BreakdownChart records={records} dimensions={state === 'setup' ? [] : dimensions} measures={state === 'setup' ? [] : [{ id:'count', label:'실행 건수', unit:'건' }, { id:'duration', label:'누적 실행 시간', unit:'분', field:'duration' }]} title={state === 'default' ? '작업량' : long ? '장기 실행 에이전트와 Discord 릴레이의 채널별 실행 분포' : '에이전트 실행 분포'} defaultSlice={state === 'default' ? 'team' : state === 'icons' ? 'step' : state === 'numeric-negative' ? 'shard' : 'agent'} defaultSegment={state === 'default' ? 'kind' : state === 'monochrome' ? null : state === 'icons' ? 'agent' : 'step'} defaultMeasure={state === 'decimals' || state === 'numeric-negative' ? 'duration' : 'count'} />
+  </div>;
+}
