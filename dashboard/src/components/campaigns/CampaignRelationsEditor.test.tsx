@@ -398,7 +398,38 @@ it("adds directional arrowheads to dependency edges, dims unrelated branches to 
   expect([edge("A->B").style?.opacity ?? 1, edge("B->C").style?.opacity ?? 1, edge("B->D").style?.opacity, edge("X->Y").style?.opacity]).toEqual([1, 1, 0.24, 0.24]);
 
   const minimapButton = named("Minimap");
-  expect(minimapButton.getAttribute("aria-pressed")).toBe("true");
+  expect(minimapButton.getAttribute("aria-pressed")).toBe("false");
   await click(minimapButton);
+  expect(named("Minimap").getAttribute("aria-pressed")).toBe("true");
+  await click(named("Minimap"));
   expect(named("Minimap").getAttribute("aria-pressed")).toBe("false");
+});
+
+it("exits fullscreen mode on Escape when clean, prompts via leave guard when dirty, and ignores Escape inside inputs", async () => {
+  const mq = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+    matches: query === "(min-width: 1280px)",
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }) as unknown as MediaQueryList);
+  try {
+    await render();
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).toHaveBeenCalledOnce();
+
+    onExit.mockClear();
+    await pick("C");
+    const input = container.querySelector<HTMLInputElement>("aside input")!;
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).not.toHaveBeenCalled();
+
+    await typeTitle("Edited C");
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).not.toHaveBeenCalled();
+    expect(text()).toContain("1 unsaved changes");
+    await click(named("Discard and leave"));
+    expect(onExit).toHaveBeenCalledOnce();
+  } finally {
+    mq.mockRestore();
+  }
 });

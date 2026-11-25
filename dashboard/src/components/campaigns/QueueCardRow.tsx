@@ -10,6 +10,12 @@ import { TaskRow } from "./TaskListParts";
 
 const PRIORITY_TONE: Record<string, ChipTone> = { urgent: "err", high: "warn" };
 
+function relativeAgeLabel(ms: number, tr: Tr) {
+  if (ms < 60_000) return tr("방금 전", "just now");
+  const age = formatAgeLabel(ms, tr);
+  return tr(`${age} 전`, `${age} ago`);
+}
+
 function changedAgo(ms: number, tr: Tr) {
   if (ms < 60_000) return tr("방금 변경", "changed just now");
   const age = formatAgeLabel(ms, tr);
@@ -50,7 +56,7 @@ export default function QueueCardRow({ card, agent, locale, selected, checked = 
           {priorityTone && <Chip tone={priorityTone}>{priorityLabel(card.priority, tr)}</Chip>}
         </>}
         trailing={age !== null && <span className="shrink-0 text-right text-xs tabular-nums text-[var(--fg-faint)]" title={changedAgo(age, tr)}>
-          <span aria-hidden>{age < 60_000 ? tr("방금", "now") : formatAgeLabel(age, tr)}</span><span className="sr-only">{changedAgo(age, tr)}</span>
+          <span aria-hidden>{relativeAgeLabel(age, tr)}</span><span className="sr-only">{changedAgo(age, tr)}</span>
         </span>}
         action={card.status === "backlog" && <Button variant="secondary" size="sm" disabled={busy} onClick={onReady} className="shrink-0">{tr("준비됨으로", "To ready")}</Button>} />
     </div>

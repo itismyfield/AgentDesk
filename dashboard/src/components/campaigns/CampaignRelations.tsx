@@ -1,6 +1,6 @@
 import { ArrowLeft, ArrowRight, TriangleAlert } from "lucide-react";
 import { useId, useMemo, useRef, useState, type ReactNode } from "react";
-import type { Campaign, CampaignNodeStatus } from "../../api/campaigns";
+import type { Campaign, CampaignNode, CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { Badge as KitBadge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
@@ -14,13 +14,14 @@ import CampaignGroupTasks from "./CampaignGroupTasks";
 import { campaignRawEdges, rawEdgeId } from "./campaignGraphRouting";
 import CampaignNeighborhood from "./CampaignNeighborhood";
 import { campaignGroup, campaignTaskNumber, campaignTaskTitle, groupCampaignNodes } from "./campaignModel";
-import { cleanBlocker } from "./campaignOverviewModel";
+import { cleanBlocker, legacyTask } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import { loadCampaignView, storedEditorScopes } from "./campaignViewStorage";
 import { keptDraft, type EditScope } from "./relationsEditorModel";
 import { TaskGroupHeading } from "./TaskListParts";
 
 type RelationsMode = "graph" | "swimlanes";
+type SwimlaneScope = "active" | "all";
 
 const SWIMLANE_STATUS: Record<CampaignNodeStatus, HandoffStatus> = {
   pending: "queued",
@@ -32,6 +33,7 @@ const SWIMLANE_STATUS: Record<CampaignNodeStatus, HandoffStatus> = {
 };
 
 const SWIMLANE_COLORS = ["#0190fe", "#10b981", "#f59e0b", "#06b6d4", "#ec4899", "#3b82f6"];
+const isActiveNode = (node: CampaignNode) => node.status !== "completed" && node.status !== "skipped";
 
 /** The cable ties saved for this campaign's editor scopes, one line each: how many lines, from which tasks, and on the
  * second line the tasks they lead to. Members gone from the campaign are left out. */
@@ -57,8 +59,10 @@ function TieLines({ campaign, tr }: { campaign: Campaign; tr: Tr }) {
 }
 
 /** Phones: each group as a row with its task count, completion and blocked count, under any loop among the groups. */
-function GroupList({ campaign, onOpen, tr, children }: { campaign: Campaign; onOpen: (group: string) => void; tr: Tr; children: ReactNode }) {
-  const overview = useMemo(() => buildCampaignGroupOverview(campaign.nodes), [campaign.nodes]);
+function GroupList({ campaign, live, onOpen, tr, children }: {
+  campaign: Campaign; live?: Record<string, CampaignNodeLive>; onOpen: (group: string) => void; tr: Tr; children: ReactNode;
+}) {
+  const overview = useMemo(() => buildCampaignGroupOverview(campaign.nodes, undefined, live), [campaign.nodes, live]);
   return <div className="grid min-w-0 gap-3 p-3">
     {overview.cycles.map((path) => <Well key={path.join(">")} className="grid gap-0.5 bg-[var(--err-soft)] px-3 py-2.5">
       <strong className="flex items-center gap-1.5 text-sm text-[var(--err)]"><TriangleAlert aria-hidden className="size-4 shrink-0" /><span className="min-w-0 [overflow-wrap:anywhere]">{groupCycleText(overview, path, tr)}</span></strong>
@@ -79,13 +83,14 @@ function GroupList({ campaign, onOpen, tr, children }: { campaign: Campaign; onO
 }
 
 /** 관계도: switch between the spatial group/task DAG and cross-group HandoffSwimlanes while keeping group context intact. */
-export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit, tr }: {
-  campaign: Campaign; selectedId: string | null; onOpen: (id: string | null) => void; onEdit?: (scope: EditScope) => void; tr: Tr;
+export default function CampaignRelations({ campaign, live, selectedId, onOpen, onEdit, tr }: {
+  campaign: Campaign; live?: Record<string, CampaignNodeLive>; selectedId: string | null; onOpen: (id: string | null) => void; onEdit?: (scope: EditScope) => void; tr: Tr;
 }) {
   const [viewMode, setViewMode] = useState<RelationsMode>("graph");
   const [chosen, setChosen] = useState<string | null>(null);
   const [group, setGroup] = useState<string | null>(null);
   const [task, setTask] = useState<string | null>(null);
+  const [swimlaneChoice, setSwimlaneChoice] = useState<{ campaignId: string; scope: SwimlaneScope } | null>(null);
   const listId = useId();
   const root = useRef<HTMLDivElement>(null);
   const selected = campaign.nodes.find((node) => node.id === selectedId);
@@ -96,13 +101,24 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
   const groups = grouped.length;
   const kept = keptDraft(campaign.id) !== null;
   const phone = useIsMobile();
+  const activeCount = useMemo(() => campaign.nodes.filter(isActiveNode).length, [campaign.nodes]);
+  const defaultSwimlaneScope: SwimlaneScope =
+    campaign.nodes.length > 24 && activeCount > 0 && activeCount < campaign.nodes.length ? "active" : "all";
+  const swimlaneScope: SwimlaneScope =
+    swimlaneChoice?.campaignId === campaign.id
+      ? swimlaneChoice.scope === "active" && activeCount === 0
+        ? "all"
+        : swimlaneChoice.scope
+      : defaultSwimlaneScope;
+  const activeOnly = swimlaneScope === "active";
+
   // Keep group spatial context when inside a group instead of replacing the entire canvas on task selection.
   const inGroup = viewMode === "graph" && !phone && group !== null;
   const activeTaskInGroup = inGroup
     ? (selected && campaignGroup(selected) === group ? selected.id : task)
     : null;
   const editScope = (): EditScope => inGroup ? { kind: "group", key: group } : selected ? { kind: "task", id: selected.id, depth: 1 }
-    : { kind: "group", key: chosen ?? group ?? campaignGroup(campaign.nodes.find((node) => node.dependencies.length) ?? campaign.nodes[0]) };
+    : { kind: "group", key: chosen ?? group ?? campaignGroup(campaign.nodes.find((node) => (node.dependencies ?? []).length) ?? campaign.nodes[0]) };
 
   const focus = (selector: string) => requestAnimationFrame(() => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(selector)?.focus()));
   const openGroup = (key: string, id: string | null = null) => {
@@ -123,28 +139,43 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
   const name = (key: string) => key || tr("미분류", "Ungrouped");
 
   const swimlanes = useMemo(() => {
-    const lanes: HandoffLane[] = grouped.map((entry, index) => ({
-      id: `group:${entry.key}`,
-      name: entry.key || tr("미분류", "Ungrouped"),
-      kind: "agent",
-      role: tr(`작업 ${entry.progress.total}개 · ${entry.progress.percent}%`, `${entry.progress.total} tasks · ${entry.progress.percent}%`),
-      color: SWIMLANE_COLORS[index % SWIMLANE_COLORS.length],
-    }));
-    const tasks: HandoffItem[] = campaign.nodes.map((node) => {
+    const visibleNodes = activeOnly ? campaign.nodes.filter(isActiveNode) : campaign.nodes;
+    const visibleIds = new Set(visibleNodes.map((node) => node.id));
+    const lanes: HandoffLane[] = grouped.flatMap((entry, index) => {
+      const activeInLane = entry.nodes.filter(isActiveNode).length;
+      if (activeOnly && activeInLane === 0) return [];
+      return [{
+        id: `group:${entry.key}`,
+        name: entry.key || tr("미분류", "Ungrouped"),
+        kind: "agent" as const,
+        role: activeOnly
+          ? tr(`활성 ${activeInLane}/${entry.progress.total}개 · ${entry.progress.percent}%`, `${activeInLane}/${entry.progress.total} active · ${entry.progress.percent}%`)
+          : tr(`작업 ${entry.progress.total}개 · ${entry.progress.percent}%`, `${entry.progress.total} tasks · ${entry.progress.percent}%`),
+        color: SWIMLANE_COLORS[index % SWIMLANE_COLORS.length],
+      }];
+    });
+    const tasks: HandoffItem[] = visibleNodes.map((node) => {
       const num = campaignTaskNumber(node);
+      const taskView = legacyTask(node, live?.[node.id]);
+      const isBlocked = taskView.attention && !taskView.gate && taskView.status !== "failed";
       return {
         id: node.id,
         laneId: `group:${campaignGroup(node)}`,
         title: num ? `${num} ${campaignTaskTitle(node)}` : node.title,
-        status: SWIMLANE_STATUS[node.status],
-        kind: node.status === "blocked" ? "gate" : "task",
-        predecessors: node.dependencies,
+        status: isBlocked ? "waiting" : SWIMLANE_STATUS[taskView.status],
+        kind: isBlocked ? "gate" : "task",
+        predecessors: (node.dependencies ?? []).filter((dep) => visibleIds.has(dep)),
         duration: node.stage || undefined,
         detail: cleanBlocker(node.blocker) ?? (node.summary?.trim() || undefined),
       };
     });
-    return { lanes, tasks };
-  }, [grouped, campaign.nodes, tr]);
+    return {
+      lanes,
+      tasks,
+      hiddenGroups: grouped.length - lanes.length,
+      hiddenTasks: campaign.nodes.length - visibleNodes.length,
+    };
+  }, [activeOnly, grouped, campaign.nodes, live, tr]);
 
   const swimlaneLabels = useMemo(() => ({
     progress: (done: number, total: number) => tr(`${done}/${total} 완료`, `${done} of ${total} done`),
@@ -191,6 +222,21 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
         </div>}
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2 max-sm:w-full">
           {onEdit && kept && <KitBadge size="md" tone="warning">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</KitBadge>}
+          {viewMode === "swimlanes" && (
+            <div className="shrink-0">
+              <SegmentedControl<SwimlaneScope>
+                variant="tray"
+                size="sm"
+                aria-label={tr("스윔레인 작업 필터", "Swimlane task filter")}
+                value={swimlaneScope}
+                onChange={(next) => setSwimlaneChoice({ campaignId: campaign.id, scope: next })}
+                options={[
+                  { value: "active", label: tr(`진행·막힘 (${activeCount})`, `Active (${activeCount})`), disabled: activeCount === 0 },
+                  { value: "all", label: tr(`전체 (${campaign.nodes.length})`, `All (${campaign.nodes.length})`) },
+                ]}
+              />
+            </div>
+          )}
           <div className="w-40 shrink-0">
             <SegmentedControl<RelationsMode>
               variant="tray"
@@ -214,6 +260,21 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
       </header>
       {viewMode === "swimlanes" ? (
         <div className="overflow-x-auto p-3 sm:p-4">
+          {activeOnly && swimlanes.hiddenTasks > 0 && (
+            <p role="status" data-testid="swimlanes-filter-caption" className="m-0 pb-2.5 text-xs text-[var(--fg-muted)]">
+              <Num>
+                {swimlanes.hiddenGroups > 0
+                  ? tr(
+                      `완료·건너뜀 그룹 ${swimlanes.hiddenGroups}개 · 작업 ${swimlanes.hiddenTasks}개를 숨겼어요.`,
+                      `Hiding ${swimlanes.hiddenGroups} completed/skipped groups and ${swimlanes.hiddenTasks} tasks.`,
+                    )
+                  : tr(
+                      `완료·건너뜀 작업 ${swimlanes.hiddenTasks}개를 숨겼어요.`,
+                      `Hiding ${swimlanes.hiddenTasks} completed/skipped tasks.`,
+                    )}
+              </Num>
+            </p>
+          )}
           <HandoffSwimlanes
             title={tr("그룹 간 작업 인계 흐름", "Cross-group task handoffs")}
             lanes={swimlanes.lanes}
@@ -227,19 +288,19 @@ export default function CampaignRelations({ campaign, selectedId, onOpen, onEdit
       ) : selected && !inGroup ? (
         <div className="p-4"><CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} /></div>
       ) : phone ? (
-        <GroupList campaign={campaign} onOpen={openGroup} tr={tr}><TieLines campaign={campaign} tr={tr} /></GroupList>
+        <GroupList campaign={campaign} live={live} onOpen={openGroup} tr={tr}><TieLines campaign={campaign} tr={tr} /></GroupList>
       ) : inGroup ? (
-        <CampaignGroupTasks key={group} campaign={campaign} group={group} chosen={activeTaskInGroup} onChoose={setTask} onGoto={goto} onGotoGroup={(key) => openGroup(key)}
+        <CampaignGroupTasks key={group} campaign={campaign} live={live} group={group} chosen={activeTaskInGroup} onChoose={setTask} onGoto={goto} onGotoGroup={(key) => openGroup(key)}
           onOpenTask={(id) => { setTask(id); onOpen(id); }} tr={tr} />
       ) : (
-        <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={goto} tr={tr} />
+        <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} live={live} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={goto} tr={tr} />
       )}
     </div>
     {phone && viewMode === "graph" && group !== null && <div data-relations-list><KitCard pad="none">
       <div className="grid min-w-0 gap-0.5 p-1.5">
         <TaskGroupHeading open controls={listId} label={name(group)} count={members.length} onToggle={() => setGroup(null)} />
         <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => {
-          const after = campaign.nodes.filter((other) => other.dependencies.includes(node.id)).length, before = node.dependencies.filter((id) => byId.has(id)).length;
+          const after = campaign.nodes.filter((other) => (other.dependencies ?? []).includes(node.id)).length, before = (node.dependencies ?? []).filter((id) => byId.has(id)).length;
           return <RowButton key={node.id} data-node-id={node.id} data-task-id={node.id} selected={node.id === selectedId} onClick={() => onOpen(node.id)}
             className="campaign-task-row grid gap-0.5 rounded-[var(--r-sm)] py-2 text-[13px]"><span className="min-w-0 truncate">{node.title}</span>
             <Cap><Num>{tr(`선행 ${before} · 후행 ${after}`, `${before} before · ${after} after`)}</Num></Cap></RowButton>;

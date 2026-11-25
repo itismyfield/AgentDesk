@@ -141,3 +141,19 @@ it("moves between group and card buttons with the arrow keys and hides the empty
   await act(async () => nav[2].click());
   expect(onSelectCard).toHaveBeenCalledWith("two");
 });
+
+it("shows campaign exclusion check message while !campaignsLoaded instead of flashing pre-filtered counts, and formats age with 전", async () => {
+  const ko = (koText: string) => koText;
+  const nineMinAgo = new Date(Date.now() - 9 * 60_000).toISOString();
+  await act(async () => root.render(<KanbanProvider initialCards={[card("free", { github_issue_number: 11, updated_at: nineMinAgo })]} initialDispatches={[]}>
+    <CampaignQueueTab language="ko" tr={ko} campaigns={[]} campaignsLoaded={false} campaignsError={null} onRetryCampaigns={vi.fn()} heldIssueUrls={[]} serverHoldsIncomplete={false} selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
+  </KanbanProvider>));
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("캠페인 제외 목록 확인 중…");
+  expect(container.querySelector("[data-card-id]")).toBeNull();
+
+  await act(async () => root.render(<KanbanProvider initialCards={[card("free", { github_issue_number: 11, updated_at: nineMinAgo })]} initialDispatches={[]}>
+    <CampaignQueueTab language="ko" tr={ko} campaigns={[campaign]} campaignsLoaded campaignsError={null} onRetryCampaigns={vi.fn()} heldIssueUrls={[]} serverHoldsIncomplete={false} selectedCardId={null} onSelectCard={vi.fn()} onCampaignSaved={vi.fn()} />
+  </KanbanProvider>));
+  expect(container.querySelector('[role="status"]')?.textContent).toBe("캠페인 밖 카드 1장");
+  expect(rowFor("free")?.textContent).toContain("9분 전");
+});

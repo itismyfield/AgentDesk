@@ -64,4 +64,9 @@
 }
 }
 /* A relations card the keyboard reached: React Flow clears its node's outline, so the card draws one, 2px on screen at any zoom. */
-@layer components { .campaign-relations :is(.react-flow__node-relationsGroup, .react-flow__node-relationsTask, .react-flow__node-relationsTail):focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); } }
+@layer components {
+  .campaign-relations :is(.react-flow__node-relationsGroup, .react-flow__node-relationsTask, .react-flow__node-relationsTail):focus-visible > div { outline: calc(2px * var(--legible, 1)) solid var(--th-focus-ring, var(--accent)); outline-offset: calc(2px * var(--legible, 1)); }
+  :is(.campaign-relations, .campaign-relations-editor) .campaign-edge-handle-left { left: -5px; right: auto; top: 50%; transform: translateY(-50%); }
+  :is(.campaign-relations, .campaign-relations-editor) .campaign-edge-handle-right { right: -5px; left: auto; top: 50%; transform: translateY(-50%); }
+  :is(.campaign-relations, .campaign-relations-editor) .react-flow__minimap { right: 1rem; bottom: 4rem; margin: 0; }
+}

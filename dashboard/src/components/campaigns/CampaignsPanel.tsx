@@ -330,11 +330,11 @@ export default function CampaignsPanel({ language }: { language: string }) {
       </summary>
       <p className="campaign-description mt-1 max-w-[72ch] px-1 text-[var(--fg-dim)]">{campaign.description}</p>
     </details>}
-    overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
+    overview={(controls) => <CampaignOverview tasks={legacyTasks} limit={null} showPr hasTracker={legacyTasks.length > 0} asOf={refreshedAt ? new Date(refreshedAt).toISOString() : null}
       summaryExtra={<CampaignAutoQueueToggle key={campaign.id} campaign={campaign} tr={tr} onSaved={onSaved} checkedRead={checkedRead} held={autoRuns(campaign.id)} />}
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
-    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
+    relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} live={live[campaign.id]} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
     board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
     pipeline={<CampaignPipeline source={{ kind: "legacy" }} campaign={campaign} tasks={legacyTasks} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
