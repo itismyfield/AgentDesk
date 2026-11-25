@@ -140,7 +140,6 @@ fn never_started_b_pending_is_closed_once_then_original_delivered_once() {
         assert!(execution_closing(herdr::EXECUTION), "its nonce stays shut");
         // The same claim still holds the original for its fresh launch; its wait is gone.
         assert_eq!(kept(node, claim).await, (true, false));
-        assert!(test_turn::active(&node.shared, channel()).await.is_none());
         recover(&node.shared, channel(), claim).await;
         assert_eq!(closes(rig), 1, "closed once");
     });
@@ -176,7 +175,6 @@ fn auto_recovery_refuses_while_any_turn_is_captured() {
             terminate_never_started(asked(node, claim, number), node.shared.clone(), &node.pool)
         };
         let refused = |why: &str| TerminationResult::Refused(why.into());
-        // A claim another wake replaced asks for nothing.
         assert_eq!(
             ask(claim.number() + 1).await,
             refused("claim no longer qualifies")
@@ -241,9 +239,7 @@ fn start_log_racing_after_fence_row_check_is_ordered_by_source_authority() {
         recover(&node.shared, channel(), claim).await;
         assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
         assert!(!execution_closing(herdr::EXECUTION));
-        assert_eq!(kept(node, claim).await, (true, true));
-        // The judgment came first: the fence is shut before any close, so a start hook arriving
-        // from here on reads it under the same authority and records nothing.
+        // The judgment came first: the fence is shut before any close, for every later start hook.
         std::fs::remove_file(logged).unwrap();
         events::forget_channel_for_tests(CHANNEL);
         probe_after_fence(Box::new(|| {

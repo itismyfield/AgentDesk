@@ -1121,11 +1121,9 @@ mod tests {
         start.nonce.clone_from(&nonce);
         start.marker.clone_from(&nonce);
         start.logged_nonce = Some(nonce.clone());
-        // The terminate that retired it left its nonce shut for good.
         crate::services::session_host::shut_execution_for_test(&nonce);
         let retired = hosted_row(owner(), &nonce, HostedState::Retired);
-        let resumed = Ok(Some(session.clone()));
-        assert_eq!(start.judged((0, 0), Some(&retired)), resumed);
+        assert_eq!(start.judged((0, 0), Some(&retired)), Ok(Some(session)));
         assert!(crate::services::session_host::execution_closing(&nonce));
     }
 }
