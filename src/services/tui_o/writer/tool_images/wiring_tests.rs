@@ -304,6 +304,14 @@ async fn reconfirmed_behind_newer_anchor(arrived: bool) {
     assert_eq!(writer.deliver(&piece("m1", "later body")).await, Step::Done);
     let body_anchor = writer.store().ledger().anchor();
     let later = Utc::now() + chrono::Duration::minutes(6);
+    if !arrived {
+        // A same-author post the ledger does not own keeps the attempt Unresolved.
+        harness.port.say(BOT, "not in the ledger");
+        assert_eq!(writer.select_images(later).await, Step::Done);
+        let outcome = &writer.store().ledger().piece(serial).unwrap().outcome;
+        assert!(matches!(outcome, Some(PieceOutcome::Unresolved(_))));
+        harness.port.history.lock().unwrap().pop();
+    }
     assert_eq!(writer.select_images(later).await, Step::Done);
     if !arrived {
         harness
