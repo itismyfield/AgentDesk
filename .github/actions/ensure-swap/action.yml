@@ -4,7 +4,7 @@ description: >-
   memory overflow pages instead of killing the runner. Problems are warnings, never failures.
 inputs:
   size-gb:
-    description: Swapfile size in GiB; skipped when active swap already reaches it.
+    description: Swapfile size in GiB (8 more on a runner without any swap); skipped when active swap already reaches it.
     required: false
     default: "16"
   path:
