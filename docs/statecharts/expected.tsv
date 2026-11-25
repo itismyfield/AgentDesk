@@ -186,6 +186,7 @@ decision-request/DiscussionScope.cfg	DecisionDiscussion	RequesterOnly	-
 decision-request/DiscussionUnknownRaw.cfg	DecisionDiscussion	FailedRawDiscarded	-
 decision-request/Display.cfg	DecisionRequest	StrictDisplayEquality	-
 decision-request/Duplicate.cfg	DecisionRequest	NoDuplicate	-
+decision-request/EarlyBootStart.cfg	DecisionRequest	ReadyBeforeStart	-
 decision-request/EarlyButtons.cfg	DecisionRequest	NoEarlyChoice	-
 decision-request/FalseSuccess.cfg	DecisionRequest	NoFalseSuccess	-
 decision-request/Fence.cfg	DecisionRequest	CurrentAtDispatch	-
@@ -224,6 +225,7 @@ decision-request/RetryClosed.cfg	DecisionRequest	NoRearmAfterClose	-
 decision-request/RunBeforeStore.cfg	DecisionRequest	StoredBeforeRun	-
 decision-request/Sealed.cfg	DecisionRequest	-	-
 decision-request/SnapshotRegister.cfg	DecisionRequest	NoIntakeLeak	-
+decision-request/StaleActivate.cfg	DecisionRequest	EndedCardStaysEnded	-
 decision-request/TempHolderId.cfg	DecisionRequest	LiveHolderKeeps	-
 decision-request/TimeOnlyRecovery.cfg	DecisionRequest	LiveHolderKeeps	-
 decision-request/TtlGuard.cfg	DecisionRequest	NoIntakeLeak	-
