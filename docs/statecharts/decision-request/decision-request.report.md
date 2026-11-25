@@ -226,17 +226,17 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 
 | 모델 전이·변수 | 코드 | 메모 |
 |---|---|---|
-| PostBegin(journal, `inflight`) | `src/services/discord/decisions/publication.rs` `post`(:99) → `src/db/decisions/publication.rs` `journal`(:63) | `stored`→`posting` CAS 한 번과 버튼 handle을 한 transaction으로 쓴다. CAS를 잃은 run은 POST하지 않는다 |
-| PostFinish(`posts`) | `publication.rs` `send_post`(호출 :159) | POST 한 번. 2xx면 `posted`(:100)로 `disabled`, 응답 유실·5xx·연결 오류는 `posting`에 남는다 |
-| PostRejected | `publication.rs` :174 → `db/decisions/publication.rs` `refused`(:118) | 400/401/403/404는 `post_failed`. 다음 ask는 같은 거절을 돌려줄 뿐 POST하지 않는다 |
-| Reconcile | `publication.rs` `publish`(:49) → `reconcile`(:188) → `find_post`(:212) | `posting`이면 포럼의 active thread 중 우리 봇이 시작했고 starter 작성자가 우리 봇이며 marker 줄이 같은 글만 회수한다. 못 찾으면 `posting`(202)에 남는다 |
+| PostBegin(journal, `inflight`) | `src/services/discord/decisions/publication.rs` `post`(:97) → `src/db/decisions/publication.rs` `journal`(:63) | `stored`→`posting` CAS 한 번과 버튼 handle을 한 transaction으로 쓴다. CAS를 잃은 run은 POST하지 않는다 |
+| PostFinish(`posts`) | `publication.rs` `send_post`(호출 :157) | POST 한 번. 2xx면 `posted`(:100)로 `disabled`, 응답 유실·5xx·연결 오류는 `posting`에 남는다 |
+| PostRejected | `publication.rs` :172 → `db/decisions/publication.rs` `refused`(:118) | 400/401/403/404는 `post_failed`. 다음 ask는 같은 거절을 돌려줄 뿐 POST하지 않는다 |
+| Reconcile | `publication.rs` `publish`(:47) → `reconcile`(:186) → `find_post`(:210) | `posting`이면 포럼의 active thread 중 우리 봇이 시작했고 starter 작성자가 우리 봇이며 marker 줄이 같은 글만 회수한다. 못 찾으면 `posting`(202)에 남는다 |
 | BootRePost(대조) | 해당 코드 없음 | 재시작 뒤에는 `inflight`가 없다. `posting` 요청은 Reconcile만 탄다 |
 | `disabled`(view `not_yet`) · EarlyButtons(대조) | `src/services/discord/decisions/card.rs` `render`(:27)·`post_body`(:72), `src/services/manual_steer/action_handle.rs` `to_decision_custom_id`(:32) | 버튼은 모두 disabled이고 custom-id는 `decision:v1:<handle>`이다. manual steer의 parse는 이를 남의 것으로 거절하고, Decision 클릭을 받는 handler는 없다(조각 4) |
-| `known`(포럼 기억) · Refresh · StaleRefresh | `src/services/discord/decisions/ingress.rs` `register`(:26, 호출 `publication.rs` :132)·`contains`(:69)·miss 조회(:90) | 게시 process는 journal 전에 포럼을 등록 집합에 넣는다. 등록 집합은 30초 판독이 덮어쓰지 않는다. 판독이 놓친 부모는 PG에서 그 포럼 하나를 다시 본다. 그래서 Fixed는 메모리에 기대지 않는다(다른 process·재시작 뒤에도 PG의 ready 행이 먼저 있다) |
-| ThreadMessage(대조) | `src/services/discord/router/intake_gate.rs:235` → `ingress.rs` `consumes`(:147) | REST 부모 또는 gateway cache 부모(`cached_parent`)가 Decision 포럼이면 dedup 전에 멈춘다. cache가 forum이 아닌 채널로 아는 부모는 조회하지 않는다 |
+| `known`(포럼 기억) · Refresh · StaleRefresh | `src/services/discord/decisions/ingress.rs` `register`(:24, 호출 `publication.rs` :130)·`contains`(:66)·miss 조회(:87) | 게시 process는 journal 전에 포럼을 등록 집합에 넣는다. 등록 집합은 30초 판독이 덮어쓰지 않는다. 판독이 놓친 부모는 PG에서 그 포럼 하나를 다시 본다. 그래서 Fixed는 메모리에 기대지 않는다(다른 process·재시작 뒤에도 PG의 ready 행이 먼저 있다) |
+| ThreadMessage(대조) | `src/services/discord/router/intake_gate.rs:235` → `ingress.rs` `consumes`(:144) | REST 부모 또는 gateway cache 부모(`cached_parent`)가 Decision 포럼이면 dedup 전에 멈춘다. cache가 forum이 아닌 채널로 아는 부모는 조회하지 않는다 |
 
 모델과 코드가 다른 곳(3b):
 
-- 모델의 Fixed는 "포럼 ready 행이 journal보다 먼저 PG에 있다"를 가정으로 둔다. 코드에서는 `resolve_or_create`가 ready를 저장하거나 확인한 뒤에야 journal로 간다(`publication.rs` :125~:130). 설정 덮어쓰기 포럼은 PG 행 대신 설정으로 막힌다.
+- 모델의 Fixed는 "포럼 ready 행이 journal보다 먼저 PG에 있다"를 가정으로 둔다. 코드에서는 `resolve_or_create`가 ready를 저장하거나 확인한 뒤에야 journal로 간다(`publication.rs` :123~:128). 설정 덮어쓰기 포럼은 PG 행 대신 설정으로 막힌다.
 - PG 조회가 실패하는 순간 다른 process(그 포럼을 등록하지 않은 process)는 그 메시지를 막지 못한다. 모델은 PG 장애를 다루지 않는다.
 - Reconcile은 active thread만 본다. 응답을 잃은 글이 회수 전에 보관(archive)되면 찾지 못하고 `posting`(202)에 남는다. 새 POST는 하지 않는다.
