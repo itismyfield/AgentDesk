@@ -120,6 +120,8 @@ def rewrite(line):
         return None
     a, b = span
     pred = line[a:b]
+    if test_atoms(pred) != 1:
+        return None  # `all(test, test)`, `any(test, all(unix, test))`: one substitution would not open it
     if pred.strip() == "test":
         lead = len(pred) - len(pred.lstrip())
         return line[:a + lead] + TS + line[a + lead + 4:]
@@ -133,6 +135,17 @@ def rewrite(line):
             at = off + s + len(arg) - len(arg.lstrip())
             return line[:at] + TS + line[at + 4:]
     return None
+
+
+def test_atoms(pred):
+    """How many `test` atoms a cfg predicate holds, string literals skipped."""
+    return len(re.findall(r"(?<![\w-])test(?![\w-])", re.sub(r'"(?:\\.|[^"\\])*"', '""', pred)))
+
+
+def mentions_test(line):
+    """A `#[cfg(..)]` / `#[cfg_attr(..)]` opening the line whose text names the `test` atom."""
+    m = re.match(r"^\s*#\[\s*cfg(?:_attr)?\s*\((.*)\)\s*\]", line)
+    return bool(m) and test_atoms(m.group(1)) > 0
 
 
 def real_gate(line):
@@ -156,6 +169,7 @@ class Tree:
         self.root = Path(root).resolve()
         self._layout = None
         self._lines, self._ranges, self._blocks, self._module_at, self.unowned = {}, {}, {}, {}, {}
+        self._attrs = {}
 
     @property
     def layout(self):
@@ -238,10 +252,49 @@ class Tree:
         outer = [own_label(self.lines(rel), j) for a, b, j in self.blocks(rel) if a < index + 1 <= b]
         return " > ".join(outer + [own_label(self.lines(rel), index)])
 
+    def attr_lines(self, rel):
+        """1-based lines where a real attribute starts the line: not text in a string, raw string or comment,
+        and not tokens of a macro invocation or `macro_rules!` body (`stringify! { #[cfg(test)] fn h() }`)."""
+        if rel in self._attrs:
+            return self._attrs[rel]
+        lines = self.lines(rel)
+        toks = rts.rust_tokens("\n".join(lines))
+        out, i, pairs = set(), 0, {"(": ")", "[": "]", "{": "}"}
+        while i < len(toks):
+            t = toks[i]
+            if t.kind == "ident" and i + 2 < len(toks) and toks[i + 1].value == "!":
+                k = i + 2
+                if toks[k].kind == "ident":  # macro_rules! name { .. }
+                    k += 1
+                if k < len(toks) and toks[k].kind == "punct" and toks[k].value in pairs:
+                    depth, k = 1, k + 1
+                    while k < len(toks) and depth:
+                        if toks[k].kind == "punct":
+                            depth += (toks[k].value in pairs) - (toks[k].value in pairs.values())
+                        k += 1
+                    i = k
+                    continue
+            if t.kind == "punct" and t.value == "#" and i + 1 < len(toks) and toks[i + 1].value in ("[", "!") \
+                    and lines[t.line - 1].lstrip().startswith("#"):
+                out.add(t.line)
+            i += 1
+        self._attrs[rel] = out
+        return out
+
     def attr_gates(self, rel, index):
         """Indexes of the real test gates among the attributes directly above lines[index]."""
-        lines = self.lines(rel)
-        return [j for j in range(vt.attr_start(lines, index), index) if real_gate(lines[j])]
+        lines, real = self.lines(rel), self.attr_lines(rel)
+        return [j for j in range(vt.attr_start(lines, index), index) if j + 1 in real and real_gate(lines[j])]
+
+    def item_cfgs(self, rel, index):
+        """The cfg predicates of the real attributes above lines[index], in order: `test`, `not(test)`, ..."""
+        lines, real = self.lines(rel), self.attr_lines(rel)
+        out = []
+        for j in range(vt.attr_start(lines, index), index):
+            span = cfg_predicate(lines[j]) if j + 1 in real else None
+            if span:
+                out.append(re.sub(r"\s+", " ", lines[j][span[0]:span[1]].strip()))
+        return " & ".join(out)
 
     def chain(self, rel, line, seen=None):
         """Every real test gate (rel, attr index) that must open for the item at `line` (1-based) to build."""
@@ -360,7 +413,8 @@ def krx_gated(tree):
                     mods.setdefault(key, (rel, n, False))
                 continue
             if own and re.match(r"^\s*(?:(?:" + vt.VIS + r")\s+)?use\s", line):
-                text = " ".join(lines[i:i + 8]).split(";")[0] + ";"
+                end = next((k for k in range(i, len(lines)) if ";" in lines[k]), len(lines) - 1)
+                text = " ".join(lines[i:end + 1]).split(";")[0] + ";"
                 for path, orig, bound in vt.use_entries(text):
                     if orig == "*":
                         continue
@@ -564,20 +618,25 @@ def hits(tree, by_name, mods, ungated):
 # ---------------------------------------------------------------------------------------------- plan
 
 def load_exclude(path):
+    """(entries, bundles) of the exclusion file; an entry names `cfg`, the gate of each item it must match."""
     doc = json.loads(Path(path).read_text("utf-8"))
     keys = [(e["file"], e["item"]) for e in doc["entries"]]
     dup = [k for k, n in collections.Counter(keys).items() if n > 1]
     if dup:
         raise CodemodError(2, [f"duplicate exclusion {f} :: {i}" for f, i in dup])
-    return doc["entries"]
+    bad = [f"exclusion without its expected `cfg` list: {e['file']} :: {e['item']}" for e in doc["entries"]
+           if not isinstance(e.get("cfg"), list) or not e["cfg"]]
+    if bad:
+        raise CodemodError(2, bad)
+    return doc["entries"], doc.get("bundles", [])
 
 
 def cfg_items(tree, rel):
     """label -> [item index] of every item in the file carrying a `#[cfg(..)]` attribute line."""
     out = collections.defaultdict(list)
-    lines = tree.lines(rel)
+    lines, real = tree.lines(rel), tree.attr_lines(rel)
     for i, line in enumerate(lines):
-        if CFG_LINE.match(line):
+        if i + 1 in real and CFG_LINE.match(line):
             k = item_index(lines, i)
             if k < len(lines) and k not in out[tree.label(rel, k)]:
                 out[tree.label(rel, k)].append(k)
@@ -612,21 +671,24 @@ def holds_tests(tree, rel, index):
     return False
 
 
-def plan(tree, exclude_entries):
+def plan(tree, exclude_entries, bundles=()):
     """The edits and their counts; raises CodemodError when a rule or the exclusion list does not fit."""
-    lay = tree.layout
     by_name, mods = krx_gated(tree)
     found = hits(tree, by_name, mods, ungated_names(tree))
-    uses = {(g["rel"], g["line"]): g["target"] for v in by_name.values() for g in v if g["kind"] == "use"}
+    # Every target of one `use` line: `use gate::{a, b, c};` opens or holds a, b and c together.
+    uses = collections.defaultdict(list)
+    for v in by_name.values():
+        for g in v:
+            if g["kind"] == "use" and g["target"] not in uses[(g["rel"], g["line"])]:
+                uses[(g["rel"], g["line"])].append(g["target"])
 
     def chain_of(target, depth=0):
-        """Gates to open for a hit; a gated re-export also needs what it re-exports (`pub use spy::Guard`)."""
+        """Gates to open for a hit; a gated re-export also needs everything it re-exports (`pub use spy::Guard`)."""
         if target[0] == "mod":
             rel, line, is_file = mods[target[1]]
             return tree.file_chain(rel) if is_file else tree.chain(rel, line)
         out = list(tree.chain(target[1], target[2]))
-        path = uses.get(target[1:])
-        if path and depth < 8:
+        for path in uses.get(target[1:], []) if depth < 8 else []:
             inner = [("mod", tuple(path[:n])) for n in range(len(path), 0, -1) if tuple(path[:n]) in mods][:1]
             inner += [("item", g["rel"], g["line"]) for g in by_name.get(path[-1], [])
                       if g["kind"] not in ("method", "field") and g["module"] == tuple(path[:-1])]
@@ -638,9 +700,23 @@ def plan(tree, exclude_entries):
     for _, target in found:
         if target not in chains:
             chains[target] = chain_of(target)
+    # Bundles: items that only work together (a reader, the static it reads, the statement that records into it).
+    stale = []
+    for bundle in bundles:
+        rel, members = bundle["file"], []
+        items = cfg_items(tree, rel) if (tree.root / rel).is_file() else {}
+        for item in bundle["items"]:
+            found_at = items.get(item, [])
+            if len(found_at) != 1:
+                stale.append(f"bundle {bundle['name']}: {rel} :: {item} matches {len(found_at)} items, not 1")
+                continue
+            members += [g for g in tree.chain(rel, found_at[0] + 1) if g not in members]
+        for t, chain in chains.items():
+            if any(g in members for g in chain):
+                chain += [g for g in members if g not in chain]
     gates = {g for chain in chains.values() for g in chain}
-    # A gated `impl Drop for T` goes with its gated `struct T` / `enum T`.
-    companions = set()
+    # A gated `impl Drop for T` goes with its gated `struct T` / `enum T`: it opens only when T opens.
+    companions = {}
     for rel, j in sorted(gates):
         lines = tree.lines(rel)
         m = re.match(r"^\s*(?:(?:" + vt.VIS + r")\s+)?(?:struct|enum)\s+(\w+)", lines[item_index(lines, j)])
@@ -648,19 +724,21 @@ def plan(tree, exclude_entries):
             continue
         for i, line in enumerate(lines):
             if re.match(r"^\s*impl\s*(<[^>]*>)?\s*Drop\s+for\s+" + m.group(1) + r"\b", line):
-                companions.update((rel, k) for k in tree.attr_gates(rel, i) if (rel, k) not in gates)
-    gates |= companions
+                companions.update(((rel, k), (rel, j)) for k in tree.attr_gates(rel, i) if (rel, k) not in gates)
+    gates |= set(companions)
     label = {g: tree.label(g[0], item_index(tree.lines(g[0]), g[1])) for g in gates}
-    # Exclusions: each entry names items carrying a cfg attribute in its file.
-    excluded, pinned, stale = set(), [], []
+    # Exclusions: each entry names items carrying a cfg attribute in its file, with the gate each must have.
+    excluded, pinned = set(), []
     for e in exclude_entries:
         rel = e["file"]
-        try:
-            matched = cfg_items(tree, rel).get(e["item"], [])
-        except OSError:
-            matched = []
+        matched = cfg_items(tree, rel).get(e["item"], []) if (tree.root / rel).is_file() else []
+        kinds = sorted(tree.item_cfgs(rel, k) for k in matched)
         if not matched:
             stale.append(f"exclusion matches nothing: {rel} :: {e['item']}")
+            continue
+        if kinds != sorted(e["cfg"]):
+            stale.append(f"exclusion matches {len(matched)} items with cfg {kinds}, expected {sorted(e['cfg'])}: "
+                         f"{rel} :: {e['item']}")
             continue
         hit_gates = {g for g in gates if g[0] == rel and label[g] == e["item"]}
         excluded |= hit_gates
@@ -668,28 +746,36 @@ def plan(tree, exclude_entries):
             pinned.append((rel, e["item"]))
     if stale:
         raise CodemodError(2, stale)
-    deferred_items = {t for t, chain in chains.items() if any(g in excluded for g in chain)}
-    wanted = {g for t, chain in chains.items() if t not in deferred_items for g in chain}
-    wanted |= {g for g in companions if g not in excluded}
-    deferred = gates - excluded - wanted
-    problems = []
-    for g in sorted(wanted):
+    # Held: no rewrite rule fits, or a namesake in the same module has a gate that can hold without `test`
+    # (`not(test)`, `not(all(test, unix))`, `cfg_attr(not(test), ..)`): opening one side would define it twice.
+    held = {}
+    for g in sorted(gates - excluded):
         rel, j = g
-        lines = tree.lines(rel)
+        lines, real = tree.lines(rel), tree.attr_lines(rel)
         if rewrite(lines[j]) is None:
-            problems.append(f"no rewrite rule: {rel}:{j + 1} {lines[j].strip()}")
+            held[g] = f"no rewrite rule: {lines[j].strip()}"
             continue
         index = item_index(lines, j)
-        if holds_tests(tree, rel, index):
-            problems.append(f"opens a test module, not excluded: {rel} :: {label[g]}")
         name = tc.DECL.match(lines[index])
-        if name:
-            for i, line in enumerate(lines):
-                if i != j and CFG_LINE.match(line) and NOT_TEST.search(line):
-                    k = item_index(lines, i)
-                    other = tc.DECL.match(lines[k]) if k < len(lines) else None
-                    if other and other.group(1) == name.group(1):
-                        problems.append(f"has a cfg(not(test)) twin, not excluded: {rel} :: {label[g]}")
+        if not name:
+            continue
+        module = tree.module_at(rel, index + 1)
+        for i, line in enumerate(lines):
+            if i + 1 not in real or i == j or not mentions_test(line):
+                continue
+            k = item_index(lines, i)
+            other = tc.DECL.match(lines[k]) if k < len(lines) and k != index else None
+            if other and other.group(1) == name.group(1) and tree.module_at(rel, k + 1) == module and \
+                    not tc.gated_attr(lines, k):
+                held[g] = f"namesake with an opposite gate at line {i + 1}: {line.strip()}"
+                break
+    blocked = excluded | set(held)
+    deferred_items = {t for t, chain in chains.items() if any(g in blocked for g in chain)}
+    wanted = {g for t, chain in chains.items() if t not in deferred_items for g in chain}
+    wanted |= {d for d, owner in companions.items() if owner in wanted and d not in blocked}
+    deferred = gates - excluded - wanted
+    problems = [f"opens a test module, not excluded: {g[0]} :: {label[g]}" for g in sorted(wanted)
+                if holds_tests(tree, g[0], item_index(tree.lines(g[0]), g[1]))]
     if problems:
         raise CodemodError(3, problems)
     edits = [{"file": rel, "line": j + 1, "item": label[(rel, j)], "before": tree.lines(rel)[j],
@@ -697,14 +783,15 @@ def plan(tree, exclude_entries):
     dl = {g for site, t in found if tree.crate_of(site.rsplit(":", 1)[0]) == "DL" for g in chains[t]}
     counts = {"scanned": len(gates), "excluded": len(excluded) + len(deferred), "listed": len(excluded),
               "deferred": len(deferred), "subs": len(edits), "files": len({e["file"] for e in edits}),
-              "companions": len(companions), "pinned": len(pinned), "dl_scanned": len(dl),
+              "companions": len(companions), "pinned": len(pinned), "held": len(held), "dl_scanned": len(dl),
               "dl_subs": len(wanted & dl)}
     state = lambda g: "excluded" if g in excluded else "deferred" if g in deferred else "edit"
     rows = [{"file": g[0], "line": g[1] + 1, "item": label[g], "state": state(g), "companion": g in companions}
             for g in sorted(gates)]
     return {"edits": edits, "counts": counts, "gates": rows,
             "excluded": sorted(f"{g[0]} :: {label[g]}" for g in excluded),
-            "deferred": sorted(f"{g[0]} :: {label[g]}" for g in deferred), "pinned": pinned}
+            "deferred": sorted(f"{g[0]} :: {label[g]}" for g in deferred), "pinned": pinned,
+            "held": [f"{g[0]}:{g[1] + 1} {label[g]} — {why}" for g, why in sorted(held.items())]}
 
 
 def test_module_entries(tree):
@@ -716,7 +803,9 @@ def test_module_entries(tree):
         for line in err.lines:
             m = re.match(r"opens a test module, not excluded: (\S+) :: (.*)$", line)
             if m:
-                rows.append({"file": m.group(1), "item": m.group(2), "reason": "test_module"})
+                rows.append({"file": m.group(1), "item": m.group(2), "reason": "test_module",
+                             "cfg": sorted(tree.item_cfgs(m.group(1), k)
+                                           for k in cfg_items(tree, m.group(1)).get(m.group(2), []))})
         return rows
 
 
@@ -747,7 +836,7 @@ def main(argv=None):
         print(json.dumps(test_module_entries(tree), indent=1, ensure_ascii=False))
         return 0
     try:
-        result = plan(tree, load_exclude(args.exclude))
+        result = plan(tree, *load_exclude(args.exclude))
     except CodemodError as err:
         print(f"TS_CODEMOD_FAIL code={err.code}")
         print("\n".join(err.lines))
@@ -757,7 +846,9 @@ def main(argv=None):
     c = result["counts"]
     print(f"TS_CODEMOD scanned={c['scanned']} excluded={c['excluded']} (listed={c['listed']} "
           f"deferred={c['deferred']}) subs={c['subs']} files={c['files']} companions={c['companions']} "
-          f"pinned={c['pinned']} dl_scanned={c['dl_scanned']} dl_subs={c['dl_subs']}")
+          f"pinned={c['pinned']} held={c['held']} dl_scanned={c['dl_scanned']} dl_subs={c['dl_subs']}")
+    for row in result["held"]:
+        print(f"held  {row}")
     if args.check:
         return 1 if result["edits"] else 0
     if not args.count:

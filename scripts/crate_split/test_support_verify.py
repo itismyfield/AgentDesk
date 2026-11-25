@@ -146,9 +146,13 @@ def verify(repo, base, head):
         problems = []
         if not bex.is_file() or not hex_.is_file() or bex.read_bytes() != hex_.read_bytes():
             problems.append(f"{EXCLUDE} differs between the commits or is missing")
-            entries = []
+            entries, bundles = [], []
         else:
-            entries = codemod.load_exclude(bex)
+            try:
+                entries, bundles = codemod.load_exclude(bex)
+            except codemod.CodemodError as err:
+                problems += err.lines
+                entries, bundles = [], []
         btree, htree = codemod.Tree(bdir), codemod.Tree(hdir)
         for e in entries:
             before, after = item_texts(btree, e), item_texts(htree, e)
@@ -158,7 +162,7 @@ def verify(repo, base, head):
                      problems))
         problems, counts = [], {}
         try:
-            result = codemod.plan(btree, entries)
+            result = codemod.plan(btree, entries, bundles)
             counts = result["counts"]
             want = {(e["file"], e["line"], e["before"], e["after"]) for e in result["edits"]}
             got = set(pairs)
@@ -173,7 +177,7 @@ def verify(repo, base, head):
                               if k in counts), problems))
         problems = []
         try:
-            left = codemod.plan(htree, entries)["edits"]
+            left = codemod.plan(htree, entries, bundles)["edits"]
             problems += [f"edit left at head: {e['file']}:{e['line']}" for e in left]
         except codemod.CodemodError as err:
             problems.append(f"codemod on head failed (code {err.code}): {err.lines[:3]}")
