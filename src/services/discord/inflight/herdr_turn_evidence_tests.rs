@@ -1,9 +1,8 @@
-//! The executor's recorded start, its durable row and the watcher's fresh-idle signal after the
-//! token is gone.
+//! A recorded Herdr start, its durable row and the watcher's fresh-idle signal after token loss.
 use super::herdr_turn_evidence::PersistedHerdrTurnStart;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
-use crate::services::discord::turn_finalizer::CompletionSignal::{self, Done, PausedLive, Unknown};
+use crate::services::discord::turn_finalizer::CompletionSignal::{Done, PausedLive, Unknown};
 use crate::services::provider::CancelToken;
 use crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart;
 use crate::services::session_host::{HostKind, HostedRuntimeLocator};
@@ -12,8 +11,10 @@ use std::sync::Arc;
 
 const LOGICAL: &str = "AgentDesk-herdr-evidence-unlisted";
 
-fn env(root: &Path) -> crate::config::TestEnvVarGuard {
-    crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", root)
+fn setup() -> (tempfile::TempDir, crate::config::TestEnvVarGuard, PathBuf) {
+    let temp = tempfile::tempdir().unwrap();
+    let env = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    (temp, env, inflight_runtime_root().unwrap())
 }
 
 fn claude_turn(at: chrono::DateTime<chrono::Utc>) -> String {
@@ -29,13 +30,9 @@ fn claude_turn(at: chrono::DateTime<chrono::Utc>) -> String {
 }
 
 fn codex_turn(turn: &str) -> String {
-    [
-        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": turn}}),
-        json!({"type": "event_msg", "payload": {"type": "task_complete", "turn_id": turn,
-            "last_agent_message": "답"}}),
-    ]
-    .map(|record| format!("{record}\n"))
-    .concat()
+    let record =
+        |kind: &str| json!({"type": "event_msg", "payload": {"type": kind, "turn_id": turn}});
+    format!("{}\n{}\n", record("task_started"), record("task_complete"))
 }
 
 /// A saved row of `channel` on a Herdr host (or plain tmux) whose transcript holds `body`.
@@ -76,22 +73,12 @@ fn row(
     (path, row)
 }
 
-fn signal(provider: &ProviderKind, channel: u64, whole_file: CompletionSignal) -> CompletionSignal {
-    herdr_fresh_idle_signal(
-        load_inflight_state(provider, channel).as_ref(),
-        LOGICAL,
-        whole_file,
-    )
-}
-
 /// Each executor's recorded start reaches its row and survives a stale save; once the token is
 /// gone the watcher holds the row on an earlier turn's terminal and ends it on its own terminal.
 #[test]
 fn same_herdr_row_restored_after_restart_finalizes_identically() {
-    let temp = tempfile::tempdir().unwrap();
-    let _env = env(temp.path());
+    let (_temp, _env, root) = setup();
     install_turn_start_sink();
-    let root = inflight_runtime_root().unwrap();
     let at = chrono::Utc::now();
     let cases = [
         (
@@ -126,17 +113,12 @@ fn same_herdr_row_restored_after_restart_finalizes_identically() {
         assert!(state.record_turn_start(HerdrTurnStart::at_end_of(&nonce, &path, submitted_at)));
         save_inflight_state_in_root(&root, &stale).unwrap();
         drop((state, token));
-        assert_eq!(
-            signal(&provider, channel, Done),
-            PausedLive,
-            "{provider:?}: an earlier turn's terminal"
-        );
+        let restored = || load_inflight_state(&provider, channel);
+        let held = herdr_fresh_idle_signal(restored().as_ref(), LOGICAL, Done);
+        assert_eq!(held, PausedLive, "{provider:?}: an earlier turn's terminal");
         std::fs::write(&path, previous + &own).unwrap();
-        assert_eq!(
-            signal(&provider, channel, PausedLive),
-            Done,
-            "{provider:?}: its own terminal"
-        );
+        let ended = herdr_fresh_idle_signal(restored().as_ref(), LOGICAL, PausedLive);
+        assert_eq!(ended, Done, "{provider:?}: its own terminal");
     }
 }
 
@@ -144,64 +126,48 @@ fn same_herdr_row_restored_after_restart_finalizes_identically() {
 /// same execution names no terminal of this row, and a successor's save drops it.
 #[test]
 fn terminal_before_input_or_from_previous_turn_is_held() {
-    let temp = tempfile::tempdir().unwrap();
-    let _env = env(temp.path());
-    let root = inflight_runtime_root().unwrap();
+    let (_temp, _env, root) = setup();
     let provider = ProviderKind::Codex;
     let (path, mut row) = row(&root, &provider, 8_399_210, &codex_turn("t1"), true);
-    assert_eq!(
-        signal(&provider, row.channel_id, Done),
-        PausedLive,
-        "before input"
-    );
-    let start = |execution: &str| HerdrTurnStart {
-        execution_nonce: execution.into(),
-        source: path.clone(),
-        file: None,
-        offset: 0,
-        submitted_at: None,
-    };
     let own = row.hosted_execution_nonce.clone().unwrap();
-    row.herdr_turn_start = Some(PersistedHerdrTurnStart {
-        turn_nonce: row.turn_nonce.clone().unwrap(),
-        start: start("exec-earlier"),
-    });
+    let starts = [
+        (None, "before input"),
+        (
+            Some((row.turn_nonce.clone().unwrap(), "exec-earlier".to_string())),
+            "another execution",
+        ),
+        (Some(("previous-turn".into(), own)), "the previous turn"),
+    ];
+    for (start, case) in starts {
+        row.herdr_turn_start = start.map(|(turn_nonce, execution_nonce)| PersistedHerdrTurnStart {
+            turn_nonce,
+            start: HerdrTurnStart {
+                execution_nonce,
+                source: path.clone(),
+                file: None,
+                offset: 0,
+                submitted_at: None,
+            },
+        });
+        assert_eq!(
+            herdr_fresh_idle_signal(Some(&row), LOGICAL, Done),
+            PausedLive,
+            "{case}"
+        );
+    }
     save_inflight_state_in_root(&root, &row).unwrap();
-    assert_eq!(
-        signal(&provider, row.channel_id, Done),
-        PausedLive,
-        "another execution's start"
-    );
-    row.herdr_turn_start = Some(PersistedHerdrTurnStart {
-        turn_nonce: "previous-turn".into(),
-        start: start(&own),
-    });
-    assert_eq!(
-        herdr_fresh_idle_signal(Some(&row), LOGICAL, Done),
-        PausedLive,
-        "the previous turn's start"
-    );
-    save_inflight_state_in_root(&root, &row).unwrap();
-    assert_eq!(
-        load_inflight_state(&provider, row.channel_id)
-            .unwrap()
-            .herdr_turn_start,
-        None
-    );
+    let saved = load_inflight_state(&provider, row.channel_id).unwrap();
+    assert_eq!(saved.herdr_turn_start, None);
 }
 
 /// A row on no Herdr host keeps every signal as before and needs no Herdr start.
 #[test]
 fn native_tmux_completion_with_verified_pin_unchanged() {
-    let temp = tempfile::tempdir().unwrap();
-    let _env = env(temp.path());
-    let root = inflight_runtime_root().unwrap();
-    let provider = ProviderKind::Claude;
-    let (_, row) = row(&root, &provider, 8_399_220, "", false);
+    let (_temp, _env, root) = setup();
+    let (_, row) = row(&root, &ProviderKind::Claude, 8_399_220, "", false);
     for whole_file in [Done, PausedLive, Unknown] {
-        assert_eq!(signal(&provider, row.channel_id, whole_file), whole_file);
         assert_eq!(
-            herdr_fresh_idle_signal(None, LOGICAL, whole_file),
+            herdr_fresh_idle_signal(Some(&row), LOGICAL, whole_file),
             whole_file
         );
     }

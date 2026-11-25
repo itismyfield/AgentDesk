@@ -66,7 +66,16 @@ impl HerdrInterruptState {
     /// Records the turn start once; a different second start is refused, never overwritten.
     pub(crate) fn record_turn_start(&self, start: HerdrTurnStart) -> bool {
         match self.turn_start.set(start) {
-            Ok(()) => true,
+            Ok(()) => {
+                // Saved before the first key; a failed save holds the row, never the input.
+                let sink = TURN_START_SINK.get();
+                if let (Some(sink), Some(nonce), Some(start)) =
+                    (sink, self.turn_nonce.as_deref(), self.turn_start.get())
+                {
+                    sink(&self.owner, nonce, start);
+                }
+                true
+            }
             Err(start) => self.turn_start.get() == Some(&start),
         }
     }
