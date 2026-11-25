@@ -83,7 +83,16 @@ impl HerdrInterruptState {
     /// The reader opened this turn's source at its first own record; a cold start's file is
     /// pinned to it once, so a later file at the same path is never this turn's.
     pub(crate) fn source_observed(&self, file: (u64, u64)) {
-        let _ = file;
+        let (Some(start), Some(nonce)) = (self.turn_start.get(), self.turn_nonce.as_deref()) else {
+            return;
+        };
+        if let (None, Some(sink)) = (start.file, TURN_START_SINK.get()) {
+            let pinned = HerdrTurnStart {
+                file: Some(file),
+                ..start.clone()
+            };
+            sink(&self.owner, nonce, &pinned);
+        }
     }
 
     /// Keeps `stop` until the reader first sees this turn's own start; `false`, dropping it, when

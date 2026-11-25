@@ -31,6 +31,19 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
     if finalizer_turn_id == 0 {
         return false;
     }
+    // This turn's Herdr row keeps its mailbox and token until its own end is proven.
+    let row = crate::services::discord::inflight::load_inflight_state_read_only(
+        provider,
+        channel_id.get(),
+    )
+    .filter(|row| row.effective_finalizer_turn_id() == finalizer_turn_id);
+    let logical = row.as_ref().and_then(|row| row.tmux_session_name.clone());
+    let logical = logical.unwrap_or_default();
+    if crate::services::discord::inflight::herdr_turn_held(shared, provider, row.as_ref(), &logical)
+        .await
+    {
+        return false;
+    }
 
     // #4106 review-fix (codex): snapshot the channel role override THIS turn owns
     // BEFORE any await. The removal below runs after awaits (mailbox finish +

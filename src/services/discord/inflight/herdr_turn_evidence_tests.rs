@@ -5,7 +5,9 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
 use crate::services::discord::turn_finalizer::CompletionSignal::{Done, PausedLive};
 use crate::services::provider::CancelToken;
-use crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart;
+use crate::services::provider::cancel_token_claude_interrupt::{
+    HerdrInterruptState, HerdrTurnStart,
+};
 use crate::services::session_host::{HostKind, HostedRuntimeLocator};
 use serde_json::json;
 use std::sync::Arc;
@@ -24,37 +26,22 @@ pub(in crate::services::discord) struct HerdrCase {
 /// What a watcher path must hold: no start, another current execution, a Pending or Retired one,
 /// no own terminal yet. `OWN` is the end it settles.
 pub(in crate::services::discord) const HELD: [HerdrCase; 5] = [
-    HerdrCase {
-        start: false,
-        hosted: (EXEC, HostedState::Bound),
-        terminal: true,
-    },
-    HerdrCase {
-        start: true,
-        hosted: ("exec-b", HostedState::Bound),
-        terminal: true,
-    },
-    HerdrCase {
-        start: true,
-        hosted: (EXEC, HostedState::Pending),
-        terminal: true,
-    },
-    HerdrCase {
-        start: true,
-        hosted: (EXEC, HostedState::Retired),
-        terminal: true,
-    },
-    HerdrCase {
-        start: true,
-        hosted: (EXEC, HostedState::Bound),
-        terminal: false,
-    },
+    case(false, EXEC, HostedState::Bound, true),
+    case(true, "exec-b", HostedState::Bound, true),
+    case(true, EXEC, HostedState::Pending, true),
+    case(true, EXEC, HostedState::Retired, true),
+    case(true, EXEC, HostedState::Bound, false),
 ];
-pub(in crate::services::discord) const OWN: HerdrCase = HerdrCase {
-    start: true,
-    hosted: (EXEC, HostedState::Bound),
-    terminal: true,
-};
+pub(in crate::services::discord) const OWN: HerdrCase = case(true, EXEC, HostedState::Bound, true);
+
+const fn case(start: bool, nonce: &'static str, state: HostedState, terminal: bool) -> HerdrCase {
+    let hosted = (nonce, state);
+    HerdrCase {
+        start,
+        hosted,
+        terminal,
+    }
+}
 
 /// Makes `row` a Claude Herdr turn of `EXEC` read from `path`, with the channel's hosted record.
 pub(in crate::services::discord) async fn mark_herdr(
@@ -86,14 +73,7 @@ async fn hosted(
 ) {
     use crate::db::dispatched_sessions::hosted_execution::tests::{record, wire};
     let (provider, channel) = (row.provider.as_str(), row.channel_id.to_string());
-    let owner = HostedOwner {
-        provider: provider.into(),
-        discord_token_hash: token_hash.into(),
-        channel_id: channel.clone(),
-        logical_key: LOGICAL.into(),
-        owner_node: "test-node".into(),
-        runtime_root: "/adk/runtime".into(),
-    };
+    let owner = owner(provider, &channel, token_hash);
     let mut record = record(&owner, nonce, state);
     if let Some(expected) = record.expected.as_mut() {
         expected.binding_provider = provider.into();
@@ -190,9 +170,17 @@ fn row(
 async fn same_herdr_row_restored_after_restart_finalizes_identically_pg() {
     let (_temp, _env, root) = setup();
     let (db, shared) = pg_shared().await;
-    let pool = shared.pg_pool.clone().unwrap();
     install_turn_start_sink();
     let at = chrono::Utc::now();
+    // A later turn's open tool call and abort after t1's own terminal must not take it away.
+    let later = [
+        json!({"type": "event_msg", "payload": {"type": "task_started", "turn_id": "t2"}}),
+        json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell",
+            "arguments": "{}", "call_id": "c2"}}),
+        json!({"type": "event_msg", "payload": {"type": "turn_aborted", "turn_id": "t2"}}),
+    ]
+    .map(|record| format!("{record}\n"))
+    .concat();
     let cases = [
         (
             ProviderKind::Claude,
@@ -203,35 +191,21 @@ async fn same_herdr_row_restored_after_restart_finalizes_identically_pg() {
         (
             ProviderKind::Codex,
             codex_turn("t0"),
-            codex_turn("t1"),
+            codex_turn("t1") + &later,
             None,
         ),
     ];
     for (n, (provider, previous, own, submitted_at)) in cases.into_iter().enumerate() {
         let channel = 8_399_200 + n as u64;
-        let (path, mut stale) = row(&root, &provider, channel, &previous, true);
-        let token = Arc::new(CancelToken::new());
-        stale.turn_nonce = token.turn_nonce().map(str::to_owned);
-        save_inflight_state_in_root(&root, &stale).unwrap();
-        let nonce = stale.hosted_execution_nonce.clone().unwrap();
-        hosted(
-            &pool,
-            &shared.token_hash,
-            &stale,
-            (nonce.as_str(), HostedState::Bound),
-        )
-        .await;
-        let state = token.prepare_herdr_interrupt(provider.clone(), &owner(&provider, channel));
-        assert!(state.record_turn_start(HerdrTurnStart::at_end_of(&nonce, &path, submitted_at)));
+        let (path, stale, token, state) =
+            begun(&shared, &root, &provider, channel, &previous).await;
+        let nonce = stale.hosted_execution_nonce.as_deref().unwrap();
+        assert!(state.record_turn_start(HerdrTurnStart::at_end_of(nonce, &path, submitted_at)));
         save_inflight_state_in_root(&root, &stale).unwrap();
         drop((state, token));
         let restored = load_inflight_state(&provider, channel);
         let held = herdr_fresh_idle_signal(&shared, &provider, restored.as_ref(), LOGICAL, Done);
-        assert_eq!(
-            held.await,
-            PausedLive,
-            "{provider:?}: an earlier turn's terminal"
-        );
+        assert_eq!(held.await, PausedLive, "{provider:?}: an earlier terminal");
         std::fs::write(&path, previous + &own).unwrap();
         let ended =
             herdr_fresh_idle_signal(&shared, &provider, restored.as_ref(), LOGICAL, PausedLive);
@@ -252,21 +226,10 @@ async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
     let prompt = turn.lines().next().unwrap().to_owned() + "\n";
     for (n, replaced) in [false, true].into_iter().enumerate() {
         let (provider, channel) = (ProviderKind::Claude, 8_399_230 + n as u64);
-        let (path, mut stale) = row(&root, &provider, channel, "", true);
+        let (path, stale, _token, state) = begun(&shared, &root, &provider, channel, "").await;
         std::fs::remove_file(&path).unwrap();
-        let token = Arc::new(CancelToken::new());
-        stale.turn_nonce = token.turn_nonce().map(str::to_owned);
-        save_inflight_state_in_root(&root, &stale).unwrap();
-        let nonce = stale.hosted_execution_nonce.clone().unwrap();
-        hosted(
-            shared.pg_pool.as_ref().unwrap(),
-            &shared.token_hash,
-            &stale,
-            (nonce.as_str(), HostedState::Bound),
-        )
-        .await;
-        let state = token.prepare_herdr_interrupt(provider.clone(), &owner(&provider, channel));
-        assert!(state.record_turn_start(HerdrTurnStart::at_end_of(&nonce, &path, Some(at))));
+        let nonce = stale.hosted_execution_nonce.as_deref().unwrap();
+        assert!(state.record_turn_start(HerdrTurnStart::at_end_of(nonce, &path, Some(at))));
         std::fs::write(&path, &prompt).unwrap();
         state.source_observed(identity(&path));
         if replaced {
@@ -285,6 +248,39 @@ async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
     db.drop().await;
 }
 
+/// A saved Herdr row of `channel` whose token began its turn, with the channel's execution Bound.
+async fn begun(
+    shared: &crate::services::discord::SharedData,
+    root: &Path,
+    provider: &ProviderKind,
+    channel: u64,
+    body: &str,
+) -> (
+    PathBuf,
+    InflightTurnState,
+    Arc<CancelToken>,
+    Arc<HerdrInterruptState>,
+) {
+    let (path, mut stale) = row(root, provider, channel, body, true);
+    let token = Arc::new(CancelToken::new());
+    stale.turn_nonce = token.turn_nonce().map(str::to_owned);
+    save_inflight_state_in_root(root, &stale).unwrap();
+    let bound = (
+        stale.hosted_execution_nonce.as_deref().unwrap(),
+        HostedState::Bound,
+    );
+    hosted(
+        shared.pg_pool.as_ref().unwrap(),
+        &shared.token_hash,
+        &stale,
+        bound,
+    )
+    .await;
+    let owner = owner(provider.as_str(), &channel.to_string(), "hash");
+    let state = token.prepare_herdr_interrupt(provider.clone(), &owner);
+    (path, stale, token, state)
+}
+
 async fn pg_shared() -> (
     crate::db::auto_queue::test_support::TestPostgresDb,
     Arc<crate::services::discord::SharedData>,
@@ -295,13 +291,13 @@ async fn pg_shared() -> (
     (db, shared)
 }
 
-fn owner(provider: &ProviderKind, channel: u64) -> HostedOwner {
+fn owner(provider: &str, channel: &str, token_hash: &str) -> HostedOwner {
     HostedOwner {
-        provider: provider.as_str().into(),
-        discord_token_hash: "hash".into(),
-        channel_id: channel.to_string(),
-        logical_key: format!("{LOGICAL}-{channel}"),
-        owner_node: "node".into(),
+        provider: provider.into(),
+        discord_token_hash: token_hash.into(),
+        channel_id: channel.into(),
+        logical_key: LOGICAL.into(),
+        owner_node: "test-node".into(),
         runtime_root: "/adk/runtime".into(),
     }
 }

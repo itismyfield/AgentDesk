@@ -29,7 +29,7 @@ impl super::RolloutRecordDecoder {
         len: u64,
         actor: &Arc<CancelToken>,
     ) -> Option<ReplayedTerminal> {
-        let mut state = replay(file, (start, len), actor)?;
+        let mut state = replay(file, (start, len), Some(actor), false)?;
         let kind = herdr_terminal_kind(&state)?;
         if kind == NativeTerminalKind::Completed {
             promote_own_task_complete_fallback_text(&mut state);
@@ -49,19 +49,35 @@ impl super::RolloutRecordDecoder {
         len: u64,
         actor: &Arc<CancelToken>,
     ) -> Option<EndedTurn> {
-        let state = replay(file, (start, len), actor)?;
-        Some(match herdr_terminal_kind(&state) {
-            Some(_) => EndedTurn::Terminal,
-            None if state.mixed_turn => EndedTurn::Mixed,
-            None => EndedTurn::NoTerminal,
-        })
+        ended(&replay(file, (start, len), Some(actor), false)?)
+    }
+
+    /// A row's read after its token is gone: it stops at the turn's first terminal, so a later
+    /// turn's records never decide it. `None` when the file cannot be read.
+    #[cfg(unix)]
+    pub(crate) fn replay_restored_herdr_turn(
+        file: &mut std::fs::File,
+        start: u64,
+        len: u64,
+    ) -> Option<EndedTurn> {
+        ended(&replay(file, (start, len), None, true)?)
+    }
+}
+
+#[cfg(unix)]
+fn ended(state: &RolloutParseState) -> EndedTurn {
+    match herdr_terminal_kind(state) {
+        Some(_) => EndedTurn::Terminal,
+        None if state.mixed_turn => EndedTurn::Mixed,
+        None => EndedTurn::NoTerminal,
     }
 }
 
 fn replay(
     file: &mut std::fs::File,
     (start, len): (u64, u64),
-    actor: &Arc<CancelToken>,
+    actor: Option<&Arc<CancelToken>>,
+    stop_at_terminal: bool,
 ) -> Option<RolloutParseState> {
     let (mut bytes, want) = (Vec::new(), len.checked_sub(start)?);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -72,11 +88,13 @@ fn replay(
     }
     let (tx, _rx) = std::sync::mpsc::channel();
     let sender = super::super::RelaySuppressionSender::new(&tx, None);
-    let accept = RecordAcceptance::new(Some(actor));
+    let accept = RecordAcceptance::new(actor);
+    let ended =
+        |state: &RolloutParseState| stop_at_terminal && herdr_terminal_kind(state).is_some();
     let mut state = RolloutParseState::default();
     let mut rest = bytes.as_slice();
     while let Some(pos) = rest.iter().position(|byte| *byte == b'\n') {
-        if accept.accept_next_record(&state) == NextRecord::StopBefore {
+        if accept.accept_next_record(&state) == NextRecord::StopBefore || stopped(&state) {
             break;
         }
         let (line, tail) = rest.split_at(pos + 1);
@@ -85,7 +103,9 @@ fn replay(
         super::process_rollout_line_bytes(line, &sender, &mut state);
     }
     let mut partial = rest.to_vec();
-    take_whole_tail(&mut partial, (&sender, &mut state), &accept, || true);
+    if !stopped(&state) {
+        take_whole_tail(&mut partial, (&sender, &mut state), &accept, || true);
+    }
     Some(state)
 }
 

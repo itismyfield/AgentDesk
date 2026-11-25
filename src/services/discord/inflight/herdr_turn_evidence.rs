@@ -28,7 +28,8 @@ pub(in crate::services::discord) fn install_turn_start_sink() {
     crate::services::provider::cancel_token_claude_interrupt::install_turn_start_sink(persist);
 }
 
-/// Saves `start` on the row of `turn_nonce` once. A failed save leaves that row held, never the input.
+/// Saves `start` on the row of `turn_nonce` once, then only pins a cold start's file to the first
+/// one its reader opened. A failed save leaves that row held, never the input.
 fn persist(owner: &HostedOwner, turn_nonce: &str, start: &HerdrTurnStart) {
     let provider = ProviderKind::from_str(&owner.provider);
     let (Some(provider), Ok(channel)) = (provider, owner.channel_id.parse::<u64>()) else {
@@ -44,7 +45,19 @@ fn persist(owner: &HostedOwner, turn_nonce: &str, start: &HerdrTurnStart) {
     let Some(mut row) = load_inflight_state_unlocked(&path) else {
         return;
     };
-    if row.turn_nonce.as_deref() != Some(turn_nonce) || row.herdr_turn_start.is_some() {
+    let pins_cold_file = |saved: &PersistedHerdrTurnStart| {
+        let unpinned = HerdrTurnStart {
+            file: None,
+            ..start.clone()
+        };
+        saved.turn_nonce == turn_nonce && start.file.is_some() && saved.start == unpinned
+    };
+    if row.turn_nonce.as_deref() != Some(turn_nonce)
+        || row
+            .herdr_turn_start
+            .as_ref()
+            .is_some_and(|saved| !pins_cold_file(saved))
+    {
         return;
     }
     row.herdr_turn_start = Some(PersistedHerdrTurnStart {
@@ -111,11 +124,46 @@ pub(in crate::services::discord) async fn watcher_herdr_evidence(
     row: Option<&InflightTurnState>,
     logical: &str,
 ) -> HerdrTurnEvidence {
-    let Some(row) = row else {
+    let Some(row) = row.filter(|row| row.herdr_row(logical)) else {
         return HerdrTurnEvidence::NotHerdr;
     };
-    let _ = (shared, provider);
-    row.herdr_turn_evidence(logical, None)
+    let bound = current_bound_nonce(shared, provider, row).await;
+    row.herdr_turn_evidence(logical, bound.as_deref())
+}
+
+/// The channel's current hosted execution nonce while it is Bound; `None` for any other state,
+/// a missing record or a failed read.
+async fn current_bound_nonce(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    row: &InflightTurnState,
+) -> Option<String> {
+    use crate::db::dispatched_session_canonical_identity::{
+        CanonicalSessionIdentity, SessionIdentityKind,
+    };
+    use crate::db::dispatched_sessions::hosted_execution::{
+        self as hosted, HostedLookup, HostedLookupKey, HostedRecord, HostedState,
+    };
+    let pool = shared.pg_pool.as_ref()?;
+    let channel = row.channel_id.to_string();
+    let identity = CanonicalSessionIdentity {
+        kind: SessionIdentityKind::DiscordChannel,
+        discord_token_hash: &shared.token_hash,
+        channel_id: &channel,
+    };
+    let key = HostedLookupKey::Canonical {
+        provider: provider.as_str(),
+        identity,
+    };
+    let HostedLookup::Found(found) = hosted::load_hosted_execution_pg(pool, key).await else {
+        return None;
+    };
+    match found.record {
+        HostedRecord::Known(record) if record.state == HostedState::Bound => {
+            Some(record.execution_nonce)
+        }
+        _ => None,
+    }
 }
 
 impl InflightTurnState {
@@ -126,29 +174,43 @@ impl InflightTurnState {
         logical: &str,
         bound: Option<&str>,
     ) -> HerdrTurnEvidence {
-        let listed = crate::services::tui_prompt_dedupe::herdr_execution_listed;
-        if self.herdr_turn_start.is_none() && !self.has_native_herdr_input() && !listed(logical) {
+        if !self.herdr_row(logical) {
             return HerdrTurnEvidence::NotHerdr;
         }
-        let _ = bound;
         match &self.herdr_turn_start {
-            Some(saved) if own_terminal(self, saved) => HerdrTurnEvidence::Own,
+            Some(saved) if own_terminal(self, saved, bound) => HerdrTurnEvidence::Own,
             _ => HerdrTurnEvidence::Insufficient,
         }
+    }
+
+    /// A saved Herdr start, a Herdr locator, or a pane a launch listed under `logical`.
+    fn herdr_row(&self, logical: &str) -> bool {
+        let listed = crate::services::tui_prompt_dedupe::herdr_execution_listed;
+        self.herdr_turn_start.is_some() || self.has_native_herdr_input() || listed(logical)
     }
 }
 
 #[cfg(unix)]
-fn own_terminal(row: &InflightTurnState, saved: &PersistedHerdrTurnStart) -> bool {
+fn own_terminal(
+    row: &InflightTurnState,
+    saved: &PersistedHerdrTurnStart,
+    bound: Option<&str>,
+) -> bool {
     use crate::services::claude::herdr_turn::{EndedTurn, ended_turn};
     use crate::services::codex_tui::rollout_tail::RolloutRecordDecoder;
     use std::os::unix::fs::MetadataExt;
     let start = &saved.start;
+    let execution = Some(start.execution_nonce.as_str());
     if row.turn_nonce.as_deref() != Some(saved.turn_nonce.as_str())
-        || row.hosted_execution_nonce.as_deref() != Some(start.execution_nonce.as_str())
+        || row.hosted_execution_nonce.as_deref() != execution
+        || bound != execution
     {
         return false;
     }
+    // A cold start whose reader never opened its file has no proven source.
+    let Some(pinned) = start.file else {
+        return false;
+    };
     let Ok(mut file) = std::fs::File::open(&start.source) else {
         return false;
     };
@@ -156,11 +218,7 @@ fn own_terminal(row: &InflightTurnState, saved: &PersistedHerdrTurnStart) -> boo
         return false;
     };
     let len = meta.len();
-    if start
-        .file
-        .is_some_and(|file| file != (meta.dev(), meta.ino()))
-        || len < start.offset
-    {
+    if pinned != (meta.dev(), meta.ino()) || len < start.offset {
         return false;
     }
     let ended = match row.provider_kind() {
@@ -168,8 +226,7 @@ fn own_terminal(row: &InflightTurnState, saved: &PersistedHerdrTurnStart) -> boo
             .submitted_at
             .and_then(|at| ended_turn(&mut file, at, len).ok()),
         Some(ProviderKind::Codex) => {
-            let actor = std::sync::Arc::new(crate::services::provider::CancelToken::new());
-            RolloutRecordDecoder::replay_ended_herdr_turn(&mut file, start.offset, len, &actor)
+            RolloutRecordDecoder::replay_restored_herdr_turn(&mut file, start.offset, len)
         }
         _ => None,
     };
@@ -177,6 +234,6 @@ fn own_terminal(row: &InflightTurnState, saved: &PersistedHerdrTurnStart) -> boo
 }
 
 #[cfg(not(unix))]
-fn own_terminal(_: &InflightTurnState, _: &PersistedHerdrTurnStart) -> bool {
+fn own_terminal(_: &InflightTurnState, _: &PersistedHerdrTurnStart, _: Option<&str>) -> bool {
     false
 }
