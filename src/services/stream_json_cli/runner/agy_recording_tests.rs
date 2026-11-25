@@ -161,13 +161,16 @@ fn stores_authoritative_body_and_preserves_the_legacy_done() {
     let records = fixture.records();
     assert_eq!(records[0]["data"]["ingress"], "discord_foreground");
     assert_eq!(records[0]["data"]["writer_generation"], 45);
-    assert_eq!(records[1]["kind"], "init");
-    assert_eq!(records[2]["data"]["text"], "draft");
+    // The gate's records precede anything the child could write.
+    assert_eq!(records[1]["kind"], "launch");
+    assert_eq!(records[2]["kind"], "started");
+    assert_eq!(records[3]["kind"], "init");
+    assert_eq!(records[4]["data"]["text"], "draft");
     let done = records.last().unwrap();
     assert_eq!(done["kind"], "done");
     assert_eq!(done["data"]["body_bytes"], body.len());
     let mut rebuilt = String::new();
-    for part in &records[3..records.len() - 1] {
+    for part in &records[5..records.len() - 1] {
         assert_eq!(part["kind"], "body_part");
         assert_eq!(part["data"]["start"], rebuilt.len());
         rebuilt.push_str(part["data"]["text"].as_str().unwrap());
@@ -188,7 +191,7 @@ fn records_a_terminal_after_the_legacy_receiver_disconnects() {
     drop(rx);
     fixture.run(&lines, tx).unwrap();
     let records = fixture.records();
-    assert_eq!(records[3]["data"]["text"], "draft");
+    assert_eq!(records[5]["data"]["text"], "draft");
     assert_eq!(records.last().unwrap()["kind"], "done");
 }
 
@@ -215,8 +218,8 @@ fn a_nonzero_child_exit_cannot_commit_done() {
     let (tx, _rx) = std::sync::mpsc::channel();
     run_prepared_recorded(command, tx, Duration::ZERO, None, &mut fixture.spool).unwrap();
     let records = fixture.records();
-    assert_eq!(records[3]["kind"], "failed");
-    assert_eq!(records[3]["data"]["reason"], "child");
+    assert_eq!(records[5]["kind"], "failed");
+    assert_eq!(records[5]["data"]["reason"], "child");
 }
 
 #[test]
@@ -228,8 +231,8 @@ fn empty_or_conflicting_authoritative_results_are_protocol_failures() {
         let (tx, _rx) = std::sync::mpsc::channel();
         fixture.run(&lines, tx).unwrap();
         let records = fixture.records();
-        assert_eq!(records[3]["kind"], "failed");
-        assert_eq!(records[3]["data"]["reason"], "protocol");
+        assert_eq!(records[5]["kind"], "failed");
+        assert_eq!(records[5]["data"]["reason"], "protocol");
     }
 }
 
@@ -246,7 +249,8 @@ fn an_unsynced_segment_does_not_advance_the_frontier() {
     let mut lines = transcript();
     lines.push(result("final"));
     let (tx, _rx) = std::sync::mpsc::channel();
-    fixture.run(&lines, tx).unwrap();
+    // No durable launch, no spawn: the child never runs.
+    assert!(fixture.run(&lines, tx).is_err());
     assert_eq!(fixture.checkpoint(), open);
     let len = fs::metadata(fixture.dir.join(SEGMENT)).unwrap().len();
     assert!(len > open["committed_bytes"].as_u64().unwrap());
@@ -263,4 +267,24 @@ fn legacy_headless_uses_delta_done_and_never_creates_a_spool() {
         message, StreamMessage::Done { result, .. } if result == "draft"
     )));
     assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+}
+
+// C2: the gate runs its command only after the go line; a closed stdin exits 75 and runs nothing.
+#[test]
+fn the_gate_runs_input_only_after_the_go_line() {
+    use std::io::Write;
+    let dir = tempfile::tempdir().unwrap();
+    for (go, code) in [(false, 75), (true, 0)] {
+        let marker = dir.path().join(format!("ran-{go}"));
+        let args = vec!["-c".to_string(), format!("touch '{}'", marker.display())];
+        let mut command = super::agy_recording::gated(std::path::Path::new("/bin/sh"), &args);
+        let mut child = command.stdin(std::process::Stdio::piped()).spawn().unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        if go {
+            stdin.write_all(b"go\n").unwrap();
+        }
+        drop(stdin);
+        assert_eq!(child.wait().unwrap().code(), Some(code));
+        assert_eq!(marker.exists(), go);
+    }
 }

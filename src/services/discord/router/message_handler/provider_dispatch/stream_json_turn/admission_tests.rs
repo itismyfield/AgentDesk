@@ -271,3 +271,103 @@ fn only_human_turns_with_the_switch_on_take_the_acp_path() {
         assert_eq!(result.is_ok(), acp, "{case}: {result:?}");
     }
 }
+
+#[cfg(unix)]
+fn selection(root: &std::path::Path) -> crate::services::imsg_reply::agy_input::WriterSelection {
+    crate::services::imsg_reply::agy_input::WriterSelection {
+        root: root.into(),
+        destination: DESTINATION,
+        logical_channel: PARENT,
+        generation: NonZeroU64::MIN,
+    }
+}
+
+/// A3, A4: the route is set on the state the first save writes, only for a ready Discord
+/// foreground on the recorded `-p` producer.
+#[cfg(unix)]
+#[tokio::test]
+async fn custody_route_is_stamped_only_for_a_ready_recorded_foreground() {
+    use crate::services::discord::inflight::AgyCustodyField;
+    use crate::services::imsg_reply::agy_input::{SELECTED_WRITER, WriterGate};
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    let root = tempfile::tempdir().unwrap();
+    let cancel = CancelToken::new();
+    let source = Some(MessageId::new(MESSAGE));
+    let stamped = |kind, source| {
+        let mut state = inflight(&cancel);
+        AgyForeground::stamp_custody(&mut state, source, kind);
+        state.agy_custody
+    };
+    let acp = |enabled| {
+        let mut config = crate::config::Config::default();
+        config.agy_acp.enabled = enabled;
+        crate::services::agy_acp::install(&config);
+    };
+    acp(false);
+    let ready = || {
+        SELECTED_WRITER.scope(WriterGate::ready(selection(root.path())), async {
+            [
+                stamped(TurnKind::Foreground, source),
+                stamped(TurnKind::BackgroundTrigger, source),
+                stamped(TurnKind::Foreground, None),
+            ]
+        })
+    };
+    let [foreground, background, sourceless] = ready().await;
+    let Some(AgyCustodyField::Route(route)) = foreground else {
+        panic!("a ready foreground carries its route");
+    };
+    assert_eq!(
+        (route.destination, route.logical_channel, route.message),
+        (DESTINATION, PARENT, MESSAGE)
+    );
+    assert_eq!(route.writer_generation, NonZeroU64::MIN);
+    assert_eq!(Some(route.nonce.to_string().as_str()), cancel.turn_nonce());
+    assert_eq!((background, sourceless), (None, None));
+    assert_eq!(
+        stamped(TurnKind::Foreground, source),
+        None,
+        "no writer is ready"
+    );
+    acp(true);
+    let [on_acp, ..] = ready().await;
+    acp(false);
+    assert_eq!(on_acp, None, "ACP turns are never routed");
+}
+
+/// A7: a route row runs only recorded; without a permit or with another execution's claim it
+/// refuses before anything is reserved or spawned.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_route_row_never_runs_unrecorded() {
+    use crate::services::imsg_reply::agy_input::{SELECTED_WRITER, WriterGate};
+    let root = tempfile::tempdir().unwrap();
+    let cancel = Arc::new(CancelToken::new());
+    let mut state = inflight(&cancel);
+    let source = Some(MessageId::new(MESSAGE));
+    SELECTED_WRITER
+        .scope(WriterGate::ready(selection(root.path())), async {
+            AgyForeground::stamp_custody(&mut state, source, TurnKind::Foreground);
+        })
+        .await;
+    assert!(state.agy_custody.is_some());
+    let claim = |cancel: &CancelToken| {
+        AgyForeground::from_claim(source, TurnKind::Foreground, true, &state, cancel, true)
+            .expect("a route row always yields its foreground")
+    };
+    for (case, input) in [
+        ("no permit", claim(&cancel)),
+        ("other execution", claim(&CancelToken::new())),
+    ] {
+        assert!(input.requires_agy(), "{case}");
+        let mut turn = streaming_turn(cancel.clone());
+        turn.agy_foreground = Some(input);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let request = read_only_request(root.path(), &cancel);
+        let result = execute_request(StreamJsonDialectId::Agy, &turn, request, tx);
+        assert!(result.is_err(), "{case}");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0, "{case}");
+    }
+}
