@@ -1,4 +1,5 @@
-//! Images inside tool results, read from raw transcript rows; nothing here records or posts.
+//! Images inside tool results, read from raw transcript rows. `derive` queues their ledger
+//! entries and `select` posts them; this file only extracts.
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
@@ -7,8 +8,12 @@ use sha2::{Digest, Sha256};
 use crate::services::discord::outbound::image_format::{self, Rejected};
 use crate::services::tui_o::shadow::ShadowProvider;
 
+pub(crate) mod derive;
 #[cfg(test)]
 mod kind_tests;
+pub(crate) mod notice;
+mod reconfirm;
+pub(crate) mod select;
 pub(crate) mod turns;
 #[cfg(test)]
 mod turns_tests;

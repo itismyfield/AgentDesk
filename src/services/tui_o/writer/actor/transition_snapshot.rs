@@ -279,8 +279,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .ok_or("the channel's POSTs in flight are not counted")?;
         let protected = self.verified.as_ref().map(super::super::owed::protected);
         let retry = usize::from(self.writer.has_local_retry());
+        let images = super::super::tool_images::select::open_count(self.writer.store().ledger());
         Ok(Obligations {
-            owed: self.owed.len() + retry + self.notice_debt_open(),
+            owed: self.owed.len() + retry + self.notice_debt_open() + images,
             prepared: usize::from(self.writer.store().ledger().unresolved().is_some()),
             unsealed: usize::from(self.deriver.has_unsealed()),
             posting,

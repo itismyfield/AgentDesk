@@ -235,8 +235,7 @@ where
     B: BindingEvents,
 {
     let mut writer = writer.with_repost_stop(stop.clone());
-    let deriver =
-        fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
+    let deriver = fresh_resume::configured_deriver(writer.channel(), provider, writer.store());
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
         .with_suspension(writer.suspension.clone())
         .with_producer_absent(producer_absent)
@@ -378,6 +377,7 @@ where
         }
         actor.prepare_notices(&fresh).await;
         actor.observe_waiting(false);
+        actor.writer.record_images(&mut actor.deriver);
         let drain = actor.writer.boot.first_drain();
         let serial_before = drain
             .as_ref()
@@ -388,6 +388,9 @@ where
             actor.refilter_after_open();
         }
         if !actor.writer.has_local_retry() {
+            if actor.delivery_allowed() {
+                actor.writer.select_images(now).await;
+            }
             actor.deliver_owed(&progress).await;
         }
         // A restart-cut episode's one notice goes after this poll's owed pieces.
@@ -761,11 +764,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return;
         }
         let protected = self.verified.as_ref().map(super::owed::protected);
+        let ledger = self.writer.store().ledger();
+        let Some(images) = super::tool_images::select::kept_sources(ledger, &mut self.deriver)
+        else {
+            return;
+        };
         let collectable = self.sources.collectable().into_iter();
         let mut collectable = collectable.filter(|(source, _)| {
-            !protected
-                .as_ref()
-                .is_some_and(|keys| keys.contains(&source_key(source)))
+            let key = source_key(source);
+            !images.contains(&key) && !protected.as_ref().is_some_and(|keys| keys.contains(&key))
         });
         for (source, keep) in collectable.by_ref() {
             if !crate::services::tui_prompt_dedupe::codex_verified_o_source_allowed(

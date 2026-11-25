@@ -1,5 +1,5 @@
-//! The native turn an image belongs to. Pure: the writer wiring feeds it each record's facts
-//! and appends the spans it reports.
+//! The native turn an image belongs to. Pure: `derive.rs` feeds it each record's facts and
+//! queues the spans it reports.
 
 use std::collections::HashMap;
 
@@ -183,6 +183,14 @@ impl ImageTurns {
 
     fn edge_turn(&self) -> NativeTurn {
         NativeTurn::new(format!("edge:{}:{}", source_key(&self.source), self.origin))
+    }
+
+    /// The turn this source is in, observed or restored from its span.
+    pub(crate) fn open_turn(&self) -> Option<&NativeTurn> {
+        match &self.state {
+            State::Open(open) => Some(&open.turn),
+            State::Idle | State::Unknown => None,
+        }
     }
 
     /// Whether GC may collect the segment holding `turn`'s opener: an open turn or an unclosed

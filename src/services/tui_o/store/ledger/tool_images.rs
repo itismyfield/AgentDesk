@@ -1,10 +1,11 @@
 //! Tool-image ledger entries: native turn spans and image obligations, replayed with the rest
-//! of the ledger. No production path appends them yet.
+//! of the ledger. The writer appends them as it derives images and settles their posts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use super::super::spool::source_key;
 use super::{LedgerState, PieceOutcome};
 use crate::services::tui_o::shadow::{SourceId, UnitKey, UnitKind};
 
@@ -76,6 +77,9 @@ pub struct ImageState {
     spans: HashMap<SourceId, Vec<TurnSpan>>,
     obligations: BTreeMap<UnitKey, ImageObligation>,
     omitted: BTreeMap<UnitKey, String>,
+    /// Prepared serials of each tool-image key, oldest first, so the selector never scans all
+    /// pieces on its per-poll read.
+    attempts: HashMap<UnitKey, Vec<u64>>,
 }
 
 /// Replays one entry; an inconsistent entry is an ownership violation like any other.
@@ -91,7 +95,8 @@ pub(crate) fn notice_native_key(turn: &str, call_id: &str) -> String {
 }
 
 impl ImageState {
-    fn apply(&mut self, entry: ImageEntry) -> Result<(), String> {
+    /// The replay rule; the deriver also applies its queued entries to its own copy with it.
+    pub(crate) fn apply(&mut self, entry: ImageEntry) -> Result<(), String> {
         match entry {
             ImageEntry::ImageTurnOpened {
                 source,
@@ -138,6 +143,13 @@ impl ImageState {
         }
     }
 
+    /// Indexes a Prepared of a tool-image key; the ledger's own Prepared check stays the rule.
+    pub(super) fn note_attempt(&mut self, key: &UnitKey, serial: u64) {
+        if key.kind == UnitKind::ToolImage {
+            self.attempts.entry(key.clone()).or_default().push(serial);
+        }
+    }
+
     /// The span holding `offset` in `source`, closed or still open.
     pub(crate) fn span_at(&self, source: &SourceId, offset: u64) -> Option<&TurnSpan> {
         self.spans.get(source)?.iter().find(|span| {
@@ -164,6 +176,39 @@ impl ImageState {
     /// ordinary disposition alone.
     pub(crate) fn owns(&self, key: &UnitKey) -> bool {
         self.obligations.contains_key(key) || self.notice_keys().any(|notice| notice == *key)
+    }
+
+    /// Whether the marker's first attempt is spent: an attempt exists or the image was omitted.
+    pub(crate) fn first_attempt_done(&self, ledger: &LedgerState, key: &UnitKey) -> bool {
+        self.omitted.contains_key(key) || ledger.latest_piece(key, 0).is_some()
+    }
+
+    /// The omission reasons of one notice's group, one per omitted image.
+    pub(crate) fn group_omissions(&self, notice: &UnitKey) -> Vec<&str> {
+        let group = self
+            .obligations
+            .iter()
+            .filter(|(_, o)| notice_key(o) == *notice);
+        group.filter_map(|(key, _)| self.omitted(key)).collect()
+    }
+
+    /// Spool keys GC keeps: a source with an unclosed span, or the record of an open image or
+    /// of an image whose notice is still owed.
+    pub(crate) fn kept_sources(&self, ledger: &LedgerState) -> HashSet<String> {
+        let unclosed = self
+            .spans
+            .iter()
+            .filter(|(_, spans)| spans.iter().any(|span| span.end_offset.is_none()));
+        let mut kept: HashSet<String> = unclosed.map(|(source, _)| source_key(source)).collect();
+        for open in self.open_obligations(ledger) {
+            let (OpenObligation::Image { key, .. } | OpenObligation::Notice { key, .. }) = open;
+            let records = self
+                .obligations
+                .iter()
+                .filter(|(image, obligation)| **image == key || notice_key(obligation) == key);
+            kept.extend(records.map(|(_, obligation)| source_key(&obligation.source)));
+        }
+        kept
     }
 
     fn notice_keys(&self) -> impl Iterator<Item = UnitKey> + '_ {
@@ -271,13 +316,9 @@ fn notice_key(obligation: &ImageObligation) -> UnitKey {
 
 /// `(serial, outcome)` of every attempt of `key`, oldest first.
 fn attempts<'a>(ledger: &'a LedgerState, key: &UnitKey) -> Vec<(u64, Option<&'a PieceOutcome>)> {
-    let pieces = ledger
-        .pieces
-        .iter()
-        .filter(|(_, piece)| piece.unit_key == *key);
-    pieces
-        .map(|(&serial, piece)| (serial, piece.outcome.as_ref()))
-        .collect()
+    let serials = ledger.tool_images.attempts.get(key).into_iter().flatten();
+    let attempt = |&serial: &u64| Some((serial, ledger.pieces.get(&serial)?.outcome.as_ref()));
+    serials.filter_map(attempt).collect()
 }
 
 fn counted(attempts: &[(u64, Option<&PieceOutcome>)]) -> usize {
