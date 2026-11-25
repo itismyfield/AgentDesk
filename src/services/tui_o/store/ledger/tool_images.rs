@@ -271,18 +271,12 @@ impl ImageState {
         self.omitted.contains_key(key) || ledger.latest_piece(key, 0).is_some()
     }
 
-    /// Per spool key, the lowest offset GC must keep: an unclosed span's opener and the start of
-    /// every `protected_ranges` record.
+    /// Per spool key, the lowest offset GC must keep: the start of every `protected_ranges`
+    /// record. Turn openers are not kept; GC records the open turn's span first instead.
     pub(crate) fn kept_from(&self, ledger: &LedgerState) -> HashMap<String, u64> {
-        let unclosed = self.spans.iter().flat_map(|(source, spans)| {
-            let open = spans.iter().filter(|span| span.end_offset.is_none());
-            open.map(move |span| (source_key(source), span.opener_offset))
-        });
         let ranges = self.protected_ranges(ledger).into_iter();
         let mut kept: HashMap<String, u64> = HashMap::new();
-        for (key, from) in
-            unclosed.chain(ranges.map(|(source, start, _)| (source_key(&source), start)))
-        {
+        for (key, from) in ranges.map(|(source, start, _)| (source_key(&source), start)) {
             let floor = kept.entry(key).or_insert(from);
             *floor = (*floor).min(from);
         }

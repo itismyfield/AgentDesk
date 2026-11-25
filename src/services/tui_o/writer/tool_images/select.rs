@@ -14,7 +14,7 @@ use crate::services::tui_o::store::ledger::tool_images::{
     ImageEntry, ImageObligation, ImageStep, NoticeStep, OpenObligation, Waiting,
 };
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState, PieceDisposition};
-use crate::services::tui_o::store::spool::SpoolFrame;
+use crate::services::tui_o::store::spool::{SpoolFrame, source_key};
 use crate::services::tui_o::writer::deliver::{Admission, ChannelWriter, Step};
 use crate::services::tui_o::writer::local_retry::LOCAL_RETRY_DELAY;
 use crate::services::tui_o::writer::pieces::{PieceWork, UnitDeriver};
@@ -127,24 +127,16 @@ pub(crate) fn open_count(ledger: &LedgerState) -> usize {
     ledger.tool_images().open_obligations(ledger).len()
 }
 
-/// Per spool key, the lowest offset GC keeps: open obligations and notices' records, unclosed
-/// spans, live open image turns; `None` while derived entries still wait to be appended.
+/// Per spool key, the lowest offset GC keeps (open obligations' and notices' records); `None`
+/// while derived entries still wait to be appended.
 pub(crate) fn kept_sources(
     ledger: &LedgerState,
     deriver: &mut UnitDeriver,
 ) -> Option<HashMap<String, u64>> {
-    let durable = ledger.tool_images();
-    let mut kept = durable.kept_from(ledger);
-    if let Some(run) = deriver.images() {
-        if run.has_queued() {
-            return None;
-        }
-        for (key, from) in run.live_openers(durable) {
-            let floor = kept.entry(key).or_insert(from);
-            *floor = (*floor).min(from);
-        }
+    if deriver.images().is_some_and(|run| run.has_queued()) {
+        return None;
     }
-    Some(kept)
+    Some(ledger.tool_images().kept_from(ledger))
 }
 
 /// The upload for an image attempt, else the ordinary unit post.
@@ -174,6 +166,19 @@ pub(crate) fn below(store: &ChannelStore, source: &SourceId, floor: Option<u64>)
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
+    /// Before GC collects `source`'s oldest segment, appends the open turn's span and waiting
+    /// calls whose evidence lies there, so replay never needs the collected rows.
+    pub(crate) fn persist_before_gc(&mut self, deriver: &mut UnitDeriver, source: &SourceId) {
+        let Some(below) = self.store().oldest_segment_end(source) else {
+            return;
+        };
+        let images = self.store().ledger().tool_images();
+        if let Some(run) = deriver.images() {
+            run.persist_before_gc(&source_key(source), below, images);
+        }
+        self.record_images(deriver);
+    }
+
     /// Appends what the deriver queued, in order; a failure stops the writer.
     pub(crate) fn record_images(&mut self, deriver: &mut UnitDeriver) {
         let entries = deriver.images().map(|run| run.take_entries());

@@ -804,6 +804,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             while self.writer.store().retained_segments(&source) > keep
                 && super::tool_images::select::below(self.writer.store(), &source, floor)
             {
+                self.writer.persist_before_gc(&mut self.deriver, &source);
                 if let Err(error) = self.writer.store().gc_oldest_segment(&source) {
                     let violation = self.writer.store().ledger().violation().map(str::to_string);
                     let alarm = match violation {

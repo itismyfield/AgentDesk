@@ -66,15 +66,38 @@ impl ImageRun {
         !self.queued.is_empty()
     }
 
-    /// `(spool key, opener offset)` of each open image turn that still needs its opener: GC
-    /// waits for its durable Closed. A turn without an image keeps nothing.
-    pub(crate) fn live_openers(&self, durable: &ImageState) -> Vec<(String, u64)> {
-        let open = self.turns.iter().filter_map(|(key, turns)| {
-            let turn = turns.open_turn()?;
-            let span = durable.span_of(turns.source(), turn.as_str())?;
-            (!turns.opener_collectable(durable, turn)).then(|| (key.clone(), span.opener_offset))
-        });
-        open.collect()
+    /// Before GC collects `key`'s records below `below`, queues what replay would read there:
+    /// the open turn's span when its opener lies below, and the turn of each call still waiting.
+    pub(crate) fn persist_before_gc(&mut self, key: &str, below: u64, durable: &ImageState) {
+        let Some(turns) = self.turns.get(key) else {
+            return;
+        };
+        let (Some(turn), Some((opener, waiting))) = (turns.open_turn(), turns.open_evidence())
+        else {
+            return;
+        };
+        if turns.opener_collectable(durable, turn) {
+            return;
+        }
+        let (source, turn) = (turns.source().clone(), turn.as_str().to_owned());
+        if opener < below && durable.span_of(&source, &turn).is_none() {
+            let (source, turn) = (source.clone(), turn.clone());
+            self.queue(ImageEntry::ImageTurnOpened {
+                source,
+                opener_offset: opener,
+                turn,
+            });
+        }
+        for call_id in waiting {
+            if durable.call_turn(&source, &call_id) != Some(turn.as_str()) {
+                let (source, turn) = (source.clone(), turn.clone());
+                self.queue(ImageEntry::ImageCall {
+                    source,
+                    call_id,
+                    turn,
+                });
+            }
+        }
     }
 
     /// Reserves a verified physical end at `at` that the restart projection could not apply;

@@ -127,9 +127,10 @@ fn attachments(harness: &Harness) -> usize {
     harness.port.attachments.lock().unwrap().len()
 }
 
-/// Opened without Closed keeps the opener segment across a restart; the durable Closed frees it.
+/// GC may collect an open turn's opener before its first image: it records the turn's span
+/// first, so a restart keeps the image on that turn and reposts nothing.
 #[tokio::test(start_paused = true)]
-async fn image_open_span_keeps_opener_until_closed_across_restart() {
+async fn image_turn_keeps_its_identity_after_opener_gc_and_restart() {
     let (harness, path, source) = switched_over(b"");
     harness.gate.acquired();
     let store = || {
@@ -140,36 +141,46 @@ async fn image_open_span_keeps_opener_until_closed_across_restart() {
     let (stop, task) = spawn(writer_over(&harness, store()));
     append(
         &path,
-        &[prompt("t1"), png("r1", "c1", 1), png("r2", "c2", 2)].concat(),
+        &[prompt("t1"), super::actor::row("m1", "reading")].concat(),
     );
     polls(4).await;
-    assert_eq!(attachments(&harness), 2);
+    let ledger = harness.channel();
     assert!(
-        harness.channel().ledger().gc_segments(&source).is_empty(),
-        "the open turn keeps its opener"
+        !ledger.ledger().gc_segments(&source).is_empty(),
+        "the opener is collected"
     );
-    halt(stop, task).await;
-    let (stop, task) = spawn(writer_over(&harness, store()));
-    polls(4).await;
-    assert_eq!(attachments(&harness), 2, "a restart reposts nothing");
-    assert!(
-        harness.channel().ledger().gc_segments(&source).is_empty(),
-        "a span without Closed keeps it"
-    );
-    append(&path, &idle());
-    polls(4).await;
-    let reopened = harness.channel();
-    let span = reopened
+    let span = ledger
         .ledger()
         .tool_images()
         .span_of(&source, "t1")
         .cloned();
-    assert!(span.and_then(|span| span.end_offset).is_some());
-    assert!(
-        !reopened.ledger().gc_segments(&source).is_empty(),
-        "the durable Closed frees the opener"
+    assert_eq!(
+        span.map(|span| span.opener_offset),
+        Some(0),
+        "its span is durable first"
     );
-    assert_eq!(harness.alarms.taken(), []);
+    // Restart before the turn's first image: only the span names the turn now.
+    halt(stop, task).await;
+    let (stop, task) = spawn(writer_over(&harness, store()));
+    let rows = [png("r1", "c1", 1), prompt("mid"), png("r2", "c2", 1)];
+    append(&path, &rows.concat());
+    polls(4).await;
+    assert_eq!(
+        attachments(&harness),
+        1,
+        "the same image of the same turn posts once"
+    );
+    append(&path, &idle());
+    polls(4).await;
+    let reopened = harness.channel();
+    let images = reopened.ledger().tool_images();
+    assert!(
+        images
+            .span_of(&source, "t1")
+            .is_some_and(|span| span.end_offset.is_some())
+    );
+    assert!(images.span_of(&source, "mid").is_none());
+    assert!(reopened.ledger().violation().is_none());
     halt(stop, task).await;
 }
 
@@ -514,10 +525,10 @@ async fn crash_before_opened_append_rederives_same_turn_key_and_obligation() {
     assert_eq!(again.images().unwrap().take_entries(), first);
 }
 
-/// A crash after the turn's end but before its Closed is durable keeps the opener; replay
-/// closes the same span.
+/// A crash after the turn's end but before its Closed is durable leaves the span open; replay
+/// closes the same span at the same offset.
 #[tokio::test(start_paused = true)]
-async fn crash_before_closed_append_keeps_opener_then_replay_closes() {
+async fn crash_before_closed_append_replays_the_same_close() {
     let (harness, path, source) = switched_over(b"");
     harness.gate.acquired();
     let mut writer = harness.writer();
@@ -535,13 +546,14 @@ async fn crash_before_closed_append_keeps_opener_then_replay_closes() {
         "Closed is queued, not yet durable"
     );
     drop(live);
-    let key = crate::services::tui_o::store::spool::source_key(&source);
+    let open = writer
+        .store()
+        .ledger()
+        .tool_images()
+        .span_of(&source, "t1")
+        .cloned();
+    assert_eq!(open.unwrap().end_offset, None);
     let mut fresh = images(&mut writer);
-    assert!(
-        kept_sources(writer.store().ledger(), &mut fresh)
-            .unwrap()
-            .contains_key(&key)
-    );
     let records = spooled(&mut writer, &source, 0);
     run(&mut writer, &mut fresh, &source, &records);
     let span = writer
@@ -549,15 +561,8 @@ async fn crash_before_closed_append_keeps_opener_then_replay_closes() {
         .ledger()
         .tool_images()
         .span_of(&source, "t1")
-        .cloned()
-        .unwrap();
-    assert_eq!(span.end_offset, Some(at));
-    let mut after = images(&mut writer);
-    assert!(
-        !kept_sources(writer.store().ledger(), &mut after)
-            .unwrap()
-            .contains_key(&key)
-    );
+        .cloned();
+    assert_eq!(span.unwrap().end_offset, Some(at));
 }
 
 /// Results without images derive exactly as a deriver without the image run and queue nothing.

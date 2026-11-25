@@ -216,6 +216,16 @@ impl ImageTurns {
         }
     }
 
+    /// The open turn's opener offset and its calls still waiting for a result.
+    pub(crate) fn open_evidence(&self) -> Option<(u64, Vec<String>)> {
+        let State::Open(open) = &self.state else {
+            return None;
+        };
+        let of_turn = |call: &&String| self.calls.get(*call) == Some(&open.turn);
+        let waiting = self.pending.iter().filter(of_turn).cloned().collect();
+        Some((open.opener_offset, waiting))
+    }
+
     /// Whether GC may collect the segment holding `turn`'s opener: an open turn or an unclosed
     /// span keeps it until its Closed is durable, even while that append fails.
     pub(crate) fn opener_collectable(&self, spans: &ImageState, turn: &NativeTurn) -> bool {
