@@ -8,6 +8,12 @@ pub(crate) mod root_replaced;
 #[path = "herdr_gate/legacy_return.rs"]
 pub(crate) mod legacy_return;
 
+#[path = "herdr_gate/closing.rs"]
+mod closing;
+pub(crate) use closing::execution_closing;
+#[cfg(test)]
+pub(crate) use closing::shut_execution_for_test;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};

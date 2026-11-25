@@ -989,6 +989,11 @@ async fn start_idle(
         super::start_failure::Failure::claimed(&mailbox, &claim).with_recovery(recovery.clone());
     let permit = super::start_failure::greeting_permit;
     let failed = permit(&shared, channel, kept.as_ref(), failed).await?;
+    // The claim is held and no turn of it is published yet: a never-started pane ends here.
+    crate::services::discord::queue_io::input_owner::pending_recovery::recover(
+        &shared, channel, &claim,
+    )
+    .await;
     let refusal = std::sync::Arc::new(Mutex::new(None));
     let owner = OwnerTurn {
         mailbox,

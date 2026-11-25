@@ -125,7 +125,7 @@ impl Owner {
 
     /// Whether execution `nonce` of `front`, refused as never started, consumed a due: only then
     /// may its pane be closed automatically.
-    #[cfg(all(test, unix))]
+    #[cfg(unix)]
     pub(crate) fn never_started_close_qualified(&self, front: &Front, nonce: &str) -> bool {
         self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
             holds(wait, front)
@@ -133,6 +133,34 @@ impl Owner {
                 && matches!(&wait.cause, RetryCause::PendingUnstarted { nonce: n }
                     | RetryCause::OwnLaunchTimeout { nonce: n } if n == nonce)
         })
+    }
+
+    /// The execution the current claim `number` of `front` may close as never started: the one
+    /// its wait consumed a due on. A claim a later one replaced names none.
+    #[cfg(unix)]
+    pub(crate) fn never_started_close_claimed(
+        &self,
+        (front, number): (&Front, u64),
+    ) -> Option<String> {
+        let nonce = self.snapshot.retry.wait.as_ref()?.cause.nonce()?.to_owned();
+        let current = number == self.claim_number && self.claimed(front.1.message_id, front);
+        (current && self.never_started_close_qualified(front, &nonce)).then_some(nonce)
+    }
+
+    /// Drops the wait of `front` on execution `nonce` once that execution was closed and retired.
+    #[cfg(unix)]
+    pub(crate) fn end_never_started_wait(
+        &mut self,
+        front: &Front,
+        nonce: &str,
+    ) -> Result<bool, String> {
+        if !self.never_started_close_qualified(front, nonce) {
+            return Ok(false);
+        }
+        let mut next = self.snapshot.clone();
+        next.retry.wait = None;
+        self.commit(next)?;
+        Ok(true)
     }
 
     /// When `tick` next consumes the armed wait's due.

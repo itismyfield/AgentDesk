@@ -2008,6 +2008,8 @@ src/
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
+│   │   │   ├── never_started.rs
+│   │   │   ├── never_started_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
@@ -2349,6 +2351,7 @@ src/
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
 │   │   │   │   ├── owed_drop_tests.rs
+│   │   │   │   ├── pending_recovery.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
@@ -2736,6 +2739,7 @@ src/
 │   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   ├── clear_execute_tests.rs
+│   │   │   │   │   ├── closing_tests.rs
 │   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
@@ -4529,6 +4533,7 @@ src/
 │   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
+│   │   │   ├── closing.rs
 │   │   │   ├── enter_readmit_tests.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs

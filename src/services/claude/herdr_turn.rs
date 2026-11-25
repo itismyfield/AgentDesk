@@ -450,7 +450,7 @@ fn cleared_source(
 }
 
 /// Whether the pane's latest logged record is execution `nonce`'s start of `session_id`.
-fn start_logged(channel: u64, logical: &str, nonce: &str, session_id: &str) -> bool {
+pub(crate) fn start_logged(channel: u64, logical: &str, nonce: &str, session_id: &str) -> bool {
     latest_logged(channel, logical).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
             && logged_session(&event.new) == Some(session_id)
