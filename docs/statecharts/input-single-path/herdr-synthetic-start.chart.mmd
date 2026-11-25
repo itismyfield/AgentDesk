@@ -1,0 +1,13 @@
+---
+title: "8422: 죽은 Bound 실행과 synthetic start"
+---
+stateDiagram-v2
+  s0: start front 도착(claim 전)
+  s1: claim 됨
+  s2: retire 뒤 재판정 대기
+  s3: 새 실행(Cold)으로 전달
+  [*] --> s0
+  s0 --> s1: start_waits 판정
+  s0 --> s2: 운영자 terminate(retired wake)
+  s1 --> s3: claim 뒤 실행
+  s2 --> s1: start_waits 판정

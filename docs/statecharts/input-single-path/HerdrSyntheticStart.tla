@@ -3,7 +3,7 @@
 \* start_waits (owner_input.rs:770-822) -> start_wait::observe (owner_input_start_wait.rs:33-97).
 \* A Herdr Bound row whose execution is dead reads Held (busy/herdr.rs:304-306) -> Unknown ->
 \* Wait::Watch + hold_front (owner_input.rs:974-978). held_watch keeps an Unknown forever and ends a
-\* Gone without a wake (held_watch.rs:60-66). Code SHA 82b96fa94b.
+\* Gone without a wake (held_watch.rs:65-71). Code SHA 82b96fa94b.
 \* Policy "Fixed" is the design-1 repair: observe asks the shared dead-Bound retire (the #8212 proof,
 \* herdr_launch/retire.rs Scope::Ended) when no turn holds the channel; a retired row reads Ready and
 \* the start cold-launches; a permanent refusal goes to the typed host refusal (Observed::Refused).
@@ -74,7 +74,7 @@ Launch == /\ s.front = "claimed"
                   THEN [s EXCEPT !.front = "delivered", !.exec = "idle", !.cold = TRUE]
                   ELSE [s EXCEPT !.front = "delivered"]
 
-\* held_watch: Ready wakes once, Gone ends unwoken, anything else keeps (held_watch.rs:60-66).
+\* held_watch: Ready wakes once, Gone ends unwoken, anything else keeps (held_watch.rs:65-71).
 \* The Fixed probe is observe itself, so each look may ask the retire again.
 WatchLook == /\ s.watch /\ s.front = "held"
              /\ LET t == IF CanAutoRetire THEN Retire(s) ELSE s
