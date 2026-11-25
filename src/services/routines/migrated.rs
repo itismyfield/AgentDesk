@@ -890,7 +890,7 @@ mod tests {
     }
 
     fn check_panic(index: usize, present: bool) {
-        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        crate::config::test_env::panic_probe::assert_restores_on_return_and_panic(
             &MIGRATED_ENV_TEST_VARS,
             present,
             ENV_FIXTURES[index],
@@ -898,7 +898,7 @@ mod tests {
     }
 
     fn observe_home(home: &std::path::Path) {
-        crate::test_env_panic_probe::checkpoint_changes(&[
+        crate::config::test_env::panic_probe::checkpoint_changes(&[
             ("HOME", Some(home.as_os_str())),
             ("USERPROFILE", None),
             ("AGENTDESK_SOURCE_ZPROFILE", None),
@@ -911,7 +911,7 @@ mod tests {
         if disable_profile {
             changes.push(("AGENTDESK_SOURCE_ZPROFILE", Some(std::ffi::OsStr::new("0"))));
         }
-        crate::test_env_panic_probe::checkpoint_changes(&changes);
+        crate::config::test_env::panic_probe::checkpoint_changes(&changes);
     }
 
     #[test]
@@ -1250,7 +1250,7 @@ mod tests {
             std::env::set_var("AGENTDESK_WORKSPACE_ROOT", &workspace_root);
             std::env::remove_var("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR");
         }
-        crate::test_env_panic_probe::checkpoint_changes(&[
+        crate::config::test_env::panic_probe::checkpoint_changes(&[
             ("AGENTDESK_WORKSPACE_ROOT", Some(workspace_root.as_os_str())),
             ("AGENTDESK_MIGRATED_AGENTFACTORY_WORKDIR", None),
         ]);
