@@ -40,7 +40,7 @@ pub(crate) fn tail() -> Vec<Value> {
 }
 
 /// A synthetic idle compaction: boundary, summary and re-attachments, then `tail`.
-fn compacted_tail() -> Vec<Value> {
+pub(crate) fn compacted_tail() -> Vec<Value> {
     let mut records = vec![
         json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}),
         json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}),

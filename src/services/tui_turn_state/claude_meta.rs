@@ -26,38 +26,67 @@ fn completed_tail(path: &Path) -> bool {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return false;
     };
-    let (mut metadata, mut segment) = (false, Compaction::Outside);
-    for line in window
-        .lines
-        .iter()
-        .rev()
-        .filter(|line| !line.trim().is_empty())
-    {
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            return false;
-        };
-        if completed_reply(&record) {
-            return metadata && segment != Compaction::Summary;
+    // Whether metadata followed the newest completed reply; `None` once anything else did.
+    let (mut after, mut segment) = (None, IdleCompaction::default());
+    for line in window.lines.iter().filter(|line| !line.trim().is_empty()) {
+        let record = serde_json::from_str::<Value>(line).ok();
+        if record.as_ref().is_some_and(completed_reply) {
+            (after, segment) = (Some(false), IdleCompaction::default());
+            continue;
         }
-        segment = match segment {
-            Compaction::Notice if record["isCompactSummary"] == true => Compaction::Summary,
-            Compaction::Summary if record["subtype"] == "compact_boundary" => Compaction::Outside,
-            _ if !idle_metadata(&record) => return false,
-            Compaction::Outside if idle_compaction_notice(&record) => Compaction::Notice,
-            segment => segment,
-        };
-        metadata = true;
+        let keeps = record.is_some_and(|record| match segment.step(&record) {
+            CompactionStep::Outside => idle_metadata(&record),
+            CompactionStep::Broken => false,
+            CompactionStep::Open | CompactionStep::Inside | CompactionStep::Closed => true,
+        });
+        after = after.filter(|_| keeps).map(|_| true);
     }
-    false
+    after == Some(true) && segment == IdleCompaction::Outside
 }
 
-/// Walking back, an idle-compaction notice admits one summary and then its boundary; a summary
-/// without its boundary, or a compaction no notice closed, is still conversation.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Compaction {
+/// A record's place in an idle compaction read forward: its boundary opens it, and only its
+/// summary and idle metadata may follow until the idle-compaction notice closes it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompactionStep {
     Outside,
-    Notice,
+    Open,
+    Inside,
+    Closed,
+    Broken,
+}
+
+/// Both Claude readers share this, so a compaction no notice closed stays conversation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum IdleCompaction {
+    #[default]
+    Outside,
+    Boundary,
     Summary,
+}
+
+impl IdleCompaction {
+    pub(crate) fn step(&mut self, record: &Value) -> CompactionStep {
+        let (next, step) = match *self {
+            Self::Outside
+                if record["type"] == "system" && record["subtype"] == "compact_boundary" =>
+            {
+                (Self::Boundary, CompactionStep::Open)
+            }
+            Self::Outside => (Self::Outside, CompactionStep::Outside),
+            Self::Boundary if record["isCompactSummary"] == true => {
+                (Self::Summary, CompactionStep::Inside)
+            }
+            Self::Summary if idle_compaction_notice(record) => {
+                (Self::Outside, CompactionStep::Closed)
+            }
+            open if record["type"] != "permission-mode" && idle_metadata(record) => {
+                (open, CompactionStep::Inside)
+            }
+            _ => (Self::Outside, CompactionStep::Broken),
+        };
+        *self = next;
+        step
+    }
 }
 
 /// Claude appends this notice only after an idle or away compaction has finished.

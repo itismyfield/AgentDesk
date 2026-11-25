@@ -10,7 +10,8 @@ const TURN_STATE_TAIL_BYTES: u64 = 64 * 1024;
 #[path = "tui_turn_state/claude_meta.rs"]
 mod claude_meta;
 pub(crate) use claude_meta::{
-    completed_reply as claude_completed_reply, idle_metadata as claude_idle_metadata,
+    CompactionStep, IdleCompaction, completed_reply as claude_completed_reply,
+    idle_metadata as claude_idle_metadata,
 };
 #[path = "tui_turn_state/completion_scan.rs"]
 mod completion_scan;

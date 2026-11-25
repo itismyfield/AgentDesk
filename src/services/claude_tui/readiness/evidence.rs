@@ -1,5 +1,7 @@
 //! Complete, bounded transcript evidence; shared turn-state classification stays unchanged.
-use crate::services::tui_turn_state::{claude_completed_reply, claude_idle_metadata};
+use crate::services::tui_turn_state::{
+    CompactionStep, IdleCompaction, claude_completed_reply, claude_idle_metadata,
+};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
@@ -40,6 +42,7 @@ pub(super) enum End {
     Summary,
     Reply,
 }
+#[derive(Clone)]
 pub(super) struct Tail {
     pub stamp: Stamp,
     pub end: End,
@@ -93,6 +96,7 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
         cleared_by: None,
     };
     let mut after_mode = false;
+    let (mut compaction, mut before) = (IdleCompaction::default(), None);
     while reader.read_until(b'\n', &mut line).ok()? > 0 {
         let record_start = offset;
         offset += line.len() as u64;
@@ -100,6 +104,13 @@ pub(super) fn read(path: &Path) -> Option<Tail> {
             return None;
         }
         let record: Value = serde_json::from_slice(&line).ok()?;
+        // A compaction its idle notice closes leaves the tail as it was before the boundary.
+        match compaction.step(&record) {
+            CompactionStep::Open => before = Some(tail.clone()),
+            CompactionStep::Closed => tail = before.take().unwrap_or(tail),
+            CompactionStep::Broken => before = None,
+            CompactionStep::Outside | CompactionStep::Inside => {}
+        }
         if let Some(native) = record["sessionId"]
             .as_str()
             .or_else(|| record["session_id"].as_str())
