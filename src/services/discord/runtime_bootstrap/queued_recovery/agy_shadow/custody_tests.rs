@@ -413,6 +413,25 @@ fn selected_parent_thread_keeps_selection_after_restart() {
     assert_eq!(adoption.permit.unwrap().target, THREAD);
 }
 
+// T13x (cache conflict)
+#[test]
+fn cached_child_contradicted_by_fresh_read_is_held_not_recovered() {
+    let snapshot = selected();
+    assert_eq!(
+        custody(&snapshot, 43, true, Some(&thread(43, 41))),
+        Ok(Custody::Selected(THREAD))
+    );
+    assert_eq!(snapshot.agy_target(43), Some(THREAD));
+    let moved = thread(43, 50);
+    assert!(snapshot.agy_recovery_target(&moved).is_ok());
+
+    assert_eq!(
+        custody(&snapshot, 43, true, Some(&moved)),
+        Err("agy thread relationship changed")
+    );
+    assert_eq!(snapshot.agy_target(43), None);
+}
+
 // T14
 #[test]
 fn recovery_only_restores_deselected_child_via_checked_parent() {
