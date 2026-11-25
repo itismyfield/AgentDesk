@@ -660,6 +660,7 @@ pub(crate) async fn finish_nonlocal_attachment_admission(
     admission: IntakeAdmission,
     submission: IntakeSubmission,
 ) -> Result<(), super::super::Error> {
+    attachment::mark_forwarded_recv(&admission, &submission);
     let waits = matches!(
         admission,
         IntakeAdmission::DeferredTurnMode(_)

@@ -206,7 +206,7 @@ impl TurnViewReconciler {
             }
             if add && emoji == '⏳' && target.kind == TurnViewTargetKind::IntakeUserMessage {
                 let wait_ms = Some(started.elapsed().as_millis() as u64);
-                crate::logging::intake_stage::mark(target.message_id.get(), "hourglass", wait_ms);
+                crate::logging::intake_stage::defer(target.message_id.get(), "hourglass", wait_ms);
             }
         }
         #[cfg(test)]

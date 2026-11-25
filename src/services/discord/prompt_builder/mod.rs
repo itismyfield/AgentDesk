@@ -695,7 +695,7 @@ pub(super) fn build_system_prompt_with_manifest(
             layer_hashes = ?layer_hashes,
             "recorded prompt manifest"
         );
-        crate::logging::intake_stage::mark_turn(&prompt_manifest.turn_id, "turn_start");
+        crate::logging::intake_stage::mark_turn(&prompt_manifest.turn_id, "prompt_manifest");
     }
 
     BuiltSystemPrompt {
