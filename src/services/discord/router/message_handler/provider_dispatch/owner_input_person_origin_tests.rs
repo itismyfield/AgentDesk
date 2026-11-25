@@ -54,9 +54,7 @@ async fn start_input(rig: &IntakeRig, source: &str, origin: &str) {
         );
     let message = stable.map_or(9_100_095_826_424_066_539, |(message, _)| message);
     let turn = format!("discord:{}:{message}", rig.channel);
-    let (original, ticket) =
-        routine::synthetic_original(&turn, rig.channel.get(), PROMPT, 1).unwrap();
-    let context = start::HeadlessProvenance {
+    let mut context = start::HeadlessProvenance {
         owner: (7, source),
         source: Some(source),
         metadata: Some(
@@ -67,6 +65,16 @@ async fn start_input(rig: &IntakeRig, source: &str, origin: &str) {
         dm: None,
     }
     .json(&turn);
+    // The Decision delivery admits the original the owner start builds: its approved actor is
+    // the author, which the owner checks against the event before it writes.
+    let (original, ticket) = match source {
+        "decision" => {
+            let asked = (turn.as_str(), rig.channel.get(), PROMPT);
+            let built = start::original(&rig.mailbox, asked, &mut context).await;
+            built.unwrap()
+        }
+        _ => routine::synthetic_original(&turn, rig.channel.get(), PROMPT, 1).unwrap(),
+    };
     assert!(matches!(
         admission::admit_with_context(&rig.mailbox, &original, ticket, context).await,
         Admission::Accepted(_)
