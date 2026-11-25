@@ -35,6 +35,7 @@ export type HomeLegacySummary = Omit<HomeLegacyCampaignSummary, "nodes"> & {
 };
 
 export const QUEUE_PATH = `/campaigns${queueLocationQuery(null)}`;
+export const CAMPAIGNS_PATH = "/campaigns";
 
 const join = (...parts: Array<string | null | undefined | false>) => parts.filter(Boolean).join(" · ");
 
@@ -328,15 +329,23 @@ function mapTurnSteps(turn: HomeTurn): AgentMonitorStep[] {
 const CLOCK_AHEAD_MS = 60_000;
 const CLOCK_MAX_MS = 12 * 3_600_000;
 
+function resolveMonitorRole(entry: HomeAgent, turn?: HomeTurn): string | null {
+  const agentProvider = !entry.unlinkedSession && !entry.agent.id.startsWith("dispatched:")
+    ? entry.agent.cli_provider?.trim() || null
+    : null;
+  return agentProvider ?? turn?.provider ?? entry.unlinkedSession?.provider ?? entry.agent.cli_provider ?? null;
+}
+
 /** A working agent's live turn for the kit monitor, with a compact fallback when turn details have not arrived. */
 export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
   if (entry.state !== "working") return null;
+  const role = resolveMonitorRole(entry, turn);
   if (!turn || (!turn.status && !turn.current_tool_line && !(turn.tool_events?.length))) {
     return {
       started: null,
       label: entry.info ?? tr("작업 중", "Working"),
       kind: "think",
-      role: entry.agent.cli_provider ?? null,
+      role,
     };
   }
   if (turn.status === "idle") return null;
@@ -349,7 +358,7 @@ export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr
     started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
-    role: turn.provider,
+    role,
     ...(steps.length > 0 ? { steps } : {}),
   };
 }
@@ -471,6 +480,19 @@ const HUMAN_TODO = new Map<string, Pick<TodoItem, "kind" | "tone"> & { chip: [st
 ]);
 const KIND_ORDER: TodoKind[] = ["approve", "decide", "deploy", "other"];
 
+function formatTodoIssueTitle(rawTitle: string, issueNumber?: string | number | null): string {
+  const trimmed = rawTitle.trim();
+  const leading = trimmed.match(/^#(\d+)\b[\s:·-]*/);
+  const issue = issueNumber != null && String(issueNumber) !== "" ? String(issueNumber) : leading?.[1] ?? null;
+  if (!issue) return trimmed;
+  let clean = trimmed;
+  const prefixRe = new RegExp(`^#${issue}\\b[\\s:·-]*`);
+  while (prefixRe.test(clean)) {
+    clean = clean.replace(prefixRe, "");
+  }
+  return clean ? `#${issue} ${clean}` : `#${issue}`;
+}
+
 export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, isKo }: {
   cards: KanbanCard[];
   campaigns: ServerCampaignSummary[] | null;
@@ -485,9 +507,10 @@ export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, i
     return time === null ? null : formatRelativeTime(time, isKo);
   };
   for (const card of cards.filter(isOpenKanbanCard)) {
+    const cleanCardTitle = cardTitle(card.title);
     const base = {
       key: `card:${card.id}`,
-      title: `${card.github_issue_number ? `#${card.github_issue_number} ` : ""}${cardTitle(card.title)}`,
+      title: card.github_issue_number ? formatTodoIssueTitle(cleanCardTitle, card.github_issue_number) : cleanCardTitle,
       to: `/campaigns${queueLocationQuery(card.id)}`,
       agentId: card.assignee_agent_id ?? card.owner_agent_id ?? null,
     };
@@ -510,7 +533,7 @@ export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, i
         kind: human.kind,
         tone: human.tone,
         chip: tr(...human.chip),
-        title: `${issue ? `#${issue} ` : ""}${spec?.title ?? node.id}`,
+        title: formatTodoIssueTitle(cardTitle(spec?.title ?? node.id), issue),
         detail: join(definition.title, typeof waitedAt === "string" && ago(waitedAt)),
         to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: view.campaign_id, node: node.id })}`,
         agentId: null,
@@ -529,7 +552,7 @@ export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, i
         kind: "approve",
         tone: "warn",
         chip: tr("승인 대기", "Approval"),
-        title: `${issue ? `#${issue} ` : ""}${node.title ?? node.id}`,
+        title: formatTodoIssueTitle(cardTitle(node.title ?? node.id), issue),
         detail: join(campaign.title, ago(node.updated_at)),
         to: `/campaigns${campaignLocationQuery({ mode: "legacy", campaign: campaign.id, node: node.id })}`,
         agentId: node.assignee ?? null,
@@ -608,12 +631,15 @@ export function describeHealthReasons(health: HomeHealth | null | undefined, tr:
   return [...new Set(reasons)];
 }
 
-/** Dynamic header link for `HomeTodoCard` when only triage alerts (no queue to-dos) are active. */
+/** Dynamic header link for `HomeTodoCard` based on campaign/queue to-dos and triage alerts. */
 export function todoHeaderLink(
   items: ReadonlyArray<TodoItem>,
   alerts: ReadonlyArray<TriageAlert>,
   tr: Tr,
 ): { to: string; label: string } {
+  if (items.length > 0 && items.every((item) => item.to.startsWith("/campaigns?mode=") && !item.key.startsWith("card:"))) {
+    return { to: CAMPAIGNS_PATH, label: tr("캠페인에서 보기", "Open campaigns") };
+  }
   if (items.length === 0 && alerts.length > 0) {
     const first = alerts[0].kind;
     if (first === "quota") return { to: "/stats", label: tr("통계에서 보기", "Open stats") };

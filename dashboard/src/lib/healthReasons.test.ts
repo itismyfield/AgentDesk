@@ -22,6 +22,21 @@ describe("describeDegradedReason", () => {
       ),
     ).toBe("adk-dashboard 턴 상태 확인 불가 (codex)");
   });
+
+  it("humanizes o_stall and startup_doctor underscore, colon, and space variants", () => {
+    for (const raw of ["o_stall", "o stall", "o_stall:o_delivery_stalled:codex:1490141479707086938"]) {
+      expect(describeDegradedReason(raw, true)).toBe("TUI 출력 스토어 지연");
+      expect(describeDegradedReason(raw, false)).toBe("TUI output store stalled");
+    }
+    for (const raw of ["startup_doctor_failed", "startup doctor failed", "startup_doctor_failed:2", "startup_doctor:db:failed"]) {
+      expect(describeDegradedReason(raw, true)).toBe("시작 자가진단 실패 항목 감지");
+      expect(describeDegradedReason(raw, false)).toBe("Startup self-check failed");
+    }
+    for (const raw of ["startup_doctor_warned", "startup doctor warned", "startup_doctor_warned:3", "startup_doctor:disk_check:warned"]) {
+      expect(describeDegradedReason(raw, true)).toBe("시작 자가진단 주의 항목 감지");
+      expect(describeDegradedReason(raw, false)).toBe("Startup self-check warning");
+    }
+  });
 });
 
 describe("aggregateDegradedReasons", () => {
@@ -42,7 +57,7 @@ describe("aggregateDegradedReasons", () => {
     expect(aggregated.some((item) => /\d{15,}/.test(item.summary))).toBe(false);
   });
 
-  it("merges duplicate relay_verdict_unknown labels into a single row with joined rawKey tooltip", () => {
+  it("merges duplicate relay_verdict_unknown, o_stall, and startup_doctor entries", () => {
     const rows = aggregateDegradedReasons(
       [
         "relay_verdict_unknown_antigravity_1490141479707086938",
@@ -63,6 +78,22 @@ describe("aggregateDegradedReasons", () => {
         rawKey:
           "relay_verdict_unknown_antigravity_1490141479707086938, relay_verdict_unknown_antigravity_1490141479707086939",
       },
+    ]);
+
+    const grouped = aggregateDegradedReasons(
+      [
+        "o_stall:o_delivery_stalled:codex:1490141479707086938",
+        "o_stall:o_delivery_stalled:claude:1490141479707086939",
+        "startup_doctor:disk_check:warned",
+        "startup_doctor_warned:1",
+        "startup_doctor_failed:1",
+      ],
+      true,
+    );
+    expect(grouped.map((item) => [item.summary, item.count])).toEqual([
+      ["TUI 출력 스토어 지연 2건", 2],
+      ["시작 자가진단 주의 항목 감지 2건", 2],
+      ["시작 자가진단 실패 항목 감지", 1],
     ]);
   });
 });

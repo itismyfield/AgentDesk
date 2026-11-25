@@ -11,7 +11,7 @@ import {
 } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
+  AGENT_STATES, CAMPAIGNS_PATH, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
   systemNeedsAttention, todoHeaderLink, todoStatus, unlinkedMonitorView,
   type HomeAgent, type HomeAgentState, type HomeHealth, type HomeMementoStatus, type HomeTone, type MonitorView,
   type SourceState, type TodoItem, type Tr, type TriageAlert,
@@ -112,7 +112,10 @@ export function HomeTodoCard({
   const total = alerts.length + items.length;
   const hidden = Math.max(0, items.length - TODO_ROWS);
   const status = todoStatus(total, [cards, campaigns]);
-  const headerLink = todoHeaderLink(items, alerts, tr);
+  const campaignOnlyItems = items.length > 0 && items.every((item) => item.to.startsWith("/campaigns?mode=") && !item.key.startsWith("card:"));
+  const headerLink = campaignOnlyItems
+    ? { to: CAMPAIGNS_PATH, label: tr("캠페인에서 보기", "Open campaigns") }
+    : todoHeaderLink(items, alerts, tr);
 
   const toggleHealthReasons = useCallback(async (fallbackReasons: string[]) => {
     setHealthOpen((prev) => {
@@ -245,7 +248,7 @@ export function HomeTodoCard({
           ) : null}
           {hidden > 0 ? (
             <div className="border-t border-[var(--line-soft)] px-3 py-3 sm:px-4">
-              <HeaderLink to={QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
+              <HeaderLink to={campaignOnlyItems ? CAMPAIGNS_PATH : QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
             </div>
           ) : null}
           {cards === "failed" ? <CardNote>{tr("작업 카드를 읽지 못해 할 일 일부는 확인 불가예요.", "Task cards did not load, so some to-dos are unknown.")}</CardNote> : null}

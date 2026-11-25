@@ -50,6 +50,23 @@ export function describeDegradedReason(reason: string, isKo: boolean): string {
   if (trimmed === "db_unavailable") return tr("데이터베이스 연결 안 됨", "Database unavailable");
   if (trimmed === "no_providers_registered") return tr("등록된 프로바이더 없음", "No providers registered");
   if (trimmed === "mailbox_snapshot_unavailable") return tr("메일박스 상태 조회 불가", "Mailbox snapshot unavailable");
+  if (trimmed === "gateway_standby") return tr("게이트웨이 대기 노드", "Gateway standby node");
+
+  if (/^o[_ ]stall(?:$|[:_\s])/i.test(trimmed)) {
+    return tr("TUI 출력 스토어 지연", "TUI output store stalled");
+  }
+  if (/^startup[_ ]doctor(?:[_:\s]+[\w-]+)*[_:\s]+failed(?:$|[:_\s])/i.test(trimmed)) {
+    return tr("시작 자가진단 실패 항목 감지", "Startup self-check failed");
+  }
+  if (/^startup[_ ]doctor(?:[_:\s]+[\w-]+)*[_:\s]+warn(?:ed|ing)?(?:$|[:_\s])/i.test(trimmed)) {
+    return tr("시작 자가진단 주의 항목 감지", "Startup self-check warning");
+  }
+  if (/^startup[_ ]doctor(?:[_:\s]+[\w-]+)*[_:\s]+error(?:$|[:_\s])/i.test(trimmed)) {
+    return tr("시작 자가진단 오류", "Startup self-check error");
+  }
+  if (/^startup[_ ]doctor(?:[_:\s]+[\w-]+)*[_:\s]+pending(?:$|[:_\s])/i.test(trimmed)) {
+    return tr("시작 자가진단 진행 중", "Startup self-check pending");
+  }
 
   const provider = trimmed.match(/^provider:([^:]+):(.+)$/);
   if (provider) {

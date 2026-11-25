@@ -54,6 +54,14 @@ describe("home agents", () => {
     // A start well after the snapshot (another time zone) or 13 hours back (a leftover file) hides the clock.
     expect(monitorView({ ...live, started_at: "2026-11-18T09:00:00Z" }, ada, tr, now)?.started).toBeNull();
     expect(monitorView(live, ada, tr, now + 13 * 3_600_000)?.started).toBeNull();
+    // Linked agents resolve role from cli_provider before falling back to turn.provider so Antigravity never shows "claude".
+    const [yunho] = classifyAgents([agent("yunho", { status: "working", session_info: "원창 채널", cli_provider: "antigravity" })], [], false);
+    const mismatchedTurn = { ...live, provider: "claude" };
+    expect(monitorView(mismatchedTurn, yunho, tr, now)?.role).toBe("antigravity");
+    const [geminiAgent] = classifyAgents([agent("gem", { status: "working", session_info: "분석 중", cli_provider: "gemini" })], [], false);
+    expect(monitorView(mismatchedTurn, geminiAgent, tr, now)?.role).toBe("gemini");
+    const [fallbackAgent] = classifyAgents([agent("plain", { status: "working", session_info: "분석 중" })], [], false);
+    expect(monitorView(mismatchedTurn, fallbackAgent, tr, now)?.role).toBe("claude");
   });
 
   it("tells an empty session list from one that failed to load", () => {
@@ -109,6 +117,40 @@ describe("home to-dos", () => {
     expect(items[1]).toMatchObject({ title: "#812 착지 대상", tone: "warn", to: "/campaigns?mode=legacy&campaign=ledger-1&node=n1" });
   });
 
+  it("strips duplicate leading issue prefixes on server and legacy campaign approval items", () => {
+    const document = structuredClone(serverCampaignFixtures.prepared);
+    document.definition.nodes[2] = {
+      ...document.definition.nodes[2],
+      title: "#8299 agy 채널을 Claude·Codex처럼 권한 우회로 실행",
+      issue_url: "https://github.com/itismyfield/AgentDesk/issues/8299",
+    };
+    document.view.nodes.forEach((node, index) => {
+      node.runtime = { ...node.runtime, human_status: index === 2 ? "awaiting_approval" : null, wait_started_at: null };
+    });
+    const legacy = [{
+      id: "ledger-dup",
+      title: "레거시 캠페인",
+      status: "active" as const,
+      auto_queue: false,
+      updated_at: "2026-11-18T00:00:00Z",
+      nodes: [{
+        id: "n-8299",
+        title: "#8299 agy 채널을 Claude·Codex처럼 권한 우회로 실행",
+        status: "running" as const,
+        stage: "LAND_READY",
+        next_action: "착지 승인 대기",
+        issue_url: "https://github.com/itismyfield/AgentDesk/issues/8299",
+        updated_at: "2026-11-18T00:00:00Z",
+      }],
+    }];
+    const items = buildTodoItems({ cards: [], campaigns: [], documents: [document], legacy, tr, isKo: true });
+    expect(items.map((item) => [item.key, item.title])).toEqual([
+      ["node:release:C", "#8299 agy 채널을 Claude·Codex처럼 권한 우회로 실행"],
+      ["legacy:ledger-dup:n-8299", "#8299 agy 채널을 Claude·Codex처럼 권한 우회로 실행"],
+    ]);
+    expect(todoHeaderLink(items, [], tr)).toEqual({ to: "/campaigns", label: "캠페인에서 보기" });
+  });
+
   it("surfaces stalled linked agents in triage alerts, aggregates health reasons, and resolves dynamic header links", () => {
     const entries = classifyAgents(
       [agent("nova", { name_ko: "노바", status: "working", session_info: "Bash 실행", visual_status_code: "stuck-suspect" } as Partial<Agent>)],
@@ -141,6 +183,8 @@ describe("home to-dos", () => {
     expect(todoHeaderLink([], [{ ...alerts[0], kind: "quota", to: "/stats" }], tr)).toEqual({ to: "/stats", label: "통계에서 보기" });
     expect(todoHeaderLink([{ key: "k", kind: "decide", tone: "err", chip: "판단", title: "t", detail: "d", to: QUEUE_PATH, agentId: null }], alerts, tr))
       .toEqual({ to: QUEUE_PATH, label: "대기열에서 보기" });
+    expect(todoHeaderLink([{ key: "legacy:1:n1", kind: "approve", tone: "warn", chip: "승인 대기", title: "#8299 agy", detail: "d", to: "/campaigns?mode=legacy&campaign=1&node=n1", agentId: null }], alerts, tr))
+      .toEqual({ to: "/campaigns", label: "캠페인에서 보기" });
   });
 
   it("shows the empty state only once every source answered", () => {
