@@ -164,21 +164,22 @@ fn concurrent_wakes_write_once() {
     let record = owner.record("claude", HostedState::Pending);
     let claims = [claim(&owner), claim(&owner)];
     let barrier = std::sync::Barrier::new(2);
-    let results: Vec<_> = std::thread::scope(|scope| {
-        let wakes: Vec<_> = claims
-            .map(|front| {
-                let (owner, record, barrier) = (&owner, &record, &barrier);
-                scope.spawn(move || {
-                    let route = ("claude", target::Route::Cold);
-                    let _waiting = on_route(owner, route, Some(front), &owner.logical);
-                    barrier.wait();
-                    hand_over(owner, (record, record, record))
-                })
-            })
-            .into_iter()
-            .collect();
-        wakes.into_iter().map(|w| w.join().unwrap()).collect()
+    let (done, results) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        for front in claims {
+            let (owner, record, barrier, done) = (&owner, &record, &barrier, done.clone());
+            scope.spawn(move || {
+                let route = ("claude", target::Route::Cold);
+                let _waiting = on_route(owner, route, Some(front), &owner.logical);
+                barrier.wait();
+                let _ = done.send(hand_over(owner, (record, record, record)));
+            });
+        }
     });
+    let cap = crate::test_support::wait::WAIT_CAP;
+    let results: Vec<Result<(), String>> = (0..2)
+        .map(|_| crate::test_support::wait::recv_within(&results, cap))
+        .collect();
     assert_eq!(
         results.iter().filter(|r| r.is_ok()).count(),
         1,
