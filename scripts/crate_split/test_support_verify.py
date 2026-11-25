@@ -15,11 +15,15 @@
               attribute block and first item line at <head> as at <base>.
   d idem      the codemod on <head> has no edit left.
   e compile   (with --compile) the library of PACKAGE builds the way a dependent's tests will see it: `test`
-              off, `test-support` on. `cargo rustc -p PACKAGE --lib --profile check -- --cfg
-              'feature="test-support"'` runs in a full `git archive` of <head> (never the working tree), with
-              CARGO_TARGET_DIR=$TS_VERIFY_TARGET_DIR or <repo>/target and cargo from $TS_VERIFY_CARGO or `cargo`.
-              PASS needs rc 0 and no `error` diagnostic; a cargo that does not start is a FAIL. This is what
-              a-d cannot see: a parser miss leaves a re-export or reader whose target stayed test-only (E0432).
+              off, the real Cargo feature `test-support` on (its optional dependencies included). `cargo check
+              -p PACKAGE --lib --features test-support --message-format short --color never` runs in a full
+              `git archive` of <head> (never the working tree), with CARGO_TARGET_DIR=$TS_VERIFY_TARGET_DIR or
+              <repo>/target and cargo from $TS_VERIFY_CARGO or `cargo`. PASS needs rc 0 and no `error`
+              diagnostic; a cargo that does not start is a FAIL. This is what a-d cannot see: a parser miss or
+              an inner dependency left test-only (E0432, E0425, E0599).
+
+Only a-e together give `TS_VERIFY PASS` (exit 0). Without --compile a clean a-d run is `TS_VERIFY
+STRUCTURAL_PASS` (exit 3): the edit is the codemod's, but nothing says the result builds.
 
 The first output line is `TS_VERIFY PASS ...` or `TS_VERIFY FAIL <checks>`; exit 0 only on PASS.
 The trees are read from git (`git archive` into a temporary directory), never from the working tree.
@@ -41,8 +45,9 @@ import test_support_codemod as codemod  # noqa: E402
 
 ATOM = 'any(test, feature = "test-support")'
 EXCLUDE = "scripts/crate_split/test_support_exclude.json"
-COMPILE_ERROR = re.compile(r"^error(?:\[E\d+\])?:(?! could not compile| aborting due to)")
-TREE_PATHS = ("Cargo.toml", "src", "crates", "scripts/crate_split/partition.json", EXCLUDE)
+BUNDLES = "scripts/crate_split/test_support_bundles.json"
+COMPILE_ERROR = re.compile(r"(?:^|: )error(?:\[E\d+\])?:(?! could not compile| aborting due to)")
+TREE_PATHS = ("Cargo.toml", "src", "crates", "scripts/crate_split/partition.json", EXCLUDE, BUNDLES)
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 
 
@@ -138,7 +143,8 @@ def item_texts(tree, entry):
 
 def compile_command(cargo, package):
     """The step-e command: the package's library with `test` off and `test-support` on."""
-    return [cargo, "rustc", "-p", package, "--lib", "--profile", "check", "--", "--cfg", 'feature="test-support"']
+    return [cargo, "check", "-p", package, "--lib", "--features", "test-support", "--message-format", "short",
+            "--color", "never"]
 
 
 def compile_head(repo, head, package, tmp):
@@ -150,13 +156,14 @@ def compile_head(repo, head, package, tmp):
     archive.stdout.close()
     if archive.wait() or tar.returncode:
         return "FAIL", "extract failed", [tar.stderr.decode(errors="replace")[-300:]]
-    env = dict(os.environ, CARGO_TARGET_DIR=os.environ.get("TS_VERIFY_TARGET_DIR", str(Path(repo) / "target")))
+    env = dict(os.environ, CARGO_TARGET_DIR=os.environ.get("TS_VERIFY_TARGET_DIR", str(Path(repo) / "target")),
+               CARGO_TERM_COLOR="never")
     cmd = compile_command(os.environ.get("TS_VERIFY_CARGO", "cargo"), package)
     try:
         proc = subprocess.run(cmd, cwd=tree, env=env, capture_output=True, text=True)
     except OSError as err:
         return "FAIL", f"cargo did not start ({err})", [" ".join(cmd)]
-    errors = [line for line in (proc.stderr + proc.stdout).splitlines() if COMPILE_ERROR.match(line)]
+    errors = [line for line in (proc.stderr + proc.stdout).splitlines() if COMPILE_ERROR.search(line)]
     detail = f"rc={proc.returncode} errors={len(errors)} cmd=`{' '.join(cmd[1:])}`"
     ok = proc.returncode == 0 and not errors
     return ("PASS" if ok else "FAIL"), detail, errors[:40] or ([] if ok else proc.stderr.splitlines()[-20:])
@@ -184,6 +191,10 @@ def verify(repo, base, head, compile_package=None):
         else:
             try:
                 entries, bundles = codemod.load_exclude(bex)
+                bb, hb = bdir / BUNDLES, hdir / BUNDLES
+                if bb.is_file() != hb.is_file() or bb.is_file() and bb.read_bytes() != hb.read_bytes():
+                    problems.append(f"{BUNDLES} differs between the commits")
+                bundles = bundles + codemod.load_bundles(bb)
             except codemod.CodemodError as err:
                 problems += err.lines
                 entries, bundles = [], []
@@ -221,11 +232,13 @@ def verify(repo, base, head, compile_package=None):
         if compile_package:
             rows.append(("e compile", *compile_head(repo, head, compile_package, tmp)))
     failed = [name.split()[0] for name, result, _, _ in rows if result != "PASS"]
+    summary = f"subs={len(pairs)} scanned={counts.get('scanned')} excluded={counts.get('excluded')} idem=0"
     if failed:
         print(f"TS_VERIFY FAIL {','.join(failed)}")
+    elif compile_package:
+        print(f"TS_VERIFY PASS {summary} compile=0")
     else:
-        print(f"TS_VERIFY PASS subs={len(pairs)} scanned={counts['scanned']} excluded={counts['excluded']} idem=0"
-              + (" compile=0" if compile_package else ""))
+        print(f"TS_VERIFY STRUCTURAL_PASS {summary} (no step e: pass --compile PACKAGE)")
     print(f"base={base} head={head}")
     print("| check | result | detail |\n|---|---|---|")
     for name, result, detail, _ in rows:
@@ -233,7 +246,7 @@ def verify(repo, base, head, compile_package=None):
     for name, _, _, problems in rows:
         for p in problems[:40]:
             print(f"{name.split()[0]}  {p}")
-    return 1 if failed else 0
+    return 1 if failed else 0 if compile_package else 3
 
 
 def main(argv=None):

@@ -1,0 +1,27 @@
+{
+ "about": "#7353 KRX-TS dependency bundles: items that only work together and so open or hold as one. A member is a file and an item label (`fn reserve_body > stmt CLAIMS`, never a line number) with the cfg it carries; a member whose cfg drifted holds the bundle. Class A only (static, field, variant, impl, initialiser, record statement, consuming branch). Class B (needs an excluded or #[test] module, a not(test) twin, a fixture split) is held through test_support_exclude.json and opened by hand.",
+ "bundles": [
+  {
+   "name": "claims_judged",
+   "items": [
+    {
+     "item": "fn claims_judged",
+     "cfg": "test",
+     "file": "src/services/tui_o/cutover/channel_gate.rs"
+    },
+    {
+     "item": "static CLAIMS",
+     "cfg": "test",
+     "file": "src/services/tui_o/cutover/channel_gate.rs"
+    },
+    {
+     "item": "fn reserve_body > stmt CLAIMS",
+     "cfg": "test",
+     "file": "src/services/tui_o/cutover/channel_gate.rs"
+    }
+   ],
+   "why": "claims_judged reads CLAIMS, which only the gated record in reserve_body fills (Sol review krxts-1 P1); opening the reader alone builds but records nothing",
+   "class": "A"
+  }
+ ]
+}

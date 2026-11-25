@@ -2,7 +2,7 @@
 """KRX test-only gates that upper tests use -> `test-support` (#7353 KRX-TS). Static, standard library only.
 
     python3 scripts/crate_split/test_support_codemod.py [--tree DIR] [--count | --check] [--plan OUT.json]
-        [--exclude FILE] [--list-test-modules]
+        [--exclude FILE] [--bundles FILE] [--list-test-modules]
 
 Once KRX is its own crate it is never built with `cfg(test)`, so a KE, DL or ROOT test that names a KRX item
 behind a test gate stops compiling. The KRX crate will export those items under its `test-support` feature,
@@ -51,6 +51,7 @@ rts = vt.rts
 TS = 'any(test, feature = "test-support")'
 UPPER = ("KE", "DL", "ROOT")
 EXCLUDE = HERE / "test_support_exclude.json"
+BUNDLES = HERE / "test_support_bundles.json"
 FIELD = re.compile(r"^\s*(?:(?:" + vt.VIS + r")\s+)?(\w+)\s*:\s*[^:]")
 IMPL = re.compile(r"^\s*(?:unsafe\s+)?impl\b(.*)$")
 MACRO = re.compile(r"^\s*(?:(?:" + vt.VIS + r")\s+)?(\w+)!\s*[{(\[]")
@@ -137,6 +138,11 @@ def rewrite(line):
     return None
 
 
+def norm_cfg(text):
+    """A recorded cfg compared with the `test-support` spelling read as `test` (an entry survives its own opening)."""
+    return re.sub(r"\s+", " ", text).replace(TS, "test")
+
+
 def test_atoms(pred):
     """How many `test` atoms a cfg predicate holds, string literals skipped."""
     return len(re.findall(r"(?<![\w-])test(?![\w-])", re.sub(r'"(?:\\.|[^"\\])*"', '""', pred)))
@@ -169,7 +175,7 @@ class Tree:
         self.root = Path(root).resolve()
         self._layout = None
         self._lines, self._ranges, self._blocks, self._module_at, self.unowned = {}, {}, {}, {}, {}
-        self._attrs = {}
+        self._attrs, self._macro = {}, {}
 
     @property
     def layout(self):
@@ -259,7 +265,7 @@ class Tree:
             return self._attrs[rel]
         lines = self.lines(rel)
         toks = rts.rust_tokens("\n".join(lines))
-        out, i, pairs = set(), 0, {"(": ")", "[": "]", "{": "}"}
+        out, inside, i, pairs = set(), set(), 0, {"(": ")", "[": "]", "{": "}"}
         while i < len(toks):
             t = toks[i]
             if t.kind == "ident" and i + 2 < len(toks) and toks[i + 1].value == "!":
@@ -267,11 +273,12 @@ class Tree:
                 if toks[k].kind == "ident":  # macro_rules! name { .. }
                     k += 1
                 if k < len(toks) and toks[k].kind == "punct" and toks[k].value in pairs:
-                    depth, k = 1, k + 1
+                    depth, open_at, k = 1, k, k + 1
                     while k < len(toks) and depth:
                         if toks[k].kind == "punct":
                             depth += (toks[k].value in pairs) - (toks[k].value in pairs.values())
                         k += 1
+                    inside.update(range(toks[open_at].line, toks[k - 1].line + 1))
                     i = k
                     continue
             if t.kind == "punct" and t.value == "#" and i + 1 < len(toks) and toks[i + 1].value in ("[", "!") \
@@ -279,7 +286,13 @@ class Tree:
                 out.add(t.line)
             i += 1
         self._attrs[rel] = out
+        self._macro[rel] = inside
         return out
+
+    def macro_lines(self, rel):
+        """1-based lines of macro invocation bodies (`thread_local! { static X .. }`): items there are opaque."""
+        self.attr_lines(rel)
+        return self._macro[rel]
 
     def use_text(self, rel, line):
         """(`use ...;` text rebuilt from Rust tokens, None) for the declaration starting on a 1-based line, so a
@@ -663,6 +676,21 @@ def load_exclude(path):
     return doc["entries"], doc.get("bundles", [])
 
 
+def load_bundles(path):
+    """Dependency bundles (test_support_bundles.json): items that open or hold as one, each with its cfg."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    bundles = json.loads(path.read_text("utf-8"))["bundles"]
+    bad = [f"bundle {b.get('name')}: member without file/item/cfg: {m}" for b in bundles for m in b["items"]
+           if not (m.get("file") or b.get("file")) or not m.get("item") or not m.get("cfg")]
+    names = [b["name"] for b in bundles]
+    bad += [f"duplicate bundle name {n}" for n, c in collections.Counter(names).items() if c > 1]
+    if bad:
+        raise CodemodError(2, bad)
+    return bundles
+
+
 def cfg_items(tree, rel):
     """label -> [item index] of every item in the file carrying a `#[cfg(..)]` attribute line."""
     out = collections.defaultdict(list)
@@ -701,6 +729,39 @@ def holds_tests(tree, rel, index):
             if any(TEST_ATTR.match(x) for x in tree.lines(other)):
                 return True
     return False
+
+
+def declarations(tree):
+    """(module, name) -> {"plain", "macro"} for the KRX crate: a declaration outside every test gate (or an
+    ungated `use` binding), and one inside a macro invocation body whose cfg the tool cannot see."""
+    out = collections.defaultdict(set)
+    lay = tree.layout
+    for rel in sorted(r for r in lay.module_of if r.endswith(".rs") and tree.crate_of(r) == "KRX"):
+        if rel in lay.test_only:
+            continue
+        lines, ranges, macro = tree.lines(rel), tree.ranges(rel), tree.macro_lines(rel)
+        for i, line in enumerate(lines):
+            m = tc.DECL.match(line)
+            is_use = not m and re.match(r"^\s*(?:(?:" + vt.VIS + r")\s+)?use\s", line)
+            if not m and not is_use:
+                continue
+            if i + 1 in macro:
+                if m:
+                    out[(tree.module_at(rel, i + 1), m.group(1))].add("macro")
+                continue
+            if tc.gated_attr(lines, i) or any(a <= i + 1 <= b for a, b in ranges):
+                continue
+            module = tree.module_at(rel, i + 1)
+            if m:
+                # A `mod x {` line belongs to x itself (Layout.module_at): its name lives in the parent.
+                inline_mod = KW.search(line).group(1) == "mod" and line.rstrip().endswith("{")
+                out[(module[:-1] if inline_mod else module, m.group(1))].add("plain")
+            else:
+                text, why = tree.use_text(rel, i + 1)
+                for _, orig, bound in vt.use_entries(text) if why is None else []:
+                    if orig != "*":
+                        out[(module, bound)].add("plain")
+    return out
 
 
 def plan(tree, exclude_entries, bundles=()):
@@ -765,30 +826,43 @@ def plan(tree, exclude_entries, bundles=()):
             parent[find(g)] = find(gs[0])
 
     held = {}
+    declared = declarations(tree)
     for (rel, line), paths in uses.items():
-        group = own_gates(("item", rel, line))
+        group, unresolved = own_gates(("item", rel, line)), []
         for path in paths:
             inner = [("mod", tuple(path[:n])) for n in range(len(path), 0, -1) if tuple(path[:n]) in mods][:1]
             inner += [("item", g["rel"], g["line"]) for g in by_name.get(path[-1], [])
                       if g["kind"] not in ("method", "field") and g["module"] == tuple(path[:-1])]
             for t in inner:
                 group += own_gates(t)
+            # Three outcomes per target (Sol/WebGPT krxts-3 P1-1): gates to open with it (`inner`), already in
+            # every build (an ungated declaration or `use` binding of the name in that module), or neither.
+            # A module that exists is not a target that resolves: `thread_local! { static X }` is neither.
+            state = declared.get((tuple(path[:-1]), path[-1]), set())
+            if not inner and "plain" not in state:
+                unresolved.append(("in a macro body" if "macro" in state else "no declaration found")
+                                  + f" for `{'::'.join(path)}`")
         union(group)
+        if unresolved:
+            for g in group:
+                held.setdefault(g, "use declaration: " + "; ".join(unresolved))
     for (rel, line), why in getattr(tree, "use_holds", {}).items():
         for g in own_gates(("item", rel, line)):
             held[g] = f"use declaration: {why}"
     # Bundles: items that only work together (a reader, the static it reads, the statement that records into it).
     stale = []
     for bundle in bundles:
-        rel, members, drift = bundle["file"], [], []
-        items = cfg_items(tree, rel) if (tree.root / rel).is_file() else {}
+        members, drift = [], []
         for member in bundle["items"]:
+            # A member names its own file, or takes the bundle's (one-file bundles).
+            rel = member.get("file", bundle.get("file"))
+            items = cfg_items(tree, rel) if rel and (tree.root / rel).is_file() else {}
             found_at = items.get(member["item"], [])
             if len(found_at) != 1:
                 stale.append(f"bundle {bundle['name']}: {rel} :: {member['item']} matches {len(found_at)} items, not 1")
                 continue
             got = tree.item_cfgs(rel, found_at[0])
-            if got != member["cfg"]:
+            if norm_cfg(got) != norm_cfg(member["cfg"]):
                 drift.append(f"{member['item']} has cfg `{got}`, recorded `{member['cfg']}`")
             members += [g for g in tree.chain(rel, found_at[0] + 1) if g not in members]
         for t, chain in chains.items():
@@ -819,13 +893,15 @@ def plan(tree, exclude_entries, bundles=()):
         if not matched:
             stale.append(f"exclusion matches nothing: {rel} :: {e['item']}")
             continue
-        if kinds != sorted(e["cfg"]):
+        if [norm_cfg(k) for k in kinds] != sorted(norm_cfg(k) for k in e["cfg"]):
             stale.append(f"exclusion matches {len(matched)} items with cfg {kinds}, expected {sorted(e['cfg'])}: "
                          f"{rel} :: {e['item']}")
             continue
-        hit_gates = {g for g in gates if g[0] == rel and label[g] == e["item"]}
-        excluded |= hit_gates
-        if not hit_gates:
+        # Every real gate of a listed item seeds the blocked groups, hit or not (krxts-3 P1-2): a sibling no
+        # upper test names still holds the `use` group it shares.
+        own = {(rel, j) for k in matched for j in tree.attr_gates(rel, k)}
+        excluded |= own
+        if not own & gates:
             pinned.append((rel, e["item"]))
     if stale:
         raise CodemodError(2, stale)
@@ -868,7 +944,7 @@ def plan(tree, exclude_entries, bundles=()):
     edits = [{"file": rel, "line": j + 1, "item": label[(rel, j)], "before": tree.lines(rel)[j],
               "after": rewrite(tree.lines(rel)[j])} for rel, j in sorted(wanted)]
     dl = {g for site, t in found if tree.crate_of(site.rsplit(":", 1)[0]) == "DL" for g in chains[t]}
-    counts = {"scanned": len(gates), "excluded": len(excluded) + len(deferred), "listed": len(excluded),
+    counts = {"scanned": len(gates), "excluded": len(excluded & gates) + len(deferred), "listed": len(excluded & gates),
               "deferred": len(deferred), "subs": len(edits), "files": len({e["file"] for e in edits}),
               "companions": len(companions), "pinned": len(pinned), "held": len(set(held) & gates), "dl_scanned": len(dl),
               "dl_subs": len(wanted & dl)}
@@ -876,7 +952,7 @@ def plan(tree, exclude_entries, bundles=()):
     rows = [{"file": g[0], "line": g[1] + 1, "item": label[g], "state": state(g), "companion": g in companions}
             for g in sorted(gates)]
     return {"edits": edits, "counts": counts, "gates": rows,
-            "excluded": sorted(f"{g[0]} :: {label[g]}" for g in excluded),
+            "excluded": sorted(f"{g[0]} :: {label[g]}" for g in excluded & gates),
             "deferred": sorted(f"{g[0]} :: {label[g]}" for g in deferred), "pinned": pinned,
             "held": [f"{g[0]}:{g[1] + 1} {label[g]} — {why}" for g, why in sorted(held.items()) if g in gates]}
 
@@ -916,6 +992,7 @@ def main(argv=None):
     mode.add_argument("--check", action="store_true", help="exit 1 when the tree still has edits to make")
     mode.add_argument("--list-test-modules", action="store_true")
     parser.add_argument("--exclude", default=str(EXCLUDE))
+    parser.add_argument("--bundles", default=str(BUNDLES))
     parser.add_argument("--plan", help="write the edit plan as JSON")
     args = parser.parse_args(argv)
     tree = Tree(args.tree)
@@ -923,7 +1000,8 @@ def main(argv=None):
         print(json.dumps(test_module_entries(tree), indent=1, ensure_ascii=False))
         return 0
     try:
-        result = plan(tree, *load_exclude(args.exclude))
+        entries, inline = load_exclude(args.exclude)
+        result = plan(tree, entries, inline + load_bundles(args.bundles))
     except CodemodError as err:
         print(f"TS_CODEMOD_FAIL code={err.code}")
         print("\n".join(err.lines))
