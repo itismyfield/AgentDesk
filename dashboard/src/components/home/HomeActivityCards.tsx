@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useState, type CSSProperties } from "react";
 import { Link } from "react-router";
 import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
 import { Button } from "../../kit/free/button-clean";
 import { UsageMeter, type UsageMeterLabels } from "../../kit/pro/usage-meter";
+import { useNow } from "../../lib/useNow";
 import {
   Cap, CardNote, CardSkeleton, Chip, HeaderLink, InspSection, MeterBar, Row, RowLink, SectionCard, StageTrack, toneText,
 } from "../common/KitPrimitives";
@@ -79,11 +80,7 @@ export function HomeCampaignsCard({ campaigns, tr, className }: { campaigns: Loa
 
 export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolean; className?: string }) {
   const routines = usePolled(loadHomeRoutines, 60_000);
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    const timer = window.setInterval(() => setNow(Date.now()), 60_000);
-    return () => window.clearInterval(timer);
-  }, []);
+  const now = useNow(60_000);
   const t = useCallback((messages: { ko: string; en?: string }) => (isKo ? messages.ko : messages.en ?? messages.ko), [isKo]);
   const rows = buildTodayRoutines(routines.data ?? [], now, tr);
   const finished = rows.filter((row) => row.finished).length;

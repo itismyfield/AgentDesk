@@ -4,7 +4,7 @@ import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { ReactNode } from "react";
-import { SurfaceNotice } from "../common/SurfacePrimitives";
+import { StatusDot, cn } from "../common/KitPrimitives";
 import { Button } from "../../kit/free/button-clean";
 import { Checkbox } from "../../kit/free/checkbox-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
@@ -23,6 +23,24 @@ import {
   useAgentSetupWizardState,
   type AgentSetupWizardProps,
 } from "./AgentSetupWizardModel";
+
+function WizardNotice({ tone, role, className, children }: { tone: "warn" | "err"; role?: "alert" | "status"; className?: string; children: ReactNode }) {
+  return (
+    <div
+      role={role}
+      className={cn(
+        "flex min-w-0 items-start gap-2.5 rounded-(--r-md) border px-3.5 py-3 text-(--fg)",
+        tone === "warn"
+          ? "border-[color-mix(in_oklch,var(--warn)_40%,transparent)] bg-(--warn-soft)"
+          : "border-[color-mix(in_oklch,var(--err)_40%,transparent)] bg-(--err-soft)",
+        className,
+      )}
+    >
+      <StatusDot tone={tone} className="mt-1.5" />
+      <div className="min-w-0 flex-1">{children}</div>
+    </div>
+  );
+}
 
 /** One wizard step: a title, a quiet line, then its fields. */
 function WizardSection({ title, description, children }: { title: ReactNode; description?: ReactNode; children: ReactNode }) {
@@ -392,7 +410,7 @@ export default function AgentSetupWizard({
                     </SectionWell>
                   </div>
                   {(preview?.errors?.length || liveValidation?.errors?.length) ? (
-                    <SurfaceNotice tone="warn" className="mt-3">
+                    <WizardNotice tone="warn" className="mt-3">
                       <div className="text-xs">
                         <div className="font-semibold">{tr("Dry-run 경고", "Dry-run warnings")}</div>
                         <ul className="mt-1 list-disc pl-5">
@@ -401,10 +419,10 @@ export default function AgentSetupWizard({
                           ))}
                         </ul>
                       </div>
-                    </SurfaceNotice>
+                    </WizardNotice>
                   ) : null}
                   {rollback ? (
-                    <SurfaceNotice tone="danger" className="mt-3">
+                    <WizardNotice tone="err" className="mt-3">
                       <div className="text-xs">
                         <div className="font-semibold">{tr("되돌린 결과", "Rollback summary")}</div>
                         {(() => {
@@ -440,13 +458,13 @@ export default function AgentSetupWizard({
                           );
                         })()}
                       </div>
-                    </SurfaceNotice>
+                    </WizardNotice>
                   ) : null}
                 </WizardSection>
               )}
 
               {error && (
-                <SurfaceNotice tone="danger">
+                <WizardNotice tone="err" role="alert">
                   <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <span className="text-sm">{error}</span>
                     {currentStep === "preview" && (
@@ -455,7 +473,7 @@ export default function AgentSetupWizard({
                       </Button>
                     )}
                   </div>
-                </SurfaceNotice>
+                </WizardNotice>
               )}
             </div>
           </div>

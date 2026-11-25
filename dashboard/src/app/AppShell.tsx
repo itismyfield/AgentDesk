@@ -7,6 +7,7 @@ import { useWorkspace } from "../contexts/WorkspaceContext";
 import { useSettings } from "../contexts/SettingsContext";
 import type { Notification } from "../components/NotificationCenter";
 import { useFocusTrap } from "../components/common/overlay";
+import { AlertDialog } from "../kit/free/dialog-clean";
 import { agentName, buildRunningNowTasks, classifyAgents } from "../components/home/homeModel";
 import { AgentTurnsProvider, reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
 import { MOBILE_LAYOUT_MEDIA_QUERY, TABLET_RAIL_MEDIA_QUERY } from "./breakpoints";
@@ -34,6 +35,10 @@ import { ShellFocusContext, ShellWindowFocusContext, type ShellFocus } from "./s
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "./shellNavigationConfig";
 import { iconForRoute } from "./shellRouteIcons";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
+
+type StopTaskPrompt =
+  | { kind: "agent"; agentId: string; label: string }
+  | { kind: "session"; sessionKey: string };
 
 interface AppShellProps {
   wsConnected: boolean;
@@ -304,15 +309,31 @@ export default function AppShell({
     navigateToRoute("/agents");
   }, [agents, navigateToRoute, openDefaultAgentInfo]);
 
-  const handleStopRunningTask = useCallback(async (taskId: string) => {
+  const [stopTaskPrompt, setStopTaskPrompt] = useState<StopTaskPrompt | null>(null);
+  const lastStopTaskPromptRef = useRef<StopTaskPrompt | null>(null);
+  if (stopTaskPrompt) {
+    lastStopTaskPromptRef.current = stopTaskPrompt;
+  }
+  const activeStopTaskPrompt = stopTaskPrompt ?? lastStopTaskPromptRef.current;
+
+  const handleStopRunningTask = useCallback((taskId: string) => {
     if (taskId.startsWith("agent:")) {
       const agentId = taskId.slice("agent:".length);
       const target = agents.find((agent) => agent.id === agentId);
       const label = target ? agentName(target, isKo) : agentId;
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm(tr(`${label}의 실행 중인 턴을 중단할까요?`, `Stop ${label}'s running turn?`));
-      if (!confirmed) return;
+      setStopTaskPrompt({ kind: "agent", agentId, label });
+      return;
+    }
+    if (taskId.startsWith("session:")) {
+      const sessionKey = taskId.slice("session:".length);
+      setStopTaskPrompt({ kind: "session", sessionKey });
+    }
+  }, [agents, isKo]);
+
+  const confirmStopRunningTask = useCallback(async () => {
+    if (!stopTaskPrompt) return;
+    if (stopTaskPrompt.kind === "agent") {
+      const { agentId, label } = stopTaskPrompt;
       try {
         const res = await stopAgentTurn(agentId);
         if (res.session_key) {
@@ -330,34 +351,28 @@ export default function AppShell({
       }
       return;
     }
-    if (taskId.startsWith("session:")) {
-      const sessionKey = taskId.slice("session:".length);
-      const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-        ? true
-        : window.confirm(tr("이 미연결 세션의 멈춘 턴 정리를 시도할까요?", "Try reconciling this unlinked session's turn?"));
-      if (!confirmed) return;
-      try {
-        const res = await reconcileStaleSessionTurn(sessionKey);
-        if (res.reconciled) {
-          setSessions((prev) =>
-            prev.map((s) => (s.session_key === sessionKey ? { ...s, status: "idle", last_seen_at: Date.now() } : s)),
-          );
-          pushNotification(tr("세션 턴을 정리했어요.", "Reconciled session turn."), "success");
-        } else {
-          pushNotification(
-            tr("현재 살아 있는 미연결 세션이에요. 에이전트 화면에서 확인해요.", "This unlinked lane is actively running; opening Agents."),
-            "info",
-          );
-          navigateToRoute("/agents");
-        }
-      } catch (error) {
-        pushNotification(
-          error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
-          "error",
+    const { sessionKey } = stopTaskPrompt;
+    try {
+      const res = await reconcileStaleSessionTurn(sessionKey);
+      if (res.reconciled) {
+        setSessions((prev) =>
+          prev.map((s) => (s.session_key === sessionKey ? { ...s, status: "idle", last_seen_at: Date.now() } : s)),
         );
+        pushNotification(tr("세션 턴을 정리했어요.", "Reconciled session turn."), "success");
+      } else {
+        pushNotification(
+          tr("현재 살아 있는 미연결 세션이에요. 에이전트 화면에서 확인해요.", "This unlinked lane is actively running; opening Agents."),
+          "info",
+        );
+        navigateToRoute("/agents");
       }
+    } catch (error) {
+      pushNotification(
+        error instanceof Error ? error.message : tr("세션 정리에 실패했어요.", "Failed to reconcile session."),
+        "error",
+      );
     }
-  }, [agents, isKo, navigateToRoute, pushNotification, refreshAgents, setSessions, tr]);
+  }, [navigateToRoute, pushNotification, refreshAgents, setSessions, stopTaskPrompt, tr]);
 
   const toggleShellTheme = useCallback(() => {
     setThemePreference((currentPreference) => {
@@ -485,7 +500,7 @@ export default function AppShell({
               resolvedTheme={resolvedTheme}
               runningTasks={runningTasks}
               onOpenRunningTask={handleOpenRunningTask}
-              onStopRunningTask={(taskId) => void handleStopRunningTask(taskId)}
+              onStopRunningTask={handleStopRunningTask}
               onViewAllRunning={() => navigateToRoute(currentRoute?.id === "home" ? "/agents" : "/home")}
               setShowCommandPalette={setShowCommandPalette}
               setShowNotificationPanel={setShowNotificationPanel}
@@ -602,6 +617,44 @@ export default function AppShell({
           tr,
           wsConnected,
         }}
+      />
+
+      <AlertDialog
+        open={stopTaskPrompt !== null}
+        onOpenChange={(open) => {
+          if (!open) setStopTaskPrompt(null);
+        }}
+        danger={activeStopTaskPrompt?.kind === "agent"}
+        title={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr(
+                `${activeStopTaskPrompt.label}의 실행 중인 턴을 중단할까요?`,
+                `Stop ${activeStopTaskPrompt.label}'s running turn?`,
+              )
+            : tr(
+                "이 미연결 세션의 멈춘 턴 정리를 시도할까요?",
+                "Try reconciling this unlinked session's turn?",
+              )
+        }
+        description={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr(
+                "현재 진행 중인 응답 생성을 즉시 멈춥니다. 대기열에 남은 작업은 유지됩니다.",
+                "Immediately stops the current turn in progress. Queued items remain intact.",
+              )
+            : tr(
+                "실제로 멈춘 세션이면 유휴 상태로 되돌리고, 아직 실행 중이면 에이전트 화면으로 이동합니다.",
+                "Marks the session idle if its turn is stale, or opens Agents if it is still actively running.",
+              )
+        }
+        confirmLabel={
+          activeStopTaskPrompt?.kind === "agent"
+            ? tr("턴 중단", "Stop turn")
+            : tr("세션 정리", "Reconcile")
+        }
+        cancelLabel={tr("취소", "Cancel")}
+        onConfirm={confirmStopRunningTask}
+        onCancel={() => setStopTaskPrompt(null)}
       />
     </div>
     </AgentTurnsProvider>

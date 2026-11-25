@@ -1,5 +1,5 @@
 import AgentPersona from "../AgentPersona";
-import { SurfaceCard } from "../common/SurfacePrimitives";
+import { KitCard } from "../common/KitPrimitives";
 import {
   BUTTON_ACCENT_STYLE,
   BUTTON_INFO_STYLE,
@@ -17,8 +17,9 @@ interface Props {
 
 export default function PipelineVisualEditorToolbar({ ctx, actions }: Props) {
   return (
-    <SurfaceCard
-      className="rounded-lg p-4 sm:p-5"
+    <KitCard
+      pad="md"
+      className="rounded-[var(--r-md)]"
       style={ctx.isFsmVariant ? FSM_PANEL_STYLE : PANEL_STYLE}
     >
       {ctx.isFsmVariant ? (
@@ -26,7 +27,7 @@ export default function PipelineVisualEditorToolbar({ ctx, actions }: Props) {
       ) : (
         <AdvancedToolbar ctx={ctx} actions={actions} />
       )}
-    </SurfaceCard>
+    </KitCard>
   );
 }
 
@@ -82,7 +83,7 @@ function FsmToolbar({ ctx, actions }: Props) {
             {tr("JSON 내보내기", "Export JSON")}
           </button>
           <button
-            onClick={() => void actions.handleClearOverride()}
+            onClick={() => (actions.confirmLeave ?? ((run: () => void) => run()))(() => void actions.handleClearOverride())}
             disabled={ctx.saving || !ctx.overrideExists}
             className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
             style={{ ...BUTTON_NEUTRAL_STYLE, opacity: ctx.saving || !ctx.overrideExists ? 0.45 : 1 }}
@@ -122,7 +123,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
           {tr("새로고침", "Refresh")}
         </button>
         <button
-          onClick={() => void actions.handleClearOverride()}
+          onClick={() => (actions.confirmLeave ?? ((run: () => void) => run()))(() => void actions.handleClearOverride())}
           disabled={ctx.saving || !ctx.overrideExists}
           className="min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium"
           style={{

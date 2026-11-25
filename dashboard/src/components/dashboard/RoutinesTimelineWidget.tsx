@@ -8,6 +8,7 @@ import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Switch } from "../../kit/free/switch-clean";
 import { ScheduledRuns, type ScheduleDay, type ScheduledTask } from "../../kit/pro/scheduled-runs";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
+import { useNow } from "../../lib/useNow";
 import { formatDiscordWebUrl, isDiscordSnowflake } from "../agent-manager/discord-routing";
 import { Cap, CardSkeleton, Chip, InspSection, Num, ROW_HOVER_CLASS, SectionCard, SELECTED_ROW_STYLE, StatusDot, type ChipTone, type DotTone } from "../common/KitPrimitives";
 import { BottomSheet } from "../common/overlay/BottomSheet";
@@ -75,7 +76,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
   const [runsError, setRunsError] = useState(false);
   const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(() => new Set());
   const [runningIds, setRunningIds] = useState<ReadonlySet<string>>(() => new Set());
-  const [now, setNow] = useState(() => Date.now());
+  const now = useNow(30_000);
   const optimistic = useRef(new Map<string, string>());
   const listRef = useRef<HTMLUListElement>(null);
   const routinesRef = useRef<RoutineRecord[]>([]);
@@ -84,8 +85,6 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
   const returnTarget = useRef<ReturnTarget>({ element: null, routineId: null });
   const pendingFocus = useRef<ReturnTarget | null>(null);
   const isMobile = useIsMobile(), split = !isMobile, toast = useToast();
-
-  useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(id); }, []);
 
   useEffect(() => {
     let mounted = true;

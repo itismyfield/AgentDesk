@@ -1,4 +1,13 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  memo,
+  useCallback,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type CSSProperties,
+} from "react";
+import { Map, Maximize, ZoomIn, ZoomOut } from "lucide-react";
 import {
   Background,
   Handle,
@@ -13,9 +22,11 @@ import {
   type NodeMouseHandler,
   type NodeProps,
   type NodeTypes,
+  type ReactFlowInstance,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 
+import { IconButton } from "../../kit/free/icon-button-clean";
 import { fsmStateTone, transitionAccent } from "./pipeline-visual-editor-styles";
 import {
   buildFsmEdgeBindingKey,
@@ -53,33 +64,51 @@ interface PipelineFlowCanvasProps {
   useScrollableMobileFsmCanvas: boolean;
 }
 
-const FLOW_SHELL_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-border) 68%, transparent)",
-  background:
-    "var(--th-bg-primary)",
-};
+const FLOAT_CHROME =
+  "absolute z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--th-card-bg)] shadow-[var(--shadow-sm)]";
+const TOOL_BTN =
+  "!size-10 [&>span]:!size-[18px] aria-pressed:!bg-[var(--accent-soft)] aria-pressed:!text-[var(--fg)]";
 
-const FSM_FLOW_SHELL_STYLE: CSSProperties = {
-  borderColor: "color-mix(in srgb, var(--th-border) 82%, transparent)",
-  background: "var(--th-bg-primary)",
-};
+function subscribeDocumentTheme(onStoreChange: () => void): () => void {
+  if (typeof document === "undefined" || typeof MutationObserver === "undefined") {
+    return () => {};
+  }
+  const observer = new MutationObserver(onStoreChange);
+  observer.observe(document.documentElement, {
+    attributes: true,
+    attributeFilter: ["data-theme", "class"],
+  });
+  return () => observer.disconnect();
+}
 
-const MUTED_TEXT_STYLE: CSSProperties = {
-  color: "var(--th-text-muted)",
-};
+function getDocumentColorMode(): "light" | "dark" {
+  if (typeof document === "undefined") return "dark";
+  return document.documentElement.dataset.theme === "light" ? "light" : "dark";
+}
+
+function getServerColorMode(): "light" | "dark" {
+  return "dark";
+}
+
+/** Inline port style so React Flow's unlayered stylesheet does not override the 10x10 blueprint handle. */
+function handlePortStyle(color: string): CSSProperties {
+  return {
+    width: 10,
+    height: 10,
+    minWidth: 0,
+    minHeight: 0,
+    borderRadius: 999,
+    border: `2px solid ${color}`,
+    background: "var(--th-card-bg)",
+  };
+}
 
 const PipelineStateNodeView = memo(function PipelineStateNodeView({
   data,
 }: NodeProps<PipelineStateNode>) {
   const { compactGraph, isFsmVariant, node, selected, tr } = data;
-  const tone = fsmStateTone(node.id);
-  const handleStyle: CSSProperties = {
-    width: 9,
-    height: 9,
-    borderColor: isFsmVariant ? "transparent" : "var(--th-card-bg)",
-    background: isFsmVariant ? "transparent" : "var(--th-accent-primary)",
-    opacity: isFsmVariant ? 0 : 0.88,
-  };
+  const tone = fsmStateTone(node.id, node.terminal);
+  const indicatorColor = selected ? "var(--accent)" : tone.stroke;
   const meta = isFsmVariant
     ? `n=${node.index + 1}`
     : [
@@ -91,70 +120,44 @@ const PipelineStateNodeView = memo(function PipelineStateNodeView({
 
   return (
     <div
-      className="rounded-md border px-3 py-2 shadow-sm"
+      className={`relative rounded-[14px] border bg-[var(--th-card-bg)] px-3 py-2.5 text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${
+        selected
+          ? "border-[var(--accent)] shadow-[0_0_0_3px_var(--accent-soft)]"
+          : "border-[var(--line)]"
+      }`}
       style={{
         width: node.width,
         minHeight: node.height,
-        borderColor: isFsmVariant
-          ? tone.stroke
-          : selected
-            ? "var(--th-accent-primary)"
-            : node.terminal
-              ? "color-mix(in srgb, var(--th-accent-primary) 52%, #16a34a 48%)"
-              : "color-mix(in srgb, var(--th-border) 88%, transparent)",
-        borderWidth: selected ? 2 : 1.5,
-        background: isFsmVariant
-          ? "var(--th-bg-surface)"
-          : node.terminal
-            ? "color-mix(in srgb, var(--th-badge-emerald-bg) 82%, var(--th-card-bg) 18%)"
-            : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
-        boxShadow: isFsmVariant
-          ? `0 0 0 1px rgba(255,255,255,0.02), 0 14px 30px ${tone.glow}`
-          : selected
-            ? "0 0 0 4px color-mix(in srgb, var(--th-accent-primary-soft) 70%, transparent)"
-            : undefined,
-        color: "var(--th-text-primary)",
       }}
     >
-      <Handle type="target" position={Position.Left} style={handleStyle} />
-      <Handle type="source" position={Position.Right} style={handleStyle} />
-      {isFsmVariant && (
-        <div
-          className="-mx-3 -mt-2 mb-2 h-[3px] rounded-t-md"
-          style={{ background: tone.stroke }}
-        />
-      )}
+      <Handle type="target" position={Position.Left} style={handlePortStyle("var(--fg-dim)")} />
+      <Handle type="source" position={Position.Right} style={handlePortStyle(indicatorColor)} />
       <div
-        className="truncate whitespace-nowrap text-[11px]"
+        aria-hidden
+        className="-mx-3 -mt-2.5 mb-2 h-[3px] rounded-t-[13px]"
+        style={{ background: indicatorColor }}
+      />
+      <div
+        className={`truncate whitespace-nowrap font-mono text-[11px] ${
+          selected ? "text-[var(--accent)]" : "text-[var(--fg-muted)]"
+        }`}
         title={node.id}
-        style={{
-          color: isFsmVariant
-            ? "var(--th-text-muted)"
-            : selected
-              ? "var(--th-accent-primary)"
-              : "var(--th-text-muted)",
-          fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace",
-        }}
       >
         {node.id}
       </div>
       <div
-        className="mt-1 truncate whitespace-nowrap text-sm font-semibold"
+        className={`mt-0.5 truncate whitespace-nowrap text-sm leading-5 font-semibold ${
+          node.terminal && !isFsmVariant ? "text-[var(--ok)]" : "text-[var(--fg)]"
+        }`}
         title={node.label}
-        style={{
-          color: node.terminal && !isFsmVariant
-            ? "color-mix(in srgb, var(--th-accent-primary) 58%, #166534 42%)"
-            : "var(--th-text-primary)",
-        }}
       >
         {node.label}
       </div>
       <div
-        className={`${compactGraph && !isFsmVariant ? "mt-1 text-[10px]" : "mt-2 text-[11px]"} truncate whitespace-nowrap`}
+        className={`${
+          compactGraph && !isFsmVariant ? "mt-1 pt-1 text-[10px]" : "mt-1.5 pt-1.5 text-[11px]"
+        } truncate whitespace-nowrap border-t border-[var(--line-soft)] text-[var(--fg-muted)]`}
         title={meta}
-        style={{
-          color: "var(--th-text-muted)",
-        }}
       >
         {meta}
       </div>
@@ -166,7 +169,12 @@ const nodeTypes = {
   pipelineState: PipelineStateNodeView,
 } satisfies NodeTypes;
 
-function edgeLabel(edge: GraphEdge, isFsmVariant: boolean, fsmEdgeBindings: Record<string, FsmEdgeBinding>, tr: Tr) {
+function edgeLabel(
+  edge: GraphEdge,
+  isFsmVariant: boolean,
+  fsmEdgeBindings: Record<string, FsmEdgeBinding>,
+  tr: Tr,
+) {
   if (isFsmVariant) {
     const bindingKey = buildFsmEdgeBindingKey(edge.from, edge.to);
     return fsmEdgeBindings[bindingKey]?.event ?? inferFsmEventName(edge.from, edge.to);
@@ -194,6 +202,16 @@ export default function PipelineFlowCanvas({
   tr,
   useScrollableMobileFsmCanvas,
 }: PipelineFlowCanvasProps) {
+  const colorMode = useSyncExternalStore(
+    subscribeDocumentTheme,
+    getDocumentColorMode,
+    getServerColorMode,
+  );
+  const flowRef = useRef<ReactFlowInstance<PipelineStateNode, PipelineEdge> | null>(null);
+  const minimapAllowed = !compactGraph && !useScrollableMobileFsmCanvas;
+  const [miniMapOpen, setMiniMapOpen] = useState(true);
+  const fitOptions = useMemo(() => ({ padding: isFsmVariant ? 0.18 : 0.16 }), [isFsmVariant]);
+
   const nodes = useMemo<PipelineStateNode[]>(
     () =>
       graph.nodes.map((node) => {
@@ -224,11 +242,11 @@ export default function PipelineFlowCanvas({
       graph.edges.map((edge) => {
         const selected = selection?.kind === "transition" && selection.index === edge.index;
         const accent = transitionAccent(edge.type);
-        const stroke = isFsmVariant
-          ? selected
-            ? "var(--th-accent-primary)"
-            : "rgba(148, 163, 184, 0.72)"
-          : accent.stroke;
+        const stroke = selected
+          ? "var(--accent)"
+          : isFsmVariant
+            ? "var(--fg-muted)"
+            : accent.stroke;
         return {
           id: edge.key,
           source: edge.from,
@@ -247,20 +265,14 @@ export default function PipelineFlowCanvas({
           labelBgPadding: [8, 4],
           labelBgBorderRadius: 10,
           labelBgStyle: {
-            fill: isFsmVariant
-              ? selected
-                ? "var(--th-accent-primary-soft)"
-                : "var(--th-bg-surface)"
-              : selected
-                ? "color-mix(in srgb, var(--th-accent-primary-soft) 74%, var(--th-card-bg) 26%)"
-                : "color-mix(in srgb, var(--th-card-bg) 94%, transparent)",
+            fill: selected ? "var(--accent-soft)" : "var(--th-card-bg)",
             stroke,
             strokeWidth: 1,
           },
           labelStyle: {
-            fill: isFsmVariant ? stroke : "var(--th-text-primary)",
+            fill: selected ? "var(--accent-fg)" : isFsmVariant ? "var(--fg-dim)" : "var(--fg)",
             fontSize: 11,
-            fontWeight: 700,
+            fontWeight: 600,
             whiteSpace: "nowrap",
             fontFamily: isFsmVariant
               ? "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace"
@@ -268,8 +280,8 @@ export default function PipelineFlowCanvas({
           },
           style: {
             stroke,
-            strokeOpacity: selected ? 0.96 : isFsmVariant ? 0.82 : 0.68,
-            strokeWidth: selected ? (isFsmVariant ? 2.4 : 3.2) : isFsmVariant ? 1.8 : 2.4,
+            strokeOpacity: selected ? 1 : 0.8,
+            strokeWidth: selected ? 2.6 : 2,
           },
           interactionWidth: 22,
           focusable: true,
@@ -303,73 +315,60 @@ export default function PipelineFlowCanvas({
     [isFsmVariant, onConnectTransition],
   );
 
-  const minimapAllowed = !compactGraph && !useScrollableMobileFsmCanvas;
-  const [miniMapVisible, setMiniMapVisible] = useState(minimapAllowed);
-  const miniMapHideTimerRef = useRef<number | null>(null);
-
-  const clearMiniMapHideTimer = useCallback(() => {
-    if (miniMapHideTimerRef.current !== null) {
-      window.clearTimeout(miniMapHideTimerRef.current);
-      miniMapHideTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleMiniMapHide = useCallback(() => {
-    if (!minimapAllowed) return;
-    clearMiniMapHideTimer();
-    miniMapHideTimerRef.current = window.setTimeout(() => {
-      setMiniMapVisible(false);
-      miniMapHideTimerRef.current = null;
-    }, 3200);
-  }, [clearMiniMapHideTimer, minimapAllowed]);
-
-  const revealMiniMap = useCallback(() => {
-    if (!minimapAllowed) return;
-    setMiniMapVisible(true);
-    scheduleMiniMapHide();
-  }, [minimapAllowed, scheduleMiniMapHide]);
-
-  useEffect(() => {
-    if (!minimapAllowed) {
-      setMiniMapVisible(false);
-      clearMiniMapHideTimer();
-      return clearMiniMapHideTimer;
-    }
-    setMiniMapVisible(true);
-    scheduleMiniMapHide();
-    return clearMiniMapHideTimer;
-  }, [clearMiniMapHideTimer, graph.edges.length, graph.nodes.length, minimapAllowed, scheduleMiniMapHide]);
-
   return (
     <div className="space-y-3">
-      <label className="grid gap-1 text-xs text-th-text-muted sm:hidden">
+      <label className="grid gap-1 text-xs text-[var(--fg-muted)] sm:hidden">
         {tr("편집할 상태 또는 전환", "State or transition to edit")}
-        <select aria-label={tr("편집할 상태 또는 전환", "State or transition to edit")} value={selection?.kind === "state" || selection?.kind === "transition" ? JSON.stringify(selection) : ""} onChange={event => onSelectionChange(JSON.parse(event.target.value) as Selection)} className="min-h-11 w-full min-w-0 rounded-md border border-th-border-subtle bg-th-bg-surface px-3 text-sm text-th-text-primary">
-          <option value="" disabled>{tr("선택하세요", "Choose an item")}</option>
-          <optgroup label={tr("상태", "States")}>{graph.nodes.map(node => <option key={node.id} value={JSON.stringify({ kind: "state", stateId: node.id })}>{node.label} · {node.id}</option>)}</optgroup>
-          <optgroup label={tr("전환", "Transitions")}>{graph.edges.map(edge => <option key={edge.key} value={JSON.stringify({ kind: "transition", index: edge.index })}>{edge.from} → {edge.to}</option>)}</optgroup>
+        <select
+          aria-label={tr("편집할 상태 또는 전환", "State or transition to edit")}
+          value={
+            selection?.kind === "state" || selection?.kind === "transition"
+              ? JSON.stringify(selection)
+              : ""
+          }
+          onChange={(event) => onSelectionChange(JSON.parse(event.target.value) as Selection)}
+          className="min-h-11 w-full min-w-0 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--th-card-bg)] px-3 text-sm text-[var(--fg)]"
+        >
+          <option value="" disabled>
+            {tr("선택하세요", "Choose an item")}
+          </option>
+          <optgroup label={tr("상태", "States")}>
+            {graph.nodes.map((node) => (
+              <option key={node.id} value={JSON.stringify({ kind: "state", stateId: node.id })}>
+                {node.label} · {node.id}
+              </option>
+            ))}
+          </optgroup>
+          <optgroup label={tr("전환", "Transitions")}>
+            {graph.edges.map((edge) => (
+              <option key={edge.key} value={JSON.stringify({ kind: "transition", index: edge.index })}>
+                {edge.from} → {edge.to}
+              </option>
+            ))}
+          </optgroup>
         </select>
       </label>
+
       <div
-        className="overflow-hidden rounded-lg border p-2 sm:p-3"
-        style={isFsmVariant ? FSM_FLOW_SHELL_STYLE : FLOW_SHELL_STYLE}
+        className="overflow-hidden rounded-[14px] border border-[var(--line-soft)] bg-[var(--bg)]"
         data-testid={useScrollableMobileFsmCanvas ? "fsm-canvas-scroll" : "pipeline-flow-canvas"}
-        onFocusCapture={revealMiniMap}
-        onPointerMove={revealMiniMap}
       >
         <div
-          className="rounded-md"
+          className="relative [&_.react-flow__node:focus-visible>div]:outline-2 [&_.react-flow__node:focus-visible>div]:outline-offset-2 [&_.react-flow__node:focus-visible>div]:outline-[var(--accent)]"
           style={{
-            height: Math.min(420, Math.max(280, graph.height + 48)),
-            minHeight: 280,
+            height: Math.min(440, Math.max(300, graph.height + 56)),
+            minHeight: 300,
           }}
         >
           <ReactFlow
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
+            onInit={(instance) => {
+              flowRef.current = instance;
+            }}
             fitView
-            fitViewOptions={{ padding: isFsmVariant ? 0.18 : 0.16 }}
+            fitViewOptions={fitOptions}
             maxZoom={1.6}
             minZoom={0.35}
             nodesDraggable={false}
@@ -384,71 +383,84 @@ export default function PipelineFlowCanvas({
             onNodeClick={handleNodeClick}
             onEdgeClick={handleEdgeClick}
             onConnect={handleConnect}
+            connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2, strokeDasharray: "6 5" }}
             proOptions={{ hideAttribution: true }}
-            colorMode="dark"
+            colorMode={colorMode}
           >
-            <Background
-              gap={isFsmVariant ? 24 : 28}
-              size={isFsmVariant ? 1 : 1.2}
-              color={isFsmVariant ? "rgba(148, 163, 184, 0.22)" : "rgba(148, 163, 184, 0.18)"}
-            />
-            {minimapAllowed && (
+            <Background gap={20} size={1.6} color="var(--line)" />
+            {minimapAllowed && miniMapOpen && (
               <MiniMap
                 pannable
                 zoomable={false}
+                ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")}
                 position="bottom-right"
-                maskColor="color-mix(in srgb, var(--th-bg-primary) 76%, transparent)"
-                nodeBorderRadius={8}
-                nodeStrokeColor="var(--th-border)"
+                bgColor="var(--th-card-bg)"
+                maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
+                nodeBorderRadius={6}
                 style={{
-                  width: 148,
-                  height: 88,
-                  borderRadius: 8,
-                  overflow: "hidden",
-                  border: "1px solid rgba(148, 163, 184, 0.24)",
-                  background: "var(--th-bg-surface)",
-                  boxShadow: "none",
-                  opacity: miniMapVisible ? 0.82 : 0,
-                  pointerEvents: miniMapVisible ? "auto" : "none",
-                  transform: miniMapVisible ? "translateY(0)" : "translateY(8px)",
-                  transition: "opacity 180ms ease, transform 180ms ease",
-                  backdropFilter: "blur(10px)",
+                  marginBottom: 60,
+                  width: 156,
+                  height: 96,
+                  border: "1px solid var(--line-soft)",
+                  borderRadius: 12,
                 }}
                 nodeColor={(node) => {
                   const graphNode = (node.data as PipelineStateNodeData).node;
-                  return isFsmVariant ? fsmStateTone(graphNode.id).stroke : "var(--th-accent-primary)";
+                  if (node.selected) return "var(--accent)";
+                  return fsmStateTone(graphNode.id, graphNode.terminal).stroke;
                 }}
               />
             )}
           </ReactFlow>
+
+          <div
+            role="toolbar"
+            aria-label={tr("보기 도구", "View tools")}
+            className={`${FLOAT_CHROME} right-3 bottom-3 flex gap-0.5 p-1`}
+          >
+            <IconButton
+              icon={<ZoomOut aria-hidden />}
+              className={TOOL_BTN}
+              label={tr("축소", "Zoom out")}
+              onClick={() => void flowRef.current?.zoomOut()}
+            />
+            <IconButton
+              icon={<ZoomIn aria-hidden />}
+              className={TOOL_BTN}
+              label={tr("확대", "Zoom in")}
+              onClick={() => void flowRef.current?.zoomIn()}
+            />
+            <IconButton
+              icon={<Maximize aria-hidden />}
+              className={TOOL_BTN}
+              label={tr("화면 맞춤", "Fit to screen")}
+              onClick={() => void flowRef.current?.fitView(fitOptions)}
+            />
+            {minimapAllowed && (
+              <IconButton
+                icon={<Map aria-hidden />}
+                className={TOOL_BTN}
+                label={tr("미니맵 표시 전환", "Toggle minimap")}
+                pressed={miniMapOpen}
+                onClick={() => setMiniMapOpen((prev) => !prev)}
+              />
+            )}
+          </div>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-3 text-xs" style={MUTED_TEXT_STYLE}>
+      <div className="flex flex-wrap items-center gap-3 text-xs text-[var(--fg-muted)]">
         {isFsmVariant ? (
           <>
             <span className="inline-flex items-center gap-2">
-              <span
-                className="inline-block h-px w-5"
-                style={{ background: "rgba(148, 163, 184, 0.7)" }}
-              />
-              <span style={{ fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace" }}>
-                {tr("전환", "edge")}
-              </span>
+              <span className="inline-block h-px w-5 bg-[var(--fg-muted)]" />
+              <span className="font-mono">{tr("전환", "edge")}</span>
             </span>
             <span className="inline-flex items-center gap-2">
-              <span
-                className="inline-block h-px w-5"
-                style={{ background: "var(--th-accent-primary)" }}
-              />
-              <span style={{ fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace" }}>
-                {tr("선택됨", "selected")}
-              </span>
+              <span className="inline-block h-px w-5 bg-[var(--accent)]" />
+              <span className="font-mono">{tr("선택됨", "selected")}</span>
             </span>
-            <span
-              className="ml-auto"
-              style={{ fontFamily: "ui-monospace, SFMono-Regular, SF Mono, Menlo, monospace" }}
-            >
+            <span className="ml-auto font-mono">
               {tr(
                 `상태:${graph.nodes.length} · 전환:${graph.edges.length}`,
                 `states:${graph.nodes.length} · transitions:${graph.edges.length}`,
