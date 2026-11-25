@@ -120,6 +120,27 @@ pub(in crate::services::discord) async fn mailbox_cancel_queued_primary_message(
     result
 }
 
+/// Clears the untaken early ⏳ of each original and source a queue exit took out.
+pub(in crate::services::discord) async fn clear_exited_early(
+    shared: &SharedData,
+    channel_id: ChannelId,
+    events: &[&crate::services::turn_orchestrator::QueueExitEvent],
+) {
+    #[cfg(unix)]
+    input_owner::early_pending::clear_left(
+        shared,
+        channel_id,
+        events.iter().flat_map(|event| {
+            let sources = event.intervention.source_message_ids.iter().copied();
+            std::iter::once(event.intervention.message_id).chain(sources)
+        }),
+        "queue_exit_accept_pending",
+    )
+    .await;
+    #[cfg(not(unix))]
+    let _ = (shared, channel_id, events);
+}
+
 pub(in crate::services::discord) struct CancelledInput {
     pub author: u64,
     pub id: u64,
