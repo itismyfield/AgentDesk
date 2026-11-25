@@ -1,7 +1,10 @@
 import type { HealthResponse, OnboardingConnectionStatus, OperatorConnectorStatus, OperatorConnectorsResponse, PromptManifestRetentionStatus } from "../../api/settingsRuntime";
+import { aggregateDegradedReasons, describeDegradedReason } from "../../lib/healthReasons";
 import { buildBottlenecks, buildSignalCards, formatBytes, formatDurationCompact, formatNumber, publicOnlyHealthNote, translateStatus } from "../OpsPageModel";
 import { connectorReason, connectorSetupSteps, providerDisplayName, settingKeyMeta } from "./SettingsCopy";
 import type { CatalogItem, StatusDetail, StatusTone } from "./SettingsModel";
+
+export { describeDegradedReason };
 
 type Tr = (ko: string, en: string) => string;
 export type ConnectionTone = "ok" | "warn" | "unknown";
@@ -120,6 +123,45 @@ function connectorItem(connector: OperatorConnectorStatus, tr: Tr, isKo: boolean
   return statusItem(connector.id, settingKeyMeta(connector.id) ? undefined : connector.name, connectorState(connector.state, tr), { tone: connectorTone(connector.state), facts, steps: setup.steps.length > 0 ? { lines: setup.steps, translated: setup.translated } : undefined }, isKo);
 }
 
+const METRIC_REASON = /^(provider:|dispatch_outbox_)/;
+
+export interface ConnectionSignalRow {
+  rawKey: string;
+  label: string;
+  count: number;
+  severity: "warning" | "danger";
+  detail: string;
+}
+
+export function buildConnectionSignalRows(data: HealthResponse, isKo: boolean): ConnectionSignalRow[] {
+  const tr: Tr = (ko, en) => (isKo ? ko : en);
+  const metricRows: ConnectionSignalRow[] = buildBottlenecks({ ...data, degraded_reasons: [] }, isKo).map((row) => ({
+    rawKey: row.kind,
+    label: row.label,
+    count: row.count,
+    severity: row.severity,
+    detail: row.detail,
+  }));
+  const rawReasons = (data.degraded_reasons ?? []).filter((reason) => !(metricRows.length > 0 && METRIC_REASON.test(reason)));
+  const reasonDetail = tr(
+    "서버가 보고한 주의 신호예요. 원래 키는 제목에 마우스를 올리면 보여요.",
+    "Reported by the server. Hover the title for the raw key.",
+  );
+  const severity = data.status === "unhealthy" ? "danger" as const : "warning" as const;
+  const reasonRows: ConnectionSignalRow[] = aggregateDegradedReasons(rawReasons, isKo).map((group) => ({
+    rawKey: group.rawKey,
+    label: group.label,
+    count: group.count,
+    severity,
+    detail: reasonDetail,
+  }));
+  return [...metricRows, ...reasonRows].sort((left, right) => {
+    const sevDelta = Number(right.severity === "danger") - Number(left.severity === "danger");
+    if (sevDelta !== 0) return sevDelta;
+    return right.count - left.count || left.rawKey.localeCompare(right.rawKey);
+  });
+}
+
 export interface ConnectionSources { statusRows: ConnectionStatusRow[]; health: Source<HealthResponse>; retention: Source<PromptManifestRetentionStatus>; connectors: Source<OperatorConnectorsResponse> }
 
 export function connectionItems({ statusRows, health, retention, connectors }: ConnectionSources, tr: Tr, isKo: boolean): CatalogItem[] {
@@ -129,7 +171,7 @@ export function connectionItems({ statusRows, health, retention, connectors }: C
   if (data?.uptime_secs) healthFacts.push([tr("가동 시간", "Uptime"), formatDurationCompact(data.uptime_secs, isKo)]);
   const items = [statusItem("health.status", undefined, pendingText(health, tr) ?? translateStatus(data?.status ?? "", isKo), {
     tone: !data ? "unknown" : data.status === "healthy" ? "ok" : "warn", facts: healthFacts,
-    notes: data ? buildBottlenecks(data, isKo).map((r) => ({ title: r.label, detail: r.detail, tone: r.severity === "danger" ? "danger" as const : "warn" as const, tooltip: r.kind, count: r.count })) : [],
+    notes: data ? buildConnectionSignalRows(data, isKo).map((r) => ({ title: r.label, detail: r.detail, tone: r.severity === "danger" ? "danger" as const : "warn" as const, tooltip: r.rawKey, count: r.count })) : [],
     ...freshness(health),
   }, isKo)];
   for (const row of statusRows) {

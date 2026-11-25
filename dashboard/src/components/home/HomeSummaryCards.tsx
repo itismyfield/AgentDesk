@@ -11,12 +11,12 @@ import {
 } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import {
-  AGENT_STATES, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
-  systemNeedsAttention, todoStatus, unlinkedMonitorView,
-  type HomeAgent, type HomeAgentState, type HomeHealth, type HomeTone, type MonitorView, type SourceState, type TodoItem,
-  type Tr, type TriageAlert,
+  AGENT_STATES, CAMPAIGNS_PATH, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
+  systemNeedsAttention, todoHeaderLink, todoStatus, unlinkedMonitorView,
+  type HomeAgent, type HomeAgentState, type HomeHealth, type HomeMementoStatus, type HomeTone, type MonitorView,
+  type SourceState, type TodoItem, type Tr, type TriageAlert,
 } from "./homeModel";
-import { loadHealthDetailOnDemand, loadHomeHealth, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
+import { loadHealthDetailOnDemand, loadHomeHealth, loadHomeMemento, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
 
 const TODO_ROWS = 5;
 const FULL_TOUCH_BUTTON_STYLE = {
@@ -66,7 +66,7 @@ function HealthReasonList({ reasons, tr, loading }: { reasons: string[]; tr: Tr;
     );
   }
   return (
-    <ul data-testid="home-health-reasons" className="m-0 flex list-none flex-col gap-1 border-t border-[var(--line-soft)] bg-[var(--bg-1)] px-3 py-2.5 text-xs leading-4 text-[var(--fg-dim)] sm:px-4">
+    <ul data-testid="home-health-reasons" className="m-0 flex max-h-52 list-none flex-col gap-1 overflow-y-auto border-t border-[var(--line-soft)] bg-[var(--bg-1)] px-3 py-2.5 text-xs leading-4 text-[var(--fg-dim)] sm:px-4">
       {reasons.map((reason) => (
         <li key={reason} className="flex items-start gap-2">
           <StatusDot tone="warn" className="mt-1" />
@@ -112,6 +112,10 @@ export function HomeTodoCard({
   const total = alerts.length + items.length;
   const hidden = Math.max(0, items.length - TODO_ROWS);
   const status = todoStatus(total, [cards, campaigns]);
+  const campaignOnlyItems = items.length > 0 && items.every((item) => item.to.startsWith("/campaigns?mode=") && !item.key.startsWith("card:"));
+  const headerLink = campaignOnlyItems
+    ? { to: CAMPAIGNS_PATH, label: tr("캠페인에서 보기", "Open campaigns") }
+    : todoHeaderLink(items, alerts, tr);
 
   const toggleHealthReasons = useCallback(async (fallbackReasons: string[]) => {
     setHealthOpen((prev) => {
@@ -156,7 +160,7 @@ export function HomeTodoCard({
       title={tr("할 일", "To do")}
       count={status === "loading" || (status === "partial" && total === 0) ? null : total}
       countTone={alerts.some((a) => a.tone === "err") ? "err" : total > 0 ? "warn" : undefined}
-      aside={<HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>}
+      aside={<HeaderLink to={headerLink.to}>{headerLink.label}</HeaderLink>}
       testId="home-todo"
       className={className}
     >
@@ -206,7 +210,7 @@ export function HomeTodoCard({
                       ) : (
                         <span className="hidden shrink-0 pr-4 sm:inline-flex">
                           <Button size="lg" variant="secondary" onClick={() => navigate(alert.to)} style={BUTTON_STYLE}>
-                            {tr("한도 보기", "View limits")}
+                            {alert.kind === "quota" ? tr("한도 보기", "View limits") : tr("에이전트 보기", "View agent")}
                           </Button>
                         </span>
                       )}
@@ -244,7 +248,7 @@ export function HomeTodoCard({
           ) : null}
           {hidden > 0 ? (
             <div className="border-t border-[var(--line-soft)] px-3 py-3 sm:px-4">
-              <HeaderLink to={QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
+              <HeaderLink to={campaignOnlyItems ? CAMPAIGNS_PATH : QUEUE_PATH}>{tr(`${hidden}건 더 보기`, `${hidden} more`)}</HeaderLink>
             </div>
           ) : null}
           {cards === "failed" ? <CardNote>{tr("작업 카드를 읽지 못해 할 일 일부는 확인 불가예요.", "Task cards did not load, so some to-dos are unknown.")}</CardNote> : null}
@@ -258,15 +262,20 @@ export function HomeTodoCard({
 }
 
 /** Server, Discord bots, Memento, campaign runs and the queue, with expandable `/api/health/detail` cause inspection. */
-export function HomeSystemCard({ campaigns, healthState, onlyWhenOff, tr, className }: {
+export function HomeSystemCard({ campaigns, healthState, mementoState, agents, onlyWhenOff, tr, className }: {
   campaigns: Loaded<HomeCampaigns>;
   healthState?: Loaded<HomeHealth>;
+  mementoState?: Loaded<HomeMementoStatus | null>;
+  agents?: Agent[];
   onlyWhenOff?: boolean;
   tr: Tr;
   className?: string;
 }) {
   const internalHealth = usePolled(loadHomeHealth, 30_000, healthState === undefined);
+  const loadMemento = useCallback(() => loadHomeMemento(agents), [agents]);
+  const internalMemento = usePolled(loadMemento, 60_000, mementoState === undefined);
   const health = healthState ?? internalHealth;
+  const memento = mementoState ?? internalMemento;
   const [reasonsOpen, setReasonsOpen] = useState(false);
   const [freshDetail, setFreshDetail] = useState<HomeHealth | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
@@ -277,6 +286,7 @@ export function HomeSystemCard({ campaigns, healthState, onlyWhenOff, tr, classN
     healthFailed: health.failed,
     legacy: campaigns.failed ? null : campaigns.data?.legacy ?? null,
     documents: campaigns.failed ? [] : campaigns.data?.documents ?? [],
+    memento: memento.failed ? null : memento.data,
     tr,
   });
   const settled = (health.data !== null || health.failed) && (campaigns.data !== null || campaigns.failed);
@@ -405,7 +415,7 @@ function AgentMonitors({
   const now = useNow(1_000);
   const labels = useMemo(() => monitorLabels(tr), [tr]);
   return (
-    <ul className="m-0 grid list-none gap-2 border-t border-[var(--line-soft)] p-3 sm:grid-cols-2 sm:gap-3 sm:px-4">
+    <ul className={cn("m-0 grid list-none gap-2 border-t border-[var(--line-soft)] p-3 sm:gap-3 sm:px-4", items.length === 1 ? "grid-cols-1" : "sm:grid-cols-2")}>
       {items.map(({ entry, view }) => {
         const canCancel = Boolean(onStopTurn && !entry.agent.id.startsWith("dispatched:"));
         return (

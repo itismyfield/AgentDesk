@@ -5,9 +5,9 @@ import { createRoot } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDispatchedSessions } from "../../api/agentActivity";
-import type { DispatchedSession } from "../../types";
+import type { Agent, DispatchedSession } from "../../types";
 import HomePageView from "./HomePageView";
-import { cleanupStaleIdleSession, reconcileStaleSessionTurn } from "./useHomeData";
+import { cleanupStaleIdleSession, reconcileStaleSessionTurn, stopAgentTurn } from "./useHomeData";
 
 const setSessionsMock = vi.fn();
 let mockSessions: DispatchedSession[] = [];
@@ -35,6 +35,7 @@ vi.mock("./useHomeData", async (importOriginal) => {
     useAgentTurns: () => new Map(),
     cleanupStaleIdleSession: vi.fn(async () => ({ disconnected: true })),
     reconcileStaleSessionTurn: vi.fn(async () => ({ ok: true, reconciled: false, reason: "still live" })),
+    stopAgentTurn: vi.fn(async () => ({ ok: true, session_key: "s1" })),
   };
 });
 vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -45,6 +46,7 @@ describe("HomePageView stale session cleanup", () => {
   afterEach(() => {
     vi.clearAllMocks();
     mockSessions = [];
+    document.body.innerHTML = "";
   });
 
   it("cleans up a 7+ day idle unlinked session via kill-tmux and refreshes with includeMerged=true", async () => {
@@ -108,6 +110,49 @@ describe("HomePageView stale session cleanup", () => {
 
     expect(reconcileStaleSessionTurn).toHaveBeenCalledWith(busyKey);
     expect(container.querySelector('[data-testid="home-triage-stale-session"]')).toBeTruthy();
+    await act(async () => root.unmount());
+  });
+
+  it("renders a single working agent monitor in 1-col grid and confirms turn stop via AlertDialog", async () => {
+    const confirmSpy = vi.fn(() => true);
+    Object.defineProperty(window, "confirm", { value: confirmSpy, configurable: true, writable: true });
+    const workingAgent = {
+      id: "ada",
+      name: "Ada",
+      name_ko: "아다",
+      status: "working",
+      session_info: "검증 실행 중",
+      cli_provider: "codex",
+    } as Agent;
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <HomePageView isKo isMobileViewport={false} agents={[workingAgent]} onOpenAgent={vi.fn()} />
+        </MemoryRouter>,
+      );
+    });
+
+    const monitorItem = container.querySelector('[data-testid="home-agent-monitor-ada"]');
+    expect(monitorItem).toBeTruthy();
+    expect(monitorItem?.parentElement?.className).toContain("grid-cols-1");
+    expect(monitorItem?.parentElement?.className).not.toContain("sm:grid-cols-2");
+
+    const cancelBtn = Array.from(container.querySelectorAll("button")).find((el) => el.textContent?.trim() === "중단");
+    expect(cancelBtn).toBeTruthy();
+    await act(async () => { cancelBtn!.click(); });
+
+    expect(confirmSpy).not.toHaveBeenCalled();
+    expect(stopAgentTurn).not.toHaveBeenCalled();
+
+    const confirmBtn = Array.from(document.querySelectorAll("button")).find((el) => el.textContent?.trim() === "턴 중단");
+    expect(confirmBtn).toBeTruthy();
+    await act(async () => { confirmBtn!.click(); });
+
+    expect(stopAgentTurn).toHaveBeenCalledWith("ada");
     await act(async () => root.unmount());
   });
 });
