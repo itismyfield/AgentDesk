@@ -2,11 +2,11 @@ use super::*;
 use crate::services::claude::herdr_turn::composer;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun};
 use crate::services::tui_prompt_dedupe::binding_events as events;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::os::unix::fs::MetadataExt;
 use std::rc::Rc;
 
-pub(crate) use super::super::test_support::{AFTER_RESERVE, after_next_reserve, after_reserve};
+use super::super::test_support::AFTER_RESERVE;
 
 struct ClearRig {
     rig: Rig,

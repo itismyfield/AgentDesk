@@ -125,7 +125,7 @@ pub(crate) fn retained_sources(session: &str) -> usize {
 #[cfg(unix)]
 use std::cell::RefCell;
 
-/// The callback the next ledger reservation runs before it returns (`reserve`, readiness/mod.rs).
+// The callback the next ledger reservation runs before it returns (`reserve`, readiness/mod.rs).
 #[cfg(unix)]
 thread_local! {
     pub(crate) static AFTER_RESERVE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
