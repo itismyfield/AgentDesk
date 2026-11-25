@@ -2,6 +2,10 @@ use crate::config::test_instance::login_test_support::{
     bind_claude_login, claude_login_fixture, review_fixture,
 };
 use crate::config::test_instance::*;
+use crate::config::test_instance::{
+    MARKER_FOR_TEST as MARKER, load_instance_declaration_for_test as load_instance_declaration,
+    read_json_for_test as read_json,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -625,7 +629,7 @@ fn claude_login_rejects_slot_one_unknown_keys_and_receipt_drift() {
             let mut m = read_json(&path).unwrap();
             m["claude_login"]["account_slot"] = serde_json::json!(1);
             let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
-            assert!(environment::Environment::load(&root, &m, &config).is_err());
+            assert!(environment::load_for_test(&root, &m, &config).is_err());
             continue;
         }
         let mut child = tests::command(&root);
@@ -1554,7 +1558,7 @@ fn claude_login_requires_the_exact_declared_pool() {
     bind_claude_login(&root, &home);
     let manifest = read_json(&root.join("manifest.json")).unwrap();
     let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
-    assert!(environment::Environment::load(&root, &manifest, &config).is_ok());
+    assert!(environment::load_for_test(&root, &manifest, &config).is_ok());
     let other = home
         .join("other/pool/instances")
         .join(root.file_name().unwrap());
@@ -1574,7 +1578,7 @@ fn claude_login_requires_the_exact_declared_pool() {
     }
     let manifest = read_json(&other.join("manifest.json")).unwrap();
     let config = read_json(&other.join("config/agentdesk.yaml")).unwrap();
-    assert!(environment::Environment::load(&other, &manifest, &config).is_err());
+    assert!(environment::load_for_test(&other, &manifest, &config).is_err());
 }
 
 #[test]

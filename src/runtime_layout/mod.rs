@@ -3,7 +3,7 @@ mod config_merge;
 mod legacy_migration;
 mod paths;
 mod skill_refresh;
-pub(crate) mod skill_sync;
+mod skill_sync;
 #[cfg(windows)]
 mod windows_links;
 
@@ -313,6 +313,15 @@ pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
 
 pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
     skill_sync::sync_managed_skills(root)
+}
+
+/// Copies a skill tree as the refresh path does, for the shipped-tree test in the root test host.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn copy_skill_dir_resolving_symlinks_for_test(
+    src: &Path,
+    dest: &Path,
+) -> Result<(), String> {
+    skill_sync::copy_skill_dir_resolving_symlinks(src, dest)
 }
 
 /// Workspace directory names the skill distributor actually walks. Manifest

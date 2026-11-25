@@ -45,10 +45,16 @@ static LIVE_UPDATES: OnceLock<tokio::sync::watch::Sender<Option<Arc<Config>>>> =
 
 /// Debounce window for collapsing bursts of filesystem events (editors emit
 /// several per save). Matches the policies watcher.
-pub(crate) const DEBOUNCE: Duration = Duration::from_millis(500);
+const DEBOUNCE: Duration = Duration::from_millis(500);
 
 // Keep edits responsive while scanning only the immediate config directory.
-pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(2);
+const POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+// Watcher timings for the daemon-snapshot tests mounted in the root test host.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) const DEBOUNCE_FOR_TEST: Duration = DEBOUNCE;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) const POLL_INTERVAL_FOR_TEST: Duration = POLL_INTERVAL;
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.
