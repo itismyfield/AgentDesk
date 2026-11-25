@@ -1,6 +1,6 @@
 use super::*;
-use crate::services::session_host::herdr::contract::{HerdrOutcome, Witnessed};
-use crate::services::session_host::herdr::model::HerdrResult;
+use crate::services::session_host::herdr_for_test::contract::{HerdrOutcome, Witnessed};
+use crate::services::session_host::herdr_for_test::model::HerdrResult;
 
 const RESTORED_SHELL: u32 = 40;
 const RESTORED_PROVIDER: u32 = 50;
@@ -430,7 +430,7 @@ fn replaced_root_end_second_proof_requires_the_first_execution_and_server() {
 /// A user_default target whose nonce's grant admitted server `granted`; the server answering now
 /// is `SERVER`, with startup proof.
 fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> HerdrTarget {
-    use crate::services::session_host::herdr::policy::permit::{
+    use crate::services::session_host::herdr_for_test::policy::permit::{
         ExistingMutationEvidence, grant_for_test, startup_for_test,
     };
     let transport = transport(&rig.server, vec![SERVER]);

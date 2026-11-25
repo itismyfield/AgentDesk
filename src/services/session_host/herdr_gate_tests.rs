@@ -28,12 +28,14 @@ use crate::services::claude_tui::hosting::FollowupHost;
 use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::herdr_admission::{self, Admission};
 use crate::services::provider::session_probe::SessionLiveness;
-use crate::services::session_host::herdr::pane_probe::tests::{FakeOs, NONCE, context, env_naming};
-use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
-use crate::services::session_host::herdr::transport::{
+use crate::services::session_host::herdr_for_test::pane_probe::tests::{
+    FakeOs, NONCE, context, env_naming,
+};
+use crate::services::session_host::herdr_for_test::provenance::{ProcessStart, StartIdentity};
+use crate::services::session_host::herdr_for_test::transport::{
     HerdrSocketConfig, HerdrSocketTransport, PeerReader,
 };
-use crate::services::session_host::herdr::wire::{LineJsonFraming, MAX_FRAME_BYTES};
+use crate::services::session_host::herdr_for_test::wire::{LineJsonFraming, MAX_FRAME_BYTES};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -41,14 +43,18 @@ use std::time::{Duration, UNIX_EPOCH};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedExecution, HostedLocation, HostedState,
 };
-use crate::services::session_host::herdr::contract::{
+use crate::services::session_host::herdr_for_test::contract::{
     self, CloseEffect, HerdrTransport, ServerWitness,
 };
-use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
-use crate::services::session_host::herdr::observe::{RestoreResume, RestoreUnverified};
-use crate::services::session_host::herdr::pane_probe::ProcessOs;
-use crate::services::session_host::herdr_gate::*;
-use crate::services::session_host::herdr_registry::{self, HerdrRegistry};
+use crate::services::session_host::herdr_for_test::model::{
+    HerdrCall, HerdrEndpoint, HerdrRequest,
+};
+use crate::services::session_host::herdr_for_test::observe::{RestoreResume, RestoreUnverified};
+use crate::services::session_host::herdr_for_test::pane_probe::ProcessOs;
+use crate::services::session_host::herdr_gate_for_test::*;
+use crate::services::session_host::herdr_registry_for_test::{
+    self as herdr_registry, HerdrRegistry,
+};
 use crate::services::session_host::{HostKey, HostMutation, HostPresence, HostRefusal};
 use crate::services::session_host::{
     HostKind, HostSessionRef, ResolvedSessionTarget, SessionTargetInput, TargetHost, TargetSource,
@@ -358,7 +364,7 @@ fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreRes
 fn audited_version(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> RestoreResume {
     match transport.hello() {
         Ok(hello)
-            if crate::services::session_host::herdr::model::supported_herdr_server(
+            if crate::services::session_host::herdr_for_test::model::supported_herdr_server(
                 &hello.version,
                 hello.protocol,
             ) =>
@@ -1146,10 +1152,10 @@ fn m0_terminate_request_pair_is_exact() {
         gate.pin(input).unwrap();
         close_results.push(gate.send_close_pinned());
         gate.pin(input).unwrap();
-        input_results.push(gate.send_pinned(close.clone()));
+        input_results.push(gate.send_pinned_for_test(close.clone()));
     }
     gate.pin_terminate().unwrap();
-    input_results.push(gate.send_pinned(close));
+    input_results.push(gate.send_pinned_for_test(close));
     for request in [
         HerdrRequest::PaneSendText {
             pane_id: PANE.into(),
@@ -1166,7 +1172,7 @@ fn m0_terminate_request_pair_is_exact() {
         },
     ] {
         gate.pin_terminate().unwrap();
-        input_results.push(gate.send_pinned(request));
+        input_results.push(gate.send_pinned_for_test(request));
     }
     assert!(rig.server.mutations().is_empty());
     assert!(
@@ -1258,7 +1264,9 @@ fn m0_close_uncertain_reply_never_retries() {
 
 #[test]
 fn m1_production_e7_rejects_unaudited_version_before_provenance() {
-    use crate::services::session_host::herdr::observe::{self, ConfigRead, ServerProvenance};
+    use crate::services::session_host::herdr_for_test::observe::{
+        self, ConfigRead, ServerProvenance,
+    };
     use std::path::Path;
     struct NoReads;
     impl ServerProvenance for NoReads {
@@ -1285,7 +1293,9 @@ fn m1_production_e7_rejects_unaudited_version_before_provenance() {
 
 #[test]
 fn m1_production_e7_accepts_audited_version() {
-    use crate::services::session_host::herdr::observe::{self, ConfigRead, ServerProvenance};
+    use crate::services::session_host::herdr_for_test::observe::{
+        self, ConfigRead, ServerProvenance,
+    };
     use std::path::Path;
     struct Proven;
     impl ServerProvenance for Proven {
@@ -1386,15 +1396,15 @@ mod service {
             &self,
             call: &HerdrCall,
         ) -> (
-            crate::services::session_host::herdr::contract::HerdrOutcome,
-            crate::services::session_host::herdr::contract::Witnessed,
+            crate::services::session_host::herdr_for_test::contract::HerdrOutcome,
+            crate::services::session_host::herdr_for_test::contract::Witnessed,
         ) {
             let (mut result, witness) = self.inner.call(call);
             if matches!(call.request, HerdrRequest::SessionSnapshot {})
                 && self.gone.load(Ordering::SeqCst)
                 && let Ok(reply) = &mut result
                 && let Ok(
-                    crate::services::session_host::herdr::model::HerdrResult::SessionSnapshot {
+                    crate::services::session_host::herdr_for_test::model::HerdrResult::SessionSnapshot {
                         snapshot,
                     },
                 ) = &mut reply.body
@@ -1407,7 +1417,7 @@ mod service {
             &self,
             call: &HerdrCall,
             witness: &ServerWitness,
-        ) -> crate::services::session_host::herdr::contract::HerdrOutcome {
+        ) -> crate::services::session_host::herdr_for_test::contract::HerdrOutcome {
             let outcome = self.inner.call_with_witness(call, witness);
             // The service's only witnessed write is its close; `closes` asserts the shape.
             if !call.request.is_read_only() {
@@ -1420,13 +1430,17 @@ mod service {
             }
             outcome
         }
-        fn server_witness(&self) -> crate::services::session_host::herdr::contract::Witnessed {
+        fn server_witness(
+            &self,
+        ) -> crate::services::session_host::herdr_for_test::contract::Witnessed {
             self.inner.server_witness()
         }
         fn hello(
             &self,
-        ) -> Result<crate::services::session_host::herdr::contract::ServerHello, RestoreUnverified>
-        {
+        ) -> Result<
+            crate::services::session_host::herdr_for_test::contract::ServerHello,
+            RestoreUnverified,
+        > {
             self.inner.hello()
         }
     }
@@ -2109,7 +2123,7 @@ pub(crate) mod p11 {
 
     use super::*;
     use crate::config::session_hosts::BootSessionHosts;
-    use crate::services::session_host::herdr::observe::CANONICAL_CONFIG;
+    use crate::services::session_host::herdr_for_test::observe::CANONICAL_CONFIG;
     use service::ScriptedOs;
 
     pub(crate) const NODE: &str = "mac-mini";
@@ -2627,5 +2641,5 @@ mod policy;
 /// Claude's stash reaches a Herdr pane under the gate's own `ctrl+s` key name.
 #[test]
 fn ctrl_s_is_the_herdr_stash_key() {
-    assert_eq!(herdr_key(HostKey::CtrlS), "ctrl+s");
+    assert_eq!(herdr_key_for_test(HostKey::CtrlS), "ctrl+s");
 }

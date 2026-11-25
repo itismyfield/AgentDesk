@@ -1,7 +1,8 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::{
     RetryDispatchMeta, disconnect_session_and_prepare_retry_pg,
-    fail_force_killed_dispatch_without_retry_pg, prepare_retry_owner_on_pg_tx,
+    fail_force_killed_dispatch_without_retry_pg,
+    prepare_retry_owner_on_pg_tx_for_test as prepare_retry_owner_on_pg_tx,
 };
 use crate::services::auto_queue::transactions::create_retry_dispatch_pg;
 use crate::test_support::wait::poll_within;
