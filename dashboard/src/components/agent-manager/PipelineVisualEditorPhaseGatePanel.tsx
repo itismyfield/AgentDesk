@@ -1,13 +1,14 @@
+import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import { INPUT_CLASS, INPUT_STYLE, MUTED_TEXT_STYLE } from "./pipeline-visual-editor-ui";
 
 interface Props {
-  ctx: any;
-  actions: any;
+  ctx: PipelineEditorCtx;
+  actions: PipelineEditorActions;
 }
 
 export default function PipelineVisualEditorPhaseGatePanel({ ctx, actions }: Props) {
-  const tr = ctx.tr;
-  const pipelineDraft = ctx.pipelineDraft;
+  const { pipelineDraft, tr } = ctx;
+  if (!pipelineDraft) return null;
 
   return (
     <div className="space-y-3">

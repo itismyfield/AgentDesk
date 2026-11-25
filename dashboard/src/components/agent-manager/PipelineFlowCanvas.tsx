@@ -209,8 +209,8 @@ export default function PipelineFlowCanvas({
   );
   const flowRef = useRef<ReactFlowInstance<PipelineStateNode, PipelineEdge> | null>(null);
   const minimapAllowed = !compactGraph && !useScrollableMobileFsmCanvas;
-  const [miniMapOpen, setMiniMapOpen] = useState(true);
-  const fitOptions = useMemo(() => ({ padding: isFsmVariant ? 0.18 : 0.16 }), [isFsmVariant]);
+  const [showMiniMap, setShowMiniMap] = useState(false);
+  const fitOptions = useMemo(() => ({ padding: 0.18 }), []);
 
   const nodes = useMemo<PipelineStateNode[]>(
     () =>
@@ -388,7 +388,7 @@ export default function PipelineFlowCanvas({
             colorMode={colorMode}
           >
             <Background gap={20} size={1.6} color="var(--line)" />
-            {minimapAllowed && miniMapOpen && (
+            {minimapAllowed && showMiniMap && (
               <MiniMap
                 pannable
                 zoomable={false}
@@ -398,9 +398,10 @@ export default function PipelineFlowCanvas({
                 maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
                 nodeBorderRadius={6}
                 style={{
-                  marginBottom: 60,
-                  width: 156,
-                  height: 96,
+                  marginBottom: 12,
+                  marginRight: 196,
+                  width: 132,
+                  height: 76,
                   border: "1px solid var(--line-soft)",
                   borderRadius: 12,
                 }}
@@ -441,8 +442,8 @@ export default function PipelineFlowCanvas({
                 icon={<Map aria-hidden />}
                 className={TOOL_BTN}
                 label={tr("미니맵 표시 전환", "Toggle minimap")}
-                pressed={miniMapOpen}
-                onClick={() => setMiniMapOpen((prev) => !prev)}
+                pressed={showMiniMap}
+                onClick={() => setShowMiniMap((prev) => !prev)}
               />
             )}
           </div>

@@ -169,7 +169,7 @@ export default function AgentManagerView({
   const header = (
     <div data-testid="agents-tab-bar" className="flex min-w-0 items-center gap-2">
       {/* The kit control is an inline-size container, so its slot needs a definite width. */}
-      <div className="min-w-0 flex-1 sm:w-80 sm:flex-none">
+      <div className="min-w-0 flex-1 sm:w-56 sm:flex-none">
         <SegmentedControl<AgentManagerTab>
           kind="tabs"
           variant="tray"
@@ -179,7 +179,6 @@ export default function AgentManagerView({
           onChange={changeTab}
           options={[
             { value: "agents", label: tr("에이전트", "Agents"), count: listedCount, controls: "agents-tab-panel" },
-            { value: "departments", label: tr("부서", "Departments"), count: departments.length, controls: "agents-departments-tab-panel" },
             { value: "skills", label: tr("스킬", "Skills"), controls: "agents-skills-tab-panel" },
           ]}
         />

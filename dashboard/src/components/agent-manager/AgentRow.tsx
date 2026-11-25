@@ -5,7 +5,7 @@ import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { Badge, type BadgeTone } from "../../kit/free/badge-clean";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
-import { Chip, RowButton, StatusDot } from "../common/KitPrimitives";
+import { RowButton, StatusDot } from "../common/KitPrimitives";
 import { agentStateLabel, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 import type { Translator } from "./types";
 
@@ -51,7 +51,7 @@ interface AgentRowProps {
   entry: HomeAgent;
   /** State and what it does now, e.g. home's agent line or the live tool line. */
   line: string;
-  department: Department | undefined;
+  department?: Department;
   /** Settings to check (no department or Discord route): an orange dot. */
   warn: boolean;
   locale: string;
@@ -63,7 +63,7 @@ interface AgentRowProps {
 
 /** One agent in the roster. Columns join as the list grows (container queries); narrow lists keep the name, the
  * state line and a chevron. */
-export default function AgentRow({ entry, line, department, warn, locale, tr, selected, onSelect, onKeyDown }: AgentRowProps) {
+export default function AgentRow({ entry, line, warn, locale, tr, selected, onSelect, onKeyDown }: AgentRowProps) {
   const { agent } = entry;
   const name = localeName(locale, agent);
   const secondary = agentSecondaryLine(agent, locale);
@@ -86,14 +86,8 @@ export default function AgentRow({ entry, line, department, warn, locale, tr, se
         <span className="hidden truncate text-xs leading-4 text-[var(--fg-muted)] @2xl:block">{secondary ?? " "}</span>
       </span>
       <span className="hidden min-w-0 flex-1 truncate text-[var(--fg-dim)] @2xl:block" title={line}>{line}</span>
-      {department ? (
-        <Chip className="hidden max-w-32 @xl:inline-flex">
-          <span aria-hidden className="size-2 shrink-0 rounded-full" style={{ background: department.color || "var(--fg-faint)" }} />
-          <span className="truncate">{localeName(locale, department)}</span>
-        </Chip>
-      ) : null}
-      <span className="hidden w-14 shrink-0 truncate text-xs text-[var(--fg-dim)] @xl:block">{provider}</span>
-      <span className="hidden w-20 shrink-0 text-right text-xs whitespace-nowrap text-[var(--fg-muted)] tabular-nums @xl:block">
+      <span className="hidden shrink-0 text-right text-xs whitespace-nowrap text-[var(--fg-dim)] @lg:block">{provider}</span>
+      <span className="hidden w-18 shrink-0 text-right text-xs whitespace-nowrap text-[var(--fg-muted)] tabular-nums @xl:block">
         {tr(`완료 ${agent.stats_tasks_done.toLocaleString()}`, `${agent.stats_tasks_done.toLocaleString()} done`)}
       </span>
       <span className="flex w-2 shrink-0 justify-center" title={warn ? checkLabel : undefined}>{warn ? <StatusDot tone="warn" /> : null}</span>

@@ -2,13 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { CalendarDays, MessageSquare, Play, RefreshCw, Repeat2 } from "lucide-react";
 import { getDiscordChannelInfo, getRoutineRuns, getRoutines, pauseRoutine, resumeRoutine, type RoutineRecord, type RoutineRunRecord } from "../../api";
 import { request } from "../../api/httpClient";
+import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
+import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { EmptyState } from "../../kit/free/empty-state-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Switch } from "../../kit/free/switch-clean";
-import { ScheduledRuns, type ScheduleDay, type ScheduledTask } from "../../kit/pro/scheduled-runs";
+import { ScheduledRuns, type ScheduleAgent, type ScheduleDay, type ScheduledTask } from "../../kit/pro/scheduled-runs";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
 import { useNow } from "../../lib/useNow";
+import type { Agent } from "../../types";
+import { avatarRoster, botAvatarFor, botAvatarStill, type BotAvatar } from "../agent-avatar/botAvatar";
 import { formatDiscordWebUrl, isDiscordSnowflake } from "../agent-manager/discord-routing";
 import { Cap, CardSkeleton, Chip, InspSection, Num, ROW_HOVER_CLASS, SectionCard, SELECTED_ROW_STYLE, StatusDot, type ChipTone, type DotTone } from "../common/KitPrimitives";
 import { BottomSheet } from "../common/overlay/BottomSheet";
@@ -39,13 +43,38 @@ const DAY_LABELS_KO = ["일", "월", "화", "수", "목", "금", "토"];
 const DAY_LABELS_EN = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const sessionBand = (h: number) => (h < 9 ? 0 : h < 15 ? 1 : h < 20 ? 2 : 3);
 
-export function buildScheduledRunsModel(routines: RoutineRecord[], now: number, language: "ko" | "en" | "ja" | "zh", t: TFunction) {
+function resolveRoutineAgent(
+  agentId: string,
+  language: "ko" | "en" | "ja" | "zh",
+  agents?: readonly Agent[] | null,
+  rosterMap?: Map<string, BotAvatar>,
+): ScheduleAgent {
+  const matched = agents?.find((item) => item.id === agentId || item.role_id === agentId);
+  const fallbackName =
+    agentId === "personal-obiseo"
+      ? language === "ko" ? "원비서" : "Obiseo"
+      : agentId === "personal-yobiseo"
+        ? language === "ko" ? "지비서" : "Yobiseo"
+        : agentId.replace(/^(?:personal|team|agent|bot)-/i, "");
+  const name = matched ? localeName(language, matched) : fallbackName || agentId;
+  return { name, mark: botAvatarStill(botAvatarFor(matched?.id ?? agentId, rosterMap)) };
+}
+
+export function buildScheduledRunsModel(
+  routines: RoutineRecord[],
+  now: number,
+  language: "ko" | "en" | "ja" | "zh",
+  t: TFunction,
+  workspaceAgents?: readonly Agent[] | null,
+) {
   const start = new Date(now); start.setHours(0, 0, 0, 0);
   const baseMs = start.getTime(), weekEndMs = baseMs + 7 * 86_400_000;
   const labels = language === "en" ? DAY_LABELS_EN : DAY_LABELS_KO;
   const days: ScheduleDay[] = Array.from({ length: 7 }, (_, i) => { const d = new Date(baseMs + i * 86_400_000); return { label: labels[d.getDay()], date: `${d.getMonth() + 1}/${d.getDate()}` }; });
   const sessions = language === "en" ? ["00–09", "09–15", "15–20", "20–24"] : ["오전 00–09", "주간 09–15", "오후 15–20", "야간 20–24"];
   const current = { day: 0, session: sessionBand(new Date(now).getHours()) };
+  const rosterMap = workspaceAgents ? avatarRoster(workspaceAgents) : undefined;
+  const agentMap = new Map<string, ScheduleAgent>();
   const cellCounts = new Map<string, number>();
   const tasks: ScheduledTask[] = sortRoutinesChronologically(routines).filter((r) => r.status === "enabled").slice(0, 18).map((routine) => {
     const due = parseTime(routine.next_due_at);
@@ -55,9 +84,28 @@ export function buildScheduledRunsModel(routines: RoutineRecord[], now: number, 
       const key = `${day}:${session}`, used = cellCounts.get(key) ?? 0;
       if (used < 2 && (day > 0 || session >= current.session)) { cellCounts.set(key, used + 1); reserved = { day, session }; }
     }
-    return { id: routine.id, title: describeRoutinePurpose(routine, t), usage: Math.min(45, Math.max(12, Math.round((routine.timeout_secs ?? 300) / 20))), agent: routine.agent_id ?? undefined, description: `${routine.name} · ${describeRoutineSchedule(routine.schedule, language)}`, reserved };
+    let meta: ScheduleAgent | undefined;
+    if (routine.agent_id) {
+      meta = agentMap.get(routine.agent_id) ?? resolveRoutineAgent(routine.agent_id, language, workspaceAgents, rosterMap);
+      agentMap.set(routine.agent_id, meta);
+    }
+    return {
+      id: routine.id,
+      title: describeRoutinePurpose(routine, t),
+      usage: Math.min(45, Math.max(12, Math.round((routine.timeout_secs ?? 300) / 20))),
+      agent: meta?.name,
+      mark: meta?.mark,
+      description: `${routine.name} · ${describeRoutineSchedule(routine.schedule, language)}`,
+      reserved,
+    };
   });
-  return { days, sessions, current, tasks };
+  const seenNames = new Set<string>();
+  const agents = Array.from(agentMap.values()).filter((item) => {
+    if (seenNames.has(item.name)) return false;
+    seenNames.add(item.name);
+    return true;
+  });
+  return { days, sessions, current, tasks, agents };
 }
 
 type ReturnTarget = { element: HTMLElement | null; routineId: string | null };
@@ -123,10 +171,11 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
     return () => { mounted = false; stop(); };
   }, [filter, reloadKey]);
 
+  const workspaceAgents = useWorkspaceAgents();
   const sortedRoutines = useMemo(() => sortRoutinesChronologically(routines), [routines]);
   const activeCount = routines.filter((r) => r.status === "enabled").length;
   const selectedRoutine = selectedRoutineId ? routines.find((r) => r.id === selectedRoutineId) ?? null : null;
-  const scheduleBoard = useMemo(() => buildScheduledRunsModel(routines, now, language, t), [language, now, routines, t]);
+  const scheduleBoard = useMemo(() => buildScheduledRunsModel(routines, now, language, t, workspaceAgents), [language, now, routines, t, workspaceAgents]);
   const guildId = useDiscordGuildId(routines.find((r) => isDiscordSnowflake(r.discord_thread_id))?.discord_thread_id ?? null);
   const threadUrlFor = (r: RoutineRecord | null) => guildId && r && isDiscordSnowflake(r.discord_thread_id) ? formatDiscordWebUrl(guildId, r.discord_thread_id) : null;
 
@@ -225,7 +274,7 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
   const refreshLabel = m("루틴 새로고침", "Refresh routines", "ルーチンを再読み込み", "刷新例程");
 
   return (
-    <div className="flex min-w-0 flex-col gap-4" data-testid="routines-timeline" aria-busy={loading}>
+    <div className="flex min-w-0 flex-col gap-3.5" data-testid="routines-timeline" aria-busy={loading}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-2">
         <div className="min-w-0 max-w-full flex-auto" data-testid="routines-filter-controls">
           <SegmentedControl variant="tray" size="sm" aria-label={m("상태로 거르기", "Filter by status", "状態で絞り込む", "按状态筛选")} value={filter} onChange={(v) => setFilter(v)} options={ROUTINE_FILTERS.map((item) => ({ value: item, label: filterLabel(item, t) }))} />
@@ -256,15 +305,14 @@ export function RoutinesTimelineWidget({ t, localeTag, language }: { t: TFunctio
         <EmptyState data-testid="routines-empty" icon={<CalendarDays size={18} aria-hidden />} title={m("표시할 루틴이 없어요.", "No routines to show.")} text={filter === "all" ? m("에이전트에게 정기 작업을 맡기면 이곳에 반복 예약이 나타나요.", "Routines appear here once an agent takes on recurring work.") : m("이 상태의 루틴이 없어요.", "No routines have this status.")} action={filter === "all" ? undefined : <Button variant="secondary" size="sm" onClick={() => setFilter("all")}>{filterLabel("all", t)}</Button>} />
       ) : (
         <>
-          <SectionCard title={m("주간·시간대별 예약 배치", "Weekly schedule slots")} count={scheduleBoard.tasks.length} testId="routines-scheduled-runs">
-            <InspSection
-              className="[&_.aui-scheduled-runs]:max-w-none! [&_.aui-scheduled-runs-modes]:hidden! [&_.aui-scheduled-runs-tapmove]:hidden! [&_.aui-scheduled-runs-detail-hint]:hidden! [&_.aui-scheduled-runs-card]:cursor-default!"
-              onPointerDownCapture={(e) => { if ((e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
-              onKeyDownCapture={(e) => { if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
-            >
-              <ScheduledRuns title={m("7일 실행 배치표", "7-day routine board")} subtitle={m("읽기 전용 · 시간대별 활성 루틴 밀도와 다음 예정 슬롯을 보여 줘요", "Read-only · active routines mapped onto upcoming 7-day time bands")} tasks={scheduleBoard.tasks} days={scheduleBoard.days} sessions={scheduleBoard.sessions} current={scheduleBoard.current} defaultMode="manual" autoStart={false} />
-            </InspSection>
-          </SectionCard>
+          <section
+            data-testid="routines-scheduled-runs"
+            className="min-w-0 overflow-x-auto [&_.aui-scheduled-runs]:max-w-none! [&_.aui-scheduled-runs-agent-mark_img]:size-4! [&_.aui-scheduled-runs-board]:min-w-[660px]! [&_.aui-scheduled-runs-board-scroll]:overflow-x-auto! [&_.aui-scheduled-runs-body]:gap-2.5! [&_.aui-scheduled-runs-body]:p-2! min-[641px]:[&_.aui-scheduled-runs-body]:grid-cols-[164px_minmax(0,1fr)]! [&_.aui-scheduled-runs-card]:h-[50px]! [&_.aui-scheduled-runs-card]:cursor-default! [&_.aui-scheduled-runs-card-mark_img]:size-3.5! [&_.aui-scheduled-runs-cell]:h-auto! [&_.aui-scheduled-runs-cell]:min-h-[40px]! [&_.aui-scheduled-runs-cell]:pb-3.5! [&_.aui-scheduled-runs-detail-hint]:hidden! [&_.aui-scheduled-runs-head]:min-h-9! [&_.aui-scheduled-runs-head]:py-1! [&_.aui-scheduled-runs-modes]:hidden! [&_.aui-scheduled-runs-queue]:min-h-0! [&_.aui-scheduled-runs-queue-list]:max-h-[216px]! [&_.aui-scheduled-runs-row]:grid-cols-[44px_repeat(var(--aui-scheduled-runs-days),minmax(0,1fr))]! [&_.aui-scheduled-runs-slot]:h-[54px]! [&_.aui-scheduled-runs-tapmove]:hidden!"
+            onPointerDownCapture={(e) => { if ((e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
+            onKeyDownCapture={(e) => { if ((e.key === " " || e.key === "Enter") && (e.target as HTMLElement).closest(".aui-scheduled-runs-card")) e.stopPropagation(); }}
+          >
+            <ScheduledRuns title={m("7일 실행 배치표", "7-day routine board")} subtitle={m("읽기 전용 · 시간대별 활성 루틴 밀도와 다음 예정 슬롯을 보여 줘요", "Read-only · active routines mapped onto upcoming 7-day time bands")} tasks={scheduleBoard.tasks} agents={scheduleBoard.agents} days={scheduleBoard.days} sessions={scheduleBoard.sessions} current={scheduleBoard.current} defaultMode="manual" autoStart={false} />
+          </section>
 
           <div className="@container/routines grid min-w-0 grid-cols-1 items-start gap-4 min-[900px]:grid-cols-[minmax(0,1fr)_clamp(320px,36%,430px)]">
             <SectionCard title={m("반복 예약 목록", "Recurring schedules")} count={sortedRoutines.length} aside={<Repeat2 size={14} aria-hidden className="ml-auto text-[var(--fg-muted)]" />}>

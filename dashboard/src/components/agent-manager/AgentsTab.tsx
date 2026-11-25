@@ -244,6 +244,11 @@ export default function AgentsTab({
       <div className="grid min-w-0 items-start gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(18rem,38%)] xl:gap-5">
         <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
           <AgentsAttentionCard attention={attention} locale={locale} isMobile={isMobile} tr={tr} onOpenAgent={onSelectAgent} />
+          {isMobile && unlinkedSessions.length > 0 ? (
+            <KitCard pad="sm">
+              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onAgentUpdated} />
+            </KitCard>
+          ) : null}
           <SectionCard
             title={tr("모든 에이전트", "All agents")}
             count={sortedEntries.length}
@@ -350,11 +355,6 @@ export default function AgentsTab({
               </Cap>
             ) : null}
           </SectionCard>
-          {isMobile && unlinkedSessions.length > 0 ? (
-            <KitCard pad="sm">
-              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onAgentUpdated} />
-            </KitCard>
-          ) : null}
         </div>
 
         {!isMobile ? (
@@ -390,8 +390,6 @@ export default function AgentsTab({
                 locale={locale}
                 tr={tr}
                 isKo={isKo}
-                deptTab={deptTab}
-                onSelectDept={setDeptTab}
                 unlinkedSessions={unlinkedSessions}
                 onSessionsChange={onAgentUpdated}
               />

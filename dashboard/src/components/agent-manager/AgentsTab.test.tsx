@@ -340,3 +340,34 @@ describe("agentSecondaryLine", () => {
     expect(agentSecondaryLine(AGENTS[1], "en")).toBe("루나");
   });
 });
+
+describe("provider summary, attention header, and active provider resolution", () => {
+  it("renders provider distribution in summary pane without queue link on attention card", async () => {
+    setViewport(false);
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
+    await flush();
+    const summaryText = document.querySelector('[data-testid="agents-summary"]')!.textContent ?? "";
+    expect(summaryText).toContain("Agents by provider");
+    expect(summaryText).toContain("Claude");
+    expect(summaryText).toContain("Codex");
+    expect(document.querySelector('[data-testid="agents-attention"]')!.textContent).not.toContain("Open queue");
+  });
+
+  it("prefers Antigravity agent provider over default claude turn fallback when no -cc channel exists", async () => {
+    const { resolveActiveAgentProvider } = await import("./AgentInfoCardContent");
+    expect(
+      resolveActiveAgentProvider(
+        { cli_provider: "antigravity", discord_channel_cc: null },
+        [],
+        "claude",
+      ),
+    ).toBe("antigravity");
+    expect(
+      resolveActiveAgentProvider(
+        { cli_provider: "codex", discord_channel_cc: "123456789012345678" },
+        [{ provider: "claude" }],
+        "claude",
+      ),
+    ).toBe("claude");
+  });
+});

@@ -113,7 +113,7 @@ describe("PipelineFlowCanvas", () => {
     expect(flowState.colorMode).toBe("light");
   });
 
-  it("keeps MiniMap persistently visible until toggled and wires zoom/fit controls", async () => {
+  it("defaults MiniMap to hidden, toggles it via Map button, and wires zoom/fit controls", async () => {
     await act(async () => {
       root.render(
         <PipelineFlowCanvas
@@ -121,7 +121,7 @@ describe("PipelineFlowCanvas", () => {
           fsmEdgeBindings={{}}
           graph={sampleGraph}
           graphPanelNote="note"
-          isFsmVariant={true}
+          isFsmVariant={false}
           onConnectTransition={vi.fn()}
           onSelectionChange={vi.fn()}
           selection={null}
@@ -131,14 +131,19 @@ describe("PipelineFlowCanvas", () => {
       );
     });
 
+    expect(container.querySelector("[data-testid='rf-minimap']")).toBeNull();
+
+    const byLabel = (label: string) =>
+      container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
+
+    await act(async () => {
+      byLabel("Toggle minimap").click();
+    });
     expect(container.querySelector("[data-testid='rf-minimap']")).toBeTruthy();
     await act(async () => {
       vi.advanceTimersByTime(5_000);
     });
     expect(container.querySelector("[data-testid='rf-minimap']")).toBeTruthy();
-
-    const byLabel = (label: string) =>
-      container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`)!;
 
     await act(async () => {
       byLabel("Zoom out").click();
@@ -147,7 +152,7 @@ describe("PipelineFlowCanvas", () => {
     });
     expect(flowState.zoomOut).toHaveBeenCalledTimes(1);
     expect(flowState.zoomIn).toHaveBeenCalledTimes(1);
-    expect(flowState.fitView).toHaveBeenCalledTimes(1);
+    expect(flowState.fitView).toHaveBeenCalledWith({ padding: 0.18 });
 
     await act(async () => {
       byLabel("Toggle minimap").click();

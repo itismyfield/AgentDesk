@@ -77,6 +77,7 @@ describe("DailyTokenCompositionCard", () => {
 
     expect(container.querySelector('[data-testid="stats-daily-token-chart"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="stats-daily-token-scroll"] .aui-breakdown-chart')).not.toBeNull();
+    expect(container.querySelector('[data-testid="stats-daily-compact-total"]')?.textContent).toBe("3.5K · $3.50");
     expect(container.querySelector(".aui-metering-chart")).toBeNull();
 
     const meteringTab = Array.from(container.querySelectorAll<HTMLButtonElement>('[role="tab"]')).find((tab) =>
@@ -141,6 +142,10 @@ describe("StatsSummaryGrid", () => {
       );
     });
 
+    const grid = container.querySelector<HTMLElement>('[data-testid="stats-summary-grid"]')!;
+    expect(grid.className).toContain("[&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-tooltip]:opacity-0!");
+    expect(container.querySelectorAll(".aui-kpi-chart-tooltip").length).toBeGreaterThan(0);
+
     const activeDays = container.querySelector<HTMLElement>('[data-testid="stats-summary-cache-saved"]')!;
     const peakDay = container.querySelector<HTMLElement>('[data-testid="stats-summary-cache-hit"]')!;
     expect(activeDays.querySelector(".aui-stat-card")).not.toBeNull();
@@ -173,5 +178,32 @@ describe("StatsSummaryGrid", () => {
       );
     });
     expect(container.querySelector('[data-testid="stats-summary-cache-saved"] .aui-trend-chart')).toBeNull();
+
+    const { buildScheduledRunsModel } = await import("../dashboard/RoutinesTimelineWidget");
+    const baseRoutine = {
+      status: "enabled",
+      schedule: "0 9 * * *",
+      execution_strategy: "fresh",
+      script_ref: "a.js",
+      last_run_at: null,
+      last_result: null,
+      checkpoint: null,
+      discord_thread_id: null,
+      timeout_secs: null,
+      in_flight_run_id: null,
+      created_at: "2026-05-17T00:00:00Z",
+      updated_at: "2026-05-17T00:00:00Z",
+    };
+    const board = buildScheduledRunsModel(
+      [
+        { ...baseRoutine, id: "r1", name: "morning-1", agent_id: "personal-obiseo", next_due_at: "2026-05-17T09:00:00Z" },
+        { ...baseRoutine, id: "r2", name: "morning-2", agent_id: "personal-yobiseo", next_due_at: "2026-05-17T10:00:00Z" },
+      ],
+      Date.parse("2026-05-17T01:00:00Z"),
+      "ko",
+      t,
+    );
+    expect(board.agents.map((a) => a.name)).toEqual(["원비서", "지비서"]);
+    expect(board.agents[0]?.mark).not.toBe(board.agents[1]?.mark);
   });
 });
