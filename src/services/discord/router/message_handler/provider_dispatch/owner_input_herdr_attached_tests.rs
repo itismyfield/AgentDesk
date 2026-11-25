@@ -11,12 +11,12 @@ fn on_route(
     key: &str,
 ) -> scope::LaunchGuard {
     let wanted = handed_over(route, provider).expect("a route whose driver hands over");
-    let _ = key;
     let registration = owner.registration(provider, "herdr");
+    let handover = (wanted, Some(key.to_owned()));
     let hook = created(
         registration,
         PROMPT.into(),
-        wanted,
+        handover,
         (front, reply_once(None)),
     );
     scope::install_launch(hook)

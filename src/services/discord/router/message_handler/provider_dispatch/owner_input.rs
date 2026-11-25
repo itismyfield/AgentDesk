@@ -753,6 +753,7 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     native_input::recover(shared, channel).await;
 }
 
+mod pending_attached;
 #[path = "owner_input_start_wait.rs"]
 mod start_wait;
 
@@ -1479,7 +1480,13 @@ fn take_owned(
         registration.phase,
     )?;
     if let Some(wanted) = handed_over(route, turn.provider.as_str()) {
-        let hook = created(registration, turn.prompt.into(), wanted, (front, reply));
+        let owner = turn.tmux_session_name.map(str::to_owned);
+        let hook = created(
+            registration,
+            turn.prompt.into(),
+            (wanted, owner),
+            (front, reply),
+        );
         return Some(Taken::Launch(scope::install_launch(hook)));
     }
     // An idle pane runs a new turn, so it holds the node's execution capacity until that AI turn
@@ -1572,15 +1579,27 @@ fn handed_over(route: target::Route, provider: &str) -> Option<scope::Lineage> {
 }
 
 /// Reserves the first prompt on the target of the execution its driver observed, runs the driver's
-/// submit as the effect, and refuses any lineage but `wanted` before reserving.
+/// submit as the effect, and refuses any lineage but `wanted` before reserving; a Claude Pending
+/// its driver attached is admitted only for the execution and the turn's `owner` its target names.
 fn created(
     r: Registration,
     frame: String,
-    wanted: scope::Lineage,
+    (wanted, owner): (scope::Lineage, Option<String>),
     (front, reply): (Option<FrontClaim>, Reply),
 ) -> scope::LaunchHook {
     Box::new(move |lineage, target, source, writer, submit_created| {
-        if lineage != wanted {
+        let attached = || {
+            let provider = r.attempt["provider"].as_str();
+            pending_attached::admits(&lineage, provider, &target, owner.as_deref())
+        };
+        let admitted = match (&wanted, &lineage) {
+            // The first prompt a Cold route waits for.
+            (scope::Lineage::Created, scope::Lineage::PendingAttached { .. }) => attached(),
+            // The next prompt a HerdrIdle route waits for.
+            (scope::Lineage::Existing, scope::Lineage::PendingAttached { .. }) => attached(),
+            _ => lineage == wanted,
+        };
+        if !admitted {
             return Err(format!("NotSent(\"lineage_refused: {lineage:?}\")"));
         }
         // A Codex Herdr write types its plan's normalized text, so that text is what is reserved.

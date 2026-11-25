@@ -173,7 +173,7 @@ impl HerdrOwner {
         created(
             self.registration(provider, host),
             prompt.into(),
-            wanted,
+            (wanted, None),
             (None, reply_once(None)),
         )
     }

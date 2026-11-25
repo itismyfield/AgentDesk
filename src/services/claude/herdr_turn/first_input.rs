@@ -29,10 +29,9 @@ pub(super) fn pending_handover(
     source: impl FnOnce(&HostedExecution) -> Result<Attached, String>,
 ) -> Result<(Attached, crate::services::claude_tui::owner_input::Lineage), String> {
     let attached = source(record)?;
-    Ok((
-        attached,
-        crate::services::claude_tui::owner_input::Lineage::Pending,
-    ))
+    let nonce = attached.nonce.clone();
+    let lineage = crate::services::claude_tui::owner_input::Lineage::PendingAttached { nonce };
+    Ok((attached, lineage))
 }
 
 /// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
@@ -44,7 +43,7 @@ pub(crate) fn owned_pending_prompt_for_tests(
     (session_id, transcript): (&str, PathBuf),
 ) -> Result<(), String> {
     let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
-    let source = |record: &HostedExecution| {
+    let source = |record: &HostedExecution| -> Result<Attached, String> {
         Ok(Attached {
             nonce: record.execution_nonce.clone(),
             session_id: session_id.into(),
