@@ -693,3 +693,66 @@ async fn late_image_call_turn_survives_call_gc_and_restart() {
         );
     }
 }
+
+/// An image-less turn's call outlives its opener and call rows (collected) and a restart; the
+/// next turn posts the same bytes first, and the late result still gets its own turn and upload.
+#[tokio::test(start_paused = true)]
+async fn late_result_of_an_image_less_turn_keeps_its_turn_after_the_next_turn_posts_the_same_bytes()
+{
+    use sha2::{Digest, Sha256};
+    let (harness, path, source) = switched_over(b"");
+    harness.gate.acquired();
+    let store = || {
+        let mut store = harness.channel();
+        store.set_limits_for_test(1, u64::MAX);
+        store
+    };
+    let (stop, task) = spawn(writer_over(&harness, store()));
+    let rows = [
+        prompt("u1"),
+        tool_use("a1", "c1"),
+        super::actor::row("m1", "working"),
+    ];
+    append(&path, &rows.concat());
+    polls(4).await;
+    halt(stop, task).await;
+    let gc = harness.channel().ledger().gc_segments(&source).len();
+    assert!(gc >= 2, "u1's opener and call rows are collected ({gc})");
+    let (stop, task) = spawn(writer_over(&harness, store()));
+    let u2 = [
+        idle(),
+        prompt("u2"),
+        tool_use("a2", "c2"),
+        png("r2", "c2", 1),
+    ];
+    append(&path, &u2.concat());
+    polls(4).await;
+    assert_eq!(attachments(&harness), 1, "u2 posts the bytes first");
+    append(&path, &png("r1", "c1", 1));
+    polls(4).await;
+    halt(stop, task).await;
+    assert_eq!(
+        attachments(&harness),
+        2,
+        "u1's late image is its own upload"
+    );
+    let sha = format!("{:x}", Sha256::digest(b"\x89PNG\r\n\x1a\n\x01"));
+    let key = |turn: &str| UnitKey {
+        channel_id: CHANNEL,
+        provider: ShadowProvider::Claude,
+        native_key: format!("img:{turn}:{sha}"),
+        kind: UnitKind::ToolImage,
+    };
+    let store = harness.channel();
+    let ledger = store.ledger();
+    for turn in ["u1", "u2"] {
+        let posted = ledger
+            .latest_piece(&key(turn), 0)
+            .map(|(_, piece)| piece.outcome.clone());
+        assert!(
+            matches!(posted, Some(Some(PieceOutcome::Posted(_)))),
+            "{turn}"
+        );
+    }
+    assert!(ledger.violation().is_none());
+}
