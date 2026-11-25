@@ -1447,13 +1447,25 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
         let runtime_binding_candidate_offset = terminal_output_committed
             .then(|| terminal_event_consumed_offset(current_offset, &all_data));
         let pin_held = path_b_record::native_held(&shared, inflight_before_relay.as_ref()).await;
+        // A Herdr turn whose own end is unproven commits its body watermark, not its end.
+        let herdr_held = crate::services::discord::inflight::herdr_turn_held(
+            &shared,
+            &watcher_provider,
+            inflight_before_relay.as_ref(),
+            &tmux_session_name,
+        )
+        .await;
         let terminal_delivery_committed = relay_ok
             && has_assistant_response
             && mark_watcher_terminal_delivery_committed(
                 &watcher_provider,
                 channel_id,
                 &tmux_session_name,
-                (inflight_identity_before_relay.as_ref(), pin_held, false),
+                (
+                    inflight_identity_before_relay.as_ref(),
+                    pin_held,
+                    herdr_held,
+                ),
                 &full_response,
                 turn_data_start_offset,
                 last_observed_generation_mtime_ns,
