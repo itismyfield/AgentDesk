@@ -580,3 +580,33 @@ fn image_less_results_derive_unchanged_and_queue_nothing() {
     assert_eq!(a, b);
     assert!(with.images().unwrap().take_entries().is_empty());
 }
+
+/// An opener collected before the turn's first image leaves a span without Closed; a verified
+/// end the restart projection cannot apply still closes it, so the next prompt opens t2.
+#[tokio::test(start_paused = true)]
+async fn image_turn_closes_at_a_verified_end_without_its_opener() {
+    let (harness, path, source) = switched_over(b"");
+    let mut writer = harness.writer();
+    let mut live = images(&mut writer);
+    let opener = prompt("t1");
+    append(&path, &[opener.clone(), png("r1", "c1", 1)].concat());
+    derive(&mut writer, &mut live, &source, 0);
+    let cutoff = path.metadata().unwrap().len();
+    append(&path, &[prompt("t2"), png("r2", "c2", 1)].concat());
+    spool(&mut writer, &source, cutoff);
+    let mut restarted = images(&mut writer);
+    let tail = spooled(&mut writer, &source, opener.len() as u64);
+    let (head, rest) = tail.split_at(1);
+    run(&mut writer, &mut restarted, &source, head);
+    let run_images = restarted.images().unwrap();
+    run_images.verified_cut(&source, cutoff, Some("t1"));
+    let rest = run(&mut writer, &mut restarted, &source, rest);
+    assert_eq!(markers(&rest), 1, "t2's image is its own");
+    let span = writer
+        .store()
+        .ledger()
+        .tool_images()
+        .span_of(&source, "t1")
+        .cloned();
+    assert_eq!(span.unwrap().end_offset, Some(cutoff));
+}

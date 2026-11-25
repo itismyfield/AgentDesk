@@ -176,9 +176,16 @@ impl UnitDeriver {
             provider: self.provider,
             source: source.clone(),
         };
-        self.restart
-            .before(&binding, record)
-            .map_or_else(Vec::new, |ended| self.end_projection(&ended))
+        let ended = self.restart.before(&binding, record);
+        let out = ended.map_or_else(Vec::new, |ended| self.end_projection(&ended));
+        // A verified end this run cannot apply for lack of its opener still ends the image turn.
+        if let (Some(images), Some(turn)) = (
+            self.images.as_mut(),
+            self.restart.cutoff_turn(source, record.start),
+        ) {
+            images.verified_cut(source, record.start, turn);
+        }
+        out
     }
 
     pub(super) fn end_projection(&mut self, ended: &super::restart_end::Ended) -> Vec<Derived> {

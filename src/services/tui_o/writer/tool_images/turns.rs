@@ -185,6 +185,10 @@ impl ImageTurns {
         NativeTurn::new(format!("edge:{}:{}", source_key(&self.source), self.origin))
     }
 
+    pub(crate) fn source(&self) -> &SourceId {
+        &self.source
+    }
+
     /// The turn this source is in, observed or restored from its span.
     pub(crate) fn open_turn(&self) -> Option<&NativeTurn> {
         match &self.state {

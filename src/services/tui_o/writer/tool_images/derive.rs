@@ -62,14 +62,28 @@ impl ImageRun {
         !self.queued.is_empty()
     }
 
-    /// Spool keys whose open turn still needs its opener: GC waits for its durable Closed.
+    /// Spool keys whose open image turn still needs its opener: GC waits for its durable Closed.
+    /// A turn without an image keeps nothing, so image-less output collects as before.
     pub(crate) fn live_openers(&self, durable: &ImageState) -> Vec<String> {
         let open = self.turns.iter().filter(|(_, turns)| {
-            turns
-                .open_turn()
-                .is_some_and(|turn| !turns.opener_collectable(durable, turn))
+            turns.open_turn().is_some_and(|turn| {
+                durable.span_of(turns.source(), turn.as_str()).is_some()
+                    && !turns.opener_collectable(durable, turn)
+            })
         });
         open.map(|(key, _)| key.clone()).collect()
+    }
+
+    /// A verified physical end at `at` that the restart projection could not apply: the open
+    /// image turn it names (or any, when the end names none) closes there.
+    pub(crate) fn verified_cut(&mut self, source: &SourceId, at: u64, turn: Option<&str>) {
+        let Some(turns) = self.turns.get(&source_key(source)) else {
+            return;
+        };
+        let named = |open: &NativeTurn| turn.is_none_or(|turn| turn == open.as_str());
+        if turns.open_turn().is_some_and(named) {
+            self.physical_end(source, at);
+        }
     }
 
     /// One record's turn facts and images; returns a marker per image owed from this record.
