@@ -540,7 +540,7 @@ async fn crash_before_closed_append_keeps_opener_then_replay_closes() {
     assert!(
         kept_sources(writer.store().ledger(), &mut fresh)
             .unwrap()
-            .contains(&key)
+            .contains_key(&key)
     );
     let records = spooled(&mut writer, &source, 0);
     run(&mut writer, &mut fresh, &source, &records);
@@ -556,7 +556,7 @@ async fn crash_before_closed_append_keeps_opener_then_replay_closes() {
     assert!(
         !kept_sources(writer.store().ledger(), &mut after)
             .unwrap()
-            .contains(&key)
+            .contains_key(&key)
     );
 }
 
@@ -569,10 +569,14 @@ fn image_less_results_derive_unchanged_and_queue_nothing() {
         json!({"type": "user", "uuid": "r1", "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": "c1", "content": [{"type": "text", "text": "ok"}]}]}}),
     );
-    append(
-        &path,
-        &[prompt("t1"), text, super::actor::row("m1", "done"), idle()].concat(),
-    );
+    let rows = [
+        prompt("t1"),
+        tool_use("a1", "c1"),
+        text,
+        super::actor::row("m1", "done"),
+        idle(),
+    ];
+    append(&path, &rows.concat());
     let mut plain = UnitDeriver::new(CHANNEL, ShadowProvider::Claude);
     let mut with = images(&mut writer);
     let a = derive_from(&mut plain, &path, &source, 0);
@@ -582,31 +586,105 @@ fn image_less_results_derive_unchanged_and_queue_nothing() {
 }
 
 /// An opener collected before the turn's first image leaves a span without Closed; a verified
-/// end the restart projection cannot apply still closes it, so the next prompt opens t2.
+/// end the projection cannot apply closes it even when the retained tail starts at that cut.
 #[tokio::test(start_paused = true)]
 async fn image_turn_closes_at_a_verified_end_without_its_opener() {
     let (harness, path, source) = switched_over(b"");
     let mut writer = harness.writer();
     let mut live = images(&mut writer);
-    let opener = prompt("t1");
-    append(&path, &[opener.clone(), png("r1", "c1", 1)].concat());
+    append(&path, &[prompt("t1"), png("r1", "c1", 1)].concat());
     derive(&mut writer, &mut live, &source, 0);
     let cutoff = path.metadata().unwrap().len();
     append(&path, &[prompt("t2"), png("r2", "c2", 1)].concat());
     spool(&mut writer, &source, cutoff);
     let mut restarted = images(&mut writer);
-    let tail = spooled(&mut writer, &source, opener.len() as u64);
-    let (head, rest) = tail.split_at(1);
-    run(&mut writer, &mut restarted, &source, head);
-    let run_images = restarted.images().unwrap();
-    run_images.verified_cut(&source, cutoff, Some("t1"));
-    let rest = run(&mut writer, &mut restarted, &source, rest);
-    assert_eq!(markers(&rest), 1, "t2's image is its own");
-    let span = writer
-        .store()
-        .ledger()
-        .tool_images()
-        .span_of(&source, "t1")
-        .cloned();
+    let tail = spooled(&mut writer, &source, cutoff);
+    restarted
+        .images()
+        .unwrap()
+        .cut_at(&source, cutoff, Some("t1"));
+    let tail = run(&mut writer, &mut restarted, &source, &tail);
+    assert_eq!(markers(&tail), 1, "t2's image is its own");
+    let ledger = writer.store().ledger();
+    let span = ledger.tool_images().span_of(&source, "t1").cloned();
     assert_eq!(span.unwrap().end_offset, Some(cutoff));
+    assert!(ledger.violation().is_none());
+}
+
+fn tool_use(id: &str, call: &str) -> Vec<u8> {
+    line(
+        json!({"type": "assistant", "uuid": format!("u-{id}"), "message": {"id": id,
+        "content": [{"type": "tool_use", "id": call, "name": "Read", "input": {}}]}}),
+    )
+}
+
+/// Replay that begins at a prompt inside an open image turn keeps the durable turn: no new
+/// Opened, no ledger violation, and the next image is keyed under the original turn.
+#[tokio::test(start_paused = true)]
+async fn replay_tail_starting_at_mid_turn_prompt_keeps_durable_turn() {
+    let (harness, path, source) = switched_over(b"");
+    let mut writer = harness.writer();
+    let mut live = images(&mut writer);
+    let head = [prompt("t1"), png("r1", "c1", 1)].concat();
+    append(
+        &path,
+        &[head.clone(), prompt("mid"), png("r2", "c2", 2)].concat(),
+    );
+    let derived = derive(&mut writer, &mut live, &source, 0);
+    assert_eq!(markers(&derived), 2);
+    let mut restarted = images(&mut writer);
+    let tail = spooled(&mut writer, &source, head.len() as u64);
+    run(&mut writer, &mut restarted, &source, &tail);
+    let ledger = writer.store().ledger();
+    assert!(ledger.violation().is_none());
+    assert!(ledger.tool_images().span_of(&source, "mid").is_none());
+}
+
+/// A result arriving after its turn ended keeps the call's turn once the call, opener and end
+/// are collected and the actor restarts: no second obligation and no second upload.
+#[tokio::test(start_paused = true)]
+async fn late_image_call_turn_survives_call_gc_and_restart() {
+    for unresolved in [false, true] {
+        let (harness, path, source) = switched_over(b"");
+        harness.gate.acquired();
+        let store = || {
+            let mut store = harness.channel();
+            store.set_limits_for_test(1, u64::MAX);
+            store
+        };
+        let (stop, task) = spawn(writer_over(&harness, store()));
+        append(
+            &path,
+            &[prompt("t1"), tool_use("a1", "c1"), idle()].concat(),
+        );
+        polls(4).await;
+        if unresolved {
+            harness
+                .port
+                .replies
+                .lock()
+                .unwrap()
+                .push_back(Reply::CreatedUnseen);
+            harness.port.unreadable.store(true, Ordering::SeqCst);
+        }
+        append(&path, &png("r1", "c1", 1));
+        polls(4).await;
+        assert_eq!(attachments(&harness), 1, "{unresolved}");
+        halt(stop, task).await;
+        let gc = harness.channel().ledger().gc_segments(&source).len();
+        assert!(gc >= 3, "call, opener and end are collected ({gc})");
+        let (stop, task) = spawn(writer_over(&harness, store()));
+        polls(4).await;
+        halt(stop, task).await;
+        assert_eq!(attachments(&harness), 1, "no second upload ({unresolved})");
+        let ledger = harness.channel();
+        let ledger = ledger.ledger();
+        assert_eq!(ledger.tool_images().call_turn(&source, "c1"), Some("t1"));
+        let images = ledger.tool_images().open_obligations(ledger).len();
+        assert_eq!(
+            images,
+            usize::from(unresolved),
+            "one obligation, still open only if unresolved"
+        );
+    }
 }
