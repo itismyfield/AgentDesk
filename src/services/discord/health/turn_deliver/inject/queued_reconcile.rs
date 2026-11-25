@@ -407,7 +407,12 @@ mod tests;
 fn mismatched_file_identity_refuses_transcript_proof() {
     use serde_json::json;
 
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    // A V1 ledger keeps the registration on the V1 writer: Windows confirms no directory flush,
+    // so a V2 publication is refused there and this Windows-run test needs only the record.
+    let ledger = runtime.path().join("runtime/injected_frames.json");
+    std::fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    std::fs::write(&ledger, r#"{"entries":[]}"#).unwrap();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("transcript.jsonl");
     let session = "47d7dbe8-0c1a-4b2e-9f3d-6a5b4c3d2e1f";
