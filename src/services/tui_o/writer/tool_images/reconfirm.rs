@@ -38,7 +38,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let proof_ids: Vec<u64> = posted.take(confirm::PROOF_IDS).collect();
         let channel = self.channel();
         let verdict = confirm::settle(
-            self.port(),
+            &*self.port,
             channel,
             anchor,
             &payload,

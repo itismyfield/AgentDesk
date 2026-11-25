@@ -103,7 +103,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let local_retry =
             (approved.is_none() && admission.is_none() && retry_owner == OriginalGate::SendLocal)
                 .then_some(LocalRetryMark::Budget);
-        self.send_piece(&piece, admission, local_retry, approved)
+        self.send_piece(&piece, admission, local_retry, approved, None)
             .await
     }
 }

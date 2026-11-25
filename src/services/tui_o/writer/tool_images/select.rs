@@ -2,6 +2,8 @@
 //! the first attempt in the owed order; every later step bypasses the ordinary disposition.
 
 use std::collections::HashSet;
+use std::future::Future;
+use std::pin::Pin;
 
 use chrono::{DateTime, Utc};
 
@@ -15,7 +17,9 @@ use crate::services::tui_o::store::spool::SpoolFrame;
 use crate::services::tui_o::writer::deliver::{Admission, ChannelWriter, Step};
 use crate::services::tui_o::writer::local_retry::LOCAL_RETRY_DELAY;
 use crate::services::tui_o::writer::pieces::{PieceWork, UnitDeriver};
-use crate::services::tui_o::writer::{AlarmSink, DeliveryLease, DiscordPort, WriterAlarm};
+use crate::services::tui_o::writer::{
+    AlarmSink, DeliveryLease, DiscordPort, PostOutcome, WriterAlarm,
+};
 
 /// What one poll does for the obligations; `None` when each waits or belongs to its marker.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,6 +143,26 @@ pub(crate) fn kept_sources(
     Some(kept)
 }
 
+/// The upload for an image attempt, else the ordinary unit post.
+pub(in crate::services::tui_o::writer) fn request<P: DiscordPort>(
+    port: &P,
+    channel: u64,
+    piece: &PieceWork,
+    attachment: Option<(Vec<u8>, String)>,
+) -> Pin<Box<dyn Future<Output = PostOutcome> + Send>> {
+    let (payload, origin, kind) = (
+        piece.payload.clone(),
+        piece.output_origin.clone(),
+        piece.unit_key.kind,
+    );
+    match attachment {
+        Some((bytes, name)) => {
+            Box::pin(port.post_unit_attachment(channel, payload, origin, kind, bytes, name))
+        }
+        None => Box::pin(port.post_unit(channel, payload, origin, kind)),
+    }
+}
+
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     /// Appends what the deriver queued, in order; a failure stops the writer.
     pub(crate) fn record_images(&mut self, deriver: &mut UnitDeriver) {
@@ -219,7 +243,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                     output_origin: None,
                     notice_origin: None,
                 };
-                self.send_piece(&piece, None, None, None).await
+                self.send_piece(&piece, None, None, None, None).await
             }
             Action::Reconfirm(serial) => self.reconfirm(serial).await,
         }
@@ -270,7 +294,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             notice_origin: None,
         };
         let attachment = Some((bytes, obligation.display_name.clone()));
-        self.send_with(&piece, admission, None, approved, attachment)
+        self.send_piece(&piece, admission, None, approved, attachment)
             .await
     }
 

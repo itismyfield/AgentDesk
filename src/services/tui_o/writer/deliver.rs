@@ -14,6 +14,7 @@ use tokio::sync::{oneshot, watch};
 
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
+use super::tool_images::select;
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
@@ -21,7 +22,7 @@ use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
-use crate::services::tui_o::shadow::{SourceId, UnitKey};
+use crate::services::tui_o::shadow::{SourceId, UnitKey, UnitKind};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::{
     LedgerEntry, LedgerState, LocalRetryMark, PieceDisposition, PieceOutcome, PieceRecord,
@@ -214,7 +215,7 @@ pub struct ChannelWriter<P, L, A> {
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
-    port: Arc<P>,
+    pub(super) port: Arc<P>,
     lease: L,
     alarms: A,
     stopped: Option<StopCause>,
@@ -376,10 +377,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         self.repost = Some(hook);
     }
 
-    pub(super) fn port(&self) -> &P {
-        &self.port
-    }
-
     pub fn store(&mut self) -> &mut ChannelStore {
         &mut self.store
     }
@@ -501,11 +498,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if self.has_local_retry() {
             return Step::LeaseBusy;
         }
-        if let Derived::Piece(piece) = item
-            && piece.unit_key.kind == crate::services::tui_o::shadow::UnitKind::ToolImage
-        {
-            return self.deliver_image(piece, admission).await;
-        }
         match item {
             Derived::Blocked { reason } => self.stop(WriterAlarm::SchemaBlocked {
                 reason: reason.clone(),
@@ -520,24 +512,16 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 self.record(LedgerEntry::Excluded { unit_key, reason })
                     .map_or_else(|step| step, |()| Step::Done)
             }
+            Derived::Piece(piece) if piece.unit_key.kind == UnitKind::ToolImage => {
+                self.deliver_image(piece, admission).await
+            }
             Derived::Piece(piece) => self.deliver_piece(piece, admission).await,
         }
     }
 
-    /// Originals and the single local retry share the lease, durable prepare and first POST poll.
+    /// Originals and the single local retry share the lease, durable prepare and first POST poll;
+    /// `attachment` (bytes, file name) goes up under the payload as its caption.
     pub(super) async fn send_piece(
-        &mut self,
-        piece: &PieceWork,
-        admission: Option<Admission<'_>>,
-        local_retry: Option<LocalRetryMark>,
-        approved: Option<u64>,
-    ) -> Step {
-        self.send_with(piece, admission, local_retry, approved, None)
-            .await
-    }
-
-    /// As [`Self::send_piece`]; `attachment` (bytes, file name) goes up under the payload caption.
-    pub(super) async fn send_with(
         &mut self,
         piece: &PieceWork,
         admission: Option<Admission<'_>>,
@@ -606,14 +590,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        let (payload, origin, kind) =
-                            (piece.payload.clone(), piece.output_origin.clone(), piece.unit_key.kind);
-                        let post: Request = match attachment.take() {
-                            Some((bytes, name)) => Box::pin(
-                                port.post_unit_attachment(channel, payload, origin, kind, bytes, name),
-                            ),
-                            None => Box::pin(port.post_unit(channel, payload, origin, kind)),
-                        };
+                        let post = select::request(&*port, channel, piece, attachment.take());
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
                             Some(running) => Box::pin(post.map(move |outcome| {
