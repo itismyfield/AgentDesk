@@ -8,7 +8,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::{GrantedServer, herdr_endpoints};
 use std::sync::Arc;
 
-const HELD: &str = "NotSent(\"herdr_root_recovery_held\")";
+pub(in crate::services::discord) const HELD: &str = "NotSent(\"herdr_root_recovery_held\")";
 
 /// Returns true only for a fresh exact match; legacy dequeue may omit its broad server hold.
 pub(in crate::services::discord) async fn before_idle(

@@ -1158,7 +1158,9 @@ src/
 │   │   │   ├── hold_resolve_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
+│   │   │   ├── pending.rs
 │   │   │   ├── provider_terminal_tests.rs
+│   │   │   ├── retry_probe.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
@@ -2006,6 +2008,8 @@ src/
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
+│   │   │   ├── never_started.rs
+│   │   │   ├── never_started_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
@@ -2350,6 +2354,7 @@ src/
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
 │   │   │   │   ├── owed_drop_tests.rs
+│   │   │   │   ├── pending_recovery.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
@@ -2682,7 +2687,8 @@ src/
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
 │   │   │   │   │   │   ├── native_input.rs
-│   │   │   │   │   │   └── pending_attached.rs
+│   │   │   │   │   │   ├── pending_attached.rs
+│   │   │   │   │   │   └── preclaim_wait.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2735,7 +2741,9 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
 │   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
-│   │   │   │   │   └── clear_execute_tests.rs
+│   │   │   │   │   ├── clear_execute_tests.rs
+│   │   │   │   │   ├── closing_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -4528,6 +4536,7 @@ src/
 │   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
+│   │   │   ├── closing.rs
 │   │   │   ├── enter_readmit_tests.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
@@ -5305,6 +5314,8 @@ src/
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── retry_wait.rs
+│   │   │   │   ├── retry_wait_tests.rs
 │   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
@@ -5313,7 +5324,8 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── v2_types/
 │   │   │   │   ├── cold_source.rs
-│   │   │   │   └── effort_restart.rs
+│   │   │   │   ├── effort_restart.rs
+│   │   │   │   └── retry_wait.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs
