@@ -89,7 +89,7 @@ async fn effort_resume_without_its_boundary_never_launches_fresh() {
 
 #[tokio::test]
 async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
-    use crate::services::codex::tui_session_launch::launch_policy::codex_tui_option_args;
+    use crate::services::codex::codex_tui_option_args_for_test as codex_tui_option_args;
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let _env = crate::config::TestEnvVarGuard::set_value_after_shared_test_env_lock(
         "AGENTDESK_CODEX_REASONING_EFFORT",
@@ -121,7 +121,7 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
         cancel: None,
         bootstrap: false,
     };
-    let chosen = crate::services::codex::herdr_turn::launch_options(&turn(Some("ultra")));
+    let chosen = crate::services::codex::herdr_turn::launch_options_for_test(&turn(Some("ultra")));
     assert_eq!(chosen.reasoning_effort.as_deref(), Some("ultra"));
     let args = codex_tui_option_args(&chosen);
     assert!(
@@ -129,15 +129,15 @@ async fn a_herdr_codex_launch_takes_the_channel_effort_over_the_environment() {
             .any(|pair| pair[0] == "-c" && pair[1] == "model_reasoning_effort=\"ultra\""),
         "the pane argv carries the saved level: {args:?}"
     );
-    let unset = crate::services::codex::herdr_turn::launch_options(&turn(None));
+    let unset = crate::services::codex::herdr_turn::launch_options_for_test(&turn(None));
     assert_eq!(
         unset.reasoning_effort.as_deref(),
         Some("low"),
         "no saved level keeps the default"
     );
     assert_ne!(
-        crate::services::codex::herdr_turn::kept_options("n", &chosen),
-        crate::services::codex::herdr_turn::kept_options("n", &unset),
+        crate::services::codex::herdr_turn::kept_options_for_test("n", &chosen),
+        crate::services::codex::herdr_turn::kept_options_for_test("n", &unset),
         "a changed level is a changed launch, so the old pane never takes the new options"
     );
 }
@@ -177,9 +177,7 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         ino: meta.ino(),
         offset: meta.len(),
     });
-    let launchable = crate::services::codex::tui_session_launch::CodexHerdrLaunchable::for_tests(
-        "/usr/bin/true",
-    );
+    let launchable = crate::services::codex::CodexHerdrLaunchable::for_tests("/usr/bin/true");
     let overlay = crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(
         crate::services::provider::ProviderKind::Codex,
     );
@@ -210,7 +208,7 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         cancel: None,
         bootstrap: false,
     };
-    crate::services::codex::herdr_turn::pane_command(
+    crate::services::codex::herdr_turn::pane_command_for_test(
         &turn,
         &prepared,
         (&launchable, &overlay, root.path()),
@@ -236,6 +234,9 @@ async fn an_effort_resume_launch_renders_the_exact_thread_with_the_saved_level()
         !exec.contains("--last") && !exec.contains("fork"),
         "no other thread is picked: {exec}"
     );
-    crate::services::codex::herdr_turn::options_kept(&turn, &prepared.context.execution_nonce)
-        .expect("later prompts of the resumed execution keep its launch options");
+    crate::services::codex::herdr_turn::options_kept_for_test(
+        &turn,
+        &prepared.context.execution_nonce,
+    )
+    .expect("later prompts of the resumed execution keep its launch options");
 }

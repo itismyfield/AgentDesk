@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view, wait};
+use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
 use crate::services::claude_tui::readiness::compact::{Outcome, Pending};
 
 fn poll(pending: &mut Pending, session: &str) -> Outcome {
@@ -8,7 +8,7 @@ fn poll(pending: &mut Pending, session: &str) -> Outcome {
     })
 }
 
-fn pane() -> ScriptedTmux {
+pub(crate) fn pane() -> ScriptedTmux {
     let tmux = ScriptedTmux::new(&view("", false));
     tmux.set_dead(false);
     fs::write(tmux.directory().join("control"), view("/compact", false)).unwrap();
@@ -287,106 +287,8 @@ fn compact_ignores_suppressed_summary_timer_and_late_assistant_until_final() {
     assert_eq!(tmux.sends(), ["/compact", "Enter"]);
 }
 
-#[test]
-fn compact_usage_caller_keeps_one_pending_across_busy_completion_and_duplicate_usage() {
-    usage_completion(false);
-}
-
-#[test]
-fn compact_old_generation_cannot_release_a_recreated_cycle() {
-    usage_completion(true);
-}
-
-fn usage_completion(recreated: bool) {
-    use crate::services::{
-        claude_compact_trigger, discord::ManagedCompactTurnIdentity, provider::ProviderKind,
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let _compact = claude_compact_trigger::STATE_TEST_LOCK
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let r = Rig::new();
-    r.assistant("busy");
-    let tmux = pane();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .build()
-        .unwrap();
-    let _enter = runtime.enter();
-    let channel = 808099;
-    let identity = ManagedCompactTurnIdentity::test_fixture(channel, &r.session);
-    let request = || {
-        claude_compact_trigger::maybe_inject_compact(
-            identity.clone(),
-            &ProviderKind::Claude,
-            600_000,
-            Some(1_000_000),
-            50,
-            300_000,
-        )
-    };
-    request();
-    request();
-    wait("compact checked busy at least twice", || {
-        fs::read_to_string(tmux.directory().join("argv"))
-            .unwrap_or_default()
-            .lines()
-            .filter(|line| line.contains("capture-pane"))
-            .count()
-            >= 2
-    });
-    assert!(tmux.sends().is_empty());
-    r.terminal();
-    wait("one compact Enter", || {
-        tmux.sends().iter().filter(|key| *key == "Enter").count() == 1
-    });
-    request();
-    assert_eq!(tmux.sends(), ["/compact", "Enter"]);
-    assert!(!r.ready());
-    if recreated {
-        claude_compact_trigger::clear_for_tmux(&r.session);
-        let before = fs::read_to_string(tmux.directory().join("argv"))
-            .unwrap()
-            .matches("capture-pane")
-            .count();
-        tmux.show(&view("", false));
-        request();
-        compact_records(&r, false);
-        wait("new generation polled without adopting old compact", || {
-            fs::read_to_string(tmux.directory().join("argv"))
-                .unwrap_or_default()
-                .matches("capture-pane")
-                .count()
-                > before
-        });
-        assert!(!r.ready());
-        assert_eq!(tmux.sends(), ["/compact", "Enter"]);
-    } else {
-        claude_compact_trigger::maybe_inject_compact(
-            identity.clone(),
-            &ProviderKind::Claude,
-            1,
-            Some(1_000_000),
-            50,
-            300_000,
-        );
-        compact_records(&r, false);
-        wait("submitted generation completes after usage re-arm", || {
-            r.ready()
-        });
-        tmux.show(&view("", false));
-        assert_eq!(r.send(), Ok(()));
-        assert_eq!(
-            tmux.sends(),
-            ["/compact", "Enter", "load", "paste", "Enter"]
-        );
-    }
-    claude_compact_trigger::clear_for_tmux(&r.session);
-}
-
 // Redacted record kinds/order from the coordinator's isolated 2.1.322 capture, rows 46..64.
-fn compact_records(r: &Rig, failed: bool) {
+pub(crate) fn compact_records(r: &Rig, failed: bool) {
     if failed {
         r.append(
             json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}),

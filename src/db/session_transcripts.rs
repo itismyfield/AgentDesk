@@ -348,10 +348,15 @@ pub(crate) async fn observe_channel_clear_fence_once(
         .await;
 }
 
-pub(crate) async fn capture_channel_clear_fence(
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn capture_channel_clear_fence_for_test(
     pool: Option<&PgPool>,
     channel_id: &str,
 ) -> ChannelClearFence {
+    capture_channel_clear_fence(pool, channel_id).await
+}
+
+async fn capture_channel_clear_fence(pool: Option<&PgPool>, channel_id: &str) -> ChannelClearFence {
     if let Some(pool) = pool {
         if let Ok((tx, fence)) = channel_clear_fence_tx(pool, channel_id).await {
             if tx.commit().await.is_ok() {

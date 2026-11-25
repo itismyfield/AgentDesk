@@ -104,7 +104,13 @@ async fn notice_owner_same_source_resume_excludes_late_imessage_row_after_reopen
     let first = launch(&c, false, "native");
     let mut actor = c.open();
     c.run(&mut actor).await;
-    assert!(actor.writer.store().cursor(&c.source).is_some());
+    assert!(
+        actor
+            .writer_mut_for_test()
+            .store()
+            .cursor(&c.source)
+            .is_some()
+    );
     let resumed = launch(&c, true, "native");
     assert_ne!(
         first.context.execution_nonce,
@@ -133,7 +139,7 @@ async fn notice_owner_same_source_resume_excludes_late_imessage_row_after_reopen
     );
     c.run(&mut actor).await;
     let evidence = actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .ledger()
         .input_notices()
@@ -154,14 +160,14 @@ async fn notice_owner_same_source_resume_excludes_late_imessage_row_after_reopen
     c.run(&mut actor).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("resume-direct-twin"))
             .is_none()
     );
     assert_eq!(c.notices(), 1);
-    assert_eq!(actor.notice_debt_extra(), 0);
+    assert_eq!(actor.notice_debt_extra_for_test(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -177,14 +183,14 @@ async fn notice_owner_resume_of_other_source_cannot_exclude_this_source() {
     c.run(&mut actor).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("foreign-resume"))
             .is_none()
     );
     assert_eq!(c.notices(), 0);
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -198,17 +204,13 @@ async fn notice_owner_resume_context_change_invalidates_prepared_census() {
     let frame = c.frame();
     register_current(&c, &frame);
     c.input("context-change", &frame);
-    crate::services::tui_o::writer::restart_end::refresh(
-        &mut actor.writer,
-        &mut actor.deriver,
-        actor.bindings.as_ref(),
-        ShadowProvider::Claude,
-    )
-    .await
-    .unwrap();
-    actor.read_sources();
+    actor
+        .refresh_for_test(ShadowProvider::Claude)
+        .await
+        .unwrap();
+    actor.read_sources_for_test();
     let origin = actor
-        .writer
+        .writer_mut_for_test()
         .store()
         .ledger()
         .input_notices()
@@ -219,7 +221,7 @@ async fn notice_owner_resume_context_change_invalidates_prepared_census() {
         .origin
         .clone()
         .unwrap();
-    let batch = Batch::prepare(actor.writer.store());
+    let batch = Batch::prepare(actor.writer_mut_for_test().store());
     assert_eq!(
         batch.decision(&origin, "context-change", &frame),
         Decision::Owned
@@ -232,12 +234,12 @@ async fn notice_owner_resume_context_change_invalidates_prepared_census() {
     c.run(&mut actor).await;
     assert!(
         actor
-            .writer
+            .writer_mut_for_test()
             .store()
             .ledger()
             .excluded(&input_key("context-change"))
             .is_none()
     );
     assert_eq!(c.notices(), 0);
-    assert_eq!(actor.notice_debt_extra(), 1);
+    assert_eq!(actor.notice_debt_extra_for_test(), 1);
 }

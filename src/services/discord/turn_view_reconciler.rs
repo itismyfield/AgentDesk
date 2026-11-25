@@ -389,15 +389,16 @@ impl TurnViewReconciler {
         identity: TurnViewIdentity,
         source: &'static str,
     ) -> TurnViewStartRecord {
-        let (delivery, attempt) = self
-            .note_state_delivery_with_attempt(
+        // The ⏳ line is written after the target lock is released.
+        let (delivery, attempt) =
+            crate::logging::intake_stage::after(self.note_state_delivery_with_attempt(
                 shared,
                 target,
                 owner,
                 identity,
                 TurnViewState::Pending,
                 source,
-            )
+            ))
             .await;
         TurnViewStartRecord {
             delivered: delivery.delivered(),

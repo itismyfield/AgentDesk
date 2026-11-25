@@ -1,7 +1,8 @@
-use crate::services::claude::herdr_turn::Attached;
-use crate::services::claude::herdr_turn::first_input::regression_tests::regression_attached;
-use crate::services::claude::herdr_turn::first_input::*;
 use crate::services::claude::herdr_turn::hold_record::{self, Held, SendOutcome, UnsentProof};
+use crate::services::claude::herdr_turn::{
+    Attached, Notice, held_record_for_test, record_outcome_for_test, regression_attached,
+    write_for_test,
+};
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::host_input::InputRun;
 use std::path::Path;
@@ -49,7 +50,7 @@ fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_
     rig.answer("pane.read", serde_json::json!({"type":"pane_read","read":{"pane_id":PANE,"source":"recent_unwrapped","text":format!("✻ Baked for 2s\n\n{}\n❯ \n{}\n  🤖 Opus(H) │ 7% │ MCP: 2\n  ⏵⏵ bypass permissions on (shift+tab to cycle)","─".repeat(52),"─".repeat(52)),"revision":1,"truncated":false}}));
     let (_, attached) = regression_attached(&rig, logical, &transcript);
     let ago = chrono::Utc::now() - chrono::Duration::hours(1);
-    let mut left = held_record(logical, &attached, "earlier input", 0, ago);
+    let mut left = held_record_for_test(logical, &attached, "earlier input", 0, ago);
     left.recorded_at = ago.to_rfc3339();
     hold_record::write(&left).unwrap();
     let notices = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -59,7 +60,8 @@ fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_
             Box::new(move |frame: String| {
                 guarded_outcome::capture_preparation(|| {
                     let (sender, _receiver) = std::sync::mpsc::channel();
-                    write(logical, None, attached, &frame, &sender, notice.as_deref()).map(drop)
+                    write_for_test(logical, None, attached, &frame, &sender, notice.as_deref())
+                        .map(drop)
                 })
             }),
             Some(writer.clone()),
@@ -116,11 +118,11 @@ fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_
             crate::services::claude_tui::host_input::InputRefusal::Unknown,
         ),
     };
-    record_outcome(
-        held_record(logical, &attached, "next input", 0, ago),
+    record_outcome_for_test(
+        held_record_for_test(logical, &attached, "next input", 0, ago),
         &refused,
     );
-    let Ok(Some(Held::V2(record))) = hold_record::read(&attached.nonce) else {
+    let Ok(Some(Held::V2(record))) = hold_record::read(attached.nonce_for_test()) else {
         panic!("the outcome rewrote the in-flight record");
     };
     let recorded = (

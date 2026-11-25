@@ -18,6 +18,11 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub mod input_notices;
+// Test seams for the ledger notice tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+mod test_access;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services) use test_access::{append_for_test, recover_for_test};
 pub mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;
@@ -229,7 +234,7 @@ pub struct LedgerState {
     output_origins:
         BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     latest: HashMap<(UnitKey, u32), u64>,
-    pub(crate) excluded: BTreeMap<UnitKey, String>,
+    excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
     resolved: HashMap<SourceId, (u64, Option<Box<BoundaryEvidence>>)>,
     violation: Option<String>,
@@ -240,7 +245,7 @@ pub struct LedgerState {
 }
 
 impl LedgerState {
-    pub(crate) fn starting_at(initial_anchor: u64) -> Self {
+    fn starting_at(initial_anchor: u64) -> Self {
         Self {
             anchor: initial_anchor,
             floor: initial_anchor,
@@ -456,7 +461,7 @@ impl LedgerState {
             && (self.anchor >> 22).saturating_sub(msg_id >> 22) <= POST_ORDER_SKEW_MS
     }
 
-    pub(crate) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
+    pub(super) fn apply(&mut self, at: DateTime<Utc>, entry: LedgerEntry) {
         match entry {
             LedgerEntry::InputNotice { entry } => {
                 input_notices::settlement::apply(self, at, *entry);
@@ -665,7 +670,7 @@ pub(super) fn create_empty(path: &Path) -> Result<(), StoreError> {
     Ok(fsync_parent_dir(path)?)
 }
 
-pub(crate) fn append(
+pub(super) fn append(
     path: &Path,
     at: DateTime<Utc>,
     entry: &LedgerEntry,
@@ -763,7 +768,7 @@ impl Unsent {
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
-pub(crate) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 

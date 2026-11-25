@@ -3,13 +3,13 @@ use super::*;
 use crate::services::tui_input::human_frame::history::v2::native::Outcome;
 use crate::services::tui_o::shadow::capture::Fingerprint;
 
-const MARK: &str = "[Request interrupted by user]";
+pub(crate) const MARK: &str = "[Request interrupted by user]";
 
-fn stop(content: Value) -> Value {
+pub(crate) fn stop(content: Value) -> Value {
     json!({"type":"user","uuid":"stop","sessionId":"parent","message":{"content":content}})
 }
 
-fn owned(f: &Fixture, closer: Value) -> Ticket {
+pub(crate) fn owned(f: &Fixture, closer: Value) -> Ticket {
     let ticket = f.register("ours", "our request");
     f.append(&[user("own", "our request"), closer]);
     f.receipt(&ticket, "own", "our request");
@@ -37,7 +37,7 @@ fn projected(f: &Fixture, live: usize) -> Analysis {
 }
 
 /// The barrier the earlier Prompt reading stored for the strict interrupt row, after `edit`.
-fn stored(f: &Fixture, ticket: &Ticket, edit: fn(&mut Barrier)) -> (Barrier, String) {
+pub(crate) fn stored(f: &Fixture, ticket: &Ticket, edit: fn(&mut Barrier)) -> (Barrier, String) {
     let bytes = std::fs::read(&f.binding.source.path).unwrap();
     let (own, end) = (
         bytes.iter().position(|b| *b == b'\n').unwrap() + 1,

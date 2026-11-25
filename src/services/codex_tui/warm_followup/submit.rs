@@ -3,7 +3,7 @@ use super::*;
 /// Settles the one submit; `None` goes on to tail the rollout. A draft that stayed
 /// in the composer is killed for a relaunch only on a confirmed tmux session.
 #[cfg(unix)]
-pub(crate) fn settle_submit(
+pub(super) fn settle_submit(
     target: &InputTarget,
     tmux_session_name: &str,
     outcome: CodexFollowupPromptSubmitOutcome,
@@ -107,6 +107,28 @@ pub(crate) fn settle_submit(
         }
     };
     Some(settled)
+}
+
+/// Settles one submit for the warm follow-up test mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn settle_submit_for_test(
+    target: &InputTarget,
+    tmux_session_name: &str,
+    outcome: CodexFollowupPromptSubmitOutcome,
+    rollout_path: &Path,
+    rollout_len_before_submit: u64,
+    prompt: &str,
+    report: (Option<u64>, Option<&std::sync::Arc<CancelToken>>),
+) -> Option<CodexWarmFollowupOutcome> {
+    settle_submit(
+        target,
+        tmux_session_name,
+        outcome,
+        rollout_path,
+        rollout_len_before_submit,
+        prompt,
+        report,
+    )
 }
 
 #[cfg(test)]

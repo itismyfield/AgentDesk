@@ -294,10 +294,10 @@ impl Registry {
             }
             *pending = None;
         }
-        if cached.as_ref().is_none_or(|(bytes, _)| *bytes != raw) {
-            *cached = Some((raw.clone(), migration::restore(&raw)?));
+        if cached.raw() != Some(raw.as_str()) {
+            cached.replace(raw.clone(), migration::restore(&raw)?);
         }
-        let (_, state) = cached.as_mut().ok_or("history cache unavailable")?;
+        let state = cached.state_mut().ok_or("history cache unavailable")?;
         let encoded = apply(state).and_then(|result| {
             if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("history encoding failed".to_string());
@@ -307,7 +307,7 @@ impl Registry {
         let (result, candidate) = match encoded {
             Ok(value) => value,
             Err(error) => {
-                *cached = None;
+                cached.clear();
                 return Err(error);
             }
         };
@@ -321,11 +321,11 @@ impl Registry {
         }
         match durable_publish::critical_publish_status(&self.path, &candidate, context()) {
             Ok(FlushStatus::Flushed) => {
-                cached.as_mut().ok_or("history cache disappeared")?.0 = candidate;
+                cached.published(candidate)?;
                 Ok(result)
             }
             status => {
-                *cached = None;
+                cached.clear();
                 if status.is_ok() {
                     *pending = Some((raw, candidate));
                 }

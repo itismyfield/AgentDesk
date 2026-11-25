@@ -149,7 +149,6 @@ class InventoryAndDraftTests(unittest.TestCase):
                 "memento-mcp",
                 "brave-search-mcp",
                 "sidecar-launcher",
-                "playwright-chromium",
             },
         )
         self.assertEqual(

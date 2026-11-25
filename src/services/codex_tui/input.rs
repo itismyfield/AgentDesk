@@ -106,8 +106,10 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_content;
 mod composer_lock;
-pub(crate) mod submission;
+mod submission;
 pub use submission::owned_preserved_plan;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use submission::{draft_notice_event_for_test, enqueue_draft_notice_for_test};
 pub(crate) use submission::{
     notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,
     submission_draft_in_pane, submission_modal_in_pane, submission_readiness_from_ansi_pane,

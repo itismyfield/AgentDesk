@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import template from "../../../e2e/fixtures/pipeline-template-campaign-development-9-v1.json";
+import template from "./fixtures/pipeline-template-campaign-development-9-v1.json";
 import { campaignPipelineSchema, type PipelineDefinition } from "../../api/serverCampaignPipeline";
 import { buildPipelineGraph, pinSummary, retryText } from "./pipelineModel";
 

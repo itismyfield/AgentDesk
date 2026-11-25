@@ -1,6 +1,10 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
-pub(crate) mod admission;
+// Test builds open it to the admission tests mounted in the discord-layer test host.
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) mod admission;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services) mod admission;
 pub(super) mod evidence;
 
 use std::collections::HashMap;

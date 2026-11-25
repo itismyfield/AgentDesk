@@ -106,7 +106,7 @@ pub(crate) struct SharedData {
     pub(in crate::services::discord) http: RuntimeHttpCache,
     /// SHA-256 hash of the bot token — used to namespace the pending-queue directory
     /// so that multiple bots sharing the same runtime root cannot steal each other's queues.
-    pub(crate) token_hash: String,
+    pub(in crate::services) token_hash: String,
     /// Weak reference to the process-wide health registry so turn handlers can
     /// reach dedicated Discord bot HTTP clients without creating an Arc cycle.
     pub(in crate::services) health_registry: std::sync::Weak<health::HealthRegistry>,
@@ -146,6 +146,20 @@ impl std::ops::Deref for SharedData {
 impl std::ops::DerefMut for SharedData {
     fn deref_mut(&mut self) -> &mut Self::Target {
         Arc::get_mut(&mut self.engine).expect("fixture runtime must have a single owner")
+    }
+}
+
+/// The bot token hash, for tests outside `services`.
+#[cfg(test)]
+impl SharedData {
+    #[cfg(unix)]
+    pub(crate) fn set_token_hash_for_test(&mut self, hash: &str) {
+        self.token_hash = hash.to_string();
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn token_hash_for_test(&self) -> &str {
+        &self.token_hash
     }
 }
 

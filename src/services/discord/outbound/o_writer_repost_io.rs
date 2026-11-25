@@ -34,7 +34,7 @@ pub(crate) enum Unsupported {
 pub(crate) struct RepostHttp {
     http: Arc<serenity::Http>,
     client: reqwest::Client,
-    pub(crate) base: Option<String>,
+    base: Option<String>,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 }
 
@@ -58,6 +58,13 @@ impl RepostHttp {
     #[cfg(test)]
     pub(crate) fn at(http: Arc<serenity::Http>, base: String) -> Result<Self, Unsupported> {
         Self::build(http, Some(base))
+    }
+
+    /// Keeps the factory's client and rate authority while directing test requests to loopback.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::services) fn at_base(mut self, base: String) -> Self {
+        self.base = Some(base);
+        self
     }
 
     fn build(http: Arc<serenity::Http>, base: Option<String>) -> Result<Self, Unsupported> {

@@ -3,6 +3,8 @@ use chrono::Utc;
 use serde_json::json;
 use sqlx::{AssertSqlSafe, PgPool};
 
+const DEFINITION_COLUMNS: &str = definition_columns_for_test();
+
 #[tokio::test]
 async fn postgres_image_attachment_partial_triplets_are_rejected() {
     let pg_db = crate::dispatch::test_support::DispatchPostgresTestDb::create(

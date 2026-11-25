@@ -71,7 +71,7 @@ fn notice_fence_missing_duplicate_active_and_nested_reads_never_start() {
         &stored,
     )
     .unwrap();
-    let permit = target.0.fence.acquire(Mutation::Input).unwrap();
+    let permit = target.acquire_for_test(Mutation::Input).unwrap();
     assert_eq!(
         try_notice_fence(&configured, &nonce, || called.set(called.get() + 1)),
         Err(HerdrGateRefusal::MutationBusy)

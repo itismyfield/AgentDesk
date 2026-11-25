@@ -348,7 +348,7 @@ fn commit(
     )
 }
 
-pub(crate) fn proof_for_binding(
+pub(super) fn proof_for_binding(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -373,11 +373,28 @@ pub(crate) fn proof_for_binding(
     Ok(proof)
 }
 
-pub(crate) fn publication_allowed(
+pub(super) fn publication_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
     publication_decision(authority, binding) == OwnershipPublicationDecision::Permitted
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn proof_for_binding_for_test(
+    authority: &TmuxSourceAuthority<'_>,
+    context: &BindingContext,
+    binding: &TuiRuntimeBinding,
+) -> io::Result<VerifiedProof> {
+    proof_for_binding(authority, context, binding)
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) fn publication_allowed_for_test(
+    authority: &TmuxSourceAuthority<'_>,
+    binding: &TuiRuntimeBinding,
+) -> bool {
+    publication_allowed(authority, binding)
 }
 
 fn publication_decision(

@@ -9,6 +9,10 @@ import { useNotifications } from "./components/NotificationCenter";
 import { useDashboardSocket } from "./app/useDashboardSocket";
 import {
   dashboardBootstrapQueryKey,
+  dashboardBootstrapSessionsQueryKey,
+  dashboardBootstrapStatsQueryKey,
+  fetchBootstrapSessions,
+  fetchBootstrapStats,
   fetchDashboardBootstrap,
 } from "./app/bootstrapQuery";
 import AppShell from "./app/AppShell";
@@ -20,6 +24,14 @@ export default function App() {
   const bootstrapQuery = useQuery({
     queryKey: dashboardBootstrapQueryKey,
     queryFn: fetchDashboardBootstrap,
+  });
+  const sessionsQuery = useQuery({
+    queryKey: dashboardBootstrapSessionsQueryKey,
+    queryFn: fetchBootstrapSessions,
+  });
+  const statsQuery = useQuery({
+    queryKey: dashboardBootstrapStatsQueryKey,
+    queryFn: fetchBootstrapStats,
   });
 
   useEffect(() => {
@@ -87,16 +99,21 @@ export default function App() {
     );
   }
 
+  const resolvedSessions = data.sessions !== undefined ? data.sessions : sessionsQuery.data;
+  const resolvedStats = data.stats !== undefined ? data.stats : (statsQuery.data ?? null);
+  const initialStatsPending = data.stats === undefined && statsQuery.isPending;
+
   return (
     <WorkspaceProvider
       initialAgents={data.agents}
       initialDepartments={data.departments}
-      initialSessions={data.sessions}
+      initialSessions={resolvedSessions}
       pushNotification={pushNotification}
     >
       <SettingsProvider
         initialSettings={data.settings}
-        initialStats={data.stats}
+        initialStats={resolvedStats}
+        initialStatsPending={initialStatsPending}
       >
         <KanbanProvider>
           <AppShell

@@ -1,15 +1,13 @@
 //! Tui session launch.
 
 #[cfg(unix)]
-pub(crate) mod first_input;
-pub(crate) mod launch_policy;
+pub(in crate::services::codex) mod first_input;
+pub(super) mod launch_policy;
 mod project_trust;
 #[cfg(unix)]
-pub(crate) use launch_policy::prepare_codex_herdr_launch;
-#[cfg(unix)]
 pub(super) use launch_policy::{
-    preflight_codex_tui_turn_with_policy, prepare_codex_tui_incarnation_with_policy,
-    tui_preflight_with_policy,
+    preflight_codex_tui_turn_with_policy, prepare_codex_herdr_launch,
+    prepare_codex_tui_incarnation_with_policy, tui_preflight_with_policy,
 };
 #[cfg(unix)]
 pub(crate) use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
@@ -246,9 +244,25 @@ pub(crate) enum CodexHerdrLaunchRefused {
 /// What an admitted Codex Herdr launch runs: the binary, its source mode and its hook endpoint.
 #[cfg(unix)]
 pub(crate) struct CodexHerdrLaunchable {
-    pub(crate) codex_bin: String,
-    pub(crate) resolution: crate::services::platform::BinaryResolution,
-    pub(crate) policy: &'static str,
+    codex_bin: String,
+    resolution: crate::services::platform::BinaryResolution,
+    policy: &'static str,
+}
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+impl CodexHerdrLaunchable {
+    /// A launchable built field by field, for tests outside this module.
+    pub(crate) fn from_parts_for_test(
+        codex_bin: String,
+        resolution: crate::services::platform::BinaryResolution,
+        policy: &'static str,
+    ) -> Self {
+        Self {
+            codex_bin,
+            resolution,
+            policy,
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

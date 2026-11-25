@@ -58,7 +58,7 @@ export function dependencyNeighborhood(nodes: CampaignNode[], selectedId: string
   };
 }
 
-export function campaignProgress(nodes: CampaignNode[]) {
+export function campaignProgress(nodes: ReadonlyArray<Pick<CampaignNode, "status">>) {
   const counts = Object.fromEntries(NODE_STATUSES.map((status) => [status, 0])) as Record<CampaignNodeStatus, number>;
   for (const node of nodes) counts[node.status]++;
   return { counts, total: nodes.length, percent: nodes.length ? Math.floor(100 * counts.completed / nodes.length) : 0 };

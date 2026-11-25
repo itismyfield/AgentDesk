@@ -271,4 +271,15 @@ impl Collector {
         evaluate_host(&mut value, now);
         value
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collect_for_test(
+        &mut self,
+        root: &Path,
+        current: &str,
+        now_ms: i64,
+        state: Option<&super::Shared>,
+    ) -> Value {
+        self.collect(root, current, now_ms, state)
+    }
 }

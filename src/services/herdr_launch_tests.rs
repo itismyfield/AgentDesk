@@ -11,6 +11,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::herdr_launch::*;
+use crate::services::herdr_launch::{
+    o_ready_at_for_test as o_ready_at, retire_unsent_for_test as retire_unsent,
+};
 use crate::services::session_host::{EvidenceGap, HostKind, RestoreResume};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use sqlx::PgPool;
@@ -417,8 +420,10 @@ async fn herdr_launch_creates_nothing_unless_its_own_pending_commits_pg() {
     let result = launch_herdr_session(&pool, launch(Some(endpoint())), failed, host.clone());
     assert!(matches!(result.await, Err(HerdrLaunchError::Prepare(_))));
     assert_eq!(stored(&pool).await, None);
-    let marker_path =
-        crate::services::tmux_common::session_temp_path(&owner.logical_key, HOST_KIND_TEMP_EXT);
+    let marker_path = crate::services::tmux_common::session_temp_path(
+        &owner.logical_key,
+        host_kind_temp_ext_for_test(),
+    );
     std::fs::create_dir(&marker_path).unwrap();
     let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone());
     assert!(matches!(result.await, Err(HerdrLaunchError::Marker(_))));

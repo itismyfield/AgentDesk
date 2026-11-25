@@ -5,6 +5,10 @@ import type { PersonaState } from "../AgentPersona";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
 import type { Translator } from "../agent-manager/types";
 import { agentStateLabel, type HomeAgentState } from "../home/homeModel";
+import { cleanupStaleIdleSession, reconcileStaleSessionTurn, type ReconcileStaleTurnResponse } from "../home/useHomeData";
+
+export { cleanupStaleIdleSession, reconcileStaleSessionTurn };
+export type ReconcileStaleResult = ReconcileStaleTurnResponse;
 
 export const STALE_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
 export const STALE_ACTIVE_MS = 30 * 60 * 1000;
@@ -14,18 +18,11 @@ const sessionOutputSchema = z.object({
   recent_output: z.string(), backend: z.string(), available: z.boolean(),
   unavailable_reason: z.string().nullish(), output_format: z.string(), captured_at_ms: z.number(),
 });
-const reconcileSchema = z.object({
-  ok: z.boolean(), session_key: z.string().optional(), reconciled: z.boolean(), status: z.string().optional(), reason: z.string().optional(),
-});
 
 export type SessionOutputSnapshot = z.infer<typeof sessionOutputSchema>;
-export type ReconcileStaleResult = z.infer<typeof reconcileSchema>;
 
 export const fetchSessionOutput = (id: number | string, lines = 80, signal?: AbortSignal) =>
   request(`/api/sessions/${encodeURIComponent(id)}/output?lines=${lines}`, { signal, cache: "no-store", suppressErrorToast: true, maxRetries: 0 }, sessionOutputSchema);
-
-export const reconcileStaleSessionTurn = (sessionKey: string) =>
-  request(`/api/sessions/${encodeURIComponent(sessionKey)}/reconcile-stale-turn`, { method: "POST", suppressErrorToast: true, maxRetries: 0 }, reconcileSchema);
 
 export function normalizeTimestamp(value: unknown): number | null {
   if (value == null) return null;
@@ -96,6 +93,10 @@ export function isStaleActiveTurn(s: DispatchedSession, now = Date.now()): boole
 
 export function canReconcileStaleSession(s: DispatchedSession, now = Date.now()): boolean {
   return isStaleActiveTurn(s, now);
+}
+
+export function canCleanupStaleIdleSession(s: DispatchedSession, now = Date.now()): boolean {
+  return s.status === "idle" && !s.active_dispatch_id && isStaleIdleSession(s, now);
 }
 
 export type SessionSummaryBucket = "working" | "background" | "stale" | "resting" | "closed";

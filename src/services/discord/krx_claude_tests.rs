@@ -11,6 +11,8 @@ mod claude_herdr_first_input_hold;
 #[path = "../claude/herdr_turn/first_input/unproven_tests.rs"]
 mod claude_herdr_first_input_unproven;
 #[cfg(unix)]
+mod claude_readiness_tests;
+#[cfg(unix)]
 #[path = "../claude_tui/host_input/busy/herdr_tests.rs"]
 mod claude_tui_busy_herdr_observation;
 #[cfg(unix)]

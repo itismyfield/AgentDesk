@@ -1,8 +1,11 @@
 //! Shipped skills-tree test that audits through the root skills-manifest route, moved out of KRX
 //! runtime_layout.
 
-use crate::runtime_layout::skill_sync::{copy_skill_dir_resolving_symlinks, sync_managed_skills};
-use crate::runtime_layout::{SkillSyncReport, managed_skills_manifest_path, managed_skills_root};
+use crate::runtime_layout::{
+    SkillSyncReport,
+    copy_skill_dir_resolving_symlinks_for_test as copy_skill_dir_resolving_symlinks,
+    managed_skills_manifest_path, managed_skills_root, sync_managed_skills,
+};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
