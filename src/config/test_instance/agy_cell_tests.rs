@@ -1,4 +1,3 @@
-use super::super::login_test_support::claude_login_fixture;
 use super::super::tests as fixture;
 use super::super::*;
 use serde_json::json;

@@ -1,9 +1,4 @@
-#[cfg(unix)]
-pub(crate) use super::test_support::fresh_fixture;
-pub(crate) use super::test_support::{
-    after_first_look, daemon_restart, forget_session, idle_fixture, lose_resume_record, pre_source,
-    restore_bound_start, retained_sources,
-};
+pub(crate) use super::test_support::{after_first_look, daemon_restart, forget_session};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server;
