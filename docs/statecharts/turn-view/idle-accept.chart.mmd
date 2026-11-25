@@ -1,0 +1,11 @@
+stateDiagram-v2
+    [*] --> New
+    New --> AcceptedHourglass: idle owner accepts a person's input / ⏳ (early attempt)
+    New --> AcceptedUnmarked: before #8398 / no marker until the start
+    AcceptedHourglass --> AcceptedHourglass: restart / record lost, persisted Pending kept
+    AcceptedHourglass --> Handing: owner grants the front
+    Handing --> Started: start re-notes Pending / fresh attempt, no add
+    Handing --> Returned: busy, race loss, replay refused or deferred, blocked, writer held, consumed
+    Returned --> Mailbox: settle, owner still holds it / ⏳ → 📬
+    Returned --> Cleared: settle, input left the queue / ⏳ removed
+    Started --> [*]: turn result keeps today's ⏳ → ✅/⚠/🛑

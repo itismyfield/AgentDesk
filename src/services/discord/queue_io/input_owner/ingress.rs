@@ -423,15 +423,25 @@ pub(crate) async fn intake(
             .allowed_bot_ids
             .contains(&request.request_owner.get());
     let raw = (shared.router_ports.owned_original)(request, bot, uploads, durable_context);
-    admit_raw(shared, provider, request.channel_id, &raw, uploads_pending).await
+    admit_raw(
+        shared,
+        provider,
+        request.channel_id,
+        &raw,
+        uploads_pending,
+        !durable_context,
+    )
+    .await
 }
 
+/// `live` marks a person's fresh arrival, the one input an idle owner puts ⏳ on at acceptance.
 async fn admit_raw(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
     raw: &Intervention,
     uploads_pending: bool,
+    live: bool,
 ) -> Option<Intake> {
     let handle = shared.mailbox(channel);
     match adopt(shared, provider, channel).await {
@@ -439,6 +449,13 @@ async fn admit_raw(
         Ok(true) => {}
         Err(error) => return Some(Intake::Rejected(error)),
     }
+    #[cfg(not(unix))]
+    let _ = live;
+    #[cfg(unix)]
+    let early = live
+        && super::early_pending::eligible(raw)
+        && ingress_hold(shared, uploads_pending).is_none()
+        && super::early_pending::idle(&handle).await;
     let role = shared
         .dispatch
         .role_overrides
@@ -462,6 +479,10 @@ async fn admit_raw(
     #[cfg(unix)]
     if intake == Intake::Accepted {
         crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Owner);
+        // Before the wake, so the start's own Pending always lands over this early ⏳.
+        if early && first {
+            super::early_pending::note(shared, channel, raw.message_id).await;
+        }
         (shared.router_ports.owner_wake)(shared, channel);
     }
     Some(intake)
@@ -548,7 +569,7 @@ pub(crate) async fn enqueue(
     channel: ChannelId,
     intervention: &Intervention,
 ) -> Option<MailboxEnqueueOutcome> {
-    let intake = admit_raw(shared, provider, channel, intervention, false).await?;
+    let intake = admit_raw(shared, provider, channel, intervention, false, false).await?;
     let (enqueued, persistence_error) = match intake {
         Intake::Accepted => (true, None),
         Intake::Pending(pending) => (false, Some(pending.to_string())),

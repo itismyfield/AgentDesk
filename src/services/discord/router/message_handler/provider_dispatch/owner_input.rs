@@ -183,7 +183,9 @@ pub(in crate::services::discord) fn owner_drive(
             idle.clone(),
             runtime.clone(),
         );
-        Box::pin(async move {
+        #[cfg(unix)]
+        let settle = (runtime.clone(), front.1.message_id);
+        let handoff = async move {
             use crate::services::discord::queue_io::input_ingress as ingress;
             let original = front.clone();
             #[cfg(unix)]
@@ -345,7 +347,13 @@ pub(in crate::services::discord) fn owner_drive(
             #[cfg(test)]
             tests::idle::observe_root_recovery_handoff(channel, original.1.message_id, &result);
             result
-        })
+        };
+        // #8398: every return of this handoff settles its front's untaken early ⏳.
+        #[cfg(unix)]
+        let handoff = crate::services::discord::queue_io::input_owner::early_pending::after_handoff(
+            settle.0, channel, settle.1, handoff,
+        );
+        Box::pin(handoff)
     });
     let settled: Option<Owed> = drains.map(|pool| {
         let settled: Owed = std::sync::Arc::new(move || {
