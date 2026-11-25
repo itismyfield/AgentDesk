@@ -1,5 +1,5 @@
 //! A Claude Pending execution its driver attached after its launch's own logged start takes the
-//! prompt the owner's Cold or HerdrIdle route waits for (#8399 S1).
+//! prompt the owner's Cold or HerdrIdle route waits for.
 use crate::services::claude_tui::owner_input::Lineage;
 use serde_json::Value;
 

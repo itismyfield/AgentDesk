@@ -1,5 +1,5 @@
 //! A Claude Pending execution whose attach found its own logged start hands its first prompt over
-//! on the route the owner waits on, and the owner's claim and reserve write it once (#8399 S1).
+//! on the route the owner waits on, and the owner's claim and reserve write it once.
 use super::*;
 use crate::services::discord::queue_io::input_owner::drive::{self, FrontClaim};
 
