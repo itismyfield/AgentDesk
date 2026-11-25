@@ -6,7 +6,6 @@ import { X } from "lucide-react";
 import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import type { Department } from "../../types";
-import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { Checkbox } from "../../kit/free/checkbox-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
@@ -33,7 +32,7 @@ type AgentFormValues = z.infer<typeof agentFormSchema>;
 type TextKey = "name" | "name_ko" | "name_ja" | "name_zh" | "personality";
 
 export default function AgentFormModal({
-  locale, tr, form, departments, isEdit, agentId, saving, onSave, onClose,
+  locale, tr, form, isEdit, agentId, saving, onSave, onClose,
 }: {
   isKo: boolean; locale: string; tr: (ko: string, en: string) => string;
   form: FormData; departments: Department[]; isEdit: boolean; agentId?: string;
@@ -119,24 +118,19 @@ export default function AgentFormModal({
             {locale.startsWith("ko") && <TextField id="agent-name-ko" label={tr("한글 이름", "Korean name")} placeholder="도로롱" {...text("name_ko")} />}
             {locale.startsWith("ja") && <TextField id="agent-name-ja" label={tr("일본어 이름", "Japanese name")} placeholder="ドロロン" {...text("name_ja")} />}
             {locale.startsWith("zh") && <TextField id="agent-name-zh" label={tr("중국어 이름", "Chinese name")} placeholder="多罗隆" {...text("name_zh")} />}
-            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-end gap-3">
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-start gap-3">
               <div>
                 <label htmlFor="agent-emoji" className="mb-1.5 block text-[13px] font-medium text-(--fg)">{tr("아이콘", "Icon")}</label>
                 <EmojiPicker id="agent-emoji" value={formValues.avatar_emoji} onChange={(emoji) => setValue("avatar_emoji", emoji, { shouldDirty: true, shouldValidate: true })} />
               </div>
               <Select
-                id="agent-department" label={tr("소속 부서", "Department")} value={formValues.department_id}
-                onChange={(value) => setValue("department_id", value, { shouldDirty: true })}
-                options={[{ value: "", label: tr("미배정", "Unassigned") }, ...departments.map((d) => ({ value: d.id, label: [d.icon, localeName(locale, d)].filter(Boolean).join(" ") }))]}
+                id="agent-provider" label={tr("메인 Provider", "Main provider")} value={formValues.cli_provider}
+                onChange={(value) => setValue("cli_provider", value, { shouldDirty: true, shouldValidate: true })}
+                disabled={providerCatalog.loading}
+                hint={providerCatalog.loading ? tr("Provider 목록을 불러오는 중이에요.", "Loading providers…") : providerCatalog.error ? tr("목록을 불러오지 못해 기본 목록을 보여 줘요.", "Could not load the list; showing the built-in one.") : undefined}
+                options={providerCatalog.selectableIds.map((p) => ({ value: p, label: catalogLabel(providerCatalog.entries, p) }))}
               />
             </div>
-            <Select
-              id="agent-provider" label={tr("메인 Provider", "Main provider")} value={formValues.cli_provider}
-              onChange={(value) => setValue("cli_provider", value, { shouldDirty: true, shouldValidate: true })}
-              disabled={providerCatalog.loading}
-              hint={providerCatalog.loading ? tr("Provider 목록을 불러오는 중이에요.", "Loading providers…") : providerCatalog.error ? tr("목록을 불러오지 못해 기본 목록을 보여 줘요.", "Could not load the list; showing the built-in one.") : undefined}
-              options={providerCatalog.selectableIds.map((p) => ({ value: p, label: catalogLabel(providerCatalog.entries, p) }))}
-            />
           </section>
 
           <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-details">

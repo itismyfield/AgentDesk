@@ -31,6 +31,42 @@ type ParentLookup = (channelInfo: api.DiscordChannelInfo | null | undefined) => 
 
 const rowClass = "flex min-w-0 items-start gap-2.5 rounded-(--r-md) px-3 py-2 shadow-[inset_0_0_0_1px_var(--line-soft)]";
 const FINISHED_PAGE = 20;
+const RAW_SNOWFLAKE_RE = /^#?(\d{15,22})$/;
+
+function extractRawChannelSnowflake(value: string): string | null {
+  const match = value.trim().match(RAW_SNOWFLAKE_RE);
+  return match ? match[1] : null;
+}
+
+function ConnectionSummaryLabel({
+  summary,
+  tr,
+}: {
+  summary: { title: string; subtitle: string | null; webUrl: string | null; deepLink: string | null };
+  tr: Translator;
+}) {
+  const rawId = extractRawChannelSnowflake(summary.title);
+  if (!rawId) return <DiscordSummaryLabel summary={summary} />;
+  const shortLabel = `${tr("#채널", "#channel")} · ...${rawId.slice(-6)}`;
+  const text = summary.subtitle ? `${shortLabel} · ${summary.subtitle}` : shortLabel;
+  const href = summary.deepLink ?? summary.webUrl;
+  if (!href) {
+    return (
+      <span className="block min-w-0 flex-1 truncate font-mono text-xs text-(--fg)" title={rawId}>
+        {text}
+      </span>
+    );
+  }
+  return (
+    <a
+      href={href}
+      className="block min-w-0 flex-1 truncate rounded-sm font-mono text-xs leading-11 text-(--fg) hover:underline sm:leading-5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent)"
+      title={rawId}
+    >
+      {text}
+    </a>
+  );
+}
 
 /** Connections: Discord routes and live sessions. Finished sessions (hundreds on busy agents) stay a count and open
  * twenty at a time, without Discord lookups. */
@@ -64,7 +100,7 @@ export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, 
       <li key={session.id} className={rowClass}>
         <div className="min-w-0 flex-1">
           <div className="flex min-w-0 items-center gap-1">
-            <DiscordSummaryLabel summary={target} />
+            <ConnectionSummaryLabel summary={target} tr={tr} />
             <DiscordDeepLinkChip deepLink={target.deepLink} label={tr("앱", "App")} />
           </div>
           <div className="mt-0.5 truncate text-xs text-(--fg-muted)">{session.session_info || session.model || "AgentDesk session"}</div>
@@ -91,14 +127,26 @@ export function AgentConnectionSection({ tr, fold, summary, bindings, sessions, 
             const counter = binding.counterModelChannelId && binding.counterModelChannelId !== binding.channelId
               ? describeDiscordTarget(binding.counterModelChannelId, counterInfo, resolveParent(counterInfo))
               : null;
+            const counterRawId = counter ? extractRawChannelSnowflake(counter.title) : null;
             return (
               <li key={`${binding.channelId}:${source}`} className={`${rowClass} items-center`}>
                 <div className="min-w-0 flex-1">
                   <div className="flex min-w-0 items-center gap-1">
-                    <DiscordSummaryLabel summary={target} />
+                    <ConnectionSummaryLabel summary={target} tr={tr} />
                     <DiscordDeepLinkChip deepLink={target.deepLink} label={tr("앱", "App")} />
                   </div>
-                  {counter ? <div className="mt-0.5 truncate text-xs text-(--fg-muted)">{`counter: ${formatDiscordSummary(counter)}`}</div> : null}
+                  {counter ? (
+                    <div className="mt-0.5 truncate text-xs text-(--fg-muted)">
+                      counter:{" "}
+                      {counterRawId ? (
+                        <span className="font-mono text-xs" title={counterRawId}>
+                          {`${tr("#채널", "#channel")} · ...${counterRawId.slice(-6)}`}
+                        </span>
+                      ) : (
+                        formatDiscordSummary(counter)
+                      )}
+                    </div>
+                  ) : null}
                 </div>
                 <Badge tone="purple">{bindingSourceLabel(source)}</Badge>
               </li>

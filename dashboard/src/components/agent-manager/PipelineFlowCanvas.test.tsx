@@ -64,6 +64,9 @@ describe("PipelineFlowCanvas", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    if (!Element.prototype.scrollIntoView) {
+      Element.prototype.scrollIntoView = () => {};
+    }
     vi.useFakeTimers();
     flowState.colorMode = null;
     flowState.zoomIn.mockReset();
@@ -114,6 +117,7 @@ describe("PipelineFlowCanvas", () => {
   });
 
   it("defaults MiniMap to hidden, toggles it via Map button, and wires zoom/fit controls", async () => {
+    const onSelectionChange = vi.fn();
     await act(async () => {
       root.render(
         <PipelineFlowCanvas
@@ -123,13 +127,27 @@ describe("PipelineFlowCanvas", () => {
           graphPanelNote="note"
           isFsmVariant={false}
           onConnectTransition={vi.fn()}
-          onSelectionChange={vi.fn()}
+          onSelectionChange={onSelectionChange}
           selection={null}
           tr={(_ko, en) => en}
           useScrollableMobileFsmCanvas={false}
         />,
       );
     });
+
+    expect(container.querySelector("select")).toBeNull();
+    const picker = container.querySelector<HTMLButtonElement>('button[role="combobox"][aria-label="State or transition to edit"]');
+    expect(picker).not.toBeNull();
+    await act(async () => {
+      picker!.click();
+    });
+    const edgeOption = [...document.querySelectorAll<HTMLElement>('[role="option"]')].find((el) =>
+      el.textContent?.includes("ready → done"),
+    )!;
+    await act(async () => {
+      edgeOption.click();
+    });
+    expect(onSelectionChange).toHaveBeenCalledWith({ kind: "transition", index: 0 });
 
     expect(container.querySelector("[data-testid='rf-minimap']")).toBeNull();
 

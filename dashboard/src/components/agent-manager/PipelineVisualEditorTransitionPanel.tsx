@@ -1,3 +1,4 @@
+import { Select } from "../../kit/free/select-clean";
 import type { PipelineConfigFull } from "../../types";
 import { ActionMenu } from "../common/ActionMenu";
 import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
@@ -5,7 +6,6 @@ import {
   BUTTON_NEUTRAL_STYLE,
   BUTTON_WARN_STYLE,
   FSM_DETAIL_PANEL_STYLE,
-  FSM_INPUT_STYLE,
   INPUT_CLASS,
   INPUT_STYLE,
   MUTED_TEXT_STYLE,
@@ -306,24 +306,21 @@ function SelectField(props: {
   emptyLabel?: string;
   fsm?: boolean;
 }) {
+  const selectOptions = [
+    ...(props.emptyLabel !== undefined ? [{ value: "", label: props.emptyLabel }] : []),
+    ...props.options
+      .filter((option) => props.emptyLabel === undefined || option !== "")
+      .map((option) => ({ value: option, label: option })),
+  ];
   return (
-    <div>
-      <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
-        {props.label}
-      </label>
-      <select
-        value={props.value}
-        onChange={(event) => props.onChange(event.target.value)}
-        className={INPUT_CLASS}
-        style={props.fsm ? FSM_INPUT_STYLE : INPUT_STYLE}
-      >
-        {props.emptyLabel !== undefined && <option value="">{props.emptyLabel}</option>}
-        {props.options.map((option) => (
-          <option key={option} value={option}>
-            {option}
-          </option>
-        ))}
-      </select>
-    </div>
+    <Select
+      label={props.label}
+      aria-label={props.label}
+      value={props.value}
+      onChange={(value) => props.onChange(value)}
+      options={selectOptions}
+      placeholder="-"
+      className={props.fsm ? "font-mono" : undefined}
+    />
   );
 }

@@ -268,7 +268,6 @@ export function AgentInfoCardContent({
     requestAnimationFrame(() => root.current?.querySelector('[data-testid="agent-detail-turns"]')?.scrollIntoView({ block: "nearest" }));
   };
 
-  const department = departments.find((entry) => entry.id === selectedDeptId);
   // Counts show once read, so an unread list never reads as zero.
   const routeCount = shared.bindings === undefined ? null : bindings.length;
   const liveCount = sessions ? live.length : null;
@@ -342,7 +341,7 @@ export function AgentInfoCardContent({
         stoppingTurn={stoppingTurn}
         stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}
-        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions })}
+        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions }).filter((warning) => warning.code !== "unassigned")}
       />
       <AlertDialog
         open={confirmStopOpen}
@@ -359,7 +358,7 @@ export function AgentInfoCardContent({
         tr={tr}
         locale={locale}
         fold={fold("run")}
-        summary={[department ? localeName(locale, department) : tr("미배정", "Unassigned"), getProviderMeta(selectedProvider).label].join(" · ")}
+        summary={getProviderMeta(selectedProvider).label}
         departments={departments}
         selectedDeptId={selectedDeptId}
         savingDept={savingDept}
