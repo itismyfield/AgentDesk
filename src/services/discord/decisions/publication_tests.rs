@@ -429,10 +429,8 @@ async fn decision_forum_refusal_leaves_the_request_to_post_once_fixed_pg() {
     rig.close().await;
 }
 
-/// A thread target is not wired for selection: its post keeps disabled buttons, says why and
-/// takes no click. The agent's own channel gets enabled buttons, once; the owner's first click is
-/// the request's one choice, stored with its event before any delivery, and a restart starts
-/// that stored selection exactly once.
+/// A thread target keeps disabled buttons, says why and takes no click. The agent's channel
+/// opens once; the first click is the one stored choice, started once after a restart.
 #[tokio::test]
 async fn decision_buttons_open_only_where_wired_and_take_one_choice_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -498,6 +496,9 @@ async fn decision_buttons_open_only_where_wired_and_take_one_choice_pg() {
     let event = event.unwrap().expect("the selection's event");
     assert!(event.approves(&first.text), "{}", first.text);
     assert_eq!((event.actor_id(), event.channel_id()), (OWNER, CHANNEL));
+    // The click's own start never came: after a restart the stored selection is what starts.
+    let aged = "UPDATE decision_choices SET chosen_at = NOW() - INTERVAL '1 minute'";
+    sqlx::query(aged).execute(&rig.pool).await.unwrap();
     let unstarted = selection::unstarted(&rig.pool).await.unwrap();
     assert_eq!(unstarted, [first.clone()], "what a restart starts");
     let reserve = crate::db::decisions::reserve_first_attempt;
@@ -508,9 +509,8 @@ async fn decision_buttons_open_only_where_wired_and_take_one_choice_pg() {
     rig.close().await;
 }
 
-/// A write journaled by a process that is gone is settled without another write: its event
-/// closes unknown, the card shows that with every button disabled, the announce bot archives and
-/// locks the thread once, and a later click stores nothing.
+/// A journaled write whose process is gone closes unknown with no other write; the card says
+/// so, the announce bot archives and locks the thread once, and a later click stores nothing.
 #[tokio::test]
 async fn decision_unknown_selection_is_settled_without_a_resend_then_sealed_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();

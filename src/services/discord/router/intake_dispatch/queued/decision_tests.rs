@@ -143,9 +143,8 @@ async fn decision_original_leaves_the_queue_unrun_unless_its_event_is_open_pg() 
     db.drop().await;
 }
 
-/// A start that queues its input again rebuilds the entry from the request text. Inside a
-/// Decision start the rebuilt entry still names the event, unmerged, and the start reads as a
-/// wait; outside one nothing is stamped, and a start that queued nothing is no wait.
+/// Inside a Decision start, an entry rebuilt from the request text still names the event and
+/// the start reads as a wait; outside one nothing is stamped.
 #[tokio::test]
 async fn decision_start_that_queues_its_input_again_keeps_the_event_origin() {
     let _root = crate::config::TestRuntimeRootGuard::new();

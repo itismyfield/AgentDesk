@@ -1,6 +1,5 @@
-//! `POST /api/decisions` stores a Decision request under its capability hash and posts it, its
-//! buttons enabled where selection is wired; `GET /api/decisions/{id}` reads it back to that
-//! requester only.
+//! `POST /api/decisions` stores a Decision request under its capability hash and posts it;
+//! `GET /api/decisions/{id}` reads it back to that requester only.
 
 use axum::{
     Json,
@@ -21,9 +20,8 @@ fn failure(status: StatusCode, error: &str) -> RouteResponse {
     (status, Json(json!({"ok": false, "error": error})))
 }
 
-/// The capability hash owns the request. 201: posted, `open` when its buttons take a selection and
-/// `disabled` when its target is not wired for one; 202: maybe posted, not re-sent; 502: starter
-/// refused for good (post_failed), or forum refused (still stored); 503: nothing was sent.
+/// The capability hash owns the request. 201: posted, `open` or (target not wired) `disabled`;
+/// 202: maybe posted, not re-sent; 502: starter or forum refused; 503: nothing was sent.
 pub async fn ask(
     _caller: HumanInputCaller,
     State(state): State<AppState>,

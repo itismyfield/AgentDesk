@@ -51,9 +51,8 @@ impl Owner {
         }
     }
 
-    /// The Decision tickets whose originals this owner still holds queued, attempted or kept, or
-    /// refused with a notice still owed (a refusal drops its bind and keeps its receipt): what a
-    /// settlement checks against the events PG already closed.
+    /// The Decision tickets this owner still holds an original of, or refused with a notice owed
+    /// (a refusal drops its bind, not its receipt): checked against the events PG closed.
     pub(crate) fn decision_tickets(&self) -> Vec<String> {
         let s = &self.snapshot;
         let tag = format!("{}-", crate::db::decisions::TICKET_TAG);

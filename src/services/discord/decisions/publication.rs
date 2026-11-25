@@ -1,6 +1,5 @@
-//! Posts a stored request with its channel's provider bot: forum guarded, journal, then one POST.
-//! A lost answer is settled by finding that post, a refusal is kept; neither is posted again.
-//! The posted buttons are enabled only where everything a selection needs is wired.
+//! Posts a stored request with its channel's provider bot, once: a lost answer is found again
+//! and a refusal is kept. Its buttons are enabled only where selection is wired.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -85,9 +84,8 @@ pub(crate) async fn publish(
     }
 }
 
-/// Why this request's buttons stay disabled: `None` only when its target is its agent's own
-/// channel and the start path a selection is delivered through is wired there. A thread target
-/// and a Herdr channel whose executor is not wired keep the disabled post.
+/// Why the buttons stay disabled; `None` when the target is the agent's own channel and a
+/// start there is not refused. A thread, or a host that refuses, keeps the disabled post.
 async fn unwired(
     pool: &PgPool,
     registry: Option<&HealthRegistry>,
@@ -104,9 +102,8 @@ async fn unwired(
     health::decision_target::start_refusal(registry, asked.provider, asked.logical_channel).await
 }
 
-/// Enables the posted starter's buttons where selection is wired; elsewhere the post keeps its
-/// disabled buttons and says why. The card is edited before the request opens in PG, so no click
-/// is taken from a card that could not be shown open.
+/// Enables the starter's buttons where selection is wired, else says why not. The card is
+/// edited before PG opens the request, so no click is taken from a card not shown open.
 async fn activate(
     pool: &PgPool,
     registry: Option<&HealthRegistry>,
@@ -125,8 +122,9 @@ async fn activate(
         return Outcome::Posted(thread);
     }
     match selection::open(pool, asked.request_id, reason.as_deref()).await {
-        Ok(true) => Outcome::Open(thread),
-        Ok(false) => Outcome::Posted(thread),
+        // A request another ask opened meanwhile is open as well.
+        Ok(_) if reason.is_none() => Outcome::Open(thread),
+        Ok(_) => Outcome::Posted(thread),
         Err(error) => {
             tracing::warn!(%error, "decision request not opened; its clicks are refused");
             Outcome::Posted(thread)

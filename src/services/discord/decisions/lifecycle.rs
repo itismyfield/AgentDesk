@@ -66,9 +66,8 @@ async fn owner(
     Some((owner.ok()?.0, provider))
 }
 
-/// One pass over the stored selections: one no attempt has started is started once (a restart
-/// between the store and the start leaves it), attempts are settled from their evidence without
-/// another write, and a request whose delivery ended is closed.
+/// One pass: an unstarted selection is started once, attempts are settled from their evidence
+/// without another write, and a request whose delivery ended is closed.
 pub(crate) async fn converge(pool: &PgPool, registry: &HealthRegistry) {
     for selection in selection::unstarted(pool).await.unwrap_or_default() {
         // Only the process whose runtime owns the channel starts it; another leaves it be.
@@ -90,9 +89,8 @@ fn refused(error: &serenity::Error) -> bool {
         if http.status_code().is_some_and(|status| confirmed(status.as_u16())))
 }
 
-/// Closes the request whose selection's delivery ended: it takes no selection again from here,
-/// its card shows the result, and the announce bot archives and locks its thread. A display that
-/// could not be made yet is tried again by the next pass; a refused one is recorded and left.
+/// Closes the request in PG, shows the result and has the announce bot archive and lock the
+/// thread. A display not made yet is tried by the next pass; a refused one is recorded.
 async fn close(pool: &PgPool, registry: &HealthRegistry, ended: &Ended) {
     let (selection, request_id) = (&ended.selection, ended.selection.request_id);
     if let Err(error) = selection::close(pool, request_id, None).await {

@@ -415,9 +415,8 @@ fn queued_submission(
     }
 }
 
-/// Finishes an admitted queue start. A Decision start then records what it proved: an input put
-/// back under its origin waits again, a clear fails it, and an error after its journal, or a
-/// deferral that did not return that input, closes it unknown.
+/// Finishes an admitted queue start. A Decision input put back under its origin waits again, a
+/// clear fails it, and an error or a deferral that did not return that input closes it unknown.
 pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,

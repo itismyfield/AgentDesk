@@ -49,9 +49,8 @@ static OPEN: AtomicBool = AtomicBool::new(false);
 /// This process's run: its node and its start on the database clock, fixed once.
 static RUN: OnceLock<decisions::Run> = OnceLock::new();
 
-/// Fixes this run's start before the process moves any event, so a row it moves is never read
-/// as an earlier run's. Every entry that starts, journals or recovers an event asks here first;
-/// until the cluster bootstrap registered this node's name there is no run and nothing moves.
+/// Fixes this run's start before the process moves any event; every entry asks here first.
+/// Until the cluster bootstrap registered this node's name there is no run and nothing moves.
 pub(crate) async fn run(pool: &PgPool) -> Result<&'static decisions::Run, sqlx::Error> {
     let Some(node) = node() else {
         let unnamed = "decision holder is not registered yet";
@@ -492,9 +491,8 @@ pub(crate) fn spawn_boot_recovery(pool: Option<PgPool>) {
     });
 }
 
-/// Settles every unsettled attempt from the evidence at hand, without another write. Asked when
-/// the registry lists a node offline (a peer that booted while it was still listed online kept
-/// its rows) and by the selection pass, so an idle channel's attempt still reaches its end.
+/// Settles every unsettled attempt from its evidence, without another write: asked when the
+/// registry lists a node offline, and by the selection pass for attempts on idle channels.
 pub(crate) async fn settle_abandoned(pool: &PgPool) {
     let settled = match run(pool).await {
         Ok(run) => recover_before(pool, run.boot, global_mailbox).await,

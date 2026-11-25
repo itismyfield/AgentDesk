@@ -55,9 +55,8 @@ fn input_text(
     )
 }
 
-/// Stores the click as the request's choice unless it already has one. The request row lock
-/// orders every selection of a request, so the first commit wins; `None` is a click on no post
-/// of ours. Whether the requester's session is alive is not asked here.
+/// Stores the click as the request's one choice under its row lock: the first commit wins, and
+/// `None` is a click on no post of ours. The requester's session is not looked at here.
 pub(crate) async fn choose_once(
     pool: &PgPool,
     click: &Click<'_>,
@@ -243,8 +242,13 @@ type Stored = (
     Option<String>,
 );
 
-/// The stored selections whose attempt is in one of `states` and whose thread is not sealed.
-async fn stored(pool: &PgPool, states: &[&str]) -> Result<Vec<Ended>, sqlx::Error> {
+/// The stored selections whose attempt is in one of `states` and whose thread is not sealed;
+/// `settled_secs` leaves out a choice younger than that, which its click is still handling.
+async fn stored(
+    pool: &PgPool,
+    states: &[&str],
+    settled_secs: f64,
+) -> Result<Vec<Ended>, sqlx::Error> {
     let rows: Vec<Stored> = sqlx::query_as(
         "SELECT r.request_id, c.selection_event_id, r.thread_id, r.logical_channel_id, r.provider,
                 r.request_ref, r.title, o.label, o.recommendation_percent, a.state, a.detail
@@ -254,9 +258,11 @@ async fn stored(pool: &PgPool, states: &[&str]) -> Result<Vec<Ended>, sqlx::Erro
          JOIN decision_delivery_attempts a ON a.event_id = c.selection_event_id
          WHERE a.state = ANY($1) AND r.sealed_at IS NULL
            AND r.lifecycle IN ('selecting', 'closed')
+           AND c.chosen_at <= NOW() - make_interval(secs => $2)
          ORDER BY c.chosen_at",
     )
     .bind(states)
+    .bind(settled_secs)
     .fetch_all(pool)
     .await?;
     let read = |row: Stored| {
@@ -283,16 +289,16 @@ async fn stored(pool: &PgPool, states: &[&str]) -> Result<Vec<Ended>, sqlx::Erro
     Ok(rows.into_iter().filter_map(read).collect())
 }
 
-/// The stored selections no attempt has started: a restart between the store and the start
-/// leaves one, and it is started once.
+/// The stored selections no attempt has started and whose click is no longer about to: a
+/// restart between the store and the start leaves one, and it is started once.
 pub(crate) async fn unstarted(pool: &PgPool) -> Result<Vec<Selection>, sqlx::Error> {
-    let found = stored(pool, &["not_started"]).await?;
+    let found = stored(pool, &["not_started"], 5.0).await?;
     Ok(found.into_iter().map(|ended| ended.selection).collect())
 }
 
 /// The selections whose delivery ended and whose thread is not archived and locked yet.
 pub(crate) async fn ended(pool: &PgPool) -> Result<Vec<Ended>, sqlx::Error> {
-    stored(pool, &["delivered", "failed", "unknown_closed"]).await
+    stored(pool, &["delivered", "failed", "unknown_closed"], 0.0).await
 }
 
 /// Whether a stored selection is still being delivered; only then are attempts settled here.

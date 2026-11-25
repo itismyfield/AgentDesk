@@ -48,9 +48,8 @@ pub trait Normalizer: Send + Sync {
     async fn normalize_once(&self) -> Normalized;
 }
 
-/// Why a start on the channel is refused now: no runtime here owns it, or its host refuses the
-/// start (a Herdr channel whose executor is not wired stays refused). `None`: the start path is
-/// wired for this channel, and a start there carries its input as the session's first prompt.
+/// Why a start on the channel is refused now: no runtime here owns it or its host refuses
+/// (a Herdr channel whose executor is not wired stays refused). `None`: the path is wired.
 pub(crate) async fn start_refusal(
     registry: &HealthRegistry,
     provider: &ProviderKind,

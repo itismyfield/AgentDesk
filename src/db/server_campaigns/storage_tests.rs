@@ -1119,6 +1119,13 @@ async fn later_branch_migrations_upgrade_a_main_database_already_at_0161_pg() {
                 "column:decision_options.handle",
             ],
         ),
+        (
+            204,
+            &[
+                "table:decision_choices",
+                "column:decision_requests.sealed_at",
+            ],
+        ),
     ];
     assert_eq!(
         expected
