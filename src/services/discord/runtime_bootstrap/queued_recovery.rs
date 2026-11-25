@@ -33,7 +33,7 @@ pub(super) async fn restore_queued_and_inflight_work(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
 ) -> Vec<(ChannelId, MessageId, MessageId)> {
-    agy_shadow::observe(http, provider).await;
+    agy_shadow::observe(http, shared.pg_pool.as_ref(), provider).await;
     let (stale_cards, held) = restore_and_hold(http, shared, provider).await;
     #[cfg(unix)]
     {

@@ -10,8 +10,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::store::STORE_DIR_NAME;
 use crate::services::tui_o::store::agy_spool::replay::{
-    AgyFrontier, AgyOutcome, AgyReplay, AgyTarget, checked_dir, child_retired, mark_child_retired,
-    replay, version_dir,
+    AgyFrontier, AgyOutcome, AgyReplay, AgySlot, AgyTarget, AgyTurnKey, SlotName, checked_dir,
+    child_retired, classify_slot, mark_child_retired, replay, version_dir,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +32,73 @@ enum Phase {
     Booting,
     Adopted,
     Retired,
+}
+
+/// Why a destination is held; the slot names the exact turn directory.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgyHoldReason {
+    /// The slot exists without a committed prefix: the producer stopped right after `mkdir`.
+    NoCheckpoint,
+    /// The producer committed `open` but neither Done nor a failure.
+    Pending(AgyTurnKey),
+    Corrupt(String),
+    Duplicate,
+    Malformed,
+    /// A slot pinned by an earlier read disappeared.
+    Frontier,
+    Evidence(AgyEvidenceHold),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgyEvidenceHold {
+    /// Only the PG row: it proves the original and destination, never the execution's nonce.
+    PgOnly,
+    Conflict,
+    Unverifiable,
+    Missing,
+}
+
+/// The execution an iMessage slot must name, or why it cannot be adopted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AgyEvidence {
+    Bound(AgyTurnKey),
+    Held(AgyEvidenceHold),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgyHeldSlot {
+    pub(crate) name: String,
+    pub(crate) reason: AgyHoldReason,
+}
+
+/// Every slot of one destination: one held slot never hides the others.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AgyCustody {
+    pub(crate) turns: Vec<AgyReplay>,
+    pub(crate) held: Vec<AgyHeldSlot>,
+}
+
+impl AgyCustody {
+    /// The frontier each replayed slot reached, for the next read to prove again.
+    pub(crate) fn frontiers(&self) -> BTreeMap<AgySlot, AgyFrontier> {
+        self.turns
+            .iter()
+            .map(|turn| (turn.slot.clone(), turn.frontier.clone()))
+            .collect()
+    }
+
+    fn hold(&mut self, slot: &AgySlot, reason: AgyHoldReason) {
+        self.held.push(AgyHeldSlot {
+            name: slot.dir_name(),
+            reason,
+        });
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct AgyAdoption {
+    pub(crate) permit: Option<AgyReadPermit>,
+    pub(crate) custody: AgyCustody,
 }
 
 pub(crate) struct AgyShadowHost {
@@ -68,11 +135,30 @@ impl AgyShadowHost {
         }))
     }
 
-    /// Restore all known turns, including those with a saved frontier whose spool disappeared.
+    /// Restore all known turns. A held slot other than a pending turn refuses the destination.
     pub(crate) fn restore(
         &self,
-        previous: &BTreeMap<u64, AgyFrontier>,
+        previous: &BTreeMap<AgySlot, AgyFrontier>,
     ) -> io::Result<Vec<AgyReplay>> {
+        let custody = self.custody(previous)?;
+        if let Some(held) = custody
+            .held
+            .iter()
+            .find(|held| !matches!(held.reason, AgyHoldReason::Pending(_)))
+        {
+            return Err(io::Error::other(format!(
+                "agy spool slot {} is held: {:?}",
+                held.name, held.reason
+            )));
+        }
+        Ok(custody.turns)
+    }
+
+    /// Every slot with its exact hold reason, including those with a saved frontier that vanished.
+    pub(crate) fn custody(
+        &self,
+        previous: &BTreeMap<AgySlot, AgyFrontier>,
+    ) -> io::Result<AgyCustody> {
         let phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
         if *phase == Phase::Retired || self.current().is_none() {
             return Err(io::Error::other("agy shadow reader lost custody"));
@@ -80,57 +166,78 @@ impl AgyShadowHost {
         self.replay_all(previous)
     }
 
-    fn replay_all(&self, previous: &BTreeMap<u64, AgyFrontier>) -> io::Result<Vec<AgyReplay>> {
+    /// Replay-only custody of an existing spool, iMessage evidence applied. Never a permit.
+    pub(crate) fn recover(
+        &self,
+        previous: &BTreeMap<AgySlot, AgyFrontier>,
+        evidence: &BTreeMap<AgySlot, AgyEvidence>,
+    ) -> io::Result<AgyCustody> {
+        let mut custody = self.custody(previous)?;
+        hold_unproven(&mut custody, evidence);
+        Ok(custody)
+    }
+
+    fn replay_all(&self, previous: &BTreeMap<AgySlot, AgyFrontier>) -> io::Result<AgyCustody> {
         checked_dir(self.root.clone())?;
         if child_retired(&self.root, self.permit.target)? {
             return Err(io::Error::other("agy shadow reader lost custody"));
         }
         let AgyTarget { destination, .. } = self.permit.target;
-        let turns = match version_dir(&self.root, destination) {
-            Ok(dir) => numeric_children(&dir)?,
+        let mut custody = AgyCustody::default();
+        let slots = match version_dir(&self.root, destination) {
+            Ok(dir) => slot_children(&dir, &mut custody)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
-        for message in previous.keys() {
-            if turns.binary_search(message).is_err() {
-                return Err(io::Error::other(
-                    "agy spool missing after a committed frontier",
-                ));
+        for slot in previous.keys() {
+            if !slots.contains(slot) {
+                custody.hold(slot, AgyHoldReason::Frontier);
             }
         }
-        let records = turns
-            .into_iter()
-            .map(|message| {
-                replay(
-                    &self.root,
-                    self.permit.target,
-                    message,
-                    previous.get(&message),
-                )
-            })
-            .collect::<io::Result<Vec<_>>>()?;
+        let mut named = BTreeMap::new();
+        for slot in slots {
+            match replay(&self.root, self.permit.target, &slot, previous.get(&slot)) {
+                Ok(turn) => {
+                    if let Some(other) = named.insert(turn.key.id, slot.clone()) {
+                        custody.hold(&other, AgyHoldReason::Duplicate);
+                        custody.hold(&slot, AgyHoldReason::Duplicate);
+                    }
+                    if turn.outcome == AgyOutcome::Pending {
+                        custody.hold(&slot, AgyHoldReason::Pending(turn.key.clone()));
+                    }
+                    custody.turns.push(turn);
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    custody.hold(&slot, AgyHoldReason::NoCheckpoint);
+                }
+                Err(error) => custody.hold(&slot, AgyHoldReason::Corrupt(error.to_string())),
+            }
+        }
         if self.current().is_none() {
             return Err(io::Error::other(
                 "agy shadow reader lost custody during replay",
             ));
         }
-        Ok(records)
+        Ok(custody)
     }
 
-    /// Ready after source validation and confirmation that prior Legacy work is settled.
+    /// Ready after source validation, iMessage evidence and confirmation that prior Legacy work is
+    /// settled. Any held slot, a pending one included, keeps the whole destination unadopted.
     pub(crate) fn adopt(
         &self,
-        previous: &BTreeMap<u64, AgyFrontier>,
+        previous: &BTreeMap<AgySlot, AgyFrontier>,
         prior_legacy_settled: bool,
-    ) -> io::Result<(Option<AgyReadPermit>, Vec<AgyReplay>)> {
+        evidence: &BTreeMap<AgySlot, AgyEvidence>,
+    ) -> io::Result<AgyAdoption> {
         let mut phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
         if *phase == Phase::Retired || self.current().is_none() {
             return Err(io::Error::other("agy shadow reader lost custody"));
         }
         *phase = Phase::Booting;
-        let turns = self.replay_all(previous)?;
+        let mut custody = self.replay_all(previous)?;
+        hold_unproven(&mut custody, evidence);
         let mut permit = None;
-        if prior_legacy_settled && turns.iter().all(|turn| turn.outcome != AgyOutcome::Pending) {
+        if prior_legacy_settled && custody.held.is_empty() {
             permit = self
                 .gate
                 .admit(|epoch| {
@@ -143,7 +250,7 @@ impl AgyShadowHost {
                 })
                 .flatten();
         }
-        Ok((permit, turns))
+        Ok(AgyAdoption { permit, custody })
     }
 
     pub(crate) fn body_owner(&self) -> Option<AgyBodyOwner> {
@@ -155,11 +262,11 @@ impl AgyShadowHost {
     }
 
     /// Called after an exact row delete and a fresh successor check under the caller's input fence.
-    /// Disposition must prove each whole turn settled; errors and pending spools keep it active.
+    /// Disposition must prove each whole turn settled; errors and held slots keep it active.
     pub(crate) fn retire_child(
         &self,
         permit: AgyReadPermit,
-        previous: &BTreeMap<u64, AgyFrontier>,
+        previous: &BTreeMap<AgySlot, AgyFrontier>,
         settled: impl Fn(&AgyReplay) -> bool,
     ) -> io::Result<bool> {
         let mut phase = self.phase.lock().unwrap_or_else(PoisonError::into_inner);
@@ -170,11 +277,8 @@ impl AgyShadowHost {
         {
             return Ok(false);
         }
-        let turns = self.replay_all(previous)?;
-        if turns
-            .iter()
-            .any(|turn| turn.outcome == AgyOutcome::Pending || !settled(turn))
-        {
+        let custody = self.replay_all(previous)?;
+        if !custody.held.is_empty() || !custody.turns.iter().all(|turn| settled(turn)) {
             return Ok(false);
         }
         self.gate
@@ -191,6 +295,27 @@ impl AgyShadowHost {
 
     fn current(&self) -> Option<()> {
         (self.gate.current().epoch() == Some(self.permit.generation.get())).then_some(())
+    }
+}
+
+/// An iMessage slot is adopted only when durable evidence names its exact execution.
+fn hold_unproven(custody: &mut AgyCustody, evidence: &BTreeMap<AgySlot, AgyEvidence>) {
+    let unproven: Vec<(AgySlot, AgyEvidenceHold)> = custody
+        .turns
+        .iter()
+        .filter(|turn| matches!(turn.slot, AgySlot::Imessage(_)))
+        .filter_map(|turn| {
+            let reason = match evidence.get(&turn.slot) {
+                Some(AgyEvidence::Bound(key)) if *key == turn.key => return None,
+                Some(AgyEvidence::Bound(_)) => AgyEvidenceHold::Conflict,
+                Some(AgyEvidence::Held(hold)) => *hold,
+                None => AgyEvidenceHold::Missing,
+            };
+            Some((turn.slot.clone(), reason))
+        })
+        .collect();
+    for (slot, reason) in unproven {
+        custody.hold(&slot, AgyHoldReason::Evidence(reason));
     }
 }
 
@@ -225,6 +350,27 @@ fn numeric_children(dir: &Path) -> io::Result<Vec<u64>> {
     }
     children.sort_unstable();
     Ok(children)
+}
+
+/// Turn slots by name. A malformed iMessage name is held; markers and temporary files are skipped.
+fn slot_children(dir: &Path, custody: &mut AgyCustody) -> io::Result<Vec<AgySlot>> {
+    let mut slots = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let name = entry?.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        match classify_slot(name) {
+            SlotName::Slot(slot) => slots.push(slot),
+            SlotName::Malformed => custody.held.push(AgyHeldSlot {
+                name: name.to_owned(),
+                reason: AgyHoldReason::Malformed,
+            }),
+            SlotName::Other => {}
+        }
+    }
+    slots.sort_unstable();
+    Ok(slots)
 }
 
 #[cfg(all(test, unix))]

@@ -11,7 +11,59 @@ use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::capture::file_identity;
 use crate::services::tui_o::shadow::{MAX_READ_BYTES, ShadowProvider, UnitKey, UnitKind};
 
-use super::{CHECKPOINT, Failure, SEGMENT, STORE_DIR_NAME};
+use super::{CHECKPOINT, Failure, IMESSAGE_SLOT_PREFIX, SEGMENT, STORE_DIR_NAME};
+
+/// One turn directory: a Discord message id, or the digest of an authenticated iMessage original.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum AgySlot {
+    Discord(u64),
+    Imessage(String),
+}
+
+impl AgySlot {
+    pub(crate) fn dir_name(&self) -> String {
+        match self {
+            Self::Discord(message) => message.to_string(),
+            Self::Imessage(digest) => format!("{IMESSAGE_SLOT_PREFIX}{digest}"),
+        }
+    }
+
+    /// The turn id its records may name: the Discord message itself, or a synthetic execution.
+    fn names(&self, id: u64) -> bool {
+        let discord = crate::services::tui_input::input_key::is_discord_key(id);
+        match self {
+            Self::Discord(message) => id == *message && discord,
+            Self::Imessage(_) => id != 0 && !discord,
+        }
+    }
+}
+
+/// How a directory name under `agy/v1` reads.
+pub(crate) enum SlotName {
+    Slot(AgySlot),
+    /// Carries the iMessage prefix without a lowercase SHA-256 digest; never skipped.
+    Malformed,
+    /// Markers and temporary files.
+    Other,
+}
+
+pub(crate) fn classify_slot(name: &str) -> SlotName {
+    if let Some(digest) = name.strip_prefix(IMESSAGE_SLOT_PREFIX) {
+        let digest_shaped = digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'));
+        return if digest_shaped {
+            SlotName::Slot(AgySlot::Imessage(digest.to_owned()))
+        } else {
+            SlotName::Malformed
+        };
+    }
+    match name.parse::<u64>() {
+        Ok(id) if id != 0 && name == id.to_string() => SlotName::Slot(AgySlot::Discord(id)),
+        _ => SlotName::Other,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct AgyTarget {
@@ -29,6 +81,8 @@ pub(crate) struct AgyTurnKey {
 pub(crate) struct AgyOpen {
     ingress: String,
     message_id: u64,
+    #[serde(default)]
+    original_input_sha256: Option<String>,
     pub(crate) logical_channel: u64,
     pub(crate) writer_generation: NonZeroU64,
     pub(crate) resume: Option<Uuid>,
@@ -36,6 +90,7 @@ pub(crate) struct AgyOpen {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgyReplay {
+    pub(crate) slot: AgySlot,
     pub(crate) key: AgyTurnKey,
     pub(crate) session_key: String,
     pub(crate) open: AgyOpen,
@@ -124,14 +179,14 @@ enum Data {
 pub(crate) fn replay(
     root: &Path,
     target: AgyTarget,
-    message: u64,
+    slot: &AgySlot,
     previous: Option<&AgyFrontier>,
 ) -> io::Result<AgyReplay> {
     let version = version_dir(root, target.destination)?;
     if read_retired_marker(&version, target)? {
         return Err(invalid("agy spool belongs to a retired child"));
     }
-    let turn = checked_dir(version.join(message.to_string()))?;
+    let turn = checked_dir(version.join(slot.dir_name()))?;
     let checkpoint_path = turn.join(CHECKPOINT);
     let checkpoint_file = open_regular(&checkpoint_path)?;
     let checkpoint: Checkpoint = serde_json::from_reader(checkpoint_file.take(4096))?;
@@ -159,6 +214,7 @@ pub(crate) fn replay(
     if meta.len() < frontier.bytes
         || previous.is_some_and(|old| {
             old.path != frontier.path
+                || old.dev != frontier.dev
                 || old.ino != frontier.ino
                 || old.bytes == 0
                 || old.bytes > frontier.bytes
@@ -196,8 +252,7 @@ pub(crate) fn replay(
             || record.destination != target.destination
             || record.seq != seq
             || record.attempt != 1
-            || record.turn_key.id != message
-            || !crate::services::tui_input::input_key::is_discord_key(message)
+            || !slot.names(record.turn_key.id)
             || record.turn_key.nonce.is_nil()
         {
             return Err(invalid(
@@ -206,7 +261,7 @@ pub(crate) fn replay(
         }
         match &mut state {
             Some(state) => state.apply(record, target)?,
-            None => state = Some(ReplayState::open(record, target)?),
+            None => state = Some(ReplayState::open(record, target, slot)?),
         }
         seq += 1;
     }
@@ -222,6 +277,7 @@ pub(crate) fn replay(
     }
     let state = state.ok_or_else(|| invalid("agy source has no open"))?;
     Ok(AgyReplay {
+        slot: slot.clone(),
         key: state.key,
         session_key: state.session_key,
         open: state.open,
@@ -269,11 +325,21 @@ struct ReplayState {
 }
 
 impl ReplayState {
-    fn open(record: Record, target: AgyTarget) -> io::Result<Self> {
+    fn open(record: Record, target: AgyTarget, slot: &AgySlot) -> io::Result<Self> {
         let Data::Open(open) = record.data else {
             return Err(invalid("agy first record is not open"));
         };
-        if open.ingress != "discord_foreground"
+        // The slot type, the ingress and the original's digest must name one source.
+        let source = match slot {
+            AgySlot::Discord(_) => {
+                open.ingress == "discord_foreground" && open.original_input_sha256.is_none()
+            }
+            AgySlot::Imessage(digest) => {
+                open.ingress == "imessage_http"
+                    && open.original_input_sha256.as_deref() == Some(digest.as_str())
+            }
+        };
+        if !source
             || open.logical_channel != target.logical_channel
             || open.message_id != record.turn_key.id
             || record.session_key.is_empty()

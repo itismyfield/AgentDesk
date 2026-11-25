@@ -62,6 +62,36 @@ impl BootChannels {
         })
     }
 
+    /// Recovery-only custody of an existing spool: destination and parent checked by REST, never a
+    /// new-input selection. Pane custody wins, a held pane child included, though nothing hosts it.
+    pub(crate) fn agy_recovery_target(
+        &self,
+        channel: &GuildChannel,
+    ) -> Result<AgyTarget, &'static str> {
+        use poise::serenity_prelude::ChannelType;
+        let destination = channel.id.get();
+        if self.site() != &Site::Home || destination == 0 {
+            return Err("agy recovery runs only at home");
+        }
+        let thread = matches!(
+            channel.kind,
+            ChannelType::PublicThread | ChannelType::PrivateThread | ChannelType::NewsThread
+        );
+        let logical_channel = match (thread, VerifiedSurface::checked_parent(channel)) {
+            (false, _) => destination,
+            (true, Some(parent)) => parent,
+            (true, None) => return Err("agy recovery thread has no checked parent"),
+        };
+        let pane_custody = |id: u64| self.hosts_output(id) || self.child(id).is_some();
+        if pane_custody(destination) || pane_custody(logical_channel) {
+            return Err("agy recovery conflicts with pane custody");
+        }
+        Ok(AgyTarget {
+            destination,
+            logical_channel,
+        })
+    }
+
     /// Only a checked Discord thread can inherit selection. A conflicting read closes the child.
     pub(crate) fn record_agy_thread(&self, channel: &GuildChannel) -> bool {
         let destination = channel.id.get();

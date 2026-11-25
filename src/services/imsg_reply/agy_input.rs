@@ -84,6 +84,20 @@ pub(super) fn split_hash(hash: &str) -> (Option<u64>, &str) {
     }
 }
 
+/// The PG row proves the original and its destination, never one execution: it holds no nonce.
+pub(crate) fn proven_source(
+    row: &Obligation,
+    destination: u64,
+    logical_channel: u64,
+) -> Option<ImessageSource> {
+    let (parent, _) = split_hash(&row.request_hash);
+    (row.source == "imessage"
+        && row.channel_id == destination.to_string()
+        && parent == Some(logical_channel))
+    .then(|| ImessageSource::from_guid(&row.origin_id))
+    .flatten()
+}
+
 #[derive(Clone)]
 pub(crate) struct Admitted {
     selection: WriterSelection,

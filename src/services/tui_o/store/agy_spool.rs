@@ -16,6 +16,8 @@ pub(crate) mod replay;
 
 pub(crate) const SEGMENT: &str = "0000.jsonl";
 pub(crate) const CHECKPOINT: &str = "committed.json";
+/// An iMessage turn slot is this prefix and the digest of its authenticated original.
+pub(crate) const IMESSAGE_SLOT_PREFIX: &str = "imsg-";
 // JSON escaping can expand a single input byte to six bytes.
 const TEXT_BYTES: usize = 4096;
 
@@ -48,7 +50,7 @@ impl ImessageSource {
     }
 
     fn slot(&self) -> String {
-        format!("imsg-{}", self.0)
+        format!("{IMESSAGE_SLOT_PREFIX}{}", self.0)
     }
 
     pub(crate) fn digest(&self) -> &str {
