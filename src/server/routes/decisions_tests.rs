@@ -1,5 +1,5 @@
-//! `POST /api/decisions` stores an ask under the hash of its requester's capability and posts
-//! nothing; `GET /api/decisions/{id}` reads it back without the capability.
+//! `POST /api/decisions` stores an ask under the hash of its requester's capability, and with no
+//! live provider bot posts nothing; `GET /api/decisions/{id}` reads it back without the capability.
 use super::*;
 use axum::{
     body::{Body, to_bytes},
@@ -76,7 +76,8 @@ async fn count(pool: &sqlx::PgPool, sql: &'static str) -> i64 {
 const REQUESTS: &str = "SELECT COUNT(*) FROM decision_requests";
 
 /// An ask is stored once per idempotency key, only the capability's hash is kept, another
-/// capability or payload cannot take the key, and nothing is queued for Discord.
+/// capability or payload cannot take the key, and without a live provider bot the stored ask
+/// answers 503 and nothing goes to Discord.
 #[tokio::test]
 async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let root = crate::config::TestRuntimeRootGuard::new();
@@ -95,8 +96,8 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let post = ("POST", "/api/decisions");
 
     let (status, first) = call(&app, post, Some(&mine), &ask_body("질문")).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
-    assert_eq!(first["publication"], "pending", "nothing is posted yet");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{first}");
+    assert_eq!(first["error"], "decision_bot_unavailable");
     assert_eq!(first["created"], true);
     let id = first["request_id"].as_str().unwrap().to_string();
 
@@ -121,7 +122,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
 
     // The same key, payload and capability is the same request.
     let (status, again) = call(&app, post, Some(&mine), &ask_body("질문")).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{again}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{again}");
     assert_eq!(
         (again["request_id"].as_str(), &again["created"]),
         (Some(id.as_str()), &json!(false))
@@ -130,7 +131,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let mut spelled = ask_body("질문");
     spelled["target"]["channel_id"] = json!(format!("00{CHANNEL}"));
     let (status, again) = call(&app, post, Some(&mine), &spelled).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "{again}");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{again}");
     assert_eq!(again["request_id"].as_str(), Some(id.as_str()));
     // Another capability, or another payload, cannot take the key.
     for (capability, title) in [(&other, "질문"), (&mine, "다른 질문")] {
@@ -160,7 +161,10 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let read = ("GET", path.as_str());
     let (status, shown) = call(&app, read, Some(&mine), &json!(null)).await;
     assert_eq!(status, StatusCode::OK, "{shown}");
-    assert_eq!(shown["title"], "질문");
+    assert_eq!(
+        (&shown["title"], &shown["publication"]),
+        (&json!("질문"), &json!("stored"))
+    );
     assert_eq!(shown["options"].as_array().map(Vec::len), Some(2));
     let text = shown.to_string();
     assert!(!text.contains(&mine) && !text.contains(&stored), "{text}");
@@ -168,7 +172,7 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let mut theirs = ask_body("남의 질문");
     theirs["idempotency_key"] = json!("k3");
     let (status, _) = call(&app, post, Some(&other), &theirs).await;
-    assert_eq!(status, StatusCode::ACCEPTED);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     for (who, capability) in [
         ("no capability", None),
         ("another requester's", Some(&other)),
