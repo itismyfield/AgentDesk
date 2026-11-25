@@ -119,6 +119,7 @@ async fn persist(pool: &sqlx::PgPool, record: &PathBRecord<'_>, fallback_called:
                 completion_range: ("", 0),
                 settle_pin: None,
                 native_held: (false, false),
+                herdr_held: false,
             },
             || {
                 fallback_called.store(true, Ordering::SeqCst);
@@ -269,6 +270,7 @@ async fn path_b_settles_only_the_scheduled_turn_that_owns_the_committed_range_pg
                         completion_range: (TMUX, 100),
                         settle_pin: pin.as_ref(),
                         native_held: (false, false),
+                        herdr_held: false,
                     },
                     || async { None },
                 )
@@ -351,6 +353,7 @@ async fn path_b_checks_native_custody_on_the_pin_and_late_rows_separately_pg() {
                     completion_range: (TMUX, 100),
                     settle_pin: Some(&pin),
                     native_held: (pin_held, !pin_held),
+                    herdr_held: false,
                 },
                 || async { None },
             )

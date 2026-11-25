@@ -214,8 +214,8 @@ async fn same_herdr_row_restored_after_restart_finalizes_identically_pg() {
     db.drop().await;
 }
 
-/// A cold start's file is pinned when the reader first opens it at the turn's own record; its own
-/// terminal there ends the turn, one in another file later put at the same path does not.
+/// A cold start's file is pinned at the turn's first own record and no later save unpins or moves
+/// it; only its own terminal in that file ends the turn.
 #[tokio::test(flavor = "current_thread")]
 async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
     let (_temp, _env, root) = setup();
@@ -230,8 +230,15 @@ async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
         std::fs::remove_file(&path).unwrap();
         let nonce = stale.hosted_execution_nonce.as_deref().unwrap();
         assert!(state.record_turn_start(HerdrTurnStart::at_end_of(nonce, &path, Some(at))));
+        let unpinned = load_inflight_state(&provider, channel).unwrap();
         std::fs::write(&path, &prompt).unwrap();
         state.source_observed(identity(&path));
+        // A stale unpinned snapshot and one naming another file both keep the first pin.
+        let mut other = load_inflight_state(&provider, channel).unwrap();
+        other.herdr_turn_start.as_mut().unwrap().start.file = Some((0, 0));
+        for snapshot in [unpinned, other] {
+            save_inflight_state_in_root(&root, &snapshot).unwrap();
+        }
         if replaced {
             std::fs::rename(&path, path.with_extension("first")).unwrap();
         }

@@ -418,11 +418,12 @@ fn an_isolated_scheduled_commit_adds_nothing_to_the_channel_history() {
     }
 }
 
-/// Path B keeps a Herdr row and its mailbox until the row's own end is proven against the current
-/// Bound execution; that end clears the row and releases the mailbox.
+/// Path B keeps a Herdr row, mailbox and token, with no completion mark a later claim reclaims on,
+/// until its own end is proven against the current Bound execution; that end releases them once.
 #[test]
 fn herdr_row_path_b_clear_waits_for_its_own_proven_end_pg() {
     use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, OWN, mark_herdr};
+    use crate::services::discord::inflight::{InflightTurnIdentity, herdr_turn_held};
     let _env = crate::services::observability::lock_env_then_runtime();
     let temp = tempfile::tempdir().unwrap();
     let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
@@ -460,24 +461,62 @@ fn herdr_row_path_b_clear_waits_for_its_own_proven_end_pg() {
             let source = temp.path().join(format!("herdr-{n}.jsonl"));
             mark_herdr(&pool, &shared.token_hash, &mut row, &source, case).await;
             crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+            let (owner, turn) = (row.request_owner_user_id, row.effective_finalizer_turn_id());
+            let claude = ProviderKind::Claude;
+            shared.record_readopted_mailbox_owner_for_episode(
+                &claude,
+                channel.get(),
+                owner,
+                turn,
+                &row,
+            );
+            let token = crate::services::discord::mailbox_snapshot(&shared, channel).await;
             let start = row.turn_start_offset.unwrap_or(row.last_offset);
+            // The watcher's terminal delivery commit, with the hold Path B judges.
+            let held = herdr_turn_held(&shared, &claude, Some(&row), WATCHER_SESSION).await;
+            mark_watcher_terminal_delivery_committed(
+                &claude,
+                channel,
+                WATCHER_SESSION,
+                (Some(&InflightTurnIdentity::from_state(&row)), false, held),
+                "synthetic terminal body",
+                start + 1,
+                None,
+                start + 64,
+                None,
+            );
             let row = Some(row);
             let effects = crate::services::discord::scheduled_turn::ChannelEffects::Allowed;
-            let (output, offsets) = (output.to_str().unwrap(), (start + 1, start + 64));
+            let offsets = (start + 1, start + 64);
+            let path = output.to_str().unwrap();
             commit(
                 &shared,
                 channel,
-                output,
+                path,
                 &row,
                 &row,
                 offsets,
                 (effects, (false, false)),
             )
             .await;
+            let next = serenity::MessageId::new(1_552_447_044_399_009_900 + n as u64);
+            let claimed = claim(&shared, channel, WATCHER_SESSION, &output, next).await;
             let active = crate::services::discord::mailbox_snapshot(&shared, channel).await;
-            let kept = (load().is_some(), active.active_user_message_id.is_some());
+            let finished = shared.is_readopted_mailbox_owner(&claude, channel.get(), owner, turn);
+            let own_row = load().is_some_and(|row| row.user_msg_id == anchor.get());
+            let kept = (own_row, active.active_user_message_id == Some(anchor));
             let own = case == OWN;
-            assert_eq!(kept, (!own, !own), "{case:?}");
+            assert_eq!(
+                (kept, finished, claimed),
+                ((!own, !own), own, own),
+                "{case:?}"
+            );
+            let cancelled = token
+                .cancel_token
+                .unwrap()
+                .cancelled
+                .load(Ordering::Relaxed);
+            assert!(own || !cancelled, "{case:?}");
         }
         db.drop().await;
     });

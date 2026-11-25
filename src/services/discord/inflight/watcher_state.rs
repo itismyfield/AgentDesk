@@ -230,6 +230,8 @@ pub(in crate::services::discord) struct WatcherTerminalCommitPatch {
     /// The outcome a scheduled row settles with, stored with the commit.
     pub scheduled_outcome:
         Option<crate::services::scheduled_messages::turn_completion::ScheduledTurnOutcome>,
+    /// Whether the commit also ends the turn; a held Herdr turn commits only its body watermark.
+    pub ends_turn: bool,
 }
 
 /// #3558: outcome of [`commit_watcher_terminal_delivery_locked_in_root`].
@@ -298,7 +300,7 @@ pub(super) fn commit_watcher_terminal_delivery_locked_in_root(
         return WatcherTerminalCommitOutcome::Skipped;
     }
 
-    state.terminal_delivery_committed = true;
+    state.terminal_delivery_committed |= patch.ends_turn;
     // Max-serialize against the in-lock reload so a late commit never moves the
     // watermark backward (the TOCTOU the old unlocked load→save introduced):
     //  - `full_response`: keep whichever body is LONGER. A concurrent stream may
