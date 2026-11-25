@@ -253,10 +253,10 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
             />
           </div>
           <div className="campaign-node-picker min-w-0 flex-1 sm:w-64 sm:flex-none">
-            <Select aria-label={tr("연결을 볼 작업", "Task to inspect")} size="lg" placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
+            <Select aria-label={tr("연결을 볼 작업", "Task to inspect")} size="sm" placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
               options={campaign.nodes.map((node) => ({ value: node.id, label: node.title }))} onChange={pick} />
           </div>
-          {onEdit && <Button variant="secondary" size="lg" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>}
+          {onEdit && <Button variant="secondary" size="sm" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>}
         </div>
       </header>
       {viewMode === "swimlanes" ? (

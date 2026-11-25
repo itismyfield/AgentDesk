@@ -19,6 +19,28 @@ import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { findRouteByPath } from "./routes";
 import { THEME_STORAGE_KEY } from "./themePreferences";
 
+const storageEntries = new Map<string, string>();
+const memoryStorage: Storage = {
+  get length() {
+    return storageEntries.size;
+  },
+  clear() {
+    storageEntries.clear();
+  },
+  getItem(key: string) {
+    return storageEntries.get(key) ?? null;
+  },
+  key(index: number) {
+    return Array.from(storageEntries.keys())[index] ?? null;
+  },
+  removeItem(key: string) {
+    storageEntries.delete(key);
+  },
+  setItem(key: string, value: string) {
+    storageEntries.set(key, String(value));
+  },
+};
+
 describe("RouteErrorBoundary & shell audit fixes", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -26,7 +48,12 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    window.localStorage.clear();
+    Object.defineProperty(window, "localStorage", {
+      configurable: true,
+      writable: true,
+      value: memoryStorage,
+    });
+    memoryStorage.clear();
     const dialog = HTMLDialogElement.prototype as HTMLDialogElement & {
       showModal?: () => void;
       show?: () => void;
@@ -50,7 +77,7 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
-    window.localStorage.clear();
+    memoryStorage.clear();
     resolveAuthentication(0, true, false);
     consoleErrorSpy.mockRestore();
   });
@@ -316,5 +343,87 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     expect(form.className).toContain("bg-[var(--bg-2)]");
     expect(form.className).toContain("border-[var(--line)]");
     expect(container.innerHTML).not.toMatch(/bg-gray-|text-gray-|border-gray-/);
+  });
+
+  it("focuses the active or first route item via [data-autofocus] instead of the close button when opening mobile More", async () => {
+    const originalMatchMedia = window.matchMedia;
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+      new Response(JSON.stringify({ error: "offline" }), {
+        status: 503,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    window.matchMedia = vi.fn().mockImplementation((query: string) => ({
+      matches: query === "(max-width: 899px)",
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+
+    try {
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      await act(async () => {
+        root.render(
+          <QueryClientProvider client={client}>
+            <MemoryRouter initialEntries={["/audit"]}>
+              <OverlayProvider>
+                <WorkspaceProvider
+                  initialAgents={[]}
+                  initialDepartments={[]}
+                  initialSessions={[]}
+                  pushNotification={() => ""}
+                >
+                  <SettingsProvider initialSettings={DEFAULT_SETTINGS} initialStats={null}>
+                    <KanbanProvider initialCards={[]} initialDispatches={[]}>
+                      <AppShell
+                        wsConnected={true}
+                        wsLastEventTs={null}
+                        notifications={[]}
+                        pushNotification={() => ""}
+                        updateNotification={() => {}}
+                        dismissNotification={() => {}}
+                      />
+                    </KanbanProvider>
+                  </SettingsProvider>
+                </WorkspaceProvider>
+              </OverlayProvider>
+            </MemoryRouter>
+          </QueryClientProvider>,
+        );
+      });
+
+      const moreTrigger = container.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-button"]')!;
+      await act(async () => {
+        moreTrigger.click();
+      });
+
+      const sheet = container.querySelector<HTMLElement>("#app-mobile-more-menu")!;
+      const closeBtn = sheet.querySelector<HTMLButtonElement>('[aria-label="더 보기 닫기"]')!;
+      const auditItem = sheet.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-audit"]')!;
+      expect(auditItem.hasAttribute("data-autofocus")).toBe(true);
+      expect(document.activeElement).toBe(auditItem);
+      expect(document.activeElement).not.toBe(closeBtn);
+
+      const homeTab = container.querySelector<HTMLButtonElement>('[data-testid="app-mobile-tab-home"]')!;
+      await act(async () => {
+        homeTab.click();
+      });
+      await act(async () => {
+        moreTrigger.click();
+      });
+
+      const reopenedSheet = container.querySelector<HTMLElement>("#app-mobile-more-menu")!;
+      const routinesItem = reopenedSheet.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-routines"]')!;
+      expect(routinesItem.hasAttribute("data-autofocus")).toBe(true);
+      expect(document.activeElement).toBe(routinesItem);
+      expect(document.activeElement).not.toBe(reopenedSheet.querySelector('[aria-label="더 보기 닫기"]'));
+    } finally {
+      window.matchMedia = originalMatchMedia;
+      fetchSpy.mockRestore();
+    }
   });
 });
