@@ -77,6 +77,18 @@ cannot apply for lack of its opener still closes the image turn, after row prepa
 | ToolImageS2bPersistMutNoCut | persist, no cut | NoSilentLoss | the cut is required once openers are collected |
 | ToolImageS2bSpanE / S2bSpanMidPrompt / S2bSpanLateSameHash | S2b w1 rule: only a turn with an image span keeps its opener | AttributionTrue (+AtMostOnce or NoSilentLoss) | opener or call collected before restart: the image falls to the edge or the next turn |
 
+## S2b re-settlement past a later body
+
+`BodyRule` lets another serial's body post past an Unresolved attempt's anchor, as the body
+FIFO goes on after that result. Under `"w4"` re-settlement with no exact match reads that
+body as an altered post and keeps the attempt Unresolved; `"owned"` skips posts the ledger
+gave other serials, so a missing image ends in its retry and omission notice.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bReconfirmBehind | RecD, persist, `"owned"`, two failures | - | the fixed rule |
+| ToolImageS2bReconfirmBehindW4 | same, `"w4"` | EventuallyAccounted | the image stays Unresolved for good |
+
 ## Limits
 
 Spool segments are one record each. History is truthful unless `Lag` hides one arrived post

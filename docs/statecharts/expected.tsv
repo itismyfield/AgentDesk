@@ -1999,6 +1999,8 @@ tui-o-writer/ToolImageS2bPersistLateSameHash.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistMidPrompt.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistMutNoCut.cfg	ToolImage	NoSilentLoss	-
 tui-o-writer/ToolImageS2bPersistUnresolved.cfg	ToolImage	-	-
+tui-o-writer/ToolImageS2bReconfirmBehind.cfg	ToolImage	-	-
+tui-o-writer/ToolImageS2bReconfirmBehindW4.cfg	ToolImage	-	EventuallyAccounted
 tui-o-writer/ToolImageS2bSpanE.cfg	ToolImage	AttributionTrue	-
 tui-o-writer/ToolImageS2bSpanLateSameHash.cfg	ToolImage	AttributionTrue,NoSilentLoss	-
 tui-o-writer/ToolImageS2bSpanMidPrompt.cfg	ToolImage	AtMostOnce,AttributionTrue	-
