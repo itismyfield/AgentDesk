@@ -268,3 +268,30 @@ fn auto_terminate_crash_between_close_and_retire_recovers_by_read_end_then_retir
         assert_eq!(kept(node, claim).await, (true, false));
     });
 }
+
+#[test]
+fn hook_record_and_auto_qualify_share_one_source_authority_key() {
+    let name = "hook_record_and_auto_qualify_share_one_source_authority_key";
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
+        // A start hook that read the fence open holds the authority of the pane its context names.
+        events::set_test_root(crate::config::runtime_root().as_deref());
+        let context = binding_context::execution_context("claude", herdr::EXECUTION).unwrap();
+        let (held, held_rx) = std::sync::mpsc::channel();
+        let (judged, judged_rx) = std::sync::mpsc::channel::<()>();
+        let hook = std::thread::spawn(move || {
+            let pane = context.tmux_session;
+            crate::services::tmux_common::with_tmux_source_authority(&pane, |_| {
+                held.send(()).unwrap();
+                // A judgment under another key ends meanwhile; under the same key it waits here.
+                let _ = judged_rx.recv_timeout(std::time::Duration::from_millis(500));
+                log_start(&pane);
+            })
+        });
+        held_rx.recv().unwrap();
+        recover(&node.shared, channel(), claim).await;
+        let _ = judged.send(());
+        hook.join().unwrap();
+        assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
+        assert!(!execution_closing(herdr::EXECUTION), "the hook's start came first");
+    });
+}
