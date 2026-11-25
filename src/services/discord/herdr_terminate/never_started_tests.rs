@@ -179,7 +179,7 @@ fn auto_recovery_refuses_while_any_turn_is_captured() {
             ask(claim.number() + 1).await,
             refused("claim no longer qualifies")
         );
-        let token = test_turn::start(&node.shared, channel(), 82, "episode-b").await;
+        let _token = test_turn::start(&node.shared, channel(), 82, "episode-b").await;
         assert_eq!(ask(claim.number()).await, refused("turn active"));
         assert!(!execution_closing(herdr::EXECUTION), "no fence was taken");
         assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
@@ -202,6 +202,7 @@ fn auto_terminate_on_same_nonce_bound_closes_nothing() {
 
 /// Logs a start of `SESSION` by the rig's execution on `logical`'s pane, as its hook would.
 fn log_start(logical: &str) -> std::path::PathBuf {
+    events::set_test_root(crate::config::runtime_root().as_deref());
     let path = events::log_path(CHANNEL).unwrap().unwrap();
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let (at, session) = (chrono::Utc::now(), SESSION.to_string());
