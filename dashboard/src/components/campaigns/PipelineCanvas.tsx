@@ -184,7 +184,7 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
           <GraphMiniMap open={minimapOpen} ready={flowReady} ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")} chosenId={chosen}
             nodeColor={(node) => node.id === chosen ? "var(--accent)" : "var(--fg-faint)"} />
         </ReactFlow>
-        <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] max-sm:bottom-3 max-sm:left-3 max-sm:max-w-[calc(100%-11.5rem)] max-sm:px-2.5 max-sm:py-1.5`}>
+        <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] max-sm:top-3 max-sm:bottom-auto max-sm:left-3 max-sm:max-w-[calc(100%-1.5rem)] max-sm:px-2.5 max-sm:py-1.5`}>
           <span className="flex items-center gap-1.5">{swatch("var(--ok)")}{tr("통과", "Pass")}</span>
           <span className="flex items-center gap-1.5">{swatch("var(--err)")}{tr("실패", "Fail")}</span>
           <span className="flex items-center gap-1.5"><RotateCw aria-hidden className="size-3 text-[var(--warn)]" />{tr("재시도", "Retry")}</span>
