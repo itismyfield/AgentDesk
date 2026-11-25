@@ -93,7 +93,7 @@ export default function DailyTokenCompositionChart({
         : undefined;
 
   return (
-    <div className="flex min-w-0 flex-col gap-3">
+    <div className="flex min-w-0 flex-col gap-2">
       {mode === undefined && (
         <div className="ml-auto w-44 max-w-full" data-testid="stats-daily-view-mode">
           <SegmentedControl<DailyTokenViewMode>
@@ -113,7 +113,7 @@ export default function DailyTokenCompositionChart({
       )}
       <div
         data-testid="stats-daily-token-scroll"
-        className="min-w-0 overflow-x-auto [&_.aui-breakdown-chart]:max-w-none!"
+        className="min-w-0 overflow-x-auto [&_.aui-breakdown-chart]:max-w-none! [&_.aui-breakdown-chart-chart]:mx-3! [&_.aui-breakdown-chart-chart]:mt-2! [&_.aui-breakdown-chart-chart]:mb-2! [&_.aui-breakdown-chart-heading]:hidden! min-[560px]:[&_.aui-breakdown-chart-picker]:flex! min-[560px]:[&_.aui-breakdown-chart-picker]:items-center! min-[560px]:[&_.aui-breakdown-chart-picker]:gap-2! min-[560px]:[&_.aui-breakdown-chart-picker>span]:shrink-0! min-[560px]:[&_.aui-breakdown-chart-picker-button]:w-auto! min-[560px]:[&_.aui-breakdown-chart-picker-button]:min-w-0! min-[560px]:[&_.aui-breakdown-chart-picker-button]:flex-1! [&_.aui-breakdown-chart-picker-button]:h-7! [&_.aui-breakdown-chart-picker-button]:px-2.5! [&_.aui-breakdown-chart-picker-button]:text-xs! [&_.aui-breakdown-chart-pickers]:gap-2! [&_.aui-breakdown-chart-pickers]:px-3! [&_.aui-breakdown-chart-pickers]:pt-2! [&_.aui-breakdown-chart-pickers]:pb-1! [&_.aui-breakdown-chart-tray]:bg-transparent! [&_.aui-breakdown-chart-tray]:p-0! [&_.aui-metering-chart]:p-3.5! [&_.aui-metering-chart-head_h2]:hidden!"
       >
         {activeMode === "metering" ? (
           <MeteringChart
@@ -121,6 +121,7 @@ export default function DailyTokenCompositionChart({
             days={meterDays}
             totals={meterTotals}
             period={periodLabel}
+            height={168}
             format={formatTokens}
             emptyLabel={t(msg("표시할 일별 토큰 데이터가 없습니다.", "No daily token data available.", "表示できる日次トークンデータがありません。", "暂无每日 Token 数据。"))}
             restLabel={t(msg("기타", "Other", "その他", "其他"))}

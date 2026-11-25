@@ -106,17 +106,20 @@ export function StatsSummaryGrid({
   return (
     <SectionCard title={t(msg(`사용량 · 최근 ${rangeDays}일`, `Usage · last ${rangeDays} days`, `使用量 · 直近${rangeDays}日`, `用量 · 最近 ${rangeDays} 天`))} testId="stats-usage">
       {/* The kit caps its card at 460px; here each chart fills its column, two columns once both fit their tooltip. */}
-      <div className="@container flex flex-col gap-3 px-3 pb-3 sm:px-4 sm:pb-4">
-        <div data-testid="stats-summary-grid" className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none!">
+      <div className="@container flex flex-col gap-2.5 px-3 pb-3 sm:px-4 sm:pb-3.5">
+        <div
+          data-testid="stats-summary-grid"
+          className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none! [&_.aui-kpi-chart-card]:px-4! [&_.aui-kpi-chart-card]:py-3.5! [&_.aui-kpi-chart-footer]:mt-2.5! [&_.aui-kpi-chart-graph]:mt-3.5! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-guide]:opacity-0! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-point]:opacity-0! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-tooltip]:opacity-0!"
+        >
           <div data-testid="stats-summary-total-tokens" className="min-w-0">
             <KpiChart
               title={t(msg("총 토큰", "Total Tokens", "総トークン", "总代币"))}
               value={summary ? formatTokens(summary.total_tokens) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
-              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: dailyTokens, color: "var(--aui-accent)" }]}
               format={formatTokens}
+              defaultIndex={Math.max(0, daily.length - 1)}
               emptyLabel={notice}
               text={text}
               footer={t(msg(
@@ -133,9 +136,9 @@ export function StatsSummaryGrid({
               value={summary ? formatCurrency(summary.total_cost) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
-              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "cost", label: t(msg("비용", "Cost", "コスト", "成本")), values: daily.map((day) => day.cost), color: "var(--aui-info)" }]}
               format={formatAxisCurrency}
+              defaultIndex={Math.max(0, daily.length - 1)}
               emptyLabel={notice}
               text={text}
               footer={summary

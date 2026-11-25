@@ -6,7 +6,7 @@ import type { TokenAnalyticsDailyPoint } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { Cap, SectionCard } from "../common/KitPrimitives";
 import type { DailyTokenViewMode } from "./DailyTokenCompositionChart";
-import { msg, type DailySeriesDescriptor } from "./statsModel";
+import { formatCurrency, formatTokens, msg, type DailySeriesDescriptor } from "./statsModel";
 import { StatsEmpty } from "./StatsCardPrimitives";
 
 const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionChart"));
@@ -14,7 +14,7 @@ const DailyTokenCompositionChart = lazy(() => import("./DailyTokenCompositionCha
 function ChartPlaceholder() {
   return (
     <div aria-hidden="true">
-      <Skeleton width="100%" height={232} radius={8} />
+      <Skeleton width="100%" height={208} radius={8} />
       <div className="mt-2 flex items-center gap-2">
         <Skeleton width={44} height={44} radius={8} />
         <Skeleton width="100%" height={12} line />
@@ -44,6 +44,8 @@ export function DailyTokenCompositionCard({
 }) {
   const [viewMode, setViewMode] = useState<DailyTokenViewMode>("breakdown");
   const allZero = daily.length > 0 && daily.every((day) => day.total_tokens <= 0);
+  const totalTokens = daily.reduce((sum, day) => sum + day.total_tokens, 0);
+  const totalCost = daily.reduce((sum, day) => sum + day.cost, 0);
 
   return (
     <SectionCard
@@ -69,17 +71,24 @@ export function DailyTokenCompositionCard({
         </div>
       }
     >
-      <div className="px-3 pb-3 sm:px-4 sm:pb-4">
-        <Cap className="mb-3 block">
-          {t(
-            msg(
-              "날짜·토큰 종류 기준과 토큰·비용 지표를 전환하며 비교해요",
-              "Switch dimensions and measures to compare daily tokens and cost",
-              "日付・トークン種別と指標を切り替えて比較します",
-              "切换日期、Token 类型与指标进行对比",
-            ),
-          )}
-        </Cap>
+      <div className="px-3 pb-3 sm:px-4 sm:pb-3.5">
+        <div className="mb-2 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+          <Cap>
+            {t(
+              msg(
+                "날짜·토큰 종류 기준과 토큰·비용 지표를 전환하며 비교해요",
+                "Switch dimensions and measures to compare daily tokens and cost",
+                "日付・トークン種別と指標を切り替えて比較します",
+                "切换日期、Token 类型与指标进行对比",
+              ),
+            )}
+          </Cap>
+          {daily.length > 0 && viewMode === "breakdown" ? (
+            <span className="font-display text-xs font-semibold text-[var(--fg)] tabular-nums" data-testid="stats-daily-compact-total">
+              {formatTokens(totalTokens)} · {formatCurrency(totalCost)}
+            </span>
+          ) : null}
+        </div>
 
         {daily.length === 0 ? (
           loading ? (

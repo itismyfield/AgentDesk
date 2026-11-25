@@ -1,7 +1,6 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Square } from "lucide-react";
 import type { AgentWarning } from "../../agent-insights";
-import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorStep } from "../../kit/pro/agent-monitor";
 import type { Agent, Department } from "../../types";
@@ -10,7 +9,6 @@ import AgentPersona from "../AgentPersona";
 import { Cap, Chip } from "../common/KitPrimitives";
 import { monitorLabels } from "../home/HomeSummaryCards";
 import { agentStateLabel, type HomeAgentState, type MonitorView } from "../home/homeModel";
-import { departmentLabels } from "./agent-list-controls";
 import type { AttentionReason } from "./agentsAttention";
 import type { Translator } from "./types";
 import { AgentDetailSection, SectionWell, type DetailFold } from "./AgentInfoCardSections";
@@ -113,29 +111,24 @@ export function AgentNowSection({
   );
 }
 
-/** Run settings: department, main Provider and account save as soon as they change; the device below has its own save. */
+/** Run settings: main Provider and account save as soon as they change; the device below has its own save. */
 export function AgentRunSettingsSection({
-  tr, locale, fold, summary, departments, selectedDeptId, savingDept, onSaveDepartment,
+  tr, fold, summary,
   selectedProvider, providerOptions, providerLabels, providerSelectDisabled, providerNotice, savingProvider, onSaveProvider,
   selectedAuthProfile, authProfileOptions, savingAuthProfile, onSaveAuthProfile, children,
 }: {
-  tr: Translator; locale: string; fold: DetailFold; summary: string; departments: Department[];
-  selectedDeptId: string; savingDept: boolean; onSaveDepartment: (nextDeptId: string) => void;
+  tr: Translator; locale?: string; fold: DetailFold; summary: string; departments?: Department[];
+  selectedDeptId?: string; savingDept?: boolean; onSaveDepartment?: (nextDeptId: string) => void;
   selectedProvider: string; providerOptions: string[]; providerLabels?: Record<string, string>;
   providerSelectDisabled?: boolean; providerNotice?: string | null; savingProvider: boolean; onSaveProvider: (nextProvider: string) => void;
   selectedAuthProfile: string; authProfileOptions: string[]; savingAuthProfile: boolean; onSaveAuthProfile: (profileId: string) => void;
   children: ReactNode;
 }) {
   const savingLabel = tr("저장 중...", "Saving...");
-  const deptLabels = useMemo(() => departmentLabels(departments, locale), [departments, locale]);
   return (
     <AgentDetailSection title={tr("실행 설정", "Run settings")} summary={fold.foldable ? summary : undefined} fold={fold} testId="agent-detail-run">
       <div className="@container min-w-0">
         <div className="grid min-w-0 gap-3 @md:grid-cols-2">
-          <Select
-            label={tr("소속 부서", "Department")} value={selectedDeptId} onChange={onSaveDepartment} disabled={savingDept} hint={savingDept ? savingLabel : undefined}
-            options={[{ value: "", label: tr("— 미배정 —", "— Unassigned —") }, ...departments.map((d) => ({ value: d.id, label: [d.icon, deptLabels.get(d.id) ?? localeName(locale, d)].filter(Boolean).join(" ") }))]}
-          />
           <Select
             label={tr("메인 Provider", "Main Provider")} value={selectedProvider} onChange={onSaveProvider} disabled={savingProvider || providerSelectDisabled} hint={savingProvider ? savingLabel : providerNotice ?? undefined}
             options={providerOptions.map((p) => ({ value: p, label: providerLabels?.[p] ?? p }))}

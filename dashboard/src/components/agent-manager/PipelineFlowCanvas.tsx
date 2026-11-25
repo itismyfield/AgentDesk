@@ -27,6 +27,7 @@ import {
 import "@xyflow/react/dist/style.css";
 
 import { IconButton } from "../../kit/free/icon-button-clean";
+import { Select } from "../../kit/free/select-clean";
 import { fsmStateTone, transitionAccent } from "./pipeline-visual-editor-styles";
 import {
   buildFsmEdgeBindingKey,
@@ -209,8 +210,8 @@ export default function PipelineFlowCanvas({
   );
   const flowRef = useRef<ReactFlowInstance<PipelineStateNode, PipelineEdge> | null>(null);
   const minimapAllowed = !compactGraph && !useScrollableMobileFsmCanvas;
-  const [miniMapOpen, setMiniMapOpen] = useState(true);
-  const fitOptions = useMemo(() => ({ padding: isFsmVariant ? 0.18 : 0.16 }), [isFsmVariant]);
+  const [showMiniMap, setShowMiniMap] = useState(false);
+  const fitOptions = useMemo(() => ({ padding: 0.18 }), []);
 
   const nodes = useMemo<PipelineStateNode[]>(
     () =>
@@ -317,37 +318,33 @@ export default function PipelineFlowCanvas({
 
   return (
     <div className="space-y-3">
-      <label className="grid gap-1 text-xs text-[var(--fg-muted)] sm:hidden">
-        {tr("편집할 상태 또는 전환", "State or transition to edit")}
-        <select
+      <div className="sm:hidden">
+        <Select
+          label={tr("편집할 상태 또는 전환", "State or transition to edit")}
           aria-label={tr("편집할 상태 또는 전환", "State or transition to edit")}
+          placeholder={tr("선택하세요", "Choose an item")}
           value={
             selection?.kind === "state" || selection?.kind === "transition"
               ? JSON.stringify(selection)
-              : ""
+              : null
           }
-          onChange={(event) => onSelectionChange(JSON.parse(event.target.value) as Selection)}
-          className="min-h-11 w-full min-w-0 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--th-card-bg)] px-3 text-sm text-[var(--fg)]"
-        >
-          <option value="" disabled>
-            {tr("선택하세요", "Choose an item")}
-          </option>
-          <optgroup label={tr("상태", "States")}>
-            {graph.nodes.map((node) => (
-              <option key={node.id} value={JSON.stringify({ kind: "state", stateId: node.id })}>
-                {node.label} · {node.id}
-              </option>
-            ))}
-          </optgroup>
-          <optgroup label={tr("전환", "Transitions")}>
-            {graph.edges.map((edge) => (
-              <option key={edge.key} value={JSON.stringify({ kind: "transition", index: edge.index })}>
-                {edge.from} → {edge.to}
-              </option>
-            ))}
-          </optgroup>
-        </select>
-      </label>
+          onChange={(nextValue) => {
+            if (nextValue) onSelectionChange(JSON.parse(nextValue) as Selection);
+          }}
+          options={[
+            ...graph.nodes.map((node) => ({
+              value: JSON.stringify({ kind: "state", stateId: node.id }),
+              label: `${node.label} · ${node.id}`,
+              description: tr("상태", "State"),
+            })),
+            ...graph.edges.map((edge) => ({
+              value: JSON.stringify({ kind: "transition", index: edge.index }),
+              label: `${edge.from} → ${edge.to}`,
+              description: tr("전환", "Transition"),
+            })),
+          ]}
+        />
+      </div>
 
       <div
         className="overflow-hidden rounded-[14px] border border-[var(--line-soft)] bg-[var(--bg)]"
@@ -388,7 +385,7 @@ export default function PipelineFlowCanvas({
             colorMode={colorMode}
           >
             <Background gap={20} size={1.6} color="var(--line)" />
-            {minimapAllowed && miniMapOpen && (
+            {minimapAllowed && showMiniMap && (
               <MiniMap
                 pannable
                 zoomable={false}
@@ -398,9 +395,10 @@ export default function PipelineFlowCanvas({
                 maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
                 nodeBorderRadius={6}
                 style={{
-                  marginBottom: 60,
-                  width: 156,
-                  height: 96,
+                  marginBottom: 12,
+                  marginRight: 196,
+                  width: 132,
+                  height: 76,
                   border: "1px solid var(--line-soft)",
                   borderRadius: 12,
                 }}
@@ -441,8 +439,8 @@ export default function PipelineFlowCanvas({
                 icon={<Map aria-hidden />}
                 className={TOOL_BTN}
                 label={tr("미니맵 표시 전환", "Toggle minimap")}
-                pressed={miniMapOpen}
-                onClick={() => setMiniMapOpen((prev) => !prev)}
+                pressed={showMiniMap}
+                onClick={() => setShowMiniMap((prev) => !prev)}
               />
             )}
           </div>

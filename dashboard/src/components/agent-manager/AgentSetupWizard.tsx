@@ -1,9 +1,8 @@
 import { Check, X } from "lucide-react";
 import type { CliProvider } from "../../types";
-import { localeName } from "../../i18n";
 import { summarizeRollback } from "../../api/agentsSetup";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { StatusDot, cn } from "../common/KitPrimitives";
 import { Button } from "../../kit/free/button-clean";
 import { Checkbox } from "../../kit/free/checkbox-clean";
@@ -59,8 +58,6 @@ export default function AgentSetupWizard({
   open,
   mode,
   sourceAgent,
-  departments,
-  locale,
   tr,
   onClose,
   onDone,
@@ -87,6 +84,13 @@ export default function AgentSetupWizard({
     runConfirm,
   } = useAgentSetupWizardState({ open, mode, sourceAgent, onDone });
   const providerCatalog = useProviderCatalog(draft.provider);
+  const [roleTouched, setRoleTouched] = useState(false);
+  const [channelTouched, setChannelTouched] = useState(false);
+
+  useEffect(() => {
+    setRoleTouched(false);
+    setChannelTouched(false);
+  }, [open, mode, sourceAgent]);
 
   if (!open) return null;
 
@@ -95,13 +99,14 @@ export default function AgentSetupWizard({
     value: string,
     onChange: (next: string) => void,
     placeholder?: string,
-    type = "text",
+    onBlur?: () => void,
   ) => (
     <TextField
       label={label}
-      type={type}
+      type="text"
       value={value}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={onBlur}
       placeholder={placeholder}
     />
   );
@@ -152,7 +157,12 @@ export default function AgentSetupWizard({
               <Button
                 variant="primary"
                 size="md"
-                onClick={() => setStepIndex((prev) => Math.min(steps.length - 1, prev + 1))}
+                onClick={() => {
+                  if (stepIndex === 0) setRoleTouched(true);
+                  if (stepIndex === 1) setChannelTouched(true);
+                  if (!currentValid) return;
+                  setStepIndex((prev) => Math.min(steps.length - 1, prev + 1));
+                }}
                 disabled={!currentValid || busy}
               >
                 {tr("다음", "Next")}
@@ -178,7 +188,11 @@ export default function AgentSetupWizard({
                 <li key={step} className="min-w-0">
                   <button
                     type="button"
-                    onClick={() => setStepIndex(index)}
+                    onClick={() => {
+                      if (index > 0) setRoleTouched(true);
+                      if (index > 1) setChannelTouched(true);
+                      setStepIndex(index);
+                    }}
                     aria-current={stepIndex === index ? "step" : undefined}
                     className={`flex min-h-11 w-full items-center justify-between gap-3 rounded-(--r-md) px-3 py-2 text-left text-xs text-(--fg) transition-colors hover:bg-(--bg-2) focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent) motion-reduce:transition-none ${
                       stepIndex === index
@@ -204,23 +218,20 @@ export default function AgentSetupWizard({
                   description={tr("역할 ID와 표시 이름은 만든 뒤에도 관리 화면에서 고칠 수 있어요.", "The role ID and names stay editable after creation.")}
                 >
                   <div className="grid gap-4 md:grid-cols-2">
-                    {field(tr("역할 ID", "Role ID"), draft.agentId, (agentId) => setDraft({ ...draft, agentId }), "adk-researcher")}
-                    {field(tr("표시 이름", "Display name"), draft.name, (name) => setDraft({ ...draft, name }), "Researcher")}
-                    {field(tr("한글 이름", "Korean name"), draft.nameKo, (nameKo) => setDraft({ ...draft, nameKo }), "리서처")}
-                    <Select
-                      label={tr("부서", "Department")}
-                      value={draft.departmentId}
-                      onChange={(departmentId) => setDraft({ ...draft, departmentId })}
-                      options={[
-                        { value: "", label: tr("미배정", "Unassigned") },
-                        ...departments.map((department) => ({
-                          value: department.id,
-                          label: [department.icon, localeName(locale, department)].filter(Boolean).join(" "),
-                        })),
-                      ]}
+                    <TextField
+                      id="wizard-role-id"
+                      data-autofocus
+                      label={tr("역할 ID", "Role ID")}
+                      type="text"
+                      value={draft.agentId}
+                      onChange={(event) => { setRoleTouched(true); setDraft({ ...draft, agentId: event.target.value }); }}
+                      onBlur={() => setRoleTouched(true)}
+                      placeholder="adk-researcher"
                     />
+                    {field(tr("표시 이름", "Display name"), draft.name, (name) => { setRoleTouched(true); setDraft({ ...draft, name }); }, "Researcher", () => setRoleTouched(true))}
+                    {field(tr("한글 이름", "Korean name"), draft.nameKo, (nameKo) => setDraft({ ...draft, nameKo }), "리서처")}
                   </div>
-                  {!validationByStep[0] && (
+                  {roleTouched && !validationByStep[0] && (
                     <p className="m-0 text-xs text-(--err)">
                       {tr("역할 ID는 영문·숫자·_·- 2자 이상이어야 해요. 표시 이름도 적어 주세요.", "The role ID needs 2+ letters, digits, _ or -, and a display name.")}
                     </p>
@@ -234,7 +245,7 @@ export default function AgentSetupWizard({
                   description={tr("이 역할을 연결할 채널 ID를 적어요.", "The Discord channel ID this role answers in.")}
                 >
                   <div className="grid gap-4 md:grid-cols-2">
-                    {field(tr("채널 ID", "Channel ID"), draft.channelId, (channelId) => setDraft({ ...draft, channelId }), "123456789012345678")}
+                    {field(tr("채널 ID", "Channel ID"), draft.channelId, (channelId) => { setChannelTouched(true); setDraft({ ...draft, channelId }); }, "123456789012345678", () => setChannelTouched(true))}
                     <Select
                       label="Provider"
                       value={draft.provider}
@@ -255,7 +266,7 @@ export default function AgentSetupWizard({
                       {tr("채널 이름", "Channel name")}: <span className="text-(--fg)">#{channelName}</span>
                     </p>
                   )}
-                  {!validationByStep[1] && (
+                  {channelTouched && !validationByStep[1] && (
                     <p className="m-0 text-xs text-(--err)">
                       {tr("채널 ID는 숫자여야 해요.", "The channel ID must be a number.")}
                     </p>

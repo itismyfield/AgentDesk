@@ -5,7 +5,7 @@ import { AlertDialog } from "../../kit/free/dialog-clean";
 import { STORAGE_KEYS } from "../../lib/storageKeys";
 import { useDraftLeaveGuard } from "../../lib/useDraftLeaveGuard";
 import { useLocalStorage } from "../../lib/useLocalStorage";
-import type { PipelineConfigFull, PipelineStage } from "../../types";
+import type { Agent, PipelineConfigFull, PipelineStage } from "../../types";
 import {
   PIPELINE_VISUAL_EDITOR_MOBILE_BREAKPOINT,
   buildFsmEdgeBindingKey,
@@ -15,6 +15,8 @@ import {
   hasRawOverride,
   inferFsmEventName,
   stageDraftFromApi,
+  type FsmEdgeBinding,
+  type PipelineGraphLayout,
   type Selection,
   type StageDraft,
 } from "./pipeline-visual-editor-model";
@@ -50,6 +52,55 @@ import {
 } from "./pipeline-visual-editor-ui";
 import PipelineVisualEditorView from "./PipelineVisualEditorView";
 import { usePipelineVisualEditorActions } from "./usePipelineVisualEditorActions";
+
+export type PipelineEditorActions = ReturnType<typeof usePipelineVisualEditorActions> & {
+  confirmLeave: (proceed: () => void) => void;
+};
+
+export type PipelineEditorFsmQuickTransition = PipelineConfigFull["transitions"][number] & {
+  index: number;
+  event: string;
+};
+
+export interface PipelineEditorCtx {
+  activeLayers: string[];
+  agents: Agent[];
+  allRepoStages: PipelineStage[];
+  collapsed: boolean;
+  compactGraph: boolean;
+  editorHelpText: string;
+  editorTitle: string;
+  error: string | null;
+  fsmEdgeBindings: Record<string, FsmEdgeBinding>;
+  fsmEventOptions: string[];
+  fsmHookOptions: string[];
+  fsmQuickTransitions: PipelineEditorFsmQuickTransition[];
+  graph: PipelineGraphLayout | null;
+  graphGridClass: string;
+  graphPanelNote: string;
+  hasVisibleChanges: boolean;
+  isFsmVariant: boolean;
+  level: EditLevel;
+  loading: boolean;
+  locale: PipelineVisualEditorProps["locale"];
+  overrideExists: boolean;
+  pipelineDraft: PipelineConfigFull | null;
+  preservedKeys: string[];
+  saving: boolean;
+  selectedAgentDetail: ReturnType<typeof selectedAgentInfo>;
+  selectedAgentId?: string | null;
+  selectedFsmEvent: string;
+  selectedFsmHook: string;
+  selectedState: PipelineConfigFull["states"][number] | null;
+  selectedTransition: PipelineConfigFull["transitions"][number] | null;
+  selectedTransitionGates: string[];
+  selectedTransitionIndex: number;
+  selection: Selection;
+  stageDrafts: StageDraft[];
+  success: string | null;
+  tr: PipelineVisualEditorProps["tr"];
+  useScrollableMobileFsmCanvas: boolean;
+}
 
 export default function PipelineVisualEditor({
   tr,
@@ -550,56 +601,55 @@ export default function PipelineVisualEditor({
     setSuccess,
     refreshAfterMutation,
   });
-  const actions = { ...baseActions, confirmLeave: leaveGuard.confirmLeave };
+  const actions: PipelineEditorActions = { ...baseActions, confirmLeave: leaveGuard.confirmLeave };
 
   if (!repo) {
     return null;
   }
 
+  const ctx: PipelineEditorCtx = {
+    activeLayers,
+    agents,
+    allRepoStages,
+    collapsed,
+    compactGraph,
+    editorHelpText,
+    editorTitle,
+    error,
+    fsmEdgeBindings,
+    fsmEventOptions,
+    fsmHookOptions,
+    fsmQuickTransitions,
+    graph,
+    graphGridClass,
+    graphPanelNote,
+    hasVisibleChanges,
+    isFsmVariant,
+    level,
+    loading,
+    locale,
+    overrideExists,
+    pipelineDraft,
+    preservedKeys,
+    saving,
+    selectedAgentDetail,
+    selectedAgentId,
+    selectedFsmEvent,
+    selectedFsmHook,
+    selectedState,
+    selectedTransition,
+    selectedTransitionGates,
+    selectedTransitionIndex,
+    selection,
+    stageDrafts,
+    success,
+    tr,
+    useScrollableMobileFsmCanvas,
+  };
+
   return (
     <>
-      <PipelineVisualEditorView
-        actions={actions}
-        ctx={{
-          activeLayers,
-          agents,
-          allRepoStages,
-          collapsed,
-          compactGraph,
-          editorHelpText,
-          editorTitle,
-          error,
-          fsmEdgeBindings,
-          fsmEventOptions,
-          fsmHookOptions,
-          fsmQuickTransitions,
-          graph,
-          graphGridClass,
-          graphPanelNote,
-          hasVisibleChanges,
-          isFsmVariant,
-          level,
-          loading,
-          locale,
-          overrideExists,
-          pipelineDraft,
-          preservedKeys,
-          saving,
-          selectedAgentDetail,
-          selectedAgentId,
-          selectedFsmEvent,
-          selectedFsmHook,
-          selectedState,
-          selectedTransition,
-          selectedTransitionGates,
-          selectedTransitionIndex,
-          selection,
-          stageDrafts,
-          success,
-          tr,
-          useScrollableMobileFsmCanvas,
-        }}
-      />
+      <PipelineVisualEditorView actions={actions} ctx={ctx} />
       <AlertDialog
         open={leaveGuard.confirmOpen}
         danger

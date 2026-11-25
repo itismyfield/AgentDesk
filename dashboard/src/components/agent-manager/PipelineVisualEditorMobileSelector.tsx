@@ -1,3 +1,4 @@
+import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import { fsmStateTone, transitionAccent } from "./pipeline-visual-editor-styles";
 import {
   FSM_DETAIL_PANEL_STYLE,
@@ -5,12 +6,13 @@ import {
 } from "./pipeline-visual-editor-ui";
 
 interface Props {
-  ctx: any;
-  actions: any;
+  ctx: PipelineEditorCtx;
+  actions: PipelineEditorActions;
 }
 
 export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Props) {
-  const tr = ctx.tr;
+  const { pipelineDraft, tr } = ctx;
+  if (!pipelineDraft) return null;
 
   return (
     <div
@@ -46,7 +48,7 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
           </span>
         </div>
         <div className="grid gap-2">
-          {ctx.fsmQuickTransitions.map((transition: any) => {
+          {ctx.fsmQuickTransitions.map((transition) => {
             const accent = transitionAccent(transition.type);
             const isSelected = ctx.selection?.kind === "transition" && ctx.selection.index === transition.index;
             return (
@@ -104,11 +106,11 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
             {tr("상태", "States")}
           </h5>
           <span className="text-[11px]" style={MUTED_TEXT_STYLE}>
-            {`${ctx.pipelineDraft.states.length}`}
+            {`${pipelineDraft.states.length}`}
           </span>
         </div>
         <div className="grid grid-cols-2 gap-2">
-          {ctx.pipelineDraft.states.map((state: any) => {
+          {pipelineDraft.states.map((state) => {
             const tone = fsmStateTone(state.id);
             const isSelected = ctx.selection?.kind === "state" && ctx.selection.stateId === state.id;
             return (
