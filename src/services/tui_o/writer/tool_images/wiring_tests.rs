@@ -481,6 +481,45 @@ async fn open_prepared_settles_before_an_owed_notice_and_not_on_an_image_less_po
     assert!(!writer.is_stopped() && writer.store().ledger().violation().is_none());
 }
 
+/// A notice attempt left Prepared by a crash has no marker: its own poll settles it.
+#[tokio::test(start_paused = true)]
+async fn restored_notice_prepared_settles_on_its_own_poll() {
+    let (harness, path, source) = switched_over(b"");
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m0", "proof")).await, Step::Done);
+    let mut deriver = images(&mut writer);
+    append(
+        &path,
+        &[prompt("t1"), result("r1", "c1", 1, "image/tiff")].concat(),
+    );
+    derive(&mut writer, &mut deriver, &source, 0);
+    let ledger = writer.store().ledger();
+    let notice = ledger.tool_images().open_obligations(ledger).into_iter();
+    let unit_key = notice.find_map(|open| match open {
+        crate::services::tui_o::store::ledger::tool_images::OpenObligation::Notice {
+            key, ..
+        } => Some(key),
+        _ => None,
+    });
+    let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+    let prepared = LedgerEntry::Prepared {
+        notice_origin: None,
+        local_retry: None,
+        serial,
+        unit_key: unit_key.unwrap(),
+        piece_index: 0,
+        payload: "notice maybe sent".into(),
+        anchor_id,
+        epoch: 1,
+    };
+    writer.store().append_ledger(prepared).unwrap();
+    assert_eq!(writer.select_images(Utc::now()).await, Step::Done);
+    let ledger = writer.store().ledger();
+    let outcome = ledger.piece(serial).unwrap().outcome.clone();
+    assert_eq!(outcome, Some(PieceOutcome::NotFound));
+}
+
 /// An unsupported image's notice: Unresolved is re-settled, NotFound retried up to three
 /// counted attempts, then kept open; the count survives a restart.
 #[tokio::test(start_paused = true)]
