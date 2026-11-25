@@ -13,3 +13,7 @@ ALTER TABLE decision_requests
 
 -- The opaque button handle of each option, written with the journal before the post.
 ALTER TABLE decision_options ADD COLUMN IF NOT EXISTS handle TEXT UNIQUE;
+
+-- The intake guard looks a thread's parent up among the forums requests were journaled to.
+CREATE INDEX IF NOT EXISTS decision_requests_forum_id ON decision_requests (forum_id)
+    WHERE forum_id IS NOT NULL;

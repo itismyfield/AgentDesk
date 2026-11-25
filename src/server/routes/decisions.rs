@@ -20,8 +20,8 @@ fn failure(status: StatusCode, error: &str) -> RouteResponse {
     (status, Json(json!({"ok": false, "error": error})))
 }
 
-/// The header's capability hash owns the request. 201: the post exists; 202: it may, and is not
-/// sent again; 502: Discord refused it; 503: nothing was sent.
+/// The capability hash owns the request. 201: posted; 202: maybe posted, not re-sent; 502: starter
+/// refused for good (post_failed), or forum refused (still stored); 503: nothing was sent.
 pub async fn ask(
     _caller: HumanInputCaller,
     State(state): State<AppState>,

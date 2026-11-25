@@ -983,7 +983,7 @@
     },
     {
       "path": "migrations/postgres/0203_decision_publication.sql",
-      "sha256": "382d2807f9365e6a5a24f399a80233099d18580ef3cb94b028236955a5779a87",
+      "sha256": "d576d153ab8438a54fdb9feb63ab3eadfab535950045a907669e4a9cc49ecbdd",
       "version": 203
     }
   ],

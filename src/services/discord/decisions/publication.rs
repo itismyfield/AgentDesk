@@ -2,6 +2,7 @@
 //! A lost answer is settled by finding that post, a refusal is kept; neither is posted again.
 
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use poise::serenity_prelude as serenity;
 use sqlx::PgPool;
@@ -75,7 +76,8 @@ pub(crate) async fn publish(
     }
 }
 
-/// The provider bot that owns the channel, with its gateway up: its REST client and user id.
+/// The provider bot that owns the channel with its gateway connected now, not merely once (a
+/// handed-back gateway keeps its Context): its REST client and user id.
 async fn provider_bot(
     registry: Option<&HealthRegistry>,
     channel: u64,
@@ -84,6 +86,9 @@ async fn provider_bot(
     let channel = serenity::ChannelId::new(channel);
     let owner = health::resolve_direct_channel_runtime(registry?, channel, provider).await;
     let (http, shared) = owner.ok()?;
+    if !shared.bot_connected.load(Ordering::SeqCst) {
+        return None;
+    }
     let bot = shared
         .http
         .cached_serenity_ctx
@@ -206,7 +211,7 @@ async fn reconcile(
 }
 
 /// The post of `request_id` among the forum's active threads: a thread our bot started whose
-/// starter, written by our bot, carries the request's marker line.
+/// starter, written by our bot, ends with the request's marker line (a quoted marker is not one).
 async fn find_post(
     http: &serenity::Http,
     forum: u64,
@@ -230,7 +235,8 @@ async fn find_post(
         let Ok(starter) = http.get_message(thread.id, starter_id).await else {
             continue;
         };
-        if starter.author.id == bot && starter.content.lines().any(|line| line == marker) {
+        let last = starter.content.lines().last();
+        if starter.author.id == bot && last == Some(marker.as_str()) {
             return Ok(Some(thread.id.get()));
         }
     }

@@ -1,5 +1,5 @@
-//! Messages under a Decision forum (ready, configured or registered before its first post) never
-//! reach agent intake; a parent the last read missed is looked up in PG, so none is missed.
+//! Messages under a Decision forum (ready, journaled, configured or registered) never reach agent
+//! intake; a parent the last read missed is looked up in PG, so none is missed.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, PoisonError};
@@ -25,18 +25,20 @@ pub(in crate::services::discord) fn register(forum: u64) {
     FORUMS.register(forum);
 }
 
-/// Whether PG records `forum` as a ready Decision forum.
-async fn ready_in_pg(pool: &PgPool, forum: u64) -> Result<bool, sqlx::Error> {
+/// Whether PG names `forum` as a Decision forum: a ready forum row, or a request journaled to
+/// post there, which a configured forum also gets before its first post.
+async fn known_in_pg(pool: &PgPool, forum: u64) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM decision_forums WHERE forum_id = $1 AND state = 'ready')",
+        "SELECT EXISTS(SELECT 1 FROM decision_forums WHERE forum_id = $1 AND state = 'ready')
+             OR EXISTS(SELECT 1 FROM decision_requests WHERE forum_id = $1)",
     )
     .bind(forum.to_string())
     .fetch_one(pool)
     .await
 }
 
-/// Every Decision forum a guard may know: the ready rows and the configured overrides. A forum
-/// whose create is still unknown has no id yet, so nothing is matched for it.
+/// Every Decision forum a guard may know: ready rows, journaled requests' forums and the configured
+/// overrides. A forum whose create is still unknown has no id yet, so nothing matches it.
 pub(crate) async fn load_forums(
     pool: Option<&PgPool>,
     config: &DecisionsConfig,
@@ -47,7 +49,8 @@ pub(crate) async fn load_forums(
         .collect();
     if let Some(pool) = pool {
         let ready: Vec<String> = sqlx::query_scalar(
-            "SELECT forum_id FROM decision_forums WHERE state = 'ready' AND forum_id IS NOT NULL",
+            "SELECT forum_id FROM decision_forums WHERE state = 'ready' AND forum_id IS NOT NULL
+             UNION SELECT forum_id FROM decision_requests WHERE forum_id IS NOT NULL",
         )
         .fetch_all(pool)
         .await?;
@@ -84,7 +87,7 @@ impl Forums {
         match (known(true), pool) {
             (Some(true), _) => return true,
             (Some(false), Some(pool)) => {
-                return match ready_in_pg(pool, parent).await {
+                return match known_in_pg(pool, parent).await {
                     Ok(ready) => {
                         if ready {
                             self.register(parent);
