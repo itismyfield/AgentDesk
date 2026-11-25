@@ -469,6 +469,21 @@ pub(in crate::services::discord) fn build_watcher_reacquire_inflight_state(
     state
 }
 
+/// Runs a watcher's inflight reacquire under the channel transition lease, never waiting for it:
+/// a dead-Bound recovery between its no-turn read and its CAS keeps this row out, and a busy lock
+/// leaves the reacquire to the watcher's next tick.
+pub(in crate::services::discord) fn reacquire_under_transition(
+    shared: &crate::services::discord::SharedData,
+    channel_id: ChannelId,
+    reacquire: impl FnOnce() -> bool,
+) -> bool {
+    use crate::services::discord::session_transition::SessionTransitionLease;
+    match SessionTransitionLease::try_acquire(shared, channel_id) {
+        Ok(_lease) => reacquire(),
+        Err(_) => false,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(in crate::services::discord) fn reacquire_watcher_inflight_for_active_stream(
     provider: &ProviderKind,

@@ -648,15 +648,23 @@ async fn start_monitor_auto_turn_when_available(
         // #3167 — the monitor auto-turn is a low-priority background relay; mark
         // it with the distinct monitor kind so queued external USER intervention
         // is not starved and synthetic stale-reclaim never preempts it.
-        let started = super::mailbox_try_start_turn_kinded(
-            shared,
-            channel_id,
-            token.clone(),
-            UserId::new(1),
-            synthetic_message_id,
-            crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
-        )
-        .await;
+        // Like a headless claim, the start waits for the channel transition lock so a dead-Bound
+        // recovery's proof-to-CAS window never sees its token appear.
+        let transition = shared.session_transition_locks.acquire(channel_id).await;
+        let started = match transition {
+            Ok(_transition) => {
+                super::mailbox_try_start_turn_kinded(
+                    shared,
+                    channel_id,
+                    token.clone(),
+                    UserId::new(1),
+                    synthetic_message_id,
+                    crate::services::turn_orchestrator::ActiveTurnKind::MonitorAutoTurn,
+                )
+                .await
+            }
+            Err(_) => false,
+        };
         if started {
             super::increment_global_active(shared, "tmux_monitor_auto_turn");
             shared

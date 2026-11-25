@@ -32,12 +32,14 @@ pub(crate) struct Retired {
     pub hold: HoldRelease,
 }
 
-/// Reads only the registered exact endpoint, then retires only that observed row and nonce.
-pub(crate) async fn observed(
-    pool: &PgPool,
-    row: &HostedObservation,
-    scope: Scope,
-) -> Result<Retired, RetireRefusal> {
+/// One read of the registered exact endpoint and whether it proves the execution ended.
+pub(crate) struct Proof {
+    pub reading: PaneReading,
+    pub ended: bool,
+}
+
+/// Reads only the registered exact endpoint; nothing is written.
+pub(crate) async fn prove(row: &HostedObservation) -> Result<Proof, RetireRefusal> {
     let HostedRecord::Known(record) = &row.record else {
         return Err(RetireRefusal::NoRow("unreadable record"));
     };
@@ -55,16 +57,34 @@ pub(crate) async fn observed(
     })
     .await
     .unwrap_or_else(|error| (PaneReading::Unreadable(error.to_string()), false));
+    Ok(Proof { reading, ended })
+}
+
+/// Reads only the registered exact endpoint, then retires only that observed row and nonce.
+pub(crate) async fn observed(
+    pool: &PgPool,
+    row: &HostedObservation,
+    scope: Scope,
+) -> Result<Retired, RetireRefusal> {
+    let HostedRecord::Known(record) = &row.record else {
+        return Err(RetireRefusal::NoRow("unreadable record"));
+    };
+    let Proof { reading, ended } = prove(row).await?;
     if scope == Scope::Missing && !matches!(reading, PaneReading::Missing) {
         return Err(RetireRefusal::Unproven("pane is not confirmed missing"));
     }
     let retired = on_reading(pool, row, record, &reading, ended).await?;
     if scope == Scope::Missing {
-        let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
-        missing.retain(|(owner, _)| owner != &record.owner);
-        missing.push((record.owner.clone(), record.execution_nonce.clone()));
+        note_missing(record);
     }
     Ok(retired)
+}
+
+/// Keeps a Missing retirement for the next front's judgement; a manual retire never records one.
+pub(crate) fn note_missing(record: &HostedExecution) {
+    let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
+    missing.retain(|(owner, _)| owner != &record.owner);
+    missing.push((record.owner.clone(), record.execution_nonce.clone()));
 }
 
 /// The hold goes only after this observation's CAS wrote Retired.

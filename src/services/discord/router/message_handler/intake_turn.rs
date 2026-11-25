@@ -985,7 +985,7 @@ pub(super) async fn handle_text_message(
         let (owner, legacy_busy_diagnostic) = match super::provider_dispatch::OwnerTurn::early(
             shared, &provider, channel_id, tmux_session_name.as_deref(),
             adk_session_key.as_deref(), owner,
-            force_fresh_provider_session,
+            (force_fresh_provider_session, intake_runtime_transition.guard()),
         ).await {
             Ok(owner) => owner,
             Err(()) => {

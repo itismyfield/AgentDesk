@@ -338,8 +338,27 @@ impl Owner {
     /// without a provider turn; an origin waiting on them is owed `Completed`.
     pub(crate) fn complete_claimed_locally(
         &mut self,
+        claimed: (&Front, u64),
+        followers: usize,
+    ) -> Result<(), String> {
+        self.take_claimed(claimed, followers, TerminalOutcome::Completed)
+    }
+
+    /// Takes the same claimed input when it was refused before any provider write; an origin
+    /// waiting on it is owed `Failed`, never a completion.
+    pub(crate) fn fail_claimed_locally(
+        &mut self,
+        claimed: (&Front, u64),
+        followers: usize,
+    ) -> Result<(), String> {
+        self.take_claimed(claimed, followers, TerminalOutcome::Failed)
+    }
+
+    fn take_claimed(
+        &mut self,
         (front, number): (&Front, u64),
         followers: usize,
+        outcome: TerminalOutcome,
     ) -> Result<(), String> {
         let claimed = number == self.claim_number
             && (self.front_claim.as_ref()).is_some_and(|c| is_front(c, front))
@@ -349,11 +368,7 @@ impl Owner {
         }
         let mut next = self.snapshot.clone();
         let taken = (1 + followers).min(next.items.len());
-        next.owe_queued(
-            0..taken,
-            TerminalOutcome::Completed,
-            super::origin::now_ms(),
-        );
+        next.owe_queued(0..taken, outcome, super::origin::now_ms());
         for _ in 0..taken {
             next.items.remove(0);
             next.unbind_item(0);

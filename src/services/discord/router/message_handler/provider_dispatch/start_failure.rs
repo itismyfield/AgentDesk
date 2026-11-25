@@ -1,5 +1,6 @@
 use super::owner_input::OwnerTurn;
 use super::*;
+use crate::db::turns::TerminalOutcome;
 use crate::services::claude::herdr_turn::retry_probe::CauseRead;
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::discord::inflight::row_removed;
@@ -29,6 +30,9 @@ pub(in crate::services::discord) fn confirmed(refusal: &HerdrRefusal) -> Option<
     }
 }
 type Shared = Arc<crate::services::discord::SharedData>;
+
+/// A start whose recorded execution this owner can never recover: nothing was sent.
+pub(super) const RECOVERY_REFUSED: &str = "NotSent(\"hosted_recovery_refused\")";
 
 #[derive(Clone, Default)]
 pub(super) struct MissingRecovery(Arc<std::sync::atomic::AtomicBool>);
@@ -120,6 +124,28 @@ impl Failure {
         channel: poise::serenity_prelude::ChannelId,
         detail: String,
     ) -> Result<Option<bool>, String> {
+        self.dispose(shared, channel, detail, TerminalOutcome::Completed)
+            .await
+    }
+
+    /// As `discard`, for an input refused before any provider write: its origin is owed `Failed`.
+    pub(super) async fn fail(
+        self,
+        shared: Option<Shared>,
+        channel: poise::serenity_prelude::ChannelId,
+        detail: String,
+    ) -> Result<Option<bool>, String> {
+        self.dispose(shared, channel, detail, TerminalOutcome::Failed)
+            .await
+    }
+
+    async fn dispose(
+        self,
+        shared: Option<Shared>,
+        channel: poise::serenity_prelude::ChannelId,
+        detail: String,
+        outcome: TerminalOutcome,
+    ) -> Result<Option<bool>, String> {
         let notice = self.notice.clone();
         let mut notice = notice.lock().await;
         let anchor = poise::serenity_prelude::MessageId::new(self.front.1.message_id);
@@ -133,8 +159,12 @@ impl Failure {
                 {
                     return Ok(None);
                 }
-                owner
-                    .complete_claimed_locally((&self.front, self.number), self.members.len() - 1)?;
+                let claimed = (&self.front, self.number);
+                let followers = self.members.len() - 1;
+                match outcome {
+                    TerminalOutcome::Failed => owner.fail_claimed_locally(claimed, followers)?,
+                    _ => owner.complete_claimed_locally(claimed, followers)?,
+                }
                 Ok(Some(true))
             })
             .await?;

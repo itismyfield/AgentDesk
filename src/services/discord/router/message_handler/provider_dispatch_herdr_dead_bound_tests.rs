@@ -22,13 +22,16 @@ const REFUSED: &str = "NotSent(\"hosted_recovery_refused\")";
 const DISCARDED: &str = "이 입력을 폐기했습니다";
 
 /// What holds the channel before the start is judged.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 enum Holds {
     Nothing,
     /// A managed turn's token.
     Token,
     /// The channel transition lock, as a registering start holds it.
     Lock,
+    /// Nothing; inside the recovery's lease, before its CAS, a registering start and a watcher's
+    /// lone inflight row are tried and must both be excluded.
+    Barrier(fn(bool)),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -138,7 +141,7 @@ fn synthetic_case(
         });
     }
     let result = intake.runtime.block_on(async {
-        if holds == Holds::Token {
+        if matches!(holds, Holds::Token) {
             let token = Arc::new(CancelToken::new());
             let holder = MessageId::new(MESSAGE - 1);
             intake
@@ -146,11 +149,23 @@ fn synthetic_case(
                 .restore_active_turn(token, UserId::new(7), holder)
                 .await;
         }
+        if let Holds::Barrier(seen) = holds {
+            let shared = intake.shared.clone();
+            let install = super::super::super::owner_input::owned_busy::dead_bound::install_before_cas;
+            install(CHANNEL, move || {
+                let channel = ChannelId::new(CHANNEL);
+                let lock = shared.session_transition_locks.lock(channel);
+                let token_excluded = lock.try_lock_owned().is_err();
+                let reacquire = crate::services::discord::tmux::tmux_watcher::liveness::reacquire_under_transition;
+                let row_excluded = !reacquire(&shared, channel, || true);
+                seen(token_excluded && row_excluded);
+            });
+        }
         let lock = intake
             .shared
             .session_transition_locks
             .lock(ChannelId::new(CHANNEL));
-        let _held = (holds == Holds::Lock).then(|| lock.try_lock_owned().unwrap());
+        let _held = matches!(holds, Holds::Lock).then(|| lock.try_lock_owned().unwrap());
         let front = synthetic_front(&intake).await;
         let start =
             dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
@@ -504,4 +519,30 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
     );
     drop(intake);
     drop(original_runtime);
+}
+
+static BARRIER: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+fn barrier_seen(excluded: bool) {
+    *BARRIER.lock().unwrap() = Some(excluded);
+}
+
+// T11b: once the recovery holds the lease after its no-turn reads, a registering start cannot take
+// the channel lock and a watcher cannot create a lone inflight row until the CAS is done.
+#[test]
+fn a_recovery_in_its_lease_excludes_new_tokens_and_lone_inflight_rows_pg() {
+    *BARRIER.lock().unwrap() = None;
+    synthetic_case(
+        "dead-bound-barrier",
+        (Pane::Missing, false, Holds::Barrier(barrier_seen)),
+        |fx, _, nonce, result| {
+            assert_ne!(result.as_ref().err().map(String::as_str), Some(START_WAITS));
+            assert_eq!(
+                *BARRIER.lock().unwrap(),
+                Some(true),
+                "both excluded inside the lease"
+            );
+            assert!(!bound(fx, nonce), "the CAS ran after the barrier");
+        },
+    );
 }
