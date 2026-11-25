@@ -162,7 +162,8 @@ src/
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── login_test_support.rs
-│   │   └── run_identity_tests.rs
+│   │   ├── run_identity_tests.rs
+│   │   └── test_support.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── channel_alias.rs
@@ -1303,6 +1304,7 @@ src/
 │   │   │   ├── restored_reply_tests.rs
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── wait.rs
 │   │   │   ├── wait_cause_tests.rs
 │   │   │   └── watched.rs
@@ -4170,6 +4172,8 @@ src/
 │   │   ├── session_notice.rs
 │   │   └── source_registry.rs
 │   ├── observability/
+│   │   ├── emit/
+│   │   │   └── test_support.rs
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs
 │   │   │   ├── capture_tests.rs
@@ -4493,6 +4497,7 @@ src/
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
 │   │   │   ├── launch_host_restore_evidence_tests.rs
+│   │   │   ├── launch_host_support.rs
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
@@ -4502,6 +4507,7 @@ src/
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
+│   │   │   ├── pane_probe_support.rs
 │   │   │   ├── pane_probe_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── provenance_tests.rs
@@ -4873,6 +4879,7 @@ src/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
 │   │   │   │   │   ├── terminal.rs
+│   │   │   │   │   ├── test_support.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs

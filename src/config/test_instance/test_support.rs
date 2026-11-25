@@ -1,6 +1,5 @@
-//! Test-instance fixtures upper-crate tests reuse once KRX is its own crate (KRX-TS): the instance generator,
-//! its child `cargo test --exact` command, the single-pass assertion and the agy-headless cell. The unit tests
-//! (host_scope_tests.rs, agy_cell_tests.rs) import them from here; the subprocess runners stay with those tests.
+//! Test-instance fixtures upper-crate tests reuse once KRX is its own crate: the instance generator, its child
+//! command, the single-pass assertion and the agy-headless cell; the subprocess runners stay with the unit tests.
 
 use super::*;
 use serde_json::json;

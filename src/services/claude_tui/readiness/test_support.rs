@@ -55,11 +55,6 @@ pub(crate) fn after_first_look(
     })
 }
 
-/// A resume accepted before start records existed: its restart finds no record to restore from.
-pub(crate) fn lose_resume_record(nonce: &str) {
-    fs::remove_file(resume_record::record_path(nonce).unwrap()).unwrap();
-}
-
 /// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
 pub(crate) fn daemon_restart(session: &str) {
     let mut state = ledger();
