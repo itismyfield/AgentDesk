@@ -857,19 +857,22 @@ CustodyInit ==
                            \/ CustodyLive(route, stage)
                            \/ (stage = "noSlot" /\ Mut = "legacyFallback")),
               step |-> 1, ends |-> 0, generic |-> 0, legacy |-> 0,
-              visibleHold |-> FALSE, unprovenAbandon |-> FALSE]
+              visibleHold |-> FALSE, unprovenAbandon |-> FALSE, judged |-> FALSE]
 CustodyPhase == CustodyBoot[agy.step]
 \* end_authority: every generic end skips a row that is not Legacy.
 CustodySkipsGeneric == agy.route \in {"agy", "held"} \/ Mut = "legacyAsAgy"
 CustodyOwnsAgy == agy.route = "agy" \/ (agy.route = "legacy" /\ Mut = "legacyAsAgy")
 CustodyEnded == agy.ends + agy.generic + agy.legacy > 0
-\* The owner re-judges until it ends the turn; "oneShot" judges once, right after observe.
-CustodyOwnerTurn == agy.step >= 3 /\ (Mut # "oneShot" \/ agy.step = 3)
+\* The owner re-judges until it ends the turn; "oneShot" keeps only the first judgement.
+CustodyOwnerTurn == agy.step >= 3 /\ (Mut # "oneShot" \/ ~agy.judged)
+\* A row the owner holds is judged once, synchronously after observe, before boot goes on.
+CustodyJudgeDue == ~CustodyEnded /\ (agy.route = "held" \/ CustodyOwnsAgy)
 
 CustodyAdvance ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.step < 8
     /\ CustodyPhase = "restore" => (CustodySkipsGeneric \/ CustodyEnded)
+    /\ CustodyPhase = "queue" => (agy.judged \/ ~CustodyJudgeDue)
     /\ agy' = [agy EXCEPT !.step = @ + 1]
 \* Reaper, generation invalidation and the general restore (settle_boot inside it).
 CustodyGenericEnd ==
@@ -878,12 +881,18 @@ CustodyGenericEnd ==
     /\ \/ ~CustodySkipsGeneric /\ agy' = [agy EXCEPT !.legacy = 1]
        \/ /\ CustodySkipsGeneric /\ Mut = "genericSettle" /\ CustodyPhase = "restore"
           /\ agy' = [agy EXCEPT !.generic = 1]
+\* A forced stop's fallback (receipt_settle::stopped, then clear_inflight_state) at any phase.
+CustodyForceStop ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ ~CustodyEnded
+    /\ \/ ~CustodySkipsGeneric /\ agy' = [agy EXCEPT !.legacy = 1]
+       \/ CustodySkipsGeneric /\ Mut = "forceStopGeneric" /\ agy' = [agy EXCEPT !.generic = 1]
 \* boot_hold before any retry: a probe error or a held row is shown, never ended generically.
 CustodyHoldVisible ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ ~agy.visibleHold /\ ~CustodyEnded
     /\ agy.route = "held" \/ (CustodyOwnsAgy /\ agy.probe = "probeError")
-    /\ agy' = [agy EXCEPT !.visibleHold = TRUE]
+    /\ agy' = [agy EXCEPT !.visibleHold = TRUE, !.judged = TRUE]
 CustodyRetry ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ agy.probe = "probeError" /\ agy.visibleHold
@@ -896,26 +905,26 @@ CustodyKillTarget ==
 CustodyKill ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyKillTarget
-    /\ agy' = [agy EXCEPT !.probe = "goneOrReused"]
+    /\ agy' = [agy EXCEPT !.probe = "goneOrReused", !.judged = TRUE]
 CustodyKillOutlived ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyKillTarget
-    /\ agy' = [agy EXCEPT !.probe = "probeError"]
+    /\ agy' = [agy EXCEPT !.probe = "probeError", !.judged = TRUE]
 CustodySettle ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded /\ agy.stage = "sealed"
-    /\ agy' = [agy EXCEPT !.ends = 1]
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE]
 \* Abandon needs proof that input never ran or that its producer is gone.
 CustodyAbandon ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded
     /\ \/ agy.stage \in {"none", "noSlot", "noCheckpoint", "openOnly", "launched"}
        \/ agy.stage = "started" /\ (agy.probe = "goneOrReused" \/ Mut = "unprovenLost")
-    /\ agy' = [agy EXCEPT !.ends = 1,
+    /\ agy' = [agy EXCEPT !.ends = 1, !.judged = TRUE,
                            !.unprovenAbandon = agy.executed /\ agy.probe # "goneOrReused"]
 CustodyRest == UNCHANGED <<agy, vars, lateVars>>
-CustodyNext == CustodyAdvance \/ CustodyGenericEnd \/ CustodyHoldVisible \/ CustodyRetry
-               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
+CustodyNext == CustodyAdvance \/ CustodyGenericEnd \/ CustodyForceStop \/ CustodyHoldVisible
+               \/ CustodyRetry               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
                \/ CustodyRest
 AgyCustodySpec == CustodyInit /\ [][CustodyNext]_agy
     /\ WF_agy(CustodyAdvance) /\ WF_agy(CustodyGenericEnd) /\ WF_agy(CustodyHoldVisible)
@@ -926,6 +935,7 @@ LegacyRecoveryKept == agy.route = "legacy" => agy.ends = 0
 AgyEndOnlyByOwner == agy.route \in {"agy", "held"} => agy.generic = 0
 NoAbandonUnproven == ~agy.unprovenAbandon
 CustodyEndsOnce == agy.ends + agy.generic + agy.legacy <= 1
+CustodyJudgedFirst == agy.step > 3 => (agy.judged \/ ~CustodyJudgeDue)
 AgyCustodyResolves == agy.route = "agy" => <>(agy.ends = 1)
 LegacyResolves == agy.route = "legacy" => <>(agy.legacy = 1)
 ProbeErrorVisible ==

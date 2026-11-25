@@ -1981,11 +1981,12 @@ tui-o-writer/WriterAgyAbandon.cfg	WriterAdoption	-	AgyAcceptedEnds
 tui-o-writer/WriterAgyBorrowOld.cfg	WriterAdoption	AgyNoSilentLoss	-
 tui-o-writer/WriterAgyClear.cfg	WriterAdoption	-	-
 tui-o-writer/WriterAgyCustody.cfg	WriterAdoption	-	-
-tui-o-writer/WriterAgyCustodyGenericSettle.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,HeldVisible,ProbeErrorVisible
+tui-o-writer/WriterAgyCustodyForceStop.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,HeldVisible,ProbeErrorVisible
+tui-o-writer/WriterAgyCustodyGenericSettle.cfg	WriterAdoption	AgyEndOnlyByOwner	AgyCustodyResolves,ProbeErrorVisible
 tui-o-writer/WriterAgyCustodyLegacyAsAgy.cfg	WriterAdoption	LegacyRecoveryKept	LegacyResolves
 tui-o-writer/WriterAgyCustodyLegacyFallback.cfg	WriterAdoption	NoAbandonUnproven	-
 tui-o-writer/WriterAgyCustodyNoLaunchGate.cfg	WriterAdoption	NoAbandonUnproven	-
-tui-o-writer/WriterAgyCustodyOneShot.cfg	WriterAdoption	-	AgyCustodyResolves,HeldVisible,ProbeErrorVisible
+tui-o-writer/WriterAgyCustodyOneShot.cfg	WriterAdoption	-	AgyCustodyResolves,ProbeErrorVisible
 tui-o-writer/WriterAgyCustodyUnprovenLost.cfg	WriterAdoption	NoAbandonUnproven	-
 tui-o-writer/WriterAgyDoubleEnd.cfg	WriterAdoption	AgyEndOnce	-
 tui-o-writer/WriterAgyDoubleRelease.cfg	WriterAdoption	AgyEndOnce	-
