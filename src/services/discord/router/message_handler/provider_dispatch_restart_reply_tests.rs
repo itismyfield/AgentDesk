@@ -38,7 +38,7 @@ fn a_restored_reply_stays_unproven_behind_an_unclosed_or_working_compaction_pg()
         let (_, started) = reconnect::launch(&fx, &Arc::new(Launcher::default()));
         let mut records = measured_compaction_tail(&started.session);
         let notice = records.iter().position(|r| r["subtype"] == "informational");
-        match change {
+        match change.clone() {
             Some(Some(mut work)) => {
                 work["sessionId"] = json!(started.session);
                 records.insert(notice.unwrap(), work);
