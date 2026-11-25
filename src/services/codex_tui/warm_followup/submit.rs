@@ -129,6 +129,8 @@ pub(crate) fn settle_submit_for_test(
         prompt,
         report,
     )
+}
+
 /// The clear end and ticket a warm follow-up test installs (KRX-TS): stored under the same pane authority the
 /// production path reads, so upper-crate tests drive the real consumer.
 #[cfg(any(test, feature = "test-support"))]
