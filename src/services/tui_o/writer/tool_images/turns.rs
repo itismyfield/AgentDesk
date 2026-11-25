@@ -1,7 +1,7 @@
 //! The native turn an image belongs to. Pure: the writer wiring feeds it each record's facts
 //! and appends the spans it reports.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use super::NativeTurn;
 use crate::services::tui_o::shadow::SourceId;
@@ -32,9 +32,12 @@ pub(crate) enum TurnEdge {
         turn: NativeTurn,
         opener_offset: u64,
     },
+    /// `pending_calls` are this turn's calls still waiting for a result: the wiring records
+    /// each as `ImageCall` with the Closed, before GC can collect the call's evidence.
     Closed {
         turn: NativeTurn,
         end_offset: u64,
+        pending_calls: Vec<String>,
     },
 }
 
@@ -54,6 +57,8 @@ pub(crate) struct ImageTurns {
     state: State,
     /// Call id to the turn of its call, kept past the turn's end for late results.
     calls: HashMap<String, NativeTurn>,
+    /// Calls without a result yet; reported when their turn ends.
+    pending: BTreeSet<String>,
 }
 
 impl ImageTurns {
@@ -68,12 +73,22 @@ impl ImageTurns {
             origin,
             state,
             calls: HashMap::new(),
+            pending: BTreeSet::new(),
         }
     }
 
-    /// Runs before any fact of the record at `offset`: a restored turn whose durable Closed ends
-    /// at or before it is over, so that record's prompt can open the next turn.
-    pub(crate) fn before_offset(&mut self, offset: u64) {
+    /// Prepares the record at `offset` before any of its facts or calls: an unknown tracker
+    /// restores the durable span holding `offset`, and a restored turn ends at its Closed.
+    pub(crate) fn before_offset(&mut self, offset: u64, spans: &ImageState) {
+        if self.state == State::Unknown
+            && let Some(span) = spans.span_at(&self.source, offset)
+        {
+            self.state = State::Open(OpenTurn {
+                turn: NativeTurn::new(span.turn.clone()),
+                opener_offset: span.opener_offset,
+                closes_at: span.end_offset,
+            });
+        }
         if let State::Open(open) = &self.state
             && open.closes_at.is_some_and(|end| end <= offset)
         {
@@ -81,7 +96,8 @@ impl ImageTurns {
         }
     }
 
-    /// Mirrors `TurnTracker::observe` (seal.rs:98-128); returns the turn a native idle closed.
+    /// Follows `TurnTracker::observe`; an idle naming another turn leaves the open turn, as the
+    /// input facts and the restart projection do. Returns the turn an idle closed.
     pub(crate) fn observe(
         &mut self,
         fact: &RecordFact,
@@ -111,6 +127,9 @@ impl ImageTurns {
                 self.state = opened(turn_id.as_deref());
                 None
             }
+            (RecordFact::Idle(Some(close)), State::Open(open)) if *close != open.turn.as_str() => {
+                None
+            }
             (RecordFact::Idle(_), _) => self.end(offset),
             _ => None,
         }
@@ -122,53 +141,53 @@ impl ImageTurns {
     }
 
     fn end(&mut self, end_offset: u64) -> Option<TurnEdge> {
-        match std::mem::replace(&mut self.state, State::Idle) {
-            State::Open(open) => Some(TurnEdge::Closed {
-                turn: open.turn,
-                end_offset,
-            }),
-            State::Idle | State::Unknown => None,
+        let State::Open(open) = std::mem::replace(&mut self.state, State::Idle) else {
+            return None;
+        };
+        let of_turn = |call: &String| self.calls.get(call) == Some(&open.turn);
+        let pending_calls: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|c| of_turn(c))
+            .cloned()
+            .collect();
+        for call in &pending_calls {
+            self.pending.remove(call);
         }
+        Some(TurnEdge::Closed {
+            turn: open.turn,
+            end_offset,
+            pending_calls,
+        })
     }
 
     /// A tool call seen in the open turn; its result belongs there even after the turn ends.
     pub(crate) fn note_call(&mut self, call_id: &str) {
         if let State::Open(open) = &self.state {
             self.calls.insert(call_id.to_owned(), open.turn.clone());
+            self.pending.insert(call_id.to_owned());
         }
     }
 
-    /// The turn of an image in `call_id`'s result at `offset`: the call's turn, the open turn,
-    /// the stored span holding `offset`, else the edge turn; a body key is never a turn.
-    pub(crate) fn turn_for_image(
-        &mut self,
-        call_id: &str,
-        offset: u64,
-        spans: &ImageState,
-    ) -> ImageTurn {
-        if self.state == State::Unknown
-            && let Some(span) = spans.span_at(&self.source, offset)
-        {
-            self.state = State::Open(OpenTurn {
-                turn: NativeTurn::new(span.turn.clone()),
-                opener_offset: span.opener_offset,
-                closes_at: span.end_offset,
-            });
-        }
+    /// A tool result arrived (with or without images); its call no longer needs attribution.
+    pub(crate) fn note_result(&mut self, call_id: &str) {
+        self.pending.remove(call_id);
+    }
+
+    /// The turn of an image in `call_id`'s result: the call's turn (memory, then the durable
+    /// attribution), the open turn, else the edge turn; a body key is never a turn.
+    pub(crate) fn turn_for_image(&self, call_id: &str, spans: &ImageState) -> ImageTurn {
         let open = match &self.state {
             State::Open(open) => Some(open),
             State::Idle | State::Unknown => None,
         };
+        let durable = || spans.call_turn(&self.source, call_id).map(NativeTurn::new);
         let turn = self
             .calls
             .get(call_id)
             .cloned()
+            .or_else(durable)
             .or_else(|| open.map(|open| open.turn.clone()))
-            .or_else(|| {
-                spans
-                    .span_at(&self.source, offset)
-                    .map(|span| NativeTurn::new(span.turn.clone()))
-            })
             .unwrap_or_else(|| self.edge_turn());
         let open_span = open
             .filter(|open| {

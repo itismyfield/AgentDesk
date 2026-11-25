@@ -79,12 +79,12 @@ fn closed_span_end_offset_applied_before_prompt() {
     let mut turns = ImageTurns::starting_at(source(), 150, 0);
     // Row preparation restores u1 from its span before any fact of the row.
     turns.before_offset(200, images);
-    assert_eq!(turns.turn_for_image("call-b", 200, images).turn, turn("u1"));
+    assert_eq!(turns.turn_for_image("call-b", images).turn, turn("u1"));
     // The next record is u2's prompt at the Closed boundary: the boundary applies first.
     turns.before_offset(300, images);
     assert_eq!(turns.observe(&prompt(), Some("u2"), 300), None);
     turns.before_offset(350, images);
-    let next = turns.turn_for_image("call-c", 350, images);
+    let next = turns.turn_for_image("call-c", images);
     assert_eq!(next.turn, turn("u2"));
     let opener_offset = 300;
     let open_span = Some(TurnEdge::Opened {
@@ -103,7 +103,7 @@ fn replay_mid_turn_prompt_after_opener_gc_keeps_durable_turn() {
     turns.before_offset(250, images);
     assert_eq!(turns.observe(&prompt(), Some("mid"), 250), None);
     turns.before_offset(300, images);
-    let image = turns.turn_for_image("call-1", 300, images);
+    let image = turns.turn_for_image("call-1", images);
     assert_eq!(image.turn, turn("u1"));
     assert_eq!(image.open_span, None);
     assert_eq!(ledger.violation(), None);
@@ -138,7 +138,7 @@ fn no_span_falls_to_edge_turn_never_body_key() {
     let ledger = LedgerState::default();
     let mut turns = ImageTurns::starting_at(source(), 500, 42);
     turns.before_offset(600, ledger.tool_images());
-    let image = turns.turn_for_image("call-1", 600, ledger.tool_images());
+    let image = turns.turn_for_image("call-1", ledger.tool_images());
     let edge = format!("edge:{}:42", source_key(&source()));
     assert_eq!(image.turn, turn(&edge));
     assert_eq!(image.open_span, None);
@@ -152,7 +152,7 @@ fn no_span_falls_to_edge_turn_never_body_key() {
         Some("row-1"),
         700,
     );
-    let again = turns.turn_for_image("call-2", 800, ledger.tool_images());
+    let again = turns.turn_for_image("call-2", ledger.tool_images());
     assert_eq!(again.turn, turn(&edge));
 }
 
@@ -167,8 +167,8 @@ fn physical_end_closes_tracker_and_keeps_call_turns() {
     assert_eq!(turns.physical_end(50), closed_edge("u1", 50, &["call-1"]));
     // Without the end, this prompt would be ignored inside the open u1.
     turns.observe(&prompt(), Some("u2"), 60);
-    assert_eq!(turns.turn_for_image("call-1", 70, images).turn, turn("u1"));
-    assert_eq!(turns.turn_for_image("call-2", 80, images).turn, turn("u2"));
+    assert_eq!(turns.turn_for_image("call-1", images).turn, turn("u1"));
+    assert_eq!(turns.turn_for_image("call-2", images).turn, turn("u2"));
 }
 
 #[test]
@@ -177,7 +177,7 @@ fn prompt_inside_open_turn_never_reopens() {
     let mut turns = ImageTurns::starting_at(source(), 0, 0);
     turns.observe(&prompt(), Some("u1"), 0);
     turns.observe(&prompt(), Some("u2"), 40);
-    let image = turns.turn_for_image("call-1", 50, ledger.tool_images());
+    let image = turns.turn_for_image("call-1", ledger.tool_images());
     assert_eq!(image.turn, turn("u1"));
 }
 
@@ -258,7 +258,7 @@ fn late_image_after_gc(late_posted: bool) {
     live.note_call("c1");
     live.before_offset(200, ledger.tool_images());
     live.note_result("c0");
-    let first = live.turn_for_image("c0", 200, ledger.tool_images());
+    let first = live.turn_for_image("c0", ledger.tool_images());
     let Some(TurnEdge::Opened {
         turn,
         opener_offset,
@@ -288,7 +288,7 @@ fn late_image_after_gc(late_posted: bool) {
     // c1's image arrives after the Closed boundary.
     live.before_offset(350, ledger.tool_images());
     live.note_result("c1");
-    let late = live.turn_for_image("c1", 350, ledger.tool_images());
+    let late = live.turn_for_image("c1", ledger.tool_images());
     assert_eq!(
         (late.turn.clone(), late.open_span.clone()),
         (self::turn("u1"), None)
@@ -299,7 +299,7 @@ fn late_image_after_gc(late_posted: bool) {
     // Everything before 350 is collected; a new writer replays only the late result.
     let mut replay = ImageTurns::starting_at(self::source(), 350, 0);
     replay.before_offset(350, ledger.tool_images());
-    let again = replay.turn_for_image("c1", 350, ledger.tool_images());
+    let again = replay.turn_for_image("c1", ledger.tool_images());
     assert_eq!(image_native_key(&again.turn, "hh"), key.native_key);
     let steps = ledger.tool_images().open_obligations(&ledger);
     let expected = match late_posted {
@@ -340,7 +340,7 @@ fn foreign_idle_keeps_parent_image_turn() {
     let started = observe_row(&mut turns, &codex_event("task_started", "parent"), 0);
     assert!(started.is_empty());
     turns.note_call("c1");
-    let first = turns.turn_for_image("c1", 10, images);
+    let first = turns.turn_for_image("c1", images);
     assert_eq!(first.turn, turn("parent"));
     // A child's or a foreign turn's named end leaves the parent running.
     for (offset, closer) in [(20, "child"), (30, "foreign")] {
@@ -349,7 +349,7 @@ fn foreign_idle_keeps_parent_image_turn() {
     }
     assert!(!turns.opener_collectable(images, &turn("parent")));
     turns.note_call("c2");
-    let second = turns.turn_for_image("c2", 40, images);
+    let second = turns.turn_for_image("c2", images);
     let sha = "ab";
     assert_eq!(
         image_native_key(&second.turn, sha),
