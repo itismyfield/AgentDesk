@@ -49,7 +49,7 @@ impl super::RolloutRecordDecoder {
         len: u64,
         actor: &Arc<CancelToken>,
     ) -> Option<EndedTurn> {
-        ended(&replay(file, (start, len), Some(actor), false)?)
+        Some(ended(&replay(file, (start, len), Some(actor), false)?))
     }
 
     /// A row's read after its token is gone: it stops at the turn's first terminal, so a later
@@ -60,7 +60,7 @@ impl super::RolloutRecordDecoder {
         start: u64,
         len: u64,
     ) -> Option<EndedTurn> {
-        ended(&replay(file, (start, len), None, true)?)
+        Some(ended(&replay(file, (start, len), None, true)?))
     }
 }
 
@@ -89,7 +89,7 @@ fn replay(
     let (tx, _rx) = std::sync::mpsc::channel();
     let sender = super::super::RelaySuppressionSender::new(&tx, None);
     let accept = RecordAcceptance::new(actor);
-    let ended =
+    let stopped =
         |state: &RolloutParseState| stop_at_terminal && herdr_terminal_kind(state).is_some();
     let mut state = RolloutParseState::default();
     let mut rest = bytes.as_slice();
