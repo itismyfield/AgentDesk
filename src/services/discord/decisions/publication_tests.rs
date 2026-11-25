@@ -13,6 +13,8 @@ use serde_json::{Value, json};
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::decision_forums::{ForumState, store as store_forum};
+use crate::db::decisions::AttemptState;
+use crate::db::decisions::selection::{Chosen, Click};
 use crate::services::discord::SharedData;
 use crate::services::discord::health::owner_runtime_for_tests;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
@@ -50,6 +52,10 @@ struct Mock {
     posts: Vec<Value>,
     guarded_at_post: Vec<bool>,
     threads: Vec<Thread>,
+    /// The starter edits taken, once a scenario lets the mock accept them.
+    edits: Option<Vec<Value>>,
+    /// The thread edits the announce bot made.
+    seals: Vec<Value>,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -63,6 +69,15 @@ fn thread_json(thread: &Thread, forum: u64) -> Value {
     let mut json = channel(thread.id, 11, Some(forum));
     json["owner_id"] = json!(thread.owner.to_string());
     json
+}
+
+fn message_json(thread: &Thread) -> Value {
+    json!({"id": thread.id.to_string(), "channel_id": thread.id.to_string(),
+        "author": discord_mock::discord_user_json(thread.author, "decision-bot", true),
+        "content": thread.content, "timestamp": "2026-11-25T00:00:00.000000+00:00",
+        "edited_timestamp": null, "tts": false, "mention_everyone": false,
+        "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
+        "pinned": false, "type": 0})
 }
 
 async fn discord(State(mock): State<Shared>, method: Method, uri: Uri, body: Bytes) -> Response {
@@ -128,15 +143,28 @@ async fn discord(State(mock): State<Shared>, method: Method, uri: Uri, body: Byt
             let Some(thread) = mock.threads.iter().find(|thread| thread.id == id(c)) else {
                 return StatusCode::NOT_FOUND.into_response();
             };
-            axum::Json(
-                json!({"id": thread.id.to_string(), "channel_id": thread.id.to_string(),
-                "author": discord_mock::discord_user_json(thread.author, "decision-bot", true),
-                "content": thread.content, "timestamp": "2026-11-25T00:00:00.000000+00:00",
-                "edited_timestamp": null, "tts": false, "mention_everyone": false,
-                "mentions": [], "mention_roles": [], "attachments": [], "embeds": [],
-                "pinned": false, "type": 0}),
-            )
-            .into_response()
+            axum::Json(message_json(thread)).into_response()
+        }
+        (Method::PATCH, ["channels", c, "messages", m]) if c == m => {
+            let edit: Value = serde_json::from_slice(&body).unwrap();
+            let mut mock = mock.lock().unwrap();
+            let mock = &mut *mock;
+            let thread = mock.threads.iter_mut().find(|thread| thread.id == id(c));
+            let (Some(edits), Some(thread)) = (mock.edits.as_mut(), thread) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            thread.content = edit["content"].as_str().unwrap().to_string();
+            edits.push(edit);
+            axum::Json(message_json(thread)).into_response()
+        }
+        (Method::PATCH, ["channels", c]) => {
+            let seal: Value = serde_json::from_slice(&body).unwrap();
+            let mut mock = mock.lock().unwrap();
+            mock.seals.push(seal);
+            let Some(thread) = mock.threads.iter().find(|thread| thread.id == id(c)) else {
+                return StatusCode::NOT_FOUND.into_response();
+            };
+            axum::Json(thread_json(thread, forum)).into_response()
         }
         _ => {
             let unknown = json!({"message": "unexpected fixture endpoint", "code": 0});
@@ -182,6 +210,8 @@ impl Rig {
             posts: Vec::new(),
             guarded_at_post: Vec::new(),
             threads: Vec::new(),
+            edits: None,
+            seals: Vec::new(),
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = format!("http://{}", listener.local_addr().unwrap());
@@ -241,6 +271,40 @@ impl Rig {
 
     fn posts(&self) -> usize {
         self.mock.lock().unwrap().posts.len()
+    }
+
+    /// The starter edits the mock took; calling it lets the mock accept them from now on.
+    fn edits(&self) -> Vec<Value> {
+        let mut mock = self.mock.lock().unwrap();
+        mock.edits.get_or_insert_with(Vec::new).clone()
+    }
+
+    async fn handle(&self, thread: u64, option: i16) -> String {
+        let handle = sqlx::query_scalar(
+            "SELECT o.handle FROM decision_options o JOIN decision_requests r USING (request_id)
+             WHERE r.thread_id = $1 AND o.ordinal = $2",
+        );
+        let handle = handle.bind(thread.to_string()).bind(option);
+        handle.fetch_one(&self.pool).await.unwrap()
+    }
+
+    /// The owner's click on `option` of the starter of `thread`.
+    async fn click(&self, thread: u64, option: i16) -> Option<Chosen> {
+        let handle = self.handle(thread, option).await;
+        let click = Click {
+            handle: &handle,
+            thread_id: thread,
+            message_id: thread,
+            bot_user_id: BOT,
+            actor: OWNER,
+        };
+        selection::choose_once(&self.pool, &click).await.unwrap()
+    }
+
+    async fn count(&self, table: &str) -> i64 {
+        let count = format!("SELECT COUNT(*) FROM {table}");
+        let count = sqlx::query_scalar(&count).fetch_one(&self.pool);
+        count.await.unwrap()
     }
 
     async fn close(self) {
@@ -362,5 +426,184 @@ async fn decision_forum_refusal_leaves_the_request_to_post_once_fixed_pg() {
     let posted = Outcome::Posted(forum + 100);
     assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, posted);
     assert_eq!(rig.posts(), 1);
+    rig.close().await;
+}
+
+/// A thread target is not wired for selection: its post keeps disabled buttons, says why and
+/// takes no click. The agent's own channel gets enabled buttons, once; the owner's first click is
+/// the request's one choice, stored with its event before any delivery, and a restart starts
+/// that stored selection exactly once.
+#[tokio::test]
+async fn decision_buttons_open_only_where_wired_and_take_one_choice_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_300_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    rig.edits();
+    let scope = (CHANNEL, CHANNEL + 77);
+    let stored = super::super::store(&rig.pool, &ask("thread"), scope, "e").await;
+    let kept = rig.publish(stored.unwrap().0, "thread", CHANNEL).await;
+    assert_eq!(kept, Outcome::Posted(forum + 100));
+    let edit = rig.edits().pop().unwrap();
+    let why = format!("{} — thread_target_not_wired", card::NOT_YET);
+    assert!(edit["content"].as_str().unwrap().contains(&why), "{edit}");
+    assert_eq!(edit["components"][0]["components"][0]["disabled"], true);
+    assert_eq!(rig.click(forum + 100, 1).await, Some(Chosen::NotOpen));
+
+    let (request_id, thread) = (rig.store("main", CHANNEL).await, forum + 101);
+    for _ in 0..2 {
+        let open = rig.publish(request_id, "main", CHANNEL).await;
+        assert_eq!(open, Outcome::Open(thread));
+    }
+    assert_eq!(rig.posts(), 2, "an open request was posted again");
+    let edit = rig.edits().pop().unwrap();
+    assert!(
+        edit["content"].as_str().unwrap().contains(card::OPEN),
+        "{edit}"
+    );
+    assert_eq!(edit["components"][0]["components"][1]["disabled"], false);
+    assert_eq!(edit["allowed_mentions"]["parse"], json!([]));
+    assert_eq!(
+        rig.count("decision_input_events").await,
+        0,
+        "before a click"
+    );
+
+    let handle = rig.handle(thread, 1).await;
+    let stray = Click {
+        handle: &handle,
+        thread_id: thread,
+        message_id: thread + 1,
+        bot_user_id: BOT,
+        actor: OWNER,
+    };
+    let stray = selection::choose_once(&rig.pool, &stray).await.unwrap();
+    assert_eq!(stray, None, "a click on another message was taken");
+    let Some(Chosen::First(first)) = rig.click(thread, 2).await else {
+        panic!("the first click is the choice");
+    };
+    let already = |same| Chosen::Already {
+        label: "내일 배포".into(),
+        same,
+    };
+    assert_eq!(rig.click(thread, 2).await, Some(already(true)));
+    assert_eq!(rig.click(thread, 1).await, Some(already(false)));
+    for table in [
+        "decision_choices",
+        "decision_input_events",
+        "decision_delivery_attempts",
+    ] {
+        assert_eq!(rig.count(table).await, 1, "{table}");
+    }
+    let event = crate::db::decisions::load_event(&rig.pool, first.event_id).await;
+    let event = event.unwrap().expect("the selection's event");
+    assert!(event.approves(&first.text), "{}", first.text);
+    assert_eq!((event.actor_id(), event.channel_id()), (OWNER, CHANNEL));
+    let unstarted = selection::unstarted(&rig.pool).await.unwrap();
+    assert_eq!(unstarted, [first.clone()], "what a restart starts");
+    let reserve = crate::db::decisions::reserve_first_attempt;
+    let once = reserve(&rig.pool, first.event_id, "t").await.unwrap();
+    let twice = reserve(&rig.pool, first.event_id, "t").await.unwrap();
+    assert_eq!((once, twice), (true, false));
+    assert!(selection::unstarted(&rig.pool).await.unwrap().is_empty());
+    rig.close().await;
+}
+
+/// A write journaled by a process that is gone is settled without another write: its event
+/// closes unknown, the card shows that with every button disabled, the announce bot archives and
+/// locks the thread once, and a later click stores nothing.
+#[tokio::test]
+async fn decision_unknown_selection_is_settled_without_a_resend_then_sealed_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_400_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    rig.edits();
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    let open = rig.publish(request_id, "r1", CHANNEL).await;
+    assert_eq!(open, Outcome::Open(thread));
+    let Some(Chosen::First(chosen)) = rig.click(thread, 1).await else {
+        panic!("the first click is the choice");
+    };
+    let gone = "UPDATE decision_delivery_attempts
+                SET state = 'may_have_sent', holder_instance_id = 'decision-node-gone'";
+    sqlx::query(gone).execute(&rig.pool).await.unwrap();
+    (crate::services::cluster::node_registry::SELF_INSTANCE_ID)
+        .get_or_init(|| "decision-test-node".to_string());
+    let before = rig.edits().len();
+    for _ in 0..2 {
+        lifecycle::converge(&rig.pool, &rig.registry).await;
+    }
+    let state: (String, String, bool) = sqlx::query_as(
+        "SELECT a.state, r.lifecycle, r.sealed_at IS NOT NULL
+         FROM decision_delivery_attempts a, decision_requests r WHERE r.request_id = $1",
+    )
+    .bind(request_id)
+    .fetch_one(&rig.pool)
+    .await
+    .unwrap();
+    assert_eq!(state, ("unknown_closed".into(), "closed".into(), true));
+    assert!(selection::unstarted(&rig.pool).await.unwrap().is_empty());
+    let shown = rig.edits();
+    assert_eq!(shown.len(), before + 1, "a sealed card is not edited again");
+    let card = shown.last().unwrap();
+    let unknown = card::ended(&chosen.label, AttemptState::UnknownClosed, None);
+    assert!(
+        card["content"].as_str().unwrap().contains(&unknown),
+        "{card}"
+    );
+    let buttons = card["components"][0]["components"].as_array().unwrap();
+    assert!(buttons.iter().all(|button| button["disabled"] == true));
+    let seals = rig.mock.lock().unwrap().seals.clone();
+    assert_eq!(seals.len(), 1, "{seals:?}");
+    assert_eq!(
+        (&seals[0]["archived"], &seals[0]["locked"]),
+        (&json!(true), &json!(true))
+    );
+    let late = Chosen::Already {
+        label: chosen.label.clone(),
+        same: false,
+    };
+    assert_eq!(rig.click(thread, 2).await, Some(late));
+    assert_eq!(rig.count("decision_choices").await, 1);
+    rig.close().await;
+}
+
+/// Only the configured owner's click is a selection: anyone else's stores nothing.
+#[tokio::test]
+async fn decision_click_by_anyone_but_the_owner_stores_nothing_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_500_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    rig.edits();
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    let open = rig.publish(request_id, "r1", CHANNEL).await;
+    assert_eq!(open, Outcome::Open(thread));
+    let handle = rig.handle(thread, 1).await;
+    let ctx = rig.mock.lock().unwrap().ctx.clone().unwrap();
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(rig.pool.clone()));
+    shared.settings.write().await.owner_user_id = Some(OWNER);
+    let data = crate::services::discord::Data {
+        shared,
+        token: "test-token".into(),
+        provider: ProviderKind::Claude,
+    };
+    let mut message = discord_mock::user_message(thread, "card");
+    message.channel_id = serenity::ChannelId::new(thread);
+    let click_by = |user: u64| -> serenity::ComponentInteraction {
+        serde_json::from_value(json!({"id": "940487400000042",
+            "application_id": BOT.to_string(), "token": "test-token", "version": 1,
+            "data": {"custom_id": handle, "component_type": 2},
+            "channel_id": thread.to_string(), "message": message, "locale": "ko",
+            "entitlements": [], "attachment_size_limit": 10485760,
+            "user": discord_mock::discord_user_json(user, "clicker", false)}))
+        .expect("complete component fixture")
+    };
+    let click = super::super::component::click;
+    let refused = click(&ctx, &click_by(STRANGER), &data).await;
+    assert!(refused.contains("운영자만"), "{refused}");
+    assert_eq!(rig.count("decision_choices").await, 0);
+    let taken = click(&ctx, &click_by(OWNER), &data).await;
+    assert!(taken.contains("선택 접수"), "{taken}");
+    assert_eq!(rig.count("decision_choices").await, 1);
     rig.close().await;
 }
