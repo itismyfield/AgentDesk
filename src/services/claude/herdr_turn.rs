@@ -430,10 +430,8 @@ fn cleared_source(
     })
 }
 
-/// A Pending execution from an earlier turn, only once the log holds its own record for the
-/// session its launch named: only an attach after SessionStart, or the pane's hooks, write one.
-/// A recorded pane without evidence is proven first, whatever its start; every refusal is typed
-/// by its cause, so the owner waits on it rather than counting a failed start.
+/// A Pending execution from an earlier turn, attached once the log holds its own start; a pane
+/// without evidence is proven first, and each refusal is typed by its cause for the owner's wait.
 fn pending_source(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
@@ -724,8 +722,7 @@ pub(crate) fn launched(
     }
 }
 
-/// Waits for execution `nonce`'s SessionStart: its provider and hooks are up. A resume waits for
-/// its own execution's `source=resume` start, never for another start of the same session. A wait
+/// Waits for execution `nonce`'s SessionStart (a resume for its own `source=resume` start); a wait
 /// that ran out, not one cancelled, is refused as this launch's own timeout.
 fn session_started(
     runtime: &Handle,
