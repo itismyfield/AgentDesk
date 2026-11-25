@@ -14,10 +14,10 @@ export const useLegible = () => useStore((state) => Math.max(1, 1 / state.transf
 
 /** The key at the canvas's bottom left: a dependency line, a cycle line and a cable tie. */
 export function RelationsLegend({ className = "", tr, ...rest }: HTMLAttributes<HTMLDivElement> & { tr: Tr }) {
-  return <div {...rest} className={`${FLOAT} bottom-4 left-4 flex flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] ${className}`}>
+  return <div {...rest} className={`${FLOAT} bottom-4 left-4 flex flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] max-sm:top-3 max-sm:bottom-auto max-sm:left-3 max-sm:max-w-[calc(100%-1.5rem)] max-sm:px-2.5 max-sm:py-1.5 ${className}`}>
     <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
     <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
-    <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" />{tr("케이블타이 · 실행에는 영향 없음", "Cable tie · no effect on runs")}</span>
+    <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" /><span>{tr("케이블타이", "Cable tie")}<span className="max-sm:hidden">{tr(" · 실행에는 영향 없음", " · no effect on runs")}</span></span></span>
   </div>;
 }
 

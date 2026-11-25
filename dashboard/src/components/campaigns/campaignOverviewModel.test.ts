@@ -2,7 +2,14 @@ import { expect, it } from "vitest";
 import { campaignNodeSchema, type Campaign } from "../../api/campaigns";
 import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import type { ServerCampaignSummary } from "../../api/serverCampaigns";
-import { effectiveRelationCounts, legacyEntry, legacyTask, serverEntry } from "./campaignOverviewModel";
+import {
+  currentLedgerStageSegment,
+  effectiveRelationCounts,
+  isLedgerHumanApprovalPending,
+  legacyEntry,
+  legacyTask,
+  serverEntry,
+} from "./campaignOverviewModel";
 import { makeCampaignNode } from "./campaignTestFixtures";
 
 const tr = (ko: string) => ko;
@@ -45,4 +52,42 @@ it("never throws in legacyTask or legacyEntry when partial summary nodes have un
   expect(entry.attention).toBe("막힘 1");
   expect(effectiveRelationCounts([partialNode]).counts.blocked).toBe(1);
   expect(campaignNodeSchema.parse({ id: "s1", title: "Summary", status: "pending", round: 1, updated_at: "2026-10-01T00:00:00Z" }).stage).toBe("");
+});
+
+it("evaluates human approval pending only on the active final ledger segment and ignores bare LAND_READY", () => {
+  expect(currentLedgerStageSegment(null)).toBe("");
+  expect(currentLedgerStageSegment("  ")).toBe("");
+  expect(
+    currentLedgerStageSegment("LAND_READY d5040b28cc → 착지 묶음 1121f(043a36220c) → 배포 뒤 옛 형식 정지 자동 정리·tick 제출 확인"),
+  ).toBe("배포 뒤 옛 형식 정지 자동 정리·tick 제출 확인");
+  expect(currentLedgerStageSegment("구현 완료 -> 착지 승인 대기")).toBe("착지 승인 대기");
+
+  expect(isLedgerHumanApprovalPending("LAND_READY", "배치 착지 대기", null)).toBe(false);
+  expect(
+    isLedgerHumanApprovalPending(
+      "LAND_READY d5040b28cc → 착지 승인 대기 → 배포 뒤 확인",
+      "결정 포럼 승인 대기 -> 머지 완료",
+      null,
+    ),
+  ).toBe(false);
+
+  expect(isLedgerHumanApprovalPending("구현 완료 → 착지 승인 대기")).toBe(true);
+  expect(isLedgerHumanApprovalPending("LAND_READY", "결정 포럼 승인 대기")).toBe(true);
+  expect(isLedgerHumanApprovalPending("배포 준비", null, "배포 승인 대기")).toBe(true);
+  expect(isLedgerHumanApprovalPending("verify -> awaiting landing approval")).toBe(true);
+  expect(isLedgerHumanApprovalPending("verify -> awaiting human approval")).toBe(true);
+
+  const bareReady = makeCampaignNode("n-bare", { status: "running", stage: "LAND_READY · 배치 착지 대기" });
+  const historical = makeCampaignNode("n-hist", {
+    status: "running",
+    stage: "LAND_READY d5040b28cc → 착지 묶음 1121f(043a36220c) → 배포 뒤 옛 형식 정지 자동 정리·tick 제출 확인",
+    next_action: "착지 승인 대기 → 배포 뒤 확인",
+  });
+  const activeGate = makeCampaignNode("n-gate", {
+    status: "running",
+    stage: "LAND_READY d5040b28cc → 착지 승인 대기",
+  });
+  expect(legacyTask(bareReady).gate).toBeNull();
+  expect(legacyTask(historical).gate).toBeNull();
+  expect(legacyTask(activeGate).gate?.gate).toBe("landing");
 });

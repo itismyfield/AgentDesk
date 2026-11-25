@@ -123,6 +123,7 @@ it("lists a phone's saved editor ties for the campaign, one line each, without m
   seed(editorViewScope(campaign.id, "group:G2"), [AC, BD, ["A", "gone"]], 7);
   seed(groupScope, [AC], 7);
   await render();
+  await click(button("List"));
   const list = container.querySelector('[aria-label="Cable ties"]')!;
   expect([...list.querySelectorAll("li")].map((item) => item.textContent)).toEqual(["Bundle of 2 · A and 1 moreLeads toC · DView only"]);
   await render({ ...campaign, nodes: nodes.map((node) => ({ ...node, dependencies: [] })) });

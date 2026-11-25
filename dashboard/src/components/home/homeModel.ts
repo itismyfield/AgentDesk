@@ -11,6 +11,7 @@ import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
 import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
+import { isLedgerHumanApprovalPending } from "../campaigns/campaignOverviewModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
 import { formatRateLimitWindowLabel, transformRLProviders, type RawRLProvider } from "../dashboard/MiniRateLimitBarModel";
@@ -462,7 +463,6 @@ export interface TriageAlert {
 
 const FAILED_STATUS = /(^|_)failed$/;
 const BENIGN_BLOCKED_PREFIXES = ["ci:waiting", "ci:running", "ci:rerunning", "ci:rework", "pr:creating"];
-const LEDGER_APPROVAL_RE = /\bLAND_READY\b|착지\s*승인\s*대기|사용자\s*승인\s*대기|awaiting\s+landing\s+approval/i;
 
 function needsPerson({ review_status, blocked_reason }: KanbanCard): boolean {
   const reason = blocked_reason ?? "";
@@ -544,8 +544,7 @@ export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, i
     if (campaign.status === "completed" || campaign.status === "cancelled") continue;
     for (const node of campaign.nodes) {
       if (!node.id || node.status === "completed" || node.status === "skipped") continue;
-      const textBlob = [node.stage, node.next_action, node.blocker].filter(Boolean).join(" ");
-      if (!LEDGER_APPROVAL_RE.test(textBlob)) continue;
+      if (!isLedgerHumanApprovalPending(node.stage, node.next_action, node.blocker)) continue;
       const issue = node.issue_url?.match(/\/issues\/(\d+)/)?.[1];
       items.push({
         key: `legacy:${campaign.id}:${node.id}`,

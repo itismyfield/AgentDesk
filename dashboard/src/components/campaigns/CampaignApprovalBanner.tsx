@@ -8,7 +8,7 @@ import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { Cap, Chip, Num, StageTrack, Well, type TrackSegment } from "../common/KitPrimitives";
 import { safeCampaignLink } from "./campaignModel";
-import { GATE_LABELS, taskCounts, type OverviewTask, type PendingGate } from "./campaignOverviewModel";
+import { GATE_LABELS, currentLedgerStageSegment, taskCounts, type OverviewTask, type PendingGate } from "./campaignOverviewModel";
 import { formatCampaignTime, type Tr } from "./campaignPresentation";
 import { newIdempotencyKey, rejectionText, type Connection } from "./serverCampaignModel";
 
@@ -124,7 +124,17 @@ export interface BatchTrackerSummary {
 
 const PIECE_RE = /조각\s*[:：]?\s*(?:완료\s*)?(\d+)\s*\/\s*(\d+)|pieces?\s*[:：]?\s*(?:done\s*)?(\d+)\s*\/\s*(\d+)/gi;
 const BATCH_CODE_RE = /\b(\d{4}[a-z])\b/g;
-const LAND_READY_RE = /\bLAND_READY\b|착지\s*대기|착지\s*승인\s*대기|리뷰·검증\s*통과/i;
+const LAND_READY_STAGE_RE = /\bLAND_READY\b|착지\s*대기|착지\s*승인\s*대기/i;
+const REVIEW_PASSED_RE = /리뷰·검증\s*통과/i;
+
+export function isLedgerLandReadyCandidate(node: { stage?: string | null; next_action?: string | null; summary?: string | null }): boolean {
+  return (
+    LAND_READY_STAGE_RE.test(currentLedgerStageSegment(node.stage)) ||
+    LAND_READY_STAGE_RE.test(currentLedgerStageSegment(node.next_action)) ||
+    REVIEW_PASSED_RE.test(currentLedgerStageSegment(node.stage)) ||
+    REVIEW_PASSED_RE.test(node.summary ?? "")
+  );
+}
 
 /** Parses structured batch/piece landing progress from ledger campaign nodes & description. */
 export function buildBatchTracker(campaign: Campaign, tasks: Array<OverviewTask & { hold?: string | null }>): BatchTrackerSummary {
@@ -149,7 +159,7 @@ export function buildBatchTracker(campaign: Campaign, tasks: Array<OverviewTask 
     const blob = [node.summary, node.stage, node.next_action].filter(Boolean).join(" \n ");
     if (scanPieces(blob)) pieceTaskCount += 1;
     const open = node.status !== "completed" && node.status !== "skipped";
-    if (open && LAND_READY_RE.test(blob)) landReadyIds.push(node.id);
+    if (open && isLedgerLandReadyCandidate(node)) landReadyIds.push(node.id);
     if (open) for (const m of blob.matchAll(BATCH_CODE_RE)) if (!batchMap.has(m[1])) batchMap.set(m[1], node.id);
   }
   const openPrCount = tasks.filter((t) => t.status !== "completed" && t.status !== "skipped" && Boolean(t.prUrl)).length;
