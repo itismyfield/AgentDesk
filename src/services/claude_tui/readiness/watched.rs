@@ -156,6 +156,12 @@ impl Watched {
             return Expiry::Waits(cause);
         }
         if !moved && self.windows == 0 {
+            let cleared_by = tail.as_ref().and_then(|tail| tail.cleared_by.as_deref());
+            tracing::info!(
+                session = %self.session,
+                ?cleared_by,
+                "readiness retained an unproven idle source"
+            );
             return Expiry::Unproven(Unproven::Retained);
         }
         if moved && self.windows < WINDOWS {

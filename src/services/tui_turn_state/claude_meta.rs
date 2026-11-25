@@ -70,9 +70,15 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
             | "tools-used"
             | "pr-link"
             | "frame-link"
-            | "repl-mode",
+            | "repl-mode"
+            | "data-flow-records"
+            | "derived-from",
         ) => true,
-        Some("system") => record["subtype"] == "informational",
+        // An away recap is Claude's out-of-turn summary of a long idle, not a turn record.
+        Some("system") => matches!(
+            record["subtype"].as_str(),
+            Some("informational" | "away_summary")
+        ),
         Some("attachment") => {
             let attachment = &record["attachment"];
             // Stop can persist added context before its next user record reaches the log.
@@ -87,6 +93,7 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                                 .as_str()
                                 .is_some_and(|context| !context.is_empty())
                     });
+            // Files and skills a compaction or resume re-attaches carry no turn of their own.
             !continues
                 && matches!(
                     attachment["type"].as_str(),
@@ -100,6 +107,9 @@ pub(crate) fn idle_metadata(record: &Value) -> bool {
                             | "hook_success"
                             | "todo_reminder"
                             | "queued_command"
+                            | "file"
+                            | "compact_file_reference"
+                            | "invoked_skills"
                     )
                 )
         }
