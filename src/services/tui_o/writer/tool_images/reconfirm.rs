@@ -36,14 +36,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 _ => None,
             });
         let proof_ids: Vec<u64> = posted.take(confirm::PROOF_IDS).collect();
+        // Bodies posted after this attempt keep its anchor behind them; their ids are not its own.
+        let owned: Vec<u64> = (0..ledger.next_serial())
+            .filter(|other| *other != serial)
+            .filter_map(|other| match ledger.piece(other)?.outcome {
+                Some(PieceOutcome::Posted(msg_id)) if msg_id > anchor => Some(msg_id),
+                _ => None,
+            })
+            .collect();
         let channel = self.channel();
-        let verdict = confirm::settle(
+        let verdict = confirm::settle_past_owned(
             &*self.port,
             channel,
             anchor,
             &payload,
             earlier_same_payload,
             &proof_ids,
+            &owned,
         )
         .await;
         let (entry, alarm) = match verdict {
