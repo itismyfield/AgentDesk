@@ -13,6 +13,8 @@ pub(crate) enum Publication {
     Posting { forum_id: u64, bot_user_id: u64 },
     /// The post exists with its buttons disabled.
     Disabled { thread_id: u64 },
+    /// The post exists and took, or takes, a selection: open, selecting or closed.
+    Active { thread_id: u64 },
     /// Discord refused the post; it is not sent again.
     PostFailed(String),
 }
@@ -45,6 +47,9 @@ pub(crate) async fn load(pool: &PgPool, request_id: Uuid) -> Result<Publication,
             thread_id: id(thread),
         },
         "post_failed" => Publication::PostFailed(error.unwrap_or_default()),
+        "open" | "selecting" | "closed" => Publication::Active {
+            thread_id: id(thread),
+        },
         _ => Publication::Stored,
     })
 }

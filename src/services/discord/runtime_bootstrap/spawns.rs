@@ -214,6 +214,7 @@ pub(in crate::services::discord) fn run_bot_spawn_execution_runtime_tasks(
 ) {
     run_bot_spawn_deferred_restart_poller(shared, provider);
     crate::services::discord::decision_drain::spawn_boot_recovery(shared.pg_pool.clone());
+    crate::services::discord::decisions::lifecycle::spawn_worker(shared);
     #[cfg(unix)]
     run_bot_spawn_reachability_observation(shared, provider);
     run_bot_spawn_orphan_delete_retry(shared, provider);

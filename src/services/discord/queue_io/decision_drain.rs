@@ -492,8 +492,9 @@ pub(crate) fn spawn_boot_recovery(pool: Option<PgPool>) {
     });
 }
 
-/// Settles the attempts of nodes the registry just listed offline: a peer that booted while
-/// such a node was still listed online kept its rows, and nothing else looks at them again.
+/// Settles every unsettled attempt from the evidence at hand, without another write. Asked when
+/// the registry lists a node offline (a peer that booted while it was still listed online kept
+/// its rows) and by the selection pass, so an idle channel's attempt still reaches its end.
 pub(crate) async fn settle_abandoned(pool: &PgPool) {
     let settled = match run(pool).await {
         Ok(run) => recover_before(pool, run.boot, global_mailbox).await,

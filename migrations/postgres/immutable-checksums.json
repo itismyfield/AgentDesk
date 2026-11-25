@@ -985,6 +985,11 @@
       "path": "migrations/postgres/0203_decision_publication.sql",
       "sha256": "d576d153ab8438a54fdb9feb63ab3eadfab535950045a907669e4a9cc49ecbdd",
       "version": 203
+    },
+    {
+      "path": "migrations/postgres/0204_decision_choices.sql",
+      "sha256": "0987b4fa2fec192500a4153858eaf6eb869c8cf9a673ffbcb2b73565a9637a4e",
+      "version": 204
     }
   ],
   "version": 1

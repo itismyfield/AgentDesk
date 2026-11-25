@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 pub(crate) mod publication;
 pub(crate) mod requests;
+pub(crate) mod selection;
 
 /// The input source only the Decision service uses; a request that names it proves nothing.
 pub(crate) const SOURCE: &str = "decision";

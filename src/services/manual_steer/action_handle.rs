@@ -33,6 +33,13 @@ impl ActionHandle {
         format!("{DECISION_PREFIX}{CUSTOM_ID_VERSION}:{}", self.to_hex())
     }
 
+    /// Whether `custom_id` is a well-formed Decision button handle.
+    pub(crate) fn is_decision_custom_id(custom_id: &str) -> bool {
+        (custom_id.strip_prefix(DECISION_PREFIX))
+            .and_then(|rest| rest.strip_prefix(CUSTOM_ID_VERSION)?.strip_prefix(':'))
+            .is_some_and(|handle| Self::from_hex(handle).is_some())
+    }
+
     pub(crate) fn parse_custom_id(custom_id: &str) -> Result<Self, CustomIdError> {
         let rest = custom_id
             .strip_prefix(CUSTOM_ID_PREFIX)

@@ -118,7 +118,8 @@ pub(crate) struct RequestRow {
     pub context: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub options: Vec<OptionRow>,
-    /// stored, posting, disabled or post_failed; the thread once the post exists.
+    /// stored, posting, disabled, post_failed, open, selecting or closed; the thread once the
+    /// post exists.
     pub publication: String,
     pub thread_id: Option<String>,
     #[serde(rename = "error", skip_serializing_if = "Option::is_none")]

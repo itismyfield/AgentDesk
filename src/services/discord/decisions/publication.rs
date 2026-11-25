@@ -1,5 +1,6 @@
 //! Posts a stored request with its channel's provider bot: forum guarded, journal, then one POST.
 //! A lost answer is settled by finding that post, a refusal is kept; neither is posted again.
+//! The posted buttons are enabled only where everything a selection needs is wired.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -8,9 +9,10 @@ use poise::serenity_prelude as serenity;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{Ask, card, ingress};
+use super::{Ask, card, ingress, lifecycle};
 use crate::config::DiscordConfig;
 use crate::db::decisions::publication::{self as store, Journal, Publication};
+use crate::db::decisions::selection;
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::decision_forums::{self, ForumError};
 use crate::services::discord::health::{self, HealthRegistry};
@@ -21,6 +23,8 @@ use crate::services::provider::ProviderKind;
 pub(crate) enum Outcome {
     /// The post exists with its buttons disabled.
     Posted(u64),
+    /// The post exists and its buttons take, or took, the operator's selection.
+    Open(u64),
     /// The POST may have gone out and its post is not found yet; it is not sent again.
     Pending,
     /// Discord refused the post or its forum for good.
@@ -55,24 +59,78 @@ pub(crate) async fn publish(
         tracing::warn!(%error, "decision publication state unread");
         Outcome::Unready("decision_store_unavailable")
     };
-    let bot = provider_bot(registry, asked.logical_channel, asked.provider);
-    match store::load(pool, asked.request_id).await {
+    let bot = provider_bot(registry, asked.logical_channel, asked.provider).await;
+    let posted = match store::load(pool, asked.request_id).await {
+        Ok(Publication::Active { thread_id }) => return Outcome::Open(thread_id),
         Ok(Publication::Disabled { thread_id }) => Outcome::Posted(thread_id),
         Ok(Publication::PostFailed(error)) => Outcome::Refused(error),
         Ok(Publication::Posting {
             forum_id,
             bot_user_id,
-        }) => match bot.await {
-            Some((http, _)) => {
-                reconcile(pool, &http, forum_id, bot_user_id, asked.request_id).await
-            }
+        }) => match &bot {
+            Some((http, _)) => reconcile(pool, http, forum_id, bot_user_id, asked.request_id).await,
             None => Outcome::Pending,
         },
-        Ok(Publication::Stored) => match bot.await {
+        Ok(Publication::Stored) => match bot.clone() {
             Some(bot) => post(pool, registry, config, &asked, bot).await,
             None => Outcome::Unready("decision_bot_unavailable"),
         },
         Err(error) => unready(error),
+    };
+    match (posted, bot) {
+        (Outcome::Posted(thread), Some((http, _))) => {
+            activate(pool, registry, &asked, &http, thread).await
+        }
+        (outcome, _) => outcome,
+    }
+}
+
+/// Why this request's buttons stay disabled: `None` only when its target is its agent's own
+/// channel and the start path a selection is delivered through is wired there. A thread target
+/// and a Herdr channel whose executor is not wired keep the disabled post.
+async fn unwired(
+    pool: &PgPool,
+    registry: Option<&HealthRegistry>,
+    asked: &Asked<'_>,
+) -> Option<String> {
+    match selection::targets_main_channel(pool, asked.request_id).await {
+        Ok(true) => {}
+        Ok(false) => return Some("thread_target_not_wired".into()),
+        Err(_) => return Some("decision_store_unavailable".into()),
+    }
+    let Some(registry) = registry else {
+        return Some("decision_bot_unavailable".into());
+    };
+    health::decision_target::start_refusal(registry, asked.provider, asked.logical_channel).await
+}
+
+/// Enables the posted starter's buttons where selection is wired; elsewhere the post keeps its
+/// disabled buttons and says why. The card is edited before the request opens in PG, so no click
+/// is taken from a card that could not be shown open.
+async fn activate(
+    pool: &PgPool,
+    registry: Option<&HealthRegistry>,
+    asked: &Asked<'_>,
+    http: &serenity::Http,
+    thread: u64,
+) -> Outcome {
+    let reason = unwired(pool, registry, asked).await;
+    let status = match &reason {
+        None => card::OPEN.to_string(),
+        Some(reason) => format!("{} — {reason}", card::NOT_YET),
+    };
+    let post = (asked.request_id, thread);
+    if let Err(error) = lifecycle::show(pool, http, post, &status, reason.is_none()).await {
+        tracing::warn!(%error, "decision card not updated; its buttons stay disabled");
+        return Outcome::Posted(thread);
+    }
+    match selection::open(pool, asked.request_id, reason.as_deref()).await {
+        Ok(true) => Outcome::Open(thread),
+        Ok(false) => Outcome::Posted(thread),
+        Err(error) => {
+            tracing::warn!(%error, "decision request not opened; its clicks are refused");
+            Outcome::Posted(thread)
+        }
     }
 }
 

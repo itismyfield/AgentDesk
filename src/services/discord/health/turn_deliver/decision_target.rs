@@ -48,6 +48,57 @@ pub trait Normalizer: Send + Sync {
     async fn normalize_once(&self) -> Normalized;
 }
 
+/// Why a start on the channel is refused now: no runtime here owns it, or its host refuses the
+/// start (a Herdr channel whose executor is not wired stays refused). `None`: the start path is
+/// wired for this channel, and a start there carries its input as the session's first prompt.
+pub(crate) async fn start_refusal(
+    registry: &HealthRegistry,
+    provider: &ProviderKind,
+    channel: u64,
+) -> Option<String> {
+    let channel = poise::serenity_prelude::ChannelId::new(channel.max(1));
+    let Ok(shared) = super::resolve_direct_channel_shared(registry, channel, provider).await else {
+        return Some("runtime_unavailable".into());
+    };
+    match super::preflight::host(&shared, provider, channel).await {
+        Ok(_) => None,
+        Err(HumanInputError::InvalidTarget(refusal)) => Some(refusal),
+        Err(error) => Some(error.kind().to_string()),
+    }
+}
+
+/// The event's one normalization on its agent's own channel: the existing start path. When that
+/// path is wired the workflow resolves and starts once more; a refusal is a confirmed non-send.
+pub(crate) struct StartPath<'a> {
+    registry: &'a HealthRegistry,
+    provider: &'a ProviderKind,
+    channel: u64,
+}
+
+impl<'a> StartPath<'a> {
+    pub(crate) fn new(
+        registry: &'a HealthRegistry,
+        provider: &'a ProviderKind,
+        channel: u64,
+    ) -> Self {
+        Self {
+            registry,
+            provider,
+            channel,
+        }
+    }
+}
+
+#[async_trait]
+impl Normalizer for StartPath<'_> {
+    async fn normalize_once(&self) -> Normalized {
+        match start_refusal(self.registry, self.provider, self.channel).await {
+            None => Normalized::Started,
+            Some(refusal) => Normalized::NotSentRefused(refusal),
+        }
+    }
+}
+
 /// The input as the delivery path sees it: the approved actor as author and the event as origin.
 fn request_of(event: &DecisionProvenance, provider: ProviderKind, text: &str) -> HumanInputRequest {
     HumanInputRequest {

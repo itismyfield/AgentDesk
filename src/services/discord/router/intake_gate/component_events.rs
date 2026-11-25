@@ -14,6 +14,9 @@ pub(super) async fn handle_component_if_applicable(
     component: &serenity::ComponentInteraction,
     data: &Data,
 ) -> Result<bool, Error> {
+    if crate::services::discord::decisions::component::component(ctx, component, data).await? {
+        return Ok(true);
+    }
     #[cfg(unix)]
     if super::super::herdr_consent::component(ctx, component, data).await? {
         return Ok(true);
