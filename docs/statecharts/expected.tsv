@@ -1987,7 +1987,6 @@ tui-o-writer/ToolImageMutNoDurableCall.cfg	ToolImage	AmbigBytesKept,AtMostOnce,A
 tui-o-writer/ToolImageMutNoNamedIdleGuard.cfg	ToolImage	AtMostOnce,AttributionTrue	-
 tui-o-writer/ToolImageMutNoRowPrep.cfg	ToolImage	AmbigBytesKept,AtMostOnce,AttributionTrue,NoWrongOpened	-
 tui-o-writer/ToolImageMutSharedPrepared.cfg	ToolImage	SinglePrepared	-
-tui-o-writer/ToolImageUnresolved.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistA.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistB.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bPersistC.cfg	ToolImage	-	-
@@ -2001,6 +2000,7 @@ tui-o-writer/ToolImageS2bPersistMutNoCut.cfg	ToolImage	NoSilentLoss	-
 tui-o-writer/ToolImageS2bPersistUnresolved.cfg	ToolImage	-	-
 tui-o-writer/ToolImageS2bSpanE.cfg	ToolImage	AttributionTrue	-
 tui-o-writer/ToolImageS2bSpanMidPrompt.cfg	ToolImage	AtMostOnce,AttributionTrue	-
+tui-o-writer/ToolImageUnresolved.cfg	ToolImage	-	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles

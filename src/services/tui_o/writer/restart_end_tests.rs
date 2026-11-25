@@ -566,8 +566,7 @@ fn image_result(uuid: &str, call: &str) -> Vec<u8> {
 }
 
 /// Capture starts after the old opener, so the projection cannot apply the verified end; the
-/// image turn restored from its span still closes at that cutoff and the new prompt's image is
-/// its own.
+/// image turn restored from its span still closes there and the new prompt's image is its own.
 #[tokio::test(start_paused = true)]
 async fn verified_end_without_opener_closes_the_restored_image_turn() {
     let channel = 810_921_105;
