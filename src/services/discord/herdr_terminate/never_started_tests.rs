@@ -292,6 +292,6 @@ fn hook_record_and_auto_qualify_share_one_source_authority_key() {
         let _ = judged.send(());
         hook.join().unwrap();
         assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
-        assert!(!execution_closing(herdr::EXECUTION), "the hook's start came first");
+        assert!(!execution_closing(herdr::EXECUTION), "the start came first");
     });
 }
