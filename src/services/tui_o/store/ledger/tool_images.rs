@@ -1,5 +1,5 @@
-//! #8397 tool-image ledger entries: native turn spans and image obligations, replayed with the
-//! rest of the ledger. No production path appends them yet; the writer wiring (S2b) does.
+//! Tool-image ledger entries: native turn spans and image obligations, replayed with the rest
+//! of the ledger. No production path appends them yet.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -173,7 +173,7 @@ impl ImageState {
             .map(|(_, obligation)| notice_key(obligation))
     }
 
-    /// Everything not yet finished, each with the next step the selector (S2b) takes; retire
+    /// Everything not yet finished, each with the selector's next step; retire
     /// refuses and GC keeps the source records while any is listed.
     pub(crate) fn open_obligations(&self, ledger: &LedgerState) -> Vec<OpenObligation> {
         let mut open = Vec::new();
@@ -389,7 +389,7 @@ fn notice_step(attempts: &[(u64, Option<&PieceOutcome>)]) -> Option<NoticeStep> 
     }
 }
 
-/// How a `Posted` for `serial` relates to the anchor rule (review-3 P1-2).
+/// How a `Posted` for `serial` relates to the anchor rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum LateConfirm {
     /// Not a tool-image reconfirmation: the ordinary anchor and skew checks apply unchanged.
@@ -402,7 +402,7 @@ pub(crate) enum LateConfirm {
     Reject(String),
 }
 
-/// Judges a late confirmation; the `Posted` reducer and replay use it in S2b.
+/// Judges a late confirmation for the `Posted` reducer and replay.
 pub(crate) fn late_confirm(ledger: &LedgerState, serial: u64, msg_id: u64) -> LateConfirm {
     let Some(piece) = ledger.pieces.get(&serial) else {
         return LateConfirm::Ordinary;

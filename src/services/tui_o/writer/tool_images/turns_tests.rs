@@ -1,4 +1,4 @@
-//! #8397 S2a: image turn tracking, span restore, Closed boundaries and the opener GC rule.
+//! Image turn tracking, span restore, Closed boundaries and the opener GC rule.
 
 use std::path::PathBuf;
 

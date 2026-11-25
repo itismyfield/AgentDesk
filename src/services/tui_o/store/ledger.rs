@@ -38,7 +38,7 @@ pub enum LedgerEntry {
     InputNotice {
         entry: Box<input_notices::NoticeEntry>,
     },
-    /// #8397 tool-image turn spans and obligations; see `tool_images`.
+    /// Tool-image turn spans and obligations; see `tool_images`.
     ToolImage {
         entry: Box<tool_images::ImageEntry>,
     },

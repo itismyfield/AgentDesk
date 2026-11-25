@@ -1,5 +1,5 @@
-//! The native turn an image belongs to (#8397 design-d3 §1, review-3 P1-1). Pure: the writer
-//! wiring (S2b) feeds it each record's facts and appends the spans it reports.
+//! The native turn an image belongs to. Pure: the writer wiring feeds it each record's facts
+//! and appends the spans it reports.
 
 use std::collections::HashMap;
 
@@ -138,9 +138,8 @@ impl ImageTurns {
         }
     }
 
-    /// The turn of an image in the result of `call_id`, read from the record at `offset`: the
-    /// call's turn, the open turn, the stored span holding `offset`, else the source's edge turn.
-    /// A body key is never a turn.
+    /// The turn of an image in `call_id`'s result at `offset`: the call's turn, the open turn,
+    /// the stored span holding `offset`, else the edge turn; a body key is never a turn.
     pub(crate) fn turn_for_image(
         &mut self,
         call_id: &str,
@@ -184,9 +183,8 @@ impl ImageTurns {
         NativeTurn::new(format!("edge:{}:{}", source_key(&self.source), self.origin))
     }
 
-    /// Whether GC may collect the segment holding `turn`'s opener. An open turn without a durable
-    /// Closed keeps it: the physical-end projection needs that evidence. A turn with a span keeps it until its Closed
-    /// is durable, including while that append is failing.
+    /// Whether GC may collect the segment holding `turn`'s opener: an open turn or an unclosed
+    /// span keeps it until its Closed is durable, even while that append fails.
     pub(crate) fn opener_collectable(&self, spans: &ImageState, turn: &NativeTurn) -> bool {
         let live = |open: &OpenTurn| open.turn == *turn && open.closes_at.is_none();
         if matches!(&self.state, State::Open(open) if live(open)) {

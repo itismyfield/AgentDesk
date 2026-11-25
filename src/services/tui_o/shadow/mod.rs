@@ -34,7 +34,7 @@ pub enum UnitKind {
     ToolResult,
     InputNotice,
     Recap,
-    /// An image a tool read, posted as an attachment; only the #8397 writer path creates it.
+    /// An image a tool read, posted as an attachment; only the tool-image writer path creates it.
     ToolImage,
 }
 

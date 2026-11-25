@@ -1,4 +1,4 @@
-//! #8397 S2a: tool-image ledger entries, open obligations and the late-confirmation judgment.
+//! Tool-image ledger entries, open obligations and the late-confirmation judgment.
 
 use std::path::PathBuf;
 
