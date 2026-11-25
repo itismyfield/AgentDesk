@@ -23,7 +23,7 @@ mod herdr {
 mod consumer_guard;
 mod create;
 pub(crate) use create::HostCreate;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use create::create_in_effect;
 mod herdr_gate;
 mod herdr_host;
@@ -31,7 +31,7 @@ mod herdr_registry;
 pub(crate) mod host_decision;
 pub(crate) mod surface_policy;
 pub(crate) mod thread_host;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
@@ -42,7 +42,7 @@ mod process_host;
 // Only unix keeps a Herdr execution to read again after a restart.
 #[cfg(unix)]
 mod recover;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use recover::{
     HerdrCurrentExecution, HerdrMarkerEvidence, compare_herdr_execution, recover_in_effect,
 };
@@ -59,7 +59,7 @@ pub(crate) use submit::SubmitSpy;
 #[cfg(unix)]
 pub(crate) use submit::WrapperFrame;
 mod termination;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support;
 mod tmux_host;
 mod traits;
@@ -85,7 +85,7 @@ pub(crate) use herdr::contract::ServerWitness;
 pub(crate) use herdr::autostart;
 #[cfg(unix)]
 pub(crate) use herdr::managed_config;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use herdr::model::HerdrEndpoint;
 pub(crate) use herdr::policy;
 pub(crate) use herdr_gate::legacy_return;

@@ -85,7 +85,7 @@ impl Seed {
         analyzed
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn reduced(&self) -> usize {
         self.memo.lock().unwrap_or_else(|e| e.into_inner()).reduced
     }

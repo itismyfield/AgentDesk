@@ -34,7 +34,7 @@ mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
@@ -1082,7 +1082,7 @@ pub fn execute_command_simple_cancellable(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::too_many_arguments)]
 pub fn execute_command_streaming(
     prompt: &str,

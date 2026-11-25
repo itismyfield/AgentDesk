@@ -25,7 +25,7 @@ pub(crate) fn session_host_label() -> String {
     }).clone()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_LABEL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
@@ -37,7 +37,7 @@ pub(crate) fn session_host_label() -> String {
         .unwrap_or_else(super::shell::hostname_short)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {

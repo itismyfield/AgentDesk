@@ -17,7 +17,7 @@ impl ConsistentEpisodeSnapshot {
     pub(super) fn records(&self) -> &[EpisodeMetadata] {
         &self.records
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn fixture(records: Vec<EpisodeMetadata>) -> Self {
         Self::decode(
             records

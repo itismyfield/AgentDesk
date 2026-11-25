@@ -41,9 +41,9 @@ pub(crate) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
 /// own file so neither of those `.generation` consumers is perturbed.
 pub(crate) const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type GenerationStampBeforeCreateHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static GENERATION_STAMP_BEFORE_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampBeforeCreateHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
@@ -63,10 +63,10 @@ fn run_generation_stamp_before_create_hook_for_tests() {
 /// test can give it any mtime the host filesystem would never produce on its own
 /// — notably one that exactly equals the previous incarnation's (#5437), which an
 /// APFS/ext4 host cannot reproduce because its timestamps advance every spawn.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type GenerationStampAfterCreateHook =
     std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static GENERATION_STAMP_AFTER_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampAfterCreateHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
@@ -98,13 +98,13 @@ const GENERATION_MTIME_BUMP_STEPS_NS: &[i64] = &[
     8_000_000_000,
 ];
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static GENERATION_MTIME_BUMP_STEPS_OVERRIDE: std::sync::LazyLock<
     std::sync::Mutex<Option<Vec<i64>>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 fn generation_mtime_bump_steps_ns() -> Vec<i64> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(steps) = GENERATION_MTIME_BUMP_STEPS_OVERRIDE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
@@ -209,7 +209,7 @@ fn bump_generation_mtime_past_previous(
 /// never carries a colliding generation key even transiently. That bump is
 /// best-effort: see `bump_generation_mtime_past_previous` for what it does and
 /// does not guarantee.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn stamp_session_generation_marker(tmux_session_name: &str) -> Option<i64> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         stamp_session_generation_marker_under_source_authority(authority, tmux_session_name)
@@ -270,9 +270,9 @@ fn stamp_session_generation_marker_under_source_authority(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type SpawnMarkersAfterGenerationHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static SPAWN_MARKERS_AFTER_GENERATION_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<SpawnMarkersAfterGenerationHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
@@ -310,7 +310,7 @@ pub(crate) fn stamp_spawn_markers(
 }
 
 /// Create a fresh nonce for legacy callers; production spawns use the combined gate.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         write_spawn_nonce_value(
@@ -356,28 +356,28 @@ fn write_spawn_nonce_value(
 }
 
 /// Test seams of the spawn stamp; `None` clears one.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_generation_before_create_hook(hook: Option<GenerationStampBeforeCreateHook>) {
     *GENERATION_STAMP_BEFORE_CREATE_HOOK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = hook;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_generation_after_create_hook(hook: Option<GenerationStampAfterCreateHook>) {
     *GENERATION_STAMP_AFTER_CREATE_HOOK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = hook;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_generation_mtime_bump_steps(steps_ns: Option<Vec<i64>>) {
     *GENERATION_MTIME_BUMP_STEPS_OVERRIDE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = steps_ns;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_spawn_after_generation_hook(hook: Option<SpawnMarkersAfterGenerationHook>) {
     *SPAWN_MARKERS_AFTER_GENERATION_HOOK
         .lock()

@@ -333,7 +333,7 @@ pub(crate) fn readiness_reads_on_this_thread() -> usize {
 }
 
 /// An O store sealed over `channels` with no checkpoint yet, as a writer's first start leaves it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn o_store_for_test(
     runtime_root: &Path,
     channels: &[u64],

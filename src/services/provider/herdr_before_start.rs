@@ -300,10 +300,10 @@ pub(crate) fn claude_observed_input(
     Ok(HerdrInputRun::Ran(run))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static BOUNDARY_STOPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
     let mut stops = BOUNDARY_STOPS.lock().unwrap();
     if stop {

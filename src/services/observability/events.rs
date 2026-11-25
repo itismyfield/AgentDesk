@@ -182,7 +182,7 @@ impl EventLog {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn clear(&self) {
         if let Ok(mut inner) = self.inner.lock() {
             inner.buffer.clear();

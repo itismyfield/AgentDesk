@@ -117,7 +117,7 @@ struct Registered {
     host: ReadOnlyHerdrHost,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type TestReads = (
     fn(&dyn HerdrTransport, &HerdrEndpoint) -> super::herdr::observe::RestoreResume,
     Arc<dyn super::herdr::pane_probe::ProcessOs>,
@@ -128,7 +128,7 @@ pub(crate) struct HerdrRegistry {
     #[cfg(unix)]
     launch: Option<SocketHerdrLaunchHost>,
     /// E7 and process reads every target gets instead of the OS ones.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     reads: Option<TestReads>,
 }
 
@@ -137,7 +137,7 @@ impl HerdrRegistry {
         endpoints: Vec::new(),
         #[cfg(unix)]
         launch: None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         reads: None,
     };
 
@@ -192,7 +192,7 @@ impl HerdrRegistry {
         Self {
             endpoints,
             launch: Some(launch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             reads: None,
         }
     }
@@ -203,7 +203,7 @@ impl HerdrRegistry {
         Self::EMPTY
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_transport(
         endpoint: HerdrEndpoint,
         transport: Arc<dyn HerdrTransport>,
@@ -214,13 +214,13 @@ impl HerdrRegistry {
         }
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
         self.launch = Some(host);
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_reads(self, reads: TestReads) -> Self {
         Self {
             reads: Some(reads),
@@ -370,7 +370,7 @@ impl HerdrRegistry {
                 evidence.clone(),
             )
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let target = match &self.reads {
             Some((restore, os)) => target.map(|target| target.with_reads(*restore, os.clone())),
             None => target,
@@ -385,7 +385,7 @@ impl HerdrRegistry {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
             HerdrPaneView::new(&registered.endpoint, transport, stored)
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let view = match &self.reads {
             Some((_, os)) => view.map(|view| view.with_os(os.clone())),
             None => view,
@@ -403,7 +403,7 @@ impl HerdrRegistry {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
             RetiredProbe::new(registered.endpoint.clone(), transport, stored)
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let probe = match &self.reads {
             Some((_, os)) => probe.map(|probe| probe.with_os(os.clone())),
             None => probe,
