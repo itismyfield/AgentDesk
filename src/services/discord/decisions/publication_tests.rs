@@ -2,6 +2,7 @@
 //! connected bot; a lost answer finds that same post, a refusal is kept, neither is posted again.
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -9,6 +10,7 @@ use axum::http::{Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use poise::serenity_prelude as serenity;
 use serde_json::{Value, json};
+use tokio::sync::Notify;
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
@@ -56,6 +58,8 @@ struct Mock {
     edits: Option<Vec<Value>>,
     /// The thread edits the announce bot made.
     seals: Vec<Value>,
+    /// Holds the next read of a starter: it signals the first and waits for the second.
+    hold: Option<(Arc<Notify>, Arc<Notify>)>,
 }
 
 type Shared = Arc<Mutex<Mock>>;
@@ -139,6 +143,11 @@ async fn discord(State(mock): State<Shared>, method: Method, uri: Uri, body: Byt
             axum::Json(json!({"threads": threads, "members": []})).into_response()
         }
         (Method::GET, ["channels", c, "messages", m]) if c == m => {
+            let hold = mock.lock().unwrap().hold.take();
+            if let Some((reached, release)) = hold {
+                reached.notify_one();
+                release.notified().await;
+            }
             let mock = mock.lock().unwrap();
             let Some(thread) = mock.threads.iter().find(|thread| thread.id == id(c)) else {
                 return StatusCode::NOT_FOUND.into_response();
@@ -151,7 +160,8 @@ async fn discord(State(mock): State<Shared>, method: Method, uri: Uri, body: Byt
             let mock = &mut *mock;
             let thread = mock.threads.iter_mut().find(|thread| thread.id == id(c));
             let (Some(edits), Some(thread)) = (mock.edits.as_mut(), thread) else {
-                return StatusCode::NOT_FOUND.into_response();
+                let lost = json!({"message": "edit lost", "code": 0});
+                return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(lost)).into_response();
             };
             thread.content = edit["content"].as_str().unwrap().to_string();
             edits.push(edit);
@@ -212,6 +222,7 @@ impl Rig {
             threads: Vec::new(),
             edits: None,
             seals: Vec::new(),
+            hold: None,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let proxy = format!("http://{}", listener.local_addr().unwrap());
@@ -354,10 +365,11 @@ async fn decision_post_whose_answer_is_lost_is_found_not_sent_again_pg() {
     let bare = rig.store("bare", BARE).await;
     outcomes.push(rig.publish(bare, "bare", BARE).await);
     let thread = forum + 100;
+    // The post is found; its buttons are not confirmed enabled while the edit fails.
     let posted = [
         Outcome::Pending,
-        Outcome::Posted(thread),
-        Outcome::Posted(thread),
+        Outcome::Activating(thread),
+        Outcome::Activating(thread),
         Outcome::NoCategory,
     ];
     assert_eq!(outcomes, posted);
@@ -423,7 +435,7 @@ async fn decision_forum_refusal_leaves_the_request_to_post_once_fixed_pg() {
         (Publication::Stored, 0)
     );
     rig.config.decisions.forum_name = None;
-    let posted = Outcome::Posted(forum + 100);
+    let posted = Outcome::Activating(forum + 100);
     assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, posted);
     assert_eq!(rig.posts(), 1);
     rig.close().await;
@@ -604,5 +616,155 @@ async fn decision_click_by_anyone_but_the_owner_stores_nothing_pg() {
     let taken = click(&ctx, &click_by(OWNER), &data).await;
     assert!(taken.contains("선택 접수"), "{taken}");
     assert_eq!(rig.count("decision_choices").await, 1);
+    rig.close().await;
+}
+
+/// The same ask again from another task, as a second caller makes it.
+fn ask_again(rig: &Rig, request_id: Uuid) -> tokio::task::JoinHandle<Outcome> {
+    let (pool, registry, config) = (rig.pool.clone(), rig.registry.clone(), rig.config.clone());
+    tokio::spawn(async move {
+        let ask = ask("r1");
+        let asked = Asked {
+            request_id,
+            ask: &ask,
+            logical_channel: CHANNEL,
+            provider: &ProviderKind::Claude,
+        };
+        publish(&pool, Some(&*registry), &config, asked).await
+    })
+}
+
+/// The owner's first click, its delivery ended failed, and the pass that closes the request.
+async fn select_and_end(rig: &Rig, thread: u64) {
+    let chosen = rig.click(thread, 1).await;
+    assert!(matches!(chosen, Some(Chosen::First(_))), "{chosen:?}");
+    let end = "UPDATE decision_delivery_attempts SET state = 'failed', detail = 'gone'";
+    sqlx::query(end).execute(&rig.pool).await.unwrap();
+    lifecycle::converge(&rig.pool, &rig.registry).await;
+}
+
+/// Card edits of one request apply in the order of its lifecycle: an ask held at its read of
+/// the card while another ask, the selection and its end go by never leaves "open" on top.
+#[tokio::test]
+async fn decision_late_activation_never_reopens_an_ended_card_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_600_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    let posted = rig.publish(request_id, "r1", CHANNEL).await;
+    assert_eq!(
+        posted,
+        Outcome::Activating(thread),
+        "edits fail: still disabled"
+    );
+    rig.edits();
+    let (reached, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+    rig.mock.lock().unwrap().hold = Some((reached.clone(), release.clone()));
+    let late = ask_again(&rig, request_id);
+    reached.notified().await;
+    // The late ask read `disabled` and waits at its read of the card. Without the card lock
+    // the other ask opens the request now, and it is selected and ended before the late edit.
+    let mut other = ask_again(&rig, request_id);
+    let raced = tokio::time::timeout(Duration::from_secs(3), &mut other).await;
+    if raced.is_ok() {
+        select_and_end(&rig, thread).await;
+    }
+    release.notify_one();
+    assert_eq!(late.await.unwrap(), Outcome::Open(thread));
+    match raced {
+        Ok(other) => assert_eq!(other.unwrap(), Outcome::Open(thread)),
+        Err(_) => {
+            assert_eq!(other.await.unwrap(), Outcome::Open(thread));
+            select_and_end(&rig, thread).await;
+        }
+    }
+    lifecycle::converge(&rig.pool, &rig.registry).await;
+    let card = rig.edits().pop().unwrap();
+    let failed = card::ended("지금 배포", AttemptState::Failed, Some("gone"));
+    assert!(
+        card["content"].as_str().unwrap().contains(&failed),
+        "{card}"
+    );
+    let buttons = card["components"][0]["components"].as_array().unwrap();
+    assert!(buttons.iter().all(|button| button["disabled"] == true));
+    assert_eq!(rig.mock.lock().unwrap().seals.len(), 1);
+    for table in ["decision_choices", "decision_input_events"] {
+        assert_eq!(rig.count(table).await, 1, "{table}");
+    }
+    rig.close().await;
+}
+
+/// A stored selection a restart left unstarted is not taken by a process whose gateway is not
+/// up yet: it stays unstarted, and once the gateway is up it is started exactly once.
+#[tokio::test]
+async fn decision_stored_selection_waits_for_the_gateway_before_its_one_start_pg() {
+    use crate::db::decisions::test_support::row;
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_700_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    rig.edits();
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    let open = rig.publish(request_id, "r1", CHANNEL).await;
+    assert_eq!(open, Outcome::Open(thread));
+    let Some(Chosen::First(chosen)) = rig.click(thread, 1).await else {
+        panic!("the first click is the choice");
+    };
+    let aged = "UPDATE decision_choices SET chosen_at = NOW() - INTERVAL '1 minute'";
+    sqlx::query(aged).execute(&rig.pool).await.unwrap();
+    (crate::services::cluster::node_registry::SELF_INSTANCE_ID)
+        .get_or_init(|| "decision-test-node".to_string());
+    // The boot pass runs with a registered node and a token, before the gateway is up.
+    rig.connected(false);
+    for _ in 0..2 {
+        lifecycle::converge(&rig.pool, &rig.registry).await;
+    }
+    let waiting = row(&rig.pool, chosen.event_id).await;
+    assert_eq!(
+        (waiting.0.as_str(), waiting.1, &waiting.2),
+        ("not_started", false, &None)
+    );
+    rig.connected(true);
+    lifecycle::converge(&rig.pool, &rig.registry).await;
+    let started = row(&rig.pool, chosen.event_id).await;
+    assert_ne!(started.0, "not_started", "the ready pass starts it");
+    assert!(started.2.is_some(), "started without its reservation");
+    lifecycle::converge(&rig.pool, &rig.registry).await;
+    let again = row(&rig.pool, chosen.event_id).await;
+    assert_eq!(
+        (&again.2, again.1),
+        (&started.2, started.1),
+        "started twice"
+    );
+    assert!(selection::unstarted(&rig.pool).await.unwrap().is_empty());
+    rig.close().await;
+}
+
+/// The ask answers open only once its buttons are confirmed enabled: a failed card edit, and an
+/// edit PG then could not follow, both answer as activating, and the same ask resumes the post.
+#[tokio::test]
+async fn decision_activation_that_did_not_finish_is_not_answered_as_open_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_800_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    let (request_id, thread) = (rig.store("r1", CHANNEL).await, forum + 100);
+    let activating = Outcome::Activating(thread);
+    assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, activating);
+    assert_eq!(rig.click(thread, 1).await, Some(Chosen::NotOpen));
+    // The edit lands but PG cannot open the request.
+    rig.edits();
+    let block = "ALTER TABLE decision_requests
+                 ADD CONSTRAINT decision_test_no_open CHECK (lifecycle <> 'open') NOT VALID";
+    sqlx::query(block).execute(&rig.pool).await.unwrap();
+    assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, activating);
+    assert_eq!(rig.edits().len(), 1, "the card was shown open");
+    assert_eq!(rig.click(thread, 1).await, Some(Chosen::NotOpen));
+    assert_eq!(rig.count("decision_choices").await, 0);
+    let unblock = "ALTER TABLE decision_requests DROP CONSTRAINT decision_test_no_open";
+    sqlx::query(unblock).execute(&rig.pool).await.unwrap();
+    for _ in 0..2 {
+        let open = rig.publish(request_id, "r1", CHANNEL).await;
+        assert_eq!(open, Outcome::Open(thread));
+    }
+    assert_eq!(rig.posts(), 1, "the same ask posted again");
     rig.close().await;
 }

@@ -143,32 +143,80 @@ async fn decision_original_leaves_the_queue_unrun_unless_its_event_is_open_pg() 
     db.drop().await;
 }
 
-/// Inside a Decision start, an entry rebuilt from the request text still names the event and
-/// the start reads as a wait; outside one nothing is stamped.
+/// Building the original a start may queue copies the event's origin and returns nothing to a
+/// queue: a start that then ran is a start. Only an accepted requeue reads as a wait.
 #[tokio::test]
-async fn decision_start_that_queues_its_input_again_keeps_the_event_origin() {
+async fn decision_start_reads_as_a_wait_only_once_a_queue_took_its_input_back() {
+    use super::super::super::IntakeExecution::{Deferred, Executed};
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let origin = format!("decision:{}", uuid::Uuid::new_v4());
-    let rebuilt = || {
-        super::super::super::response_format::build_race_requeued_intervention(
-            serenity::UserId::new(ACTOR),
-            serenity::MessageId::new(9),
-            TEXT,
-            true,
-            None,
-            false,
-            true,
-            Vec::new(),
-        )
-    };
-    let start = async { (rebuilt(), decision_queue::starting_origin()) };
-    let ((entry, named), back) = decision_queue::started_under(Some(origin.clone()), start).await;
-    assert_eq!(decision_queue::origin(&entry), Some(origin.as_str()));
-    assert_eq!(
-        (named, back, entry.merge_consecutive),
-        (Some(origin), true, false)
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let (channel, message) = (
+        serenity::ChannelId::new(8_211_402),
+        serenity::MessageId::new(9),
     );
-    assert_eq!(decision_queue::origin(&rebuilt()), None);
-    let (_, back) = decision_queue::started_under(Some("decision:x".into()), async {}).await;
-    assert!(!back);
+    let origin = format!("decision:{}", uuid::Uuid::new_v4());
+    let request = super::super::super::message_handler::IntakeRequest {
+        intake_outbox_id: None,
+        channel_id: channel,
+        user_msg_id: message,
+        source_message_ids: vec![message],
+        busy_followup_retry_user_msg_id: message,
+        request_owner: serenity::UserId::new(ACTOR),
+        request_owner_name: "owner".into(),
+        user_text: TEXT.into(),
+        reply_to_user_message: true,
+        defer_watcher_resume: false,
+        wait_for_completion: false,
+        merge_consecutive: true,
+        reply_context: None,
+        has_reply_boundary: false,
+        dm_hint: None,
+        turn_kind: super::super::super::TurnKind::Foreground,
+        preserve_on_cancel: true,
+    };
+    let build = || {
+        let build = super::super::super::message_handler::input_payload::owned_original;
+        build(&request, false, Vec::new(), true)
+    };
+    let start = async { (build(), decision_queue::starting_origin()) };
+    let ((built, named), back) = decision_queue::started_under(Some(origin.clone()), start).await;
+    assert_eq!(decision_queue::origin(&built), Some(origin.as_str()));
+    assert_eq!(
+        (named, built.merge_consecutive),
+        (Some(origin.clone()), false)
+    );
+    assert!(!back, "building the original is no return to a queue");
+    assert_eq!(
+        decision_end(Some(&Executed), back),
+        decision_queue::Ended::Started
+    );
+    assert_eq!(
+        decision_queue::origin(&build()),
+        None,
+        "stamped outside a start"
+    );
+
+    let requeue = async {
+        let requeue = crate::services::discord::mailbox_requeue_intervention_front;
+        let outcome = requeue(&shared, &ProviderKind::Claude, channel, build()).await;
+        decision_queue::requeued(&outcome);
+        outcome.enqueued
+    };
+    let (enqueued, back) = decision_queue::started_under(Some(origin.clone()), requeue).await;
+    assert!(enqueued && back, "an accepted requeue is the return");
+    assert_eq!(
+        decision_end(Some(&Executed), back),
+        decision_queue::Ended::WaitsAgain
+    );
+    let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
+    let queued = shared.mailbox(channel).take_next_soft(persistence).await;
+    let queued = queued.intervention.expect("the requeued original");
+    assert_eq!(decision_queue::origin(&queued), Some(origin.as_str()));
+    assert_eq!((queued.text.as_str(), queued.message_id), (TEXT, message));
+    assert_eq!(queued.source_message_queued_generations.len(), 1);
+    assert_eq!(
+        decision_end(Some(&Deferred), false),
+        decision_queue::Ended::Unknown
+    );
+    assert_eq!(decision_end(None, true), decision_queue::Ended::Unknown);
 }
