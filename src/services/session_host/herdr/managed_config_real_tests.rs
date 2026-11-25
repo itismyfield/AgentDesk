@@ -1,6 +1,8 @@
 use super::*;
 use crate::config::session_hosts::{BootSessionHosts, EndpointConfig, EndpointMode};
-use crate::services::session_host::herdr::managed_config::{ManagedHome, path::PersonalPaths};
+use crate::services::session_host::herdr_for_test::managed_config::{
+    ManagedHome, path::PersonalPaths,
+};
 
 fn managed(server: &RealServer) -> ManagedHome {
     let user = server.dir.join("isolated-user");

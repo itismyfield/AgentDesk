@@ -1,7 +1,6 @@
 //! Moved from src/services/claude/herdr_turn/first_input.rs: drives the discord input owner.
 
-use crate::services::claude::herdr_turn::first_input::regression_tests::regression_attached;
-use crate::services::claude::herdr_turn::first_input::*;
+use crate::services::claude::herdr_turn::{regression_attached, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
 use std::sync::Arc;
 use std::time::Duration;
@@ -54,7 +53,8 @@ fn herdr_composer_refusal_keeps_real_owner_proof_and_wake_then_submits_once() {
         Box::new(move |frame: String| {
             guarded_outcome::capture_preparation(|| {
                 let (sender, receiver) = std::sync::mpsc::channel();
-                let result = write(logical, None, attached, &frame, &sender, None).map(drop);
+                let result =
+                    write_for_test(logical, None, attached, &frame, &sender, None).map(drop);
                 drop(receiver);
                 result
             })
@@ -109,7 +109,8 @@ fn herdr_composer_refusal_keeps_real_owner_proof_and_wake_then_submits_once() {
         Box::new(move |frame: String| {
             guarded_outcome::capture_preparation(|| {
                 let (sender, receiver) = std::sync::mpsc::channel();
-                let result = write(logical, None, attached, &frame, &sender, None).map(drop);
+                let result =
+                    write_for_test(logical, None, attached, &frame, &sender, None).map(drop);
                 drop(receiver);
                 result
             })

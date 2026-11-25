@@ -128,8 +128,8 @@ impl TrustedForwardTarget {
         self.endpoint(relative_endpoint)
     }
 
-    #[cfg(test)]
-    pub(super) fn for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_test(
         owner_instance_id: &str,
         origin: &str,
     ) -> Result<Self, TrustedTargetError> {

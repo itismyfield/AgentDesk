@@ -2,7 +2,7 @@
 //! create, terminate and restart-read effects on it. Admission, identity and cancel routing stay
 //! with owners.
 
-pub(crate) mod herdr {
+mod herdr {
     #[cfg(unix)]
     pub(crate) mod autostart;
     pub(crate) mod contract;
@@ -25,9 +25,9 @@ mod create;
 pub(crate) use create::HostCreate;
 #[cfg(test)]
 pub(crate) use create::create_in_effect;
-pub(crate) mod herdr_gate;
-pub(crate) mod herdr_host;
-pub(crate) mod herdr_registry;
+mod herdr_gate;
+mod herdr_host;
+mod herdr_registry;
 pub(crate) mod host_decision;
 pub(crate) mod surface_policy;
 pub(crate) mod thread_host;
@@ -36,7 +36,7 @@ pub(crate) use herdr_registry::HerdrRegistry;
 #[cfg(test)]
 pub(crate) mod herdr_socket_rig_tests;
 pub(crate) mod legacy_collapse;
-pub(crate) mod model;
+mod model;
 pub(crate) mod operation_policy;
 mod process_host;
 // Only unix keeps a Herdr execution to read again after a restart.
@@ -62,7 +62,22 @@ mod termination;
 #[cfg(test)]
 pub(crate) mod test_support;
 mod tmux_host;
-pub(crate) mod traits;
+mod traits;
+// Test seams: the Herdr internals the session-host tests reach from their upper-crate hosts.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod herdr_for_test {
+    pub(crate) use super::herdr::*;
+}
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod herdr_gate_for_test {
+    pub(crate) use super::herdr_gate::*;
+}
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod herdr_registry_for_test {
+    pub(crate) use super::herdr_registry::*;
+}
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use herdr_host::HerdrHost;
 
 pub(crate) use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.

@@ -83,7 +83,7 @@ impl Harness {
             event_sequence: state.event_sequence,
             control: state.control,
         };
-        write::persist(
+        persist_for_test(
             &mut tx,
             None,
             &Decision {
@@ -700,7 +700,7 @@ async fn immutable_attempt_binding_and_action_target_mismatch_roll_back_pg() {
             result,
         };
         assert!(matches!(
-            write::persist(&mut tx, Some(&original), &decision).await,
+            persist_for_test(&mut tx, Some(&original), &decision).await,
             Err(StoreError::InconsistentState)
         ));
         tx.rollback().await.unwrap();

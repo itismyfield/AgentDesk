@@ -21,8 +21,8 @@ fn control_hmac_matches_rfc4231_case_one() {
     let mut key = [0; 32];
     key[..20].fill(0x0b);
     assert_eq!(
-        crate::config::test_instance::lifecycle::hex_digest(
-            crate::config::test_instance::lifecycle::control_hmac(&key, b"Hi There")
+        crate::config::test_instance::lifecycle::hex_digest_for_test(
+            crate::config::test_instance::lifecycle::control_hmac_for_test(&key, b"Hi There")
         ),
         "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
     );
@@ -30,14 +30,14 @@ fn control_hmac_matches_rfc4231_case_one() {
 
 #[test]
 fn control_request_matches_the_cross_language_vector() {
-    let key = crate::config::test_instance::lifecycle::derive_control_key([
+    let key = crate::config::test_instance::lifecycle::derive_control_key_for_test([
         ("announce_bot_token", b"fixture-announce".as_slice()),
         ("claude_bot_token", b"fixture-claude".as_slice()),
         ("codex_bot_token", b"fixture-codex".as_slice()),
         ("notify_bot_token", b"fixture-notify".as_slice()),
     ]);
     assert_eq!(
-        crate::config::test_instance::lifecycle::hex_digest(key),
+        crate::config::test_instance::lifecycle::hex_digest_for_test(key),
         "b5608c372adc5486f387dfa64c820fb55585348284b575a6d206e6de12293d8a"
     );
     let request = json!({"schema":1,"action":"stop","root":"/tmp/adk-control-vector",
@@ -45,7 +45,7 @@ fn control_request_matches_the_cross_language_vector() {
         "nonce":"22345678-1234-4234-8234-123456789abc",
         "challenge":"32345678-1234-4234-8234-123456789abc"});
     assert_eq!(
-        crate::config::test_instance::lifecycle::signed_control(
+        crate::config::test_instance::lifecycle::signed_control_for_test(
             &key,
             b"agentdesk-test-control-v1/request\0",
             &request
@@ -77,9 +77,9 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         crate::config::test_instance::lifecycle::bound_listener("127.0.0.1:18791".parse().unwrap())
             .unwrap();
         let instance = instance::current().unwrap().unwrap();
-        let key = crate::config::test_instance::lifecycle::derive_control_key(material);
+        let key = crate::config::test_instance::lifecycle::derive_control_key_for_test(material);
         let sign = |mut value: Value| {
-            value["proof"] = crate::config::test_instance::lifecycle::signed_control(
+            value["proof"] = crate::config::test_instance::lifecycle::signed_control_for_test(
                 &key,
                 b"agentdesk-test-control-v1/request\0",
                 &value,
@@ -94,7 +94,8 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         let mut probe = value.clone();
         probe["action"] = json!("probe");
         assert!(
-            crate::config::test_instance::lifecycle::prepare_control(peer, &sign(probe)).is_err(),
+            crate::config::test_instance::lifecycle::prepare_control_for_test(peer, &sign(probe))
+                .is_err(),
             "probe action must be rejected"
         );
         assert!(
@@ -102,9 +103,11 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
                 .is_ok(),
             "an admitted Unix run must attach its stop route"
         );
-        let response =
-            crate::config::test_instance::lifecycle::prepare_control(peer, &sign(value.clone()))
-                .unwrap();
+        let response = crate::config::test_instance::lifecycle::prepare_control_for_test(
+            peer,
+            &sign(value.clone()),
+        )
+        .unwrap();
         assert!(
             !instance
                 .root
@@ -139,7 +142,7 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         unsigned.as_object_mut().unwrap().remove("proof");
         assert_eq!(
             response["proof"],
-            crate::config::test_instance::lifecycle::signed_control(
+            crate::config::test_instance::lifecycle::signed_control_for_test(
                 &key,
                 b"agentdesk-test-control-v1/response\0",
                 &unsigned
@@ -161,7 +164,7 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
                 request["proof"] = json!("0".repeat(64));
             }
             assert!(
-                crate::config::test_instance::lifecycle::prepare_control(
+                crate::config::test_instance::lifecycle::prepare_control_for_test(
                     peer,
                     &serde_json::to_vec(&request).unwrap()
                 )
@@ -170,7 +173,7 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
             );
         }
         assert!(
-            crate::config::test_instance::lifecycle::prepare_control(
+            crate::config::test_instance::lifecycle::prepare_control_for_test(
                 "192.0.2.1:12345".parse().unwrap(),
                 &sign(value.clone())
             )
@@ -182,7 +185,8 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         let mut stop = value.clone();
         stop["action"] = json!("stop");
         assert!(
-            crate::config::test_instance::lifecycle::dispatch_control(peer, &sign(stop)).is_err(),
+            crate::config::test_instance::lifecycle::dispatch_control_for_test(peer, &sign(stop))
+                .is_err(),
             "existing acknowledgement was overwritten"
         );
         assert_eq!(std::fs::read(&ack).unwrap(), b"foreign-control-sentinel");
@@ -190,7 +194,8 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         std::fs::rename(&executable, executable.with_extension("old")).unwrap();
         std::fs::write(executable, b"changed synthetic image").unwrap();
         assert!(
-            crate::config::test_instance::lifecycle::prepare_control(peer, &sign(value)).is_err(),
+            crate::config::test_instance::lifecycle::prepare_control_for_test(peer, &sign(value))
+                .is_err(),
             "changed executable reached the authenticated control callback"
         );
         return;
@@ -210,7 +215,7 @@ fn control_probe_rejects_bad_auth_scope_peer_and_changed_image() {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         let m = std::fs::metadata(path).unwrap();
         json!({"name":name,"application_id":(index+100).to_string(),"device":m.dev(),"inode":m.ino(),"size":m.len(),
-            "mtime_ns":crate::config::test_instance::lifecycle::nanoseconds(m.mtime(),m.mtime_nsec()).unwrap(),"ctime_ns":crate::config::test_instance::lifecycle::nanoseconds(m.ctime(),m.ctime_nsec()).unwrap()})
+            "mtime_ns":crate::config::test_instance::lifecycle::nanoseconds_for_test(m.mtime(),m.mtime_nsec()).unwrap(),"ctime_ns":crate::config::test_instance::lifecycle::nanoseconds_for_test(m.ctime(),m.ctime_nsec()).unwrap()})
     }).collect();
     let run = json!({"schema":1,"head":"a".repeat(40),"worktree":fixture.root.join("fixture-worktree"),
         "binary":{"fd":binary.as_raw_fd(),"device":metadata.dev(),"inode":metadata.ino(),"sha256":digest},"identities":identities});
@@ -813,7 +818,7 @@ fn agy_lease_without_a_verified_run_is_refused() {
         );
         return;
     }
-    let (temporary, root, _home) = instance::agy_cell::tests::agy_fixture();
+    let (temporary, root, _home) = instance::agy_fixture();
     let fixture = LeaseFixture::with_root(temporary, root, true);
     fixture::assert_single_test_passed(
         &finish(fixture.spawn(name, "agy-no-run", Some(&fixture.witness), true)),

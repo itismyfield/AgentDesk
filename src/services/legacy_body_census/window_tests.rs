@@ -1,6 +1,6 @@
 use serde_json::json;
 
-pub(super) use super::super::window::valid_chain;
+pub(super) use crate::services::legacy_body_census::valid_chain_for_test as valid_chain;
 
 #[test]
 fn five_thousand_links_are_visited_at_most_twice() {

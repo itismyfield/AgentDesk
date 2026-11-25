@@ -13,17 +13,21 @@ use crate::services::herdr_launch::{HERDR_PANE_ENV, unset_herdr_env_before_exec}
 use crate::services::herdr_launch::{
     HerdrCreateOutcome, HerdrCreateRequest, HerdrLaunchEndpoint, HerdrLaunchHost,
 };
-use crate::services::session_host::herdr::contract::{HerdrTransport, ServerWitness};
-use crate::services::session_host::herdr::launch_host::*;
-use crate::services::session_host::herdr::model::{HerdrCall, HerdrEndpoint, HerdrRequest};
-use crate::services::session_host::herdr::observe;
-use crate::services::session_host::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
-use crate::services::session_host::herdr::wire::LineJsonFraming;
+use crate::services::session_host::herdr_for_test::contract::{HerdrTransport, ServerWitness};
+use crate::services::session_host::herdr_for_test::launch_host::*;
+use crate::services::session_host::herdr_for_test::model::{
+    HerdrCall, HerdrEndpoint, HerdrRequest,
+};
+use crate::services::session_host::herdr_for_test::observe;
+use crate::services::session_host::herdr_for_test::transport::{
+    HerdrSocketConfig, HerdrSocketTransport,
+};
+use crate::services::session_host::herdr_for_test::wire::LineJsonFraming;
 
 #[path = "launch_host_restore_evidence_tests.rs"]
 mod restore_evidence;
-use crate::services::session_host::herdr::model::{HerdrProcessInfo, HerdrResult};
-use crate::services::session_host::herdr::{pane_probe::start_text, provenance};
+use crate::services::session_host::herdr_for_test::model::{HerdrProcessInfo, HerdrResult};
+use crate::services::session_host::herdr_for_test::{pane_probe::start_text, provenance};
 
 // The macOS sh launcher execs bash, so select the native shell for an exact OS identity.
 const T19_SHELL: &str = "/bin/bash";

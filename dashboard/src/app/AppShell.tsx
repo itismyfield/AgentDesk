@@ -10,7 +10,7 @@ import { useFocusTrap } from "../components/common/overlay";
 import { agentName, buildRunningNowTasks, classifyAgents } from "../components/home/homeModel";
 import { AgentTurnsProvider, reconcileStaleSessionTurn, stopAgentTurn, useAgentTurns } from "../components/home/useHomeData";
 import { MOBILE_LAYOUT_MEDIA_QUERY, TABLET_RAIL_MEDIA_QUERY } from "./breakpoints";
-import { PRIMARY_ROUTES, findRouteByPath, type AppRouteEntry, type AppRouteId } from "./routes";
+import { DEFAULT_ROUTE_PATH, PRIMARY_ROUTES, findRouteByPath, type AppRouteEntry, type AppRouteId } from "./routes";
 import { AppMobileNavigation } from "./AppMobileNavigation";
 import { AppSidebar } from "./AppSidebar";
 import { AppTopBar } from "./AppTopBar";
@@ -70,7 +70,7 @@ export default function AppShell({
     () => findRouteByPath(location.pathname),
     [location.pathname],
   );
-  const { settings, setSettings, stats, refreshStats, isKo, locale, tr } =
+  const { settings, setSettings, stats, initialStatsPending, refreshStats, isKo, locale, tr } =
     useSettings();
   const {
     agents,
@@ -126,8 +126,9 @@ export default function AppShell({
     [agents, sessions, sessionsFailed],
   );
   const runningTurns = useAgentTurns(workingAgentIds);
-  const statsOnArrival = useRef(stats);
-  statsOnArrival.current = stats;
+  const hasBootstrapStats = Boolean(stats) || Boolean(initialStatsPending);
+  const statsOnArrival = useRef(hasBootstrapStats);
+  statsOnArrival.current = hasBootstrapStats;
   const sawShellRoute = useRef(false);
   const runningTasks = useMemo(
     () =>
@@ -166,7 +167,7 @@ export default function AppShell({
   }, []);
 
   useEffect(() => {
-    if (window.localStorage.getItem(THEME_STORAGE_KEY) == null) {
+    if (typeof window.localStorage?.getItem === "function" && window.localStorage.getItem(THEME_STORAGE_KEY) == null) {
       setThemePreference(settings.theme);
     }
   }, [settings.theme]);
@@ -236,11 +237,17 @@ export default function AppShell({
     }
   }, [isMobileViewport]);
 
+  useLayoutEffect(() => {
+    if (location.pathname === "/") {
+      navigate(DEFAULT_ROUTE_PATH, { replace: true });
+    }
+  }, [location.pathname, navigate]);
+
   useEffect(() => {
+    if (currentRoute?.id !== "home" && currentRoute?.id !== "stats") return;
     const opening = !sawShellRoute.current;
     sawShellRoute.current = true;
-    if (currentRoute?.id !== "home" && currentRoute?.id !== "stats") return;
-    // Bootstrap already loaded stats for the first paint. Refresh on later visits.
+    // Bootstrap already loaded (or is loading) stats for the first paint. Refresh on later visits.
     if (opening && statsOnArrival.current) return;
     refreshStats();
   }, [currentRoute?.id, refreshStats]);

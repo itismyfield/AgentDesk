@@ -5,7 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::tests::pending;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedRecord, HostedState,
 };
-use crate::services::herdr_launch::{HerdrLaunchError, retire_unsent};
+use crate::services::herdr_launch::{HerdrLaunchError, retire_unsent_for_test as retire_unsent};
 
 /// The host scope of the configured Herdr channel whose exact row reads `found`.
 fn read(

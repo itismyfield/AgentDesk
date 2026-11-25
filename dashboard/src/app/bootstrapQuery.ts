@@ -8,17 +8,20 @@ import type {
 } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
 
-// Only what the shell needs on every page; screens load their own heavy data.
+// Shell essentials that gate the first frame; heavy session/stats payloads stream in parallel without blocking AppShell.
 export interface BootstrapData {
   agents: Agent[];
   departments: Department[];
-  /** Null when the session list did not load, so an empty list is never mistaken for no sessions. */
-  sessions: DispatchedSession[] | null;
-  stats: DashboardStats | null;
+  /** Present when supplied by a caller/mock; otherwise loaded in parallel via fetchBootstrapSessions. */
+  sessions?: DispatchedSession[] | null;
+  /** Present when supplied by a caller/mock; otherwise loaded in parallel via fetchBootstrapStats. */
+  stats?: DashboardStats | null;
   settings: CompanySettings;
 }
 
 export const dashboardBootstrapQueryKey = ["dashboard", "bootstrap"] as const;
+export const dashboardBootstrapSessionsQueryKey = ["dashboard", "bootstrap", "sessions"] as const;
+export const dashboardBootstrapStatsQueryKey = ["dashboard", "bootstrap", "stats"] as const;
 
 function safe<T>(promise: Promise<T>, fallback: T): Promise<T> {
   return promise.catch((error) => {
@@ -28,19 +31,22 @@ function safe<T>(promise: Promise<T>, fallback: T): Promise<T> {
 }
 
 export async function fetchDashboardBootstrap(): Promise<BootstrapData> {
-  await safe(api.getSession(), { ok: false, csrf_token: "" });
-  const [agents, departments, sessions, stats, settings] = await Promise.all([
+  const [agents, departments, settings] = await Promise.all([
     safe(api.getAgents(), [] as Agent[]),
     safe(api.getDepartments(), [] as Department[]),
-    safe(api.getDispatchedSessions(true), null as DispatchedSession[] | null),
-    safe(api.getStats(), null as DashboardStats | null),
     safe(api.getSettings(), DEFAULT_SETTINGS as Partial<CompanySettings>),
   ]);
   return {
     agents,
     departments,
-    sessions,
-    stats,
     settings: { ...DEFAULT_SETTINGS, ...settings } as CompanySettings,
   };
+}
+
+export function fetchBootstrapSessions(): Promise<DispatchedSession[] | null> {
+  return safe(api.getDispatchedSessions(true), null as DispatchedSession[] | null);
+}
+
+export function fetchBootstrapStats(): Promise<DashboardStats | null> {
+  return safe(api.getStats(), null as DashboardStats | null);
 }

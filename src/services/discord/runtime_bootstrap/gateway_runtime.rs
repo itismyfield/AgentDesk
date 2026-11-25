@@ -117,12 +117,24 @@ pub(in crate::services::discord) fn run_bot_framework_options(
         commands,
         command_check: Some(|ctx| Box::pin(command_guard::check(ctx))),
         event_handler: |framework, event| {
-            Box::pin(handle_event(
-                framework.serenity_context,
-                event,
-                framework.user_data,
+            let ctx = framework.serenity_context;
+            Box::pin(crate::logging::intake_stage::gateway(
+                inbound_message_id(ctx, event),
+                handle_event(ctx, event, framework.user_data),
             ))
         },
         ..Default::default()
+    }
+}
+
+/// The id of a message event not authored by this bot, which the intake stage lines follow.
+fn inbound_message_id(ctx: &serenity::Context, event: &serenity::FullEvent) -> Option<u64> {
+    match event {
+        serenity::FullEvent::Message { new_message }
+            if new_message.author.id != ctx.cache.current_user().id =>
+        {
+            Some(new_message.id.get())
+        }
+        _ => None,
     }
 }

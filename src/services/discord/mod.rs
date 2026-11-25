@@ -448,7 +448,9 @@ pub(crate) use bot_runtime::has_fresh_inflight_for_channel;
 use bot_runtime::increment_counter;
 pub(in crate::services::discord) use bot_runtime::increment_global_active;
 pub(crate) use bot_runtime::inflight_state_allows_idle_tmux_repair_for_channel;
-pub(crate) use bot_runtime::mark_reconcile_complete;
+pub(super) use bot_runtime::mark_reconcile_complete;
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) use bot_runtime::mark_reconcile_complete_for_test;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_counter;
 pub(in crate::services::discord) use bot_runtime::saturating_decrement_global_active;
 pub(super) use bot_runtime::single_message_panel_enabled;

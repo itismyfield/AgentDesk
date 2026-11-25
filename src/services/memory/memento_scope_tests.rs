@@ -1,7 +1,7 @@
 use crate::domain::memory::ResolvedMemorySettings;
 use crate::runtime_layout;
 use crate::services::discord::settings::{MemoryBackendKind, resolve_role_binding};
-use crate::services::memory::memento::*;
+use crate::services::memory::*;
 use axum::{Json, Router, extract::State, routing::post};
 use poise::serenity_prelude::ChannelId;
 use serde_json::{Value, json};
@@ -195,13 +195,8 @@ fn memory_group_explicit_settings_win_over_host_channel() {
         memory_group: Some("family-counsel".into()),
         ..Default::default()
     });
-    let config = MementoRuntimeConfig {
-        endpoint: "fixture".into(),
-        access_key: "fixture".into(),
-        workspace_override: None,
-    };
     assert_eq!(
-        backend.resolve_workspace("family-counsel", 4242, None, &config),
+        backend.resolve_workspace_for_test("family-counsel", 4242, None),
         "family-counsel"
     );
 }

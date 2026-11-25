@@ -43,7 +43,10 @@ fn admit_and_finish_queued<'a>(
     after_admission: PortFuture<'a, bool>,
 ) -> PortFuture<'a, QueuedRun> {
     use super::QueuedAdmissionDisposition as Disposition;
-    Box::pin(async move {
+    let representative = admission.intervention.message_id.get();
+    let sources = admission.intervention.source_message_ids.iter();
+    let sources = sources.map(|id| id.get()).collect();
+    let run = async move {
         let QueuedAdmission {
             provider,
             channel_id,
@@ -81,7 +84,12 @@ fn admit_and_finish_queued<'a>(
             after_admission,
             result,
         }
-    })
+    };
+    Box::pin(crate::logging::intake_stage::merged(
+        representative,
+        sources,
+        run,
+    ))
 }
 
 fn start_exact_retry<'a>(

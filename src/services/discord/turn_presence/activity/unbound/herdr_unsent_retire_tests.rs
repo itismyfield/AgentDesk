@@ -1,6 +1,6 @@
 //! A turn-mode Herdr channel whose create was proven unsent is not left waiting on presence.
 use super::*;
-use crate::services::herdr_launch::{HerdrLaunchError, retire_unsent};
+use crate::services::herdr_launch::{HerdrLaunchError, retire_unsent_for_test as retire_unsent};
 
 // The launch listed its execution, then retired it with no pane; presence reads no session and
 // the input that waited on it is taken, as a routine waiting on that presence proceeds.

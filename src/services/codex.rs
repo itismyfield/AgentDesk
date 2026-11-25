@@ -26,14 +26,29 @@ use followup_reader::send_followup_to_tmux;
 mod herdr_guard_tests;
 #[cfg(unix)]
 pub(crate) mod herdr_turn;
-pub(crate) mod tui_session_launch;
+#[cfg(unix)]
+mod launch_script;
+#[cfg(unix)]
+use launch_script::CodexTuiLaunchScript;
+mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(test, unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
+#[cfg(all(test, unix))]
+pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
 pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use tui_session_launch::{
+    CodexHerdrLaunchable,
+    first_input::{Create, Observe, Submitted, create_for_test, observe_for_test},
+    launch_policy::{
+        codex_tui_option_args_for_test, prepare_codex_herdr_launch_for_test,
+        resolve_codex_binary_for_test,
+    },
+};
 #[cfg(unix)]
 pub(crate) use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
@@ -245,7 +260,7 @@ pub(crate) use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
 
-pub(crate) fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
     log_codex_binary_probe(&probe);
     probe.resolution
@@ -1242,18 +1257,6 @@ fn cleanup_existing_codex_tui_session(
     if !pane_already_stopped {
         crate::services::session_host::TmuxHost.kill(tmux_session_name, reason_text);
     }
-}
-
-/// Paths and timing produced while preparing a Codex Direct TUI launch script.
-#[cfg(unix)]
-pub(crate) struct CodexTuiLaunchScript {
-    fence: crate::services::tmux_common::runtime_hint_fence::RuntimeHintFence,
-    pub(crate) prepared: crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation,
-    pub(crate) script_path: String,
-    pub(crate) owner_path: String,
-    rollout_modified_since: std::time::SystemTime,
-    /// The Discord handoff reserved before launch, held until the tail returns.
-    handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
 }
 
 /// Wire the cancel token to the freshly created tmux session: record the

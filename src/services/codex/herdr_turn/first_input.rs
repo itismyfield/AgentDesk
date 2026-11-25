@@ -1,10 +1,19 @@
 //! Submit owns the physical mutation; Source binding and the reply belong to observation.
 use super::*;
 
-pub(super) struct Submitted {
-    target: HerdrTarget,
-    logged: tokio::sync::watch::Receiver<u64>,
+// Defined in a private child so default builds name it only inside `herdr_turn`, as before.
+mod submitted {
+    use crate::services::session_host::HerdrTarget;
+
+    pub(crate) struct Submitted {
+        pub(super) target: HerdrTarget,
+        pub(super) logged: tokio::sync::watch::Receiver<u64>,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) use submitted::Submitted;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use submitted::Submitted;
 
 pub(super) fn submit(
     turn: &CodexHerdrTurn<'_>,
@@ -117,8 +126,8 @@ fn restore_pending(
 }
 
 fn read_pending(pool: &PgPool, owner: &HostedOwner, runtime: &Handle) -> HostedLookup {
-    #[cfg(test)]
-    pg_tests::before_pending_lookup(&owner.logical_key);
+    #[cfg(any(test, feature = "test-support"))]
+    pending_lookup_probe::before_pending_lookup(&owner.logical_key);
     runtime.block_on(load(pool, owner))
 }
 
@@ -292,5 +301,32 @@ pub(super) fn observe(
     )
 }
 
-#[cfg(test)]
-mod pg_tests;
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    pub(crate) fn logged_for_test(&self) -> &tokio::sync::watch::Receiver<u64> {
+        &self.logged
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    runtime: &Handle,
+    nonce: &str,
+) -> Result<Option<Submitted>, String> {
+    submit(turn, runtime, nonce)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_owned_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+    record: &HostedExecution,
+) -> Result<Submitted, String> {
+    submit_owned(turn, hook, lineage, record)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "first_input/pending_lookup_probe_tests.rs"]
+pub(crate) mod pending_lookup_probe;

@@ -595,9 +595,7 @@ pub(crate) struct ParsedPhaseGateContext {
     pub final_phase: bool,
 }
 
-pub(crate) fn parse_phase_gate_context(
-    context_json: Option<&str>,
-) -> Option<ParsedPhaseGateContext> {
+fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
     let raw = context_json?.trim();
     if raw.is_empty() {
         return None;
@@ -626,6 +624,14 @@ pub(crate) fn parse_phase_gate_context(
         next_phase,
         final_phase,
     })
+}
+
+/// Test seam for the phase-gate tests mounted in the services test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn parse_phase_gate_context_for_test(
+    context_json: Option<&str>,
+) -> Option<ParsedPhaseGateContext> {
+    parse_phase_gate_context(context_json)
 }
 
 fn numeric_i64(value: &Value) -> Option<i64> {

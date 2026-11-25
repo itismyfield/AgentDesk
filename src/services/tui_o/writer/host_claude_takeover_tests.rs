@@ -1199,7 +1199,9 @@ async fn exercise_replaced_pending(pool: &sqlx::PgPool, channel: u64, parent: u6
         BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
         intake_route::{IntakeRoute, route_for_placement},
     };
-    use crate::services::tui_o::writer::{binding::BindingEvents, late_adopt::claude::thread};
+    use crate::services::tui_o::writer::{
+        binding::BindingEvents, late_adopt::thread_plan_for_test,
+    };
 
     const NEXT: &str = "c1a0de00-0000-4000-8000-000000007621";
     seed_resume_row(pool, channel, &Binds::new(channel).tmux).await;
@@ -1263,7 +1265,7 @@ async fn exercise_replaced_pending(pool: &sqlx::PgPool, channel: u64, parent: u6
     if old_body {
         let log = f.io.bindings(channel, ShadowProvider::Claude);
         let events = log.binding_events_since(channel, 0).unwrap();
-        assert!(thread::plan(&events, parent).is_none());
+        assert!(thread_plan_for_test(&events, parent).is_none());
     }
     *f.io.intake_pool.lock().unwrap() = Some(pool.clone());
     f.start_host();

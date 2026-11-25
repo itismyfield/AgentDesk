@@ -221,14 +221,19 @@ pub(super) async fn mailbox_enqueue_intervention(
     channel_id: ChannelId,
     intervention: Intervention,
 ) -> MailboxEnqueueOutcome {
-    queue_io::mailbox_enqueue_observed_intervention(
+    let message_id = intervention.message_id.get();
+    let outcome = queue_io::mailbox_enqueue_observed_intervention(
         shared,
         provider,
         channel_id,
         intervention,
         None,
     )
-    .await
+    .await;
+    if outcome.enqueued && outcome.persistence_error.is_none() {
+        crate::logging::intake_stage::mark(message_id, "queued", None);
+    }
+    outcome
 }
 
 pub(super) async fn mailbox_has_pending_soft_queue(

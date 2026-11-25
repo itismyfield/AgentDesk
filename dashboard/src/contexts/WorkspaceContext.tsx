@@ -33,7 +33,7 @@ const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 interface WorkspaceProviderProps {
   initialAgents: Agent[];
   initialDepartments: Department[];
-  initialSessions: DispatchedSession[] | null;
+  initialSessions?: DispatchedSession[] | null;
   pushNotification: (msg: string, level: "info" | "success" | "warning" | "error") => void;
   children: ReactNode;
 }
@@ -49,6 +49,22 @@ export function WorkspaceProvider({
   const [departments, setDepartments] = useState<Department[]>(initialDepartments);
   const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions ?? []);
   const [sessionsFailed, setSessionsFailed] = useState(initialSessions === null);
+  const seededSessionsRef = useRef(initialSessions !== undefined);
+
+  useEffect(() => {
+    if (seededSessionsRef.current || initialSessions === undefined) return;
+    seededSessionsRef.current = true;
+    if (initialSessions === null) {
+      setSessionsFailed(true);
+      return;
+    }
+    setSessionsFailed(false);
+    setSessions((prev) => {
+      if (prev.length === 0) return initialSessions;
+      const seen = new Set(prev.map((s) => s.id));
+      return [...prev, ...initialSessions.filter((s) => !seen.has(s.id))];
+    });
+  }, [initialSessions]);
 
   const sessionAwareAgents = useMemo(() => applySessionOverlay(agents, sessions), [agents, sessions]);
   const agentsRef = useRef<Agent[]>(sessionAwareAgents);

@@ -6,10 +6,9 @@ use crate::services::codex_tui::host_input::spy::{SpyGuard, SpyState, known, res
 use crate::services::codex_tui::input::{
     CodexFollowupPromptSubmitOutcome, PromptReadinessSnapshot,
 };
-use crate::services::codex_tui::warm_followup::submit::settle_submit;
-use crate::services::codex_tui::warm_followup::submit::tests::install_clear_end;
 use crate::services::codex_tui::warm_followup::{
-    CodexWarmFallbackReason, CodexWarmFollowupOutcome,
+    CodexWarmFallbackReason, CodexWarmFollowupOutcome, install_clear_end,
+    settle_submit_for_test as settle_submit,
 };
 use crate::services::discord::codex_absence::replacement::Probe;
 use crate::services::provider::{CancelToken, cancel_requested};

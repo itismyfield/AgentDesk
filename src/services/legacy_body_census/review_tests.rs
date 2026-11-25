@@ -36,9 +36,12 @@ fn head(root: &Path) -> Value {
 fn directory_sync_failure_returns_the_existing_file() {
     let root = tempfile::tempdir().unwrap();
     let boot = boot();
-    let state = Arc::new(Mutex::new(State::new(&boot, Some("test-node".into()))));
+    let state = Arc::new(Mutex::new(State::new_for_test(
+        &boot,
+        Some("test-node".into()),
+    )));
     let result =
-        history::prepare_with_sync(root.path(), &boot, Some("doctor".into()), &state, |_| {
+        prepare_with_sync_for_test(root.path(), &boot, Some("doctor".into()), &state, |_| {
             Err(std::io::Error::other("fixture directory sync failed"))
         });
     assert!(
@@ -88,13 +91,13 @@ fn a_missing_verified_manifest_row_cannot_certify_coverage() {
     for row in data["claim_probes"].as_array_mut().unwrap() {
         row["status"] = json!("VERIFIED");
     }
-    assert_eq!(manifest::inspect(&data.to_string())["coverage"], false);
+    assert_eq!(inspect_for_test(&data.to_string())["coverage"], false);
     assert_eq!(
-        manifest::inspect(&data.to_string())["instrumentation_complete"],
+        inspect_for_test(&data.to_string())["instrumentation_complete"],
         true
     );
     data["probes"].as_array_mut().unwrap().pop();
-    let inspected = manifest::inspect(&data.to_string());
+    let inspected = inspect_for_test(&data.to_string());
     assert_eq!(inspected["coverage"], false);
     assert_eq!(inspected["error"], "manifest_invalid");
 }
@@ -124,7 +127,7 @@ fn transport_manifest_requires_complete_verified_rows() {
         if case == "incomplete" {
             current["transport_probes"].as_array_mut().unwrap().pop();
         }
-        let observed = manifest::inspect(&current.to_string());
+        let observed = inspect_for_test(&current.to_string());
         assert_eq!(observed["coverage"], false, "{case}");
         assert_eq!(
             observed["instrumentation_complete"],
@@ -239,7 +242,7 @@ async fn own_invalid_reasons_are_persisted_once_until_a_new_reason_arrives() {
     let root = tempfile::tempdir().unwrap();
     let id = boot();
     let current = open(root.path(), &id).await;
-    invalidate(&current.0.state, "WRITE_TIMEOUT");
+    invalidate_for_test(current.state_for_test(), "WRITE_TIMEOUT");
     assert!(current.append(json!({"kind":"checkpoint"})).await);
     assert!(current.append(json!({"kind":"checkpoint"})).await);
     assert_eq!(
@@ -249,7 +252,7 @@ async fn own_invalid_reasons_are_persisted_once_until_a_new_reason_arrives() {
             .count(),
         1
     );
-    invalidate(&current.0.state, "WRITE_FAILED");
+    invalidate_for_test(current.state_for_test(), "WRITE_FAILED");
     assert!(current.append(json!({"kind":"checkpoint"})).await);
     assert_eq!(
         records(root.path(), &id)
@@ -466,16 +469,14 @@ async fn a_failed_head_publish_keeps_the_boot_and_its_own_invalid_record() {
 async fn a_directory_sync_failure_is_written_to_the_created_journal() {
     let root = tempfile::tempdir().unwrap();
     let id = boot();
-    let current = Journal(writer::Writer::spawn(
+    let current = Journal::spawn_for_test(
         Some(root.path().into()),
         id.clone(),
-        writer::Options {
-            doctor: Some("doctor".into()),
-            host: Some("test-node".into()),
-            sync_parent: Some(|_| Err(std::io::Error::other("fixture sync failed"))),
-            ..Default::default()
-        },
-    ));
+        Some("doctor".into()),
+        Some("test-node".into()),
+        Some(|_| Err(std::io::Error::other("fixture sync failed"))),
+        None,
+    );
     assert!(current.append(json!({"kind":"boot_ready"})).await);
     assert_eq!(current.snapshot()["journal_invalid"], true);
     assert!(records(root.path(), &id).iter().any(|row| {
@@ -505,7 +506,7 @@ fn a_record_is_encoded_before_one_write_all() {
         }
     }
     let mut output = Counting::default();
-    history::append_line(&mut output, &json!({"kind":"checkpoint","value":"a\nb"})).unwrap();
+    append_line_for_test(&mut output, &json!({"kind":"checkpoint","value":"a\nb"})).unwrap();
     assert_eq!(output.writes, 1);
     assert_eq!(output.bytes.last(), Some(&b'\n'));
     assert_eq!(
@@ -585,17 +586,15 @@ async fn head_publication_holds_the_boot_lock() {
         entered: entered.clone(),
         release: release.clone(),
     });
-    let current = Journal(writer::Writer::spawn(
+    let current = Journal::spawn_for_test(
         Some(root.path().into()),
         id,
-        writer::Options {
-            doctor: Some("doctor".into()),
-            host: Some("test-node".into()),
-            sync_parent: Some(held_sync),
-            ..Default::default()
-        },
-    ));
-    current.0.try_append(json!({"kind":"boot_ready"}));
+        Some("doctor".into()),
+        Some("test-node".into()),
+        Some(held_sync),
+        None,
+    );
+    current.try_append_for_test(json!({"kind":"boot_ready"}));
     tokio::time::timeout(Duration::from_secs(2), entered.notified())
         .await
         .expect("writer reached header sync");
@@ -667,7 +666,7 @@ fn claim_manifest_requires_complete_verified_rows() {
             }
             _ => {}
         }
-        let result = manifest::inspect(&current.to_string());
+        let result = inspect_for_test(&current.to_string());
         assert_eq!(result["coverage"], false, "{case}");
         assert_eq!(
             result["instrumentation_complete"],
@@ -694,21 +693,31 @@ async fn a_durable_cut_requires_its_boot_and_a_live_owner_or_final_drain() {
     let id = boot();
     let current = open(root.path(), &id).await;
     assert!(current.append(json!({"kind":"checkpoint"})).await);
-    let shared = current.0.state.clone();
+    let shared = current.state_for_test().clone();
     {
         let state = shared.lock().unwrap();
         for candidate in ["PASS", "FAIL"] {
-            assert_eq!(state.window.verdict(Some(&id.id), candidate), candidate);
-            assert_eq!(state.window.verdict(None, candidate), "INCONCLUSIVE");
             assert_eq!(
-                state.window.verdict(Some("other-boot"), candidate),
+                state
+                    .window_for_test()
+                    .verdict_for_test(Some(&id.id), candidate),
+                candidate
+            );
+            assert_eq!(
+                state.window_for_test().verdict_for_test(None, candidate),
+                "INCONCLUSIVE"
+            );
+            assert_eq!(
+                state
+                    .window_for_test()
+                    .verdict_for_test(Some("other-boot"), candidate),
                 "INCONCLUSIVE"
             );
         }
     }
     drop(current);
     tokio::time::timeout(Duration::from_secs(2), async {
-        while !shared.lock().unwrap().window.closed {
+        while !shared.lock().unwrap().window_for_test().closed_for_test() {
             tokio::task::yield_now().await;
         }
     })
@@ -734,13 +743,13 @@ async fn a_durable_cut_requires_its_boot_and_a_live_owner_or_final_drain() {
             "missing_drain" => altered.retain(|r| r["kind"] != "drain"),
             _ => {}
         }
-        let mut window = crate::services::legacy_body_census::window::Window::new(id.id.clone());
+        let mut window = crate::services::legacy_body_census::Window::new_for_test(id.id.clone());
         for row in altered.iter().skip(1) {
-            window.observe(row);
+            window.observe_for_test(row);
         }
         for candidate in ["PASS", "FAIL"] {
             assert_eq!(
-                window.verdict(None, candidate),
+                window.verdict_for_test(None, candidate),
                 if case == "valid" {
                     candidate
                 } else {
@@ -762,33 +771,31 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
     let armed = Arc::new(AtomicBool::new(false));
     let (entered_tx, entered_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
-    let current = Journal(writer::Writer::spawn(
+    let current = Journal::spawn_for_test(
         Some(root.path().into()),
         id.clone(),
-        writer::Options {
-            doctor: Some("doctor-123-456".into()),
-            host: Some("test-node".into()),
-            after_ack: {
-                let armed = armed.clone();
-                let release_rx = Mutex::new(release_rx);
-                Arc::new(move || {
-                    if armed.swap(false, Ordering::SeqCst) {
-                        entered_tx.send(()).unwrap();
-                        recv_within(&release_rx.lock().unwrap(), WAIT_CAP);
-                    }
-                })
-            },
-            ..Default::default()
-        },
-    ));
+        Some("doctor-123-456".into()),
+        Some("test-node".into()),
+        None,
+        Some({
+            let armed = armed.clone();
+            let release_rx = Mutex::new(release_rx);
+            Arc::new(move || {
+                if armed.swap(false, Ordering::SeqCst) {
+                    entered_tx.send(()).unwrap();
+                    recv_within(&release_rx.lock().unwrap(), WAIT_CAP);
+                }
+            })
+        }),
+    );
     assert!(current.append(json!({"kind":"boot_ready"})).await);
     let initial_gate = collector_gate(root.path()).await;
     let mut collector = Collector::default();
-    let before = collector.collect(
+    let before = collector.collect_for_test(
         root.path(),
         &id.id,
         chrono::Utc::now().timestamp_millis(),
-        Some(&current.0.state),
+        Some(current.state_for_test()),
     );
     assert!(
         !before["local_evaluation"]["reasons"]
@@ -803,17 +810,25 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
         .open(root.path().join("legacy_body_census/writer.lock"))
         .unwrap();
     lock.lock().unwrap();
-    current.0.try_append(json!({"kind":"checkpoint"}));
+    current.try_append_for_test(json!({"kind":"checkpoint"}));
     {
-        let state = current.0.state.lock().unwrap();
-        assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "INCONCLUSIVE");
-        assert_ne!(Some(state.window.cut), state.window.drained);
+        let state = current.state_for_test().lock().unwrap();
+        assert_eq!(
+            state
+                .window_for_test()
+                .verdict_for_test(Some(&id.id), "PASS"),
+            "INCONCLUSIVE"
+        );
+        assert_ne!(
+            Some(state.window_for_test().cut_for_test()),
+            state.window_for_test().drained_for_test()
+        );
     }
-    let queued = collector.collect(
+    let queued = collector.collect_for_test(
         root.path(),
         &id.id,
         chrono::Utc::now().timestamp_millis(),
-        Some(&current.0.state),
+        Some(current.state_for_test()),
     );
     assert!(
         queued["live_journal"]["enqueued_cut"].as_u64().unwrap()
@@ -830,14 +845,19 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
     assert!(current.append(json!({"kind":"checkpoint"})).await);
     recv_within(&entered_rx, WAIT_CAP);
     {
-        let state = current.0.state.lock().unwrap();
-        assert_eq!(state.window.verdict(Some(&id.id), "PASS"), "PASS");
+        let state = current.state_for_test().lock().unwrap();
+        assert_eq!(
+            state
+                .window_for_test()
+                .verdict_for_test(Some(&id.id), "PASS"),
+            "PASS"
+        );
     }
-    let locked = collector.collect(
+    let locked = collector.collect_for_test(
         root.path(),
         &id.id,
         chrono::Utc::now().timestamp_millis(),
-        Some(&current.0.state),
+        Some(current.state_for_test()),
     );
     let durable = records(root.path(), &id).pop().unwrap();
     release_tx.send(()).unwrap();
@@ -856,11 +876,11 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
             .contains(&json!("LIVE_CUT_UNVERIFIED"))
     );
     let _drained_gate = collector_gate(root.path()).await;
-    let drained = collector.collect(
+    let drained = collector.collect_for_test(
         root.path(),
         &id.id,
         chrono::Utc::now().timestamp_millis(),
-        Some(&current.0.state),
+        Some(current.state_for_test()),
     );
     assert!(
         !drained["local_evaluation"]["reasons"]
@@ -869,16 +889,15 @@ async fn a_new_enqueue_cannot_reuse_the_previous_drain() {
             .contains(&json!("LIVE_CUT_UNVERIFIED"))
     );
     current
-        .0
-        .state
+        .state_for_test()
         .lock()
         .unwrap()
-        .mark("WRITE_QUEUE_UNAVAILABLE");
-    let invalid = collector.collect(
+        .mark_for_test("WRITE_QUEUE_UNAVAILABLE");
+    let invalid = collector.collect_for_test(
         root.path(),
         &id.id,
         chrono::Utc::now().timestamp_millis(),
-        Some(&current.0.state),
+        Some(current.state_for_test()),
     );
     assert_eq!(invalid["live_journal"]["invalid"], true);
     assert!(

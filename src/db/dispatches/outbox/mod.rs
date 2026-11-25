@@ -11,7 +11,7 @@
 //! - `model` owns shared row/data shapes.
 
 mod claim;
-pub(crate) mod delivery;
+mod delivery;
 mod diagnostics;
 mod followup;
 mod model;
@@ -23,6 +23,8 @@ pub(crate) use claim::{
     select_pending_dispatch_outbox_claim_candidates_pg,
     select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use delivery::DispatchOutboxLeaseUpdateError;
 pub(crate) use delivery::{
     dispatch_notify_delivery_suppressed_pg, mark_dispatch_dispatched_pg, mark_outbox_done_pg,
     mark_outbox_failed_pg,
