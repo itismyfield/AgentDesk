@@ -74,7 +74,7 @@
   {"file": "src/services/claude/herdr_turn/first_input.rs", "item": "mod regression_tests", "reason": "manual_b", "cfg": ["test"], "why": "needs session_host::herdr_socket_rig_tests (pane_probe::tests) and readiness::tests::pre_source"},
   {"file": "src/services/tui_o/channel_policy/adoption.rs", "item": "mod body_check", "reason": "manual_b", "cfg": ["test"], "why": "needs cutover::test_override (production/test twin, private) and Candidate.bodiless"},
   {"file": "src/config/test_instance.rs", "item": "mod login_test_support", "reason": "manual_b", "cfg": ["all(test, unix)"], "why": "AGY path: needs agy_cell tests / host_scope_tests generators"},
-  {"file": "src/services/tui_o/writer/input_facts/native.rs", "item": "use tests::fold", "reason": "manual_b", "cfg": ["all(test, unix)"], "why": "fold() lives in native/tests.rs, a #[test] module"},
+  {"file": "src/services/tui_o/writer/input_facts/native.rs", "item": "use test_support::fold", "reason": "manual_b", "cfg": ["all(test, unix)"], "why": "fold() lives in native/tests.rs, a #[test] module"},
   {"file": "src/services/tui_prompt_dedupe.rs", "item": "fn run_serial_test", "reason": "manual_b", "cfg": ["test"], "why": "TEST_LOCK's #[cfg(test)] is separated from the static by `//` comment lines, so no tool attaches that gate; move the comment above the attribute by hand"}
  ]
 }

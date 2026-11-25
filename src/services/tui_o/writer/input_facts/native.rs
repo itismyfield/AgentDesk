@@ -1,7 +1,7 @@
 //! Claude native input record classification and inactive source-bound membership evidence.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 use self::classify as classify_queued_record;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 use super::Ordered;
 #[cfg(unix)]
 use super::{ShadowProvider, SourceBinding};
@@ -123,7 +123,7 @@ pub(crate) struct Observation {
     pub(crate) receipts: Vec<MembershipReceipt>,
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) struct Record {
     pub(super) range: (u64, u64),
     pub(super) value: Value,
@@ -163,8 +163,12 @@ pub(crate) struct Analysis {
     pub(crate) barriers: Vec<Barrier>,
 }
 
-#[cfg(all(test, unix))]
-pub(super) use tests::fold;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(super) use test_support::fold;
+
+/// The reference fold tests compare against, shared with upper-crate finalizer tests (KRX-TS).
+#[cfg(all(any(test, feature = "test-support"), unix))]
+mod test_support;
 
 #[cfg(all(test, unix))]
 mod tests;

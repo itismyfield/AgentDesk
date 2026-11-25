@@ -7,7 +7,7 @@ use crate::services::codex_tui::input::{
     CodexFollowupPromptSubmitOutcome, PromptReadinessSnapshot,
 };
 use crate::services::codex_tui::warm_followup::submit::settle_submit;
-use crate::services::codex_tui::warm_followup::submit::tests::install_clear_end;
+use crate::services::codex_tui::warm_followup::submit::test_support::install_clear_end;
 use crate::services::codex_tui::warm_followup::{
     CodexWarmFallbackReason, CodexWarmFollowupOutcome,
 };

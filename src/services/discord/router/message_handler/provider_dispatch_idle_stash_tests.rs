@@ -57,7 +57,7 @@ fn managed_request(
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(session, transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, transcript);
     (row, cap)
 }
 

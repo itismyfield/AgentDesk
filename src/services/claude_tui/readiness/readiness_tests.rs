@@ -1,3 +1,9 @@
+#[cfg(unix)]
+pub(crate) use super::test_support::fresh_fixture;
+pub(crate) use super::test_support::{
+    after_first_look, daemon_restart, forget_session, idle_fixture, lose_resume_record, pre_source,
+    restore_bound_start, retained_sources,
+};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server;
@@ -398,36 +404,6 @@ fn subagent_stop_and_reentrant_stop_cannot_clear_root_continuation() {
     assert!(r.ready());
 }
 
-thread_local! {
-    static SOURCES: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-/// Existing submission fixtures exercise keys and custody over a completed source.
-pub(crate) fn idle_fixture(session: &str) {
-    if Source::current(session, None).is_some_and(|source| source.path.exists()) {
-        return;
-    }
-    ledger()
-        .entries
-        .retain(|source, _| source.session != session);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("fixture.jsonl");
-    fs::write(
-        &path,
-        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-    )
-    .unwrap();
-    ledger().entries.insert(
-        Source {
-            session: session.into(),
-            nonce: source::nonce(session).flatten(),
-            native: "fixture".into(),
-            path,
-        },
-        Entry::default(),
-    );
-    SOURCES.with(|sources| sources.borrow_mut().push(dir));
-}
-
 #[test]
 fn restored_history_needs_new_activity_and_summary_needs_a_matching_stop() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -605,24 +581,6 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     assert_eq!(unproven(), None, "a running turn ends by itself");
     assert!(tmux.sends().is_empty());
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
-}
-
-/// Runs `act` once the wait on `session` made its first look. That look creates the ledger entry
-/// after the wait kept its Stamp, so `act` lands inside the wait without a hook in the wait.
-pub(crate) fn after_first_look(
-    session: &str,
-    act: impl FnOnce() + Send + 'static,
-) -> std::thread::JoinHandle<()> {
-    assert_eq!(retained_sources(session), 0, "no look precedes the wait");
-    let session = session.to_owned();
-    std::thread::spawn(move || {
-        let until = std::time::Instant::now() + Duration::from_secs(30);
-        while retained_sources(&session) == 0 {
-            assert!(std::time::Instant::now() < until, "the wait never looked");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        act();
-    })
 }
 
 // A restarted idle pane appends one metadata row while the owner's input waits: no key, the
@@ -1151,42 +1109,6 @@ fn an_unrecorded_resume_start_keeps_the_restart_floor_without_refusing_its_hook(
     assert!(r.ready(), "a published record is whole");
 }
 
-/// A resume accepted before start records existed: its restart finds no record to restore from.
-pub(crate) fn lose_resume_record(nonce: &str) {
-    fs::remove_file(resume_record::record_path(nonce).unwrap()).unwrap();
-}
-
-/// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
-pub(crate) fn daemon_restart(session: &str) {
-    let mut state = ledger();
-    state.entries.retain(|source, _| source.session != session);
-    state.starts.retain(|(started, _), _| started != session);
-}
-
-#[cfg(unix)]
-pub(crate) fn fresh_fixture(session: &str) {
-    if let Some(path) = super::super::guarded_outcome::fresh_source_for_tests() {
-        pre_source(session, Path::new(&path));
-    }
-}
-
-pub(crate) fn pre_source(session: &str, path: &Path) {
-    let source = Source::current(session, Some(path)).unwrap_or_else(|| Source {
-        session: session.into(),
-        nonce: source::nonce(session).flatten(),
-        native: path.file_stem().unwrap().to_string_lossy().into_owned(),
-        path: path.into(),
-    });
-    let mut state = ledger();
-    state
-        .entries
-        .retain(|old, _| old.session != session || old == &source);
-    state.entries.entry(source).or_insert_with(|| Entry {
-        start: true,
-        ..Entry::default()
-    });
-}
-
 #[test]
 fn duplicate_stop_invalidates_proof_without_stranding_an_unsent_reservation() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -1590,37 +1512,6 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
 mod compact_tests;
-
-// A process restart forgets volatile readiness without deleting durable hook evidence.
-pub(crate) fn forget_session(session: &str) {
-    let mut state = ledger();
-    state.entries.retain(|source, _| source.session != session);
-    state.starts.retain(|(logical, _), _| logical != session);
-}
-
-// Reproduce the interval after durable certification and before volatile Start publication.
-pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
-    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
-    let nonce = source::nonce(session).flatten().unwrap();
-    let bound = Source {
-        session: session.into(),
-        nonce: Some(nonce.clone()),
-        native: binding.session_id.unwrap(),
-        path: binding.output_path.into(),
-    };
-    let mut state = ledger();
-    state.entries.entry(bound.clone()).or_default();
-    state.starts.insert((session.into(), nonce), (at, bound));
-}
-
-pub(crate) fn retained_sources(session: &str) -> usize {
-    let nonce = source::nonce(session).flatten();
-    ledger()
-        .entries
-        .keys()
-        .filter(|source| source.session == session && source.nonce == nonce)
-        .count()
-}
 
 #[test]
 fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {

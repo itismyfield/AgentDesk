@@ -110,7 +110,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
         .connect_lazy("postgres://localhost/unused_cold_submit_test")
         .unwrap();
     let transcript = root.path().join("not-created.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(logical, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(logical, &transcript);
     let prompt = "reply _ literal\nattachment + voice";
     let attached = Attached {
         nonce: NONCE.into(),

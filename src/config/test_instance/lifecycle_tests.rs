@@ -813,7 +813,7 @@ fn agy_lease_without_a_verified_run_is_refused() {
         );
         return;
     }
-    let (temporary, root, _home) = instance::agy_cell::tests::agy_fixture();
+    let (temporary, root, _home) = instance::test_support::agy_fixture();
     let fixture = LeaseFixture::with_root(temporary, root, true);
     fixture::assert_single_test_passed(
         &finish(fixture.spawn(name, "agy-no-run", Some(&fixture.witness), true)),

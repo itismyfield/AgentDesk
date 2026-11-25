@@ -69,11 +69,11 @@ const RELAYED_ENTRY_ID_RING_CAP: usize = 512;
 
 static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
     LazyLock::new(|| Mutex::new(TuiPromptDedupeState::default()));
-#[cfg(test)]
 // Tests that also mutate process env must acquire `shared_test_env_lock()` before
 // this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn run_serial_test(future: impl std::future::Future<Output = ()>) {
     crate::test_support::serial_runtime::run(
         || TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),

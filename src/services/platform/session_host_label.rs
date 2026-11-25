@@ -2,12 +2,12 @@
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 use std::sync::OnceLock;
 
 use crate::domain::file_sync::fsync_parent_dir;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) fn session_host_label() -> String {
     static LABEL: OnceLock<String> = OnceLock::new();
     LABEL.get_or_init(|| {
@@ -30,7 +30,7 @@ thread_local! {
     static TEST_LABEL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn session_host_label() -> String {
     TEST_LABEL
         .with(|label| label.borrow().clone())

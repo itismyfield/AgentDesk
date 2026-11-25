@@ -119,7 +119,7 @@ pub(super) fn owned(
     fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
     fs::write(marker, &nonce).unwrap();
     if provider == "claude" {
-        crate::services::claude_tui::readiness::tests::pre_source(
+        crate::services::claude_tui::readiness::test_support::pre_source(
             name,
             &renderer.join("transcript"),
         );
@@ -304,7 +304,7 @@ impl Rig {
             let path = binding
                 .as_ref()
                 .map_or(transcript, |binding| Path::new(binding.relay_output_path()));
-            crate::services::claude_tui::readiness::tests::pre_source(&self.name, path);
+            crate::services::claude_tui::readiness::test_support::pre_source(&self.name, path);
         }
         let root = crate::services::tmux_common::current_tmux_owner_marker();
         // A live pane's attempt names the transcript it was observed on.
@@ -1972,7 +1972,7 @@ fn b2_dispatch_idle_receipt_uses_actual_turn_and_preserves_settle() {
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&rig.name, &path);
     let claim = rig.claim(&rig.granted_front()).unwrap();
     let registration = rig.registration(
         &ProviderKind::Claude,

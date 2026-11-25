@@ -1,4 +1,4 @@
-use crate::services::observability::emit::tests::{
+use crate::services::observability::emit::test_support::{
     ROOT_CAUSE_ACTIONS, every_emit_surface_records_one_recent_event_scenario as surfaces,
     invariant_severity_routes_to_exact_log_level_and_suffix_4422 as foreign_invariants,
     relay_root_cause_metric_wrappers_record_persistent_events_scenario as root_metrics,

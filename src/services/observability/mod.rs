@@ -476,7 +476,7 @@ pub(crate) fn reset_for_tests() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_support::{lock_env_then_runtime, test_runtime_lock};

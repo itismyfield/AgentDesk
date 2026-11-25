@@ -489,6 +489,13 @@ class Codemod(unittest.TestCase):
         rc, out = fx.codemod()
         self.assertEqual(rc, 2, out)
         self.assertIn("exclusion matches 2 items with cfg ['not(test)', 'test'], expected ['test']", out)
+        # Both sides opened by hand (the manual commit): the entry still matches its two items.
+        core = (fx.core().replace("#[cfg(not(test))]\npub(crate) fn registry", '#[cfg(not(any(test, feature = "test-support")))]\npub(crate) fn registry')
+                .replace("#[cfg(test)]\npub(crate) fn registry", f"#[cfg({TS})]\npub(crate) fn registry"))
+        (fx.repo / "src/core.rs").write_text(core)
+        (fx.repo / verify.EXCLUDE).write_text(json.dumps(exclusions("fn kept", "mod tests",
+                                                                    ("fn registry", ["not(test)", "test"]))))
+        self.assertEqual(fx.codemod("--count")[0], 0, fx.codemod("--count")[1])
 
     def test_every_target_of_one_reexport_opens_or_holds_together(self):
         # Sol krxts-1 P1: `use gate::{a, b, c}` kept one path per line and opened only the last target.

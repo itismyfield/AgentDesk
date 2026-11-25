@@ -28,7 +28,9 @@ use crate::services::claude_tui::hosting::FollowupHost;
 use crate::services::claude_tui::input::TuiInputAction;
 use crate::services::herdr_admission::{self, Admission};
 use crate::services::provider::session_probe::SessionLiveness;
-use crate::services::session_host::herdr::pane_probe::tests::{FakeOs, NONCE, context, env_naming};
+use crate::services::session_host::herdr::pane_probe::test_support::{
+    FakeOs, NONCE, context, env_naming,
+};
 use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};
 use crate::services::session_host::herdr::transport::{
     HerdrSocketConfig, HerdrSocketTransport, PeerReader,

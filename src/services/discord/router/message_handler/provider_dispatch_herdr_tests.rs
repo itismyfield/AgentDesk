@@ -359,7 +359,10 @@ impl Fixture {
             self.logical(),
             claude(&transcript, &session),
         );
-        crate::services::claude_tui::readiness::tests::pre_source(self.logical(), &transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            self.logical(),
+            &transcript,
+        );
         HostedExecution {
             schema: 1,
             state: HostedState::Bound,

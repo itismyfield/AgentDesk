@@ -21,7 +21,7 @@ pub(crate) use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
     LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use adoption::{
     body_check::{BodyCheck, SinkOp},
     stored,
@@ -638,7 +638,7 @@ impl BootChannels {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn foreign(mut self, home: &str) -> Self {
         self.site = Site::Foreign { home: home.into() };
         self.channels = self.selected.clone();
