@@ -82,6 +82,8 @@ pub(crate) async fn publish(
         (Outcome::Posted(thread), Some((http, _))) => {
             activate(pool, registry, &asked, &http, thread).await
         }
+        // The post exists but no connected bot can confirm or finish its activation now.
+        (Outcome::Posted(thread), None) => Outcome::Activating(thread),
         (outcome, _) => outcome,
     }
 }
