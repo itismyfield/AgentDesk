@@ -7,7 +7,7 @@ use serde_json::json;
 use super::actor::{append, halt, polls, spawn, switched_over, writer_over};
 use super::*;
 use crate::services::tui_o::shadow::capture::SourceCapture;
-use crate::services::tui_o::shadow::{CaptureOutcome, MAX_READ_BYTES, SourceId};
+use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
 use crate::services::tui_o::writer::actor::Actor;
 use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::restart_end::Ended;
