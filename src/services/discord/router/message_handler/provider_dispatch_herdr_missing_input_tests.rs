@@ -3,7 +3,11 @@ use super::*;
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
 use crate::services::discord::shared_state::test_rest;
 
-fn recording_runtime(intake: &mut Intake, fx: &Fixture, launch: bool) -> tokio::runtime::Runtime {
+pub(super) fn recording_runtime(
+    intake: &mut Intake,
+    fx: &Fixture,
+    launch: bool,
+) -> tokio::runtime::Runtime {
     let install: Box<dyn Fn() + Send + Sync> = if launch {
         Box::new(fx.rig.thread_installer_with_launch(NODE, KEY, SESSION))
     } else {
