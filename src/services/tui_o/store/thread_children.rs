@@ -77,7 +77,7 @@ impl OStore {
 #[cfg(test)]
 mod retirement_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl OStore {
     fn fixture_scope(channels: &[u64]) -> std::sync::Arc<InitScope> {
         std::sync::Arc::new(InitScope::fixture(channels))

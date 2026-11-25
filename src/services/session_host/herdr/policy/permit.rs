@@ -218,14 +218,14 @@ pub(crate) fn create_for_test(
 }
 
 /// Startup proof of `witness`'s server, as `observe_policy` leaves it when its config predates it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn startup_for_test(witness: ServerWitness) -> super::StartupProof {
     super::StartupProof {
         evidence: proof_for_test(witness),
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn proof_for_test(witness: ServerWitness) -> NextRestartProof {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");

@@ -939,7 +939,7 @@ pub(crate) async fn connect_test_pool_with_max_connections(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
     // Test helpers frequently create many isolated pools in parallel on CI.
     // Keep the default test pool lean so PG-backed route tests do not exhaust
@@ -1203,7 +1203,7 @@ pub(crate) async fn connect_test_pool_and_migrate(
     require_pg_guard(connect_test_pool_and_migrate_inner(database_url, label).await)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn connect_test_pool_with_max_connections_and_migrate_inner(
     database_url: &str,
     label: &str,
@@ -1219,7 +1219,7 @@ async fn connect_test_pool_with_max_connections_and_migrate_inner(
     Ok(pool)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
     database_url: &str,
     label: &str,

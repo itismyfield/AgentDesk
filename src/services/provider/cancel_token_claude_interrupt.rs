@@ -401,7 +401,7 @@ impl CancelToken {
     }
 
     /// [`Self::try_prepare_herdr_interrupt`] for a test turn that must take its state.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn prepare_herdr_interrupt(
         &self,
         provider: ProviderKind,

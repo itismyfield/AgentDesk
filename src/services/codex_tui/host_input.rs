@@ -209,10 +209,10 @@ impl CodexTransport for TmuxCodexInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type Injected = (Box<dyn CodexTransport>, Box<dyn MutationGate>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static INJECTED: std::cell::RefCell<Option<Injected>> = const { std::cell::RefCell::new(None) };
 }
@@ -225,7 +225,7 @@ fn with_legacy_using<R>(
     default_transport: &mut dyn CodexTransport,
     operation: impl FnOnce(&mut dyn CodexTransport, &dyn MutationGate) -> R,
 ) -> R {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some((mut transport, gate)) = INJECTED.with(|slot| slot.borrow_mut().take()) {
         let result = operation(transport.as_mut(), gate.as_ref());
         INJECTED.with(|slot| *slot.borrow_mut() = Some((transport, gate)));
@@ -764,7 +764,7 @@ impl<E: TuiActionExecutor> CodexWrites for ExecutorWrites<'_, E> {
 }
 
 /// Recording transport and gate the Codex TUI tests install in place of tmux.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;

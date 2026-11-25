@@ -506,7 +506,7 @@ pub(super) fn observe(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) fn observe_cold_for_tests(
     turn: &HerdrTurn<'_>,
     attached: Attached,

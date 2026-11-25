@@ -42,7 +42,7 @@ fn stopped_before_key(cancel_token: Option<&CancelToken>) {
 
 /// The first prompt of an execution the caller just created, for the input owner's effect; the
 /// response stays with the provider's observer, which takes the returned ticket.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn submit_created(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,

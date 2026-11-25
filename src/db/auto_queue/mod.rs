@@ -12,11 +12,11 @@ pub mod runs;
 pub mod slot_predicate;
 pub mod slots;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod run_completion_barrier_tests;
 #[cfg(test)]
 mod run_completion_contract_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_support;
 
 pub use claim::*;

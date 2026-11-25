@@ -628,7 +628,7 @@ impl BootChannels {
     }
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn adopted(mut self, state: Adoption) -> Self {
         self.candidates = self
             .channels

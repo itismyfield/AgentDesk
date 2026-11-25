@@ -34,7 +34,7 @@ pub(crate) use diagnostics::{
 pub(crate) use followup::{
     clear_all_dispatch_threads_pg, load_card_status_pg, load_completed_dispatch_info_pg,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use model::DispatchOutboxClaimCandidate;
 pub(crate) use model::{CompletedDispatchInfo, DispatchOutboxRow};
 pub(crate) use notify::requeue_dispatch_notify_pg;

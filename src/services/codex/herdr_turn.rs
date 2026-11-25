@@ -471,7 +471,7 @@ fn release_closed_hold(logical: &str, nonce: &str) {
 }
 
 /// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn owned_first_prompt_for_tests(
     turn: &CodexHerdrTurn<'_>,
     record: &HostedExecution,
@@ -483,7 +483,7 @@ pub(crate) fn owned_first_prompt_for_tests(
 
 /// A test's prepared Codex tmux argv create handed to the owner hook on this thread; it lives here
 /// because the tmux launch module is private to Codex.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn owned_spawn_for_tests(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     at: (&str, &str),

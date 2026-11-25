@@ -47,7 +47,7 @@ pub use emit::{
 // #3561 — operator relay-loss signal monitor. Driven by the hourly
 // `RelaySignalAlerterJob` maintenance job (see `server::maintenance`). #5993:
 // reports are WARN lines plus observability events, never Discord messages.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use relay_signal_alert::idle_cleanup_preserved_count;
 pub(crate) use relay_signal_alert::{
     record_idle_cleanup_preserved, report_relay_signal_threshold_crossings_pg,
@@ -463,7 +463,7 @@ pub fn init_observability(pg_pool: Option<PgPool>) {
     events::ensure_flusher();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_for_tests() {
     let runtime = runtime();
     runtime.counters.clear();

@@ -13,7 +13,7 @@ pub(crate) mod usage_footer;
 pub(crate) use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
 
 /// Enumerate channel-named files with each store's existing channel loader.
@@ -950,7 +950,7 @@ pub(crate) fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     prepared.publish().map(|Published| ()).map_err(failed)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::domain::atomic_write::rename_fault;
 
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.

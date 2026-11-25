@@ -482,7 +482,7 @@ where
     actor.writer.stop_cause().cloned()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn run_channel_at<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
@@ -920,9 +920,9 @@ pub(crate) use test_support::exercise_held_actor_for_tests;
 pub(crate) use transition::scoped_tests::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use transition::test_hooks as transition_hooks;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use transition_snapshot::{
     execution_read, execution_sources, force_execution_for_tests,
 };

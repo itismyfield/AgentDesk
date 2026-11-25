@@ -248,7 +248,7 @@ pub(crate) fn health_json() -> Value {
 
 pub(crate) fn detail_json() -> Value {
     let now = chrono::Utc::now().timestamp_millis();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(value) = TEST_PROJECTION.try_with(|(cache, now)| cache.snapshot(*now)) {
         return value;
     }
@@ -263,14 +263,14 @@ pub(crate) fn detail_json() -> Value {
     value
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use cache::ProjectionCache;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use collector::Collector;
 pub(crate) use evaluation::evaluate;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn with_projection_for_test<T>(
     cache: Arc<ProjectionCache>,
     now: i64,

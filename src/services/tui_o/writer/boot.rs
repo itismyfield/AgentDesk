@@ -173,7 +173,7 @@ impl Trace {
             deferred = details.replay.deferred,
             "[tui_o] writer boot stage"
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         EVENTS.with_borrow_mut(|events| {
             if let Some(events) = events {
                 events.push(Event {
@@ -223,7 +223,7 @@ impl Drop for Phase {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
 pub(crate) struct Event {
     pub channel: u64,
@@ -232,17 +232,17 @@ pub(crate) struct Event {
     pub details: Details,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static EVENTS: std::cell::RefCell<Option<Vec<Event>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn capture() {
     EVENTS.with_borrow_mut(|events| *events = Some(Vec::new()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn events() -> Vec<Event> {
     EVENTS.with_borrow(|events| events.clone().unwrap_or_default())
 }
