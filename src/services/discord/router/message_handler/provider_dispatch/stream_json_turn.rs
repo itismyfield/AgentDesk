@@ -66,7 +66,11 @@ impl AgyForeground {
         kind: TurnKind,
     ) {
         Self::stamp_http(state);
-        state.agy_custody = custody_route(state, source, kind).map(AgyCustodyField::Route);
+        let route = custody_route(state, source, kind);
+        if let Some(route) = &route {
+            crate::services::discord::inflight::note_custody_written(route);
+        }
+        state.agy_custody = route.map(AgyCustodyField::Route);
     }
 
     pub(in crate::services::discord::router::message_handler) fn stamp_http(

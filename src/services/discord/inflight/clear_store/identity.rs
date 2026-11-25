@@ -54,7 +54,10 @@ fn guarded_identity_clear_outcome(
     expected: &InflightTurnIdentity,
     expected_turn_nonce: Option<&str>,
 ) -> GuardedClearOutcome {
-    if state.restart_mode.is_some() {
+    // A planned restart keeps its row, except for the AGY owner ending its own exact route.
+    if state.restart_mode.is_some()
+        && !crate::services::discord::inflight::row_removed::owner_permits(None, state)
+    {
         return GuardedClearOutcome::PlannedRestartSkipped;
     }
     if state.rebind_origin {

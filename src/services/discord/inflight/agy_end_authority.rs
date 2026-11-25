@@ -111,19 +111,27 @@ pub(in crate::services::discord) fn custody_rows(
     Ok(rows)
 }
 
-/// Runs `clear` as the AGY owner when `row`'s route names this exact execution and `nonce`, so the
-/// custody guard lets that one row's delete through; any other row stays kept.
+/// Runs `clear` as the AGY owner of `row` when its route names `nonce`; under the row lock only that
+/// stored route, generation included, passes the custody guard and a planned restart's marker.
 pub(in crate::services::discord) fn as_route_owner<T>(
     provider: &ProviderKind,
     row: &InflightTurnState,
     nonce: Uuid,
     clear: impl FnOnce() -> T,
 ) -> T {
-    let owned = end_authority(row) == EndAuthority::Agy
-        && matches!(&row.agy_custody, Some(AgyCustodyField::Route(route)) if route.nonce == nonce);
-    let path = owned
-        .then(super::inflight_runtime_root)
-        .flatten()
-        .map(|root| super::inflight_state_path(&root, provider, row.channel_id));
-    super::row_removed::with_owner(path, clear)
+    let route = match &row.agy_custody {
+        Some(AgyCustodyField::Route(route))
+            if route.nonce == nonce && end_authority(row) == EndAuthority::Agy =>
+        {
+            Some(route.clone())
+        }
+        _ => None,
+    };
+    let permit = route
+        .zip(super::inflight_runtime_root())
+        .map(|(route, root)| {
+            let path = super::inflight_state_path(&root, provider, row.channel_id);
+            super::row_removed::OwnerPermit { path, route }
+        });
+    super::row_removed::with_owner(permit, clear)
 }

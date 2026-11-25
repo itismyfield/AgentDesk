@@ -86,17 +86,35 @@ pub(super) fn removed(path: &Path, pin: Option<InflightEpisodePin>) {
     });
 }
 /// Every inflight row delete; an AGY custody row is its owner's to remove, so it is kept here.
-std::thread_local! {
-    /// The one row path the AGY owner may delete on this thread while its permit runs.
-    static OWNER: std::cell::RefCell<Option<std::path::PathBuf>> = const { std::cell::RefCell::new(None) };
+/// The AGY owner's permit on this thread: one row path and the exact route it expects there.
+pub(super) struct OwnerPermit {
+    pub(super) path: std::path::PathBuf,
+    pub(super) route: super::AgyCustodyRoute,
 }
 
-/// Runs `clear` with the owner's permit for `path` (none when `None`); it ends with `clear`.
-pub(super) fn with_owner<T>(path: Option<std::path::PathBuf>, clear: impl FnOnce() -> T) -> T {
-    let earlier = OWNER.with(|owner| owner.replace(path));
+std::thread_local! {
+    static OWNER: std::cell::RefCell<Option<OwnerPermit>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Runs `clear` holding `permit` (none when `None`); the permit ends with `clear`.
+pub(super) fn with_owner<T>(permit: Option<OwnerPermit>, clear: impl FnOnce() -> T) -> T {
+    let earlier = OWNER.with(|owner| owner.replace(permit));
     let result = clear();
     OWNER.with(|owner| owner.replace(earlier));
     result
+}
+
+/// Whether the permit names this locked row: its path when given, and its whole stored route,
+/// writer generation included, on a row the owner still ends.
+pub(super) fn owner_permits(path: Option<&Path>, row: &InflightTurnState) -> bool {
+    OWNER.with(|owner| {
+        owner.borrow().as_ref().is_some_and(|permit| {
+            path.is_none_or(|path| path == permit.path)
+                && super::end_authority(row) == super::EndAuthority::Agy
+                && matches!(&row.agy_custody, Some(super::AgyCustodyField::Route(route))
+                    if *route == permit.route)
+        })
+    })
 }
 
 pub(super) fn unlink(
@@ -104,8 +122,10 @@ pub(super) fn unlink(
     remove: impl FnOnce() -> std::io::Result<()>,
 ) -> std::io::Result<()> {
     let bytes = fs::read(path).unwrap_or_default();
-    if super::agy_end_authority::generic_end_keeps(&String::from_utf8_lossy(&bytes))
-        && !OWNER.with(|owner| owner.borrow().as_deref() == Some(path))
+    let content = String::from_utf8_lossy(&bytes);
+    if super::agy_end_authority::generic_end_keeps(&content)
+        && !serde_json::from_str::<InflightTurnState>(&content)
+            .is_ok_and(|row| owner_permits(Some(path), &row))
     {
         return Err(std::io::Error::other("AGY custody row kept for its owner"));
     }

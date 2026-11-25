@@ -151,7 +151,7 @@ pub(in crate::services::discord) use agy_end_authority::{
     EndAuthority, as_route_owner, end_authority, generic_may_end,
 };
 pub(in crate::services::discord) use model::agy_custody::{
-    AgyCustodyField, AgyCustodyRoute, AgyProducer,
+    AgyCustodyField, AgyCustodyRoute, AgyProducer, custody_written_here, note_custody_written,
 };
 mod removal;
 #[cfg(all(test, unix))]

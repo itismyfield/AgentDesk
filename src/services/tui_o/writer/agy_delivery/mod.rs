@@ -60,6 +60,25 @@ pub(crate) trait Transport {
     ) -> impl Future<Output = Result<Vec<Evidence>, String>> + Send;
 }
 
+/// A shared port posts as the port itself does.
+impl<T: Transport + Sync> Transport for &T {
+    fn bot(&self) -> Option<NonZeroU64> {
+        (**self).bot()
+    }
+
+    fn post(&self, channel: u64, piece: &Piece) -> impl Future<Output = Post> + Send {
+        (**self).post(channel, piece)
+    }
+
+    fn history_before(
+        &self,
+        channel: u64,
+        before: Option<NonZeroU64>,
+    ) -> impl Future<Output = Result<Vec<Evidence>, String>> + Send {
+        (**self).history_before(channel, before)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Effect {
     ClearInflight,

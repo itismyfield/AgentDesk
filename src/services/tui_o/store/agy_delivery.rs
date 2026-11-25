@@ -170,27 +170,42 @@ pub(crate) fn read_saved(
     }
 }
 
-/// Every saved journal short of `Complete`; one that cannot be read is named by its path.
+/// Every saved journal short of `Complete`. A listing or journal that cannot be read is an error
+/// naming its path, never an empty result; only a missing directory is an absence.
 pub(crate) fn unfinished(runtime_root: &Path) -> Vec<Result<Saved, String>> {
+    let listing = |dir: &Path| -> Result<Vec<String>, String> {
+        let failed = |error: io::Error| format!("{}: {error}", dir.display());
+        match fs::read_dir(dir) {
+            Ok(entries) => entries
+                .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+                .collect::<Result<_, _>>()
+                .map_err(failed),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(failed(error)),
+        }
+    };
     let store = runtime_root.join(STORE_DIR_NAME);
-    let ids = |dir: &Path| -> Vec<u64> {
-        let entries = fs::read_dir(dir).into_iter().flatten().flatten();
-        let names = entries.filter_map(|entry| entry.file_name().into_string().ok());
-        names
-            .filter_map(|name| name.strip_suffix(".json")?.parse().ok())
-            .collect()
+    let destinations = match listing(&store) {
+        Ok(names) => names,
+        Err(error) => return vec![Err(error)],
     };
     let mut found = Vec::new();
-    for destination in fs::read_dir(&store).into_iter().flatten().flatten() {
-        let Some(destination) = destination
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse().ok())
-        else {
+    for name in destinations {
+        let Ok(destination) = name.parse::<u64>() else {
             continue;
         };
-        let dir = store.join(destination.to_string()).join("agy-delivery");
-        for id in ids(&dir) {
+        let dir = store.join(&name).join("agy-delivery");
+        let names = match listing(&dir) {
+            Ok(names) => names,
+            Err(error) => {
+                found.push(Err(error));
+                continue;
+            }
+        };
+        let ids = names
+            .iter()
+            .filter_map(|name| name.strip_suffix(".json")?.parse().ok());
+        for id in ids {
             match read_saved(runtime_root, destination, id) {
                 Ok(Some(saved)) if saved.ended != Some(Stage::Complete) => found.push(Ok(saved)),
                 Ok(_) => {}

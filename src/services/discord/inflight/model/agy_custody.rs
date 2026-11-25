@@ -30,6 +30,24 @@ pub(in crate::services::discord) struct AgyCustodyRoute {
 
 const ROUTE_VERSION: u32 = 1;
 
+/// Routes this process wrote; a boot owner's later pass never takes one of them for earlier debt.
+static WRITTEN: std::sync::Mutex<std::collections::BTreeSet<(u64, u64, Uuid)>> =
+    std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+pub(in crate::services::discord) fn note_custody_written(route: &AgyCustodyRoute) {
+    let mut written = WRITTEN.lock().unwrap_or_else(|poison| poison.into_inner());
+    written.insert((route.destination, route.message, route.nonce));
+}
+
+pub(in crate::services::discord) fn custody_written_here(
+    destination: u64,
+    message: u64,
+    nonce: Uuid,
+) -> bool {
+    let written = WRITTEN.lock().unwrap_or_else(|poison| poison.into_inner());
+    written.contains(&(destination, message, nonce))
+}
+
 /// A route this binary cannot read is kept verbatim and held, never read as Legacy.
 #[derive(Clone, Debug, PartialEq)]
 pub(in crate::services::discord) enum AgyCustodyField {

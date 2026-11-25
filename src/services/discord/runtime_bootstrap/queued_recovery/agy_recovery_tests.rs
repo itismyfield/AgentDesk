@@ -395,13 +395,12 @@ async fn bot_identity_is_fetched_only_for_work_and_again_after_a_failure() {
         std::future::ready((calls.get() > 1).then_some(&boot.wire))
     };
     let jobs = judge(&boot.root, None);
-    let (gate, shared, holds) = (&boot.gate, &boot.shared, &boot.holds);
+    let (gate, shared) = (&boot.gate, &boot.shared);
     drive(
         &boot.root,
         gate,
         &Lease,
         shared,
-        holds,
         jobs,
         identity,
         Duration::ZERO,
@@ -420,7 +419,6 @@ async fn bot_identity_is_fetched_only_for_work_and_again_after_a_failure() {
         gate,
         &Lease,
         shared,
-        holds,
         BTreeMap::new(),
         empty,
         Duration::ZERO,

@@ -60,8 +60,8 @@ enum Job {
     Done,
 }
 
-/// Runs after observe: judgement and journal opening come first, posting runs in a spawned task
-/// that judges the held keys again until none is left.
+/// Runs after observe: judgement comes first, posting runs in a spawned task that judges the
+/// keys it left open again until none is left. An empty boot makes no Discord call.
 pub(super) async fn run(http: &Arc<Http>, shared: &Arc<SharedData>, provider: &ProviderKind) {
     // Once per process: a later pass would judge this process's own live producers as orphans.
     static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -80,30 +80,57 @@ pub(super) async fn run(http: &Arc<Http>, shared: &Arc<SharedData>, provider: &P
     let Ok(jobs) = judged.await else {
         return;
     };
-    let bot = http
-        .get_current_user()
-        .await
-        .map_or(0, |user| user.id.get());
+    if jobs.is_empty() {
+        return;
+    }
     let (http, shared) = (Arc::clone(http), Arc::clone(shared));
     tokio::spawn(async move {
         let gate = ownership::gate(PROVIDER);
-        let port = GatewayPort::new(http, bot);
         let leases = ChannelLeases::from_shared(Arc::clone(&shared));
-        let holds = HoldSet::default();
-        let mut open = deliver(&root, &gate, &port, &leases, &shared, &holds, jobs).await;
-        while !open.is_empty() {
-            tokio::time::sleep(RETRY).await;
-            let (scan, only) = (root.clone(), open.clone());
-            let Ok(jobs) = tokio::task::spawn_blocking(move || judge(&scan, Some(&only))).await
-            else {
-                return;
-            };
-            open = deliver(&root, &gate, &port, &leases, &shared, &holds, jobs).await;
-        }
+        let identity = move || {
+            let http = Arc::clone(&http);
+            async move {
+                let bot = http.get_current_user().await.ok()?.id.get();
+                Some(GatewayPort::new(http, bot))
+            }
+        };
+        drive(&root, &gate, &leases, &shared, jobs, identity, RETRY).await;
     });
 }
 
-/// One boot pass over everything found: the keys still unresolved.
+/// Delivers and retries until no key is open. The bot identity is fetched only for delivery work
+/// and again on the next pass after a failure, never fixed to an unusable value.
+async fn drive<P, Fut>(
+    root: &Path,
+    gate: &OwnershipGate,
+    leases: &impl DeliveryLease,
+    projection: &impl Projection,
+    mut jobs: BTreeMap<String, Job>,
+    mut identity: impl FnMut() -> Fut,
+    retry: Duration,
+) where
+    P: Transport,
+    Fut: std::future::Future<Output = Option<P>>,
+{
+    let (holds, mut port) = (HoldSet::default(), None);
+    loop {
+        if port.is_none() && jobs.values().any(|job| matches!(job, Job::Deliver(..))) {
+            port = identity().await;
+        }
+        let open = deliver(root, gate, port.as_ref(), leases, projection, &holds, jobs).await;
+        if open.is_empty() {
+            return;
+        }
+        tokio::time::sleep(retry).await;
+        let (scan, only) = (root.to_owned(), open);
+        let Ok(next) = tokio::task::spawn_blocking(move || judge(&scan, Some(&only))).await else {
+            return;
+        };
+        jobs = next;
+    }
+}
+
+/// One pass over everything found, or over the keys `only` left open: the keys still unresolved.
 pub(super) async fn recover(
     root: &Path,
     gate: &OwnershipGate,
@@ -114,26 +141,35 @@ pub(super) async fn recover(
     only: Option<&BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let jobs = judge(root, only);
-    deliver(root, gate, port, leases, projection, holds, jobs).await
+    deliver(root, gate, Some(port), leases, projection, holds, jobs).await
 }
 
 async fn deliver(
     root: &Path,
     gate: &OwnershipGate,
-    port: &impl Transport,
+    port: Option<&impl Transport>,
     leases: &impl DeliveryLease,
     projection: &impl Projection,
     holds: &HoldSet,
     jobs: BTreeMap<String, Job>,
 ) -> BTreeSet<String> {
+    // Every unresolved key is held before any transport, so one key's end never hides another.
+    for (name, job) in &jobs {
+        if !matches!(job, Job::Done) {
+            holds.record(name, Some("agy custody is being ended".into()));
+        }
+    }
     let mut open = BTreeSet::new();
     for (name, job) in jobs {
-        let held = match job {
-            Job::Done => None,
-            Job::Held(reason) => Some(reason),
-            Job::Deliver(plan, lease) => settle(root, gate, port, leases, projection, &plan, lease)
-                .await
-                .err(),
+        let held = match (job, port) {
+            (Job::Done, _) => None,
+            (Job::Held(reason), _) => Some(reason),
+            (Job::Deliver(..), None) => Some("agy owner bot identity is unavailable".into()),
+            (Job::Deliver(plan, lease), Some(port)) => {
+                settle(root, gate, port, leases, projection, &plan, lease)
+                    .await
+                    .err()
+            }
         };
         if held.is_some() {
             open.insert(name.clone());
@@ -181,11 +217,15 @@ struct Found {
     saved: Option<Saved>,
 }
 
-/// Route rows and unfinished journals, joined on the full turn key; `only` limits a retry to the
-/// keys an earlier pass left open, and a key no longer found there is done.
+/// The one key a failed discovery holds; a later complete scan takes up the debt it hid.
+const DISCOVERY: &str = "discovery";
+
+/// Route rows and unfinished journals, joined on the full turn key. A retry (`only`) decides
+/// nothing about a key it did not leave open, and never takes a route this process wrote for debt;
+/// an incomplete scan proves no key gone.
 fn judge(root: &Path, only: Option<&BTreeSet<String>>) -> BTreeMap<String, Job> {
-    let mut jobs = BTreeMap::new();
     let mut found = BTreeMap::<String, Found>::new();
+    let (mut held_rows, mut failed) = (Vec::new(), Vec::new());
     match inflight::custody_rows(&ProviderKind::Antigravity) {
         Ok(rows) => {
             for row in rows {
@@ -195,33 +235,41 @@ fn judge(root: &Path, only: Option<&BTreeSet<String>>) -> BTreeMap<String, Job> 
                             entry(&mut found, key).route = Some(route);
                         }
                     }
-                    CustodyRow::Held(channel) => {
-                        let held = Job::Held("agy custody row is held".into());
-                        jobs.insert(format!("row:{channel}"), held);
-                    }
+                    CustodyRow::Held(channel) => held_rows.push(format!("row:{channel}")),
                 }
             }
         }
-        Err(error) => {
-            jobs.insert("rows".into(), Job::Held(error));
-        }
+        Err(error) => failed.push(error),
     }
     for saved in unfinished(root) {
         match saved {
             Ok(saved) => entry(&mut found, saved.key).saved = Some(saved),
-            Err(path) => {
-                jobs.insert(format!("journal:{path}"), Job::Held(path));
-            }
+            Err(error) => failed.push(error),
         }
+    }
+    let adopt = failed.is_empty() && only.is_some_and(|only| only.contains(DISCOVERY));
+    let wanted =
+        |name: &str, here: bool| only.is_none_or(|only| only.contains(name) || (adopt && !here));
+    let mut jobs = BTreeMap::new();
+    for name in held_rows.into_iter().filter(|name| wanted(name, false)) {
+        jobs.insert(name, Job::Held("agy custody row is held".into()));
     }
     for (name, found) in found {
-        jobs.insert(name, decide(root, found));
-    }
-    if let Some(only) = only {
-        jobs.retain(|name, _| only.contains(name));
-        for name in only {
-            jobs.entry(name.clone()).or_insert(Job::Done);
+        let key = found.key;
+        let here = inflight::custody_written_here(key.destination.get(), key.id.get(), key.nonce);
+        if wanted(&name, here) {
+            jobs.insert(name, decide(root, found));
         }
+    }
+    if !failed.is_empty() {
+        jobs.insert(DISCOVERY.into(), Job::Held(failed.join("; ")));
+    }
+    for name in only.into_iter().flatten() {
+        jobs.entry(name.clone())
+            .or_insert_with(|| match failed.is_empty() {
+                true => Job::Done,
+                false => Job::Held("agy custody discovery is incomplete".into()),
+            });
     }
     jobs
 }
