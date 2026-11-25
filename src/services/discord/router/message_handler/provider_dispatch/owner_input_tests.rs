@@ -1101,7 +1101,7 @@ fn created_first_prompt(rig: &Rig) -> Result<(), String> {
     let hook = created(
         prepared_before_launch(rig),
         PROMPT.into(),
-        scope::Lineage::Created,
+        (scope::Lineage::Created, None),
         (None, reply_once(None)),
     );
     let _entered = rig.runtime.enter();
@@ -1290,7 +1290,7 @@ impl Rig {
         let hook = created(
             prepared_before_launch(self),
             PROMPT.into(),
-            scope::Lineage::Created,
+            (scope::Lineage::Created, None),
             (None, reply_once(None)),
         );
         let writer = writer.map(str::to_owned);

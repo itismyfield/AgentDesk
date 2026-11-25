@@ -261,7 +261,7 @@ fn cold_first_prompt_held(name: &str, channel: u64, stop: bool) -> (Result<(), S
     let hook = created(
         prepared_before_launch(&rig),
         PROMPT.into(),
-        scope::Lineage::Created,
+        (scope::Lineage::Created, None),
         (None, reply_once(None)),
     );
     let result = {
