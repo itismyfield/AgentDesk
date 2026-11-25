@@ -1,6 +1,5 @@
-//! `POST /api/decisions` stores an agent's Decision request under the hash of its requester's
-//! capability and posts it to the category's Decision forum with its buttons disabled;
-//! `GET /api/decisions/{id}` reads it back to that requester only.
+//! `POST /api/decisions` stores a Decision request under its capability hash and posts it with
+//! disabled buttons; `GET /api/decisions/{id}` reads it back to that requester only.
 
 use axum::{
     Json,
@@ -21,9 +20,8 @@ fn failure(status: StatusCode, error: &str) -> RouteResponse {
     (status, Json(json!({"ok": false, "error": error})))
 }
 
-/// The caller extractor answers before the body is read. The body names the agent and target;
-/// the header carries the capability whose hash becomes the request's owner. 201 means the post
-/// exists, 202 that it may and is not sent again, 502 a refusal and 503 that nothing was sent.
+/// The header's capability hash owns the request. 201: the post exists; 202: it may, and is not
+/// sent again; 502: Discord refused it; 503: nothing was sent.
 pub async fn ask(
     _caller: HumanInputCaller,
     State(state): State<AppState>,

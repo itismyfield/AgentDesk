@@ -1,7 +1,5 @@
-//! Posts a stored Decision request to its category's Decision forum with the provider bot that
-//! owns the request's channel: the forum joins the intake guard, the journal is written, then one
-//! POST. A lost answer is settled by finding that post again, a refusal is kept, and neither one
-//! is ever posted a second time.
+//! Posts a stored request with its channel's provider bot: forum guarded, journal, then one POST.
+//! A lost answer is settled by finding that post, a refusal is kept; neither is posted again.
 
 use std::sync::Arc;
 

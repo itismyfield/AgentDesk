@@ -1,6 +1,5 @@
-//! The gate itself keeps a message under a Decision forum out of agent intake: such a message
-//! leaves no dedup entry, while the same message under any other parent goes on into intake. The
-//! parent comes from REST, or from the gateway cache when REST cannot read the thread.
+//! The gate keeps a message under a Decision forum, its parent read over REST or else from the
+//! gateway cache, out of intake (no dedup entry); under any other parent it goes on into intake.
 
 use std::sync::Arc;
 use std::time::Duration;

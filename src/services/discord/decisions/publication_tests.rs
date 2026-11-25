@@ -1,6 +1,5 @@
-//! A stored request is posted once, with its buttons disabled, by the provider bot that owns its
-//! channel, under a forum the intake guard already knows. A lost answer is settled by finding
-//! that post; a refusal is kept; neither one is posted again.
+//! A stored request is posted once with disabled buttons under an already guarded forum; a lost
+//! answer is settled by finding that post, a refusal is kept, and neither is posted again.
 use std::sync::{Arc, Mutex};
 
 use axum::body::Bytes;

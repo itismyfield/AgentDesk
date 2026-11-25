@@ -1,7 +1,5 @@
-//! Messages under a Decision forum belong to the Decision service and never reach the agent's
-//! ordinary intake. The forums are the ones recorded as ready plus the configured overrides; a
-//! forum this process posts to is registered before its first post, and a parent the last read
-//! missed is looked up in PG, so a forum another process just made ready is known at once.
+//! Messages under a Decision forum (ready, configured or registered before its first post) never
+//! reach agent intake; a parent the last read missed is looked up in PG, so none is missed.
 
 use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, PoisonError};
@@ -63,9 +61,8 @@ impl Forums {
         (self.1.lock().unwrap_or_else(PoisonError::into_inner)).insert(forum);
     }
 
-    /// Whether `parent` is a Decision forum. A configured or registered forum is one whatever
-    /// was read; a fresh read that misses asks PG for that one forum; a read that fails keeps
-    /// the last known set, so a forum already seen stays closed.
+    /// Whether `parent` is a Decision forum: configured or registered always, else the last read,
+    /// which on a miss asks PG for that forum and on failure keeps the last known set.
     pub(crate) async fn contains(
         &self,
         pool: Option<&PgPool>,

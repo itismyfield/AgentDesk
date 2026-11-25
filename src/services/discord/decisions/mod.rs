@@ -1,6 +1,5 @@
-//! Decision requests: what an agent asks its operator to choose. An ask is stored, then posted to
-//! its category's Decision forum with its buttons disabled; Decision forum threads stay out of
-//! agent intake.
+//! Decision requests: what an agent asks its operator to choose. An ask is stored and posted with
+//! disabled buttons to its category's Decision forum, whose threads stay out of agent intake.
 
 pub(crate) mod card;
 pub(crate) mod ingress;

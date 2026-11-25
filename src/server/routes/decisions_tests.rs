@@ -75,9 +75,8 @@ async fn count(pool: &sqlx::PgPool, sql: &'static str) -> i64 {
 
 const REQUESTS: &str = "SELECT COUNT(*) FROM decision_requests";
 
-/// An ask is stored once per idempotency key, only the capability's hash is kept, another
-/// capability or payload cannot take the key, and without a live provider bot the stored ask
-/// answers 503 and nothing goes to Discord.
+/// One request per key under the capability's hash only, the key not taken by another capability
+/// or payload; with no live provider bot the stored ask answers 503 and nothing is posted.
 #[tokio::test]
 async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     let root = crate::config::TestRuntimeRootGuard::new();
