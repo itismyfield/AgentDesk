@@ -584,7 +584,6 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
-
 // Evidence inside a window delivers the waiting input; Cancel ends the wait even when no
 // SessionStart follows, before submission can recheck the token.
 #[cfg(unix)]
