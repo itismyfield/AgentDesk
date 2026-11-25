@@ -193,7 +193,7 @@ pub(super) fn build_race_requeued_intervention(
             queued_generation,
         )
     };
-    Intervention {
+    let mut entry = Intervention {
         author_id: request_owner,
         author_is_bot: false,
         message_id: user_msg_id,
@@ -208,7 +208,9 @@ pub(super) fn build_race_requeued_intervention(
         has_reply_boundary,
         merge_consecutive,
         pending_uploads,
-    }
+    };
+    crate::services::discord::decision_drain::queued::keep_origin(&mut entry);
+    entry
 }
 
 #[cfg(test)]

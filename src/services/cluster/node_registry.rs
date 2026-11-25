@@ -487,7 +487,7 @@ fn spawn_stale_claim_owner_reassignment_loop(
     });
 }
 
-async fn mark_stale_worker_nodes_offline(
+pub(crate) async fn mark_stale_worker_nodes_offline(
     pool: &PgPool,
     stale_threshold_secs: u64,
     self_instance_id: &str,
@@ -511,6 +511,7 @@ async fn mark_stale_worker_nodes_offline(
             affected,
             "[cluster] flipped stale worker_nodes to offline"
         );
+        crate::services::discord::decision_drain::settle_abandoned(pool).await;
     }
     Ok(affected)
 }

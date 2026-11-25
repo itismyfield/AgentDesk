@@ -7,12 +7,15 @@ pub(super) enum Observed {
     Legacy,
     Refused,
     Native(Screen),
+    /// The Bound row's execution is confirmed absent from its server; an unreadable one is not.
+    Missing,
 }
 
 impl Observed {
     pub(super) fn native(self) -> Option<Screen> {
         match self {
             Self::Native(screen) => Some(screen),
+            Self::Missing => Some(Screen::Unknown),
             Self::Legacy | Self::Refused => None,
         }
     }
@@ -74,9 +77,13 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
             },
         );
     }
-    let target = if plan.row.as_ref().is_some_and(|row| {
-        matches!(&row.record, HostedRecord::Known(record) if record.state == HostedState::Bound)
-    }) {
+    let bound = plan.row.as_ref().and_then(|row| match &row.record {
+        HostedRecord::Known(record) if record.state == HostedState::Bound => Some(record),
+        _ => None,
+    });
+    let view =
+        bound.and_then(|record| crate::services::session_host::herdr_endpoints().view(record));
+    let target = if bound.is_some() {
         match start_target(shared, channel, context).await {
             Ok(Some(target)) => Some(target),
             _ => return Observed::Native(Screen::Unknown),
@@ -89,11 +96,16 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
     let host = TurnHost::Herdr(plan);
     let observation =
         claude_handoff::observe_busy(channel.get(), logical, &host, &shared.token_hash);
-    Observed::Native(match observation.state() {
-        BusyState::Idle => Screen::Ready,
-        BusyState::Busy => Screen::Blocked,
-        BusyState::Held | BusyState::Legacy => Screen::Unknown,
-    })
+    use crate::services::session_host::PaneReading;
+    let missing = || {
+        (view.as_ref()).is_some_and(|view| matches!(view.read_execution(), PaneReading::Missing))
+    };
+    match observation.state() {
+        BusyState::Idle => Observed::Native(Screen::Ready),
+        BusyState::Busy => Observed::Native(Screen::Blocked),
+        BusyState::Held if missing() => Observed::Missing,
+        BusyState::Held | BusyState::Legacy => Observed::Native(Screen::Unknown),
+    }
 }
 
 #[cfg(test)]

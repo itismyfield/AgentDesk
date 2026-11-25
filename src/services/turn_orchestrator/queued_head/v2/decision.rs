@@ -51,15 +51,27 @@ impl Owner {
         }
     }
 
-    /// The Decision tickets whose originals this owner still holds queued, attempted or kept:
-    /// what a settlement checks against the events PG already closed.
+    /// The Decision tickets whose originals this owner still holds queued, attempted or kept, or
+    /// refused with a notice still owed (a refusal drops its bind and keeps its receipt): what a
+    /// settlement checks against the events PG already closed.
     pub(crate) fn decision_tickets(&self) -> Vec<String> {
+        let s = &self.snapshot;
         let tag = format!("{}-", crate::db::decisions::TICKET_TAG);
-        let held = (self.snapshot.admission_binds.iter())
+        let held = (s.admission_binds.iter())
             .filter(|bind| !matches!(bind.at, BindAt::Settled { .. }))
             .filter_map(|bind| bind.receipt.strip_prefix("tk:")?.split(':').next())
             .filter(|ticket| ticket.starts_with(&tag));
         let mut tickets: Vec<String> = held.map(str::to_string).collect();
+        let inputs = (s.refused_inputs.iter()).filter(|r| !r.notice.enqueued);
+        let fronts = (s.refused_fronts.iter()).filter(|r| !r.notice.enqueued);
+        let refused: Vec<&str> = (inputs.flat_map(|r| &r.members))
+            .chain(fronts.flat_map(|r| &r.members))
+            .map(|member| member.fingerprint.as_str())
+            .collect();
+        let receipts = (s.admission_receipts.iter())
+            .filter_map(|receipt| receipt.strip_prefix("tk:")?.rsplit_once(':'))
+            .filter(|(ticket, digest)| ticket.starts_with(&tag) && refused.contains(digest));
+        tickets.extend(receipts.map(|(ticket, _)| ticket.to_string()));
         tickets.sort();
         tickets.dedup();
         tickets

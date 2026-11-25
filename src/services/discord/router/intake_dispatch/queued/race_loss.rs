@@ -66,6 +66,7 @@ impl QueuedRestoreOwner {
             self.provider,
             self.channel_id,
         );
+        super::decision_queue::returned();
         Ok(super::super::super::IntakeExecution::Deferred)
     }
 }

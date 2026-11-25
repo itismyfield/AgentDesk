@@ -51,6 +51,11 @@ impl AgyForeground {
             state.input_origin_ids = vec![claim.guid];
             state.logical_channel_id = Some(claim.selection.logical_channel);
         }
+        // A queue-drained Decision's turn names its event, so its receipt settles that event.
+        let decision = crate::services::discord::decision_drain::queued::starting_origin();
+        if let Some(origin) = decision {
+            state.input_origin_ids = vec![origin];
+        }
     }
 
     pub(in crate::services::discord::router::message_handler) fn from_claim(

@@ -760,6 +760,8 @@ enum Wait {
     Go,
     Event,
     Watch(crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe),
+    /// A Decision start whose Bound execution is confirmed absent: it ends, it does not wait.
+    Missing,
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
@@ -783,6 +785,12 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
         // The driver preserves a known host refusal as a typed, confirmed non-send.
         start_wait::Observed::Refused => return Wait::Go,
         start_wait::Observed::Native(screen) => Some(screen),
+        start_wait::Observed::Missing
+            if InputOrigin::from_context(Some(context)) == InputOrigin::Decision =>
+        {
+            return Wait::Missing;
+        }
+        start_wait::Observed::Missing => Some(Screen::Unknown),
     };
     if let Some(screen) = screen {
         if screen == Screen::Ready {
@@ -980,6 +988,9 @@ async fn start_idle(
     }
     if let Wait::Event = wait {
         return Err(START_WAITS.into());
+    }
+    if let Wait::Missing = wait {
+        return Err(crate::services::discord::decision_drain::MISSING.into());
     }
     let (held, holder) = (front.clone(), mailbox.clone());
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;

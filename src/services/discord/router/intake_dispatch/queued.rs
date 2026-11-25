@@ -84,6 +84,7 @@ impl QueuedRestoreOwner {
             "queued transition busy restored",
         )
         .await;
+        decision_queue::returned();
         super::super::IntakeExecution::Deferred
     }
 }
@@ -414,20 +415,25 @@ fn queued_submission(
     }
 }
 
-/// Finishes an admitted queue start. A Decision start then records what it proved: a return to
-/// the queue waits again, a clear fails it, and an error after its journal closes it unknown.
+/// Finishes an admitted queue start. A Decision start then records what it proved: an input put
+/// back under its origin waits again, a clear fails it, and an error after its journal, or a
+/// deferral that did not return that input, closes it unknown.
 pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
     use super::super::IntakeExecution::{ConsumedProtected, Deferred, Executed};
     let decision = admitted.decision;
-    let result = finish_admitted(deps, admitted).await;
+    let origin = (admitted.restore_owner.as_ref())
+        .filter(|_| decision.is_some())
+        .and_then(|owner| decision_queue::origin(&owner.original).map(str::to_owned));
+    let start = finish_admitted(deps, admitted);
+    let (result, back) = decision_queue::started_under(origin, start).await;
     let ended = match &result {
+        Ok(Executed | Deferred) if back => decision_queue::Ended::WaitsAgain,
         Ok(Executed) => decision_queue::Ended::Started,
-        Ok(Deferred) => decision_queue::Ended::WaitsAgain,
         Ok(ConsumedProtected) => decision_queue::Ended::Cleared,
-        Err(_) => decision_queue::Ended::Unknown,
+        Ok(Deferred) | Err(_) => decision_queue::Ended::Unknown,
     };
     decision_queue::end(deps.shared.pg_pool.as_ref(), decision, ended).await;
     result

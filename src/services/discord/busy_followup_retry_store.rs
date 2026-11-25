@@ -289,7 +289,7 @@ async fn requeue_inflight(
             }
         })
         .collect();
-    let intervention = Intervention {
+    let mut intervention = Intervention {
         author_id: UserId::new(inflight_state.request_owner_user_id()),
         author_is_bot: false,
         message_id,
@@ -305,6 +305,7 @@ async fn requeue_inflight(
         merge_consecutive: inflight_state.followup_merge_consecutive(),
         pending_uploads: inflight_state.followup_pending_uploads().clone(),
     };
+    super::decision_drain::queued::keep_origin(&mut intervention);
     mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
 }
 

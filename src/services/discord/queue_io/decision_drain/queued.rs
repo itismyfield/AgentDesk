@@ -69,11 +69,65 @@ pub(crate) async fn begin(pool: Option<&PgPool>, channel: u64, entry: &Intervent
     }
 }
 
+tokio::task_local! {
+    /// The Decision original a non-owner queue start is running, for the code it runs through.
+    static STARTING: Starting;
+}
+
+struct Starting {
+    origin: String,
+    /// Set once the input is back on the queue under this origin.
+    back: std::sync::atomic::AtomicBool,
+}
+
+/// Runs a queue start with its Decision origin in scope. `true`: the start put its input back
+/// on the queue under that origin, so nothing was written and its next drain is checked again.
+pub(crate) async fn started_under<F: std::future::Future>(
+    origin: Option<String>,
+    start: F,
+) -> (F::Output, bool) {
+    let Some(origin) = origin else {
+        return (start.await, false);
+    };
+    let back = false.into();
+    let run = async {
+        let output = start.await;
+        (output, STARTING.with(|at| at.back.load(Ordering::SeqCst)))
+    };
+    STARTING.scope(Starting { origin, back }, run).await
+}
+
+/// The origin of the Decision original this task is starting: its turn's receipt names it.
+pub(crate) fn starting_origin() -> Option<String> {
+    STARTING.try_with(|at| at.origin.clone()).ok()
+}
+
+/// Records that this start's own original is durably back on the queue.
+pub(crate) fn returned() {
+    let _ = STARTING.try_with(|at| at.back.store(true, Ordering::SeqCst));
+}
+
+/// Keeps the Decision origin on an entry a start rebuilt from its text to queue it again: the
+/// entry stays one unmerged source that the next drain checks against the event.
+pub(crate) fn keep_origin(entry: &mut Intervention) {
+    let Some(origin) = starting_origin() else {
+        return;
+    };
+    let primary = entry.message_id;
+    (entry.source_message_queued_generations).retain(|source| source.message_id == primary);
+    for source in &mut entry.source_message_queued_generations {
+        source.origin_id = Some(origin.clone());
+    }
+    entry.source_message_ids = vec![primary];
+    entry.merge_consecutive = false;
+    returned();
+}
+
 /// How a journaled non-owner start ended.
 pub(crate) enum Ended {
     /// A turn took the input: that turn's receipt settles the event.
     Started,
-    /// Nothing was written and the original is back on the queue: it waits again.
+    /// Nothing was written and the input is back on the queue under its origin: it waits again.
     WaitsAgain,
     /// A clear removed the original before anything was written.
     Cleared,

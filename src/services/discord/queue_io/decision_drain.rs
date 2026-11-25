@@ -50,18 +50,35 @@ static OPEN: AtomicBool = AtomicBool::new(false);
 static RUN: OnceLock<decisions::Run> = OnceLock::new();
 
 /// Fixes this run's start before the process moves any event, so a row it moves is never read
-/// as an earlier run's. Every entry that starts, journals or recovers an event asks here first.
+/// as an earlier run's. Every entry that starts, journals or recovers an event asks here first;
+/// until the cluster bootstrap registered this node's name there is no run and nothing moves.
 pub(crate) async fn run(pool: &PgPool) -> Result<&'static decisions::Run, sqlx::Error> {
+    let Some(node) = node() else {
+        let unnamed = "decision holder is not registered yet";
+        return Err(sqlx::Error::Protocol(unnamed.into()));
+    };
     if let Some(run) = RUN.get() {
         return Ok(run);
     }
     let boot = decisions::clock(pool).await?;
-    Ok(RUN.get_or_init(|| decisions::Run::of(&node(), boot)))
+    Ok(RUN.get_or_init(|| decisions::Run::of(&node, boot)))
 }
 
-/// The node this process runs as in the cluster's registry.
-fn node() -> String {
-    crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
+#[cfg(test)]
+thread_local! {
+    /// Hides this node's registration from the test's thread, as before the cluster bootstrap.
+    static UNREGISTERED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The name this node registered in the cluster's registry; a temporary name is never one.
+fn node() -> Option<String> {
+    #[cfg(test)]
+    if UNREGISTERED.with(std::cell::Cell::get) {
+        return None;
+    }
+    crate::services::cluster::node_registry::SELF_INSTANCE_ID
+        .get()
+        .cloned()
 }
 
 /// Marks that approved events exist, so the owner's drain settles them from now on.
@@ -70,6 +87,8 @@ pub(crate) fn note_open() {
 }
 
 const INTERRUPTED: &str = "interrupted_before_delivery";
+/// The owner's start found its Bound session's execution absent from the Herdr server.
+pub(crate) const MISSING: &str = "NotSent(\"herdr_execution_missing\")";
 #[cfg(unix)]
 const CLOSED: &str = "NotSent(\"decision_closed\")";
 #[cfg(unix)]
@@ -273,6 +292,10 @@ async fn settle_as(
         }
         (NormalWait, Some(Held::Gone)) => fail(pool, mailbox, row, "original_removed").await,
         (MayHaveSent, Some(Held::InFlight)) => Ok(()),
+        // The session's execution is confirmed gone: no turn boundary will ever come for it.
+        (MayHaveSent, Some(Held::Waiting)) if proven_unsent.is_some_and(|e| e == MISSING) => {
+            fail(pool, mailbox, row, "herdr_execution_missing").await
+        }
         // The owner put the original back on a proof that no key was sent: it waits again.
         (MayHaveSent, Some(Held::Waiting)) if proven_unsent.is_some() => {
             step(pool, row, (MayHaveSent, NormalWait), None)
@@ -431,7 +454,10 @@ async fn recover_before(
     boot: chrono::DateTime<chrono::Utc>,
     mailbox_of: impl Fn(u64) -> Option<ChannelMailboxHandle>,
 ) -> Result<usize, sqlx::Error> {
-    let run = decisions::Run::of(&node(), boot);
+    let Some(node) = node() else {
+        return Ok(0);
+    };
+    let run = decisions::Run::of(&node, boot);
     let rows = decisions::unsettled(pool, None, Some(&run)).await?;
     if !rows.is_empty() {
         note_open();
@@ -456,10 +482,26 @@ pub async fn recover_boot(pool: &PgPool) -> Result<usize, sqlx::Error> {
 pub(crate) fn spawn_boot_recovery(pool: Option<PgPool>) {
     let Some(pool) = pool else { return };
     tokio::spawn(async move {
+        // Whose attempts are abandoned is judged under this node's registered name.
+        while node().is_none() {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
         if let Err(error) = recover_boot(&pool).await {
             tracing::warn!(%error, "decision boot recovery did not run");
         }
     });
+}
+
+/// Settles the attempts of nodes the registry just listed offline: a peer that booted while
+/// such a node was still listed online kept its rows, and nothing else looks at them again.
+pub(crate) async fn settle_abandoned(pool: &PgPool) {
+    let settled = match run(pool).await {
+        Ok(run) => recover_before(pool, run.boot, global_mailbox).await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = settled {
+        tracing::warn!(%error, "decision attempts of an offline node left unsettled");
+    }
 }
 
 fn global_mailbox(channel: u64) -> Option<ChannelMailboxHandle> {
