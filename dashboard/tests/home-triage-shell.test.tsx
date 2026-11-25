@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -9,15 +9,17 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { request } from "../src/api/httpClient";
+import { AppMobileNavigation } from "../src/app/AppMobileNavigation";
 import { AppSidebar } from "../src/app/AppSidebar";
 import { AppTopBar } from "../src/app/AppTopBar";
 import { TABLET_RAIL_MEDIA_QUERY } from "../src/app/breakpoints";
 import { PageFrame } from "../src/app/PageFrame";
-import { PRIMARY_ROUTES } from "../src/app/routes";
+import { PRIMARY_ROUTES, type AppRouteId } from "../src/app/routes";
 import { ShellWindowFocusContext } from "../src/app/shellFocus";
 import { MOBILE_PRIMARY_ROUTE_IDS, SIDEBAR_SECTION_ORDER } from "../src/app/shellNavigationConfig";
 import { iconForRoute } from "../src/app/shellRouteIcons";
 import CommandPalette from "../src/components/CommandPalette";
+import { useFocusTrap } from "../src/components/common/overlay";
 import { HomeAgentsCard, HomeSystemCard, HomeTodoCard } from "../src/components/home/HomeSummaryCards";
 import {
   buildHomeAgents,
@@ -500,5 +502,68 @@ describe("Slice 1 — TopBar RunningNow, Responsive Shell, inert, Mobile Stats t
     )!;
     await act(async () => { runRow.click(); });
     expect(request).toHaveBeenCalledWith("/api/routines/rt-1/run-now", expect.objectContaining({ method: "POST" }));
+  });
+
+  it("focuses the active or first overflow route RowButton instead of the header close button when opening mobile More sheet", async () => {
+    const primaryRoutes = MOBILE_PRIMARY_ROUTE_IDS.map((id) => PRIMARY_ROUTES.find((r) => r.id === id)!);
+    const moreRoutes = PRIMARY_ROUTES.filter((r) => !MOBILE_PRIMARY_ROUTE_IDS.includes(r.id));
+
+    function MobileHarness({ initialRouteId }: { initialRouteId: AppRouteId }) {
+      const [moreOpen, setMoreOpen] = useState(false);
+      const moreMenuRef = useFocusTrap(moreOpen);
+      const activeRouteId = moreOpen || !MOBILE_PRIMARY_ROUTE_IDS.includes(initialRouteId) ? "more" : initialRouteId;
+      return (
+        <AppMobileNavigation
+          activeRouteId={activeRouteId}
+          bottomSheetZIndex={50}
+          currentRouteId={initialRouteId}
+          iconForRoute={iconForRoute}
+          isKo={true}
+          moreMenuRef={moreMenuRef}
+          moreOpen={moreOpen}
+          moreRoutes={moreRoutes}
+          navigateToRoute={() => {}}
+          primaryRoutes={primaryRoutes}
+          resolvedTheme="dark"
+          routeBadge={() => undefined}
+          setMoreOpen={setMoreOpen}
+          setShowTweaksPanel={() => {}}
+          toggleShellTheme={() => {}}
+          tabbarHeight="64px"
+          tabbarZIndex={30}
+        />
+      );
+    }
+
+    await renderWithProviders(<MobileHarness initialRouteId="home" />);
+    const moreTrigger = container.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-button"]')!;
+    moreTrigger.focus();
+    await act(async () => {
+      moreTrigger.click();
+    });
+
+    const firstOverflowRow = container.querySelector<HTMLButtonElement>(`[data-testid="app-mobile-more-${moreRoutes[0].id}"]`)!;
+    const closeButton = container.querySelector<HTMLButtonElement>('button[aria-label="더 보기 닫기"]')!;
+    expect(firstOverflowRow.hasAttribute("data-autofocus")).toBe(true);
+    expect(document.activeElement).toBe(firstOverflowRow);
+    expect(document.activeElement).not.toBe(closeButton);
+
+    await act(async () => {
+      firstOverflowRow.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    expect(container.querySelector('[data-testid="app-mobile-more-menu"]')).toBeNull();
+    expect(document.activeElement).toBe(moreTrigger);
+
+    await renderWithProviders(<MobileHarness initialRouteId="settings" />);
+    const settingsTrigger = container.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-button"]')!;
+    await act(async () => {
+      settingsTrigger.click();
+    });
+
+    const settingsRow = container.querySelector<HTMLButtonElement>('[data-testid="app-mobile-more-settings"]')!;
+    const routinesRow = container.querySelector<HTMLButtonElement>(`[data-testid="app-mobile-more-${moreRoutes[0].id}"]`)!;
+    expect(routinesRow.hasAttribute("data-autofocus")).toBe(false);
+    expect(settingsRow.hasAttribute("data-autofocus")).toBe(true);
+    expect(document.activeElement).toBe(settingsRow);
   });
 });

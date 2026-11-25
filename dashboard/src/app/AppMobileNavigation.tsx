@@ -88,6 +88,9 @@ export function AppMobileNavigation({
 }: AppMobileNavigationProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
   const moreBadge = moreRoutes.reduce((sum, route) => sum + (routeBadge(route.id) ?? 0), 0);
+  const autoFocusRouteId = moreRoutes.some((route) => route.id === currentRouteId)
+    ? currentRouteId
+    : moreRoutes[0]?.id;
   const themeLabel =
     resolvedTheme === "dark" ? tr("밝은 화면으로", "Light theme") : tr("어두운 화면으로", "Dark theme");
 
@@ -194,6 +197,7 @@ export function AppMobileNavigation({
                   <RowButton
                     key={route.id}
                     data-testid={`app-mobile-more-${route.id}`}
+                    data-autofocus={route.id === autoFocusRouteId || undefined}
                     selected={isCurrent}
                     aria-label={label + badgeAriaSuffix(isKo, badge)}
                     aria-current={isCurrent ? "page" : undefined}
