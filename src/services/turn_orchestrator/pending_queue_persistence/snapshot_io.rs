@@ -18,7 +18,7 @@ pub(super) fn save_channel_queue_locked(
         ));
     };
     super::super::queued_head::compat::require_legacy_write(&path)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if save_fault::take(channel_id) {
         return Err(format!(
             "injected pending queue save failure {}",
@@ -64,7 +64,7 @@ pub(super) fn save_channel_queue_locked(
         .token_hash(token_hash)
         .channel_id(channel_id.get());
     runtime_store::critical_publish(&path, &json, context)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if post_save_fault::take(channel_id) {
         return Err(format!(
             "injected error after queue publication {}",

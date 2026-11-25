@@ -21,12 +21,12 @@ mod herdr_stop;
 mod http_force;
 
 pub(super) use cancel_effects::force_purge_and_settle;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) use cancel_effects::force_purge_channel_mailbox;
 pub(crate) use cancel_effects::schedule_post_cancel_queue_drain;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use cancel_effects::set_pre_purge_hook_for_test;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use cancel_effects::set_pre_purge_probe_for_test;
 pub(crate) use cancel_effects::settle_v2_drops;
 

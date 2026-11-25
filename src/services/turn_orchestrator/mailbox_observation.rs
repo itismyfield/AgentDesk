@@ -17,20 +17,20 @@ impl MailboxObservationFailure {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! {
     static ENUMERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Counts a whole-registry read, so a test can tell how often one pass enumerated actors.
 fn count_enumeration() {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     ENUMERATIONS.with(|count| count.set(count.get() + 1));
 }
 
 impl ChannelMailboxRegistry {
     /// Whole-registry reads this thread has made through `snapshot_all` or the health read.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn enumerations_for_tests() -> usize {
         ENUMERATIONS.with(std::cell::Cell::get)
     }

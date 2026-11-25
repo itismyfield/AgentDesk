@@ -14,21 +14,21 @@ use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, PurgeQueueResult, QueuePersistenceContext,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use crate::services::turn_orchestrator::Intervention;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::{
     collections::HashMap,
     sync::{LazyLock, Mutex},
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type PrePurgeHooks = HashMap<ChannelId, (Vec<Intervention>, String)>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PRE_PURGE_HOOK_FOR_TESTS: LazyLock<Mutex<PrePurgeHooks>> = LazyLock::new(Default::default);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_pre_purge_hook_for_test(
     channel: ChannelId,
     items: Vec<Intervention>,
@@ -40,15 +40,15 @@ pub(crate) fn set_pre_purge_hook_for_test(
         .insert(channel, (items, token.into()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type PrePurgeProbe = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PRE_PURGE_PROBE_FOR_TESTS: LazyLock<Mutex<HashMap<ChannelId, PrePurgeProbe>>> =
     LazyLock::new(Default::default);
 
 /// Runs `probe` once when a purge of `channel` is about to reach its actor.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn set_pre_purge_probe_for_test(channel: ChannelId, probe: PrePurgeProbe) {
     PRE_PURGE_PROBE_FOR_TESTS
         .lock()
@@ -56,7 +56,7 @@ pub(crate) fn set_pre_purge_probe_for_test(channel: ChannelId, probe: PrePurgePr
         .insert(channel, probe);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 async fn run_pre_purge_hook_for_test(
     provider: &ProviderKind,
     channel: ChannelId,
@@ -195,7 +195,7 @@ async fn purge_on<R: QueueCancelPort>(
         token_hash = channel_token_hash;
     }
     let persistence = QueuePersistenceContext::new(provider, &token_hash, None);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_pre_purge_hook_for_test(provider, channel_id, handle).await;
     // A V2 owner's queue purges only as captured; the head it already attempted stays.
     #[cfg(unix)]
@@ -409,7 +409,7 @@ pub(super) mod herdr {
         };
         let checked = match capture {
             Ok(expected) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::run_pre_purge_hook_for_test(provider, channel, actor).await;
                 let purge = actor.try_purge_queue_if_unchanged(persistence, expected);
                 purge

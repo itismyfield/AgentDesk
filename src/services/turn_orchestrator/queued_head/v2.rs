@@ -1,7 +1,7 @@
 //! The V2 input owner the mailbox actor holds for a channel's queue file.
 use super::v2_types::*;
 use super::{HeadPhase, PendingQueueItem, QueueIdentity};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use sha2::Digest;
 use std::path::PathBuf;
 
@@ -27,7 +27,7 @@ mod sources;
 pub(crate) mod start_failure;
 pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use source_admission::AdmitError;
 pub(crate) use source_admission::Ticket;
 
@@ -239,7 +239,7 @@ impl Owner {
         Ok(owner)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn enqueue(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
         if self.pending.is_some() {
             return Err(AdmitError::NotCommitted("owner recovery required".into()));
@@ -257,7 +257,7 @@ impl Owner {
         Ok(true)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn enqueue_fixture(&mut self, item: &PendingQueueItem) -> Result<bool, AdmitError> {
         self.enqueue(item)
     }
@@ -333,7 +333,7 @@ impl Owner {
 
     /// Reserves the prepared queue front as one unit: `prepared` gives each original's shown name
     /// and single-input body; the first original it does not know starts the next unit.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn reserve_unit(
         &mut self,
         attempt: AttemptIdentity,
@@ -372,7 +372,7 @@ impl Owner {
     }
 
     /// The one ordered member list a unit is made of, and the frame and digest rendered from it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn unit(
         &self,
         prepared: &impl Fn(&PendingQueueItem) -> Option<(String, String)>,
@@ -618,7 +618,7 @@ impl InputAttempt {
 }
 
 /// One queued original as the caller prepared it for a unit: its shown name and prompt body.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct MemberView {
     original: PendingQueueItem,
     name: String,
@@ -627,7 +627,7 @@ struct MemberView {
 
 /// The unit's body without the busy header the leaf adds for the first author: each original's
 /// body in arrival order, with an author line only where the author changes after the first.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn render(views: &[MemberView]) -> String {
     let mut author = None;
     let bodies = views.iter().map(|view| {

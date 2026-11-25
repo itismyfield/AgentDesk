@@ -418,7 +418,7 @@ pub(super) fn pending_queue_item_from_intervention(
 }
 
 /// Lets a metadata-free test write replace only a missing file or a legacy array.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn refuse_metadata_loss(path: &Path) -> Result<(), String> {
     match fs::read_to_string(path) {
         Ok(content) if !matches!(parse_snapshot(&content), Ok((_, None))) => {
@@ -433,7 +433,7 @@ fn refuse_metadata_loss(path: &Path) -> Result<(), String> {
 
 /// Write-through: save a single channel's queue to disk.
 /// If the queue is empty the file is removed.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn save_channel_queue(
     provider: &ProviderKind,
     token_hash: &str,
@@ -474,7 +474,7 @@ fn save_channel_queue_locked(
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) mod post_save_fault {
     use super::ChannelId;
     static ARMED: std::sync::Mutex<Vec<ChannelId>> = std::sync::Mutex::new(Vec::new());
@@ -821,7 +821,7 @@ pub(crate) fn load_pending_dispatch_markers(
         })
         .collect()
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn load_channel_pending_queue(
     provider: &ProviderKind,
     token_hash: &str,
@@ -864,7 +864,7 @@ pub(crate) fn warn_legacy_pending_queue_files(provider: &ProviderKind) {
 }
 
 /// Test-only: fail a channel's next queue save before the file is touched, once.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) mod save_fault {
     use poise::serenity_prelude::ChannelId;
     use std::sync::Mutex;
