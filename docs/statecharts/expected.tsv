@@ -587,9 +587,11 @@ input-single-path/HerdrSyntheticStartFixedCodexShell.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedCodexUnreadable.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedExternalTurn.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedForeign.cfg	HerdrSyntheticStart	-	-
+input-single-path/HerdrSyntheticStartFixedInflightRace.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedInflightUnreadable.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedLive.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedManagedTurn.cfg	HerdrSyntheticStart	-	-
+input-single-path/HerdrSyntheticStartFixedPersonInflightRace.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedPersonMissing.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedPersonRace.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedPersonShell.cfg	HerdrSyntheticStart	-	-
@@ -598,6 +600,7 @@ input-single-path/HerdrSyntheticStartFixedRaceLive.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedShell.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedUnreadable.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartGoneNoRetire.cfg	HerdrSyntheticStart	-	OwnedStartDelivered,SyntheticSettles
+input-single-path/HerdrSyntheticStartInflightNoLease.cfg	HerdrSyntheticStart	NoAutoRetireUnderTurn	-
 input-single-path/HerdrSyntheticStartNoBorrow.cfg	HerdrSyntheticStart	-	OwnedStartDelivered,SyntheticSettles
 input-single-path/HerdrSyntheticStartNoLease.cfg	HerdrSyntheticStart	NoAutoRetireUnderTurn	-
 input-single-path/HerdrSyntheticStartOkFlatten.cfg	HerdrSyntheticStart	NoAutoRetireUnderTurn	-

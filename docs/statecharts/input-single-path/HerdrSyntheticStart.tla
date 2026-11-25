@@ -13,14 +13,15 @@
 \* A person's input reaches the same recovery after claim (owned_busy.rs:99-339); "Before" for a
 \* person is #8212 (Scope::Missing only).
 EXTENDS Naturals
-CONSTANTS Policy, Host, Provider, Origin, Exec0, Turn0, Inflight0, Foreign, Race, Mutant
+CONSTANTS Policy, Host, Provider, Origin, Exec0, Turn0, Inflight0, Foreign, Race, InflightRace,
+          Mutant
 
 VARIABLE s
 vars == <<s>>
 
 Init == s = [front |-> "queued", awake |-> TRUE, watch |-> FALSE,
              row |-> "Bound", exec |-> Exec0, turn |-> Turn0, inflight |-> Inflight0,
-             lease |-> FALSE, turnStarted |-> FALSE,
+             lease |-> FALSE, turnStarted |-> FALSE, inflightStarted |-> FALSE,
              autoRetired |-> FALSE, badRetire |-> FALSE, turnRetire |-> FALSE,
              cold |-> FALSE, refusing |-> FALSE, outcome |-> "none"]
 
@@ -43,7 +44,7 @@ OwnerDiffers == Foreign \/ (Mutant = "ownerClaudeConst" /\ Provider = "codex")
 \* No turn holds the channel: no token, and the inflight read is exactly Ok(None).
 \* Mutant okFlatten reads a failed inflight read as no row.
 NoTurn == /\ (s.turn = "none" \/ Mutant = "RetireUnderTurn")
-          /\ (s.inflight = "none" \/ Mutant = "okFlatten")
+          /\ (s.inflight = "none" \/ (Mutant = "okFlatten" /\ s.inflight = "unreadable"))
 \* The lease: try_acquire for a synthetic start, borrow for a person already in transition.
 LeaseOk == ~(Origin = "person" /\ Mutant = "noBorrow")
 
@@ -72,12 +73,14 @@ Verdict == IF Host = "tmux" THEN TmuxRead
 
 Begin(t) == [t EXCEPT !.front = "retiring", !.watch = FALSE, !.awake = FALSE,
                       !.lease = (Mutant # "noLease")]
+\* Mutant inflightNoLease keeps the lease for token registrations only.
 
 Drive == /\ s.front = "queued" /\ s.awake
          /\ IF Host = "tmux" /\ s.exec = "busy"
             \* transcript_turns: a busy channel waits for an event (owner_input.rs:802-808).
             THEN s' = [s EXCEPT !.awake = FALSE]
-            ELSE IF Host = "herdr" /\ Origin = "synthetic" /\ s.turn = "external"
+            ELSE IF Host = "herdr" /\ Origin = "synthetic"
+                    /\ (s.turn = "external" \/ s.inflight = "row")
             \* A non-managed inflight row waits for its row end (owner_input.rs:780-783).
             THEN s' = [s EXCEPT !.awake = FALSE]
             ELSE s' = CASE Verdict \in {"Ready", "Gone"} /\ (Host = "tmux" \/ Verdict = "Ready") ->
@@ -135,16 +138,24 @@ TurnStart == /\ Race /\ Host = "herdr" /\ ~s.turnStarted /\ s.turn = "none" /\ ~
              /\ s.front \in {"queued", "held", "retiring"}
              /\ s' = [s EXCEPT !.turn = "managed", !.turnStarted = TRUE]
 TurnEnd == s.turn # "none" /\ s' = Woken([s EXCEPT !.turn = "none"])
+\* A watcher creates an inflight row alone (liveness.rs:473-529 reacquire, monitor auto turn) from
+\* a stream it saw before the execution ended; implementation: it takes the transition lease.
+InflightStart == /\ InflightRace /\ Host = "herdr" /\ ~s.inflightStarted /\ s.inflight = "none"
+                 /\ (~s.lease \/ Mutant = "inflightNoLease")
+                 /\ s.front \in {"queued", "held", "retiring"}
+                 /\ s' = [s EXCEPT !.inflight = "row", !.inflightStarted = TRUE]
+\* Its row ends (herdr_row_end) and wakes the owner.
+InflightEnd == s.inflight = "row" /\ s' = Woken([s EXCEPT !.inflight = "none"])
 \* Operator or HTTP force terminate: S3b-1 retired_wake wakes the owner. Never fair.
 OperatorRetire == /\ Host = "herdr" /\ s.row = "Bound" /\ Dead /\ s.front # "retiring"
                   /\ s' = Woken([s EXCEPT !.row = "Retired"])
 Done == s.front \in {"delivered", "rejected"} /\ UNCHANGED vars
 
 Next == Done \/ Drive \/ WatchLook \/ Cas \/ Launch \/ NativeEnds \/ Readable \/ InflightRead
-        \/ Die \/ TurnStart \/ TurnEnd \/ OperatorRetire
+        \/ Die \/ TurnStart \/ TurnEnd \/ InflightStart \/ InflightEnd \/ OperatorRetire
 Spec == Init /\ [][Next]_vars /\ WF_vars(Drive) /\ WF_vars(WatchLook) /\ WF_vars(Cas)
         /\ WF_vars(Launch) /\ WF_vars(NativeEnds) /\ WF_vars(Readable)
-        /\ WF_vars(InflightRead) /\ WF_vars(TurnEnd)
+        /\ WF_vars(InflightRead) /\ WF_vars(TurnEnd) /\ WF_vars(InflightEnd)
 
 \* Safety.
 NoAutoRetireLive == ~s.badRetire
