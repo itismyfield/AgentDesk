@@ -34,6 +34,8 @@ pub enum UnitKind {
     ToolResult,
     InputNotice,
     Recap,
+    /// An image a tool read, posted as an attachment; only the tool-image writer path creates it.
+    ToolImage,
 }
 
 /// Unit identity; session id is deliberately absent so forked sources inherit keys.

@@ -60,6 +60,35 @@ fn image_upload_validates_filename_mime_magic_and_base64() {
     assert!(decode(Some(&JsonValue::Null)).unwrap().is_none());
 }
 
+fn rejection(value: &JsonValue) -> (StatusCode, String) {
+    let Err(error) = decode(Some(value)) else {
+        panic!("upload must be rejected");
+    };
+    (error.status(), error.message().to_owned())
+}
+
+#[test]
+fn image_upload_reports_size_before_encoding_and_empty_data_as_size() {
+    let limit = image_format::MAX_IMAGE_BYTES.div_ceil(3) * 4;
+    let malformed = |len: usize| {
+        let mut value = upload(b"\x89PNG\r\n\x1a\n");
+        value["dataBase64"] = json!("!".repeat(len));
+        value
+    };
+    let bad_request = |message: &str| (StatusCode::BAD_REQUEST, message.to_owned());
+    // Past the encoded limit malformed text is a size error: the length check runs before decoding.
+    let size = bad_request("imageAttachment exceeds 8 MiB");
+    assert_eq!(rejection(&malformed(limit + 1)), size);
+    assert_eq!(rejection(&malformed(limit + 4)), size);
+    let encoding = bad_request("imageAttachment.dataBase64 must be canonical standard base64");
+    assert_eq!(rejection(&malformed(limit)), encoding);
+    // Empty data decodes to zero bytes and is a size error, never a magic mismatch.
+    let mut empty = upload(b"\x89PNG\r\n\x1a\n");
+    empty["dataBase64"] = json!("");
+    let empty_size = bad_request("imageAttachment must contain 1 byte to 8 MiB");
+    assert_eq!(rejection(&empty), empty_size);
+}
+
 #[test]
 fn image_context_rejects_mixed_targets_and_rendered_utf16_overflow() {
     let context = |providers| Context {

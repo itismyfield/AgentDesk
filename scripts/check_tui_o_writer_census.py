@@ -174,6 +174,7 @@ EXPECTED_PRIMITIVES: dict[str, dict[str, int]] = {
     "outbound/delivery.rs": {".edit_message": 1},
     "outbound/manual_delivery.rs": {"dispatch_channel_message": 3},
     "outbound/o_writer_io.rs": {".send_message": 1},
+    "outbound/o_writer_io/attachment.rs": {".send_message": 1},
     "outbound/serenity_reference.rs": {".send_message": 2},
     "outbound/transport.rs": {".send_message": 1},
     "outbound/turn_output_controller.rs": {"deliver_turn_output*": 3},
@@ -289,6 +290,7 @@ CENSUS: dict[str, tuple[str, ...]] = {
     "outbound/delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/manual_delivery.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/o_writer_io.rs": ("O", "KEEP_TRANSPORT"),
+    "outbound/o_writer_io/attachment.rs": ("O", "KEEP_TRANSPORT"),
     "outbound/serenity_reference.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/transport.rs": ("W19", "KEEP_TRANSPORT"),
     "outbound/turn_output_controller.rs": ("W19", "KEEP_TRANSPORT"),
@@ -808,6 +810,7 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
     problems = []
     if active & {"O_GATEWAY_CREATED_ACK", "O_REPOST_CREATED_ACK"} and ack_sites != {
         "src/services/discord/outbound/o_writer_io.rs": ["post:ack"],
+        "src/services/discord/outbound/o_writer_io/attachment.rs": ["post:ack"],
         "src/services/discord/outbound/o_writer_repost_io.rs": ["create:ack"],
     }:
         problems.append("transport guard: O ACK callers moved outside the two Created ports")
