@@ -1,7 +1,9 @@
 //! Messages under a Decision forum belong to the Decision service and never reach the agent's
-//! ordinary intake. The forums are the ones recorded as ready plus the configured overrides.
+//! ordinary intake. The forums are the ones recorded as ready plus the configured overrides; a
+//! forum this process posts to is registered before its first post, and a parent the last read
+//! missed is looked up in PG, so a forum another process just made ready is known at once.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -10,14 +12,30 @@ use sqlx::PgPool;
 
 use crate::config::decisions::DecisionsConfig;
 
-/// How long one read of the forum set is reused; a forum recorded since shows up within it.
+/// How long one full read of the forum set is reused before it is read again.
 const REFRESH: Duration = Duration::from_secs(30);
 
-/// The forum set this process last read, and when.
+/// The forum set this process last read and when, and the forums registered or found since; a
+/// later read replaces the first but never the second.
 #[derive(Default)]
-pub(crate) struct Forums(Mutex<Option<(Instant, HashSet<u64>)>>);
+pub(crate) struct Forums(Mutex<Option<(Instant, HashSet<u64>)>>, Mutex<BTreeSet<u64>>);
 
-static FORUMS: Forums = Forums(Mutex::new(None));
+static FORUMS: Forums = Forums(Mutex::new(None), Mutex::new(BTreeSet::new()));
+
+/// Guards `forum` in this process from now on, before anything is posted to it.
+pub(in crate::services::discord) fn register(forum: u64) {
+    FORUMS.register(forum);
+}
+
+/// Whether PG records `forum` as a ready Decision forum.
+async fn ready_in_pg(pool: &PgPool, forum: u64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM decision_forums WHERE forum_id = $1 AND state = 'ready')",
+    )
+    .bind(forum.to_string())
+    .fetch_one(pool)
+    .await
+}
 
 /// Every Decision forum a guard may know: the ready rows and the configured overrides. A forum
 /// whose create is still unknown has no id yet, so nothing is matched for it.
@@ -41,8 +59,13 @@ pub(crate) async fn load_forums(
 }
 
 impl Forums {
-    /// Whether `parent` is a Decision forum. A configured forum is one whatever was read before;
-    /// a read that fails keeps the last known set, so a forum already seen stays closed.
+    pub(crate) fn register(&self, forum: u64) {
+        (self.1.lock().unwrap_or_else(PoisonError::into_inner)).insert(forum);
+    }
+
+    /// Whether `parent` is a Decision forum. A configured or registered forum is one whatever
+    /// was read; a fresh read that misses asks PG for that one forum; a read that fails keeps
+    /// the last known set, so a forum already seen stays closed.
     pub(crate) async fn contains(
         &self,
         pool: Option<&PgPool>,
@@ -50,7 +73,9 @@ impl Forums {
         parent: u64,
     ) -> bool {
         let configured = |id: &String| id.parse::<u64>().ok() == Some(parent);
-        if config.forums_by_category.values().any(configured) {
+        let registered =
+            || (self.1.lock().unwrap_or_else(PoisonError::into_inner)).contains(&parent);
+        if config.forums_by_category.values().any(configured) || registered() {
             return true;
         }
         let known = |fresh_only: bool| {
@@ -59,8 +84,24 @@ impl Forums {
                 .filter(|(at, _)| !fresh_only || at.elapsed() < REFRESH)
                 .map(|(_, forums)| forums.contains(&parent))
         };
-        if let Some(answer) = known(true) {
-            return answer;
+        match (known(true), pool) {
+            (Some(true), _) => return true,
+            (Some(false), Some(pool)) => {
+                return match ready_in_pg(pool, parent).await {
+                    Ok(ready) => {
+                        if ready {
+                            self.register(parent);
+                        }
+                        ready
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "decision forum lookup failed; the last read stands");
+                        false
+                    }
+                };
+            }
+            (Some(false), None) => return false,
+            (None, _) => {}
         }
         match load_forums(pool, config).await {
             Ok(forums) => {
@@ -75,6 +116,20 @@ impl Forums {
             }
         }
     }
+}
+
+/// Whether the gateway cache knows `parent` as a channel that is no forum; a Decision forum is a
+/// forum, so a thread under any other kind needs no lookup.
+fn surely_not_forum(
+    ctx: &serenity::Context,
+    message: &serenity::Message,
+    parent: serenity::ChannelId,
+) -> bool {
+    let Some(guild) = message.guild_id.and_then(|guild| ctx.cache.guild(guild)) else {
+        return false;
+    };
+    (guild.channels.get(&parent))
+        .is_some_and(|channel| channel.kind != serenity::ChannelType::Forum)
 }
 
 /// The thread's parent as the gateway cache holds it, for when the caller's own read failed.
@@ -98,6 +153,9 @@ pub(in crate::services::discord) async fn consumes(
     let Some(parent) = parent.or_else(|| cached_parent(ctx, message)) else {
         return false;
     };
+    if surely_not_forum(ctx, message, parent) {
+        return false;
+    }
     let config = crate::config::snapshot()
         .map(|config| config.discord.decisions.clone())
         .unwrap_or_default();

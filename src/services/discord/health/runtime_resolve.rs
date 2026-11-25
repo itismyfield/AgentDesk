@@ -234,7 +234,7 @@ async fn select_direct_channel_shared(
     .to_string())
 }
 
-pub(super) async fn resolve_direct_channel_runtime(
+pub(crate) async fn resolve_direct_channel_runtime(
     registry: &HealthRegistry,
     channel_id: ChannelId,
     owner_provider: &ProviderKind,

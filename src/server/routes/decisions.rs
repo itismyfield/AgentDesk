@@ -1,5 +1,6 @@
 //! `POST /api/decisions` stores an agent's Decision request under the hash of its requester's
-//! capability; `GET /api/decisions/{id}` reads it back to that requester only. Nothing is posted.
+//! capability and posts it to the category's Decision forum with its buttons disabled;
+//! `GET /api/decisions/{id}` reads it back to that requester only.
 
 use axum::{
     Json,
@@ -11,7 +12,8 @@ use serde_json::{Value, json};
 use super::AppState;
 use super::agents_turn_target::resolve_agent_turn_target;
 use super::auth::HumanInputCaller;
-use crate::services::discord::decisions::{self, Ask, AskError, requester};
+use crate::services::discord::decisions::publication::{self, Asked, Outcome};
+use crate::services::discord::decisions::{self, Ask, AskError, card, requester};
 
 type RouteResponse = (StatusCode, Json<Value>);
 
@@ -20,7 +22,8 @@ fn failure(status: StatusCode, error: &str) -> RouteResponse {
 }
 
 /// The caller extractor answers before the body is read. The body names the agent and target;
-/// the header carries the capability whose hash becomes the request's owner.
+/// the header carries the capability whose hash becomes the request's owner. 201 means the post
+/// exists, 202 that it may and is not sent again, 502 a refusal and 503 that nothing was sent.
 pub async fn ask(
     _caller: HumanInputCaller,
     State(state): State<AppState>,
@@ -41,17 +44,55 @@ pub async fn ask(
         Ok(target) => target,
         Err(refused) => return refused,
     };
+    if let Some(units) = publication::too_long(&body, state.config.discord.owner_id) {
+        let (error, limit) = ("decision_post_too_long", card::CONTENT_LIMIT);
+        let body = json!({"ok": false, "error": error, "utf16_units": units, "limit": limit});
+        return (StatusCode::UNPROCESSABLE_ENTITY, Json(body));
+    }
     let scope = (target.logical_channel(), target.channel_id);
-    match decisions::store(pool, &body, scope, &capability).await {
-        // Stored only: publication is not wired, so no post, button or notice exists.
-        Ok((id, created)) => (
-            StatusCode::ACCEPTED,
-            Json(json!({"ok": true, "request_id": id, "created": created,
-                "publication": "pending"})),
+    let (id, created) = match decisions::store(pool, &body, scope, &capability).await {
+        Ok(stored) => stored,
+        Err(error) => return not_stored(error),
+    };
+    let asked = Asked {
+        request_id: id,
+        ask: &body,
+        logical_channel: target.logical_channel(),
+        provider: &target.provider,
+    };
+    let outcome = publication::publish(pool, registry, &state.config.discord, asked).await;
+    let (status, mut reply) = match outcome {
+        Outcome::Posted(thread) => (
+            StatusCode::CREATED,
+            json!({"ok": true, "publication": "disabled", "thread_id": thread.to_string()}),
         ),
-        Err(AskError::Invalid(rule)) => failure(StatusCode::BAD_REQUEST, rule),
-        Err(AskError::Conflict) => failure(StatusCode::CONFLICT, "idempotency_conflict"),
-        Err(AskError::Storage(error)) => {
+        Outcome::Pending => (
+            StatusCode::ACCEPTED,
+            json!({"ok": true, "publication": "pending"}),
+        ),
+        Outcome::Refused(error) => (
+            StatusCode::BAD_GATEWAY,
+            json!({"ok": false, "error": error}),
+        ),
+        Outcome::Unready(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok": false, "error": error}),
+        ),
+        Outcome::NoCategory => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            json!({"ok": false, "error": "target_category_unavailable"}),
+        ),
+    };
+    reply["request_id"] = json!(id);
+    reply["created"] = created.into();
+    (status, Json(reply))
+}
+
+fn not_stored(error: AskError) -> RouteResponse {
+    match error {
+        AskError::Invalid(rule) => failure(StatusCode::BAD_REQUEST, rule),
+        AskError::Conflict => failure(StatusCode::CONFLICT, "idempotency_conflict"),
+        AskError::Storage(error) => {
             tracing::warn!(%error, "decision ask was not stored");
             failure(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -83,7 +124,6 @@ pub async fn show(
         Ok(Some(request)) => {
             let mut body = json!(request);
             body["ok"] = true.into();
-            body["publication"] = "pending".into();
             (StatusCode::OK, Json(body))
         }
         Ok(None) => failure(StatusCode::FORBIDDEN, "not_request_owner"),

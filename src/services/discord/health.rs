@@ -188,8 +188,10 @@ pub(crate) use recovery::{judge_provider_channel_stop, stop_judged_provider_chan
 #[cfg(test)]
 pub(crate) use runtime_resolve::owner_runtime_for_tests;
 pub use runtime_resolve::resolve_bot_http;
-use runtime_resolve::{resolve_direct_channel_runtime, resolve_direct_channel_shared};
-pub(crate) use runtime_resolve::{resolve_intake_worker_runtime, resolve_utility_bot_http};
+use runtime_resolve::resolve_direct_channel_shared;
+pub(crate) use runtime_resolve::{
+    resolve_direct_channel_runtime, resolve_intake_worker_runtime, resolve_utility_bot_http,
+};
 #[allow(unused_imports)]
 pub use snapshot::{
     DiscordHealthSnapshot, HealthStatus, WatcherStateSnapshot, build_health_snapshot,

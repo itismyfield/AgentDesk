@@ -1,7 +1,10 @@
-//! Decision requests: what an agent asks its operator to choose. This slice stores the ask and
-//! keeps Decision forum threads out of agent intake; nothing is posted yet.
+//! Decision requests: what an agent asks its operator to choose. An ask is stored, then posted to
+//! its category's Decision forum with its buttons disabled; Decision forum threads stay out of
+//! agent intake.
 
+pub(crate) mod card;
 pub(crate) mod ingress;
+pub(crate) mod publication;
 pub(crate) mod requester;
 
 use serde::Deserialize;

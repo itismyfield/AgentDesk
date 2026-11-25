@@ -1,9 +1,11 @@
-//! Discord button custom-id codec for the manual-steer action handle, and its random issuance.
+//! Discord button custom-id codec for the action handle, and its random issuance. Manual steer
+//! owns `msteer:v1`; a Decision button carries the same handle under `decision:v1`.
 
 pub(crate) use super::handle_value::ActionHandle;
 
 const CUSTOM_ID_PREFIX: &str = "msteer:";
 const CUSTOM_ID_VERSION: &str = "v1";
+const DECISION_PREFIX: &str = "decision:";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CustomIdError {
@@ -24,6 +26,11 @@ impl ActionHandle {
 
     pub(crate) fn to_custom_id(self) -> String {
         format!("{CUSTOM_ID_PREFIX}{CUSTOM_ID_VERSION}:{}", self.to_hex())
+    }
+
+    /// The handle as a Decision button's custom-id; manual steer's parse refuses it as foreign.
+    pub(crate) fn to_decision_custom_id(self) -> String {
+        format!("{DECISION_PREFIX}{CUSTOM_ID_VERSION}:{}", self.to_hex())
     }
 
     pub(crate) fn parse_custom_id(custom_id: &str) -> Result<Self, CustomIdError> {
@@ -68,6 +75,7 @@ mod tests {
                 CustomIdError::NotManualSteer,
             ),
             (format!("MSTEER:v1:{hex}"), CustomIdError::NotManualSteer),
+            (format!("decision:v1:{hex}"), CustomIdError::NotManualSteer),
             (
                 format!("msteer:v2:{hex}"),
                 CustomIdError::UnsupportedVersion,

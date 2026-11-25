@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+pub(crate) mod publication;
 pub(crate) mod requests;
 
 /// The input source only the Decision service uses; a request that names it proves nothing.

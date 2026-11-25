@@ -46,3 +46,25 @@ fn decision_ask_options_are_distinct_words_with_a_whole_recommendation() {
         assert_eq!(rule(options.clone()), Err(expected), "{options}");
     }
 }
+
+/// The card is measured as Discord measures it, in UTF-16 units: one of exactly 2,000 units is
+/// posted, one more is refused, and a character outside the BMP counts twice.
+#[test]
+fn decision_card_is_refused_past_two_thousand_utf16_units() {
+    let card = |context: &str| {
+        let body = json!({"agent_id": "a", "target": {"channel_id": "7"}, "ref": "r",
+            "title": "t", "context": context, "options": [{"label": "x"}, {"label": "y"}]});
+        let ask: Ask = serde_json::from_value(body).unwrap();
+        let options = ask.stored_options().unwrap();
+        card::render(&ask, &options, Some(7), Uuid::nil()).map(|card| card.content)
+    };
+    let empty = card("").unwrap().encode_utf16().count();
+    // A context adds its own line: its text and one newline.
+    let room = card::CONTENT_LIMIT - empty - 1;
+    let fill = format!("{}{}", "a".repeat(room % 2), "😀".repeat(room / 2));
+    assert_eq!(
+        card(&fill).map(|text| text.encode_utf16().count()),
+        Ok(2000)
+    );
+    assert_eq!(card(&format!("{fill}😀")).err(), Some(2002));
+}

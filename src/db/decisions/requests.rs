@@ -118,6 +118,11 @@ pub(crate) struct RequestRow {
     pub context: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub options: Vec<OptionRow>,
+    /// stored, posting, disabled or post_failed; the thread once the post exists.
+    pub publication: String,
+    pub thread_id: Option<String>,
+    #[serde(rename = "error", skip_serializing_if = "Option::is_none")]
+    pub post_error: Option<String>,
 }
 
 /// The request only when `capability_sha256` is the hash it was asked under; a request of
@@ -135,18 +140,31 @@ pub(crate) async fn load_owned(
         String,
         String,
         chrono::DateTime<chrono::Utc>,
+        String,
+        Option<String>,
+        Option<String>,
     );
     let head: Option<Head> = sqlx::query_as(
         "SELECT requester_agent_id, logical_channel_id, target_channel_id, request_ref, title,
-                context, created_at
+                context, created_at, lifecycle, thread_id, post_error
          FROM decision_requests WHERE request_id = $1 AND capability_sha256 = $2",
     )
     .bind(request_id)
     .bind(capability_sha256)
     .fetch_optional(pool)
     .await?;
-    let Some((agent_id, logical_channel_id, target_channel_id, request_ref, title, context, at)) =
-        head
+    let Some((
+        agent_id,
+        logical,
+        target,
+        request_ref,
+        title,
+        context,
+        at,
+        publication,
+        thread,
+        error,
+    )) = head
     else {
         return Ok(None);
     };
@@ -166,12 +184,15 @@ pub(crate) async fn load_owned(
     Ok(Some(RequestRow {
         request_id,
         agent_id,
-        logical_channel_id,
-        target_channel_id,
+        logical_channel_id: logical,
+        target_channel_id: target,
         request_ref,
         title,
         context,
         created_at: at,
         options: options.into_iter().map(option).collect(),
+        publication,
+        thread_id: thread,
+        post_error: error,
     }))
 }

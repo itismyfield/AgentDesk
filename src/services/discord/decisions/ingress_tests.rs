@@ -82,3 +82,20 @@ async fn decision_forum_guard_takes_a_newly_configured_forum_at_once_pg() {
     assert!(forums.contains(Some(&pool), &after, 8_211_001).await);
     db.drop().await;
 }
+
+/// A forum registered before its first post stays guarded through a later read that lacks it
+/// and while PG is away.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_forum_registered_before_its_post_outlives_later_reads_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (forums, config) = (Forums::default(), DecisionsConfig::default());
+    assert!(!forums.contains(Some(&pool), &config, 8_211_005).await);
+    forums.register(8_211_005);
+    age(&forums);
+    assert!(forums.contains(Some(&pool), &config, 8_211_005).await);
+    pool.close().await;
+    age(&forums);
+    assert!(forums.contains(Some(&pool), &config, 8_211_005).await);
+    db.drop().await;
+}

@@ -130,7 +130,7 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr terminate`](#agentdesk-herdr-terminate) | Ask the local server to close one execution's pane and retire it; needs the live switch |  |
 | [`agentdesk herdr probe-user-default`](#agentdesk-herdr-probe-user-default) | Check the execution user's own herdr server once; reads no AgentDesk config or database |  |
 | [`agentdesk decision`](#agentdesk-decision) | Ask the operator to decide, and read a Decision request |  |
-| [`agentdesk decision ask`](#agentdesk-decision-ask) | Store a Decision request from a JSON body; nothing is posted until publication is wired |  |
+| [`agentdesk decision ask`](#agentdesk-decision-ask) | Ask from a JSON body: store the request and post it to the category's Decision forum |  |
 | [`agentdesk decision get`](#agentdesk-decision-get) | Read one Decision request |  |
 
 ## Commands
@@ -1322,12 +1322,12 @@ Usage: `agentdesk decision <COMMAND>`
 
 Subcommands:
 
-- `ask` — Store a Decision request from a JSON body; nothing is posted until publication is wired
+- `ask` — Ask from a JSON body: store the request and post it to the category's Decision forum
 - `get` — Read one Decision request
 
 ### `agentdesk decision ask`
 
-Store a Decision request from a JSON body; nothing is posted until publication is wired
+Ask from a JSON body: store the request and post it to the category's Decision forum
 
 Usage: `agentdesk decision ask [OPTIONS]`
 
