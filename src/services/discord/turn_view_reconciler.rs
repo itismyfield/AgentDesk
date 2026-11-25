@@ -21,7 +21,7 @@ use super::{SharedData, queue_reactions, reaction_lifecycle, runtime_store};
 // #4278: descendant module owns orphan-`⏳` defense while retaining access to
 // the reconciler's private target store and persistence helpers.
 mod orphan_sweep;
-// #8398: the ⏳ an idle owner puts on an input at acceptance and its settle.
+// The ⏳ an idle owner puts on an input at acceptance, and its settle.
 mod accept_pending;
 // #4554: mailbox-truth repair is isolated to keep this giant module net-zero.
 mod api;
@@ -358,7 +358,7 @@ pub(in crate::services::discord) struct TurnViewReconciler {
     targets: DashMap<TurnViewTarget, AppliedTarget>,
     target_locks: std::sync::Mutex<HashMap<TurnViewTarget, Arc<tokio::sync::Mutex<()>>>>,
     next_start_attempt: AtomicU64,
-    /// #8398: early ⏳ attempts noted at owner acceptance that no start has taken over yet.
+    /// Early ⏳ attempts noted at owner acceptance that no start has taken over yet.
     accept_pending: DashMap<TurnViewTarget, TurnStartAttempt>,
     // Bounded in-memory only. A restart loses this guard, and durable queue
     // replay remains the source of truth for messages still queued on disk.

@@ -1,5 +1,4 @@
-//! #8398: an idle owner's acceptance puts ⏳ on a person's input before the owner wakes; the
-//! handoff's return keeps it for a start and otherwise rolls it back to 📬 or clears it.
+//! An idle owner's acceptance ⏳ lands before the wake, stays for a start, else 📬 or cleared.
 
 use super::super::ingress::Intake;
 use super::*;

@@ -1,11 +1,5 @@
-//! #8398: an idle owner puts ⏳ on a person's input as soon as it accepts it, before the start
-//! is decided; the return of that input's owner handoff settles the ⏳ that no start took over.
-//!
-//! Every way a granted front can end without starting (busy pane, race loss, replay refusal or
-//! deferral, blocked or writer-held admission, injection) returns through the one handoff, so
-//! the settle there covers them all: back to 📬 while the owner still holds the original, cleared
-//! once it left the queue. A start re-notes Pending over the early ⏳ with a fresh attempt, which
-//! turns the attempt-scoped settle into a no-op.
+//! An idle owner puts ⏳ on a person's input at acceptance; the return of its one handoff keeps
+//! it for a start and otherwise rolls it back to 📬 or clears it, covering every other exit.
 
 use std::future::Future;
 use std::sync::Arc;

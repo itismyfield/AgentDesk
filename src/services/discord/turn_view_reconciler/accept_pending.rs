@@ -1,10 +1,5 @@
-//! #8398: the ⏳ an idle owner puts on a human input when it accepts it, before its start is
-//! decided, and the settle that retracts that ⏳ when no start took it over.
-//!
-//! A start site later re-notes Pending over the early ⏳; that only takes a fresh attempt
-//! (`update_matching_pending_attempt` or the generation transfer), never another add. Every
-//! rollback or clear here is scoped to the early attempt, so a start that took over makes the
-//! settle a no-op.
+//! The ⏳ an idle owner puts on an input at acceptance. A start re-notes Pending over it with a
+//! fresh attempt, so the attempt-scoped settle after the handoff never touches a started turn.
 
 use super::*;
 
@@ -35,9 +30,8 @@ impl TurnViewReconciler {
         Some(attempt)
     }
 
-    /// The early attempt on `target` that no start took over, with the owner it was noted under:
-    /// this generation's record, or a Pending that an older generation persisted (its record was
-    /// lost with that process). Consumes this generation's record either way.
+    /// The early attempt no start took over and its owner: this generation's record, else a
+    /// Pending an older generation persisted (a restart lost its record).
     fn untaken_accept_pending(
         &self,
         shared: &SharedData,
@@ -64,9 +58,8 @@ impl TurnViewReconciler {
         untaken.then_some((current.owner, attempt))
     }
 
-    /// Settles an early ⏳ once its owner handoff returned: back to 📬 while the owner still holds
-    /// the original, cleared when it left the queue without a start. `still_queued` is read only
-    /// when an untaken attempt exists. Returns whether it acted.
+    /// After the handoff: an untaken early ⏳ goes back to 📬 while the owner holds the input,
+    /// else it is cleared. `still_queued` is read only then; returns whether it acted.
     pub(in crate::services::discord) async fn settle_accept_pending<Q>(
         &self,
         shared: &SharedData,

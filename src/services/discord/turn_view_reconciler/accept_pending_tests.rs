@@ -1,5 +1,4 @@
-//! #8398: the early ⏳ an idle owner puts on an accepted input, taken over by a start or settled
-//! back to 📬 or cleared once its handoff returned without one.
+//! The early ⏳ is taken over by a start, else settled back to 📬 or cleared after the handoff.
 
 use super::*;
 
