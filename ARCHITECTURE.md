@@ -244,7 +244,8 @@ src/
 │   │   └── pg_tests.rs
 │   ├── decisions/
 │   │   ├── publication.rs
-│   │   └── requests.rs
+│   │   ├── requests.rs
+│   │   └── selection.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
@@ -1800,8 +1801,10 @@ src/
 │   │   ├── decisions/
 │   │   │   ├── ask_tests.rs
 │   │   │   ├── card.rs
+│   │   │   ├── component.rs
 │   │   │   ├── ingress.rs
 │   │   │   ├── ingress_tests.rs
+│   │   │   ├── lifecycle.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── publication.rs
 │   │   │   ├── publication_tests.rs
