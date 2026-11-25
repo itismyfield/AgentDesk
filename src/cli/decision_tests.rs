@@ -110,6 +110,26 @@ fn decision_get_presents_the_capability_its_request_was_asked_under() {
     assert!(remember(root.path(), &json!({"ok": false}), Some(&asked)).is_err());
 }
 
+/// A stored request is linked to its capability before its answer is shown, and an answer whose
+/// link cannot be written is never shown as a success.
+#[test]
+fn decision_ask_answer_is_shown_only_once_its_request_is_linked() {
+    let root = tempfile::tempdir().unwrap();
+    let (capability, id) = ("a".repeat(64), uuid::Uuid::new_v4());
+    let reply = json!({"ok": true, "request_id": id});
+    let mut shown = 0;
+    let linked = settle(root.path(), 201, &reply, Some(&capability), |_| {
+        assert!(owner_cache::of_request(root.path(), id).is_ok());
+        shown += 1;
+    });
+    assert_eq!((linked, shown), (Ok(()), 1));
+    let blocked = tempfile::NamedTempFile::new().unwrap();
+    let unlinked = settle(blocked.path(), 202, &reply, Some(&capability), |_| {
+        panic!("a success shown without its link")
+    });
+    assert!(unlinked.is_err());
+}
+
 /// One channel is one scope however its id is spelled, and a name that is no id is refused
 /// before any capability exists.
 #[test]

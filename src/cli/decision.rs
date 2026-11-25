@@ -17,7 +17,7 @@ pub(crate) struct DecisionArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum DecisionCommand {
-    /// Store a Decision request from a JSON body; nothing is posted until publication is wired
+    /// Ask from a JSON body: store the request and post it to the category's Decision forum
     Ask {
         /// Path of the request JSON, or `-` for stdin
         #[arg(long)]
@@ -44,11 +44,7 @@ pub(crate) fn run(args: DecisionArgs) -> Result<(), String> {
                 super::client::post_local_with(&base, "/api/decisions", &body, read, owner)
                     .map_err(unanswered)
             })?;
-            print(&reply);
-            if status != 202 {
-                return Err(format!("decision ask: HTTP {status}"));
-            }
-            remember(&root, &reply, presented.as_deref())
+            settle(&root, status, &reply, presented.as_deref(), print)
         }
         DecisionCommand::Get { id } => {
             let id = uuid::Uuid::parse_str(id.trim())
@@ -76,6 +72,24 @@ fn ask<T>(
     let scope = owner_cache::Scope::of(body)?;
     let capability = owner_cache::prepare(root, &scope)?;
     send(&capability)
+}
+
+/// An answered ask. A stored request is linked to its capability before its answer is shown, so
+/// an id on stdout can always be read back; any other answer is shown as the error it is.
+fn settle(
+    root: &std::path::Path,
+    status: u16,
+    reply: &Value,
+    capability: Option<&str>,
+    show: impl FnOnce(&Value),
+) -> Result<(), String> {
+    if !matches!(status, 201 | 202) {
+        show(reply);
+        return Err(format!("decision ask: HTTP {status}"));
+    }
+    remember(root, reply, capability)?;
+    show(reply);
+    Ok(())
 }
 
 /// Links the request an ask's answer names to the capability it was asked under.

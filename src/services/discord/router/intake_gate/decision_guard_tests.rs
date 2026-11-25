@@ -1,5 +1,6 @@
 //! The gate itself keeps a message under a Decision forum out of agent intake: such a message
-//! leaves no dedup entry, while the same message under any other parent goes on into intake.
+//! leaves no dedup entry, while the same message under any other parent goes on into intake. The
+//! parent comes from REST, or from the gateway cache when REST cannot read the thread.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,8 +22,10 @@ const FORUM: u64 = 940_821_100_000_001;
 const ELSEWHERE: u64 = 940_821_100_000_002;
 const UNDER_FORUM: u64 = 940_821_100_000_003;
 const UNDER_ELSEWHERE: u64 = 940_821_100_000_004;
+const CACHED_UNDER_FORUM: u64 = 940_821_100_000_005;
+const CACHED_UNDER_ELSEWHERE: u64 = 940_821_100_000_006;
 
-/// Both test channels are threads that name their parent; every other channel is plain text.
+/// Two threads name their parent over REST, the cached ones cannot be read, the rest are text.
 async fn discord_http(request: Request<Body>) -> Response {
     let path = request.uri().path();
     let id = (path.strip_prefix("/api/v10/channels/")).and_then(|id| id.parse::<u64>().ok());
@@ -30,6 +33,10 @@ async fn discord_http(request: Request<Body>) -> Response {
         let unknown = json!({"message": "unexpected fixture endpoint", "code": 0});
         return (StatusCode::NOT_FOUND, axum::Json(unknown)).into_response();
     };
+    if matches!(id, CACHED_UNDER_FORUM | CACHED_UNDER_ELSEWHERE) {
+        let down = json!({"message": "unreadable fixture channel", "code": 0});
+        return (StatusCode::INTERNAL_SERVER_ERROR, axum::Json(down)).into_response();
+    }
     let parent = match id {
         UNDER_FORUM => Some(FORUM),
         UNDER_ELSEWHERE => Some(ELSEWHERE),
@@ -46,6 +53,48 @@ async fn discord_http(request: Request<Body>) -> Response {
             "parent_id": null}),
     };
     axum::Json(channel).into_response()
+}
+
+/// The gateway cache holds the guild with the two threads REST cannot read.
+fn cache_threads(ctx: &serenity::Context) {
+    let mut guild = serde_json::to_value(serenity::Guild::default()).unwrap();
+    guild["id"] = json!(GUILD.to_string());
+    let thread = |id: u64, parent: u64| {
+        json!({"id": id.to_string(), "type": 11,
+        "guild_id": GUILD.to_string(), "name": "thread", "parent_id": parent.to_string()})
+    };
+    guild["threads"] = json!([
+        thread(CACHED_UNDER_FORUM, FORUM),
+        thread(CACHED_UNDER_ELSEWHERE, ELSEWHERE)
+    ]);
+    let mut event: serenity::GuildCreateEvent = serde_json::from_value(guild).unwrap();
+    ctx.cache.update(&mut event);
+}
+
+/// Whether the message got past the guard into intake's dedup. A message the guard keeps must
+/// leave the handler cleanly and in time, so a crash or a hang never reads as kept out.
+async fn reaches_intake(ctx: &serenity::Context, data: &Arc<Data>, thread: u64, id: u64) -> bool {
+    let mut message = discord_mock::user_message(id, "operator reply");
+    message.channel_id = serenity::ChannelId::new(thread);
+    message.guild_id = Some(serenity::GuildId::new(GUILD));
+    let event = serenity::FullEvent::Message {
+        new_message: message,
+    };
+    let (task_ctx, task_data) = (ctx.clone(), data.clone());
+    let mut handled =
+        tokio::spawn(async move { router::handle_event(&task_ctx, &event, &task_data).await });
+    let finished = tokio::time::timeout(Duration::from_secs(10), &mut handled).await;
+    let key = format!("mid:{id}");
+    let entered = data.shared.dispatch.intake_dedup.contains_key(&key);
+    if !entered {
+        let joined = finished.expect("a kept message leaves the gate within 10s");
+        joined
+            .expect("the gate task panicked")
+            .expect("the gate failed");
+    } else if finished.is_err() {
+        handled.abort();
+    }
+    entered
 }
 
 #[tokio::test]
@@ -69,37 +118,20 @@ async fn decision_forum_message_stops_at_the_gate_before_agent_intake_pg() {
         token: "test-token".into(),
         provider: ProviderKind::Claude,
     });
+    cache_threads(&ctx);
     let mut reached = Vec::new();
     for (thread, id) in [
         (UNDER_FORUM, 940_821_100_000_011_u64),
         (UNDER_ELSEWHERE, 940_821_100_000_012),
+        (CACHED_UNDER_FORUM, 940_821_100_000_013),
+        (CACHED_UNDER_ELSEWHERE, 940_821_100_000_014),
     ] {
-        let mut message = discord_mock::user_message(id, "operator reply");
-        message.channel_id = serenity::ChannelId::new(thread);
-        message.guild_id = Some(serenity::GuildId::new(GUILD));
-        let event = serenity::FullEvent::Message {
-            new_message: message,
-        };
-        let (task_ctx, task_data) = (ctx.clone(), data.clone());
-        let mut handled = tokio::spawn(async move {
-            let _ = router::handle_event(&task_ctx, &event, &task_data).await;
-        });
-        if tokio::time::timeout(Duration::from_secs(10), &mut handled)
-            .await
-            .is_err()
-        {
-            handled.abort();
-        }
-        let entered = shared
-            .dispatch
-            .intake_dedup
-            .contains_key(&format!("mid:{id}"));
-        reached.push(entered);
+        reached.push(reaches_intake(&ctx, &data, thread, id).await);
     }
     assert_eq!(
         reached,
-        [false, true],
-        "under the forum: no intake; under another parent: intake"
+        [false, true, false, true],
+        "under the forum (REST or cached parent): no intake; under another parent: intake"
     );
     http.abort();
     gateway.abort();
