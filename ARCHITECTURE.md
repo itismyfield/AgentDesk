@@ -4769,7 +4769,9 @@ src/
 │   │   │   │   ├── input_notices/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
-│   │   │   │   └── input_notices.rs
+│   │   │   │   ├── input_notices.rs
+│   │   │   │   ├── tool_images.rs
+│   │   │   │   └── tool_images_tests.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4926,6 +4928,10 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── tool_images/
+│   │   │   │   ├── kind_tests.rs
+│   │   │   │   ├── turns.rs
+│   │   │   │   └── turns_tests.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
