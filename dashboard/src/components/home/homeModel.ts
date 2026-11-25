@@ -1,4 +1,4 @@
-import type { Campaign } from "../../api/campaigns";
+import type { Campaign, HomeLegacyCampaignSummary } from "../../api/campaigns";
 import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView } from "../../api/serverCampaigns";
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
@@ -684,7 +684,7 @@ function uptimeText(seconds: number, tr: Tr): string {
 export function buildSystemRows({ health, healthFailed, legacy, documents, tr }: {
   health: HomeHealth | null;
   healthFailed: boolean;
-  legacy: Campaign[] | null;
+  legacy: ReadonlyArray<HomeLegacyCampaignSummary> | null;
   documents: ServerCampaignDocument[];
   tr: Tr;
 }): SystemRow[] {
@@ -785,7 +785,7 @@ function serverCampaignRow(summary: ServerCampaignSummary, document: ServerCampa
   };
 }
 
-function legacyCampaignRow(campaign: Campaign, tr: Tr): CampaignRow {
+function legacyCampaignRow(campaign: HomeLegacyCampaignSummary, tr: Tr): CampaignRow {
   const { counts, total } = campaignProgress(campaign.nodes);
   const [label, tone]: [string, HomeTone] = campaign.status === "active"
     ? [tr("진행 중", "Active"), "info"]
@@ -808,7 +808,7 @@ function legacyCampaignRow(campaign: Campaign, tr: Tr): CampaignRow {
 }
 
 export function buildCampaignRows({ legacy, summaries, documents, tr, limit }: {
-  legacy: Campaign[] | null;
+  legacy: ReadonlyArray<HomeLegacyCampaignSummary> | null;
   summaries: ServerCampaignSummary[] | null;
   documents: ServerCampaignDocument[];
   tr: Tr;
