@@ -1,7 +1,5 @@
-//! Which durable record proves one iMessage execution before its spool is adopted.
-//!
-//! The PG admission row proves the original and its destination; only the inflight row names the
-//! nonce, so only it binds a spool to one execution. A PG row alone holds the slot.
+//! Evidence for one iMessage execution: the PG row proves the original and destination, and only
+//! the inflight row names the nonce, so a PG row alone holds the slot.
 
 use std::collections::BTreeMap;
 
