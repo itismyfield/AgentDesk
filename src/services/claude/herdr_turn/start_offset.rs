@@ -61,6 +61,12 @@ pub(super) fn wait(
             .map_err(|error| format!("Failed to read turn transcript: {error}"))?;
         if record.last() == Some(&b'\n') {
             if std::str::from_utf8(&record).is_ok_and(|line| eligible(line, &submitted_at)) {
+                // The turn's first own record is in this file: a cold start's source is pinned to it.
+                if let (Some(state), SourceFileIdentity::Unix { dev, ino }) =
+                    (token.herdr_interrupt_state(), identity)
+                {
+                    state.source_observed((dev, ino));
+                }
                 return Ok(Some(offset));
             }
             offset = offset.saturating_add(record.len() as u64);
