@@ -1,0 +1,4 @@
+# Generated data left out of the PR size cap (scripts/pr_cap_prod.py prints it as GENERATED_DATA).
+# A file here is produced by a tool and checked by a command, so it is not review surface.
+# One row per glob, three tab-separated fields: glob<TAB>generation command<TAB>verification command
+# Lines starting with # and blank lines are ignored. The list is read from the measured head commit.
