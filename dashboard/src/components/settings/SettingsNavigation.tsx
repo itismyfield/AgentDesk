@@ -52,6 +52,7 @@ function PhoneRow({
         )}
       </span>
       <ItemChip item={item} tr={tr} />
+      <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />
     </RowButton>
   );
 }
@@ -73,38 +74,14 @@ export function SettingsPhoneCatalog({
   tr,
 }: SettingsPhoneCatalogProps) {
   if (category === "all" && !searching) {
+    const essentialKeys = new Set(essential.map((item) => item.key));
+    const nonEssentialDiffering = differing.filter((item) => !essentialKeys.has(item.key));
     return (
       <div className="flex min-w-0 flex-col gap-3" data-testid="settings-catalog">
         {notice}
         {loading ? (
           <KitCard>
             <CardSkeleton label={tr("설정을 불러오는 중…", "Loading settings…")} />
-          </KitCard>
-        ) : null}
-        {essential.length > 0 ? (
-          <KitCard as="section" aria-label={tr("필수 운영 설정", "Essential settings")} data-testid="settings-tier-essential">
-            <Row className="min-h-[52px]">
-              <h2 className="m-0 flex-1 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("필수 운영 설정", "Essential settings")}</h2>
-              <CountBadge count={essential.length} />
-            </Row>
-            {essential.map((item) => (
-              <div key={item.key} className="border-t border-[var(--line-soft)]">
-                <PhoneRow item={item} selected={selectedKey === item.key} onOpen={onOpen} tr={tr} />
-              </div>
-            ))}
-          </KitCard>
-        ) : null}
-        {differing.length > 0 ? (
-          <KitCard as="section" aria-label={tr("기본값과 다름", "Differs from default")} data-testid="settings-differing">
-            <Row className="min-h-[52px]">
-              <h2 className="m-0 flex-1 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("기본값과 다름", "Differs from default")}</h2>
-              <CountBadge count={differing.length} tone="warn" />
-            </Row>
-            {differing.map((item) => (
-              <div key={item.key} className="border-t border-[var(--line-soft)]">
-                <PhoneRow item={item} selected={selectedKey === item.key} onOpen={onOpen} tr={tr} />
-              </div>
-            ))}
           </KitCard>
         ) : null}
         <nav aria-label={tr("분류", "Categories")}>
@@ -120,6 +97,32 @@ export function SettingsPhoneCatalog({
             ))}
           </KitCard>
         </nav>
+        {essential.length > 0 ? (
+          <KitCard as="section" aria-label={tr("필수 운영 설정", "Essential settings")} data-testid="settings-tier-essential">
+            <Row className="min-h-[52px]">
+              <h2 className="m-0 flex-1 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("필수 운영 설정", "Essential settings")}</h2>
+              <CountBadge count={essential.length} />
+            </Row>
+            {essential.map((item) => (
+              <div key={item.key} className="border-t border-[var(--line-soft)]">
+                <PhoneRow item={item} selected={selectedKey === item.key} onOpen={onOpen} tr={tr} />
+              </div>
+            ))}
+          </KitCard>
+        ) : null}
+        {nonEssentialDiffering.length > 0 ? (
+          <KitCard as="section" aria-label={tr("기본값과 다름", "Differs from default")} data-testid="settings-differing">
+            <Row className="min-h-[52px]">
+              <h2 className="m-0 flex-1 text-sm leading-5 font-semibold text-[var(--fg)]">{tr("기본값과 다름", "Differs from default")}</h2>
+              <CountBadge count={nonEssentialDiffering.length} tone="warn" />
+            </Row>
+            {nonEssentialDiffering.map((item) => (
+              <div key={item.key} className="border-t border-[var(--line-soft)]">
+                <PhoneRow item={item} selected={selectedKey === item.key} onOpen={onOpen} tr={tr} />
+              </div>
+            ))}
+          </KitCard>
+        ) : null}
         {blocks}
       </div>
     );
