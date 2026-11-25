@@ -169,9 +169,8 @@ fn note(channel: ChannelId, reason: &str, said: &mut Option<String>) {
     *said = Some(reason.to_string());
 }
 
-/// A claimed start whose Bound execution this owner can never recover: the exact claim and its
-/// originals are removed, their origin is owed `Failed`, the reason is posted or handed to the
-/// outbox, and the start settles as a non-send.
+/// A claimed start whose Bound execution this owner can never recover: its originals go with a
+/// `Failed` receipt and a posted (or outboxed) reason, and the start settles as a non-send.
 pub(super) async fn reject(
     shared: &Shared,
     channel: ChannelId,

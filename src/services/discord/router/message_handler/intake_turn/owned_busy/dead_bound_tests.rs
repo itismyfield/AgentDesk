@@ -1,6 +1,5 @@
-//! The dead-Bound recovery's own judgements: the owner is compared with the asking provider, a
-//! held transition lock or any turn, inflight row or unread inflight file leaves the row for a later
-//! look, and a person's own intake guard never blocks it.
+//! The recovery's own judgements: the owner is the asking provider's; a held lock, a turn,
+//! an inflight row or an unread inflight file leaves the row; a person's guard never blocks it.
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{HostedObservation, HostedOwner, SourceRef};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;

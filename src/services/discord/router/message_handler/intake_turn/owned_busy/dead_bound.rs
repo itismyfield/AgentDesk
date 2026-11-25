@@ -1,6 +1,5 @@
-//! The dead-Bound recovery a person's early entry and a synthetic start's pre-claim read share.
-//! Under the channel transition lease it proves the recorded execution ended, sees that no turn
-//! token or inflight row holds the channel, and only then retires that exact row.
+//! The dead-Bound recovery a person's entry and a synthetic start's pre-claim read share: under the
+//! transition lease it proves the execution ended and no turn holds the channel, then retires it.
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedLocation, HostedRecord, HostedState,

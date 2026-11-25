@@ -1,8 +1,5 @@
-//! A synthetic start (a wake-watch resume) on a Bound Herdr execution, through the actual idle
-//! start: a proven-ended execution (missing pane or lone recorded root shell) is retired before any
-//! write and a fresh one takes the input; one this owner can never recover is refused with a Failed
-//! receipt; a live, unreadable or turn-held execution is left as it was. A person's input on a lone
-//! root shell reaches the same recovery.
+//! A wake-watch resume on a Bound Herdr execution through the actual idle start: a proven-ended one
+//! is retired before any write, an unrecoverable one refused Failed, a live or held one kept.
 use super::missing_input::recording_runtime;
 use super::*;
 use crate::services::discord::queue_io::input_owner::admission::admit_with_context;
@@ -315,8 +312,8 @@ fn dispatch_drive(
     }
 }
 
-// T10b: a person's input on a lone recorded root shell now reaches the same recovery under its own
-// borrowed intake guard; #8212 alone accepted only a missing pane.
+// T10b: a person's input on a lone recorded root shell reaches the same recovery under its own
+// borrowed intake guard; the earlier person-only recovery accepted only a missing pane.
 #[test]
 fn a_person_input_retires_a_lone_root_shell_under_its_own_guard_pg() {
     let fx = Fixture::new("dead-bound-person-shell", None);

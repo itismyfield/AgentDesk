@@ -243,3 +243,40 @@ giant 규칙: intake_turn.rs(인자 1개)와 owner_input.rs(closure 블록 이�
 | P2-1 inflight 판독 fail-open | `_result` API, `Ok(None)`만 통과. T12 | 5.1 T |
 | P2-2 비용 과소 기재 | 실제 경로로 정정, 사유 변화만 info. T13 | 5.1 C, 5.4 |
 | 사람 입력 영향 | T10 (a)~(e) | 3절, 5.3 |
+
+## 8. 구현 반영(impl-w1, S3b-1 w4 `4e9dd9e38d` merge 위)
+
+### 8.1 계약 L 보강: 증명 → 무턴 판독 → CAS
+`retire::observed`를 `prove`(판독만)와 `on_reading`(CAS)으로 나눴다. 공통 recovery는 lease 아래에서 ① `root_replaced::current` → ② `prove` → ③ token·inflight `_result` → ④ `on_reading` 순서로 간다.
+이 순서에서는 살아 있던 provider가 남긴 증거로 만들어진 token·inflight가 ③에서 이미 보인다. 증명 뒤에는 그런 증거가 새로 생길 수 없다.
+
+### 8.2 등록 경로 감사(리뷰 xh P2-1, 완료 조건)
+token 등록(`mailbox_try_start_turn*`, `try_start_turn_with_stale_busy_heal`, `restore_active_turn*`)과 inflight 신규 생성(`save_inflight_state*`)의 prod 호출자 전수:
+
+| # | 경로 | 만드는 것 | transition lock | Herdr 죽은 Bound에서 도달 | 처리 |
+|---|---|---|---|---|---|
+| 1 | router/turn_start.rs:142-179 `claim_reserved_headless_turn` | token | `acquire`(:151) | 예 | 이미 배제 |
+| 2 | intake_turn.rs:663 → 1011 사람 intake(`try_start_turn_with_stale_busy_heal`, message_handler.rs:110-150) | token | intake guard | 예 | 이미 배제, recovery는 borrow |
+| 3 | tui_prompt_relay/synthetic_start/claim/admitted.rs:279 → tui_direct_pending_start/state.rs:403, bridge_handoff.rs:889 | inflight·token | AdmissionFence lease(admission_fence.rs:40-44) | 예 | 이미 배제 |
+| 4 | recovery_engine/runtime.rs:325 `reregister_active_turn_from_inflight_inner` | token | 없음 | 기존 inflight 행이 있어야 함 | ③ inflight 판독이 먼저 막음 |
+| 5 | provider_isolation.rs:278 `save_intake_inflight` | inflight | (#2 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |
+| 6 | foreign_row.rs:47, headless_turn/replay_start.rs:73, headless_turn.rs:1015 | inflight | (#1 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |
+| 7 | tmux_watcher/liveness.rs:473-529 `reacquire_watcher_inflight_for_active_stream`(호출 streaming_status_tick.rs:282, loop_poll_prologue.rs:436) | inflight 단독 | 없었음 | 예(watcher가 Herdr도 돌고 `transcript_turns`가 보장되지 않음) | **lease 적용**: `reacquire_under_transition`이 `try_acquire`, 바쁘면 다음 tick |
+| 8 | tmux.rs:614-680 `start_monitor_auto_turn_when_available`(+ monitor_auto_turn_inflight.rs:54) | token(+ 뒤따르는 inflight) | 없었음 | 예(같은 watcher) | **lease 적용**: headless claim처럼 `acquire`(최대 3초), 실패는 기존 deferred 경로 |
+| 9 | recovery_engine/manual_rebind/mod.rs:770 | inflight | 없음 | 아니오: 운영자 `/rebind`, 살아 있는 tmux 세션 확인이 먼저 | 근거만 |
+| 10 | turn_orchestrator.rs:799 `restore_active_turn_kinded` | (정의 wrapper) | — | — | 해당 없음 |
+
+시험 전용 호출(분리): outbound/o_writer_io/agy.rs:184·199, tmux_reaper.rs:951·996·1085·1160·1210·1305·1476, turn_finalizer/cleanup/terminal_release.rs:182·205·264·284, tui_prompt_relay/bridge_completion.rs:121·135·150·205·281·360, tmux_watcher/placeholder_reclaim.rs:193, health/turn_deliver.rs:696(`seed_*_for_tests`), health/{recovery,watcher_respawn,snapshot}.rs의 시험 모듈, turn_finalizer/episode.rs:884, router/message_handler/turn_lifecycle.rs:242.
+감사 경로 10, lease 적용 2(#7, #8). 상태 차트에 `InflightStart`(watcher의 inflight 단독 생성)와 뮤턴트 `inflightNoLease`를 넣었다.
+
+### 8.3 리뷰 xh P2-2: 사람 입력의 Ended 확장과 Missing watch
+`owned_busy/missing_watch.rs`는 이제 Missing만이 아니라 CLI와 같은 `view.ended`(Missing 또는 기록된 root shell만 남음)를 읽는다. 무턴(token 없음)이고 inflight가 정확히 `Ok(None)`이면 Ready로 owner를 깨운다.
+watch 자체는 retire하지 않는다. 깨어난 intake가 공통 recovery를 다시 탄다(lone root shell → inflight 판독 오류 → 회복 → wake → retire → Cold).
+
+### 8.4 리뷰 xh P2-3: MISSING marker
+CLI `retire::observed(Scope::Ended)`는 marker를 남기지 않는다(그대로). 부팅 `Scope::Missing`도 그대로다. 공통 recovery는 실제 판독이 Missing일 때만 `retire::note_missing`으로 남긴다(lone root shell은 남기지 않음).
+
+### 8.5 Codex 시험 범위
+Codex Herdr 시험 rig(`provider_dispatch_codex_herdr_tests.rs`)는 provider 실행 단계(`fx.turn`)용이다. owner 판독 단계(runtime root, 세션 키, session_hosts)가 구성되어 있지 않다.
+이번 조각은 provider에 따라 갈리는 owner 비교를 순수 함수 `owner_differs`로 떼어 Claude·Codex 단위 시험으로 고정했다(뮤턴트 OwnerClaudeConst RED).
+Codex 판독 경로의 조기 반환은 코드에서 없앴다(두 provider가 같은 `screen == Unknown && bound` 분기를 지남). T1x·T2x·T4x·T9x E2E는 Codex owner rig가 필요해 남는 일로 둔다.

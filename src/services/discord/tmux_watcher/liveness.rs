@@ -469,9 +469,8 @@ pub(in crate::services::discord) fn build_watcher_reacquire_inflight_state(
     state
 }
 
-/// Runs a watcher's inflight reacquire under the channel transition lease, never waiting for it:
-/// a dead-Bound recovery between its no-turn read and its CAS keeps this row out, and a busy lock
-/// leaves the reacquire to the watcher's next tick.
+/// Runs a watcher's inflight reacquire under the channel transition lease, never waiting for it; a
+/// recovery between its no-turn read and its CAS keeps this row out until the next tick.
 pub(in crate::services::discord) fn reacquire_under_transition(
     shared: &crate::services::discord::SharedData,
     channel_id: ChannelId,

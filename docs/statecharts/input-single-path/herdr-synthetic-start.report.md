@@ -1,4 +1,4 @@
-# HerdrSyntheticStart (#8422, rev2)
+# HerdrSyntheticStart (#8422, rev2 + impl-w1)
 
 Code SHA: `82b96fa94b8d5e552f55d4f9c8a80d909503755c` (#8399 S3b-1 w3). Design: [8422 design rev2](../../design/8422-synthetic-dead-bound.design.md).
 
@@ -14,6 +14,8 @@ with the asking provider and the CLI `retire::observed(Scope::Ended)` proof. The
 lease from its last no-turn read to the CAS (`retiring` phase; a person borrows its own guard), and passes only an
 exact `Ok(None)` inflight read. A retired row reads Ready and the start cold-launches. A permanent refusal settles Failed.
 `TurnStart` is another start registering its token; it must take the transition lock first (turn_start.rs:151).
+`InflightStart` is a watcher creating an inflight row alone (liveness.rs:473-529 reacquire, monitor auto turn); the
+implementation makes it take the same lease (design 8.2).
 
 Rules: `SyntheticSettles` (delivered or explicitly refused), `OwnedStartDelivered` (a start whose owner matches is
 delivered), `NoAutoRetireLive`, `NoAutoRetireUnderTurn` (no Bound retired while a token or an unproven inflight read
@@ -29,9 +31,11 @@ holds the channel), `RetiredStartIsCold`, `RejectedIsFailed`, `TypeOK`, and the 
 | FixedLive, FixedBusy, FixedUnreadable, FixedCodexLive, FixedCodexUnreadable | live or unreadable: never retired | - |
 | FixedManagedTurn, FixedExternalTurn, FixedInflightUnreadable | turn, inflight row, inflight read error | - |
 | FixedRace, FixedRaceLive | token registration race around the CAS | - |
+| FixedInflightRace, FixedPersonInflightRace | a watcher's lone inflight row racing the CAS | - |
 | CodexEarlyReturn | mutant: Codex returns before the recovery | SyntheticSettles, OwnedStartDelivered |
 | OwnerClaudeConst | mutant: owner compared with "claude" | OwnedStartDelivered |
 | NoLease | mutant: no lease between read and CAS | NoAutoRetireUnderTurn |
+| InflightNoLease | mutant: the lone inflight row skips the lease | NoAutoRetireUnderTurn |
 | NoBorrow | mutant: person re-acquires its own lock | SyntheticSettles, OwnedStartDelivered |
 | RejectAsCompleted | mutant: refusal settled Completed | RejectedIsFailed |
 | OkFlatten | mutant: inflight read error passes as no row | NoAutoRetireUnderTurn |
@@ -43,7 +47,7 @@ holds the channel), `RetiredStartIsCold`, `RejectedIsFailed`, `TypeOK`, and the 
 
 RED 5 → GREEN 5 (Before, BeforeShell, BeforeCodex, BeforeForeign, BeforePersonShell →
 Fixed, FixedShell, FixedCodex, FixedForeign, FixedPersonShell).
-`scripts/ci/statecharts_tlc.py --base 82b96fa94b --jobs 4`: PASS 36/36 (29.5 s total).
+`scripts/ci/statecharts_tlc.py --base 82b96fa94b --jobs 4`: PASS 39/39 (29.8 s total).
 
 `NoLease` shortest counterexample: front arrives → `start_waits` begins the retire without a lease →
 another start registers its token → the CAS retires a Bound that a turn holds.
@@ -51,5 +55,5 @@ another start registers its token → the CAS retires a Bound that a turn holds.
 Charts: [before](herdr-synthetic-start.before.chart.mmd), [fixed](herdr-synthetic-start.chart.mmd),
 [no lease](herdr-synthetic-start.nolease.chart.mmd).
 Not modelled: a tmux pane dying during an Event wait (acceptance test T8 fixes the watcher → unbound Idle → WakeOwner
-order), token registrations outside the transition lock (implementation audit, design 5.1 L), pane naming waits,
+order), the audit's per-call proofs (design 8.2), pane naming waits,
 transient row read failures, restart-gate holds, receipt persistence across restart (acceptance test T7).
