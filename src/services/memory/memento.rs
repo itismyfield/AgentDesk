@@ -78,18 +78,17 @@ pub(crate) async fn with_memento_test_endpoint<T>(
 
 #[cfg(any(test, feature = "test-support"))]
 impl MementoBackend {
-    /// Resolves the workspace under a fixture runtime config that carries only `workspace_override`.
+    /// Resolves the workspace under a fixture runtime config with no workspace override.
     pub(crate) fn resolve_workspace_for_test(
         &self,
         role_id: &str,
         channel_id: u64,
         channel_name: Option<&str>,
-        workspace_override: Option<String>,
     ) -> String {
         let config = MementoRuntimeConfig {
             endpoint: "fixture".into(),
             access_key: "fixture".into(),
-            workspace_override,
+            workspace_override: None,
         };
         self.resolve_workspace(role_id, channel_id, channel_name, &config)
     }

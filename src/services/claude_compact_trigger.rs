@@ -13,14 +13,21 @@ use crate::services::provider::ProviderKind;
 mod turn_identity;
 pub(in crate::services) use turn_identity::CompactTurnIdentity;
 
-/// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
-/// channel and the physical tmux pane so [`clear_for_tmux`] can forget every
-/// channel's flag for a recreated pane name (launch/teardown hygiene).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct CompactPaneKey {
-    channel_id: u64,
-    tmux_session_name: String,
+// The key lives in a private child so only test builds can name it outside this module.
+mod pane_key {
+    /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
+    /// channel and the physical tmux pane so [`super::clear_for_tmux`] can forget every
+    /// channel's flag for a recreated pane name (launch/teardown hygiene).
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub(crate) struct CompactPaneKey {
+        pub(super) channel_id: u64,
+        pub(super) tmux_session_name: String,
+    }
 }
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use pane_key::CompactPaneKey;
+#[cfg(not(any(test, feature = "test-support")))]
+use pane_key::CompactPaneKey;
 
 /// Per-pane once-per-fill-cycle state.
 ///

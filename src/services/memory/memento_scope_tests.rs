@@ -196,7 +196,7 @@ fn memory_group_explicit_settings_win_over_host_channel() {
         ..Default::default()
     });
     assert_eq!(
-        backend.resolve_workspace_for_test("family-counsel", 4242, None, None),
+        backend.resolve_workspace_for_test("family-counsel", 4242, None),
         "family-counsel"
     );
 }
