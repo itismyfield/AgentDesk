@@ -37,6 +37,8 @@ use super::inflight::{
 use crate::services::provider::ProviderKind;
 
 mod abandon_guard;
+#[cfg(test)]
+mod agy_custody_tests;
 mod panel_shape;
 #[cfg(test)]
 mod retirement_tests;

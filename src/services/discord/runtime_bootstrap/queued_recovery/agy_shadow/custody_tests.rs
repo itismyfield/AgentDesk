@@ -173,7 +173,9 @@ fn observe_once(
     let (host, first) = first_read(root.to_owned(), custody, Arc::clone(gate))
         .unwrap()
         .unwrap();
-    let found = evidence::assemble(custody.target(), &first.turns, inflight, rows);
+    let target = custody.target();
+    let bindings = evidence::journal_bindings(root, target.destination, &first.turns);
+    let found = evidence::assemble(target, &first.turns, inflight, rows, &bindings);
     let settled = evidence::prior_legacy_settled(inflight, &first.turns, &found);
     second_read(&host, custody, &first, settled, &found).unwrap()
 }
@@ -488,4 +490,66 @@ fn observe_mixed_slots_hold_then_admit_after_evidence() {
     assert!(adoption.custody.held.is_empty());
     assert_eq!(adoption.custody.turns.len(), 2);
     assert_eq!(adoption.permit.unwrap().target, DIRECT);
+}
+
+/// A delivery journal written by slice 4 for the iMessage execution, with its binding.
+fn journal(root: &Path, nonce: Uuid) {
+    let dir = root.join(format!("o_store/{}/agy-delivery", DIRECT.destination));
+    fs::create_dir_all(&dir).unwrap();
+    let state = serde_json::json!({
+        "version": 1,
+        "key": {"destination": DIRECT.destination, "id": EXECUTION, "nonce": nonce},
+        "revision": 1,
+        "fingerprint": [0; 32],
+        "last_seq": 3,
+        "receipts": [],
+        "footer": null,
+        "attempt": null,
+        "ended": null,
+        "binding": {"logical_channel": DIRECT.logical_channel,
+            "original": {"imessage": {"digest": source().digest()}}},
+    });
+    fs::write(
+        dir.join(format!("{EXECUTION}.json")),
+        serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+}
+
+// D5
+#[test]
+fn observe_accepts_journal_binding_after_inflight_clear() {
+    let root = tempfile::tempdir().unwrap();
+    let nonce = Uuid::new_v4();
+    sealed_imessage(root.path(), nonce);
+    journal(root.path(), nonce);
+    let adoption = observe_once(
+        root.path(),
+        &owned_gate(),
+        Custody::Selected(DIRECT),
+        &Ok(None),
+        &queue_row(),
+    );
+    assert!(adoption.custody.held.is_empty());
+    assert_eq!(adoption.permit.unwrap().target, DIRECT);
+}
+
+// D6
+#[test]
+fn observe_holds_journal_binding_with_other_nonce() {
+    let root = tempfile::tempdir().unwrap();
+    sealed_imessage(root.path(), Uuid::new_v4());
+    journal(root.path(), Uuid::new_v4());
+    let adoption = observe_once(
+        root.path(),
+        &owned_gate(),
+        Custody::Selected(DIRECT),
+        &Ok(None),
+        &queue_row(),
+    );
+    assert_eq!(adoption.permit, None);
+    assert_eq!(
+        evidence_held(&adoption),
+        [AgyHoldReason::Evidence(AgyEvidenceHold::Conflict)]
+    );
 }

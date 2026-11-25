@@ -166,3 +166,7 @@ impl<'a> Journal<'a> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "agy_delivery_root_tests.rs"]
+mod root_tests;

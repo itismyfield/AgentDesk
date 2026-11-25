@@ -141,6 +141,9 @@ use self::rebind_reap::{
     ownerless_external_input_inflight_is_stale_at, proven_dead_from_signals,
     reap_dead_watcher_rebind_origin_locked_in_root, should_reap_dead_watcher_rebind_origin,
 };
+#[cfg(all(test, unix))]
+#[path = "inflight/agy_end_authority_tests.rs"]
+mod agy_end_authority_tests;
 mod removal;
 #[cfg(all(test, unix))]
 use removal::persist_native_boot_record;

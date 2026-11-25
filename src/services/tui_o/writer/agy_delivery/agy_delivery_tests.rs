@@ -6,8 +6,8 @@ use std::sync::Mutex;
 use super::plan::{Seal, Terminal};
 use super::*;
 use crate::domain::message_split::{DISCORD_MSG_LIMIT, discord_message_units};
-use crate::services::tui_o::store::agy_delivery::TurnKey;
-use crate::services::tui_o::store::{Initialized, OEra, OStore, StoreConfig, fault};
+use crate::services::tui_o::store::agy_delivery::{AgyJournalRoot, TurnKey};
+use crate::services::tui_o::store::{OStore, StoreConfig, fault};
 use crate::services::tui_o::writer::DeliveryLease;
 use uuid::Uuid;
 
@@ -17,8 +17,6 @@ const fn id(value: u64) -> NonZeroU64 {
 
 struct Fixture {
     root: tempfile::TempDir,
-    store: OStore,
-    era: OEra,
     key: TurnKey,
     lease: TurnLease,
     gate: OwnershipGate,
@@ -27,21 +25,9 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        // AGY custody has no pane init: the destination's journal opens beside the spool.
+        OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
             .unwrap()
-            .unwrap();
-        let now = chrono::Utc::now();
-        let era = store
-            .begin_fixture_era(&[7], now, |channel| {
-                Ok(Initialized {
-                    channel,
-                    at: now,
-                    sources: vec![],
-                    initial_anchor: 0,
-                    build_digest: "test".into(),
-                    policy_parent: None,
-                })
-            })
             .unwrap();
         let key = TurnKey {
             destination: id(7),
@@ -56,8 +42,6 @@ impl Fixture {
         gate.acquired();
         Self {
             root,
-            store,
-            era,
             key,
             lease,
             gate,
@@ -68,8 +52,8 @@ impl Fixture {
         self.gate.current().epoch().unwrap()
     }
 
-    fn open_store(&self) -> ChannelStore {
-        self.store.open_channel(&self.era, 7).unwrap().unwrap()
+    fn open_store(&self) -> AgyJournalRoot {
+        AgyJournalRoot::open(self.root.path(), id(7)).unwrap()
     }
 
     fn plan(&self, body: &str) -> Plan {
