@@ -306,7 +306,10 @@ async fn requeue_inflight(
         pending_uploads: inflight_state.followup_pending_uploads().clone(),
     };
     super::decision_drain::queued::keep_origin(&mut intervention);
-    mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await
+    let outcome =
+        mailbox_requeue_intervention_front(shared, provider, channel_id, intervention).await;
+    super::decision_drain::queued::requeued(&outcome);
+    outcome
 }
 
 pub(in crate::services::discord) fn load(

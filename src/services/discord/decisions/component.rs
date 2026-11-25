@@ -6,7 +6,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use sqlx::PgPool;
 
-use super::{card, lifecycle};
+use super::lifecycle;
 use crate::db::decisions::selection::{self, Chosen, Click, Selection};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::{Data, Error};
@@ -82,13 +82,7 @@ async fn accepted(
     registry: Option<Arc<HealthRegistry>>,
     selection: Selection,
 ) {
-    let (post, status) = (
-        (selection.request_id, selection.thread_id),
-        card::selecting(&selection.label),
-    );
-    if let Err(error) = lifecycle::show(&pool, &http, post, &status, false).await {
-        tracing::warn!(%error, "decision card still shows open buttons");
-    }
+    lifecycle::show_selecting(&pool, &http, selection.request_id).await;
     // Without a registry here the selection pass starts the stored selection.
     if let Some(registry) = registry {
         lifecycle::deliver(&pool, &registry, &selection).await;

@@ -692,7 +692,7 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
     merge_consecutive: bool,
     pending_uploads: crate::services::cluster::attachment_transfer::uploads::PendingUploads,
 ) -> MailboxEnqueueOutcome {
-    super::super::super::mailbox_requeue_intervention_front(
+    let outcome = super::super::super::mailbox_requeue_intervention_front(
         shared,
         provider,
         channel_id,
@@ -707,7 +707,9 @@ pub(super) async fn enqueue_busy_tui_followup_for_retry(
             pending_uploads,
         ),
     )
-    .await
+    .await;
+    crate::services::discord::decision_drain::queued::requeued(&outcome);
+    outcome
 }
 
 #[cfg(test)]

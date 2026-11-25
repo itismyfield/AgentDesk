@@ -220,6 +220,54 @@ pub(crate) async fn buttons(
     .await
 }
 
+/// What PG holds of a request's card now; every card edit is decided from one read of it.
+#[derive(Clone, Debug)]
+pub(crate) struct CardState {
+    pub lifecycle: String,
+    pub thread_id: u64,
+    pub sealed: bool,
+    /// The stored choice's label and where its delivery stands.
+    pub chosen: Option<(String, AttemptState, Option<String>)>,
+}
+
+pub(crate) async fn card(
+    pool: &PgPool,
+    request_id: Uuid,
+) -> Result<Option<CardState>, sqlx::Error> {
+    type Row = (
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let row: Option<Row> = sqlx::query_as(
+        "SELECT r.lifecycle, r.thread_id, r.sealed_at IS NOT NULL, o.label, a.state, a.detail
+         FROM decision_requests r
+         LEFT JOIN decision_choices c ON c.request_id = r.request_id
+         LEFT JOIN decision_options o ON o.request_id = c.request_id AND o.ordinal = c.ordinal
+         LEFT JOIN decision_delivery_attempts a ON a.event_id = c.selection_event_id
+         WHERE r.request_id = $1",
+    )
+    .bind(request_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(
+        row.and_then(|(lifecycle, thread, sealed, label, state, detail)| {
+            let state = state.as_deref().and_then(AttemptState::parse);
+            Some(CardState {
+                lifecycle,
+                thread_id: thread?.parse().ok()?,
+                sealed,
+                chosen: label
+                    .zip(state)
+                    .map(|(label, state)| (label, state, detail)),
+            })
+        }),
+    )
+}
+
 /// A selection whose delivery reached its end, with the end its card shows.
 #[derive(Clone, Debug)]
 pub(crate) struct Ended {

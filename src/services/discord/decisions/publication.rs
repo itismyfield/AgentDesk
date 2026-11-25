@@ -24,6 +24,8 @@ pub(crate) enum Outcome {
     Posted(u64),
     /// The post exists and its buttons take, or took, the operator's selection.
     Open(u64),
+    /// The post exists and its buttons are not confirmed enabled yet; the same ask resumes.
+    Activating(u64),
     /// The POST may have gone out and its post is not found yet; it is not sent again.
     Pending,
     /// Discord refused the post or its forum for good.
@@ -84,26 +86,35 @@ pub(crate) async fn publish(
     }
 }
 
-/// Why the buttons stay disabled; `None` when the target is the agent's own channel and a
-/// start there is not refused. A thread, or a host that refuses, keeps the disabled post.
-async fn unwired(
-    pool: &PgPool,
-    registry: Option<&HealthRegistry>,
-    asked: &Asked<'_>,
-) -> Option<String> {
-    match selection::targets_main_channel(pool, asked.request_id).await {
-        Ok(true) => {}
-        Ok(false) => return Some("thread_target_not_wired".into()),
-        Err(_) => return Some("decision_store_unavailable".into()),
-    }
-    let Some(registry) = registry else {
-        return Some("decision_bot_unavailable".into());
-    };
-    health::decision_target::start_refusal(registry, asked.provider, asked.logical_channel).await
+/// Whether this request's kind of target takes a selection.
+enum Wiring {
+    /// The agent's own channel, and a start there is not refused.
+    Wired,
+    /// Not supported for this target: a thread, or a channel whose host refuses the start.
+    Unsupported(String),
+    /// Not judged now (storage or the channel's runtime is away): the same ask judges again.
+    Unready,
 }
 
-/// Enables the starter's buttons where selection is wired, else says why not. The card is
-/// edited before PG opens the request, so no click is taken from a card not shown open.
+async fn wiring(pool: &PgPool, registry: Option<&HealthRegistry>, asked: &Asked<'_>) -> Wiring {
+    use health::decision_target::{StartCheck, start_check};
+    match selection::targets_main_channel(pool, asked.request_id).await {
+        Ok(true) => {}
+        Ok(false) => return Wiring::Unsupported("thread_target_not_wired".into()),
+        Err(_) => return Wiring::Unready,
+    }
+    let Some(registry) = registry else {
+        return Wiring::Unready;
+    };
+    match start_check(registry, asked.provider, asked.logical_channel).await {
+        StartCheck::Wired => Wiring::Wired,
+        StartCheck::Refused(refusal) => Wiring::Unsupported(refusal),
+        StartCheck::NoRuntime => Wiring::Unready,
+    }
+}
+
+/// Enables the starter's buttons where selection is wired, else says why not, under the
+/// request's card lock: a card another ask or a selection already moved on is not edited.
 async fn activate(
     pool: &PgPool,
     registry: Option<&HealthRegistry>,
@@ -111,25 +122,58 @@ async fn activate(
     http: &serenity::Http,
     thread: u64,
 ) -> Outcome {
-    let reason = unwired(pool, registry, asked).await;
-    let status = match &reason {
-        None => card::OPEN.to_string(),
-        Some(reason) => format!("{} — {reason}", card::NOT_YET),
-    };
+    let wiring = wiring(pool, registry, asked).await;
     let post = (asked.request_id, thread);
-    if let Err(error) = lifecycle::show(pool, http, post, &status, reason.is_none()).await {
-        tracing::warn!(%error, "decision card not updated; its buttons stay disabled");
-        return Outcome::Posted(thread);
-    }
-    match selection::open(pool, asked.request_id, reason.as_deref()).await {
-        // A request another ask opened meanwhile is open as well.
-        Ok(_) if reason.is_none() => Outcome::Open(thread),
-        Ok(_) => Outcome::Posted(thread),
-        Err(error) => {
-            tracing::warn!(%error, "decision request not opened; its clicks are refused");
-            Outcome::Posted(thread)
+    let locked = lifecycle::under_card_lock(pool, asked.request_id, async {
+        match store::load(pool, asked.request_id).await {
+            Ok(Publication::Active { thread_id }) => return Outcome::Open(thread_id),
+            Ok(Publication::Disabled { .. }) => {}
+            _ => return Outcome::Activating(thread),
         }
-    }
+        let reason = match &wiring {
+            Wiring::Wired => None,
+            Wiring::Unsupported(reason) => Some(reason.as_str()),
+            Wiring::Unready => return Outcome::Activating(thread),
+        };
+        let status = match reason {
+            None => card::OPEN.to_string(),
+            Some(reason) => format!("{} — {reason}", card::NOT_YET),
+        };
+        // The card is edited before PG opens the request: no click is taken from a card not
+        // shown open, and only a request PG opened here is answered as open.
+        match lifecycle::show(pool, http, post, &status, reason.is_none()).await {
+            Ok(()) => {}
+            Err(error) if reason.is_none() && lifecycle::refused(&error) => {
+                tracing::warn!(%error, "decision card edit refused; its buttons stay disabled");
+                return Outcome::Refused("decision_activation_rejected".into());
+            }
+            Err(error) => {
+                tracing::warn!(%error, "decision card not updated; its buttons stay disabled");
+                return match reason {
+                    None => Outcome::Activating(thread),
+                    Some(_) => Outcome::Posted(thread),
+                };
+            }
+        }
+        match (
+            selection::open(pool, asked.request_id, reason).await,
+            reason,
+        ) {
+            (Ok(true), None) => Outcome::Open(thread),
+            (Ok(_), Some(_)) => Outcome::Posted(thread),
+            (opened, _) => {
+                tracing::warn!(
+                    ?opened,
+                    "decision request not opened; its clicks are refused"
+                );
+                Outcome::Activating(thread)
+            }
+        }
+    });
+    locked.await.unwrap_or_else(|error| {
+        tracing::warn!(%error, "decision card lock not taken; its buttons stay disabled");
+        Outcome::Activating(thread)
+    })
 }
 
 /// The provider bot that owns the channel with its gateway connected now, not merely once (a

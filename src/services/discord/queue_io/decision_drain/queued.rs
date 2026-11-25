@@ -107,8 +107,15 @@ pub(crate) fn returned() {
     let _ = STARTING.try_with(|at| at.back.store(true, Ordering::SeqCst));
 }
 
-/// Keeps the Decision origin on an entry a start rebuilt from its text to queue it again: the
-/// entry stays one unmerged source that the next drain checks against the event.
+/// Records that a queue accepted this start's input again: only then is it durably back.
+pub(crate) fn requeued(outcome: &crate::services::discord::MailboxEnqueueOutcome) {
+    if outcome.enqueued && outcome.persistence_error.is_none() {
+        returned();
+    }
+}
+
+/// Keeps the Decision origin on an entry a start rebuilt from its text: one unmerged source its
+/// next drain checks against the event. Building it puts nothing back on a queue.
 pub(crate) fn keep_origin(entry: &mut Intervention) {
     let Some(origin) = starting_origin() else {
         return;
@@ -120,10 +127,10 @@ pub(crate) fn keep_origin(entry: &mut Intervention) {
     }
     entry.source_message_ids = vec![primary];
     entry.merge_consecutive = false;
-    returned();
 }
 
 /// How a journaled non-owner start ended.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Ended {
     /// A turn took the input: that turn's receipt settles the event.
     Started,

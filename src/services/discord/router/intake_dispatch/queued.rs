@@ -421,21 +421,29 @@ pub(crate) async fn finish_admitted_queued_intake(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     admitted: AdmittedQueuedIntake,
 ) -> Result<super::super::IntakeExecution, super::super::super::Error> {
-    use super::super::IntakeExecution::{ConsumedProtected, Deferred, Executed};
     let decision = admitted.decision;
     let origin = (admitted.restore_owner.as_ref())
         .filter(|_| decision.is_some())
         .and_then(|owner| decision_queue::origin(&owner.original).map(str::to_owned));
     let start = finish_admitted(deps, admitted);
     let (result, back) = decision_queue::started_under(origin, start).await;
-    let ended = match &result {
-        Ok(Executed | Deferred) if back => decision_queue::Ended::WaitsAgain,
-        Ok(Executed) => decision_queue::Ended::Started,
-        Ok(ConsumedProtected) => decision_queue::Ended::Cleared,
-        Ok(Deferred) | Err(_) => decision_queue::Ended::Unknown,
-    };
+    let ended = decision_end(result.as_ref().ok(), back);
     decision_queue::end(deps.shared.pg_pool.as_ref(), decision, ended).await;
     result
+}
+
+/// What a journaled start proved; `back`: a queue accepted its input again under its origin.
+fn decision_end(
+    result: Option<&super::super::IntakeExecution>,
+    back: bool,
+) -> decision_queue::Ended {
+    use super::super::IntakeExecution::{ConsumedProtected, Deferred, Executed};
+    match result {
+        Some(Executed | Deferred) if back => decision_queue::Ended::WaitsAgain,
+        Some(Executed) => decision_queue::Ended::Started,
+        Some(ConsumedProtected) => decision_queue::Ended::Cleared,
+        Some(Deferred) | None => decision_queue::Ended::Unknown,
+    }
 }
 
 async fn finish_admitted(

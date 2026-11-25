@@ -36,7 +36,7 @@ pub enum Normalized {
     /// The session start carried this input as its first prompt, under this turn. Like any
     /// start it is no receipt: the event settles from the evidence that turn leaves.
     FirstPrompt(String),
-    /// A session is up and the input still has to be delivered.
+    /// The input still has to be delivered: a session is up, or a start may be tried again.
     Started,
     NotSentRefused(String),
     Unknown(String),
@@ -48,26 +48,36 @@ pub trait Normalizer: Send + Sync {
     async fn normalize_once(&self) -> Normalized;
 }
 
-/// Why a start on the channel is refused now: no runtime here owns it or its host refuses
-/// (a Herdr channel whose executor is not wired stays refused). `None`: the path is wired.
-pub(crate) async fn start_refusal(
+/// Whether a start on the channel can be made now.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum StartCheck {
+    /// The start path is wired: a start carries its input as the session's first prompt.
+    Wired,
+    /// The channel's host refuses the start (a Herdr channel whose executor is not wired).
+    Refused(String),
+    /// No runtime in this process owns the channel now.
+    NoRuntime,
+}
+
+/// Asks the channel's runtime and its host; the host's refusal is passed on, never bypassed.
+pub(crate) async fn start_check(
     registry: &HealthRegistry,
     provider: &ProviderKind,
     channel: u64,
-) -> Option<String> {
+) -> StartCheck {
     let channel = poise::serenity_prelude::ChannelId::new(channel.max(1));
     let Ok(shared) = super::resolve_direct_channel_shared(registry, channel, provider).await else {
-        return Some("runtime_unavailable".into());
+        return StartCheck::NoRuntime;
     };
     match super::preflight::host(&shared, provider, channel).await {
-        Ok(_) => None,
-        Err(HumanInputError::InvalidTarget(refusal)) => Some(refusal),
-        Err(error) => Some(error.kind().to_string()),
+        Ok(_) => StartCheck::Wired,
+        Err(HumanInputError::InvalidTarget(refusal)) => StartCheck::Refused(refusal),
+        Err(error) => StartCheck::Refused(error.kind().to_string()),
     }
 }
 
-/// The event's one normalization on its agent's own channel: the existing start path. When that
-/// path is wired the workflow resolves and starts once more; a refusal is a confirmed non-send.
+/// The event's one normalization on its agent's own channel. It starts no session itself: when
+/// the start path is not refused now, the workflow resolves and starts once more.
 pub(crate) struct StartPath<'a> {
     registry: &'a HealthRegistry,
     provider: &'a ProviderKind,
@@ -91,9 +101,10 @@ impl<'a> StartPath<'a> {
 #[async_trait]
 impl Normalizer for StartPath<'_> {
     async fn normalize_once(&self) -> Normalized {
-        match start_refusal(self.registry, self.provider, self.channel).await {
-            None => Normalized::Started,
-            Some(refusal) => Normalized::NotSentRefused(refusal),
+        match start_check(self.registry, self.provider, self.channel).await {
+            StartCheck::Wired => Normalized::Started,
+            StartCheck::Refused(refusal) => Normalized::NotSentRefused(refusal),
+            StartCheck::NoRuntime => Normalized::NotSentRefused("runtime_unavailable".into()),
         }
     }
 }

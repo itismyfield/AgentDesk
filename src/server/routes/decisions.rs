@@ -20,8 +20,8 @@ fn failure(status: StatusCode, error: &str) -> RouteResponse {
     (status, Json(json!({"ok": false, "error": error})))
 }
 
-/// The capability hash owns the request. 201: posted, `open` or (target not wired) `disabled`;
-/// 202: maybe posted, not re-sent; 502: starter or forum refused; 503: nothing was sent.
+/// The capability hash owns the request. 201: `open` confirmed, or `disabled` (target not wired);
+/// 202: post or activation unfinished, resumed by the same ask; 502: refused; 503: nothing sent.
 pub async fn ask(
     _caller: HumanInputCaller,
     State(state): State<AppState>,
@@ -67,6 +67,10 @@ pub async fn ask(
         Outcome::Open(thread) => (
             StatusCode::CREATED,
             json!({"ok": true, "publication": "open", "thread_id": thread.to_string()}),
+        ),
+        Outcome::Activating(thread) => (
+            StatusCode::ACCEPTED,
+            json!({"ok": true, "publication": "activating", "thread_id": thread.to_string()}),
         ),
         Outcome::Pending => (
             StatusCode::ACCEPTED,

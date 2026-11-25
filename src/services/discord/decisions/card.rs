@@ -78,6 +78,60 @@ pub(crate) fn buttons(
     )]
 }
 
+pub(crate) struct Card {
+    pub name: String,
+    pub content: String,
+}
+
+/// The line a post of `request_id` carries and no other post does.
+pub(crate) fn marker(request_id: Uuid) -> String {
+    format!("-# decision {request_id}")
+}
+
+/// The card, or its length in UTF-16 units when Discord would refuse it as too long.
+pub(crate) fn render(
+    ask: &Ask,
+    options: &[OptionRow],
+    owner: Option<u64>,
+    request_id: Uuid,
+) -> Result<Card, usize> {
+    let mut content = format!("## {}\n", ask.title.trim());
+    if !ask.context.trim().is_empty() {
+        content.push_str(&format!("{}\n", ask.context.trim()));
+    }
+    content.push_str("\n**선택지**\n");
+    for (index, option) in options.iter().enumerate() {
+        let key = (option.key.as_deref()).map_or(String::new(), |key| format!(" (`{key}`)"));
+        content.push_str(&format!("{}. **{}**{key}", index + 1, option.label));
+        if !option.detail.trim().is_empty() {
+            content.push_str(&format!(" — {}", option.detail.trim()));
+        }
+        if let Some(percent) = option.recommendation_percent {
+            content.push_str(&format!(" · Gemini 추천 {percent}%"));
+        }
+        content.push('\n');
+    }
+    if options
+        .iter()
+        .all(|option| option.recommendation_percent.is_none())
+    {
+        content.push_str("Gemini 추천: 추천 확인 불가\n");
+    }
+    let (agent, request_ref) = (&ask.agent_id, ask.request_ref.trim());
+    content.push_str(&format!("요청: `{agent}` · ref `{request_ref}`\n"));
+    let mention = owner.map_or(String::new(), |owner| format!("<@{owner}> "));
+    content.push_str(&format!(
+        "{mention}{NOT_YET} — 버튼은 선택 처리가 연결된 뒤에 열린다.\n{}",
+        marker(request_id)
+    ));
+    let units = content.encode_utf16().count();
+    if units > CONTENT_LIMIT {
+        return Err(units);
+    }
+    let name = ask.title.trim().chars().take(100).collect();
+    Ok(Card { name, content })
+}
+
 /// The forum post: the card, a mention that may only reach the owner, and one disabled button
 /// per option carrying that option's handle.
 pub(crate) fn post_body(
