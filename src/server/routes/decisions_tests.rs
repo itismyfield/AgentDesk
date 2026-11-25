@@ -197,3 +197,44 @@ async fn decision_ask_stores_one_request_under_its_capability_hash_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// The length is checked before anything is stored: a card of exactly 2,000 UTF-16 units is
+/// stored (and, with no live bot, answered 503), one unit more is 422 and stores nothing.
+#[tokio::test]
+async fn decision_ask_past_the_card_limit_is_refused_before_it_is_stored_pg() {
+    use crate::services::discord::decisions::{Ask, publication::too_long};
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id)
+         VALUES ('decision-asker', 'decision-asker', 'claude', $1)",
+    )
+    .bind(CHANNEL)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let app = app(root.path(), pool.clone());
+    let body = |key: &str, context: usize| {
+        let mut body = ask_body("질문");
+        body["idempotency_key"] = json!(key);
+        body["context"] = json!("a".repeat(context));
+        body
+    };
+    // A context far past the limit measures the rest of the card.
+    let probe: Ask = serde_json::from_value(body("probe", 3000)).unwrap();
+    let fits = 2000 - (too_long(&probe, None).unwrap() - 3000);
+    let post = ("POST", "/api/decisions");
+    let capability = "ab".repeat(32);
+    let (status, stored) = call(&app, post, Some(&capability), &body("fits", fits)).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{stored}");
+    assert_eq!(stored["created"], true);
+    let (status, refused) = call(&app, post, Some(&capability), &body("over", fits + 1)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refused}");
+    assert_eq!(refused["error"], "decision_post_too_long");
+    assert_eq!(count(&pool, REQUESTS).await, 1);
+    let options = count(&pool, "SELECT COUNT(*) FROM decision_options").await;
+    assert_eq!(options, 2);
+    pool.close().await;
+    db.drop().await;
+}

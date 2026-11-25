@@ -83,8 +83,8 @@ async fn decision_forum_guard_takes_a_newly_configured_forum_at_once_pg() {
     db.drop().await;
 }
 
-/// A forum registered before its first post stays guarded through a later read that lacks it
-/// and while PG is away.
+/// A forum registered before its first post stays guarded after a full read that lacks it, and
+/// then while PG is away.
 #[tokio::test(flavor = "current_thread")]
 async fn decision_forum_registered_before_its_post_outlives_later_reads_pg() {
     let db = TestPostgresDb::create().await;
@@ -93,9 +93,48 @@ async fn decision_forum_registered_before_its_post_outlives_later_reads_pg() {
     assert!(!forums.contains(Some(&pool), &config, 8_211_005).await);
     forums.register(8_211_005);
     age(&forums);
-    assert!(forums.contains(Some(&pool), &config, 8_211_005).await);
+    // Another parent makes the guard read the whole set again, a set without the registered one.
+    assert!(!forums.contains(Some(&pool), &config, 8_211_007).await);
     pool.close().await;
     age(&forums);
     assert!(forums.contains(Some(&pool), &config, 8_211_005).await);
+    db.drop().await;
+}
+
+/// A request journaled to `forum`, as a publisher that has the forum configured leaves it: no
+/// forum row, only the journal.
+async fn journal_into(pool: &PgPool, forum: u64) {
+    use crate::db::decisions::publication::{Journal, journal};
+    let body = serde_json::json!({"agent_id": "a", "target": {"channel_id": "1"}, "ref": "r",
+        "title": "t", "options": [{"label": "x"}, {"label": "y"}]});
+    let ask: super::super::Ask = serde_json::from_value(body).unwrap();
+    let (id, _) = super::super::store(pool, &ask, (1, 1), "c").await.unwrap();
+    let entry = Journal {
+        provider: "claude",
+        bot_user_id: 1,
+        forum_id: forum,
+        handles: &[],
+    };
+    assert!(journal(pool, id, &entry).await.unwrap());
+}
+
+/// A forum only the publisher has configured is guarded by every other receiver once a request is
+/// journaled to it: on a fresh read's miss, after the reuse window, and on a first read.
+#[tokio::test(flavor = "current_thread")]
+async fn decision_forum_journaled_under_another_nodes_override_is_guarded_pg() {
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let receiver = DecisionsConfig::default();
+    let (missed, stale) = (Forums::default(), Forums::default());
+    for forums in [&missed, &stale] {
+        assert!(!forums.contains(Some(&pool), &receiver, 8_211_006).await);
+    }
+    journal_into(&pool, 8_211_006).await;
+    assert!(missed.contains(Some(&pool), &receiver, 8_211_006).await);
+    age(&stale);
+    assert!(stale.contains(Some(&pool), &receiver, 8_211_006).await);
+    let first = Forums::default();
+    assert!(first.contains(Some(&pool), &receiver, 8_211_006).await);
+    pool.close().await;
     db.drop().await;
 }
