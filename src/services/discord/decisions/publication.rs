@@ -399,4 +399,4 @@ fn forum_outcome(error: ForumError) -> Outcome {
 
 #[cfg(all(test, unix))]
 #[path = "publication_tests.rs"]
-mod tests;
+pub(crate) mod tests;

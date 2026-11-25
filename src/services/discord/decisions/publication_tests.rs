@@ -2,7 +2,6 @@
 //! connected bot; a lost answer finds that same post, a refusal is kept, neither is posted again.
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -21,10 +20,11 @@ use crate::services::discord::SharedData;
 use crate::services::discord::health::owner_runtime_for_tests;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::manual_steer::action_handle::CustomIdError;
+use crate::test_support::wait;
 
 const GUILD: u64 = 96_326_000_998;
 const CATEGORY: u64 = 940_821_200_000_001;
-const CHANNEL: u64 = 940_821_200_000_002;
+pub(crate) const CHANNEL: u64 = 940_821_200_000_002;
 const BARE: u64 = 940_821_200_000_003;
 const OWNER: u64 = 940_821_200_000_009;
 const STRANGER: u64 = 940_821_200_000_008;
@@ -33,7 +33,7 @@ const BOT: u64 = discord_mock::BOT_ID;
 /// How the mock forum answers a post: keeps it and loses the answer, keeps it and answers, or
 /// refuses it.
 #[derive(Clone, Copy)]
-enum Answer {
+pub(crate) enum Answer {
     Lost,
     Created,
     Forbidden,
@@ -195,18 +195,18 @@ fn ask(request_ref: &str) -> Ask {
 
 /// One provider runtime whose gateway Context and REST client point at a mock forum, its bot
 /// connected or not as the scenario sets it.
-struct Rig {
+pub(crate) struct Rig {
     db: TestPostgresDb,
-    pool: sqlx::PgPool,
-    registry: Arc<HealthRegistry>,
+    pub(crate) pool: sqlx::PgPool,
+    pub(crate) registry: Arc<HealthRegistry>,
     shared: Arc<SharedData>,
-    config: DiscordConfig,
+    pub(crate) config: DiscordConfig,
     mock: Shared,
     tasks: [tokio::task::JoinHandle<()>; 2],
 }
 
 impl Rig {
-    async fn new(answer: Answer, forum: u64) -> Self {
+    pub(crate) async fn new(answer: Answer, forum: u64) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let ready = ForumState::Ready(forum.to_string());
@@ -255,7 +255,7 @@ impl Rig {
         rig
     }
 
-    fn connected(&self, up: bool) {
+    pub(crate) fn connected(&self, up: bool) {
         self.shared.bot_connected.store(up, Ordering::SeqCst);
     }
 
@@ -280,12 +280,12 @@ impl Rig {
         store::load(&self.pool, request_id).await.unwrap()
     }
 
-    fn posts(&self) -> usize {
+    pub(crate) fn posts(&self) -> usize {
         self.mock.lock().unwrap().posts.len()
     }
 
     /// The starter edits the mock took; calling it lets the mock accept them from now on.
-    fn edits(&self) -> Vec<Value> {
+    pub(crate) fn edits(&self) -> Vec<Value> {
         let mut mock = self.mock.lock().unwrap();
         mock.edits.get_or_insert_with(Vec::new).clone()
     }
@@ -300,7 +300,7 @@ impl Rig {
     }
 
     /// The owner's click on `option` of the starter of `thread`.
-    async fn click(&self, thread: u64, option: i16) -> Option<Chosen> {
+    pub(crate) async fn click(&self, thread: u64, option: i16) -> Option<Chosen> {
         let handle = self.handle(thread, option).await;
         let click = Click {
             handle: &handle,
@@ -318,7 +318,7 @@ impl Rig {
         count.await.unwrap()
     }
 
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         self.tasks.iter().for_each(tokio::task::JoinHandle::abort);
         self.pool.close().await;
         self.db.drop().await;
@@ -661,22 +661,39 @@ async fn decision_late_activation_never_reopens_an_ended_card_pg() {
     let (reached, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
     rig.mock.lock().unwrap().hold = Some((reached.clone(), release.clone()));
     let late = ask_again(&rig, request_id);
-    reached.notified().await;
-    // The late ask read `disabled` and waits at its read of the card. Without the card lock
-    // the other ask opens the request now, and it is selected and ended before the late edit.
-    let mut other = ask_again(&rig, request_id);
-    let raced = tokio::time::timeout(Duration::from_secs(3), &mut other).await;
-    if raced.is_ok() {
+    wait::await_within(reached.notified(), wait::WAIT_CAP).await;
+    // The late ask read `disabled` and waits at its read of the card. The other ask either
+    // finishes (no card lock: it is then selected and ended first) or is seen waiting on the lock.
+    let other = ask_again(&rig, request_id);
+    let waiters = "SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())";
+    let settled = wait::poll_within(
+        async || {
+            let waiting: i64 = sqlx::query_scalar(waiters)
+                .fetch_one(&rig.pool)
+                .await
+                .unwrap();
+            match other.is_finished() || waiting > 0 {
+                true => Ok(other.is_finished()),
+                false => Err("neither finished nor waiting on the card lock".to_string()),
+            }
+        },
+        wait::WAIT_CAP,
+        "the other ask",
+    );
+    let raced = settled.await.expect("the race was not reached");
+    if raced {
         select_and_end(&rig, thread).await;
     }
     release.notify_one();
-    assert_eq!(late.await.unwrap(), Outcome::Open(thread));
-    match raced {
-        Ok(other) => assert_eq!(other.unwrap(), Outcome::Open(thread)),
-        Err(_) => {
-            assert_eq!(other.await.unwrap(), Outcome::Open(thread));
-            select_and_end(&rig, thread).await;
-        }
+    let late = wait::await_within(late, wait::WAIT_CAP).await.unwrap();
+    let other = wait::await_within(other, wait::WAIT_CAP).await.unwrap();
+    assert_eq!(
+        (late, other),
+        (Outcome::Open(thread), Outcome::Open(thread))
+    );
+    if !raced {
+        select_and_end(&rig, thread).await;
     }
     lifecycle::converge(&rig.pool, &rig.registry).await;
     let card = rig.edits().pop().unwrap();
@@ -750,6 +767,11 @@ async fn decision_activation_that_did_not_finish_is_not_answered_as_open_pg() {
     let activating = Outcome::Activating(thread);
     assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, activating);
     assert_eq!(rig.click(thread, 1).await, Some(Chosen::NotOpen));
+    // The same ask while the bot's gateway is away: the post exists, nothing confirms it open.
+    rig.connected(false);
+    assert_eq!(rig.publish(request_id, "r1", CHANNEL).await, activating);
+    assert_eq!(rig.click(thread, 1).await, Some(Chosen::NotOpen));
+    rig.connected(true);
     // The edit lands but PG cannot open the request.
     rig.edits();
     let block = "ALTER TABLE decision_requests

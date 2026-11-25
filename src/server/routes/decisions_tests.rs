@@ -15,7 +15,18 @@ const OWNER: &str = "x-agentdesk-decision-owner";
 const CHANNEL: &str = "8211300001";
 
 fn app(root: &std::path::Path, pool: sqlx::PgPool) -> Router {
+    app_with(root, pool, None, Default::default())
+}
+
+/// The API over `pool`, with the Discord runtimes and settings a posting scenario supplies.
+fn app_with(
+    root: &std::path::Path,
+    pool: sqlx::PgPool,
+    health_registry: Option<Arc<crate::services::discord::health::HealthRegistry>>,
+    discord: crate::config::DiscordConfig,
+) -> Router {
     let mut config = crate::config::Config::default();
+    config.discord = discord;
     config.server.host = "127.0.0.1".into();
     config.policies.hot_reload = false;
     config.policies.dir = root.join("policies");
@@ -27,7 +38,7 @@ fn app(root: &std::path::Path, pool: sqlx::PgPool) -> Router {
         pg_pool: Some(pool),
         broadcast_tx: crate::eventbus::new_broadcast(),
         batch_buffer: Default::default(),
-        health_registry: None,
+        health_registry,
         cluster_instance_id: None,
     };
     let access = crate::server::dashboard_auth::DashboardAccess::new(&state.config);
@@ -237,4 +248,59 @@ async fn decision_ask_past_the_card_limit_is_refused_before_it_is_stored_pg() {
     assert_eq!(options, 2);
     pool.close().await;
     db.drop().await;
+}
+
+/// The ask answers 201 only once its buttons are confirmed enabled. A posted request whose card
+/// edit failed, asked again while its bot's gateway is away, is 202 on the same post, unposted.
+#[cfg(unix)]
+#[tokio::test]
+async fn decision_ask_is_activating_until_its_buttons_are_confirmed_open_pg() {
+    use crate::db::decisions::selection::Chosen;
+    use crate::services::discord::decisions::publication::tests::{Answer, CHANNEL as POSTED, Rig};
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let forum = 940_821_200_900_000;
+    let rig = Rig::new(Answer::Created, forum).await;
+    sqlx::query(
+        "INSERT INTO agents (id, name, provider, discord_channel_id)
+         VALUES ('decision-asker', 'decision-asker', 'claude', $1)",
+    )
+    .bind(POSTED.to_string())
+    .execute(&rig.pool)
+    .await
+    .unwrap();
+    let registry = Some(rig.registry.clone());
+    let app = app_with(root.path(), rig.pool.clone(), registry, rig.config.clone());
+    let (capability, post) = ("ab".repeat(32), ("POST", "/api/decisions"));
+    let mut body = ask_body("질문");
+    body["target"]["channel_id"] = json!(POSTED.to_string());
+    let thread = json!((forum + 100).to_string());
+
+    // The card edit fails: the post exists, disabled.
+    let (status, first) = call(&app, post, Some(&capability), &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{first}");
+    assert_eq!(
+        (&first["publication"], &first["thread_id"]),
+        (&json!("activating"), &thread)
+    );
+    // The same ask while the gateway is away.
+    rig.connected(false);
+    let (status, away) = call(&app, post, Some(&capability), &body).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{away}");
+    assert_eq!(
+        (&away["publication"], &away["thread_id"]),
+        (&json!("activating"), &thread)
+    );
+    assert_eq!((&away["created"], rig.posts()), (&json!(false), 1));
+    assert_eq!(rig.click(forum + 100, 1).await, Some(Chosen::NotOpen));
+    // Reconnected, and the edit is taken: confirmed open on the same post.
+    rig.connected(true);
+    rig.edits();
+    let (status, open) = call(&app, post, Some(&capability), &body).await;
+    assert_eq!(status, StatusCode::CREATED, "{open}");
+    assert_eq!(
+        (&open["publication"], &open["thread_id"]),
+        (&json!("open"), &thread)
+    );
+    assert_eq!(rig.posts(), 1, "the same ask posted again");
+    rig.close().await;
 }
