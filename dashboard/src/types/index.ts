@@ -357,6 +357,7 @@ export interface DispatchedSession {
   provider: CliProvider;
   model: string | null;
   status: DispatchedSessionStatus;
+  active_dispatch_id?: string | null;
   session_info: string | null;
   avatar_emoji: string;
   tokens: number;

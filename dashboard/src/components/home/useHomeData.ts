@@ -1,3 +1,4 @@
+import { z } from "zod";
 import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getCampaigns, type HomeLegacyCampaignSummary } from "../../api/campaigns";
 import { healthDetailBlocked, noteHealthDetailError } from "../../api/healthDetailAccess";
@@ -140,19 +141,54 @@ export async function loadHomeUsage(): Promise<RawUsageProvider[]> {
   return data.providers ?? [];
 }
 
-export interface ReconcileStaleTurnResponse {
-  ok?: boolean;
-  session_key?: string;
-  reconciled?: boolean;
-  status?: string;
-  reason?: string;
-}
+const reconcileSchema = z.object({
+  ok: z.boolean().optional(),
+  session_key: z.string().optional(),
+  reconciled: z.boolean().optional(),
+  status: z.string().optional(),
+  reason: z.string().optional(),
+});
+
+export type ReconcileStaleTurnResponse = z.infer<typeof reconcileSchema>;
 
 export function reconcileStaleSessionTurn(sessionKey: string): Promise<ReconcileStaleTurnResponse> {
-  return request<ReconcileStaleTurnResponse>(
+  return request(
     `/api/sessions/${encodeURIComponent(sessionKey)}/reconcile-stale-turn`,
     { method: "POST", maxRetries: 0, suppressErrorToast: true },
+    reconcileSchema,
   );
+}
+
+const killTmuxSchema = z.object({
+  ok: z.boolean().optional(),
+  tmux_killed: z.boolean().optional(),
+  tmux_was_alive: z.boolean().nullable().optional(),
+  session_row_disconnected: z.boolean().optional(),
+  preserved_reason: z.string().optional(),
+  reason: z.string().optional(),
+});
+
+export type KillTmuxSessionResponse = z.infer<typeof killTmuxSchema>;
+
+/** Disconnects an idle session whose tmux is gone (or kills an idle tmux first), preserving resume selectors. */
+export async function cleanupStaleIdleSession(
+  sessionKey: string,
+): Promise<{ disconnected: boolean; reason?: string }> {
+  const path = `/api/sessions/${encodeURIComponent(sessionKey)}/kill-tmux`;
+  const opts = {
+    method: "POST",
+    body: JSON.stringify({ reason: "manual: dashboard stale session cleanup" }),
+    maxRetries: 0,
+    suppressErrorToast: true,
+  };
+  let res = await request(path, opts, killTmuxSchema);
+  if (res.ok && res.tmux_killed && !res.session_row_disconnected) {
+    res = await request(path, opts, killTmuxSchema);
+  }
+  return {
+    disconnected: Boolean(res.session_row_disconnected),
+    reason: res.preserved_reason ?? res.reason,
+  };
 }
 
 export interface StopAgentTurnResponse {
