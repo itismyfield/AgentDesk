@@ -11,8 +11,9 @@ import { AgentOverlay } from "../agent-manager/AgentOverlay";
 import type { Translator } from "../agent-manager/types";
 import { SessionInfoCard } from "./SessionInfoCard";
 import {
-  canReconcileStaleSession, compareSessions, isStaleIdleSession, reconcileStaleSessionTurn,
-  sessionLastActivityTs, sessionPersona, sessionStateText, sessionSummaryCounts, sessionTitle,
+  canCleanupStaleIdleSession, canReconcileStaleSession, cleanupStaleIdleSession, compareSessions,
+  isStaleIdleSession, reconcileStaleSessionTurn, sessionLastActivityTs, sessionPersona,
+  sessionStateText, sessionSummaryCounts, sessionTitle,
 } from "./SessionPanelModel";
 
 interface Props {
@@ -31,7 +32,10 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
   const [reconcilingKey, setReconcilingKey] = useState<string | null>(null);
   const [reconciledKeys, setReconciledKeys] = useState<Record<string, string>>({});
   const effective = useMemo(
-    () => sessions.map((s) => (reconciledKeys[s.session_key] === "ok" ? { ...s, status: "idle" as const, last_seen_at: Date.now() } : s)),
+    () =>
+      sessions
+        .filter((s) => reconciledKeys[s.session_key] !== "disconnected")
+        .map((s) => (reconciledKeys[s.session_key] === "ok" ? { ...s, status: "idle" as const, last_seen_at: Date.now() } : s)),
     [sessions, reconciledKeys],
   );
   const sorted = useMemo(() => [...effective].sort(compareSessions), [effective]);
@@ -45,6 +49,20 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
       if (res.reconciled) onSessionsChange?.();
     } catch {
       setReconciledKeys((prev) => ({ ...prev, [session.session_key]: tr("정리 요청에 실패했어요. 다시 시도해 보세요.", "Reconcile failed. Try again.") }));
+    } finally {
+      setReconcilingKey(null);
+    }
+  };
+
+  const handleCleanupIdle = async (session: DispatchedSession) => {
+    setReconcilingKey(session.session_key);
+    try {
+      const res = await cleanupStaleIdleSession(session.session_key);
+      const verdict = res.disconnected ? "disconnected" : (res.reason || tr("아직 활성 상태라 세션을 유지했어요.", "Session is still active; kept as-is."));
+      setReconciledKeys((prev) => ({ ...prev, [session.session_key]: verdict }));
+      if (res.disconnected) onSessionsChange?.();
+    } catch {
+      setReconciledKeys((prev) => ({ ...prev, [session.session_key]: tr("정리 요청에 실패했어요. 다시 시도해 보세요.", "Cleanup failed. Try again.") }));
     } finally {
       setReconcilingKey(null);
     }
@@ -71,6 +89,7 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
           const expanded = open === session.id, detailId = `${baseId}-${session.id}`;
           const stale = isStaleIdleSession(session), note = reconciledKeys[session.session_key];
           const reconcilable = canReconcileStaleSession(session) && note !== "ok";
+          const cleanableIdle = canCleanupStaleIdleSession(session) && note !== "disconnected";
           return (
             <li key={session.id} className="border-t border-(--line-soft) first:border-t-0">
               <div className="flex min-w-0 items-center gap-1.5 pr-2">
@@ -87,6 +106,10 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
                 {reconcilable ? (
                   <Button variant="secondary" size="sm" icon={<RotateCcw size={13} aria-hidden />} loading={reconcilingKey === session.session_key} onClick={() => void handleReconcile(session)} data-testid={`reconcile-session-${session.id}`}>
                     {tr("멈춘 턴 정리", "Reconcile stale turn")}
+                  </Button>
+                ) : cleanableIdle ? (
+                  <Button variant="secondary" size="sm" loading={reconcilingKey === session.session_key} onClick={() => void handleCleanupIdle(session)} data-testid={`cleanup-session-${session.id}`}>
+                    {tr("정리", "Clean up")}
                   </Button>
                 ) : null}
               </div>
