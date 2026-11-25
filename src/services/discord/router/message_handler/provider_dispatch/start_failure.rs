@@ -577,3 +577,7 @@ mod tests;
 #[cfg(test)]
 #[path = "start_failure_missing_tests.rs"]
 mod missing_tests;
+
+#[cfg(all(test, unix))]
+#[path = "start_failure_seed_tests.rs"]
+mod seed_tests;

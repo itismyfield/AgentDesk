@@ -21,6 +21,8 @@ mod attached;
 mod busy_operation;
 #[path = "owner_input_herdr_pending_tests.rs"]
 mod pending;
+#[path = "owner_input_herdr_seed_tests.rs"]
+mod seed;
 
 const PROMPT: &str = "owner herdr first prompt";
 

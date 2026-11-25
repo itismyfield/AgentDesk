@@ -496,6 +496,10 @@ pub(in crate::services::discord) async fn seed_permit(
     }
 }
 
+#[cfg(test)]
+#[path = "seed_successor_tests.rs"]
+mod seed_successor_tests;
+
 enum Applied {
     Vacant,
     Retired,
