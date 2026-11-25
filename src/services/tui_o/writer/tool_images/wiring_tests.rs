@@ -263,9 +263,8 @@ fn derive_from(
     out
 }
 
-/// An Unresolved image found behind a newer body posts nothing again, keeps the body's anchor
-/// and leaves the channel running, now and on replay. One that never arrived is NotFound past
-/// that body, and ends in one omission notice after its allowed retry.
+/// An Unresolved image that arrived behind a newer body settles without a repost or a stop; one
+/// that never arrived is NotFound past that body and ends in one notice after its retry.
 #[tokio::test(start_paused = true)]
 async fn unresolved_image_reconfirmed_behind_newer_anchor_without_stopping() {
     for arrived in [true, false] {
