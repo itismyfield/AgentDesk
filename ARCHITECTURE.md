@@ -2332,6 +2332,8 @@ src/
 │   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
+│   │   │   │   ├── early_pending.rs
+│   │   │   │   ├── early_pending_tests.rs
 │   │   │   │   ├── effect.rs
 │   │   │   │   ├── effect_tests.rs
 │   │   │   │   ├── effort_close_tests.rs
@@ -3740,6 +3742,8 @@ src/
 │   │   │   ├── unknown_notice_store.rs
 │   │   │   └── unknown_notice_tests.rs
 │   │   ├── turn_view_reconciler/
+│   │   │   ├── accept_pending.rs
+│   │   │   ├── accept_pending_tests.rs
 │   │   │   ├── anchor_completion.rs
 │   │   │   ├── api.rs
 │   │   │   ├── apply.rs
