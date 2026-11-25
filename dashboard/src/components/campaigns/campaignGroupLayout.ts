@@ -10,7 +10,7 @@ export const GROUP_PIN_Y = 82;
 export const LAYER = GROUP_WIDTH + 88;
 const ROW_GAP = 24;
 /** Cards with no line to another sit closer together, under the linked ones, in rows shaped for a portrait canvas. */
-const SHELF = GROUP_WIDTH + 36;
+const SHELF = GROUP_WIDTH + 64;
 const SHELF_ASPECT = 0.9;
 const SECTION_GAP = 72;
 /** A line running backwards loops under the linked cards, each in its own lane this far apart. */
