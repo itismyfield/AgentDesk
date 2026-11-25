@@ -2,14 +2,19 @@
 //! on it: one close, no turn settled, the original and its claim kept for the turn that follows.
 use super::*;
 use crate::services::discord::queue_io::input_owner::admission::{AdmissionTicket, admit};
-use crate::services::discord::queue_io::input_owner::drive::{FrontClaim, claim_turn};
+use crate::services::discord::queue_io::input_owner::drive::{Front, FrontClaim, claim_turn};
 use crate::services::discord::queue_io::input_owner::pending_recovery::recover;
+use crate::services::discord::router::message_handler::{
+    OwnerTurn, install_root_recovery_launch, start_idle_for_test,
+};
+use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::execution_closing;
 use crate::services::tui_prompt_dedupe::{binding_context, binding_events as events};
 use crate::services::turn_orchestrator::{
     PendingQueueItem, RetryWaitCause, assert_original_and_ticket_kept, v2_queue,
 };
+use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
 use futures::FutureExt;
 use herdr::HostedState::{Pending, Retired};
 use poise::serenity_prelude::ChannelId;
@@ -36,27 +41,32 @@ fn with_waited(
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
         let node = Node::store(&rig, None, stored).await;
-        let claim = waited(&node).await;
+        waited(&node).await;
+        let claim = claim(&node).await;
         body(&rig, &node, &claim).await;
         node.finish().await;
     });
 }
 
-async fn claim(node: &Node) -> FrontClaim {
-    let mailbox = node.shared.mailbox(channel());
-    let granted = mailbox.v2_request(|slot| {
+/// The owner's front, granted as the drive grants it before a start.
+async fn grant(node: &Node) -> Front {
+    let granted = node.shared.mailbox(channel()).v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;
         owner.grant_front(&front).map(|_| front)
     });
-    let front = granted.await.unwrap();
+    granted.await.unwrap()
+}
+
+async fn claim(node: &Node) -> FrontClaim {
+    let (front, mailbox) = (grant(node).await, node.shared.mailbox(channel()));
     let claimed = claim_turn(&mailbox, front.1.message_id, &front).await;
     claimed.unwrap().expect("the granted front is claimed")
 }
 
-/// One original of `node`'s channel whose wait on the rig's execution consumed its first due,
-/// claimed again; the launch context names the session a logged start would carry.
-async fn waited(node: &Node) -> FrontClaim {
+/// One original of `node`'s channel whose wait on the rig's execution consumed its first due; the
+/// launch context names the session a logged start would carry.
+async fn waited(node: &Node) {
     let context = binding_context::BindingContext {
         schema: 1,
         provider: "claude".into(),
@@ -97,7 +107,6 @@ async fn waited(node: &Node) -> FrontClaim {
         owner.tick(30_000)
     });
     entered.await.unwrap();
-    claim(node).await
 }
 
 /// Whether `claim` is still the owner's claim on its kept original and ticket, and whether its
@@ -287,11 +296,81 @@ fn hook_record_and_auto_qualify_share_one_source_authority_key() {
                 log_start(&pane);
             })
         });
-        held_rx.recv().unwrap();
+        recv_within(&held_rx, WAIT_CAP);
         recover(&node.shared, channel(), claim).await;
         let _ = judged.send(());
-        hook.join().unwrap();
+        join_within(hook, WAIT_CAP);
         assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
         assert!(!execution_closing(herdr::EXECUTION), "the start came first");
+    });
+}
+
+#[test]
+fn unreadable_start_log_refuses_the_auto_close_and_keeps_the_wait() {
+    let name = "unreadable_start_log_refuses_the_auto_close_and_keeps_the_wait";
+    with_waited(name, Stored::NeverAttached, async |rig, node, claim| {
+        // A start was logged, then the log took a complete line no reader can parse.
+        let logged = log_start(node.key.rsplit_once(':').unwrap().1);
+        let mut log = std::fs::OpenOptions::new()
+            .append(true)
+            .open(logged)
+            .unwrap();
+        std::io::Write::write_all(&mut log, b"{\"seq\":2,\n").unwrap();
+        events::forget_channel_for_tests(CHANNEL);
+        let current = asked(node, claim, claim.number());
+        let result = terminate_never_started(current, node.shared.clone(), &node.pool).await;
+        let unreadable = matches!(&result, TerminationResult::Refused(why)
+            if why.starts_with("start log unreadable"));
+        assert!(unreadable, "{result:?}");
+        recover(&node.shared, channel(), claim).await;
+        assert_eq!((closes(rig), state(node).await), (0, Some(Pending)));
+        assert!(!execution_closing(herdr::EXECUTION), "no fence was taken");
+        assert_eq!(kept(node, claim).await, (true, true));
+    });
+}
+
+#[test]
+fn start_idle_closes_the_never_started_pending_before_the_launch_takes_the_original() {
+    let name = "start_idle_closes_the_never_started_pending_before_the_launch_takes_the_original";
+    let Some((rig, runtime)) = rig_child(&format!("never_started_tests::{name}")) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::store(&rig, None, Stored::NeverAttached).await;
+        waited(&node).await;
+        let (proxy, gateway, _discord) =
+            discord_mock::start(discord_mock::DiscordMockState::new()).await;
+        let context = discord_mock::serenity_context(proxy, gateway).await;
+        crate::services::discord::ready_gateway_for_test(&node.shared, context);
+        // The launch is the handoff a user front reaches after its claim; it stops there unsent.
+        let launched = Arc::new(Mutex::new(Vec::new()));
+        let seen = launched.clone();
+        let stop = Box::new(move |owner: OwnerTurn, text: &str| -> Result<(), String> {
+            let front = owner.front();
+            seen.lock()
+                .unwrap()
+                .push((front.0.clone(), front.1.message_id, text.to_string()));
+            owner.defer_before_submit("fixture_stop");
+            Err("NotSent(\"fixture_stop\")".to_string())
+        });
+        let _launch = install_root_recovery_launch(channel(), stop);
+        let front = grant(&node).await;
+        let started = start_idle_for_test(node.shared.clone(), channel(), front.clone()).await;
+        assert_eq!(started, Err("NotSent(\"fixture_stop\")".to_string()));
+        assert_eq!((closes(&rig), state(&node).await), (1, Some(Retired)));
+        let original = (
+            front.0.clone(),
+            front.1.message_id,
+            "original input".to_string(),
+        );
+        assert_eq!(*launched.lock().unwrap(), [original]);
+        let read = node.shared.mailbox(channel()).v2_request(move |slot| {
+            let owner = slot.as_ref().ok_or("no owner")?;
+            assert_original_and_ticket_kept(owner, &front);
+            Ok(owner.snapshot.retry.wait.is_none())
+        });
+        assert!(read.await.unwrap(), "the wait ended with the close");
+        node.finish().await;
     });
 }
