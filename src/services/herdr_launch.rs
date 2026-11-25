@@ -644,8 +644,9 @@ pub(crate) async fn launch_herdr_session(
     })
 }
 
-/// Retires this launch's own Pending once no create left for it; a row that moved on or names a
-/// pane is kept. Returns `error`, the failure that proved nothing was sent.
+/// Retires this launch's own Pending once no create left for it, and then the runtime hint it
+/// inherited; a row that moved on or names a pane is kept. Returns `error`, the failure that
+/// proved nothing was sent.
 pub(crate) async fn retire_unsent(
     pool: &PgPool,
     owner: &HostedOwner,
@@ -655,6 +656,8 @@ pub(crate) async fn retire_unsent(
     let retired = retire_own_unplaced(pool, owner, nonce).await;
     if retired != Ok(HostedCasOutcome::Written) {
         tracing::warn!(nonce, ?retired, ?error, "herdr launch: unsent Pending kept");
+    } else if let Err(why) = runtime_marker::clear(owner, nonce).await {
+        tracing::warn!(nonce, %why, "herdr launch: unsent retire kept its runtime hint");
     }
     error
 }
