@@ -117,7 +117,7 @@ fn herdr_key(key: HostKey) -> &'static str {
 }
 
 /// Test seam: Herdr's key name for `key`.
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn herdr_key_for_test(key: HostKey) -> &'static str {
     herdr_key(key)
 }
@@ -419,7 +419,7 @@ impl HerdrTarget {
     }
 
     /// Test seam: holds this pane's execution fence for `mutation` until the guard drops.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn acquire_for_test(
         &self,
         mutation: Mutation,
@@ -428,7 +428,7 @@ impl HerdrTarget {
     }
 
     /// Test seam: sends `request` on the pinned judgment, as the input executor does.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn send_pinned_for_test(
         &self,
         request: HerdrRequest,

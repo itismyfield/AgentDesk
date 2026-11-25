@@ -131,12 +131,7 @@ esac
             .unwrap();
         candidate.attach_first_execution(&worker_context, "hi", token.turn_nonce());
         let result = observe_for_test(Observe {
-            submitted: Submitted {
-                prepared,
-                validated_tail: tail,
-                rollout_modified_since: std::time::UNIX_EPOCH,
-                handoff,
-            },
+            submitted: Submitted::for_test(prepared, tail, std::time::UNIX_EPOCH, handoff),
             working_dir: &cwd,
             sender,
             cancel_token: Some(token),

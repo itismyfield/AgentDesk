@@ -187,9 +187,11 @@ pub(crate) struct Fault {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Fault {
-    /// Test seam: the notice this fault moves, so a test can redirect its receipts.
-    pub(crate) fn notice_mut_for_test(&mut self) -> Option<&mut OperatorNotice> {
-        self.notice.as_mut()
+    /// Test seam: keeps the receipts of the notice this fault moves under `root`.
+    pub(crate) fn set_notice_receipt_root_for_test(&mut self, root: &std::path::Path) {
+        if let Some(notice) = self.notice.as_mut() {
+            notice.root = Some(root.to_path_buf());
+        }
     }
 }
 

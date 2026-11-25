@@ -149,8 +149,8 @@ pub(crate) struct BusyObservation {
 #[cfg(any(test, feature = "test-support"))]
 impl BusyObservation {
     /// The Herdr read this observation captured, for tests outside this module.
-    pub(crate) fn context_for_test(&self) -> Option<&Arc<herdr::Context>> {
-        self.context.as_ref()
+    pub(crate) fn context_for_test(&self) -> Option<&herdr::Context> {
+        self.context.as_deref()
     }
 
     pub(crate) fn admits_for_test(&self, request: &Request<'_>) -> bool {

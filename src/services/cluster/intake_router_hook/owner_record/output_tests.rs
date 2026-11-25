@@ -35,16 +35,19 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
         .run(async {})
         .await
         .unwrap();
-    let mut generation = artifact.clone();
-    *generation.origin_generation_mut_for_test() += 1;
+    let mut generation = serde_json::to_value(&artifact).unwrap();
+    let next = generation["origin"]["generation"].as_i64().unwrap() + 1;
+    generation["origin"]["generation"] = json!(next);
+    let generation: Artifact = serde_json::from_value(generation).unwrap();
     assert!(
         scope
             .acquire(origin.channel_for_test(), "answer", Some(&generation))
             .await
             .is_err()
     );
-    let mut changed = artifact.clone();
-    *changed.origin_binding_mut_for_test() = json!({"native":"successor"});
+    let mut changed = serde_json::to_value(&artifact).unwrap();
+    changed["origin"]["binding"] = json!({"native":"successor"});
+    let changed: Artifact = serde_json::from_value(changed).unwrap();
     assert!(
         scope
             .acquire(origin.channel_for_test(), "answer", Some(&changed))

@@ -129,7 +129,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                 !root.path().join("home/sessions").exists(),
                 "no rollout is needed for physical create"
             );
-            assert_eq!(submitted.prepared.context.provider, "codex");
+            assert_eq!(submitted.prepared_for_test().context.provider, "codex");
             let calls = std::fs::read_to_string(root.path().join("tmux.calls")).unwrap();
             assert_eq!(
                 calls

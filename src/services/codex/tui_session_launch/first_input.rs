@@ -14,10 +14,33 @@ pub(crate) struct Create<'a> {
 }
 
 pub(crate) struct Submitted {
-    pub prepared: PreparedIncarnation,
-    pub validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
-    pub rollout_modified_since: std::time::SystemTime,
-    pub handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+    pub(in crate::services::codex) prepared: PreparedIncarnation,
+    pub(in crate::services::codex) validated_tail:
+        crate::services::codex_tui::tail_launch::ValidatedTail,
+    pub(in crate::services::codex) rollout_modified_since: std::time::SystemTime,
+    pub(in crate::services::codex) handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    /// A ticket as a create returns it, for tests outside this module.
+    pub(crate) fn for_test(
+        prepared: PreparedIncarnation,
+        validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
+        rollout_modified_since: std::time::SystemTime,
+        handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+    ) -> Self {
+        Self {
+            prepared,
+            validated_tail,
+            rollout_modified_since,
+            handoff,
+        }
+    }
+
+    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+        &self.prepared
+    }
 }
 
 /// The argv-bearing create, for tests outside this module.

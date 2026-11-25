@@ -242,17 +242,6 @@ impl Origin {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
-impl Artifact {
-    pub(crate) fn origin_generation_mut_for_test(&mut self) -> &mut i64 {
-        &mut self.origin.generation
-    }
-
-    pub(crate) fn origin_binding_mut_for_test(&mut self) -> &mut serde_json::Value {
-        &mut self.origin.binding
-    }
-}
-
 #[cfg(test)]
 #[path = "output_fixture_tests.rs"]
 pub(crate) mod tests;

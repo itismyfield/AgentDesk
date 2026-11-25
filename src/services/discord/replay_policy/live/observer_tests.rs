@@ -1,8 +1,6 @@
 use crate::config::TestEnvVarGuard as Guard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::replay_disposition::write::{
-    self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt,
-};
+use crate::db::replay_disposition::write::{self, BeginFrom, CanonicalInput, EffectProjection};
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::replay_policy::live::*;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -507,7 +505,7 @@ fn inflight(live: &LiveAttempt) -> crate::services::discord::inflight::InflightT
         None,
         0,
     );
-    state.replay_receipt_id = live.attempt_for_test(ExactAttempt::receipt_id);
+    state.replay_receipt_id = live.attempt_identity_for_test().map(|(receipt, _)| receipt);
     state
 }
 
@@ -630,7 +628,7 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
         let tok = token(&first);
         let state = inflight(&first);
         let id = state.replay_receipt_id.unwrap();
-        let nonce = first.attempt_for_test(|a| a.nonce().to_string()).unwrap();
+        let (_, nonce) = first.attempt_identity_for_test().unwrap();
         let session = format!("p2-retry-{success}");
         sqlx::query("INSERT INTO sessions (session_key,channel_id,provider,status,current_replay_receipt_id,replay_episode_nonce,claude_session_id) VALUES ($1,'7330','codex','turn_active',$2,$3,'stale')").bind(&session).bind(id).bind(&nonce).execute(&pool).await.unwrap();
         direct(

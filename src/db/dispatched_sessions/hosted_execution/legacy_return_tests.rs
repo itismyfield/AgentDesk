@@ -24,7 +24,7 @@ async fn setup() -> (TestPostgresDb, PgPool, HostedObservation, HostedExecution)
         .fetch_one(&pool).await.unwrap();
     sqlx::query("INSERT INTO session_key_aliases (session_id, session_key) VALUES ($1, 'legacy-return-alias')")
         .bind(id).execute(&pool).await.unwrap();
-    let observed = HostedObservation::for_test(id, Some(wire(&r)), HostedRecord::Known(r.clone()));
+    let observed = HostedObservation::for_test(id, Some(wire(&r)));
     (db, pool, observed, r)
 }
 
@@ -125,7 +125,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
         HostedCasOutcome::Stale
     );
     assert_eq!(snapshot(&pool, observed.session_id()).await, after);
-    let legacy = HostedObservation::for_test(observed.session_id(), None, HostedRecord::Legacy);
+    let legacy = HostedObservation::for_test(observed.session_id(), None);
     let next = crate::db::dispatched_sessions::hosted_execution::tests::pending(&r.owner, "n-new");
     assert_eq!(
         install_pending_pg(&pool, &legacy, next).await.unwrap(),
@@ -182,11 +182,7 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
         wire(&record(&r.owner, "n-old", HostedState::Bound)),
         json!({"schema": 99}),
     ] {
-        let obs = HostedObservation::for_test(
-            observed.session_id(),
-            Some(raw.clone()),
-            HostedRecord::decode(Some(&raw)),
-        );
+        let obs = HostedObservation::for_test(observed.session_id(), Some(raw.clone()));
         assert!(
             return_legacy_pg(&pool, &obs, &r.owner, &r.execution_nonce, &proof)
                 .await

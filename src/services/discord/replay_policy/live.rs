@@ -301,10 +301,12 @@ impl LiveAttempt {
         lock(&self.observation).clone()
     }
 
-    /// Reads the attempt not yet handed to a decision, if any.
+    /// The receipt ID and nonce of the attempt not yet handed to a decision, if any.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn attempt_for_test<T>(&self, read: impl FnOnce(&ExactAttempt) -> T) -> Option<T> {
-        lock(&self.attempt).as_ref().map(read)
+    pub(crate) fn attempt_identity_for_test(&self) -> Option<(i64, String)> {
+        lock(&self.attempt)
+            .as_ref()
+            .map(|attempt| (attempt.receipt_id(), attempt.nonce().to_string()))
     }
 }
 

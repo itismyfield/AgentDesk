@@ -522,11 +522,8 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
     paused().block_on(async {
         let tick = |e7: &RestoreResume| {
             let mut faults = pass_with_for_test(&boot, &f.personal, &|_| Some(e7.clone()));
-            for notice in faults
-                .iter_mut()
-                .filter_map(|fault| fault.notice_mut_for_test())
-            {
-                notice.root = Some(receipts.clone());
+            for fault in &mut faults {
+                fault.set_notice_receipt_root_for_test(&receipts);
             }
             notify(faults, observe_operator_notice)
         };
