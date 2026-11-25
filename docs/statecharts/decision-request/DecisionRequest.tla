@@ -60,12 +60,12 @@ Desired == CASE phase \in {"new", "posting"} -> "none"
              [] phase = "unknown_closed" -> "unknown"
              [] phase = "post_failed" -> "none"
              [] OTHER -> "processing"
-\* The journal: this run alone may POST. `known` is a receiving process's memory of the forum, and
-\* only the memory-trusting contrasts track it: SnapshotRegister may miss the registration.
+\* The journal: this run alone may POST, and its row names the forum in PG. `known` is a receiver's
+\* memory of the forum; SnapshotRegister and OverrideUnshared may never learn it.
 PostBegin == /\ alive /\ phase = "new"
     /\ phase' = ("posting")
     /\ inflight' = (TRUE)
-    /\ \E reached \in BOOLEAN: known' = (IF Mode = "SnapshotRegister" THEN reached ELSE known)
+    /\ \E reached \in BOOLEAN: known' = (IF Mode \in {"SnapshotRegister", "OverrideUnshared"} THEN reached ELSE known)
     /\ UNCHANGED <<choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, listed, gone, bound>>
 \* Only the run that wrote the journal posts the starter, once, buttons disabled. A lost answer is
 \* settled by finding that post (RePost sends another); a boot never posts (BootRePost does).
@@ -91,13 +91,13 @@ Activate == /\ alive /\ phase = "disabled"
     /\ phase' = ("open")
     /\ view' = ("open")
     /\ UNCHANGED <<choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, leaked, bootstrapped, tempHeld, listed, gone, bound, known, inflight>>
-\* A Decision thread's message never reaches ordinary intake. The guard matches the forum, so it holds
-\* before the thread id is stored (GuardByThread does not). On a miss Fixed asks PG, where the forum
-\* is ready before the journal; TtlGuard and SnapshotRegister trust memory alone.
+\* A Decision thread's message never reaches ordinary intake. The guard matches the forum (GuardByThread
+\* only stored threads); on a miss Fixed asks PG, whose journal row names it. OverrideUnshared asks only
+\* the forum cache, which a configured forum never enters; the others trust memory.
 ThreadMessage == /\ posts > 0 /\ ~leaked
     /\ \/ Mode = "NoIntakeGuard"
        \/ Mode = "GuardByThread" /\ phase = "posting"
-       \/ Mode \in {"TtlGuard", "SnapshotRegister"} /\ ~known
+       \/ Mode \in {"TtlGuard", "SnapshotRegister", "OverrideUnshared"} /\ ~known
     /\ leaked' = (TRUE)
     /\ UNCHANGED <<phase, choice, first, accepted, payload, runnable, begun, claims, norms, session, resolved, busy, sent, writes, pending, writeTarget, dispatchSession, receipt, alive, crashes, sessionMoves, archived, locked, archiveMoves, view, closed, atClose, unauthorized, queueFault, preserved, journal, holds, tookLive, kept, noticed, otherKept, otherNoticed, posts, early, bootstrapped, tempHeld, listed, gone, bound, known, inflight>>
 \* The periodic full read of ready forums. An older read that lands late replaces the set; when the
