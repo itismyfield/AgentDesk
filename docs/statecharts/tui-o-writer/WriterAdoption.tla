@@ -785,6 +785,8 @@ OwnerRestart ==
 OwnerNewInput ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.boot = "ready" /\ ~agy.retired /\ ~agy.newSpool
+    \* Read readiness is not an input permit: an existing turn's end comes first.
+    /\ agy.debt \in {"none", "settled"} \/ Mut = "inputWithDebt"
     /\ agy' = [agy EXCEPT !.newSpool = TRUE]
 
 OwnerNewInputEnds ==
@@ -833,5 +835,101 @@ AgyExistingDebtResolves ==
 ShadowNoVisible == Fix = "shadow" => agy.visible = 0
 NoRetireWithNewSpool == agy.retired => ~agy.newSpool
 AgyNoAbandonLive == ~agy.abandonedLive
+NoNewInputWithExistingDebt == agy.newSpool => agy.debt \in {"none", "settled"}
+
+\* Durable AGY custody across a restart (#8274 4a). route: the inflight custody field read by
+\* end_authority (absent = legacy, present = agy, unreadable or inconsistent = held). stage: what
+\* the spool proves, NoCheckpoint included. probe: ProcessIdentity::probe of the started producer.
+\* After a restart no writer is left, so a live orphan never seals; the owner ends it.
+CustodyStages == {"noSlot", "noCheckpoint", "openOnly", "launched", "started", "sealed"}
+CustodyProbes == {"same", "goneOrReused", "probeError"}
+CustodyBoot == <<"reap", "observe", "queue", "invalidate", "restore", "markers", "held", "idle">>
+CustodyLive(route, stage) ==
+    route = "agy" /\ (stage = "started" \/ (stage = "launched" /\ Mut = "noLaunchGate"))
+CustodyInit ==
+    /\ LegacyIdle /\ QuietLate
+    /\ \E route \in {"legacy", "agy", "held"}, stage \in CustodyStages, probe \in CustodyProbes :
+       agy = [route |-> route,
+              stage |-> IF route = "agy" THEN stage ELSE "none",
+              probe |-> IF CustodyLive(route, stage) THEN probe ELSE "none",
+              \* Input ran: a started producer, or a route row that ran without its spool.
+              executed |-> route = "agy" /\ (stage \in {"started", "sealed"}
+                           \/ CustodyLive(route, stage)
+                           \/ (stage = "noSlot" /\ Mut = "legacyFallback")),
+              step |-> 1, ends |-> 0, generic |-> 0, legacy |-> 0,
+              visibleHold |-> FALSE, unprovenAbandon |-> FALSE]
+CustodyPhase == CustodyBoot[agy.step]
+\* end_authority: every generic end skips a row that is not Legacy.
+CustodySkipsGeneric == agy.route \in {"agy", "held"} \/ Mut = "legacyAsAgy"
+CustodyOwnsAgy == agy.route = "agy" \/ (agy.route = "legacy" /\ Mut = "legacyAsAgy")
+CustodyEnded == agy.ends + agy.generic + agy.legacy > 0
+\* The owner re-judges until it ends the turn; "oneShot" judges once, right after observe.
+CustodyOwnerTurn == agy.step >= 3 /\ (Mut # "oneShot" \/ agy.step = 3)
+
+CustodyAdvance ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.step < 8
+    /\ CustodyPhase = "restore" => (CustodySkipsGeneric \/ CustodyEnded)
+    /\ agy' = [agy EXCEPT !.step = @ + 1]
+\* Reaper, generation invalidation and the general restore (settle_boot inside it).
+CustodyGenericEnd ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyPhase \in {"reap", "invalidate", "restore"} /\ ~CustodyEnded
+    /\ \/ ~CustodySkipsGeneric /\ agy' = [agy EXCEPT !.legacy = 1]
+       \/ /\ CustodySkipsGeneric /\ Mut = "genericSettle" /\ CustodyPhase = "restore"
+          /\ agy' = [agy EXCEPT !.generic = 1]
+\* boot_hold before any retry: a probe error or a held row is shown, never ended generically.
+CustodyHoldVisible ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyOwnerTurn /\ ~agy.visibleHold /\ ~CustodyEnded
+    /\ agy.route = "held" \/ (CustodyOwnsAgy /\ agy.probe = "probeError")
+    /\ agy' = [agy EXCEPT !.visibleHold = TRUE]
+CustodyRetry ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ agy.probe = "probeError" /\ agy.visibleHold
+    /\ \E probe \in {"same", "goneOrReused"} : agy' = [agy EXCEPT !.probe = probe]
+\* A same-identity orphan has its group killed. A group that outlives the deadline is a probe
+\* error; killing again eventually clears it (strong fairness on the cleared outcome).
+CustodyKillTarget ==
+    CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded
+    /\ agy.stage = "started" /\ agy.probe = "same"
+CustodyKill ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyKillTarget
+    /\ agy' = [agy EXCEPT !.probe = "goneOrReused"]
+CustodyKillOutlived ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyKillTarget
+    /\ agy' = [agy EXCEPT !.probe = "probeError"]
+CustodySettle ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded /\ agy.stage = "sealed"
+    /\ agy' = [agy EXCEPT !.ends = 1]
+\* Abandon needs proof that input never ran or that its producer is gone.
+CustodyAbandon ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ CustodyOwnerTurn /\ CustodyOwnsAgy /\ ~CustodyEnded
+    /\ \/ agy.stage \in {"none", "noSlot", "noCheckpoint", "openOnly", "launched"}
+       \/ agy.stage = "started" /\ (agy.probe = "goneOrReused" \/ Mut = "unprovenLost")
+    /\ agy' = [agy EXCEPT !.ends = 1,
+                           !.unprovenAbandon = agy.executed /\ agy.probe # "goneOrReused"]
+CustodyRest == UNCHANGED <<agy, vars, lateVars>>
+CustodyNext == CustodyAdvance \/ CustodyGenericEnd \/ CustodyHoldVisible \/ CustodyRetry
+               \/ CustodyKill \/ CustodyKillOutlived \/ CustodySettle \/ CustodyAbandon
+               \/ CustodyRest
+AgyCustodySpec == CustodyInit /\ [][CustodyNext]_agy
+    /\ WF_agy(CustodyAdvance) /\ WF_agy(CustodyGenericEnd) /\ WF_agy(CustodyHoldVisible)
+    /\ WF_agy(CustodyRetry) /\ SF_agy(CustodyKill) /\ WF_agy(CustodySettle)
+    /\ WF_agy(CustodyAbandon)
+
+LegacyRecoveryKept == agy.route = "legacy" => agy.ends = 0
+AgyEndOnlyByOwner == agy.route \in {"agy", "held"} => agy.generic = 0
+NoAbandonUnproven == ~agy.unprovenAbandon
+CustodyEndsOnce == agy.ends + agy.generic + agy.legacy <= 1
+AgyCustodyResolves == agy.route = "agy" => <>(agy.ends = 1)
+LegacyResolves == agy.route = "legacy" => <>(agy.legacy = 1)
+ProbeErrorVisible ==
+    (agy.route = "agy" /\ agy.probe = "probeError") ~> (agy.visibleHold \/ agy.ends = 1)
+HeldVisible == agy.route = "held" => <>agy.visibleHold
 AgyDamagedVisible == (agy.slots = "damaged" /\ agy.verified) ~> agy.boot = "held"
 ====
