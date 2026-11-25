@@ -24,7 +24,7 @@ services, and manual-only tools are reported explicitly rather than silently dro
 | native installer | `opencode` | hygiene candidate only when already installed; its self-updater still requires exact per-tool approval |
 | remote service | memento MCP at the configured mac-mini endpoint | health/version report only; no local mutation |
 | npx always-latest | brave-search MCP | reports the unpinned spec and latest package version; pin approval is a manual config decision |
-| manual/receipt | `SidecarLauncher`, Playwright + Chromium | report only; no mutation |
+| manual/receipt | `SidecarLauncher` | report only; no mutation |
 
 The `check --offline` diagnostic skips all registry and HTTP probes, including memento, while still
 emitting every row. Normal weekly checks do query npm, PyPI, Homebrew metadata, rustup, and memento.

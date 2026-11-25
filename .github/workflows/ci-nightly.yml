@@ -39,7 +39,7 @@ jobs:
           cache-dependency-path: dashboard/package-lock.json
 
       # PR-required gate: build + Vitest only (verify-dashboard.sh).
-      # Playwright smoke was dropped from Nightly by the user decision of 2026-11-25; it runs locally only.
+      # Playwright was removed from the repo on 2026-11-25; use agent-browser for local browser verification.
       - name: dashboard build/test (PR gate path)
         run: ./scripts/verify-dashboard.sh
         env:
