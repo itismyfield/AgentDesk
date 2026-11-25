@@ -421,7 +421,7 @@ async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
             let posts = harness.port.posts();
             let notices: Vec<_> = posts
                 .iter()
-                .filter(|p| p.starts_with("-# 이미지"))
+                .filter(|p| p.starts_with("-# 이미지 1장 생략"))
                 .collect();
             assert_eq!(notices.len(), 1, "{status}");
             assert!(notices[0].starts_with(&format!("-# 이미지 1장 생략({label} 1)")));
