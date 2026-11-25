@@ -1,7 +1,10 @@
+import type { ReactNode } from "react";
 import type { TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { KpiChart, type KpiChartText } from "../../kit/pro/kpi-chart";
-import { Cap, SectionCard } from "../common/KitPrimitives";
+import { StatCard } from "../../kit/pro/stat-card";
+import { TrendChart } from "../../kit/pro/trend-chart";
+import { SectionCard } from "../common/KitPrimitives";
 import {
   formatAxisCurrency,
   formatCompactDate,
@@ -11,17 +14,30 @@ import {
   msg,
   type MetricDelta,
 } from "./statsModel";
-import { NUMERIC_STYLE } from "./StatsCardPrimitives";
 
-/** A summary fact without a daily series: label, value and its note. */
-function SummaryFact({ testId, label, value, note }: { testId: string; label: string; value: string; note: string }) {
+/** Kit StatCard summary fact with an optional compact TrendChart sparkline when multiple days are present. */
+function SummaryFact({
+  testId,
+  label,
+  value,
+  note,
+  chart,
+}: {
+  testId: string;
+  label: string;
+  value: string;
+  note: string;
+  chart?: ReactNode;
+}) {
   return (
-    <div data-testid={testId} className="flex min-w-0 flex-col gap-0.5 px-3 py-3 sm:px-4">
-      <dt className="text-xs leading-4 text-[var(--fg-muted)]">{label}</dt>
-      <dd className="m-0 flex min-w-0 flex-wrap items-baseline gap-x-2 text-lg leading-7 font-semibold text-[var(--fg)]" style={NUMERIC_STYLE}>
-        {value}
-        <Cap className="font-normal [overflow-wrap:anywhere]">{note}</Cap>
-      </dd>
+    <div data-testid={testId} className="min-w-0">
+      <StatCard
+        label={label}
+        value={value}
+        footer={note}
+        chart={chart}
+        layout={chart ? "beside" : "stack"}
+      />
     </div>
   );
 }
@@ -83,11 +99,14 @@ export function StatsSummaryGrid({
     : "";
   const savingsRate = cacheSavingsDelta ? `(${cacheSavingsDelta.value.replace("-", "")})` : "";
   const text = kpiText(t);
+  const hasSparkline = daily.length > 1;
+  const dailyTokens = daily.map((day) => day.total_tokens);
+  const peakIndex = peakDay ? daily.findIndex((day) => day.date === peakDay.date) : -1;
 
   return (
     <SectionCard title={t(msg(`사용량 · 최근 ${rangeDays}일`, `Usage · last ${rangeDays} days`, `使用量 · 直近${rangeDays}日`, `用量 · 最近 ${rangeDays} 天`))} testId="stats-usage">
       {/* The kit caps its card at 460px; here each chart fills its column, two columns once both fit their tooltip. */}
-      <div className="@container px-3 pb-3 sm:px-4 sm:pb-4">
+      <div className="@container flex flex-col gap-3 px-3 pb-3 sm:px-4 sm:pb-4">
         <div data-testid="stats-summary-grid" className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none!">
           <div data-testid="stats-summary-total-tokens" className="min-w-0">
             <KpiChart
@@ -96,7 +115,7 @@ export function StatsSummaryGrid({
               labels={labels}
               tooltipLabels={tooltipLabels}
               defaultIndex={Math.max(0, daily.length - 1)}
-              series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: daily.map((day) => day.total_tokens), color: "var(--aui-accent)" }]}
+              series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: dailyTokens, color: "var(--aui-accent)" }]}
               format={formatTokens}
               emptyLabel={notice}
               text={text}
@@ -130,25 +149,50 @@ export function StatsSummaryGrid({
             />
           </div>
         </div>
+        <div className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2">
+          <SummaryFact
+            testId="stats-summary-cache-saved"
+            label={t(msg("활성 일수", "Active Days", "稼働日数", "活跃天数"))}
+            value={summary ? `${numberFormatter.format(summary.active_days)} / ${days}` : missing}
+            note={summary
+              ? t(msg(`일 평균 ${formatTokens(Math.round(average))}`, `Avg ${formatTokens(Math.round(average))} per day`, `平均 ${formatTokens(Math.round(average))} / 日`, `日均 ${formatTokens(Math.round(average))}`))
+              : notice}
+            chart={hasSparkline ? (
+              <TrendChart
+                labels={labels}
+                series={[{ name: t(msg("일별 토큰", "Daily tokens", "日次トークン", "每日 Token")), values: dailyTokens, color: "var(--aui-accent, #0190fe)" }]}
+                variant="spark"
+                axes="none"
+                height={36}
+                tooltip={false}
+                format={formatTokens}
+                label={t(msg("활성 일수 추이", "Active days trend", "稼働日数推移", "活跃天数趋势"))}
+              />
+            ) : undefined}
+          />
+          <SummaryFact
+            testId="stats-summary-cache-hit"
+            label={t(msg("피크 데이", "Peak Day", "ピーク日", "峰值日"))}
+            value={peakDay ? formatCompactDate(peakDay.date) : missing}
+            note={peakDay
+              ? `${formatTokens(peakDay.total_tokens)}${peakRatio ? t(msg(` · 평균의 ${peakRatio.toFixed(1)}배`, ` · ${peakRatio.toFixed(1)}x avg`, ` · 平均の ${peakRatio.toFixed(1)}x`, ` · ${peakRatio.toFixed(1)}x 平均`)) : ""}`
+              : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : notice}
+            chart={hasSparkline ? (
+              <TrendChart
+                labels={labels}
+                series={[{ name: t(msg("피크 추이", "Peak trend", "ピーク推移", "峰值趋势")), values: dailyTokens, color: "var(--aui-info, #a651f0)" }]}
+                variant="spark"
+                axes="none"
+                height={36}
+                tooltip={false}
+                defaultIndex={peakIndex >= 0 ? peakIndex : null}
+                format={formatTokens}
+                label={t(msg("피크 데이 추이", "Peak day trend", "ピーク日推移", "峰值日趋势"))}
+              />
+            ) : undefined}
+          />
+        </div>
       </div>
-      <dl className="m-0 grid grid-cols-1 border-t border-[var(--line-soft)] sm:grid-cols-2 sm:divide-x sm:divide-[var(--line-soft)] max-sm:divide-y max-sm:divide-[var(--line-soft)]">
-        <SummaryFact
-          testId="stats-summary-cache-saved"
-          label={t(msg("활성 일수", "Active Days", "稼働日数", "活跃天数"))}
-          value={summary ? `${numberFormatter.format(summary.active_days)} / ${days}` : missing}
-          note={summary
-            ? t(msg(`일 평균 ${formatTokens(Math.round(average))}`, `Avg ${formatTokens(Math.round(average))} per day`, `平均 ${formatTokens(Math.round(average))} / 日`, `日均 ${formatTokens(Math.round(average))}`))
-            : notice}
-        />
-        <SummaryFact
-          testId="stats-summary-cache-hit"
-          label={t(msg("피크 데이", "Peak Day", "ピーク日", "峰值日"))}
-          value={peakDay ? formatCompactDate(peakDay.date) : missing}
-          note={peakDay
-            ? `${formatTokens(peakDay.total_tokens)}${peakRatio ? t(msg(` · 평균의 ${peakRatio.toFixed(1)}배`, ` · ${peakRatio.toFixed(1)}x avg`, ` · 平均の ${peakRatio.toFixed(1)}x`, ` · ${peakRatio.toFixed(1)}x 平均`)) : ""}`
-            : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : notice}
-        />
-      </dl>
     </SectionCard>
   );
 }
