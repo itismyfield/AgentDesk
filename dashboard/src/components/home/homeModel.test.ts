@@ -6,7 +6,7 @@ import { serverCampaignFixtures } from "../../api/serverCampaignsFixtures";
 import { mergeAgentStatus } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import {
-  agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildUsageRows, classifyAgents, monitorView, pauseMeterScale, systemNeedsAttention, todoStatus, usageDetail,
+  QUEUE_PATH, agentLine, autoPauseRule, buildCampaignRows, buildSystemRows, buildTodayRoutines, buildTodoItems, buildTriageAlerts, buildUsageRows, classifyAgents, describeHealthReasons, monitorView, pauseMeterScale, systemNeedsAttention, todoHeaderLink, todoStatus, usageDetail,
   type HomeHealth,
 } from "./homeModel";
 
@@ -42,8 +42,9 @@ describe("home agents", () => {
     expect(classifyAgents(mergeAgentStatus(listed, agent("child")), [{ ...waiting, status: "idle" }], false)[0].state).toBe("resting");
   });
 
-  it("monitors a working agent's live turn and times it only from an in-flight snapshot", () => {
-    const [ada] = classifyAgents([agent("ada", { status: "working", session_info: "PR 리뷰" })], [], false);
+  it("monitors a working agent's live turn, falls back when turn is undefined, and times only in-flight snapshots", () => {
+    const [ada] = classifyAgents([agent("ada", { status: "working", session_info: "PR 리뷰", cli_provider: "codex" })], [], false);
+    expect(monitorView(undefined, ada, tr)).toEqual({ started: null, label: "PR 리뷰", kind: "think", role: "codex" });
     const turn = { status: "working", started_at: "2026-11-18T00:00:00Z", updated_at: null, provider: "codex", current_tool_line: null };
     expect(monitorView(turn, ada, tr)).toEqual({ started: null, label: "PR 리뷰", kind: "think", role: "codex" });
     const live = { ...turn, updated_at: "2026-11-18T00:05:00Z", current_tool_line: "npm test", tool_events: [{ kind: "tool", tool_name: "Bash" }] };
@@ -83,15 +84,63 @@ describe("home to-dos", () => {
     expect(items[3].agentId).toBeNull();
   });
 
-  it("lists server nodes waiting for approval, a decision or a deploy first, and leaves work the scheduler assigns", () => {
+  it("lists server and legacy LAND_READY approval gates first, and leaves work the scheduler assigns", () => {
     const document = structuredClone(serverCampaignFixtures.prepared);
     const statuses = ["awaiting_deploy", "awaiting_start", "awaiting_approval"];
     document.view.nodes.forEach((node, index) => { node.runtime = { ...node.runtime, human_status: statuses[index], wait_started_at: null }; });
-    const items = buildTodoItems({ cards: [card("d", "review", { review_status: "dilemma_pending" })], campaigns: [], documents: [document], tr, isKo: true });
+    const legacy = [{
+      id: "ledger-1",
+      title: "레거시 캠페인",
+      status: "active" as const,
+      auto_queue: false,
+      updated_at: "2026-11-18T00:00:00Z",
+      nodes: [
+        { id: "n1", title: "착지 대상", status: "running" as const, stage: "LAND_READY", next_action: "착지 승인 대기", issue_url: "https://github.com/o/r/issues/812", updated_at: "2026-11-18T00:00:00Z" },
+        { id: "n2", title: "이미 완료", status: "completed" as const, stage: "LAND_READY" },
+      ],
+    }];
+    const items = buildTodoItems({ cards: [card("d", "review", { review_status: "dilemma_pending" })], campaigns: [], documents: [document], legacy, tr, isKo: true });
     expect(items.map((item) => [item.key, item.kind, item.chip])).toEqual([
-      ["node:release:C", "approve", "승인 대기"], ["card:d", "decide", "판단 필요"], ["node:release:A", "deploy", "배포 대기"],
+      ["node:release:C", "approve", "승인 대기"],
+      ["legacy:ledger-1:n1", "approve", "승인 대기"],
+      ["card:d", "decide", "판단 필요"],
+      ["node:release:A", "deploy", "배포 대기"],
     ]);
-    expect(items[0]).toMatchObject({ title: "#7440 Independent work", detail: "Release", to: "/campaigns?mode=server&campaign=release&node=C" });
+    expect(items[1]).toMatchObject({ title: "#812 착지 대상", tone: "warn", to: "/campaigns?mode=legacy&campaign=ledger-1&node=n1" });
+  });
+
+  it("surfaces stalled linked agents in triage alerts, aggregates health reasons, and resolves dynamic header links", () => {
+    const entries = classifyAgents(
+      [agent("nova", { name_ko: "노바", status: "working", session_info: "Bash 실행", visual_status_code: "stuck-suspect" } as Partial<Agent>)],
+      [],
+      false,
+    );
+    expect(entries[0].stalled).toBe(true);
+    const health: HomeHealth = {
+      status: "degraded",
+      degraded_reasons: [
+        "turn_presence_unknown:claude:1490141479707086938:none:1:60",
+        "turn_presence_unknown:claude:1490141479707086939:none:1:60",
+      ],
+    };
+    expect(describeHealthReasons(health, tr)).toEqual(["claude 턴 상태 미확인 세션 2개"]);
+    const alerts = buildTriageAlerts({
+      usageRows: [],
+      rule: null,
+      sessions: [],
+      agentEntries: entries,
+      health,
+      tr,
+      isKo: true,
+    });
+    expect(alerts.map((a) => [a.kind, a.chip, a.to])).toEqual([
+      ["health", "서버 주의", "/settings?category=connections"],
+      ["stalled-agent", "막힘 의심", "/agents?agent=nova"],
+    ]);
+    expect(todoHeaderLink([], alerts, tr)).toEqual({ to: "/settings?category=connections", label: "연결 상태 보기" });
+    expect(todoHeaderLink([], [{ ...alerts[0], kind: "quota", to: "/stats" }], tr)).toEqual({ to: "/stats", label: "통계에서 보기" });
+    expect(todoHeaderLink([{ key: "k", kind: "decide", tone: "err", chip: "판단", title: "t", detail: "d", to: QUEUE_PATH, agentId: null }], alerts, tr))
+      .toEqual({ to: QUEUE_PATH, label: "대기열에서 보기" });
   });
 
   it("shows the empty state only once every source answered", () => {
@@ -115,6 +164,20 @@ describe("home system", () => {
     expect(Object.fromEntries(rows.map((row) => [row.key, [row.value, row.tone]]))).toEqual({
       server: ["주의", "warn"], discord: ["확인 불가", "neutral"], memento: ["확인 불가", "neutral"],
       campaign: ["서버 실행 기능 꺼짐 · 자동 진행 1개", "warn"], queue: ["확인 불가", "neutral"],
+    });
+    const connectedMemento = buildSystemRows({
+      health: { status: "healthy", providers: [{ name: "claude", connected: true, active_turns: 0, queue_depth: 0, sessions: 1, restart_pending: false, last_turn_at: null }], queue_depth: 0 },
+      healthFailed: false,
+      legacy: [],
+      documents: [],
+      memento: { connected: true, status: "connected" },
+      tr,
+    });
+    expect(connectedMemento.find((row) => row.key === "memento")).toEqual({
+      key: "memento",
+      label: "Memento",
+      value: "연결됨",
+      tone: "ok",
     });
   });
 
@@ -198,10 +261,16 @@ describe("home routines and usage", () => {
     expect(autoPauseRule(null)).toBeNull();
   });
 
-  it("hands a pause below 100% to the kit meter and names it on the row only for a rule at 100% or more", () => {
+  it("always keeps a danger scale for 100% red tone and names the pause on the row only for a rule at 100% or more", () => {
     const [high, full] = buildUsageRows([{ provider: "claude", buckets: [{ name: "7d", limit: 100, used: 92, remaining: 8, reset: 0 }, { name: "5h", limit: 100, used: 100, remaining: 0, reset: 0 }], stale: false }], true);
     expect([{ enabled: true, pct: 90 }, { enabled: true, pct: 70 }, { enabled: true, pct: 100 }, { enabled: false, pct: 90 }, null].map(pauseMeterScale))
-      .toEqual([{ warnAt: 0.8, dangerAt: 0.9 }, { warnAt: 0.7, dangerAt: 0.7 }, {}, {}, {}]);
+      .toEqual([
+        { warnAt: 0.8, dangerAt: 0.9 },
+        { warnAt: 0.7, dangerAt: 0.7 },
+        { warnAt: 0.8, dangerAt: 0.99 },
+        { warnAt: 0.8, dangerAt: 0.99 },
+        { warnAt: 0.8, dangerAt: 0.99 },
+      ]);
     expect(usageDetail(high, { enabled: true, pct: 90 }, tr)).toBeUndefined();
     expect([usageDetail(full, { enabled: true, pct: 100 }, tr), usageDetail(high, { enabled: true, pct: 100 }, tr)]).toEqual(["자동 진행 멈춤 기준 이상", undefined]);
     expect(usageDetail(full, { enabled: false, pct: 100 }, tr)).toBeUndefined();

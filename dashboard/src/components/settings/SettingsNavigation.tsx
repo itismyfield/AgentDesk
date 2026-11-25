@@ -113,7 +113,7 @@ export function SettingsPhoneCatalog({
               <div key={entry.id} className="border-t border-[var(--line-soft)] first:border-t-0">
                 <RowButton className="min-h-[52px]" data-testid={`settings-category-${entry.id}`} onClick={() => onCategory(entry.id)}>
                   <span className="min-w-0 flex-1 text-sm leading-5 text-[var(--fg)]">{entry.label}</span>
-                  <Cap className="font-display tabular-nums">{entry.count}</Cap>
+                  {!loading ? <Cap className="font-display tabular-nums">{entry.count}</Cap> : null}
                   <ChevronRight size={16} aria-hidden className="shrink-0 text-[var(--fg-muted)]" />
                 </RowButton>
               </div>

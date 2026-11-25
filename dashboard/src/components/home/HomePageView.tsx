@@ -1,6 +1,7 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import { getDispatchedSessions } from "../../api/agentActivity";
 import { PageFrame } from "../../app/PageFrame";
+import { AlertDialog } from "../../kit/free/dialog-clean";
 import type { Notification } from "../NotificationCenter";
 import { useKanban } from "../../contexts/KanbanContext";
 import { useWorkspace } from "../../contexts/WorkspaceContext";
@@ -21,6 +22,7 @@ import {
   cleanupStaleIdleSession,
   loadHomeCampaigns,
   loadHomeHealth,
+  loadHomeMemento,
   loadHomeUsage,
   loadRuntimeConfig,
   reconcileStaleSessionTurn,
@@ -50,15 +52,36 @@ export default function HomePageView({
   const usage = usePolled(loadHomeUsage, 60_000);
   const runtime = usePolled(loadRuntimeConfig, 300_000);
 
+  const agentsRef = useRef(agents);
+  agentsRef.current = agents;
+  const mementoKey = useMemo(
+    () =>
+      agents
+        .map((a) => `${a.id}:${a.discord_channel_cc ?? ""}:${a.discord_channel_cdx ?? ""}:${a.discord_channel_alt ?? ""}:${a.discord_channel_id ?? ""}`)
+        .join("|"),
+    [agents],
+  );
+  const readMemento = useCallback(() => loadHomeMemento(agentsRef.current), [mementoKey]);
+  const memento = usePolled(readMemento, 60_000);
+
   const [reconciledKeys, setReconciledKeys] = useState<Set<string>>(() => new Set());
   const [busyKeys, setBusyKeys] = useState<Set<string>>(() => new Set());
+  const [stopTarget, setStopTarget] = useState<Agent | null>(null);
 
   const entries = useMemo(
     () => buildHomeAgents(agents, sessions, sessionsFailed),
     [agents, sessions, sessionsFailed],
   );
   const todo = useMemo(
-    () => buildTodoItems({ cards: kanbanCards, campaigns: campaigns.data?.summaries ?? null, documents: campaigns.data?.documents, tr, isKo }),
+    () =>
+      buildTodoItems({
+        cards: kanbanCards,
+        campaigns: campaigns.data?.summaries ?? null,
+        documents: campaigns.data?.documents,
+        legacy: campaigns.data?.legacy,
+        tr,
+        isKo,
+      }),
     [kanbanCards, campaigns.data, tr, isKo],
   );
   const usageRows = useMemo(() => buildUsageRows(usage.data ?? [], isKo), [usage.data, isKo]);
@@ -69,12 +92,13 @@ export default function HomePageView({
         usageRows,
         rule,
         sessions,
+        agentEntries: entries,
         reconciledKeys,
         health: health.failed ? null : health.data,
         tr,
         isKo,
       }),
-    [usageRows, rule, sessions, reconciledKeys, health.failed, health.data, tr, isKo],
+    [usageRows, rule, sessions, entries, reconciledKeys, health.failed, health.data, tr, isKo],
   );
 
   const handleReconcileSession = useCallback(async (sessionKey: string) => {
@@ -134,12 +158,8 @@ export default function HomePageView({
     }
   }, [onNotify, sessions, setSessions, tr]);
 
-  const handleStopAgentTurn = useCallback(async (agent: Agent) => {
+  const confirmStopAgentTurn = useCallback(async (agent: Agent) => {
     const name = agentName(agent, isKo);
-    const confirmed = typeof window === "undefined" || typeof window.confirm !== "function"
-      ? true
-      : window.confirm(tr(`${name}의 실행 중인 턴을 중단할까요? (대기열은 유지돼요)`, `Stop ${name}'s running turn? (Queued items stay)`));
-    if (!confirmed) return;
     try {
       const response = await stopAgentTurn(agent.id);
       if (response.session_key) {
@@ -163,6 +183,7 @@ export default function HomePageView({
   const campaignsSource = campaignTodoSource(campaigns);
   const details = campaigns.data && !campaigns.failed ? { failed: campaigns.data.detailFailed, cut: campaigns.data.detailsCut } : undefined;
   const todoCollapsed = todo.length === 0 && triageAlerts.length === 0 && cardsSource === "ok" && campaignsSource === "ok";
+  const stopName = stopTarget ? agentName(stopTarget, isKo) : "";
 
   return (
     <PageFrame
@@ -188,7 +209,7 @@ export default function HomePageView({
               onReconcileSession={handleReconcileSession}
               busySessionKeys={busyKeys}
             />
-            <HomeSystemCard campaigns={campaigns} healthState={health} onlyWhenOff={isMobileViewport} tr={tr} />
+            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} tr={tr} />
           </>
         ) : (
           <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
@@ -205,7 +226,7 @@ export default function HomePageView({
               busySessionKeys={busyKeys}
               className="flex-[2_1_32.5rem]"
             />
-            <HomeSystemCard campaigns={campaigns} healthState={health} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
+            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
           </div>
         )}
         <HomeAgentsCard
@@ -214,7 +235,7 @@ export default function HomePageView({
           tr={tr}
           isKo={isKo}
           onOpenAgent={onOpenAgent}
-          onStopAgentTurn={handleStopAgentTurn}
+          onStopAgentTurn={setStopTarget}
         />
         <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
           <HomeCampaignsCard campaigns={campaigns} tr={tr} className="flex-[3_1_26.25rem]" />
@@ -222,6 +243,17 @@ export default function HomePageView({
           <HomeUsageCard tr={tr} isKo={isKo} usageState={usage} runtimeState={runtime} className="flex-[2_1_16.25rem]" />
         </div>
       </div>
+
+      <AlertDialog
+        open={Boolean(stopTarget)}
+        onOpenChange={(open) => { if (!open) setStopTarget(null); }}
+        danger
+        title={tr(`${stopName}의 실행 중인 턴을 중단할까요?`, `Stop ${stopName}'s running turn?`)}
+        description={tr("진행 중인 응답만 멈추고 대기열에 남은 작업은 유지돼요.", "Only the running turn stops; queued items stay.")}
+        cancelLabel={tr("취소", "Cancel")}
+        confirmLabel={tr("턴 중단", "Stop turn")}
+        onConfirm={() => (stopTarget ? confirmStopAgentTurn(stopTarget) : undefined)}
+      />
     </PageFrame>
   );
 }

@@ -22,10 +22,16 @@ export function defaultAuditProvider(agent: BoundAgent): AuditProvider | null {
   return list.find((provider) => provider === agent.cli_provider) ?? list[0] ?? null;
 }
 
-/** Agents with at least one channel binding; relay test harness agents go last so the default pick is a real one. */
-export function auditAgents<T extends BoundAgent>(agents: T[]): T[] {
+/** E2E test harness agents (`e2e` in id or display name). */
+export function isAuditTestAgent(agent: Pick<Agent, "id"> & { name?: string | null; name_ko?: string | null }): boolean {
+  return isTestAgent(agent) || /e2e/i.test(agent.id) || /e2e/i.test(agent.name ?? "") || /e2e/i.test(agent.name_ko ?? "");
+}
+
+/** Agents with at least one channel binding; relay test harness agents go last (or are omitted when `includeTests` is false). */
+export function auditAgents<T extends BoundAgent & { name?: string | null; name_ko?: string | null }>(agents: T[], includeTests = true): T[] {
   const listed = agents.filter((agent) => auditProviders(agent).length > 0);
-  return [...listed.filter((agent) => !isTestAgent(agent)), ...listed.filter(isTestAgent)];
+  const real = listed.filter((agent) => !isAuditTestAgent(agent));
+  return includeTests ? [...real, ...listed.filter(isAuditTestAgent)] : real;
 }
 
 export function matchesAgent(agent: Pick<Agent, "id" | "name" | "name_ko" | "alias">, query: string): boolean {

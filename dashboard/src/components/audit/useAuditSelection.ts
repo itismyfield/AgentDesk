@@ -1,8 +1,8 @@
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useLocation, useNavigate, useSearchParams, type NavigateOptions } from "react-router";
 import type { AuditProvider } from "../../api/promptAudit";
 import type { Agent } from "../../types";
-import { auditAgents, auditProviders, defaultAuditProvider } from "./auditModel";
+import { auditAgents, auditProviders, defaultAuditProvider, isAuditTestAgent } from "./auditModel";
 
 export type AuditTab = "prompts" | "anchors";
 export type AuditSelection = ReturnType<typeof useAuditSelection>;
@@ -12,8 +12,16 @@ export function useAuditSelection(agents: Agent[], phone: boolean) {
   const [params, setParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const [includeTestsState, setIncludeTests] = useState(false);
   const tab: AuditTab = params.get("tab") === "anchors" ? "anchors" : "prompts";
-  const list = useMemo(() => auditAgents(agents), [agents]);
+  const allBound = useMemo(() => auditAgents(agents, true), [agents]);
+  const testCount = useMemo(() => allBound.filter(isAuditTestAgent).length, [allBound]);
+  const requestedInAll = allBound.find((item) => item.id === params.get("agent"));
+  const includeTests = includeTestsState || Boolean(requestedInAll && isAuditTestAgent(requestedInAll));
+  const list = useMemo(
+    () => (includeTests ? allBound : allBound.filter((item) => !isAuditTestAgent(item))),
+    [allBound, includeTests],
+  );
   const requested = list.find((agent) => agent.id === params.get("agent"));
   // Desktop always shows a detail, so it falls back to the first agent without touching the URL.
   const agent = requested ?? (phone ? undefined : list[0]);
@@ -45,5 +53,5 @@ export function useAuditSelection(agents: Agent[], phone: boolean) {
     else update({ agent: null, provider: null }, { replace: true });
   };
 
-  return { tab, list, agent, providers, provider, selectTab, selectAgent, selectProvider, back };
+  return { tab, list, testCount, includeTests, setIncludeTests, agent, providers, provider, selectTab, selectAgent, selectProvider, back };
 }
