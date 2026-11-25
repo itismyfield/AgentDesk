@@ -50,7 +50,8 @@ fn with_waited(
 
 /// The owner's front, granted as the drive grants it before a start.
 async fn grant(node: &Node) -> Front {
-    let granted = node.shared.mailbox(channel()).v2_request(|slot| {
+    let mailbox = node.shared.mailbox(channel());
+    let granted = mailbox.v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;
         owner.grant_front(&front).map(|_| front)
@@ -365,7 +366,8 @@ fn start_idle_closes_the_never_started_pending_before_the_launch_takes_the_origi
             "original input".to_string(),
         );
         assert_eq!(*launched.lock().unwrap(), [original]);
-        let read = node.shared.mailbox(channel()).v2_request(move |slot| {
+        let mailbox = node.shared.mailbox(channel());
+        let read = mailbox.v2_request(move |slot| {
             let owner = slot.as_ref().ok_or("no owner")?;
             assert_original_and_ticket_kept(owner, &front);
             Ok(owner.snapshot.retry.wait.is_none())
