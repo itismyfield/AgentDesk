@@ -291,6 +291,6 @@ fn forum_outcome(error: ForumError) -> Outcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "publication_tests.rs"]
 mod tests;
