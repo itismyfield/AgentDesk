@@ -1,4 +1,4 @@
-//! A durable custody route keeps an AGY row out of every generic end (#8274 4a-1).
+//! A durable custody route keeps an AGY row out of every generic end.
 
 use std::fs;
 use std::num::NonZeroU64;

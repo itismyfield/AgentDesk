@@ -1,4 +1,4 @@
-//! AGY delivery custody opens without pane state and refuses a destination a pane owns (#8274 4a-1).
+//! AGY delivery custody opens without pane state and refuses a destination a pane owns.
 
 use std::num::NonZeroU64;
 

@@ -1,4 +1,4 @@
-//! The sweeper never edits or ends a row the AGY owner holds (#8274 4a-1).
+//! The sweeper never edits or ends a row the AGY owner holds.
 
 use std::num::NonZeroU64;
 

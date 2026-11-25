@@ -153,7 +153,7 @@ pub(in crate::services::discord) struct InflightTurnState {
     /// Durable evidence that recovery must retain this row for the agy reader.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy_imessage_source_sha256: Option<String>,
-    /// The AGY output owner of this execution; absent on every Legacy row (#8274 4a).
+    /// The AGY output owner of this execution; absent on every Legacy row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agy_custody: Option<agy_custody::AgyCustodyField>,
     /// A terminal this execution confirmed but could not commit; the row stays until boot or

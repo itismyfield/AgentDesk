@@ -1,4 +1,4 @@
-//! The durable output owner of one AGY execution, written with the row's first create (#8274 4a).
+//! The durable output owner of one AGY execution, written with the row's first create.
 
 use std::num::NonZeroU64;
 

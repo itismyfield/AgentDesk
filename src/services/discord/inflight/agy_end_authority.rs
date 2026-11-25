@@ -1,4 +1,4 @@
-//! Who may end an inflight row: the one durable predicate every generic end consults (#8274 4a).
+//! Who may end an inflight row: the one durable predicate every generic end consults.
 
 use uuid::Uuid;
 
