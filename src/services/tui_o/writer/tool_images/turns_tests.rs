@@ -36,7 +36,7 @@ fn spans(entries: Vec<ImageEntry>) -> LedgerState {
         let entry = LedgerEntry::ToolImage {
             entry: Box::new(entry),
         };
-        state.apply(Utc::now(), entry);
+        state.apply_for_test(Utc::now(), entry);
     }
     assert_eq!(state.violation(), None);
     state
@@ -185,7 +185,7 @@ fn apply_image(ledger: &mut LedgerState, entry: ImageEntry) {
     let entry = LedgerEntry::ToolImage {
         entry: Box::new(entry),
     };
-    ledger.apply(Utc::now(), entry);
+    ledger.apply_for_test(Utc::now(), entry);
 }
 
 /// Records the image obligation the wiring would append; returns its unit key.
@@ -233,7 +233,7 @@ fn attempt(ledger: &mut LedgerState, key: &UnitKey, msg_id: Option<u64>) -> u64 
         local_retry: None,
         notice_origin: None,
     };
-    ledger.apply(Utc::now(), prepared);
+    ledger.apply_for_test(Utc::now(), prepared);
     let result = match msg_id {
         Some(msg_id) => LedgerEntry::Posted {
             serial,
@@ -245,12 +245,12 @@ fn attempt(ledger: &mut LedgerState, key: &UnitKey, msg_id: Option<u64>) -> u64 
             reason: "history unreadable".into(),
         },
     };
-    ledger.apply(Utc::now(), result);
+    ledger.apply_for_test(Utc::now(), result);
     serial
 }
 
 fn late_image_after_gc(late_posted: bool) {
-    let mut ledger = LedgerState::starting_at(1 << 22);
+    let mut ledger = LedgerState::starting_at_for_test(1 << 22);
     let mut live = ImageTurns::starting_at(source(), 0, 0);
     live.before_offset(100, ledger.tool_images());
     live.observe(&prompt(), Some("u1"), 100);
