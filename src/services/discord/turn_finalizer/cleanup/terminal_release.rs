@@ -229,4 +229,66 @@ mod tests {
         })
         .await;
     }
+
+    /// A Herdr row keeps its mailbox and token at the pre-panel release until its own end is
+    /// proven against the current Bound execution; that end releases them exactly once.
+    #[tokio::test(flavor = "current_thread")]
+    async fn herdr_pre_panel_release_waits_for_its_own_proven_end_pg() {
+        use crate::services::discord::inflight::herdr_turn_evidence_tests::{
+            HELD, OWN, mark_herdr,
+        };
+        with_isolated_runtime_root(|| async move {
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let mut shared = make_shared_data_for_tests();
+            Arc::get_mut(&mut shared).unwrap().pg_pool = Some(db.connect_and_migrate().await);
+            let (pool, provider) = (shared.pg_pool.clone().unwrap(), ProviderKind::Claude);
+            let dir = tempfile::tempdir().unwrap();
+            for (n, case) in HELD.into_iter().chain([OWN]).enumerate() {
+                let (channel, turn) = (ChannelId::new(8_399_300 + n as u64), 8_399_310 + n as u64);
+                let token = Arc::new(CancelToken::new());
+                let start = MessageId::new(turn);
+                assert!(
+                    mailbox_try_start_turn(&shared, channel, token.clone(), UserId::new(42), start)
+                        .await
+                );
+                let mut row = crate::services::discord::inflight::InflightTurnState::new(
+                    provider.clone(),
+                    channel.get(),
+                    None,
+                    42,
+                    turn,
+                    turn,
+                    String::new(),
+                    None,
+                    Some(format!("AgentDesk-claude-pre-panel-{n}")),
+                    None,
+                    None,
+                    0,
+                );
+                row.turn_nonce = token.turn_nonce().map(str::to_owned);
+                let path = dir.path().join(format!("{n}.jsonl"));
+                mark_herdr(&pool, &shared.token_hash, &mut row, &path, case).await;
+                crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+                let key = Some(TurnKey::new(
+                    channel,
+                    turn,
+                    shared.restart.current_generation,
+                ));
+                let released = super::release_restored_watcher_active_turn_before_panel_edit(
+                    &shared, &provider, key,
+                );
+                let own = case == OWN;
+                assert_eq!(released.await, own, "{case:?}");
+                assert_eq!(token.cancelled.load(Ordering::Relaxed), own, "{case:?}");
+                let live = mailbox_snapshot(&shared, channel).await.cancel_token;
+                assert_eq!(live.is_some(), !own, "{case:?}");
+                let again = super::release_restored_watcher_active_turn_before_panel_edit(
+                    &shared, &provider, key,
+                );
+                assert!(!again.await, "{case:?}: a second release finds nothing");
+            }
+            db.drop().await;
+        })
+        .await;
+    }
 }

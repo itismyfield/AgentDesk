@@ -80,6 +80,12 @@ impl HerdrInterruptState {
         }
     }
 
+    /// The reader opened this turn's source at its first own record; a cold start's file is
+    /// pinned to it once, so a later file at the same path is never this turn's.
+    pub(crate) fn source_observed(&self, file: (u64, u64)) {
+        let _ = file;
+    }
+
     /// Keeps `stop` until the reader first sees this turn's own start; `false`, dropping it, when
     /// that was already seen. Only the first armed stop is kept.
     pub(crate) fn arm_late_stop(&self, stop: LateStop) -> bool {

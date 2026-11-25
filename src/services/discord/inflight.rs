@@ -11,9 +11,9 @@ mod destructive_commit;
 mod finalizer_identity;
 mod herdr_turn_evidence;
 #[cfg(all(test, unix))]
-mod herdr_turn_evidence_tests;
+pub(in crate::services::discord) mod herdr_turn_evidence_tests;
 pub(in crate::services::discord) use herdr_turn_evidence::{
-    herdr_fresh_idle_signal, install_turn_start_sink,
+    herdr_fresh_idle_signal, herdr_turn_held, install_turn_start_sink,
 };
 mod host_locator;
 pub(in crate::services::discord) use host_locator::PersistedHostLocator;

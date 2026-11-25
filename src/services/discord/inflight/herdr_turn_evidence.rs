@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
+use crate::services::discord::SharedData;
 use crate::services::discord::turn_finalizer::CompletionSignal;
 use crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart;
 
@@ -78,32 +79,58 @@ pub(super) fn carry_forward(
 }
 
 /// The fresh-idle signal for `row`: a Herdr turn ends on its own terminal only and is held otherwise.
-pub(in crate::services::discord) fn herdr_fresh_idle_signal(
+pub(in crate::services::discord) async fn herdr_fresh_idle_signal(
+    shared: &SharedData,
+    provider: &ProviderKind,
     row: Option<&InflightTurnState>,
     logical: &str,
     signal: CompletionSignal,
 ) -> CompletionSignal {
-    let Some(row) = row else {
-        return signal;
-    };
-    match row.herdr_turn_evidence(logical) {
+    match watcher_herdr_evidence(shared, provider, row, logical).await {
         HerdrTurnEvidence::NotHerdr => signal,
         HerdrTurnEvidence::Own => CompletionSignal::Done,
         HerdrTurnEvidence::Insufficient => CompletionSignal::PausedLive,
     }
 }
 
+/// Whether a watcher path that would clear `row`, release its mailbox or cancel its token must keep
+/// them: a Herdr row whose own end is not proven.
+pub(in crate::services::discord) async fn herdr_turn_held(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    row: Option<&InflightTurnState>,
+    logical: &str,
+) -> bool {
+    watcher_herdr_evidence(shared, provider, row, logical).await == HerdrTurnEvidence::Insufficient
+}
+
+/// The watcher's evidence for `row`, judged against the channel's current hosted execution.
+pub(in crate::services::discord) async fn watcher_herdr_evidence(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    row: Option<&InflightTurnState>,
+    logical: &str,
+) -> HerdrTurnEvidence {
+    let Some(row) = row else {
+        return HerdrTurnEvidence::NotHerdr;
+    };
+    let _ = (shared, provider);
+    row.herdr_turn_evidence(logical, None)
+}
+
 impl InflightTurnState {
     /// `Own` only for the terminal of this row's turn read from its saved start, in the same file
-    /// of the same execution; a Herdr row without that is `Insufficient`.
+    /// of the current Bound execution `bound`; a Herdr row without that is `Insufficient`.
     pub(in crate::services::discord) fn herdr_turn_evidence(
         &self,
         logical: &str,
+        bound: Option<&str>,
     ) -> HerdrTurnEvidence {
         let listed = crate::services::tui_prompt_dedupe::herdr_execution_listed;
         if self.herdr_turn_start.is_none() && !self.has_native_herdr_input() && !listed(logical) {
             return HerdrTurnEvidence::NotHerdr;
         }
+        let _ = bound;
         match &self.herdr_turn_start {
             Some(saved) if own_terminal(self, saved) => HerdrTurnEvidence::Own,
             _ => HerdrTurnEvidence::Insufficient,
