@@ -31,7 +31,7 @@ async fn d4b_channel_turn_reopen_keeps_admission_and_budget_pg() {
     assert_eq!(opened.load(Ordering::SeqCst), 1);
     assert_eq!(io.posts.load(Ordering::SeqCst), 0);
     let before = o_piece_attempts::attempts(&pool, &key).await.unwrap();
-    turn.log = None;
+    *turn.log_slot() = None;
     turn.turn(&mut writer).await;
     assert_eq!(
         o_piece_attempts::attempts(&pool, &key).await.unwrap(),
@@ -40,8 +40,8 @@ async fn d4b_channel_turn_reopen_keeps_admission_and_budget_pg() {
     assert_eq!(opened.load(Ordering::SeqCst), 1);
     assert_eq!(io.posts.load(Ordering::SeqCst), 0);
     let reads = io.reader.reads();
-    turn.runner
-        .probes
+    turn.runner_mut()
+        .probes_mut()
         .insert(key.clone(), ready_probe(&pool, &key, &io).await);
     turn.turn(&mut writer).await;
     assert!(path.exists());

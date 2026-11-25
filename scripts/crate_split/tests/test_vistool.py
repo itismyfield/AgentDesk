@@ -64,7 +64,7 @@ def widener():
 def leak(descr, name, rel, text):
     """rustc's E0446 as the KRX shadow run recorded it on `impl FromStr for IntakeOutboxStatus { type Err = .. }`:
     the primary span is the associated type, the labelled one the declaration of the type it leaks."""
-    at = line_of(rel, text)
+    at = text if isinstance(text, int) else line_of(rel, text)
     return {"level": "error", "code": {"code": "E0446"}, "message": f"{descr} type `{name}` in public interface",
             "children": [], "spans": [
                 {"is_primary": True, "file_name": rel, "line_start": at + 3, "line_end": at + 3, "label": f"can't leak {descr} type"},
@@ -627,16 +627,21 @@ class Probe(unittest.TestCase):
 
 
 class LoopGuard(unittest.TestCase):
-    def scripted(self, rounds):
-        """The tool on the mini fixture, cargo replaced by one (lower, upper) diagnostic list per round."""
+    def scripted(self, rounds, setup=None):
+        """The tool on the mini fixture (after `setup(repo)`), cargo replaced by one (lower, upper) diagnostic
+        list per round; a callable entry is asked with the root of the probe copy being checked."""
         calls = []
 
         def fake(cargo, cwd, args, target_dir, own_root, manifest=None):
             calls.append(cwd.name)
-            return [{"_test": False, **d, "_root": str(cwd)} for d in rounds[calls.count("lower") - 1][cwd.name == "upper"]], 0.1
+            got = rounds[calls.count("lower") - 1][cwd.name == "upper"]
+            return [{"_test": False, **d, "_root": str(cwd)} for d in (got(cwd) if callable(got) else got)], 0.1
 
         with tempfile.TemporaryDirectory() as tmp:
             repo, git = fixture_repo(Path(tmp))
+            if setup:
+                setup(repo)
+                subprocess.run(git + ["commit", "-qam", "setup"], check=True)
             with mock.patch.object(vistool, "run_check", fake):
                 ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                      apply=True, log=lambda *a, **k: None)
@@ -662,6 +667,50 @@ class LoopGuard(unittest.TestCase):
         ok, line, *_ = self.scripted([([], [gone])])
         self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL upper_probe_broken"))
 
+    def test_lower_edit_leaves_the_upper_reexport_in_place(self):
+        # LOW's services/mod.rs holds a leaked type next to `mod store;`, which upper replaced by a re-export
+        # (dropping `#[path]`). Lower's text written over it builds `store` inside upper, where the field is
+        # private to nobody, so its edit is lost and the run still passes.
+        def chain(repo):
+            mod = repo / "src/services/mod.rs"
+            mod.write_text('#[path = "store.rs"]\n' + mod.read_text().replace("pub(crate) mod store;", "pub mod store;")
+                           + "\npub(crate) struct Leaked;\n")
+            split(["core", "services", "services::store"], ["(root)", "app", "services::web"], path=repo / "partition.json")
+
+        field = {"level": "error", "code": {"code": "E0451"}, "message": "field `size` of struct `Thing` is private",
+                 "children": [], "spans": []}
+        seen = []
+
+        def upper(cwd):
+            seen.append((cwd / "src/services/mod.rs").read_text().split("\n"))
+            return [field] if "pub use probe_lower::services::store;" in seen[-1] else []
+
+        leaked = leak("crate-private", "Leaked", "src/services/mod.rs", 9)
+        ok, line, *_, manifest = self.scripted([([leaked], []), ([], upper), ([], [])], chain)
+        self.assertTrue(ok, (line, manifest.get("fail")))
+        self.assertEqual((seen[0][:2] + seen[0][-2:], [e["after"] for e in manifest["final_edits"]]),
+                         (["pub use probe_lower::services::store;", "mod web;", "pub struct Leaked;", ""],
+                          ["pub struct Leaked;", "    pub size: u32,"]))
+
+    def test_upper_interface_leak_is_never_macro_residue(self):
+        # Once LOW's type is `pub`, an upper `impl FromStr for <it> { type Err = macro_error; }` leaks a private
+        # type. The message has "macro" in it; as macro_path residue the run would pass and apply its patch.
+        token = leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")
+        leaked = {"level": "error", "code": {"code": "E0446"}, "message": "private type `macro_error` in public interface",
+                  "children": [], "spans": [{"is_primary": True, "file_name": "src/app.rs", "line_start": 9, "line_end": 9}]}
+        ok, line, _, status, patched, manifest = self.scripted([([token], []), ([], [leaked])])
+        self.assertEqual((line, patched, status), ("VISTOOL_FAIL upper_probe_broken crate=LOW iters=2", False, ""))
+        self.assertIn("macro_error", manifest["fail"]["detail"])
+
+    def test_edit_without_the_same_upper_line_fails_closed(self):
+        def drifted(cwd):
+            core = cwd.parent / "upper/src/core.rs"
+            core.write_text("// drift\n" + core.read_text())
+            return [leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")]
+
+        ok, line, _, status, patched, manifest = self.scripted([(drifted, []), ([], [])])
+        self.assertEqual((line.split(" crate=")[0], patched, status), ("VISTOOL_FAIL upper_probe_broken", False, ""))
+        self.assertIn("src/core.rs:", manifest["fail"]["detail"])
 
     def test_leaked_type_goes_as_far_as_the_interface_and_no_further(self):
         token = leak("crate-private", "Token", "src/core.rs", "pub(crate) struct Token;")

@@ -427,7 +427,8 @@ async fn resolve(
         // Held until the pane effect ends. Bounded waiters (claim handback, headless start, /clear,
         // /resume) give up after 3s; intake and kickoff never wait and fall back to their queue.
         let transition = shared
-            .session_transition_lock(request.channel_id)
+            .session_transition_locks
+            .lock(request.channel_id)
             .try_lock_owned()
             .map_err(|_| TRANSITION_BUSY)?;
         let (snapshot, row) = observe(shared, request).await;

@@ -98,7 +98,8 @@ pub(super) async fn finalize_and_drain_queued_turns(
                 // from the current mailbox under the automatic-progression cap
                 // policy so a capped retry stays parked while later work can run.
                 let next_intervention = match shared_owned
-                    .session_transition_lock(channel_id)
+                    .session_transition_locks
+                    .lock(channel_id)
                     .try_lock_owned()
                 {
                     Ok(transition_guard) => {
@@ -553,7 +554,7 @@ mod tests {
                     .await;
 
                 let transition_guard = shared
-                    .session_transition_lock(channel_id)
+                    .session_transition_locks.lock(channel_id)
                     .lock_owned()
                     .await;
                 finalize_and_drain_queued_turns(

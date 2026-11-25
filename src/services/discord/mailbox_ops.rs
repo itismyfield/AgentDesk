@@ -294,7 +294,11 @@ pub(super) async fn idle_queue_take_next_soft_if_ready(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> MailboxTakeNextSoftOutcome {
-    let _transition_guard = match shared.session_transition_lock(channel_id).try_lock_owned() {
+    let _transition_guard = match shared
+        .session_transition_locks
+        .lock(channel_id)
+        .try_lock_owned()
+    {
         Ok(guard) => guard,
         Err(_) => {
             return MailboxTakeNextSoftOutcome::default();

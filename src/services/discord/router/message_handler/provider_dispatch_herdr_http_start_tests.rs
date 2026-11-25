@@ -1031,7 +1031,7 @@ fn execution_gone(terminal: Option<bool>, foreign: bool) {
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
             }).await.expect("the actual end pass reaches the refused notice transport");
-            let after_refusal = intake.shared.session_transition_lock(ChannelId::new(CHANNEL)).lock_owned().await;
+            let after_refusal = intake.shared.session_transition_locks.lock(ChannelId::new(CHANNEL)).lock_owned().await;
             let held = inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHANNEL)
                 .expect("a refused notice preserves the captured inflight row");
             assert_eq!(held.turn_nonce, row.turn_nonce, "a refused notice preserves the same inflight episode");

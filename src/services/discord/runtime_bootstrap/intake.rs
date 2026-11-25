@@ -76,11 +76,19 @@ pub(super) fn run_bot_maybe_spawn_intake_worker(shared: &Arc<SharedData>, provid
 }
 
 /// The router's admission check and executor, handed to the worker this runtime starts.
-const INTAKE_TURN_PORT: crate::services::cluster::intake_worker::IntakeTurnPort =
+const INTAKE_TURN_PORT: crate::services::cluster::intake_worker::IntakeTurnPort<SharedData> =
     crate::services::cluster::intake_worker::IntakeTurnPort {
         checkpoint_waits: crate::services::discord::router::checkpoint_waits_for_admission,
         execute: execute_intake_turn,
+        resolve_runtime: resolve_intake_runtime,
     };
+
+fn resolve_intake_runtime<'a>(
+    claimant: &'a SharedData,
+    channel_id: serenity::ChannelId,
+) -> crate::services::cluster::intake_worker::ResolveRuntimeFuture<'a, SharedData> {
+    Box::pin(crate::services::discord::health::resolve_intake_worker_runtime(claimant, channel_id))
+}
 
 fn execute_intake_turn<'a>(
     http: &'a Arc<serenity::http::Http>,

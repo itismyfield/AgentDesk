@@ -23,7 +23,7 @@ pub(in crate::services::discord) mod missing_marker {
         shared: &Arc<SharedData>,
         pool: &PgPool,
         candidate: &MissingMarkerCandidate,
-        transition: &SessionTransitionLease<'_>,
+        transition: &SessionTransitionLease<'_, SharedData>,
     ) -> Recovery {
         recover_report(shared, pool, &candidate.0, Some(transition), true).await
     }
@@ -346,7 +346,7 @@ pub(crate) async fn recover(
     shared: &Arc<SharedData>,
     pool: &PgPool,
     candidate: &RootReplacedCandidate,
-    transition: Option<&SessionTransitionLease<'_>>,
+    transition: Option<&SessionTransitionLease<'_, SharedData>>,
 ) -> Recovery {
     remember_candidate(candidate);
     recover_report(shared, pool, &candidate.0, transition, false).await
@@ -355,7 +355,7 @@ pub(crate) async fn recover_retired(
     shared: &Arc<SharedData>,
     pool: &PgPool,
     row: &HostedObservation,
-    transition: Option<&SessionTransitionLease<'_>>,
+    transition: Option<&SessionTransitionLease<'_, SharedData>>,
 ) -> Recovery {
     let HostedRecord::Known(record) = &row.record else {
         return Recovery::Held("unknown retired execution".into());
@@ -382,8 +382,8 @@ pub(crate) async fn recover_retired(
 fn transition<'a>(
     shared: &'a SharedData,
     channel: ChannelId,
-    borrowed: Option<&SessionTransitionLease<'_>>,
-) -> Result<Option<SessionTransitionLease<'a>>, String> {
+    borrowed: Option<&SessionTransitionLease<'_, SharedData>>,
+) -> Result<Option<SessionTransitionLease<'a, SharedData>>, String> {
     #[cfg(test)]
     TRANSITIONS.with(|count| count.set(count.get() + 1));
     if let Some(lease) = borrowed {
@@ -400,7 +400,7 @@ async fn recover_report(
     shared: &Arc<SharedData>,
     pool: &PgPool,
     row: &HostedObservation,
-    transition: Option<&SessionTransitionLease<'_>>,
+    transition: Option<&SessionTransitionLease<'_, SharedData>>,
     marker_missing: bool,
 ) -> Recovery {
     let result = recover_inner(shared, pool, row, transition, marker_missing).await;
@@ -426,7 +426,7 @@ async fn recover_inner(
     shared: &Arc<SharedData>,
     pool: &PgPool,
     row: &HostedObservation,
-    borrowed: Option<&SessionTransitionLease<'_>>,
+    borrowed: Option<&SessionTransitionLease<'_, SharedData>>,
     marker_missing: bool,
 ) -> Recovery {
     let held = Recovery::Held;

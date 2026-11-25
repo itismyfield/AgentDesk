@@ -537,7 +537,8 @@ mod retired_selector {
                     .unwrap();
             let transition = seeded
                 .shared
-                .session_transition_lock(seeded.channel)
+                .session_transition_locks
+                .lock(seeded.channel)
                 .lock_owned()
                 .await;
             let clear = start_clear(&seeded);

@@ -76,7 +76,8 @@ pub(super) async fn clear(
     let (original, excluded) = original_execution(shared, provider, channel).await;
     let reason = original.err();
     discard_waiting(shared, provider, channel, Some(&logical), &excluded, report).await;
-    let lease = guard.and_then(|guard| SessionTransitionLease::borrow(shared, channel, guard).ok());
+    let lease = guard
+        .and_then(|guard| SessionTransitionLease::borrow(shared.as_ref(), channel, guard).ok());
     let result = if let Some(reason) = reason {
         Recovery::Held(reason)
     } else if let Some(lease) = lease.as_ref() {

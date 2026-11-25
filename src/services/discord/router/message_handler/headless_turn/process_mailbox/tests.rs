@@ -470,7 +470,8 @@ async fn delayed_transition_unlock_retries_the_original_completion_callback() {
         fixture.settle(false).await;
         let transition = fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .lock_owned()
             .await;
         let retirement = finalize(lease);
@@ -500,7 +501,8 @@ async fn retry_never_removes_a_new_idle_actor_or_a_later_idle_claim() {
             fixture.settle(false).await;
             let transition = fixture
                 .shared
-                .session_transition_lock(fixture.channel)
+                .session_transition_locks
+                .lock(fixture.channel)
                 .lock_owned()
                 .await;
             let retirement = finalize(lease);
@@ -562,7 +564,8 @@ async fn watcher_admitted_during_retry_preserves_the_original_actor() {
         fixture.settle(false).await;
         let transition = fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .lock_owned()
             .await;
         let retirement = finalize(lease);

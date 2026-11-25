@@ -308,7 +308,9 @@ fn herdr_refusal_or_unreachable_server_hands_the_input_back_pg() {
 
 /// Queues `texts` on the channel as the route does while another path holds its transition.
 async fn enqueue(registry: &HealthRegistry, shared: &SharedData, channel: u64, texts: &[&str]) {
-    let lock = shared.session_transition_lock(ChannelId::new(channel));
+    let lock = shared
+        .session_transition_locks
+        .lock(ChannelId::new(channel));
     let _held = lock.lock_owned().await;
     crate::services::discord::queue_io::with_post_enqueue_idle_queue_kick_suppressed(async {
         for text in texts {

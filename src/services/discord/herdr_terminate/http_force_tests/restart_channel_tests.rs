@@ -99,7 +99,8 @@ impl Wakes {
             channel(),
             Some(Arc::new(move || {
                 let free = shared
-                    .session_transition_lock(channel())
+                    .session_transition_locks
+                    .lock(channel())
                     .try_lock_owned()
                     .is_ok();
                 let gated = restart_gate::inflight("claude", &shared.token_hash, CHANNEL);
@@ -230,7 +231,8 @@ fn restart_common_retires_disconnects_keeps_selector_and_wakes_owner_pg() {
                 assert_eq!(selected.as_deref(), Some(SELECTOR));
                 assert!(
                     shared
-                        .session_transition_lock(channel())
+                        .session_transition_locks
+                        .lock(channel())
                         .try_lock_owned()
                         .is_err()
                 );

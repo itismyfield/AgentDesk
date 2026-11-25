@@ -171,7 +171,11 @@ pub async fn purge_idle_channel_mailbox_registry_entry(
     let mut refused: Option<&'static str> = None;
     for shared in runtimes {
         // An injection owner holds the transition from its reservation to its last mailbox write.
-        let Ok(_transition) = shared.session_transition_lock(channel).try_lock_owned() else {
+        let Ok(_transition) = shared
+            .session_transition_locks
+            .lock(channel)
+            .try_lock_owned()
+        else {
             refused = Some("transition_busy");
             continue;
         };

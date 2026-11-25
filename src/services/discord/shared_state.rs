@@ -3,6 +3,7 @@
 //! fields, keeping `SharedData`'s public surface and every call site
 //! unchanged.
 
+mod g7_host;
 #[path = "gateway_lease_diagnostics.rs"]
 pub(in crate::services::discord) mod gateway_lease_diagnostics;
 #[path = "router_ports.rs"]

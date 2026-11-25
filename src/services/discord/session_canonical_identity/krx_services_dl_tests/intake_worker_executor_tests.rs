@@ -4,11 +4,24 @@
 use crate::services::cluster::intake_worker::test_executor;
 use crate::services::discord::IntakeRequest;
 
-pub(crate) const PORT: crate::services::cluster::intake_worker::IntakeTurnPort =
-    crate::services::cluster::intake_worker::IntakeTurnPort {
-        checkpoint_waits: test_executor::CHECKPOINT_WAITS,
-        execute: boxed_execute,
-    };
+/// The production admission check and runtime resolver; only the executor is stood in.
+pub(crate) const PORT: crate::services::cluster::intake_worker::IntakeTurnPort<
+    crate::services::discord::SharedData,
+> = crate::services::cluster::intake_worker::IntakeTurnPort {
+    checkpoint_waits: crate::services::discord::checkpoint_waits_for_admission,
+    execute: boxed_execute,
+    resolve_runtime: boxed_resolve,
+};
+
+fn boxed_resolve<'a>(
+    claimant: &'a crate::services::discord::SharedData,
+    channel_id: poise::serenity_prelude::ChannelId,
+) -> crate::services::cluster::intake_worker::ResolveRuntimeFuture<
+    'a,
+    crate::services::discord::SharedData,
+> {
+    Box::pin(crate::services::discord::health::resolve_intake_worker_runtime(claimant, channel_id))
+}
 
 fn boxed_execute<'a>(
     http: &'a std::sync::Arc<serenity::http::Http>,

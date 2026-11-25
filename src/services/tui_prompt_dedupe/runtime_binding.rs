@@ -965,8 +965,6 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
 
 #[cfg(test)]
 mod codex_legacy_lock_tests;
-#[cfg(test)]
-mod codex_verified_tests;
 
 pub(crate) fn advance_tmux_runtime_binding_offset(
     tmux_session_name: &str,

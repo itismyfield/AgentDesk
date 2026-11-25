@@ -32,7 +32,8 @@ impl Fixture {
     async fn arrive_held(&self, text: &str) -> MessageId {
         let transition = self
             .shared
-            .session_transition_lock(self.channel)
+            .session_transition_locks
+            .lock(self.channel)
             .lock_owned()
             .await;
         self.enqueue(text).await;
@@ -175,7 +176,8 @@ async fn s3_an_enqueue_alone_types_the_busy_channel_backlog_in_order_pg() {
 
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("B next").await;
@@ -221,7 +223,8 @@ async fn s3_a_vetoed_first_attempt_is_retried_by_the_slow_backstop_h_then_b_pg()
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("H vetoed first").await;
@@ -263,7 +266,8 @@ async fn s3_time_spent_queued_never_keeps_a_ready_input_from_the_busy_pane_pg() 
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("H retried once long ago").await;
@@ -309,7 +313,8 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("P spent its retries").await;
@@ -341,7 +346,8 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
 
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("H behind parked P").await;
@@ -393,7 +399,8 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     let _gate = router::busy_inject_support::open_gate(fixture.channel.get());
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("H raced by two workers").await;
@@ -468,7 +475,8 @@ async fn s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg() {
         let _gate = list_open.then(|| router::busy_inject_support::open_gate(channel));
         let transition = fixture
             .shared
-            .session_transition_lock(fixture.channel)
+            .session_transition_locks
+            .lock(fixture.channel)
             .lock_owned()
             .await;
         fixture.enqueue("H behind a closed gate").await;
@@ -659,7 +667,8 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
     let _raced_gate = router::busy_inject_support::open_gate(raced.channel.get());
     let transition = raced
         .shared
-        .session_transition_lock(raced.channel)
+        .session_transition_locks
+        .lock(raced.channel)
         .lock_owned()
         .await;
     queue_io::with_post_enqueue_idle_queue_kick_suppressed(raced.enqueue("H settled elsewhere"))
@@ -843,7 +852,8 @@ async fn s3_an_unreadable_thread_parent_keeps_the_backlog_watched_until_it_reads
     // B is offered while the transition is held, so its veto leaves the backstop armed.
     let transition = fixture
         .shared
-        .session_transition_lock(fixture.channel)
+        .session_transition_locks
+        .lock(fixture.channel)
         .lock_owned()
         .await;
     fixture.enqueue("B in a gated thread").await;

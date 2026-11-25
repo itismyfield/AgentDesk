@@ -407,7 +407,8 @@ impl PeriodicCompletionFence {
             fixture
                 .rig
                 .shared
-                .session_transition_lock(self.channel)
+                .session_transition_locks
+                .lock(self.channel)
                 .lock_owned()
                 .await,
         );

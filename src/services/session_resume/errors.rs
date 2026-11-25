@@ -21,7 +21,8 @@ impl ResumeRebindError {
                 Json(json!({
                     "error": format!(
                         "채널 세션 전환이 {}초 동안 계속 사용 중입니다. 잠시 후 /resume을 다시 시도해 주세요.",
-                        crate::services::discord::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT.as_secs()
+                        crate::services::discord::session_transition::SESSION_TRANSITION_LOCK_WAIT_TIMEOUT
+                            .as_secs()
                     )
                 })),
             ),

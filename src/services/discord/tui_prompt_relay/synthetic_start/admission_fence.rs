@@ -19,7 +19,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{self, ExternalInputRelayLease};
 
 pub(super) struct AdmissionFence<'a> {
-    transition: SessionTransitionLease<'a>,
+    transition: SessionTransitionLease<'a, SharedData>,
     shared: &'a Arc<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
@@ -38,8 +38,8 @@ impl<'a> AdmissionFence<'a> {
         borrowed: Option<&'a OwnedMutexGuard<()>>,
     ) -> Result<Self, String> {
         let transition = match borrowed {
-            Some(guard) => SessionTransitionLease::borrow(shared, channel, guard),
-            None => SessionTransitionLease::try_acquire(shared, channel),
+            Some(guard) => SessionTransitionLease::borrow(shared.as_ref(), channel, guard),
+            None => SessionTransitionLease::try_acquire(shared.as_ref(), channel),
         }
         .map_err(|_| "synthetic session transition busy or mismatched".to_string())?;
         let mut fence = Self {

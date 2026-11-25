@@ -763,7 +763,8 @@ mod cases {
         let fx = Fixture::new(7_533_341, 9_100_095_491_915_388_021, Options::default()).await;
         let held = fx
             .shared
-            .session_transition_lock(fx.channel)
+            .session_transition_locks
+            .lock(fx.channel)
             .try_lock_owned()
             .unwrap();
         fx.pass().await;

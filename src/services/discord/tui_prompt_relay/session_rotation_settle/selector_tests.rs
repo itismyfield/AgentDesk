@@ -50,7 +50,8 @@ async fn retired_rotation_moves_the_channel_selector_to_the_rotated_session_pg()
     f.rotate();
     let transition = f
         .shared
-        .session_transition_lock(f.channel)
+        .session_transition_locks
+        .lock(f.channel)
         .lock_owned()
         .await;
     settle_claude_session_rotations(&f.shared).await;

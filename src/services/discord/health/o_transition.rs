@@ -47,7 +47,7 @@ pub(crate) async fn resolve_context(
     }
     launched(&record)?;
     Ok(Context {
-        lock: shared.session_transition_lock(channel),
+        lock: shared.session_transition_locks.lock(channel),
         tmux: record.owner.logical_key,
         nonce: record.execution_nonce,
         codex: None,
@@ -62,7 +62,9 @@ pub(crate) async fn resolve_codex_context(
 ) -> Result<Context, codex_context::Unavailable> {
     let prepared = codex_context::prepare(registry, shared.clone(), channel).await?;
     Ok(Context {
-        lock: shared.session_transition_lock(ChannelId::new(channel)),
+        lock: shared
+            .session_transition_locks
+            .lock(ChannelId::new(channel)),
         tmux: prepared.tmux,
         nonce: prepared.nonce,
         codex: Some(prepared.observer),
