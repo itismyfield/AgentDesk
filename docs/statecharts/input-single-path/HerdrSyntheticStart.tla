@@ -1,93 +1,122 @@
 ---- MODULE HerdrSyntheticStart ----
 \* #8422: a synthetic start (HttpStart, Routine, Decision, EffortContinue) is judged before claim by
 \* start_waits (owner_input.rs:770-822) -> start_wait::observe (owner_input_start_wait.rs:33-97).
-\* A Herdr Bound row whose execution is dead reads Held (busy/herdr.rs:304-306) -> Unknown ->
-\* Wait::Watch + hold_front (owner_input.rs:974-978). held_watch keeps an Unknown forever and ends a
-\* Gone without a wake (held_watch.rs:65-71). Code SHA 82b96fa94b.
-\* Policy "Fixed" is the design-1 repair: observe asks the shared dead-Bound retire (the #8212 proof,
-\* herdr_launch/retire.rs Scope::Ended) when no turn holds the channel; a retired row reads Ready and
-\* the start cold-launches; a permanent refusal goes to the typed host refusal (Observed::Refused).
+\* A Herdr Bound row whose execution is dead reads Held (Claude: busy/herdr.rs:304-306) or
+\* Activity::Unknown (Codex: owner_input_start_wait.rs:67-76, unbound.rs:328) -> Wait::Watch +
+\* hold_front (owner_input.rs:974-978). held_watch keeps an Unknown forever and ends a Gone without
+\* a wake (held_watch.rs:65-71). Code SHA 82b96fa94b.
+\* Policy "Fixed" is design rev2: observe asks the shared dead-Bound recovery for every provider
+\* (the CLI retire::observed(Scope::Ended) proof, owner compared with the asking provider); the
+\* recovery holds the channel transition lease from its last no-turn read to the CAS (borrowed by a
+\* person's input that already holds it); a retired row reads Ready and the start cold-launches; a
+\* permanent refusal is settled Failed with its reason.
+\* A person's input reaches the same recovery after claim (owned_busy.rs:99-339); "Before" for a
+\* person is #8212 (Scope::Missing only).
 EXTENDS Naturals
-CONSTANTS Policy, Host, Exec0, Turn0, Foreign, Mutant
+CONSTANTS Policy, Host, Provider, Origin, Exec0, Turn0, Inflight0, Foreign, Race, Mutant
 
 VARIABLE s
 vars == <<s>>
 
 Init == s = [front |-> "queued", awake |-> TRUE, watch |-> FALSE,
-             row |-> "Bound", exec |-> Exec0, turn |-> Turn0,
+             row |-> "Bound", exec |-> Exec0, turn |-> Turn0, inflight |-> Inflight0,
+             lease |-> FALSE, turnStarted |-> FALSE,
              autoRetired |-> FALSE, badRetire |-> FALSE, turnRetire |-> FALSE,
-             cold |-> FALSE, refusing |-> FALSE]
+             cold |-> FALSE, refusing |-> FALSE, outcome |-> "none"]
 
-\* The proof retire::observed accepts: pane missing or a lone recorded root shell (ended_across).
-\* Mutant RetireOnHeld retires on any Held reading, as candidate (3) without the exact proof would.
-Proven == s.exec = "dead" \/ (Mutant = "RetireOnHeld" /\ s.exec = "unreadable")
-\* No external inflight row reached observe; a managed turn or a captured token refuses the retire.
-Guarded == s.turn = "none" \/ Mutant = "RetireUnderTurn"
-CanAutoRetire == /\ Policy = "Fixed" /\ Mutant # "GoneNoRetire" /\ Host = "herdr"
-                 /\ s.row = "Bound" /\ ~Foreign /\ Guarded /\ Proven
+Dead == s.exec \in {"missing", "shell"}
 
-\* One Herdr observe of the start's channel execution, after any retire it asked for.
+\* Whether the recovery is reached from this start's judgement at all.
+Reached == \/ /\ Policy = "Fixed"
+               /\ ~(Provider = "codex" /\ Mutant = "codexEarlyReturn")
+           \/ /\ Policy = "Before" /\ Origin = "person" /\ Provider = "claude"
+
+\* The exact ended proof: Fixed uses Scope::Ended (missing pane or lone recorded root shell);
+\* #8212 used Scope::Missing. Mutant RetireOnHeld retires on any unclear read.
+Proven == \/ (Policy = "Fixed" /\ Dead)
+          \/ (Policy = "Before" /\ s.exec = "missing")
+          \/ (Mutant = "RetireOnHeld" /\ s.exec = "unreadable")
+
+\* The owner check; mutant ownerClaudeConst keeps the "claude" constant.
+OwnerDiffers == Foreign \/ (Mutant = "ownerClaudeConst" /\ Provider = "codex")
+
+\* No turn holds the channel: no token, and the inflight read is exactly Ok(None).
+\* Mutant okFlatten reads a failed inflight read as no row.
+NoTurn == /\ (s.turn = "none" \/ Mutant = "RetireUnderTurn")
+          /\ (s.inflight = "none" \/ Mutant = "okFlatten")
+\* The lease: try_acquire for a synthetic start, borrow for a person already in transition.
+LeaseOk == ~(Origin = "person" /\ Mutant = "noBorrow")
+
+\* One Herdr read of the channel execution (Claude busy reader or Codex activity).
 HerdrRead == IF s.row # "Bound" THEN "Ready"
-             ELSE IF Foreign THEN (IF Policy = "Fixed" THEN "Refused" ELSE "Unknown")
              ELSE CASE s.exec = "idle" -> "Ready"
                     [] s.exec = "busy" -> "Blocked"
                     [] s.exec = "unreadable" -> "Unknown"
-                    [] s.exec = "dead" -> IF Mutant = "GoneNoRetire" THEN "Gone" ELSE "Unknown"
-\* A tmux start's native read (owner_input.rs:866-871, 880-889).
+                    [] Dead -> IF Mutant = "GoneNoRetire" THEN "Gone" ELSE "Unknown"
 TmuxRead == CASE s.exec = "idle" -> "Ready"
-              [] s.exec = "dead" -> "Gone"
               [] s.exec = "busy" -> "Blocked"
               [] s.exec = "unreadable" -> "Unknown"
+              [] Dead -> "Gone"
 
-Retire(t) == [t EXCEPT !.row = "Retired", !.autoRetired = TRUE,
-                       !.badRetire = t.badRetire \/ t.exec # "dead",
-                       !.turnRetire = t.turnRetire \/ t.turn # "none"]
+\* The recovery's verdict on an Unknown Bound read.
+Recovery == IF ~Reached \/ Mutant = "GoneNoRetire" THEN "none"
+            ELSE IF OwnerDiffers THEN "refused"
+            ELSE IF Proven /\ NoTurn /\ LeaseOk THEN "begin"
+            ELSE "reobserve"
 
-\* The drive grants the front and start_idle judges it before claim.
+\* Judge: a granted (drive) or watched (watch) front reads its execution.
+Verdict == IF Host = "tmux" THEN TmuxRead
+           ELSE IF HerdrRead = "Unknown" /\ Recovery = "begin" THEN "begin"
+           ELSE IF HerdrRead = "Unknown" /\ Recovery = "refused" THEN "refused"
+           ELSE HerdrRead
+
+Begin(t) == [t EXCEPT !.front = "retiring", !.watch = FALSE, !.awake = FALSE,
+                      !.lease = (Mutant # "noLease")]
+
 Drive == /\ s.front = "queued" /\ s.awake
-         /\ IF Host = "tmux"
-            THEN \* transcript_turns: a busy channel waits for an event (owner_input.rs:802-808).
-                 IF s.exec = "busy" THEN s' = [s EXCEPT !.awake = FALSE]
-                 ELSE IF TmuxRead \in {"Ready", "Gone"}
-                      THEN s' = [s EXCEPT !.awake = FALSE, !.front = "claimed"]
-                      ELSE s' = [s EXCEPT !.awake = FALSE, !.front = "held", !.watch = TRUE]
-            ELSE IF s.turn = "external"
-                 \* A non-managed inflight row waits for its row end (owner_input.rs:780-783).
-                 THEN s' = [s EXCEPT !.awake = FALSE]
-                 ELSE LET t == IF CanAutoRetire THEN Retire(s) ELSE s
-                          read == IF t.row # "Bound" THEN "Ready" ELSE HerdrRead
-                      IN s' = CASE read = "Ready" ->
-                                     [t EXCEPT !.awake = FALSE, !.front = "claimed"]
-                                [] read = "Refused" ->
-                                     [t EXCEPT !.awake = FALSE, !.front = "claimed",
-                                               !.refusing = TRUE]
-                                [] OTHER ->
-                                     [t EXCEPT !.awake = FALSE, !.front = "held", !.watch = TRUE]
+         /\ IF Host = "tmux" /\ s.exec = "busy"
+            \* transcript_turns: a busy channel waits for an event (owner_input.rs:802-808).
+            THEN s' = [s EXCEPT !.awake = FALSE]
+            ELSE IF Host = "herdr" /\ Origin = "synthetic" /\ s.turn = "external"
+            \* A non-managed inflight row waits for its row end (owner_input.rs:780-783).
+            THEN s' = [s EXCEPT !.awake = FALSE]
+            ELSE s' = CASE Verdict \in {"Ready", "Gone"} /\ (Host = "tmux" \/ Verdict = "Ready") ->
+                             [s EXCEPT !.awake = FALSE, !.front = "claimed"]
+                        [] Verdict = "begin" -> Begin(s)
+                        [] Verdict = "refused" ->
+                             [s EXCEPT !.awake = FALSE, !.front = "claimed", !.refusing = TRUE]
+                        [] OTHER -> [s EXCEPT !.awake = FALSE, !.front = "held", !.watch = TRUE]
 
-\* The claimed start runs: a typed host refusal settles it, a retired row cold-launches.
+\* held_watch probe = the same judgement; Ready (or a refusal) wakes once, Gone ends unwoken.
+\* A begun recovery runs under its own lease whatever the front's later lead check says.
+WatchLook == /\ s.watch /\ s.front = "held"
+             /\ s' = CASE Verdict \in {"Ready", "refused"} ->
+                            [s EXCEPT !.watch = FALSE, !.front = "queued", !.awake = TRUE]
+                       [] Verdict = "begin" -> Begin(s)
+                       [] Verdict = "Gone" -> [s EXCEPT !.watch = FALSE]
+                       [] OTHER -> s
+
+\* The CAS ends the recovery: the row retires, the lease drops, the start goes on to claim.
+Cas == /\ s.front = "retiring"
+       /\ s' = [s EXCEPT !.row = "Retired", !.autoRetired = TRUE, !.lease = FALSE,
+                         !.front = "claimed",
+                         !.badRetire = s.badRetire \/ ~Dead,
+                         !.turnRetire = s.turnRetire \/ s.turn # "none" \/ s.inflight # "none"]
+
+\* The claimed start runs: a typed refusal settles Failed, a retired row cold-launches.
 Launch == /\ s.front = "claimed"
-          /\ s' = IF s.refusing THEN [s EXCEPT !.front = "rejected"]
+          /\ s' = IF s.refusing
+                  THEN [s EXCEPT !.front = "rejected",
+                                 !.outcome = IF Mutant = "rejectAsCompleted"
+                                             THEN "completed" ELSE "failed"]
                   ELSE IF Host = "herdr" /\ s.row = "Retired"
                   THEN [s EXCEPT !.front = "delivered", !.row = "Bound", !.exec = "idle",
-                                 !.cold = TRUE]
-                  ELSE IF Host = "tmux" /\ s.exec = "dead"
-                  THEN [s EXCEPT !.front = "delivered", !.exec = "idle", !.cold = TRUE]
-                  ELSE [s EXCEPT !.front = "delivered"]
+                                 !.cold = TRUE, !.outcome = "completed"]
+                  ELSE IF Host = "tmux" /\ Dead
+                  THEN [s EXCEPT !.front = "delivered", !.exec = "idle", !.cold = TRUE,
+                                 !.outcome = "completed"]
+                  ELSE [s EXCEPT !.front = "delivered", !.outcome = "completed"]
 
-\* held_watch: Ready wakes once, Gone ends unwoken, anything else keeps (held_watch.rs:65-71).
-\* The Fixed probe is observe itself, so each look may ask the retire again.
-WatchLook == /\ s.watch /\ s.front = "held"
-             /\ LET t == IF CanAutoRetire THEN Retire(s) ELSE s
-                    read == IF Host = "tmux" THEN TmuxRead
-                            ELSE IF t.row # "Bound" THEN "Ready"
-                            ELSE IF HerdrRead = "Refused" THEN "Ready"
-                            ELSE HerdrRead
-                IN s' = CASE read = "Ready" ->
-                               [t EXCEPT !.watch = FALSE, !.front = "queued", !.awake = TRUE]
-                          [] read = "Gone" -> [t EXCEPT !.watch = FALSE]
-                          [] OTHER -> t
-
-\* Any owner wake re-drives a waiting or held front.
 Woken(t) == IF t.front \in {"queued", "held"}
             THEN [t EXCEPT !.front = "queued", !.awake = TRUE, !.watch = FALSE] ELSE t
 
@@ -96,30 +125,36 @@ NativeEnds == /\ s.exec = "busy"
               /\ LET t == [s EXCEPT !.exec = "idle"]
                  IN s' = IF Host = "tmux" /\ Mutant # "NoPresenceWake" THEN Woken(t) ELSE t
 Readable == s.exec = "unreadable" /\ s' = [s EXCEPT !.exec = "idle"]
-\* The execution dies on its own; nothing is woken by it.
-\* Herdr only: a tmux pane's death after an Event wait is outside this model (report: residual).
+InflightRead == s.inflight = "unreadable" /\ s' = [s EXCEPT !.inflight = "none"]
+\* The execution dies on its own, leaving a missing pane or a lone root shell; nothing wakes.
 Die == /\ Host = "herdr" /\ s.exec \in {"idle", "busy", "unreadable"}
        /\ s.front \in {"queued", "held"}
-       /\ s' = [s EXCEPT !.exec = "dead"]
-\* A holding turn ends at its own boundary (or its row end) and wakes the owner.
+       /\ \E e \in {"missing", "shell"} : s' = [s EXCEPT !.exec = e]
+\* Another start registers its token; it takes the transition lock first (turn_start.rs:151).
+TurnStart == /\ Race /\ Host = "herdr" /\ ~s.turnStarted /\ s.turn = "none" /\ ~s.lease
+             /\ s.front \in {"queued", "held", "retiring"}
+             /\ s' = [s EXCEPT !.turn = "managed", !.turnStarted = TRUE]
 TurnEnd == s.turn # "none" /\ s' = Woken([s EXCEPT !.turn = "none"])
 \* Operator or HTTP force terminate: S3b-1 retired_wake wakes the owner. Never fair.
-OperatorRetire == /\ Host = "herdr" /\ s.row = "Bound" /\ s.exec = "dead"
+OperatorRetire == /\ Host = "herdr" /\ s.row = "Bound" /\ Dead /\ s.front # "retiring"
                   /\ s' = Woken([s EXCEPT !.row = "Retired"])
-
-\* A settled start stays settled.
 Done == s.front \in {"delivered", "rejected"} /\ UNCHANGED vars
 
-Next == Done \/ Drive \/ Launch \/ WatchLook \/ NativeEnds \/ Readable \/ Die \/ TurnEnd \/ OperatorRetire
-Spec == Init /\ [][Next]_vars /\ WF_vars(Drive) /\ WF_vars(Launch) /\ WF_vars(WatchLook)
-        /\ WF_vars(NativeEnds) /\ WF_vars(Readable) /\ WF_vars(TurnEnd)
+Next == Done \/ Drive \/ WatchLook \/ Cas \/ Launch \/ NativeEnds \/ Readable \/ InflightRead
+        \/ Die \/ TurnStart \/ TurnEnd \/ OperatorRetire
+Spec == Init /\ [][Next]_vars /\ WF_vars(Drive) /\ WF_vars(WatchLook) /\ WF_vars(Cas)
+        /\ WF_vars(Launch) /\ WF_vars(NativeEnds) /\ WF_vars(Readable)
+        /\ WF_vars(InflightRead) /\ WF_vars(TurnEnd)
 
-\* Safety: an automatic retire never ends a live or unproven execution, nor one a turn holds.
+\* Safety.
 NoAutoRetireLive == ~s.badRetire
+\* A channel holding a turn token (or an unproven inflight read) never has its Bound retired.
 NoAutoRetireUnderTurn == ~s.turnRetire
 RetiredStartIsCold == (s.front = "delivered" /\ s.autoRetired) => s.cold
-TypeOK == s.front \in {"queued", "held", "claimed", "delivered", "rejected"}
+RejectedIsFailed == s.front = "rejected" => s.outcome = "failed"
+TypeOK == s.front \in {"queued", "held", "retiring", "claimed", "delivered", "rejected"}
 
-\* Liveness: a synthetic start is delivered or explicitly refused.
+\* Liveness: the start is delivered or explicitly refused; a start whose owner matches is delivered.
 SyntheticSettles == <>(s.front \in {"delivered", "rejected"})
+OwnedStartDelivered == <>(s.front = "delivered" \/ (Foreign /\ s.front = "rejected"))
 ====
