@@ -19,9 +19,8 @@ use crate::services::discord::herdr_terminate::{
 };
 use crate::services::provider::ProviderKind;
 
-/// Ends the never-started execution `claim`'s front waited on, then drops that wait. The previous
-/// handoff returned and no turn of this one is published yet; a turn still holding the channel,
-/// a logged start or the switch off closes nothing and leaves the front to the turn that follows.
+/// Ends the never-started execution `claim`'s front waited on, then drops that wait. A turn still
+/// holding the channel, a logged start or the switch off closes nothing; the next turn follows.
 pub(crate) async fn recover(shared: &Arc<SharedData>, channel: ChannelId, claim: &FrontClaim) {
     let Some(request) = qualified(shared, channel, claim).await else {
         return;
@@ -42,7 +41,8 @@ pub(crate) async fn recover(shared: &Arc<SharedData>, channel: ChannelId, claim:
     if result != TerminationResult::Retired {
         return;
     }
-    let ended = shared.mailbox(channel).v2_request(move |slot| {
+    let mailbox = shared.mailbox(channel);
+    let ended = mailbox.v2_request(move |slot| {
         let owner = slot.as_mut().ok_or("V2 not adopted")?;
         owner.end_never_started_wait(&front, &nonce)
     });
@@ -63,7 +63,8 @@ async fn qualified(
     }
     let (front, number) = (claim.front().clone(), claim.number());
     let asked = front.clone();
-    let named = shared.mailbox_peek(channel)?.v2_request(move |slot| {
+    let mailbox = shared.mailbox_peek(channel)?;
+    let named = mailbox.v2_request(move |slot| {
         Ok(slot
             .as_ref()
             .and_then(|owner| owner.never_started_close_claimed((&asked, number))))

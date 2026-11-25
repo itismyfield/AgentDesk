@@ -451,7 +451,6 @@ pub(crate) async fn terminate_explicit_herdr_for_test(
 
 /// The service up to settlement: `expected` fixes the owner and row dispatch. Its captured flag
 /// also requires the captured turn to own that dispatch; restart can leave a different one on the row.
-/// `never_started` narrows the run to a Pending execution no start was logged for and no turn holds.
 async fn terminate_scoped(
     request: OperatorTerminate,
     shared: Arc<SharedData>,

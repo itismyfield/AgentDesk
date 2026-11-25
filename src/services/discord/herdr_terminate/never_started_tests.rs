@@ -103,8 +103,12 @@ async fn waited(node: &Node) -> FrontClaim {
 /// Whether `claim` is still the owner's claim on its kept original and ticket, and whether its
 /// retry wait remains.
 async fn kept(node: &Node, claim: &FrontClaim) -> (bool, bool) {
-    let (front, number) = (claim.front().clone(), claim.number());
-    let read = node.shared.mailbox(channel()).v2_request(move |slot| {
+    let (front, number, mailbox) = (
+        claim.front().clone(),
+        claim.number(),
+        node.shared.mailbox(channel()),
+    );
+    let read = mailbox.v2_request(move |slot| {
         let owner = slot.as_ref().ok_or("no owner")?;
         assert_original_and_ticket_kept(owner, &front);
         let current = owner.claim_number() == number && owner.claimed(front.1.message_id, &front);
