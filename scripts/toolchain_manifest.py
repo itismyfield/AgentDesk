@@ -255,22 +255,6 @@ def tool_inventory() -> tuple[ToolSpec, ...]:
                 "https://github.com/Ocasio-J/SidecarLauncher",
                 report_only=True,
             ),
-            ToolSpec(
-                "playwright-chromium",
-                "playwright + Chromium",
-                "manual",
-                "report-only",
-                "command",
-                ("playwright", "--version"),
-                "manual",
-                "inspect /receipt when installed",
-                None,
-                None,
-                None,
-                "installation is on-demand and receipt-managed",
-                "https://playwright.dev/docs/browsers",
-                report_only=True,
-            ),
         ]
     )
     return tuple(specs)
