@@ -122,6 +122,30 @@ fn reconfirm_due(ledger: &LedgerState, serial: u64, now: DateTime<Utc>) -> bool 
     at + waited.min(chrono::Duration::minutes(5)) <= now
 }
 
+/// The open attempt is an image's or notice's own, or a due action needs the one Prepared; an
+/// image-less poll leaves a body's open attempt to its next delivery.
+fn settles_open(ledger: &LedgerState, now: DateTime<Utc>) -> bool {
+    let Some((open, _)) = ledger.unresolved() else {
+        return false;
+    };
+    let own = ledger
+        .tool_images()
+        .open_obligations(ledger)
+        .into_iter()
+        .any(|o| match o {
+            OpenObligation::Image {
+                step: ImageStep::Waiting(waiting),
+                ..
+            }
+            | OpenObligation::Notice {
+                step: NoticeStep::Waiting(waiting),
+                ..
+            } => matches!(waiting, Waiting::Prepared { serial } if serial == open),
+            _ => false,
+        });
+    own || next_action(ledger, now).is_some()
+}
+
 /// Open image and notice obligations; any of them refuses a source retirement.
 pub(crate) fn open_count(ledger: &LedgerState) -> usize {
     ledger.tool_images().open_obligations(ledger).len()
@@ -229,12 +253,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             .await
     }
 
-    /// One poll's image or notice action, after the ordinary open attempt is settled.
+    /// One poll's image or notice action, after settling the open attempt when `settles_open` says so.
     pub(crate) async fn select_images(&mut self, now: DateTime<Utc>) -> Step {
         if self.is_stopped() {
             return Step::Stopped;
         }
-        if let Err(step) = self.settle_open().await {
+        if settles_open(self.store().ledger(), now)
+            && let Err(step) = self.settle_open().await
+        {
             return step;
         }
         let Some(action) = next_action(self.store().ledger(), now) else {
