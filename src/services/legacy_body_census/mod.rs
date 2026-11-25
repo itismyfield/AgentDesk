@@ -11,27 +11,36 @@ mod cache;
 mod collector;
 mod evaluation;
 mod evidence;
-pub(crate) mod history;
-pub(crate) mod manifest;
+mod history;
+mod manifest;
 pub(crate) mod request_context;
 pub(crate) mod transport;
-pub(crate) mod window;
-pub(crate) mod writer;
+mod window;
+mod writer;
 
-pub(crate) type Shared = Arc<Mutex<State>>;
+type Shared = Arc<Mutex<State>>;
 
-pub(crate) struct State {
-    header: Value,
-    ready: bool,
-    invalid: bool,
-    own_reasons: Vec<String>,
-    history_problems: Vec<Value>,
-    pub(crate) window: window::Window,
-    predecessor_window: Value,
+// Defined in a private child so default builds name it only inside this module, as before.
+mod state {
+    use serde_json::Value;
+
+    pub(crate) struct State {
+        pub(super) header: Value,
+        pub(super) ready: bool,
+        pub(super) invalid: bool,
+        pub(super) own_reasons: Vec<String>,
+        pub(super) history_problems: Vec<Value>,
+        pub(super) window: super::window::Window,
+        pub(super) predecessor_window: Value,
+    }
 }
+#[cfg(not(any(test, feature = "test-support")))]
+use state::State;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use state::State;
 
 impl State {
-    pub(crate) fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {
+    fn new(boot: &crate::services::process_boot::Boot, host: Option<String>) -> Self {
         let probes = manifest::snapshot();
         let mut state = Self {
             header: json!({"boot_id":boot.id,"host":host,"started_at_ms":boot.started_at_ms,
@@ -50,7 +59,7 @@ impl State {
         state
     }
 
-    pub(crate) fn mark(&mut self, reason: &str) {
+    fn mark(&mut self, reason: &str) {
         self.invalid = true;
         self.window.invalid = true;
         if !self.own_reasons.iter().any(|old| old == reason) {
@@ -71,7 +80,7 @@ impl State {
     }
 }
 
-pub(crate) fn invalidate(state: &Shared, reason: &str) {
+fn invalidate(state: &Shared, reason: &str) {
     state
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -88,7 +97,7 @@ fn inherited(state: &Shared, boot: Option<&str>, reason: &str) {
     }
 }
 
-pub(crate) struct Journal(pub(crate) writer::Writer);
+pub(crate) struct Journal(writer::Writer);
 
 impl Journal {
     pub(crate) async fn append(&self, record: Value) -> bool {
@@ -274,4 +283,67 @@ pub(crate) async fn with_projection_for_test<T>(
     next: impl std::future::Future<Output = T>,
 ) -> T {
     TEST_PROJECTION.scope((cache, now), next).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use history::{append_line_for_test, prepare_with_sync_for_test};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use manifest::packaged_for_test;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use manifest::{inspect_for_test, inspect_with_evidence_for_test};
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use window::{Window, valid_chain_for_test};
+
+#[cfg(any(test, feature = "test-support"))]
+impl State {
+    pub(crate) fn new_for_test(
+        boot: &crate::services::process_boot::Boot,
+        host: Option<String>,
+    ) -> Self {
+        Self::new(boot, host)
+    }
+
+    pub(crate) fn mark_for_test(&mut self, reason: &str) {
+        self.mark(reason);
+    }
+
+    pub(crate) fn window_for_test(&self) -> &window::Window {
+        &self.window
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn invalidate_for_test(state: &Shared, reason: &str) {
+    invalidate(state, reason);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Journal {
+    pub(crate) fn spawn_for_test(
+        root: Option<PathBuf>,
+        boot: crate::services::process_boot::Boot,
+        doctor: Option<String>,
+        host: Option<String>,
+        sync_parent: Option<writer::SyncParent>,
+        after_ack: Option<writer::Hook>,
+    ) -> Self {
+        let mut options = writer::Options {
+            doctor,
+            host,
+            sync_parent,
+            ..Default::default()
+        };
+        if let Some(after_ack) = after_ack {
+            options.after_ack = after_ack;
+        }
+        Self(writer::Writer::spawn(root, boot, options))
+    }
+
+    pub(crate) fn state_for_test(&self) -> &Shared {
+        &self.0.state
+    }
+
+    pub(crate) fn try_append_for_test(&self, record: Value) {
+        self.0.try_append(record);
+    }
 }

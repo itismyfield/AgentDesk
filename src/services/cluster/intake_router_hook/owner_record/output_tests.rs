@@ -17,7 +17,7 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     };
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&artifact))
+            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .unwrap()
             .run(async { 1 })
@@ -29,42 +29,42 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
         pool: single,
         provider: "claude".into(),
     };
-    one.acquire(&origin.channel, "answer", Some(&artifact))
+    one.acquire(origin.channel_for_test(), "answer", Some(&artifact))
         .await
         .unwrap()
         .run(async {})
         .await
         .unwrap();
     let mut generation = artifact.clone();
-    generation.origin.generation += 1;
+    *generation.origin_generation_mut_for_test() += 1;
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&generation))
+            .acquire(origin.channel_for_test(), "answer", Some(&generation))
             .await
             .is_err()
     );
     let mut changed = artifact.clone();
-    changed.origin.binding = json!({"native":"successor"});
+    *changed.origin_binding_mut_for_test() = json!({"native":"successor"});
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&changed))
+            .acquire(origin.channel_for_test(), "answer", Some(&changed))
             .await
             .is_err()
     );
     assert!(
         scope
-            .acquire(&origin.channel, "changed", Some(&artifact))
+            .acquire(origin.channel_for_test(), "changed", Some(&artifact))
             .await
             .is_err()
     );
     assert!(
         scope
-            .acquire(&origin.channel, "answer", None)
+            .acquire(origin.channel_for_test(), "answer", None)
             .await
             .is_err()
     );
     assert!(
-        acquire(None, &origin.channel, "answer", Some(&artifact))
+        acquire(None, origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
@@ -73,7 +73,7 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
         source_artifact(
             Some(&pool),
             "claude",
-            &origin.channel,
+            origin.channel_for_test(),
             "90001",
             None,
             "answer"
@@ -84,14 +84,14 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     );
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&artifact))
+            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
     pool.close().await;
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&artifact))
+            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
@@ -106,16 +106,22 @@ async fn output_origin_withheld_source_never_authorizes_fresh_effect_pg() {
     };
     let artifact = origin.seal("answer");
     let mut tx = pool.begin().await.unwrap();
-    custody::lock(&mut tx, &OwnerIdentity::new("claude", &origin.channel))
-        .await
-        .unwrap();
-    crate::db::replay_disposition::write::withhold_owner_loss_on_tx(&mut tx, origin.receipt)
-        .await
-        .unwrap();
+    custody::lock(
+        &mut tx,
+        &OwnerIdentity::new("claude", origin.channel_for_test()),
+    )
+    .await
+    .unwrap();
+    crate::db::replay_disposition::write::withhold_owner_loss_on_tx(
+        &mut tx,
+        origin.receipt_for_test(),
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
     assert!(
         scope
-            .acquire(&origin.channel, "answer", Some(&artifact))
+            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
@@ -130,7 +136,7 @@ async fn output_origin_owner_switch_waits_for_actual_effect_guard_pg() {
     };
     let artifact = origin.seal("answer");
     let hold = scope
-        .acquire(&origin.channel, "answer", Some(&artifact))
+        .acquire(origin.channel_for_test(), "answer", Some(&artifact))
         .await
         .unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -145,7 +151,7 @@ async fn output_origin_owner_switch_waits_for_actual_effect_guard_pg() {
     inside.await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     let locked: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(OwnerIdentity::new("claude", &origin.channel).advisory_key())
+        .bind(OwnerIdentity::new("claude", origin.channel_for_test()).advisory_key())
         .fetch_one(&mut *tx)
         .await
         .unwrap();
@@ -183,7 +189,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
         fn raise(&self, _: u64, _: WriterAlarm) {}
     }
     let (_db, pool, origin) = fixture("7336903").await;
-    let channel = origin.channel.parse::<u64>().unwrap();
+    let channel = origin.channel_for_test().parse::<u64>().unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (entered, inside) = tokio::sync::oneshot::channel();
@@ -254,7 +260,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     let _ = parent.await;
     let mut tx = pool.begin().await.unwrap();
     let free: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-        .bind(OwnerIdentity::new("claude", &origin.channel).advisory_key())
+        .bind(OwnerIdentity::new("claude", origin.channel_for_test()).advisory_key())
         .fetch_one(&mut *tx)
         .await
         .unwrap();
@@ -269,7 +275,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
         loop {
             let mut tx = pool.begin().await.unwrap();
             let free: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
-                .bind(OwnerIdentity::new("claude", &origin.channel).advisory_key())
+                .bind(OwnerIdentity::new("claude", origin.channel_for_test()).advisory_key())
                 .fetch_one(&mut *tx)
                 .await
                 .unwrap();

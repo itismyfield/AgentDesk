@@ -1,12 +1,21 @@
 //! Submit owns the physical mutation; Source binding and the reply belong to observation.
 use super::*;
 
-pub(crate) struct Submitted {
-    target: HerdrTarget,
-    pub(crate) logged: tokio::sync::watch::Receiver<u64>,
-}
+// Defined in a private child so default builds name it only inside `herdr_turn`, as before.
+mod submitted {
+    use crate::services::session_host::HerdrTarget;
 
-pub(crate) fn submit(
+    pub(crate) struct Submitted {
+        pub(super) target: HerdrTarget,
+        pub(super) logged: tokio::sync::watch::Receiver<u64>,
+    }
+}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(super) use submitted::Submitted;
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use submitted::Submitted;
+
+pub(super) fn submit(
     turn: &CodexHerdrTurn<'_>,
     runtime: &Handle,
     nonce: &str,
@@ -25,7 +34,7 @@ pub(crate) fn submit(
 
 /// The first prompt through the owner waiting on this thread: it reserves the frame on the
 /// execution the launch recorded, binds its pane, and runs this write as its effect.
-pub(crate) fn submit_owned(
+pub(super) fn submit_owned(
     turn: &CodexHerdrTurn<'_>,
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     lineage: crate::services::claude_tui::owner_input::Lineage,
@@ -290,6 +299,32 @@ pub(super) fn observe(
         source.session_id.clone(),
         sender,
     )
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl Submitted {
+    pub(crate) fn logged_for_test(&self) -> &tokio::sync::watch::Receiver<u64> {
+        &self.logged
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    runtime: &Handle,
+    nonce: &str,
+) -> Result<Option<Submitted>, String> {
+    submit(turn, runtime, nonce)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn submit_owned_for_test(
+    turn: &CodexHerdrTurn<'_>,
+    hook: crate::services::claude_tui::owner_input::LaunchHook,
+    lineage: crate::services::claude_tui::owner_input::Lineage,
+    record: &HostedExecution,
+) -> Result<Submitted, String> {
+    submit_owned(turn, hook, lineage, record)
 }
 
 #[cfg(any(test, feature = "test-support"))]

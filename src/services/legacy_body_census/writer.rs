@@ -8,17 +8,17 @@ use std::{
 };
 use tokio::sync::oneshot;
 
-pub(crate) type Hook = Arc<dyn Fn() + Send + Sync>;
-pub(crate) type SyncParent = fn(&Path) -> std::io::Result<()>;
+pub(super) type Hook = Arc<dyn Fn() + Send + Sync>;
+pub(super) type SyncParent = fn(&Path) -> std::io::Result<()>;
 
-pub(crate) struct Options {
-    pub(crate) doctor: Option<String>,
-    pub(crate) host: Option<String>,
-    pub(crate) timeout: Duration,
-    pub(crate) before_write: Hook,
+pub(super) struct Options {
+    pub(super) doctor: Option<String>,
+    pub(super) host: Option<String>,
+    pub(super) timeout: Duration,
+    pub(super) before_write: Hook,
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) after_ack: Hook,
-    pub(crate) sync_parent: Option<SyncParent>,
+    pub(super) sync_parent: Option<SyncParent>,
 }
 
 impl Default for Options {
@@ -42,9 +42,9 @@ struct Message {
     host: Option<Option<String>>,
 }
 
-pub(crate) struct Writer {
+pub(super) struct Writer {
     sender: mpsc::SyncSender<Message>,
-    pub(crate) state: Shared,
+    pub(super) state: Shared,
     timeout: Duration,
     pub(super) projection: Arc<ProjectionCache>,
 }
@@ -88,7 +88,7 @@ fn write_drain(file: &mut Option<std::fs::File>, state: &Shared, cut: u64, close
 }
 
 impl Writer {
-    pub(crate) fn spawn(root: Option<PathBuf>, boot: Boot, mut options: Options) -> Self {
+    pub(super) fn spawn(root: Option<PathBuf>, boot: Boot, mut options: Options) -> Self {
         let (sender, receiver) = mpsc::sync_channel::<Message>(64);
         let state = Arc::new(Mutex::new(State::new(&boot, options.host.clone())));
         let shared = state.clone();
@@ -229,7 +229,7 @@ impl Writer {
         self.queue(record, Some(ack), None).then_some(received)
     }
 
-    pub(crate) fn try_append(&self, record: Value) {
+    pub(super) fn try_append(&self, record: Value) {
         self.queue(record, None, None);
     }
 

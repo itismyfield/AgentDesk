@@ -2,7 +2,10 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOw
 use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, SourceRef};
 use crate::services::claude::herdr_turn::not_held;
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
-use crate::services::codex::herdr_turn::first_input::{pending_lookup_probe, submit, submit_owned};
+use crate::services::codex::herdr_turn::first_input::pending_lookup_probe;
+use crate::services::codex::herdr_turn::first_input::{
+    submit_for_test as submit, submit_owned_for_test as submit_owned,
+};
 use crate::services::codex::herdr_turn::{CodexHerdrTurn, logged_source};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
@@ -387,7 +390,7 @@ fn run_case(case: Case) {
     );
     assert_eq!(sends[1], json!({"pane_id": PANE, "keys": ["enter"]}));
     assert!(
-        !matches!(submitted.logged.has_changed(), Ok(true)),
+        !matches!(submitted.logged_for_test().has_changed(), Ok(true)),
         "no invented SessionStart wakes the observer"
     );
     assert!(

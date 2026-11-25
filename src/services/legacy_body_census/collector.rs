@@ -25,7 +25,7 @@ fn problem(errors: &mut Vec<String>, reason: &str) {
 }
 
 impl Collector {
-    pub(crate) fn collect(
+    pub(super) fn collect(
         &mut self,
         root: &Path,
         current: &str,
@@ -270,5 +270,16 @@ impl Collector {
         value["live_journal"] = json!({"boot_id":current,"enqueued_cut":cut,"invalid":false});
         evaluate_host(&mut value, now);
         value
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn collect_for_test(
+        &mut self,
+        root: &Path,
+        current: &str,
+        now_ms: i64,
+        state: Option<&super::Shared>,
+    ) -> Value {
+        self.collect(root, current, now_ms, state)
     }
 }

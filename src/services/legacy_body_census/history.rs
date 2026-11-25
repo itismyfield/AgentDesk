@@ -8,7 +8,7 @@ use std::{
     path::Path,
 };
 
-pub(crate) fn append_line(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
+pub(super) fn append_line(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
     let mut bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
     bytes.push(b'\n');
     file.write_all(&bytes)
@@ -125,7 +125,7 @@ pub(super) fn prepare(
     )
 }
 
-pub(crate) fn prepare_with_sync(
+pub(super) fn prepare_with_sync(
     root: &Path,
     boot: &Boot,
     doctor: Option<String>,
@@ -240,4 +240,20 @@ pub(super) fn lock_writer(root: &Path) -> std::io::Result<File> {
         .open(root.join("legacy_body_census/writer.lock"))?;
     file.lock()?;
     Ok(file)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn append_line_for_test(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
+    append_line(file, record)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn prepare_with_sync_for_test(
+    root: &Path,
+    boot: &Boot,
+    doctor: Option<String>,
+    state: &Shared,
+    sync_parent: fn(&Path) -> std::io::Result<()>,
+) -> Result<File, &'static str> {
+    prepare_with_sync(root, boot, doctor, state, sync_parent)
 }

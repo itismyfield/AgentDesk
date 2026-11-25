@@ -128,7 +128,7 @@ pub(crate) fn spawn(config: crate::config::Config, pool: sqlx::PgPool, local: St
     });
 }
 
-pub(crate) async fn probe(context: &ForwardCallerContext, node: &Value) -> Value {
+async fn probe(context: &ForwardCallerContext, node: &Value) -> Value {
     let mut trusted = false;
     let result = tokio::time::timeout(PROBE_DEADLINE, async {
         if node["status"] != "online" {
@@ -160,7 +160,7 @@ pub(crate) async fn probe(context: &ForwardCallerContext, node: &Value) -> Value
         "observed_at_ms":now,"expires_at_ms":now + TTL_MS})
 }
 
-pub(crate) async fn probe_target(
+async fn probe_target(
     context: &ForwardCallerContext,
     target: &super::TrustedForwardTarget,
 ) -> Result<(), &'static str> {
@@ -200,6 +200,22 @@ pub(crate) async fn probe_target(
         return Err("forwarding_probe_identity_mismatch");
     }
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) type TrustedForwardTargetForTest = super::TrustedForwardTarget;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn probe_for_test(context: &ForwardCallerContext, node: &Value) -> Value {
+    probe(context, node).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) async fn probe_target_for_test(
+    context: &ForwardCallerContext,
+    target: &super::TrustedForwardTarget,
+) -> Result<(), &'static str> {
+    probe_target(context, target).await
 }
 
 #[cfg(test)]
