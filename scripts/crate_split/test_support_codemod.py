@@ -59,6 +59,9 @@ CONTAINER = re.compile(tc.ITEM_START.pattern + r"|^\s*(?:(?:" + vt.VIS + r")\s+)
 CFG_LINE = re.compile(r"^(\s*)#\[cfg\(")
 NOT_TEST = re.compile(r"\bnot\s*\(\s*(?:test\b|any\s*\(\s*test\b)")
 TEST_ATTR = re.compile(r"^\s*#\[\s*(?:(?:tokio|async_std|actix_rt)\s*::\s*)?test\b")
+# Keywords a `!` can follow without making a macro call: `if !ready {`, `while !done {`, `return !x`.
+NOT_MACRO = {"if", "while", "match", "return", "in", "let", "else", "for", "loop", "move", "mut", "ref", "as", "break",
+             "continue", "yield", "await", "where", "unsafe", "async", "dyn", "impl", "fn", "pub", "use", "mod"}
 KW = re.compile(r"\b(fn|struct|enum|union|trait|type|const|static|mod|macro_rules!)\s")
 
 
@@ -268,9 +271,9 @@ class Tree:
         out, inside, i, pairs = set(), set(), 0, {"(": ")", "[": "]", "{": "}"}
         while i < len(toks):
             t = toks[i]
-            if t.kind == "ident" and i + 2 < len(toks) and toks[i + 1].value == "!":
+            if t.kind == "ident" and i + 2 < len(toks) and toks[i + 1].value == "!" and t.value not in NOT_MACRO:
                 k = i + 2
-                if toks[k].kind == "ident":  # macro_rules! name { .. }
+                if t.value == "macro_rules" and toks[k].kind == "ident":  # macro_rules! name { .. }
                     k += 1
                 if k < len(toks) and toks[k].kind == "punct" and toks[k].value in pairs:
                     depth, open_at, k = 1, k, k + 1
@@ -385,7 +388,12 @@ def own_label(lines, index):
     f = FIELD.match(line)
     if f and not line.strip().startswith(("let ", "fn ")):
         return f"field {f.group(1)}"
-    return "stmt " + re.sub(r"\s+", " ", line.strip())
+    text = re.sub(r"\s+", " ", line.strip())
+    if text == "{":
+        # A bare block statement is named by its first line, so two blocks in one fn are told apart.
+        inner = next((x.strip() for x in lines[index + 1:index + 6] if x.strip()), "")
+        text = "{ " + re.sub(r"\s+", " ", inner)
+    return "stmt " + text
 
 
 def impl_type(lines, index):
@@ -858,13 +866,16 @@ def plan(tree, exclude_entries, bundles=()):
             rel = member.get("file", bundle.get("file"))
             items = cfg_items(tree, rel) if rel and (tree.root / rel).is_file() else {}
             found_at = items.get(member["item"], [])
-            if len(found_at) != 1:
-                stale.append(f"bundle {bundle['name']}: {rel} :: {member['item']} matches {len(found_at)} items, not 1")
+            want = member.get("count", 1)  # identical statements that open together are counted, not guessed
+            if len(found_at) != want:
+                stale.append(f"bundle {bundle['name']}: {rel} :: {member['item']} matches {len(found_at)} items, "
+                             f"not {want}")
                 continue
-            got = tree.item_cfgs(rel, found_at[0])
-            if norm_cfg(got) != norm_cfg(member["cfg"]):
-                drift.append(f"{member['item']} has cfg `{got}`, recorded `{member['cfg']}`")
-            members += [g for g in tree.chain(rel, found_at[0] + 1) if g not in members]
+            for k in found_at:
+                got = tree.item_cfgs(rel, k)
+                if norm_cfg(got) != norm_cfg(member["cfg"]):
+                    drift.append(f"{member['item']} has cfg `{got}`, recorded `{member['cfg']}`")
+                members += [g for g in tree.chain(rel, k + 1) if g not in members]
         for t, chain in chains.items():
             if any(g in members for g in chain):
                 chain += [g for g in members if g not in chain]
@@ -916,6 +927,20 @@ def plan(tree, exclude_entries, bundles=()):
             held[g] = f"no rewrite rule: {lines[j].strip()}"
             continue
         index = item_index(lines, j)
+        own = label[g].split(" > ")[-1]
+        if own.startswith("stmt "):
+            # A statement whose sibling in the same fn has an opposite gate (`#[cfg(not(test))] { .. }` next to
+            # `#[cfg(test)] { .. }`): opening one side runs both arms under the feature.
+            scope = label[g].rsplit(" > ", 1)[0] if " > " in label[g] else ""
+            for i, line in enumerate(lines):
+                if i + 1 not in real or i == j or not mentions_test(line) or real_gate(line):
+                    continue
+                other = tree.label(rel, item_index(lines, i))
+                if other.split(" > ")[-1].startswith("stmt ") and \
+                        (other.rsplit(" > ", 1)[0] if " > " in other else "") == scope:
+                    held[g] = f"statement with an opposite-gated sibling at line {i + 1}: {line.strip()}"
+                    break
+            continue
         if not tc.DECL.match(lines[index]):
             continue
         module = tree.module_at(rel, index + 1)

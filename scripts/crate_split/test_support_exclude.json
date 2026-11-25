@@ -5,7 +5,8 @@
   "not_test_twin": "a `cfg(not(test))` item of the same name; both sides must flip together (`not(any(test, feature = \"test-support\"))`)",
   "fixture_reader": "reads a fixture an opened setter installs; it must open with the setter and the restore",
   "scan_false_positive": "the name scan matched an unrelated call (`filler.len()`, `Registry::prepare`; mkrxcfg-1 hand check)",
-  "test_module": "opens a whole module holding tests; helper-only fixtures are split out instead (mkrxcfg-1 review focus 1)"
+  "test_module": "opens a whole module holding tests; helper-only fixtures are split out instead (mkrxcfg-1 review focus 1)",
+  "manual_b": "class B: depends on an excluded or #[test] module, a not(test) twin or a fixture split; held with its callers and opened by hand (KRX-TS manual commit)"
  },
  "entries": [
   {
@@ -566,6 +567,51 @@
    "cfg": [
     "test"
    ]
+  },
+  {
+   "file": "src/services/claude/herdr_turn/first_input.rs",
+   "item": "mod regression_tests",
+   "reason": "manual_b",
+   "cfg": [
+    "test"
+   ],
+   "why": "needs session_host::herdr_socket_rig_tests (pane_probe::tests) and readiness::tests::pre_source"
+  },
+  {
+   "file": "src/services/tui_o/channel_policy/adoption.rs",
+   "item": "mod body_check",
+   "reason": "manual_b",
+   "cfg": [
+    "test"
+   ],
+   "why": "needs cutover::test_override (production/test twin, private) and Candidate.bodiless"
+  },
+  {
+   "file": "src/config/test_instance.rs",
+   "item": "mod login_test_support",
+   "reason": "manual_b",
+   "cfg": [
+    "all(test, unix)"
+   ],
+   "why": "AGY path: needs agy_cell tests / host_scope_tests generators"
+  },
+  {
+   "file": "src/services/tui_o/writer/input_facts/native.rs",
+   "item": "use tests::fold",
+   "reason": "manual_b",
+   "cfg": [
+    "all(test, unix)"
+   ],
+   "why": "fold() lives in native/tests.rs, a #[test] module"
+  },
+  {
+   "file": "src/services/tui_prompt_dedupe.rs",
+   "item": "fn run_serial_test",
+   "reason": "manual_b",
+   "cfg": [
+    "test"
+   ],
+   "why": "TEST_LOCK's #[cfg(test)] is separated from the static by `//` comment lines, so no tool attaches that gate; move the comment above the attribute by hand"
   }
  ]
 }

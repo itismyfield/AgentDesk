@@ -183,6 +183,101 @@ pub(crate) fn attr_twin() {}
 #[cfg(test)]
 pub(crate) fn attr_twin() {}
 """
+# Review krxts-3 §2-3 shapes. A field that a gated initialiser fills and a gated statement records into.
+FIELD_BUNDLE = """
+pub(crate) struct Facts {
+    pub(crate) seen: u64,
+    #[cfg(test)]
+    pub(crate) records: Vec<u64>,
+}
+
+impl Facts {
+    pub(crate) fn new() -> Self {
+        Self {
+            seen: 0,
+            #[cfg(test)]
+            records: Vec::new(),
+        }
+    }
+
+    pub(crate) fn observe(&mut self, value: u64) {
+        self.seen += 1;
+        #[cfg(test)]
+        self.records.push(value);
+        let _ = value;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recorded(&self) -> &[u64] {
+        &self.records
+    }
+}
+"""
+# A helper that reads a fixture of an excluded `mod tests`.
+TESTS_FIXTURE = """
+#[cfg(test)]
+pub(crate) fn with_fixture() -> u64 {
+    tests::fixture()
+}
+
+#[cfg(test)]
+mod tests {
+    pub(crate) fn fixture() -> u64 {
+        3
+    }
+
+    #[test]
+    fn t() {}
+}
+"""
+# A setter, the store it writes and the production branch that reads it: the value must be observed.
+CONSUMER = """
+#[cfg(test)]
+thread_local! {
+    static INSTALLED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub fn install(value: u64) {
+    INSTALLED.with(|slot| slot.set(Some(value)));
+}
+
+pub fn read() -> u64 {
+    #[cfg(test)]
+    if let Some(value) = INSTALLED.with(|slot| slot.get()) {
+        return value;
+    }
+    7
+}
+"""
+CONSUMER_MEMBERS = ("thread_local!{INSTALLED}", "fn install",
+                    "fn read > stmt if let Some(value) = INSTALLED.with(|slot| slot.get()) {")
+# Statement-level production/test arms in one fn, and a setter that only the test arm reads.
+STMT_TWIN = """
+#[cfg(test)]
+thread_local! {
+    static OVERRIDE: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_generation(value: u64) {
+    OVERRIDE.with(|o| o.set(Some(value)));
+}
+
+pub(crate) fn generation() -> u64 {
+    #[cfg(not(test))]
+    {
+        7
+    }
+    #[cfg(test)]
+    {
+        if let Some(value) = OVERRIDE.with(|o| o.get()) {
+            return value;
+        }
+        8
+    }
+}
+"""
 # A re-export whose module exists but whose target is a static inside a gated `thread_local!`.
 TLS_REEXPORT = """
 pub(crate) mod clear {
@@ -249,6 +344,9 @@ pub(crate) fn registry() {}
 #[cfg(test)]
 pub(crate) fn registry() {}
 """
+
+
+CORE_SUBS = 11  # gates the base fixture opens (helper .. Spy); new shapes are counted on top of it
 
 
 def exclusions(*items, bundles=()):
@@ -431,6 +529,75 @@ class Codemod(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertTrue(fx.core().endswith(REEXPORT), fx.core()[-400:])
 
+    def test_a_field_opens_with_its_initialiser_and_record_statement(self):
+        app = APP.replace("seeded();", "seeded();\n        let _ = crate::core::Facts::new().recorded();")
+        members = ("struct Facts > field records", "impl Facts > fn new > field records",
+                   "impl Facts > fn observe > stmt self.records.push(value);", "impl Facts > fn recorded")
+        fx = Fixture(self.tmp.name, core=CORE + FIELD_BUNDLE, app=app, bundles=[("facts", members)])
+        self.assertEqual(fx.codemod()[0], 0)
+        self.assertEqual(fx.core().count(TS) - CORE_SUBS, 4, fx.core()[-900:])
+        # Without the bundle only the reader opens: the field, its initialiser and the record stay test-only.
+        fx = Fixture(Path(self.tmp.name) / "loose", core=CORE + FIELD_BUNDLE, app=app)
+        self.assertEqual(fx.codemod()[0], 0)
+        self.assertIn("    #[cfg(test)]\n    pub(crate) records: Vec<u64>,", fx.core())
+
+    def test_a_bundle_on_an_excluded_tests_module_holds_its_helper(self):
+        app = APP.replace("seeded();", "seeded();\n        crate::core::with_fixture();")
+        fx = Fixture(self.tmp.name, core=CORE + TESTS_FIXTURE, app=app, exclude=("fn kept", "mod tests"),
+                     bundles=[("fixture", ("fn with_fixture", "mod tests"))])
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(fx.core().endswith(TESTS_FIXTURE), fx.core()[-400:])
+
+    def test_a_setter_opens_with_the_branch_that_consumes_it(self):
+        app = APP.replace("seeded();", "seeded();\n        crate::core::install(5);")
+        fx = Fixture(self.tmp.name, core=CORE + CONSUMER, app=app, bundles=[("installed", CONSUMER_MEMBERS)])
+        self.assertEqual(fx.codemod()[0], 0)
+        self.assertIn(f"    #[cfg({TS})]\n    if let Some(value) = INSTALLED", fx.core())
+        # The store alone (no consuming branch) would build and silently read the production value.
+        fx = Fixture(Path(self.tmp.name) / "loose", core=CORE + CONSUMER, app=app,
+                     bundles=[("installed", CONSUMER_MEMBERS[:2])])
+        self.assertEqual(fx.codemod()[0], 0)
+        self.assertIn("    #[cfg(test)]\n    if let Some(value) = INSTALLED", fx.core())
+
+    @unittest.skipUnless(os.environ.get("AGENTDESK_TS_E2E") == "1", "set AGENTDESK_TS_E2E=1 (cargo required)")
+    def test_the_installed_value_is_observed_by_the_real_call_under_the_feature(self):
+        # Built with `--features test-support` and run without `cfg(test)`: the production `read()` must return the
+        # value the setter installed, so the bundled consuming branch really runs (and without it, 7).
+        app = APP.replace("seeded();", "seeded();\n        crate::core::install(5);")
+        for name, members, want in (("bundled", CONSUMER_MEMBERS, "5"), ("store-only", CONSUMER_MEMBERS[:2], "7")):
+            root = Path(self.tmp.name) / name
+            fx = Fixture(root, core=CORE + CONSUMER, app=app, bundles=[("installed", members)])
+            self.assertEqual(fx.codemod()[0], 0)
+            (fx.repo / "Cargo.toml").write_text(
+                '[package]\nname = "fx"\nversion = "0.1.0"\nedition = "2021"\n\n[features]\ntest-support = []\n\n'
+                '[lints.rust]\nunexpected_cfgs = "allow"\n')
+            (fx.repo / "src/lib.rs").write_text("#![allow(dead_code, unused)]\nmod app;\npub mod core;\nmod decoy;\n")
+            (fx.repo / "src/bin").mkdir()
+            (fx.repo / "src/bin/probe.rs").write_text("fn main() {\n    fx::core::install(5);\n"
+                                                      "    println!(\"{}\", fx::core::read());\n}\n")
+            core = (fx.repo / "src/core.rs").read_text().replace("pub(crate) fn", "pub fn")
+            (fx.repo / "src/core.rs").write_text(core)
+            run = subprocess.run(["cargo", "run", "-q", "--features", "test-support", "--bin", "probe"], cwd=fx.repo,
+                                 capture_output=True, text=True,
+                                 env=dict(os.environ, CARGO_TARGET_DIR=str(root / "target")))
+            if name == "bundled":
+                self.assertEqual((run.returncode, run.stdout.strip()), (0, want), run.stderr[-2000:])
+            else:
+                # The store opened without its branch: it builds, and the real call never sees the value.
+                self.assertEqual((run.returncode, run.stdout.strip()), (0, want), run.stderr[-2000:])
+
+    def test_a_statement_next_to_an_opposite_gated_sibling_is_held(self):
+        # runtime_store.rs `process_generation()`: `#[cfg(not(test))] { .. }` / `#[cfg(test)] { .. }` arms.
+        app = APP.replace("seeded();", "seeded();\n        crate::core::set_generation(1);")
+        fx = Fixture(self.tmp.name, core=CORE + STMT_TWIN, app=app,
+                     bundles=[("gen", ("thread_local!{OVERRIDE}", "fn set_generation",
+                                       "fn generation > stmt { if let Some(value) = OVERRIDE.with(|o| o.get()) {"))])
+        rc, out = fx.codemod()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("statement with an opposite-gated sibling at line", out)
+        self.assertTrue(fx.core().endswith(STMT_TWIN), fx.core()[-500:])
+
     def test_a_comment_semicolon_inside_the_use_does_not_end_it(self):
         # Sol krxts-2 P1: `first, // note;` ended the declaration at the comment, so two targets stayed shut.
         core = CORE + REEXPORT.replace("    first, second, third,", "    first, // note; see below\n    second, third,")
@@ -506,6 +673,20 @@ class Codemod(unittest.TestCase):
         rc, out = fx.codemod()
         self.assertEqual(rc, 0, out)
         self.assertIn("#[cfg(test)]\npub(crate) struct Guard;\n\n#[cfg(test)]\nimpl Drop for Guard", fx.core())
+
+    def test_a_gate_inside_an_if_not_block_is_a_real_attribute(self):
+        # `if !acked { #[cfg(test)] RECORDS.with(..) }` (replay.rs): `if !acked {` is not `name! name { .. }`.
+        # `if !(a && b) {` / `while !(done) {`: `!` straight before a group is still a keyword's operand.
+        src = ("fn f(acked: bool, done: bool) {\n    if !acked {\n        #[cfg(test)]\n        record();\n    }\n"
+               "    if !(acked && done) {\n        #[cfg(test)]\n        record();\n    }\n"
+               "    while !(done) {\n        #[cfg(test)]\n        record();\n    }\n}\n")
+        root = Path(self.tmp.name) / "notmacro"
+        (root / "src").mkdir(parents=True)
+        (root / "src/a.rs").write_text(src)
+        self.assertTrue({3, 7, 11} <= codemod.Tree(root).attr_lines("src/a.rs"))
+        v = Equivalence.classify(None, src, src.replace("cfg(test)", f"cfg({TS})"))
+        self.assertEqual((v.klass, v.cfg), ("cfg", 1))
+        self.assertEqual(v.reasons, [])
 
     def test_attribute_text_in_a_macro_or_raw_string_is_never_a_gate(self):
         fx = Fixture(self.tmp.name, core=CORE + FAKE)

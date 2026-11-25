@@ -22,6 +22,1325 @@
    ],
    "why": "claims_judged reads CLAIMS, which only the gated record in reserve_body fills (Sol review krxts-1 P1); opening the reader alone builds but records nothing",
    "class": "A"
+  },
+  {
+   "name": "METADATA_TEST_PROGRAM",
+   "class": "A",
+   "why": "step-e errors: src/config/test_instance/environment.rs:785 E0425",
+   "items": [
+    {
+     "file": "src/config/test_instance/environment.rs",
+     "item": "fn metadata_program > stmt if let Some(path) = METADATA_TEST_PROGRAM.lock().unwrap().clone() {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/config/test_instance/environment.rs",
+     "item": "fn set_metadata_program_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/config/test_instance/environment.rs",
+     "item": "static METADATA_TEST_PROGRAM",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "PinnedRuntimeHost",
+   "class": "A",
+   "why": "step-e errors: src/config.rs:2964 E0425; src/config.rs:2977 E0422",
+   "items": [
+    {
+     "file": "src/config.rs",
+     "item": "fn pin_runtime_host_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/config.rs",
+     "item": "struct PinnedRuntimeHost",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "POSTED",
+   "class": "A",
+   "why": "step-e errors: src/services/claude/fresh_notice.rs:103 E0425",
+   "items": [
+    {
+     "file": "src/services/claude/fresh_notice.rs",
+     "item": "fn claim > stmt (POSTED.lock().unwrap_or_else(PoisonError::into_inner)).push(requested.to_string());",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude/fresh_notice.rs",
+     "item": "fn posted_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude/fresh_notice.rs",
+     "item": "static POSTED",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "observe_cold_for_tests",
+   "class": "A",
+   "why": "step-e errors: src/services/claude/herdr_turn.rs:247 E0425",
+   "items": [
+    {
+     "file": "src/services/claude/herdr_turn.rs",
+     "item": "fn observe_cold_prompt_for_tests",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/claude/herdr_turn/first_input.rs",
+     "item": "fn observe_cold_for_tests",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "STATE_TEST_LOCK",
+   "class": "A",
+   "why": "step-e errors: src/services/claude_compact_trigger.rs:497 E0425; src/services/claude_compact_trigger.rs:500 E0425",
+   "items": [
+    {
+     "file": "src/services/claude_compact_trigger.rs",
+     "item": "fn reset_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_compact_trigger.rs",
+     "item": "fn state_test_guard",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_compact_trigger.rs",
+     "item": "static STATE_TEST_LOCK",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "OBSERVED",
+   "class": "A",
+   "why": "step-e errors: src/services/claude_tui/host_input/busy.rs:279 E0425",
+   "items": [
+    {
+     "file": "src/services/claude_tui/host_input/busy.rs",
+     "item": "fn observed",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_tui/host_input/busy.rs",
+     "item": "static OBSERVED",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "INJECTED",
+   "class": "A",
+   "why": "step-e errors: src/services/claude_tui/host_input.rs:1131 E0425; src/services/claude_tui/host_input.rs:1142 E0425",
+   "items": [
+    {
+     "file": "src/services/claude_tui/host_input.rs",
+     "item": "fn with_transport > stmt if let Some(mut injected) = INJECTED.with(|slot| slot.borrow_mut().take()) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_tui/host_input.rs",
+     "item": "mod spy",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_tui/host_input.rs",
+     "item": "thread_local!{INJECTED}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "NATIVE_READ_BYTES",
+   "class": "A",
+   "why": "step-e errors: src/services/claude_tui/input/user_receipt.rs:525 E0425",
+   "items": [
+    {
+     "file": "src/services/claude_tui/input/user_receipt.rs",
+     "item": "fn native_read_byte_total",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/claude_tui/input/user_receipt.rs",
+     "item": "impl UserReceipt > fn native_pin_before_tail > stmt NATIVE_READ_BYTES.with(|total| total.set(total.get() + (cursor - next) as u64));",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_tui/input/user_receipt.rs",
+     "item": "impl UserReceipt > fn try_pin_native_user > stmt { NATIVE_READ_BYTES.with(|total| total.set(total.get() + size as u64));",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_tui/input/user_receipt.rs",
+     "item": "thread_local!{NATIVE_READ_BYTES}",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "Injected",
+   "class": "A",
+   "why": "step-e errors: src/services/codex_tui/host_input.rs:1033 E0425; src/services/codex_tui/host_input.rs:1037 E0425; src/services/codex_tui/host_input.rs:1048 E0425",
+   "items": [
+    {
+     "file": "src/services/codex_tui/host_input.rs",
+     "item": "fn with_legacy_using > stmt if let Some((mut transport, gate)) = INJECTED.with(|slot| slot.borrow_mut().take()) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/host_input.rs",
+     "item": "mod spy",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/host_input.rs",
+     "item": "thread_local!{INJECTED}",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/host_input.rs",
+     "item": "type Injected",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "FAILING_HEADER_READ",
+   "class": "A",
+   "why": "step-e errors: src/services/codex_tui/rollout_index.rs:629 E0425",
+   "items": [
+    {
+     "file": "src/services/codex_tui/rollout_index.rs",
+     "item": "fn fail_header_reads_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/rollout_index.rs",
+     "item": "thread_local!{FAILING_HEADER_READ}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "CACHE_TEST_LOCK",
+   "class": "A",
+   "why": "step-e errors: src/services/codex_tui/rollout_index.rs:733 E0425; src/services/codex_tui/rollout_index.rs:736 E0425",
+   "items": [
+    {
+     "file": "src/services/codex_tui/rollout_index.rs",
+     "item": "fn lock_cache_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/rollout_index.rs",
+     "item": "fn reset_cache_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/codex_tui/rollout_index.rs",
+     "item": "static CACHE_TEST_LOCK",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "READS",
+   "class": "A",
+   "why": "step-e errors: src/services/discord/replay_policy/activation.rs:141 E0425; src/services/discord/replay_policy/activation.rs:145 E0425",
+   "items": [
+    {
+     "file": "src/services/discord/replay_policy/activation.rs",
+     "item": "fn reads",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/replay_policy/activation.rs",
+     "item": "fn record_read",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/replay_policy/activation.rs",
+     "item": "static READS",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "TEST_LABEL",
+   "class": "A",
+   "why": "step-e errors: src/services/platform/session_host_label.rs:45 E0425; src/services/platform/session_host_label.rs:49 E0425",
+   "items": [
+    {
+     "file": "src/services/platform/session_host_label.rs",
+     "item": "fn with_session_host_label_path_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/platform/session_host_label.rs",
+     "item": "thread_local!{TEST_LABEL}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "TEST_HOSTNAME",
+   "class": "A",
+   "why": "step-e errors: src/services/platform/shell.rs:224 E0425; src/services/platform/shell.rs:228 E0425",
+   "items": [
+    {
+     "file": "src/services/platform/shell.rs",
+     "item": "fn hostname_short > stmt if let Some(host) = TEST_HOSTNAME.with(|slot| slot.borrow().clone()) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/platform/shell.rs",
+     "item": "fn with_hostname_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/platform/shell.rs",
+     "item": "thread_local!{TEST_HOSTNAME}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "TEST_PROJECTION",
+   "class": "A",
+   "why": "step-e errors: src/services/legacy_body_census/mod.rs:279 E0425",
+   "items": [
+    {
+     "file": "src/services/legacy_body_census/mod.rs",
+     "item": "fn detail_json > stmt if let Ok(value) = TEST_PROJECTION.try_with(|(cache, now)| cache.snapshot(*now)) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/legacy_body_census/mod.rs",
+     "item": "fn with_projection_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/legacy_body_census/mod.rs",
+     "item": "stmt tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "BOUNDARY_STOPS",
+   "class": "A",
+   "why": "step-e errors: src/services/provider/herdr_before_start.rs:308 E0425",
+   "items": [
+    {
+     "file": "src/services/provider/herdr_before_start.rs",
+     "item": "fn stop_at_input_boundary",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/provider/herdr_before_start.rs",
+     "item": "static BOUNDARY_STOPS",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "IN_PORT",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/create.rs:156 E0425",
+   "items": [
+    {
+     "file": "src/services/session_host/create.rs",
+     "item": "fn create > stmt IN_PORT.set(entered);",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/create.rs",
+     "item": "fn create > stmt let entered = IN_PORT.replace(true);",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/create.rs",
+     "item": "fn create_in_effect",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/create.rs",
+     "item": "thread_local!{IN_PORT}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "TestReads",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr_registry.rs:224 E0425; src/services/session_host/herdr_registry.rs:226 E0560",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > const EMPTY > field reads",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > fn over > field reads",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > fn retired_probe > stmt let probe = match &self.reads {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > fn target_with_evidence_result > stmt let target = match &self.reads {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > fn view > stmt let view = match &self.reads {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "impl HerdrRegistry > fn with_reads",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "struct HerdrRegistry > field reads",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "type TestReads",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "FORCED",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr_registry.rs:460 E0425",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "fn force_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr_registry.rs",
+     "item": "thread_local!{FORCED}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "IN_PORT#2",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/recover.rs:267 E0425",
+   "items": [
+    {
+     "file": "src/services/session_host/recover.rs",
+     "item": "fn recover > stmt IN_PORT.set(entered);",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/recover.rs",
+     "item": "fn recover > stmt let entered = IN_PORT.replace(true);",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/recover.rs",
+     "item": "fn recover_in_effect",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/recover.rs",
+     "item": "thread_local!{IN_PORT}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "GENERATION_STAMP_BEFORE_CREATE_HOOK",
+   "class": "A",
+   "why": "step-e errors: src/services/tmux_common/spawn_markers.rs:361 E0425",
+   "items": [
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "fn set_generation_before_create_hook",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "static GENERATION_STAMP_BEFORE_CREATE_HOOK",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "GENERATION_STAMP_AFTER_CREATE_HOOK",
+   "class": "A",
+   "why": "step-e errors: src/services/tmux_common/spawn_markers.rs:368 E0425",
+   "items": [
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "fn set_generation_after_create_hook",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "static GENERATION_STAMP_AFTER_CREATE_HOOK",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "GENERATION_MTIME_BUMP_STEPS_OVERRIDE",
+   "class": "A",
+   "why": "step-e errors: src/services/tmux_common/spawn_markers.rs:375 E0425",
+   "items": [
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "fn generation_mtime_bump_steps_ns > stmt if let Some(steps) = GENERATION_MTIME_BUMP_STEPS_OVERRIDE",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "fn set_generation_mtime_bump_steps",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "static GENERATION_MTIME_BUMP_STEPS_OVERRIDE",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "SPAWN_MARKERS_AFTER_GENERATION_HOOK",
+   "class": "A",
+   "why": "step-e errors: src/services/tmux_common/spawn_markers.rs:382 E0425",
+   "items": [
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "fn set_spawn_after_generation_hook",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tmux_common/spawn_markers.rs",
+     "item": "static SPAWN_MARKERS_AFTER_GENERATION_HOOK",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "ProbeGuard",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/cutover/intake_route/input.rs:177 E0425; src/services/tui_o/cutover/intake_route/input.rs:178 E0425; src/services/tui_o/cutover/intake_route/input.rs:181 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/cutover/intake_route/input.rs",
+     "item": "fn install_probe",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/cutover/intake_route/input.rs",
+     "item": "static PROBE",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/cutover/intake_route/input.rs",
+     "item": "struct ProbeGuard",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "Installed",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/exact_submission.rs:29 E0425; src/services/tui_o/exact_submission.rs:30 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/exact_submission.rs",
+     "item": "fn install",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/exact_submission.rs",
+     "item": "struct Installed",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "CodexProvenance",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/store/codex_provenance/mutation.rs:309 E0422; src/services/tui_o/store/codex_provenance/mutation.rs:310 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "impl ChannelStore > fn init_codex_provenance",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "use super::{CodexProvenance, SCHEMA}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "FORCED_EXECUTION",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/actor/transition_snapshot.rs:358 E0425; src/services/tui_o/writer/actor/transition_snapshot.rs:361 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/actor/transition_snapshot.rs",
+     "item": "fn execution_read > stmt if let Some(forced) = FORCED_EXECUTION.with(|forced| forced.borrow().clone()) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/actor/transition_snapshot.rs",
+     "item": "fn force_execution_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/actor/transition_snapshot.rs",
+     "item": "thread_local!{FORCED_EXECUTION}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "EVENTS",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/boot.rs:242 E0425; src/services/tui_o/writer/boot.rs:246 E0425; src/services/tui_o/writer/boot.rs:247 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/boot.rs",
+     "item": "fn capture",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/boot.rs",
+     "item": "fn events",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/boot.rs",
+     "item": "impl Trace > fn emit > stmt EVENTS.with_borrow_mut(|events| {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/boot.rs",
+     "item": "struct Event",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/boot.rs",
+     "item": "thread_local!{EVENTS}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "FORCED_UNSETTLED",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/host.rs:422 E0425; src/services/tui_o/writer/host.rs:425 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "fn force_unsettled_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "fn rotation_unsettled > stmt if let Some(forced) = FORCED_UNSETTLED.with(std::cell::Cell::get) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "thread_local!{FORCED_UNSETTLED}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "fold",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/input_facts.rs:599 E0425; src/services/tui_o/writer/input_facts.rs:601 E0609",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn native_evidence",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn open_capture > field native_records",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn poll_inner > stmt if let Some(records) = &mut self.native_records",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "struct InputFacts > field native_records",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts/native.rs",
+     "item": "use tests::fold",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "SNAPSHOTS",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/replay.rs:100 E0425; src/services/tui_o/writer/replay.rs:105 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn capture",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn filter > stmt SNAPSHOTS.with_borrow_mut(|snapshots| {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn snapshots",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "thread_local!{SNAPSHOTS}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "Snapshot",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/replay.rs:104 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn snapshots",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "type Snapshot",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "AFTER_APPEND",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs:13 E0425; src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs:18 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs",
+     "item": "fn after_companion_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs",
+     "item": "fn corrupt_companion_candidate_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs",
+     "item": "fn plan_companion > stmt let ownership = {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs",
+     "item": "fn settle > stmt if let Some(action) = AFTER_APPEND.with(|slot| slot.borrow_mut().take()) {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events/codex/commit/resume_companions.rs",
+     "item": "thread_local!{AFTER_APPEND}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "TEST_ROOT",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_prompt_dedupe/binding_events.rs:1041 E0425; src/services/tui_prompt_dedupe/binding_events.rs:1046 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events.rs",
+     "item": "fn set_test_root",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events.rs",
+     "item": "fn test_root",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_prompt_dedupe/binding_events.rs",
+     "item": "thread_local!{TEST_ROOT}",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "connect_test_pool_with_max_connections_and_migrate_inner",
+   "class": "A",
+   "why": "step-e errors: src/db/postgres.rs:1229 E0425",
+   "items": [
+    {
+     "file": "src/db/postgres.rs",
+     "item": "fn connect_test_pool_with_max_connections_and_migrate",
+     "cfg": "test"
+    },
+    {
+     "file": "src/db/postgres.rs",
+     "item": "fn connect_test_pool_with_max_connections_and_migrate_inner",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "Future",
+   "class": "A",
+   "why": "step-e errors: src/services/claude_command.rs:163 E0599",
+   "items": [
+    {
+     "file": "src/services/claude_command.rs",
+     "item": "enum ExecutionPurpose > stmt Future,",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/claude_command.rs",
+     "item": "impl ClaudeCommandBuilder > fn for_future_for_test",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "seal",
+   "class": "A",
+   "why": "step-e errors: src/services/cluster/stream_relay/source_read_proof.rs:97 E0609; src/services/cluster/stream_relay/source_read_proof.rs:124 E0560",
+   "items": [
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "impl SourceCertificate > fn confirmed",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "impl SourceCertificate > fn prefix_is_current",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "struct SourceCertificate > field seal",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "is_current",
+   "class": "A",
+   "why": "step-e errors: src/services/cluster/stream_relay/source_read_proof.rs:118 E0599; src/services/cluster/stream_relay/source_read_proof.rs:220 E0599",
+   "items": [
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "impl PrefixSeal",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "impl SourceCertificate > fn confirmed",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/cluster/stream_relay/source_read_proof.rs",
+     "item": "impl SourceReadProof",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "prepare_codex_tui_incarnation",
+   "class": "A",
+   "why": "step-e errors: src/services/codex/tui_session_launch.rs:215 E0425",
+   "items": [
+    {
+     "file": "src/services/codex/tui_session_launch.rs",
+     "item": "fn prepare_codex_tui_incarnation",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/codex/tui_session_launch.rs",
+     "item": "fn prepare_codex_tui_launch_script",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "lock_unpoisoned",
+   "class": "A",
+   "why": "step-e errors: src/services/discord/runtime_store.rs:393 E0425; src/services/discord/runtime_store.rs:783 E0425; src/services/discord/runtime_store.rs:784 E0425; src/services/discord/runtime_store.rs:786 E0425",
+   "items": [
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn allocate_process_generation_binding > stmt { if let Some(generation) = *test_generation_override() {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn lock_unpoisoned",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn process_generation > stmt { if let Some(generation) = *test_generation_override() {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn process_generation_binding > stmt { if let Some(generation) = *test_generation_override() {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn set_process_generation_for_tests",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn test_allocation_memo",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "fn test_generation_override",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/discord/runtime_store.rs",
+     "item": "mod test_generation_publication",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "checker",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr/launch_host.rs:460 E0609",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "impl SocketHerdrLaunchHost > fn new > field checker",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "impl SocketHerdrLaunchHost > fn observe_policy_from > stmt let checker = self.checker.as_deref().unwrap_or(checker);",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "impl SocketHerdrLaunchHost > fn with_policy_checker_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "struct SocketHerdrLaunchHost > field checker",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "poison_for_test",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr/launch_host.rs:500 E0599",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "impl SocketHerdrLaunchHost > fn poison_proof_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/policy/cache.rs",
+     "item": "impl ProofCache > fn poison_for_test",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "from_grants",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr/launch_host.rs:509 E0599",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr/launch_host.rs",
+     "item": "impl SocketHerdrLaunchHost > fn with_prepared_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/policy/grant_store.rs",
+     "item": "impl GrantRestoration > fn from_grants",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "proof_for_test",
+   "class": "A",
+   "why": "step-e errors: src/services/session_host/herdr/policy/permit.rs:224 E0425",
+   "items": [
+    {
+     "file": "src/services/session_host/herdr/policy/permit.rs",
+     "item": "fn proof_for_test",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/session_host/herdr/policy/permit.rs",
+     "item": "fn startup_for_test",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "fail_after",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/repost/runner.rs:595 E0609",
+   "items": [
+    {
+     "file": "src/services/tui_o/repost/provenance.rs",
+     "item": "impl ProvenanceLog > fn open > field fail_after",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/repost/provenance.rs",
+     "item": "impl ProvenanceLog > fn write > stmt if let Some(cut) = self.fail_after.take() {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/repost/provenance.rs",
+     "item": "struct ProvenanceLog > field fail_after",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/repost/runner.rs",
+     "item": "impl ChannelTurn",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "change_codex_provenance",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/store/codex_provenance/mutation.rs:328 E0599",
+   "items": [
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "impl ChannelStore > fn change_codex_provenance",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "impl ChannelStore > fn persist_codex_span",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "keep",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/host.rs:501 E0609",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "impl ManagedWriterHandle > fn keep_reservation",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "struct ManagedWriterHandle > field keep",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "native_records",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/input_facts.rs:580 E0609; src/services/tui_o/writer/input_facts.rs:584 E0609",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn observe_native",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn open_capture > field native_records",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "impl InputFacts > fn poll_inner > stmt if let Some(records) = &mut self.native_records",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/tui_o/writer/input_facts.rs",
+     "item": "struct InputFacts > field native_records",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "jobs_started",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/writer/rotation.rs:914 E0609; src/services/tui_o/writer/rotation.rs:917 E0609; src/services/tui_o/writer/rotation.rs:923 E0609",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "impl Sources > fn new > field hold_validation",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "impl Sources > fn new > field jobs_started",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "mod probe",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "struct Sources > field hold_validation",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "struct Sources > field jobs_started",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "struct Validation > field ready",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "stream_child+stream_queue:test_delay",
+   "class": "A",
+   "why": "step-e errors: test_fixture.rs:11,91 E0433 `stream_queue::test_delay`; recv_timeout consumes the installed delay",
+   "items": [
+    {
+     "file": "src/services/process/stream_child.rs",
+     "item": "mod test_fixture",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "mod test_delay",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Receiver > fn recv_timeout > stmt test_delay::before_receive(&self.gate);",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "login_test_support",
+   "class": "A",
+   "why": "step-e errors: src/config/test_instance/environment.rs:920 E0433",
+   "items": [
+    {
+     "file": "src/config/test_instance.rs",
+     "item": "mod login_test_support",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/config/test_instance/environment.rs",
+     "item": "fn login_fixture_for_tests",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "valid",
+   "class": "A",
+   "why": "step-e errors: src/services/tui_o/store/codex_provenance/mutation.rs:363 E0425",
+   "items": [
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "impl ChannelStore > fn change_codex_provenance",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/store/codex_provenance/mutation.rs",
+     "item": "use super::valid",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "stream_queue:test_delay instrumentation",
+   "class": "A",
+   "why": "step-e it2: test_delay.rs:56-109 E0609 Gate.changed, State.published/received; producers counted by channel/clone/send/Drop",
+   "items": [
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "struct State > field published",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "struct State > field received",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "struct State > field producers",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "struct Gate > field changed",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "fn channel > field changed",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "fn channel > stmt { gate.state.lock().unwrap().producers = 1;",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Clone for Sender > fn clone > stmt { self.gate.state.lock().unwrap().producers += 1;",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Sender > fn send > stmt { let mut state = state;",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Drop for Sender",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Receiver > fn recv_timeout > stmt test_delay::before_receive(&self.gate);",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "impl Receiver > fn recv_timeout > stmt if result.is_ok() {",
+     "cfg": "all(test, unix)"
+    },
+    {
+     "file": "src/services/process/stream_child/stream_queue.rs",
+     "item": "mod test_delay",
+     "cfg": "all(test, unix)"
+    }
+   ]
+  },
+  {
+   "name": "managed_start+host:keep",
+   "class": "A",
+   "why": "step-e it2: managed_start.rs:96 E0063 missing field `keep` (shorthand initialiser)",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/host/managed_start.rs",
+     "item": "fn start_managed > stmt keep,",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/host.rs",
+     "item": "struct ManagedWriterHandle > field keep",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "readers+rotation:ready",
+   "class": "A",
+   "why": "step-e it2: readers.rs:721 E0063 missing field `ready`",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/rotation/readers.rs",
+     "item": "impl Sources > fn start_validation > stmt let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation/readers.rs",
+     "item": "impl Sources > fn start_validation > stmt let done = ready.clone();",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation/readers.rs",
+     "item": "impl Sources > fn start_validation > stmt ready,",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/rotation.rs",
+     "item": "struct Validation > field ready",
+     "cfg": "test"
+    }
+   ]
+  },
+  {
+   "name": "replay:kept",
+   "class": "A",
+   "why": "step-e it2: replay.rs:53 E0425 `kept` (the record statement's local)",
+   "items": [
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn filter > stmt let mut kept = Vec::new();",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn filter > stmt SNAPSHOTS.with_borrow(|snapshots| {",
+     "cfg": "test"
+    },
+    {
+     "file": "src/services/tui_o/writer/replay.rs",
+     "item": "fn filter > stmt SNAPSHOTS.with_borrow_mut(|snapshots| {",
+     "cfg": "test"
+    }
+   ]
   }
  ]
 }
