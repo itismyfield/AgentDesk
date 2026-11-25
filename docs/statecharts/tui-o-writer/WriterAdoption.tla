@@ -394,6 +394,13 @@ AgyHttpFixture == Fix \in {"httpOn", "httpOff"}
 AgyHttpOrigin == agy.ingress = "authenticatedHttp"
 AgyHttpCustody == AgyHttpOn /\ AgyHttpOrigin /\ agy.http.valid /\ agy.http.writer
 AgyOPath == agy.ingress = "discordForeground" \/ AgyHttpCustody
+\* Reader evidence for an iMessage slot: "bound" = durable destination, parent, id, nonce and
+\* digest agree (inflight); "pgOnly" = the PG row proves only the original and destination;
+\* "conflict" = an observed disagreement. digest = slot suffix, open sha and original agree.
+AgyEvidence == {"bound", "pgOnly", "conflict"}
+AgyHttpReadable == agy.http.digest /\ agy.http.evidence = "bound"
+AgyHttpPermanentHold ==
+    agy.phase = "readHeld" /\ (~agy.http.digest \/ agy.http.evidence = "conflict")
 AgyTurn(id, phase) ==
     [id |-> id, phase |-> phase, oldDebt |-> phase = "waiting" /\ Fix # "short",
      ingress |-> "discordForeground", accepted |-> FALSE,
@@ -406,13 +413,16 @@ AgyTurn(id, phase) ==
      legacy |-> 0, alarm |-> FALSE, stale |-> FALSE,
      http |-> [valid |-> FALSE, key |-> 0, busy |-> FALSE, writer |-> FALSE,
                disposition |-> "pending", restarted |-> FALSE,
-               replayed |-> FALSE, turns |-> 0]]
+               replayed |-> FALSE, turns |-> 0,
+               digest |-> TRUE, evidence |-> "bound"]]
 AgyInit == /\ LegacyIdle /\ QuietLate
            /\ IF AgyHttpFixture
-              THEN \E key \in 1..2, valid \in BOOLEAN, busy \in BOOLEAN, writer \in BOOLEAN :
+              THEN \E key \in 1..2, valid \in BOOLEAN, busy \in BOOLEAN, writer \in BOOLEAN,
+                       digest \in BOOLEAN, evidence \in AgyEvidence :
                   agy = [AgyTurn(1, "ready") EXCEPT !.ingress = "authenticatedHttp",
                            !.http.key = key, !.http.valid = valid, !.http.busy = busy,
-                           !.http.writer = writer]
+                           !.http.writer = writer, !.http.digest = digest,
+                           !.http.evidence = evidence]
               ELSE IF Fix = "headless"
               THEN \E ingress \in {"routine", "authenticatedHttp"} :
                   agy = [AgyTurn(1, "ready") EXCEPT !.ingress = ingress]
@@ -499,7 +509,26 @@ AgyDiscard ==
 AgyReadSeal ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "sealed" /\ agy.spool /\ agy.authority
+    /\ ~AgyHttpCustody \/ AgyHttpReadable \/ Mut = "blindReader"
+    /\ Mut # "discordOnlyReader" \/ agy.ingress = "discordForeground"
     /\ agy' = [agy EXCEPT !.phase = "delivery"]
+\* The reader keeps the committed spool and names the held slot; nothing is posted.
+AgyHttpReadHold ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "sealed" /\ agy.spool /\ agy.authority /\ AgyHttpCustody
+    /\ ~AgyHttpReadable /\ Mut # "noReadHold"
+    /\ agy' = [agy EXCEPT !.phase = "readHeld"]
+\* Slice 4 publishes a nonce-bearing durable binding for the accepted execution.
+\* "noBinding" removes it: the activation condition this model depends on.
+AgyHttpBindingPublish ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ AgyHttpCustody /\ agy.accepted /\ agy.http.evidence = "pgOnly" /\ Mut # "noBinding"
+    /\ agy' = [agy EXCEPT !.http.evidence = "bound"]
+\* The reader re-reads the same committed prefix once the evidence is readable.
+AgyHttpReaderRecheck ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.phase = "readHeld" /\ AgyHttpReadable
+    /\ agy' = [agy EXCEPT !.phase = "sealed"]
 AgyPrepare ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.phase = "delivery" /\ agy.terminal = "done" /\ agy.authority /\ ~agy.discarded
@@ -612,6 +641,7 @@ AgyNext ==
        \/ AgyArchive \/ AgyNextInput \/ AgyHeadlessAnswer \/ AgyLegacyRace \/ AgyBlindRepost
        \/ AgyRepeatDone \/ AgyStaleChild \/ AgyPrematurePost \/ AgyRest
        \/ AgyHttpClaim \/ AgyHttpQueue \/ AgyHttpRestart \/ AgyHttpReplay \/ AgyHttpRefuse
+       \/ AgyHttpReadHold \/ AgyHttpBindingPublish \/ AgyHttpReaderRecheck
 AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyLegacyReceipt) /\ WF_agy(AgyAdopt) /\ WF_agy(AgyReserve) /\ WF_agy(AgySpawn)
     /\ WF_agy(AgyAppendDelta) /\ WF_agy(AgyObserveSuccess \/ AgyObserveFailure)
@@ -621,6 +651,7 @@ AgySpec == AgyInit /\ [][AgyNext]_agy
     /\ WF_agy(AgyArchive) /\ WF_agy(AgyNextInput)
     /\ WF_agy(AgyChildFailed) /\ WF_agy(AgyNotifyFailure) /\ WF_agy(AgyHeadlessAnswer)
     /\ WF_agy(AgyHttpClaim) /\ WF_agy(AgyHttpQueue) /\ WF_agy(AgyHttpRefuse) /\ WF_agy(AgyHttpReplay)
+    /\ WF_agy(AgyHttpReadHold) /\ WF_agy(AgyHttpBindingPublish) /\ WF_agy(AgyHttpReaderRecheck)
 
 AgyOnlyDiscordAdmission == (agy.accepted \/ agy.spool) => agy.ingress = "discordForeground"
 AgyHttpOnce == agy.http.turns <= 1
@@ -655,24 +686,50 @@ AgyInputIdentity == ~agy.stale
 AgyAcceptedEnds ==
     \A id \in 1..AgyTurnLimit :
         []((agy.id = id /\ agy.accepted) =>
-            <>(agy.id > id \/ (agy.id = id /\ agy.phase = "ended" /\ agy.ends = 1)))
+            <>(agy.id > id \/ (agy.id = id /\ agy.phase = "ended" /\ agy.ends = 1)
+               \/ (agy.id = id /\ AgyHttpPermanentHold)))
 AgySecondTurnEnds == <>(agy.id = 2 /\ agy.phase = "ended")
 AgyFailedEnds == (Fix = "failed") => <>(agy.phase = "ended" /\ agy.alarm)
 AgyHeadlessKept == (Fix = "headless") => <>(agy.phase = "headlessDone" /\ agy.legacy = 1)
+\* Pre-admission "held" has no spool; a reader hold keeps the accepted spool.
+AgyHttpReadVerified ==
+    (AgyHttpCustody /\ agy.phase \in {"delivery", "finishing", "ended"}) => AgyHttpReadable
+AgyReadHoldKeepsSpool == agy.phase = "readHeld" => agy.spool /\ agy.accepted
+AgyHttpReadableEnds ==
+    (AgyHttpCustody /\ agy.accepted /\ AgyHttpReadable) ~> agy.phase = "ended"
+AgyHttpUnreadableHeld ==
+    (AgyHttpCustody /\ agy.phase = "sealed" /\ ~AgyHttpReadable)
+        ~> (agy.phase = "readHeld" \/ AgyHttpReadable)
 
 \* One verified child and its prior Legacy obligation. Shadow is always record-only.
 \* "cutover" exercises the future permission with the same lifecycle guards.
 OwnerInit ==
     /\ LegacyIdle /\ QuietLate
-    /\ \E selected \in BOOLEAN :
+    /\ \E selected \in BOOLEAN, debt \in {"none", "pending", "sealed"},
+          slots \in {"typed", "damaged"}, producer \in {"alive", "lost"} :
        agy = [selected |-> selected, verified |-> FALSE, prior |-> TRUE,
               boot |-> "starting", generation |-> 1, owners |-> {"legacy"},
-              retired |-> FALSE, late |-> FALSE]
+              retired |-> FALSE, late |-> FALSE,
+              slots |-> slots, debt |-> debt, recovery |-> FALSE,
+              newSpool |-> FALSE, visible |-> 0, reruns |-> 0,
+              producer |-> IF debt = "pending" THEN producer ELSE "lost",
+              abandonedLive |-> FALSE]
+
+\* Only an activated owner may take recovery effects; shadow stays record-only.
+OwnerActive == Fix = "cutover" \/ Mut = "shadowEffect"
 
 OwnerVerify ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.selected /\ ~agy.verified
     /\ agy' = [agy EXCEPT !.verified = TRUE]
+
+\* A deselected destination with an existing spool: independent durable evidence of
+\* destination and parent grants recovery-only custody, never a new-input selection.
+OwnerRecoveryVerify ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ ~agy.selected /\ ~agy.verified /\ agy.debt \in {"pending", "sealed"}
+    /\ Mut # "selectedOnly"
+    /\ agy' = [agy EXCEPT !.verified = TRUE, !.recovery = TRUE]
 
 OwnerLegacyReceipt ==
     /\ UNCHANGED <<vars, lateVars>>
@@ -682,11 +739,38 @@ OwnerLegacyReceipt ==
 OwnerBoot ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.verified /\ agy.boot = "starting"
-    /\ agy' = [agy EXCEPT !.boot = "scanned"]
+    /\ agy' = [agy EXCEPT !.boot = IF agy.slots = "damaged" /\ Mut # "slotBlind"
+                                    THEN "held" ELSE "scanned"]
+
+\* A running producer either commits Done or exits without it.
+OwnerProducerEnds ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.debt = "pending" /\ agy.producer = "alive"
+    /\ \/ agy' = [agy EXCEPT !.debt = "sealed", !.producer = "lost"]
+       \/ agy' = [agy EXCEPT !.producer = "lost"]
+
+\* The existing answer is processed once by the recovery owner, with or without selection.
+OwnerSettle ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot \in {"scanned", "ready"} /\ agy.debt = "sealed" /\ OwnerActive
+    /\ agy' = [agy EXCEPT !.debt = "settled", !.visible = @ + 1]
+
+\* A producer lost before Done: the recovery owner ends the turn as failed without a new
+\* admission permit; the input is not run again.
+OwnerAbandon ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot \in {"scanned", "ready"} /\ agy.debt = "pending" /\ Mut # "noAbandon"
+    /\ OwnerActive /\ (agy.producer = "lost" \/ Mut = "abandonLive")
+    /\ agy' = [agy EXCEPT !.debt = "settled", !.visible = @ + 1,
+                           !.reruns = IF Mut = "rerun" THEN @ + 1 ELSE @,
+                           !.abandonedLive = agy.producer = "alive"]
 
 OwnerAdopt ==
     /\ UNCHANGED <<vars, lateVars>>
     /\ agy.boot = "scanned" /\ ~agy.prior /\ ~agy.retired
+    /\ agy.debt # "pending"
+    /\ agy.selected \/ Mut = "recoveryAdmits"
+    /\ agy.slots = "typed" \/ Mut = "slotBlind"
     /\ (Mut # "noOwner" \/ agy.generation = 1)
     /\ agy' = [agy EXCEPT !.boot = "ready",
         !.owners = IF Fix = "shadow" THEN {"legacy"}
@@ -698,9 +782,20 @@ OwnerRestart ==
     /\ agy' = [agy EXCEPT !.boot = "starting", !.generation = 2,
                            !.owners = IF Fix = "shadow" THEN {"legacy"} ELSE {}]
 
+OwnerNewInput ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.boot = "ready" /\ ~agy.retired /\ ~agy.newSpool
+    /\ agy' = [agy EXCEPT !.newSpool = TRUE]
+
+OwnerNewInputEnds ==
+    /\ UNCHANGED <<vars, lateVars>>
+    /\ agy.newSpool
+    /\ agy' = [agy EXCEPT !.newSpool = FALSE]
+
 OwnerRetire ==
     /\ UNCHANGED <<vars, lateVars>>
-    /\ agy.boot = "ready" /\ ~agy.retired
+    /\ agy.boot = "ready" /\ ~agy.retired /\ agy.debt \in {"none", "settled"}
+    /\ ~agy.newSpool \/ Mut = "retireWithInput"
     /\ agy' = [agy EXCEPT !.retired = TRUE, !.owners = {}]
 
 OwnerLateBody ==
@@ -709,12 +804,16 @@ OwnerLateBody ==
     /\ agy' = [agy EXCEPT !.late = TRUE]
 
 OwnerRest == UNCHANGED <<agy, vars, lateVars>>
-OwnerNext == OwnerVerify \/ OwnerLegacyReceipt \/ OwnerBoot \/ OwnerAdopt
+OwnerNext == OwnerVerify \/ OwnerRecoveryVerify \/ OwnerLegacyReceipt \/ OwnerBoot
+             \/ OwnerProducerEnds \/ OwnerSettle \/ OwnerAbandon \/ OwnerAdopt
+             \/ OwnerNewInput \/ OwnerNewInputEnds
              \/ OwnerRestart \/ OwnerRetire \/ OwnerLateBody \/ OwnerRest
 
 AgyOwnerSpec == OwnerInit /\ [][OwnerNext]_agy
     /\ WF_agy(OwnerVerify) /\ WF_agy(OwnerLegacyReceipt)
     /\ WF_agy(OwnerBoot) /\ WF_agy(OwnerAdopt)
+    /\ WF_agy(OwnerRecoveryVerify) /\ WF_agy(OwnerSettle) /\ WF_agy(OwnerAbandon)
+    /\ WF_agy(OwnerProducerEnds)
 
 AgyChildSingleOwner == ~({"legacy", "o"} \subseteq agy.owners)
 AgyRetirementFenced == agy.retired => agy.owners = {} /\ ~agy.late
@@ -722,4 +821,17 @@ AgyShadowRecordOnly == Fix = "shadow" => "o" \notin agy.owners
 AgyRestartResolvesOwner ==
     []((agy.generation = 2 /\ ~agy.retired) =>
        <> (agy.retired \/ (agy.boot = "ready" /\ agy.owners # {})))
+AgyNoRerun == agy.reruns = 0
+AgyVisibleOnce == agy.visible <= 1
+AgyRecoveryNoNewSpool == ~agy.selected => ~agy.newSpool
+AgyDamagedNeverReady ==
+    agy.slots = "damaged" => agy.boot \notin {"scanned", "ready"} /\ agy.debt # "settled"
+AgyRetiredSettled == agy.retired => agy.debt \in {"none", "settled"}
+AgyExistingDebtResolves ==
+    (OwnerActive /\ agy.debt \in {"pending", "sealed"} /\ agy.slots = "typed")
+        ~> agy.debt = "settled"
+ShadowNoVisible == Fix = "shadow" => agy.visible = 0
+NoRetireWithNewSpool == agy.retired => ~agy.newSpool
+AgyNoAbandonLive == ~agy.abandonedLive
+AgyDamagedVisible == (agy.slots = "damaged" /\ agy.verified) ~> agy.boot = "held"
 ====
