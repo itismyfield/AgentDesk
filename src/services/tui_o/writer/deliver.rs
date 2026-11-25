@@ -293,6 +293,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             receipts,
         };
         writer.exclude_stored_tool_results();
+        writer.finish_image_refusals();
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
         let refused = writer.receipts.blocked(ledger);

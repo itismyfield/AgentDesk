@@ -159,6 +159,15 @@ pub(in crate::services::tui_o::writer) fn unit_post<P: DiscordPort>(
     }
 }
 
+/// 400 and 413 refuse the image alone; any other status refuses the channel.
+fn refusal_reason(status: u16) -> Option<OmitReason> {
+    match status {
+        400 => Some(OmitReason::UnsupportedType),
+        413 => Some(OmitReason::TooLarge),
+        _ => None,
+    }
+}
+
 /// Whether the oldest segment of `source` lies wholly below the offset GC keeps from.
 pub(crate) fn below(store: &ChannelStore, source: &SourceId, floor: Option<u64>) -> bool {
     let end = || store.oldest_segment_end(source);
@@ -275,11 +284,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         serial: u64,
         status: u16,
     ) -> Option<Step> {
-        let reason = match status {
-            400 => OmitReason::UnsupportedType,
-            413 => OmitReason::TooLarge,
-            _ => return None,
-        };
+        let reason = refusal_reason(status)?;
         let ledger = self.store().ledger();
         let unit_key = ledger.piece(serial)?.unit_key.clone();
         ledger.tool_images().obligation(&unit_key)?;
@@ -290,6 +295,31 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let recorded = (self.record(LedgerEntry::Rejected { serial, status }))
             .and_then(|()| self.record(LedgerEntry::ToolImage { entry }));
         Some(recorded.map_or_else(|step| step, |()| Step::Done))
+    }
+
+    /// Boot completes an image refusal a crash cut between its Rejected and ImageOmitted, so the
+    /// image is omitted with its notice rather than read as a blocked channel.
+    pub(in crate::services::tui_o::writer) fn finish_image_refusals(&mut self) {
+        let ledger = self.store().ledger();
+        if ledger.violation().is_some() {
+            return;
+        }
+        let open = ledger.tool_images().open_obligations(ledger).into_iter();
+        let cut: Vec<_> = (open.filter_map(|open| match open {
+            OpenObligation::Image {
+                key,
+                step: ImageStep::Waiting(Waiting::Rejected { status, .. }),
+            } => Some((key, refusal_reason(status)?)),
+            _ => None,
+        }))
+        .collect();
+        for (unit_key, reason) in cut {
+            let reason = reason.as_str().to_owned();
+            let entry = Box::new(ImageEntry::ImageOmitted { unit_key, reason });
+            if self.record(LedgerEntry::ToolImage { entry }).is_err() {
+                return;
+            }
+        }
     }
 
     async fn attempt_image(
