@@ -423,6 +423,9 @@ class PrCapCheckTest(unittest.TestCase):
     def test_test_to_tool_conversion_counts_each_side_by_its_own_class(self):
         (self.producer / "test_conv.py").write_text("def test_a():\n" + "    x = 1\n" * 1799)
         (self.producer / "test_tool.py").write_text("x = 1\n" * 1000)
+        (self.producer / "scripts").mkdir()
+        (self.producer / "scripts/cap_generated_data.tsv").write_text("*.json\tg\tv\n")
+        (self.producer / "big.json").write_text("{}\n" * 1800)
         self.commit(self.producer)
         self.git(self.producer, "push", "origin", "main")
         self.git(self.repo, "fetch", "origin", "main")
@@ -434,6 +437,10 @@ class PrCapCheckTest(unittest.TestCase):
         (self.repo / "test_tool.py").write_text("def test_a():\n    assert True\n")
         self.commit()
         self.assert_pass(self.check_cap(), "2 files net +501 code (+1501/-1000")
+        (self.repo / "scripts/cap_generated_data.tsv").unlink()
+        (self.repo / "big.json").write_text("[]\n" * 1501)
+        self.commit()
+        self.assertIn("4 files net +2001 code (+3002/-1001", self.check_cap().stdout)
 
     def test_non_utf8_excluded_document_passes(self):
         (self.repo / "docs").mkdir()
@@ -443,7 +450,7 @@ class PrCapCheckTest(unittest.TestCase):
 
     def test_canonical_snapshot(self):
         digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
-        self.assertEqual(digest, "088d1baff3f06a9d6ab5070fb4fe65d71d09bec1d4b52039fafa8729504c5f50")
+        self.assertEqual(digest, "7d1843bcd61f937229ad91a5a04fff37b4bc59ffa21e6f54ffddd36d60819b28")
 
 if __name__ == "__main__":
     unittest.main()

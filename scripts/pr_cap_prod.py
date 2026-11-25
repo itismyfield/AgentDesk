@@ -3,10 +3,12 @@
 
 usage: pr_cap_prod.py <base> <head> [--repo <path>]
 Blank and comment-only lines, tests, fixtures, generated files and docs are not counted.
-Files matching a glob in scripts/cap_generated_data.tsv are tool output, not review surface: listed apart as GENERATED_DATA.
+Data files matching a full row of scripts/cap_generated_data.tsv are tool output, not review surface: listed apart as GENERATED_DATA.
+Added lines take the head file's class and deleted lines the base file's, so turning a test into a tool is not offset.
 Rust files also skip the lines inside `#[cfg(test)] mod x { ... }` blocks; a top-of-file `mod tests;` or test helper does not hide the prod lines below it.
 """
 import argparse
+import ast
 import fnmatch
 import re
 import subprocess
@@ -21,12 +23,13 @@ EXCLUDE = (
     "scripts/sql_execution_surface_inventory.json",
     "*/generated/*",
 )
-TEST_FILES = ("tests/*", "*/tests/*", "*_tests.rs", "*_test.rs")
 # A test_*.py name alone is not a test; tool code without test definitions counts as prod.
 PY_TEST_NAMES = ("*/test_*.py", "test_*.py")
-PY_TEST_CONTENT = re.compile(r"^\s*(?:def test_\w+|async def test_\w+|class \w+\(.*TestCase\)|import pytest|import unittest|from unittest)", re.M)
 # Rows are glob<TAB>generation command<TAB>verification command, read from the head commit.
 GENERATED_LIST = "scripts/cap_generated_data.tsv"
+# Only data outside source trees may leave the count; the commands are printed for review, never run.
+DATA_EXTENSIONS = (".json", ".jsonl", ".tsv", ".csv", ".txt")
+SOURCE_DIR = re.compile(r"^(?:src|crates/[^/]+/src)/")
 HUNK = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
 CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
 ATTR = re.compile(r"^\s*#\[")
@@ -34,7 +37,7 @@ MOD_BLOCK = re.compile(r"^(\s*)(?:pub(?:\([^)]*\))?\s+)?mod\s+\w+\s*\{\s*$")
 
 
 def git(repo, *args):
-    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, check=True).stdout
+    return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True, errors="replace", check=True).stdout
 
 
 def excluded(path):
@@ -98,45 +101,77 @@ def test_block_lines(lines):
     return inside
 
 
+def test_function(node):
+    return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_")
+
+
 def py_test_file(repo, rev, path):
-    return any(fnmatch.fnmatch(path, pat) for pat in PY_TEST_NAMES) and PY_TEST_CONTENT.search("\n".join(file_lines(repo, rev, path))) is not None
+    """A test_*.py file is a test only when its syntax tree defines a test function or a TestCase class; unparsable files count."""
+    if not any(fnmatch.fnmatch(path, pat) for pat in PY_TEST_NAMES):
+        return False
+    try:
+        tree = ast.parse("\n".join(file_lines(repo, rev, path)))
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return False
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef):
+            bases = (b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "") for b in node.bases)
+            if any(name.endswith("TestCase") for name in bases) or any(map(test_function, node.body)):
+                return True
+        elif test_function(node):
+            return True
+    return False
 
 
 def generated_rules(repo, head):
-    rules = []
-    for line in file_lines(repo, head, GENERATED_LIST):
-        if line.strip() and not line.lstrip().startswith("#"):
-            parts = line.split("\t")
-            rules.append((parts[0].strip(), *(p.strip() for p in (parts[1:] + ["?", "?"])[:2])))
-    return rules
+    return [tuple(p.strip() for p in line.split("\t")) for line in file_lines(repo, head, GENERATED_LIST)
+            if line.strip() and not line.lstrip().startswith("#")]
+
+
+def generated_verdict(path, rules):
+    """(row, None) for listed data left out of the count, (None, reason) for a matching row that is refused."""
+    rule = next((r for r in rules if fnmatch.fnmatch(path, r[0])), None)
+    if rule is None:
+        return None, None
+    if path == GENERATED_LIST:
+        return None, "list-file"
+    if len(rule) != 3 or not all(rule):
+        return None, "missing-fields"
+    if not path.endswith(DATA_EXTENSIONS):
+        return None, "not-data-extension"
+    if SOURCE_DIR.match(path):
+        return None, "source-path"
+    return rule, None
 
 
 def measure(repo, base, head):
     """prod maps a path to (code adds, code dels, raw adds, raw dels), or None for a binary file.
-    generated maps a listed data path to (raw adds, generation command, verification command)."""
-    prod, other, generated = {}, {}, {}
-    rules = generated_rules(repo, head)
+    generated maps a listed data path to (raw adds, generation command, verification command); rejected maps a path to the reason."""
+    prod, other, generated, rejected = {}, {}, {}, {}
+    rules, base_rules = generated_rules(repo, head), generated_rules(repo, base)
     for row in git(repo, "diff", "--numstat", "--no-renames", base, head).splitlines():
         a, d, path = row.split("\t", 2)
         if a == "-":
             prod[path] = None
             continue
         a, d = int(a), int(d)
-        rev = head if file_lines(repo, head, path) else base
-        test = py_test_file(repo, rev, path)
-        rule = next((r for r in rules if fnmatch.fnmatch(path, r[0])), None)
-        if rule and not test and not any(fnmatch.fnmatch(path, pat) for pat in TEST_FILES):
-            generated[path] = (a, rule[1], rule[2])
-            continue
-        if excluded(path) or test:
+        if excluded(path):
             other[path] = (a, d)
             continue
-        ca, cd = code_delta(repo, base, head, path)
+        rule, reason = generated_verdict(path, rules)
+        if rule:
+            generated[path] = (a, rule[1], rule[2])
+        elif reason:
+            rejected[path] = reason
+        head_prod = not rule and not py_test_file(repo, head, path)
+        base_prod = not generated_verdict(path, base_rules)[0] and not py_test_file(repo, base, path)
+        ca, cd = code_delta(repo, base, head, path) if head_prod or base_prod else (0, 0)
+        ca, cd = ca * head_prod, cd * base_prod
         if ca or cd:
-            prod[path] = (ca, cd, a, d)
-        if a - ca:
-            other[path + "#noncode"] = (a - ca, 0)
-    return prod, other, generated
+            prod[path] = (ca, cd, a * head_prod, d * base_prod)
+        if a - ca and not rule:
+            other[path + "#noncode" if head_prod else path] = (a - ca, 0)
+    return prod, other, generated, rejected
 
 
 def main():
@@ -149,7 +184,7 @@ def main():
     base = git(args.repo, "merge-base", args.base, args.head).strip()
     if base != git(args.repo, "rev-parse", args.base).strip():
         print(f"base {args.base} advanced; measuring from merge-base {base[:10]}")
-    prod, other, generated = measure(args.repo, base, args.head)
+    prod, other, generated, rejected = measure(args.repo, base, args.head)
     binary = [p for p, v in prod.items() if v is None]
     rows = [v for v in prod.values() if v is not None]
     ca, cd = sum(r[0] for r in rows), sum(r[1] for r in rows)
@@ -161,6 +196,8 @@ def main():
         print(f"GENERATED_DATA {len(generated)} files +{sum(v[0] for v in generated.values())} lines not counted (셈 밖 데이터):")
         for p, (a, gen, ver) in sorted(generated.items()):
             print(f"  {p} +{a} generate: {gen} verify: {ver}")
+    for p, reason in sorted(rejected.items()):
+        print(f"GENERATED_DATA_REJECTED {p} {reason}")
     if binary:
         print(f"CAP: FAIL (binary prod files: {', '.join(binary)})")
         return 1
