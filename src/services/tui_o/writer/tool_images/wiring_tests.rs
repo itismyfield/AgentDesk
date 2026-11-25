@@ -121,6 +121,14 @@ async fn deliver_all(writer: &mut Writer, items: &[Derived]) {
     }
 }
 
+/// Appends and captures each row on its own, so each lands in its own spool segment GC can take.
+async fn feed(path: &std::path::Path, rows: &[Vec<u8>]) {
+    for row in rows {
+        append(path, row);
+        polls(4).await;
+    }
+}
+
 fn markers(items: &[Derived]) -> usize {
     let image = |item: &&Derived| matches!(item, Derived::Piece(p) if p.unit_key.kind == UnitKind::ToolImage);
     items.iter().filter(image).count()
@@ -142,11 +150,7 @@ async fn image_turn_keeps_its_identity_after_opener_gc_and_restart() {
         store
     };
     let (stop, task) = spawn(writer_over(&harness, store()));
-    append(
-        &path,
-        &[prompt("t1"), super::actor::row("m1", "reading")].concat(),
-    );
-    polls(4).await;
+    feed(&path, &[prompt("t1"), super::actor::row("m1", "reading")]).await;
     let ledger = harness.channel();
     assert!(
         !ledger.ledger().gc_segments(&source).is_empty(),
@@ -296,8 +300,9 @@ async fn reconfirmed_behind_newer_anchor(arrived: bool) {
     let bindings = std::sync::Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude));
     let sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone());
     let mut actor = Actor::new_for_test(writer, deriver, sources, bindings);
-    // What a child retirement reads: the open image is owed until it settles.
-    assert_eq!(actor.undelivered_for_test(1).unwrap().images, 1);
+    // What a child retirement reads: the open image is owed until it settles, apart from `owed`.
+    let read = actor.undelivered_for_test(1).unwrap();
+    assert_eq!((read.images, read.owed, read.notice_owed), (1, 0, 0));
     let writer = actor.writer_mut_for_test();
     harness.port.unreadable.store(false, Ordering::SeqCst);
     harness.port.id_gap.store(40_000 << 22, Ordering::SeqCst);
@@ -366,11 +371,11 @@ fn image_key(writer: &mut Writer) -> UnitKey {
     key.expect("one open image")
 }
 
-/// 400 is the image's own refusal: omitted with a notice, channel running. 403 refuses the
+/// 400 and 413 refuse the image alone: omitted with one notice, channel running. 403 refuses the
 /// channel: the same blocked stop a body gets, before and after a restart.
 #[tokio::test(start_paused = true)]
 async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
-    for status in [400, 403] {
+    for status in [400, 413, 403] {
         let (harness, path, source) = switched_over(b"");
         harness.gate.acquired();
         let mut writer = harness.writer();
@@ -395,7 +400,7 @@ async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
             (status == 403, status == 403),
             "{status}"
         );
-        if status == 400 {
+        if status != 403 {
             // Crash after the Rejected append, before the ImageOmitted one: restart completes it.
             let ledger = ledger_path(&harness);
             let text = std::fs::read_to_string(&ledger).unwrap();
@@ -408,12 +413,20 @@ async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
                 "a 400 prefix is not a blocked channel"
             );
             assert_eq!(writer.select_images(Utc::now()).await, Step::Done);
-            let notice = harness.port.posts().last().cloned().unwrap();
-            assert!(
-                notice.starts_with("-# 이미지 1장 생략(형식 미지원 1)"),
-                "{notice}"
-            );
-            assert_eq!(open_count(writer.store().ledger()), 0);
+            let label = if status == 400 {
+                "형식 미지원"
+            } else {
+                "크기 초과"
+            };
+            let posts = harness.port.posts();
+            let notices: Vec<_> = posts
+                .iter()
+                .filter(|p| p.starts_with("-# 이미지"))
+                .collect();
+            assert_eq!(notices.len(), 1, "{status}");
+            assert!(notices[0].starts_with(&format!("-# 이미지 1장 생략({label} 1)")));
+            let left = (open_count(writer.store().ledger()), attachments(&harness));
+            assert_eq!(left, (0, 1), "no reupload ({status})");
         }
         assert_eq!(
             harness.writer().is_stopped(),
@@ -421,6 +434,51 @@ async fn image_refused_400_omits_with_notice_and_403_blocks_like_body() {
             "{status} after restart"
         );
     }
+}
+
+/// An image-less poll leaves a restored body Prepared for the body's own delivery; once a notice
+/// is owed, that Prepared settles before the notice posts, so one Prepared stays open at most.
+#[tokio::test(start_paused = true)]
+async fn open_prepared_settles_before_an_owed_notice_and_not_on_an_image_less_poll() {
+    let (harness, path, source) = switched_over(b"");
+    harness.gate.acquired();
+    let mut writer = harness.writer();
+    assert_eq!(writer.deliver(&piece("m0", "proof")).await, Step::Done);
+    let ledger = writer.store().ledger();
+    let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
+    let prepared = LedgerEntry::Prepared {
+        notice_origin: None,
+        local_retry: None,
+        serial,
+        unit_key: unit("c9"),
+        piece_index: 0,
+        payload: "maybe sent".into(),
+        anchor_id,
+        epoch: 1,
+    };
+    writer.store().append_ledger(prepared).unwrap();
+    assert_eq!(writer.select_images(Utc::now()).await, Step::Done);
+    let outcome = |writer: &mut Writer| {
+        writer
+            .store()
+            .ledger()
+            .piece(serial)
+            .unwrap()
+            .outcome
+            .clone()
+    };
+    assert_eq!(outcome(&mut writer), None, "nothing image-owed touches it");
+    let mut deriver = images(&mut writer);
+    append(
+        &path,
+        &[prompt("t1"), result("r1", "c1", 1, "image/tiff")].concat(),
+    );
+    derive(&mut writer, &mut deriver, &source, 0);
+    assert_eq!(writer.select_images(Utc::now()).await, Step::Done);
+    assert_eq!(outcome(&mut writer), Some(PieceOutcome::NotFound));
+    let last = harness.port.posts().last().cloned().unwrap();
+    assert!(last.starts_with("-# 이미지 1장 생략"), "{last}");
+    assert!(!writer.is_stopped() && writer.store().ledger().violation().is_none());
 }
 
 /// An unsupported image's notice: Unresolved is re-settled, NotFound retried up to three
@@ -715,11 +773,7 @@ async fn late_image_call_turn_survives_call_gc_and_restart() {
             store
         };
         let (stop, task) = spawn(writer_over(&harness, store()));
-        append(
-            &path,
-            &[prompt("t1"), tool_use("a1", "c1"), idle()].concat(),
-        );
-        polls(4).await;
+        feed(&path, &[prompt("t1"), tool_use("a1", "c1"), idle()]).await;
         if unresolved {
             harness
                 .port
@@ -770,8 +824,7 @@ async fn late_result_of_an_image_less_turn_keeps_its_turn_after_the_next_turn_po
         tool_use("a1", "c1"),
         super::actor::row("m1", "working"),
     ];
-    append(&path, &rows.concat());
-    polls(4).await;
+    feed(&path, &rows).await;
     halt(stop, task).await;
     let gc = harness.channel().ledger().gc_segments(&source).len();
     assert!(gc >= 2, "u1's opener and call rows are collected ({gc})");
