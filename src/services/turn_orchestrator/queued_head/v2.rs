@@ -15,6 +15,7 @@ mod commit;
 pub(crate) mod control;
 pub(crate) mod decision;
 mod effort_continue;
+mod idle_head;
 mod migration;
 pub(crate) mod origin;
 pub(crate) mod projection;

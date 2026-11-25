@@ -573,7 +573,8 @@ mod claim {
             HeadMsg::V2(msg) => {
                 let v1_holds =
                     !state.intervention_queue.is_empty() || state.pending_user_dispatch.is_some();
-                msg.run(&mut state.queued_head.v2, v1_holds)
+                let turn_active = state.cancel_token.is_some();
+                msg.run(&mut state.queued_head.v2, v1_holds, turn_active)
             }
             HeadMsg::Claim {
                 expected,

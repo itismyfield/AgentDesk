@@ -24,6 +24,22 @@ tokio::task_local! {
         tokio::sync::oneshot::Sender<()>,
         tokio::sync::oneshot::Receiver<()>,
     )>>;
+    pub(crate) static BEFORE_EARLY_NOTE: std::cell::RefCell<Option<Pause>>;
+    pub(crate) static AFTER_EARLY_NOTE: std::cell::RefCell<Option<Pause>>;
+}
+#[cfg(test)]
+pub(crate) type Pause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+/// Holds a test at `seam` until it releases the task; production never pauses.
+#[cfg(all(test, unix))]
+async fn pause_at(seam: &'static tokio::task::LocalKey<std::cell::RefCell<Option<Pause>>>) {
+    if let Ok(Some((entered, release))) = seam.try_with(|pause| pause.borrow_mut().take()) {
+        let _ = entered.send(());
+        let _ = release.await;
+    }
 }
 
 /// Whether a local TUI channel's seams adopt its queue: always in production.
@@ -306,8 +322,9 @@ impl Original {
     }
 
     /// Admits under the stable ticket on every call; a ticket the owner already holds, even as an
-    /// unconfirmed candidate, resumes the stored original. True when this call first sees it committed.
-    async fn admit_first(&mut self, handle: &ChannelMailboxHandle) -> (Intake, bool) {
+    /// unconfirmed candidate, resumes the stored original. The flags: this call first sees it
+    /// committed, and the same actor turn found it the sole input of an owner with no turn.
+    async fn admit_first(&mut self, handle: &ChannelMailboxHandle) -> (Intake, bool, bool) {
         use super::admission::AdmissionState;
         let before = super::admission::status(handle, &self.ticket).await;
         let first = before.is_ok_and(|state| state != AdmissionState::Committed);
@@ -320,25 +337,27 @@ impl Original {
             let _ = release.await;
         }
         match handle
-            .v2_resume_ticket(self.item.clone(), ticket, same_input)
+            .v2_resume_ticket_at_head(self.item.clone(), ticket, same_input)
             .await
         {
-            Ok((_, stored)) => {
+            Ok((_, stored, opened)) => {
                 self.item = stored;
-                (Intake::Accepted, first)
+                (Intake::Accepted, first, opened)
             }
-            Err(error) if error.is_pending() => {
-                (Intake::Pending(OwnerPending(self.ticket.clone())), false)
-            }
+            Err(error) if error.is_pending() => (
+                Intake::Pending(OwnerPending(self.ticket.clone())),
+                false,
+                false,
+            ),
             Err(error) => {
                 // A committed Discord ticket survives delivery removing its stored original.
                 let committed = super::admission::status(handle, &self.ticket)
                     .await
                     .is_ok_and(|state| state == AdmissionState::Committed);
                 if committed {
-                    (Intake::Accepted, false)
+                    (Intake::Accepted, false, false)
                 } else {
-                    (Intake::Rejected(error.into()), false)
+                    (Intake::Rejected(error.into()), false, false)
                 }
             }
         }
@@ -454,8 +473,7 @@ async fn admit_raw(
     #[cfg(unix)]
     let early = live
         && super::early_pending::eligible(raw)
-        && ingress_hold(shared, uploads_pending).is_none()
-        && super::early_pending::idle(&handle).await;
+        && ingress_hold(shared, uploads_pending).is_none();
     let role = shared
         .dispatch
         .role_overrides
@@ -465,7 +483,9 @@ async fn admit_raw(
         Ok(original) => original,
         Err(error) => return Some(Intake::Rejected(error)),
     };
-    let (intake, first) = original.admit_first(&handle).await;
+    let (intake, first, opened) = original.admit_first(&handle).await;
+    #[cfg(not(unix))]
+    let _ = opened;
     if first && let Some(hold) = ingress_hold(shared, uploads_pending) {
         #[cfg(test)]
         if let Ok(Some((entered, release))) =
@@ -480,8 +500,12 @@ async fn admit_raw(
     if intake == Intake::Accepted {
         crate::logging::intake_timing::mark(crate::logging::intake_timing::Stage::Owner);
         // Before the wake, so the start's own Pending always lands over this early ⏳.
-        if early && first {
+        if early && first && opened {
+            #[cfg(test)]
+            pause_at(&BEFORE_EARLY_NOTE).await;
             super::early_pending::note(shared, channel, raw.message_id).await;
+            #[cfg(test)]
+            pause_at(&AFTER_EARLY_NOTE).await;
         }
         (shared.router_ports.owner_wake)(shared, channel);
     }

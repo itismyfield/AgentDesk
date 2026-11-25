@@ -1,12 +1,13 @@
 use super::super::{ChannelMailboxHandle, ChannelMailboxMsg, HeadMsg};
 use super::*;
 
-type Action = Box<dyn FnOnce(&mut Option<Owner>, bool) + Send>;
+type Action = Box<dyn FnOnce(&mut Option<Owner>, bool, bool) + Send>;
 pub(crate) struct Message(Action);
 impl Message {
     /// `v1_holds`: the legacy queue or its dispatch reservation still holds an input.
-    pub(crate) fn run(self, owner: &mut Option<Owner>, v1_holds: bool) {
-        (self.0)(owner, v1_holds);
+    /// `turn_active`: the same actor holds a running turn for the channel.
+    pub(crate) fn run(self, owner: &mut Option<Owner>, v1_holds: bool, turn_active: bool) {
+        (self.0)(owner, v1_holds, turn_active);
     }
     pub(crate) fn refuse(self) {
         drop(self);
@@ -64,9 +65,18 @@ impl ChannelMailboxHandle {
         &self,
         f: impl FnOnce(&mut Option<Owner>, bool) -> Result<T, String> + Send + 'static,
     ) -> Result<T, String> {
+        self.v2_turn_seen(move |owner, v1_holds, _| f(owner, v1_holds))
+            .await
+    }
+
+    /// One owner turn that also sees whether the actor holds a running turn.
+    pub(super) async fn v2_turn_seen<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Option<Owner>, bool, bool) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
         self.request(move |reply| {
-            let msg = Message(Box::new(move |owner, v1_holds| {
-                let _ = reply.send(f(owner, v1_holds));
+            let msg = Message(Box::new(move |owner, v1_holds, turn_active| {
+                let _ = reply.send(f(owner, v1_holds, turn_active));
             }));
             ChannelMailboxMsg::Injection(super::super::super::injected_inputs::InjectionMsg::Head(
                 HeadMsg::V2(msg),

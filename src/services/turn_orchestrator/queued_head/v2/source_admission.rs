@@ -759,6 +759,34 @@ impl Owner {
     }
 }
 
+/// One ticket's resume inside the owner's actor turn: the stored original when it is the same
+/// input, else the offered one; a different input under the ticket conflicts.
+pub(super) fn resume_in(
+    slot: &mut Option<Owner>,
+    original: PendingQueueItem,
+    ticket: Ticket,
+    same_input: fn(&PendingQueueItem, &PendingQueueItem) -> bool,
+) -> Result<(Admitted, PendingQueueItem), AdmitError> {
+    let Some(owner) = slot.as_mut() else {
+        return Err(AdmitError::NotCommitted("V2 not adopted".into()));
+    };
+    let chosen = match owner.ticket_original(&ticket) {
+        Some(stored) if same_input(&stored, &original) => stored,
+        Some(_) => {
+            return Err(AdmitError::Conflict(
+                "another input names the ticket".into(),
+            ));
+        }
+        None if original.queued_generation == 0 => {
+            let unsettled = "the original's queued generation is unsettled";
+            return Err(AdmitError::NotCommitted(unsettled.into()));
+        }
+        None => original,
+    };
+    let admitted = Custody::resume(&chosen, ticket).advance(owner);
+    admitted.map(|admitted| (admitted, chosen))
+}
+
 impl super::super::super::ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) async fn v2_admit(
@@ -805,28 +833,9 @@ impl super::super::super::ChannelMailboxHandle {
         same_input: fn(&PendingQueueItem, &PendingQueueItem) -> bool,
     ) -> Result<(Admitted, PendingQueueItem), AdmitError> {
         let ticket = Ticket::new(&ticket).map_err(AdmitError::NotCommitted)?;
-        self.v2_request(move |slot| {
-            let Some(owner) = slot.as_mut() else {
-                return Ok(Err(AdmitError::NotCommitted("V2 not adopted".into())));
-            };
-            let chosen = match owner.ticket_original(&ticket) {
-                Some(stored) if same_input(&stored, &original) => stored,
-                Some(_) => {
-                    return Ok(Err(AdmitError::Conflict(
-                        "another input names the ticket".into(),
-                    )));
-                }
-                None if original.queued_generation == 0 => {
-                    let unsettled = "the original's queued generation is unsettled";
-                    return Ok(Err(AdmitError::NotCommitted(unsettled.into())));
-                }
-                None => original,
-            };
-            let admitted = Custody::resume(&chosen, ticket).advance(owner);
-            Ok(admitted.map(|admitted| (admitted, chosen)))
-        })
-        .await
-        .map_err(|_| AdmitError::Pending)?
+        self.v2_request(move |slot| Ok(resume_in(slot, original, ticket, same_input)))
+            .await
+            .map_err(|_| AdmitError::Pending)?
     }
 
     /// Reads the ticket's standing; it never recovers, commits or admits.
