@@ -109,7 +109,7 @@ pub struct NoticeState {
     pub reserved_ids: BTreeSet<u64>,
 }
 
-pub(crate) fn record_id(record: &SourceRange) -> RecordId {
+fn record_id(record: &SourceRange) -> RecordId {
     (record.source.clone(), record.start, record.end)
 }
 
@@ -188,7 +188,7 @@ impl NoticeEvidence {
         }
     }
 
-    pub(crate) fn complete(&self) -> bool {
+    fn complete(&self) -> bool {
         self.prompt.is_some()
             && self.prompt_sha256.is_some()
             && self.unit_key.is_some()
@@ -198,7 +198,7 @@ impl NoticeEvidence {
 }
 
 impl MigrationSnapshot {
-    pub(crate) fn contains(&self, record: &SourceRange) -> bool {
+    fn contains(&self, record: &SourceRange) -> bool {
         self.sources.iter().any(|source| {
             source.source == record.source
                 && source.lower <= record.start
@@ -212,7 +212,7 @@ impl MigrationSnapshot {
 }
 
 impl NoticeState {
-    pub(crate) fn apply(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
+    pub(super) fn apply(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
         match entry {
             NoticeEntry::Settled { record, settlement } => return self.settle(record, *settlement),
             NoticeEntry::MigrationStarted { snapshot } => {
@@ -344,5 +344,35 @@ impl NoticeState {
             }
         }
         Ok(None)
+    }
+}
+
+// Test seams for the notice tests mounted in the discord-layer test host.
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services) fn record_id_for_test(record: &SourceRange) -> RecordId {
+    record_id(record)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl NoticeEvidence {
+    pub(in crate::services) fn complete_for_test(&self) -> bool {
+        self.complete()
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl MigrationSnapshot {
+    pub(in crate::services) fn contains_for_test(&self, record: &SourceRange) -> bool {
+        self.contains(record)
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+impl NoticeState {
+    pub(in crate::services) fn apply_for_test(
+        &mut self,
+        entry: NoticeEntry,
+    ) -> Result<Option<UnitKey>, String> {
+        self.apply(entry)
     }
 }

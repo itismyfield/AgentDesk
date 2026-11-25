@@ -4770,7 +4770,8 @@ src/
 │   │   │   │   ├── input_notices/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
-│   │   │   │   └── input_notices.rs
+│   │   │   │   ├── input_notices.rs
+│   │   │   │   └── test_access.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4834,6 +4835,7 @@ src/
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
 │   │   │   │   ├── scoped_transition_tests.rs
+│   │   │   │   ├── test_access.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
 │   │   │   ├── adoption/
@@ -4855,6 +4857,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
+│   │   │   │   ├── test_access.rs
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
 │   │   │   │   └── authority_contention_tests.rs

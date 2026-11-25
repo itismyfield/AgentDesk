@@ -111,14 +111,14 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
             obligation == Obligation::LocalRetry
         );
         assert_eq!(
-            !writer.resume_pieces().is_empty(),
+            !writer.resume_pieces_for_test().is_empty(),
             obligation == Obligation::ApprovedResume
         );
         assert_eq!(
             writer.store().ledger().unresolved().is_some(),
             obligation == Obligation::Unresolved
         );
-        let selection = writer.suspension.clone();
+        let selection = writer.suspension_for_test().clone();
         let ledger_path = harness.port.ledger.lock().unwrap().clone().unwrap();
         let ledger_before = std::fs::read(&ledger_path).unwrap();
         harness.gate.acquired();
