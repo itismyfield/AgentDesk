@@ -380,10 +380,33 @@ class PrCapCheckTest(unittest.TestCase):
         for name in ("docs/a.md", "tests/a.rs", "src/generated/a.rs", "src/fixtures/a.txt", "scripts/test_a.py", "scripts/pg_test_lane_manifest.txt"):
             path = self.repo / name
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("test\n" * 900)
+            path.write_text("def test_a():\n" * 900)
         (self.repo / "src/prod.rs").write_text("// comment\n\nfn prod() {}\n#[cfg(test)]\nmod tests {\n" + "    fn t() {}\n" * 900 + "}\n")
         self.commit()
         self.assert_pass(self.check_cap(), "1 files net +1 code")
+
+    def test_generated_data_list_excludes_only_listed_files(self):
+        (self.repo / "data").mkdir()
+        (self.repo / "data/rows.json").write_text("{}\n" * 900)
+        (self.repo / "config.json").write_text("{}\n" * 2)
+        self.commit()
+        result = self.check_cap()
+        self.assert_pass(result, "2 files net +902 code")
+        self.assertNotIn("GENERATED_DATA", result.stdout)
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/cap_generated_data.tsv").write_text("data/*.json\tpython3 gen.py\tpython3 gen.py --check\n")
+        self.commit()
+        result = self.check_cap()
+        self.assert_pass(result, "2 files net +3 code")
+        self.assertIn("GENERATED_DATA 1 files +900 lines not counted", result.stdout)
+        self.assertIn("  data/rows.json +900 generate: python3 gen.py verify: python3 gen.py --check", result.stdout)
+
+    def test_test_named_python_counts_unless_it_defines_tests(self):
+        (self.repo / "scripts").mkdir()
+        (self.repo / "scripts/test_support_x.py").write_text("x = 1\n" * 3)
+        (self.repo / "scripts/test_real.py").write_text("import unittest\n" + "x = 1\n" * 900)
+        self.commit()
+        self.assert_pass(self.check_cap(), "1 files net +3 code")
 
     def test_canonical_snapshot(self):
         digest = hashlib.sha256(HELPER.with_name("pr_cap_prod.py").read_bytes()).hexdigest()
