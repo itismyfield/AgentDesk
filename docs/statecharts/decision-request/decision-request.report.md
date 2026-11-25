@@ -188,7 +188,7 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 | MarkOffline · OfflineSettle · `gone` (P2 ②) | `decision_drain.rs` `recover_before`(:429), `src/services/cluster/node_registry.rs` `mark_stale_worker_nodes_offline`(:490) | 2c head에는 offline 전환에서 정산을 다시 부르는 배선이 없다 = `NoOfflineSettle` |
 | RefuseKept · `bound` (P2 ⑤) | `src/services/turn_orchestrator/queued_head/v2/decision.rs` `decision_tickets`(:56), `v2/refused.rs` `refuse_not_sent`(:12) | 2c head의 sweep은 bind에서만 후보를 모은다 = `BindOnlySweep` |
 
-수정 전 RED / 후 GREEN(TLC 1.7.4, `PASS: 34/34 configs`):
+수정 전 RED / 후 GREEN(TLC 1.7.4, 모델 작성 때 `PASS: 34/34 configs`; 마지막 세 행은 3b가 더해 `PASS: 37/37 configs`):
 
 | cfg | Mode | 수정 전(RED) | Fixed(GREEN) |
 |---|---|---|---|
@@ -199,6 +199,9 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 | TempHolderId | P2 ①: 등록 전 임시 이름으로 시도를 옮김 | `LiveHolderKeeps` 반례 | PASS |
 | NoOfflineSettle | P2 ②: offline 전환 뒤 재정산 없음 | liveness `AbandonedEnds` 반례 | PASS(`Gone.cfg`) |
 | BindOnlySweep | P2 ⑤: bind에서만 후보 수집 | `NoDecisionNotice` 반례 | PASS |
+| TtlGuard | 3a의 30초 판독만 믿는 guard(등록·miss 조회 없음) | `NoIntakeLeak` 반례 | PASS |
+| SnapshotRegister | 등록을 판독 집합 안에 두는 guard(늦은 판독이 지움, 다른 process는 모름) | `NoIntakeLeak` 반례 | PASS |
+| BootRePost | 재시작 뒤 `posting` 요청을 다시 POST | `OnePost` 반례 | PASS |
 
 **P2 ①②⑤는 2c head 코드가 대조 Mode 쪽이다.** Fixed·Gone의 PASS는 조각 4 착수 조건으로 넘긴 목표 계약이고, 현재 코드의 증명이 아니다(producer가 없어 지금은 도달하지 않는다).
 
@@ -215,4 +218,25 @@ online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 o
 | requester cap | CLI `src/cli/decision.rs` `ask`(:71)·`get`(:92) → `src/cli/decision/owner_cache.rs` `prepare`(:55)·`of_request`(:75), 서버 `src/services/discord/decisions/requester.rs` `hash`(:18) | cap은 요청을 보내기 전에 사설 cache에 쓰이고, 서버는 hash만 저장한다 |
 | ThreadMessage 대조(`NoIntakeGuard`·`GuardByThread`) | `src/services/discord/router/intake_gate.rs:235` → `src/services/discord/decisions/ingress.rs` `consumes`(:92) → `contains`(:46) → `load_forums`(:24) | 부모가 Decision 포럼(ready 행 + 설정 덮어쓰기)인 thread의 메시지는 dedup 전에 intake에서 빠진다. thread id를 보지 않으므로 게시 응답 유실 구간(`posting` ∧ `posts`=1)에도 성립한다 |
 
-모델과 코드가 다른 곳(3a): 차단은 포럼 집합을 30초마다 다시 읽는다(`ingress.rs` `REFRESH`:14). 방금 기록된 포럼은 다음 판독까지 최대 30초 동안 모른다. 모델의 `GuardByForum`은 포럼을 항상 아는 것으로 둔다. 3b가 게시 전에 그 포럼을 이 process의 집합에 넣어 이 창을 닫아야 한다. thread의 부모는 intake가 이미 읽은 값과 gateway cache에서만 얻는다. 둘 다 없으면(채널 조회 실패 + cache 없음) 판정하지 못하고 기존 intake로 간다.
+모델과 코드가 다른 곳(3a, 3b에서 닫음 — 아래 3b 절): 차단은 포럼 집합을 30초마다 다시 읽는다(`ingress.rs` `REFRESH`:14). 방금 기록된 포럼은 다음 판독까지 최대 30초 동안 모른다. 모델의 `GuardByForum`은 포럼을 항상 아는 것으로 둔다. 3b가 게시 전에 그 포럼을 이 process의 집합에 넣어 이 창을 닫아야 한다. thread의 부모는 intake가 이미 읽은 값과 gateway cache에서만 얻는다. 둘 다 없으면(채널 조회 실패 + cache 없음) 판정하지 못하고 기존 intake로 간다.
+
+### 조각 3b 코드 좌표 (게시·회수·비활성 버튼, 포럼 기억)
+
+좌표는 조각 3b head 기준이다. 3b가 PostFinish·Reconcile·PostRejected·`disabled`를 코드로 만들고, 3a가 남긴 "포럼을 모르는 구간"을 모델에 넣었다(`known`·`inflight`, 대조 TtlGuard·SnapshotRegister·BootRePost). TLC 1.7.4 `PASS: 37/37 configs`(Fixed PASS).
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| PostBegin(journal, `inflight`) | `src/services/discord/decisions/publication.rs` `post`(:99) → `src/db/decisions/publication.rs` `journal`(:63) | `stored`→`posting` CAS 한 번과 버튼 handle을 한 transaction으로 쓴다. CAS를 잃은 run은 POST하지 않는다 |
+| PostFinish(`posts`) | `publication.rs` `send_post`(호출 :159) | POST 한 번. 2xx면 `posted`(:100)로 `disabled`, 응답 유실·5xx·연결 오류는 `posting`에 남는다 |
+| PostRejected | `publication.rs` :174 → `db/decisions/publication.rs` `refused`(:118) | 400/401/403/404는 `post_failed`. 다음 ask는 같은 거절을 돌려줄 뿐 POST하지 않는다 |
+| Reconcile | `publication.rs` `publish`(:49) → `reconcile`(:188) → `find_post`(:212) | `posting`이면 포럼의 active thread 중 우리 봇이 시작했고 starter 작성자가 우리 봇이며 marker 줄이 같은 글만 회수한다. 못 찾으면 `posting`(202)에 남는다 |
+| BootRePost(대조) | 해당 코드 없음 | 재시작 뒤에는 `inflight`가 없다. `posting` 요청은 Reconcile만 탄다 |
+| `disabled`(view `not_yet`) · EarlyButtons(대조) | `src/services/discord/decisions/card.rs` `render`(:27)·`post_body`(:72), `src/services/manual_steer/action_handle.rs` `to_decision_custom_id`(:32) | 버튼은 모두 disabled이고 custom-id는 `decision:v1:<handle>`이다. manual steer의 parse는 이를 남의 것으로 거절하고, Decision 클릭을 받는 handler는 없다(조각 4) |
+| `known`(포럼 기억) · Refresh · StaleRefresh | `src/services/discord/decisions/ingress.rs` `register`(:26, 호출 `publication.rs` :132)·`contains`(:69)·miss 조회(:90) | 게시 process는 journal 전에 포럼을 등록 집합에 넣는다. 등록 집합은 30초 판독이 덮어쓰지 않는다. 판독이 놓친 부모는 PG에서 그 포럼 하나를 다시 본다. 그래서 Fixed는 메모리에 기대지 않는다(다른 process·재시작 뒤에도 PG의 ready 행이 먼저 있다) |
+| ThreadMessage(대조) | `src/services/discord/router/intake_gate.rs:235` → `ingress.rs` `consumes`(:147) | REST 부모 또는 gateway cache 부모(`cached_parent`)가 Decision 포럼이면 dedup 전에 멈춘다. cache가 forum이 아닌 채널로 아는 부모는 조회하지 않는다 |
+
+모델과 코드가 다른 곳(3b):
+
+- 모델의 Fixed는 "포럼 ready 행이 journal보다 먼저 PG에 있다"를 가정으로 둔다. 코드에서는 `resolve_or_create`가 ready를 저장하거나 확인한 뒤에야 journal로 간다(`publication.rs` :125~:130). 설정 덮어쓰기 포럼은 PG 행 대신 설정으로 막힌다.
+- PG 조회가 실패하는 순간 다른 process(그 포럼을 등록하지 않은 process)는 그 메시지를 막지 못한다. 모델은 PG 장애를 다루지 않는다.
+- Reconcile은 active thread만 본다. 응답을 잃은 글이 회수 전에 보관(archive)되면 찾지 못하고 `posting`(202)에 남는다. 새 POST는 하지 않는다.

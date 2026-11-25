@@ -176,6 +176,7 @@ agent_handoff의 source=decision 거절과 owner 경로 안의 claude_handoff �
 - 1,000줄 넘는 기존 파일에는 module/re-export/호출 줄만 넣고 본체는 새 child에 둔다.
 - 조각 3은 단독으로 기능 완료를 주장하지 않는다. 조각 4 뒤에 활성 버튼, 조각 5 뒤에 자유 의견 안내를 노출한다(§13 P2-3).
 - 조각 3은 3a(요청 저장·API·CLI·requester cap·intake 차단, 게시 없이 202 `publication: pending`)와 3b(게시·회수·비활성 버튼)로 나눈다. intake 차단은 저장된 thread id가 아니라 부모가 Decision 포럼인 thread를 기준으로 한다. 게시 응답을 잃어 thread id가 아직 없는 구간에도 막기 위해서다.
+- 3b는 N06·N08을 `src/services/discord/decisions/publication.rs`(게시·회수)·`card.rs`(글·비활성 버튼)와 `src/services/manual_steer/action_handle.rs`의 `decision:v1` custom-id로 둔다. 게시 process는 첫 게시 전에 포럼을 intake 차단 등록 집합에 넣고, 차단은 판독이 놓친 부모를 PG에서 다시 보므로 다른 process가 방금 ready로 만든 포럼도 곧바로 막는다. provider 봇의 gateway가 이 process에 없으면 `decision_bot_unavailable`(503)이다.
 
 수정 전 RED→GREEN 계획:
 
