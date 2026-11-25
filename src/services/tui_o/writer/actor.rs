@@ -75,6 +75,8 @@ pub struct Undelivered {
     pub verified_work: usize,
     /// The channel's POSTs started and not ended.
     pub posting: usize,
+    /// Open tool-image and omission-notice obligations, as a source transition counts them.
+    pub images: usize,
     /// Each unretired, unparked source's path and how far its bytes are captured.
     pub captured: Vec<(std::path::PathBuf, u64)>,
 }
@@ -842,7 +844,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         super::progress::position(owed, retry, ledger, unsealed)
     }
 
-    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end, binds not
+    /// Pieces, an open `Prepared`, open image obligations, unsealed units, sources read short of their end, binds not
     /// applied, verified work, POSTs in flight and each source's capture, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
     fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
@@ -866,6 +868,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         );
         let store = self.writer.store();
         let prepared = usize::from(store.ledger().unresolved().is_some());
+        let images = super::tool_images::select::open_count(store.ledger());
         let rotation = store.rotation().ok()?;
         let checkpoint = store.binding_checkpoint().ok()?;
         let mut uncaptured = 0;
@@ -893,6 +896,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
             // A channel no writer counted yet has started no POST in this process.
             posting: super::deliver::posts_in_flight(channel).unwrap_or(0),
+            images,
             captured,
         })
     }

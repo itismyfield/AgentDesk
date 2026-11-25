@@ -8,7 +8,10 @@ use super::actor::{append, halt, polls, spawn, switched_over, writer_over};
 use super::*;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, MAX_READ_BYTES, SourceId};
+use crate::services::tui_o::writer::actor::Actor;
+use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::restart_end::Ended;
+use crate::services::tui_o::writer::rotation::Sources;
 use crate::services::tui_o::writer::tool_images::derive::ImageRun;
 use crate::services::tui_o::writer::tool_images::select::{kept_sources, open_count};
 
@@ -291,6 +294,12 @@ async fn reconfirmed_behind_newer_anchor(arrived: bool) {
         writer.store().ledger().piece(serial).unwrap().outcome,
         Some(PieceOutcome::Unresolved(_))
     ));
+    let bindings = std::sync::Arc::new(ChannelBindingLog::new(CHANNEL, ShadowProvider::Claude));
+    let sources = Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone());
+    let mut actor = Actor::new_for_test(writer, deriver, sources, bindings);
+    // What a child retirement reads: the open image is owed until it settles.
+    assert_eq!(actor.undelivered_for_test(1).unwrap().images, 1);
+    let writer = actor.writer_mut_for_test();
     harness.port.unreadable.store(false, Ordering::SeqCst);
     harness.port.id_gap.store(40_000 << 22, Ordering::SeqCst);
     assert_eq!(writer.deliver(&piece("m1", "later body")).await, Step::Done);
@@ -315,6 +324,7 @@ async fn reconfirmed_behind_newer_anchor(arrived: bool) {
             .filter(|post| post.starts_with("-# 이미지 1장 생략"));
         let open = open_count(writer.store().ledger());
         assert_eq!((notices.count(), open, attachments(&harness)), (1, 0, 2));
+        assert_eq!(actor.undelivered_for_test(2).unwrap().images, 0);
         return;
     }
     let ledger = writer.store().ledger();
@@ -326,6 +336,7 @@ async fn reconfirmed_behind_newer_anchor(arrived: bool) {
     assert_eq!(attachments(&harness), 1);
     assert_eq!(writer.deliver(&piece("m2", "next body")).await, Step::Done);
     assert!(harness.port.posts().contains(&"next body".to_owned()));
+    assert_eq!(actor.undelivered_for_test(2).unwrap().images, 0);
     let mut replayed = harness.writer();
     assert!(!replayed.is_stopped());
     let ledger = replayed.store().ledger();
