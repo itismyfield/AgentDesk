@@ -324,8 +324,8 @@ def test_equivalent_atoms(toks, close) -> set:
     drop, inert = set(), set()
     # Tokens of a macro invocation or `macro_rules!` body are data (`stringify!(#[cfg(test)])`), not attributes.
     for i in range(len(toks) - 2):
-        if toks[i].kind == "id" and is_p(toks[i + 1], "!"):
-            k = i + 3 if toks[i + 2].kind == "id" else i + 2
+        if toks[i].kind == "id" and is_p(toks[i + 1], "!") and toks[i].text not in KEYWORDS:
+            k = i + 3 if toks[i].text == "macro_rules" and toks[i + 2].kind == "id" else i + 2
             if k < len(toks) and toks[k].kind == "p" and toks[k].text in PAIRS:
                 inert.update(range(k, close[k] + 1))
     for i in range(len(toks) - 3):
