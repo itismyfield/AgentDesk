@@ -15,9 +15,8 @@ pub(in crate::services) use turn_identity::CompactTurnIdentity;
 
 // The key lives in a private child so only test builds can name it outside this module.
 mod pane_key {
-    /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
-    /// channel and the physical tmux pane so [`super::clear_for_tmux`] can forget every
-    /// channel's flag for a recreated pane name (launch/teardown hygiene).
+    /// Per-pane key for the once-per-fill-cycle armed flag, keyed by channel and tmux pane so
+    /// [`super::clear_for_tmux`] can forget every channel's flag for a recreated pane name.
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     pub(crate) struct CompactPaneKey {
         pub(super) channel_id: u64,
