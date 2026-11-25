@@ -104,7 +104,15 @@ describe("home to-dos", () => {
       updated_at: "2026-11-18T00:00:00Z",
       nodes: [
         { id: "n1", title: "착지 대상", status: "running" as const, stage: "LAND_READY", next_action: "착지 승인 대기", issue_url: "https://github.com/o/r/issues/812", updated_at: "2026-11-18T00:00:00Z" },
-        { id: "n2", title: "이미 완료", status: "completed" as const, stage: "LAND_READY" },
+        { id: "n2", title: "이미 완료", status: "completed" as const, stage: "착지 승인 대기" },
+        { id: "n3", title: "내부 배치 준비", status: "running" as const, stage: "LAND_READY d5040b28cc", next_action: "배치 묶음 대기" },
+        {
+          id: "n4",
+          title: "배포 뒤 확인 중",
+          status: "running" as const,
+          stage: "LAND_READY d5040b28cc → 착지 승인 대기 → 배포 뒤 옛 형식 정지 자동 정리·tick 제출 확인",
+          next_action: "결정 포럼 승인 대기 -> 머지 완료",
+        },
       ],
     }];
     const items = buildTodoItems({ cards: [card("d", "review", { review_status: "dilemma_pending" })], campaigns: [], documents: [document], legacy, tr, isKo: true });

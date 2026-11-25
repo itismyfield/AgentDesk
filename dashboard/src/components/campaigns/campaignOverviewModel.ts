@@ -151,7 +151,20 @@ export interface OverviewTask {
 /** A session as a card's foot shows it: a dot, the state words and when it was last seen. */
 export interface SessionNow { tone: DotTone; text: string; seenAt: string | null }
 
-const LEDGER_APPROVAL_RE = /\bLAND_READY\b|착지\s*승인\s*대기|사용자\s*승인\s*대기|awaiting\s+landing\s+approval/i;
+const LEDGER_HUMAN_APPROVAL_RE = /(?:착지|머지|배포|사용자|결정\s*포럼)\s*승인\s*대기|awaiting\s+(?:landing|human|user)\s+approval/i;
+
+export function currentLedgerStageSegment(text: string | null | undefined): string {
+  const parts = (text ?? "").trim().split(/\s*(?:→|->)\s*/).filter(Boolean);
+  return parts.at(-1) ?? "";
+}
+
+export function isLedgerHumanApprovalPending(
+  stage?: string | null,
+  nextAction?: string | null,
+  blocker?: string | null,
+): boolean {
+  return [stage, nextAction, blocker].some((field) => LEDGER_HUMAN_APPROVAL_RE.test(currentLedgerStageSegment(field)));
+}
 
 /** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
@@ -161,8 +174,7 @@ export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): Overvie
   const step = campaignStageStep(stageText).index;
   const title = campaignTaskTitle(node);
   const canAwaitApproval = status === "running" || status === "pending";
-  const textBlob = [stageText, node.next_action].filter(Boolean).join(" ");
-  const gate: PendingGate | null = canAwaitApproval && LEDGER_APPROVAL_RE.test(textBlob)
+  const gate: PendingGate | null = canAwaitApproval && isLedgerHumanApprovalPending(stageText, node.next_action)
     ? { gate: "landing", openedAt: node.updated_at ?? null, evidenceNote: (node.evidence ?? []).at(-1) ?? (node.summary?.trim() || null) }
     : null;
   return {
