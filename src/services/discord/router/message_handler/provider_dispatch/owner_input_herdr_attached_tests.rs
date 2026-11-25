@@ -64,6 +64,9 @@ fn renonced(record: &HostedExecution, nonce: &str) -> HostedExecution {
     let mut record = record.clone();
     record.execution_nonce = nonce.into();
     record.source_ref.execution_nonce = nonce.into();
+    if let Some(expected) = record.expected.as_mut() {
+        expected.binding_nonce = nonce.into();
+    }
     record
 }
 
