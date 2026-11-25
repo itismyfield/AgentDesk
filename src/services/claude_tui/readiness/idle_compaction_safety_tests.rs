@@ -239,3 +239,23 @@ fn a_compaction_no_idle_notice_closed_or_that_work_follows_holds_both_readings()
         assert_ne!(state, TuiTurnState::Idle, "{records:?}");
     }
 }
+
+#[test]
+fn a_closed_compaction_keeps_the_session_id_read_inside_it() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let mut records = [vec![end_turn()], compacted_tail()].concat();
+    records[2]["sessionId"] = json!("inside");
+    let read = |records: &[Value]| {
+        let text: String = records.iter().map(|record| format!("{record}\n")).collect();
+        std::fs::write(file.path(), text).unwrap();
+        super::super::evidence::read(file.path()).map(|tail| tail.native)
+    };
+    assert_eq!(read(&records), Some(Some("inside".into())));
+    let notice = records.iter().position(|r| r["subtype"] == "informational");
+    records[notice.unwrap()]["sessionId"] = json!("another");
+    assert_eq!(
+        read(&records),
+        None,
+        "the notice of another session cannot close it"
+    );
+}

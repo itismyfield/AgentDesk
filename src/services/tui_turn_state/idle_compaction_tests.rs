@@ -55,6 +55,54 @@ pub(crate) fn compacted_tail() -> Vec<Value> {
     records
 }
 
+/// Record kinds and line lengths measured from a real idle compaction after a relay Stop, from the
+/// completed reply on; every body here is synthetic filler.
+const MEASURED: &str = "reply:3942 stop:855 system/stop_hook_summary:1083 system/turn_duration:471
+    last-prompt:279 ai-title:115 mode:82 permission-mode:114 repl-mode:87 session-owner:186
+    atis-latch:82 derived-from:184 data-flow-records:263 system/compact_boundary:1526
+    data-flow-records:26268 summary:15629 @file:12360 @file:19582 @file:3508
+    @compact_file_reference:1262 @file:3044 @invoked_skills:10740 @agent_listing_delta:20764
+    @skill_listing:66752 @mcp_instructions_delta:20141 @environment:2654 @model:954 @language:1101
+    start:917 system/informational:658 last-prompt:279 ai-title:115 mode:82 permission-mode:114
+    repl-mode:87 session-owner:186 atis-latch:82 data-flow-records:192 cost-state:864";
+
+/// `MEASURED` as records of `native`, each padded to its measured length.
+pub(crate) fn measured_compaction_tail(native: &str) -> Vec<Value> {
+    let quiet = r#"{"suppressOutput":true}"#;
+    let hook = |event: &str, name: &str, id: &str| {
+        json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":event,
+            "hookName":name,"command":format!("claude-hook-relay --session-id {native}"),
+            "stdout":quiet,"stderr":"","exitCode":0,"toolUseID":id}})
+    };
+    let notice = tail().remove(7);
+    MEASURED
+        .split_whitespace()
+        .map(|entry| {
+            let (kind, len) = entry.split_once(':').unwrap();
+            let mut record = match kind.split_once('/') {
+                _ if kind == "reply" => end_turn(),
+                _ if kind == "stop" => hook("Stop", "Stop", "stop-hook"),
+                _ if kind == "start" => hook("SessionStart", "SessionStart:compact", "start-hook"),
+                _ if kind == "summary" => json!({"type":"user","isCompactSummary":true,
+                    "message":{"role":"user","content":"summary"}}),
+                Some(("system", "informational")) => notice.clone(),
+                Some((_, subtype)) => json!({"type":"system","subtype":subtype,
+                    "compactMetadata":{"trigger":"auto"},"toolUseID":"stop-hook",
+                    "preventedContinuation":false,"hookErrors":[],"hookAdditionalContext":[]}),
+                None if kind.starts_with('@') => {
+                    json!({"type":"attachment","attachment":{"type":&kind[1..]}})
+                }
+                None => json!({"type":kind}),
+            };
+            record["sessionId"] = json!(native);
+            record["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+            let used = record.to_string().len() + r#","pad":"""#.len();
+            record["pad"] = json!("x".repeat(len.parse::<usize>().unwrap().saturating_sub(used)));
+            record
+        })
+        .collect()
+}
+
 fn observe(records: Vec<Value>) -> TuiTurnState {
     let file = tempfile::NamedTempFile::new().unwrap();
     let text = records
@@ -120,4 +168,27 @@ fn idle_compaction_tail_does_not_cross_an_old_terminal_or_unknown_record() {
         observe_claude_jsonl_turn_state(file.path()),
         TuiTurnState::Idle
     );
+}
+
+#[test]
+fn a_compaction_hides_the_terminal_beneath_it_until_its_notice_closes_it() {
+    let mut records = vec![
+        end_turn(),
+        json!({"type":"system","subtype":"turn_duration"}),
+    ];
+    let mut closed = false;
+    for record in compacted_tail() {
+        closed |= record["subtype"] == "informational";
+        // A session-state block would end the walk before the compaction; leave it out.
+        if record["type"] != "permission-mode" {
+            records.push(record);
+        }
+        let state = observe(records.clone());
+        assert_eq!(
+            state == TuiTurnState::Idle,
+            closed,
+            "{}: {state:?}",
+            records.len()
+        );
+    }
 }
