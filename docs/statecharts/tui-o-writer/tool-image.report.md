@@ -89,6 +89,17 @@ gave other serials, so a missing image ends in its retry and omission notice.
 | ToolImageS2bReconfirmBehind | RecD, persist, `"owned"`, two failures | - | the fixed rule |
 | ToolImageS2bReconfirmBehindW4 | same, `"w4"` | EventuallyAccounted | the image stays Unresolved for good |
 
+## S2b image poll and a restored body Prepared
+
+`SelectSettle` starts with a body's Prepared left open by a crash. The image poll settles it
+under `"always"` (w5: every poll) or only when an image step is due under `"due"`; image and
+notice attempts wait for it either way.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bSelectSettleDue | RecF, persist, `"due"` | - | the body's Prepared waits for its delivery or a due image step |
+| ToolImageS2bSelectSettleAlways | same, `"always"` | NoImagelessSettle | the first poll settles it before any image step |
+
 ## Limits
 
 Spool segments are one record each. History is truthful unless `Lag` hides one arrived post
