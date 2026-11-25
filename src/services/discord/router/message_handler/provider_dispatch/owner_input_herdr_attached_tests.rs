@@ -49,7 +49,7 @@ fn hand_over(
     crate::services::claude_tui::readiness::tests::pre_source(&owner.logical, &transcript);
     let _entered = owner.runtime.enter();
     let session = ("attached-sid", transcript);
-    crate::services::claude::herdr_turn::first_input::owned_pending_prompt_for_tests(
+    crate::services::claude::herdr_turn::owned_pending_prompt_for_tests(
         &turn, executions, session,
     )
 }

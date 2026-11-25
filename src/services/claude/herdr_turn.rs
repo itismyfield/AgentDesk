@@ -7,6 +7,8 @@ pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
 #[cfg(test)]
 pub(crate) use first_input::regression_tests::regression_attached;
+#[cfg(all(test, unix))]
+pub(crate) use first_input::owned_pending_prompt_for_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::{
     Notice, held_record_for_test, record_outcome_for_test, submit_for_test, submit_owned_for_test,
