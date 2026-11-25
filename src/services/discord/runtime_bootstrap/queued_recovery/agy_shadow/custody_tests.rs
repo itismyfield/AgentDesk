@@ -493,14 +493,15 @@ fn observe_mixed_slots_hold_then_admit_after_evidence() {
 }
 
 /// A delivery journal written by slice 4 for the iMessage execution, with its binding.
-fn journal(root: &Path, nonce: Uuid) {
+fn journal(root: &Path, nonce: Uuid, version: u32) {
     let dir = root.join(format!("o_store/{}/agy-delivery", DIRECT.destination));
     fs::create_dir_all(&dir).unwrap();
+    let fingerprint = [0_u8; 32];
     let state = serde_json::json!({
-        "version": 1,
+        "version": version,
         "key": {"destination": DIRECT.destination, "id": EXECUTION, "nonce": nonce},
         "revision": 1,
-        "fingerprint": [0; 32],
+        "fingerprint": fingerprint,
         "last_seq": 3,
         "receipts": [],
         "footer": null,
@@ -522,7 +523,7 @@ fn observe_accepts_journal_binding_after_inflight_clear() {
     let root = tempfile::tempdir().unwrap();
     let nonce = Uuid::new_v4();
     sealed_imessage(root.path(), nonce);
-    journal(root.path(), nonce);
+    journal(root.path(), nonce, 1);
     let adoption = observe_once(
         root.path(),
         &owned_gate(),
@@ -539,7 +540,7 @@ fn observe_accepts_journal_binding_after_inflight_clear() {
 fn observe_holds_journal_binding_with_other_nonce() {
     let root = tempfile::tempdir().unwrap();
     sealed_imessage(root.path(), Uuid::new_v4());
-    journal(root.path(), Uuid::new_v4());
+    journal(root.path(), Uuid::new_v4(), 1);
     let adoption = observe_once(
         root.path(),
         &owned_gate(),
@@ -551,5 +552,28 @@ fn observe_holds_journal_binding_with_other_nonce() {
     assert_eq!(
         evidence_held(&adoption),
         [AgyHoldReason::Evidence(AgyEvidenceHold::Conflict)]
+    );
+}
+
+// A journal of a version this binary does not know is unreadable, never binding evidence.
+#[test]
+fn observe_holds_journal_of_unknown_version() {
+    let root = tempfile::tempdir().unwrap();
+    let nonce = Uuid::new_v4();
+    sealed_imessage(root.path(), nonce);
+    journal(root.path(), nonce, 2);
+    let read = crate::services::tui_o::store::agy_delivery::read_binding;
+    assert!(read(root.path(), DIRECT.destination, EXECUTION).is_err());
+    let adoption = observe_once(
+        root.path(),
+        &owned_gate(),
+        Custody::Selected(DIRECT),
+        &Ok(None),
+        &queue_row(),
+    );
+    assert_eq!(adoption.permit, None);
+    assert_eq!(
+        evidence_held(&adoption),
+        [AgyHoldReason::Evidence(AgyEvidenceHold::Unverifiable)]
     );
 }

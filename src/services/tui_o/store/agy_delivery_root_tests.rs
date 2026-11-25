@@ -60,11 +60,12 @@ fn journal_binding_is_read_with_its_turn_key() {
         .join("7")
         .join("agy-delivery");
     std::fs::create_dir_all(&dir).unwrap();
+    let fingerprint = [0_u8; 32];
     let journal = serde_json::json!({
         "version": 1,
         "key": {"destination": 7, "id": 100, "nonce": nonce},
         "revision": 1,
-        "fingerprint": [0; 32],
+        "fingerprint": fingerprint,
         "last_seq": 3,
         "receipts": [],
         "footer": null,

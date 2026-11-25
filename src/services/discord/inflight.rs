@@ -144,7 +144,7 @@ use self::rebind_reap::{
 mod agy_end_authority;
 #[cfg(all(test, unix))]
 #[path = "inflight/agy_end_authority_tests.rs"]
-mod agy_end_authority_tests;
+pub(in crate::services::discord) mod agy_end_authority_tests;
 pub(in crate::services::discord) use agy_end_authority::{
     EndAuthority, end_authority, generic_may_end,
 };

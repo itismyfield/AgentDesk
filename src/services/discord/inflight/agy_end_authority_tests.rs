@@ -2,11 +2,11 @@
 
 use std::fs;
 use std::num::NonZeroU64;
+use std::sync::Arc;
 
 use uuid::Uuid;
 
 use super::*;
-use crate::services::discord::health::test_support::age_file;
 use crate::services::discord::inflight::{
     AgyCustodyField, AgyCustodyRoute, AgyProducer, InflightTurnState, TerminalReceiptStamp,
     inflight_state_path, load_channel_inflight_for_probe,
@@ -30,7 +30,7 @@ fn route(channel: u64, nonce: Uuid) -> AgyCustodyRoute {
 }
 
 /// An AGY foreground row; `routed` adds the custody field and nothing else.
-fn row(channel: u64, routed: bool) -> InflightTurnState {
+pub(in crate::services::discord) fn row(channel: u64, routed: bool) -> InflightTurnState {
     let mut row = InflightTurnState::new(
         ProviderKind::Antigravity,
         channel,
@@ -55,7 +55,10 @@ fn row(channel: u64, routed: bool) -> InflightTurnState {
 }
 
 /// Writes the row as the store would and returns its path.
-fn write(root: &std::path::Path, row: &InflightTurnState) -> std::path::PathBuf {
+pub(in crate::services::discord) fn write(
+    root: &std::path::Path,
+    row: &InflightTurnState,
+) -> std::path::PathBuf {
     let path = inflight_state_path(root, &ProviderKind::Antigravity, row.channel_id);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_string_pretty(row).unwrap()).unwrap();
@@ -95,22 +98,28 @@ fn route_that_differs_from_the_row_is_held() {
     assert_eq!(end_authority(&other_parent), EndAuthority::Held);
 }
 
-// A8
+// A8: only an absent field reads as Legacy; a present one, `null` included, is kept and held.
 #[test]
 fn route_none_keeps_row_bytes_and_unknown_route_is_held() {
     let legacy = row(6_325_610_005, false);
     let bytes = serde_json::to_string(&legacy).unwrap();
     assert!(!bytes.contains("agy_custody"));
-
-    let mut nulled: serde_json::Value = serde_json::from_str(&bytes).unwrap();
-    nulled["agy_custody"] = serde_json::Value::Null;
-    let parsed: InflightTurnState = serde_json::from_value(nulled).unwrap();
-    assert!(parsed.agy_custody.is_none());
+    let parsed: InflightTurnState = serde_json::from_str(&bytes).unwrap();
+    assert_eq!(end_authority(&parsed), EndAuthority::Legacy);
     assert_eq!(serde_json::to_string(&parsed).unwrap(), bytes);
 
     let routed = row(6_325_610_006, true);
+    let parsed: InflightTurnState =
+        serde_json::from_str(&serde_json::to_string(&routed).unwrap()).unwrap();
+    assert_eq!(end_authority(&parsed), EndAuthority::Agy);
+    let Some(AgyCustodyField::Route(valid)) = routed.agy_custody.clone() else {
+        panic!("routed fixture");
+    };
+    let mut next_version = serde_json::to_value(valid).unwrap();
+    next_version["v"] = serde_json::json!(2);
     for unknown in [
-        serde_json::json!({"v": 2, "producer": "print"}),
+        serde_json::Value::Null,
+        next_version,
         serde_json::json!("not a route"),
     ] {
         let mut value = serde_json::to_value(&routed).unwrap();
@@ -122,7 +131,7 @@ fn route_none_keeps_row_bytes_and_unknown_route_is_held() {
         ));
         assert_eq!(end_authority(&parsed), EndAuthority::Held);
         let kept = serde_json::to_value(&parsed).unwrap();
-        assert_eq!(kept["agy_custody"], unknown);
+        assert_eq!(kept.get("agy_custody"), Some(&unknown));
     }
 }
 
@@ -174,22 +183,6 @@ fn generation_invalidation_keeps_route_row() {
             .any(|(channel, _)| *channel == legacy.channel_id)
     );
     assert!(!legacy_path.exists());
-}
-
-// B2 the boot reaper's stale verdict, read through the same classification
-#[test]
-fn stale_classification_keeps_route_row() {
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    let root = inflight_root();
-    let routed = row(6_325_610_011, true);
-    age_file(&write(&root, &routed), 3_600);
-    let legacy = row(6_325_610_012, false);
-    age_file(&write(&root, &legacy), 3_600);
-
-    let kept = load_channel_inflight_for_probe(&ProviderKind::Antigravity, routed.channel_id);
-    assert!(matches!(kept, Ok(Some(_))));
-    let hidden = load_channel_inflight_for_probe(&ProviderKind::Antigravity, legacy.channel_id);
-    assert!(matches!(hidden, Ok(None)));
 }
 
 // B4, B4'
@@ -259,4 +252,68 @@ async fn next_admission_never_settles_a_marked_route_row() {
     .await;
     assert!(!settled);
     assert!(path.exists());
+}
+
+async fn outcome(pool: &sqlx::PgPool, channel: u64) -> Option<String> {
+    let sql =
+        "SELECT terminal_outcome FROM turns WHERE turn_id = $1 AND terminal_outcome IS NOT NULL";
+    let query = sqlx::query_scalar::<_, String>(sql).bind(format!("discord:{channel}:{MESSAGE}"));
+    query.fetch_optional(pool).await.unwrap()
+}
+
+// A forced stop on a runtime with no live turn keeps a custody row: no Cancelled receipt, no delete.
+#[tokio::test(flavor = "current_thread")]
+async fn forced_stop_keeps_custody_rows_and_records_no_receipt_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let mut unreadable = row(6_325_610_019, false);
+    unreadable.agy_custody = Some(AgyCustodyField::Unreadable(serde_json::json!({"v": 2})));
+    let rows = [
+        (row(6_325_610_018, true), true),
+        (unreadable, true),
+        (row(6_325_610_020, false), false),
+    ];
+    let mut shared = crate::services::discord::make_shared_data_for_tests();
+    Arc::get_mut(&mut shared).unwrap().pg_pool = Some(pool.clone());
+    shared.settings.write().await.allowed_channel_ids =
+        rows.iter().map(|(state, _)| state.channel_id).collect();
+    let registry = crate::services::discord::health::HealthRegistry::new();
+    registry.register("antigravity".into(), shared).await;
+    for (state, custody) in rows {
+        let channel = state.channel_id;
+        let path = write(&inflight_root(), &state);
+        let before = fs::read(&path).ok();
+        let stop = crate::services::discord::health::force_kill_provider_channel_runtime;
+        let channel_id = poise::serenity_prelude::ChannelId::new(channel);
+        let stopped = stop(
+            &registry,
+            "antigravity",
+            channel_id,
+            "custody",
+            "custody_test",
+        )
+        .await;
+        let cleared = crate::services::discord::health::InflightDisposition::Cleared;
+        let cleared = stopped.unwrap().inflight == cleared;
+        if !custody {
+            assert_eq!((path.exists(), cleared), (false, true));
+            assert_eq!(outcome(&pool, channel).await.as_deref(), Some("cancelled"));
+            continue;
+        }
+        assert_eq!(
+            (fs::read(&path).ok(), cleared),
+            (before.clone(), false),
+            "{channel}"
+        );
+        assert_eq!(outcome(&pool, channel).await, None, "{channel}");
+        // The generic settle every other end uses neither records nor marks it either.
+        let failed = crate::db::turns::TerminalOutcome::Failed;
+        let settle = crate::services::discord::receipt_settle::record_or_stamp;
+        assert!(!settle(Some(&pool), &state, failed).await, "{channel}");
+        assert_eq!(fs::read(&path).ok(), before, "{channel}");
+        assert_eq!(outcome(&pool, channel).await, None, "{channel}");
+    }
+    pool.close().await;
+    db.drop().await;
 }

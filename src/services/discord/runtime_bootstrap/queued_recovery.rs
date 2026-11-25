@@ -6,6 +6,9 @@ pub(super) use native_input::prepare_native_boot;
 
 mod agy_shadow;
 
+#[cfg(all(test, unix))]
+#[path = "queued_recovery_agy_custody_tests.rs"]
+mod agy_custody_tests;
 #[cfg(test)]
 #[path = "queued_recovery_s2a_tests.rs"]
 mod s2a_tests;
