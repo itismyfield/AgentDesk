@@ -87,3 +87,6 @@ pub(super) async fn observe(http: &Http, provider: &ProviderKind) {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod custody_tests;

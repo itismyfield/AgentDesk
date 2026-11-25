@@ -229,3 +229,6 @@ fn numeric_children(dir: &Path) -> io::Result<Vec<u64>> {
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(all(test, unix))]
+mod slot_tests;

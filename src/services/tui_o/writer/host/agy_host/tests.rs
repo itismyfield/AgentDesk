@@ -46,10 +46,13 @@ fn agy_shadow_replays_only_committed_prefix_and_canonical_units() {
     spool.delta("preview").unwrap();
     let gate = owned_gate();
     let host = start(root.path(), &gate);
-    let (ready, pending) = host.adopt(&BTreeMap::new(), true).unwrap();
-    assert_eq!(ready, None);
+    let first = host
+        .adopt(&BTreeMap::new(), true, &BTreeMap::new())
+        .unwrap();
+    assert_eq!(first.permit, None);
+    let pending = first.custody.turns;
     assert_eq!(pending[0].outcome, AgyOutcome::Pending);
-    let previous = BTreeMap::from([(MESSAGE, pending[0].frontier.clone())]);
+    let previous = BTreeMap::from([(AgySlot::Discord(MESSAGE), pending[0].frontier.clone())]);
 
     let body = "🧪\n".repeat(1_500);
     spool.done(conversation, &body).unwrap();
@@ -59,8 +62,9 @@ fn agy_shadow_replays_only_committed_prefix_and_canonical_units() {
         .unwrap()
         .write_all(b"{\"partial\":")
         .unwrap();
-    let (ready, adopted) = host.adopt(&previous, true).unwrap();
-    assert_eq!(ready.unwrap().target, TARGET);
+    let second = host.adopt(&previous, true, &BTreeMap::new()).unwrap();
+    assert_eq!(second.permit.unwrap().target, TARGET);
+    let adopted = second.custody.turns;
     let AgyOutcome::Sealed(seal) = &adopted[0].outcome else {
         panic!("missing seal")
     };
@@ -81,22 +85,23 @@ fn agy_shadow_rejects_parent_conflict_prefix_shrink_and_segment_replacement() {
     let root = tempfile::tempdir().unwrap();
     let mut spool = reserve(root.path(), MESSAGE);
     spool.fail(Failure::Child).unwrap();
-    let found = replay(root.path(), TARGET, MESSAGE, None).unwrap();
+    let slot = AgySlot::Discord(MESSAGE);
+    let found = replay(root.path(), TARGET, &slot, None).unwrap();
     assert_eq!(found.outcome, AgyOutcome::Failed(Failure::Child));
     let wrong_parent = AgyTarget {
         logical_channel: 55,
         ..TARGET
     };
-    assert!(replay(root.path(), wrong_parent, MESSAGE, None).is_err());
+    assert!(replay(root.path(), wrong_parent, &slot, None).is_err());
     let segment = &found.frontier.path;
     let original = fs::read(segment).unwrap();
     fs::write(segment, &original[..original.len() - 1]).unwrap();
-    assert!(replay(root.path(), TARGET, MESSAGE, Some(&found.frontier)).is_err());
+    assert!(replay(root.path(), TARGET, &slot, Some(&found.frontier)).is_err());
     fs::write(segment, &original).unwrap();
     let replacement = segment.with_extension("replacement");
     fs::write(&replacement, &original).unwrap();
     fs::rename(replacement, segment).unwrap();
-    assert!(replay(root.path(), TARGET, MESSAGE, Some(&found.frontier)).is_err());
+    assert!(replay(root.path(), TARGET, &slot, Some(&found.frontier)).is_err());
 }
 
 #[test]
@@ -104,8 +109,19 @@ fn agy_shadow_restart_resolves_one_owner_and_fences_retired_child() {
     let root = tempfile::tempdir().unwrap();
     let gate = owned_gate();
     let first = start(root.path(), &gate);
-    assert!(first.adopt(&BTreeMap::new(), false).unwrap().0.is_none());
-    let first_permit = first.adopt(&BTreeMap::new(), true).unwrap().0.unwrap();
+    let no_evidence = BTreeMap::new();
+    assert!(
+        first
+            .adopt(&BTreeMap::new(), false, &no_evidence)
+            .unwrap()
+            .permit
+            .is_none()
+    );
+    let first_permit = first
+        .adopt(&BTreeMap::new(), true, &no_evidence)
+        .unwrap()
+        .permit
+        .unwrap();
     assert_eq!(first.body_owner(), Some(AgyBodyOwner::Legacy));
 
     gate.uncertain();
@@ -113,7 +129,11 @@ fn agy_shadow_restart_resolves_one_owner_and_fences_retired_child() {
     assert_eq!(first.body_owner(), None);
     gate.reacquired().unwrap();
     let next = start(root.path(), &gate);
-    let permit = next.adopt(&BTreeMap::new(), true).unwrap().0.unwrap();
+    let permit = next
+        .adopt(&BTreeMap::new(), true, &no_evidence)
+        .unwrap()
+        .permit
+        .unwrap();
     assert_ne!(first_permit, permit);
     assert!(
         !next
@@ -139,10 +159,14 @@ fn agy_shadow_restart_resolves_one_owner_and_fences_retired_child() {
         .done(Uuid::new_v4(), "late")
         .unwrap();
     assert!(next.restore(&BTreeMap::new()).is_err());
-    assert!(replay(root.path(), TARGET, MESSAGE + 1, None).is_err());
+    assert!(replay(root.path(), TARGET, &AgySlot::Discord(MESSAGE + 1), None).is_err());
     let restarted = start(root.path(), &owned_gate());
     assert_eq!(restarted.body_owner(), Some(AgyBodyOwner::Retired));
-    assert!(restarted.adopt(&BTreeMap::new(), true).is_err());
+    assert!(
+        restarted
+            .adopt(&BTreeMap::new(), true, &no_evidence)
+            .is_err()
+    );
 }
 
 #[test]
@@ -152,8 +176,18 @@ fn agy_shadow_missing_known_spool_is_debt_after_restart() {
     let gate = owned_gate();
     let host = start(root.path(), &gate);
     let turns = host.restore(&BTreeMap::new()).unwrap();
-    let prior = BTreeMap::from([(MESSAGE, turns[0].frontier.clone())]);
+    let prior = BTreeMap::from([(AgySlot::Discord(MESSAGE), turns[0].frontier.clone())]);
     fs::remove_file(&turns[0].frontier.path).unwrap();
     gate.acquired();
-    assert!(start(root.path(), &gate).adopt(&prior, true).is_err());
+    let adoption = start(root.path(), &gate)
+        .adopt(&prior, true, &BTreeMap::new())
+        .unwrap();
+    assert!(adoption.permit.is_none());
+    assert_eq!(
+        adoption.custody.held,
+        vec![AgyHeldSlot {
+            name: MESSAGE.to_string(),
+            reason: AgyHoldReason::NoCheckpoint,
+        }]
+    );
 }
