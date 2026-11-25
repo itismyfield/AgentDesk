@@ -214,9 +214,8 @@ async fn same_herdr_row_restored_after_restart_finalizes_identically_pg() {
     db.drop().await;
 }
 
-/// A cold start's file is pinned when the reader first opens it at the turn's own record and later
-/// saves never unpin or move it; its own terminal there ends the turn, one in another file later put
-/// at the same path does not.
+/// A cold start's file is pinned at the turn's first own record and no later save unpins or moves
+/// it; only its own terminal in that file ends the turn.
 #[tokio::test(flavor = "current_thread")]
 async fn cold_start_file_is_pinned_at_its_first_own_record_pg() {
     let (_temp, _env, root) = setup();

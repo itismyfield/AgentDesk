@@ -418,9 +418,8 @@ fn an_isolated_scheduled_commit_adds_nothing_to_the_channel_history() {
     }
 }
 
-/// Path B keeps a Herdr row and its mailbox until the row's own end is proven against the current
-/// Bound execution: neither its terminal commit nor its FINISHED mark lets a later synthetic claim
-/// reclaim them. That end clears the row and releases the mailbox once.
+/// Path B keeps a Herdr row, mailbox and token, with no completion mark a later claim reclaims on,
+/// until its own end is proven against the current Bound execution; that end releases them once.
 #[test]
 fn herdr_row_path_b_clear_waits_for_its_own_proven_end_pg() {
     use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, OWN, mark_herdr};
