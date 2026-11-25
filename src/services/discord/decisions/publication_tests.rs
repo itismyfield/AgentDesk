@@ -313,8 +313,9 @@ impl Rig {
     }
 
     async fn count(&self, table: &str) -> i64 {
-        let count = format!("SELECT COUNT(*) FROM {table}");
-        let count = sqlx::query_scalar(&count).fetch_one(&self.pool);
+        // `table` is a test literal naming one of this rig's tables.
+        let count = sqlx::AssertSqlSafe(format!("SELECT COUNT(*) FROM {table}"));
+        let count = sqlx::query_scalar(count).fetch_one(&self.pool);
         count.await.unwrap()
     }
 
