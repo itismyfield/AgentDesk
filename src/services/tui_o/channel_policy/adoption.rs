@@ -355,7 +355,20 @@ impl Candidate {
         origin: &'static std::panic::Location<'static>,
     ) -> BodyClaimed {
         let (state, reason) = self.take(channel);
-        self.count_body(channel, origin, state, reason)
+        let owned = state.owned();
+        let send = (!owned).then(|| {
+            #[cfg(any(test, feature = "test-support"))]
+            Self::before_legacy_started(channel);
+            let seq = self.sends.started.fetch_add(1, Ordering::SeqCst) + 1;
+            self.begin_body_send(seq, origin)
+        });
+        self.record_body_claim(channel, origin, owned, reason);
+        drop(state);
+        BodyClaimed {
+            owned,
+            send,
+            reason,
+        }
     }
 
     pub(in crate::services::tui_o) fn claim_deferred_body(
@@ -364,32 +377,48 @@ impl Candidate {
         origin: &'static std::panic::Location<'static>,
     ) -> Option<BodyClaimed> {
         let state = self.lock();
-        (*state == Adoption::Deferred && self.late_adopt_origin())
-            .then(|| self.count_body(channel, origin, state, ClaimReason::Deferred))
+        if *state != Adoption::Deferred || !self.late_adopt_origin() {
+            return None;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        Self::before_legacy_started(channel);
+        let seq = self.sends.started.fetch_add(1, Ordering::SeqCst) + 1;
+        let send = self.begin_body_send(seq, origin);
+        self.record_body_claim(channel, origin, false, ClaimReason::Deferred);
+        drop(state);
+        Some(BodyClaimed {
+            owned: false,
+            send: Some(send),
+            reason: ClaimReason::Deferred,
+        })
     }
 
-    fn count_body(
+    #[cfg(any(test, feature = "test-support"))]
+    fn before_legacy_started(channel: u64) {
+        crate::services::tui_o::writer::activation::test_hook::run(
+            channel,
+            crate::services::tui_o::writer::activation::test_hook::Step::BeforeLegacyStarted,
+        )
+        .expect("Legacy start hook");
+    }
+
+    fn begin_body_send(
+        &self,
+        seq: u64,
+        origin: &'static std::panic::Location<'static>,
+    ) -> LegacySend {
+        self.sends.stages.begin(seq, origin);
+        let sends = Arc::clone(&self.sends);
+        LegacySend { sends, seq }
+    }
+
+    fn record_body_claim(
         &self,
         channel: u64,
         origin: &'static std::panic::Location<'static>,
-        state: MutexGuard<'_, Adoption>,
+        owned: bool,
         reason: ClaimReason,
-    ) -> BodyClaimed {
-        let owned = state.owned();
-        #[cfg(any(test, feature = "test-support"))]
-        if !owned {
-            crate::services::tui_o::writer::activation::test_hook::run(
-                channel,
-                crate::services::tui_o::writer::activation::test_hook::Step::BeforeLegacyStarted,
-            )
-            .expect("Legacy start hook");
-        }
-        let send = (!owned).then(|| {
-            let seq = self.sends.started.fetch_add(1, Ordering::SeqCst) + 1;
-            self.sends.stages.begin(seq, origin);
-            let sends = Arc::clone(&self.sends);
-            LegacySend { sends, seq }
-        });
+    ) {
         let (started, finished) = self.sends();
         let (sent, settled) = self.sends.stages.counts();
         let mark = self.turn_mark();
@@ -398,12 +427,6 @@ impl Candidate {
             mark_used = mark.is_some_and(|m| m.order == self.baseline_order.load(Ordering::SeqCst)),
             mark_seq = mark.map(|m| m.seq), mark_sends = ?mark.map(|m| m.sends),
             "[tui_o] body claim");
-        drop(state);
-        BodyClaimed {
-            owned,
-            send,
-            reason,
-        }
     }
 
     fn take(&self, channel: u64) -> (MutexGuard<'_, Adoption>, ClaimReason) {

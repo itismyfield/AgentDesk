@@ -240,6 +240,15 @@ impl<'a> BodyClaim<'a> {
         let owned = o_keeps_body(self.channel_id, claimed.owned, self.direct);
         Ok(BodyClaimed { owned, ..claimed })
     }
+
+    fn check_body_site(self, site: Option<BodySite>) -> Result<(), IdentityError> {
+        if matches!(self.kind, KindOf::ProcessThread(_))
+            && (self.direct || !matches!(site, Some(BodySite::BridgeHeadless)))
+        {
+            return Err(IdentityError::ChildDeliveryHeld.hold(self.channel_id));
+        }
+        Ok(())
+    }
 }
 
 /// An owned channel's body is O's whatever the caller's gateway. A caller without a direct one
@@ -294,8 +303,9 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
 ) -> Result<(BodySend<T>, Option<LegacySend>), IdentityError> {
     if let Some(claim) = claim {
         super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
+        claim.check_body_site(None)?;
     }
-    let claimed = reserve_body(claim, None)?;
+    let claimed = reserve_body(claim)?;
     if claimed.owned {
         return Ok((BodySend::OwnedByO, None));
     }
@@ -437,8 +447,9 @@ pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T
 ) -> Result<(BodySend<T>, BodyTransport), IdentityError> {
     if let Some(claim) = claim {
         super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
+        claim.check_body_site(Some(site))?;
     }
-    let claimed = reserve_body(claim, Some(site))?;
+    let claimed = reserve_body(claim)?;
     let context = BodyTransport::inherited(site, claimed.send, claimed.reason);
     if claimed.owned {
         return Ok((BodySend::OwnedByO, context));
@@ -447,18 +458,10 @@ pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T
     Ok((BodySend::Sent(sent), context))
 }
 
-fn reserve_body(
-    claim: Option<BodyClaim<'_>>,
-    site: Option<BodySite>,
-) -> Result<BodyClaimed, IdentityError> {
+fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityError> {
     let Some(claim) = claim else {
         return Ok(legacy(ClaimReason::NoClaim));
     };
-    if matches!(claim.kind, KindOf::ProcessThread(_))
-        && (claim.direct || !matches!(site, Some(BodySite::BridgeHeadless)))
-    {
-        return Err(IdentityError::ChildDeliveryHeld.hold(claim.channel_id));
-    }
     let claimed = claim.claim()?;
     #[cfg(test)]
     CLAIMS
