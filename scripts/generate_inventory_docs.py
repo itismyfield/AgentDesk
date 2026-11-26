@@ -114,6 +114,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "krx_db_b_tests.rs": "Test-only host that declares the second slice of KRX db tests calling root-crate items.",
     "krx_db_tests.rs": "Test-only host that declares KRX db tests calling root-crate items, so they leave the KRX crate.",
     "krx_services_tests.rs": "Test-only host that declares KRX services tests (cluster) calling root-crate items, so they leave the KRX crate.",
+    "krx_services_tests/": "Test functions moved out of KRX services test files because they call root-crate items.",
     "krx_session_host_tests.rs": "Test-only host that declares KRX session_host tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_tests.rs": "Test-only host that declares KRX tui_o tests calling root-crate items, so they leave the KRX crate.",
     "krx_tui_o_unix_tests.rs": "Test-only host for KRX tui_o tests originally gated on `cfg(all(test, unix))` that call root-crate items.",
@@ -745,8 +746,12 @@ def _path_attr(code: str, view: str) -> str | None:
     return match.group("path") if match else None
 
 
+_WORKSPACE_LIB_ROOT_RE = re.compile(r"adk_[a-z0-9_]+_lib\.rs")
+
+
 def _file_module_dir(parent: Path) -> Path:
-    if parent.name in {"lib.rs", "main.rs", "mod.rs"}:
+    # Workspace crates build `src/adk_*_lib.rs` as their lib root, so children sit beside it like lib.rs.
+    if parent.name in {"lib.rs", "main.rs", "mod.rs"} or _WORKSPACE_LIB_ROOT_RE.fullmatch(parent.name):
         return parent.parent
     return parent.parent / parent.stem
 

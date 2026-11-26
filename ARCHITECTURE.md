@@ -180,7 +180,6 @@ src/
 │   ├── readers_live_reload_tests.rs
 │   ├── reload_classes.rs
 │   ├── retired_providers.rs
-│   ├── retired_providers_tests.rs
 │   ├── retired_relay_tests.rs
 │   ├── runtime_profile.rs
 │   ├── runtime_root_guard.rs
@@ -621,9 +620,12 @@ src/
 ├── krx_claude_tests/
 │   └── tui_session_launch_tests.rs
 ├── krx_config_tests/
+│   ├── retired_providers_tests.rs
 │   ├── runtime_validation_tests.rs
 │   ├── settings_cli_tests.rs
 │   └── skill_sync_shipped_tree_tests.rs
+├── krx_services_tests/
+│   └── legacy_body_census_entry_tests.rs
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
@@ -4307,6 +4309,8 @@ src/
 │   │   ├── smoke.rs
 │   │   ├── snapshot.rs
 │   │   └── upgrade.rs
+│   ├── provider_teardown/
+│   │   └── test_support.rs
 │   ├── queue/
 │   │   ├── cancel_effects.rs
 │   │   ├── cancel_effects_v2_tests.rs
@@ -4915,6 +4919,8 @@ src/
 │   │   │   │   └── codex.rs
 │   │   │   ├── local_retry/
 │   │   │   │   └── notice_selection.rs
+│   │   │   ├── owed/
+│   │   │   │   └── test_support.rs
 │   │   │   ├── rotation/
 │   │   │   │   ├── archive_eof.rs
 │   │   │   │   ├── archive_eof_tests.rs
@@ -5056,6 +5062,7 @@ src/
 │   │   │   ├── s2a_actor_tests.rs
 │   │   │   ├── scoped_repost_tests.rs
 │   │   │   ├── source_identity_tests.rs
+│   │   │   ├── source_read_support.rs
 │   │   │   ├── source_read_tests.rs
 │   │   │   ├── stall_handoff_tests.rs
 │   │   │   ├── stall_tests.rs
@@ -5124,7 +5131,8 @@ src/
 │   │   │   ├── herdr_resume.rs
 │   │   │   ├── inventory.rs
 │   │   │   ├── inventory_tests.rs
-│   │   │   └── registration.rs
+│   │   │   ├── registration.rs
+│   │   │   └── test_support.rs
 │   │   ├── binding_events/
 │   │   │   ├── codex/
 │   │   │   │   ├── commit/
@@ -5570,6 +5578,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
+| `src/krx_services_tests/` | Test functions moved out of KRX services test files because they call root-crate items. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
