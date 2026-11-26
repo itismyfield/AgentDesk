@@ -846,7 +846,7 @@ E1~E93 모두 처분했다. S4로 남기는 것은 E20·E87의 Codex 신규 자�
 |---|---|---|---|---|
 | 1 | S2a 첫 커밋 | clear_teardown.rs, resume_fence.rs, turn_host.rs, effort.rs, tui_passthrough.rs | 5파일, +70~120 | 요청된 세 수리와 필수 뮤턴트 |
 | 2 | S2a 나머지: 현재 소비자·판정 정합 | DB hosted_execution.rs; thread_host.rs, host_decision.rs; 신규 session_host/thread_launch.rs; typed 생성 gate와 기존 Claude/Codex 호출부; channel_policy.rs, children.rs, cutover.rs; 공통 consent endpoint | 첫 커밋 포함 약 22~26파일, +350~600 | 현재 관측을 공통화. 새 fresh 분기는 아직 켜지 않음 |
-| 3 | S2b: 부팅·복구·해제 | runtime_bootstrap.rs, runtime_bootstrap/o_writer_host.rs; herdr_reader.rs, 신규 herdr_reader/thread_lifecycle.rs; herdr_source.rs; herdr_terminate.rs, 신규 herdr_terminate/idle.rs; auto_queue/runtime.rs; 필요한 DB 후보 조회 | 약 9~12파일, +350~600 | 실제 시작 gate와 주기 생산 caller에 연결. 신규 활성화 없음 |
+| 3 | S2b: 부팅·복구·해제 | runtime_bootstrap.rs, runtime_bootstrap/o_writer_host.rs; herdr_reader.rs, 신규 herdr_reader/thread_lifecycle.rs; herdr_source.rs; herdr_terminate.rs, 신규 herdr_terminate/idle.rs; auto_queue/runtime.rs; 필요한 DB 후보 조회 | 약 9~12파일, +350~600 | 실제 시작 gate와 주기 생산 caller에 연결. 신규 활성화 없음. T-S2-9 전체는 S2b-2로 이관한다. Notice POST 보류는 #8437 착지 뒤, owner별 seed 통합은 S2a-2의 owner 키 착지 뒤에 구현한다. |
 | 4 | S2c: 배치·첫 입력·활성화 | turn_host/`thread_launch`; herdr_launch.rs, prepared.rs, policy.rs, unplaced.rs; Herdr model.rs, contract.rs, launch_host.rs; herdr_gate residue 추출; Claude herdr_turn·`handoff`·`pending`·`first_input`; claude_thread.rs; 두 dispatch/handoff 전달부; redirect·headless admission | 약 25~29파일, +650~1100 | tab create부터 새 fresh 판정까지 원자 착지. 유일한 활성화 조각. T-S2-10 단언 (5)와 S2a 첫 커밋 계약 ③(1121i P2-1)은 S2c로 이관한다. Codex 자식의 busy continuation과 idle 다음 입력에서 같은 native session을 Herdr로 재개하고 legacy driver 진입 0을 확인한 뒤, S2a-1의 임시 자식 effort 거절을 제거한다. |
 
 
