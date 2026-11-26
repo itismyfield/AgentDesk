@@ -96,7 +96,7 @@ pub(super) async fn get_in(
 
 // Host initiation and command decisions serialize on the same campaign row. The caller
 // keeps this transaction until it finishes using the snapshot at the host gate.
-pub(crate) async fn get_for_worker(
+pub async fn get_for_worker(
     tx: &mut Transaction<'_, Postgres>,
     id: &str,
 ) -> StoreResult<Option<CampaignState>> {
@@ -140,7 +140,7 @@ pub async fn revisions(pool: &PgPool, id: &str) -> StoreResult<Vec<DefinitionRev
 }
 
 #[derive(Serialize)]
-pub(crate) struct ApprovalOpeningRequest<'a> {
+pub struct ApprovalOpeningRequest<'a> {
     pub campaign_id: &'a str,
     pub event_sequence: u64,
     pub binding: &'a ApprovalBinding,
@@ -148,7 +148,7 @@ pub(crate) struct ApprovalOpeningRequest<'a> {
 
 pub(crate) type ApprovalOpeningTimes = BTreeMap<String, BTreeMap<String, DateTime<Utc>>>;
 
-pub(crate) async fn approval_opening_times(
+pub async fn approval_opening_times(
     pool: &PgPool,
     requests: &[ApprovalOpeningRequest<'_>],
 ) -> StoreResult<ApprovalOpeningTimes> {

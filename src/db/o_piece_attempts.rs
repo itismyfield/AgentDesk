@@ -14,7 +14,7 @@ use super::o_piece_delivery::{
 pub(crate) const SLOTS: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AttemptResult {
+pub enum AttemptResult {
     Created,
     Rejected,
     Uncertain,
@@ -46,13 +46,13 @@ impl AttemptResult {
 
 /// Why a further send is asked for.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Intent {
+pub enum Intent {
     AutoReconfirm,
     OperatorResume { approval_id: String },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AttemptKind {
+pub enum AttemptKind {
     Original,
     /// A counted send made before the piece was admitted.
     PriorRetry,
@@ -84,13 +84,13 @@ fn parse<T: Copy>(all: &[T], name: fn(T) -> &'static str, raw: &str) -> Result<T
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AttemptRow {
-    pub(crate) slot: u8,
+pub struct AttemptRow {
+    pub slot: u8,
     pub(crate) kind: AttemptKind,
-    pub(crate) result: Option<AttemptResult>,
+    pub result: Option<AttemptResult>,
 }
 
-pub(crate) struct GrantRequest<'a> {
+pub struct GrantRequest<'a> {
     pub(crate) key: &'a PieceKey,
     /// The row revision the caller's evidence was read at; any later change refuses the grant.
     pub(crate) expected_revision: i64,
@@ -104,7 +104,7 @@ pub(crate) struct GrantRequest<'a> {
 /// Proof that one grant call consumed `slot`. Only [`grant`] builds it, never from a read, and it
 /// is not `Clone`, so a lost commit reply or a re-read cannot mint a second one.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SlotGrant {
+pub struct SlotGrant {
     key: PieceKey,
     slot: u8,
     grant_id: Uuid,
@@ -116,7 +116,7 @@ impl SlotGrant {
         &self.key
     }
 
-    pub(crate) fn slot(&self) -> u8 {
+    pub fn slot(&self) -> u8 {
         self.slot
     }
 
@@ -126,7 +126,7 @@ impl SlotGrant {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum GrantOutcome {
+pub enum GrantOutcome {
     Granted(SlotGrant),
     NotAdmitted,
     /// A receipt exists; nothing more is sent.
@@ -145,10 +145,7 @@ pub(crate) enum GrantOutcome {
 
 /// Consumes the next slot under the piece's row lock, or says why not. PostgreSQL failure is an
 /// error, never a grant.
-pub(crate) async fn grant(
-    pool: &PgPool,
-    request: GrantRequest<'_>,
-) -> Result<GrantOutcome, LedgerError> {
+pub async fn grant(pool: &PgPool, request: GrantRequest<'_>) -> Result<GrantOutcome, LedgerError> {
     let key = request.key;
     let mut tx = pool.begin().await?;
     let lock =
@@ -221,7 +218,7 @@ pub(crate) async fn grant(
 
 /// Records how the granted send ended. `None` when the slot was already settled, by this grant or
 /// by another holder after its deadline; the slot stays spent either way.
-pub(crate) async fn settle(
+pub async fn settle(
     pool: &PgPool,
     grant: &SlotGrant,
     result: AttemptResult,
@@ -330,10 +327,7 @@ async fn attempts_in(
 }
 
 /// The piece's consumed slots in order.
-pub(crate) async fn attempts(
-    pool: &PgPool,
-    key: &PieceKey,
-) -> Result<Vec<AttemptRow>, LedgerError> {
+pub async fn attempts(pool: &PgPool, key: &PieceKey) -> Result<Vec<AttemptRow>, LedgerError> {
     let mut tx = pool.begin().await?;
     let rows = attempts_in(&mut tx, key).await?;
     tx.commit().await?;

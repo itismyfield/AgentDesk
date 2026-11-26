@@ -684,7 +684,7 @@ fn c132_early_cancel_never_binds_or_announces_runtime() {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod regression_tests {
+pub mod regression_tests {
     use super::*;
     pub(super) fn c132_early_cancel_never_binds_or_announces_runtime() {
         use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, SESSION};
@@ -759,7 +759,7 @@ pub(crate) mod regression_tests {
         drop(root_guard);
     }
 
-    pub(crate) fn regression_attached(
+    pub fn regression_attached(
         rig: &crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
         logical: &str,
         transcript: &Path,

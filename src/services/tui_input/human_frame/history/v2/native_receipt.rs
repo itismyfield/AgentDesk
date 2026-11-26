@@ -1,7 +1,7 @@
 //! Membership confirms delivery only; terminal evidence still needs its separate result CAS.
 use super::*;
 impl Registry {
-    pub(crate) fn try_native_receipt(
+    pub fn try_native_receipt(
         &self,
         namespace: &str,
         ticket: &Ticket,

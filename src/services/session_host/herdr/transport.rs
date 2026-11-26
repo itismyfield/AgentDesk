@@ -19,7 +19,7 @@ use super::wire::{self, HerdrFraming, LineJsonFraming, MAX_FRAME_BYTES};
 use crate::config::test_instance;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HerdrSocketConfig {
+pub struct HerdrSocketConfig {
     /// Per read or write on the socket.
     pub io_timeout: Duration,
     /// Total budget for one read-only call, retries included.
@@ -40,7 +40,7 @@ impl Default for HerdrSocketConfig {
 }
 
 /// Names the process that accepted a connection: its pid and start.
-pub(crate) type PeerReader =
+pub type PeerReader =
     Box<dyn Fn(&UnixStream) -> Result<(u32, ProcessStart), RestoreUnverified> + Send + Sync>;
 
 /// One dialled connection and the server it reached, read before anything is written.
@@ -50,7 +50,7 @@ struct Dialled {
     server: Result<(ServerWitness, SystemTime), RestoreUnverified>,
 }
 
-pub(crate) struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
+pub struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
     socket_path: PathBuf,
     config: HerdrSocketConfig,
     framing: F,

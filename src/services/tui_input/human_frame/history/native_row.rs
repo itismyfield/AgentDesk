@@ -1,13 +1,13 @@
 use super::*;
 
-pub(crate) struct NativeRow {
-    pub(crate) record: serde_json::Value,
-    pub(crate) file: [u64; 2],
-    pub(crate) range: (u64, u64),
-    pub(crate) digest: String,
+pub struct NativeRow {
+    pub record: serde_json::Value,
+    pub file: [u64; 2],
+    pub range: (u64, u64),
+    pub digest: String,
 }
 
-pub(crate) fn read_native_row(
+pub fn read_native_row(
     path: &Path,
     source: [u64; 2],
     offset: u64,
@@ -53,7 +53,7 @@ pub(crate) fn read_native_row(
     })
 }
 
-pub(crate) fn native_prompt(record: &serde_json::Value, sid: &str) -> Option<String> {
+pub fn native_prompt(record: &serde_json::Value, sid: &str) -> Option<String> {
     let uuid = record["uuid"].as_str()?;
     if sid.is_empty()
         || record["sessionId"] != sid

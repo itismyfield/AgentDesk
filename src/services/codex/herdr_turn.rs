@@ -3,10 +3,10 @@
 //! a Bound pane takes each later prompt once; owned delivery also permits a person's draft.
 
 #[cfg(unix)]
-pub(crate) mod busy;
+pub mod busy;
 mod first_input;
 #[cfg(unix)]
-pub(crate) mod restart_intent;
+pub mod restart_intent;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::{pending_lookup_probe, submit_for_test, submit_owned_for_test};
 
@@ -68,7 +68,7 @@ const SOURCE_WAIT: Duration = Duration::from_secs(60);
 const SOURCE_WAIT: Duration = Duration::from_secs(3);
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
-pub(crate) struct CodexHerdrTurn<'a> {
+pub struct CodexHerdrTurn<'a> {
     pub pool: &'a PgPool,
     pub owner: HostedOwner,
     pub channel_id: u64,
@@ -90,7 +90,7 @@ pub(crate) struct CodexHerdrTurn<'a> {
 }
 
 /// What a turn takes from its caller: the launch host and the source attach.
-pub(crate) trait CodexHerdrPorts {
+pub trait CodexHerdrPorts {
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>>;
     /// `Ok(bound)` once the launch's own hook source is confirmed; `Err` attached nothing.
     fn attach(
@@ -138,7 +138,7 @@ fn refused(why: PromptRefused) -> String {
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
-pub(crate) fn execute(
+pub fn execute(
     turn: CodexHerdrTurn<'_>,
     ports: &dyn CodexHerdrPorts,
     sender: Sender<StreamMessage>,
@@ -189,7 +189,7 @@ pub(crate) fn execute(
     result
 }
 
-fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+pub fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     let tools = Some(turn.allowed_tools);
     let instructions = super::compose_codex_developer_instructions(turn.system_prompt, tools);
     CodexLaunchOptions::new("")
@@ -263,7 +263,7 @@ fn fresh_launch(
 
 /// The pane command of `prepared`: a resume names the exact thread its incarnation expects, a
 /// fresh launch names none. Its options are kept before the Pending row, for each later prompt.
-fn pane_command(
+pub fn pane_command(
     turn: &CodexHerdrTurn<'_>,
     prepared: &PreparedIncarnation,
     (launchable, overlay, home): (
@@ -434,7 +434,7 @@ fn owned_composer(
 }
 
 /// What execution `nonce` keeps of the options it was launched with.
-fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
+pub fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
     format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
 }
 
@@ -488,7 +488,7 @@ pub(crate) fn options_kept_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> R
 }
 
 /// Refuses a prompt whose launch options are not the ones execution `nonce` was launched with.
-fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+pub fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
     let logical = turn.owner.logical_key.as_str();
     let expected = kept_options(nonce, &launch_options(turn));
     match read_codex_tui_launch_options_fingerprint(logical) {
@@ -523,7 +523,7 @@ fn release_closed_hold(logical: &str, nonce: &str) {
 
 /// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_first_prompt_for_tests(
+pub fn owned_first_prompt_for_tests(
     turn: &CodexHerdrTurn<'_>,
     record: &HostedExecution,
     lineage: crate::services::claude_tui::owner_input::Lineage,
@@ -535,7 +535,7 @@ pub(crate) fn owned_first_prompt_for_tests(
 /// A test's prepared Codex tmux argv create handed to the owner hook on this thread; it lives here
 /// because the tmux launch module is private to Codex.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_spawn_for_tests(
+pub fn owned_spawn_for_tests(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     at: (&str, &str),
     prompt: &str,

@@ -1,13 +1,8 @@
 use std::num::NonZeroU64;
 use std::sync::Arc;
-use std::time::Instant;
 
 use super::{DiscordPort, GatewayPort, PostOutcome, confirm, serenity};
-use crate::services::discord::{self, SharedData, inflight};
-use crate::services::provider::ProviderKind;
-use crate::services::tui_o::writer::agy_delivery::{
-    Effect, Evidence, Piece, Post, Projection, Transport, TurnLease, hash,
-};
+use crate::services::tui_o::writer::agy_delivery::{Evidence, Piece, Post, Transport, hash};
 use serenity::{ChannelId, CreateEmbed, CreateEmbedFooter, CreateMessage, GetMessages, Nonce};
 
 #[derive(Clone)]
@@ -89,73 +84,94 @@ fn correlation(message: &serenity::Message) -> Option<&str> {
     Some(&footer.text)
 }
 
-impl Projection for Arc<SharedData> {
-    async fn apply(&self, lease: TurnLease, effect: Effect) -> Result<(), String> {
-        let channel = ChannelId::from(lease.key.destination);
-        let id = lease.key.id.get();
-        let nonce = lease.key.nonce.to_string();
-        let provider = ProviderKind::Antigravity;
-        match effect {
-            Effect::ClearInflight => {
-                use inflight::GuardedClearOutcome::*;
-                let Some(row) =
-                    inflight::load_inflight_state_read_only_result(&provider, channel.get())?
-                else {
-                    return Ok(());
-                };
-                if row.effective_finalizer_turn_id() != id
-                    || row.turn_nonce.as_deref() != Some(&nonce)
-                {
-                    return Ok(());
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use projection::AgyProjection;
+
+// No production caller drives the dormant agy delivery yet; only its tests build the projection.
+#[cfg(any(test, feature = "test-support"))]
+mod projection {
+    use std::sync::Arc;
+    use std::time::Instant;
+
+    use super::serenity::ChannelId;
+    use crate::services::discord::{self, SharedData, inflight};
+    use crate::services::provider::ProviderKind;
+    use crate::services::tui_o::writer::agy_delivery::{Effect, Projection, TurnLease};
+
+    /// SharedData as the dormant agy delivery projection; a local wrapper because the trait lives in the runtime crate.
+    pub(crate) struct AgyProjection(pub(crate) Arc<SharedData>);
+
+    impl Projection for AgyProjection {
+        async fn apply(&self, lease: TurnLease, effect: Effect) -> Result<(), String> {
+            let shared = &self.0;
+            let channel = ChannelId::from(lease.key.destination);
+            let id = lease.key.id.get();
+            let nonce = lease.key.nonce.to_string();
+            let provider = ProviderKind::Antigravity;
+            match effect {
+                Effect::ClearInflight => {
+                    use inflight::GuardedClearOutcome::*;
+                    let Some(row) =
+                        inflight::load_inflight_state_read_only_result(&provider, channel.get())?
+                    else {
+                        return Ok(());
+                    };
+                    if row.effective_finalizer_turn_id() != id
+                        || row.turn_nonce.as_deref() != Some(&nonce)
+                    {
+                        return Ok(());
+                    }
+                    let result = inflight::clear_inflight_state_for_captured_episode(
+                        &provider,
+                        channel.get(),
+                        &inflight::InflightTurnIdentity::from_state(&row),
+                        Some(&nonce),
+                    );
+                    match result {
+                        Cleared | Missing | UserMsgMismatch => Ok(()),
+                        other => Err(format!("agy inflight projection held ({other:?})")),
+                    }
                 }
-                let result = inflight::clear_inflight_state_for_captured_episode(
-                    &provider,
-                    channel.get(),
-                    &inflight::InflightTurnIdentity::from_state(&row),
-                    Some(&nonce),
-                );
-                match result {
-                    Cleared | Missing | UserMsgMismatch => Ok(()),
-                    other => Err(format!("agy inflight projection held ({other:?})")),
+                Effect::ReleaseLease => {
+                    let cutoff = Instant::now();
+                    let Some(mailbox) = shared.mailbox_peek(channel) else {
+                        return Ok(());
+                    };
+                    let snapshot = mailbox.snapshot().await;
+                    if snapshot.active_user_message_id.map(|id| id.get()) != Some(id)
+                        || snapshot.active_turn_nonce.as_deref() != Some(&nonce)
+                        || snapshot.cancel_token.is_none()
+                    {
+                        return Ok(());
+                    }
+                    let released = discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+                        shared, &provider, channel, lease.key.id.into(), Some(nonce.clone()), cutoff,
+                        snapshot.cancel_token,
+                    ).await;
+                    if released.removed_token.is_none() || released.persistence_error.is_some() {
+                        return Err("agy mailbox release did not confirm the turn".into());
+                    }
+                    discord::saturating_decrement_global_active(shared);
+                    let key = discord::turn_finalizer::TurnKey::new(
+                        channel,
+                        id,
+                        shared.restart.current_generation,
+                    )
+                    .with_episode_nonce(Some(&nonce));
+                    shared
+                        .turn_finalizer
+                        .note_mailbox_released(key, shared.clone());
+                    Ok(())
                 }
-            }
-            Effect::ReleaseLease => {
-                let cutoff = Instant::now();
-                let Some(mailbox) = self.mailbox_peek(channel) else {
-                    return Ok(());
-                };
-                let snapshot = mailbox.snapshot().await;
-                if snapshot.active_user_message_id.map(|id| id.get()) != Some(id)
-                    || snapshot.active_turn_nonce.as_deref() != Some(&nonce)
-                    || snapshot.cancel_token.is_none()
-                {
-                    return Ok(());
+                Effect::WakeQueue => {
+                    discord::schedule_deferred_idle_queue_kickoff(
+                        shared.clone(),
+                        provider,
+                        channel,
+                        "agy_done",
+                    );
+                    Ok(())
                 }
-                let released = discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
-                    self, &provider, channel, lease.key.id.into(), Some(nonce.clone()), cutoff,
-                    snapshot.cancel_token,
-                ).await;
-                if released.removed_token.is_none() || released.persistence_error.is_some() {
-                    return Err("agy mailbox release did not confirm the turn".into());
-                }
-                discord::saturating_decrement_global_active(self);
-                let key = discord::turn_finalizer::TurnKey::new(
-                    channel,
-                    id,
-                    self.restart.current_generation,
-                )
-                .with_episode_nonce(Some(&nonce));
-                self.turn_finalizer.note_mailbox_released(key, self.clone());
-                Ok(())
-            }
-            Effect::WakeQueue => {
-                discord::schedule_deferred_idle_queue_kickoff(
-                    self.clone(),
-                    provider,
-                    channel,
-                    "agy_done",
-                );
-                Ok(())
             }
         }
     }
@@ -164,9 +180,11 @@ impl Projection for Arc<SharedData> {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use crate::services::discord;
     use crate::services::discord::turn_finalizer::tests::with_isolated_runtime_root;
     use crate::services::provider::CancelToken;
     use crate::services::tui_o::store::agy_delivery::TurnKey;
+    use crate::services::tui_o::writer::agy_delivery::{Effect, TurnLease};
     use poise::serenity_prelude::{MessageId, UserId};
     use std::sync::atomic::Ordering;
 
@@ -193,14 +211,20 @@ mod tests {
                     nonce: token_a.turn_nonce().unwrap().parse().unwrap(),
                 },
             };
-            shared.apply(lease, Effect::ReleaseLease).await.unwrap();
+            AgyProjection(shared.clone())
+                .apply(lease, Effect::ReleaseLease)
+                .await
+                .unwrap();
             assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 0);
             assert!(
                 discord::mailbox_try_start_turn(&shared, channel, token_b.clone(), user, msg_b)
                     .await
             );
             discord::increment_global_active(&shared, "agy fixture b");
-            shared.apply(lease, Effect::ReleaseLease).await.unwrap();
+            AgyProjection(shared.clone())
+                .apply(lease, Effect::ReleaseLease)
+                .await
+                .unwrap();
             assert_eq!(shared.restart.global_active.load(Ordering::Relaxed), 1);
             let live = shared.mailbox_peek(channel).unwrap().snapshot().await;
             assert_eq!(live.active_user_message_id, Some(msg_b));

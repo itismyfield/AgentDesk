@@ -7,7 +7,7 @@ use crate::services::session_host::{HostedRuntimeLocator, InteractiveSessionHost
 mod contract;
 
 use contract::TerminateProof;
-pub(crate) use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
+pub use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
 
 /// The execution-identity owner's comparison for the target, as it returned it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl HostTerminateWarrant<'_> {
     }
 }
 
-pub(crate) fn terminate_hosted_session(
+pub fn terminate_hosted_session(
     host: &dyn InteractiveSessionHost,
     warrant: HostTerminateWarrant<'_>,
 ) -> HostTerminateEffect {
@@ -52,12 +52,12 @@ pub(crate) fn terminate_hosted_session(
 
 // Its only production caller is the operator termination service.
 #[cfg(unix)]
-pub(crate) mod herdr_terminate {
+pub mod herdr_terminate {
     use crate::services::session_host::HerdrTarget;
 
     mod contract;
 
-    pub(crate) use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
+    pub use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
 
     impl<'a> OperatorTerminateWarrant<'a> {
         #[cfg(any(test, feature = "test-support"))]
@@ -67,7 +67,7 @@ pub(crate) mod herdr_terminate {
                 fence: None,
             }
         }
-        pub(crate) fn issue_fenced(
+        pub fn issue_fenced(
             target: HerdrTarget,
             fence: &'a crate::services::session_host::TerminationFence,
         ) -> Self {
@@ -79,9 +79,7 @@ pub(crate) mod herdr_terminate {
     }
 
     /// Consumes the operator proof; no locator or cancel verdict can replace it.
-    pub(crate) fn terminate_herdr_once(
-        warrant: OperatorTerminateWarrant<'_>,
-    ) -> HerdrTerminateResult {
+    pub fn terminate_herdr_once(warrant: OperatorTerminateWarrant<'_>) -> HerdrTerminateResult {
         use super::{HostTerminateEffect, HostTerminateWarrant, terminate_hosted_session};
         use crate::services::session_host::{HostKind, host_for};
 

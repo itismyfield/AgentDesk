@@ -64,7 +64,7 @@ pub(crate) fn clear_launch_provenance_for_tmux(tmux_session_name: &str) {
 /// plus a non-empty model therefore permits only the conservative
 /// maximum-window trigger bound. `None` remains reserved for panes without
 /// managed launch provenance or usable model evidence.
-pub(crate) fn context_window_for_turn(
+pub fn context_window_for_turn(
     tmux_session_name: &str,
     current_model: Option<&str>,
 ) -> Option<u64> {

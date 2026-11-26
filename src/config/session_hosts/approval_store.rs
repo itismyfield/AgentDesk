@@ -6,13 +6,13 @@ use super::BootSessionHosts;
 use super::projection::{self, Decoded, Projection};
 use crate::services::discord::runtime_store;
 
-pub(crate) enum Loaded {
+pub enum Loaded {
     Missing,
     Known(BootSessionHosts, Option<&'static str>),
     Unavailable(&'static str),
 }
 
-pub(crate) trait ApprovalStore {
+pub trait ApprovalStore {
     fn load(&self) -> Loaded;
     fn save(&self, hosts: &BootSessionHosts) -> Result<(), String>;
     fn recovery_action(&self, reason: &str, stopped: bool) -> String {
@@ -28,7 +28,7 @@ pub(crate) trait ApprovalStore {
     }
 }
 
-pub(crate) struct FileApprovalStore(pub(crate) Option<PathBuf>);
+pub struct FileApprovalStore(pub(crate) Option<PathBuf>);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +38,7 @@ struct PendingMarker {
 }
 
 impl FileApprovalStore {
-    pub(crate) fn runtime() -> Self {
+    pub fn runtime() -> Self {
         Self(crate::config::runtime_root().map(|root| root.join("runtime/session_hosts_approval")))
     }
 

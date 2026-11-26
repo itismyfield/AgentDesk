@@ -21,7 +21,7 @@ struct CachedProbe {
 static CACHE: LazyLock<RwLock<BTreeMap<String, CachedProbe>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-pub(crate) fn diagnostics(
+pub fn diagnostics(
     config: &crate::config::ClusterConfig,
     node: &Value,
     local: Option<&str>,

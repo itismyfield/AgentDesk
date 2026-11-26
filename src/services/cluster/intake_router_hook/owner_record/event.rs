@@ -7,12 +7,12 @@ use crate::services::message_outbox::{
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
-pub(crate) const SOURCE: &str = "routing_transition";
+pub const SOURCE: &str = "routing_transition";
 /// Notices post as the notify utility bot, which carries non-turn provenance.
 pub(crate) const BOT: &str = "notify";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Event {
+pub struct Event {
     pub generation: i64,
     pub from: String,
     pub to: String,
@@ -200,11 +200,11 @@ pub(crate) async fn reserve_on_tx(
 /// Discord honours an enforced nonce only briefly; an older Posting attempt is never reposted.
 const NONCE_RETRY_SECONDS: f64 = 120.0;
 /// A dead worker's routing claim and a failed POST both come back inside that window.
-pub(crate) const RECLAIM_SECONDS: i64 = 45;
-pub(crate) const RETRY_SECONDS: i64 = 15;
+pub const RECLAIM_SECONDS: i64 = 45;
+pub const RETRY_SECONDS: i64 = 15;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Step {
+pub enum Step {
     Post(Box<Event>),
     Sent(String),
     Uncertain,
@@ -221,7 +221,7 @@ struct Cursor {
 }
 
 /// The claimed outbox row posts only through its owner pointer; Posting is durable before the POST.
-pub(crate) async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<Step, sqlx::Error> {
+pub async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<Step, sqlx::Error> {
     let owner: Option<(String, String)> = sqlx::query_as(
         "SELECT provider,raw_channel_id FROM intake_session_owners WHERE routing_notice_outbox_id=$1",
     )
@@ -280,7 +280,7 @@ async fn set_state(
 }
 
 /// Only the stored nonce's own POST may settle the cursor, and only with a real receipt.
-pub(crate) async fn record_sent(
+pub async fn record_sent(
     pool: &sqlx::PgPool,
     outbox_id: i64,
     nonce: &str,

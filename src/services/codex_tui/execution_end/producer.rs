@@ -25,7 +25,7 @@ pub(super) struct Candidate {
 }
 
 /// This token is inherited from the synchronous dispatch, never looked up by latest scope.
-pub(crate) struct LaunchObservation {
+pub struct LaunchObservation {
     id: Option<attempt::AttemptId>,
     old: Option<OldEnd>,
     capture_failure: Option<(String, Option<u32>)>,
@@ -153,11 +153,7 @@ pub(crate) fn binding_published_under(authority: &TmuxSourceAuthority<'_>) {
 }
 
 /// A2b may call this on idle polls. It only observes the current binding and writes End/Seal.
-pub(crate) fn retry_bound_candidate(
-    channel: u64,
-    authority: &TmuxSourceAuthority<'_>,
-    nonce: &str,
-) {
+pub fn retry_bound_candidate(channel: u64, authority: &TmuxSourceAuthority<'_>, nonce: &str) {
     attempt::with_candidate_under(channel, authority, nonce, |mut candidate| {
         match candidate.seal(authority) {
             Ok(true) => None,

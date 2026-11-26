@@ -18,7 +18,7 @@ pub(crate) mod image_format;
 mod image_format_tests;
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
-pub(crate) mod notification_policy;
+pub(crate) use adk_runtime::services::discord::outbound::notification_policy;
 #[cfg(all(test, unix))]
 mod notification_policy_tests;
 #[cfg(unix)]

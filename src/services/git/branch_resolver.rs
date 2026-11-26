@@ -12,7 +12,7 @@ pub fn git_branch_name(dir: &str) -> Option<String> {
         .filter(|s| s != "HEAD")
 }
 
-pub(crate) fn is_mainlike_branch(branch: &str) -> bool {
+pub fn is_mainlike_branch(branch: &str) -> bool {
     matches!(branch, "main" | "master" | "origin/main" | "origin/master")
 }
 

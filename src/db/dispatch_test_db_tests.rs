@@ -1,6 +1,6 @@
 //! Per-test PostgreSQL database fixture; upper tests reach it through `dispatch::test_support`.
 
-pub(crate) struct DispatchPostgresTestDb {
+pub struct DispatchPostgresTestDb {
     _lock: crate::db::postgres::PostgresTestLifecycleGuard,
     admin_url: String,
     database_name: String,
@@ -54,11 +54,11 @@ impl Drop for DispatchPostgresTestDb {
 
 impl DispatchPostgresTestDb {
     /// Keeps the legacy Option adapter while treating unavailable PostgreSQL as a fixture failure.
-    pub(crate) async fn try_create(prefix: &str, label: &str) -> Option<Self> {
+    pub async fn try_create(prefix: &str, label: &str) -> Option<Self> {
         Some(Self::create(prefix, label).await)
     }
 
-    pub(crate) async fn create(prefix: &str, label: &str) -> Self {
+    pub async fn create(prefix: &str, label: &str) -> Self {
         let lock = crate::db::postgres::lock_test_lifecycle();
         let base = crate::db::postgres::postgres_test_database_url_base()
             .expect("POSTGRES_TEST_DATABASE_URL_BASE required for PostgreSQL fixtures"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
@@ -87,7 +87,7 @@ impl DispatchPostgresTestDb {
         &self.database_name
     }
 
-    pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
+    pub async fn connect_and_migrate(&self) -> sqlx::PgPool {
         crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, &self.label)
             .await
             .unwrap_or_else(|err| {
@@ -95,7 +95,7 @@ impl DispatchPostgresTestDb {
             })
     }
 
-    pub(crate) async fn connect_and_migrate_with_max_connections(
+    pub async fn connect_and_migrate_with_max_connections(
         &self,
         max_connections: u32,
     ) -> sqlx::PgPool {
@@ -124,12 +124,12 @@ impl DispatchPostgresTestDb {
     }
 }
 
-pub(crate) fn postgres_base_database_url() -> String {
+pub fn postgres_base_database_url() -> String {
     crate::db::postgres::postgres_test_database_url_base()
         .expect("POSTGRES_TEST_DATABASE_URL_BASE required for PostgreSQL fixtures") // agentdesk-audit: allow-unwrap — test-only fixture adapter requires an explicitly configured shared base
 }
 
-pub(crate) fn postgres_admin_database_url() -> String {
+pub fn postgres_admin_database_url() -> String {
     let admin_db = std::env::var("POSTGRES_TEST_ADMIN_DB")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -137,7 +137,7 @@ pub(crate) fn postgres_admin_database_url() -> String {
     format!("{}/{}", postgres_base_database_url(), admin_db)
 }
 
-pub(crate) async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, title: &str) {
+pub async fn seed_pg_dispatch(pool: &sqlx::PgPool, dispatch_id: &str, title: &str) {
     sqlx::query(
         "INSERT INTO task_dispatches (id, status, title, created_at, updated_at)
          VALUES ($1, 'pending', $2, NOW(), NOW())",

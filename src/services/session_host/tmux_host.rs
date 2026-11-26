@@ -16,7 +16,7 @@ mod fifo;
 pub(super) mod input;
 
 /// Adapter over platform probes and input executors, retaining their transport behaviour.
-pub(crate) struct TmuxHost;
+pub struct TmuxHost;
 
 fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError> {
     match result {
@@ -41,7 +41,7 @@ pub(super) fn create(request: &TmuxCreate<'_>) -> Result<Output, String> {
 }
 
 /// tmux `send-keys` name of a host key.
-pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
+pub fn tmux_key_name(key: HostKey) -> &'static str {
     match key {
         HostKey::Enter => "Enter",
         HostKey::Escape => "Escape",
@@ -91,7 +91,7 @@ impl TmuxHost {
     }
 
     /// Preserve the stop owner's keys and raw status/error handling.
-    pub(crate) fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
+    pub fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
         tmux::send_keys(name, keys)
     }
 
@@ -109,11 +109,11 @@ impl TmuxHost {
         tmux::pane_liveness(name)
     }
 
-    pub(crate) fn pane_current_path(&self, name: &str) -> Option<String> {
+    pub fn pane_current_path(&self, name: &str) -> Option<String> {
         tmux::pane_current_path(name)
     }
 
-    pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
+    pub fn list_session_names(&self) -> Result<Vec<String>, String> {
         tmux::list_session_names()
     }
 
@@ -134,15 +134,15 @@ impl TmuxHost {
         tmux::capture_pane_timeout(session, scroll_back, timeout)
     }
 
-    pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
+    pub fn kill(&self, name: &str, reason: &str) -> bool {
         tmux::kill_session(name, reason)
     }
 
-    pub(crate) fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
+    pub fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
         tmux::kill_session_output(name, reason)
     }
 
-    pub(crate) fn kill_output_timeout(
+    pub fn kill_output_timeout(
         &self,
         name: &str,
         reason: &str,
@@ -181,7 +181,7 @@ impl TmuxHost {
         .into_output()
     }
 
-    pub(crate) fn liveness_within(
+    pub fn liveness_within(
         &self,
         session: HostSessionRef<'_>,
         budget: std::time::Duration,

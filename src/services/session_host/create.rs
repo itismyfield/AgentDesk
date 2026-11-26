@@ -36,7 +36,7 @@ pub(super) enum Request<'a> {
 
 /// A prepared launch its owner already admitted. Only the tmux adapter builds the tmux forms; a
 /// Herdr form borrows the launch's clear-epoch effect permit, so it is held until the create ends.
-pub(crate) struct HostCreate<'a>(pub(super) Request<'a>);
+pub struct HostCreate<'a>(pub(super) Request<'a>);
 
 impl<'a> HostCreate<'a> {
     pub(crate) fn herdr(
@@ -73,7 +73,7 @@ enum Evidence {
     Herdr(HerdrCreateOutcome),
 }
 
-pub(crate) struct CreateOutcome {
+pub struct CreateOutcome {
     pub(crate) creation: HostCreation,
     evidence: Evidence,
 }
@@ -152,7 +152,7 @@ thread_local! { static IN_PORT: std::cell::Cell<bool> = const { std::cell::Cell:
 
 /// Whether this thread is inside the create port, for a fake host to tell a bypassing caller.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn create_in_effect() -> bool {
+pub fn create_in_effect() -> bool {
     IN_PORT.get()
 }
 

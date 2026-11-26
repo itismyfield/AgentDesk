@@ -7,7 +7,7 @@ use super::{HerdrTarget, HostError, HostKey, HostKind, HostMutation, HostRefusal
 use crate::services::tui_input::bounded_tmux::BoundedTmuxError;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum InputSource {
+pub enum InputSource {
     Inherited,
     Control,
     #[cfg(unix)]
@@ -38,7 +38,7 @@ pub(super) enum Target<'a> {
 
 /// Only adapters construct tmux authorities; they consume the original identity and owner
 /// checks at the original write boundary. A Herdr authority carries its pinned execution gate.
-pub(crate) struct AuthorizedHostTarget<'a> {
+pub struct AuthorizedHostTarget<'a> {
     pub(super) target: Target<'a>,
     pub(super) source: InputSource,
 }
@@ -53,12 +53,12 @@ impl<'a> AuthorizedHostTarget<'a> {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum PinnedInput<'a> {
+pub enum PinnedInput<'a> {
     Paste { buffer: &'a str },
     Enter,
 }
 
-pub(crate) enum SubmitPayload<'a> {
+pub enum SubmitPayload<'a> {
     Literal(&'a str),
     BracketedText(&'a str),
     LoadText {
@@ -84,12 +84,12 @@ pub(crate) enum SubmitPayload<'a> {
 }
 
 #[cfg(unix)]
-pub(crate) enum WrapperFrame<'a> {
+pub enum WrapperFrame<'a> {
     Encoded(&'a str),
     Line(&'a dyn std::fmt::Display),
 }
 
-pub(crate) enum KeyOutcome {
+pub enum KeyOutcome {
     Applied,
     Held,
     Failed,
@@ -104,7 +104,7 @@ enum Evidence {
     Wrapper(Result<(), String>),
 }
 
-pub(crate) struct SubmitOutcome {
+pub struct SubmitOutcome {
     pub(crate) mutation: HostMutation,
     evidence: Evidence,
 }
@@ -204,7 +204,7 @@ impl SubmitOutcome {
         }
     }
 
-    pub(crate) fn into_output(self) -> Result<Output, String> {
+    pub fn into_output(self) -> Result<Output, String> {
         match self.evidence {
             Evidence::Output(output) => output,
             Evidence::Bounded(output) => output.map_err(|error| error.to_string()),
@@ -238,7 +238,7 @@ impl SubmitOutcome {
     }
 
     #[cfg(unix)]
-    pub(crate) fn into_wrapper(self) -> Result<(), String> {
+    pub fn into_wrapper(self) -> Result<(), String> {
         match self.evidence {
             Evidence::Wrapper(result) => result,
             _ => Err("host submit evidence is not a wrapper frame".into()),

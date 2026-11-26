@@ -32,14 +32,14 @@ fn registry() -> MutexGuard<'static, HashMap<EpisodeKey, Arc<EpisodePermissionRe
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READY: std::cell::RefCell<std::collections::HashSet<u64>> = Default::default();
 }
 
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
-pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
-    #[cfg(test)]
+pub fn owed_delivery_ready(channel: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
     if READY.with(|ready| ready.borrow().contains(&channel)) {
         return true;
     }
@@ -104,7 +104,7 @@ impl EpisodePermissionRecord {
 }
 
 /// A writer that stops for good leaves each of its channel's records Unknown, never settled.
-pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
+pub fn revoke_channel(channel: u64, reason: &'static str) {
     let records: Vec<_> = (registry().iter())
         .filter(|(key, _)| key.0 == channel)
         .map(|(_, record)| Arc::clone(record))
@@ -114,8 +114,8 @@ pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_ready_for_tests(channel: u64, ready: bool) {
     READY.with(|set| match ready {
         true => set.borrow_mut().insert(channel),
         false => set.borrow_mut().remove(&channel),
@@ -123,8 +123,8 @@ pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
 }
 
 /// Test seam for P4-2's issuance: one Arc per exact episode, a conflict never replaces it.
-#[cfg(test)]
-pub(crate) fn issue_for_tests(
+#[cfg(any(test, feature = "test-support"))]
+pub fn issue_for_tests(
     execution: ExecutionProofRef,
     episode: TurnEpisodeRef,
     token: &Arc<CancelToken>,
@@ -174,8 +174,8 @@ fn issue(
     Ok(record)
 }
 
-#[cfg(test)]
-pub(crate) fn forget_channel_for_tests(channel: u64) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn forget_channel_for_tests(channel: u64) {
     registry().retain(|key, _| key.0 != channel);
 }
 

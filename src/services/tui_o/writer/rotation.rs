@@ -243,7 +243,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-pub(super) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -875,7 +875,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod probe {
+pub mod probe {
     //! Reads a live reader's rotation start, which no store row or alarm shows.
     use super::{Instant, SourceId, Sources};
 
@@ -886,7 +886,7 @@ pub(crate) mod probe {
         let reader = sources.readers.iter().find(|r| r.source == *source);
         reader.map(|r| r.rotated_at)
     }
-    pub(crate) fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
+    pub fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
         sources
             .readers
             .iter()
@@ -912,16 +912,16 @@ pub(crate) mod probe {
             .quiet
             .is_some()
     }
-    pub(crate) fn validating<B>(sources: &Sources<B>) -> bool {
+    pub fn validating<B>(sources: &Sources<B>) -> bool {
         sources.validation.is_some()
     }
-    pub(crate) fn jobs_started<B>(sources: &Sources<B>) -> usize {
+    pub fn jobs_started<B>(sources: &Sources<B>) -> usize {
         sources.jobs_started
     }
     pub(crate) fn hold_validation<B>(sources: &mut Sources<B>, hold: bool) {
         sources.hold_validation = hold;
     }
-    pub(crate) fn ready<B>(sources: &Sources<B>) -> bool {
+    pub fn ready<B>(sources: &Sources<B>) -> bool {
         sources
             .validation
             .as_ref()

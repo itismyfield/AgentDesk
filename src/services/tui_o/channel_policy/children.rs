@@ -28,10 +28,10 @@ struct ChildEntry {
 
 /// A resolved child of an O parent, as every snapshot clone reads it.
 #[derive(Clone, Debug)]
-pub(crate) struct Child {
+pub struct Child {
     pub(crate) parent: u64,
     pub(crate) kind: RuntimeHandoffKind,
-    pub(crate) candidate: Candidate,
+    pub candidate: Candidate,
 }
 
 #[cfg(test)]
@@ -72,7 +72,7 @@ impl ChildEntry {
 
 /// A known child whose relationship is unresolved, conflicting or unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildHeld;
+pub struct ChildHeld;
 
 impl ChildEntry {
     /// `None` once the child resolved under a parent O does not select.
@@ -379,7 +379,7 @@ impl BootChannels {
     }
 
     /// Called once per shared view before provider dispatch; recorded relationships need no REST.
-    pub(crate) fn refresh_child_records(&self) {
+    pub fn refresh_child_records(&self) {
         if self
             .children
             .entries
@@ -393,12 +393,12 @@ impl BootChannels {
             .refresh_records(self, crate::config::runtime_root().as_deref());
     }
 
-    pub(crate) fn configured_binding(&self, channel: u64) -> bool {
+    pub fn configured_binding(&self, channel: u64) -> bool {
         self.bindings.contains(&channel)
     }
 
     /// What the shared view holds for `channel`: `None` leaves it to boot membership.
-    pub(crate) fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
+    pub fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
         let entries = self
             .children
             .entries
@@ -429,7 +429,7 @@ impl BootChannels {
 
     /// Reserves each unconfigured thread a boot read left open whose hinted parent O selects. The
     /// hint only picks the reservation; the parent is bound by a later checked read.
-    pub(crate) fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
+    pub fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
         for &(channel, hinted) in threads {
             if !self.configured_binding(channel) && self.channels.contains(&hinted) {
                 self.children.reserve(channel);
@@ -453,7 +453,7 @@ impl BootChannels {
     }
 
     /// Boot membership plus every known child, held ones included so no reader drops them.
-    pub(crate) fn output_channels(&self) -> std::collections::BTreeSet<u64> {
+    pub fn output_channels(&self) -> std::collections::BTreeSet<u64> {
         let entries = self
             .children
             .entries
@@ -473,7 +473,7 @@ impl BootChannels {
     }
 
     /// The channel whose boot policy governs `channel`: a child's parent, or the channel itself.
-    pub(crate) fn policy_channel(&self, channel: u64) -> u64 {
+    pub fn policy_channel(&self, channel: u64) -> u64 {
         match self.child(channel) {
             Some(Ok(child)) => child.parent,
             _ => channel,

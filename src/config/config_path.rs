@@ -54,7 +54,7 @@ pub fn load_config_file(path: &Path) -> Result<Option<Config>> {
 }
 
 /// One WARN per file version for a resolved config file that failed to load.
-pub(crate) fn warn_unloadable(path: &Path, error: std::fmt::Arguments<'_>) {
+pub fn warn_unloadable(path: &Path, error: std::fmt::Arguments<'_>) {
     if first_failure_of_this_version(path) {
         tracing::warn!(
             path = %path.display(),

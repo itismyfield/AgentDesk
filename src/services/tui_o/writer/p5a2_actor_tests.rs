@@ -8,7 +8,7 @@ use crate::services::tui_o::writer::binding::ChannelBindingLog;
 use crate::services::tui_o::writer::host::{
     Custody, HostIo, HostParts, ManagedWriterHandle, Readiness, start_managed,
 };
-use crate::services::tui_o::writer::owed::tests::{Alarms, Lease, Port};
+use crate::services::tui_o::writer::owed::test_support::{Alarms, Lease, Port};
 use crate::services::tui_prompt_dedupe::{
     self as dedupe,
     binding_context::{BindingContext, PreparedIncarnation},

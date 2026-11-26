@@ -221,7 +221,7 @@ impl Ledger {
     }
 }
 
-pub(crate) struct RealServer {
+pub struct RealServer {
     root: PathBuf,
     bin: PathBuf,
     /// The scratch copy's bytes when the test began; the server must run exactly these.
@@ -350,22 +350,22 @@ impl RealServer {
         }
     }
 
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         &self.root
     }
-    pub(crate) fn dir(&self) -> &Path {
+    pub fn dir(&self) -> &Path {
         &self.dir
     }
     pub(crate) fn home(&self) -> &Path {
         &self.home
     }
-    pub(crate) fn fake_provider(&self) -> &Path {
+    pub fn fake_provider(&self) -> &Path {
         &self.fake
     }
-    pub(crate) fn context_seen_path(&self) -> &Path {
+    pub fn context_seen_path(&self) -> &Path {
         &self.context_seen
     }
-    pub(crate) fn input_receipts_path(&self) -> &Path {
+    pub fn input_receipts_path(&self) -> &Path {
         &self.input_receipts
     }
     pub(crate) fn session(&self) -> &str {
@@ -555,7 +555,7 @@ impl RealServer {
         }
     }
 
-    pub(crate) fn provider_ready(&mut self) -> Value {
+    pub fn provider_ready(&mut self) -> Value {
         let path = self.dir.join("context-seen.json");
         wait_for(
             || json_file(&path).is_some(),
@@ -583,12 +583,12 @@ impl RealServer {
         seen
     }
 
-    pub(crate) fn write_control(&self, control: &Value) {
+    pub fn write_control(&self, control: &Value) {
         validate_control(&self.root, self.provider, control).unwrap();
         atomic_json(&self.dir.join("control.json"), control);
     }
 
-    pub(crate) fn release_answer(&self, seq: usize) {
+    pub fn release_answer(&self, seq: usize) {
         assert!((1..=3).contains(&seq));
         atomic_json(
             &self.dir.join(format!("answer-{seq}.release")),
@@ -596,7 +596,7 @@ impl RealServer {
         );
     }
 
-    pub(crate) fn inputs(&self) -> Vec<Value> {
+    pub fn inputs(&self) -> Vec<Value> {
         json_lines(&self.dir.join("inputs.jsonl"))
     }
 
@@ -607,7 +607,7 @@ impl RealServer {
     }
 
     /// Counts real API mutations; native terminal bytes never use these API methods.
-    pub(crate) fn input_requests(&self) -> Vec<String> {
+    pub fn input_requests(&self) -> Vec<String> {
         let server_log = self.home.join("xdg/herdr/herdr-server.log");
         let log = std::fs::read_to_string(&server_log).unwrap();
         let fields = regex::Regex::new(
@@ -672,7 +672,7 @@ impl RealServer {
         requests
     }
 
-    pub(crate) fn assert_input_bytes(&self, expected: [&str; 3]) {
+    pub fn assert_input_bytes(&self, expected: [&str; 3]) {
         let inputs = self.inputs();
         assert_eq!(inputs.len(), 3, "T14 three actual provider inputs");
         assert!(
@@ -715,7 +715,7 @@ impl RealServer {
             .append(json!({"event":"input_bytes_check", "inputs":inputs}));
     }
 
-    pub(crate) fn assert_single_execution(&self, pane: &str, provider_pid: u32) {
+    pub fn assert_single_execution(&self, pane: &str, provider_pid: u32) {
         let snapshot = self.snapshot();
         let panes = snapshot["panes"].as_array().unwrap();
         assert_eq!(panes.len(), 1, "T14 one real execution pane");
@@ -750,7 +750,7 @@ impl RealServer {
             "snapshot":snapshot,"process_info":process,"provider_starts":starts.len()}));
     }
 
-    pub(crate) fn attach(&mut self, pane: &str) -> RealClient {
+    pub fn attach(&mut self, pane: &str) -> RealClient {
         let info = self.read_rpc("pane.get", json!({"pane_id":pane}));
         let terminal = info["pane"]["terminal_id"]
             .as_str()
@@ -861,13 +861,13 @@ pub(crate) struct RealClient {
 }
 
 impl RealClient {
-    pub(crate) fn screen_path(&self) -> &Path {
+    pub fn screen_path(&self) -> &Path {
         &self.screen
     }
-    pub(crate) fn receipt_path(&self) -> &Path {
+    pub fn receipt_path(&self) -> &Path {
         &self.receipt
     }
-    pub(crate) fn send_prompt(&mut self, prompt: &str) {
+    pub fn send_prompt(&mut self, prompt: &str) {
         assert!(!prompt.contains(['\r', '\u{1b}']));
         writeln!(
             self.stdin.as_mut().unwrap(),
@@ -877,7 +877,7 @@ impl RealClient {
         .unwrap();
         self.stdin.as_mut().unwrap().flush().unwrap();
     }
-    pub(crate) fn detach(&mut self) -> bool {
+    pub fn detach(&mut self) -> bool {
         let Some(mut child) = self.child.take() else {
             return true;
         };

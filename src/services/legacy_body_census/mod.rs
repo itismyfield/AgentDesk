@@ -13,8 +13,11 @@ mod evaluation;
 mod evidence;
 mod history;
 mod manifest;
-pub(crate) mod request_context;
-pub(crate) mod transport;
+pub mod request_context;
+#[cfg(test)]
+#[path = "entry_tests.rs"]
+mod tests;
+pub mod transport;
 mod window;
 mod writer;
 
@@ -171,14 +174,14 @@ pub(crate) fn producer_identity() -> Value {
     json!({"boot_id":crate::services::process_boot::initialize().id,"host":host})
 }
 
-pub(crate) fn observation_unknown(reason: &str) {
+pub fn observation_unknown(reason: &str) {
     if let Some(journal) = JOURNAL.get() {
         invalidate(&journal.0.state, reason);
         transport::try_record(json!({"kind":"invalid","reasons":[reason]}));
     }
 }
 
-pub(crate) fn start() {
+pub fn start() {
     JOURNAL.get_or_init(|| {
         let root: Option<PathBuf> = crate::config::runtime_root();
         Journal(writer::Writer::spawn(
@@ -189,12 +192,12 @@ pub(crate) fn start() {
     });
 }
 
-pub(crate) async fn ensure_ready() {
+pub async fn ensure_ready() {
     let host = crate::config::snapshot().and_then(|config| config.cluster.instance_id.clone());
     ensure_ready_with(host.as_deref()).await;
 }
 
-pub(crate) async fn ensure_ready_with(host: Option<&str>) {
+pub async fn ensure_ready_with(host: Option<&str>) {
     start();
     READY
         .get_or_init(|| async {
@@ -205,7 +208,7 @@ pub(crate) async fn ensure_ready_with(host: Option<&str>) {
         .await;
 }
 
-pub(crate) async fn record_selection(config: &crate::config::Config, installed: bool) {
+pub async fn record_selection(config: &crate::config::Config, installed: bool) {
     use crate::services::tui_o::channel_policy;
     let writer = &channel_policy::tui_o_of(config).writer;
     let bindings: Option<std::collections::BTreeSet<u64>> =
@@ -230,7 +233,7 @@ pub(crate) async fn record_selection(config: &crate::config::Config, installed: 
     }
 }
 
-pub(crate) fn health_json() -> Value {
+pub fn health_json() -> Value {
     let mut value = JOURNAL.get().map_or_else(
         || {
             let probes = manifest::snapshot();
@@ -252,7 +255,7 @@ pub(crate) fn health_json() -> Value {
     value
 }
 
-pub(crate) fn detail_json() -> Value {
+pub fn detail_json() -> Value {
     let now = chrono::Utc::now().timestamp_millis();
     #[cfg(any(test, feature = "test-support"))]
     if let Ok(value) = TEST_PROJECTION.try_with(|(cache, now)| cache.snapshot(*now)) {
@@ -270,14 +273,14 @@ pub(crate) fn detail_json() -> Value {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use cache::ProjectionCache;
+pub use cache::ProjectionCache;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use collector::Collector;
-pub(crate) use evaluation::evaluate;
+pub use collector::Collector;
+pub use evaluation::evaluate;
 #[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn with_projection_for_test<T>(
+pub async fn with_projection_for_test<T>(
     cache: Arc<ProjectionCache>,
     now: i64,
     next: impl std::future::Future<Output = T>,

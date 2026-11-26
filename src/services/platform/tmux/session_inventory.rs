@@ -9,12 +9,12 @@ use std::process::{Command, Output};
 use std::time::Duration;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EmptyReason {
+pub enum EmptyReason {
     MissingSocket(PathBuf),
     NoServer(PathBuf),
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Inventory {
+pub enum Inventory {
     Sessions(Vec<String>),
     Empty(EmptyReason),
     ProbeFailed(String),
@@ -156,7 +156,7 @@ fn prepare(mut command: Command) -> Command {
 
 /// One inventory and the command context in which it was obtained.
 #[derive(Clone, Debug)]
-pub(crate) struct Observation {
+pub struct Observation {
     pub inventory: Inventory,
     context: Option<Namespace>,
     ambient: [Option<OsString>; 3],
@@ -164,18 +164,18 @@ pub(crate) struct Observation {
     process: (u32, u32, Option<PathBuf>),
 }
 impl Observation {
-    pub(crate) fn diagnostics(&self) -> impl std::fmt::Debug + '_ {
+    pub fn diagnostics(&self) -> impl std::fmt::Debug + '_ {
         self.context
             .as_ref()
             .map(|c| (&c.program, (c.uid, c.euid), &c.selectors, &c.explicit))
     }
-    pub(crate) fn same_namespace(&self, other: &Self) -> bool {
+    pub fn same_namespace(&self, other: &Self) -> bool {
         self.context == other.context
             && self.ambient == other.ambient
             && self.production == other.production
             && self.process == other.process
     }
-    pub(crate) fn current(&self) -> bool {
+    pub fn current(&self) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         assert!(
             !crate::services::platform::owner_publication_fence::held(),
@@ -210,7 +210,7 @@ fn ambient() -> [Option<OsString>; 3] {
         std::env::var_os("PATH"),
     ]
 }
-pub(crate) fn observe_inventory(channel: u64) -> Observation {
+pub fn observe_inventory(channel: u64) -> Observation {
     #[cfg(any(test, feature = "test-support"))]
     {
         test_support::record_channel_probe(channel);
@@ -389,7 +389,7 @@ fn classify_socket_failure(
 mod real_tests;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "session_inventory/test_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;
 #[cfg(test)]
 #[path = "session_inventory/unit_tests.rs"]
 pub(crate) mod tests;

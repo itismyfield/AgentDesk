@@ -15,15 +15,15 @@ pub struct HookEvent {
     pub received_at: DateTime<Utc>,
     pub payload: Value,
     #[serde(skip)]
-    pub(crate) fanout: Option<HookFanout>,
+    pub fanout: Option<HookFanout>,
     #[serde(skip)]
-    pub(crate) original_context: Option<BindingContext>,
+    pub original_context: Option<BindingContext>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct HookFanout {
-    pub(crate) origin_session_id: String,
-    pub(crate) primary_discarded: bool,
+pub struct HookFanout {
+    pub origin_session_id: String,
+    pub primary_discarded: bool,
 }
 
 #[cfg(test)]

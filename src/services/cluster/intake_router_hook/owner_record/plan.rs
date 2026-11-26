@@ -7,7 +7,7 @@ use sqlx::{Postgres, Transaction};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Plan {
+pub struct Plan {
     pub version: u8,
     pub home: String,
     pub target: String,
@@ -40,7 +40,7 @@ pub(crate) fn build(observation: &snapshot::Shared) -> Result<Option<Plan>, sqlx
 }
 
 /// Planning is per held row; only promotion keeps the oldest-first order.
-pub(crate) async fn save_on_tx(
+pub async fn save_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
     delivery: i64,

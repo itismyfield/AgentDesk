@@ -15,7 +15,7 @@ pub(crate) type UnrecordedClose =
 /// The owner runtime's side of a launch; the runtime that owns the channel supplies it.
 #[cfg(any(unix, test))]
 #[derive(Clone, Copy)]
-pub(crate) struct OwnerPort {
+pub struct OwnerPort {
     /// Keeps the end of execution `nonce` when it is the one a Claude takeover of `channel` took.
     pub takeover_ended: fn(u64, &str, &str),
     pub close_unrecorded: UnrecordedClose,

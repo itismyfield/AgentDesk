@@ -24,7 +24,7 @@ pub use resolve::{
     RATE_LIMIT_STALE_SEC, Resolved, RowSetting, RuntimeSetting, SettingSource, max_entry_retries,
     policy_kv_rows, policy_value, resolve_row, resolve_with_kv, runtime_config_field,
 };
-pub(crate) use runtime_config_put::is_runtime_config_key;
+pub use runtime_config_put::is_runtime_config_key;
 use runtime_config_put::{runtime_config_keys, with_explicit_runtime_config_keys};
 
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
@@ -64,7 +64,7 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
 pub(crate) const RETIRED_CONFIG_KEY_PREFIXES: &[&str] =
     &["merge_strategy_mode:card:", "escalation_thread:"];
 
-pub(crate) const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExplicitKeys";
+pub const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExplicitKeys";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KvSeedAction {

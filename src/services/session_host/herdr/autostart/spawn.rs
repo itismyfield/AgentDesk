@@ -14,7 +14,7 @@ use super::{Environment, Refusal, record};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Ensured {
+pub enum Ensured {
     Present,
     Started(u32),
     Refused(Refusal),
@@ -24,7 +24,7 @@ pub(crate) enum Ensured {
 
 /// Where one start reads and writes; production derives it from this process.
 #[derive(Debug, Clone)]
-pub(crate) struct Context {
+pub struct Context {
     pub env: Environment,
     pub local_node: Option<String>,
     /// The start records and the started server's output; `None` refuses every start.
@@ -52,7 +52,7 @@ impl Context {
 
 /// Ensures `launch`'s server is up when it is the local default user server and absent; every
 /// other case returns without IO beyond reading the socket.
-pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
+pub async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
     if crate::config::test_instance::requested() {
         return Ensured::Refused("test_instance_manual_daemon_required");
     }
@@ -68,7 +68,7 @@ pub(crate) async fn ensure(launch: &HerdrLaunchEndpoint) -> Ensured {
 
 /// `ensure` in its own task, for a caller that must not wait; skipped while a start for the
 /// socket is already being judged.
-pub(crate) fn demand(launch: &HerdrLaunchEndpoint) {
+pub fn demand(launch: &HerdrLaunchEndpoint) {
     if crate::config::test_instance::requested() {
         return;
     }
@@ -374,7 +374,7 @@ thread_local! {
 
 /// How many times this thread entered `ensure`; entry points are tested by this count.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn ensured_on_this_thread() -> usize {
+pub fn ensured_on_this_thread() -> usize {
     ENSURED.with(std::cell::Cell::get)
 }
 
@@ -382,7 +382,7 @@ pub(crate) fn ensured_on_this_thread() -> usize {
 static TEST_CONTEXTS: Mutex<BTreeMap<PathBuf, Context>> = Mutex::new(BTreeMap::new());
 
 /// Whether this host may start `socket`'s server, as `ensure` would judge it.
-pub(crate) fn supported(socket: &Path) -> bool {
+pub fn supported(socket: &Path) -> bool {
     scoped(socket).map_or(cfg!(target_os = "macos"), |context| context.supported)
 }
 

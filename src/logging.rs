@@ -8,9 +8,9 @@ use tracing::field;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
 
-pub(crate) mod auto_queue;
+pub mod auto_queue;
 pub(crate) mod intake_stage;
-pub(crate) mod intake_timing;
+pub mod intake_timing;
 
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
@@ -19,18 +19,22 @@ const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 ///
 /// Exported because it is a CONTRACT on tracing targets, not a local detail: its
 /// target match is a path prefix, so any `tracing` target whose first segment is
-/// not `agentdesk` is dropped unless an operator edits `RUST_LOG`. Instrumented
+/// neither `agentdesk` nor `adk_runtime` is dropped unless an operator edits `RUST_LOG`. Instrumented
 /// call sites that must survive in `dcserver.stdout.log` filter a subscriber
 /// with this exact constant in their tests
 /// (`turn_bridge::…::body_mutation_telemetry_tests`), so a change here fails
 /// those tests instead of silently muting a production record.
-pub(crate) const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info";
+pub const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info,adk_runtime=info";
 
 pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
-    let directive = DEFAULT_TRACING_DIRECTIVE
-        .parse()
-        .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
-    Ok(EnvFilter::from_default_env().add_directive(directive))
+    let mut filter = EnvFilter::from_default_env();
+    for directive in DEFAULT_TRACING_DIRECTIVE.split(',') {
+        let directive = directive
+            .parse()
+            .map_err(|error| anyhow::anyhow!("Failed to parse tracing directive: {error}"))?;
+        filter = filter.add_directive(directive);
+    }
+    Ok(filter)
 }
 
 #[cfg(test)]
@@ -197,7 +201,7 @@ fn init_tracing_once() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn init_tracing() -> Result<()> {
+pub fn init_tracing() -> Result<()> {
     static TRACING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
     let init_result =
@@ -251,7 +255,7 @@ fn log_level(hint: Option<tracing::level_filters::LevelFilter>) -> log::LevelFil
     }
 }
 
-pub(crate) fn init_dcserver_tracing() -> Result<()> {
+pub fn init_dcserver_tracing() -> Result<()> {
     static DCSERVER_TRACING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
     let init_result = DCSERVER_TRACING_INIT
@@ -347,7 +351,7 @@ impl<'a> MakeWriter<'a> for RedactingStdout {
     }
 }
 
-pub(crate) fn redact_log_text(text: &str) -> String {
+pub fn redact_log_text(text: &str) -> String {
     crate::utils::redact::redact_known_secrets(text)
 }
 
@@ -569,7 +573,7 @@ impl<'a> TraceContext<'a> {
     }
 }
 
-pub(crate) fn dispatch_span(
+pub fn dispatch_span(
     name: &'static str,
     dispatch_id: Option<&str>,
     card_id: Option<&str>,
@@ -582,7 +586,7 @@ pub(crate) fn dispatch_span(
         .span(name)
 }
 
-pub(crate) fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing::Span {
+pub fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing::Span {
     TraceContext::from_payload(payload)
         .with_hook_name(Some(hook_name))
         .span("policy_hook")
@@ -590,7 +594,7 @@ pub(crate) fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing
 
 /// Sibling to `dispatch_span` for callers that also carry a channel/session
 /// identity; `dispatch_span`'s signature stays unchanged for existing callers.
-pub(crate) fn session_span(
+pub fn session_span(
     name: &'static str,
     dispatch_id: Option<&str>,
     agent_id: Option<&str>,
@@ -707,7 +711,7 @@ mod rotation_tests {
 /// Test log capture: tracing-core's JustOne fast path caches the first hitting thread's
 /// interest, so a subscriber-less test thread can cache `never` under a live capture.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_capture {
+pub mod test_capture {
     use std::sync::OnceLock;
 
     use tracing::level_filters::LevelFilter;
@@ -750,7 +754,7 @@ pub(crate) mod test_capture {
 
     /// Call before installing a capture subscriber. Two permanent registrations
     /// keep tracing-core off its single-dispatcher path for the whole process.
-    pub(crate) fn pin_callsite_interest() {
+    pub fn pin_callsite_interest() {
         static PINS: OnceLock<[Dispatch; 2]> = OnceLock::new();
         PINS.get_or_init(|| [Dispatch::new(InterestPin), Dispatch::new(InterestPin)]);
     }

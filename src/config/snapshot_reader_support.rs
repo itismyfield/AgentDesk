@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) fn isolated(body: impl FnOnce()) {
+pub fn isolated(body: impl FnOnce()) {
     const CHILD: &str = "ADK_TEST_SNAPSHOT_READER_CHILD";
     let thread = std::thread::current();
     let name = thread.name().expect("named libtest worker");
@@ -28,7 +28,7 @@ pub(crate) fn isolated(body: impl FnOnce()) {
     println!("snapshot child executed: {name}");
 }
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _root_env: crate::config::TestEnvVarGuard,
     root: tempfile::TempDir,
     pub(crate) path: PathBuf,

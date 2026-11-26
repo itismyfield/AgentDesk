@@ -4,7 +4,7 @@ use crate::services::process::reaping::CommandReapExt;
 #[cfg(all(test, unix))]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
-pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
+pub use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]
 mod absence_launch;
 #[cfg(all(test, unix))]
@@ -25,12 +25,12 @@ use followup_reader::send_followup_to_tmux;
 #[cfg(all(test, unix))]
 mod herdr_guard_tests;
 #[cfg(unix)]
-pub(crate) mod herdr_turn;
+pub mod herdr_turn;
 #[cfg(unix)]
 mod launch_script;
 #[cfg(unix)]
 use launch_script::CodexTuiLaunchScript;
-mod tui_session_launch;
+pub mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
@@ -39,7 +39,7 @@ pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
+pub use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::{
     CodexHerdrLaunchable,
@@ -50,7 +50,7 @@ pub(crate) use tui_session_launch::{
     },
 };
 #[cfg(unix)]
-pub(crate) use tui_session_launch::{
+pub use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
     verified_warm_preflight,
 };
@@ -100,8 +100,8 @@ use crate::services::{
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const TMUX_PROMPT_B64_CHUNK_SIZE: usize = 700;
-pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
-pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
+pub const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
+pub const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
 #[cfg(unix)]
 type CodexTuiSessionTurnLock = Arc<Mutex<()>>;
@@ -164,7 +164,7 @@ fn log_codex_runtime_kind(entrypoint: &'static str, runtime_kind: CodexRuntimeKi
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CodexLaunchOptions {
+pub struct CodexLaunchOptions {
     pub(crate) prompt: String,
     pub(crate) developer_instructions: Option<String>,
     pub(crate) resume_session_id: Option<String>,
@@ -179,60 +179,60 @@ pub(crate) struct CodexLaunchOptions {
 }
 
 impl CodexLaunchOptions {
-    pub(crate) fn new(prompt: &str) -> Self {
+    pub fn new(prompt: &str) -> Self {
         Self {
             prompt: prompt.to_string(),
             ..Self::default()
         }
     }
 
-    pub(crate) fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
+    pub fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
         self.resume_session_id =
             clean_nonempty(value).filter(|session_id| is_valid_session_id(session_id));
         self
     }
 
-    pub(crate) fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
+    pub fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
         self.developer_instructions = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_model(mut self, value: Option<&str>) -> Self {
+    pub fn with_model(mut self, value: Option<&str>) -> Self {
         self.model = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
+    pub fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
         self.reasoning_effort = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
+    pub fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
         self.compact_token_limit = value.filter(|limit| *limit > 0);
         self
     }
 
-    pub(crate) fn with_readonly_mode(mut self, value: bool) -> Self {
+    pub fn with_readonly_mode(mut self, value: bool) -> Self {
         self.readonly_mode = value;
         self
     }
 
-    pub(crate) fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
         self.fast_mode_enabled = value;
         self
     }
 
-    pub(crate) fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
         self.goals_enabled = value;
         self
     }
 
-    pub(crate) fn with_cwd(mut self, value: Option<&str>) -> Self {
+    pub fn with_cwd(mut self, value: Option<&str>) -> Self {
         self.cwd = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_add_dirs(mut self, values: &[&str]) -> Self {
+    pub fn with_add_dirs(mut self, values: &[&str]) -> Self {
         self.add_dirs = values
             .iter()
             .filter_map(|value| clean_nonempty(Some(value)))
@@ -255,12 +255,12 @@ pub fn resolve_codex_path() -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
-pub(crate) use crate::services::codex_tui::session::source_observation::{
+pub use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
+pub use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
 
-fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+pub fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
     log_codex_binary_probe(&probe);
     probe.resolution
@@ -490,13 +490,13 @@ fn base_tui_args(
     build_codex_tui_args(&options)
 }
 
-pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = codex_tui_option_args(options);
     args.extend(["--".to_string(), options.prompt.to_string()]);
     args
 }
 
-pub(crate) fn build_codex_exec_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn build_codex_exec_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     append_codex_common_launch_args(&mut args, options);
     args.push("exec".to_string());
@@ -1129,7 +1129,7 @@ pub fn execute_command_streaming(
     )
 }
 
-pub(crate) fn compose_codex_developer_instructions(
+pub fn compose_codex_developer_instructions(
     system_prompt: Option<&str>,
     _allowed_tools: Option<&[String]>,
 ) -> Option<String> {
@@ -1849,7 +1849,7 @@ fn codex_mcp_result(result: &Value) -> (String, bool) {
     (codex_mcp_payload_content(payload), is_error)
 }
 
-pub(crate) fn codex_background_event_summary(json: &Value) -> Option<&str> {
+pub fn codex_background_event_summary(json: &Value) -> Option<&str> {
     if json.get("type").and_then(Value::as_str) != Some("background_event") {
         return None;
     }

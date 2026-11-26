@@ -1,9 +1,9 @@
 //! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
-mod first_input;
-mod handoff;
-pub(crate) mod hold_record;
+pub mod first_input;
+pub mod handoff;
+pub mod hold_record;
 pub(crate) mod hold_resolve;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use first_input::owned_pending_prompt_for_tests;
@@ -142,13 +142,13 @@ impl HerdrLaunchHost for Boot<'_> {
 }
 
 /// The boot registry's launch host, on its endpoints only.
-pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
+pub fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
     let host = herdr_endpoints().launch_host()?;
     Some(Arc::new(Boot(host)))
 }
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
-pub(crate) struct HerdrTurn<'a> {
+pub struct HerdrTurn<'a> {
     pub pool: &'a PgPool,
     pub owner: HostedOwner,
     pub channel_id: u64,
@@ -167,7 +167,7 @@ pub(crate) struct HerdrTurn<'a> {
 }
 
 /// The stored execution whose launched session the turn asks to attach, and its pane gate.
-pub(crate) struct AttachRequest<'a> {
+pub struct AttachRequest<'a> {
     pub owner: &'a HostedOwner,
     pub record: &'a HostedExecution,
     pub session_id: &'a str,
@@ -176,7 +176,7 @@ pub(crate) struct AttachRequest<'a> {
 }
 
 /// What a turn takes from its caller: launch host, hook events and the source reconcile.
-pub(crate) trait HerdrTurnPorts {
+pub trait HerdrTurnPorts {
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>>;
     fn hook_events(&self) -> broadcast::Receiver<HookEvent>;
     /// `Ok(bound)` once the launched source is published; `Err` attached nothing.
@@ -212,19 +212,19 @@ pub(crate) trait HerdrTurnPorts {
 }
 
 /// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
-pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
+pub type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 #[cfg(not(any(test, feature = "test-support")))]
 use attached::Attached;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use attached::Attached;
+pub use attached::Attached;
 
 /// Defined once here; the uses above name it only inside `herdr_turn` outside test builds.
 mod attached {
     use super::{HerdrTarget, PathBuf};
 
     /// The source a prompt goes to.
-    pub(crate) struct Attached {
+    pub struct Attached {
         pub(super) nonce: String,
         pub(super) session_id: String,
         pub(super) transcript: PathBuf,
@@ -238,7 +238,7 @@ mod attached {
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_prompt_for_tests(
+pub fn owned_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
     (session_id, transcript): (&str, PathBuf),
@@ -259,7 +259,7 @@ pub(crate) fn owned_prompt_for_tests(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn observe_cold_prompt_for_tests(
+pub fn observe_cold_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
     (session_id, transcript): (&str, PathBuf),
@@ -287,7 +287,7 @@ fn physical(record: &HostedExecution) -> Option<(String, String)> {
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
-pub(crate) fn execute(
+pub fn execute(
     turn: HerdrTurn<'_>,
     ports: &dyn HerdrTurnPorts,
     sender: Sender<StreamMessage>,
@@ -369,7 +369,7 @@ fn bound_source(
 }
 
 /// The clear Pending a Bound execution's next prompt goes to.
-pub(crate) struct AwaitedClear {
+pub struct AwaitedClear {
     pub session_id: String,
     /// The transcript path the Pending's hook named.
     pub transcript: Option<String>,
@@ -377,7 +377,7 @@ pub(crate) struct AwaitedClear {
 
 /// Execution `nonce`'s latest own SessionStart(clear) Pending, when every record after the source
 /// it logged last is such a Pending taken from that source and the canonical fold awaits it.
-pub(crate) fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
+pub fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
     let events = binding_events_since(channel, 0).unwrap_or_default();
     let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
     let pane = events
@@ -496,7 +496,7 @@ fn logged_session(target: &BindingTarget) -> Option<&str> {
 }
 
 /// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
-pub(crate) fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+pub fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
@@ -511,7 +511,7 @@ fn holds_dir() -> Result<PathBuf, String> {
 
 /// What releasing an input hold left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HoldRelease {
+pub enum HoldRelease {
     /// Removed and synced, or there was none.
     Released,
     /// Removed, but the directory sync failed, so the removal may not survive a crash.
@@ -522,7 +522,7 @@ pub(crate) enum HoldRelease {
 
 /// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
 /// as does a Codex cold start once its launch's own source is bound.
-pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
+pub fn release_hold(nonce: &str) -> HoldRelease {
     let (path, removed) = match unlink_hold(nonce) {
         Ok(unlinked) => unlinked,
         Err(error) => return HoldRelease::Kept(error),
@@ -537,7 +537,7 @@ pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
 }
 
 /// Unlinks the same validated nonce path for ordinary and durable hold release.
-pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
+pub fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
     let path = hold_path(nonce)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok((path, true)),
@@ -547,7 +547,7 @@ pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
 }
 
 /// Each held nonce and when its hold was recorded, from a v1 time or a v2 record.
-pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
+pub fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     let dir = holds_dir()?;
     let entries = match std::fs::read_dir(&dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -577,7 +577,7 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
 }
 
 /// Whether an earlier prompt may sit in execution `nonce`'s composer; `Err` when unreadable.
-pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
+pub fn input_held(nonce: &str) -> Result<bool, String> {
     match std::fs::symlink_metadata(hold_path(nonce)?) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Ok(_) => Ok(true),
@@ -588,7 +588,7 @@ pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
 }
 
 /// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
-pub(crate) fn not_held(nonce: &str) -> Result<(), String> {
+pub fn not_held(nonce: &str) -> Result<(), String> {
     match input_held(nonce)? {
         false => Ok(()),
         true => Err(format!(
@@ -605,7 +605,7 @@ fn legacy_not_held(nonce: &str) -> Result<(), String> {
 }
 
 /// Recorded and synced before the first write, so even a crash mid-send leaves it.
-pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
+pub fn hold(nonce: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = hold_path(nonce)?;
     let written = std::fs::create_dir_all(path.parent().unwrap_or(&path))
@@ -689,13 +689,13 @@ fn session_started(
 }
 
 /// The gated pane of a stored execution on this node's registered endpoint.
-pub(crate) fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
+pub fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
     herdr_endpoints()
         .target(record)
         .ok_or_else(|| "herdr turn: the execution is not on a registered endpoint".into())
 }
 
-pub(crate) async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
+pub async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
     let identity = CanonicalSessionIdentity {
         kind: SessionIdentityKind::DiscordChannel,
         discord_token_hash: &owner.discord_token_hash,
@@ -812,7 +812,7 @@ impl ClaudeTurnTerminal {
 /// One Claude turn's records as the Herdr reader and bridge admission judge them alike: a
 /// turn-end record counts only after this turn's own prompt, so an earlier turn's tail ends nothing.
 #[derive(Default)]
-pub(crate) struct HerdrTurnLines {
+pub struct HerdrTurnLines {
     stream: StreamLineState,
     prompt_seen: bool,
     /// Output before the prompt or a second prompt before the terminal: another turn's records.
@@ -857,7 +857,7 @@ impl HerdrTurnLines {
 
 /// The typed frame the Herdr reader would send for `transcript` read from `start`, for admission tests.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn herdr_terminal_frame(
+pub fn herdr_terminal_frame(
     transcript: &str,
     start: u64,
     logical: &str,
@@ -937,9 +937,9 @@ use pending::pending_source;
 pub(crate) mod retry_probe;
 use live_reader::read_to_provider_terminal;
 pub(crate) use retry_probe::take as take_retry_probe;
-pub(crate) mod start_offset;
+pub mod start_offset;
 mod terminal_replay;
-pub(crate) use terminal_replay::{
+pub use terminal_replay::{
     EndedTurn, Terminal, TurnOutput, TurnRead, closed_turn_read, ended_turn, ended_turn_read,
     replay_herdr_turn,
 };
@@ -954,10 +954,10 @@ mod coldstop_input_tests;
 #[cfg(all(test, unix))]
 mod boot_host_tests;
 
-pub(crate) mod composer;
+pub mod composer;
 
 thread_local! { static OWNER_BOUND_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-pub(crate) fn take_owner_bound_failure() -> bool {
+pub fn take_owner_bound_failure() -> bool {
     OWNER_BOUND_FAILURE.with(|flag| flag.replace(false))
 }
 

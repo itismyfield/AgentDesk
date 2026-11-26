@@ -10,7 +10,7 @@ use super::phase_gate_verdict::{
     verdict_matches as phase_gate_verdict_matches,
 };
 
-pub(crate) mod reconcile_write;
+pub mod reconcile_write;
 
 pub async fn current_batch_phase_pg(
     pool: &PgPool,
@@ -163,7 +163,7 @@ fn normalize_phase_gate_pass_verdict(pass_verdict: &str) -> String {
     }
 }
 
-pub(crate) fn normalize_optional_text(value: Option<&str>) -> Option<String> {
+pub fn normalize_optional_text(value: Option<&str>) -> Option<String> {
     value.and_then(|item| {
         let trimmed = item.trim();
         if trimmed.is_empty() {
@@ -270,7 +270,7 @@ pub async fn clear_phase_gate_state_on_pg(
 /// Outcome of `reconcile_phase_gate_for_terminal_dispatch_on_pg_tx`. Used by
 /// callers (and tests) to decide whether a follow-up resume/complete is owed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PhaseGateReconciliation {
+pub enum PhaseGateReconciliation {
     /// Dispatch carries no `phase_gate` context, so nothing to do.
     NoContext,
     /// Phase-gate state row was already in `failed` — leaving it alone.
@@ -318,7 +318,7 @@ pub(crate) enum PhaseGateReconciliation {
 
 /// Phase-gate reconcile writes for one terminal dispatch. A `Cleared` result carries
 /// `run_finalized: false`; the service attempts run completion on the same tx and fills it.
-pub(crate) async fn write_phase_gate_reconcile_on_pg_tx(
+pub async fn write_phase_gate_reconcile_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
     dispatch_status: &str,
@@ -524,7 +524,7 @@ impl PhaseGateRepairError {
         }
     }
 
-    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::InvalidRequest {
             message: message.into(),
         }
@@ -536,7 +536,7 @@ impl PhaseGateRepairError {
         }
     }
 
-    pub(crate) fn database(message: impl Into<String>) -> Self {
+    pub fn database(message: impl Into<String>) -> Self {
         Self::Database {
             message: message.into(),
         }
@@ -548,7 +548,7 @@ impl PhaseGateRepairError {
         }
     }
 
-    pub(crate) fn reconcile(message: impl Into<String>) -> Self {
+    pub fn reconcile(message: impl Into<String>) -> Self {
         Self::Reconcile {
             message: message.into(),
         }
@@ -588,14 +588,14 @@ pub struct PhaseGateRepairOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedPhaseGateContext {
+pub struct ParsedPhaseGateContext {
     pub run_id: String,
     pub phase: i64,
     pub next_phase: Option<i64>,
     pub final_phase: bool,
 }
 
-fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
+pub fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
     let raw = context_json?.trim();
     if raw.is_empty() {
         return None;
@@ -731,7 +731,7 @@ async fn phase_gate_run_phase_uses_legacy_default_on_pg_tx(
     })
 }
 
-pub(crate) async fn authoritative_phase_gate_context_on_pg_tx(
+pub async fn authoritative_phase_gate_context_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase: i64,

@@ -1,13 +1,13 @@
 use super::*;
 use serde_json::json;
 
-pub(crate) fn end_turn() -> Value {
+pub fn end_turn() -> Value {
     json!({"type":"assistant","uuid":uuid::Uuid::new_v4().to_string(),"apiBlockIndex":0,
         "message":{"id":"idle-completion","role":"assistant","stop_reason":"end_turn",
         "content":[{"type":"text","text":"Finished."}]}})
 }
 
-pub(crate) fn tail() -> Vec<Value> {
+pub fn tail() -> Vec<Value> {
     let mut records: Vec<_> = [
         "agent_listing_delta",
         "skill_listing",

@@ -15,16 +15,16 @@ use crate::db::dispatched_session_canonical_identity::{
 
 #[cfg(unix)]
 #[path = "hosted_execution/http_force.rs"]
-pub(crate) mod http_force;
+pub mod http_force;
 #[path = "hosted_execution/legacy_return.rs"]
-pub(crate) mod legacy_return;
+pub mod legacy_return;
 
-pub(crate) const HOSTED_EXECUTION_SCHEMA: u32 = 1;
+pub const HOSTED_EXECUTION_SCHEMA: u32 = 1;
 const HERDR_HOST: &str = "herdr";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HostedState {
+pub enum HostedState {
     Pending,
     Bound,
     Retired,
@@ -33,7 +33,7 @@ pub(crate) enum HostedState {
 /// Canonical owner; provider, token hash and channel must equal the row's identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HostedOwner {
+pub struct HostedOwner {
     pub provider: String,
     pub discord_token_hash: String,
     pub channel_id: String,
@@ -44,7 +44,7 @@ pub(crate) struct HostedOwner {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HostedLocation {
+pub struct HostedLocation {
     pub host: String,
     pub execution_node: String,
     pub endpoint_config_key: String,
@@ -55,7 +55,7 @@ pub(crate) struct HostedLocation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ProcessStamp {
+pub struct ProcessStamp {
     pub pid: u32,
     pub start: String,
 }
@@ -64,7 +64,7 @@ pub(crate) struct ProcessStamp {
 /// observations are compared against it and never replace it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExpectedExecution {
+pub struct ExpectedExecution {
     pub binding_provider: String,
     pub binding_nonce: String,
     pub root: ProcessStamp,
@@ -74,7 +74,7 @@ pub(crate) struct ExpectedExecution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SourceRef {
+pub struct SourceRef {
     pub runtime_root: String,
     pub channel: String,
     pub provider: String,
@@ -88,7 +88,7 @@ pub(crate) struct SourceRef {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HostedExecution {
+pub struct HostedExecution {
     pub schema: u32,
     pub state: HostedState,
     pub execution_nonce: String,
@@ -111,11 +111,7 @@ fn filled(values: &[&str]) -> bool {
 
 impl HostedExecution {
     /// A new incarnation's first record: no pane or process evidence yet.
-    pub(crate) fn pending(
-        owner: HostedOwner,
-        execution_nonce: String,
-        source_ref: SourceRef,
-    ) -> Self {
+    pub fn pending(owner: HostedOwner, execution_nonce: String, source_ref: SourceRef) -> Self {
         Self {
             schema: HOSTED_EXECUTION_SCHEMA,
             state: HostedState::Pending,
@@ -168,7 +164,7 @@ impl HostedExecution {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum HostedRecord {
+pub enum HostedRecord {
     /// SQL NULL: the row predates hosted execution and keeps its legacy meaning.
     Legacy,
     Known(HostedExecution),
@@ -177,7 +173,7 @@ pub(crate) enum HostedRecord {
 }
 
 impl HostedRecord {
-    pub(crate) fn decode(raw: Option<&Value>) -> Self {
+    pub fn decode(raw: Option<&Value>) -> Self {
         let Some(raw) = raw else {
             return Self::Legacy;
         };
@@ -202,14 +198,14 @@ impl HostedRecord {
 
 /// One row's record as read; the raw value is the CAS expectation for the next write.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct HostedObservation {
+pub struct HostedObservation {
     session_id: i64,
     raw: Option<Value>,
-    pub(crate) record: HostedRecord,
+    pub record: HostedRecord,
 }
 
 impl HostedObservation {
-    pub(crate) fn session_id(&self) -> i64 {
+    pub fn session_id(&self) -> i64 {
         self.session_id
     }
 
@@ -226,7 +222,7 @@ impl HostedObservation {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum HostedLookupKey<'a> {
+pub enum HostedLookupKey<'a> {
     /// Full primary or alias session key.
     SessionKey(&'a str),
     Canonical {
@@ -236,7 +232,7 @@ pub(crate) enum HostedLookupKey<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum HostedLookup {
+pub enum HostedLookup {
     Found(HostedObservation),
     Missing,
     /// Incomplete key or database failure; never a legacy answer.
@@ -245,10 +241,7 @@ pub(crate) enum HostedLookup {
 }
 
 /// Resolve exactly one sessions row by full key or exact canonical tuple, then read its record.
-pub(crate) async fn load_hosted_execution_pg(
-    pool: &PgPool,
-    key: HostedLookupKey<'_>,
-) -> HostedLookup {
+pub async fn load_hosted_execution_pg(pool: &PgPool, key: HostedLookupKey<'_>) -> HostedLookup {
     let resolved = match key {
         HostedLookupKey::SessionKey(session_key) if filled(&[session_key]) => {
             resolve_session_row_pg(pool, Some(session_key), None, None).await
@@ -313,11 +306,11 @@ pub(crate) async fn load_hosted_execution_pg(
 }
 
 /// The record states of a live execution.
-pub(crate) const LIVE: &[&str] = &["pending", "bound"];
+pub const LIVE: &[&str] = &["pending", "bound"];
 
 /// Every row whose record places a Herdr execution in one of `states` on `node`; a record that does
 /// not decode, or names another owner than its row, comes back Unknown.
-pub(crate) async fn list_local_herdr_rows_pg(
+pub async fn list_local_herdr_rows_pg(
     pool: &PgPool,
     node: &str,
     states: &[&str],
@@ -341,7 +334,7 @@ pub(crate) async fn list_local_herdr_rows_pg(
 }
 
 /// Every Pending row owned by `node` whose launch recorded no pane yet.
-pub(crate) async fn list_local_unplaced_pending_pg(
+pub async fn list_local_unplaced_pending_pg(
     pool: &PgPool,
     node: &str,
 ) -> Result<Vec<HostedObservation>, String> {
@@ -397,14 +390,14 @@ fn owner_matches_row(owner: &HostedOwner, identity: &[Option<String>; 4]) -> boo
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostedCasOutcome {
+pub enum HostedCasOutcome {
     Written,
     /// The row, its canonical identity or its record changed since the observation.
     Stale,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) enum HostedTransitionError {
+pub enum HostedTransitionError {
     UnknownRecord,
     NotAllowed(Option<HostedState>),
     NonceMismatch,
@@ -416,7 +409,7 @@ pub(crate) enum HostedTransitionError {
 }
 
 /// Install a new incarnation's Pending record over a legacy row or a retired older nonce.
-pub(crate) async fn install_pending_pg(
+pub async fn install_pending_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     next: HostedExecution,
@@ -438,7 +431,7 @@ pub(crate) async fn record_pane_location_pg(
 }
 
 /// Fill the pane location and launch evidence once, only for the same Pending nonce.
-pub(crate) async fn record_launch_evidence_pg(
+pub async fn record_launch_evidence_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     owner: &HostedOwner,
@@ -457,7 +450,7 @@ pub(crate) async fn record_launch_evidence_pg(
 }
 
 /// Pending with complete launch evidence becomes Bound for the same nonce.
-pub(crate) async fn bind_pg(
+pub async fn bind_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     owner: &HostedOwner,
@@ -468,7 +461,7 @@ pub(crate) async fn bind_pg(
 }
 
 /// Retire the confirmed-ended execution of this nonce; any other nonce is refused.
-pub(crate) async fn retire_pg(
+pub async fn retire_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     owner: &HostedOwner,
@@ -620,9 +613,9 @@ async fn compare_and_set_pg(
 
 /// One sessions row as ordinary cleanup reads it before deleting it.
 #[derive(Debug, PartialEq)]
-pub(crate) struct CleanupRow {
-    pub(crate) id: i64,
-    pub(crate) session_key: Option<String>,
+pub struct CleanupRow {
+    pub id: i64,
+    pub session_key: Option<String>,
     /// provider, identity_kind, discord_token_hash, channel_id as read.
     identity: [Option<String>; 4],
     raw: Option<Value>,
@@ -647,7 +640,7 @@ impl CleanupRow {
     }
 
     /// Payload and canonical row ownership only; the service judges Legacy markers.
-    pub(crate) fn record_deletable(&self) -> bool {
+    pub fn record_deletable(&self) -> bool {
         let record = HostedRecord::decode(self.raw.as_ref());
         record.deletable()
             && match &record {
@@ -657,11 +650,11 @@ impl CleanupRow {
             }
     }
 
-    pub(crate) fn is_legacy(&self) -> bool {
+    pub fn is_legacy(&self) -> bool {
         self.raw.is_none()
     }
 
-    pub(crate) fn locator_keys(&self) -> impl Iterator<Item = &str> {
+    pub fn locator_keys(&self) -> impl Iterator<Item = &str> {
         self.session_key
             .iter()
             .chain(&self.aliases)
@@ -685,9 +678,7 @@ impl CleanupRow {
 }
 
 /// Candidate snapshots in the same order used by bulk cleanup.
-pub(crate) async fn load_disconnected_cleanup_rows_pg(
-    pool: &PgPool,
-) -> Result<Vec<CleanupRow>, String> {
+pub async fn load_disconnected_cleanup_rows_pg(pool: &PgPool) -> Result<Vec<CleanupRow>, String> {
     let rows = sqlx::query(
         "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
                 s.channel_id, s.hosted_execution,
@@ -705,7 +696,7 @@ pub(crate) async fn load_disconnected_cleanup_rows_pg(
 }
 
 /// Applies the service's judged snapshots in one transaction with the original predicates.
-pub(crate) async fn delete_disconnected_sessions_pg(
+pub async fn delete_disconnected_sessions_pg(
     pool: &PgPool,
     judged: &[CleanupRow],
 ) -> Result<u64, String> {
@@ -734,7 +725,7 @@ pub(crate) async fn delete_disconnected_sessions_pg(
 }
 
 /// Reads one row as cleanup judges it; alias keys are ordered so two reads compare equal.
-pub(crate) async fn load_cleanup_row_pg<'e>(
+pub async fn load_cleanup_row_pg<'e>(
     executor: impl sqlx::PgExecutor<'e>,
     session_id: i64,
 ) -> Result<Option<CleanupRow>, String> {
@@ -756,7 +747,7 @@ pub(crate) async fn load_cleanup_row_pg<'e>(
 }
 
 /// Resolve an explicit delete locator without taking its mutation lock.
-pub(crate) async fn load_session_delete_candidate_pg(
+pub async fn load_session_delete_candidate_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<CleanupRow>, String> {
@@ -769,12 +760,12 @@ pub(crate) async fn load_session_delete_candidate_pg(
     load_cleanup_row_pg(pool, session_id).await
 }
 
-pub(crate) fn changed_after_check(session_id: i64) -> String {
+pub fn changed_after_check(session_id: i64) -> String {
     format!("session {session_id} changed after its hosted execution check; retry the delete")
 }
 
 /// Takes the delete's row lock and drops it at once: the wait for any holder ends here.
-pub(crate) async fn wait_out_row_lock_pg(pool: &PgPool, session_key: &str) -> Result<(), String> {
+pub async fn wait_out_row_lock_pg(pool: &PgPool, session_key: &str) -> Result<(), String> {
     let mut tx = pool
         .begin()
         .await
@@ -815,7 +806,7 @@ pub(crate) async fn delete_locked_session_pg(
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "hosted_execution_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "hosted_execution_tests.rs"]

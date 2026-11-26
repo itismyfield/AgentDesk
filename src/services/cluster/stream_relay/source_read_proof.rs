@@ -82,7 +82,7 @@ impl SourcePin {
 }
 
 #[derive(Clone)]
-pub(crate) struct SourceCertificate {
+pub struct SourceCertificate {
     pin: SourcePin,
     end: u64,
     generation: i64,
@@ -97,7 +97,7 @@ impl SourceCertificate {
         self.seal.is_current()
     }
 
-    pub(crate) fn matches(&self, end: u64, generation: i64, reset: u64) -> bool {
+    pub fn matches(&self, end: u64, generation: i64, reset: u64) -> bool {
         self.end == end
             && self.generation == generation
             && self.reset == reset
@@ -128,7 +128,7 @@ impl SourceCertificate {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ReadVersion {
+pub struct ReadVersion {
     identity: (u64, u64),
     len: u64,
     modified: (i64, i64),
@@ -159,7 +159,7 @@ impl ReadVersion {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
-pub(crate) struct SourceReadProof {
+pub struct SourceReadProof {
     file: std::sync::Arc<std::fs::File>,
     path: std::path::PathBuf,
     pin: SourcePin,
@@ -223,7 +223,7 @@ impl SourceReadProof {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[derive(Clone)]
-pub(crate) struct PrefixSeal {
+pub struct PrefixSeal {
     file: std::sync::Arc<std::fs::File>,
     path: std::path::PathBuf,
     pin: SourcePin,

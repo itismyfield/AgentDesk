@@ -7,7 +7,7 @@ const SUBMISSION_RESERVED_ROWS: usize = 10;
 const MAX_SUBMISSION_ROWS: usize = 40;
 
 /// One bracketed paste avoids digit actions and preserves the plan's normalized payload bytes.
-pub(crate) fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
+pub fn owned_prompt_plan(prompt: &str) -> Result<Vec<TuiInputAction>, String> {
     one_paste(plan_prompt_submit(prompt)?)
 }
 
@@ -34,7 +34,7 @@ fn one_paste(plan: Vec<TuiInputAction>) -> Result<Vec<TuiInputAction>, String> {
 
 const DRAFT_NOTICE_KIND: &str = "codex.draft_preservation_unconfirmed";
 
-fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
+pub fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
     let (primary, generation) = original?;
     Some(format!(
         "{DRAFT_NOTICE_KIND}:{channel}:{primary}:{generation}"
@@ -42,7 +42,7 @@ fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<Stri
 }
 
 /// Without an owner identity there is no stable notice key; no draft text leaves this path.
-pub(crate) fn notify_owned_draft(channel: u64) {
+pub fn notify_owned_draft(channel: u64) {
     let Some(event) = draft_notice_event(
         channel,
         crate::services::claude_tui::owner_input::original_identity(),
@@ -62,7 +62,7 @@ pub(crate) fn notify_owned_draft(channel: u64) {
     }
 }
 
-async fn enqueue_draft_notice(
+pub async fn enqueue_draft_notice(
     pool: &sqlx::PgPool,
     channel: u64,
     event: &str,
@@ -109,7 +109,7 @@ pub(crate) async fn enqueue_draft_notice_for_test(
 }
 
 /// A conservative screen budget; the core checks frame bytes before this payload callback.
-pub(crate) fn prompt_submission_fits_pane(
+pub fn prompt_submission_fits_pane(
     frame: &str,
     uses_paste: bool,
     size: Option<(usize, usize)>,
@@ -186,7 +186,7 @@ pub(super) fn submission_snapshot_with_pane(
 }
 
 /// The whole visible composer body; a partial row or unknown layout proves no ownership.
-pub(crate) fn submission_draft_in_pane(pane: &str) -> Option<String> {
+pub fn submission_draft_in_pane(pane: &str) -> Option<String> {
     submission_draft_with_start_in_pane(pane).map(|(_, body)| body)
 }
 
@@ -195,7 +195,7 @@ fn submission_draft_with_start_in_pane(pane: &str) -> Option<(usize, String)> {
 }
 
 /// Submission requires a complete empty body or one raw dim compact suggestion row.
-pub(crate) fn submission_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
+pub fn submission_readiness_from_ansi_pane(pane_with_escapes: &str) -> (bool, bool, String) {
     let plain = strip_ansi_escape_sequences(pane_with_escapes);
     let draft = submission_draft_with_start_in_pane(pane_with_escapes).map(|(_, body)| body);
     let dim_hint = draft
@@ -233,7 +233,7 @@ fn submission_control_rows(pane: &str) -> Option<Vec<&str>> {
 }
 
 /// Modal controls are outside the complete current composer, not inside its prompt body.
-pub(crate) fn submission_modal_in_pane(pane: &str) -> bool {
+pub fn submission_modal_in_pane(pane: &str) -> bool {
     let Some(controls) = submission_control_rows(pane) else {
         return pane_has_codex_interactive_modal_in_pane(pane)
             || pane
@@ -274,7 +274,7 @@ pub(crate) fn submission_modal_in_pane(pane: &str) -> bool {
 }
 
 /// Only active-turn control rows outside the current composer veto a guarded submission.
-pub(crate) fn submission_busy_in_pane(pane: &str) -> bool {
+pub fn submission_busy_in_pane(pane: &str) -> bool {
     let Some(composer) = submission_composer_start_in_pane(pane) else {
         return false;
     };

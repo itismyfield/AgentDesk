@@ -83,13 +83,13 @@ fn wait_for_tmux_output(
 
 mod availability;
 mod instance_scope;
-pub(crate) use instance_scope::{input_command, validate_target};
-pub(crate) mod health_probe;
+pub use instance_scope::{input_command, validate_target};
+pub mod health_probe;
 pub(crate) mod session_identity;
 #[cfg(all(test, unix))]
 pub(crate) mod session_identity_tests;
 #[cfg(unix)]
-pub(crate) mod session_inventory;
+pub mod session_inventory;
 
 pub use availability::{
     cached_unavailable_due_to_missing, invalidate_cache as invalidate_availability_cache,
@@ -107,7 +107,7 @@ pub fn version() -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionPresence {
+pub enum SessionPresence {
     Present,
     Missing,
     ProbeFailed,
@@ -137,7 +137,7 @@ pub(crate) fn classify_has_session_output(output: &Output) -> SessionPresence {
     }
 }
 
-pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
+pub fn session_presence(session_name: &str) -> SessionPresence {
     if is_blank_session_name(session_name) {
         return SessionPresence::ProbeFailed;
     }
@@ -173,7 +173,7 @@ pub fn create_session(
     create_session_with_identity(session_name, working_dir, shell_command, &identity)
 }
 
-pub(crate) fn create_session_with_identity(
+pub fn create_session_with_identity(
     session_name: &str,
     working_dir: Option<&str>,
     shell_command: &str,
@@ -348,7 +348,7 @@ fn log_kill_request(session_name: &str, reason: &str) {
 
 /// Test-only record of every tmux kill this process requested, by session name.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod kill_requests {
+pub mod kill_requests {
     use std::sync::{LazyLock, Mutex};
 
     static REQUESTED: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Mutex::default);
@@ -361,7 +361,7 @@ pub(crate) mod kill_requests {
     }
 
     /// How many kills were requested for exactly `session_name`.
-    pub(crate) fn count(session_name: &str) -> usize {
+    pub fn count(session_name: &str) -> usize {
         let requested = REQUESTED
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1013,7 +1013,7 @@ impl From<bool> for PaneLiveness {
 mod liveness;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use liveness::tests as liveness_tests;
+pub use liveness::tests as liveness_tests;
 
 /// Probe a session's pane liveness as a three-state answer (see [`PaneLiveness`]).
 pub fn pane_liveness(session_name: &str) -> PaneLiveness {

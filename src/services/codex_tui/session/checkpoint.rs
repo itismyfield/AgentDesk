@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Source {
+pub struct Source {
     pub path: PathBuf,
     pub session_id: Option<String>,
     identity: SourceFileIdentity,
@@ -18,14 +18,10 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    pub(crate) fn matches_path(&self, path: &Path) -> bool {
+    pub fn matches_path(&self, path: &Path) -> bool {
         crate::services::codex_tui::session::codex_tui_rollout_paths_same(&self.path, path)
     }
-    pub(crate) fn open(
-        tmux: &str,
-        path: &Path,
-        session_id: Option<String>,
-    ) -> io::Result<(Self, File)> {
+    pub fn open(tmux: &str, path: &Path, session_id: Option<String>) -> io::Result<(Self, File)> {
         let mut file = File::open(path)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("Codex source is not a regular file"));
@@ -44,7 +40,7 @@ impl Source {
         Ok((source, file))
     }
 
-    pub(crate) fn record(&self, tmux: &str, end: u64) -> io::Result<serde_json::Value> {
+    pub fn record(&self, tmux: &str, end: u64) -> io::Result<serde_json::Value> {
         let mut file = self.reader(tmux)?;
         if end == 0 || boundary(&mut file, end)? != end {
             return Err(io::Error::other("Codex record is not sealed"));
@@ -64,7 +60,7 @@ impl Source {
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
-    pub(crate) fn check(&self, tmux: &str) -> io::Result<()> {
+    pub fn check(&self, tmux: &str) -> io::Result<()> {
         self.reader(tmux).map(|_| ())
     }
 
@@ -98,7 +94,7 @@ fn nonce(tmux: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
-pub(crate) fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
+pub fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
     if offset > file.metadata()?.len() {
         return Err(io::Error::other("Codex checkpoint beyond source"));
     }
@@ -123,12 +119,12 @@ pub(crate) fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
     Ok(0)
 }
 
-pub(crate) fn at(path: &Path, offset: u64) -> io::Result<u64> {
+pub fn at(path: &Path, offset: u64) -> io::Result<u64> {
     boundary(&mut File::open(path)?, offset)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Advance {
+pub enum Advance {
     Advanced {
         source: SourceFileIdentity,
         start: u64,
@@ -141,7 +137,7 @@ pub(crate) enum Advance {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ScanStats {
+pub struct ScanStats {
     pub assistant_records: u64,
     pub records: u64,
     pub source_bytes: u64,
@@ -150,13 +146,13 @@ pub(crate) struct ScanStats {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ObservationKind {
+pub enum ObservationKind {
     Unknown,
     Delegated,
 }
 
 impl ScanStats {
-    pub(crate) fn add(&mut self, stats: Self) {
+    pub fn add(&mut self, stats: Self) {
         self.assistant_records += stats.assistant_records;
         self.records += stats.records;
         self.source_bytes += stats.source_bytes;
@@ -176,7 +172,7 @@ impl ScanStats {
             "Codex observed a physical span"
         );
     }
-    pub(crate) fn observe(&mut self, bytes: usize, json: Option<&serde_json::Value>) {
+    pub fn observe(&mut self, bytes: usize, json: Option<&serde_json::Value>) {
         self.records += 1;
         self.source_bytes += bytes as u64;
         let Some(json) = json else {
@@ -205,10 +201,10 @@ impl ScanStats {
     }
 }
 
-pub(crate) type ParkedOwnerKey = (u64, String, String, String, u64, u64);
+pub type ParkedOwnerKey = (u64, String, String, String, u64, u64);
 
 #[derive(Clone, Debug)]
-pub(crate) struct RestorePlan<C> {
+pub struct RestorePlan<C> {
     pub source: Source,
     pub input_start: u64,
     pub held: Option<C>,

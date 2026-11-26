@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 use sqlx::{Postgres, Transaction};
 
 #[derive(Clone)]
-pub(crate) struct Context {
+pub struct Context {
     pub policy_channel: String,
     pub pair: [String; 2],
     pub gateway: Option<String>,
@@ -15,7 +15,7 @@ pub(crate) struct Context {
     pub lease_seconds: i64,
 }
 
-pub(crate) struct Shared {
+pub struct Shared {
     pub context: Context,
     pub home: Option<String>,
     pub conflict: bool,

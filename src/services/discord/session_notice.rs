@@ -6,12 +6,12 @@ use poise::serenity_prelude::{ChannelId, Http};
 use std::sync::Arc;
 
 // Injected-prompt classification and input notices, re-imported by `tui_prompt_relay`.
-pub(in crate::services::discord) mod injected_prompt_policy;
-pub(in crate::services) mod input_notice;
+pub mod injected_prompt_policy;
+pub mod input_notice;
 mod input_notice_memo;
-pub(in crate::services::discord) mod observed_prompt_decision;
+pub mod observed_prompt_decision;
 
-pub(super) fn preview(text: &str) -> String {
+pub fn preview(text: &str) -> String {
     let text = tui_task_card::strip_terminal_controls(text)
         .replace("\r\n", "\n")
         .replace(['\r', '\u{2028}', '\u{2029}'], "\n");
@@ -42,16 +42,16 @@ pub(super) fn preview(text: &str) -> String {
     escaped
 }
 
-pub(crate) fn subtext(icon: &str, text: &str) -> String {
+pub fn subtext(icon: &str, text: &str) -> String {
     finish(format!("-# {icon} {}", preview(text)))
 }
 
-pub(crate) fn finish(text: String) -> String {
+pub fn finish(text: String) -> String {
     // Bound the preview before applying the shared Discord UTF-16 clamp.
     tui_task_card::clamp_discord_message_content(&tui_task_card::truncate_chars_ascii(&text, 900))
 }
 
-pub(crate) fn is_inline(text: &str) -> bool {
+pub fn is_inline(text: &str) -> bool {
     text.starts_with("-# ")
         && !text
             .chars()
@@ -59,7 +59,7 @@ pub(crate) fn is_inline(text: &str) -> bool {
 }
 
 /// Channel runtime lookup for `provider_http`; the health registry implements it.
-pub(super) trait ChannelRuntimeHttp {
+pub trait ChannelRuntimeHttp {
     /// `None` when no single runtime owns the channel, `Some(None)` when it has no credentials.
     fn channel_runtime_http(
         &self,
@@ -68,7 +68,7 @@ pub(super) trait ChannelRuntimeHttp {
     ) -> impl std::future::Future<Output = Option<Option<Arc<Http>>>> + Send;
 }
 
-pub(super) async fn provider_http(
+pub async fn provider_http(
     registry: &impl ChannelRuntimeHttp,
     provider: &ProviderKind,
     channel: ChannelId,

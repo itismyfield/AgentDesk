@@ -4,7 +4,7 @@ use crate::services::session_host::ClearedHostSession;
 
 /// Whether the turn's tmux session may be torn down, judged before spawn.
 #[derive(Debug)]
-pub(crate) enum TeardownClearance {
+pub enum TeardownClearance {
     /// The turn's sessions row is a found legacy row with no host trace.
     Cleared(ClearedHostSession),
     /// The guard kept the session; every teardown effect is skipped.
@@ -72,7 +72,7 @@ pub(crate) fn report_tmux_death(
 
 /// Audit, exit reason, then kill of `tmux_name`, in that order, once admitted.
 #[cfg(unix)]
-pub(crate) fn teardown_tmux(
+pub fn teardown_tmux(
     clearance: Option<&TeardownClearance>,
     tmux_name: &str,
     component: &str,
@@ -86,6 +86,9 @@ pub(crate) fn teardown_tmux(
     crate::services::session_host::TmuxHost.kill(tmux_name, reason);
     Ok(())
 }
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 #[path = "provider_teardown_tests.rs"]

@@ -20,7 +20,7 @@ const CONFIRMED: u8 = b'C';
 /// The held file lock spans the complete remote write. Never unlink receipt
 /// files: a contender may already have opened the same inode before locking it.
 #[derive(Debug)]
-pub(crate) struct WriterClaim {
+pub struct WriterClaim {
     file: File,
 }
 
@@ -157,7 +157,7 @@ fn generation_path(directory: &Path, endpoint: &str) -> std::path::PathBuf {
 /// A mutation changes the store generation so old receipts cannot suppress a
 /// legitimate remember after amend/forget. Old in-flight completions remain in
 /// their old generation and never restore stale suppression.
-pub(crate) fn writer_fingerprint(
+pub fn writer_fingerprint(
     directory: &Path,
     endpoint: &str,
     auth_identity: &str,
@@ -197,7 +197,7 @@ pub(crate) fn writer_fingerprint(
 /// Invalidate the entire endpoint because a privileged maintenance credential
 /// can consolidate facts written under other client credentials. Fingerprints
 /// still isolate credentials: this can permit extra writes, never merge tenants.
-pub(crate) fn invalidate_writer_receipts(
+pub fn invalidate_writer_receipts(
     directory: &Path,
     endpoint: &str,
     _auth_identity: &str,

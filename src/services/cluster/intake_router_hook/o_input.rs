@@ -2,7 +2,7 @@
 
 use super::*;
 
-mod fallback_route;
+pub mod fallback_route;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use fallback_route::{BEFORE_PLAN, ENTERED};
 

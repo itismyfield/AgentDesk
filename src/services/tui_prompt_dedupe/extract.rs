@@ -97,13 +97,13 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     extract_claude_transcript_user_prompt_with_entry_id(json).map(|(prompt, _)| prompt)
 }
 
-pub(crate) fn is_claude_compact_summary(json: &Value) -> bool {
+pub fn is_claude_compact_summary(json: &Value) -> bool {
     json.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
 }
 
 /// A scheduled-task fire's own row marks, which the hook and the writer both read. `turnOrigin`
 /// belongs to the whole turn, so a typed input and a compact summary of that turn carry it too.
-pub(crate) fn carries_scheduled_fire_marks(json: &Value) -> bool {
+pub fn carries_scheduled_fire_marks(json: &Value) -> bool {
     !is_claude_compact_summary(json)
         && (json.get("scheduledTaskId").is_some_and(Value::is_string)
             || matches!(
@@ -348,10 +348,7 @@ pub enum PromptObservation {
     Ignored,
 }
 
-pub(crate) fn resolve_tmux_session_name(
-    provider: &str,
-    provider_session_id: &str,
-) -> Option<String> {
+pub fn resolve_tmux_session_name(provider: &str, provider_session_id: &str) -> Option<String> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state
@@ -384,17 +381,17 @@ pub(super) fn open_native_turn(
 }
 
 /// A row now answers the native turn `prompt` opened.
-pub(crate) fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
+pub fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
     settle_native_turn(prompt, Some(NativeTurnOwner::Answer));
 }
 
 /// The deferred start worker of `anchor` takes over the native turn `prompt` opened.
-pub(crate) fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
+pub fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
     settle_native_turn(prompt, Some(NativeTurnOwner::Worker(anchor)));
 }
 
 /// The relay of `prompt` ended with no owner: its own unowned slot goes, a newer one stays.
-pub(crate) fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
+pub fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
     settle_native_turn(prompt, None);
 }
 
@@ -425,7 +422,7 @@ fn settle_native_turn(prompt: &ObservedTuiPrompt, owner: Option<NativeTurnOwner>
 
 /// The deferred start worker of `anchor` ended: a claimed row keeps its turn, any other exit drops
 /// it so a later steer of that turn is relayed as its own input.
-pub(crate) fn settle_worker_native_turn(
+pub fn settle_worker_native_turn(
     provider: &str,
     tmux_session_name: &str,
     anchor: u64,
@@ -761,16 +758,16 @@ fn record_local_only_entry_id(prompt: &ObservedTuiPrompt) {
 }
 
 /// Mark a local-only entry as replayed after its Discord session note was accepted.
-pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+pub fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
     record_local_only_entry_id(prompt);
 }
 
 /// Seal a local-only transcript half collapsed into an already-rendered note.
-pub(crate) fn seal_deduped_local_only_entry_id(prompt: &ObservedTuiPrompt) {
+pub fn seal_deduped_local_only_entry_id(prompt: &ObservedTuiPrompt) {
     record_local_only_entry_id(prompt);
 }
 
-pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
+pub fn prompts_match(expected: &str, observed: &str) -> bool {
     let expected_trimmed = normalize_line_endings(expected).trim().to_string();
     let observed_trimmed = normalize_line_endings(observed).trim().to_string();
     if expected_trimmed == observed_trimmed {

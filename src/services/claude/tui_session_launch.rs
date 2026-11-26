@@ -7,7 +7,7 @@ use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
 type ThreadLaunchPolicy = fn(u64) -> Option<String>;
-pub(crate) enum ResumePane<'a> {
+pub enum ResumePane<'a> {
     Cold,
     BeforeKey {
         nonce: Option<&'a str>,
@@ -64,7 +64,7 @@ pub(crate) fn prepare_and_create_claude_tui_session_for_test(
 /// Prepare durable launch evidence before creating the hosted tmux session.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn prepare_and_create_claude_tui_session(
+pub fn prepare_and_create_claude_tui_session(
     tmux_session_name: &str,
     working_dir: &str,
     working_dir_path: &std::path::Path,
@@ -200,7 +200,7 @@ pub(super) fn record_locked_turn(tmux: &str) {
     debug_log(&format!("Claude TUI session turn lock acquired: {tmux}"));
 }
 
-pub(crate) fn reserve_thread_body_before_key(
+pub fn reserve_thread_body_before_key(
     channel: Option<u64>,
     session: &str,
     nonce: Option<&str>,

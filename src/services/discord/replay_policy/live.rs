@@ -2,7 +2,7 @@
 
 use crate::db::replay_disposition::write::ExactAttempt;
 use crate::domain::replay_evidence::live::issuer;
-pub(crate) use crate::domain::replay_evidence::{
+pub use crate::domain::replay_evidence::{
     TerminalKind,
     live::{NoEffectEvidence, TerminalEvidence},
 };
@@ -11,11 +11,11 @@ use std::sync::Mutex;
 pub(crate) mod issuer_key;
 pub(crate) mod seal;
 mod tap;
-pub(crate) use tap::RawTap;
+pub use tap::RawTap;
 
 /// Activity after start that makes an automatic rerun unsafe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Activity {
+pub enum Activity {
     Output,
     Tool,
     Unclassified,
@@ -23,7 +23,7 @@ pub(crate) enum Activity {
 
 /// One raw fact from the attempt's reader, recorded before any parsing decision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Seen {
+pub enum Seen {
     StdoutEof,
     /// The child's wait result; a failed wait leaves the observation broken.
     Exited {
@@ -64,7 +64,7 @@ impl Seen {
 
 /// Raw record of one exact attempt; an incomplete record never reads as an empty one.
 #[derive(Debug, Clone)]
-pub(crate) struct RawObservation {
+pub struct RawObservation {
     receipt_id: i64,
     nonce: String,
     seen: Vec<Seen>,
@@ -186,7 +186,7 @@ pub(crate) enum Verdict {
 /// The in-process record of one started protected attempt. Only the token of the executor that
 /// spent its start permit carries one, so a restored or foreign turn never decides with it.
 #[derive(Debug)]
-pub(crate) struct LiveAttempt {
+pub struct LiveAttempt {
     attempt: Mutex<Option<ExactAttempt>>,
     observation: Mutex<RawObservation>,
     recorded: tokio::sync::Notify,
@@ -199,7 +199,7 @@ pub(crate) struct LiveAttempt {
 }
 
 impl LiveAttempt {
-    pub(crate) fn new(attempt: ExactAttempt) -> Self {
+    pub fn new(attempt: ExactAttempt) -> Self {
         Self {
             observation: Mutex::new(RawObservation::new(&attempt)),
             attempt: Mutex::new(Some(attempt)),
@@ -269,7 +269,7 @@ impl LiveAttempt {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record(&self, seen: Seen) {
+    pub fn record(&self, seen: Seen) {
         lock(&self.observation).seal = seal::Seal::fixture();
         self.record_fact(seen);
     }

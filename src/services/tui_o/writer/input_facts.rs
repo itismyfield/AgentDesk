@@ -14,9 +14,9 @@ use crate::services::tui_o::shadow::{
     CaptureOutcome, CaptureSource, ShadowProvider, SourceBinding,
 };
 
-pub(crate) mod native;
+pub mod native;
 mod queued;
-pub(crate) use native::{QueueRecord, classify as classify_queued_record};
+pub use native::{QueueRecord, classify as classify_queued_record};
 pub mod reactions;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,7 +258,7 @@ impl InputFacts {
     }
 
     /// Installs ends whose source, binding provenance and prefix a worker already checked.
-    pub(crate) fn set_restart_ends(&mut self, mut ends: Vec<VerifiedEnd>) {
+    pub fn set_restart_ends(&mut self, mut ends: Vec<VerifiedEnd>) {
         ends.sort_by(|a, b| {
             (a.cutoff, a.open_after, &a.end_id).cmp(&(b.cutoff, b.open_after, &b.end_id))
         });
@@ -266,15 +266,15 @@ impl InputFacts {
         self.restart_stale = false;
     }
 
-    pub(crate) fn restart_needs_reload(&self) -> bool {
+    pub fn restart_needs_reload(&self) -> bool {
         self.restart_stale
     }
 
-    pub(crate) fn restart_ended(&self) -> bool {
+    pub fn restart_ended(&self) -> bool {
         self.physical_end_id.is_some() && self.state == TurnState::Idle
     }
 
-    pub(crate) fn restart_proof_current(&self) -> bool {
+    pub fn restart_proof_current(&self) -> bool {
         match (
             &self.physical_snapshot,
             Fingerprint::path(&self.binding.source),
@@ -284,7 +284,7 @@ impl InputFacts {
         }
     }
 
-    pub(crate) fn restart_proof_grew(&self) -> bool {
+    pub fn restart_proof_grew(&self) -> bool {
         self.physical_snapshot.as_ref().is_some_and(|kept| {
             Fingerprint::path(&self.binding.source)
                 .is_ok_and(|now| (now.dev, now.ino) == (kept.dev, kept.ino) && now.len > kept.len)
@@ -292,7 +292,7 @@ impl InputFacts {
     }
 
     /// Worker-only: recheck the applied end's native prefix without replaying the reader.
-    pub(crate) fn renew_restart_proof(&mut self) -> bool {
+    pub fn renew_restart_proof(&mut self) -> bool {
         let Some(index) = self
             .restart_ends
             .iter()
@@ -392,7 +392,7 @@ impl InputFacts {
 
     /// The turn this reader treats as running, with its native id when one is known.
     /// Where the open turn started and its native id, as a restart end names them.
-    pub(crate) fn open_window(&self) -> Option<(u64, Option<String>)> {
+    pub fn open_window(&self) -> Option<(u64, Option<String>)> {
         Some((self.open_after?, self.open_turn()?.cloned()))
     }
 

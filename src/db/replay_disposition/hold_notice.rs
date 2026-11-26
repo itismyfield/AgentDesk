@@ -11,17 +11,17 @@ pub(super) const TEXT: &str =
     "출력 또는 도구 활동이 있어 자동 재실행을 보류했습니다. 원 요청과 부분 결과를 보존했습니다.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HoldNotice {
+pub struct HoldNotice {
     pub(crate) dedupe_key: String,
-    pub(crate) outbox_id: i64,
+    pub outbox_id: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hold_nonce: Option<String>,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct NoticeRouting<'a> {
-    pub(crate) bot: &'a str,
-    pub(crate) session_key: Option<&'a str>,
+pub struct NoticeRouting<'a> {
+    pub bot: &'a str,
+    pub session_key: Option<&'a str>,
 }
 
 pub(super) fn key(receipt_id: i64) -> String {
@@ -47,14 +47,14 @@ pub(super) fn from_preserved(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NoticeRead {
+pub enum NoticeRead {
     Missing,
     NotNotified,
     Notified(HoldNotice),
 }
 
 #[derive(Debug)]
-pub(crate) enum NoticeReadError {
+pub enum NoticeReadError {
     Storage(sqlx::Error),
     Malformed,
 }
@@ -68,7 +68,7 @@ impl std::fmt::Display for NoticeReadError {
     }
 }
 
-pub(crate) async fn read(pool: &PgPool, receipt_id: i64) -> Result<NoticeRead, NoticeReadError> {
+pub async fn read(pool: &PgPool, receipt_id: i64) -> Result<NoticeRead, NoticeReadError> {
     let row: Option<(Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
         "SELECT replay_preserved, replay_episode_nonce FROM intake_outbox WHERE id = $1",
     )

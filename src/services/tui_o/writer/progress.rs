@@ -85,7 +85,7 @@ impl Drop for Publisher {
 }
 
 /// The position the running actor of `channel` last published; `None` when no actor runs.
-pub(crate) fn read(channel: u64) -> Option<ChannelProgress> {
+pub fn read(channel: u64) -> Option<ChannelProgress> {
     with_board(|board| board.get(&channel).map(|(_, progress)| *progress))
 }
 

@@ -107,7 +107,7 @@ pub fn same_file(a: &SourceId, b: &SourceId) -> bool {
 
 /// Renumbers chosen files' dev as a reboot would, keyed by their real (dev, ino).
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod renumber {
+pub mod renumber {
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::{LazyLock, Mutex};
@@ -121,7 +121,7 @@ pub(crate) mod renumber {
 
     /// Live stats of `path`'s inode report a dev XORed with `shift` until the guard drops. Keep
     /// the inode alive meanwhile, so no other test's new file reuses it.
-    pub(crate) fn shift(path: &Path, shift: u64) -> Guard {
+    pub fn shift(path: &Path, shift: u64) -> Guard {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path).unwrap();
         let key = (meta.dev(), meta.ino());

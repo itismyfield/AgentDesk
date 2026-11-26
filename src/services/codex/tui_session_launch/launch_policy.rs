@@ -54,7 +54,7 @@ pub(in crate::services::codex) fn tui_preflight_with_policy(
 }
 
 #[cfg(unix)]
-pub(crate) fn successor_hooks_ready() -> bool {
+pub fn successor_hooks_ready() -> bool {
     verified_hook_eligibility(None).is_ok()
 }
 
@@ -174,9 +174,7 @@ impl CodexTuiLaunchScript {
 }
 
 /// The TUI argv up to its prompt; Herdr types the prompt into the composer instead.
-pub(in crate::services::codex) fn codex_tui_option_args(
-    options: &CodexLaunchOptions,
-) -> Vec<String> {
+pub fn codex_tui_option_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     if options.resume_session_id.is_some() {
         args.push("resume".to_string());
@@ -283,7 +281,7 @@ pub(crate) fn prepare_codex_herdr_launch_for_test(
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
-pub(in crate::services::codex) fn prepare_codex_herdr_launch(
+pub fn prepare_codex_herdr_launch(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,
@@ -335,7 +333,7 @@ pub(in crate::services::codex) fn prepare_codex_herdr_launch(
 
 /// Fresh panes must carry no resume command, even if the renderer changes its option order.
 #[cfg(unix)]
-pub(crate) fn validate_herdr_fresh_argv(
+pub fn validate_herdr_fresh_argv(
     mode: &str,
     resume: Option<&str>,
     args: &[String],

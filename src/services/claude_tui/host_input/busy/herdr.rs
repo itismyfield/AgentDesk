@@ -277,7 +277,7 @@ impl Reading {
     }
 }
 
-pub(crate) fn observe(
+pub fn observe(
     (channel, logical, nonce): (u64, &str, &str),
     (target, writer, attempt_target): (HerdrTarget, String, serde_json::Value),
     output_ready: fn(u64) -> bool,

@@ -387,7 +387,7 @@ impl NativeSources {
 }
 
 impl<B: BindingEvents> Sources<B> {
-    pub(crate) fn with_native_inputs(mut self, enabled: bool) -> Self {
+    pub fn with_native_inputs(mut self, enabled: bool) -> Self {
         if enabled && self.provider == crate::services::tui_o::shadow::ShadowProvider::Claude {
             self.native = Some(NativeSources::default());
         }
@@ -470,7 +470,7 @@ impl<B: BindingEvents> Sources<B> {
 
     /// The buffered unterminated tail, once the seed has every complete record before it.
     #[cfg(unix)]
-    pub(crate) fn raw_tail(
+    pub fn raw_tail(
         &self,
         source: &SourceId,
     ) -> Option<super::super::input_facts::native::terminal::Tail> {
@@ -552,10 +552,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     #[cfg(unix)]
-    pub(crate) async fn offer_native(
-        &mut self,
-        port: &super::super::actor::native_input::NativePort,
-    ) {
+    pub async fn offer_native(&mut self, port: &super::super::actor::native_input::NativePort) {
         port.inner.retry().await;
         let sources: Vec<_> = self
             .readers

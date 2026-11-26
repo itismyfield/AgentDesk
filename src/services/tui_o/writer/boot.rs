@@ -247,11 +247,11 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn capture() {
+pub fn capture() {
     EVENTS.with_borrow_mut(|events| *events = Some(Vec::new()));
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn events() -> Vec<Event> {
+pub fn events() -> Vec<Event> {
     EVENTS.with_borrow(|events| events.clone().unwrap_or_default())
 }

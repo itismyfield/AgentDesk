@@ -1,24 +1,24 @@
 //! Persistent state of the O writer under `<runtime_root>/o_store`: once-written `init` and
 //! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
-pub(crate) mod agy_delivery;
-pub(crate) mod agy_spool;
+pub mod agy_delivery;
+pub mod agy_spool;
 pub mod cleanup_witness;
-pub(crate) mod clear_end;
+pub mod clear_end;
 #[cfg(unix)]
-pub(crate) mod codex_end;
-pub(crate) mod codex_provenance;
+pub mod codex_end;
+pub mod codex_provenance;
 #[cfg(unix)]
-pub(crate) mod delivery_evidence;
+pub mod delivery_evidence;
 mod durable;
 pub(crate) mod input_notice_floor;
 pub mod ledger;
-pub(crate) mod restart_end;
-pub(crate) mod restart_notice;
+pub mod restart_end;
+pub mod restart_notice;
 pub mod rotation;
 pub mod spool;
-pub(crate) mod thread_children;
-pub(crate) mod tool_card_switch;
+pub mod thread_children;
+pub mod tool_card_switch;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;
@@ -37,7 +37,7 @@ use crate::services::session_host::surface_policy::InitScope;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use durable::fault;
+pub use durable::fault;
 
 pub const STORE_DIR_NAME: &str = "o_store";
 pub const ERA_FILE: &str = "o_era";
@@ -488,7 +488,7 @@ impl ChannelStore {
 
     /// Small segments let a test see GC keep or drop a source's older records.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_segment_max_for_tests(&mut self, max: u64) {
+    pub fn set_segment_max_for_tests(&mut self, max: u64) {
         self.segment_max = max;
     }
 

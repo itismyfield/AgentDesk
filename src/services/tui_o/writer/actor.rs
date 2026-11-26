@@ -492,7 +492,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn run_channel_at<P, L, A, B>(
+pub async fn run_channel_at<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -523,13 +523,13 @@ mod notice_settlement;
 #[cfg(not(any(test, feature = "test-support")))]
 mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) mod notice_work;
+pub mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
+pub use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
-pub(crate) mod codex_retention;
+pub mod codex_retention;
 mod transition;
 mod transition_snapshot;
 // Test seams for the actor tests mounted in the discord-layer test host.
@@ -538,7 +538,7 @@ mod test_access;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) use test_access::WAIT_LIMIT_FOR_TEST;
 
-pub(crate) mod codex_submission;
+pub mod codex_submission;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     fn project_operator_resumes(&mut self) {
@@ -939,11 +939,9 @@ pub(crate) use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition::test_hooks as transition_hooks;
+pub use transition::test_hooks as transition_hooks;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition_snapshot::{
-    execution_read, execution_sources, force_execution_for_tests,
-};
+pub use transition_snapshot::{execution_read, execution_sources, force_execution_for_tests};
 
 #[cfg(test)]
 mod test_support {

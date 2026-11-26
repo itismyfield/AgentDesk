@@ -15,20 +15,20 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Port {
+pub struct Port {
     suspension: super::super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Request>,
 }
 
-pub(crate) struct Receiver {
+pub struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Request>,
 }
 
-pub(crate) enum Operation {
+pub enum Operation {
     #[cfg(test)]
     Prepare(SubmitFloor),
     Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
@@ -123,7 +123,7 @@ impl Port {
         self.suspension.is_empty()
     }
 
-    pub(crate) fn new(generation: u64) -> (Self, Receiver) {
+    pub fn new(generation: u64) -> (Self, Receiver) {
         let run = Arc::new(());
         let (send, receive) = mpsc::channel(4);
         let receiver = Receiver {
@@ -143,7 +143,7 @@ impl Port {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn same_run(&self, other: &Self) -> bool {
+    pub fn same_run(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.run, &other.run)
     }
 
@@ -478,7 +478,7 @@ thread_local! {
     static SPAWN: std::cell::RefCell<Option<Receiver>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
+pub fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
     struct Scope;
     impl Drop for Scope {
         fn drop(&mut self) {

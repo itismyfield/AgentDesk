@@ -24,19 +24,19 @@ use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_m
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 
 mod observation;
-pub(crate) use observation::observe_hook_at;
+pub use observation::observe_hook_at;
 #[cfg(unix)]
-pub(crate) use observation::{observe_claude_record_at, observe_codex_record_at};
+pub use observation::{observe_claude_record_at, observe_codex_record_at};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HostedSourcePin {
-    pub(crate) provider: String,
-    pub(crate) channel_id: u64,
-    pub(crate) logical_key: String,
-    pub(crate) execution_nonce: String,
+pub struct HostedSourcePin {
+    pub provider: String,
+    pub channel_id: u64,
+    pub logical_key: String,
+    pub execution_nonce: String,
     #[serde(default = "default_hosted_admission_required")]
-    pub(crate) hosted_admission_required: bool,
-    pub(crate) source: SourceId,
+    pub hosted_admission_required: bool,
+    pub source: SourceId,
 }
 
 fn default_hosted_admission_required() -> bool {
@@ -44,7 +44,7 @@ fn default_hosted_admission_required() -> bool {
 }
 
 /// Only affirmative host evidence selects hosted admission; unreadable evidence stays unresolved.
-pub(crate) fn herdr_evidence(
+pub fn herdr_evidence(
     channel: u64,
     logical: &str,
     record: Option<&HostedRecord>,
@@ -68,7 +68,7 @@ pub(crate) fn herdr_evidence(
 }
 
 /// Reads the original file's binding history; a current binding cannot supply a missing origin.
-pub(crate) fn capture(
+pub fn capture(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -108,7 +108,7 @@ fn context_matches(provider: &str, logical: &str, channel: u64, context: &Bindin
 }
 
 /// Capture before a scanner opens the file; its immutable selector names the execution.
-pub(crate) fn scan_context_from_path(
+pub fn scan_context_from_path(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -135,7 +135,7 @@ fn context_current(provider: &str, logical: &str, channel: u64, context: &Bindin
 }
 
 /// A scanner's record must belong to its captured execution, even if older history is missing.
-pub(crate) fn capture_scanned(
+pub fn capture_scanned(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -168,10 +168,7 @@ pub(crate) fn capture_scanned(
     Some(pin)
 }
 
-pub(crate) fn claude_record_created_at(
-    path: &Path,
-    start: u64,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+pub fn claude_record_created_at(path: &Path, start: u64) -> Option<chrono::DateTime<chrono::Utc>> {
     use std::io::{BufRead, Seek, SeekFrom};
     let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
     file.seek(SeekFrom::Start(start)).ok()?;
@@ -184,7 +181,7 @@ pub(crate) fn claude_record_created_at(
 }
 
 /// Rechecks the execution already carried by a source; it never chooses a newer execution.
-pub(crate) fn validate(pin: &HostedSourcePin) -> bool {
+pub fn validate(pin: &HostedSourcePin) -> bool {
     capture_native(
         &pin.provider,
         &pin.logical_key,
@@ -201,7 +198,7 @@ pub(crate) fn validate(pin: &HostedSourcePin) -> bool {
 }
 
 /// An exact saved episode supplies the original native session and execution nonce.
-pub(crate) fn restore(
+pub fn restore(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -274,7 +271,7 @@ fn capture_native(
 }
 
 /// A hook's routing id can outlive a native clear; only its payload names the observed source.
-pub(crate) fn capture_hook(
+pub fn capture_hook(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -312,12 +309,12 @@ pub(crate) fn capture_hook(
 pub(crate) mod tests;
 
 /// Runtime fields the adoption check reads; the Discord runtime implements it.
-pub(crate) trait AdoptionRuntime {
+pub trait AdoptionRuntime {
     fn pg_pool(&self) -> Option<&sqlx::PgPool>;
     fn token_hash(&self) -> &str;
 }
 
-pub(crate) async fn adoption_channel<S: AdoptionRuntime>(
+pub async fn adoption_channel<S: AdoptionRuntime>(
     shared: &Arc<S>,
     prompt: &super::ObservedTuiPrompt,
     candidate: Option<ChannelId>,
@@ -344,7 +341,7 @@ pub(crate) async fn adoption_channel<S: AdoptionRuntime>(
 }
 
 // New prompt adoption needs a live execution; admitted readers keep their tail.
-pub(crate) async fn current_execution_for_adoption<S: AdoptionRuntime>(
+pub async fn current_execution_for_adoption<S: AdoptionRuntime>(
     shared: &Arc<S>,
     provider: &str,
     channel: ChannelId,
@@ -379,7 +376,7 @@ pub(crate) async fn current_execution_for_adoption<S: AdoptionRuntime>(
     execution_current(record).await
 }
 
-pub(crate) async fn execution_current(
+pub async fn execution_current(
     record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
 ) -> bool {
     let Some(target) = herdr_endpoints().target(record) else {

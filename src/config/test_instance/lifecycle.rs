@@ -1,7 +1,7 @@
 use super::{environment, requested};
 
 #[derive(Debug)]
-pub(crate) struct HeldLease {
+pub struct HeldLease {
     #[cfg(unix)]
     _file: std::fs::File,
     #[cfg(unix)]
@@ -23,13 +23,13 @@ fn rejected() -> String {
     "test instance lease admission rejected".into()
 }
 
-pub(crate) fn legacy_cleanup_if_unscoped(cleanup: impl FnOnce()) {
+pub fn legacy_cleanup_if_unscoped(cleanup: impl FnOnce()) {
     if !requested() {
         cleanup();
     }
 }
 
-pub(crate) fn admit_dcserver() -> Result<Option<HeldLease>, String> {
+pub fn admit_dcserver() -> Result<Option<HeldLease>, String> {
     if !requested() {
         return Ok(None);
     }
@@ -330,14 +330,14 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
+pub fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
     u64::try_from(seconds)
         .ok()?
         .checked_mul(1_000_000_000)?
         .checked_add(u64::try_from(nanos).ok()?)
 }
 
-pub(crate) fn has_admitted_run() -> bool {
+pub fn has_admitted_run() -> bool {
     #[cfg(unix)]
     {
         RUN.lock().is_ok_and(|snapshot| snapshot.is_some())
@@ -349,7 +349,7 @@ pub(crate) fn has_admitted_run() -> bool {
 }
 
 /// Bot identity count of the admitted run's profile (three for agy, four for TUI live).
-pub(crate) fn admitted_identity_count() -> Option<usize> {
+pub fn admitted_identity_count() -> Option<usize> {
     #[cfg(unix)]
     {
         if !has_admitted_run() {
@@ -366,7 +366,7 @@ pub(crate) fn admitted_identity_count() -> Option<usize> {
     }
 }
 
-pub(crate) fn bound_listener(address: std::net::SocketAddr) -> Result<(), String> {
+pub fn bound_listener(address: std::net::SocketAddr) -> Result<(), String> {
     if !requested() {
         return Ok(());
     }
@@ -392,7 +392,7 @@ pub(crate) fn bound_listener(address: std::net::SocketAddr) -> Result<(), String
     }
 }
 
-pub(crate) fn health_witness() -> Result<Option<serde_json::Value>, String> {
+pub fn health_witness() -> Result<Option<serde_json::Value>, String> {
     let Some(instance) = super::current()? else {
         return Ok(None);
     };
@@ -421,7 +421,7 @@ pub(crate) fn health_witness() -> Result<Option<serde_json::Value>, String> {
     }
 }
 
-pub(crate) fn with_control_routes(app: axum::Router) -> Result<axum::Router, String> {
+pub fn with_control_routes(app: axum::Router) -> Result<axum::Router, String> {
     if !has_admitted_run() {
         return Ok(app);
     }
@@ -460,7 +460,10 @@ struct ControlRequest {
 }
 
 #[cfg(unix)]
-fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
+pub fn dispatch_control(
+    peer: std::net::SocketAddr,
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
     let response = prepare_control(peer, body)?;
     let instance = super::current()?.ok_or_else(rejected)?;
     let run = RUN.lock().map_err(|_| rejected())?;
@@ -478,7 +481,10 @@ fn dispatch_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_jso
 }
 
 #[cfg(unix)]
-fn prepare_control(peer: std::net::SocketAddr, body: &[u8]) -> Result<serde_json::Value, String> {
+pub fn prepare_control(
+    peer: std::net::SocketAddr,
+    body: &[u8],
+) -> Result<serde_json::Value, String> {
     let request: ControlRequest = serde_json::from_slice(body).map_err(|_| rejected())?;
     let instance = super::current()?.ok_or_else(rejected)?;
     let run = RUN.lock().map_err(|_| rejected())?;
@@ -588,7 +594,9 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-fn derive_control_key<'a>(credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>) -> [u8; 32] {
+pub fn derive_control_key<'a>(
+    credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> [u8; 32] {
     use sha2::Digest;
     let mut digest = sha2::Sha256::new();
     digest.update(b"agentdesk-test-control-key-v1\0");
@@ -602,7 +610,7 @@ fn derive_control_key<'a>(credentials: impl IntoIterator<Item = (&'a str, &'a [u
 }
 
 #[cfg(unix)]
-fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+pub fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut inner = [0x36; 64];
     let mut outer = [0x5c; 64];
@@ -621,12 +629,12 @@ fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(unix)]
-fn hex_digest(digest: [u8; 32]) -> String {
+pub fn hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(unix)]
-fn signed_control(
+pub fn signed_control(
     key: &[u8; 32],
     domain: &[u8],
     value: &serde_json::Value,

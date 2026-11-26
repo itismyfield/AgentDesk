@@ -10,7 +10,7 @@ use crate::services::session_host::surface_policy::VerifiedSurface;
 
 mod child_store;
 mod lifecycle;
-pub(crate) use child_store::ChildStore;
+pub use child_store::ChildStore;
 pub(crate) use lifecycle::ChildLifecycle;
 
 const FLOOR: &str = "thread_children.floor";
@@ -98,7 +98,7 @@ impl OStore {
         std::sync::Arc::new(InitScope::fixture(channels))
     }
 
-    pub(crate) fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
+    pub fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
         self.init_channel(init, &Self::fixture_scope(&[init.channel]))
     }
 
@@ -118,7 +118,7 @@ impl OStore {
         self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]), None)
     }
 
-    pub(crate) fn begin_fixture_era(
+    pub fn begin_fixture_era(
         &self,
         channels: &[u64],
         at: chrono::DateTime<chrono::Utc>,

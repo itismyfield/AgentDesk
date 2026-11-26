@@ -6,10 +6,10 @@ pub mod remote;
 pub mod repo_resolver;
 pub mod runner;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_origin_fixture;
+pub mod test_origin_fixture;
 pub mod worktree_resolver;
 
-pub(crate) use branch_resolver::is_mainlike_branch;
+pub use branch_resolver::is_mainlike_branch;
 pub use branch_resolver::{git_branch_containing_commit, git_branch_name, git_merge_base};
 pub use commit_resolver::{
     find_latest_commit_for_issue, git_best_commit_for_dispatch, git_dispatch_baseline_commit,
@@ -17,7 +17,7 @@ pub use commit_resolver::{
     git_mainline_head_commit, git_mainline_issue_numbers, git_tracked_change_paths,
     git_tracked_change_paths_strict,
 };
-pub(crate) use remote::parse_github_repo_from_remote;
+pub use remote::parse_github_repo_from_remote;
 pub use repo_resolver::{
     is_no_repo_mapping_error, resolve_repo_dir, resolve_repo_dir_for_id,
     resolve_repo_dir_for_target,

@@ -125,7 +125,7 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 }
 
 /// Codex entry for a live hook naming the native turn the input opens or steers.
-pub(crate) fn observe_codex_prompt_in_turn_at(
+pub fn observe_codex_prompt_in_turn_at(
     tmux_session_name: &str,
     prompt: &str,
     entry_id: Option<&str>,
@@ -204,7 +204,7 @@ pub(super) fn observe_held_prompt(
     )
 }
 
-pub(crate) fn observe_hook_prompt_by_tmux_with_prompt_id_at(
+pub fn observe_hook_prompt_by_tmux_with_prompt_id_at(
     provider: &str,
     tmux_session_name: &str,
     prompt: &str,
@@ -256,7 +256,7 @@ pub fn observe_prompt_candidates_by_tmux(
     )
 }
 
-pub(crate) fn observe_prompt_candidates_by_tmux_for_relay_lease(
+pub fn observe_prompt_candidates_by_tmux_for_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     prompts: &[String],
@@ -644,7 +644,7 @@ pub(super) fn observe_inner(
     PromptObservation::PublishedSshDirect
 }
 
-pub(crate) fn record_external_input_relay_lease(
+pub fn record_external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     channel_id: Option<u64>,
@@ -664,7 +664,7 @@ pub(crate) fn record_external_input_relay_lease(
 /// [`clear_external_input_relay_lease_if_matches`] /
 /// [`clear_external_input_relay_lease_if_generation_matches`] compare against, so
 /// a guard never clobbers a newer (even value-identical `Unassigned`) lease.
-pub(crate) fn record_external_input_turn_lease(
+pub fn record_external_input_turn_lease(
     provider: &str,
     tmux_session_name: &str,
     mut lease: ExternalInputRelayLease,
@@ -682,7 +682,7 @@ pub(crate) fn record_external_input_turn_lease(
     state.store_external_input_lease(&provider, tmux_session_name, lease)
 }
 
-pub(crate) fn external_input_relay_lease(
+pub fn external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -703,7 +703,7 @@ pub(crate) fn external_input_relay_lease(
         })
 }
 
-pub(crate) fn external_input_relay_lease_present(
+pub fn external_input_relay_lease_present(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -711,7 +711,7 @@ pub(crate) fn external_input_relay_lease_present(
     external_input_relay_lease(provider, tmux_session_name, channel_id).is_some()
 }
 
-pub(crate) fn clear_external_input_relay_lease(
+pub fn clear_external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -771,7 +771,7 @@ pub(crate) fn with_external_input_relay_lease_if_matches<R, E>(
     Some(result)
 }
 
-pub(crate) fn clear_external_input_relay_lease_if_matches(
+pub fn clear_external_input_relay_lease_if_matches(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -813,7 +813,7 @@ pub(crate) fn clear_external_input_relay_lease_if_matches(
 /// generation — untouched. A guard whose captured lease was never recorded
 /// (generation == [`EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED`]) clears
 /// nothing.
-pub(crate) fn clear_external_input_relay_lease_if_generation_matches(
+pub fn clear_external_input_relay_lease_if_generation_matches(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -883,7 +883,7 @@ fn clear_external_input_relay_lease_if_generation_matches_unscoped(
 /// the matching anchor has not yet been consumed. Watchers use this to keep
 /// the post-terminal suppress guard from killing legitimate direct-input
 /// responses during the brief window before `record_prompt_anchor` lands.
-pub(crate) fn is_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) -> bool {
+pub fn is_ssh_direct_observation_pending(provider: &str, tmux_session_name: &str) -> bool {
     let provider = normalize_provider(provider);
     let tmux_session_name = tmux_session_name.trim();
     if provider.is_empty() || tmux_session_name.is_empty() {
@@ -910,10 +910,7 @@ pub(super) fn clear_ssh_direct_observation_pending(provider: &str, tmux_session_
 
 /// Whether the hook relay announced this scanner row's prompt after the row was published. When
 /// it did, only the lease and marker this row's own observation recorded are released.
-pub(crate) fn withdraw_row_announced_by_its_hook(
-    prompt: &ObservedTuiPrompt,
-    channel_id: u64,
-) -> bool {
+pub fn withdraw_row_announced_by_its_hook(prompt: &ObservedTuiPrompt, channel_id: u64) -> bool {
     let Some(prompt_id) = prompt.row_prompt_id.as_deref() else {
         return false;
     };
@@ -955,7 +952,7 @@ fn clear_ssh_direct_observation_pending_if_generation_matches(
     true
 }
 
-pub(crate) fn record_suppressed_discord_origin_prompt(
+pub fn record_suppressed_discord_origin_prompt(
     provider: &str,
     tmux_session_name: &str,
     prompt: &str,

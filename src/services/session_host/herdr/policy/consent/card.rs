@@ -1,20 +1,20 @@
 use super::{CardState, Consent, State};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Button {
+pub struct Button {
     pub label: &'static str,
     pub custom_id: String,
     pub disabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Card {
+pub struct Card {
     pub content: String,
     pub buttons: Vec<Button>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Click {
+pub struct Click {
     pub nonce: String,
     pub yes: bool,
 }
@@ -34,7 +34,7 @@ fn valid_nonce(nonce: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
 }
 
-pub(crate) fn parse(custom_id: &str) -> Option<Click> {
+pub fn parse(custom_id: &str) -> Option<Click> {
     let mut parts = custom_id.strip_prefix("hresume:v1:")?.split(':');
     let nonce = parts.next()?;
     let yes = match parts.next()? {

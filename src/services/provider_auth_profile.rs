@@ -23,8 +23,8 @@ pub use crate::domain::provider_auth_profile::{
     DEFAULT_PROFILE_ID, ProviderAuthOverlay, ProviderAuthProfileDef,
 };
 
-pub(crate) mod queries;
-pub(crate) mod repository;
+pub mod queries;
+pub mod repository;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthProfileError {

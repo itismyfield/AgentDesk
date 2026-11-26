@@ -16,7 +16,7 @@ use super::traits::InteractiveSessionHost;
 
 /// Herdr pane host over an injected transport. It exists only with a
 /// validated endpoint; nothing in production constructs one yet.
-pub(crate) struct HerdrHost<T: HerdrTransport> {
+pub struct HerdrHost<T: HerdrTransport> {
     endpoint: HerdrEndpoint,
     transport: T,
     next_id: AtomicU64,

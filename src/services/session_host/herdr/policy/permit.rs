@@ -5,7 +5,7 @@ use super::{NextRestartProof, PeerSource, StartupProof, Unverified};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CreatePermit {
+pub struct CreatePermit {
     endpoint: HerdrLaunchEndpoint,
     proof: NextRestartProof,
 }
@@ -54,7 +54,7 @@ impl CreatePermit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LaunchAdmissionGrant {
+pub struct LaunchAdmissionGrant {
     endpoint: HerdrLaunchEndpoint,
     nonce: String,
     witness: ServerWitness,
@@ -156,7 +156,7 @@ impl LaunchAdmissionGrant {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ExistingMutationEvidence {
+pub struct ExistingMutationEvidence {
     pub(crate) startup: Option<StartupProof>,
     pub(crate) grant: Option<LaunchAdmissionGrant>,
 }
@@ -195,7 +195,7 @@ impl ExistingMutationPermit {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn grant_for_test(
+pub fn grant_for_test(
     endpoint: &HerdrLaunchEndpoint,
     nonce: &str,
     witness: ServerWitness,
@@ -218,8 +218,8 @@ pub(crate) fn create_for_test(
 }
 
 /// Startup proof of `witness`'s server, as `observe_policy` leaves it when its config predates it.
-#[cfg(test)]
-pub(crate) fn startup_for_test(witness: ServerWitness) -> super::StartupProof {
+#[cfg(any(test, feature = "test-support"))]
+pub fn startup_for_test(witness: ServerWitness) -> super::StartupProof {
     super::StartupProof {
         evidence: proof_for_test(witness),
     }

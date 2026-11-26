@@ -7,14 +7,14 @@ use serde::Deserialize;
 use serde_json::Value;
 
 mod agy_cell;
-pub(crate) mod environment;
-pub(crate) mod lifecycle;
+pub mod environment;
+pub mod lifecycle;
 
 const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 
 #[derive(Debug)]
-pub(crate) struct TestInstance {
+pub struct TestInstance {
     pub(crate) root: PathBuf,
     config_path: PathBuf,
     pub(crate) instance_id: String,
@@ -44,11 +44,11 @@ pub(crate) struct HerdrHost {
     pub(crate) endpoint_key: String,
 }
 
-pub(crate) fn requested() -> bool {
+pub fn requested() -> bool {
     INSTANCE.get().is_some() || std::env::var_os(MARKER).is_some()
 }
 
-pub(crate) fn initialize() -> Result<(), String> {
+pub fn initialize() -> Result<(), String> {
     if !requested() {
         return Ok(());
     }
@@ -73,7 +73,7 @@ pub(crate) fn initialize() -> Result<(), String> {
         .map_err(Clone::clone)
 }
 
-pub(crate) fn current() -> Result<Option<&'static TestInstance>, String> {
+pub fn current() -> Result<Option<&'static TestInstance>, String> {
     match INSTANCE.get() {
         Some(result) => result.as_ref().map(Some).map_err(Clone::clone),
         None if requested() => Err(rejected()),
@@ -578,9 +578,9 @@ pub(crate) mod tests;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/login_test_support.rs"]
-pub(crate) mod login_test_support;
+pub mod login_test_support;
 
 /// Fixtures upper-crate tests reuse (KRX-TS); the unit tests in `tests` import them.
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/test_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;

@@ -6,7 +6,7 @@ use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Pending,
     Submitted,
     Completed,

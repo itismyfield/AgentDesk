@@ -19,7 +19,7 @@ static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    pub static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -30,7 +30,7 @@ pub(super) fn note_work(owed: usize, unsealed: bool) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn work_for_tests() -> (usize, bool) {
+pub fn work_for_tests() -> (usize, bool) {
     (WORK.0.load(Ordering::SeqCst), WORK.1.load(Ordering::SeqCst))
 }
 

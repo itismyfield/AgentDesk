@@ -82,7 +82,7 @@ impl ValidatedDefinition {
     pub fn hashes(&self) -> &BTreeMap<String, DefinitionHashes> {
         &self.hashes
     }
-    pub(crate) fn set_pipeline(
+    pub fn set_pipeline(
         &mut self,
         pipeline: Box<PipelineDefinition>,
         active_revision: Option<u64>,
@@ -179,7 +179,7 @@ fn graph_error(value: DagError) -> DefinitionError {
     }
 }
 
-pub(crate) fn validate_pipeline(pipeline: &PipelineDefinition) -> Result<(), DefinitionError> {
+pub fn validate_pipeline(pipeline: &PipelineDefinition) -> Result<(), DefinitionError> {
     let pipeline_errors = pipeline.validate();
     if pipeline_errors.is_empty() {
         Ok(())

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PreparedLaunch {
+pub struct PreparedLaunch {
     #[serde(deserialize_with = "strict_context")]
     pub context: BindingContext,
     pub episode: TurnEpisodeRef,
@@ -64,7 +64,7 @@ fn hash(value: &str) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct NativeFloor {
+pub struct NativeFloor {
     launch: PreparedLaunch,
     execution: ExecutionProofRef,
     canonical_source: SourceId,
@@ -154,7 +154,7 @@ impl NativeFloor {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", deny_unknown_fields)]
-pub(crate) enum SubmitFloor {
+pub enum SubmitFloor {
     PreparedLaunch(Box<PreparedLaunch>),
     NativeFloor(Box<NativeFloor>),
 }

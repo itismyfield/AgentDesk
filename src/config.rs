@@ -5,10 +5,10 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-pub(crate) mod decision_gate;
-pub(crate) mod decisions;
+pub mod decision_gate;
+pub mod decisions;
 mod runtime_settings;
-mod runtime_validation;
+pub mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 /// Runtime-validation fixtures for the tests mounted in the root test host.
 #[cfg(any(test, feature = "test-support"))]
@@ -19,24 +19,24 @@ pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 mod channel_alias;
-pub(crate) use channel_alias::resolve_channel_alias;
-pub(crate) mod runtime_profile;
-pub(crate) mod test_instance;
+pub use channel_alias::resolve_channel_alias;
+pub mod runtime_profile;
+pub mod test_instance;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
-pub(crate) mod session_hosts;
+pub mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub mod config_path;
-pub(crate) mod disk_write;
+pub mod disk_write;
 mod peer_filter;
 pub mod reload_classes;
-pub(crate) mod retired_providers;
+pub mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
-pub(crate) mod transcript_homes;
+pub mod transcript_homes;
 pub use config_path::resolved_config_path;
-pub(crate) use disk_write::render_config_for_path;
+pub use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
 pub use server_surface::BrowserGuardMode;
@@ -49,19 +49,19 @@ pub fn snapshot() -> Option<std::sync::Arc<Config>> {
 }
 
 /// Boot preparation and standalone CLI keep their existing loader until LIVE is published.
-pub(crate) fn runtime_config() -> Config {
+pub fn runtime_config() -> Config {
     snapshot()
         .map(|config| (*config).clone())
         .unwrap_or_else(load_graceful)
 }
 
-pub(crate) fn runtime_config_strict() -> Result<Config> {
+pub fn runtime_config_strict() -> Result<Config> {
     snapshot()
         .map(|config| Ok((*config).clone()))
         .unwrap_or_else(load)
 }
 
-pub(crate) fn runtime_config_optional() -> Option<Config> {
+pub fn runtime_config_optional() -> Option<Config> {
     snapshot()
         .map(|config| (*config).clone())
         .or_else(|| config_path::load_runtime_config_file().map(|(config, _)| config))
@@ -74,7 +74,7 @@ pub(crate) struct RuntimeConfigSource {
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "config/snapshot_reader_support.rs"]
-pub(crate) mod snapshot_reader_support;
+pub mod snapshot_reader_support;
 
 #[cfg(test)]
 #[path = "config/snapshot_reader_tests.rs"]
@@ -864,7 +864,7 @@ impl ClusterDispatchRoutingConfig {
 }
 
 /// The routing constraint that admits every candidate; the default constraint list holds only it.
-pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
+pub const NOOP_CONSTRAINT_NAME: &str = "noop";
 
 fn default_dispatch_routing_constraints() -> Vec<String> {
     vec![NOOP_CONSTRAINT_NAME.to_string()]
@@ -1431,12 +1431,12 @@ fn is_structural_relay_verdict_source(source: &RelayVerdictSource) -> bool {
 
 /// A conservative bound that stays within chrono's duration and UTC datetime
 /// ranges while remaining far above any operational sweep TTL.
-pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
+pub const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
 /// Gives startup recovery and session restoration two minutes before the first
 /// intake-delivery sweep. This matches the sibling session-GC startup delay.
-pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
+pub const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
 /// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
-pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
+pub const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
 
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
@@ -2514,7 +2514,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-pub(crate) fn validate_config(config: &Config) -> Result<()> {
+pub fn validate_config(config: &Config) -> Result<()> {
     test_instance::environment::validate_config(config).map_err(anyhow::Error::msg)?;
     runtime_validation::validate(config)?;
     config.decision_gate.validate()?;
@@ -2876,14 +2876,14 @@ pub fn load_graceful() -> Config {
 /// `shared_test_env_lock().lock()` sites, which the re-entry tripwire below
 /// cannot reach.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
+pub fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     crate::db::postgres::assert_test_lifecycle_lock_not_held_before_env_lock();
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_env_lock {
+pub mod test_env_lock {
     //! Canonical acquisition path for the shared test-environment mutex.
     //! New test sites must use `acquire_shared_test_env_lock`; directly locking
     //! `shared_test_env_lock` is forbidden.
@@ -2893,7 +2893,7 @@ pub(crate) mod test_env_lock {
             const { std::cell::Cell::new(false) };
     }
 
-    pub(crate) struct SharedTestEnvLockGuard {
+    pub struct SharedTestEnvLockGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -2905,7 +2905,7 @@ pub(crate) mod test_env_lock {
     }
 
     /// Panics unless this thread took the lock through `acquire_shared_test_env_lock`.
-    pub(crate) fn assert_shared_test_env_lock_held() {
+    pub fn assert_shared_test_env_lock_held() {
         let held = SHARED_TEST_ENV_LOCK_HELD.with(|held| held.get());
         assert!(
             held,
@@ -2914,7 +2914,7 @@ pub(crate) mod test_env_lock {
     }
 
     #[track_caller]
-    pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
+    pub fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
         // Resolve the mutex first: the accessor carries the `E`-after-`P`
         // ordering tripwire, and running it before the re-entry flag is armed
         // keeps an ordering panic from stranding `SHARED_TEST_ENV_LOCK_HELD`
@@ -2933,9 +2933,9 @@ pub(crate) mod test_env_lock {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_env;
+pub mod test_env;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
+pub use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.
 ///
@@ -2968,7 +2968,7 @@ pub(crate) struct PinnedRuntimeHost {
 /// below rather than reached through that helper.
 #[cfg(any(test, feature = "test-support"))]
 #[track_caller]
-pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
+pub fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     let env_lock = test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("tempdir");
     let claude_home = tempfile::tempdir().expect("tempdir");

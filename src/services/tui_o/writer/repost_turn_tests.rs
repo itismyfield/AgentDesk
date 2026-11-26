@@ -564,7 +564,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     harness.port.unreadable.store(true, Ordering::SeqCst);
     assert_eq!(writer.deliver(&piece("on", "on payload")).await, Step::Done);
     assert_eq!(*intent_first.lock().unwrap(), Some(true));
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     for native in ["before", "open-before"] {
         assert!(!admitted(native).await, "{native}");
     }

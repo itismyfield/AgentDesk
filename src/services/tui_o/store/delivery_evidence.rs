@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 mod streaming;
 
-pub(crate) fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
+pub fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
     let mut bytes = Vec::new();
     File::open(path)
         .ok()?
@@ -27,12 +27,7 @@ pub(crate) fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
         .flatten()
 }
 
-pub(crate) fn source(
-    root: &Path,
-    channel: u64,
-    path: &Path,
-    file: (u64, u64),
-) -> Option<spool::Cursor> {
+pub fn source(root: &Path, channel: u64, path: &Path, file: (u64, u64)) -> Option<spool::Cursor> {
     let store = OStore::existing(root)?;
     let init = store.read_init(channel).ok()??;
     let dir = store.channel_dir(channel);
@@ -59,7 +54,7 @@ pub(crate) fn source(
     (cursor.source == source).then_some(cursor)
 }
 
-pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
+pub fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
     let store = OStore::existing(root)?;
     std::fs::metadata(store.channel_dir(channel).join(LEDGER_FILE))
         .ok()?
@@ -69,7 +64,7 @@ pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> 
 
 // Candidates are scoped to one manifest; they never authorize a writer or replace ledger replay.
 #[derive(Clone, Default)]
-pub(crate) struct LocalEvidence {
+pub struct LocalEvidence {
     pieces: HashMap<(UnitKey, u32), (u64, ledger::PieceRecord)>,
     confirmations: HashMap<u64, Box<ledger::PostConfirmation>>,
     #[cfg(test)]
@@ -82,7 +77,7 @@ pub(crate) struct LocalEvidence {
 }
 
 impl LocalEvidence {
-    pub(crate) fn confirmed_post(&self, key: &UnitKey, index: u32, bot_id: u64) -> Option<u64> {
+    pub fn confirmed_post(&self, key: &UnitKey, index: u32, bot_id: u64) -> Option<u64> {
         let (serial, piece) = self.latest_piece(key, index)?;
         let confirmation = self.confirmations.get(&serial)?;
         if !confirmation.matches(serial, piece, bot_id) {
@@ -94,11 +89,7 @@ impl LocalEvidence {
         }
     }
 
-    pub(crate) fn latest_piece(
-        &self,
-        key: &UnitKey,
-        index: u32,
-    ) -> Option<(u64, &ledger::PieceRecord)> {
+    pub fn latest_piece(&self, key: &UnitKey, index: u32) -> Option<(u64, &ledger::PieceRecord)> {
         self.pieces
             .get(&(key.clone(), index))
             .map(|(serial, record)| (*serial, record))
@@ -168,7 +159,7 @@ thread_local! {
     pub(crate) static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn local(
+pub fn local(
     root: &Path,
     channel: u64,
     requested: &[(UnitKey, u32)],

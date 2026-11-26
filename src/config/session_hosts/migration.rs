@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 mod consent_holds;
-pub(crate) use consent_holds::ConsentHolds;
+pub use consent_holds::ConsentHolds;
 
 use serde::Serialize;
 use sqlx::{PgPool, Row};
@@ -14,14 +14,14 @@ use super::{BootSessionHosts, ChannelEndpoint, SessionHostsConfig};
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Diagnostic {
+pub struct Diagnostic {
     pub reason: &'static str,
     pub channels: Vec<u64>,
     pub blockers: Vec<String>,
     pub action: String,
 }
 
-pub(crate) struct HostsBootSelection {
+pub struct HostsBootSelection {
     hosts: BootSessionHosts,
     candidate: SessionHostsConfig,
     diagnostic: Option<Diagnostic>,
@@ -29,7 +29,7 @@ pub(crate) struct HostsBootSelection {
 }
 
 impl HostsBootSelection {
-    pub(crate) fn hosts(&self) -> &BootSessionHosts {
+    pub fn hosts(&self) -> &BootSessionHosts {
         &self.hosts
     }
 
@@ -69,20 +69,20 @@ impl HostsBootSelection {
     }
 }
 
-pub(crate) struct MigrationRow {
+pub struct MigrationRow {
     pub id: i64,
     pub channel: u64,
     pub record: HostedRecord,
 }
 
-pub(crate) trait RowSource {
+pub trait RowSource {
     fn available(&self) -> bool {
         true
     }
     async fn rows(&self, channels: &BTreeSet<u64>) -> Result<Vec<MigrationRow>, String>;
 }
 
-pub(crate) trait HoldSource {
+pub trait HoldSource {
     const INTRODUCED: bool;
     async fn unresolved(&self, channels: &BTreeSet<u64>) -> Result<Vec<u64>, String>;
     /// Held channels for this move; only a return reserved for `candidate` lets its input pass.
@@ -105,7 +105,7 @@ pub(crate) trait HoldSource {
 
 /// Names one channel's endpoint binding; a returned input is reserved for exactly this value.
 #[cfg(unix)]
-pub(crate) fn binding_digest(hosts: &SessionHostsConfig, channel: u64) -> Option<[u8; 32]> {
+pub fn binding_digest(hosts: &SessionHostsConfig, channel: u64) -> Option<[u8; 32]> {
     use sha2::{Digest, Sha256};
     let mapped = super::projected_channels(hosts).ok()?.remove(&channel)?;
     let mode = hosts.herdr.endpoints.get(&mapped.key)?.mode;
@@ -128,7 +128,7 @@ pub(crate) fn binding_digest(hosts: &SessionHostsConfig, channel: u64) -> Option
     Some(Sha256::digest(serde_json::to_vec(&bound).ok()?).into())
 }
 
-pub(crate) struct NoHoldStore;
+pub struct NoHoldStore;
 const HOLDS_NOT_INTRODUCED: &[u64] = &[];
 impl HoldSource for NoHoldStore {
     const INTRODUCED: bool = false;
@@ -137,7 +137,7 @@ impl HoldSource for NoHoldStore {
     }
 }
 
-pub(crate) struct PgRows<'a>(pub Option<&'a PgPool>);
+pub struct PgRows<'a>(pub Option<&'a PgPool>);
 impl RowSource for PgRows<'_> {
     fn available(&self) -> bool {
         self.0.is_some()
@@ -246,7 +246,7 @@ fn blocks(row: &MigrationRow, old: &BootSessionHosts, new: &BootSessionHosts) ->
     }
 }
 
-pub(crate) async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
+pub async fn select<S: ApprovalStore, R: RowSource, H: HoldSource>(
     candidate: BootSessionHosts,
     store: &S,
     rows: &R,

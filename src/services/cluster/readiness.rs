@@ -18,7 +18,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(PROBE_TTL_MS as u64 / 4);
 static SNAPSHOT: LazyLock<RwLock<Option<ExecutionProbe>>> = LazyLock::new(|| RwLock::new(None));
 static POLLERS: LazyLock<RwLock<BTreeMap<String, i64>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-pub(crate) fn boot_id() -> String {
+pub fn boot_id() -> String {
     crate::services::process_boot::initialize().id.clone()
 }
 
@@ -173,7 +173,7 @@ fn with_forwarding(mut report: ReadinessReport, node: &Value) -> ReadinessReport
     report
 }
 
-pub(crate) fn attach_diagnostics(node: &mut Value) {
+pub fn attach_diagnostics(node: &mut Value) {
     let providers = node
         .pointer("/capabilities/intake_worker/providers")
         .and_then(Value::as_array)
@@ -425,6 +425,6 @@ fn readiness_probe(kind: &ProviderKind) -> Option<crate::services::provider::Pro
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn collect_for_login_test() -> ExecutionProbe {
+pub fn collect_for_login_test() -> ExecutionProbe {
     collect(&Config::default())
 }

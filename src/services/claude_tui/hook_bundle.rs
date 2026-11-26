@@ -6,7 +6,7 @@ use std::path::Path;
 use serde_json::{Value, json};
 
 mod launch_settings;
-pub(crate) mod statusline;
+pub mod statusline;
 pub use launch_settings::write_claude_launch_settings;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

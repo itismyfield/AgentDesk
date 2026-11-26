@@ -3,7 +3,7 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct MembershipReceipt {
+pub struct MembershipReceipt {
     namespace: String,
     ticket: Ticket,
     row: String,
@@ -13,10 +13,10 @@ pub(crate) struct MembershipReceipt {
     row_digest: String,
 }
 impl MembershipReceipt {
-    pub(crate) fn identity(&self) -> (&str, &Ticket) {
+    pub fn identity(&self) -> (&str, &Ticket) {
         (&self.namespace, &self.ticket)
     }
-    pub(crate) fn record(&self) -> (&str, &str, (u64, u64), &str) {
+    pub fn record(&self) -> (&str, &str, (u64, u64), &str) {
         (&self.kind, &self.row, self.range, &self.frame_hash)
     }
 }

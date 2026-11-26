@@ -8,21 +8,21 @@ use std::{fs, io, io::Write, path::Path};
 
 /// The parent's re-exports of this module, kept here so the giant parent does not grow.
 pub(super) mod exports {
-    pub(crate) use super::{
+    pub use super::{
         advance_checked as advance_codex_offset_checked,
         advance_tmux_runtime_binding_offset_under_source_authority,
         migrate_raw_native_marker as migrate_codex_raw_marker,
         preservable_marker as codex_verified_preservable_marker,
     };
     #[cfg(unix)]
-    pub(crate) use super::{
+    pub use super::{
         codex_parked_owner_source, codex_restore_checkpoint, codex_restore_observed_end,
         codex_restore_parked_owners, codex_restore_scan_floor, codex_restore_source_current,
         complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
         prepare_codex_restore, record_codex_unknown_span, settle_codex_parked_delivery,
     };
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) use super::{codex_restore_observation_for_tests, codex_restore_settled_for_tests};
+    pub use super::{codex_restore_observation_for_tests, codex_restore_settled_for_tests};
     #[cfg(unix)]
     pub(in crate::services::tui_prompt_dedupe) use super::{
         remember_codex_restored_origin, settle_codex_restored_join,
@@ -51,7 +51,7 @@ fn linked_marker(
         }))
 }
 
-pub(crate) fn preservable_marker(
+pub fn preservable_marker(
     authority: &TmuxSourceAuthority<'_>,
     path: &Path,
     session_id: Option<&str>,
@@ -215,7 +215,7 @@ fn normalize_native(
     source.check(authority.session())
 }
 
-pub(crate) fn migrate_raw_native_marker(
+pub fn migrate_raw_native_marker(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> io::Result<()> {
@@ -370,7 +370,7 @@ fn persist_checkpoint(
     crate::domain::file_sync::fsync_parent_dir(Path::new(&path))
 }
 
-pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
+pub fn advance_tmux_runtime_binding_offset_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     output_path: &str,
     last_offset: u64,
@@ -382,7 +382,7 @@ pub(crate) fn advance_tmux_runtime_binding_offset_under_source_authority(
     )
 }
 
-pub(crate) fn advance_checked(
+pub fn advance_checked(
     authority: &TmuxSourceAuthority<'_>,
     output_path: &str,
     expected: Option<u64>,
@@ -495,7 +495,7 @@ fn advance_cursor(
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<(u64, bool)> {
+pub fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<(u64, bool)> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let scope = state.codex_restore_by_tmux.get(tmux)?;
     (scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
@@ -503,7 +503,7 @@ pub(crate) fn codex_restore_scan_floor(tmux: &str, path: &Path) -> Option<(u64, 
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_checkpoint(tmux: &str, path: &Path) -> Option<u64> {
+pub fn codex_restore_checkpoint(tmux: &str, path: &Path) -> Option<u64> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let scope = state.codex_restore_by_tmux.get(tmux)?;
     (scope.source.matches_path(path) && scope.source.check(tmux).is_ok())
@@ -511,7 +511,7 @@ pub(crate) fn codex_restore_checkpoint(tmux: &str, path: &Path) -> Option<u64> {
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_observed_end(tmux: &str) -> Option<u64> {
+pub fn codex_restore_observed_end(tmux: &str) -> Option<u64> {
     STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -521,7 +521,7 @@ pub(crate) fn codex_restore_observed_end(tmux: &str) -> Option<u64> {
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_source_current(tmux: &str, path: &Path) -> bool {
+pub fn codex_restore_source_current(tmux: &str, path: &Path) -> bool {
     STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -531,7 +531,7 @@ pub(crate) fn codex_restore_source_current(tmux: &str, path: &Path) -> bool {
 }
 
 #[cfg(unix)]
-pub(crate) fn record_codex_unknown_span(
+pub fn record_codex_unknown_span(
     tmux: &str,
     start: u64,
     end: u64,
@@ -545,7 +545,7 @@ pub(crate) fn record_codex_unknown_span(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn codex_restore_observation_for_tests(
+pub fn codex_restore_observation_for_tests(
     tmux: &str,
 ) -> Option<(
     u64,
@@ -570,7 +570,7 @@ pub(crate) fn codex_restore_observation_for_tests(
 
 /// Links one restored parked record to the existing captured bridge episode.
 #[cfg(unix)]
-pub(crate) fn link_codex_parked_owner(
+pub fn link_codex_parked_owner(
     tmux: &str,
     turn: &str,
     prompt: &str,
@@ -621,7 +621,7 @@ pub(crate) fn link_codex_parked_owner(
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_parked_owner_source(
+pub fn codex_parked_owner_source(
     tmux: &str,
     turn: &str,
     owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
@@ -659,7 +659,7 @@ pub(in crate::services::tui_prompt_dedupe) fn codex_restore_replacement_allowed(
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_parked_owners(
+pub fn codex_restore_parked_owners(
     tmux: &str,
 ) -> Vec<(
     String,
@@ -682,7 +682,7 @@ pub(crate) fn codex_restore_parked_owners(
 }
 
 #[cfg(unix)]
-pub(crate) fn complete_codex_parked_owner(
+pub fn complete_codex_parked_owner(
     tmux: &str,
     turn: &str,
     owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
@@ -718,7 +718,7 @@ pub(crate) fn complete_codex_parked_owner(
 /// Settles a restored parked owner from the proof captured before its exact delivery.
 /// Its receipt already committed, so a later wrapper generation cannot reopen custody.
 #[cfg(unix)]
-pub(crate) fn settle_codex_parked_delivery(
+pub fn settle_codex_parked_delivery(
     tmux: &str,
     turn: &str,
     owner: &crate::services::codex_tui::session::checkpoint::ParkedOwnerKey,
@@ -878,7 +878,7 @@ pub(in crate::services::tui_prompt_dedupe) fn remember_codex_restored_origin(
 
 /// Keeps bootstrap observation, input custody and output checkpoints in separate namespaces.
 #[cfg(unix)]
-pub(crate) fn prepare_codex_restore(
+pub fn prepare_codex_restore(
     tmux: &str,
     source: crate::services::codex_tui::session::checkpoint::Source,
     restore_custody: bool,
@@ -938,7 +938,7 @@ pub(crate) fn prepare_codex_restore(
 }
 
 #[cfg(unix)]
-pub(crate) fn finish_codex_restore(
+pub fn finish_codex_restore(
     tmux: &str,
     mut scope: super::super::handoff::CodexRestore,
     stats: crate::services::codex_tui::session::checkpoint::ScanStats,
@@ -991,7 +991,7 @@ pub(crate) fn finish_codex_restore(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn codex_restore_settled_for_tests(tmux: &str) -> Option<usize> {
+pub fn codex_restore_settled_for_tests(tmux: &str) -> Option<usize> {
     STATE
         .lock()
         .unwrap_or_else(|e| e.into_inner())

@@ -1,7 +1,7 @@
-pub(crate) mod binding_context;
-pub(crate) mod binding_events;
-pub(crate) mod hosted_source;
-pub(crate) mod pending;
+pub mod binding_context;
+pub mod binding_events;
+pub mod hosted_source;
+pub mod pending;
 use serde_json::Value;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -72,9 +72,9 @@ static STATE: LazyLock<Mutex<TuiPromptDedupeState>> =
 // Tests that also mutate process env must acquire `shared_test_env_lock()` before
 // this lock. Keep that env -> dedupe order globally to avoid AB/BA deadlocks.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+pub static TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn run_serial_test(future: impl std::future::Future<Output = ()>) {
+pub fn run_serial_test(future: impl std::future::Future<Output = ()>) {
     crate::test_support::serial_runtime::run(
         || TEST_LOCK.lock().unwrap_or_else(|error| error.into_inner()),
         future,
@@ -99,8 +99,8 @@ static SSH_DIRECT_OBSERVATION_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 /// `generation` sentinel for a freshly constructed lease that has NOT yet been
 /// recorded (and therefore not yet stamped with a unique generation).
-pub(crate) const EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED: u64 = 0;
-pub(crate) const SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED: u64 = 0;
+pub const EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED: u64 = 0;
+pub const SSH_DIRECT_OBSERVATION_GENERATION_UNRECORDED: u64 = 0;
 
 fn next_external_input_relay_lease_generation() -> u64 {
     EXTERNAL_INPUT_RELAY_LEASE_GENERATION.fetch_add(1, Ordering::Relaxed)
@@ -122,29 +122,29 @@ pub struct ObservedTuiPrompt {
     /// Exact side effects created before this event was published. Local-only
     /// controls carry the unrecorded sentinel for both fields because they
     /// publish no lease/SSH state at all.
-    pub(crate) external_input_lease_generation: u64,
-    pub(crate) ssh_direct_observation_generation: u64,
+    pub external_input_lease_generation: u64,
+    pub ssh_direct_observation_generation: u64,
     /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
     /// announcement POST result settles it.
-    pub(crate) hook_prompt_id: Option<String>,
+    pub hook_prompt_id: Option<String>,
     /// A transcript row's `prompt_id` that was still unannounced when the scanner published the
     /// row; only looked up again before the relay announces, never settled by it.
-    pub(crate) row_prompt_id: Option<String>,
+    pub row_prompt_id: Option<String>,
     /// Codex native turn this input opened, when its hook or record named one.
-    pub(crate) native_turn_id: Option<String>,
+    pub native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.
-    pub(crate) steer_echo: bool,
-    pub(crate) hosted_source: Option<hosted_source::HostedSourcePin>,
+    pub steer_echo: bool,
+    pub hosted_source: Option<hosted_source::HostedSourcePin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TuiPromptAnchor {
+pub struct TuiPromptAnchor {
     pub channel_id: u64,
     pub message_id: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExternalInputRelayOwner {
+pub enum ExternalInputRelayOwner {
     Unassigned,
     BridgeAdapter,
     TuiPromptRelay,
@@ -153,7 +153,7 @@ pub(crate) enum ExternalInputRelayOwner {
 }
 
 impl ExternalInputRelayOwner {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Unassigned => "unassigned",
             Self::BridgeAdapter => "bridge_adapter",
@@ -165,7 +165,7 @@ impl ExternalInputRelayOwner {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExternalInputRelayLease {
+pub struct ExternalInputRelayLease {
     pub channel_id: Option<u64>,
     pub turn_id: Option<String>,
     pub session_key: Option<String>,
@@ -185,7 +185,7 @@ pub(crate) struct ExternalInputRelayLease {
 }
 
 impl ExternalInputRelayLease {
-    pub(crate) fn unassigned(channel_id: Option<u64>) -> Self {
+    pub fn unassigned(channel_id: Option<u64>) -> Self {
         Self {
             channel_id,
             turn_id: None,
@@ -199,7 +199,7 @@ impl ExternalInputRelayLease {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct TuiRuntimeBinding {
+pub struct TuiRuntimeBinding {
     pub runtime_kind: RuntimeHandoffKind,
     pub output_path: String,
     pub relay_output_path: Option<String>,
@@ -210,14 +210,14 @@ pub(crate) struct TuiRuntimeBinding {
 }
 
 impl TuiRuntimeBinding {
-    pub(crate) fn relay_output_path(&self) -> &str {
+    pub fn relay_output_path(&self) -> &str {
         self.relay_output_path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
             .unwrap_or(&self.output_path)
     }
 
-    pub(crate) fn relay_last_offset(&self) -> u64 {
+    pub fn relay_last_offset(&self) -> u64 {
         self.relay_last_offset.unwrap_or(self.last_offset)
     }
 }
@@ -344,18 +344,18 @@ mod handoff;
 mod injected_steer;
 mod observation;
 #[cfg(unix)]
-pub(crate) mod observer_publication;
+pub mod observer_publication;
 mod prompt_identity;
 mod runtime_binding;
 mod session_rotation;
 mod shadow_peek;
 mod state;
-pub(crate) mod terminal_custody;
+pub mod terminal_custody;
 
-pub(crate) use session_rotation::*;
+pub use session_rotation::*;
 #[cfg(test)]
 pub(crate) use shadow_peek::hold_binding_peek_lock_for_tests;
-pub(crate) use shadow_peek::peek_tmux_runtime_binding;
+pub use shadow_peek::peek_tmux_runtime_binding;
 
 pub(crate) use extract::is_discord_relayed_user_prompt;
 #[cfg(test)]
@@ -369,21 +369,21 @@ use extract::{
 pub use handoff::RecordEvidence;
 #[cfg(test)]
 pub(crate) use handoff::tests::on_owning_publish;
-pub(crate) use handoff::{
+pub use handoff::{
     BindOutcome, HandoffGuard, bind_discord_handoff_record, drain_expired_handoffs,
     reserve_discord_handoff,
 };
 #[cfg(unix)]
-pub(crate) use handoff::{codex_replay_restored_handoff_inputs, codex_restore_has_custody};
+pub use handoff::{codex_replay_restored_handoff_inputs, codex_restore_has_custody};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
-pub(crate) use injected_steer::retain_injected_steer;
+pub use handoff::{durable_handoff_present_for_tests, held_handoff_inputs_for_tests};
+pub use injected_steer::retain_injected_steer;
 use injected_steer::{Claim, InjectedSteer, claim_injected_steer};
-pub(crate) use injected_steer::{register_injected_steer, withdraw_injected_steer};
+pub use injected_steer::{register_injected_steer, withdraw_injected_steer};
 use observation::clear_ssh_direct_observation_pending;
 pub use observation::*;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use prompt_identity::age_observed_prompt_records_for_tests;
+pub use prompt_identity::age_observed_prompt_records_for_tests;
 pub use prompt_identity::{
     ClaudePromptId, extract_claude_transcript_prompt_id, extract_prompt_id_from_hook_payload,
     record_announced_prompt_id, withdraw_unannounced_prompt_id,
@@ -391,14 +391,12 @@ pub use prompt_identity::{
 use prompt_identity::{PromptIdMatch, check_relayed_prompt_id, record_observed_hook_prompt_id};
 pub use runtime_binding::*;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use runtime_binding::{
-    codex_restore_observation_for_tests, codex_restore_settled_for_tests,
-};
+pub use runtime_binding::{codex_restore_observation_for_tests, codex_restore_settled_for_tests};
 #[cfg(test)]
 pub(crate) use state::assert_marker_publication_unlocked_for_tests;
 // Only the unix-gated codex_verified tests in the discord layer call these.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use state::{expired_session_mapping_stamp_for_tests, with_tmux_entries_for_tests};
+pub use state::{expired_session_mapping_stamp_for_tests, with_tmux_entries_for_tests};
 
 #[cfg(test)]
 mod injected_steer_tests;

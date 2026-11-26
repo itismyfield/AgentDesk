@@ -24,7 +24,7 @@ const JOB_ENV: &str = "herdr_job_env_mismatch";
 
 /// The latest upkeep of one dedicated endpoint's home, as health shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Record {
+pub struct Record {
     pub config: &'static str,
     pub backup: Option<PathBuf>,
     pub last_e7: String,
@@ -39,7 +39,7 @@ pub(crate) struct Record {
 
 impl Record {
     /// An upkeep that stopped reporting is never read as healthy; its confirmed cause still stands.
-    pub(crate) fn stale_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn stale_at(&self, now: DateTime<Utc>) -> bool {
         (now - self.observed_at)
             .to_std()
             .is_ok_and(|age| age > STALE_AFTER)
@@ -49,7 +49,7 @@ impl Record {
 static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
 static TASK: OnceLock<()> = OnceLock::new();
 
-pub(crate) fn records() -> BTreeMap<String, Record> {
+pub fn records() -> BTreeMap<String, Record> {
     RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
@@ -144,11 +144,11 @@ fn read_e7(boot: &BootSessionHosts, key: &str) -> Option<RestoreResume> {
 /// A home's notice target: a stable fault identity and the one channel that hears it. Delivery
 /// lives beside the Unknown notice owner it reuses, in `turn_presence/operator_notice.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OperatorNotice {
+pub struct OperatorNotice {
     /// Where its receipt is kept; `None` is the runtime's own root.
-    pub(crate) root: Option<PathBuf>,
-    pub(crate) fault: String,
-    pub(crate) channel: u64,
+    pub root: Option<PathBuf>,
+    pub fault: String,
+    pub channel: u64,
 }
 
 impl OperatorNotice {
@@ -177,7 +177,7 @@ pub(crate) type ObserveNotice = for<'a> fn(
 >;
 
 /// A home's confirmed cause after a pass, and the notice that cause moves.
-pub(crate) struct Fault {
+pub struct Fault {
     keys: Vec<String>,
     cause: Option<&'static str>,
     /// Every endpoint read a fresh `Off`: only then does a pass without a cause end the episode.
@@ -197,7 +197,7 @@ impl Fault {
 
 /// One upkeep pass over the booted dedicated homes. A refused or failing home never blocks
 /// another; a busy home keeps its last record until the next tick.
-pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: bool) -> Vec<Fault> {
+pub fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: bool) -> Vec<Fault> {
     pass_with(boot, personal, &|key| {
         observe.then(|| read_e7(boot, key)).flatten()
     })
@@ -319,14 +319,14 @@ pub(crate) async fn notify(faults: Vec<Fault>, observe: ObserveNotice) {
 }
 
 /// The boot pass over the snapshot this process installed, never a re-read config.
-pub(crate) fn boot() {
+pub fn boot() {
     if let Some(boot) = with_boot(|boot| boot.cloned()) {
         let _ = pass(&boot, &PersonalPaths::current(), false);
     }
 }
 
 /// Starts the process's one upkeep task when the booted snapshot has a local dedicated home.
-pub(crate) fn spawn(observe: ObserveNotice) -> bool {
+pub fn spawn(observe: ObserveNotice) -> bool {
     let Some(boot) = with_boot(|boot| boot.cloned()) else {
         return false;
     };

@@ -1,7 +1,7 @@
 //! Immutable launch evidence; binding authority remains with the runtime binding.
 
 #[cfg(unix)]
-pub(crate) mod registration;
+pub mod registration;
 
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
@@ -18,12 +18,12 @@ use std::{
 pub(crate) const UNSET_CONTEXT: &str = "unset AGENTDESK_BINDING_CONTEXT\n";
 pub(crate) mod herdr_resume;
 mod inventory;
-pub(crate) use herdr_resume::ResumeStart;
-pub(crate) use inventory::inventory;
+pub use herdr_resume::ResumeStart;
+pub use inventory::inventory;
 use inventory::read_hook_context;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingContext {
+pub struct BindingContext {
     pub schema: u32,
     pub provider: String,
     pub created_at: DateTime<Utc>,
@@ -44,25 +44,25 @@ pub(crate) struct BindingContext {
 }
 
 #[derive(Debug)]
-pub(crate) struct PreparedIncarnation {
+pub struct PreparedIncarnation {
     pub context: BindingContext,
     pub path: PathBuf,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ContextPresence {
+pub enum ContextPresence {
     Present,
     Absent,
     Unknown,
 }
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SpawnNonceMarker {
+pub enum SpawnNonceMarker {
     Known(String),
     Absent,
     Unreadable,
 }
 
-pub(crate) fn stable_host_identity() -> Option<String> {
+pub fn stable_host_identity() -> Option<String> {
     crate::config::runtime_config()
         .cluster
         .instance_id
@@ -72,7 +72,7 @@ pub(crate) fn stable_host_identity() -> Option<String> {
         .find(|id| !id.is_empty())
 }
 
-pub(crate) fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
+pub fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
     if !matches!(provider, "claude" | "codex")
         || nonce.len() != 32
         || !nonce.bytes().all(|b| b.is_ascii_hexdigit())
@@ -91,7 +91,7 @@ pub(crate) fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "runtime root unavailable"))
 }
 
-pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
+pub fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
     let Ok(path) = context_path(provider, nonce) else {
         return ContextPresence::Unknown;
     };
@@ -102,7 +102,7 @@ pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
     }
 }
 
-pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
+pub fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
     for path in [
         tc::session_temp_path(tmux, "spawn_nonce"),
         tc::legacy_tmp_session_path(tmux, "spawn_nonce"),
@@ -118,12 +118,12 @@ pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
 
 // Hook capture reads this value without consulting mutable markers.
 const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT";
-pub(crate) const BINDING_HEADER: &str = "x-agentdesk-binding-context";
+pub const BINDING_HEADER: &str = "x-agentdesk-binding-context";
 const CONTEXT_LIMIT: u64 = 16 * 1024;
 const HEADER_LIMIT: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum AbsentReason {
+pub enum AbsentReason {
     EnvUnset,
     Unreadable,
     Corrupt,
@@ -133,18 +133,18 @@ pub(crate) enum AbsentReason {
     LegacyRequest,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CapturedContext {
+pub enum CapturedContext {
     Captured(Box<BindingContext>),
     Absent(AbsentReason),
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ObservedHookProcess {
+pub struct ObservedHookProcess {
     pub tmux: Option<String>,
     pub tmux_pane: Option<String>,
     pub provider_pid: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HookBindingEnvelope {
+pub struct HookBindingEnvelope {
     pub context: CapturedContext,
     pub observed: ObservedHookProcess,
 }
@@ -153,7 +153,7 @@ impl HookBindingEnvelope {
         Self::capture_from_env(provider, |name| std::env::var_os(name))
     }
 
-    pub(crate) fn capture_from_env(
+    pub fn capture_from_env(
         provider: &str,
         env: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Self {
@@ -186,7 +186,7 @@ impl HookBindingEnvelope {
         }
     }
 
-    pub(crate) fn encode(&self) -> Result<String, String> {
+    pub fn encode(&self) -> Result<String, String> {
         serde_json::to_vec(self)
             .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
             .map_err(|e| e.to_string())
@@ -213,7 +213,7 @@ fn checked_context(path: &Path, provider: &str) -> Result<BindingContext, Absent
 }
 
 /// Execution `nonce`'s own context, read from its own path under the hook's rules.
-pub(crate) fn execution_context(provider: &str, nonce: &str) -> Result<BindingContext, String> {
+pub fn execution_context(provider: &str, nonce: &str) -> Result<BindingContext, String> {
     let own = context_path(provider, nonce).map_err(|error| error.to_string())?;
     let ctx = checked_context(&own, provider).map_err(|reason| format!("{reason:?}"))?;
     if ctx.execution_nonce != nonce {
@@ -305,7 +305,7 @@ pub(super) fn durable_directory(path: &Path) -> io::Result<()> {
 }
 
 impl PreparedIncarnation {
-    pub(crate) fn prepare(
+    pub fn prepare(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -319,7 +319,7 @@ impl PreparedIncarnation {
     }
 
     /// Records `provider_root` as the source root the launched child will write under.
-    pub(crate) fn prepare_at(
+    pub fn prepare_at(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -339,7 +339,7 @@ impl PreparedIncarnation {
     }
 
     /// Pins the exact argv digest and source policy before immutable publication.
-    pub(crate) fn prepare_pinned(
+    pub fn prepare_pinned(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -373,7 +373,7 @@ impl PreparedIncarnation {
         Self::create(context).map_err(|e| format!("create binding context: {e}"))
     }
 
-    pub(crate) fn create(context: BindingContext) -> io::Result<Self> {
+    pub fn create(context: BindingContext) -> io::Result<Self> {
         let path = context_path(&context.provider, &context.execution_nonce)?;
         let parent = path
             .parent()
@@ -464,14 +464,14 @@ impl PreparedIncarnation {
         })
     }
 
-    pub(crate) fn env_lines(&self) -> String {
+    pub fn env_lines(&self) -> String {
         format!(
             "{UNSET_CONTEXT}export AGENTDESK_BINDING_CONTEXT={}\n",
             crate::services::process::shell_escape(&self.path.to_string_lossy())
         )
     }
 
-    pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+    pub fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
         result.map(|_| ()).map_err(|error| {
             crate::services::session_host::TmuxHost.kill(
                 &self.context.tmux_session,
@@ -612,27 +612,18 @@ fn creation_fault(step: &str) -> io::Result<()> {
     }
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod test_support;
+
 #[cfg(all(test, unix))]
 pub(crate) mod tests {
+    pub(crate) use super::test_support::{fixture, fixture_after_shared_test_env_lock};
     use super::*;
     use crate::config::TestEnvVarGuard as Guard;
     use crate::services::tmux_common::spawn_markers::stamp_spawn_markers;
     use SessionPresence::{Missing, Present, ProbeFailed};
     use std::os::unix::fs::PermissionsExt;
 
-    pub(crate) fn fixture() -> (tempfile::TempDir, [Guard; 2]) {
-        let root = tempfile::tempdir().unwrap();
-        let env = Guard::set_path("AGENTDESK_ROOT_DIR", root.path());
-        with_config(root, env)
-    }
-    /// `fixture` for a caller that already holds the shared env lock, so it can
-    /// take that lock before `TEST_LOCK` (the env -> dedupe order).
-    pub(crate) fn fixture_after_shared_test_env_lock() -> (tempfile::TempDir, [Guard; 2]) {
-        crate::config::test_env_lock::assert_shared_test_env_lock_held();
-        let root = tempfile::tempdir().unwrap();
-        let env = Guard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
-        with_config(root, env)
-    }
     #[test]
     fn the_after_lock_fixture_needs_the_env_lock_and_restores_on_drop() {
         use crate::config::test_env_lock::acquire_shared_test_env_lock as lock;
@@ -666,12 +657,6 @@ pub(crate) mod tests {
             before,
             "env restored"
         );
-    }
-    fn with_config(root: tempfile::TempDir, env: Guard) -> (tempfile::TempDir, [Guard; 2]) {
-        let config = root.path().join("config.yaml");
-        fs::write(&config, "server: {}").unwrap();
-        let config_env = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CONFIG", &config);
-        (root, [config_env, env])
     }
     pub(crate) fn prepared() -> PreparedIncarnation {
         let tmux = format!("binding-{}", uuid::Uuid::new_v4().simple());

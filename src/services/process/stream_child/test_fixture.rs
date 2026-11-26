@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-pub(crate) struct ProviderFixture {
+pub struct ProviderFixture {
     dir: tempfile::TempDir,
     pub(crate) cli: PathBuf,
     parent_group: i32,
@@ -14,7 +14,7 @@ pub(crate) struct ProviderFixture {
     stop_owner_probe: mpsc::Sender<()>,
     delay: Option<super::stream_queue::test_delay::Guard>,
 }
-pub(crate) const CASES: [&str; 6] = [
+pub const CASES: [&str; 6] = [
     "error",
     "normal",
     "continuous",

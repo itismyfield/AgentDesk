@@ -11,7 +11,7 @@ use std::sync::Arc;
 mod stderr;
 use stderr::StderrRead;
 
-pub(crate) struct RawTap(Option<Arc<LiveAttempt>>);
+pub struct RawTap(Option<Arc<LiveAttempt>>);
 
 impl RawTap {
     pub(crate) fn for_token(token: Option<&CancelToken>) -> Self {

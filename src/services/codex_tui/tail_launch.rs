@@ -21,7 +21,7 @@ thread_local! {
 }
 
 /// A resume carries `(rollout_path, start_offset, selected_session_id)`; `None` tails fresh.
-pub(crate) struct ValidatedTail {
+pub struct ValidatedTail {
     resume: Option<(PathBuf, u64, String)>,
     context: BindingContext,
 }
@@ -37,7 +37,7 @@ fn verified(context: &BindingContext) -> bool {
 }
 
 /// Deterministic selection checks; the marker written after this can prove they passed.
-pub(crate) fn validate_selection(
+pub fn validate_selection(
     context: &BindingContext,
     selection: &CodexTuiSessionSelection,
 ) -> Result<ValidatedTail, String> {

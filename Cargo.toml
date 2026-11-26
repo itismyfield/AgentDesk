@@ -6,7 +6,7 @@ description = "AI agent orchestration platform"
 license = "MIT"
 
 [workspace]
-members = ["crates/adk-base", "crates/adk-store", "crates/adk-test-support"]
+members = ["crates/adk-base", "crates/adk-runtime", "crates/adk-store", "crates/adk-test-support"]
 resolver = "3"
 
 [lib]
@@ -15,10 +15,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "agentdesk"
 path = "src/main.rs"
-
-[lints.rust]
-# `test-support`는 아래 [features]가 선언한다(KRX-TS). 이 등록은 같은 값을 한 번 더 적을 뿐이다.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("test-support"))'] }
 
 [lints.clippy]
 # #2954 stage-1 hard gates. Full `-D warnings` is tracked separately because
@@ -47,6 +43,7 @@ test-support = ["dep:adk-test-support", "tokio/test-util"]
 
 [dependencies]
 adk-base = { path = "crates/adk-base" }
+adk-runtime = { path = "crates/adk-runtime" }
 adk-test-support = { path = "crates/adk-test-support", optional = true }
 adk-store = { path = "crates/adk-store" }
 # HTTP server
@@ -135,6 +132,7 @@ plist = "1.8"
 
 [dev-dependencies]
 adk-base = { path = "crates/adk-base", features = ["test-support"] }
+adk-runtime = { path = "crates/adk-runtime", features = ["test-support"] }
 adk-test-support = { path = "crates/adk-test-support" }
 flate2 = "1"
 filetime = "0.2"

@@ -16,12 +16,12 @@ use crate::services::claude_tui::memento_feedback::{
 
 mod hook_event;
 pub use hook_event::HookEvent;
-pub(crate) use hook_event::HookFanout;
-pub(crate) mod adoption_retry;
-pub(crate) mod observation_ingress;
-pub(crate) mod relay_receipts;
-pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
-pub(crate) use observation_ingress::{
+pub use hook_event::HookFanout;
+pub mod adoption_retry;
+pub mod observation_ingress;
+pub mod relay_receipts;
+pub use adoption_retry::retry_deferred_claude_adoptions;
+pub use observation_ingress::{
     boot_discovery_done, mark_boot_discovery_complete, note_claude_pane_registration,
 };
 use relay_receipts::{RelayReceiptBegin, RelayReceiptLedger, RelayReceiptPin, RelayReceiptTicket};
@@ -114,7 +114,7 @@ impl HookEventKind {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct HookBroadcastProbe {
+pub struct HookBroadcastProbe {
     pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
     pub(crate) primary_sent: tokio::sync::Notify,
     pub(crate) release_alias: tokio::sync::Notify,
@@ -212,7 +212,7 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
 
 /// Publishes `event` to the live hook subscribers as the receiver would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn publish_hook_event_for_tests(event: HookEvent) {
+pub fn publish_hook_event_for_tests(event: HookEvent) {
     let _ = HOOK_SERVER_STATE.event_tx.send(event);
 }
 
@@ -221,7 +221,7 @@ pub fn hook_receiver_router() -> Router {
     hook_receiver_router_with_state(HOOK_SERVER_STATE.clone())
 }
 
-pub(crate) fn hook_receiver_router_with_state(state: HookServerState) -> Router {
+pub fn hook_receiver_router_with_state(state: HookServerState) -> Router {
     super::readiness::initialize();
     Router::new()
         .route("/hooks/{provider}/{event}", post(receive_hook))

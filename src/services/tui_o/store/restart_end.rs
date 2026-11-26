@@ -23,7 +23,7 @@ static VERSIONS: LazyLock<Mutex<HashMap<u64, watch::Sender<u64>>>> =
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RestartEnd {
+pub struct RestartEnd {
     pub end_id: String,
     pub channel: u64,
     pub provider: ShadowProvider,
@@ -45,7 +45,7 @@ struct Record {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Appended {
+pub enum Appended {
     Durable,
     PublishedUnsynced(String),
 }
@@ -71,7 +71,7 @@ fn version_sender(channel: u64) -> watch::Sender<u64> {
         .clone()
 }
 
-pub(crate) fn subscribe(channel: u64) -> watch::Receiver<u64> {
+pub fn subscribe(channel: u64) -> watch::Receiver<u64> {
     version_sender(channel).subscribe()
 }
 
@@ -146,7 +146,7 @@ fn read_one(path: &Path, channel: u64) -> Result<RestartEnd, String> {
 }
 
 /// Missing is empty. Records are never evicted, and source files are checked only by consumers.
-pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
+pub fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
     let entries = match fs::read_dir(dir(root, channel)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -185,7 +185,7 @@ fn confirm_durable(path: &Path) -> Result<(), String> {
 }
 
 /// Re-establishes directory durability before a consumer projects any published end.
-pub(crate) fn read_durable(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
+pub fn read_durable(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
     let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     let witnesses = read(root, channel)?;
     if let Some(first) = witnesses.first() {
@@ -227,7 +227,7 @@ fn verify_source_eof(witness: &RestartEnd) -> Result<(), String> {
 }
 
 /// Written by the effort restart once it has confirmed the old process ended.
-pub(crate) fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, String> {
+pub fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, String> {
     if !valid(witness, witness.channel) {
         return Err("restart end identity mismatch".into());
     }

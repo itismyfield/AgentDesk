@@ -10,7 +10,7 @@ use crate::services::provider::ProviderKind::{Claude as ClaudeKind, Codex as Cod
 use crate::services::tui_turn_state::envelope_is_turn_end_terminator;
 
 /// Visible assistant prose, preserving the block's text and excluding signatures and blank thinking.
-pub(crate) fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
+pub fn visible_assistant_block_text(block: &serde_json::Value) -> Option<&str> {
     match block.get("type").and_then(serde_json::Value::as_str) {
         Some("text") => block.get("text").and_then(serde_json::Value::as_str),
         Some("thinking") => block
@@ -170,7 +170,7 @@ thread_local! {
 
 /// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct V5Rule(());
+pub struct V5Rule(());
 
 #[cfg(any(test, feature = "test-support"))]
 impl V5Rule {
@@ -198,7 +198,7 @@ fn claude_body(resumed: bool, block: &Value) -> UnitContent {
 }
 
 /// Claude's top-level compaction marker, including the underscored spelling.
-pub(crate) fn record_is_compact_summary(record: &Value) -> bool {
+pub fn record_is_compact_summary(record: &Value) -> bool {
     ["isCompactSummary", "is_compact_summary"]
         .into_iter()
         .any(|key| record.get(key).and_then(Value::as_bool).unwrap_or(false))

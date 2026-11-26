@@ -12,9 +12,9 @@ thread_local! { pub(super) static COMMAND: RefCell<Option<(Command, Option<PathB
 static CHANNEL_PROBES: std::sync::LazyLock<
     std::sync::Mutex<std::collections::BTreeMap<u64, Arc<AtomicUsize>>>,
 > = std::sync::LazyLock::new(Default::default);
-pub(crate) struct ChannelProbeTrace(u64, Arc<AtomicUsize>);
+pub struct ChannelProbeTrace(u64, Arc<AtomicUsize>);
 impl ChannelProbeTrace {
-    pub(crate) fn new(channel: u64) -> Self {
+    pub fn new(channel: u64) -> Self {
         let count = Arc::new(AtomicUsize::new(0));
         assert!(
             CHANNEL_PROBES
@@ -25,7 +25,7 @@ impl ChannelProbeTrace {
         );
         Self(channel, count)
     }
-    pub(crate) fn calls(&self) -> usize {
+    pub fn calls(&self) -> usize {
         self.1.load(Ordering::SeqCst)
     }
 }
@@ -49,9 +49,9 @@ static NAMESPACES: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeM
 static CHANNEL_COMMANDS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::BTreeMap<u64, PathBuf>>,
 > = std::sync::LazyLock::new(Default::default);
-pub(crate) struct ChannelCommand(u64, PathBuf);
+pub struct ChannelCommand(u64, PathBuf);
 impl ChannelCommand {
-    pub(crate) fn new(channel: u64, executable: PathBuf) -> Self {
+    pub fn new(channel: u64, executable: PathBuf) -> Self {
         assert!(
             CHANNEL_COMMANDS
                 .lock()
@@ -70,9 +70,9 @@ impl Drop for ChannelCommand {
         );
     }
 }
-pub(crate) struct ChannelNamespace(u64, PathBuf);
+pub struct ChannelNamespace(u64, PathBuf);
 impl ChannelNamespace {
-    pub(crate) fn new(channel: u64, socket: PathBuf) -> Self {
+    pub fn new(channel: u64, socket: PathBuf) -> Self {
         assert!(
             NAMESPACES
                 .lock()
@@ -82,7 +82,7 @@ impl ChannelNamespace {
         );
         Self(channel, socket)
     }
-    pub(crate) fn start_command(&self) -> Command {
+    pub fn start_command(&self) -> Command {
         namespace_command(&self.1)
     }
 }
@@ -109,7 +109,7 @@ pub(super) fn channel_command(channel: u64) -> Option<(Command, Option<PathBuf>)
     let socket = NAMESPACES.lock().unwrap().get(&channel).cloned()?;
     Some((namespace_command(&socket), Some(socket)))
 }
-pub(crate) fn assert_same_start_context(
+pub fn assert_same_start_context(
     observation: &Observation,
     command: &Command,
     socket: Option<PathBuf>,
@@ -132,6 +132,6 @@ pub(crate) fn assert_same_start_context(
         "probe and selected start changed binary/uid/namespace"
     );
 }
-pub(crate) fn production_start_command() -> Command {
+pub fn production_start_command() -> Command {
     tmux_command().unwrap()
 }

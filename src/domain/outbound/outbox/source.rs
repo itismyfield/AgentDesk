@@ -92,7 +92,7 @@ const POLICIES: &[SourcePolicy] = &[
     policy!(Dashboard, "dashboard", DASHBOARD),
 ];
 
-pub(crate) const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
+pub const RETIRED_SEND_SOURCES: &[&str] = &["merge-automation"];
 
 pub(crate) fn is_static_notice_kind(source: &str) -> bool {
     let Some(policy) = POLICIES

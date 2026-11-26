@@ -12,12 +12,12 @@ use super::{
     evidence_store, read, write, write_evidence,
 };
 
-pub(crate) enum StoreRequest {
+pub enum StoreRequest {
     Create(DefinitionInput),
     Command(Command),
 }
 
-pub(crate) enum Preparation<'a> {
+pub enum Preparation<'a> {
     Replay {
         tx: Transaction<'a, Postgres>,
         reply: CommandReply,
@@ -25,7 +25,7 @@ pub(crate) enum Preparation<'a> {
     Fresh(Box<PreparedCommand<'a>>),
 }
 
-pub(crate) struct PreparedCommand<'a> {
+pub struct PreparedCommand<'a> {
     tx: Transaction<'a, Postgres>,
     id: String,
     key: String,
@@ -36,7 +36,7 @@ pub(crate) struct PreparedCommand<'a> {
     stored_seal: Option<CandidateSeal>,
 }
 
-pub(crate) struct StagedCommand<'a> {
+pub struct StagedCommand<'a> {
     tx: Transaction<'a, Postgres>,
     id: String,
     key: String,
@@ -45,7 +45,7 @@ pub(crate) struct StagedCommand<'a> {
     outcome: CommandOutcome,
 }
 
-pub(crate) async fn prepare<'a>(
+pub async fn prepare<'a>(
     mut tx: Transaction<'a, Postgres>,
     id: &str,
     key: &str,
@@ -129,31 +129,31 @@ pub(crate) async fn prepare<'a>(
 }
 
 impl<'a> PreparedCommand<'a> {
-    pub(crate) fn id(&self) -> &str {
+    pub fn id(&self) -> &str {
         &self.id
     }
 
-    pub(crate) fn key(&self) -> &str {
+    pub fn key(&self) -> &str {
         &self.key
     }
 
-    pub(crate) fn observed_at(&self) -> DateTime<Utc> {
+    pub fn observed_at(&self) -> DateTime<Utc> {
         self.observed_at
     }
 
-    pub(crate) fn request(&self) -> &StoreRequest {
+    pub fn request(&self) -> &StoreRequest {
         &self.request
     }
 
-    pub(crate) fn previous(&self) -> Option<&CampaignState> {
+    pub fn previous(&self) -> Option<&CampaignState> {
         self.previous.as_ref()
     }
 
-    pub(crate) fn stored_seal(&self) -> Option<&CandidateSeal> {
+    pub fn stored_seal(&self) -> Option<&CandidateSeal> {
         self.stored_seal.as_ref()
     }
 
-    pub(crate) async fn stage(
+    pub async fn stage(
         self: Box<Self>,
         decision: Option<Result<Decision, Rejection>>,
     ) -> StoreResult<StagedCommand<'a>> {
@@ -192,11 +192,11 @@ impl<'a> PreparedCommand<'a> {
 }
 
 impl<'a> StagedCommand<'a> {
-    pub(crate) fn outcome(&self) -> &CommandOutcome {
+    pub fn outcome(&self) -> &CommandOutcome {
         &self.outcome
     }
 
-    pub(crate) async fn record_receipt(
+    pub async fn record_receipt(
         self,
         response: ReceiptResponse,
     ) -> StoreResult<(Transaction<'a, Postgres>, CommandReply)> {

@@ -44,7 +44,7 @@ impl<I: HostIo> Hosted<'_, I> {
 
 impl Readiness {
     /// Ready channels considered by the periodic retention sweep.
-    pub(crate) fn transition_channels(&self) -> Vec<u64> {
+    pub fn transition_channels(&self) -> Vec<u64> {
         locked(&self.ready).iter().copied().collect()
     }
 
@@ -73,19 +73,19 @@ impl Readiness {
     }
 
     /// The running actor's port, while it takes work as `with_submission` checks it.
-    pub(crate) fn transition(&self, channel: u64) -> Option<TransitionPort> {
+    pub fn transition(&self, channel: u64) -> Option<TransitionPort> {
         self.with_transition(channel, false, |port| Ok(port.clone()))
             .ok()
     }
 
     /// Returns a live port for read-only diagnostics; requests still enforce suspension.
-    pub(crate) fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
+    pub fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
         self.with_transition(channel, true, |port| Ok(port.clone()))
             .ok()
     }
 
     /// Consumes `reply` only while the run `sent` named is still the channel's current one.
-    pub(crate) fn with_transition_reply<T>(
+    pub fn with_transition_reply<T>(
         &self,
         channel: u64,
         sent: &TransitionPort,

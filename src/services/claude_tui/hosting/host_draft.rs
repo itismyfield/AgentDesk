@@ -21,7 +21,7 @@ const DRAFT_CLEAR_ATTEMPTS: usize = 2;
 const DRAFT_KEY_SETTLE: Duration = Duration::from_millis(120);
 
 /// The host a warm follow-up drives and the gate admitting each mutation.
-pub(crate) struct FollowupHost<'a> {
+pub struct FollowupHost<'a> {
     pub(crate) target: InputTarget,
     pub(crate) gate: &'a dyn MutationGate,
 }

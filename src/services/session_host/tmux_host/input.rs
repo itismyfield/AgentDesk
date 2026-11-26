@@ -75,7 +75,7 @@ impl TmuxHost {
         )
     }
 
-    pub(crate) fn platform_input(
+    pub fn platform_input(
         &self,
         session: &str,
         source: InputSource,

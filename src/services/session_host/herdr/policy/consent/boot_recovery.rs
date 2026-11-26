@@ -2,8 +2,8 @@
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
-pub(crate) struct BootState(AtomicU8);
-pub(crate) static PROCESS: BootState = BootState::empty();
+pub struct BootState(AtomicU8);
+pub static PROCESS: BootState = BootState::empty();
 impl BootState {
     const fn empty() -> Self {
         Self(AtomicU8::new(0))
@@ -14,14 +14,14 @@ impl BootState {
         Self::empty()
     }
 
-    pub(crate) fn try_claim(&self) -> Option<BootRecovery<'_>> {
+    pub fn try_claim(&self) -> Option<BootRecovery<'_>> {
         self.0
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .ok()
             .map(|_| BootRecovery(self))
     }
 
-    pub(crate) fn is_ready(&self) -> bool {
+    pub fn is_ready(&self) -> bool {
         self.0.load(Ordering::Acquire) == 2
     }
 
@@ -34,7 +34,7 @@ impl BootState {
     }
 }
 
-pub(crate) struct BootRecovery<'a>(&'a BootState);
+pub struct BootRecovery<'a>(&'a BootState);
 impl BootRecovery<'_> {
     pub(crate) fn check(&self) -> Result<(), String> {
         if self.0.0.load(Ordering::Acquire) == 1 {
@@ -43,7 +43,7 @@ impl BootRecovery<'_> {
             Err("consent boot recovery authority is no longer active".into())
         }
     }
-    pub(crate) fn complete(self) {
+    pub fn complete(self) {
         self.0.0.store(2, Ordering::Release);
     }
 

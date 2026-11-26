@@ -3,11 +3,11 @@
 //! Herdr pane takes them only through its own gate.
 
 #[cfg(unix)]
-pub(crate) mod busy;
+pub mod busy;
 #[cfg(unix)]
-pub(crate) use busy::{BusyOperation, BusyOutcome};
+pub use busy::{BusyOperation, BusyOutcome};
 mod transport;
-pub(crate) use transport::InputTransport;
+pub use transport::InputTransport;
 
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
@@ -27,7 +27,7 @@ use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_
 use std::process::Output;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InputTarget {
+pub enum InputTarget {
     /// A confirmed tmux session.
     Tmux(String),
     /// A recorded Herdr pane; it takes keys only through its own gate.
@@ -36,7 +36,7 @@ pub(crate) enum InputTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputRefusal {
+pub enum InputRefusal {
     Unsupported(HostKind),
     Unknown,
     /// The readiness budget ended on an idle source that proves no boundary; no look clears it.
@@ -123,7 +123,7 @@ impl InputTarget {
 }
 
 /// Checked before every pane mutation; the execution validator implements it.
-pub(crate) trait MutationGate {
+pub trait MutationGate {
     fn admit(&self, session: &str) -> Result<(), InputRefusal>;
     /// A cancel key only stops work; a gate may admit it where it admits no other input.
     fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
@@ -180,7 +180,7 @@ impl HerdrTarget {
 }
 
 /// Legacy tmux keeps no stored execution evidence to re-check, so it admits.
-pub(crate) struct LegacyTmuxGate;
+pub struct LegacyTmuxGate;
 
 impl MutationGate for LegacyTmuxGate {
     fn admit(&self, _session: &str) -> Result<(), InputRefusal> {
@@ -248,7 +248,7 @@ impl InputTransport for TmuxInput {
 
 /// Input to a Herdr pane: each write goes out under the judgment its gate pinned just
 /// before it, and retire kills nothing.
-pub(crate) struct HerdrInput<'a> {
+pub struct HerdrInput<'a> {
     target: &'a HerdrTarget,
     buffers: std::collections::HashMap<String, String>,
 }
@@ -356,7 +356,7 @@ fn with_transport<R>(operation: impl FnOnce(&mut dyn InputTransport) -> R) -> R 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InputRun {
+pub enum InputRun {
     Applied,
     /// Nothing reached the pane.
     Refused(InputRefusal),
@@ -371,14 +371,14 @@ pub(crate) enum InputRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StopCause {
+pub enum StopCause {
     Refused(InputRefusal),
     Send(String),
 }
 
 impl InputRun {
     /// The `Result` legacy tmux callers return, with their original error text.
-    pub(crate) fn into_legacy(self) -> Result<(), String> {
+    pub fn into_legacy(self) -> Result<(), String> {
         match self {
             Self::Applied => Ok(()),
             Self::Cancelled { .. } => Err(PROMPT_READY_CANCELLED_ERROR.to_string()),
@@ -400,7 +400,7 @@ fn refused_message(refusal: InputRefusal) -> String {
 }
 
 /// Runs `actions` on `target`, admitting every pane mutation through `gate`.
-pub(crate) fn run_plan(
+pub fn run_plan(
     target: &InputTarget,
     gate: &dyn MutationGate,
     transport: &mut dyn InputTransport,
@@ -663,7 +663,7 @@ fn ensure_named_success(output: Output, name: &str) -> Result<(), String> {
 
 /// A plan on a Herdr pane: its own gate admits each write and pins the server for it.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn run_herdr(
+pub fn run_herdr(
     target: &HerdrTarget,
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
@@ -697,7 +697,7 @@ pub(crate) fn capture_draft_with(
 }
 
 /// The legacy tmux session as the draft-protection reader needs it.
-pub(crate) fn observe_draft(session_name: &str) -> Option<String> {
+pub fn observe_draft(session_name: &str) -> Option<String> {
     with_transport(|transport| transport.capture_draft(session_name))
 }
 
@@ -740,7 +740,7 @@ pub(crate) fn legacy_write(
 /// A pane read; `Truncated` is a host saying it cut the text.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostCapture {
+pub enum HostCapture {
     Complete(String),
     Truncated,
     Unavailable,
@@ -748,7 +748,7 @@ pub(crate) enum HostCapture {
 
 /// Executor result a follow-up consumes; never folded into a generic error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostInputOutcome {
+pub enum HostInputOutcome {
     Cleared,
     ReadySameExecution,
     Busy,
@@ -798,7 +798,7 @@ impl HostInputOutcome {
 /// Readiness from one observation. A blind, truncated or failed read is never
 /// ready, and only a confirmed tmux session that reads dead may be recreated.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn classify(
+pub fn classify(
     target: &InputTarget,
     liveness: SessionLiveness,
     capture: &HostCapture,
@@ -839,9 +839,9 @@ pub(crate) fn classify(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use spy::{FakeDraftPane, watch_actions};
+pub use spy::{FakeDraftPane, watch_actions};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use spy::{SpyGuard, SpyState};
+pub use spy::{SpyGuard, SpyState};
 
 /// Recording transport the Claude TUI input tests install in place of tmux.
 #[cfg(any(test, feature = "test-support"))]
@@ -870,7 +870,7 @@ mod spy {
         }
     }
     #[cfg(unix)]
-    pub(crate) fn watch_actions(
+    pub fn watch_actions(
         target: HerdrTarget,
         hook: impl Fn(&TuiInputAction) + Send + Sync + 'static,
     ) -> ActionWatch {
@@ -895,7 +895,7 @@ mod spy {
         }
     }
 
-    pub(crate) struct SpyState {
+    pub struct SpyState {
         pub calls: Vec<String>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
@@ -1077,14 +1077,14 @@ mod spy {
     /// A tmux stand-in for one session's draft capture on any thread: `-e` prints the `pane` file
     /// as written, a capture without it drops attributes, and every call is logged.
     #[cfg(unix)]
-    pub(crate) struct FakeDraftPane {
+    pub struct FakeDraftPane {
         dir: tempfile::TempDir,
         session: String,
     }
 
     #[cfg(unix)]
     impl FakeDraftPane {
-        pub(crate) fn new(session: &str) -> Self {
+        pub fn new(session: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let d = dir.path().display();
@@ -1103,12 +1103,12 @@ mod spy {
             }
         }
 
-        pub(crate) fn show(&self, pane: &str) {
+        pub fn show(&self, pane: &str) {
             std::fs::write(self.dir.path().join("pane"), pane).unwrap();
         }
 
         /// How many `-e` captures read this pane.
-        pub(crate) fn draft_reads(&self) -> usize {
+        pub fn draft_reads(&self) -> usize {
             let log = std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
             log.lines().filter(|line| line.contains(" -e ")).count()
         }
@@ -1122,10 +1122,10 @@ mod spy {
     }
 
     /// Routes this thread's legacy input through a spy until dropped.
-    pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
+    pub struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
     impl SpyGuard {
-        pub(crate) fn install(state: SpyState) -> Self {
+        pub fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let spy: Box<dyn InputTransport> = Box::new(Spy(state.clone()));
             INJECTED.with(|slot| *slot.borrow_mut() = Some(spy));

@@ -1,5 +1,5 @@
-pub(crate) mod reaping;
-pub(crate) mod stream_child;
+pub mod reaping;
+pub mod stream_child;
 
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -516,7 +516,7 @@ pub fn kill_pid_tree(pid: u32) {
 }
 
 #[cfg(unix)]
-pub(crate) fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
+pub fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if !identity.has_baseline() {
         tracing::debug!(
@@ -596,7 +596,7 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
 
 /// Shell-escape a string using single quotes (POSIX safe).
 /// Internal single quotes are replaced with `'\''`.
-pub(crate) fn shell_escape(s: &str) -> String {
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

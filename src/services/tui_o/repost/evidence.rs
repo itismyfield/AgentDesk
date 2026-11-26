@@ -10,22 +10,22 @@ use crate::services::tui_o::repost::o_piece_delivery::{DeliveryRow, PieceKey};
 /// Bumped when attribution rules change, so evidence judged by other rules is not reused.
 pub(crate) const MATCHER_VERSION: i32 = 1;
 /// The first pass starts no sooner than this after the earlier send was seen settled.
-pub(crate) const FIRST_PASS_AFTER: Duration = Duration::from_secs(10);
+pub const FIRST_PASS_AFTER: Duration = Duration::from_secs(10);
 /// The second starts no sooner than this after the first completed, so read time adds to it.
-pub(crate) const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
+pub const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
 
 /// Who reads. A pass begun under one holder, run or credentials proves nothing under another.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RunScope {
-    pub(crate) holder: String,
-    pub(crate) run: String,
-    pub(crate) credentials: String,
-    pub(crate) evidence_generation: u64,
+pub struct RunScope {
+    pub holder: String,
+    pub run: String,
+    pub credentials: String,
+    pub evidence_generation: u64,
 }
 
 /// Everything absence evidence is about; any change means the passes looked for something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EvidenceScope {
+pub struct EvidenceScope {
     pub(crate) key: PieceKey,
     pub(crate) payload_sha256: String,
     pub(crate) sender_id: u64,
@@ -37,16 +37,12 @@ pub(crate) struct EvidenceScope {
     pub(crate) checked_slots: Vec<u8>,
     /// The piece's own stored anchor, never the ledger's latest one.
     pub(crate) original_anchor: u64,
-    pub(crate) run: RunScope,
+    pub run: RunScope,
 }
 
 impl EvidenceScope {
     /// The scope of `row` as read now; `Err(slot)` while a slot is open, as its send may land.
-    pub(crate) fn of(
-        row: &DeliveryRow,
-        attempts: &[AttemptRow],
-        run: &RunScope,
-    ) -> Result<Self, u8> {
+    pub fn of(row: &DeliveryRow, attempts: &[AttemptRow], run: &RunScope) -> Result<Self, u8> {
         if let Some(open) = attempts.iter().find(|attempt| attempt.result.is_none()) {
             return Err(open.slot);
         }
@@ -148,7 +144,7 @@ impl CompletedPass {
 /// Two clean passes in order and on time over one scope. Fields stay private so nothing outside
 /// the probe can assemble one.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct NotFoundEvidence {
+pub struct NotFoundEvidence {
     passes: [CompletedPass; 2],
 }
 

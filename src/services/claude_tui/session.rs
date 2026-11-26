@@ -9,7 +9,7 @@ use std::{
 
 mod effort;
 use effort::LaunchEffort;
-pub(crate) use effort::{expect_owner_first_submit, owner_first_submit};
+pub use effort::{expect_owner_first_submit, owner_first_submit};
 
 use crate::services::claude_command::ClaudeBinary;
 #[cfg(test)]
@@ -45,7 +45,7 @@ static RELAUNCH_MODEL_RESETS: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Only a model reset relaunch asks its next launch to replace the resumed model.
-pub(crate) fn request_model_reset_for_relaunch(tmux: &str, session: &str) {
+pub fn request_model_reset_for_relaunch(tmux: &str, session: &str) {
     RELAUNCH_MODEL_RESETS
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -87,7 +87,7 @@ fn remember_persisted_continuation(tmux_session_name: &str, session_id: &str) {
 /// the launch script selects the new transcript on the next pane restart, and
 /// the hook settings address the same identity. A partially completed repair is
 /// accepted and converges on the next call.
-pub(crate) fn persist_claude_continuation_session(
+pub fn persist_claude_continuation_session(
     tmux_session_name: &str,
     new_session_id: &str,
 ) -> Result<bool, String> {
@@ -287,7 +287,7 @@ fn persist_claude_continuation_session_files(
 
 /// The launch inputs a Claude TUI process takes from its channel's settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ClaudeTuiLaunchSettings<'a> {
+pub struct ClaudeTuiLaunchSettings<'a> {
     pub(crate) model: Option<&'a str>,
     /// `None` leaves fast mode to the CLI's own settings.
     pub(crate) fast_mode: Option<bool>,

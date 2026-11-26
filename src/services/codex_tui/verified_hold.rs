@@ -7,11 +7,10 @@ use crate::services::{
 use std::{sync::Arc, time::Duration};
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static HOLD_ENTERED_FOR_TESTS: std::sync::Mutex<
-    Option<std::sync::mpsc::Sender<String>>,
-> = std::sync::Mutex::new(None);
+pub static HOLD_ENTERED_FOR_TESTS: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> =
+    std::sync::Mutex::new(None);
 
-pub(crate) fn existing_incarnation(tmux: &str) -> bool {
+pub fn existing_incarnation(tmux: &str) -> bool {
     dedupe::codex_verified_requires_proof(tmux) && !dedupe::clear_relaunch::relaunch_open(tmux)
 }
 
@@ -35,9 +34,6 @@ pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> 
     Ok(())
 }
 
-pub(crate) fn preflight(
-    tmux: &str,
-    cancel: Option<&Arc<CancelToken>>,
-) -> Option<Result<(), String>> {
+pub fn preflight(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Option<Result<(), String>> {
     existing_incarnation(tmux).then(|| wait_for_cancel(tmux, cancel))
 }

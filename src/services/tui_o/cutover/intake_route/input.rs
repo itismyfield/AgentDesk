@@ -4,11 +4,11 @@ use super::{IntakeRoute, RuntimeHandoffKind};
 use crate::services::tui_o::writer::host;
 use crate::services::tui_prompt_dedupe::clear_relaunch;
 
-pub(crate) async fn for_input_placement(provider: &str, channel: u64) -> IntakeRoute {
+pub async fn for_input_placement(provider: &str, channel: u64) -> IntakeRoute {
     placement(provider, Some(channel)).await
 }
 
-pub(crate) async fn text_for_input_placement(provider: &str, channel: &str) -> IntakeRoute {
+pub async fn text_for_input_placement(provider: &str, channel: &str) -> IntakeRoute {
     placement(provider, channel.parse().ok()).await
 }
 
@@ -29,7 +29,7 @@ async fn placement(provider: &str, channel: Option<u64>) -> IntakeRoute {
 }
 
 /// A claimed row keeps its adoption; only its current intake eligibility is checked again.
-pub(crate) async fn for_claimed_input(
+pub async fn for_claimed_input(
     provider: &str,
     channel: u64,
     row: i64,
@@ -53,7 +53,7 @@ pub(crate) async fn for_claimed_input(
 }
 
 /// Advisory discovery only; both claimed-row boundaries observe eligibility again.
-pub(crate) async fn held_input_channels(provider: &str) -> Result<Vec<String>, String> {
+pub async fn held_input_channels(provider: &str) -> Result<Vec<String>, String> {
     if !provider.trim().eq_ignore_ascii_case("codex")
         || !super::super::owned_channels()
             .iter()
@@ -67,7 +67,7 @@ pub(crate) async fn held_input_channels(provider: &str) -> Result<Vec<String>, S
         .map_err(|error| format!("O input discovery failed: {error}"))
 }
 
-pub(crate) fn selected_codex_input(provider: &str, channel: u64) -> bool {
+pub fn selected_codex_input(provider: &str, channel: u64) -> bool {
     provider.trim().eq_ignore_ascii_case("codex")
         && channel == crate::services::codex_tui::canary::CANARY_CHANNEL
         && super::super::owned_kind(channel) == Some(RuntimeHandoffKind::CodexTui)
@@ -160,7 +160,7 @@ fn note(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct InputProbe {
+pub struct InputProbe {
     pub channel: u64,
     pub entered: std::sync::mpsc::Sender<std::thread::ThreadId>,
     pub scheduled: tokio::sync::oneshot::Sender<()>,
@@ -174,7 +174,7 @@ static PROBE: std::sync::Mutex<Option<InputProbe>> = std::sync::Mutex::new(None)
 pub(crate) struct ProbeGuard;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install_probe(probe: InputProbe) -> ProbeGuard {
+pub fn install_probe(probe: InputProbe) -> ProbeGuard {
     let mut slot = PROBE.lock().unwrap();
     assert!(slot.is_none(), "an O input probe is already installed");
     *slot = Some(probe);

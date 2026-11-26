@@ -34,6 +34,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 mod notice_migration;
 #[path = "input_notices/retry.rs"]
 mod notice_retry;
+#[cfg(any(test, feature = "test-support"))]
+mod test_access;
 mod usage_footer;
 // Test seams for the writer tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
@@ -72,13 +74,13 @@ pub fn last_posted(channel: u64) -> Option<u64> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
+pub fn note_posted_for_tests(channel: u64, msg_id: u64) {
     note_posted(channel, msg_id);
 }
 
 /// What a process restart does to the in-memory position; the guard keeps other restarts out.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
+pub fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
     static RESTARTS: Mutex<()> = Mutex::new(());
     let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
     LAST_POSTED
@@ -256,7 +258,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::new`], judging the recovered refusals with the shared receipts read before start.
-    pub(crate) fn with_receipts(
+    pub fn with_receipts(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,
@@ -310,7 +312,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::with_receipts`] over the receipts `repost` reads first, then gives it the turn.
-    pub(crate) async fn hosted(
+    pub async fn hosted(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,
@@ -326,12 +328,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Gives the writer its re-post turn, if its host has one.
-    pub(crate) fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
+    pub fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
         self.repost = hook;
         self
     }
 
-    pub(crate) fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
+    pub fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
         self.repost_stops.push(stop);
         self
     }
@@ -341,7 +343,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Outstanding ordinary pieces pin retired cursors; re-post turns have nothing owed.
-    pub(crate) fn delivery_allowed(&self, owing: bool) -> bool {
+    pub fn delivery_allowed(&self, owing: bool) -> bool {
         source_delivery_allowed(
             self.channel,
             self.store

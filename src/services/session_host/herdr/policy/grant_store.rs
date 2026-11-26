@@ -36,7 +36,7 @@ impl GrantRestoration {
     }
 }
 
-pub(crate) struct FileGrantStore(Directory);
+pub struct FileGrantStore(Directory);
 impl FileGrantStore {
     pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))

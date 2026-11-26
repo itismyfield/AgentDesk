@@ -19,7 +19,7 @@ const COMPACTED_LOCAL_COMMAND_STDOUT_PREFIX: &str = "<local-command-stdout>Compa
 /// events and continuation banners stay passive, and slash-control echoes use
 /// command-kind rendering.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services::discord) enum InjectedPromptClass {
+pub enum InjectedPromptClass {
     HumanTuiDirect,
     /// A Claude scheduled-task fire: a typed input's lifecycle under its own notice header.
     ScheduledPrompt,
@@ -32,7 +32,7 @@ pub(in crate::services::discord) enum InjectedPromptClass {
 impl InjectedPromptClass {
     /// Whether this class represents a human-driven active turn that should
     /// receive a `⏳` reaction and claim queue/inflight ownership.
-    pub(in crate::services::discord) fn is_human_active_turn(self) -> bool {
+    pub fn is_human_active_turn(self) -> bool {
         matches!(
             self,
             InjectedPromptClass::HumanTuiDirect | InjectedPromptClass::ScheduledPrompt
@@ -41,7 +41,7 @@ impl InjectedPromptClass {
 
     /// Neutral machine events suppress the active-turn lifecycle. Slash control
     /// echoes are not human turns, but keep the full synthetic lifecycle.
-    pub(in crate::services::discord) fn suppresses_user_turn_lifecycle(self) -> bool {
+    pub fn suppresses_user_turn_lifecycle(self) -> bool {
         matches!(
             self,
             InjectedPromptClass::SystemContinuation
@@ -61,7 +61,7 @@ impl InjectedPromptClass {
         )
     }
 
-    pub(in crate::services::discord) fn is_subagent_notification_event(self) -> bool {
+    pub fn is_subagent_notification_event(self) -> bool {
         matches!(self, InjectedPromptClass::SubagentNotificationEvent)
     }
 }
@@ -110,7 +110,7 @@ impl InjectedPromptClass {
 /// rather than to its meaning: if a future input path ever delivers a bare
 /// `/clear` — a raw pane write, a differently-wrapped injector — the wedge comes
 /// back silently, and the fix belongs in the classifier, not here.
-pub(in crate::services::discord) fn injected_prompt_suppresses_user_turn_lifecycle(
+pub fn injected_prompt_suppresses_user_turn_lifecycle(
     injected_class: InjectedPromptClass,
     slash_command_kind: Option<&str>,
 ) -> bool {
@@ -126,7 +126,7 @@ pub(in crate::services::discord) fn injected_prompt_suppresses_user_turn_lifecyc
 /// Pure classifier for injected TUI prompt text. Order is load-bearing:
 /// start-anchored subagent envelopes win before generic continuation banners
 /// because Provider Session Reuse may wrap the machine-event tail.
-pub(in crate::services::discord) fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
+pub fn classify_injected_prompt(prompt: &str) -> InjectedPromptClass {
     if is_start_anchored_subagent_notification(prompt) {
         InjectedPromptClass::SubagentNotificationEvent
     } else if is_system_continuation_prompt(prompt) {
@@ -142,7 +142,7 @@ pub(in crate::services::discord) fn classify_injected_prompt(prompt: &str) -> In
 
 /// The same classification, told whether the transcript marks the prompt's row as a scheduled
 /// fire. Only a prompt that would otherwise be a typed input becomes scheduled.
-pub(in crate::services::discord) fn classify_injected_prompt_with_origin(
+pub fn classify_injected_prompt_with_origin(
     prompt: &str,
     scheduled_fire: bool,
 ) -> InjectedPromptClass {
@@ -235,7 +235,7 @@ pub(in crate::services::discord) fn is_task_notification_prompt(prompt: &str) ->
 /// StatusEvents — combined with finding 1's id requirement this closes the
 /// false-close attack where a quoted live tool-use-id would otherwise finalize a
 /// real running slot.
-pub(in crate::services::discord) fn is_start_anchored_task_notification(prompt: &str) -> bool {
+pub fn is_start_anchored_task_notification(prompt: &str) -> bool {
     let normalized = normalized_start_anchored_injection(prompt);
     starts_with_xmlish_tag(&normalized, "task-notification")
 }
@@ -243,7 +243,7 @@ pub(in crate::services::discord) fn is_start_anchored_task_notification(prompt: 
 /// Detects Codex `<subagent_notification>` envelopes as neutral machine events.
 /// This is deliberately START-ANCHORED: a human prompt that quotes the XML-ish
 /// tag mid-body remains a normal TUI-direct prompt.
-pub(in crate::services::discord) fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
+pub fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
     subagent_notification_card::is_start_anchored_subagent_notification(prompt)
 }
 
@@ -308,7 +308,7 @@ pub(in crate::services::discord) fn strip_leading_injection_wrapper(text: &str) 
     crate::services::tui_prompt_control::strip_leading_injection_wrapper(text)
 }
 
-pub(in crate::services::discord) fn format_ssh_direct_prompt_notification(
+pub fn format_ssh_direct_prompt_notification(
     _provider: &str,
     _tmux_session_name: &str,
     prompt: &str,
@@ -324,7 +324,7 @@ fn raw_prompt_notice(header: &str, prompt: &str) -> String {
 }
 
 /// A direct prompt's notice by class; a scheduled fire is told apart by its header.
-pub(in crate::services::discord) fn format_direct_prompt_notification(
+pub fn format_direct_prompt_notification(
     class: InjectedPromptClass,
     provider: &str,
     tmux_session_name: &str,
@@ -345,7 +345,7 @@ pub(in crate::services::discord) fn format_subagent_notification_card(
 }
 
 /// Canonical command kind for slash-control dedupe and kind-only notes.
-pub(in crate::services::discord) fn slash_command_control_kind(prompt: &str) -> String {
+pub fn slash_command_control_kind(prompt: &str) -> String {
     let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
     if starts_with_compacted_local_command_stdout(&normalized) {
         return "/compact".to_string();
@@ -386,7 +386,7 @@ fn first_xml_tag_token(text: &str, tag: &str) -> Option<String> {
 }
 
 /// Slash-control note; `/loop` and generic local stdout may include a short body.
-pub(in crate::services::discord) fn format_slash_command_control_note(
+pub fn format_slash_command_control_note(
     tmux_session_name: &str,
     kind: &str,
     raw_prompt: &str,
@@ -437,10 +437,7 @@ pub(in crate::services::discord) fn extract_loop_body(prompt: &str) -> Option<St
 
 /// A local command's output as written, under a `-# ⚙️ /<command>` header. `None` for a name
 /// that is not a plain slash token or an empty output; the caller keeps the kind-only note.
-pub(in crate::services::discord) fn format_slash_command_output_notice(
-    command: &str,
-    raw_prompt: &str,
-) -> Option<String> {
+pub fn format_slash_command_output_notice(command: &str, raw_prompt: &str) -> Option<String> {
     let name = command.strip_prefix('/')?;
     let plain = !name.is_empty()
         && name.len() <= 64
@@ -453,7 +450,7 @@ pub(in crate::services::discord) fn format_slash_command_output_notice(
 }
 
 /// Whether the row is a local command's output rather than the command itself.
-pub(in crate::services::discord) fn is_local_command_output_row(prompt: &str) -> bool {
+pub fn is_local_command_output_row(prompt: &str) -> bool {
     local_command_stdout_inner(prompt).is_some()
 }
 
@@ -478,10 +475,7 @@ fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
     (!body.is_empty()).then_some(body)
 }
 
-pub(in crate::services::discord) fn format_system_continuation_note(
-    tmux_session_name: &str,
-    _prompt: &str,
-) -> String {
+pub fn format_system_continuation_note(tmux_session_name: &str, _prompt: &str) -> String {
     super::super::session_notice::subtext(
         "🧩",
         &format!("Session continued (compact/resume) · tmux: {tmux_session_name}"),

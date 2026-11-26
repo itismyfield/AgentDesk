@@ -1,17 +1,17 @@
 //! Herdr launch preparation for one channel's canonical row.
 //! Durable Pending and user-default grants precede create; retries only probe.
 
-pub(crate) mod clear_epoch;
+pub mod clear_epoch;
 #[cfg(unix)]
 mod codex_resume;
 mod owner_port;
-pub(crate) mod policy;
+pub mod policy;
 mod prepared;
 #[cfg(unix)]
-pub(crate) mod retire;
-pub(crate) mod retired_hold;
-pub(crate) mod runtime_marker;
-pub(crate) mod unplaced;
+pub mod retire;
+pub mod retired_hold;
+pub mod runtime_marker;
+pub mod unplaced;
 
 use crate::config::session_hosts::EndpointMode;
 use policy::{LaunchGrantStore, PermitFuture, UserDefaultCreateRequest};
@@ -42,14 +42,14 @@ use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, execution_context, stable_host_identity,
 };
 #[cfg(any(unix, test))]
-pub(crate) use owner_port::OwnerPort;
+pub use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
 /// What Herdr gives every pane process (same set through 0.9.5); a provider that sees them may
 /// report to Herdr.
-pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
+pub const HERDR_PANE_ENV: [&str; 7] = [
     "HERDR_ENV",
     "HERDR_PANE_ID",
     "HERDR_BIN_PATH",
@@ -61,7 +61,7 @@ pub(crate) const HERDR_PANE_ENV: [&str; 7] = [
 
 /// Whether a TUI launch for the channel belongs to Herdr. A configured channel never gets a tmux
 /// session, whatever its admission or O readiness; the turn host reports why it is refused.
-pub(crate) fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
+pub fn herdr_configured_for_tui_launch(channel_id: Option<u64>) -> bool {
     channel_id.is_some_and(configured)
 }
 
@@ -77,7 +77,7 @@ fn configured(channel: u64) -> bool {
 }
 
 /// Whether the channel's O writer could take a Herdr turn of `kind`'s provider now.
-pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
+pub fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
     o_ready_at(runtime_root().as_deref(), channel, kind)
 }
 
@@ -119,7 +119,7 @@ fn writer_accepts(channel: u64) -> bool {
 
 /// A configured Herdr endpoint; no field falls back to a default socket, session or pane.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(crate) struct HerdrLaunchEndpoint {
+pub struct HerdrLaunchEndpoint {
     pub execution_node: String,
     pub config_key: String,
     pub socket_addr: String,
@@ -127,7 +127,7 @@ pub(crate) struct HerdrLaunchEndpoint {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrCreateRequest {
+pub struct HerdrCreateRequest {
     pub endpoint: HerdrLaunchEndpoint,
     /// Name of the managed workspace/tab; the pane comes back in the reply.
     pub label: String,
@@ -138,7 +138,7 @@ pub(crate) struct HerdrCreateRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrCreateOutcome {
+pub enum HerdrCreateOutcome {
     Created {
         pane_id: String,
     },
@@ -157,7 +157,7 @@ pub(crate) enum HerdrCreateOutcome {
 /// What launch evidence must tie together: the pane, the execution, and the server the
 /// launch was sent to, after which the provider started.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EvidenceProbe {
+pub struct EvidenceProbe {
     pub location: HostedLocation,
     pub provider: String,
     pub execution_nonce: String,
@@ -166,7 +166,7 @@ pub(crate) struct EvidenceProbe {
 }
 
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
-pub(crate) trait HerdrLaunchHost: Send + Sync {
+pub trait HerdrLaunchHost: Send + Sync {
     fn mode(&self, endpoint: &HerdrLaunchEndpoint) -> EndpointMode;
     fn create_permit<'a>(&'a self, _: &'a HerdrLaunchEndpoint) -> PermitFuture<'a> {
         Box::pin(async { Err("user-default policy source unavailable".into()) })
@@ -221,7 +221,7 @@ pub(crate) trait HerdrLaunchHost: Send + Sync {
     }
 }
 
-pub(crate) struct HerdrLaunch {
+pub struct HerdrLaunch {
     pub endpoint: Option<HerdrLaunchEndpoint>,
     pub owner: HostedOwner,
     pub channel_id: Option<u64>,
@@ -234,13 +234,13 @@ pub(crate) struct HerdrLaunch {
     pub takeover_ended: fn(u64, &str, &str),
 }
 
-pub(crate) struct HerdrLaunchCommand {
+pub struct HerdrLaunchCommand {
     pub cwd: PathBuf,
     pub command: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrLaunchOutcome {
+pub enum HerdrLaunchOutcome {
     /// The pane location is stored; `evidence` tells whether its process stamps are too.
     Launched {
         execution_nonce: String,
@@ -256,7 +256,7 @@ pub(crate) enum HerdrLaunchOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrLaunchError {
+pub enum HerdrLaunchError {
     /// Refused before any I/O.
     Unsupported(&'static str),
     /// The prepared cwd or command cannot run in a pane; refused before Pending.
@@ -292,7 +292,7 @@ thread_local! {
 pub(crate) struct WriterAcceptsGuard(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAcceptsGuard {
+pub fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAcceptsGuard {
     WriterAcceptsGuard(WRITER_ACCEPTS.with(|cell| cell.replace(writer_accepts)))
 }
 
@@ -334,7 +334,7 @@ pub(crate) fn readiness_reads_on_this_thread() -> usize {
 
 /// An O store sealed over `channels` with no checkpoint yet, as a writer's first start leaves it.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_store_for_test(
+pub fn o_store_for_test(
     runtime_root: &Path,
     channels: &[u64],
 ) -> (OStore, crate::services::tui_o::store::OEra) {
@@ -400,7 +400,7 @@ fn pane_location(endpoint: &HerdrLaunchEndpoint, pane_id: String) -> HostedLocat
 
 /// The workspace label a launch creates: the channel's logical key and the execution nonce, so the
 /// pane is the launch's own before any provider runs in it, and after a server restart.
-pub(crate) fn workspace_marker(logical_key: &str, nonce: &str) -> String {
+pub fn workspace_marker(logical_key: &str, nonce: &str) -> String {
     format!("{logical_key}#{nonce}")
 }
 
@@ -421,7 +421,7 @@ pub(crate) fn launch_command_eligible(cwd: &Path, command: &str) -> Result<(), S
 
 /// Removes the Herdr pane variables on the line before the script's provider `exec`, after
 /// every export; the first `exec` line, since its arguments may hold any text.
-pub(crate) fn unset_herdr_env_before_exec(script: &str) -> Result<String, String> {
+pub fn unset_herdr_env_before_exec(script: &str) -> Result<String, String> {
     let exec = script
         .find("\nexec ")
         .ok_or("launch script has no provider exec")?
@@ -431,7 +431,7 @@ pub(crate) fn unset_herdr_env_before_exec(script: &str) -> Result<String, String
 }
 
 /// Prepares and starts one Herdr execution for `launch.owner`'s canonical row.
-pub(crate) async fn launch_herdr_session(
+pub async fn launch_herdr_session(
     pool: &PgPool,
     launch: HerdrLaunch,
     prepare: impl FnOnce(&PreparedIncarnation) -> Result<HerdrLaunchCommand, String>,
@@ -692,7 +692,7 @@ pub(crate) async fn retire_own_unplaced(
 
 /// Retires Pending `nonce` with no launch evidence whose recorded pane is `placed` (`None`: no
 /// pane), by a CAS on the row read here.
-pub(crate) async fn retire_own_pending(
+pub async fn retire_own_pending(
     pool: &PgPool,
     owner: &HostedOwner,
     nonce: &str,

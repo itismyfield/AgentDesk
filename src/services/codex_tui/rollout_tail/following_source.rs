@@ -3,10 +3,10 @@
 use super::*;
 
 type RecordWitness = Box<dyn FnMut(u64, &[u8]) -> Result<(), String> + Send>;
-pub(crate) struct FixedRecoverySource {
-    pub(crate) file: std::fs::File,
-    pub(crate) ready: Option<std::sync::mpsc::Sender<()>>,
-    pub(crate) observe: Option<RecordWitness>,
+pub struct FixedRecoverySource {
+    pub file: std::fs::File,
+    pub ready: Option<std::sync::mpsc::Sender<()>>,
+    pub observe: Option<RecordWitness>,
 }
 impl From<std::fs::File> for FixedRecoverySource {
     fn from(file: std::fs::File) -> Self {
@@ -38,7 +38,7 @@ impl TailClock for SystemTailClock {
     }
 }
 
-pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
+pub fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,
     session_id: Option<&str>,
@@ -59,7 +59,7 @@ pub(crate) fn tail_recovery_rollout_for_tmux<L: Into<PaneLiveness>>(
     )
 }
 
-pub(crate) fn tail_fixed_recovery_rollout(
+pub fn tail_fixed_recovery_rollout(
     source: FixedRecoverySource,
     rollout_path: &Path,
     start_offset: u64,

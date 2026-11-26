@@ -5,7 +5,7 @@ use serde::Serialize;
 use sqlx::{PgPool, Row, postgres::PgRow};
 
 #[derive(Debug, Serialize)]
-pub(crate) struct SessionEvidence {
+pub struct SessionEvidence {
     pub agent_id: String,
     pub channel_id: Option<String>,
     pub provider: Option<String>,
@@ -13,10 +13,10 @@ pub(crate) struct SessionEvidence {
     pub raw_provider_session_id: Option<String>,
 }
 
-pub(crate) struct SessionEvidenceRow(PgRow);
+pub struct SessionEvidenceRow(PgRow);
 
 impl SessionEvidenceRow {
-    pub(crate) fn decode_binding(&self) -> Result<(String, AgentChannelBindings), sqlx::Error> {
+    pub fn decode_binding(&self) -> Result<(String, AgentChannelBindings), sqlx::Error> {
         let agent_id = self.0.try_get("agent_id")?;
         let bindings = AgentChannelBindings {
             provider: self.0.try_get("agent_provider")?,
@@ -28,7 +28,7 @@ impl SessionEvidenceRow {
         Ok((agent_id, bindings))
     }
 
-    pub(crate) fn matches_session(
+    pub fn matches_session(
         &self,
         channel_id: &Option<String>,
         provider: &Option<String>,
@@ -40,16 +40,16 @@ impl SessionEvidenceRow {
         )
     }
 
-    pub(crate) fn decode_session_key(&self) -> Result<Option<String>, sqlx::Error> {
+    pub fn decode_session_key(&self) -> Result<Option<String>, sqlx::Error> {
         self.0.try_get("session_key")
     }
 
-    pub(crate) fn decode_raw_provider_session_id(&self) -> Result<Option<String>, sqlx::Error> {
+    pub fn decode_raw_provider_session_id(&self) -> Result<Option<String>, sqlx::Error> {
         self.0.try_get("raw_provider_session_id")
     }
 }
 
-pub(crate) async fn load_session_evidence_rows_pg(
+pub async fn load_session_evidence_rows_pg(
     pool: &PgPool,
     identifier: &str,
 ) -> Result<Vec<SessionEvidenceRow>, sqlx::Error> {

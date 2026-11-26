@@ -684,7 +684,7 @@ pub(super) mod scoped_support;
 pub(super) mod scoped_tests;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_hooks {
+pub mod test_hooks {
     //! Lets a test wait for the probe workers, count the snapshots, and look in just before a
     //! retirement is written.
     use std::cell::{Cell, RefCell};
@@ -693,11 +693,11 @@ pub(crate) mod test_hooks {
     }
 
     #[cfg(unix)]
-    pub(crate) fn snapshot_authority_held() -> bool {
+    pub fn snapshot_authority_held() -> bool {
         SNAPSHOT_AUTHORITY.with(Cell::get)
     }
 
-    pub(crate) fn snapshot_authority_scope(held: bool) -> impl Drop {
+    pub fn snapshot_authority_scope(held: bool) -> impl Drop {
         struct Restore(bool);
         impl Drop for Restore {
             fn drop(&mut self) {
@@ -730,7 +730,7 @@ pub(crate) mod test_hooks {
 
     /// Moves the actors' clock on this thread by `by` just as one next takes a worker's probes,
     /// until the guard drops.
-    pub(crate) fn skew_at_receipt(by: Duration) -> impl Drop {
+    pub fn skew_at_receipt(by: Duration) -> impl Drop {
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {
@@ -748,12 +748,12 @@ pub(crate) mod test_hooks {
     }
 
     /// Probe workers the actors on this thread started so far.
-    pub(crate) fn started() -> usize {
+    pub fn started() -> usize {
         WORKERS.with(|workers| workers.borrow().len())
     }
 
     /// Blocks this thread until every probe worker its actors started has sent its probes.
-    pub(crate) fn settle_workers() {
+    pub fn settle_workers() {
         let pending = || WORKERS.with(|w| w.borrow().iter().any(|d| !d.load(Ordering::Acquire)));
         while pending() {
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -765,7 +765,7 @@ pub(crate) mod test_hooks {
     }
 
     /// Snapshots the actors on this thread built so far, each one a read of the store and history.
-    pub(crate) fn snapshots() -> usize {
+    pub fn snapshots() -> usize {
         SNAPSHOTS.with(Cell::get)
     }
 
@@ -774,7 +774,7 @@ pub(crate) mod test_hooks {
     }
 
     /// Runs `hook` just before each retirement write on this thread until the guard drops.
-    pub(crate) fn on_retire(hook: impl FnMut() + 'static) -> impl Drop {
+    pub fn on_retire(hook: impl FnMut() + 'static) -> impl Drop {
         struct Clear;
         impl Drop for Clear {
             fn drop(&mut self) {

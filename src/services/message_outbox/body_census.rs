@@ -18,7 +18,7 @@ pub(super) fn capture(source: &str) -> Option<Value> {
 }
 
 /// Only persisted producer evidence can establish a nonbody exclusion.
-pub(crate) fn delivery_tag(source: &str, stored: Option<Value>) -> Value {
+pub fn delivery_tag(source: &str, stored: Option<Value>) -> Value {
     if let Some(tag) = stored.as_ref().and_then(restore) {
         return tag;
     }

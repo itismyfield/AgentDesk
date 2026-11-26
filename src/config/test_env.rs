@@ -1,9 +1,9 @@
 /// Child-process probe proving a test fixture restores the environment on return and unwind.
 #[path = "../test_env_panic_probe.rs"]
-pub(crate) mod panic_probe;
-pub(crate) mod teardown_probe;
+pub mod panic_probe;
+pub mod teardown_probe;
 
-pub(crate) struct TestEnvVarGuard {
+pub struct TestEnvVarGuard {
     _lock: Option<super::test_env_lock::SharedTestEnvLockGuard>,
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -11,7 +11,7 @@ pub(crate) struct TestEnvVarGuard {
 
 impl TestEnvVarGuard {
     #[track_caller]
-    pub(crate) fn set_path(key: &'static str, value: &std::path::Path) -> Self {
+    pub fn set_path(key: &'static str, value: &std::path::Path) -> Self {
         let lock = super::test_env_lock::acquire_shared_test_env_lock();
         let previous = std::env::var_os(key);
         unsafe { std::env::set_var(key, value) };
@@ -22,21 +22,18 @@ impl TestEnvVarGuard {
         }
     }
 
-    pub(crate) fn set_path_after_shared_test_env_lock(
-        key: &'static str,
-        value: &std::path::Path,
-    ) -> Self {
+    pub fn set_path_after_shared_test_env_lock(key: &'static str, value: &std::path::Path) -> Self {
         Self::set_value_after_shared_test_env_lock(key, value.as_os_str())
     }
 
-    pub(crate) fn remove_after_shared_test_env_lock(key: &'static str) -> Self {
+    pub fn remove_after_shared_test_env_lock(key: &'static str) -> Self {
         let guard = Self::capture_after_shared_test_env_lock(key);
         unsafe { std::env::remove_var(key) };
         guard
     }
 
     /// Set a non-path value while the caller owns the shared environment lock.
-    pub(crate) fn set_value_after_shared_test_env_lock(
+    pub fn set_value_after_shared_test_env_lock(
         key: &'static str,
         value: &std::ffi::OsStr,
     ) -> Self {
@@ -48,7 +45,7 @@ impl TestEnvVarGuard {
     /// Put `dir` in front of `PATH` while the caller owns the shared env lock. The system
     /// dirs stay, because tests that spawn `sh`/`sleep`/`python3` by name run unlocked.
     #[cfg(unix)]
-    pub(crate) fn prepend_path_after_shared_test_env_lock(dir: &std::path::Path) -> Self {
+    pub fn prepend_path_after_shared_test_env_lock(dir: &std::path::Path) -> Self {
         let inherited = std::env::var_os("PATH").unwrap_or_default();
         let paths = std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&inherited));
         let joined = std::env::join_paths(paths).expect("join PATH");
@@ -75,13 +72,13 @@ impl Drop for TestEnvVarGuard {
 }
 
 #[track_caller]
-pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
+pub fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
 
 /// A fresh TMPDIR for a fixture that moves it. Never removed: tests on other threads create
 /// their temp dirs inside it meanwhile, and removing it would delete those under them.
-pub(crate) fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
+pub fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
     tempfile::Builder::new()
         .prefix(&format!("adk-{label}-"))
         .tempdir()
@@ -89,14 +86,14 @@ pub(crate) fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
         .keep()
 }
 
-pub(crate) struct TestRuntimeRootGuard {
+pub struct TestRuntimeRootGuard {
     _config: Option<TestEnvVarGuard>,
     _env: TestEnvVarGuard,
     _root: tempfile::TempDir,
 }
 
 impl TestRuntimeRootGuard {
-    pub(crate) fn path(&self) -> &std::path::Path {
+    pub fn path(&self) -> &std::path::Path {
         self._root.path()
     }
 
@@ -110,7 +107,7 @@ impl TestRuntimeRootGuard {
     }
 
     #[track_caller]
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let root = tempfile::tempdir().expect("runtime root");
         let env = set_agentdesk_root_for_test(root.path());
         Self {
@@ -121,7 +118,7 @@ impl TestRuntimeRootGuard {
     }
 }
 
-pub(crate) fn assert_test_config_write_within_root(root: &std::path::Path, path: &std::path::Path) {
+pub fn assert_test_config_write_within_root(root: &std::path::Path, path: &std::path::Path) {
     assert!(
         !path
             .components()

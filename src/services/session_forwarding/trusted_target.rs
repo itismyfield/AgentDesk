@@ -12,7 +12,7 @@ use crate::config::{ClusterConfig, ClusterNodeConfig};
 const FORWARD_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TrustedTargetError {
+pub enum TrustedTargetError {
     MissingConfig,
     InvalidConfiguredOrigin,
     InvalidAdvertisedOrigin,
@@ -67,7 +67,7 @@ impl TrustedTargetError {
 }
 
 #[derive(Clone)]
-pub(crate) struct TrustedForwardTarget {
+pub struct TrustedForwardTarget {
     owner_instance_id: String,
     origin: Url,
     client: reqwest::Client,
@@ -165,7 +165,7 @@ impl ForwardDnsResolver for SystemForwardDnsResolver {
     }
 }
 
-pub(crate) async fn build_trusted_target(
+pub async fn build_trusted_target(
     cluster: &ClusterConfig,
     owner_instance_id: &str,
     advertised_origin: &str,
@@ -426,7 +426,7 @@ fn ipv6_is_allowed(address: Ipv6Addr, allow_private: bool) -> bool {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod loopback_seam {
+pub mod loopback_seam {
     //! One exact loopback socket the registering thread treats as an operator-allowed private
     //! address, so a test can forward to an owner server on 127.0.0.1; consent checks still apply.
 
@@ -438,10 +438,10 @@ pub(crate) mod loopback_seam {
     }
 
     /// The registration; dropping it restores the address policy on its thread.
-    pub(crate) struct LoopbackGuard(());
+    pub struct LoopbackGuard(());
 
     /// Admits loopback `address` on this thread only; registering a second one panics.
-    pub(crate) fn allow_loopback_for_test(address: SocketAddr) -> LoopbackGuard {
+    pub fn allow_loopback_for_test(address: SocketAddr) -> LoopbackGuard {
         assert!(
             address.ip().is_loopback(),
             "{address} is not a loopback socket"

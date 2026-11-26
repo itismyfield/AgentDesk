@@ -13,7 +13,7 @@ use crate::services::tui_prompt_dedupe::{
     observation::{PromptObservationEffect, observe_inner},
 };
 
-pub(crate) fn observe_hook_at(
+pub fn observe_hook_at(
     provider: &str,
     logical: &str,
     prompt: &str,
@@ -41,7 +41,7 @@ pub(crate) fn observe_hook_at(
 }
 
 #[cfg(unix)]
-pub(crate) fn observe_claude_record_at(
+pub fn observe_claude_record_at(
     logical: &str,
     prompt: &str,
     (entry, prompt_id): (Option<&str>, Option<&str>),
@@ -60,7 +60,7 @@ pub(crate) fn observe_claude_record_at(
 }
 
 #[cfg(unix)]
-pub(crate) fn observe_codex_record_at(
+pub fn observe_codex_record_at(
     logical: &str,
     (path, start, record): (&Path, u64, &RecordEvidence),
     (prompt, entry, inferred): (&str, Option<&str>, Option<&str>),

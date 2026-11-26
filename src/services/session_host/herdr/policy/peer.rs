@@ -43,7 +43,7 @@ pub(crate) fn verify_current_image(checker: &FileToken) -> Result<(), Unverified
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn verify_current_release_image(checker: &FileToken) -> Result<(), Unverified> {
+pub fn verify_current_release_image(checker: &FileToken) -> Result<(), Unverified> {
     if !loaded_image::for_current_release()?.matches(checker) {
         return Err(Unverified::Identity);
     }
@@ -78,7 +78,7 @@ pub(crate) struct PeerObservation {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PeerSnapshot {
+pub struct PeerSnapshot {
     pub witness: ServerWitness,
     pub socket_dir: (u64, u64),
     pub started: SystemTime,

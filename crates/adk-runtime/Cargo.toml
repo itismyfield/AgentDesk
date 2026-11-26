@@ -1,0 +1,88 @@
+[package]
+name = "adk-runtime"
+# Same as the root package: three runtime modules report `CARGO_PKG_VERSION` as the AgentDesk version.
+version = "0.1.3"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[lib]
+path = "../../src/adk_runtime_lib.rs"
+
+[features]
+# Opens the test-only items that parent tests reach; the parent enables this only through its
+# dev-dependency, so release builds never carry it.
+test-support = ["dep:adk-test-support", "dep:filetime", "dep:tower", "tokio/test-util"]
+
+[dependencies]
+adk-base = { path = "../adk-base" }
+adk-store = { path = "../adk-store" }
+adk-test-support = { path = "../adk-test-support", optional = true }
+filetime = { version = "0.2", optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws", "macros"] }
+base64 = "0.22"
+blake3 = "1"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+chrono-tz = "0.10"
+dashmap = "6"
+dirs = "6.0.0"
+futures = "0.3"
+hex = "0.4"
+icu_properties = "=2.1.2"
+libc = "0.2"
+log = "0.4"
+notify = "7"
+poise = { version = "0.7", default-features = false, features = ["cache", "chrono", "handle_panics"] }
+pulldown-cmark = "0.9.6"
+rand = "0.8"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "stream", "form", "query"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "native_tls_backend"] }
+sha2 = "0.10"
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres", "migrate", "macros", "chrono", "json", "uuid"] }
+sysinfo = { version = "0.37", default-features = false, features = ["system", "disk", "network"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml_edit = { version = "=0.25.17", default-features = false, features = ["parse"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+unicode-width = "0.2"
+ureq = { version = "2", features = ["json"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
+which = "8.0.2"
+zstd = { version = "=0.13.3", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_LibraryLoader", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist = "1.8"
+
+[dev-dependencies]
+adk-base = { path = "../adk-base", features = ["test-support"] }
+adk-test-support = { path = "../adk-test-support" }
+filetime = "0.2"
+tokio = { version = "1", features = ["test-util"] }
+tower = { version = "0.5", features = ["util"] }
+
+# The root package's lint table is not inherited by workspace members; keep the same gates here.
+[lints.clippy]
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+correctness = { level = "deny", priority = -1 }
+await_holding_lock = "deny"
+drop_non_drop = "deny"
+mistyped_literal_suffixes = "deny"
+large_enum_variant = "deny"
+result_large_err = "deny"
+too_many_arguments = "deny"
+type_complexity = "deny"

@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub(crate) const STRICT_NAMESPACE: &str = "herdr_exact_episode";
+pub const STRICT_NAMESPACE: &str = "herdr_exact_episode";
 pub(crate) const VERSION: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExactEpisodePin {
+pub struct ExactEpisodePin {
     pub episode: Uuid,
     pub owner: String,
     pub execution_nonce: String,
@@ -21,7 +21,7 @@ pub(crate) struct ExactEpisodePin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SourceIdentity {
+pub struct SourceIdentity {
     pub incarnation: Uuid,
     pub opener: u64,
     pub digest: String,
@@ -29,7 +29,7 @@ pub(crate) struct SourceIdentity {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TerminalSeal {
+pub struct TerminalSeal {
     pub source: SourceIdentity,
     pub terminal_identity: String,
     pub terminal_end: u64,
@@ -39,7 +39,7 @@ pub(crate) struct TerminalSeal {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FrozenSettlementContext {
+pub struct FrozenSettlementContext {
     pub intake: Option<(i64, u64)>,
     pub dispatch: Option<(i64, u64)>,
     pub aliases: Vec<String>,
@@ -49,7 +49,7 @@ pub(crate) struct FrozenSettlementContext {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExactPieceRef {
+pub struct ExactPieceRef {
     pub episode: Uuid,
     pub source: SourceIdentity,
     pub native_unit: String,
@@ -66,7 +66,7 @@ pub(crate) struct ExactPieceRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExactTerminalManifest {
+pub struct ExactTerminalManifest {
     pub source: SourceIdentity,
     pub seal: Option<TerminalSeal>,
     pub captured_through: u64,
@@ -78,7 +78,7 @@ pub(crate) struct ExactTerminalManifest {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct DirectReceipt {
+pub struct DirectReceipt {
     pub requested_channel: String,
     pub returned_channel: String,
     pub message_id: String,
@@ -88,7 +88,7 @@ pub(crate) struct DirectReceipt {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FrontierWitness {
+pub struct FrontierWitness {
     pub id: Uuid,
     pub source: SourceIdentity,
     pub range: (u64, u64),
@@ -97,7 +97,7 @@ pub(crate) struct FrontierWitness {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", deny_unknown_fields)]
-pub(crate) enum EpisodeEvidence {
+pub enum EpisodeEvidence {
     Pin(ExactEpisodePin),
     Manifest(ExactTerminalManifest),
     SourceResolved(SourceIdentity),
@@ -135,14 +135,14 @@ pub(crate) enum EpisodeEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum SubmissionBasis {
+pub enum SubmissionBasis {
     NoAttempt,
     GateRefused { nonce: Uuid },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct EpisodeMetadata {
+pub struct EpisodeMetadata {
     pub namespace: String,
     pub version: u32,
     pub episode: Uuid,
@@ -169,18 +169,18 @@ impl EpisodeMetadata {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Authority {
+pub enum Authority {
     Pending,
     Body,
     Policy,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Settlement {
+pub enum Settlement {
     Outstanding,
     Settled,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StrictResolution {
+pub struct StrictResolution {
     authority: Authority,
     settlement: Settlement,
     pub evidence_refs: Vec<Uuid>,

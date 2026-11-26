@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use super::*;
 
-pub(crate) const TOKEN: &str = "discord_0123456789abcdef";
+pub const TOKEN: &str = "discord_0123456789abcdef";
 
-pub(crate) fn owner(channel_id: &str) -> HostedOwner {
+pub fn owner(channel_id: &str) -> HostedOwner {
     HostedOwner {
         provider: "claude".into(),
         discord_token_hash: TOKEN.into(),
@@ -17,7 +17,7 @@ pub(crate) fn owner(channel_id: &str) -> HostedOwner {
     }
 }
 
-pub(crate) fn pending(owner: &HostedOwner, nonce: &str) -> HostedExecution {
+pub fn pending(owner: &HostedOwner, nonce: &str) -> HostedExecution {
     let source_ref = SourceRef {
         runtime_root: owner.runtime_root.clone(),
         channel: owner.channel_id.clone(),
@@ -30,7 +30,7 @@ pub(crate) fn pending(owner: &HostedOwner, nonce: &str) -> HostedExecution {
     HostedExecution::pending(owner.clone(), nonce.into(), source_ref)
 }
 
-pub(crate) fn location(pane_id: &str) -> HostedLocation {
+pub fn location(pane_id: &str) -> HostedLocation {
     HostedLocation {
         host: "herdr".into(),
         execution_node: "test-node".into(),
@@ -41,7 +41,7 @@ pub(crate) fn location(pane_id: &str) -> HostedLocation {
     }
 }
 
-pub(crate) fn expected(nonce: &str, root_pid: u32) -> ExpectedExecution {
+pub fn expected(nonce: &str, root_pid: u32) -> ExpectedExecution {
     ExpectedExecution {
         binding_provider: "claude".into(),
         binding_nonce: nonce.into(),
@@ -57,7 +57,7 @@ pub(crate) fn expected(nonce: &str, root_pid: u32) -> ExpectedExecution {
     }
 }
 
-pub(crate) fn record(owner: &HostedOwner, nonce: &str, state: HostedState) -> HostedExecution {
+pub fn record(owner: &HostedOwner, nonce: &str, state: HostedState) -> HostedExecution {
     let mut record = pending(owner, nonce);
     if state != HostedState::Pending {
         record.location = Some(location("pane-1"));
@@ -67,11 +67,11 @@ pub(crate) fn record(owner: &HostedOwner, nonce: &str, state: HostedState) -> Ho
     record
 }
 
-pub(crate) fn wire(record: &HostedExecution) -> Value {
+pub fn wire(record: &HostedExecution) -> Value {
     serde_json::to_value(record).unwrap()
 }
 
-pub(crate) fn future_schema(owner: &HostedOwner) -> Value {
+pub fn future_schema(owner: &HostedOwner) -> Value {
     let mut raw = wire(&record(owner, "n-future", HostedState::Retired));
     raw["schema"] = json!(2);
     raw

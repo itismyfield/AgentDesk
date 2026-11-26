@@ -1,23 +1,25 @@
 //! Tui session launch.
 
 #[cfg(unix)]
-pub(in crate::services::codex) mod first_input;
-pub(super) mod launch_policy;
+pub mod first_input;
+pub mod launch_policy;
 mod project_trust;
+#[cfg(unix)]
+pub use launch_policy::prepare_codex_herdr_launch;
 #[cfg(unix)]
 pub(super) use launch_policy::{
     preflight_codex_tui_turn_with_policy, prepare_codex_herdr_launch,
     prepare_codex_tui_incarnation_with_policy, tui_preflight_with_policy,
 };
 #[cfg(unix)]
-pub(crate) use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
+pub use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};
 
 use super::*;
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 
 #[cfg(unix)]
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum CodexTuiLaunchRefused {
+pub enum CodexTuiLaunchRefused {
     SourceModeInvalid(&'static str),
     HooksUnavailable,
     CliMissing,
@@ -44,7 +46,7 @@ impl std::fmt::Display for CodexTuiLaunchRefused {
 
 /// Read-only eligibility, reused immediately before each pane effect.
 #[cfg(unix)]
-pub(crate) fn tui_preflight(
+pub fn tui_preflight(
     tmux: &str,
     channel: Option<u64>,
     options: &CodexLaunchOptions,
@@ -55,7 +57,7 @@ pub(crate) fn tui_preflight(
 
 /// A warm incarnation keeps its verified policy when the next launch mode changes.
 #[cfg(unix)]
-pub(crate) fn verified_warm_preflight<'a>(
+pub fn verified_warm_preflight<'a>(
     options: &CodexLaunchOptions,
     context: &'a crate::services::tui_prompt_dedupe::binding_context::BindingContext,
 ) -> Result<VerifiedWarmEligibility<'a>, CodexTuiLaunchRefused> {
@@ -72,7 +74,7 @@ pub(crate) fn verified_warm_preflight<'a>(
 }
 
 #[cfg(unix)]
-pub(crate) struct VerifiedWarmEligibility<'a> {
+pub struct VerifiedWarmEligibility<'a> {
     resume_root: Option<&'a std::path::Path>,
     hooks: bool,
 }
@@ -194,7 +196,7 @@ thread_local! {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_codex_tui_launch_script(
+pub fn prepare_codex_tui_launch_script(
     tmux: &str,
     session_id: Option<&str>,
     prompt: &str,
@@ -243,7 +245,7 @@ pub(crate) enum CodexHerdrLaunchRefused {
 
 /// What an admitted Codex Herdr launch runs: the binary, its source mode and its hook endpoint.
 #[cfg(unix)]
-pub(crate) struct CodexHerdrLaunchable {
+pub struct CodexHerdrLaunchable {
     codex_bin: String,
     resolution: crate::services::platform::BinaryResolution,
     policy: &'static str,
@@ -428,7 +430,7 @@ fn add_codex_tui_hooks(
 
 /// Publishes a tail handoff only after cancellation, source and readiness checks.
 #[cfg(unix)]
-pub(crate) fn emit_codex_tui_post_tail_handoff(
+pub fn emit_codex_tui_post_tail_handoff(
     tail_result: crate::services::codex_tui::rollout_tail::CodexTuiTailResult,
     sender: Sender<StreamMessage>,
     cancel_token_for_post_tail: Option<std::sync::Arc<CancelToken>>,

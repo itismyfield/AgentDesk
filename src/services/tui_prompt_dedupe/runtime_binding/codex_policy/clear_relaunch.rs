@@ -12,17 +12,17 @@ mod absent_open;
 #[path = "fresh_admission.rs"]
 mod fresh_admission;
 #[path = "herdr_bootstrap.rs"]
-pub(crate) mod herdr_bootstrap;
+pub mod herdr_bootstrap;
 #[cfg(test)]
 pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
-pub(crate) use fresh_admission::{
+pub use fresh_admission::{
     FRESH_SCOPE_BUSY, fresh_scope_eligible, fresh_scope_pending, input_hold_reason_for_channel,
     input_reason_for_channel, successor_unproved_for_channel, with_current_scope_nonce,
     with_fresh_scope,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Captured {
+pub struct Captured {
     pub seq: u64,
     pub nonce: String,
     pub committed_at: DateTime<Utc>,
@@ -112,7 +112,7 @@ fn capture_under(authority: &TmuxSourceAuthority<'_>) -> Result<Option<Captured>
     }))
 }
 
-pub(crate) fn capture(tmux: &str) -> Result<Option<Captured>, String> {
+pub fn capture(tmux: &str) -> Result<Option<Captured>, String> {
     tc::with_tmux_source_authority(tmux, capture_under)
 }
 
@@ -135,7 +135,7 @@ fn vacant_under(authority: &TmuxSourceAuthority<'_>) -> bool {
     unowned && dead(tmux)
 }
 
-pub(crate) fn vacant(tmux: &str) -> bool {
+pub fn vacant(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, vacant_under)
 }
 
@@ -149,15 +149,15 @@ pub(super) fn open_under(authority: &TmuxSourceAuthority<'_>) -> bool {
     current.seq <= mark.retired_through_seq && current.nonce == mark.nonce
 }
 
-pub(crate) fn relaunch_open(tmux: &str) -> bool {
+pub fn relaunch_open(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, open_under)
 }
 
-pub(crate) fn launch_blocked(tmux: &str) -> bool {
+pub fn launch_blocked(tmux: &str) -> bool {
     codex_verified_input_blocked(tmux) && !relaunch_open(tmux)
 }
 
-pub(crate) fn launch_blocked_observed(
+pub fn launch_blocked_observed(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
 ) -> bool {
@@ -165,7 +165,7 @@ pub(crate) fn launch_blocked_observed(
         || (absent_capture(tmux, observation).is_none() && launch_blocked(tmux))
 }
 
-pub(crate) fn absent_capture(
+pub fn absent_capture(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
 ) -> Option<Captured> {
@@ -174,7 +174,7 @@ pub(crate) fn absent_capture(
     })
 }
 
-pub(crate) fn absent_matches(
+pub fn absent_matches(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
     captured: &Captured,
@@ -204,7 +204,7 @@ pub(super) fn successor_unproved_under(
     absent_open::successor_unproved_under(authority, nonce, context)
 }
 
-pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
+pub fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
     let fence = tc::runtime_hint_fence::RuntimeHintFence::acquire(&captured.context.tmux_session)?;
     tc::with_tmux_source_authority(&captured.context.tmux_session, |authority| {
         fence.validate(authority.session())?;

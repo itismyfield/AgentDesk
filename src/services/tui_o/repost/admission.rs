@@ -18,16 +18,16 @@ use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 
 /// An original whose result went uncertain while re-post was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OriginalAttempt {
+pub struct OriginalAttempt {
     pub(crate) serial: u64,
-    pub(crate) key: PieceKey,
+    pub key: PieceKey,
     pub(crate) payload: String,
     pub(crate) anchor: u64,
 }
 
 /// Why an uncertain piece is kept and reported instead of re-posted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BacklogReason {
+pub enum BacklogReason {
     BeforeActivation,
     /// No durable intent shows it was sent while re-post was on.
     NoIntent,
@@ -38,7 +38,7 @@ pub(crate) enum BacklogReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Candidate {
+pub enum Candidate {
     Eligible(OriginalAttempt),
     Backlog(BacklogReason),
     /// No PG admission needed, including pieces owned by local retry.
@@ -47,7 +47,7 @@ pub(crate) enum Candidate {
 
 /// Classifies the latest attempt of a piece. Rejected is never admitted on its own; only an
 /// operator's approval re-opens it.
-pub(crate) fn classify(
+pub fn classify(
     serial: u64,
     record: &PieceRecord,
     provenance: &super::provenance::Provenance,
@@ -99,7 +99,7 @@ pub(crate) fn classify(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BacklogEntry {
+pub struct BacklogEntry {
     pub(crate) serial: u64,
     pub(crate) unit_key: UnitKey,
     pub(crate) piece_index: u32,
@@ -108,7 +108,7 @@ pub(crate) struct BacklogEntry {
 
 /// Not-yet-reported uncertain pieces that are never re-posted, marked reported before they are
 /// returned so a repeated scan reports nothing twice. `latest` holds each piece's latest attempt.
-pub(crate) fn report_backlog<'r>(
+pub fn report_backlog<'r>(
     log: &mut ProvenanceLog,
     latest: impl IntoIterator<Item = (u64, &'r PieceRecord)>,
 ) -> io::Result<Vec<BacklogEntry>> {
@@ -139,7 +139,7 @@ pub(crate) fn report_backlog<'r>(
 }
 
 #[derive(Debug)]
-pub(crate) enum AdoptError {
+pub enum AdoptError {
     /// The sidecar did not take the entry; nothing was admitted and nothing is re-sent.
     Sidecar(io::Error),
     /// PostgreSQL did not answer; the admission stays pending and is retried, never replaced by a
@@ -163,7 +163,7 @@ impl From<LedgerError> for AdoptError {
 
 /// How many counted sends an operator-approved piece made before its approval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PriorBudget {
+pub enum PriorBudget {
     /// Counting the rejected original.
     Known { counted_posts: u32 },
     /// Unprovable: admitted with no further send allowed.
@@ -172,7 +172,7 @@ pub(crate) enum PriorBudget {
 
 /// The latest rejected attempt an operator approved re-sending.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ApprovedRejected {
+pub struct ApprovedRejected {
     pub(crate) rejected_serial: u64,
     pub(crate) key: PieceKey,
     pub(crate) payload: String,
@@ -181,14 +181,14 @@ pub(crate) struct ApprovedRejected {
 
 /// Admission keys of a channel, recovered before a holder posts any original.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AdmittedKeys {
+pub enum AdmittedKeys {
     Known(BTreeSet<PieceKey>),
     /// PostgreSQL did not answer; this is not "none admitted".
     Unreadable(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OriginalGate {
+pub enum OriginalGate {
     /// PG did not take retry authority for this fresh original.
     SendLocal,
     /// PG's durable intent owns any further send.
@@ -220,7 +220,7 @@ impl AdmittedKeys {
 
 /// Durable `Posted` entries of admitted pieces as `(key, message)`, to record as receipts before
 /// any further slot is considered; Discord changing the content does not matter.
-pub(crate) fn posted_receipts<'r>(
+pub fn posted_receipts<'r>(
     records: impl IntoIterator<Item = &'r PieceRecord>,
     admitted: &BTreeSet<PieceKey>,
 ) -> Vec<(PieceKey, u64)> {
@@ -234,14 +234,14 @@ pub(crate) fn posted_receipts<'r>(
 }
 
 /// Admission against PostgreSQL with durable provenance for uncertain originals.
-pub(crate) struct Admitter<'a> {
+pub struct Admitter<'a> {
     pool: &'a PgPool,
     node: &'a str,
     sender_id: u64,
 }
 
 impl<'a> Admitter<'a> {
-    pub(crate) fn new(pool: &'a PgPool, node: &'a str, sender_id: u64) -> Self {
+    pub fn new(pool: &'a PgPool, node: &'a str, sender_id: u64) -> Self {
         Self {
             pool,
             node,
@@ -269,7 +269,7 @@ impl<'a> Admitter<'a> {
 
     /// Admits an uncertain on original with slot 0 spent: sidecar pending, PostgreSQL, admitted. A
     /// failure leaves it pending for [`Self::resume_pending`]; the original is never sent again.
-    pub(crate) async fn adopt_uncertain(
+    pub async fn adopt_uncertain(
         &self,
         log: &mut ProvenanceLog,
         original: &OriginalAttempt,

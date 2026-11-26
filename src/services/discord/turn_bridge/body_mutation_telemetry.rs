@@ -50,8 +50,8 @@ use sha2::{Digest, Sha256};
 /// Tracing target for the per-mutation record.
 ///
 /// The `agentdesk::` prefix is load-bearing, not cosmetic: the shipped filter
-/// is [`crate::logging::DEFAULT_TRACING_DIRECTIVE`] (`agentdesk=info`), whose
-/// target match is a path prefix, so a target without that first segment is
+/// is [`crate::logging::DEFAULT_TRACING_DIRECTIVE`] (`agentdesk=info,adk_runtime=info`), whose
+/// target match is a path prefix, so a target without one of those first segments is
 /// REJECTED and the record never reaches `dcserver.stdout.log`. The second
 /// segment keeps it greppable/filterable once admitted.
 /// `production_filter_admits_the_body_mutation_target` pins both halves of that

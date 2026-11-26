@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// A pane stays the same across handoff and SID rehydration, but not a respawn.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PaneIdentity {
+pub struct PaneIdentity {
     runtime_kind: RuntimeHandoffKind,
     output_path: String,
     nonce: SpawnNonceMarker,
@@ -22,7 +22,7 @@ impl PaneIdentity {
             nonce,
         })
     }
-    pub(crate) fn capture(session: &str) -> Option<Self> {
+    pub fn capture(session: &str) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
             let binding =
                 tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
@@ -34,7 +34,7 @@ impl PaneIdentity {
 }
 
 #[derive(Debug)]
-pub(crate) struct UserReceipt {
+pub struct UserReceipt {
     session: String,
     pane: Arc<PaneIdentity>,
     sid: String,
@@ -296,7 +296,7 @@ impl UserReceipt {
         })
     }
 
-    pub(crate) fn seal(&mut self) {
+    pub fn seal(&mut self) {
         if self.ended {
             return;
         }
@@ -332,7 +332,7 @@ impl UserReceipt {
 
     /// An external turn uses the native reader's sealed byte range and original file identity.
     #[cfg(unix)]
-    pub(crate) fn from_native_range(
+    pub fn from_native_range(
         session: &str,
         prompt: &str,
         sid: Option<&str>,
@@ -384,7 +384,7 @@ impl UserReceipt {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_pin_before_tail(
+    pub fn native_pin_before_tail(
         session: &str,
         prompt: &str,
         sid: Option<&str>,
@@ -453,7 +453,7 @@ impl UserReceipt {
         Some(pin)
     }
 
-    pub(crate) fn confirmed(&mut self) -> bool {
+    pub fn confirmed(&mut self) -> bool {
         let Some(end) = self.end else {
             return false;
         };
@@ -521,7 +521,7 @@ impl UserReceipt {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! { static NATIVE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn native_read_byte_total() -> u64 {
+pub fn native_read_byte_total() -> u64 {
     NATIVE_READ_BYTES.with(std::cell::Cell::get)
 }
 
@@ -536,9 +536,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// Re-adopt only the stored row on the same live pane, never search for another input.
-pub(crate) fn revalidate_native_pin(
-    pin: &crate::services::provider::native_stop::NativeUserPin,
-) -> bool {
+pub fn revalidate_native_pin(pin: &crate::services::provider::native_stop::NativeUserPin) -> bool {
     #[cfg(not(unix))]
     {
         let _ = pin;

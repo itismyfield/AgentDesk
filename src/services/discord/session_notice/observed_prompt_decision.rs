@@ -9,29 +9,27 @@ use crate::services::tui_prompt_control::{
 };
 
 #[derive(Debug, PartialEq, Eq)]
-pub(in crate::services::discord) struct RelayObservedPromptInjectionDecision {
-    pub(in crate::services::discord) injected_class: InjectedPromptClass,
-    pub(in crate::services::discord) slash_command_kind: Option<String>,
-    pub(in crate::services::discord) local_only_slash: bool,
-    pub(in crate::services::discord) local_only_control: Option<LocalOnlySlashControl>,
+pub struct RelayObservedPromptInjectionDecision {
+    pub injected_class: InjectedPromptClass,
+    pub slash_command_kind: Option<String>,
+    pub local_only_slash: bool,
+    pub local_only_control: Option<LocalOnlySlashControl>,
 }
 
 impl RelayObservedPromptInjectionDecision {
-    pub(in crate::services::discord) fn starts_external_turn_lifecycle(&self) -> bool {
+    pub fn starts_external_turn_lifecycle(&self) -> bool {
         !self.local_only_slash
             && !self.injected_class.suppresses_user_turn_lifecycle()
             && !self.injected_class.is_subagent_notification_event()
     }
 }
 
-pub(in crate::services::discord) fn observed_prompt_starts_external_turn_lifecycle(
-    prompt: &str,
-) -> bool {
+pub fn observed_prompt_starts_external_turn_lifecycle(prompt: &str) -> bool {
     relay_observed_prompt_injected_prompt_decision(prompt).starts_external_turn_lifecycle()
 }
 
 /// Pure classification used before relay lease/ownership side effects.
-pub(in crate::services::discord) fn relay_observed_prompt_injected_prompt_decision(
+pub fn relay_observed_prompt_injected_prompt_decision(
     prompt: &str,
 ) -> RelayObservedPromptInjectionDecision {
     let injected_class = classify_injected_prompt(prompt);

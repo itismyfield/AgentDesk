@@ -14,16 +14,16 @@ use crate::services::provider::CancelToken;
 
 /// A turn's first provider terminal as the live tail accepts it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReplayedTerminal {
-    pub(crate) kind: NativeTerminalKind,
-    pub(crate) end: u64,
+pub struct ReplayedTerminal {
+    pub kind: NativeTerminalKind,
+    pub end: u64,
     pub(crate) result: String,
 }
 
 impl super::RolloutRecordDecoder {
     /// Replays `file` from the turn's own `start` up to `len` under the tail's acceptance policy;
     /// `None` when no record before `len` ends the turn.
-    pub(crate) fn replay_herdr_turn(
+    pub fn replay_herdr_turn(
         file: &mut std::fs::File,
         start: u64,
         len: u64,
@@ -43,7 +43,7 @@ impl super::RolloutRecordDecoder {
 
     /// The same replay read for what ended the turn. `None` when the file cannot be read.
     #[cfg(unix)]
-    pub(crate) fn replay_ended_herdr_turn(
+    pub fn replay_ended_herdr_turn(
         file: &mut std::fs::File,
         start: u64,
         len: u64,

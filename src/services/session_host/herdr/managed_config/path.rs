@@ -9,14 +9,14 @@ use crate::config::session_hosts::{BootSessionHosts, EndpointMode, SessionHostsC
 use crate::domain::file_sync::fsync_parent_dir;
 
 #[derive(Debug)]
-pub(crate) struct PersonalPaths {
+pub struct PersonalPaths {
     pub home: PathBuf,
     pub xdg: Option<PathBuf>,
 }
 
 impl PersonalPaths {
     /// The executing account's home and XDG config home; an unknown home authorizes nothing.
-    pub(crate) fn current() -> Self {
+    pub fn current() -> Self {
         Self {
             home: dirs::home_dir().unwrap_or_default(),
             xdg: std::env::var_os("XDG_CONFIG_HOME")
@@ -28,14 +28,14 @@ impl PersonalPaths {
 
 /// The endpoints that share one managed home, or why they may not be written.
 #[derive(Debug)]
-pub(crate) struct Target {
+pub struct Target {
     pub keys: Vec<String>,
     pub declared: PathBuf,
     pub home: io::Result<ManagedHome>,
 }
 
 #[derive(Debug)]
-pub(crate) struct ManagedHome {
+pub struct ManagedHome {
     pub(super) path: PathBuf,
     pub(super) uid: u32,
 }
@@ -147,7 +147,7 @@ impl ManagedHome {
     }
 
     /// Only this node's dedicated endpoints; a user-default endpoint is never resolved or opened.
-    pub(crate) fn of(
+    pub fn of(
         node: Option<&str>,
         hosts: &SessionHostsConfig,
         personal: &PersonalPaths,
