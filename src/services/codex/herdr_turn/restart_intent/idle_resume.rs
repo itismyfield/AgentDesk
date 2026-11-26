@@ -70,6 +70,18 @@ pub(crate) fn forget(owner: &HostedOwner, operation: &str) {
     }
 }
 
+/// Cancels whatever thread an idle end kept for `owner`'s retired execution `nonce`, so a clear
+/// leaves nothing for the next launch to resume; `Err` when that cancel did not land.
+pub(crate) fn forbid(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
+    match read(owner).filter(|kept| !kept.cancelled && kept.retired_nonce == nonce) {
+        Some(mut kept) => {
+            kept.cancelled = true;
+            write(&kept)
+        }
+        None => Ok(()),
+    }
+}
+
 /// The resume an idle end kept for `owner`'s retired execution `nonce`.
 pub(super) fn kept(owner: &HostedOwner, nonce: &str) -> Option<EffortResume> {
     let kept = read(owner).filter(|kept| !kept.cancelled && kept.retired_nonce == nonce)?;

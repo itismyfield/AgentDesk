@@ -114,6 +114,13 @@ pub(super) async fn clear(
             _ => false,
         };
         if same {
+            // The thread an idle end kept is forgotten before the selector, or the clear stays open.
+            let forbid = crate::services::codex::herdr_turn::restart_intent::idle_resume::forbid;
+            if let Err(error) = forbid(&record.owner, &record.execution_nonce) {
+                let held = format!("idle resume not cancelled: {error}");
+                report.execution = Some(ExecutionCleanup::Pending(held));
+                return true;
+            }
             // `current` already proved the exact key names this row; the keyed clear skips it.
             let cleared = hosted_execution::http_force::clear_retired_selector_pg(
                 pool,

@@ -144,13 +144,14 @@ impl Drop for IdleGate {
     /// A run that stopped before its release gives the row back without leaving it locked, and
     /// drops only the thread record it stored itself.
     fn drop(&mut self) {
-        let held = self.held.get_mut().unwrap_or_else(PoisonError::into_inner);
-        if let Some(tx) = held.take() {
-            tokio::spawn(async move { drop(tx.rollback().await) });
-        }
+        // The cancel lands while the row lock still keeps the next end from storing its own record.
         let kept = self.kept.get_mut().unwrap_or_else(PoisonError::into_inner);
         if let Some((owner, operation)) = kept.take() {
             idle_resume::forget(&owner, &operation);
+        }
+        let held = self.held.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if let Some(tx) = held.take() {
+            tokio::spawn(async move { drop(tx.rollback().await) });
         }
     }
 }
@@ -340,12 +341,10 @@ async fn disconnect(pool: &PgPool, row: &HostedObservation, record: &HostedExecu
     }
 }
 
-/// Whether the recorded execution's pane and provider already read as ended.
+/// Whether the recorded execution's pane reads as ended and its provider process is proven gone.
 async fn already_ended(record: &HostedExecution) -> bool {
-    let Some(view) = super::herdr_endpoints().view(record) else {
+    let Some(target) = super::herdr_endpoints().target(record) else {
         return false;
     };
-    let read = record.clone();
-    let ended = tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()));
-    ended.await.unwrap_or(false)
+    super::execution_end(target, record.clone()).await == super::ExecutionEnd::Ended
 }
