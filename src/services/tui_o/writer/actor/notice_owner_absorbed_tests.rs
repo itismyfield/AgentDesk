@@ -167,9 +167,10 @@ async fn consumed_absorption_does_not_contest_the_next_registered_remove() {
     arm_absorption(&c, &registry, 8828, &frame);
     append_remove_only(&c, "contested-remove", &frame);
     c.run(&mut restarted).await;
+    let key = input_key("contested-remove");
+    assert_eq!(notice_evidence(&mut restarted, &key), 1);
     let debt = restarted.undelivered_for_test(2).unwrap();
     let ledger = restarted.writer_mut_for_test().store().ledger();
-    let key = input_key("contested-remove");
     assert_eq!(debt.notice_owed, 1);
     assert_eq!(ledger.excluded(&key), None);
     assert!(ledger.latest_piece(&key, 0).is_none());
