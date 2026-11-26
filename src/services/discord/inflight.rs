@@ -151,12 +151,12 @@ mod agy_end_authority;
 #[cfg(all(test, unix))]
 #[path = "inflight/agy_end_authority_tests.rs"]
 pub(in crate::services::discord) mod agy_end_authority_tests;
-pub(in crate::services::discord) use agy_end_authority::{
-    EndAuthority, end_authority, generic_may_end,
-};
-pub(in crate::services::discord) use model::agy_custody::{
-    AgyCustodyField, AgyCustodyRoute, AgyProducer,
-};
+pub(in crate::services::discord) use agy_end_authority::generic_may_end;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) use agy_end_authority::{EndAuthority, end_authority};
+pub(in crate::services::discord) use model::agy_custody::AgyCustodyField;
+#[cfg(test)]
+pub(in crate::services::discord) use model::agy_custody::{AgyCustodyRoute, AgyProducer};
 mod removal;
 #[cfg(all(test, unix))]
 use removal::persist_native_boot_record;
