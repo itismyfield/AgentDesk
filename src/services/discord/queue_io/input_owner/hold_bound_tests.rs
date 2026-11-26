@@ -310,9 +310,13 @@ impl Rig {
         assert!(!self.mailbox.has_active_turn().await.unwrap());
         assert!(self.row().is_none());
         drive::wake(self.drive.clone());
+        self.assert_delivered().await;
+    }
+
+    async fn assert_delivered(&self) {
         until_async(
-            || async { self.mailbox.snapshot().await.queue_depth() == 0 },
-            "the eligible front did not drain",
+            || async { self.mailbox.try_snapshot().await.unwrap().v2_queue == Some((0, false)) },
+            "the eligible front did not settle",
         )
         .await;
         assert_eq!(self.delivered(), 1);
@@ -601,6 +605,7 @@ async fn hold_bound_mut_no_dedupe_queue_eligible_and_held_watch_deliver_once() {
         }),
     );
     let (_, observed) = held_watch::watch_observed(rig.drive.clone(), FRONT_MESSAGE);
+    ready_tasks().await;
     step(LOOK).await;
     until(
         || entering.try_recv().is_ok(),
@@ -623,11 +628,7 @@ async fn hold_bound_mut_no_dedupe_queue_eligible_and_held_watch_deliver_once() {
     let observed = observed.await.unwrap();
     assert_eq!(observed.verdict, held_watch::Verdict::Wake);
     drive::wake(rig.drive.clone());
-    until_async(
-        || async { rig.mailbox.snapshot().await.queue_depth() == 0 },
-        "the front did not drain",
-    )
-    .await;
+    rig.assert_delivered().await;
     ready_tasks().await;
     assert_eq!(rig.delivered(), 1);
     assert!(events.try_recv().is_err());
@@ -638,7 +639,7 @@ async fn hold_bound_mut_no_dedupe_attempted_head_never_releases_the_lease() {
     let _root = TestRuntimeRootGuard::with_isolated_config();
     let rig = Rig::open(84_321, ProviderKind::Claude, None, true).await;
     let capture = Capture::new(rig.channel.get(), WitnessSample::at("herdr", CLAUDE_IDLE));
-    rig.lease(Some(OLD_MESSAGE)).await;
+    let original = rig.lease(Some(OLD_MESSAGE)).await;
     rig.hold().await;
 
     let prepared = attempt(rig.channel.get(), &rig.provider);
@@ -654,14 +655,21 @@ async fn hold_bound_mut_no_dedupe_attempted_head_never_releases_the_lease() {
 
     step(BOUND).await;
     three_looks().await;
-    rig.kept().await;
+    let snapshot = rig.mailbox.try_snapshot().await.unwrap();
+    assert!(snapshot.cancel_token.is_some());
+    assert_eq!(snapshot.v2_queue, Some((0, true)));
+    assert!(original.matches_episode_nonce(rig.row().unwrap().turn_nonce.as_deref()));
+    assert_eq!(rig.delivered(), 0);
     assert_eq!(capture.reads(), 0);
     let queue = rig
         .mailbox
         .v2_request(|slot| slot.as_ref().unwrap().json())
         .await
         .unwrap();
-    assert!(!queue["head_injection"].is_null(), "{queue}");
+    assert_eq!(
+        queue["head_injection"]["identity"]["primary"], FRONT_MESSAGE,
+        "{queue}"
+    );
 }
 
 #[test]
