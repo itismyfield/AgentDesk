@@ -1247,8 +1247,8 @@ input-single-path/OwnerInputBusyS1TargetFresh.cfg	OwnerInputBusyS1	-	-
 input-single-path/OwnerInputBusyS1TargetHoldCleared.cfg	OwnerInputBusyS1	-	-
 input-single-path/OwnerInputBusyS1TargetJoinDoublePost.cfg	OwnerInputBusyS1	ReplyExactlyOnce	-
 input-single-path/OwnerInputBusyS1TargetJoinUnmarked.cfg	OwnerInputBusyS1	JoinedMarked	-
-input-single-path/OwnerInputBusyS1TargetNearMiss.cfg	OwnerInputBusyS1	-	-
 input-single-path/OwnerInputBusyS1TargetMarkOnPaste.cfg	OwnerInputBusyS1	MarkOnlyJoined	-
+input-single-path/OwnerInputBusyS1TargetNearMiss.cfg	OwnerInputBusyS1	-	-
 input-single-path/OwnerInputBusyS1TargetNoLateBind.cfg	OwnerInputBusyS1	-	ReplyPosted
 input-single-path/OwnerInputBusyS1TargetNoLateBindFresh.cfg	OwnerInputBusyS1	-	ReplyPosted
 input-single-path/OwnerInputBusyS1TargetNoReference.cfg	OwnerInputBusyS1	AnswerBound	-
