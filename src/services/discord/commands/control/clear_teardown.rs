@@ -171,8 +171,10 @@ async fn end_herdr(
             }
             (id, HostedRecord::Known(record)) => {
                 drop(transition.take());
-                let cleared = clear_retired_selector_pg(pool, id, &record).await;
-                note_retired_selector(cleared, report);
+                if super::herdr_recovery::idle_resume_forbidden(&record, report) {
+                    let cleared = clear_retired_selector_pg(pool, id, &record).await;
+                    note_retired_selector(cleared, report);
+                }
                 report.execution = Some(super::clear_report::ExecutionCleanup::Retired);
                 return true;
             }

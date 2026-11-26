@@ -114,11 +114,8 @@ pub(super) async fn clear(
             _ => false,
         };
         if same {
-            // The thread an idle end kept is forgotten before the selector, or the clear stays open.
-            let forbid = crate::services::codex::herdr_turn::restart_intent::idle_resume::forbid;
-            if let Err(error) = forbid(&record.owner, &record.execution_nonce) {
-                let held = format!("idle resume not cancelled: {error}");
-                report.execution = Some(ExecutionCleanup::Pending(held));
+            if !idle_resume_forbidden(record, report) {
+                report.execution = Some(ExecutionCleanup::Pending("idle resume kept".into()));
                 return true;
             }
             // `current` already proved the exact key names this row; the keyed clear skips it.
@@ -167,22 +164,25 @@ pub(super) async fn clear(
             _ => None,
         };
         let fenced = match exact {
-            Some(current) => {
+            Some(current) if idle_resume_forbidden(&current, report) => {
                 crate::db::dispatched_sessions::provider_resume_fence::set_for_execution_pg(
                     pool,
                     row.session_id(),
                     &current,
                 )
                 .await
+                .map(Some)
             }
-            None => Ok(false),
+            Some(_) => Ok(None),
+            None => Ok(Some(false)),
         };
         match fenced {
-            Ok(true) => {
+            Ok(None) => {}
+            Ok(Some(true)) => {
                 report.conversation_reset = true;
                 commit_conversation_reset(shared, channel, report).await;
             }
-            Ok(false) => report.fail("provider_resume_fence", "clear execution row moved on"),
+            Ok(Some(false)) => report.fail("provider_resume_fence", "clear execution row moved on"),
             Err(error) => report.fail("provider_resume_fence", &error),
         }
     }
@@ -333,3 +333,19 @@ async fn discard_waiting(
 #[cfg(all(test, unix))]
 #[path = "herdr_recovery_tests.rs"]
 mod tests;
+
+/// Every clear path ends the thread an idle end kept for `record` before it forgets the selector;
+/// `false`, reported, when that did not land, so the clear claims no reset.
+pub(super) fn idle_resume_forbidden(
+    record: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+    report: &mut ClearReport,
+) -> bool {
+    use crate::services::codex::herdr_turn::restart_intent::idle_resume::forbid;
+    match forbid(&record.owner, &record.execution_nonce) {
+        Ok(()) => true,
+        Err(error) => {
+            report.fail("idle_resume", &error);
+            false
+        }
+    }
+}
