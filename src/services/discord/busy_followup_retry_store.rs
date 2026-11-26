@@ -15,7 +15,7 @@ pub(in crate::services::discord) mod draft_release_watch;
 #[cfg(test)]
 mod hold_release_tests;
 mod inflight_row;
-mod policy;
+pub(in crate::services::discord) mod policy;
 pub(crate) use inflight_row::FollowupRetryRow;
 pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};

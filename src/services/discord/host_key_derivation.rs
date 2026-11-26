@@ -192,3 +192,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod ke_session_tests;
+
+#[cfg(test)]
+mod ke_tests;

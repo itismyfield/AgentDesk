@@ -36,11 +36,11 @@ pub(crate) use http_terminate::{Expected, HttpTerminate, Released};
 pub(crate) use mailbox_observation::MailboxObservationFailure;
 pub(crate) mod checked_purge;
 mod overflow;
-mod pending_queue_persistence;
+pub(crate) mod pending_queue_persistence;
 pub(crate) mod policy_close;
 mod queue_cancellation;
 mod queue_enqueue;
-mod queued_head;
+pub(crate) mod queued_head;
 mod recovery_kickoff;
 #[cfg(test)]
 mod recovery_kickoff_tests;
