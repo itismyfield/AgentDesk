@@ -141,17 +141,22 @@ pub(super) async fn observe(
         _ => return Unknown("provider_unsupported"),
     };
     #[cfg(test)]
-    if let Some(sample) = super::super::hold_bound_tests::observation(channel) {
+    if let Some((sample, claude_source)) = super::super::hold_bound_tests::observation(channel) {
         use super::super::hold_bound_tests::Transcript;
         let host = if sample.host == "herdr" {
             Host::Herdr
         } else {
             Host::Tmux
         };
-        return panes_and_transcript(host, provider, sample.capture, || match sample.transcript {
-            Transcript::Ended => End::Proven,
-            Transcript::Open => End::Open,
-            Transcript::Unknown => End::Unknown,
+        return panes_and_transcript(host, provider, sample.capture, || {
+            if let Some(source) = claude_source {
+                return claude_end(&source.session, &source.path);
+            }
+            match sample.transcript {
+                Transcript::Ended => End::Proven,
+                Transcript::Open => End::Open,
+                Transcript::Unknown => End::Unknown,
+            }
         });
     }
 

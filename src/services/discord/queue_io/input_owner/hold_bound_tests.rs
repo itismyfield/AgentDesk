@@ -16,9 +16,13 @@ use serde_json::{Value, json};
 use serenity::model::id::{ChannelId, MessageId, UserId};
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
+
+mod claude_transcript_tests;
+mod restart_notice_tests;
 
 const BOUND: Duration = Duration::from_secs(180);
 const LOOK: Duration = Duration::from_secs(2);
@@ -58,22 +62,29 @@ impl WitnessSample {
     }
 }
 
+#[derive(Clone)]
+pub(super) struct ClaudeSource {
+    pub(super) session: String,
+    pub(super) path: PathBuf,
+}
+
 struct Samples {
     last: WitnessSample,
     pending: VecDeque<WitnessSample>,
     reads: usize,
+    claude_source: Option<ClaudeSource>,
 }
 
 static SAMPLES: LazyLock<Mutex<HashMap<u64, Samples>>> = LazyLock::new(Default::default);
 
-pub(super) fn observation(channel: u64) -> Option<WitnessSample> {
+pub(super) fn observation(channel: u64) -> Option<(WitnessSample, Option<ClaudeSource>)> {
     let mut all = SAMPLES.lock().unwrap();
     let samples = all.get_mut(&channel)?;
     if let Some(next) = samples.pending.pop_front() {
         samples.last = next;
     }
     samples.reads += 1;
-    Some(samples.last)
+    Some((samples.last, samples.claude_source.clone()))
 }
 
 struct Capture(u64);
@@ -90,6 +101,7 @@ impl Capture {
                         last: first,
                         pending: VecDeque::new(),
                         reads: 0,
+                        claude_source: None,
                     }
                 )
                 .is_none()
