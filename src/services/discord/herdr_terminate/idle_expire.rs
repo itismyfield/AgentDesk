@@ -1,6 +1,5 @@
-//! The idle end of a Bound Herdr execution, asked by the idle-kill policy through kill-tmux: it
-//! closes nothing while a turn, an inflight row or an active dispatch holds the channel, and keeps
-//! the provider session so the next message resumes it.
+//! Idle-kill's end of a Bound Herdr execution: nothing closes while a turn, an inflight row or an
+//! active dispatch holds the channel, and the provider session is kept for the next message.
 use std::sync::Arc;
 
 use sqlx::PgPool;
