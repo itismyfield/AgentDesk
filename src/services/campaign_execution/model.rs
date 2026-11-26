@@ -9,9 +9,9 @@ pub use crate::domain::campaign::model::{
 };
 
 #[cfg(test)]
-use super::adk_workspace::WorkspaceObservation;
+use crate::domain::campaign::definition::DefinitionError;
 #[cfg(test)]
-use super::definition::DefinitionError;
+use crate::domain::campaign::workspace::WorkspaceObservation;
 #[cfg(test)]
 use chrono::Utc;
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crate::domain::campaign::{
+    candidate_seal::CandidateSeal,
     decision_item::{ApprovalBinding, ApprovalTarget},
     definition::valid_id,
     deployment::DeployJob,
@@ -8,7 +9,6 @@ use crate::domain::campaign::{
     workflow_options::ApprovalGate,
 };
 
-use super::candidate_seal::CandidateSeal;
 use super::control;
 use super::model::*;
 use super::stage_fsm::Transition;

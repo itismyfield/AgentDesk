@@ -1,13 +1,12 @@
 use super::*;
-use crate::services::campaign_execution::{
-    adk_workspace::WorkspaceObservation,
+use crate::domain::campaign::{
     candidate_seal::CandidateSeal,
-    control::tests as domain,
     definition::{AcceptanceCondition, VerificationKind},
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
-    model::*,
-    profile::*,
-    verification_run::*,
+    workspace::WorkspaceObservation,
+};
+use crate::services::campaign_execution::{
+    control::tests as domain, model::*, profile::*, verification_run::*,
 };
 
 pub(crate) const OUTPUT: &str = "output-h1";

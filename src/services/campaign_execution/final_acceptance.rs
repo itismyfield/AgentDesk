@@ -3,9 +3,10 @@ use sqlx::PgPool;
 
 use crate::domain::campaign::definition::VerificationKind;
 pub use crate::domain::campaign::deployment::AcceptanceFact;
+use crate::domain::campaign::deployment::DeployStatus;
 use crate::domain::campaign::landing::MergeReceipt;
 
-use super::deploy_policy::{self, DeployStatus, Landed};
+use super::deploy_policy::{self, Landed};
 use super::host_worker::{HostWorker, WorkerError};
 use super::lifecycle;
 use super::model::*;

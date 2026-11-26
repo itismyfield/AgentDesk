@@ -1,13 +1,11 @@
 use crate::db::server_campaigns::evidence_store::*;
 use crate::domain::campaign::evidence::EvidenceDecision;
+use crate::domain::campaign::evidence::EvidenceEnvelope;
 use crate::domain::campaign::evidence::EvidenceStatus;
+use crate::domain::campaign::evidence_gate::GATE_RULE_VERSION;
 use crate::services::campaign_execution::{
     control::tests as domain,
-    evidence::EvidenceEnvelope,
-    evidence_gate::{
-        GATE_RULE_VERSION,
-        tests::{OUTPUT, claim, seal, workspace},
-    },
+    evidence_gate::tests::{OUTPUT, claim, seal, workspace},
 };
 use crate::services::krx_db_tests::server_campaigns_storage::Harness;
 use sqlx::PgPool;

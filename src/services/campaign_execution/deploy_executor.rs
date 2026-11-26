@@ -7,14 +7,16 @@ use sqlx::PgPool;
 
 use crate::db::server_campaigns::StoreError;
 use crate::domain::campaign::decision_item::ApprovalBinding;
+use crate::domain::campaign::deployment::{
+    DeployFact, DeployHost, DeployJob, DeployStatus, DeployWitness,
+};
 use crate::services::git::GitCommand;
 
 use super::adk_observe::is_sha;
 use super::deploy_observe::{
     DeploymentExpectation, DeploymentHealth, DeploymentProgress, DeploymentWatch, step_deployment,
 };
-pub use super::deploy_policy::DeployHost;
-use super::deploy_policy::{self, DeployFact, DeployJob, DeployStatus, DeployWitness, Permit};
+use super::deploy_policy::{self, Permit};
 use super::effect_envelope::execution_nonce;
 use super::host_gate::{EffectAuthority, EffectEnvelope, Initiated, Initiation, JournalState};
 use super::host_worker::{HostWorker, WorkerError};

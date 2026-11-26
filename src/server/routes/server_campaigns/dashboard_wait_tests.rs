@@ -8,7 +8,7 @@ async fn dashboard_v3_gate_projection_is_bound_to_the_view_sequence_pg() {
     let mut definition = state.definition.input().clone();
     definition.workflow_options.as_mut().unwrap().start = true;
     state.definition =
-        crate::services::campaign_execution::definition::validate_definition(definition).unwrap();
+        crate::domain::campaign::definition::validate_definition(definition).unwrap();
     h.seed_running_state(&state).await;
     let detail_path = "/server-campaigns/campaign";
     let node_path = "/campaign/view/nodes/2/runtime";

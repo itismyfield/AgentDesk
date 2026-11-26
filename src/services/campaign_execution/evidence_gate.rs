@@ -1,5 +1,5 @@
-pub use crate::domain::campaign::evidence_gate::*;
-
+#[cfg(test)]
+use crate::domain::campaign::evidence_gate::*;
 #[cfg(test)]
 use std::collections::BTreeMap;
 

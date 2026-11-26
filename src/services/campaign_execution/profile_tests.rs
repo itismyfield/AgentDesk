@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::campaign_execution::definition::{
+use crate::domain::campaign::definition::{
     DefinitionInput, NodeDefinition, VerificationKind, WORKFLOW_VERSION, validate_definition,
 };
 use crate::services::campaign_execution::model::{HostGate, SessionIdentity};

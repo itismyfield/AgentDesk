@@ -1,8 +1,10 @@
 use crate::db::server_campaigns::*;
+use crate::domain::campaign::evidence::{
+    EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission,
+};
 use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
     control::tests as domain,
-    evidence::{EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission},
     evidence_gate::tests::{REPO, workspace},
     profile::{ExecutedTest, ExecutionEnvironment, TestOutcome},
     stage_fsm::tests as fsm,

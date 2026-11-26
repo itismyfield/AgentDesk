@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::campaign::workspace::WorkspaceObservation;
+
 use super::adk_resources::AdkResources;
 use super::adk_workspace::{self, AdkWorkspaceKey, WorkspaceError};
 use super::model::HostGate;
@@ -256,7 +258,7 @@ fn observe_build(checkout: &Path, id: &str) -> Result<AdkBuildIdentity, AdapterE
 }
 
 fn execution_environment(
-    witness: adk_workspace::WorkspaceObservation,
+    witness: WorkspaceObservation,
     build: AdkBuildIdentity,
     now: DateTime<Utc>,
 ) -> ExecutionEnvironment {

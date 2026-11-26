@@ -354,7 +354,7 @@ fn checked_review(
     let attempt = run.attempts.get(&action.binding.attempt_id)?;
     let assessment = super::review_wait::assessment(run, action, review)?;
     if attempt.outcome != Some(AttemptOutcome::Passed)
-        || assessment.verdict != super::evidence_gate::Verdict::Pass
+        || assessment.verdict != crate::domain::campaign::evidence_gate::Verdict::Pass
         || assessment.adopted.is_empty()
     {
         return None;

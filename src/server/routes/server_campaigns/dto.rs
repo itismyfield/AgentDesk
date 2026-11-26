@@ -1,13 +1,11 @@
 use crate::domain::campaign::{
     decision_item::{ApprovalBinding, ApprovalTarget, ForumApproval},
+    definition::DefinitionInput,
     workflow_options::ApprovalGate,
 };
 use serde::Deserialize;
 
-use crate::services::campaign_execution::{
-    definition::DefinitionInput,
-    model::{ChangeReason, Command, StopMode},
-};
+use crate::services::campaign_execution::model::{ChangeReason, Command, StopMode};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

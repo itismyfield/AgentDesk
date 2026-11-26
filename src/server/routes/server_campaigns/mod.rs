@@ -207,7 +207,7 @@ pub(super) async fn events(
         || query
             .run_id
             .as_ref()
-            .is_some_and(|run| !crate::services::campaign_execution::definition::valid_id(run))
+            .is_some_and(|run| !crate::domain::campaign::definition::valid_id(run))
     {
         return Err(AppError::bad_request("invalid event pagination or run_id"));
     }

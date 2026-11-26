@@ -1,7 +1,7 @@
 use super::*;
-use crate::services::campaign_execution::{
-    control::tests::{binding, envelope, input, now, prepared, running, step, stop, with_action},
-    definition::validate_definition,
+use crate::domain::campaign::definition::validate_definition;
+use crate::services::campaign_execution::control::tests::{
+    binding, envelope, input, now, prepared, running, step, stop, with_action,
 };
 use serde_json::json;
 

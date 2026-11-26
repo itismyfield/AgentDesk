@@ -8,10 +8,10 @@ use crate::db::server_campaigns::{
     CommandOutcome, ReceiptResponse,
     command_transaction::{self, Preparation, StoreRequest},
 };
+use crate::domain::campaign::candidate_seal::CandidateSeal;
 use crate::services::campaign_execution::{
     adk_resources::AdkResources,
     adk_workspace::observe_checkout,
-    candidate_seal::CandidateSeal,
     commands,
     control::tests as domain,
     landing_prepare::tests::{fixture_checkout, tools},

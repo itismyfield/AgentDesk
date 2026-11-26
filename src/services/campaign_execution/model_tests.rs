@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::campaign_execution::definition::{WORKFLOW_VERSION, validate_definition};
+use crate::domain::campaign::definition::{WORKFLOW_VERSION, validate_definition};
 use serde_json::json;
 
 #[test]
@@ -220,7 +220,7 @@ fn model_fence_ack_requires_run_identity_even_when_gate_and_version_are_known() 
 #[test]
 fn model_rejection_definition_error_is_backward_compatible_and_preserves_typed_details() {
     use crate::db::server_campaigns::CommandOutcome;
-    use crate::services::campaign_execution::definition::DefinitionErrorCode;
+    use crate::domain::campaign::definition::DefinitionErrorCode;
 
     let legacy = json!({"code":"invalid_definition","target":null});
     let rejection: Rejection = serde_json::from_value(legacy.clone()).unwrap();
@@ -266,7 +266,7 @@ fn command_fingerprint_and_serde_preserve_storage_bytes() {
     assert_eq!(serde_json::to_vec(&command).unwrap(), bytes);
     assert_eq!(serde_json::from_slice::<Command>(bytes).unwrap(), command);
     assert_eq!(
-        crate::services::campaign_execution::control::command_fingerprint(&command).unwrap(),
+        crate::domain::campaign::model::command_fingerprint(&command).unwrap(),
         blake3::hash(bytes).to_hex().to_string()
     );
 }

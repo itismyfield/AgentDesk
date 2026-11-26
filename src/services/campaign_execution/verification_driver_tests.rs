@@ -4,11 +4,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::domain::campaign::evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission};
 use crate::services::campaign_execution::{
     adk_resources::AdkResources,
     adk_workspace,
     control::tests as domain,
-    evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
     execution_pin::IssueObservation,
     host_identity,
     pipeline_rules::MinimalPipelineScope,

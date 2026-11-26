@@ -10,11 +10,9 @@ use crate::{
     db::server_campaigns::{
         CommandOutcome, CommandReply, ReceiptResponse, StoreError, StoreResult,
     },
+    domain::campaign::definition::{self, DefinitionErrorCode},
     error::{AppError, AppResult, ErrorCode},
-    services::campaign_execution::{
-        definition::{self, DefinitionErrorCode},
-        model::{Rejection, RejectionCode},
-    },
+    services::campaign_execution::model::{Rejection, RejectionCode},
 };
 
 pub(super) fn id(id: &str) -> AppResult<()> {

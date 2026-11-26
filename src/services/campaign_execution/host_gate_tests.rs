@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use tempfile::{TempDir, tempdir};
 
 use super::*;
-use crate::services::campaign_execution::candidate_seal::CandidateSeal;
+use crate::domain::campaign::candidate_seal::CandidateSeal;
 use crate::services::campaign_execution::control::{decide, tests as domain};
 use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,

@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 
-use super::adk_workspace::WorkspaceObservation;
-use super::candidate_seal::CandidateSeal;
-use super::evidence::{self, EvidenceEnvelope, EvidenceStatus};
+use crate::domain::campaign::candidate_seal::CandidateSeal;
+use crate::domain::campaign::evidence::{self, EvidenceEnvelope, EvidenceStatus};
+use crate::domain::campaign::workspace::WorkspaceObservation;
+
 use super::model::*;
 use super::profile::ExecutionEnvironment;
 use super::stage_fsm::{self, Transition};

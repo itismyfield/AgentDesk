@@ -2,11 +2,12 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
-use super::candidate_seal::CandidateSeal;
-use super::definition::WORKFLOW_VERSION;
-use super::evidence_gate::{
+use crate::domain::campaign::candidate_seal::CandidateSeal;
+use crate::domain::campaign::definition::WORKFLOW_VERSION;
+use crate::domain::campaign::evidence_gate::{
     GateReason, StageAssessment, Verdict, assess_verification, evaluate_stage,
 };
+
 use super::failure_budget::{FailureDisposition, record_quality_failure};
 use super::lifecycle::{self, GateTarget};
 use super::model::*;

@@ -9,10 +9,10 @@ use crate::db::server_campaigns::{
     self as store, CommandOutcome, ReceiptResponse, StoreError, StoreResult,
     command_transaction::StoreRequest,
 };
+use crate::domain::campaign::model::command_fingerprint;
 
 use super::adk_adapter::{AdapterError, AdkAdapter};
 use super::commands;
-use super::control::command_fingerprint;
 use super::execution_pin::{ExecutionPin, PinError, RequirementsSnapshot};
 use super::host_worker::{HostWorker, WorkerError, WorkerTurn};
 use super::model::*;

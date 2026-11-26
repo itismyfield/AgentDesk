@@ -461,8 +461,8 @@ async fn m4_regression_a_late_launch_keeps_the_finish_fence_at_the_same_version_
 #[cfg(unix)]
 #[tokio::test]
 async fn a_retained_phase_result_is_committed_once_and_then_acknowledged_pg() {
+    use crate::domain::campaign::evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission};
     use crate::services::campaign_execution::{
-        evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
         evidence_gate::tests::{REPO, workspace},
         verification_run::{PhaseOutput, ProcessIdentity, tests as a1},
     };

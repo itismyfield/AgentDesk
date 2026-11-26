@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use super::*;
+use crate::domain::campaign::definition::DefinitionHashes;
 use crate::services::campaign_execution::adk_observe::observe_main;
 use crate::services::campaign_execution::adk_observe::tests::{
     at, commit, remote_and_clone, sh_git,
 };
-use crate::services::campaign_execution::definition::DefinitionHashes;
 use crate::services::campaign_execution::profile::{Candidate, ReviewExtent};
 
 fn artifact(node: &str, base: &str, head: &str) -> NodeArtifact {

@@ -1,10 +1,9 @@
 use serde_json::json;
 
 use super::*;
+use crate::domain::campaign::{definition, evidence_gate::StageAssessment};
 use crate::services::campaign_execution::{
     control::{decide, tests as domain},
-    definition,
-    evidence_gate::StageAssessment,
     stage_fsm::tests as fsm,
 };
 

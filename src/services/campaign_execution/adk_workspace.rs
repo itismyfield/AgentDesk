@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::definition::valid_id;
 use super::model::Repository;
 use super::profile::{Candidate, ContractError, VerificationCheckoutKind, Workspace};
 use super::verification_run::BoundSubject;
+use crate::domain::campaign::definition::valid_id;
+use crate::domain::campaign::workspace::WorkspaceObservation;
 use crate::services::git::GitCommand;
 
 // Editing space identity: issue numbers are not part of it, so two nodes on one issue stay apart.
@@ -17,8 +18,6 @@ pub struct AdkWorkspaceKey {
     pub node_id: String,
     pub series: u32,
 }
-
-pub use crate::domain::campaign::workspace::WorkspaceObservation;
 
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum WorkspaceError {

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use super::definition::PROFILE_VERSION;
+use crate::domain::campaign::definition::PROFILE_VERSION;
+
 use super::model::{Repository, Role};
 use super::profile::{EnvironmentComponent, ProfileLimits, RepositoryProfile};
 use super::verification_run::{Digest, VerificationSpec, digest_of};

@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
 
+use crate::domain::campaign::definition::{self, DefinitionInput, WORKFLOW_VERSION};
+use crate::domain::campaign::model::command_fingerprint;
+
 use super::{
-    decision_commands,
-    definition::{self, DefinitionInput, WORKFLOW_VERSION},
-    lifecycle,
-    model::*,
-    pipeline_editor, review_wait, stage_fsm, verification_commands,
+    decision_commands, lifecycle, model::*, pipeline_editor, review_wait, stage_fsm,
+    verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;
@@ -198,8 +198,6 @@ pub fn replay_receipt(
     }
     Ok(receipt.result.clone())
 }
-
-pub use crate::domain::campaign::model::command_fingerprint;
 
 // The store looks up this campaign/key receipt under the same transaction lock.
 pub fn decide_with_receipt(

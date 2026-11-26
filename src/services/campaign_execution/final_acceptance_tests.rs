@@ -1,9 +1,8 @@
 use chrono::TimeDelta;
 
 use super::*;
-use crate::domain::campaign::deployment::AcceptanceCheck;
+use crate::domain::campaign::deployment::{AcceptanceCheck, DeployFact};
 use crate::services::campaign_execution::control::{self, tests as domain};
-use crate::services::campaign_execution::deploy_policy::DeployFact;
 use crate::services::campaign_execution::deploy_policy::tests::{
     deployed, landed, record, request, sha, witnesses,
 };

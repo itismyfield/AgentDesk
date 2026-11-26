@@ -2,7 +2,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 
 use crate::domain::campaign::decision_item::ApprovalBinding;
 use crate::domain::campaign::definition::{AcceptanceCondition, VerificationKind};
-pub use crate::domain::campaign::deployment::{
+use crate::domain::campaign::deployment::{
     DeployFact, DeployHost, DeployIntent, DeployJob, DeployStatus, DeployWitness,
 };
 use crate::domain::campaign::profile::MainIntegrationEvidence;

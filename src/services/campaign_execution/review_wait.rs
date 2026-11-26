@@ -4,12 +4,12 @@ use sqlx::{PgPool, Postgres, Transaction};
 use crate::db::server_campaigns::{
     self as store, CommandOutcome, ReceiptResponse, StoreError, command_transaction::StoreRequest,
 };
-use crate::domain::campaign::model::ReviewedCandidate;
+use crate::domain::campaign::evidence::{EvidenceEnvelope, EvidencePayload, EvidenceStatus, admit};
+use crate::domain::campaign::evidence_gate::{GateReason, StageAssessment, Verdict};
+use crate::domain::campaign::model::{ReviewedCandidate, command_fingerprint};
 
 use super::commands;
-use super::control::{command_fingerprint, observe_action, validate_new_start};
-use super::evidence::{EvidenceEnvelope, EvidencePayload, EvidenceStatus, admit};
-use super::evidence_gate::{GateReason, StageAssessment, Verdict};
+use super::control::{observe_action, validate_new_start};
 use super::model::*;
 use super::profile::{ReviewExtent, ReviewRange};
 use super::review_dispatch::{ReviewError, WebGptReply};
