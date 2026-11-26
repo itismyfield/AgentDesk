@@ -216,6 +216,7 @@ async fn human_waits_matches_current_gate_and_snapshot_sequence_pg() {
     let binding = approval_binding("b");
     let first_at = domain::now() + TimeDelta::nanoseconds(123);
     open(&h.pool, "first", first_at, &binding).await;
+    let first_page = store::list(&h.pool, 100, 0).await.unwrap();
 
     let other_at = domain::now() + TimeDelta::seconds(2);
     open(&h.pool, "other", other_at, &approval_binding("d")).await;
@@ -235,6 +236,12 @@ async fn human_waits_matches_current_gate_and_snapshot_sequence_pg() {
     assert_eq!(current[0]["human_status"], runtime["human_status"]);
     assert_eq!(current[0]["wait_started_at"], json!(reopened_at));
     assert_eq!(current[0]["wait_started_at"], runtime["wait_started_at"]);
+
+    let from_first_page = super::project_page(&h.pool, &first_page, Utc::now())
+        .await
+        .unwrap();
+    assert_eq!(from_first_page.len(), 1);
+    assert_eq!(from_first_page[0].wait_started_at, Some(first_at));
 
     command(
         &h.pool,
@@ -285,4 +292,16 @@ async fn human_waits_reports_empty_and_query_failure_pg() {
     .await;
     assert!(unavailable.get("waits").is_none());
     h.close().await;
+}
+
+#[tokio::test]
+async fn human_waits_requires_dashboard_auth_and_pg() {
+    let (app, _dir) = app(None);
+    assert_eq!(
+        get(&app, LIST, false).await.status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let unavailable =
+        expect_json(get(&app, LIST, true).await, StatusCode::SERVICE_UNAVAILABLE).await;
+    assert!(unavailable.get("waits").is_none());
 }

@@ -10,7 +10,6 @@ use super::super::{
     server_campaigns, settings, stats,
 };
 
-#[cfg(test)]
 mod human_waits;
 
 // Category: admin
@@ -36,6 +35,7 @@ fn campaign_router() -> ApiRouter {
 
 fn server_campaign_router() -> ApiRouter {
     Router::new()
+        .route("/human-waits", get(human_waits::list_human_waits))
         .route(
             "/server-campaigns",
             get(server_campaigns::list).post(server_campaigns::create),
