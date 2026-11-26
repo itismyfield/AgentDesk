@@ -23,10 +23,17 @@ VARIABLES proc,      \* "new" | "down" | "old": the binary serving the store
           oTurn,     \* the open input arrived after the child's init committed (handoff)
           bound,     \* the thread is itself a configured binding, written through its member adoption
           exec,      \* an owner refresh installed a Bound execution view over the child's adoption
-          stray      \* a second, child adoption was recorded for a configured binding
+          stray,     \* a second, child adoption was recorded for a configured binding
+          routineCase, routineRelation, routineOwner, routinePhase,
+          routinePosts, routineRestarted
 vars == <<proc, relation, cand, floor, init, tomb, tombGen, writer, gen, input, knock,
           arrived, oSent, lSent, via, row, retire, deploy, booted, crashes,
           parentO, dormant, wmode, lSending, lateTurn, oTurn, bound, exec, stray>>
+routineVars == <<routineCase, routineRelation, routineOwner, routinePhase,
+                 routinePosts, routineRestarted>>
+allVars == <<vars, routineVars>>
+RoutineIdle == /\ routineCase = "none" /\ routineRelation = "none" /\ routineOwner = "none"
+               /\ routinePhase = "none" /\ routinePosts = 0 /\ routineRestarted = FALSE
 
 Init ==
     /\ parentO \in BOOLEAN /\ dormant \in BOOLEAN /\ (dormant => parentO)
@@ -96,6 +103,9 @@ Resolve ==
 \* Legacy posts a body where the gate reads the thread as a non-member, a Legacy parent's
 \* child, or the late reservation's own turn before the handoff.
 \* An execution view owns the body unless the child's late adoption still waits for that turn.
+LateLegacyOpen(candidate, initialized, ownTurn) ==
+    candidate = "late" /\ ~initialized /\ ownTurn
+
 ExecOwns == exec /\ (Mut = "execFirst" \/ cand # "late")
 LegacyOpen ==
     IF bound THEN stray
@@ -103,7 +113,7 @@ LegacyOpen ==
          /\ \/ Fix = "before"
             \/ (relation = "none" /\ ~knock)
             \/ cand \in {"pending", "legacy"}
-            \/ (cand = "late" /\ ~init /\ lateTurn)
+            \/ LateLegacyOpen(cand, init, lateTurn)
             \/ (Mut = "direct" /\ relation # "none")
 \* The claim is counted until the send ends; the handoff waits on it.
 LegacyClaim ==
@@ -138,7 +148,8 @@ PublishFloor ==
                    wmode, lSending, lateTurn, oTurn>>
 \* The handoff: init commits only after the late turn's Legacy send settled, so O starts at
 \* the next turn and never re-reads a body Legacy is still sending.
-Settled == Mut = "noWait" \/ (~lSending /\ ~(input = "waiting" /\ lateTurn))
+LegacySettled(sending, waitingOwnTurn) == ~sending /\ ~waitingOwnTurn
+Settled == Mut = "noWait" \/ LegacySettled(lSending, input = "waiting" /\ lateTurn)
 PublishInit ==
     /\ proc = "new" /\ writer = "starting" /\ ~init /\ (floor \/ Mut = "reverse")
     /\ cand \in {"late", "parent"} /\ Settled
@@ -267,7 +278,7 @@ Next == Arrive \/ Admit \/ EarlyPlace \/ Resolve \/ LegacyClaim \/ LegacyDone \/
         \/ PublishInit \/ InitFail \/ HeldVisible \/ Ready \/ Post \/ Crash \/ Boot
         \/ DeployCheck \/ DeployStop \/ DeploySwap \/ GcDelete \/ StopWriter \/ Retire
         \/ InstallExec \/ LegacyCut \/ UNCHANGED vars
-Spec == /\ Init /\ [][Next]_vars
+Spec == /\ Init /\ RoutineIdle /\ [][Next /\ UNCHANGED routineVars]_allVars
         /\ WF_vars(Admit) /\ WF_vars(Resolve) /\ WF_vars(LegacyClaim) /\ WF_vars(LegacyDone)
         /\ WF_vars(StartWriter)
         /\ WF_vars(PublishFloor) /\ WF_vars(PublishInit) /\ WF_vars(Ready) /\ WF_vars(Post)
@@ -290,4 +301,124 @@ InheritDormant == writer \in {"starting", "ready"} => ((wmode = "dormant") = dor
 ChildInputAnswered == [](input = "waiting" => <>(input # "waiting" \/ proc = "old"))
 \* An input held at placement is resolved while its process runs.
 HeldResolves == [](relation = "unresolved" => <>(relation # "unresolved" \/ proc # "new"))
+
+\* Routine terminal projection. Child registration/permit (E03, E05–08, E12–16),
+\* process origin and kind (E17–22, E29–31), counted send and ACK (E34–39).
+RoutineStableCases == {"eventFirst", "routineFirst", "codex", "restart"}
+RoutineVerifiedCases == RoutineStableCases \cup {"commitFirst"}
+RoutineContrastCases == {"committed", "blockedPermit", "unselectedTui", "unselectedLegacy",
+                         "unresolved", "expectedMissing", "wrongKind", "foreignEpisode"}
+RoutineCases ==
+    CASE Mut \in {"routineCurrent", "routineNoRoute"} -> {"eventFirst"}
+      [] Mut = "routineNoProof" -> {"foreignEpisode"}
+      [] Mut = "routineNoFence" -> {"commitFirst"}
+      [] Mut = "routineFalseAck" -> {"commitFirst"}
+      [] Mut = "routineNoRecheck" -> {"restart"}
+      [] Mut = "routineRepost" -> {"restart"}
+      [] OTHER -> RoutineVerifiedCases \cup RoutineContrastCases
+
+RoutineInit ==
+    /\ routineCase \in RoutineCases
+    /\ routineRelation = CASE routineCase = "unresolved" -> "unresolved"
+                          [] routineCase \in {"routineFirst", "unselectedTui", "unselectedLegacy",
+                                                "expectedMissing"} -> "none"
+                          [] OTHER -> "verified"
+    /\ routineOwner = CASE routineCase = "committed" -> "committed"
+                       [] routineRelation = "verified" -> "late"
+                       [] routineRelation = "unresolved" -> "held"
+                       [] OTHER -> "none"
+    /\ routinePhase = (IF routineCase = "routineFirst" THEN "checking" ELSE "terminal")
+    /\ routinePosts = 0 /\ routineRestarted = FALSE
+
+RoutineExpected == CASE routineCase = "expectedMissing" -> "none"
+                    [] routineCase = "codex" -> "codexTui"
+                    [] OTHER -> "claudeTui"
+RoutineActual == CASE routineCase = "wrongKind" -> "codexTui"
+                  [] Mut = "routineCurrent" \/ routineCase \in RoutineContrastCases -> "none"
+                  [] OTHER -> "processBackend"
+RoutineProof == routineCase \in RoutineVerifiedCases \/
+                 (Mut = "routineNoProof" /\ routineCase = "foreignEpisode")
+RoutineOwnerOpen ==
+    /\ routineCase # "blockedPermit"
+    /\ LateLegacyOpen(routineOwner, routineOwner = "committed", TRUE)
+RoutineChecked == routineRelation = "verified" \/
+                  (Mut = "routineNoRecheck" /\ routineRestarted)
+
+\* These routes meet the pre-existing early membership and kind branches.
+RoutineOriginal == CASE routineCase = "unselectedLegacy" -> "legacy"
+                    [] routineCase = "unselectedTui" -> "unselectedTui"
+                    [] routineCase = "unresolved" -> "reservation"
+                    [] RoutineExpected = "none" -> "ownedHeld"
+                    [] RoutineActual = "none" -> "unknownKind"
+                    [] OTHER -> "kindMismatch"
+
+RoutineDecision ==
+    IF Mut \notin {"routineCurrent", "routineNoRoute"} /\ RoutineProof
+       /\ (RoutineActual = "processBackend" \/ Mut = "routineNoProof")
+    THEN IF RoutineChecked /\ RoutineOwnerOpen THEN "counted" ELSE "held"
+    ELSE RoutineOriginal
+
+RoutineCheck ==
+    /\ routinePhase = "checking" /\ routineCase \in RoutineVerifiedCases
+    /\ routineRelation' = "verified" /\ routineOwner' = "late"
+    /\ routinePhase' = "terminal"
+    /\ UNCHANGED <<routineCase, routinePosts, routineRestarted>>
+
+RoutinePeek ==
+    /\ routinePhase = "terminal"
+    /\ routinePhase' = IF RoutineDecision = "counted" THEN "peeked" ELSE RoutineDecision
+    /\ UNCHANGED <<routineCase, routineRelation, routineOwner, routinePosts, routineRestarted>>
+
+\* The transport rechecks ownership after peek and counts the send through visible ACK.
+RoutineClaim ==
+    /\ routinePhase = "peeked"
+    /\ routinePhase' = CASE RoutineDecision = "counted" -> "sending"
+                        [] Mut = "routineFalseAck" -> "posted"
+                        [] OTHER -> "held"
+    /\ UNCHANGED <<routineCase, routineRelation, routineOwner, routinePosts, routineRestarted>>
+
+RoutineSending == routinePhase \in {"sending", "visible"}
+RoutineAdopt ==
+    /\ routineOwner = "late" /\ routineCase = "commitFirst"
+    /\ \/ routinePhase = "posted"
+       \/ /\ (routinePhase = "peeked" \/ Mut = "routineNoFence")
+          /\ (LegacySettled(RoutineSending, FALSE) \/ Mut = "routineNoFence")
+    /\ routineOwner' = "committed"
+    /\ UNCHANGED <<routineCase, routineRelation, routinePhase, routinePosts, routineRestarted>>
+
+\* The same turn's durable outbox identity survives a crash after Discord visibility.
+RoutineVisible ==
+    /\ routinePhase = "sending" /\ routinePhase' = "visible"
+    /\ routinePosts' = IF routinePosts = 0 \/ Mut = "routineRepost"
+                       THEN routinePosts + 1 ELSE routinePosts
+    /\ UNCHANGED <<routineCase, routineRelation, routineOwner, routineRestarted>>
+RoutineAck ==
+    /\ routinePhase = "visible" /\ routinePhase' = "posted"
+    /\ UNCHANGED <<routineCase, routineRelation, routineOwner, routinePosts, routineRestarted>>
+
+RoutineCrash ==
+    /\ routineCase = "restart" /\ ~routineRestarted
+    /\ routinePhase \in {"peeked", "sending", "visible"}
+    /\ routineRestarted' = TRUE /\ routineRelation' = "none"
+    /\ IF Mut = "routineNoRecheck"
+       THEN /\ routineOwner' = "late" /\ routinePhase' = "terminal"
+       ELSE /\ routineOwner' = "none" /\ routinePhase' = "checking"
+    /\ UNCHANGED <<routineCase, routinePosts>>
+
+RoutineNext == RoutineCheck \/ RoutinePeek \/ RoutineClaim \/ RoutineAdopt
+               \/ RoutineVisible \/ RoutineAck \/ RoutineCrash \/ UNCHANGED routineVars
+RoutineSpec == /\ Init /\ ~parentO /\ RoutineInit
+               /\ [][RoutineNext /\ UNCHANGED vars]_allVars
+               /\ WF_routineVars(RoutineCheck) /\ WF_routineVars(RoutinePeek)
+               /\ WF_routineVars(RoutineClaim) /\ WF_routineVars(RoutineVisible)
+               /\ WF_routineVars(RoutineAck)
+
+RoutineExactlyOnce == routinePosts <= 1 /\ (routinePhase = "posted" => routinePosts = 1)
+RoutineClaimFenced == RoutineSending =>
+    (routineCase \in RoutineVerifiedCases /\ routineRelation = "verified" /\ RoutineOwnerOpen)
+RoutineOtherKindsUnchanged ==
+    routineCase \in RoutineContrastCases => RoutineDecision = RoutineOriginal
+RoutineEventuallyPosted ==
+    (routineCase \in RoutineStableCases) => <>(routinePhase = "posted")
+
 =============================================================================

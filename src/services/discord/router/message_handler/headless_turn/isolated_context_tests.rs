@@ -48,6 +48,10 @@ struct Fixture {
 /// The provider CLI is pinned to a stub that holds its turn open until `release`, or until its
 /// directory goes away with a failed test; it then answers with the `answer` file or fails.
 async fn fixture() -> Fixture {
+    fixture_for(ProviderKind::Claude).await
+}
+
+async fn fixture_for(provider: ProviderKind) -> Fixture {
     let root = crate::config::TestRuntimeRootGuard::new();
     // A config override in the environment would hide the agent written under this root.
     let unset = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock;
@@ -56,7 +60,8 @@ async fn fixture() -> Fixture {
     let mut config = crate::config::Config::default();
     config.agents.push(
         serde_yaml::from_str(&format!(
-            "id: agent8117\nname: Test\nchannels:\n  claude:\n    id: '{}'\n    workspace: {}\n",
+            "id: agent8117\nname: Test\nchannels:\n  {}:\n    id: '{}'\n    workspace: {}\n",
+            provider.as_str(),
             PRIMARY.get(),
             workdir.path().display()
         ))
@@ -75,6 +80,10 @@ async fn fixture() -> Fixture {
         "echo run >> \"$d/spawned\"\n",
         "while [ -d \"$d\" ] && [ ! -e \"$d/release\" ]; do sleep 0.05; done\n",
         "[ -e \"$d/answer\" ] || exit 1\n",
+        "case \"${0##*/}\" in codex)\n",
+        "printf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"81170000-0000-4000-8000-000000000001\"}'\n",
+        "printf '{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"%s\"}}\\n' \"$(cat \"$d/answer\")\"\n",
+        "printf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{}}'; exit 0 ;; esac\n",
         "printf '{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"%s\",",
         "\"session_id\":\"81170000-0000-4000-8000-000000000001\"}\\n' \"$(cat \"$d/answer\")\"\n"
     );
@@ -94,10 +103,13 @@ async fn fixture() -> Fixture {
     let (db, pool) = postgres().await;
     // A real token hash shape, so the runtime API accepts the identity a session hook names.
     let mut shared = shared_on(&pool).await;
-    Arc::get_mut(&mut shared).unwrap().token_hash = "discord_8117811781178117".to_string();
+    let writable = Arc::get_mut(&mut shared).unwrap();
+    writable.token_hash = "discord_8117811781178117".to_string();
+    writable.provider = provider.clone();
+    shared.settings.write().await.provider = provider.clone();
     let registry = Arc::new(HealthRegistry::new());
     registry
-        .register("claude".to_string(), shared.clone())
+        .register(provider.as_str().to_string(), shared.clone())
         .await;
     use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
     let discord = discord_mock::DiscordMockState::new();
@@ -107,7 +119,7 @@ async fn fixture() -> Fixture {
     let (proxy, gateway, _server) = discord_mock::start(discord.clone()).await;
     let ctx = discord_mock::serenity_context(proxy, gateway).await;
     registry
-        .register_http("claude".to_string(), ctx.http.clone())
+        .register_http(provider.as_str().to_string(), ctx.http.clone())
         .await;
     shared.http.cached_serenity_ctx.set(ctx).unwrap();
     let token = "test-token".to_string();
@@ -124,13 +136,14 @@ async fn fixture() -> Fixture {
             content: "primary talk".into(),
         });
         drop(core);
-        let tmux_name = ProviderKind::Claude.build_tmux_session_name(name);
+        let tmux_name = provider.build_tmux_session_name(name);
         sqlx::query(
             "INSERT INTO sessions (session_key, provider, status, identity_kind,
                                    discord_token_hash, channel_id, claude_session_id)
-             VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, 'primary-sid')",
+             VALUES ($1, $2, 'idle', 'discord_channel', $3, $4, 'primary-sid')",
         )
         .bind(channel_key(&shared, &tmux_name))
+        .bind(provider.as_str())
         .bind(&shared.token_hash)
         .bind(channel.get().to_string())
         .execute(&pool)
@@ -479,6 +492,25 @@ async fn routine_claim_with(
     thread: Option<ChannelId>,
     (retries, fallback): (i32, Option<&str>),
 ) -> Claim {
+    let (store, attached) = attach_routine(fixture, headless, thread, (retries, fallback)).await;
+    let routine_id = attached.id;
+    let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
+    assert_eq!(claimed.routine_id, routine_id);
+    let registry = Some(fixture.registry.clone());
+    let executor = RoutineAgentExecutor::new(Arc::new(fixture.pool.clone()), registry, 60)
+        .with_headless_fresh_agents(true);
+    (store, executor, claimed, routine_id)
+}
+
+async fn attach_routine(
+    fixture: &Fixture,
+    headless: bool,
+    thread: Option<ChannelId>,
+    (retries, fallback): (i32, Option<&str>),
+) -> (
+    RoutineStore,
+    crate::services::routines::store::RoutineRecord,
+) {
     let pool = &fixture.pool;
     // Only the routine attached here is due, so the claim below is its run.
     sqlx::query("UPDATE routines SET status = 'paused'")
@@ -487,11 +519,15 @@ async fn routine_claim_with(
         .unwrap();
     for agent in ["agent8117"].into_iter().chain(fallback) {
         sqlx::query(
-            "INSERT INTO agents (id, name, provider, discord_channel_cc)
-             VALUES ($2, 'A', 'claude', $1) ON CONFLICT (id) DO NOTHING",
+            "INSERT INTO agents (id, name, provider, discord_channel_cc, discord_channel_cdx)
+             VALUES ($1, 'A', $2,
+                     CASE WHEN $2 = 'claude' THEN $3 END,
+                     CASE WHEN $2 = 'codex' THEN $3 END)
+             ON CONFLICT (id) DO NOTHING",
         )
-        .bind(PRIMARY.get().to_string())
         .bind(agent)
+        .bind(fixture.shared.provider.as_str())
+        .bind(PRIMARY.get().to_string())
         .execute(pool)
         .await
         .unwrap();
@@ -520,14 +556,11 @@ async fn routine_claim_with(
         runner: json!({"kind": "quickjs", "script_ref": "nightly.js"}),
     };
     let definition = headless.then_some(&definition);
-    let attached = store.attach_routine_with_execution(routine_row, definition, 3);
-    let routine_id = attached.await.unwrap().id;
-    let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
-    assert_eq!(claimed.routine_id, routine_id);
-    let registry = Some(fixture.registry.clone());
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
-        .with_headless_fresh_agents(true);
-    (store, executor, claimed, routine_id)
+    let attached = store
+        .attach_routine_with_execution(routine_row, definition, 3)
+        .await
+        .unwrap();
+    (store, attached)
 }
 
 /// Makes a deferred or retrying run due now, its deferral window opened `opened_mins` ago.
@@ -1150,3 +1183,6 @@ async fn people_who_write_while_a_headless_run_holds_the_primary_wait_once_and_o
 mod thread_tests;
 #[path = "unverified_thread_tests.rs"]
 mod unverified_thread_tests;
+
+#[path = "routine_result_process_tests.rs"]
+mod routine_result_process_tests;
