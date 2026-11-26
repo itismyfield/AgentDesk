@@ -433,8 +433,8 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/watchers/dispatched_origin_ghost.rs:103` | `consume_dispatched_origin_ghost_if_current` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/turn_lifecycle.rs:524` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 | `src/services/turn_lifecycle.rs:526` | `stop_turn_with_policy` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:979` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
-| `src/services/turn_lifecycle.rs:983` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:841` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
+| `src/services/turn_lifecycle.rs:842` | `clear_inflight_by_channel` | ProjectionClear(Settle / OperatorRelease / AdjacentEnd) |
 
 ## inflight_alias: 64행 (시험·주석 제외 20행)
 
