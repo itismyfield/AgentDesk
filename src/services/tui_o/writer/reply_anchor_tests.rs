@@ -165,6 +165,39 @@ async fn class_hash_match_without_exact_receipt_binds_nothing() {
     }
 }
 
+/// A dequeued input is not absorbed: an unrelated prompt opening the next turn binds nothing,
+/// while the input's own receipted prompt opens its turn as the reply without a joined mark.
+#[tokio::test]
+async fn dequeued_input_binds_only_its_own_receipted_prompt() {
+    for (case, (prompt, reply)) in [
+        (user("foreign", "unrelated input"), None),
+        (user("u-b", "ours"), Some(B)),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let f = Fixture::new();
+        f.register("b", "ours");
+        f.append(&[queue("enqueue", "ours"), queue("dequeue", "")]);
+        let at = append(&f, &[prompt, answer("one")]);
+        let harness = Harness::new();
+        harness.gate.acquired();
+        let (mut writer, anchors) = (harness.writer(), Anchors::default());
+        writer.attach_reply_anchors(anchors.clone());
+        settle(&f, &anchors, &registrations(&f, &[("b", B)]));
+        assert_eq!(writer.deliver(&piece(&f, "one", at)).await, Step::Done);
+        assert_eq!(
+            *harness.port.reply_to.lock().unwrap(),
+            [reply],
+            "case={case}"
+        );
+        assert!(
+            harness.port.joined.lock().unwrap().is_empty(),
+            "case={case}"
+        );
+    }
+}
+
 /// Uniqueness failures and an ordinary withdrawal bind no input, so the answer has no reference.
 #[test]
 fn ambiguous_or_withdrawn_inputs_bind_nothing() {

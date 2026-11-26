@@ -27,7 +27,9 @@ TerminalOk == Scenario # "i8432"
 \* A turn AgentDesk did not start has no Discord anchor and no mailbox token. In "nearmiss" that
 \* external prompt equals B's frame only after trimming: no exact receipt names it, so it binds
 \* nothing (ClassHashFallback mutant binds it to B by the trimmed class hash).
-External == Scenario \in {"external", "nearmiss"}
+\* In "dequeued" the TUI took B off its queue (dequeue, no absorption) before the external prompt
+\* opened a turn; only an absorption or B's own receipted row binds B (RowlessDequeue binds it).
+External == Scenario \in {"external", "nearmiss", "dequeued"}
 AnchoredA == ~External
 ATarget == IF AnchoredA THEN "A" ELSE IF merged THEN "B" ELSE "none"
 \* Pre-key checks that want a bound source (mutants of Target; all of them in Current).
@@ -67,6 +69,7 @@ AEnds == /\ a = "running"
                       [] AnchoredA /\ aBound -> "A"
                       [] b = "joined" /\ bBound -> "B"
                       [] Scenario = "nearmiss" /\ Mutant = "ClassHashFallback" /\ reg -> "B"
+                      [] Scenario = "dequeued" /\ Mutant = "RowlessDequeue" /\ reg -> "B"
                       [] Mutant = "PostOrder" /\ b = "pasted" -> "B"
                       [] OTHER -> "none"
          /\ bTo' = IF Mutant = "JoinDoublePost" /\ b = "joined" THEN "B" ELSE bTo
@@ -221,6 +224,8 @@ ReplyExactlyOnce == /\ aReplies <= 1 /\ bReplies <= 1
                     /\ (b = "answered" => (bReplies = 1) # merged)
 JoinedMarked == merged => mark
 MarkOnlyJoined == mark => (b = "joined" \/ merged)
+\* A's answer names B only when B was absorbed into A's turn.
+NoUnevidencedBind == aTo = "B" => merged
 AnswerBound == /\ (aReplies >= 1 => aTo = ATarget)
                /\ (bReplies >= 1 => bTo = "B")
 KeyBeforeLeave == b \in Delivered => keys >= 1
