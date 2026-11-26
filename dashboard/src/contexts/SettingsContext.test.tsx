@@ -10,6 +10,8 @@ vi.mock("../api/client", () => ({ getStats: vi.fn() }));
 
 import { getStats } from "../api/client";
 
+vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => { resolve = res; });

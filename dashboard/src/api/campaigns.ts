@@ -125,7 +125,15 @@ export type Campaign = z.infer<typeof campaignSchema>;
 export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
 
 export interface HomeCampaignNodeSummary {
+  id: string;
+  title: string;
   status: CampaignNodeStatus;
+  stage: string;
+  next_action: string | null;
+  blocker: string | null;
+  assignee: string | null;
+  issue_url: string | null;
+  updated_at: string;
 }
 
 export interface HomeLegacyCampaignSummary {
@@ -137,12 +145,24 @@ export interface HomeLegacyCampaignSummary {
   updated_at: string;
 }
 
+const homeCampaignNodeSummarySchema = z.looseObject({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  status: campaignNodeStatusSchema,
+  stage: z.string().nullable().default("").transform((v) => v ?? ""),
+  next_action: nullableText,
+  blocker: nullableText,
+  assignee: nullableText,
+  issue_url: nullableText,
+  updated_at: z.string(),
+});
+
 const homeCampaignSummarySchema = z.looseObject({
   id: z.string().min(1),
   title: z.string().min(1),
   status: campaignStatusSchema,
   auto_queue: z.boolean().default(false),
-  nodes: z.array(z.looseObject({ status: campaignNodeStatusSchema })).default([]),
+  nodes: z.array(homeCampaignNodeSummarySchema).default([]),
   updated_at: z.string(),
 });
 

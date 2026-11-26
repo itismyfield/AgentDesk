@@ -707,12 +707,12 @@ const styles = `
 .aui-scheduled-runs-queue-head { display: flex; height: 30px; flex: none; align-items: center; justify-content: space-between; padding: 0 6px 0 8px; color: var(--aui-scheduled-runs-muted); font-size: 11.5px; font-weight: 500; }
 .aui-scheduled-runs-queue-count { display: grid; min-width: 20px; height: 18px; padding: 0 5px; place-items: center; border-radius: 999px; background: var(--aui-scheduled-runs-count-face); font-size: 11px; font-variant-numeric: tabular-nums; }
 .aui-scheduled-runs-queue-list { min-height: 0; flex: 1 1 0; overflow-y: auto; overscroll-behavior: contain; }
-.aui-scheduled-runs-slot { height: 68px; }
+.aui-scheduled-runs-slot { height: 70px; }
 .aui-scheduled-runs-slot[data-flying] .aui-scheduled-runs-card { visibility: hidden; }
 .aui-scheduled-runs-slot[data-leaving] { overflow: hidden; animation: aui-scheduled-runs-collapse 420ms var(--aui-scheduled-runs-ease) 140ms both; }
 .aui-scheduled-runs-slot[data-leaving] .aui-scheduled-runs-card { visibility: hidden; }
 .aui-scheduled-runs-queue-empty { padding: 4px; color: var(--aui-scheduled-runs-faint); font-size: 12px; text-align: center; animation: aui-scheduled-runs-fade 300ms ease 300ms both; }
-.aui-scheduled-runs-card { display: grid; width: 100%; height: 64px; min-width: 0; align-content: center; gap: 3px; padding: 0 8px 0 6px; border: 0; border-radius: 10px; background: var(--aui-scheduled-runs-card); box-shadow: var(--aui-scheduled-runs-shadow); color: var(--aui-scheduled-runs-ink); text-align: left; transition: opacity 240ms ease, box-shadow 160ms ease; user-select: none; -webkit-user-select: none; }
+.aui-scheduled-runs-card { display: grid; width: 100%; height: 66px; min-width: 0; align-content: center; gap: 3px; padding: 0 8px 0 6px; border: 0; border-radius: 10px; background: var(--aui-scheduled-runs-card); box-shadow: var(--aui-scheduled-runs-shadow); color: var(--aui-scheduled-runs-ink); text-align: left; transition: opacity 240ms ease, box-shadow 160ms ease; user-select: none; -webkit-user-select: none; }
 .aui-scheduled-runs-card[data-dim] { opacity: .35; }
 .aui-scheduled-runs-card[data-lifted] { opacity: .35; }
 .aui-scheduled-runs-card[data-settle] { transition: none; }
@@ -720,7 +720,7 @@ const styles = `
 .aui-scheduled-runs-card-top { display: flex; min-width: 0; align-items: center; gap: 6px; }
 .aui-scheduled-runs-card-mark { display: grid; flex: none; width: 18px; height: 18px; place-items: center; border-radius: 5px; box-shadow: inset 0 0 0 1px var(--aui-scheduled-runs-line); color: var(--aui-scheduled-runs-body); font-size: 10px; font-weight: 600; }
 .aui-scheduled-runs-card-title { min-width: 0; overflow: hidden; font-size: 12px; font-weight: 500; line-height: 15px; text-overflow: ellipsis; white-space: nowrap; }
-.aui-scheduled-runs-card-sub { min-width: 0; overflow: hidden; padding-left: 24px; color: var(--aui-scheduled-runs-muted); font-size: 11.5px; line-height: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.aui-scheduled-runs-card-sub { min-width: 0; overflow: hidden; padding-left: 24px; color: var(--aui-scheduled-runs-muted); font-size: 11.5px; line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
 .aui-scheduled-runs-card-sub[data-warn] { color: var(--aui-scheduled-runs-warn); }
 .aui-scheduled-runs-card-foot { display: flex; min-width: 0; height: 16px; align-items: center; gap: 6px; padding-left: 24px; }
 .aui-scheduled-runs-stats { display: flex; min-width: 0; flex: 1; gap: 10px; overflow: hidden; color: var(--aui-scheduled-runs-muted); font-size: 11.5px; line-height: 16px; font-variant-numeric: tabular-nums; }
@@ -729,7 +729,7 @@ const styles = `
 .aui-scheduled-runs-tag { flex: none; margin-left: auto; padding: 0 5px; border-radius: 999px; background: var(--aui-scheduled-runs-tag); color: var(--aui-scheduled-runs-body); font-size: 10px; line-height: 15px; font-variant-numeric: tabular-nums; }
 .aui-scheduled-runs-part + .aui-scheduled-runs-tag { margin-left: 0; }
 .aui-scheduled-runs-tag[data-warn] { color: var(--aui-scheduled-runs-warn); }
-.aui-scheduled-runs-board-scroll { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; }
+.aui-scheduled-runs-board-scroll { min-width: 0; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: thin; scrollbar-color: var(--aui-scheduled-runs-line) transparent; }
 .aui-scheduled-runs-board { display: grid; gap: 4px; }
 .aui-scheduled-runs-row { display: grid; grid-template-columns: 34px repeat(var(--aui-scheduled-runs-days), minmax(0, 1fr)); gap: 4px; }
 .aui-scheduled-runs-row:first-child { height: 30px; }
@@ -737,7 +737,7 @@ const styles = `
 .aui-scheduled-runs-day-label { color: var(--aui-scheduled-runs-muted); font-size: 10.5px; font-weight: 500; letter-spacing: .5px; line-height: 16px; text-transform: uppercase; }
 .aui-scheduled-runs-day-date { color: var(--aui-scheduled-runs-ink); font-size: 12px; font-weight: 500; letter-spacing: 0; font-variant-numeric: tabular-nums; }
 .aui-scheduled-runs-time { padding-top: 6px; color: var(--aui-scheduled-runs-faint); font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
-.aui-scheduled-runs-cell { position: relative; height: 156px; min-width: 0; padding: 4px 4px 20px; border-radius: 12px; background: var(--aui-scheduled-runs-well); box-shadow: inset 0 0 0 1px var(--aui-scheduled-runs-ring); transition: background-color 160ms ease, box-shadow 160ms ease; }
+.aui-scheduled-runs-cell { position: relative; height: 160px; min-width: 0; padding: 4px 4px 20px; border-radius: 12px; background: var(--aui-scheduled-runs-well); box-shadow: inset 0 0 0 1px var(--aui-scheduled-runs-ring); transition: background-color 160ms ease, box-shadow 160ms ease; }
 .aui-scheduled-runs-cell[data-past] { background: transparent; }
 .aui-scheduled-runs-cell[data-past] .aui-scheduled-runs-cell-cards { opacity: .45; }
 .aui-scheduled-runs-cell[data-past] .aui-scheduled-runs-meter i { opacity: .5; }
@@ -750,7 +750,7 @@ const styles = `
 .aui-scheduled-runs-piece[data-hidden] { visibility: hidden; }
 /* Trailing pieces stay hidden through the flight; the appear animation starts when they are revealed with the landing. */
 .aui-scheduled-runs-piece:not([data-first]):not([data-hidden]) { animation: aui-scheduled-runs-appear 460ms var(--aui-scheduled-runs-ease) both; }
-.aui-scheduled-runs-more { height: 64px; padding-left: 6px; color: var(--aui-scheduled-runs-muted); font-size: 11px; line-height: 64px; }
+.aui-scheduled-runs-more { height: 66px; padding-left: 6px; color: var(--aui-scheduled-runs-muted); font-size: 11px; line-height: 66px; }
 .aui-scheduled-runs-now { position: absolute; top: -2.75px; right: 0; left: 0; z-index: 2; height: 1.5px; background: var(--aui-scheduled-runs-now); }
 .aui-scheduled-runs-now::before { position: absolute; top: -3.25px; left: -4px; width: 8px; height: 8px; border-radius: 50%; background: var(--aui-scheduled-runs-now); content: ''; }
 .aui-scheduled-runs-meter { position: absolute; right: 8px; bottom: 9px; left: 8px; height: 4px; overflow: hidden; border-radius: 2px; background: var(--aui-scheduled-runs-track); }
@@ -793,13 +793,13 @@ const styles = `
   .aui-scheduled-runs-queue { min-height: 0; }
   .aui-scheduled-runs-queue-list { display: grid; max-height: 320px; flex: none; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); column-gap: 4px; align-content: start; }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-scheduled-runs-agent, .aui-scheduled-runs-agents[data-open] .aui-scheduled-runs-agent { min-width: 44px; height: 44px; justify-content: center; margin-left: 4px; }
   .aui-scheduled-runs-agents { padding-left: 0; }
   .aui-scheduled-runs-mode { height: 44px; padding: 0 14px; }
   .aui-scheduled-runs-card { touch-action: manipulation; }
 }
-@keyframes aui-scheduled-runs-collapse { from { height: 68px; } to { height: 0; } }
+@keyframes aui-scheduled-runs-collapse { from { height: 70px; } to { height: 0; } }
 @keyframes aui-scheduled-runs-fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes aui-scheduled-runs-appear { from { opacity: 0; transform: translateY(-6px) scale(.96); } to { opacity: 1; transform: none; } }
 @keyframes aui-scheduled-runs-detail { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }

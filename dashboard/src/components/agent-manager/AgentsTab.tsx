@@ -309,6 +309,7 @@ export default function AgentsTab({
                     kind="tabs"
                     variant="tray"
                     size={isMobile ? "sm" : "md"}
+                    className="max-sm:[--aui-segmented-control-clean-px:6px]! max-sm:[--aui-segmented-control-clean-fs:12px]!"
                     aria-label={tr("에이전트 상태", "Agent status")}
                     value={statusFilter}
                     onChange={(value) => setStatusFilter(value as AgentStatusFilter)}

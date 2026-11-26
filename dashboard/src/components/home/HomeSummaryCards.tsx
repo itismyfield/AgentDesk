@@ -262,12 +262,13 @@ export function HomeTodoCard({
 }
 
 /** Server, Discord bots, Memento, campaign runs and the queue, with expandable `/api/health/detail` cause inspection. */
-export function HomeSystemCard({ campaigns, healthState, mementoState, agents, onlyWhenOff, tr, className }: {
+export function HomeSystemCard({ campaigns, healthState, mementoState, agents, onlyWhenOff, healthTriageShown, tr, className }: {
   campaigns: Loaded<HomeCampaigns>;
   healthState?: Loaded<HomeHealth>;
   mementoState?: Loaded<HomeMementoStatus | null>;
   agents?: Agent[];
   onlyWhenOff?: boolean;
+  healthTriageShown?: boolean;
   tr: Tr;
   className?: string;
 }) {
@@ -290,12 +291,14 @@ export function HomeSystemCard({ campaigns, healthState, mementoState, agents, o
     tr,
   });
   const settled = (health.data !== null || health.failed) && (campaigns.data !== null || campaigns.failed);
-  if (onlyWhenOff && !(settled && systemNeedsAttention(rows, tr))) return null;
+  const effectiveRows = onlyWhenOff && healthTriageShown ? rows.filter((row) => row.key !== "server") : rows;
+  if (onlyWhenOff && !(settled && systemNeedsAttention(effectiveRows, tr))) return null;
 
   const publicOnly = current?.publicOnly;
   const clock = health.at === null ? null : formatClock(health.at);
   const serverRow = rows.find((row) => row.key === "server");
   const serverDegraded = serverRow?.tone === "warn" || serverRow?.tone === "err";
+  const showReasonsButton = serverDegraded && !(onlyWhenOff && healthTriageShown);
   const reasons = describeHealthReasons(freshDetail ?? current, tr);
 
   const handleToggleReasons = () => {
@@ -317,7 +320,7 @@ export function HomeSystemCard({ campaigns, healthState, mementoState, agents, o
       title={tr("시스템", "System")}
       aside={(
         <span className="flex items-center gap-2">
-          {serverDegraded ? (
+          {showReasonsButton ? (
             <Button
               size="sm"
               variant="ghost"
@@ -354,7 +357,7 @@ export function HomeSystemCard({ campaigns, healthState, mementoState, agents, o
           </KeyValue>
         ))}
       </InspSection>
-      {serverDegraded && reasonsOpen ? (
+      {showReasonsButton && reasonsOpen ? (
         <HealthReasonList reasons={reasons} tr={tr} loading={loadingDetail} />
       ) : null}
       {publicOnly ? (

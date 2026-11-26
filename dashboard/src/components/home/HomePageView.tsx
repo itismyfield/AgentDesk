@@ -100,6 +100,7 @@ export default function HomePageView({
       }),
     [usageRows, rule, sessions, entries, reconciledKeys, health.failed, health.data, tr, isKo],
   );
+  const hasHealthTriage = useMemo(() => triageAlerts.some((alert) => alert.kind === "health"), [triageAlerts]);
 
   const handleReconcileSession = useCallback(async (sessionKey: string) => {
     setBusyKeys((prev) => new Set(prev).add(sessionKey));
@@ -209,7 +210,7 @@ export default function HomePageView({
               onReconcileSession={handleReconcileSession}
               busySessionKeys={busyKeys}
             />
-            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} tr={tr} />
+            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} healthTriageShown={hasHealthTriage} tr={tr} />
           </>
         ) : (
           <div className="flex min-w-0 flex-wrap items-stretch gap-3 sm:gap-4">
@@ -226,7 +227,7 @@ export default function HomePageView({
               busySessionKeys={busyKeys}
               className="flex-[2_1_32.5rem]"
             />
-            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} tr={tr} className="flex-[1_1_18.75rem]" />
+            <HomeSystemCard campaigns={campaigns} healthState={health} mementoState={memento} agents={agents} onlyWhenOff={isMobileViewport} healthTriageShown={hasHealthTriage} tr={tr} className="flex-[1_1_18.75rem]" />
           </div>
         )}
         <HomeAgentsCard
