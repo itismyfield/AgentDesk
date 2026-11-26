@@ -168,7 +168,7 @@ sys.exit(result.returncode)
             inner.provider = provider.clone();
             inner.settings.get_mut().provider = provider.clone();
             inner.api_port = port;
-            inner.token_hash = crate::services::discord::settings::discord_token_hash("test-token");
+            inner.token_hash = crate::utils::discord::discord_token_hash("test-token");
             inner.health_registry = Arc::downgrade(&registry);
         }
         shared

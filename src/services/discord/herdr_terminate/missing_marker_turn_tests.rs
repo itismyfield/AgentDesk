@@ -9,7 +9,6 @@ use crate::services::claude_tui::hook_server::{
     HookEvent, HookServerState, hook_receiver_router_with_state,
 };
 use crate::services::discord::herdr_terminate::root_replaced::CAS_ATTEMPTS;
-use crate::services::discord::recovery_engine::herdr_reader::SocketHerdrReader;
 use crate::services::discord::tui_prompt_relay::herdr_source::{
     HerdrSourceAttach, attach_launched_herdr_source,
 };
@@ -17,6 +16,7 @@ use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::herdr_launch::HerdrLaunchHost;
 use crate::services::provider_auth_profile::ProviderAuthOverlay;
 use crate::services::session_host::HerdrTarget;
+use crate::services::session_host::SocketHerdrReader;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events};
 use crate::services::turn_host::{self, HerdrRefusal, TurnHost};
 use real::missing_marker_rig::{CHANNEL, Case, LOGICAL, TOKEN, child};

@@ -5,7 +5,8 @@
 use poise::serenity_prelude::ChannelId;
 
 use super::DispatchProfile;
-use crate::services::discord::settings::{MemoryBackendKind, ResolvedMemorySettings, RoleBinding};
+use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+use crate::services::discord::settings::RoleBinding;
 use crate::services::memory::{
     UNBOUND_MEMORY_ROLE_ID, resolve_memento_agent_id, resolve_memento_workspace,
     sanitize_memento_workspace_segment,

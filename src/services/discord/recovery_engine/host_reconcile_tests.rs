@@ -3,6 +3,9 @@ use std::sync::Mutex;
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
 use crate::db::dispatched_sessions::hosted_execution::tests::{location, owner, record};
+use crate::services::session_host::{
+    HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, NoHerdrEndpoint,
+};
 use crate::services::session_host::{HerdrMismatch, HerdrUnknown};
 use HerdrExecutionMatch::{Match, Mismatch, Unknown};
 

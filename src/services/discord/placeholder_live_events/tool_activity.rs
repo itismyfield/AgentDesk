@@ -4,8 +4,8 @@ use std::time::Instant;
 use poise::serenity_prelude::ChannelId;
 use serde_json::Value;
 
-use super::tool_summary::{class, safe_tool_summary};
 use crate::config::ToolActivityDisplay;
+use crate::domain::tool_summary::{class, safe_tool_summary};
 use crate::services::agent_protocol::StatusEvent;
 
 const CAPACITY: usize = 64;
@@ -501,7 +501,7 @@ pub(super) fn fit_panel(sections: Vec<String>) -> String {
             if index == 0 {
                 Some(section)
             } else {
-                super::tool_summary::safe_section(&section).or_else(|| {
+                crate::domain::tool_summary::safe_section(&section).or_else(|| {
                     let title = section.lines().next()?;
                     ["Plan", "Tasks", "Subagents", "Workflow"]
                         .contains(&title)

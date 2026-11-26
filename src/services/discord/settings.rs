@@ -24,17 +24,17 @@ use super::org_schema;
 use super::runtime_store;
 use super::runtime_store::{bot_settings_path, discord_uploads_root};
 
-pub(crate) use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
-pub(crate) use crate::services::channel_roles::RegisteredChannelBinding;
-pub(crate) use crate::utils::discord::discord_token_hash;
+use crate::domain::memory::ResolvedMemorySettings;
+pub(crate) use crate::services::channel_roles::{
+    memory_settings_for_role, resolve_agent_memory_settings,
+};
+use crate::utils::discord::discord_token_hash;
 pub(super) use content::{
     channel_upload_dir, cleanup_channel_uploads, cleanup_old_uploads, load_review_tuning_guidance,
     load_role_prompt, load_shared_prompt_for_profile, read_canon_prompt,
     render_peer_agent_guidance,
 };
-pub(crate) use memory::{
-    memory_settings_for_binding, memory_settings_for_role, resolve_agent_memory_settings,
-};
+pub(crate) use memory::memory_settings_for_binding;
 pub(super) use read::{load_bot_settings, load_last_session_path};
 pub use read::{
     load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,

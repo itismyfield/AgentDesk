@@ -4,11 +4,10 @@ use std::path::{Path, PathBuf};
 use poise::serenity_prelude::ChannelId;
 
 use super::DispatchProfile;
-use super::settings::{
-    PeerAgentInfo, RegisteredChannelBinding, RoleBinding, resolve_agent_memory_settings,
-};
+use super::settings::{PeerAgentInfo, RoleBinding, resolve_agent_memory_settings};
 use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config};
 use crate::services::agent_identity::{identity_from_parts, identity_label};
+use crate::services::channel_roles::RegisteredChannelBinding;
 use crate::services::channel_roles::config_projection::default_prompt_path;
 use crate::services::channel_roles::config_projection::{
     binding_provider, default_workspace, find_channel_binding, role_projection_from_channel,

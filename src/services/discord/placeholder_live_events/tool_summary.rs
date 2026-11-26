@@ -1,5 +1,4 @@
 //! Placeholder-side view of `domain::tool_summary`; its tests keep this module path.
-pub(super) use crate::domain::tool_summary::{class, safe_section, safe_tool_summary};
 #[cfg(test)]
 use crate::domain::tool_summary::{description_text, text};
 

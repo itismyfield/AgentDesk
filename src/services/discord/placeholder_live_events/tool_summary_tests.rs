@@ -1,4 +1,4 @@
-use super::{class, safe_section, safe_tool_summary};
+use crate::domain::tool_summary::{class, safe_section, safe_tool_summary};
 use serde_json::json;
 
 fn render(name: &str, value: serde_json::Value) -> Option<String> {

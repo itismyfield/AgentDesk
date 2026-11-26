@@ -237,8 +237,8 @@ where
 #[cfg(test)]
 mod memory_scope_tests {
     use super::*;
+    use crate::domain::memory::MemoryBackendKind;
     use crate::services::discord::prompt_builder::{DispatchProfile, build_system_prompt};
-    use crate::services::discord::settings::MemoryBackendKind;
 
     fn routine_binding_and_hint(group: Option<&str>) -> (settings::RoleBinding, String) {
         let root = tempfile::tempdir().unwrap();

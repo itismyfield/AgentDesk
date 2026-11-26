@@ -8,9 +8,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
 };
 use crate::services::session_host::HerdrExecutionMatch;
-pub(crate) use crate::services::session_host::{
-    HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, NoHerdrEndpoint,
-};
+use crate::services::session_host::HerdrExecutionReader;
 use crate::services::session_host::{HostKind, HostRecover, HostRecovery, host_for};
 use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_marker};
 

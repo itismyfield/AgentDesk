@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::channel_roles::RegisteredChannelBinding;
 use crate::services::provider::ProviderRuntimeExt;
 
 pub(crate) fn channel_supports_provider(

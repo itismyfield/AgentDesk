@@ -10,7 +10,7 @@ use poise::serenity_prelude::ChannelId;
 
 pub(super) fn spawn_memory_capture_task(
     channel_id: ChannelId,
-    capture_memory_settings: settings::ResolvedMemorySettings,
+    capture_memory_settings: crate::domain::memory::ResolvedMemorySettings,
     capture_request: CaptureRequest,
 ) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
@@ -30,7 +30,7 @@ pub(super) fn spawn_memory_capture_task(
 
 pub(in crate::services::discord) fn spawn_memory_reflect_task(
     channel_id: ChannelId,
-    reflect_memory_settings: settings::ResolvedMemorySettings,
+    reflect_memory_settings: crate::domain::memory::ResolvedMemorySettings,
     reflect_request: ReflectRequest,
 ) -> tokio::task::JoinHandle<crate::services::memory::CaptureResult> {
     tokio::spawn(async move {
@@ -190,10 +190,10 @@ mod background_memory_task_tests {
     use poise::serenity_prelude::ChannelId;
     use std::time::{Duration, Instant};
 
-    fn memento_settings() -> settings::ResolvedMemorySettings {
-        settings::ResolvedMemorySettings {
-            backend: settings::MemoryBackendKind::Memento,
-            ..settings::ResolvedMemorySettings::default()
+    fn memento_settings() -> crate::domain::memory::ResolvedMemorySettings {
+        crate::domain::memory::ResolvedMemorySettings {
+            backend: crate::domain::memory::MemoryBackendKind::Memento,
+            ..crate::domain::memory::ResolvedMemorySettings::default()
         }
     }
 
@@ -357,7 +357,7 @@ mod background_memory_task_tests {
         let session = live_session();
         let memento_plan = plan_turn_end_memory(
             &session,
-            settings::MemoryBackendKind::Memento,
+            crate::domain::memory::MemoryBackendKind::Memento,
             false,
             false,
             false,
@@ -366,7 +366,7 @@ mod background_memory_task_tests {
         .expect("active session plan");
         let file_plan = plan_turn_end_memory(
             &session,
-            settings::MemoryBackendKind::File,
+            crate::domain::memory::MemoryBackendKind::File,
             false,
             false,
             false,
@@ -510,13 +510,13 @@ fn build_memento_transcript(history: &[HistoryItem]) -> String {
 
 pub(in crate::services::discord) fn take_memento_reflect_request(
     session: &mut DiscordSession,
-    memory_settings: &settings::ResolvedMemorySettings,
+    memory_settings: &crate::domain::memory::ResolvedMemorySettings,
     provider: &ProviderKind,
     role_binding: Option<&RoleBinding>,
     channel_id: u64,
     reason: SessionEndReason,
 ) -> Option<ReflectRequest> {
-    if memory_settings.backend != settings::MemoryBackendKind::Memento
+    if memory_settings.backend != crate::domain::memory::MemoryBackendKind::Memento
         || !session.memento_context_loaded
         || session.memento_reflected
     {
@@ -599,7 +599,7 @@ pub(super) struct TurnEndMemoryPlan {
 
 pub(super) fn plan_turn_end_memory(
     session: &DiscordSession,
-    backend: settings::MemoryBackendKind,
+    backend: crate::domain::memory::MemoryBackendKind,
     is_prompt_too_long: bool,
     resume_failure_detected: bool,
     terminal_session_reset_required: bool,
@@ -615,7 +615,7 @@ pub(super) fn plan_turn_end_memory(
             session_end_reason: None,
             clear_provider_session: false,
             persist_transcript,
-            analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
+            analyze_recall_feedback: backend == crate::domain::memory::MemoryBackendKind::Memento,
             spawn_capture: false,
         });
     }
@@ -632,13 +632,14 @@ pub(super) fn plan_turn_end_memory(
         session_end_reason,
         clear_provider_session,
         persist_transcript,
-        analyze_recall_feedback: backend == settings::MemoryBackendKind::Memento,
+        analyze_recall_feedback: backend == crate::domain::memory::MemoryBackendKind::Memento,
         // A complete transcript remains in AgentDesk's own session store.
         // Forwarding the raw user/assistant turn to Memento creates a durable
         // episode, which is neither atomic memory nor guaranteed to fit
         // Memento's fragment limits. Keep file-backend capture compatibility,
         // but never schedule the automatic raw-turn writer for Memento.
-        spawn_capture: persist_transcript && backend != settings::MemoryBackendKind::Memento,
+        spawn_capture: persist_transcript
+            && backend != crate::domain::memory::MemoryBackendKind::Memento,
     })
 }
 
