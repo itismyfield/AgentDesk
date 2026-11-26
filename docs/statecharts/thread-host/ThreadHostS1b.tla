@@ -33,10 +33,14 @@ EXTENDS Naturals
 CONSTANTS Mode, Entries
 
 VARIABLES entry, proof, cache, restarted, sinceRestart, restored,
-          restartHost, tmuxOp, relaunch, consent, sync
+          restartHost, tmuxOp, relaunch, consent, sync,
+          \* S2 placement section (SpecS2); constant under Spec.
+          exec, made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, idle, slot
 
 vars == <<entry, proof, cache, restarted, sinceRestart, restored,
           restartHost, tmuxOp, relaunch, consent, sync>>
+s2vars == <<exec, made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, idle, slot>>
+allvars == <<vars, s2vars>>
 
 Threads == {"LiveTmux", "DeadTmux", "ProbeFail", "HerdrBound", "Unresolved", "SlotGc", "LegacyKey"}
 KeyHolders == {"SlotGc", "LegacyKey"}
@@ -111,6 +115,17 @@ SyncOutcome == CASE cache = "Herdr" -> "HerdrPath"
                  [] cache = "None" /\ Mode = "MutUnknownSkipsTmux" -> "Skipped"
                  [] OTHER -> "TmuxPath"
 
+\* ---- S2 placement section: definitions used by Init ----
+S2Entries == {"NewThread", "FreshAfterKill", "ResumeTmux", "TmuxParentThread"}
+HerdrParentS2 == {"NewThread", "FreshAfterKill", "ResumeTmux"}
+S2Init == /\ exec = IF entry \in {"FreshAfterKill", "ResumeTmux"} THEN "LegacyDead" ELSE "None"
+          /\ made = FALSE /\ tabs = 0 /\ tmuxs = 0
+          /\ inq = IF entry \in S2Entries THEN "Queued" ELSE "None"
+          /\ submits = 0
+          \* turn_host.rs:446 o_writer_ready(child, kind) at the first judgement.
+          /\ oready \in (IF entry \in HerdrParentS2 THEN BOOLEAN ELSE {TRUE})
+          /\ epoch = 0 /\ restarts2 = 0 /\ idle = FALSE /\ slot = "Bound"
+
 Init == /\ entry \in Entries
         /\ proof \in {"Ok", "Pending"}
         \* A running process recorded the pane it launched; nothing else is judged yet.
@@ -118,6 +133,7 @@ Init == /\ entry \in Entries
         /\ restarted = FALSE /\ sinceRestart = FALSE /\ restored = TRUE
         /\ restartHost = "None" /\ tmuxOp = "None" /\ relaunch = "None"
         /\ consent = "None" /\ sync = "None"
+        /\ S2Init
 
 
 CmdRestart == /\ restartHost = "None" /\ restartHost' = RestartOutcome
@@ -168,8 +184,9 @@ SyncRead == /\ entry \in Threads /\ sync = "None"
 Next == CmdRestart \/ CmdTmuxOp \/ CmdRelaunch \/ Input \/ Turn \/ Restart \/ BootRestore
         \/ SyncRead
 
-Spec == Init /\ [][Next]_vars /\ WF_vars(CmdRestart) /\ WF_vars(CmdTmuxOp)
-        /\ WF_vars(CmdRelaunch) /\ WF_vars(Input)
+Spec == Init /\ [][Next /\ UNCHANGED s2vars]_allvars
+        /\ WF_allvars(CmdRestart /\ UNCHANGED s2vars) /\ WF_allvars(CmdTmuxOp /\ UNCHANGED s2vars)
+        /\ WF_allvars(CmdRelaunch /\ UNCHANGED s2vars) /\ WF_allvars(Input /\ UNCHANGED s2vars)
 
 TmuxThread == entry \in {"LiveTmux", "DeadTmux"}
 
@@ -205,4 +222,113 @@ RestoredBeforeRead == entry = "HerdrBound" => sync # "TmuxPath"
 
 CommandsAnswer == <>(restartHost # "None" /\ tmuxOp # "None" /\ relaunch # "None"
                      /\ consent # "None")
+
+\* ---- S2 placement section (SpecS2), written against main b04ea56650 ----
+\* Mode "Main" is b04ea56650 (S1a and S1b landed). "S2Naive" is the activation alone: turn_host
+\* sends a Herdr parent's thread without a selector to configured_turn, and nothing else changes
+\* (no first launch permit, boot unplaced pass and idle cleanup as in main). "S2" is the contract
+\* the S2 design must meet. "MutS2*" removes one rule from S2.
+\* Entries (s2-prep entry table):
+\*   NewThread         Herdr parent, new thread, no row, no selector (first human/bot message)
+\*   FreshAfterKill    Herdr parent, legacy row, tmux killed and selector cleared (11-26 18:12)
+\*   ResumeTmux        Herdr parent, legacy row, tmux Missing, selector kept (existing tmux thread)
+\*   TmuxParentThread  thread under a tmux parent
+\* exec: None (no row), LegacyDead (legacy row, no tmux), Tmux (live tmux), Pending (Herdr row
+\* without location, herdr_launch.rs:550), Bound, Retired, Gone (row deleted by thread_gc).
+S2Like == Mode \in {"S2", "MutS2NoPermit", "MutS2NoBootResolve", "MutS2NoRelease",
+                    "MutS2TabNoMarker", "MutS2SelectorIgnored", "MutS2ReplayResubmit"}
+Selector == entry = "ResumeTmux"
+
+\* turn_host.rs resolve: own Retired Herdr goes back to configured_turn; main answers Tmux for every
+\* thread without a Bound row at the parent's endpoint (:239-242); delta 4: a selector keeps tmux.
+LaunchHost == CASE entry = "TmuxParentThread" -> "Tmux"
+                [] exec = "Retired" -> "Herdr"
+                [] Mode = "Main" -> "Tmux"
+                [] Selector /\ Mode # "MutS2SelectorIgnored" -> "Tmux"
+                [] OTHER -> "Herdr"
+\* Without a permit a late child's O writer is not ready: turn_host.rs:446-458 OWriterNotReady.
+PermitMissing == Mode \in {"S2Naive", "MutS2NoPermit"}
+\* Boot unplaced pass: herdr_reader.rs:363 reads herdr_endpoint(owner.channel_id), own boot only.
+BootResolves == S2Like /\ Mode # "MutS2NoBootResolve"
+\* Idle release of a Herdr thread: session_idle_cleanup.rs:75-81 skips any Herdr decision.
+HerdrIdleReleased == S2Like /\ Mode # "MutS2NoRelease"
+Released == {"LegacyDead", "Retired", "Gone"}
+
+\* intake_turn.rs:1940 for_turn -> provider_dispatch.rs:360 drive. Tmux: claude.rs:2602 and
+\* tui_session_launch.rs:93,108 guard only the channel's own boot entry, then the launch and first
+\* prompt (claude_tui/session.rs:499 logs the launch). Herdr: Pending row first.
+Launch == /\ UNCHANGED vars /\ entry \in S2Entries /\ inq = "Queued"
+          /\ exec \in {"None", "LegacyDead", "Retired", "Gone"}
+          /\ IF LaunchHost = "Tmux"
+             THEN /\ exec' = "Tmux" /\ tmuxs' = tmuxs + 1
+                  /\ inq' = "Submitted" /\ submits' = submits + 1
+                  /\ UNCHANGED <<made, epoch>>
+             ELSE IF PermitMissing /\ ~oready
+                  THEN /\ inq' = "Refused"
+                       /\ UNCHANGED <<exec, made, tmuxs, submits, epoch>>
+                  ELSE /\ exec' = "Pending" /\ made' = FALSE /\ epoch' = restarts2
+                       /\ UNCHANGED <<tmuxs, inq, submits>>
+          /\ UNCHANGED <<tabs, oready, restarts2, idle, slot>>
+\* session_host/herdr/launch_host.rs create in this process: answered (Bound) or answer lost.
+\* At most two panes per thread keep the model finite (only MutS2TabNoMarker reaches two).
+Create == /\ UNCHANGED vars /\ exec = "Pending" /\ epoch = restarts2 /\ ~made /\ tabs < 2
+          /\ made' = TRUE /\ tabs' = tabs + 1
+          /\ exec' \in {"Bound", "Pending"}
+          /\ UNCHANGED <<tmuxs, inq, submits, oready, epoch, restarts2, idle, slot>>
+\* Unplaced resolution: the launch's own (herdr_launch/unplaced.rs) or, after a restart, the boot
+\* pass. A found pane is adopted; none retires the row. MutS2TabNoMarker cannot find a tab.
+Resolve == /\ UNCHANGED vars /\ exec = "Pending"
+           /\ IF epoch = restarts2 THEN made ELSE BootResolves
+           /\ exec' = IF made /\ Mode # "MutS2TabNoMarker" THEN "Bound" ELSE "Retired"
+           /\ UNCHANGED <<made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, idle, slot>>
+\* The replayed input meets the unresolved Pending row: turn_host.rs:239-241
+\* HostedHerdrUnconfigured. S2 holds it until the row resolves.
+Rejudge == /\ UNCHANGED vars /\ exec = "Pending" /\ epoch # restarts2 /\ inq = "Queued" /\ ~BootResolves
+           /\ inq' = "Refused"
+           /\ UNCHANGED <<exec, made, tabs, tmuxs, submits, oready, epoch, restarts2, idle, slot>>
+\* claude/herdr_turn first_input submit_owned: the first input once.
+SubmitHerdr == /\ UNCHANGED vars /\ exec = "Bound" /\ inq = "Queued"
+               /\ inq' = "Submitted" /\ submits' = submits + 1
+               /\ UNCHANGED <<exec, made, tabs, tmuxs, oready, epoch, restarts2, idle, slot>>
+\* Process restart: rows and panes stay. MutS2ReplayResubmit replays a submitted input.
+Restart2 == /\ UNCHANGED vars /\ restarts2 = 0 /\ restarts2' = 1
+            /\ inq' = IF Mode = "MutS2ReplayResubmit" /\ inq = "Submitted" /\ exec = "Bound"
+                      THEN "Queued" ELSE inq
+            /\ UNCHANGED <<exec, made, tabs, tmuxs, submits, oready, epoch, idle, slot>>
+\* The turn ended and the thread stayed idle past thread_gc's hour (db/.../thread_gc.rs:69).
+Idle == /\ UNCHANGED vars /\ exec \in {"Tmux", "Bound"} /\ inq = "Submitted" /\ ~idle /\ idle' = TRUE
+        /\ UNCHANGED <<exec, made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, slot>>
+\* session_idle_cleanup.rs:87 skips a channel whose mailbox holds a turn: no release under a queued input.
+ReleaseIdle == /\ UNCHANGED vars /\ idle /\ inq # "Queued"
+               /\ \/ exec = "Tmux" /\ exec' = "LegacyDead" /\ tabs' = tabs
+                  \/ exec = "Bound" /\ HerdrIdleReleased /\ exec' = "Retired" /\ tabs' = tabs - 1
+               /\ UNCHANGED <<made, tmuxs, inq, submits, oready, epoch, restarts2, idle, slot>>
+\* thread_gc deletes only a legacy or retired row with no tmux session
+\* (hosted_cleanup/thread_gc.rs:78-89, migrations 0131 agentdesk_hosted_execution_deletable).
+Gc == /\ UNCHANGED vars /\ idle /\ exec \in {"LegacyDead", "Retired"} /\ exec' = "Gone"
+      /\ UNCHANGED <<made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, idle, slot>>
+\* auto_queue/runtime.rs:498-507 host_decision_for_rows: Bound -> Herdr, Pending -> Hold: skipped.
+SlotReset == /\ UNCHANGED vars /\ idle /\ slot = "Bound" /\ exec \in Released \cup {"Tmux"}
+             /\ slot' = "Reset"
+             /\ UNCHANGED <<exec, made, tabs, tmuxs, inq, submits, oready, epoch, restarts2, idle>>
+
+NextS2 == Launch \/ Create \/ Resolve \/ Rejudge \/ SubmitHerdr \/ Restart2 \/ Idle
+          \/ ReleaseIdle \/ Gc \/ SlotReset
+SpecS2 == Init /\ [][NextS2]_allvars
+          /\ WF_allvars(Launch) /\ WF_allvars(Create) /\ WF_allvars(Resolve)
+          /\ WF_allvars(SubmitHerdr) /\ WF_allvars(Idle) /\ WF_allvars(ReleaseIdle)
+          /\ WF_allvars(Gc) /\ WF_allvars(SlotReset)
+
+\* A new execution under a Herdr parent is Herdr: no tmux session, after restart, thread_gc and
+\* slot reset included (every relaunch goes through Launch).
+NewThreadFollowsParent == entry \in {"NewThread", "FreshAfterKill"} => tmuxs = 0
+ExistingTmuxStaysTmux == entry = "ResumeTmux" => tabs = 0 /\ exec # "Pending"
+TmuxParentStaysTmux == entry = "TmuxParentThread" => tabs = 0 /\ exec # "Pending"
+NoInputRefused == inq # "Refused"
+SingleSubmit == submits <= 1
+NoDuplicatePane == tabs <= 1
+\* Liveness: the first input is placed and submitted; an idle execution and its slot are released.
+FirstInputResolves == <>(submits >= 1)
+EventuallyReleased == [](idle => <>(exec \in Released))
+SlotRotates == [](idle => <>(slot = "Reset"))
 =============================================================================

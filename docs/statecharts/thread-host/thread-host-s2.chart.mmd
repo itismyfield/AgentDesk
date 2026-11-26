@@ -1,0 +1,52 @@
+---
+title: "thread under a Herdr parent: where its new session runs (S2)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Herdr
+    lg1: Tmux
+    lg2: None
+  }
+  class lg0 teal
+  class lg1 tan
+  class lg2 blue
+  s0: Legacy row, no tmux session
+  s1: No session row
+  s2: Herdr row Pending, no pane yet
+  s3: tmux session running
+  s4: tmux session idle
+  s5: Herdr pane bound, first input waiting
+  s6: Herdr pane made, location not recorded
+  s7: Herdr execution retired
+  s8: Herdr pane running
+  s9: Row deleted by thread_gc
+  s10: Herdr pane idle
+  [*] --> s0
+  [*] --> s1
+  s0 --> s2: a queued input starts the thread's session (turn host judges the host)
+  s1 --> s2: a queued input starts the thread's session (turn host judges the host)
+  s0 --> s3: a queued input starts the session on tmux
+  s1 --> s3: a queued input starts the session on tmux
+  s2 --> s5: Herdr creates the pane (answer may be lost)
+  s2 --> s6: Herdr creates the pane (answer may be lost)
+  s3 --> s4: the turn ends and the thread stays idle past an hour
+  s2 --> s7: unplaced row resolved: the pane adopted, or the row retired
+  s4 --> s0: idle cleanup ends the session
+  s5 --> s8: the first input is submitted to the Herdr pane
+  s6 --> s5: unplaced row resolved: the pane adopted, or the row retired
+  s7 --> s2: a queued input starts the thread's session (turn host judges the host)
+  s0 --> s9: thread_gc deletes the row
+  s8 --> s10: the turn ends and the thread stays idle past an hour
+  s10 --> s7: idle cleanup ends the session
+  s7 --> s9: thread_gc deletes the row
+  class s0 blue
+  class s1 blue
+  class s2 teal
+  class s3 tan
+  class s4 tan
+  class s5 teal
+  class s6 teal
+  class s7 teal
+  class s8 teal
+  class s9 blue
+  class s10 teal

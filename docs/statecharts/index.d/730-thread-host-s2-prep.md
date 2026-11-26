@@ -1,0 +1,2 @@
+key: 730-thread-host-s2-prep
+| `thread-host` S2 placement contract (#8118) | `b04ea56650` | Main: `NewThreadFollowsParent` (11-26 18:12 launch: legacy row, tmux killed, selector cleared → tmux, 1 step); S2Naive (activation alone): `NoInputRefused`, liveness `FirstInputResolves`, `EventuallyReleased`, `SlotRotates`; six S2 mutants each RED on their own rule | `ThreadHostS1b` gains a separate `SpecS2` section (S1 configs unchanged). S2 GREEN is the design contract, not code. [Report](thread-host/thread-host-s1b.report.md) |
