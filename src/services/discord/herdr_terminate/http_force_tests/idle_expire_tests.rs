@@ -419,9 +419,8 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
     });
 }
 
-/// The owning bot runs no runtime on a booted server, yet its execution ends, and a Codex owner's
-/// next launch resumes the thread. `moved`: another bot serves the channel now, and its runtime is
-/// never the one that ends the old pane.
+/// With no owner runtime on a booted server the execution still ends and a Codex owner's next launch
+/// resumes the thread. `moved`: another bot, never the one ending the pane, serves the channel.
 fn orphaned(name: &str, moved: bool, codex: bool) {
     let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
         return;
