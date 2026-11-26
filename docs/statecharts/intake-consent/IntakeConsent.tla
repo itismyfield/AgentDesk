@@ -4,7 +4,8 @@
 EXTENDS Naturals
 CONSTANTS Boundary, Mutant, MaxClaims
 ASSUME Boundary \in {"current", "d1", "r2"}
-ASSUME Mutant \in {"none", "forge", "reuse", "stale", "bookkeeping", "owner-only", "open-key"}
+ASSUME Mutant \in {"none", "forge", "reuse", "stale", "bookkeeping", "owner-only", "open-key", "qp3-before",
+                  "qp3-own-endpoint", "qp3-reapply"}
 ASSUME MaxClaims \in 2..3
 Ids == 1..MaxClaims
 EmptyRow == [status |-> "pending", payload |-> "original", source |-> "original",
@@ -229,4 +230,90 @@ ReleaseOnce == s.releases <= 1
 NoEffectsThenRollback == ~s.badAfterEffects /\ s.effects <= 1
 ProofEventuallySettles == \A i \in Ids : (s.a[i].proof \in {"slot", "held"}) ~> (s.a[i].proof = "spent")
 TransactionEventuallyEnds == \A i \in Ids : (s.a[i].pc \in {"wantLock", "ownerLocked", "read", "commit"}) ~> (s.a[i].pc = "done")
+
+\* Card and custody protocol after a durable hold. The older Spec still
+\* checks the before-effects proof and CAS; this spec starts after that boundary.
+ParentEndpoint == "parent"
+Qp3Intents == [i \in {"child", "sibling"} |->
+    [channel |-> i, provider |-> "claude", source |-> <<i, 31>>,
+     generation |-> 7, ticket |-> <<i, 7>>]]
+NoCard == [channel |-> "none", message |-> 0, nonce |-> 0]
+Qp3Card(n) == [channel |-> "child", message |-> 900 + n, nonce |-> n]
+Qp3Init ==
+    s = [phase |-> "held", endpoint |-> ParentEndpoint, card |-> NoCard,
+         intents |-> Qp3Intents, releases |-> [i \in DOMAIN Qp3Intents |-> 0],
+         effects |-> 0, effectsAtApply |-> 0,
+         restarted |-> FALSE, ready |-> TRUE, replays |-> 0]
+
+Qp3Endpoint(channel) ==
+    IF Mutant = "qp3-before"
+    THEN IF channel = "child" THEN "none" ELSE "child-own"
+    ELSE ParentEndpoint
+
+IssueCard ==
+    /\ s.phase = "held"
+    /\ Qp3Endpoint("child") = s.endpoint
+    /\ s' = [s EXCEPT !.phase = "pending", !.card = Qp3Card(1)]
+
+CardSendFailed ==
+    /\ s.phase = "held"
+    /\ s' = [s EXCEPT !.phase = "retry"]
+
+Retry(channel, intent) ==
+    /\ s.phase = "retry"
+    /\ channel = intent.channel
+    /\ intent \in {s.intents[i] : i \in DOMAIN s.intents}
+    /\ Qp3Endpoint(channel) = s.endpoint
+    /\ Qp3Endpoint("child") = s.endpoint
+    /\ s' = [s EXCEPT !.phase = "pending", !.card = Qp3Card(2)]
+
+CardMatches(card, actor, provider) ==
+    /\ card = s.card /\ actor = "owner" /\ provider = "claude"
+    /\ (IF Mutant = "qp3-own-endpoint" THEN "child-own" ELSE Qp3Endpoint(card.channel))
+        = s.endpoint
+
+Decide(card, actor, provider) ==
+    /\ s.phase = "pending"
+    /\ CardMatches(card, actor, provider)
+    /\ s' = [s EXCEPT !.phase = "accepted"]
+
+ApplyConsent ==
+    /\ s.phase = "accepted"
+    /\ s' = [s EXCEPT !.phase = "applied", !.effects = @ + 1,
+                  !.effectsAtApply = s.effects + 1]
+
+RestartApplied ==
+    /\ s.phase = "applied" /\ ~s.restarted
+    /\ s' = [s EXCEPT !.restarted = TRUE, !.ready = FALSE]
+
+ReplayApplied ==
+    /\ s.phase = "applied" /\ s.replays < 2
+    /\ Qp3Endpoint(s.card.channel) = s.endpoint
+    /\ s' = [s EXCEPT !.ready = TRUE, !.replays = @ + 1,
+                  !.effects = IF Mutant = "qp3-reapply" THEN @ + 1 ELSE @]
+
+ReleaseOriginal(i) ==
+    /\ s.phase = "applied" /\ s.ready
+    /\ s.intents[i] = Qp3Intents[i] /\ s.releases[i] = 0
+    /\ s' = [s EXCEPT !.releases[i] = 1]
+
+OwnerDecision == Decide(s.card, "owner", "claude")
+Qp3IssueOrRetry == IssueCard \/ Retry("child", Qp3Intents["child"])
+Qp3Next ==
+    \/ IssueCard \/ CardSendFailed
+    \/ \E channel \in {"child", "sibling"}, i \in DOMAIN Qp3Intents :
+        Retry(channel, Qp3Intents[i])
+    \/ \E n \in {1, 2}, message \in {901, 902}, channel \in {"child", "sibling"},
+          actor \in {"owner", "other"}, provider \in {"claude", "codex"} :
+        Decide([channel |-> channel, message |-> message, nonce |-> n], actor, provider)
+    \/ ApplyConsent \/ RestartApplied \/ ReplayApplied
+    \/ \E i \in DOMAIN Qp3Intents : ReleaseOriginal(i)
+
+SpecQp3 == Qp3Init /\ [][Qp3Next]_vars
+    /\ WF_vars(Qp3IssueOrRetry) /\ WF_vars(OwnerDecision) /\ WF_vars(ApplyConsent)
+
+EffectAtMostOnce == s.effects <= 1 /\ s.intents = Qp3Intents
+    /\ \A i \in DOMAIN s.releases : s.releases[i] \in 0..1
+EffectEventuallyOne == <>(s.effects = 1)
+ReplayAddsNoEffect == s.replays > 0 => s.effects = s.effectsAtApply
 =============================================================================

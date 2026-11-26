@@ -66,6 +66,9 @@ python3 scripts/ci/statechart_index.py --output docs/statecharts/index.generated
 Open the generated index alongside this README for working relative links. The PR and main
 contracts jobs publish the full tables and an index change summary as an artifact named `statechart-index-*`.
 
+The [Q-P3 consent row](index.d/051-intake-consent-parent-endpoint.md) checks consent for an already held
+child original against the parent's endpoint, including retry, receipt replay and exact custody.
+
 The [clear-authorities integration row](index.d/650-input-single-path-clear-authorities.md) records the
 historical **41ace S2-before** public-Ready/invalid-certificate scenario and DualCoupled
 counterexample. Latest B1 public readiness requires a current certificate,
