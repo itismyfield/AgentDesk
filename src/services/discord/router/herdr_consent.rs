@@ -13,7 +13,7 @@ use crate::services::provider::ProviderKind;
 use crate::services::session_host::policy::{
     PeerSource,
     consent::{
-        self, Consent, ConsentStore, State,
+        self, Consent, ConsentKey, ConsentStore, State,
         engine::{Engine, Event},
         preview,
     },
@@ -42,6 +42,29 @@ pub(in crate::services::discord) fn endpoint(channel: u64) -> Option<HerdrLaunch
     })
 }
 
+fn endpoint_scope(channel: u64) -> (u64, bool) {
+    use crate::services::session_host::surface_policy::{Relation, relation};
+
+    match relation(channel) {
+        Relation::Child { parent } => (parent, true),
+        Relation::NotChild | Relation::Unresolved => (channel, false),
+    }
+}
+
+/// The checked parent supplies consent's server. Cards and inputs keep their own channels.
+pub(in crate::services::discord) fn consent_endpoint(channel: u64) -> Option<HerdrLaunchEndpoint> {
+    endpoint(endpoint_scope(channel).0)
+}
+
+pub(in crate::services::discord) fn matches_endpoint(
+    endpoint: &HerdrLaunchEndpoint,
+    key: &ConsentKey,
+) -> bool {
+    endpoint.execution_node == key.node
+        && endpoint.socket_addr.as_str() == key.socket.to_string_lossy().as_ref()
+        && endpoint.herdr_session == key.named_session
+}
+
 fn require_local(endpoint: &HerdrLaunchEndpoint) -> Result<(), String> {
     local_gateway(&endpoint.execution_node, "retry")
 }
@@ -55,20 +78,21 @@ fn local_gateway(execution_node: &str, command: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn source(consent: &Consent) -> Result<Arc<dyn PeerSource>, String> {
+fn verified_endpoint(consent: &Consent) -> Result<HerdrLaunchEndpoint, String> {
     let endpoint =
-        endpoint(consent.channel).ok_or("user-default consent endpoint is unavailable")?;
-    if endpoint.execution_node != consent.key.node
-        || endpoint.socket_addr.as_str() != consent.key.socket.to_string_lossy().as_ref()
-        || endpoint.herdr_session != consent.key.named_session
-    {
+        consent_endpoint(consent.channel).ok_or("user-default consent endpoint is unavailable")?;
+    if !matches_endpoint(&endpoint, &consent.key) {
         return Err("consent endpoint changed; preserve held inputs".into());
     }
     // SAFETY: geteuid has no preconditions and cannot fail.
     if consent.key.user != unsafe { libc::geteuid() } {
         return Err("consent execution user changed; preserve held inputs".into());
     }
-    peer(&endpoint)
+    Ok(endpoint)
+}
+
+fn source(consent: &Consent) -> Result<Arc<dyn PeerSource>, String> {
+    peer(&verified_endpoint(consent)?)
 }
 
 fn peer(endpoint: &HerdrLaunchEndpoint) -> Result<Arc<dyn PeerSource>, String> {
@@ -130,7 +154,7 @@ pub(super) async fn component(
     component: &serenity::ComponentInteraction,
     data: &Data,
 ) -> Result<bool, Error> {
-    let Some(configured) = endpoint(component.channel_id.get()) else {
+    let Some(configured) = consent_endpoint(component.channel_id.get()) else {
         return Ok(false);
     };
     let Some(click) = consent::card::parse(&component.data.custom_id) else {
@@ -213,7 +237,8 @@ pub(in crate::services::discord) async fn retry(
     if text.split_whitespace().eq(["!herdr", "consent", "return"]) {
         return return_input::handle(ctx, msg, data, channel).await;
     }
-    let Some(configured) = endpoint(channel.get()) else {
+    let (scope, inherited) = endpoint_scope(channel.get());
+    let Some(configured) = endpoint(scope) else {
         return Ok(false);
     };
     if !text.split_whitespace().eq(["!herdr", "consent", "retry"]) {
@@ -250,13 +275,14 @@ pub(in crate::services::discord) async fn retry(
         };
         let mut matching = load().await?;
         if matching.is_empty() {
-            if data
-                .shared
-                .mailbox(channel)
-                .snapshot()
-                .await
-                .intervention_queue
-                .is_empty()
+            if inherited
+                || data
+                    .shared
+                    .mailbox(channel)
+                    .snapshot()
+                    .await
+                    .intervention_queue
+                    .is_empty()
             {
                 return Err(
                     "보류한 herdr 동의가 없습니다. 입력을 새로 만들거나 실행하지 않았습니다."
@@ -274,6 +300,9 @@ pub(in crate::services::discord) async fn retry(
             matching = load().await?;
         }
         for consent in matching {
+            if !matches_endpoint(&configured, &consent.key) {
+                return Err("consent command endpoint changed; preserve held inputs".into());
+            }
             crate::services::discord::validate_live_channel_routing(
                 ctx,
                 &data.provider,
@@ -282,15 +311,14 @@ pub(in crate::services::discord) async fn retry(
             )
             .await
             .map_err(|_| "consent card provider/channel binding changed".to_string())?;
-            let peer = source(&consent)?;
+            let target = verified_endpoint(&consent)?;
+            let peer = peer(&target)?;
             // Replaying an Applied receipt needs no fresh evidence; a new generation's card does.
             let prepared = if consent.state != State::Applied || consent.needs_new_generation() {
                 let revision = consent.preview.revision.checked_add(1);
                 let revision = revision.ok_or("consent revision exhausted")?;
                 // A fresh card needs a live server; its preview then names that new server.
-                if let Some(target) = endpoint(consent.channel) {
-                    crate::services::session_host::autostart::spawn::ensure(&target).await;
-                }
+                crate::services::session_host::autostart::spawn::ensure(&target).await;
                 Some(preview::prepare(peer, revision).await?)
             } else {
                 None

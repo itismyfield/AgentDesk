@@ -144,9 +144,12 @@ impl ClearReport {
     ) {
         use crate::services::discord::router::herdr_consent;
         use crate::services::turn_orchestrator as queue;
-        if herdr_consent::endpoint(channel.get()).is_none() || !self.failed.is_empty() {
+        if !self.failed.is_empty() {
             return;
         }
+        let Some(endpoint) = herdr_consent::consent_endpoint(channel.get()) else {
+            return;
+        };
         let Some(discarded) = &self.discarded else {
             return;
         };
@@ -191,6 +194,9 @@ impl ClearReport {
             present.extend(snapshot.pending_user_dispatch_source_ids);
             let store = herdr_consent::store();
             for (mut consent, intents) in store.unresolved()? {
+                if !herdr_consent::matches_endpoint(&endpoint, &consent.key) {
+                    continue;
+                }
                 for intent in intents {
                     if intent.store == "mailbox"
                         && intent.provider == provider.as_str()

@@ -584,7 +584,7 @@ pub(crate) async fn dispatch_text_intake(
 /// Channel opt-in retains source projection; final execution still needs its supported scope.
 pub(crate) fn checkpoint_waits_for_admission(channel_id: serenity::ChannelId) -> bool {
     #[cfg(unix)]
-    if super::herdr_consent::endpoint(channel_id.get()).is_some() {
+    if super::herdr_consent::consent_endpoint(channel_id.get()).is_some() {
         return true;
     }
     replay_admission::dormant_start(&channel_id.get().to_string()).is_none()
@@ -613,8 +613,9 @@ pub(crate) fn dispatch_live_text_intake<'a, 'b: 'a>(
         super::herdr_consent::admission::tests::after_preflight(&submission).await;
         let waits = admission_waits_for_custody(&admission);
         #[cfg(unix)]
-        let waits =
-            waits || super::herdr_consent::endpoint(submission.request.channel_id.get()).is_some();
+        let waits = waits
+            || super::herdr_consent::consent_endpoint(submission.request.channel_id.get())
+                .is_some();
         // An owner admission moves the checkpoint only once it is Accepted.
         let waits = waits
             || super::super::queue_io::input_ingress::adopt(
@@ -893,7 +894,7 @@ pub(in crate::services::discord::router) async fn defer_live_submission(
         intervention.source_message_queued_generations.push(queued);
     }
     #[cfg(unix)]
-    if super::herdr_consent::endpoint(channel_id.get()).is_some() {
+    if super::herdr_consent::consent_endpoint(channel_id.get()).is_some() {
         let origin = format!("{:?}", submission.origin);
         for source in &mut intervention.source_message_queued_generations {
             source.origin = Some(origin.clone());

@@ -96,11 +96,9 @@ pub(super) struct LiveOwner {
 #[async_trait::async_trait]
 impl Owner for LiveOwner {
     async fn current(&mut self, consent: &Consent) -> Result<Current, String> {
-        let installed =
-            super::endpoint(consent.channel).ok_or("consent endpoint is no longer user-default")?;
-        if installed.execution_node != consent.key.node
-            || installed.socket_addr.as_str() != consent.key.socket.to_string_lossy().as_ref()
-            || installed.herdr_session != consent.key.named_session
+        let installed = super::consent_endpoint(consent.channel)
+            .ok_or("consent endpoint is no longer user-default")?;
+        if !super::matches_endpoint(&installed, &consent.key)
             || consent.provider != self.provider.as_str()
         {
             return Err("consent endpoint/provider changed; preserve held inputs".into());
