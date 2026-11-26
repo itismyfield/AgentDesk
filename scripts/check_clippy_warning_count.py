@@ -7,7 +7,11 @@ import re
 import subprocess
 from pathlib import Path
 
-COMMAND = "cargo clippy --workspace --all-targets --all-features -- -W clippy::all"
+COMMAND_ROLLOUT = (
+    "cargo clippy --workspace --all-targets --all-features -- -W clippy::all",
+    "cargo clippy --workspace --all-targets --features adk-base/test-support -- -W clippy::all",
+)
+COMMAND = COMMAND_ROLLOUT[1]
 ENVIRONMENT = ("toolchain", "host", "rustc_commit", "runner", "command")
 
 
@@ -45,12 +49,12 @@ def toolchain():
                 rustc_verbose=rustc, clippy_version=clippy)
 
 
-def load_baseline(text):
+def load_baseline(text, *, expected_command=COMMAND):
     baseline = json.loads(text)
     if (not isinstance(baseline, dict) or baseline.get("schema") != 1
             or type(baseline.get("warnings")) is not int or baseline["warnings"] < 0
             or any(not isinstance(baseline.get(key), str) or not baseline[key] for key in ENVIRONMENT)
-            or baseline["command"] != COMMAND):
+            or (expected_command is not None and baseline["command"] != expected_command)):
         raise ValueError("invalid warning baseline")
     return baseline
 
@@ -64,10 +68,18 @@ def enforce(report, path, base_ref):
     base = subprocess.check_output(["git", "rev-parse", "--verify", "--end-of-options", base_ref + "^{commit}"], text=True).strip()
     present = subprocess.check_output(["git", "ls-tree", "--name-only", base, "--", relative], text=True).strip()
     if present:
-        previous = load_baseline(subprocess.check_output(["git", "show", base + ":" + relative], text=True))
+        previous = load_baseline(
+            subprocess.check_output(["git", "show", base + ":" + relative], text=True),
+            expected_command=None,
+        )
         if baseline["warnings"] > previous["warnings"]:
             raise ValueError("warning baseline increase is forbidden")
-        if any(baseline[key] != previous[key] for key in ENVIRONMENT):
+        changed = {key for key in ENVIRONMENT if baseline[key] != previous[key]}
+        if changed and not (
+            changed == {"command"}
+            and (previous["command"], baseline["command"]) == COMMAND_ROLLOUT
+            and baseline.get("command_rollout_from") == previous["command"]
+        ):
             raise ValueError("warning baseline environment change requires a separate rollout")
     report.update(baseline=baseline["warnings"], baseline_base=base)
     if report["warnings"] > baseline["warnings"]:
