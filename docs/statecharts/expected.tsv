@@ -684,6 +684,11 @@ input-single-path/HerdrInputHoldRestartUnreadable.cfg	HerdrInputHold	-	HoldEvent
 input-single-path/HerdrInputHoldSecondHold.cfg	HerdrInputHold	-	-
 input-single-path/HerdrInputHoldStashOther.cfg	HerdrInputHold	-	-
 input-single-path/HerdrInputHoldUnreadable.cfg	HerdrInputHold	-	HoldEventuallyReleased,LaterInputStarts
+input-single-path/HerdrWatcherCompletionAfter.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionBefore.cfg	HerdrWatcherCompletion	NoSilentLoss	HeldEventuallyDelivered
+input-single-path/HerdrWatcherCompletionBoundaries.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionIgnoreIdentity.cfg	HerdrWatcherCompletion	ExactFrameAuthority	-
+input-single-path/HerdrWatcherCompletionRestart.cfg	HerdrWatcherCompletion	-	-
 input-single-path/I7651RestartAfter.cfg	I7651Restart	-	-
 input-single-path/I7651RestartBlindRetry.cfg	I7651Restart	ClosedNoticeWasDelivered,NoticeAtMostOnce	-
 input-single-path/I7651RestartDecisive.cfg	I7651Restart	-	-

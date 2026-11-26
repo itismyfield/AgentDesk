@@ -1,15 +1,7 @@
-//! #3894 — reconcile/backstop finalize cluster split out of `turn_finalizer.rs`.
-//!
-//! PURE MOVE (no logic change): the timer-driven `reconcile` pass (expired
-//! delivery-lease reclaim, deadline-armed gate-timeout finalize, the #3277
-//! proven-terminal fast-path probe, the #3016 phase-5a watcher far-backstop, and
-//! TTL GC) plus its `run_backstop_finalize` helper, lifted verbatim. The parent
-//! re-imports `reconcile` (`use self::reconcile::reconcile`) so the actor loop's
-//! `select!` arm stays byte-identical. The lone discord-module reference
-//! (`super::lease_now_ms()`) is rewritten to its absolute path; the bodies are
-//! otherwise identical.
+//! Timer-driven lease recovery, deadline finalization, and ledger expiry.
 
 use super::completion_admission::publish_claimed_queue_eligible;
+use super::watcher_backstop::watcher_backstop_check;
 use super::*;
 
 #[cfg(unix)]
@@ -36,12 +28,25 @@ async fn run_backstop_finalize(
     shared: &Arc<SharedData>,
     now: Instant,
 ) {
-    match ledger.get_mut(&ledger_key) {
-        Some(entry) if entry.phase == Phase::Pending && generic_backstop_allowed(entry) => {
-            entry.phase = Phase::Finalizing;
-        }
-        _ => return,
+    let Some(entry) = ledger
+        .get_mut(&ledger_key)
+        .filter(|entry| entry.phase == Phase::Pending)
+    else {
+        return;
+    };
+    if !generic_backstop_allowed(entry) {
+        tracing::debug!(
+            channel_id = ledger_key.channel_id.get(),
+            user_msg_id = ledger_key.user_msg_id,
+            generation = ledger_key.generation,
+            provider = provider.as_str(),
+            reason = "native_input",
+            event = "watcher_backstop_native_input_guard",
+            "generic backstop skipped for native input"
+        );
+        return;
     }
+    entry.phase = Phase::Finalizing;
     // Backstop finalize: the deferred terminal originated from the watcher but
     // no caller is around to clear inflight, so the backstop context clears it
     // here — and the row, still on disk, feeds the marker-ensure row fallback.
@@ -347,14 +352,33 @@ pub(super) async fn reconcile(
         // the deadline; a still-live one EXTENDS its backstop a full horizon.
         // A fast-path-PULLED deadline stays STRICT (codex r1) so a transiently
         // absent/stale handle cannot smuggle a busy turn past the third check.
-        if watcher_backstop_turn_is_terminal(shared, turn_key, &provider, !pulled) {
-            run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
-        } else if let Some(entry) = ledger.get_mut(&ledger_key) {
-            if entry.phase == Phase::Pending {
+        match watcher_backstop_check(shared, turn_key, &provider, !pulled) {
+            Ok(()) => {
+                run_backstop_finalize(ledger, ledger_key, turn_key, provider, shared, now).await;
+            }
+            Err(reason) => {
+                let Some(entry) = ledger
+                    .get_mut(&ledger_key)
+                    .filter(|entry| entry.phase == Phase::Pending)
+                else {
+                    continue;
+                };
                 entry.watcher_backstop_deadline = Some(now + WATCHER_REGISTER_BACKSTOP);
                 // #3277: re-prove from scratch on the restored generous horizon.
                 entry.watcher_backstop_deadline_pulled = false;
                 entry.watcher_backstop_terminal_streak = 0;
+                if pulled {
+                    tracing::info!(
+                        channel_id = ledger_key.channel_id.get(),
+                        user_msg_id = ledger_key.user_msg_id,
+                        generation = ledger_key.generation,
+                        provider = provider.as_str(),
+                        reason,
+                        event = "watcher_backstop_deadline_extended",
+                        extension_secs = WATCHER_REGISTER_BACKSTOP.as_secs(),
+                        "watcher backstop strict re-check deferred and extended the deadline"
+                    );
+                }
             }
         }
     }

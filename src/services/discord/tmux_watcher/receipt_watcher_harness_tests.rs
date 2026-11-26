@@ -8,6 +8,150 @@ const T0: &str = "I7340 T0 delivered before the watcher started";
 const BODY: &str = "I7340 answer the restored watcher relays";
 const ORIGIN: &str = "G-watcher-origin";
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, mark_herdr};
+    use crate::services::discord::inflight::{
+        GuardedSaveOutcome, InflightTurnIdentity, RelayOwnerKind,
+        stamp_runtime_handoff_if_matches_identity,
+    };
+    use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
+
+    let test = "i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let prefix = format!("{}{}{}", user("earlier question"), said(T0), stop());
+    let start = prefix.len() as u64;
+    let mut h = Harness::on(432, &prefix, Some(pool.clone())).await;
+    h.commit(0, start);
+    let mut prelaunch = InflightTurnState::new(
+        CLAUDE,
+        h.channel.get(),
+        None,
+        7,
+        8_432_000_001,
+        0,
+        "question".to_string(),
+        None,
+        Some(h.tmux.clone()),
+        None,
+        None,
+        0,
+    );
+    prelaunch.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+    prelaunch.turn_source = TurnSource::Managed;
+    prelaunch.turn_nonce = Some("i8432-turn".to_string());
+    prelaunch.input_origin_ids = vec!["i8432-origin".to_string()];
+    mark_herdr(
+        &pool,
+        &h.shared.token_hash,
+        &mut prelaunch,
+        std::path::Path::new(&h.path),
+        HELD[4],
+    )
+    .await;
+    std::fs::write(&h.path, prefix).unwrap();
+    let saved = prelaunch.herdr_turn_start.as_mut().unwrap();
+    saved.start.offset = start;
+    let at = (saved.start.submitted_at.unwrap() + chrono::Duration::seconds(1)).to_rfc3339();
+    h.save(&prelaunch);
+    let prelaunch = h.row().unwrap();
+    let mut handoff = prelaunch.clone();
+    handoff.output_path = Some(h.path.clone());
+    handoff.last_offset = start;
+    handoff.set_relay_owner_kind(RelayOwnerKind::Watcher);
+    assert_eq!(
+        stamp_runtime_handoff_if_matches_identity(
+            (&prelaunch, &mut handoff),
+            &InflightTurnIdentity::from_state(&prelaunch),
+            test,
+        ),
+        GuardedSaveOutcome::Saved
+    );
+    let restored = h.row().unwrap();
+    assert_eq!(restored.turn_start_offset, Some(0));
+    assert_eq!(
+        restored.herdr_turn_start.as_ref().unwrap().start.offset,
+        start
+    );
+    drop(start_live_turn(&h, &restored, restored.turn_nonce.clone()).await);
+    let generation = h.shared.restart.current_generation;
+    let key = TurnKey::new(h.channel, restored.user_msg_id, generation)
+        .with_episode_nonce(restored.turn_nonce.as_deref());
+    h.shared
+        .turn_finalizer
+        .register_start_with_completion_admission(
+            key,
+            CLAUDE,
+            RelayOwnerKind::Watcher,
+            CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+            &h.shared,
+        );
+    assert!(
+        h.shared
+            .turn_finalizer
+            .has_live_watcher_pending(h.channel, generation)
+            .await
+    );
+    h.spawn(start);
+    let body = "i8432 answer from the handed-off watcher";
+    let frame = [
+        serde_json::json!({"type":"user", "timestamp":at, "message":{"role":"user","content":"question"}}),
+        serde_json::json!({"type":"assistant", "timestamp":at, "message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":body}]}}),
+        serde_json::json!({"type":"system", "timestamp":at, "subtype":"stop_hook_summary"}),
+        serde_json::json!({"type":"system", "timestamp":at, "subtype":"turn_duration"}),
+    ]
+    .map(|line| format!("{line}\n"))
+    .concat();
+    h.append(frame.as_bytes());
+    h.until("soft terminal relay decision", |h| !h.frames().is_empty())
+        .await;
+    assert!(
+        h.events("relay flight recorder").iter().any(|line| {
+            field(line, "terminal_kind").as_deref() == Some("soft_stop_hook_summary")
+        })
+    );
+    assert!(
+        h.frames()
+            .iter()
+            .any(|(from, _, route)| { *from == start && route == "watcher_direct" }),
+        "expected direct authority for the suffix, got {:?}",
+        h.frames()
+    );
+    h.drained("terminal frame").await;
+    h.until("reply and terminal retirement", |h| {
+        h.showing(body) && h.row().is_none()
+    })
+    .await;
+    assert_eq!(h.observe(&[body]).copies[0].len(), 1);
+    assert!(
+        h.shared
+            .mailbox(h.channel)
+            .snapshot()
+            .await
+            .cancel_token
+            .is_none()
+    );
+    assert!(
+        !h.shared
+            .turn_finalizer
+            .has_live_watcher_pending(h.channel, generation)
+            .await
+    );
+    assert_eq!(
+        receipt(&pool, restored.user_msg_id, h.channel).await,
+        Some((vec!["i8432-origin".to_string()], "completed".to_string()))
+    );
+    h.cancel();
+    h.exited("watcher exit").await;
+    pool.close().await;
+    db.drop().await;
+}
+
 async fn receipt(
     pool: &sqlx::PgPool,
     user_msg_id: u64,
