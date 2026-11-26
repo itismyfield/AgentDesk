@@ -226,6 +226,14 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
                     (root / source).parent.mkdir(parents=True, exist_ok=True)
                     (root / parent).write_text(declaration, encoding="utf-8")
                     (root / source).write_text("mod windows_contract { #[cfg(test)] mod tests { #[test] fn " + test_id.rsplit("::", 1)[1] + "() {} } }\n", encoding="utf-8")
+                if mutation == "worker_recovery_removed":
+                    (root / "src/lib.rs").write_text("mod services;\n", encoding="utf-8")
+                    shutil.rmtree(root / "src/server")
+                elif mutation == "runtime_store_removed":
+                    (root / "src/adk_runtime_lib.rs").write_text("pub mod services {\n    pub mod discord {}\n}\n", encoding="utf-8")
+                    (root / "src/services/discord/runtime_store.rs").unlink()
+                elif mutation == "runtime_store_id_removed":
+                    (root / "src/services/discord/runtime_store.rs").write_text("mod windows_contract { #[cfg(test)] mod tests {} }\n", encoding="utf-8")
             governed = root / LEXICAL.source
             original = root / "lexical.original"
             if governed.exists():
@@ -303,6 +311,16 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
         missing = self.run_fixture(runner=True, mode="missing_windows_refusal")
         self.assertEqual(missing.result.returncode, 4, missing.result.stderr)
         self.assertEqual(missing.calls[-1], expected)
+
+    def test_runner_fails_when_a_required_owner_selects_nothing_and_still_runs_the_rest(self) -> None:
+        # Losing either owner (declaration and file, or only its test) must fail the runner, not skip the others.
+        for mutation, survivor in (("runtime_store_removed", "agentdesk"), ("runtime_store_id_removed", "agentdesk"),
+                                   ("worker_recovery_removed", "adk-runtime")):
+            with self.subTest(mutation=mutation):
+                outcome = self.run_fixture(runner=True, mutation=mutation)
+                self.assertNotEqual(outcome.result.returncode, 0, outcome.result.stdout)
+                self.assertEqual([call.split()[2] for call in outcome.calls[:-1]], [survivor], outcome.calls)
+                self.assertTrue(outcome.calls[-1].startswith("nextest run --workspace --lib "), outcome.calls)
 
     def test_runner_seals_this_checkout_and_names_compiled_windows_targets(self) -> None:
         # The fixtures above model the crate layout by hand; this seals the committed runner against the checkout.
