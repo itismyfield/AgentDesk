@@ -339,6 +339,11 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
     read(BOOT.get())
 }
 
+/// Whether the boot host policy has been published.
+pub(crate) fn boot_policy_published() -> bool {
+    with_boot(|boot| boot.is_some())
+}
+
 pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
     #[cfg(any(test, feature = "test-support"))]
     if FORCED.with(|forced| forced.borrow().is_some()) {

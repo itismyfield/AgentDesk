@@ -12,7 +12,7 @@ pub(crate) async fn archive_duplicate_slot_threads(
     candidate_thread_ids: &[String],
 ) {
     if expected_parent == 0
-        || !crate::config::session_hosts::with_boot(|boot| boot.is_some())
+        || !crate::config::session_hosts::boot_policy_published()
         || !matches!(parent_policy(expected_parent), PolicyHost::Tmux)
     {
         return;
