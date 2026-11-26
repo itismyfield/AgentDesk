@@ -31,18 +31,18 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 pub(super) const CHANNEL: u64 = 584_521;
 
 #[derive(Default)]
-pub(crate) struct Port {
+pub struct Port {
     pub(super) history_override: Mutex<Option<Vec<SeenMessage>>>,
     pub(super) history_reads: std::sync::atomic::AtomicUsize,
     pub(super) posts: Mutex<Vec<String>>,
     /// Runs inside each POST's first poll, under the gate and any record lock.
     pub(super) on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
-    pub(crate) delay: Mutex<Option<std::time::Duration>>,
+    pub delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl Port {
-    pub(crate) fn posts(&self) -> Vec<String> {
+    pub fn posts(&self) -> Vec<String> {
         self.posts.lock().unwrap().clone()
     }
 }
@@ -102,11 +102,11 @@ impl DiscordPort for Port {
     }
 }
 
-pub(crate) struct Lease;
+pub struct Lease;
 
 thread_local! {
     /// While set, every lease on this thread is held elsewhere.
-    pub(crate) static LEASE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    pub static LEASE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 impl DeliveryLease for Lease {
@@ -127,7 +127,7 @@ impl AlarmSink for Alarms {
 }
 
 /// An in-memory Codex binding log whose seq notice moves with each bind.
-pub(crate) struct Bindings {
+pub struct Bindings {
     channel: u64,
     events: Mutex<Vec<BindingEvent>>,
     notice: watch::Sender<u64>,
@@ -138,7 +138,7 @@ impl Bindings {
         Self::on(CHANNEL)
     }
 
-    pub(crate) fn on(channel: u64) -> Arc<Self> {
+    pub fn on(channel: u64) -> Arc<Self> {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
         Arc::new(Self {
             channel,
@@ -147,7 +147,7 @@ impl Bindings {
         })
     }
 
-    pub(crate) fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
+    pub fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
         let mut events = self.events.lock().unwrap();
         let seq = events.len() as u64 + 1;
         let evidence = BindingEvidence {
@@ -188,7 +188,7 @@ impl BindingEvents for Bindings {
 
 pub(crate) type Writer = ChannelWriter<Port, Lease, Alarms>;
 
-pub(crate) fn owed_writer(store: ChannelStore) -> (Writer, Arc<Port>) {
+pub fn owed_writer(store: ChannelStore) -> (Writer, Arc<Port>) {
     let (gate, port) = (
         Arc::new(OwnershipGate::default()),
         Arc::new(Port::default()),
@@ -222,7 +222,7 @@ pub(super) fn append(path: &Path, lines: &[String]) {
     file.write_all(lines.concat().as_bytes()).unwrap();
 }
 
-pub(crate) fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
+pub fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
     let runtime = tempfile::tempdir().unwrap();
     let head = header("s1");
     let path = runtime.path().join("a.jsonl");
@@ -254,7 +254,7 @@ pub(crate) fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId)
     (runtime, store, source)
 }
 
-pub(crate) fn opened(store: &OStore) -> ChannelStore {
+pub fn opened(store: &OStore) -> ChannelStore {
     let era = store.read_era().unwrap().unwrap();
     let channel = era.initial_channels[0];
     store.open_channel(&era, channel).unwrap().unwrap()
@@ -294,9 +294,9 @@ pub(super) fn payload(work: &OwedWork) -> &str {
 }
 
 /// Opens the readiness gate for one channel on this thread and forgets its records on drop.
-pub(crate) struct Gate(u64);
+pub struct Gate(u64);
 impl Gate {
-    pub(crate) fn open(channel: u64, ready: bool) -> Self {
+    pub fn open(channel: u64, ready: bool) -> Self {
         set_ready_for_tests(channel, ready);
         Self(channel)
     }
@@ -329,7 +329,7 @@ pub(super) fn episode_span(
 }
 
 /// Appends one closed native turn, stores its span, and issues its permit when `permit`.
-pub(crate) fn turn(
+pub fn turn(
     store: &mut ChannelStore,
     source: &SourceId,
     message: u64,

@@ -31,11 +31,11 @@ use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
-pub(crate) const BOT: u64 = 42;
-pub(crate) const CHANNEL: u64 = 7;
+pub const BOT: u64 = 42;
+pub const CHANNEL: u64 = 7;
 
 thread_local! {
-    pub(crate) static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
+    pub static RESTART_POLICY_CALLS: std::cell::Cell<Option<(u64, usize)>> = const {
         std::cell::Cell::new(None)
     };
 }
@@ -51,7 +51,7 @@ pub(crate) fn restart_policy_call(channel: u64) {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) enum Reply {
+pub enum Reply {
     Created,
     /// Discord created the message but the response was lost.
     CreatedUnseen,
@@ -71,29 +71,29 @@ pub(crate) enum Reply {
 type PostHook = Arc<Mutex<Option<Box<dyn Fn() + Send>>>>;
 
 #[derive(Default)]
-pub(crate) struct FakePort {
+pub struct FakePort {
     usage_footer_pool: std::sync::OnceLock<sqlx::PgPool>,
-    pub(crate) history: Mutex<Vec<SeenMessage>>,
-    pub(crate) replies: Mutex<VecDeque<Reply>>,
+    pub history: Mutex<Vec<SeenMessage>>,
+    pub replies: Mutex<VecDeque<Reply>>,
     pub(super) posts: Mutex<Vec<String>>,
     pub(super) prepared_before_post: Mutex<Vec<bool>>,
     pub(crate) ledger: Mutex<Option<PathBuf>>,
-    pub(crate) unreadable: AtomicBool,
+    pub unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
     pub(crate) lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
     pub(crate) started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
     pub(crate) hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-    pub(crate) on_post: PostHook,
-    pub(crate) history_reads: AtomicUsize,
+    pub on_post: PostHook,
+    pub history_reads: AtomicUsize,
     pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {
-    pub(crate) fn say(&self, author_id: u64, content: &str) -> SeenMessage {
+    pub fn say(&self, author_id: u64, content: &str) -> SeenMessage {
         let mut history = self.history.lock().unwrap();
         let id = 1000 + history.len() as u64;
         let content = content.to_string();
@@ -106,7 +106,7 @@ impl FakePort {
         message
     }
 
-    pub(crate) fn posts(&self) -> Vec<String> {
+    pub fn posts(&self) -> Vec<String> {
         self.posts.lock().unwrap().clone()
     }
 }
@@ -230,15 +230,15 @@ impl DiscordPort for FakePort {
 }
 
 #[derive(Default)]
-pub(crate) struct FakeLease {
+pub struct FakeLease {
     pub(crate) busy: AtomicBool,
     pub(crate) released: Arc<AtomicUsize>,
     pub(crate) on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
-    pub(crate) unavailable: Mutex<Vec<u64>>,
+    pub unavailable: Mutex<Vec<u64>>,
 }
 
-pub(crate) struct Held(Arc<AtomicUsize>);
+pub struct Held(Arc<AtomicUsize>);
 
 impl Drop for Held {
     fn drop(&mut self) {
@@ -265,8 +265,8 @@ impl DeliveryLease for Arc<FakeLease> {
 #[derive(Clone)]
 pub(crate) struct Alarms {
     channel: u64,
-    pub(crate) raised: Arc<Mutex<Vec<WriterAlarm>>>,
-    pub(crate) cleared: Arc<AtomicUsize>,
+    pub raised: Arc<Mutex<Vec<WriterAlarm>>>,
+    pub cleared: Arc<AtomicUsize>,
     /// The reader count the writer last reported.
     pub(super) readers: Arc<Mutex<Option<usize>>>,
 }
@@ -289,7 +289,7 @@ impl AlarmSink for Alarms {
 }
 
 impl Alarms {
-    pub(crate) fn taken(&self) -> Vec<WriterAlarm> {
+    pub fn taken(&self) -> Vec<WriterAlarm> {
         std::mem::take(&mut self.raised.lock().unwrap())
     }
 
@@ -298,29 +298,29 @@ impl Alarms {
     }
 }
 
-pub(crate) type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
+pub type Writer = ChannelWriter<FakePort, Arc<FakeLease>, Alarms>;
 
-pub(crate) struct Harness {
-    pub(crate) channel_id: u64,
-    pub(crate) _runtime: tempfile::TempDir,
-    pub(crate) store: OStore,
-    pub(crate) gate: Arc<OwnershipGate>,
-    pub(crate) port: Arc<FakePort>,
-    pub(crate) lease: Arc<FakeLease>,
-    pub(crate) alarms: Alarms,
+pub struct Harness {
+    pub channel_id: u64,
+    pub _runtime: tempfile::TempDir,
+    pub store: OStore,
+    pub gate: Arc<OwnershipGate>,
+    pub port: Arc<FakePort>,
+    pub lease: Arc<FakeLease>,
+    pub alarms: Alarms,
 }
 
 impl Harness {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::build(|_| Vec::new())
     }
 
     /// `sources` may create transcripts under the runtime root before the era begins.
-    pub(crate) fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
+    pub fn build(sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>) -> Self {
         Self::build_channel(CHANNEL, sources)
     }
 
-    pub(crate) fn build_channel(
+    pub fn build_channel(
         channel_id: u64,
         sources: impl FnOnce(&std::path::Path) -> Vec<InitSource>,
     ) -> Self {
@@ -370,7 +370,7 @@ impl Harness {
         }
     }
 
-    pub(crate) fn channel(&self) -> ChannelStore {
+    pub fn channel(&self) -> ChannelStore {
         let era = self.store.read_era().unwrap().unwrap();
         self.store
             .open_channel(&era, self.channel_id)
@@ -378,7 +378,7 @@ impl Harness {
             .unwrap()
     }
 
-    pub(crate) fn writer(&self) -> Writer {
+    pub fn writer(&self) -> Writer {
         let (gate, port) = (Arc::clone(&self.gate), Arc::clone(&self.port));
         ChannelWriter::new(
             self.channel(),
@@ -390,7 +390,7 @@ impl Harness {
     }
 }
 
-pub(crate) fn unit(native_key: &str) -> UnitKey {
+pub fn unit(native_key: &str) -> UnitKey {
     let (provider, kind) = (ShadowProvider::Claude, UnitKind::Body);
     UnitKey {
         channel_id: CHANNEL,
@@ -400,7 +400,7 @@ pub(crate) fn unit(native_key: &str) -> UnitKey {
     }
 }
 
-pub(crate) async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec<String>, String) {
+pub async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec<String>, String) {
     let harness = Harness::build_channel(channel, |_| Vec::new());
     harness.gate.acquired();
     let mut writer = harness.writer();
@@ -435,7 +435,7 @@ pub(crate) async fn post_codex_records_for_test(channel: u64, raw: &str) -> (Vec
     (harness.port.posts(), ledger)
 }
 
-pub(crate) fn piece(native_key: &str, payload: &str) -> Derived {
+pub fn piece(native_key: &str, payload: &str) -> Derived {
     Derived::Piece(PieceWork {
         output_origin: None,
         unit_key: unit(native_key),
@@ -445,7 +445,7 @@ pub(crate) fn piece(native_key: &str, payload: &str) -> Derived {
     })
 }
 
-pub(crate) fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
+pub fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutcome> {
     let ledger = writer.store().ledger();
     ledger
         .latest_piece(&unit(native_key), 0)
@@ -453,7 +453,7 @@ pub(crate) fn outcome(writer: &mut Writer, native_key: &str) -> Option<PieceOutc
 }
 
 /// The ledger file a channel store appends to.
-pub(crate) fn ledger_path(harness: &Harness) -> PathBuf {
+pub fn ledger_path(harness: &Harness) -> PathBuf {
     let dir = harness
         ._runtime
         .path()
@@ -462,7 +462,7 @@ pub(crate) fn ledger_path(harness: &Harness) -> PathBuf {
     dir.join("ledger.jsonl")
 }
 
-pub(crate) fn row(id: &str, text: &str) -> Vec<u8> {
+pub fn row(id: &str, text: &str) -> Vec<u8> {
     let row = serde_json::json!({
         "type": "assistant", "uuid": format!("u-{id}"), "apiBlockIndex": 0,
         "message": {"id": id, "content": [{"type": "text", "text": text}]},
@@ -471,7 +471,7 @@ pub(crate) fn row(id: &str, text: &str) -> Vec<u8> {
     line.push(b'\n');
     line
 }
-pub(crate) fn append(path: &Path, bytes: &[u8]) {
+pub fn append(path: &Path, bytes: &[u8]) {
     let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(bytes).unwrap();
 }
@@ -496,7 +496,7 @@ pub(crate) fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, 
     let (path, source) = bound.unwrap();
     (harness, path, source)
 }
-pub(crate) async fn polls(count: u32) {
+pub async fn polls(count: u32) {
     tokio::time::sleep(POLL_INTERVAL * count).await;
 }
 /// A spawned actor; it returns why it stopped.
@@ -564,7 +564,7 @@ pub(crate) fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
     bindings
 }
 /// An in-memory binding log with the channel's seq notice.
-pub(crate) struct FakeBindings {
+pub struct FakeBindings {
     pub(crate) events: Mutex<Vec<BindingEvent>>,
     pub(super) notice: watch::Sender<u64>,
     /// Set while every read of the log fails with this error.
@@ -614,14 +614,14 @@ pub(crate) fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
     ChannelWriter::new(store, gate, port, lease, harness.alarms.clone())
 }
 
-pub(crate) async fn halt(stop: watch::Sender<bool>, task: Actor) {
+pub async fn halt(stop: watch::Sender<bool>, task: Actor) {
     stop.send(true).unwrap();
     task.await.unwrap();
 }
 
-pub(crate) const O_CHANNEL: u64 = CHANNEL;
+pub const O_CHANNEL: u64 = CHANNEL;
 
-pub(crate) struct ODrive {
+pub struct ODrive {
     harness: Harness,
     writer: Writer,
     sources: Sources<BindingLog>,
@@ -727,7 +727,7 @@ pub(super) async fn deliver_all(writer: &mut Writer, items: &[Derived]) {
     }
 }
 
-pub(crate) struct FooterWriter {
+pub struct FooterWriter {
     harness: Harness,
     writer: Writer,
 }
@@ -741,7 +741,7 @@ impl FooterWriter {
         Self { harness, writer }
     }
 
-    pub(crate) fn root(&self) -> &std::path::Path {
+    pub fn root(&self) -> &std::path::Path {
         self.harness._runtime.path()
     }
 
@@ -749,7 +749,7 @@ impl FooterWriter {
         self.writer = self.harness.writer();
     }
 
-    pub(crate) async fn turn(&mut self, id: &str) -> String {
+    pub async fn turn(&mut self, id: &str) -> String {
         use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
 
         let session = uuid::Uuid::new_v4().to_string();

@@ -383,7 +383,7 @@ pub(crate) fn protected(log: &OwedLog) -> HashSet<String> {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(all(test, unix))]
 #[path = "owed_tests.rs"]

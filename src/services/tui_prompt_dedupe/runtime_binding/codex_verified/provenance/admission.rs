@@ -115,7 +115,7 @@ pub fn revoke_channel(channel: u64, reason: &'static str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
+pub fn set_ready_for_tests(channel: u64, ready: bool) {
     READY.with(|set| match ready {
         true => set.borrow_mut().insert(channel),
         false => set.borrow_mut().remove(&channel),
@@ -124,7 +124,7 @@ pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
 
 /// Test seam for P4-2's issuance: one Arc per exact episode, a conflict never replaces it.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn issue_for_tests(
+pub fn issue_for_tests(
     execution: ExecutionProofRef,
     episode: TurnEpisodeRef,
     token: &Arc<CancelToken>,
@@ -175,7 +175,7 @@ fn issue(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_channel_for_tests(channel: u64) {
+pub fn forget_channel_for_tests(channel: u64) {
     registry().retain(|key, _| key.0 != channel);
 }
 
