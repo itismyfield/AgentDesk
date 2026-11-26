@@ -142,7 +142,8 @@ impl Fixture {
     }
 
     async fn call(&self, suffix: &str, body: &Value, obligations: bool) -> (StatusCode, Value) {
-        self.call_with_probe(suffix, body, obligations, false).await
+        self.call_with_probe(suffix, body, obligations, false, None)
+            .await
     }
 
     async fn call_with_probe(
@@ -151,14 +152,18 @@ impl Fixture {
         body: &Value,
         obligations: bool,
         inherited: bool,
+        request_channel: Option<u64>,
     ) -> (StatusCode, Value) {
         let request = Request::builder()
             .method("POST")
             .uri(format!("/agents/imessage-notice-agent/{suffix}"))
             .header("content-type", "application/json")
-            .extension(super::auth::loopback_peer())
-            .body(Body::from(body.to_string()))
-            .unwrap();
+            .extension(super::auth::loopback_peer());
+        let request = match request_channel {
+            Some(channel) => request.header("x-channel-id", channel.to_string()),
+            None => request,
+        };
+        let request = request.body(Body::from(body.to_string())).unwrap();
         let probe = DeliveryProbe {
             calls: self.backend.clone(),
             ..Default::default()
@@ -398,6 +403,72 @@ async fn imessage_handoff_echoes_one_input_notice_line_pg() {
     f.one("-# ⌨️ tui direct input\n```\n시험: 요청 본문\n```")
         .await;
     f.close().await;
+}
+
+async fn check_delegation_card_channel(channel: u64, request_channel: Option<u64>, expected: u64) {
+    use crate::db::turns::{TerminalOutcome, TurnReceipt, record_turn_receipt};
+    use crate::services::agents::delegation::{DelegationOrigin, publish_result_cards};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let f = Fixture::new(channel, false).await;
+    sqlx::query(
+        "UPDATE agents SET provider = 'antigravity', discord_channel_id = '780001'
+           WHERE id = 'imessage-sender'",
+    )
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let (status, body) = f
+        .call_with_probe(
+            "handoff",
+            &json!({"from_agent_id":"imessage-sender", "prompt":"Run once", "delegation":true}),
+            false,
+            false,
+            request_channel,
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["status"], "accepted", "{body}");
+    let origin = body["origin_id"].as_str().unwrap();
+    assert_eq!(
+        DelegationOrigin::parse(origin).unwrap().requester_channel,
+        expected
+    );
+
+    let origins = [origin.to_string()];
+    let receipt = TurnReceipt {
+        turn_id: body["turn_id"].as_str().unwrap(),
+        channel_id: body["channel_id"].as_str().unwrap(),
+        agent_id: Some("imessage-notice-agent"),
+        provider: "claude",
+        session_key: None,
+        started_at: None,
+        consumed_origin_ids: &origins,
+        outcome: TerminalOutcome::Completed,
+        confirmed_at: chrono::Utc::now(),
+    };
+    record_turn_receipt(&f.pool, &receipt).await.unwrap();
+    assert_eq!(publish_result_cards(&f.pool).await.unwrap(), 1);
+    let targets: Vec<String> = sqlx::query_scalar(
+        "SELECT target FROM message_outbox WHERE reason_code = 'delegation.result'",
+    )
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(targets, [format!("channel:{expected}")]);
+    f.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delegation_handoff_uses_request_channel_pg() {
+    let worker_channel = 7_811_390;
+    let cc = worker_channel + 100;
+    check_delegation_card_channel(worker_channel, Some(cc), cc).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn delegation_handoff_without_request_channel_uses_primary_pg() {
+    check_delegation_card_channel(7_811_391, None, 780_001).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -735,7 +806,7 @@ async fn imessage_deliver_concurrent_origin_has_one_backend_and_enqueue_pg() {
         };
         let winner = DELIVERY_PROBE_FOR_TEST.scope(
             probe,
-            f.call_with_probe("turn/deliver", &request, obligations, true),
+            f.call_with_probe("turn/deliver", &request, obligations, true, None),
         );
         let loser = async {
             tokio::time::timeout(std::time::Duration::from_secs(10), entered.notified())
