@@ -34,7 +34,7 @@ pub enum Unsupported {
 pub struct RepostHttp {
     http: Arc<serenity::Http>,
     client: reqwest::Client,
-    pub(crate) base: Option<String>,
+    pub base: Option<String>,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
 }
 

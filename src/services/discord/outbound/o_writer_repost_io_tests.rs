@@ -27,9 +27,13 @@ type Seen = Arc<StdMutex<Vec<(String, Vec<u8>)>>>;
 /// Outcome kind, wire, counted and throttled.
 type Summary = (&'static str, u32, u32, u32);
 
-impl RepostHttp {
+trait AtBase {
+    fn at_base(self, base: String) -> Self;
+}
+
+impl AtBase for RepostHttp {
     /// Keeps the factory's client and rate authority while directing test requests to loopback.
-    pub(crate) fn at_base(mut self, base: String) -> Self {
+    fn at_base(mut self, base: String) -> Self {
         self.base = Some(base);
         self
     }

@@ -34,7 +34,7 @@ pub enum EvidenceStoreError {
     Transition,
 }
 
-pub(crate) type Result<T> = std::result::Result<T, EvidenceStoreError>;
+pub type Result<T> = std::result::Result<T, EvidenceStoreError>;
 
 impl StoredEvidence {
     pub fn recorded(envelope: EvidenceEnvelope) -> Self {
