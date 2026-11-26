@@ -14,7 +14,7 @@ STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)
 QUEUE_REASON = re.compile(r"provider:([a-z0-9_-]+):pending_queue_depth:([1-9][0-9]*)\Z")
 TARGET_QUEUE = re.compile(r"target_mailbox:([a-z0-9_-]+):pending_queue_depth<=([1-9][0-9]*)\Z")
 CHANNEL_NUMBER = r"[1-9][0-9]{0,19}"
-RETENTION_REASON = re.compile(rf"tui_o:reader_retention_stalled:({CHANNEL_NUMBER})")
+TUI_CHANNEL_REASON = re.compile(rf"(tui_o:(?:reader_retention_stalled|binding_missing)):({CHANNEL_NUMBER})")
 RELAY_UNKNOWN_REASON = re.compile(
     rf"relay_verdict_unknown_(?:claude|codex|opencode|qwen|grok|antigravity)_({CHANNEL_NUMBER})")
 
@@ -141,12 +141,55 @@ def unknown_error(body, target_channel):
     return None
 
 
+def target_channels(body, target_channel):
+    """The target and direct children named by either end of the detail's relay proof."""
+    target = channel_id(target_channel)
+    if target is None:
+        return set()
+    channels = {target}
+    boxes = body.get("mailboxes")
+    for row in boxes if isinstance(boxes, list) else ():
+        relay = row.get("relay_health") if isinstance(row, dict) else None
+        if isinstance(relay, dict):
+            owner = channel_id(row.get("channel_id"))
+            if owner == target:
+                child = channel_id(relay.get("thread_channel_id"))
+                if child is not None:
+                    channels.add(child)
+            elif owner is not None and channel_id(relay.get("parent_channel_id")) == target:
+                channels.add(owner)
+    return channels
+
+
+def _pending_queue_owners(body, match, target):
+    """Join the provider sum to unique mailbox rows from the same detail response."""
+    boxes = body.get("mailboxes")
+    if not isinstance(boxes, list) or body.get("mailbox_observation_failures", []) != []:
+        return set()
+    depths = {}
+    for row in boxes:
+        if not isinstance(row, dict):
+            return set()
+        provider, owner, depth = row.get("provider"), channel_id(row.get("channel_id")), row.get("queue_depth")
+        if not isinstance(provider, str) or not provider or owner is None or type(depth) is not int or depth < 0:
+            return set()
+        key = (provider, owner)
+        if key in depths:
+            return set()
+        depths[key] = depth
+    target_depths = [depth for (_, owner), depth in depths.items() if owner == target]
+    pending = {owner: depth for (provider, owner), depth in depths.items() if provider == match[1] and depth}
+    if len(target_depths) != 1 or str(sum(pending.values())) != match[2]:
+        return set()
+    return set(pending) | ({target} if target_depths[0] else set())
+
+
 def classify_degraded_reasons(body, target_channel):
     """Return internal reason matching text, a bounded code, and scope for each reason."""
     reasons = body.get("degraded_reasons")
     if not isinstance(reasons, list):
         return []
-    target = channel_id(target_channel)
+    targets = target_channels(body, target_channel)
     presence, presence_error = _presence_owners(body)
     classifications = []
     for reason in reasons:
@@ -156,15 +199,19 @@ def classify_degraded_reasons(body, target_channel):
             reason = None
         elif unknown_family(reason):
             code, channels = PREFIX, presence.get(reason, set())
-        elif match := RETENTION_REASON.fullmatch(reason):
-            code, channels = "tui_o:reader_retention_stalled", {channel_id(match[1])}
+        elif match := TUI_CHANNEL_REASON.fullmatch(reason):
+            code, channels = match[1], {channel_id(match[2])}
         elif match := RELAY_UNKNOWN_REASON.fullmatch(reason):
             code, channels = "relay_verdict_unknown", {channel_id(match[1])}
+        elif match := QUEUE_REASON.fullmatch(reason):
+            code = "provider:pending_queue_depth"
+            if reasons.count(reason) == 1:
+                channels = _pending_queue_owners(body, match, channel_id(target_channel))
         elif reason.startswith("herdr_") and ATOM.fullmatch(reason):
             code = "herdr"
         scope = "unknown"
-        if target is not None and channels and None not in channels:
-            scope = "target" if target in channels else "foreign"
+        if targets and channels and None not in channels:
+            scope = "target" if targets & channels else "foreign"
         classifications.append((reason, code, scope))
     if presence_error and body.get(PREFIX) and not any(unknown_family(r) for r in reasons):
         classifications.append((None, PREFIX, "unknown"))

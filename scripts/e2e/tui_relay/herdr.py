@@ -204,13 +204,17 @@ def published_row(block, status, *, channel, provider):
     return current_row(status, channel=channel, provider=provider)
 
 
+class CellBusy(assertions.AssertionError):
+    """A measured input hold or an active target mailbox."""
+
+
 def current_row(status, *, channel, provider, cold=False):
     rows = status.get("executions") if isinstance(status, dict) else None
     holds = status.get("other_input_holds") if isinstance(status, dict) else None
     if not isinstance(rows, list) or not isinstance(holds, list):
         raise assertions.AssertionError("Herdr status executions/other_input_holds missing")
     if holds:
-        raise assertions.AssertionError("Herdr current CLI status has other input holds")
+        raise CellBusy("Herdr current CLI status has other input holds")
     for row in rows:
         if (not isinstance(row, dict) or row.get("record") == "unreadable"
                 or any(key not in row for key in ("channel", "provider", "state", "input_hold"))
@@ -218,7 +222,7 @@ def current_row(status, *, channel, provider, cold=False):
                 or not str(row["channel"]) or not row.get("provider") or not row.get("state")):
             raise assertions.AssertionError("Herdr status row unreadable or incomplete")
         if row["input_hold"] is not None:
-            raise assertions.AssertionError("Herdr current CLI status has an input hold")
+            raise CellBusy("Herdr current CLI status has an input hold")
     matches = [r for r in rows if str(r["channel"]) == str(channel) and r["state"] != "retired"]
     if not matches and cold:
         return None
@@ -248,10 +252,11 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
         status, payload = driver._read_api_json(args.base_url, "/api/health/detail", timeout=5)
-        stage = "detail_readiness"
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
+        if status == 200:
+            stage = "detail_readiness"
         evidence["readiness"].update({k: payload[k] for k in
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
@@ -263,6 +268,11 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                          ignored_degraded_reasons_unattributed=[] if foreign_only else unattributed(ignored))
             if any(health_readiness.unknown_family(r) for r in ignored):
                 evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
+            if foreign_only and cold and isinstance(boxes := payload.get("mailboxes"), list):
+                targets = health_readiness.target_channels(payload, args.channel_id)
+                if any(isinstance(box, dict) and health_readiness.channel_id(box.get("channel_id")) in targets
+                       and driver._mailbox_busy_reasons(box) for box in boxes):
+                    raise CellBusy("Herdr target mailbox is busy")
         stage = "herdr_readiness"
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
@@ -284,8 +294,8 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         evidence["readiness"]["error"] = str(error)
         error.herdr_observation = evidence
         if getattr(args, "capture_preflight_failure", False):
-            error.herdr_preflight_failure = preflight_evidence.capture(stage, payload, channel=args.channel_id,
-                                                                      http_status=status)
+            error.herdr_preflight_failure = preflight_evidence.capture(
+                "busy" if isinstance(error, CellBusy) else stage, payload, channel=args.channel_id, http_status=status)
         raise
 
 

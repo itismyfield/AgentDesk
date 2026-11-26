@@ -35,6 +35,10 @@ SESSION = "AgentDesk-claude-adk-claude-tui-2-e2e"
 FOREIGN_RETENTION = "tui_o:reader_retention_stalled:30"
 TARGET_RETENTION = "tui_o:reader_retention_stalled:20"
 UNATTRIBUTED_RETENTION = "tui_o:reader_retention_stalled:unattributed"
+BINDING = "tui_o:binding_missing:"
+QUEUE = "provider:claude:pending_queue_depth:"
+TARGET_BOX = {"provider": "claude", "channel_id": 20, "queue_depth": 0, "agent_turn_status": "idle"}
+FOREIGN_BOX = {"provider": "claude", "channel_id": 40, "queue_depth": 1, "agent_turn_status": "idle"}
 
 
 def degraded_detail(*reasons):
@@ -294,6 +298,97 @@ class Driver(Fixture):
         self.assertEqual(len(row["herdr_observations"]), 2)
         for observation in row["herdr_observations"]:
             self.assertEqual(observation["readiness"]["ignored_degraded_reasons_unattributed"], [])
+
+    def test_release_allows_binding_and_bounded_queue_proven_foreign(self):
+        codex_queue = "provider:codex:pending_queue_depth:1"
+        for reasons, foreign in (([BINDING + "40"], FOREIGN_BOX), ([QUEUE + "1"], FOREIGN_BOX),
+                                 ([BINDING + "40", QUEUE + "1"], FOREIGN_BOX),
+                                 ([codex_queue], {**FOREIGN_BOX, "provider": "codex"})):
+            with self.subTest(reasons=reasons):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(*reasons), "mailboxes": [TARGET_BOX, foreign]})
+                self.assertEqual((report["status"], len(prompts), report["native_turns"]), ("PASS", 3, 3))
+                row = read_json(Path(report["evidence_paths"][0]), {})["scenarios"][0]
+                self.assertEqual(len(row["herdr_observations"]), 2)
+                for observation in row["herdr_observations"]:
+                    self.assertEqual(observation["readiness"]["ignored_degraded_reasons"], reasons)
+
+    def test_release_blocks_child_reasons_from_either_end_of_thread_proof(self):
+        group = "turn_presence_unknown:claude:other:session_identity_unresolved:none:2:80"
+        presence = [{"channel_id": channel, "provider": "claude", "agent_id": "other",
+                     "reason": "session_identity_unresolved", "hold_leaf": None, "elapsed_secs": 80,
+                     "unknown_since": "2026-11-20T00:00:00Z"} for channel in (40, 41)]
+        parent = {**TARGET_BOX, "relay_health": {"thread_channel_id": 40}}
+        child = {**FOREIGN_BOX, "relay_health": {"parent_channel_id": 20}}
+        for reason, code, boxes in (
+            (group, "turn_presence_unknown", [parent]),
+            ("relay_verdict_unknown_codex_40", "relay_verdict_unknown", [TARGET_BOX, child]),
+            (BINDING + "40", "tui_o:binding_missing", [parent]),
+            (QUEUE + "1", "provider:pending_queue_depth", [TARGET_BOX, child]),
+        ):
+            with self.subTest(reason=reason):
+                detail = {**degraded_detail(reason), "mailboxes": boxes}
+                if reason == group:
+                    detail["turn_presence_unknown"] = presence
+                report, prompts, _ = self.drive(detail_fields=detail)
+                self.assertEqual((report["status"], prompts, report["native_turns"]), ("UNEVALUABLE", [], 0))
+                self.assertIn({"code": code, "scope": "target"}, report["preflight_failure"]["reasons"])
+
+    def test_release_rejects_unproven_queue_and_binding_or_busy_target(self):
+        cases = [
+            ("target-binding", [BINDING + "20"], [TARGET_BOX], {}),
+            ("noncanonical-binding", [BINDING + "040"], [TARGET_BOX], {}),
+            ("overflow-binding", [BINDING + str(2**64)], [TARGET_BOX], {}),
+            ("above-cap", [QUEUE + "2"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": 2}], {}),
+            ("target-queue", [QUEUE + "1"], [{**TARGET_BOX, "queue_depth": 1}], {}),
+            ("sum-mismatch", [QUEUE + "1"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": 2}], {}),
+            ("duplicate-box", [QUEUE + "1"], [TARGET_BOX, FOREIGN_BOX, {**FOREIGN_BOX, "channel_id": "40", "queue_depth": 0}], {}),
+            ("duplicate-reason", [QUEUE + "1"] * 2, [TARGET_BOX, FOREIGN_BOX], {}),
+            ("missing-mailboxes", [QUEUE + "1"], None, {}),
+            ("missing-target", [QUEUE + "1"], [FOREIGN_BOX], {}),
+            ("bad-depth", [QUEUE + "1"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": True}], {}),
+            ("mailbox-read-failure", [QUEUE + "1", "mailbox_snapshot_unavailable"], [TARGET_BOX, FOREIGN_BOX],
+             {"mailbox_observation_failures": [{"channel_id": 41}]}),
+            ("incomplete-read-proof", [QUEUE + "1"], [TARGET_BOX, FOREIGN_BOX],
+             {"mailbox_observation_failures": [{"channel_id": 41}]}),
+            ("busy-target", [BINDING + "40", QUEUE + "1"], [{**TARGET_BOX, "agent_turn_status": "active"}, FOREIGN_BOX], {}),
+            ("global-degradation", [BINDING + "40", QUEUE + "1", "db_slow"], [TARGET_BOX, FOREIGN_BOX], {}),
+        ]
+        for label, reasons, mailboxes, extra in cases:
+            with self.subTest(label=label):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(*reasons), "mailboxes": mailboxes, **extra})
+                self.assertEqual((report["status"], prompts, report["real_provider_contacted"]), ("UNEVALUABLE", [], False))
+                if label == "busy-target":
+                    self.assertEqual(report["preflight_failure"]["stage"], "busy")
+
+    def test_release_rechecks_queue_scope_after_the_first_observation(self):
+        def queue_moves_to_target(detail):
+            detail["mailboxes"] = [{**TARGET_BOX, "queue_depth": 1}, {**FOREIGN_BOX, "queue_depth": 0}]
+
+        report, prompts, _ = self.drive(detail_fields={
+            **degraded_detail(QUEUE + "1"), "mailboxes": [TARGET_BOX, FOREIGN_BOX]},
+            before_final_observe=queue_moves_to_target)
+        self.assertEqual(len(prompts), 3)
+        self.assertNotEqual(report["status"], "PASS")
+
+    def test_cli_input_hold_is_busy_and_cli_read_failure_is_observability(self):
+        write_json(self.root / "herdr-status.json",
+                   {"executions": [{**RUNNING, "input_hold": {"recorded_at": "now"}}], "other_input_holds": []})
+        for cli, stage in ((True, "busy"), (False, "herdr_status")):
+            with self.subTest(stage=stage):
+                report, prompts, _ = self.drive(cli=cli)
+                self.assertEqual((report["status"], prompts, report["preflight_failure"]["stage"]),
+                                 ("UNEVALUABLE", [], stage))
+
+    def test_non_200_second_health_read_reports_observability(self):
+        smoke = smoke_driver._smoke()[0]  # noqa: SLF001
+        out = io.StringIO()
+        with mock.patch.object(smoke.cell_driver, "_read_api_json", side_effect=[(200, DETAIL), (503, {})]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(smoke.main(["preflight", "--failure-json", "--base-url", "http://127.0.0.1:9",
+                                         "--cell", "claude-herdr", "--channel-id", "20"]), 2)
+        self.assertEqual(json.loads(out.getvalue()), {"stage": "health_read", "http_status": 503})
 
     def test_release_herdr_policy_refuses_target_and_unattributed_reasons(self):
         for reason in (TARGET_RETENTION, UNATTRIBUTED_RETENTION, "relay_verdict_unknown_codex_20",

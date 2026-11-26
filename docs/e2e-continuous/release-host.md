@@ -63,7 +63,15 @@ manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr`
   `<provider>-herdr`이고, preflight는 `/api/health/detail`의 Herdr 블록과 릴리스 바이너리의 `herdr status`로 입력 hold가
   0인지 본다. 판정도 Herdr detail·CLI 증거가 있어야 PASS다. 관측한 host가 계획한 칸과 다르면 `HOST_MISMATCH`,
   Herdr endpoint가 하나로 정해지지 않으면 `HERDR_ENDPOINT_AMBIGUOUS`로 입력 전에 거절한다.
-  이 경로는 서버 상태가 `healthy`일 때만 idle로 본다(degraded 사유 허용 목록 없음).
+  기본 프로필의 E-50·E-51은 HTTP 200과 복구 완료가 확인되면 `degraded` 상태에서도 다음 검사로
+  진행한다. 모든 사유가 같은 응답에서 시험 채널 범위 밖으로 귀속되고 허용 목록과 일치해야 한다.
+  허용 목록은 turn presence unknown, relay verdict unknown, reader retention stalled, O binding
+  missing과 Claude·Codex 각각 깊이 1의 pending queue다. 응답에서 시험 채널의 자식으로 확인된
+  thread도 시험 범위에 들어간다. 큐는 대상 mailbox의 깊이 0, mailbox 행의 유일성, 제공자별 합과
+  양수인 큐 전부의 범위가 확인돼야 한다. mailbox 읽기 실패도 입력 전에 거절한다.
+  Herdr의 hold·CLI 검사와 대상 mailbox의 활성 상태 검사는 별도로 적용한다.
+  사유가 실제 busy 또는 준비 조건 거절이면 `CELL_NOT_IDLE`, health·CLI 관측에 실패하면
+  `SERVER_UNOBSERVABLE`로 기록한다. 두 경우 모두 `UNEVALUABLE`이다.
 - **하네스는 driver 프로세스 안에서 돈다.** 채널 lease를 가진 프로세스가 곧 입력을 보내는 프로세스다. driver가 죽으면
   입력도 같이 끝나고, lease가 풀린 뒤 남아서 보내는 프로세스가 없다.
 - **턴마다 예산을 확인한다.** 하네스의 모든 채널 입력은 보내기 직전에 gate를 지난다(`tui_relay/discord.py`의 `input_gate`).

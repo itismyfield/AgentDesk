@@ -192,8 +192,14 @@ def _execute(lease, config, record, row, remaining):
             if key in report:
                 row[key] = report[key]
     status = report.get("status") if isinstance(report, dict) else None
-    if status == "UNEVALUABLE" and (failure := preflight_evidence.bounded(report.get("preflight_failure"))):
-        row.update(reason="CELL_NOT_IDLE", preflight_failure=failure)
+    if status == "UNEVALUABLE":
+        failure = preflight_evidence.bounded(report.get("preflight_failure"))
+        if failure:
+            stage = failure["stage"]
+            reason = "SERVER_UNOBSERVABLE" if stage in preflight_evidence.OBSERVATION_FAILURE_STAGES else "CELL_NOT_IDLE"
+            row.update(reason=reason, preflight_failure=failure)
+        elif report.get("reason") == "SERVER_UNOBSERVABLE":
+            row["reason"] = "SERVER_UNOBSERVABLE"
     turns = report.get("native_turns") if isinstance(report, dict) else None
     row.update(status=status if status in RESULTS and (proc.returncode == 0 or status == "FAIL") else "UNEVALUABLE",
                driver_rc=proc.returncode, elapsed_s=round(time.monotonic() - started, 3),
