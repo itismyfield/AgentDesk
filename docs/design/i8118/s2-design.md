@@ -1,14 +1,163 @@
-# #8118 S2 설계 w2 — Herdr 부모 채널 아래 스레드 세션의 배치·활성화
+# #8118 S2 설계 w4 — Herdr 부모 채널 아래 스레드 세션의 배치·활성화
 
 - 본문은 WebGPT pro 설계 w1(`design-s2-1`, VERDICT: DESIGN_READY)이고, 이 문서에 옮겨 실었다. 그 위에 독립 설계 리뷰 `review-design-s2-1`(WebGPT xh, P0 0 · P1 8, VERDICT: ISSUES)을 반영해 w2로 고쳤다.
 - 코드 기준은 `b52e052e24e13781569050ec940eb35b9496ed54`다(prod는 base `b04ea56650`과 같다). `origin/main` `c28732c52c`는 아래 좌표 파일을 바꾸지 않았다.
 - 경로 표기: `src/services/` 아래는 접두를 생략한다. 그 밖의 경로는 `src/`부터 적는다. 새로 만들 파일은 "신규"로 표시한다.
 - 리뷰의 P1 8건은 모두 코드로 확인했고(반증 0), 개선 방향을 채택했다. 그중 P1-3·P1-4·P1-6은 범위나 조각 배정을 고쳐서 채택했다.
-- w2가 바꾼 곳은 맨 앞 `## w2 변경` 표에 모았고, 본문 해당 자리에는 `[w2-P1-n]` 표시를 달았다. 표시가 없는 본문은 w1 그대로다.
+- w2가 바꾼 곳은 `## w2 변경` 표에 모았고, 본문 해당 자리에는 `[w2-P1-n]` 표시를 달았다. 표시가 없는 본문은 w1 그대로다.
+- w3은 설계 델타 리뷰 2라운드 `review-design-s2-2`(WebGPT xh, P0 0 · P1 2 · P2 3, VERDICT: ISSUES, 이전 P1 8건 중 6건 닫힘, S2a-1·S2a-2 착수 GO)의 P1 2·P2 3과 Q-P1~Q-P3 답을 반영한다. 바뀐 곳은 `## w3 변경` 표에 모았고, 본문에는 `[w3-…]` 표시를 달았다. 코드 기준은 그대로 `b52e052e24`다(이 브랜치 HEAD `a086520093`까지 `src/` 변경 없음).
+- w4는 델타 리뷰 3라운드 `review-design-s2-3`(WebGPT xh, P0 0 · P1 1 · P2 2, VERDICT: ISSUES, P1-2·P2·Q 반영 확인)의 P1 1과 P2 2를 반영한다. 맨 앞 `## w4 변경` 표에 모았고 본문에는 `[w4-…]` 표시를 달았다. 코드 기준은 그대로 `b52e052e24`다.
 
 <!-- doc-path-refs: proposed src/services/session_host/thread_launch.rs -->
 <!-- doc-path-refs: proposed src/services/discord/recovery_engine/herdr_reader/thread_lifecycle.rs -->
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/idle.rs -->
+
+<!-- doc-path-refs: proposed src/services/session_host/herdr_gate/child_residue.rs -->
+<!-- doc-path-refs: proposed src/services/herdr_launch/unplaced/placed.rs -->
+
+
+## w4 변경
+
+| 항목 | 리뷰 지적 확인 | 바뀐 결정 | 코드 좌표(b52e052e24) | 조각 | 시험·뮤턴트 |
+|---|---|---|---|---|---|
+| P1-1 잔여 | **확인.** w3는 "marker pane 없음 → Held, 사라진 pane의 retire는 기존 reconnect의 `Scope::Missing`이 맡는다"고 했다. 그러나 `reconnect_unless_pending`은 Pending이면 lease를 잡기도 전에 `(Reconnect::Pending, None)`으로 돌아가서 같은 함수의 Missing retire에 닿지 않는다. server-replaced 경로(`rebooted_pending`)는 launch context 뒤 OS 재부팅을 요구하므로 AgentDesk 재시작의 대체가 아니다. 그래서 잔재 pane을 닫은 뒤 DB retire 전에 재시작하거나 close 응답이 한 번 유실되면, pane 없는 placed Pending이 남아 첫 입력이 재개되지 않는다 | **S2b 공통 placed resolver가 exact Missing 처분까지 소유한다.** reconnect는 Pending에 열지 않는다(Pending을 Bound처럼 attach·seed하는 부작용을 피함). 기존 pane 부재 관측 규칙(한 server witness에서 snapshot presence `Missing`)을 launch의 witness로 읽고, `retire_own_pending(.., Some(location))` exact CAS로 retire한다. 원본 미시도·KnownNotSent 조건은 그대로다. **Missing은 재제출 허가가 아니다.** 아래 "P1-1 계약(w4)" | `recovery_engine/herdr_reader.rs:418-427`(Pending 조기 반환), `:449-458`(`retire::observed(.., Scope::Missing)`); `herdr_launch/retire.rs:36-68`(`observed`: Missing이 아니면 `Unproven`), `:71-106`(`on_reading` → `retire_pg`); `session_host/herdr_gate.rs:856-876`(`read_execution_on_checked`: snapshot의 answered witness 대조 → `HostPresence::Missing`); `herdr_launch.rs:695-715`(`retire_own_pending`: Pending·nonce·location·증거 없음 CAS), `:466-480`(grant witness와 current witness 대조의 기존 예); `recovery_engine/herdr_server_replaced.rs:240-289`(`rebooted_pending`, 재부팅 전제); `herdr_launch/unplaced.rs:367-377`(`dispose`) | S2b | T-S2-21 갈래 (5)~(9)(§6). 뮤턴트: Pending 조기 반환 유지(모델 `MutW4PendingEarlyReturn` → `FirstInputResolves` RED), exact CAS 제거(`MutW4MissingNoCas` → `RetireOwnGeneration`·`NoDuplicatePane`·`FirstInputResolves` RED), 읽기 실패를 부재로(`MutW4UnreadAsMissing` → `NoDuplicatePane` RED), Missing을 재제출 허가로(`MutW4MissingResubmits` → `SingleSubmit` RED) |
+| P2-1 | 확인. 중복 archive의 "Herdr 행 존재" 검사는 순간 관측이다. Retired 행이 GC로 지워지면 Herdr 이력이 사라지고, rowless·vacant 후보를 검사한 직후 새 Herdr 자식이 설치될 수도 있다 | 행 존재 대신 **부모 정책**으로 막는다: 중복 archive 후보의 부모(`expected_parent`)가 Herdr 정책이면 그 아래 후보는 행 상태와 무관하게 archive를 건너뛴다. 새 잠금·archive 복구 큐는 만들지 않는다. main보다 archive가 줄어드는 쪽이다(Herdr 부모 아래 legacy 중복 스레드도 archive 안 함, 화면 정리만 잃음) | `dispatches/discord_delivery/transport.rs:659-668,721-746`; `dispatches/thread_archive_defer.rs:45-56`; `src/db/dispatched_sessions/thread_gc.rs:92-118` | S2b | T-S2-8 (e)에 Retired GC → rowless → 중복 archive 검사 → 새 자식 설치 갈래를 더한다(PATCH 0) |
+| P2-2 | 확인. 생산 pristine은 workspace의 pane 1·tab 1이라는 배치 조건이다(`launch_host.rs:827`). shell을 쓴 뒤 다시 lone shell이 된 경우는 구분하지 못한다 | "touched"를 **기존 잔재 판정으로 관측 가능한 변경**(추가 pane·tab, lone root shell이 아닌 다른 occupant)으로 한정한다. 터미널 사용 이력은 보장하지 않는다. 입력 이력 추적은 만들지 않는다. 모델도 맞췄다: `LostCommandHeld`는 관측 가능한 변경, 새 entry `LostCommandShellUsed`는 처분됨 | `session_host/herdr/launch_host.rs:827-841`; `herdr_launch/unplaced.rs:173-203` | 문서·모델 | T-S2-21 갈래 (4)의 touched를 "추가 pane, 추가 tab, 다른 occupant" 셋으로 명시 |
+| 조각 | — | S2b 재추정: 파일 수는 그대로 18, 순증 +770~1170. +1200 정지선에 가까워서 분할 후보를 미리 정한다(아래 "S2b 크기(w4)") | — | S2b | — |
+
+### P1-1 계약(w4) — placed resolver의 exact Missing 처분 (S2b)
+
+w3 "P1-1 계약" 2번의 `marker pane 없음(Plan::Retire): placed에서는 Held` 줄을 아래 표로 바꾼다. 처분은 모두 공통 placed resolver 한 곳이 한다.
+
+| 관측(launch의 endpoint·witness) | 처분 |
+|---|---|
+| 기록된 pane이 있고 exact marker·lone root shell·pristine | 기존 `Dispose` → close → 아래 Missing 처분으로 retire |
+| 기록된 pane에서 그 nonce의 provider 실행 증거 | `Adopt`(증거 기록), 추가 create 0 |
+| 기록된 pane이 snapshot에 없음(`HostPresence::Missing`, answered witness = launch witness) | **exact Missing retire**: `retire_own_pending(pool, owner, nonce, Some(&L))` |
+| 같은 nonce를 주장하는 다른 pane 존재 | Held |
+| 목록·snapshot 실패, witness 불일치(서버 교체 포함), presence 미확정 | Held, 추가 create 0. 서버 교체는 기존 server-replaced 경로 몫 |
+| row·nonce·location이 바뀜 | CAS가 `the row is no longer this launch's Pending`으로 거절, 기존 행·successor 보존 |
+
+1. **읽기 규칙.** 새 판정은 만들지 않는다. `herdr_gate.rs:856-876`과 같은 `contract::snapshot_observation(..).presence()`를, `unplaced_witness`로 얻은 launch witness 위에서 읽는다. snapshot 응답의 witness가 다르면 Held다. 구현 자리는 `HerdrLaunchHost::pane_presence(endpoint, pane_id, witness)`다. 기본 구현은 `Err(unsupported)`이고 `launch_host.rs`가 실제 구현을 가진다. giant `herdr_gate.rs`(1252줄)는 바꾸지 않는다. 시험 fake는 기본 구현으로 컴파일된다.
+2. **쓰기 규칙.** `retire_own_pending`의 exact CAS(state Pending, 같은 nonce, location = L, expected 없음)만 쓴다. `retire::observed`·`retire_pg`의 row 스냅샷 CAS로 바꾸지 않는다. placed 조건(location = L)을 CAS가 직접 지키기 때문이다.
+3. **재개 조건.** retire는 pane이 없다는 사실만 확정한다. 원본이 그 nonce에서 미시도이거나 기존 owner 판단이 KnownNotSent일 때만 Q3의 "확정 미전송 fresh successor" 증거가 되고, 같은 원본이 진행한다. 첫 키 뒤라 hold가 있거나 attempt가 MayHaveSent·Unconfirmed면 retire만 하고 자동 재제출은 0이다(`queued_head/v2/retained.rs:65-83,339-352`). receipt 또는 운영자 처분으로 해결한다.
+4. **호출 시점.** `pending.rs:29-35`(turn)와 `herdr_reader.rs:363-398`(주기 unplaced pass)의 placed 판정이 매번 이 표를 처음부터 다시 판정한다. close 직후 재시작했거나 close 응답을 잃었으면, 다음 판정에서 pane이 Missing으로 보이므로 retire로 끝난다. close를 다시 보내지 않는다.
+5. **reconnect는 그대로다.** `reconnect_unless_pending`의 Pending 조기 반환(`:425-427`)을 바꾸지 않는다.
+6. **크기.** `unplaced.rs`(또는 child `herdr_launch/unplaced/placed.rs`)에 Missing 분기 +40~60, `launch_host.rs`에 `pane_presence` +25~35, `herdr_launch.rs` trait 기본 구현 +5~8.
+
+### S2b 크기(w4)
+
+| 항목 | w3 추정 | w4 추정 |
+|---|---|---|
+| 파일 | 18(신규 2) | 18(신규 2). `herdr_gate.rs`·`retire.rs`·`herdr_reader.rs` 추가 변경 없음 |
+| 순증 | +700~1050 | +770~1170(P1-1 Missing +70~100, P2-1 부모 정책 +10~20) |
+
+- 실측이 +1200을 넘으면 독립 안전 경계로 둘로 나눈다. **S2b-1 부팅·복구**(11파일, +450~650): `launch_host.rs`, `herdr_launch.rs`, `unplaced.rs`, `pending.rs`, `herdr_reader.rs`, `rehydration.rs`, `runtime_bootstrap.rs`, `o_writer_host.rs`, `herdr_source.rs`, `input_notices/admission.rs`, `thread_host.rs`. **S2b-2 해제·슬롯**(7파일, +320~520): `herdr_terminate.rs`, 신규 `herdr_terminate/idle.rs`, 신규 `herdr_reader/thread_lifecycle.rs`, `auto_queue/runtime.rs`, `thread_archive_defer.rs`, `discord_delivery/transport.rs`, `thread_gc.rs`. 두 조각은 서로의 호출자를 필요로 하지 않는다.
+- U-w3-2(T0 #8441·#8128 조각 I와 idle 해제 책임)는 S2b-2 쪽에만 걸린다.
+
+### 상태 차트(w4)
+
+`SpecS2`의 `S2` 모드가 이제 w4 계약이다. w3의 원자적 `PlacedResidue`를 `ResidueClose`와 `PlacedMissingRetire`로 나눠, 그 사이에 재시작이나 close 응답 유실이 끼어들 수 있게 했다. 새 entry는 `LostAfterKey`(첫 키 뒤 pane 소멸, payload 불명)와 `LostCommandShellUsed`(P2-2)다. 실행 세대(`gen`)는 3에서 포화한다. 결과는 `62/62` expected 일치(기존 56 결과 유지)이고, report "Design w4" 절에 있다.
+
+| 반례(RED) | w4 계약 |
+|---|---|
+| `MutW4PendingEarlyReturn`(w3 계약): `FirstInputResolves` RED. pane은 사라졌는데 Pending이 영구히 남음 | `S2W4Lost` GREEN(close 뒤 재시작, 이미 사라진 pane, 첫 키 뒤 소멸, 사용된 shell) |
+| `MutW4MissingNoCas`: `RetireOwnGeneration`·`NoDuplicatePane`·`FirstInputResolves` RED | `S2W4All` GREEN(모든 w2·w3·w4 entry, safety) |
+| `MutW4UnreadAsMissing`: `NoDuplicatePane` RED | 〃 |
+| `MutW4MissingResubmits`: `SingleSubmit` RED | 〃 |
+
+모델은 목록 실패와 witness 불일치를 구분하지 않는다. 둘 다 "Missing을 보지 못함"이고, 이 Hold를 깨는 것이 `MutW4UnreadAsMissing`이다. 생산 시험 T-S2-21은 둘을 따로 둔다.
+
+## w3 변경
+
+| 항목 | 리뷰 지적 확인 | 바뀐 결정 | 코드 좌표(b52e052e24) | 조각 | 시험·뮤턴트 |
+|---|---|---|---|---|---|
+| P1-1 | **확인.** placed Pending(위치 기록, 증거 없음)은 `pending_source`에서 증거 재확인만 하고, 실패하면 `PendingUnproven`으로 끝난다. `NeverStartedTerminate`는 `expected.is_some()`을 요구해 쓸 수 없다. 주기 복구의 unplaced 판정은 위치 없는 행만 받는다. 그래서 "전송 불명이었지만 실제로 미실행"인 pane은 회복 뒤에도 빈 shell과 보류 입력으로 남는다 | 새 복구 엔진을 만들지 않는다. **기존 unplaced 잔재 판정(`judge`: exact marker·lone root shell·pristine)을 placed Pending에도 쓴다.** placed에서는 기록된 pane ID만 판정 대상이고, marker pane이 없으면 Held다(사라진 pane은 기존 `Scope::Missing` retire 몫). 판정이 `Dispose`면 그 pane을 닫고 `retire_own_pending(.., Some(location))`로 retire한 뒤 같은 원본을 fresh successor로 진행한다. transcript·SessionStart가 없다는 이유만으로는 미전송을 추정하지 않는다. 끝까지 증거가 모자라면 기존 Hold다. 아래 "P1-1 계약" | `session_host/herdr/launch_host.rs:645-655`(command 결과를 `CreatedUnconfirmed`로 합침); `herdr_launch.rs:645-650`(위치만 기록하고 Indeterminate), `:461-462,735-760`(`awaiting_evidence` → `probe_again`), `:695-715`(`retire_own_pending`, placed 인자 있음, 호출자 `recovery_engine/herdr_server_replaced.rs:286`); `claude/herdr_turn/pending.rs:16-18`(unplaced는 Retired면 `launched_source`), `:29-35`(placed는 `PendingUnproven`); `herdr_launch/unplaced.rs:173-203`(`judge`의 marker·pristine), `:348-363`(`unplaced()`가 위치 없는 행만 받음), `:63-75`(`quiet_since`); `discord/herdr_terminate/never_started.rs:23-25` | S2b | T-S2-21을 네 갈래로 넓힌다(§6). 뮤턴트: placed pristine 판정 제거(모델 `MutW3NoPristine` → `TouchedResidueHeld` RED), 부재 추정(`MutW3ResidueByAbsence` → `ResidueNeverRan`·`FirstInputResolves` RED), placed 판정 없음(`MutW3NoPlacedResidue` → `FirstInputResolves` RED) |
+| P1-2 | **확인.** slot reset의 archive는 실행 nonce가 아니라 thread ID에 대한 Discord PATCH다. map 전이가 성공해도 같은 thread ID에 새 실행이 들어올 수 있다: 기존 dispatch의 `active_thread_id` 재사용은 archive된 스레드를 되살리고(unarchive) 그 스레드를 쓴다. 직접 Discord 입력도 같다. `RetiredExclusion`은 (channel, provider) 종료 배타이고 Discord 입력이나 다른 provider 행을 막지 못한다 | 해제 판정의 유효기간을 **map CAS 커밋까지**로 정한다. 그 뒤에는 thread ID에 외부 효과를 내지 않는다. 그래서 **Herdr 해제(확정 Retired exact 정산)로 회전하는 스레드는 archive하지 않는다.** archive는 현행처럼 확인된 legacy tmux 행만 있는 스레드에만 한다(main과 같은 집합). 중복 slot thread archive도 Herdr 행이 하나라도 있는 스레드는 건너뛴다. map 전이는 읽은 map 값에 대한 CAS로 바꾼다. 아래 "P1-2 계약" | `auto_queue/runtime.rs:387-445`(archive `:390` → 세션 정리 `:391` → map `UPDATE … '{}'` `:392-406`, 조건 없음), `:423-427`(archive는 선택적 Discord 효과라는 기존 주석), `:439`(discord.com 고정 URL), `:496-502`(`host_decision_for_rows`로 Herdr 스레드 제외); `session_host/host_decision.rs:105-130`(스레드의 모든 provider 행을 읽음); `intake_turn/adk_thread.rs:152-205`(`active_thread_id` 재사용); `router/thread_binding.rs:77-110`(재사용 때 unarchive); `discord/herdr_terminate.rs:617-642`(retire → `settle_and_release` → `RetiredExclusion`); `dispatches/discord_delivery/transport.rs:659-760`(중복 archive, Herdr 판정 없음), `orchestration.rs:857,978`(호출) | S2b | T-S2-8 확장(§6): map CAS 직후·archive 직전 successor, 같은 스레드의 다른 provider, legacy 대조군, map CAS 경합, 중복 archive. 뮤턴트: Herdr 해제 스레드를 archive 목록에 되돌림(모델 `MutW3ArchiveAfterRelease` → `ArchiveSparesLive` RED) / map 무조건 UPDATE |
+| P2-1 | 확인. `Execution::Unknown.endpoint()`는 None이고, notice admission은 None이면 Herdr fence 없이 `start(store)`를 부른다 | E86에서 Unknown·owner Hold를 확인된 Tmux와 구분해 **fail-closed**로 둔다. owner 단위 Hold(w2-P1-5)의 소비자 쪽 의미다 | `session_host/thread_host.rs:63-83,103-117`; `tui_o/writer/input_notices/admission.rs:131-144` | S2b | T-S2-9에 추가: 미확인 Bound와 기존 notice debt를 함께 부팅 → Hold 동안 notice POST 0 |
+| P2-2 | 확인. 모델의 `reserved`는 bool이고 `FirstInputResolves`는 제출 횟수로 성립한다 | 모델 GREEN은 예약의 exact owner·nonce, 첫 제출 뒤 Bind와 실제 O 출력 완료, 정산 전 해제 금지, 같은 스레드의 둘째 provider를 증명하지 않는다고 적는다(아래 "상태 차트(w3)"). T-S2-1·8·19·21 생산 시험이 맡는다. T-S2-19에 다른 nonce의 예약을 재사용하는 뮤턴트를 더한다 | `docs/statecharts/thread-host/ThreadHostS1b.tla` `Reserve`·`SubmitHerdr` | 문서 | T-S2-19 뮤턴트 추가 |
+| P2-3 | 확인. 안 A의 S2c-1 "공통 write 예약 골격"과 tab 모델은 S2c-2 전까지 소비자가 없다. own-boot 채널에 child 전용 source policy를 요구하면 정상 입력이 보류될 수 있다 | S2c-1을 **실제 생산 호출자를 통한 수리**로 좁힌다: own-boot Herdr exact retry의 예약 실패 → 키 0·같은 receipt 보존, I3 provider 선고정, restart `adopt` 뒤 seed. own 채널 일반 입력은 그대로 둔다. child source policy 요구와 tab.create 모델은 S2c-2로 옮긴다. 아래 "범위 선택지" 안 A | `claude/herdr_turn/first_input.rs:226-333`(`write`: hold 판정 → hold 기록 → 키); `intake_turn/worker_entry.rs:182`; `queue_io/input_owner/ingress.rs:415-417`; `claude/herdr_turn.rs:764-773` | S2c-1 / S2c-2 | T-S2-19를 S2c-1 착지 조건으로 둔다. RED가 안 나오면 [U-w3-1] |
+| Q-P1 | — | typed 생성 gate(E17·E18·E19)를 **S2c-2로 옮긴다.** S2a에는 기존 동작 회귀 대조군만 둔다(T-S2-4, Codex 기존 동작). **S2a-3 독립 조각은 없앤다.** 활성화 전에도 실제 오판을 고치는 생산 호출자가 구현 중 확인되면 그 부분만 S2a-2로 착지한다 | E17 `claude/tui_session_launch.rs:91-108`, E18 `claude.rs:2602`, E19 Codex 생성 경계, `herdr_launch.rs`(`herdr_configured_for_tui_launch`) | S2c-2 | S2c-2: 확인된 Tmux → tmux 생성 허용, Herdr/Hold → tmux 생성 0, 같은 채널의 Claude Herdr·Codex Tmux → provider별 gate 독립. 뮤턴트 typed gate를 own-boot 검사로 되돌림 |
+| Q-P2 | — | 공통 관측(rowless 정규 tmux 이름 probe, alias·selector 관측, ProbeFailed/Missing 분리, 그것을 소비하는 기존 호출부 수리)은 **S2a-2**. `input_runs_herdr`의 probe 생략 제거와 Nothing → Herdr fresh 활성화는 **S2c-2에 함께** 둔다. 활성화 전에는 probe 생략이 Nothing → Tmux라 bool 결과가 같다 | `session_host/host_decision.rs:149-160,197-205,253-290` | S2a-2 / S2c-2 | S2a-2: T-S2-3b/c/d. S2c-2: live tmux 스레드가 부모 Herdr 동의에 묶이지 않음(`MutS2ProbeSkipped`와 같은 뜻) |
+| Q-P3(U-A) | — | 동의 카드·명령은 **부모 endpoint를 상속한다.** 서버 선택·동의 근거만 부모 것이고, 입력의 source ID·generation·ticket, HostedOwner, 실제 카드, 원본 custody는 원래 identity를 유지한다(I3의 원본 custody가 부모에 있으면 그대로). 보류된 동의의 retry·카드 응답은 현재 실행의 `input_runs_herdr` bool에 다시 묶지 않고 저장된 exact consent identity로 검증한다. 경계별 처리는 아래 "Q-P3 동의 경계" 표 | `router/herdr_consent.rs:60,94-125,133,216,291`; `router/herdr_consent/transport.rs:100`; `router/herdr_consent/admission.rs:40-47`(자식 판단은 이미 부모 endpoint); `router/herdr_consent/return_input.rs:14-16` | S2a-2 | proof 없는 자식의 첫 입력 → 카드 생성 → owner 승인 → 같은 원본 제출 1회, retry·Applied 재시작 복구, 형제 자식 간 custody 구분 |
+| 조각 | — | S2a-1 → S2a-2 → S2b → S2c-1 → S2c-2. S2a-3 없음. 재추정은 아래 "조각·크기 재추정(w3)" | — | 전체 | — |
+
+### P1-1 계약 — placed Pending의 실제 미실행 처분 (S2b)
+
+1. `launch_host::create_checked`는 command 입력 결과를 셋으로 나눠 돌려준다: 확인됨(`Created`), **확정 미전송**(`mutation_result`의 `HostError::Transport`, 곧 transport `NotSent`), **전송 불명**(`Indeterminate`·그 밖). 지금은 뒤의 둘이 `CreatedUnconfirmed`로 합쳐진다(`launch_host.rs:654`). 확정 미전송이 결론을 정하지는 않는다. 같은 잔재 판정을 quiet 대기 없이 바로 돌려도 된다는 뜻만 있다.
+2. 처분 판정은 하나다. `herdr_launch/unplaced.rs`의 `judge`를 placed Pending에도 쓴다:
+   - 대상: 행이 여전히 그 nonce의 Pending이고 `location = Some(L)`, `expected = None`. `unplaced()` 행 확인(`:348-363`)을 "위치가 L이거나 없음"으로 넓힌다.
+   - pane 범위: placed에서는 `L.pane_id`인 pane만 own·residue 후보다. marker가 같은 다른 pane은 `several panes claim the launch` Held다.
+   - `Dispose`(exact marker, `LoneShell`, pristine): pane을 닫고 `retire_own_pending(pool, owner, nonce, Some(&L))`(`herdr_launch.rs:695-715`). 결과는 `Resolution::Retired`이고, Q3의 "확정 미전송 fresh successor" 증거가 된다.
+   - `Adopt`(provider가 그 nonce의 context로 실행 중): 기존 증거 probe를 기록한다(`probe_again`과 같은 규칙). 추가 create는 0이다.
+   - marker pane 없음(`Plan::Retire`): placed에서는 Held다. 사라진 pane의 retire는 기존 reconnect의 `Scope::Missing`(`recovery_engine/herdr_reader.rs:436-470`)이 맡는다. **[w4-P1-1] 틀렸다**: reconnect는 Pending이면 일찍 돌아간다(`:425-427`). placed resolver가 exact Missing retire를 직접 한다(맨 앞 "P1-1 계약(w4)").
+   - `Held`(touched shell, unreadable, 여러 pane, quiet 미달, 다른 nodes·runtime): 기존 `PendingUnproven` 보류다. [w4-P2-2] touched는 관측 가능한 변경(추가 pane·tab, 다른 occupant)만 뜻한다. 키·create는 0이고 원본을 보존한다.
+3. 호출자는 둘이다. turn 경로 `pending.rs:29-35`는 증거 재확인이 실패하면 이 판정을 부르고, `Retired`이면 unplaced와 같이 `launched_source`로 간다(`:16-18`). 주기 경로 `herdr_reader.rs:363-398`의 unplaced pass는 placed·증거 없는 행도 같은 lease로 판정하고, 진전은 owner를 깨우는 신호로만 쓴다.
+4. transcript 부재, SessionStart 부재, `start_logged` false는 어느 것도 미전송 근거가 아니다. 콜드 Claude는 첫 키 전에 transcript가 없다(w2-P1-1). 그래서 이 판정은 pane의 실제 occupant(`PaneOccupant`)와 pristine만 본다.
+5. pristine은 S2b(자기 boot workspace)에서 기존 정의(`launch_host.rs:827`: workspace의 pane 1·tab 1)를 쓴다. S2c 자식 tab에서는 Q4대로 tab 단위 pane 1과 exact marker·root로 바꾼다(`herdr_gate` residue 이동, S2c-2).
+6. 크기: `unplaced.rs`(466줄)에 행 확인 확장·pane 범위 인자만 넣는다. placed 진입 함수가 60줄을 넘으면 `herdr_launch/unplaced/placed.rs` child로 뺀다.
+
+### P1-2 계약 — 해제 판정의 유효기간과 archive (S2b)
+
+1. 해제 판정 = (a) exact 실행의 종료 확인(`read_end`), (b) `settle_and_release` 완료(`RetiredExclusion` 보유, `herdr_terminate.rs:628-640`), (c) slot map CAS. 판정은 (c)의 커밋에서 끝난다. 그 뒤의 thread ID 외부 효과는 이 판정으로 정당화되지 않는다.
+2. **Herdr 해제로 회전하는 스레드는 Discord archive를 하지 않는다.** 이유: 같은 thread ID의 새 입력은 slot 배타 밖에서 들어온다. `active_thread_id` 재사용은 스레드를 되살리고(`thread_binding.rs:77-110`), 직접 Discord 입력은 AgentDesk 잠금 없이 도착한다. 그래서 map CAS 뒤 PATCH까지의 창은 lease로 닫을 수 없다. archive는 이미 선택적 Discord 효과다(`runtime.rs:423-427`). 별도 분산 트랜잭션이나 archive 복구 큐는 만들지 않는다.
+3. `filter_safe_slot_thread_reset_targets`(`runtime.rs:484-551`)의 결과를 둘로 나눈다. 확인된 legacy tmux 스레드는 현행대로 archive + 정리한다(main과 같음). 확정 Herdr Retired 스레드는 exact 정산과 map CAS만 하고 archive는 없다(w2-P1-6의 exact row·nonce 조건). 다른 provider 행이 하나라도 해제되지 않았으면 그 스레드는 해제하지 않는다. `host_decision_for_rows`가 스레드의 모든 provider 행을 읽는다(`host_decision.rs:105-130`).
+4. map 전이는 `build_slot_clear_target_pg`가 읽은 map 값에 대한 CAS다(`WHERE … AND thread_id_map = $읽은 값`). 불일치하면 binding을 보존한다(기존 경고 분기 `:407-411`).
+5. 중복 slot thread archive(`transport.rs:659-760`)는 Herdr 행이 하나라도 있는 스레드를 건너뛴다. [w4-P2-1] 행 존재 대신 부모 정책으로 바꾼다: 부모가 Herdr 정책이면 그 아래 후보는 모두 건너뛴다. 판정 본체는 `dispatches/thread_archive_defer.rs`에 두고 `transport.rs`(giant 1175)에는 호출 한 줄만 둔다. `orchestration.rs`는 바꾸지 않는다. 재사용 실패 분기(`:896-899`)는 map 항목만 지우고 archive하지 않는다.
+6. map 전이 뒤 같은 스레드에 successor가 생겨도 DB 정산은 exact Retired nonce에만 쓰므로 successor 행·selector·nonce는 그대로다. archive는 없다. slot은 다른 스레드를 가리키고, successor는 S2b 주기 idle 해제가 나중에 처리한다.
+7. 넓히지 않음: legacy 스레드의 같은 경합(map 정리 뒤 재사용된 legacy 스레드 archive)은 main에도 있는 기존 결함이다. 이번에 넓히지 않고 후속 후보로 둔다.
+8. 시험 관측: `runtime.rs`의 archive를 기존 `discord_api_base_url()`(`transport.rs:111-117`, 운영 설정 `AGENTDESK_DISCORD_API_BASE_URL`) 경유로 바꿔, fake Discord 서버가 PATCH 횟수를 센다. 새 시험 스위치는 만들지 않는다.
+
+### Q-P3 동의 경계 (S2a-2)
+
+| 경계 | 지금 | w3 계약 |
+|---|---|---|
+| `herdr_consent.rs:60` | 자기 channel의 user-default endpoint | 부모를 포함한 유효 endpoint로 consent key 검증 |
+| `:94-125` `run` | `source(&consent)` 통과 뒤 실제 카드 생성 | 유효 endpoint 확인 뒤 실제 카드 생성. own으로 남기면 durable hold에 들어간 자식 입력이 카드를 못 받는다 |
+| `:133` component | own endpoint | 유효 endpoint 확인 뒤 실제 카드 identity 대조 |
+| `:216` retry | own endpoint | 자식에서도 기존 consent retry 허용. 저장된 exact consent identity로 검증하고 현재 실행 bool에 다시 묶지 않음 |
+| `:291` ensure | own endpoint | 해당 부모 Herdr 서버 기동 |
+| `herdr_consent/transport.rs:100` | 설치된 own endpoint와 consent key 대조 | 부모 endpoint와 기존 consent key 일치 확인 |
+| `herdr_consent/admission.rs:40-47` | 자식은 이미 부모 endpoint | 유지 |
+| `herdr_consent/return_input.rs:14-16` | own-boot guard | 유지. 부모 binding rollback이라 자식에 상속하지 않음(w1 Q8) |
+
+### 조각·크기 재추정(w3)
+
+추정이고 측정이 아니다. 이 레그의 `pr_cap_prod.py a086520093 HEAD` 실측은 prod 0이다. 조각별 실측은 구현 레인이 한다.
+
+| 조각 | w2 추정 | w3 추정(prod 파일 / 순증) | 바뀐 이유 | T0 #8430·#8432·#8399 겹침 | 그 밖의 겹침(2310 목록) |
+|---|---|---|---|---|---|
+| S2a-1 | 5 / +70~120 | 5 / +70~120 | 그대로 | 없음 | `turn_host.rs`(mkrx_w7) |
+| S2a-2 | 19~21 / +320~520 | 20 / +360~580 | Q-P3 동의 경계(`herdr_consent.rs`, `herdr_consent/transport.rs`, `herdr_consent/admission.rs`). probe 생략 제거는 S2c-2로 | 없음 | mkrx_w7 11파일, `input_notices/admission.rs`(i8437_wip) |
+| S2a-3 | 8~9 / +100~200 | **없음** | Q-P1: S2c-2로 흡수 | — | — |
+| S2b | 15~18 / +600~950 | 18(신규 2) / +700~1050 | P1-1 placed 판정(`unplaced.rs`, `pending.rs`, `herdr_reader.rs`), P1-2 archive 분리·map CAS(`runtime.rs`, `thread_archive_defer.rs`, `transport.rs` 호출 1줄), P2-1(`input_notices/admission.rs`, `thread_host.rs`). `never_started.rs`·`orchestration.rs`는 빠짐 | **없음** | mkrx_w7 8파일, rxbd_w8 5파일, `input_notices/admission.rs`(i8437_wip) |
+| S2c-1 | 10~12 / +300~500 | 8 / +200~350 | P2-3: 소비자 없는 예약 골격·tab 모델을 S2c-2로 | `restart/herdr.rs`, `restart_seed.rs`(i8399_s3b2) | mkrx_w7 3파일, rxbd_w8 `adk_thread.rs` |
+| S2c-2 | 18~22 / +500~800 | 28(신규 2) / +750~1150 | + typed gate(Q-P1), + probe 전환(Q-P2), + tab 모델(P2-3), + child source policy 요구 | `herdr_gate.rs`(i8430_s1), `owner_input.rs`(i8430_s1·i8399_s3b2), `herdr_turn/handoff.rs`(i8399_s3b2) | mkrx_w7 19파일, rxbd_w8 2파일 |
+
+- 조각별 파일 목록은 보고서와 `~/.adk/lane-runs/i8118-s2/logs/w3/<조각>.txt`에 있다. 겹침은 `t2-overlap-files-2310.txt`(코디 23:10)에 대조했다.
+- S2b는 T0 #8441·#8128 조각 I(herdr 6시간 유휴 자동 종료, ref 없음)와 **책임이 겹친다**: S2b의 신규 `herdr_terminate/idle.rs`와 주기 해제. 2310 목록은 그 조각이 세션 정리·유휴 종료 경로를 건드린다고 적는다. S2b 착수 전에 코디가 소유를 정한다([U-w3-2]).
+- S2c-2는 30파일 상한에 닿는다(28, 겹치는 파일 차감 뒤). 실측이 30 또는 +1200을 넘으면 첫 감량 후보는 Codex 생성 경계(E19의 `codex.rs`, `launch_policy.rs`) 호출 교체를 S4로 미루는 것이다. 신규 Codex 자식은 S4라서 S2에서 결과가 같을 수 있다. 다만 own-boot bool이 Herdr 부모 아래 Codex tmux 생성을 막지 않는지는 확인하지 않았다([U-w3-3]). dormant 코드를 S2b로 옮겨 맞추지는 않는다.
+
+### 상태 차트(w3)
+
+`SpecS2`의 `S2` 모드가 이제 w3 계약이다. w2의 두 빈틈은 `MutW3*` 뮤턴트로 재현한다. 새 entry `LostCommand`·`LostCommandHeld`·`SlotSuccessor`는 새 cfg에만 있고, 기존 48 cfg 결과는 그대로다(56/56 expected 일치). 결과는 report "Design w3" 절에 있다.
+
+| P1 | w2 빈틈 재현(RED) | w3 계약 |
+|---|---|---|
+| 1 | `MutW3NoPlacedResidue`: `FirstInputResolves` RED(명령이 실행되지 않은 placed pane에서 멈춤) | `S2W3Lost` GREEN |
+| 1 | `MutW3NoPristine`: `TouchedResidueHeld` RED(손댄 shell을 닫음) | `S2W3Held` GREEN(safety만, Hold는 진전을 주장하지 않음) |
+| 1 | `MutW3ResidueByAbsence`: `ResidueNeverRan` RED(transcript 없는 콜드 Claude를 닫음), `FirstInputResolves` RED(successor도 매번 닫힘) | `S2W3Lost` GREEN |
+| 2 | `MutW3ArchiveAfterRelease`(w2 순서): `ArchiveSparesLive` RED(해제 → slot reset → successor → archive) | `S2W3Slot` GREEN, `S2W3All` GREEN |
+
+모델 GREEN의 범위(P2-2): 예약의 exact owner·nonce 일치(`reserved`는 bool), 첫 제출 뒤 Bind와 실제 O 출력 완료, 정산되지 않은 실행의 해제 금지, 같은 스레드의 둘째 provider 실행은 모델이 증명하지 않는다. 각각 T-S2-19, T-S2-1, T-S2-8, T-S2-8(다른 provider 갈래)가 생산 경계에서 맡는다.
+
+### [U] w3 추가
+
+| 항목 | 미확인 내용 | 처리 |
+|---|---|---|
+| U-w3-1 | own-boot exact retry가 지금 hold 기록 실패·epoch 거절에서 receipt를 어떻게 정산하는지 실제 실행으로 확인하지 않았다 | S2c-1 착수 때 T-S2-19를 base에서 먼저 돌린다. RED가 안 나오면 S2c-1의 예약 부분은 S2c-2로 넘기고 S2c-1은 I3·restart만 남긴다 |
+| U-w3-2 | T0 #8441·#8128 조각 I와 S2b idle 해제의 소유 | S2b 착수 전 코디 결정 |
+| U-w3-3 | Herdr 부모 아래 Codex tmux 생성에서 own-boot bool의 실제 결과 | S2c-2 실측이 상한을 넘을 때만 확인하고 감량 후보로 쓴다 |
 
 ## w2 변경
 
@@ -44,11 +193,13 @@
 
 ### 조각·크기 재추정(w2)
 
+> **[w3]** 이 표는 w2 값이다. w3 재추정은 맨 앞 "조각·크기 재추정(w3)"을 따른다(S2a-3 없앰, S2c-1 축소).
+
 | 조각 | w1 추정 | w2 추정(prod 파일 / 순증) | 바뀐 이유 |
 |---|---|---|---|
 | S2a-1 | 5 / +70~120 | 5 / +70~120 | 그대로 |
 | S2a-2 | (S2a 합계 22~26 / +350~600) | 19~21 / +320~520 | P1-8: `tui_prompt_relay.rs`, `tui_prompt_relay/synthetic_start/admission_fence.rs`, `tui_o/writer/actor.rs`(giant 1057, 호출만), `tui_o/writer/input_notices/admission.rs`. rowless probe |
-| S2a-3 | (위에 포함) | 8~9 / +100~200 | 그대로(Q-P1: S2c로 옮길지는 미정) |
+| S2a-3 | (위에 포함) | 8~9 / +100~200 | 그대로(Q-P1: S2c로 옮길지는 미정) — [w3-Q-P1] 없앰, S2c-2로 흡수 |
 | S2b | 9~12 / +350~600 | 15~18 / +600~950 | P1-4(`launch_host.rs`, `herdr_launch.rs`, `pending.rs`, `never_started.rs`), P1-5(`runtime_bootstrap.rs` 순서, `herdr_reader.rs` 재사용), P1-6(`orchestration.rs`, 종료 엔진 정산 증거, registry verdict 분기) |
 | S2c | 25~29 / +650~1100 | 28~32 / +800~1300 | P1-1·2(`first_input.rs`, `herdr_turn.rs`, `worker_entry.rs` 정산 연결), P1-3(`adk_thread.rs`, reset 경로), P1-7(`restart/herdr.rs`, `restart_seed.rs`). P1-4의 `launch_host` 부분은 S2b로 옮김 |
 
@@ -61,7 +212,7 @@
 
 ### 상태 차트(w2)
 
-`docs/statecharts/thread-host/ThreadHostS1b.tla` `SpecS2`의 `S2` 모드가 이제 w2 계약이다. w1의 결함은 `MutW1*` 뮤턴트로 재현한다. 결과는 report "Design w2" 절에 있다.
+`docs/statecharts/thread-host/ThreadHostS1b.tla` `SpecS2`의 `S2` 모드가 이제 w2 계약이다([w3] w3에서 다시 고쳤다. 맨 앞 "상태 차트(w3)"). w1의 결함은 `MutW1*` 뮤턴트로 재현한다. 결과는 report "Design w2" 절에 있다.
 
 | P1 | w1 결함 재현(RED) | w2 계약 |
 |---|---|---|
@@ -83,12 +234,16 @@ P1 8건은 모두 닫는 방향이 정해졌다(반영 8/8, 기각 0). 반영 �
     - Herdr 클라이언트 `tab.create` 요청·응답 모델: protocol fixture로 시험한다.
   - **S2c-2(활성화, 약 18~22파일 / +500~800):** `next_host` 본문, child plan·permit, tab 배치·marker 복구, 첫 입력 순서(P1-1), vacant reset fresh 의도(P1-3 나머지), tmux 생성 거절.
   - 위험: S2c-1의 tab 모델은 S2c-2 전까지 호출자가 없다. 이것을 피하려면 tab 모델을 S2c-2로 옮긴다(S2c-2 +100).
+  - **[w3-P2-3·Q-P1] 안 A를 고쳐 채택한다(리뷰 권고 "수정 안 A").** 착지 순서는 S2a-1 → S2a-2 → S2b → S2c-1 → S2c-2다.
+    - S2c-1(8파일 / +200~350)은 오늘의 생산 호출자로 검증되는 수리만 둔다: own-boot Herdr exact retry의 예약 실패 → 키 0·같은 receipt 보존(T-S2-19), I3 자식·provider·owner 선고정(T-S2-20의 own 경로), restart `adopt` 뒤 seed(T-S2-22). own 채널 일반 입력은 바꾸지 않는다. 자식 source policy를 요구하지 않는다.
+    - S2c-2(28파일 / +750~1150)로 옮긴다: child source policy 예약 요구, `tab.create` 요청·응답 모델, typed 생성 gate(E17·E18·E19), `input_runs_herdr` probe 전환. 호출자 없는 배관을 선행 착지하지 않는다.
+    - S2c-2는 30파일 상한에 닿는다. 실측이 넘으면 맨 앞 "조각·크기 재추정(w3)"의 감량 후보를 쓰고, dormant 코드를 S2b로 옮겨 맞추지 않는다.
 - **안 B: S2c를 하나로 두고 S2b로 더 당긴다.** P1-4를 이미 당겼으므로 추가로 당길 후보는 Herdr 클라이언트 tab 모델뿐이다. 그러면 S2b에 호출자 없는 코드가 생긴다. 권고하지 않는다.
 - **안 C: 활성화 범위를 줄인다.** S2c 활성화를 "사람·봇 첫 메시지(I1·I2)의 새 스레드"로 한정하고, I3 redirect·exact retry(I10)·`/restart` vacant(I16)는 기존대로 Tmux 또는 Hold로 둔다. DoD 1의 "새 스레드"는 덮지만 dispatch 스레드(I3)의 Herdr화가 늦어진다. 18:12 증상(조율 스레드, I1)은 닫힌다.
 
 ---
 
-# 본문(w1 전문, w2 표시 포함)
+# 본문(w1 전문, w2·w3·w4 표시 포함)
 
 #8118 S2 설계 — Herdr 부모 채널 아래 스레드 세션의 배치·활성화
 
@@ -105,12 +260,12 @@ S2는 Claude 자식의 부모 workspace 내 tab 배치, 첫 입력과 출력 보
 | selector 정본 | canonical DB 행의 claude_session_id. 행 상태와 같은 조회에서 읽는다. Herdr Retired의 native ID는 tmux selector와 구분한다. |
 | 첫 실행 의도와 허가 | ChildFresh 실행 의도와 ChildLaunchPermit(Fresh)를 분리한다. 후자는 late child의 O 준비 예외만 허용한다. |
 | 배치 | 검증된 부모 Bound pane의 workspace에 tab.create. 부모 pane이 없으면 D1 명시 거절한다. |
-| 복구 | 자식의 기존 nonce와 부모 endpoint를 사용한다. tab marker로 원래 pane을 찾고, 미확정 입력은 같은 owner custody에서 기다린다. [w2-P1-1] 첫 키는 Bind 앞(placed Pending + 예약 뒤). [w2-P1-4] command 확정 미전송은 exact 정리 뒤 같은 원본 재개. |
+| 복구 | 자식의 기존 nonce와 부모 endpoint를 사용한다. tab marker로 원래 pane을 찾고, 미확정 입력은 같은 owner custody에서 기다린다. [w2-P1-1] 첫 키는 Bind 앞(placed Pending + 예약 뒤). [w2-P1-4] command 확정 미전송은 exact 정리 뒤 같은 원본 재개. [w3-P1-1] 전송 불명도 공통 잔재 판정으로 미실행이 확인되면 같은 처분, 아니면 Hold. |
 | 출력 | 모든 새 Claude Herdr 자식 incarnation에 claude_thread_writer:<parent>를 기록하고 첫 키 전에 예약을 확정한다. |
-| 해제 | idle 자식 해제를 S2에 포함한다. 기존 주기 복구 pass가 해제하고, 슬롯은 확정 Retired 또는 rowless 상태에서 회전한다. [w2-P1-6] 종료 + 정산 완료 + map 전이를 묶은 해제 판정 뒤에만 archive. |
+| 해제 | idle 자식 해제를 S2에 포함한다. 기존 주기 복구 pass가 해제하고, 슬롯은 확정 Retired 또는 rowless 상태에서 회전한다. [w2-P1-6] 종료 + 정산 완료 + map 전이를 묶은 해제 판정 뒤에만 archive. [w3-P1-2] 판정은 map CAS에서 끝나고, Herdr 해제 스레드는 archive하지 않는다. |
 | 관계·부팅 | 부모 관계를 O candidate 존재와 분리한다. 관계 복원과 Bound seed를 소비자 시작보다 앞에 둔다. [w2-P1-5] 끝난 행은 그 앞에서 exact retire, 미확인은 owner 단위 Hold로 두고 소비자는 시작한다. [w2-P1-8] 현재 실행 기록은 provider·정규 owner별. |
 | 범위 | canonical Claude TUI 입력은 S2. Codex 신규 자식은 S4. routine Process 및 독립 label/snapshot 실행은 S1r. |
-| 분할 | S2a: 현재 소비자·판정 정합 → S2b: 부팅·복구·해제 → S2c: tab 배치·첫 입력·활성화. 활성화는 S2c에만 둔다. |
+| 분할 | S2a: 현재 소비자·판정 정합 → S2b: 부팅·복구·해제 → S2c: tab 배치·첫 입력·활성화. 활성화는 S2c에만 둔다. [w3] S2a-1 → S2a-2 → S2b → S2c-1(생산 호출자 수리) → S2c-2(활성화). S2a-3은 없다. |
 
 
 현재 코드에서 이 결정을 요구하는 지점은 turn_host.rs:219–243, host_decision.rs:197–204, herdr_reader.rs:207–218,363–366, session_idle_cleanup.rs:25–42,75–81, auto_queue/runtime.rs:498–507,555–590이다.
@@ -193,6 +348,8 @@ Pending과 미전송 successor
 Pending은 새 Fresh permit을 받지 않는다. 기존 nonce의 durable context를 검증하여 같은 실행의 복구·첫 입력 보호 경로에 들어간다.
 
 > **[w2-P1-4]** create ACK 뒤 command가 **확정 미전송**이면 launch_host가 그 사실을 보존한다. exact nonce·marker·root를 확인해 잔재를 닫고 retire한 것이 이 절의 "확정 미전송 fresh successor" 증거가 된다. 전송 불명은 증거를 다시 확인할 뿐 successor 허가가 아니다(S2b).
+
+> **[w3-P1-1]** 전송 불명이었더라도 뒤의 독립 증거(공통 잔재 판정의 exact marker·lone root shell·pristine)로 미실행이 확인되면 잔재를 닫고 retire한다. 이것도 "확정 미전송 fresh successor" 증거다. 증거가 모자라면 Hold다. transcript·SessionStart 부재는 증거가 아니다(맨 앞 "P1-1 계약").
 
 다만 다음 정상 경로를 막아서는 안 된다.
 
@@ -305,6 +462,8 @@ active turn·owner front·queued input·dispatch·active child 없음;
 
 > **[w2-P1-6]** 슬롯 해제는 "exact 실행 종료 + 정산 완료(`settle_and_release` 뒤 증거) + slot map 전이"를 하나로 묶은 판정 뒤에만 archive한다(`auto_queue/runtime.rs:387-445`의 archive → DB 순서를 뒤집는다). Herdr 해제 경로는 `managed_reset_verdict`(`:511-519`)와 managed tmux·mailbox reset을 거치지 않는다. dispatch 재사용 실패·중복 archive(`dispatches/discord_delivery/orchestration.rs:847-904`)도 같은 판정을 쓴다. `Retired`만으로 정산 완료를 추정하지 않는다(종료 엔진은 retire를 정산보다 먼저 기록한다, `herdr_terminate.rs:623,630`).
 
+> **[w3-P1-2]** 해제 판정의 유효기간은 map CAS 커밋까지다. Herdr 해제로 회전하는 스레드는 archive하지 않고, map 전이는 읽은 값의 CAS로 한다. 위 블록의 "판정 뒤에만 archive"는 legacy 스레드에만 남는다(맨 앞 "P1-2 계약").
+
 | 실제 상태 | 슬롯 처리 |
 |---|---|
 | Herdr Bound·Pending·미확인 | 보류 |
@@ -336,6 +495,8 @@ HostDecision::Herdr는 명령이 선택할 호스트를 뜻한다. 현재 Bound 
 
 또한 input_runs_herdr의 tmux probe 생략을 제거한다. 현재 probe_tmux=false는 Legacy를 실제 관측 없이 Nothing으로 바꾼다(host_decision.rs:149–160,281–282). 이 상태에서 Nothing만 Herdr로 바꾸면 live tmux가 부모 동의에 묶인다.
 
+> **[w3-Q-P2]** probe 생략 제거는 Nothing → Herdr fresh 활성화와 함께 S2c-2에 둔다. S2a-2는 공통 관측(rowless probe, alias·selector, ProbeFailed/Missing)과 그 소비자 수리만 한다.
+
 Q8. C행 13곳은 각각 어떻게 처리하는가?
 
 | E행 | 판정 | 계약과 근거 |
@@ -356,6 +517,8 @@ Q8. C행 13곳은 각각 어떻게 처리하는가?
 
 
 E34의 공통 변경에서 endpoint 선택과 입력 identity를 분리한다. 부모는 서버 선택에만 사용한다. mailbox·consent intent·HostedOwner를 부모로 바꾸지 않는다.
+
+> **[w3-Q-P3]** U-A 결정: 동의 카드·명령의 발행·응답·재시도·서버 기동 경계도 부모 endpoint를 상속한다. 카드·custody·source identity는 원래 것이다. 경계별 표는 맨 앞 "Q-P3 동의 경계".
 
 herdr_consent/return_input.rs:14–16의 own mapping guard는 유지한다. 이 명령은 개별 자식 실행이 아니라 부팅 설정의 채널 binding rollback을 다룬다. 자식에게 부모 binding rollback을 열지 않는다.
 
@@ -541,12 +704,12 @@ tab 배치만 먼저 착지시키지 않는다. S2a·S2b는 기존 생산 소비
 | C3 | ChildFresh는 기존 tmux 종료·native resume·handoff journal 신규 개시를 하지 않는다. | 두 claude_handoff 경로, Q2 좌표 — [w2-P1-2] 공통 `first_input` write의 예약 강제로 exact retry도 같은 경계를 지난다. |
 | C4 | 신규 자식 owner는 자식이며 배치는 검증된 부모 workspace의 tab이다. | herdr_launch.rs:224–235,548–603, launch_host.rs:594–655 |
 | C5 | Pending commit 전에 create하지 않는다. create 결과 불명에서 재전송하지 않는다. | herdr_launch.rs:548–624, unplaced.rs:229–311 |
-| C6 | Pending 복구는 같은 nonce를 채택하거나 확정 종료한다. Adopted를 Bound로 취급하지 않는다. | pending.rs:7–69, herdr_source.rs:132–190 — [w2-P1-1] 순서: placed Pending → 예약 → 첫 키 → transcript 검증 → Bind. Adopted도 placed Pending도 Bound가 아니다. |
+| C6 | Pending 복구는 같은 nonce를 채택하거나 확정 종료한다. Adopted를 Bound로 취급하지 않는다. | pending.rs:7–69, herdr_source.rs:132–190 — [w2-P1-1] 순서: placed Pending → 예약 → 첫 키 → transcript 검증 → Bind. Adopted도 placed Pending도 Bound가 아니다. [w3-P1-1] 미실행이 확인된 placed Pending은 공통 잔재 판정으로 확정 종료한다. |
 | C7 | 모든 새 Claude child의 source policy는 부모를 고정하며 첫 키보다 앞서 출력 예약을 확정한다. | herdr_launch.rs:816–843, claude_thread.rs:59–135,173–249, first_input.rs:269–333 |
 | C8 | 원본 identity별 첫 payload는 최대 1회. 불명 전송은 자동 재제출하지 않는다. | owner v2 attempt/retained, Q12 좌표 |
 | C9 | 부팅 후 Bound를 처음 읽는 D 소비자보다 관계 복원·seed가 앞선다. | runtime_bootstrap.rs:302–340, o_writer_host.rs:523–562 — [w2-P1-5] 끝난 것이 확인된 행은 소비자 앞에서 exact retire, 미확인은 owner 단위 Hold. 전체 부팅을 막지 않는다. |
 | C10 | 자동 idle 종료는 새 입력과 경합하면 중단하며 정확한 자식 nonce만 종료한다. | herdr_terminate.rs:498–581,617–642, 신규 idle.rs |
-| C11 | 슬롯의 해제 가능성은 미래 호스트와 별개다. Retired 정산은 successor를 수정하지 않는다. | auto_queue/runtime.rs:176–191,498–590 — [w2-P1-6] 해제 판정(종료 + 정산 완료 + map 전이) 뒤에만 archive. |
+| C11 | 슬롯의 해제 가능성은 미래 호스트와 별개다. Retired 정산은 successor를 수정하지 않는다. | auto_queue/runtime.rs:176–191,498–590 — [w2-P1-6] 해제 판정(종료 + 정산 완료 + map 전이) 뒤에만 archive. [w3-P1-2] 판정은 map CAS에서 끝나고, Herdr 해제 스레드는 archive하지 않는다. |
 | C12 | 부모 endpoint를 상속해도 custody·consent intent·HostedOwner identity는 바꾸지 않는다. | herdr_consent/admission.rs, intake_turn/adk_thread.rs |
 | L1 | 지원되는 입력에서 부모·admission·O 준비가 회복되면 첫 입력이 진행된다. | configured_plan, owner wait, Pending attach |
 | L2 | 종료가 허가되고 idle·증거 조건이 지속되면 자식은 Retired에 도달한다. | 기존 주기 pass → 신규 idle 종료 |
@@ -576,15 +739,15 @@ E1~E31 — 판정·입력·생성
 | E8 | turn_host.rs:200–252 | 바꿈. Q1 상태표와 Pending 보류 |
 | E9 | turn_host.rs:282–318 | 바꿈. 사전 eligibility·typed wait, first 소비 없음 |
 | E10 | turn_host.rs:412–463 | 바꿈. child plan·late first permit·복구 입장 구분 |
-| E11 | host_decision.rs:75–290 | 바꿈. 확인된 Nothing에서만 다음 호스트; probe 생략 제거 — [w2] rowless도 정규 tmux 이름으로 probe(`host_decision.rs:253-255`의 probe 전 Nothing 제거). |
+| E11 | host_decision.rs:75–290 | 바꿈. 확인된 Nothing에서만 다음 호스트; probe 생략 제거 — [w2] rowless도 정규 tmux 이름으로 probe(`host_decision.rs:253-255`의 probe 전 Nothing 제거). [w3-Q-P2] 관측은 S2a-2, probe 생략 제거는 S2c-2. |
 | E12 | discord/host_defer_gate.rs:109,298,309 | 남김. 공통 판정을 소비 |
 | E13 | intake_turn/host_refusal.rs:19 | 바꿈(공통). 새 자식 사전 허용·보류 |
 | E14 | intake_turn.rs:1940 | 바꿈(공통). 최종 child 판정. giant에 새 본체 없음 |
 | E15 | turn_teardown_clearance.rs:11 등 | 남김. keyed teardown 보호 유지 |
 | E16 | provider_dispatch.rs:360–371 | 바꿈, 전달만. child·first·fresh를 HerdrTurn에 전달 |
-| E17 | claude/tui_session_launch.rs:91–108 | 바꿈. provider-qualified 생성 gate; Herdr/Hold에서 tmux create 0 |
-| E18 | claude.rs:2602 | 바꿈, 호출만. E17과 같은 생성 gate |
-| E19 | Codex 생성 경계 6곳 | 바꿈, 호출 정합. provider 명시. 신규 Codex child 정책은 S4 |
+| E17 | claude/tui_session_launch.rs:91–108 | 바꿈. provider-qualified 생성 gate; Herdr/Hold에서 tmux create 0 — [w3-Q-P1] S2c-2 |
+| E18 | claude.rs:2602 | 바꿈, 호출만. E17과 같은 생성 gate — [w3-Q-P1] S2c-2 |
+| E19 | Codex 생성 경계 6곳 | 바꿈, 호출 정합. provider 명시. 신규 Codex child 정책은 S4 — [w3-Q-P1] S2c-2(상한 초과 시 S4 이월 후보, U-w3-3) |
 | E20 | discord/codex_absence.rs:31 | 남김/S4. 분류와 생성 허가를 혼합하지 않음 |
 | E21 | headless_turn/admission.rs:48–51, headless_turn.rs:993 | 바꿈. checked 관계 선행, Standing 범위 유지 |
 | E22 | input_owner/claude_handoff.rs:261–286 | 바꿈 필수. ChildFresh journal 신규 개시 제외 |
@@ -604,7 +767,7 @@ E32~E64 — 동의·관계·명령
 |---|---|---|
 | E32 | origin_admission.rs:19 | 남김. thread 인자가 있는 경로는 기존 prepared admission |
 | E33 | herdr_consent/admission.rs:31–49 | 바꿈. 현재/다음 실행을 동일 사실로 판정, fresh child proof |
-| E34 | herdr_consent.rs:31 | 바꿈. 확인된 부모 user-default endpoint |
+| E34 | herdr_consent.rs:31 | 바꿈. 확인된 부모 user-default endpoint — [w3-Q-P3] 카드·명령 경계(`:60,94-125,133,216,291`, `transport.rs:100`)도 부모 endpoint, identity는 원래 것 |
 | E35 | intake_dispatch.rs:587,617,896 | 바꿈(공통). child custody checkpoint |
 | E36 | busy_inject.rs:86–92 | 남김. 보수적 제외와 owner/큐 drain 유지 |
 | E37 | busy_inject.rs:103–109 | 바꿈, 조회 연결만. provider를 구별하는 next 판정 |
@@ -653,7 +816,7 @@ E65~E93 — 정리·복구·출력·배치
 | E75 | hosted_provider 소비자 | 남김. provider switch 의미 유지 |
 | E76 | hosted thread GC·migration 0131 | 남김. Legacy/Retired만 삭제, live Pending/Bound 보존 |
 | E77 | src/db/dispatched_sessions.rs:2086,2123 | 남김. 기존 Legacy selector 삭제 의미; 조회 정본은 Q2에서 확장 |
-| E78 | auto_queue/runtime.rs:498–507 | 바꿈. future-host가 아닌 actual-release clearance — [w2-P1-6] 해제 판정 뒤 archive. |
+| E78 | auto_queue/runtime.rs:498–507 | 바꿈. future-host가 아닌 actual-release clearance — [w2-P1-6] 해제 판정 뒤 archive. [w3-P1-2] Herdr 해제 스레드는 archive 없음, map CAS. |
 | E79 | 같은 파일 :555–590 | 바꿈. Retired 전용 exact 정산, Legacy gate 유지 — [w2-P1-6] `managed_reset_verdict` 분기 포함. |
 | E80 | tui_prompt_relay.rs:754 | 남김. boot seed 이후 current 소비 — [w2-P1-8] provider·source identity를 넘겨 provider별 현재 실행 조회. |
 | E81 | synthetic_start/admission_fence.rs:168 | 남김. boot gate·source 보호 아래 동작 — [w2-P1-8] 같음. |
@@ -661,12 +824,12 @@ E65~E93 — 정리·복구·출력·배치
 | E83 | unbound/herdr_bound.rs:19, completed_scheduled.rs:162 | current는 남김, next 호출은 provider를 구별하도록 연결 |
 | E84 | unbound.rs:305,534 | 남김. 동적 자식은 앞선 binding 필터로 제외 |
 | E85 | tui_o/writer/actor.rs:462–470 | 남김. boot gate 뒤 현재 실행, 미정산 출력 보호 — [w2-P1-8] 같음. |
-| E86 | writer/input_notices/admission.rs:131 | 남김. boot gate 뒤 current fence — [w2-P1-8] 같음. |
+| E86 | writer/input_notices/admission.rs:131 | 남김. boot gate 뒤 current fence — [w2-P1-8] 같음. [w3-P2-1] Unknown·owner Hold는 확인된 Tmux와 구분해 fail-closed(S2b). |
 | E87 | writer/rotation/readers.rs:806 | 남김/S4. Codex 전용 |
 | E88 | discord/queue_dispatch.rs:253 | 남김. own canary 자동 개입 |
-| E89 | herdr_launch.rs:550 | 바꿈. 자식 owner와 immutable child context로 Pending 설치 — [w2-P1-4] command 확정 미전송·불명 구분을 Pending 정산이 소비. |
+| E89 | herdr_launch.rs:550 | 바꿈. 자식 owner와 immutable child context로 Pending 설치 — [w2-P1-4] command 확정 미전송·불명 구분을 Pending 정산이 소비. [w3-P1-1] placed Pending도 공통 잔재 판정. |
 | E90 | launch_host.rs:619, model.rs:238 | 바꿈. parent-workspace TabCreate — [w2-P1-4] `create_checked` 결과 구분은 S2b에서 먼저 착지. |
-| E91 | herdr_launch/unplaced.rs:229,316 | 바꿈. tab marker·tab residue·기존 nonce 복구 |
+| E91 | herdr_launch/unplaced.rs:229,316 | 바꿈. tab marker·tab residue·기존 nonce 복구 — [w3-P1-1] S2b에서 placed Pending에도 `judge`를 씀(pane 범위는 기록된 pane). |
 | E92 | herdr_gate.rs:225 | 남김. 전달받은 endpoint·nonce의 기존 fence |
 | E93 | first_input.rs:108–168,269–333 | 바꿈. owner effect 안에서 첫 키 전 보호 예약 — [w2-P1-1·2] 예약은 공통 write, 첫 키는 Bind 앞. |
 
@@ -675,7 +838,7 @@ E1~E93 모두 처분했다. S4로 남기는 것은 E20·E87의 Codex 신규 자�
 
 5. 조각표 — 파일·추정 줄·착지 순서
 
-> **[w2]** 이 절의 추정은 w1 값이다. w2 재추정은 앞의 "조각·크기 재추정(w2)"와 "범위 선택지"를 따른다.
+> **[w2]** 이 절의 추정은 w1 값이다. w2 재추정은 앞의 "조각·크기 재추정(w2)"와 "범위 선택지"를 따른다. **[w3]** 최신 재추정은 맨 앞 "조각·크기 재추정(w3)"이다.
 
 아래 수치는 설계 추정이다. 측정 결과가 아니다. 실제 파일 수·순증·누적치는 pr_cap_prod.py 출력으로 확정한다.
 
@@ -712,8 +875,8 @@ T-S2-1~10 확정
 | T-S2-5 첫 허가 | late first 진행, normal Pending은 ordinary readiness, 첫 키 전 출력 보호 | late child의 OWriterNotReady; child source policy 부재 | configured_plan → HerdrTurn → owner hook → first_input::write | permit 제거 / fresh Pending까지 예외 / reservation을 키 뒤로 이동 |
 | T-S2-6 Pending 재시작 | 부모 endpoint 복구, 같은 원본 보류·재개 | 자기 boot만 읽어 복구 누락·terminal refusal | I7/I8/I10/I11 → owner wait → boot/주기 resolver → attach | own-boot 복원 / wait를 소비 / Adopted를 Bound로 seed |
 | T-S2-7 create 응답 유실 | 기존 tab 채택, 두 번째 pane 0 | tab 경로·tab marker 투영 없음 | prepared::create → 응답 유실 → resolve_unplaced | workspace label만 검색 / create 재전송 |
-| T-S2-8 idle·slot | 무입력·재시작 자식도 해제, Retired slot 회전 | Herdr skip, E78/E79의 영구 거절 | 주기 source tick → idle 종료 → slot reset | release 제거 / E79 legacy-only / exact nonce 조건 제거 — [w2-P1-6] successor 설치, Retired CAS 직후 정산 지연, Discord 조회 실패에서 map·출력 보존과 archive 0 |
-| T-S2-9 boot seed | Bound가 첫 동기 읽기에서 Tmux가 되지 않음 | JUDGED가 비어 있음 | 공통 run_bot bootstrap → relay/presence/HTTP/worker | seed를 spawn 뒤로 이동 / 관계 복원보다 먼저 기록 — [w2-P1-5] 옛 root·사라진 pane 행 + 정상 tmux 채널 부팅 → 정상 채널 작업, 미확인 자식 키·create 0 |
+| T-S2-8 idle·slot | 무입력·재시작 자식도 해제, Retired slot 회전 | Herdr skip, E78/E79의 영구 거절 | 주기 source tick → idle 종료 → slot reset | release 제거 / E79 legacy-only / exact nonce 조건 제거 — [w2-P1-6] successor 설치, Retired CAS 직후 정산 지연, Discord 조회 실패에서 map·출력 보존과 archive 0 — [w3-P1-2] (a) map CAS 직후·archive 직전 successor 설치(dispatch `active_thread_id` 재사용, 직접 입력) → archive PATCH 0, successor 행·selector·nonce 보존 (b) 같은 스레드에 다른 provider의 live 실행 → 해제 0·archive 0 (c) legacy만 있는 스레드 → archive 1(main 대조군) (d) map 읽기와 CAS 사이 upsert → CAS 실패·binding 보존 (e) 중복 archive 후보에 Herdr 행 → PATCH 0, legacy 후보 → PATCH 1. [w4-P2-1] Herdr 부모 아래 Retired GC → rowless → 중복 archive 검사 → 새 자식 설치 → PATCH 0, tmux 부모 아래 legacy 후보 → PATCH 1. 뮤턴트 Herdr 해제 스레드를 archive 목록에 되돌림 / map 무조건 UPDATE |
+| T-S2-9 boot seed | Bound가 첫 동기 읽기에서 Tmux가 되지 않음 | JUDGED가 비어 있음 | 공통 run_bot bootstrap → relay/presence/HTTP/worker | seed를 spawn 뒤로 이동 / 관계 복원보다 먼저 기록 — [w2-P1-5] 옛 root·사라진 pane 행 + 정상 tmux 채널 부팅 → 정상 채널 작업, 미확인 자식 키·create 0 — [w3-P2-1] 미확인 Bound + 기존 notice debt 부팅 → Hold 동안 notice POST 0 |
 | T-S2-10 첫 커밋 | clear·verified_bound·effort 세 계약 | Pending/Retired/Hold clear 누락, 거절을 Herdr 기록, Codex child effort 거절 | 실제 명령·`for_turn`·capability/passthrough | .is_herdr() gate 복원 / verified_bound 무시 / own-boot effort 복원 |
 
 
@@ -736,6 +899,8 @@ verified_bound=false gate refusal: JUDGED Herdr 기록 0.
 | T-S2-16 redirect custody | 부모 Bound가 child proof를 대신함, 동의 후 새 original/thread 중복 | child 재판정 삭제 / custody channel 덮어쓰기 |
 | T-S2-17 idle 경합 | idle 검사 뒤 새 front·native 입력·출력 custody가 생겼는데 종료 | transition/fence 안의 마지막 idle 검사 삭제 |
 | T-S2-18 범위·스위치 | Codex 신규 활성화, Apart label 병합, switch off인데 create/terminate | provider·Standing·기존 권한 검사 제거 |
+| T-S2-19 exact retry 예약 [w2-P1-2·w3-P2-2] | 실제 `start_exact_retry`에서 예약 실패 → 키 0·같은 receipt 보존, 성공 → 예약 뒤 제출 1회. S2c-1은 own-boot 채널, S2c-2는 자식 | 직접 `submit` 가드 제거 / **다른 nonce의 예약 재사용**(w3) |
+| T-S2-21 placed Pending 처분 [w2-P1-4·w3-P1-1] | 실제 `launch_herdr_session` → `SocketHerdrLaunchHost::create_checked`(fake Herdr socket, `session_host/herdr/unplaced_rig_tests.rs` 리그)에서 create ACK 뒤 command 입력을 실패시키고, 재시작 또는 다음 turn → owner wait → `pending_source`·주기 pass. 네 갈래: **(1) 확정 미전송**(transport NotSent) → exact 잔재 정리 → retire → 같은 원본 진행, 살아 있는 tab 1·제출 1 **(2) 전송 불명 + 실행 증거**(그 nonce의 provider가 pane에서 실행) → 기존 pane 채택, 추가 create 0·제출 1 **(3) 전송 불명 + pristine 잔재**(quiet 뒤 lone root shell, exact marker) → exact 정리 → 같은 원본 진행, 살아 있는 tab 1·제출 1 **(4) 전송 불명 + 증거 불충분**(손댄 shell, 여러 pane, unreadable, quiet 미달) → Hold, 추가 create 0·키 0·원본 보존. (2)에 transcript·SessionStart가 아직 없는 콜드 시작 변형을 넣는다. [w4-P2-2] (4)의 touched는 추가 pane, 추가 tab, 다른 occupant 셋으로 둔다. **[w4-P1-1]** (5) residue close 성공 직후 중단 → 재시작 뒤 exact retire, 같은 원본 제출 1·살아 있는 pane 1 (6) close 적용 뒤 응답 유실 → 다음 pass에서 exact retire, close 재전송 0 (7) 기록된 pane이 이미 없음 → snapshot `Missing`(launch witness)으로 retire (8) 목록·snapshot 실패 또는 witness 불일치 → Hold, 추가 create 0 (9) 첫 키 뒤 pane 소멸(원본 전송 불명) → retire만, 자동 재제출 0 | placed pristine 판정 제거((4) RED) / transcript 부재로 미전송 추정((2) 변형 RED) / placed 판정 없음((3) RED) / [w4] Pending 조기 반환 유지((5)(6)(7) RED) / exact CAS 제거(successor 행이 바뀐 뒤의 낡은 관측으로 retire, RED) / 읽기 실패를 Missing으로((8) RED) / Missing을 재제출 허가로((9) RED) |
 
 
 수정 전부터 존재하는 올바른 동작은 “수정 전 FAIL”로 꾸미지 않는다. T-S2-3·4와 기존 Codex 동작은 base 대조군 PASS, 회귀 뮤턴트 RED로 기록한다.
@@ -757,7 +922,7 @@ DoD 3·4의 실측을 단위 시험이나 모델 GREEN으로 대체하지 않는
 7. 상태 차트 갱신 지시
 7.1 기존 모드와 기대 결과
 
-> **[w2]** 모델의 `S2` 모드는 이제 w2 계약이다. w1 결함은 `MutW1*` 뮤턴트로 재현한다(앞의 "상태 차트(w2)" 표).
+> **[w2]** 모델의 `S2` 모드는 이제 w2 계약이다. w1 결함은 `MutW1*` 뮤턴트로 재현한다(앞의 "상태 차트(w2)" 표). **[w3]** 지금은 w3 계약이고 w2 빈틈은 `MutW3*`로 재현한다(맨 앞 "상태 차트(w3)").
 
 현재 보고서의 결과는 고정 SHA에 기록된 결과다. 이번 설계 작업에서 TLC를 재실행한 것은 아니다. 
 
@@ -832,6 +997,6 @@ liveness cfg의 정상 운영 전제에는 local·허용 endpoint, 부모 배치
 
 I21의 일반 handoff/recovery는 등록된 agent binding/catalog에서 대상을 고르므로 동적 새 스레드를 발견하는 별도 입구로 확대하지 않는다. 명시 binding된 thread가 있다면 기존 canonical 경로가 공통 판정을 소비한다(discord/agent_handoff.rs:544–586, agent_recovery/durable/operations.rs:51–55).
 
-위 [U]는 구현·배포 증거로 닫을 항목이다. FreshAfterKill의 의미, S3 제외, 배치 방식, 복구·해제 책임, 범위와 분할에 남은 제품 결정은 없다.
+위 [U]와 맨 앞 "[U] w3 추가"는 구현·배포 증거로 닫을 항목이다. FreshAfterKill의 의미, S3 제외, 배치 방식, 복구·해제 책임, 범위와 분할에 남은 제품 결정은 없다.
 
 VERDICT: DESIGN_READY

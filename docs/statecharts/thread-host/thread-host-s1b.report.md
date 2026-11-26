@@ -234,3 +234,61 @@ New rules: `KeyAfterReservation` (no first key before its output reservation) an
 | `MutW1RestartNoSeed` | RED | `FirstInputResolves` |
 
 Each w1 counterexample was checked against the code coordinates in the table above. The other three P1 (4 command unsent after a tab create, 6 slot archive before settlement, 8 per-provider current execution) are covered by production tests in the design, not by this model.
+
+### Design w3 (review-design-s2-2 P1 1, 2)
+
+Written against `b52e052e24e13781569050ec940eb35b9496ed54`.
+The second design review left two P1 open and called them outside the model; both fit as a small extension.
+Mode `S2` is now the w3 contract; each w2 gap is a `MutW3*` mutant.
+The new entries and rules live in new configs only, and every earlier config keeps its result (56/56 configs as expected).
+
+| P1 | Model | Code |
+|---|---|---|
+| 1 placed Pending whose command never ran | Entry `LostCommand`: an answered create may leave `ran = FALSE` once (a single failed command input); `SubmitHerdr` needs `ran` (attach needs the pane's own logged start). `PlacedResidue` is the shared unplaced residue rule applied to a placed Pending: the shell is closed and the row retired, then the same original goes on in a fresh successor. Entry `LostCommandHeld`: the residue is touched, so it is held | `session_host/herdr/launch_host.rs:645-655` (`CreatedUnconfirmed` for the command input), `herdr_launch.rs:645-650`, `claude/herdr_turn/pending.rs:31-34` (`PendingUnproven`), `herdr_launch/unplaced.rs:173-203` (exact marker, root, pristine), `herdr_launch.rs:695-715` (`retire_own_pending` with the placed location) |
+| 2 slot archive after the map moved on | Entry `SlotSuccessor`: after release and slot reset, `Successor` starts a new execution in the same thread. `ArchiveThread` (only `MutW3ArchiveAfterRelease`, design w2's order) archives the thread ID afterwards; w3 never archives a thread released from Herdr | `auto_queue/runtime.rs:387-445` (archive by thread ID, `:423-427` optional Discord side), `intake_turn/adk_thread.rs:154-205` (`active_thread_id` reuse), `router/thread_binding.rs:77-110` (unarchive on reuse) |
+
+New rules: `ResidueNeverRan` (a residue close never ends a pane whose command ran), `TouchedResidueHeld` (a touched shell is never closed), `ArchiveSparesLive` (a release's archive never lands on a live successor).
+
+| cfg | expected | result |
+|---|---|---|
+| `S2W3Lost` (S2; LostCommand) | GREEN | GREEN |
+| `S2W3Held` (S2; LostCommandHeld, safety only: a held residue claims no progress) | GREEN | GREEN |
+| `S2W3Slot` (S2; SlotSuccessor) | GREEN | GREEN |
+| `S2W3All` (S2; NewThread, RetryNew, DispatchNew, RestartVacant and the three w3 entries, safety) | GREEN | GREEN |
+| `MutW3NoPlacedResidue` | RED | `FirstInputResolves` (stuck at a placed pane whose command never ran) |
+| `MutW3ResidueByAbsence` | RED | `ResidueNeverRan` (a cold Claude has no transcript before its first key, so the guess closes a running pane), `FirstInputResolves` (every successor is closed the same way) |
+| `MutW3NoPristine` | RED | `TouchedResidueHeld` (2 steps after the create) |
+| `MutW3ArchiveAfterRelease` | RED | `ArchiveSparesLive` (release, slot reset, successor, archive) |
+
+The model still does not prove what the review's P2-2 lists: the reservation's exact owner and nonce (`reserved` is a bool), Bind after the first submit with the O output done, settlement before release, and a second provider's execution in the same thread. Those stay with the production tests T-S2-1, T-S2-8, T-S2-19 and T-S2-21 of the design.
+
+### Design w4 (review-design-s2-3 P1 1, P2 2)
+
+Written against `b52e052e24e13781569050ec940eb35b9496ed54`.
+The third design review found that design w3 left the retire of a placed Pending whose pane is gone to the relay reconnect, which returns early for every Pending.
+The model now splits w3's atomic `PlacedResidue` into `ResidueClose` and `PlacedMissingRetire`, so a restart or a lost close answer can fall between them; mode `S2` is the w4 contract and each w3 gap is a `MutW4*` mutant.
+New entries live in new configs only; every earlier config keeps its result (62/62 configs as expected).
+
+| Step | Model | Code |
+|---|---|---|
+| close | `ResidueClose`: the pane goes, the row stays the placed Pending (`gone`, `goneGen`) | `herdr_launch/unplaced.rs:367-377` (`dispose_residue`), `:173-203` (`judge`) |
+| restart or lost answer between | `Restart2` or no step: the same state | design s2-design.md "P1-1 contract" |
+| retire | `PlacedMissingRetire`: only the generation whose pane was seen gone, only from `Placed` | read rule `session_host/herdr_gate.rs:856-876` (snapshot presence `Missing` on one witness), write `herdr_launch.rs:695-715` (`retire_own_pending` exact CAS) |
+| why w3 missed it | `MutW4PendingEarlyReturn` has no such retire | `recovery_engine/herdr_reader.rs:425-427` returns for a Pending before the Missing retire at `:449-458` |
+| pane already gone | `PaneVanishes` (entry `LostCommand`, once) | — |
+| payload unknown | entry `LostAfterKey`: the pane goes after the first key; the retire keeps the input submitted, `unsent` false | `turn_orchestrator/queued_head/v2/retained.rs:65-83,339-352` (Unconfirmed is never requeued) |
+| P2-2 | entry `LostCommandShellUsed`: a used shell that is a lone root shell again is disposed; `LostCommandHeld` now means an observable change (another pane or tab, another occupant) | `session_host/herdr/launch_host.rs:827-841` (pristine is the workspace layout) |
+
+Execution generations saturate at 3 so the relaunch loops of the mutants stay finite; contract paths use at most 2.
+New rule: `RetireOwnGeneration` (a Missing retire ends only the generation whose pane it saw gone).
+
+| cfg | expected | result |
+|---|---|---|
+| `S2W4Lost` (S2; LostCommand, LostAfterKey, LostCommandShellUsed) | GREEN | GREEN |
+| `S2W4All` (S2; all w2, w3 and w4 entries, safety) | GREEN | GREEN |
+| `MutW4PendingEarlyReturn` (design w3) | RED | `FirstInputResolves` (pane gone, row Pending forever) |
+| `MutW4MissingNoCas` | RED | `RetireOwnGeneration`, `NoDuplicatePane` (the successor's pane is orphaned), `FirstInputResolves` |
+| `MutW4UnreadAsMissing` | RED | `NoDuplicatePane` (a present pane read as gone, then a second create) |
+| `MutW4MissingResubmits` | RED | `SingleSubmit` (Missing taken as a resend permit) |
+
+The model does not separate a list failure from a witness change: both are "no Missing seen", the hold `MutW4UnreadAsMissing` breaks. The production test T-S2-21 names each.
