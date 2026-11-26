@@ -60,6 +60,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         &self.sources
     }
 
+    #[cfg(unix)]
+    pub(in crate::services) fn sources_mut_for_test(&mut self) -> &mut Sources<B> {
+        &mut self.sources
+    }
+
     pub(in crate::services) fn bindings_for_test(&self) -> &Arc<B> {
         &self.bindings
     }
