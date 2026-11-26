@@ -1,4 +1,5 @@
 //! Session-kill and repair test on the DL key-promotion rig.
+#![cfg(unix)]
 use rquickjs::Object;
 use serde_json::Value;
 
