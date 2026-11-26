@@ -78,10 +78,13 @@ class RealLayout(vt.Layout):
 
 
 class RealResolver:
-    """rustc file names (relative to the workspace root) -> ('lower' | 'upper' | None, repo-relative path)."""
+    """rustc file names (relative to the workspace root) -> ('lower' | 'upper' | None, repo-relative path).
 
-    def __init__(self, ws, members, lower, upper):
+    A file of lower's module map is lower even outside its member dir (a lib path like `../../src/x.rs`)."""
+
+    def __init__(self, ws, members, lower, upper, x_files=()):
         self.ws, self.members, self.lower, self.upper = ws.resolve(), members, lower, upper
+        self.x_files = x_files
 
     def rel(self, file_name, run_root):
         p = Path(file_name)
@@ -89,6 +92,8 @@ class RealResolver:
         if not p.is_relative_to(self.ws):
             return None, p.as_posix()
         rel = p.relative_to(self.ws).as_posix()
+        if rel in self.x_files:
+            return "lower", rel
         owner = member_of(rel, self.members)
         return ("lower" if owner == self.lower else "upper" if owner == self.upper else None), rel
 
@@ -134,7 +139,7 @@ class RealProbe:
         if self.probe.exists():
             shutil.rmtree(self.probe)
         vt.extract_head(self.repo, self.lower)
-        return layout, RealResolver(self.lower, members, self.lower_dir, self.upper_dir)
+        return layout, RealResolver(self.lower, members, self.lower_dir, self.upper_dir, layout.x_files)
 
     def _check(self, cargo, pkg, rel, args):
         own = self.lower / rel

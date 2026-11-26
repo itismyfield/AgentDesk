@@ -425,8 +425,8 @@ def transform_upper(root, layout):
 # ---------------------------------------------------------------------------------------------- cargo
 
 def run_check(cargo, cwd, args, target_dir, own_root, manifest=None):
-    """Deduplicated compiler messages of the package rooted at own_root (and, in a workspace whose root
-    package contains the members, owning `manifest`)."""
+    """Deduplicated compiler messages of one package: the one owning `manifest` when given (a member's lib
+    path may leave its directory), else the one whose target sources sit under own_root."""
     env = dict(os.environ, CARGO_TARGET_DIR=str(target_dir))
     started = time.monotonic()
     proc = subprocess.run([cargo, "check", *args, "--message-format=json"], cwd=cwd, env=env,
@@ -442,7 +442,7 @@ def run_check(cargo, cwd, args, target_dir, own_root, manifest=None):
         if msg.get("reason") != "compiler-message":
             continue
         src = str(Path(msg.get("target", {}).get("src_path", "")).resolve())
-        if not src.startswith(prefix):
+        if manifest is None and not src.startswith(prefix):
             continue
         if manifest is not None and Path(msg.get("manifest_path", "")).resolve() != Path(manifest).resolve():
             continue
@@ -727,6 +727,14 @@ class Widener:
                     hits.append((rel, i))
         return hits
 
+    def _struct_at_path(self, diag, hits):
+        """Same-named structs narrowed to the module of the message's type path (`krate::a::b::Name<T>`,
+        `a::b::Name`); rustc names the crate only when the type is foreign to the reporting crate."""
+        names = NAME_IN_MSG.findall(diag.get("message", ""))
+        segs = [s for s in re.sub(r"<.*", "", names[1] if len(names) > 1 else "").split("::")[:-1] if s != "crate"]
+        at = lambda module: [(rel, i) for rel, i in hits if self.layout.module_at(rel, i + 1) == module]
+        return (at(tuple(segs)) or at(tuple(segs[1:]))) if segs else []
+
     def _edit(self, rel, index, op, what):
         if apply_op(self.lines(rel)[index], op) == self.lines(rel)[index]:
             return {}, ("unresolved", f"{what} already pub: {rel}:{index + 1}")
@@ -750,6 +758,8 @@ class Widener:
         span = definition_span(diag)
         if span is None and kind == "field":
             hits = self.unique_struct(owner)
+            if len(hits) > 1:
+                hits = self._struct_at_path(diag, hits) or hits
             if len(hits) != 1:
                 return {}, ("unresolved", f"struct `{owner}` defined {len(hits)} times in {self.layout.crate}")
             return self._field(*hits[0], name, owner)

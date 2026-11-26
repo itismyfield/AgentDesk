@@ -866,6 +866,61 @@ class RealMode(unittest.TestCase):
         self.assertEqual((caught.exception.reason, caught.exception.detail), ("residue", "test_cfg=2"))
 
 
+# cargo stand-in: per `-p` package, print each spec diagnostic until its file holds the widened text.
+FAKE_CARGO = """import json, sys
+from pathlib import Path
+ws, spec = Path.cwd(), json.loads(Path(sys.argv[0]).with_suffix(".json").read_text())
+member, lib = spec["libs"][sys.argv[sys.argv.index("-p") + 1]]
+out = [d for rel, done, d in spec["diags"].get(member, []) if done not in (ws / rel).read_text()]
+for d in out:
+    print(json.dumps({"reason": "compiler-message", "manifest_path": str(ws / member / "Cargo.toml"),
+                      "target": {"src_path": str(ws / lib)}, "message": d}))
+sys.exit(101 if out else 0)
+"""
+STRUCT = "pub(crate) struct {} {{\n    pub(crate) id: u32,\n}}\n"
+# The lower lib path leaves its member dir (`../upper/src/low/lib.rs`), like adk-runtime's `../../src`.
+OUTSIDE = {"lower/Cargo.toml": '[package]\nname = "lower"\nversion = "0.1.0"\nedition = "2024"\n\n'
+                               '[lib]\npath = "../upper/src/low/lib.rs"\n',
+           "upper/src/low/lib.rs": "pub(crate) mod a;\npub(crate) mod b;\n",
+           "upper/src/low/a.rs": STRUCT.format("Context") + STRUCT.format("Config"),
+           "upper/src/low/b.rs": STRUCT.format("Context")}
+
+
+def diag(code, message, at=None):
+    note = [{"message": "defined here", "spans": [{"file_name": at, "line_start": 4, "line_end": 4}]}] if at else []
+    return {"level": "error", "code": {"code": code}, "message": message, "children": note,
+            "spans": [{"is_primary": True, "file_name": "upper/src/lib.rs", "line_start": 3, "line_end": 3,
+                       "column_start": 5}]}
+
+
+class RealOutsideMember(unittest.TestCase):
+    def test_lower_lib_outside_its_member_dir(self):
+        a, b = "upper/src/low/a.rs", "upper/src/low/b.rs"
+        cases = [
+            # RED before: the resolver sided a.rs by member dir (upper), so it was cut_residue with 0 edits.
+            ("upper", a, "pub struct Config", diag("E0603", "struct `Config` is private", a),
+             "VISTOOL_OK", [(a, "pub struct Config {")]),
+            # RED before: its src_path is outside lower/, so run_check dropped it and the run was cargo_failed.
+            ("lower", a, "never", diag("E0425", "cannot find value `gone` in this scope", a),
+             "VISTOOL_FAIL lower_probe_broken", []),
+            # RED before: two `Context` structs left this E0616 (no definition span) unresolved, "defined 2 times".
+            ("upper", b, "pub id", diag("E0616", "field `id` of struct `lower::b::Context<u8>` is private"),
+             "VISTOOL_OK", [(b, "    pub id: u32,")]),
+        ]
+        for member, rel, done, d, want_line, want_edits in cases:
+            with self.subTest(d["message"]), tempfile.TemporaryDirectory() as tmp:
+                repo, _ = real_repo(Path(tmp), OUTSIDE)
+                cargo = Path(tmp) / "cargo"
+                cargo.write_text(f"#!{sys.executable}\n{FAKE_CARGO}")
+                cargo.chmod(0o755)
+                cargo.with_suffix(".json").write_text(json.dumps({"diags": {member: [[rel, done, d]]}, "libs": {
+                    "lower": ["lower", "upper/src/low/lib.rs"], "upper": ["upper", "upper/src/lib.rs"]}}))
+                ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
+                                                       cargo=str(cargo), log=lambda *a, **k: None)
+                self.assertTrue(line.startswith(want_line + " "), (line, manifest.get("fail")))
+                self.assertEqual([(e["file"], e["after"]) for e in manifest["final_edits"]], want_edits)
+
+
 # Wrappers and incremental settings of the caller (CI's global RUSTC_WRAPPER=sccache, cargo-shim's
 # CARGO_INCREMENTAL=1, a ~/.cargo/config.toml rustc-wrapper) must not reach the throwaway fixture build.
 CLEAN_CARGO_ENV = {"RUSTC_WRAPPER": "", "CARGO_BUILD_RUSTC_WRAPPER": "", "RUSTC_WORKSPACE_WRAPPER": "",
