@@ -1,7 +1,7 @@
 ---- MODULE OwnerInputBusySplit ----
 \* One person input B on a channel whose earlier turn A may leave its mailbox token behind.
 \* Policy Current: the owner drive splits on the mailbox active turn (hand_busy / hand_idle).
-\* Policy Target (#8328 design w1, user decision busy-inject-step0-1126 a):
+\* Policy Target (#8328 design w1-w3, user decision busy-inject-step0-1126 a):
 \*   Claude - a live session with no hold condition takes B at once. B may join the running
 \*            turn A (Claude absorbs it at A's next tool boundary); then A's one answer carries
 \*            B's part and B carries the "joined the running turn" mark instead of its own reply.
@@ -15,12 +15,21 @@
 \* replies to its opener's anchor; a turn with no Discord opener (Scenario "external": TUI
 \* direct input or a background notice) replies to the first Discord input that joined it,
 \* else to none. Post order never decides the anchor.
+\* Design w3:
+\*   mark  - the "joined" mark is set when Claude absorbs B (TuiAbsorb), never at the paste; a B
+\*           that runs its own turn never carries it (MarkOnPaste mutant = Current's behaviour).
+\*   lease - node_execution_leases has one row per (instance, provider, channel). The channel
+\*           holds at most one execution lease; an accepted follow-up (B pasted or Tab-queued
+\*           while A runs) extends A's lease instead of acquiring, and the lease is released
+\*           after the last follow-up's turn ends. AcquirePerTab / NonceOverwrite mutants.
+\*   source - a Claude paste never waits for the transcript file (a fresh session has none until
+\*           B's own turn writes it). RequireTranscriptBeforePaste mutant = BusyClaude today.
 EXTENDS Naturals
 CONSTANTS Policy, Provider, Scenario, Blocker, BlockerClears, Cap, Mutant
 VARIABLES a, screen, token, b, keys, aReplies, bReplies, wake, blocker,
-          refl, mark, merged, aLost, aTo, bTo
+          refl, mark, merged, aLost, aTo, bTo, leases
 vars == <<a, screen, token, b, keys, aReplies, bReplies, wake, blocker,
-          refl, mark, merged, aLost, aTo, bTo>>
+          refl, mark, merged, aLost, aTo, bTo, leases>>
 
 Pending == {"queued", "held"}
 Delivered == {"composing", "pasted", "joined", "running", "ended", "answered"}
@@ -28,9 +37,17 @@ Delivered == {"composing", "pasted", "joined", "running", "ended", "answered"}
 TerminalOk == Scenario # "i8432"
 \* A turn AgentDesk did not start has no Discord anchor and no mailbox token.
 AnchoredA == Scenario # "external"
-Fixed == <<refl, mark, merged, aLost, aTo, bTo>>
+Fixed == <<refl, mark, merged, aLost, aTo, bTo, leases>>
 \* The anchor A's one answer must reply to.
 ATarget == IF AnchoredA THEN "A" ELSE IF merged THEN "B" ELSE "none"
+\* The key that starts or queues B takes the channel's execution lease only when the channel
+\* holds none (execution_capacity::acquire is one INSERT on the channel's primary key).
+\* AcquirePerTab mutant: every key acquires again (a second row for the same channel).
+Acquire == leases' = IF leases = 0 THEN 1
+                     ELSE IF Mutant = "AcquirePerTab" THEN leases + 1 ELSE leases
+\* NonceOverwrite mutant: the second acquire overwrites the row's nonce, so the running turn's
+\* renew fails and execution_capacity cancels that provider (A's work is lost).
+Overwrites == Mutant = "NonceOverwrite" /\ leases >= 1 /\ a = "running"
 
 Init == /\ a = IF Scenario = "idle" THEN "none" ELSE "running"
         /\ screen = IF Scenario = "idle" THEN "Idle" ELSE "Busy"
@@ -39,6 +56,8 @@ Init == /\ a = IF Scenario = "idle" THEN "none" ELSE "running"
         /\ wake = FALSE /\ blocker = Blocker
         /\ refl = FALSE /\ mark = FALSE /\ merged = FALSE /\ aLost = FALSE
         /\ aTo = "unset" /\ bTo = "unset"
+        \* An AgentDesk-started A holds the channel's lease; an external turn holds none.
+        /\ leases = IF Scenario \in {"busy", "i8432"} THEN 1 ELSE 0
 
 \* A's answer is relayed once; a B that joined A rides in that same answer.
 \* Only a submitted terminal releases A's token and wakes the owner.
@@ -58,6 +77,8 @@ AEnds == /\ a = "running"
                       [] Mutant = "PostOrder" /\ b \in {"composing", "pasted"} -> "B"
                       [] OTHER -> "none"
          /\ bTo' = IF Mutant = "JoinDoublePost" /\ b = "joined" THEN "B" ELSE bTo
+         \* Current: A's guard drops with A. Target: a pasted/queued B keeps the lease for its turn.
+         /\ leases' = IF Policy = "Target" /\ b = "pasted" THEN leases ELSE 0
          /\ UNCHANGED <<keys, blocker, refl, mark, aLost>>
 
 Arrive == /\ b = "absent"
@@ -67,28 +88,37 @@ Arrive == /\ b = "absent"
 
 Hold == b' = "held" /\ UNCHANGED <<keys, token>>
 \* Claude's single key effect. With no token the start claims one for B's own turn; with a token
-\* (live or left behind) B is pasted under it and no second turn is opened. Pasting into a busy
-\* screen marks B "joined the running turn" unless the JoinUnmarked mutant drops the mark.
+\* (live or left behind) B is pasted under it and no second turn is opened. Current marks a
+\* paste into a busy screen "joined" at once; Target marks only at TuiAbsorb (MarkOnPaste mutant).
 Paste(owner) == /\ b' = "pasted" /\ keys' = keys + 1
                 /\ token' = IF owner = "none" THEN "B" ELSE owner
-                /\ mark' = (screen = "Busy" /\ Mutant # "JoinUnmarked")
+                /\ mark' = IF Policy = "Current" \/ Mutant = "MarkOnPaste"
+                           THEN screen = "Busy" ELSE mark
 
 \* owner_drive: has_active_turn -> hand_busy (Busy screen pastes, Idle screen is
 \* NotSent busy_source_unavailable), else hand_idle claims the token for B's own turn.
 DriveCurrent == /\ Policy = "Current" /\ b \in Pending /\ wake
                 /\ wake' = FALSE
-                /\ IF blocker # "none" THEN Hold /\ UNCHANGED mark
+                /\ IF blocker # "none" THEN Hold /\ UNCHANGED <<mark, leases>>
                    ELSE IF token # "none"
-                        THEN IF screen = "Busy" THEN Paste(token) ELSE Hold /\ UNCHANGED mark
-                        ELSE Paste("none")
+                        \* A busy pane writes into the turn that already holds capacity
+                        \* (owner_input.rs take_owned acquires only for ClaudeIdle/CodexIdle).
+                        THEN IF screen = "Busy" THEN Paste(token) /\ UNCHANGED leases
+                             ELSE Hold /\ UNCHANGED <<mark, leases>>
+                        ELSE Paste("none") /\ Acquire
                 /\ UNCHANGED <<a, screen, aReplies, bReplies, blocker, refl, merged, aLost, aTo, bTo>>
 
 \* Target Claude: only a hold condition keeps B; the token and the screen do not.
+\* The transcript is not a hold condition: the anchor, nonce and frame are registered first and
+\* the source binds later. RequireTranscriptBeforePaste mutant: a session with no transcript yet
+\* (Scenario idle = a fresh session) is held, and only a turn could create the transcript.
 DriveTargetClaude ==
     /\ Policy = "Target" /\ Provider = "claude" /\ b \in Pending /\ wake
     /\ wake' = FALSE
-    /\ IF blocker # "none" THEN Hold /\ UNCHANGED mark ELSE Paste(token)
-    /\ UNCHANGED <<a, screen, aReplies, bReplies, blocker, refl, merged, aLost, aTo, bTo>>
+    /\ IF blocker # "none" \/ (Mutant = "RequireTranscriptBeforePaste" /\ Scenario = "idle")
+       THEN Hold /\ UNCHANGED <<mark, leases, aLost>>
+       ELSE Paste(token) /\ Acquire /\ aLost' = (aLost \/ Overwrites)
+    /\ UNCHANGED <<a, screen, aReplies, bReplies, blocker, refl, merged, aTo, bTo>>
 
 \* Target Codex, design w2: no busy read. Hold conditions first (draft, modal, completion
 \* popup, unready composer, unaccepted earlier input), then one paste.
@@ -99,24 +129,25 @@ PasteCodex ==
        THEN Hold /\ UNCHANGED refl
        ELSE /\ b' = "composing" /\ keys' = keys + 1 /\ refl' = FALSE
             /\ token' = IF token = "none" THEN "B" ELSE token
-    /\ UNCHANGED <<a, screen, aReplies, bReplies, blocker, mark, merged, aLost, aTo, bTo>>
+    /\ UNCHANGED <<a, screen, aReplies, bReplies, blocker, mark, merged, aLost, aTo, bTo, leases>>
 
 \* The composer shows the pasted frame (the reflect check reads it in the same lock).
 Reflect == /\ b = "composing" /\ ~refl
            /\ refl' = TRUE
            /\ UNCHANGED <<a, screen, token, b, keys, aReplies, bReplies, wake, blocker>>
-           /\ UNCHANGED <<mark, merged, aLost, aTo, bTo>>
+           /\ UNCHANGED <<mark, merged, aLost, aTo, bTo, leases>>
 
 \* The one key. Tab: idle submits, busy queues B for its own turn after A; either way the TUI
 \* accepted it. A key before the paste shows lands on a composer still taking the paste burst
 \* and leaves B as a draft (NoReflectCheck mutant). AlwaysEnter mutant: Enter steers into A.
+\* An accepted Tab joins the channel's one lease (acquiring only when none is held).
 KeyCodex ==
     /\ b = "composing" /\ (refl \/ Mutant = "NoReflectCheck")
     /\ IF ~refl
-       THEN b' = "stuck" /\ UNCHANGED aLost
+       THEN b' = "stuck" /\ UNCHANGED <<aLost, leases>>
        ELSE IF Mutant = "AlwaysEnter" /\ screen = "Busy"
-       THEN b' = "joined" /\ aLost' = TRUE
-       ELSE b' = "pasted" /\ UNCHANGED aLost
+       THEN b' = "joined" /\ aLost' = TRUE /\ UNCHANGED leases
+       ELSE b' = "pasted" /\ Acquire /\ aLost' = (aLost \/ Overwrites)
     /\ UNCHANGED <<a, screen, token, keys, aReplies, bReplies, wake, blocker>>
     /\ UNCHANGED <<refl, mark, merged, aTo, bTo>>
 
@@ -129,10 +160,12 @@ Retry == /\ b = "held" /\ ~wake
 \* Claude takes a pasted B into the running turn at A's next tool boundary
 \* (transcript: enqueue -> remove absorbed_mid_turn / queued_command inside A's turn).
 \* No fairness: a turn with no tool boundary left runs B after A instead.
+\* Target sets the joined mark here, from the absorb evidence (JoinUnmarked mutant drops it).
 TuiAbsorb == /\ Provider = "claude" /\ b = "pasted" /\ a = "running"
              /\ b' = "joined"
+             /\ mark' = IF Policy = "Target" THEN Mutant # "JoinUnmarked" ELSE mark
              /\ UNCHANGED <<a, screen, token, keys, aReplies, bReplies, wake, blocker>>
-             /\ UNCHANGED Fixed
+             /\ UNCHANGED <<refl, merged, aLost, aTo, bTo, leases>>
 
 \* The TUI runs a pasted (or TUI-queued) input when its screen is Idle; B's echo opens B's turn.
 TuiStart == /\ b = "pasted" /\ screen = "Idle"
@@ -140,11 +173,13 @@ TuiStart == /\ b = "pasted" /\ screen = "Idle"
             /\ UNCHANGED <<a, token, keys, aReplies, bReplies, wake, blocker>>
             /\ UNCHANGED Fixed
 
+\* B is the channel's last follow-up: its end releases the lease.
 BEnds == /\ b = "running"
          /\ b' = "ended" /\ screen' = "Idle"
          /\ token' = IF TerminalOk /\ token = "B" THEN "none" ELSE token
+         /\ leases' = 0
          /\ UNCHANGED <<a, keys, aReplies, bReplies, wake, blocker>>
-         /\ UNCHANGED Fixed
+         /\ UNCHANGED <<refl, mark, merged, aLost, aTo, bTo>>
 
 \* B's own turn is posted by B's echo. TokenAttribution mutant: posted to whoever holds the token.
 PostB == /\ b = "ended"
@@ -156,7 +191,7 @@ PostB == /\ b = "ended"
             ELSE bReplies' = bReplies + 1 /\ UNCHANGED aReplies
          /\ bTo' = IF Mutant = "NoReference" THEN "none" ELSE "B"
          /\ UNCHANGED <<a, screen, token, keys, wake, blocker>>
-         /\ UNCHANGED <<refl, mark, merged, aLost, aTo>>
+         /\ UNCHANGED <<refl, mark, merged, aLost, aTo, leases>>
 
 \* Draft, modal, missing session, unready attachment/composer or recovery kickoff ends.
 ClearBlocker == /\ BlockerClears /\ blocker # "none"
@@ -166,11 +201,15 @@ ClearBlocker == /\ BlockerClears /\ blocker # "none"
 
 \* Idle cap safety net (#8430 option not taken by U1): stash the draft, submit B, restore.
 CapStash == /\ Cap = "IdleStash" /\ b = "held" /\ screen = "Idle" /\ blocker = "draft"
-            /\ Paste(token)
+            /\ Paste(token) /\ Acquire
             /\ UNCHANGED <<a, screen, aReplies, bReplies, wake, blocker, refl, merged, aLost, aTo, bTo>>
 
 \* Mutants: resend after no echo yet; the TUI drops an input pasted while busy.
-ResendBeforeEcho == /\ Mutant = "ResendBeforeEcho" /\ b = "pasted" /\ keys = 1
+\* AcceptedStillExpires: a Tab-accepted B still waits for A, the 30 s confirmation deadline asks
+\* the person to resend, and the queued B and the resent copy both run.
+ResendBeforeEcho == /\ \/ Mutant = "ResendBeforeEcho"
+                       \/ Mutant = "AcceptedStillExpires" /\ Provider = "codex" /\ a = "running"
+                    /\ b = "pasted" /\ keys = 1
                     /\ keys' = 2
                     /\ UNCHANGED <<a, screen, token, b, aReplies, bReplies, wake, blocker>>
                     /\ UNCHANGED Fixed
@@ -199,6 +238,7 @@ TypeOK == /\ a \in {"none", "running", "ended"} /\ screen \in {"Busy", "Idle"}
           /\ blocker \in {"none", "draft", "modal", "nosession", "attach", "composer", "recovery"}
           /\ refl \in BOOLEAN /\ mark \in BOOLEAN /\ merged \in BOOLEAN /\ aLost \in BOOLEAN
           /\ aTo \in {"unset", "none", "A", "B"} /\ bTo \in {"unset", "none", "B"}
+          /\ leases \in 0..2
 NoDuplicate == keys <= 1
 \* Neither B nor A's work disappears without a notice (a Codex steer loses A's work).
 NoSilentLoss == b # "lost" /\ ~aLost
@@ -213,7 +253,15 @@ AnswerBound == /\ (aReplies >= 1 => aTo = ATarget)
                /\ (bReplies >= 1 => bTo = "B")
 \* A front leaves the owner queue only through its one key effect.
 KeyBeforeLeave == b \in Delivered => keys >= 1
+\* The joined mark only ever stands on a B that joined (or rode in) the running turn.
+MarkOnlyJoined == mark => (b = "joined" \/ merged)
+\* At most one execution lease row per channel (primary key instance, provider, channel).
+OneLease == leases <= 1
+\* A running AgentDesk turn, A or B, is covered by the channel's lease.
+LeaseCovers == ((a = "running" /\ AnchoredA) \/ b = "running") => leases >= 1
 
 IdleDelivers == (b \in Pending /\ screen = "Idle") ~> (b \in Delivered)
 ReplyPosted == <>(bReplies = 1 \/ merged)
+\* The lease is released once the last follow-up's turn is over.
+LeaseReleased == <>[](leases = 0)
 =============================================================================

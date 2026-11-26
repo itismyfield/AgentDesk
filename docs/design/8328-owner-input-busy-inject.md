@@ -1,11 +1,12 @@
-# #8328 1단계 설계 (w2): owner 입력 바쁜 중 주입 — 답 anchor 귀속을 핵심으로, Claude는 합류, Codex는 항상 Tab
+# #8328 1단계 설계 (w3): owner 입력 바쁜 중 주입 — 답 anchor 귀속을 핵심으로, Claude는 합류, Codex는 항상 Tab, 채널 실행 lease 하나
 
-<!-- doc-path-refs: proposed src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/tui_o/store/anchor_bindings.rs src/services/tui_o/writer/deliver/prepared.rs src/services/tui_o/writer/reply_anchor.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
+<!-- doc-path-refs: proposed src/services/cluster/execution_capacity/channel_lease.rs src/services/tui_input/human_frame/history/v2/key_admit.rs src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/tui_o/store/anchor_bindings.rs src/services/tui_o/writer/deliver/prepared.rs src/services/tui_o/writer/reply_anchor.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
 
-- 기준 코드: `origin/main` = `82702fe252`. 브랜치는 `wt/i8328-design`이다(w1 `cafed27b40` 위에 이어서).
+- 기준 코드: `origin/main` = `82702fe252`. 브랜치는 `wt/i8328-design`이다(w1 `cafed27b40`, w2 `1113953fa4` 위에 이어서).
 - 결정 출처:
   - 사용자 결정 busy-inject-step0-1126 a (13:01)
   - 메인 판단·코디 결정 (13:20): Codex는 항상 Tab, 1단계 핵심 범위는 귀속
+  - 설계 리뷰 i8328-design-2(`1113953fa4`, P1 2·P2 4): w3에서 모두 반영했다. 반영 위치는 아래 표와 같다.
   - 입력: 설계 준비 보고서, 0단계 실측(`report-e2e-1.md`), Codex Tab 실측(`report-tab-1.md`, `logs/tab-1/`), 코디 요약(`coord-note-tab-for-design.md`), 이슈 #8328
 - 운영 코드는 바꾸지 않는다. 바뀌는 것은 문서·모델·cfg·보고서·색인 행뿐이다. cargo는 0회다.
 - 약어. 경로는 `src/services/discord/` 기준이다.
@@ -17,62 +18,71 @@
   - TW = `src/services/tui_o/writer/`
   - HF = `src/services/tui_input/human_frame/`
 
+| 리뷰 지적 | 결정 | 반영 위치 |
+|---|---|---|
+| P1-1 Codex Tab마다 capacity 획득 → 같은 채널 lease 충돌 | 채널 실행 lease는 하나다. 수락된 후속 입력은 실행 중 턴의 lease를 이어 쓰고, 마지막 후속 턴이 끝난 뒤 반납한다. 두 번째 acquire와 nonce 덮어쓰기는 없다 | §5.4, §2.1 3단계, 조각 A6, 모델 `AcquirePerTab`·`NonceOverwrite` RED |
+| P1-2 BusyClaude가 transcript 없이 `TranscriptUnavailable` | 키 전에 anchor·nonce·frame hash·target incarnation을 V2 `pre_source`로 등록하고, source는 나중에 결합한다. 붙여넣기+Enter는 transcript 파일 유무와 떼어 놓는다 | §5.5, §2.1 4단계, 조각 A3, 모델 `RequireTranscriptBeforePaste` RED |
+| P2-1 수락된 Codex 입력에 30초 미확인 | `AwaitingAcceptance`와 `AcceptedAwaitingNative`로 나눈다. 수락이 짧은 기한을 끝낸다 | §5.1, 조각 A2, 모델 `AcceptedStillExpires` RED |
+| P2-2 기존 stash + 현재 사람 초안을 제출하는 경로 | 사람 소유이거나 소유를 모르는 composer는 같은 잠금 안에서 키 전에 보류한다. managed stash 예외는 안전 보관과 빈 composer가 증명될 때만이다 | §2.2 H1, §7.1, 조각 A3 |
+| P2-3 실제 합류 전 ➕ | 목표에서 ➕는 흡수 증거 뒤에만 단다. 별도 턴이면 ➕를 달지 않고, 이미 달린 것은 거둔다 | §6.2-2, §4, 조각 A1, 모델 `MarkOnPaste` RED·`MarkOnlyJoined` |
+| P2-4 `channel_accepts`를 출력 소유로 오해 | 관찰자 게시는 durable output ownership(`tui_o/cutover`)으로 정하고, `channel_accepts`는 readiness로만 쓴다 | §4, §12-1, 조각 A3 |
+
 ## 0. 한 줄 요약
 
 1. **귀속(핵심)**: 게시하는 답은 모두 입력 anchor(사람이 보낸 Discord 메시지) 하나에 reply로 건다.
    - 어느 anchor에 걸지는 transcript에서 그 답이 속한 native 턴과, 그 턴을 연(또는 그 턴에 합류한) 입력의 frame nonce로 정한다.
    - 게시 순서, mailbox 토큰, 주입한 경로로는 정하지 않는다.
-   - 합류 입력은 합친 답 한 번으로 친다. 답은 그 턴을 연 입력의 anchor에 걸고, 합류한 입력에는 ➕ '진행 중 턴에 합류' 표시를 단다.
+   - 합류 입력은 합친 답 한 번으로 친다. 답은 그 턴을 연 입력의 anchor에 건다. 합류한 입력에는 ➕ '진행 중 턴에 합류' 표시를 단다. 다는 시점은 흡수 증거(J2)가 나온 뒤다(w3).
 2. **Claude**: 바쁜지 확인하지 않는다. 보류 조건만 보고 붙여넣기+Enter를 한다. 다음 도구 경계에서 흡수되면 합류, 아니면 자기 턴이다.
 3. **Codex**: 바쁜지 확인하지 않고 **항상 Tab**이다. 절차는 붙여넣기 → 화면 반영 확인 → Tab → 수락 확인(대기 항목 또는 새 턴 사용자 입력)이다. Tab의 뜻을 확인하지 못한 화면(§2.4 표)에서는 보관한다.
-4. echo가 아직 없다는 사실은 재전송 근거가 아니다(w1 그대로).
+4. echo가 아직 없다는 사실은 재전송 근거가 아니다(w1 그대로). Codex에서 수락이 확인된 입력은 native 턴이 올 때까지 기다리고, 짧은 기한으로 재전송을 요청하지 않는다(w3).
+5. **실행 용량(w3)**: 채널마다 실행 lease는 하나다. 수락된 후속 입력은 실행 중 턴의 lease를 이어 쓴다. lease는 마지막 후속 턴이 끝난 뒤 반납한다.
+6. **Claude 키는 transcript 파일을 기다리지 않는다(w3)**: 키 전에 V2 `pre_source`로 등록하고, source는 나중에 결합한다.
 
 ## 1. 상태 차트 (0단계)
 
-모델은 `docs/statecharts/input-single-path/OwnerInputBusySplit.tla`이고, cfg는 w1의 20개에서 24개로 바뀌었다. 보고서는 `owner-input-busy-split.report.md`다.
+모델은 `docs/statecharts/input-single-path/OwnerInputBusySplit.tla`다. cfg는 w2의 24개에서 30개로 늘었다. 보고서는 `owner-input-busy-split.report.md`이고, 판 이력과 전후표가 거기에 있다.
 
-w2에서 들인 행동:
-- **Codex 항상 Tab**: w1의 `ObserveCodex`·`KeyCodex`(바쁨 읽기 → 키 고르기)를 지웠다. 대신 세 동작을 둔다.
-  - `PasteCodex`: 보류 조건 확인 → 붙여넣기 1회(키 효과 1)
-  - `Reflect`: 입력창에 frame이 보임
-  - `KeyCodex`: Tab. idle 화면은 제출, 바쁜 화면은 대기열 수락이고, 어느 쪽이든 B는 A 뒤 자기 턴으로 돈다.
-  - 상수 `TabAtIdle`·`UncertainKey`·`Unknowable`과 변수 `seen`·`unk`를 없앴다.
-- **답 anchor 귀속**: 변수 `aTo`·`bTo`(각 답이 reply로 건 anchor)와 시나리오 `external`(AgentDesk가 시작하지 않은 턴 A: anchor 없음, 토큰 없음)을 더했다.
-  - 규칙 `AnswerBound`: A 답은 `ATarget`(A에 anchor가 있으면 A, 없으면 합류한 B, 합류한 입력도 없으면 none)에 건다. B의 자기 답은 B에 건다.
-- 지킨 규칙: `NoDuplicate`·`NoSilentLoss`·`ReplyExactlyOnce`(합류 입력은 합친 답 한 번)·`JoinedMarked`·`AnswerBound`·`KeyBeforeLeave`. liveness `IdleDelivers`·`ReplyPosted`는 그대로다.
+w3에서 들인 것(설계 리뷰 i8328-design-2):
+- **합류 표시**: 목표 경로는 `TuiAbsorb`(흡수 증거)에서만 `mark`를 세운다. 현재 경로는 붙여넣기 때 세우는 동작 그대로다.
+  - 새 규칙 `MarkOnlyJoined == mark ⇒ (b = joined ∨ merged)`.
+  - w2 목표 모델에는 리뷰가 찾은 7상태 반례가 있었다(Arrive→DriveTargetClaude→AEnds→TuiStart→BEnds→PostB 뒤 `mark = TRUE`). w3에서는 `MarkOnPaste` mutant로 RED가 된다.
+- **채널 실행 lease**: 변수 `leases`는 이 채널의 `node_execution_leases` 행 수다. AgentDesk가 시작한 A는 1에서 시작한다.
+  - 키는 lease가 없을 때만 새로 잡는다(`Acquire`).
+  - A가 끝날 때 붙여넣었거나 대기 중인 B가 있으면 lease를 지킨다. B가 끝나면 반납한다.
+  - 새 규칙: `OneLease`(행 ≤ 1), `LeaseCovers`(실행 중인 AgentDesk 턴은 lease를 가짐), `LeaseReleased`(`<>[](leases = 0)`).
+  - 새 mutant: `AcquirePerTab`(Tab마다 획득 → 행 2), `NonceOverwrite`(두 번째 획득이 nonce를 덮어씀 → A renew 실패·provider 취소 → A 작업 유실).
+- **transcript 없는 Claude 주입**: 새 cfg `TargetIdle`(새 세션, transcript 없음)은 GREEN이고, mutant `RequireTranscriptBeforePaste`는 RED다.
+- **수락 뒤 기한**: mutant `AcceptedStillExpires`(Tab 수락 뒤 30초 기한이 재전송을 요청 → 키 효과 2)는 RED다.
 
-`statecharts_tlc.check_cfg`로 24개 cfg를 직접 돌린 결과(전부 기대 집합 일치):
+`statecharts_tlc.check_cfg`로 30개 cfg를 모두 직접 돌렸고, 결과가 전부 기대 집합과 일치했다. w2 → w3 전후표는 다음과 같다(바뀐 cfg와 새 cfg만 따로 적고, 나머지는 한 줄로 묶었다).
 
-| cfg | 결과 | 뜻 |
-|---|---|---|
-| `Current8432` | **RED** `IdleDelivers`·`ReplyPosted` | 현재 경로: 남은 토큰 + Idle 화면 → hand_busy 보류 반복 |
-| `CurrentBusy` | GREEN | 현재 경로, A 정상 종료 |
-| `Target8432`·`TargetBusy`·`TargetExternal` | **GREEN** | Claude 목표 경로: 남은 토큰, 바쁜 턴, 외부 턴 모두 성립 |
-| `TargetHoldCleared`·`TargetComposerNotReady` | GREEN | 보류가 풀리면 전달 |
-| `TargetDraftStuck` | RED `IdleDelivers`·`ReplyPosted` (U1로 수용) | 사람 초안이 끝내 남으면 알림만 |
-| `TargetDraftStuckCap` | GREEN | U1이 채택하지 않은 대조군 |
-| `CodexTargetBusy`·`CodexTarget8432`·`CodexTargetExternal`·`CodexComposerNotReady` | **GREEN** | Codex 항상 Tab |
-| `TargetTokenAttribution` | mutant RED `ReplyExactlyOnce`·`ReplyPosted` | 토큰 보유자에게 귀속 |
-| `TargetResendBeforeEcho` | mutant RED `NoDuplicate` | echo 전 재전송 |
-| `TargetTuiDrop`·`CodexTuiDrop` | mutant RED `NoSilentLoss`·`ReplyPosted` | TUI가 입력을 버림 |
-| `TargetJoinUnmarked` | mutant RED `JoinedMarked` | 합류 표시 누락 |
-| `TargetJoinDoublePost` | mutant RED `ReplyExactlyOnce` | 합류 몫을 따로 한 번 더 게시 |
-| `TargetPostOrder`·`CodexPostOrder` | mutant RED `AnswerBound` | **게시 순서로 귀속**: 외부 턴 A의 답이 키를 누른 B에 걸린다 |
-| `TargetNoReference` | mutant RED `AnswerBound` | **reply reference 없이 게시** |
-| `CodexAlwaysEnter` | mutant RED `NoSilentLoss` | 항상 Enter: 바쁜 턴 steer로 A 작업 유실 |
-| `CodexNoReflectCheck` | mutant RED `ReplyPosted` | 반영 확인 없이 Tab: B가 초안에 남음 |
+| cfg | w2 | w3 | 뜻 |
+|---|---|---|---|
+| `Current8432` | RED `IdleDelivers`·`ReplyPosted` | **RED** `IdleDelivers`·`ReplyPosted`·`MarkOnlyJoined`·`LeaseCovers` | 현재 경로: 남은 토큰 + Idle 화면이면 hand_busy 보류가 되풀이된다. 붙여넣기 때 바로 ➕ |
+| `CurrentBusy` | GREEN | **RED** `MarkOnlyJoined`·`LeaseCovers` | 현재 경로: 바쁜 화면 붙여넣기에 바로 ➕. busy 가지는 용량을 잡지 않고(OI:1493-1515), A가 끝나면 guard가 풀린다(OI:1568). 그래서 B 자기 턴이 lease 없이 돈다 |
+| `TargetIdle` | (없음) | GREEN | 새 세션(transcript 없음)에서도 주입 1회 |
+| `TargetMarkOnPaste` | (없음) | mutant RED `MarkOnlyJoined` | 목표에서 붙여넣기 때 ➕ |
+| `CodexAcquirePerTab` | (없음) | mutant RED `OneLease` | Tab마다 capacity 획득 |
+| `CodexNonceOverwrite` | (없음) | mutant RED `NoSilentLoss` | `ON CONFLICT DO UPDATE` nonce 덮어쓰기 → A 취소 |
+| `TargetRequireTranscript` | (없음) | mutant RED `IdleDelivers`·`ReplyPosted` | 붙여넣기 전 transcript 요구(지금의 BusyClaude) |
+| `CodexAcceptedStillExpires` | (없음) | mutant RED `NoDuplicate` | 수락된 B에 30초 재전송 요청 |
+| 나머지 22개(Target 10, mutant 11, DraftStuck 1) | w2 결과 | 같음 | 새 규칙 4개를 더해도 결과가 같다 |
 
 정리:
-- Current8432는 RED, Target은 GREEN이다.
-- mutant 11개가 RED다. 그중 귀속 mutant 3개(게시 순서 ×2, reply reference 없음)가 브리프의 요구다.
-- 그 밖의 expected RED는 2개(Current8432, DraftStuck)다.
+- Current는 RED(2개)이고 Target은 GREEN(11개)이다.
+- mutant는 16개가 모두 RED다. 그중 리뷰가 요구한 두 경로는 P1-1의 `AcquirePerTab`·`NonceOverwrite`와 P2-3의 `MarkOnPaste`다.
+- 그 밖의 expected RED는 수용한 `TargetDraftStuck`(U1) 1개다.
 
-차트(`docs/statecharts/input-single-path/`):
-- `owner-input-busy-split.current-8432.chart.mmd` (exit 1)
-- `….target-8432`, `….target-busy-join`, `….codex-target-busy`, `….codex-target-external` (각 exit 0)
-- `….codex-always-enter`, `….target-post-order` (각 exit 1)
+차트(`docs/statecharts/input-single-path/`, w3 모델로 다시 그림):
+- RED(exit 1): `owner-input-busy-split.current-8432`, `….current-busy`, `….codex-always-enter`, `….target-post-order`, `….target-mark-on-paste`, `….codex-acquire-per-tab`, `….codex-nonce-overwrite`
+- GREEN(exit 0): `….target-8432`, `….target-busy-join`, `….codex-target-busy`, `….codex-target-external`
+- `….target-busy-join` 차트에서 ➕는 흡수(s4→s7) 뒤 상태에만 있다. A 뒤 자기 턴으로 돈 B의 상태에는 ➕가 없고, lease는 B가 끝날 때 0이 된다.
 
-모델의 한계: 입력 하나와 앞 턴 하나다. 두 입력이 한 턴에 합쳐지는 경우(실측 불일치 b·c, §6.4)는 §6의 "한 턴에 anchor 여럿" 규칙과 조각 A1 시험이 맡는다.
+모델의 한계:
+- 입력 하나, 앞 턴 하나, 채널 하나만 다룬다. 다른 채널의 slot 상한은 A6 시험이 맡는다.
+- 두 입력이 한 턴에 합쳐지는 경우(실측 불일치 b·c, §6.4)는 §6.3 규칙이 맡는다. 시험은 A1의 두 nonce fixture와 A5의 두 입력 fixture다.
+- host 차이(Herdr·tmux)도 다루지 않는다. A3 시험이 두 host에서 각각 확인한다.
 
 ## 2. 목표 경로
 
@@ -87,21 +97,24 @@ match origin:
 
 `inject::hand`(새 child `src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs`)의 순서:
 1. 전이 잠금 `session_transition_locks.try_lock_owned()`. 키를 다 누를 때까지 쥔다. 실패하면 `session_transition_busy`. 지금은 OI:264-269, 280에 busy 가지 전용으로만 있다.
-2. 보류 조건(§2.2). 걸리면 `NotSent(<사유>)`이고 front는 남는다.
-3. 장부 고르기. 이것은 관문이 아니다.
+2. 보류 조건(§2.2). 걸리면 `NotSent(<사유>)`이고 front는 남는다. composer 소유 판정(H1, §7.1)은 키를 누를 composer 잠금 안에서 한다.
+3. 장부 고르기와 실행 lease. 장부 고르기는 관문이 아니다.
    - 토큰이 있으면 **합류 장부**: front claim, 키 전에 `record_native_busy_child`(OI:463-471)
    - 토큰이 없으면 **자기 턴 장부**: 기존 `decision_drain::hand_idle` → `start_idle`(OI:943)
-4. 키 효과
-   - Claude: 기존 `BusyClaude`(`claude_tui/host_input/busy/herdr.rs:28-140`)
+   - 실행 lease(§5.4): 채널에 lease가 있으면 이 입력을 그 lease의 후속 입력으로 더한다. DB는 건드리지 않는다. lease가 없으면 키 전에 `execution_capacity::acquire`로 하나 잡는다. 거절되면 `NotSent(capacity)`이고 키는 0이다.
+4. **키 전 등록**(§5.5): anchor 목록·nonce·frame hash·target incarnation을 V2 attempt로 durable하게 등록한다. source(transcript 경로·offset)는 비어 있어도 된다(`pre_source`, OI:114-137). 등록이 실패하면 키 0이다.
+5. 키 효과
+   - Claude: 붙여넣기+Enter. transcript 파일 유무를 묻지 않는다. 지금의 `BusyClaude`(`claude_tui/host_input/busy/herdr.rs:53-68`, tmux `claude_tui/busy_inject.rs:571-581`)는 키 전에 transcript metadata를 읽고, 없으면 `NotSent(TranscriptUnavailable)`로 끝낸다. 이 순서를 §5.5대로 바꾼다.
    - Codex: §2.3 Tab 절차
-5. 귀속 대기 항목(§5.1)에 nonce·anchor를 기록한다. 답 anchor는 §6이 정한다.
+6. 귀속 대기 항목(§5.1)은 4단계 등록과 같은 commit에서 만든다. 답 anchor는 §6이 정한다.
 
 ### 2.2 남는 보류 조건
 
 | # | 조건 | 판정 위치 | 해소·wake | #8430 상한 |
 |---|---|---|---|---|
 | H3 | 세션 없음 | `Phase::Absent` → `Route::Cold`(`queue_io/input_owner/target.rs:81`), OI:1752 | 보류가 아니라 기존 cold launch(자기 턴 장부) | 불필요 |
-| H1 | 사람 초안 | Claude `busy/herdr.rs:77`, `effect/claude.rs` `draft_notice`. Codex `screen::draft_may_be_present`(`codex_tui/busy_inject/screen.rs:102`) | 사람이 보내거나 지움 → held_watch | **알림만**(U1). 기존 Claude managed stash(초안 C-s 보관·복원)는 초안을 제출하지 않으므로 현행 유지 |
+| H1 | 사람 소유이거나 소유를 모르는 composer(§7.1) | 키를 누를 composer 잠금 안에서 판정한다. Claude `busy_inject::draft_sighting`(`claude_tui/busy_inject/ownership.rs:26-40`)이 `Settled`가 아니면 보류. 기존 stash + 현재 글자(`Unsettled`), 읽지 못한 composer(`Composer::Unknown`), 모달 footer도 여기에 든다. Codex `screen::draft_may_be_present`(`codex_tui/busy_inject/screen.rs:102`) | 사람이 보내거나 지움 → held_watch | **알림만**(U1). 지금 코드에는 사람 초안을 제출하는 경로가 있다: stash A가 있고 composer에 사람 초안 B가 있으면 `Unsettled`인데도 `["paste","Enter"]`로 B+frame을 제출한다(`claude_tui/busy_inject/stash_tests.rs:369-377`). 그 뒤 `draft_notice`(`effect/claude.rs:86-90`)는 제출 뒤 알림일 뿐이다. 목표에서는 이 경로를 키 전 보류로 바꾼다. managed stash(C-s) 예외는 화면에 stash가 없고(`Stash::AbsentInRecognizedLayout`), C-s 뒤 composer가 비었음이 증명될 때만 남긴다 |
+| Hk | 실행 용량 거절 | §5.4. 채널에 lease가 없고 node slot이 다 찼을 때 | 다른 턴이 끝나면 held_watch | 불필요 |
 | H2 | 모달·승인 창·Tab 뜻 미확인 화면 | Claude `busy/herdr.rs:40-51`. Codex `screen::delivery_veto`(`screen.rs:75-99`)와 §2.4 표 | 사람 응답 → held_watch | 불필요 |
 | Hc | composer 미준비(`/clear`·재시작 직후) | Claude `claude_tui/input/preparation_hold.rs:112`. Codex `codex_tui/readiness.rs` 준비 증명. 실측 Tab 0.3s부터 24회 성공 | readiness → held_watch | 불필요 |
 | Hq | (Codex) 앞 주입 수락 미확인 | 같은 채널 바로 앞 입력이 대기 항목·새 턴 사용자 입력으로 확인 안 됨(§5.1 "수락됨") | 수락 확인 → held_watch | 불필요 |
@@ -129,7 +142,11 @@ match origin:
    - 실패하면(반영 안 됨, 또는 붙여넣기 뒤 completion popup이 열림) 키를 누르지 않는다. `WriteUncertain`으로 끝내고 소유 초안 알림(`codex_tui::input::notify_owned_draft`)을 보낸다. 재붙여넣기는 없다.
    - 근거: Codex의 "Paste detection — Recognize pasted-text bursts and keep multiline input together"(바이너리 문구)와 실측 busy1(붙여넣은 직후 Tab → 두 건 합쳐짐·셋째 건 초안 잔류, 0/3).
 4. **Tab** 1회.
-5. **수락 확인**: B가 `Queued follow-up inputs` 항목(`screen.rs:22-27` QUEUE_HEADERS)으로 옮겨졌거나 rollout에 B의 사용자 표식이 나타나면 수락이다. 귀속 대기 항목을 "수락됨"으로 표시한다. 다음 front는 이를 기다린다(Hq).
+5. **수락 확인**: B가 `Queued follow-up inputs` 항목(`screen.rs:22-27` QUEUE_HEADERS)으로 옮겨졌거나 rollout에 B의 사용자 표식이 나타나면 수락이다.
+   - 귀속 대기 항목을 `AwaitingAcceptance`에서 `AcceptedAwaitingNative`로 옮긴다(§5.1). 이 전이가 30초 확인 기한(`v2/attempt.rs:107,161`의 `confirmation_deadline_ms`)을 끝낸다.
+   - 수락된 B는 A가 몇 분을 돌든 native 턴이 올 때까지 기다린다. 재전송 요청은 없다.
+   - 다음 front는 이 수락을 기다린다(Hq).
+   - 수락된 B는 채널 lease의 후속 입력으로 남는다(§5.4).
 6. 고정 지연은 쓰지 않는다. 실측의 0.12s는 관측치일 뿐이다.
 
 구현 손잡이:
@@ -198,8 +215,9 @@ match origin:
 | preclaim retry | OI:961 | claim 직전(두 장부 공통) |
 | never-started 복구 | OI:993 | 자기 턴 장부(그대로) |
 | Decision journal | `decision_drain.rs:212` | 그대로(U2) |
-| ➕ 표시 시점 | 키 직후 `turn_view_reconciler/injected.rs:179,204` | anchor 결합에서 '합류'로 판정된 순간(§6) |
-| 답 게시 주체 | Claude 합류 장부는 토큰 턴 relay, 외부 턴은 tui_o, 0단계 S1T는 A 턴 bridge | **tui_o writer 하나**(TW). 게시마다 §6의 reply anchor를 단다. owner 관찰자(`busy_owner_observer` WF:739, Codex `warm_followup::owner_observer`)는 tui_o가 출력을 맡은 채널(`tui_o::writer::host::channel_accepts`)에서 정산만 하고 게시하지 않는다 |
+| ➕ 표시 시점 | 키 직후 `turn_view_reconciler/injected.rs:179,204` | J2가 흡수(진행 중 턴 안의 `queued_command`·`absorbed_mid_turn`, `src/services/tui_o/writer/input_facts/native.rs:20-60`)를 확인한 뒤에만 단다. 별도 턴의 opener로 결합되면 달지 않는다. 키 직후 달린 ➕가 있으면(배포 직후) 거둔다(§6.2-2) |
+| 실행 용량 | 자기 턴 장부만 키마다 `acquire`(OI:1493-1515), Herdr 실행은 `provider_dispatch.rs:623-628`. guard는 그 턴과 함께 drop된다(OI:1568) | 채널 lease 하나(§5.4). 키는 lease가 없을 때만 잡는다. 반납은 마지막 후속 턴이 끝난 뒤다 |
+| 답 게시 주체 | Claude 합류 장부는 토큰 턴 relay, 외부 턴은 tui_o, 0단계 S1T는 A 턴 bridge | **tui_o writer 하나**(TW). 게시마다 §6의 reply anchor를 단다. 관찰자 게시 여부는 **durable output ownership**으로 정한다. 근거는 boot policy와 이 프로세스의 adoption이다(`tui_o/cutover.rs:1-4,76-92`, 판정 `tui_o::cutover::peek_o_owns_tui_output_for_channel`, 본문 송신은 `claim_then_send`·`o_keeps_body`(`tui_o/cutover/channel_gate.rs:232-263`) cutover fence).<br>O가 소유한 채널에서는 owner 관찰자(`busy_owner_observer` WF:739, Codex `warm_followup::owner_observer`)가 정산만 하고 본문을 게시하지 않는다. `tui_o::writer::host::channel_accepts`(`tui_o/writer/host.rs:269-278`: readiness·gateway 소유·stopping·resumed)는 readiness일 뿐이다. 이것이 거짓이어도 legacy 게시로 바꾸지 않는다. O 본문은 writer가 회복한 뒤 1회 나간다 |
 
 ## 5. 새로 필요한 것
 
@@ -207,14 +225,19 @@ match origin:
 
 V2 `SnapshotV2`(`v2_types.rs:27-65`)에 선택 필드 `awaiting_echo: Vec<AwaitingEcho>`를 더한다. `serde(default, skip_serializing_if = "Vec::is_empty")`이고 형식 전환 장치는 없다.
 
-`AwaitingEcho`에 담는 값: anchor message id 목록(follower 포함), frame nonce, provider·session·transcript(모르면 None)·키 시점 offset, 장부 종류, 토큰 turn id, echo deadline(`head_injection.confirmation_deadline_ms` 계산 재사용).
+`AwaitingEcho`에 담는 값:
+- anchor message id 목록(follower 포함)
+- frame nonce, frame hash
+- target incarnation: provider·session·Herdr pane 또는 tmux target. V2 attempt의 `target`(OI:109-113)과 같다.
+- source: 키 시점에 알면 transcript 경로·file id·offset, 모르면 `pre_source`(OI:114-123)
+- 장부 종류, 토큰 turn id, 상태, 상태별 기한
 
-수명:
-1. **만듦**: Submitted·WriteUncertain과 같은 commit에서 만든다.
-2. **수락됨**(Codex): 대기 항목이나 사용자 표식이 확인되면 표시한다(Hq).
-3. **결합**: §6의 anchor 결합 기록이 생기면 지운다.
-4. **기한 초과**: 재주입 없이 retained Unconfirmed + 재전송 요청 1회.
-5. **세션 종료**: Cancelled/HostTerminated 정산 + 알림.
+상태:
+1. **`AwaitingAcceptance`**: 키 전 등록(§2.1 4단계)과 같은 commit에서 만든다. 키 전에 만들기 때문에 키 뒤 재시작에도 남는다. 짧은 확인 기한(`confirmation_deadline_ms` 30초, `v2/attempt.rs:107,161`)은 이 상태에만 걸린다.
+2. **`AcceptedAwaitingNative`**: TUI가 입력을 받았다는 증거가 있는 상태다. 증거는 Codex 대기열 항목 또는 사용자 표식(§2.3 5단계), Claude 입력창이 비고 queue 기록이 생긴 것이다. 이 전이가 짧은 기한을 끝낸다. 항목은 native 결합까지 남고 기한이 없다. 재전송 요청은 철회·미실행 증거가 있을 때만 한다. 증거는 Esc 회수(`Withdraw`), 세션 종료, clear, TUI 대기열에서 항목이 결합 없이 사라짐이다.
+3. **결합**: J2가 현재 incarnation의 source와 native user 행에서 같은 nonce·frame hash를 찾으면 원래 anchor에 결합하고 항목을 지운다. source가 늦게 생겨도 재주입하지 않는다.
+4. **`AwaitingAcceptance` 기한 초과**: 재주입 없이 retained Unconfirmed + 재전송 요청 1회. 기한을 늘리는 것으로 고치지 않는다.
+5. **세션 종료·clear·Terminate**: Cancelled/HostTerminated 정산 + 알림. 후속 입력이면 채널 lease에서도 뺀다(§5.4).
 
 본체는 새 child `src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs`다.
 
@@ -229,6 +252,39 @@ tui_o store에 채널별 durable journal `anchor_bindings`(새 child `src/servic
 ### 5.3 복구 kickoff 전 보류 (H10)
 
 U3로 H5에 포함된다. 조각 A4에서 `restore_inflight.rs:2248` kickoff → `recovery_flush.rs:120-123` `complete_active_reconcile` 순서를 고정하는 시험을 둔다.
+
+### 5.4 채널 실행 lease 하나 (P1-1)
+
+지금 코드:
+- `node_execution_leases`의 PK는 `(instance_id, provider, channel_id)`다(`migrations/postgres/0126_execution_capacity.sql:2-8`). 채널마다 행은 하나뿐이다.
+- `store::acquire`는 만료 행을 지우고 일반 INSERT를 한다(`src/services/cluster/execution_capacity/store.rs:3-26`). 같은 채널에 살아 있는 행이 있으면 PK 충돌이다.
+- renew는 자기 nonce로만 한다(`store.rs:28-38`). renew가 실패하면 provider를 취소한다(`src/services/cluster/execution_capacity.rs:178-184`, `cancel_with_tmux_cleanup`).
+- 그래서 Tab마다 acquire하면 같은 채널의 실행 중 lease와 충돌한다(`AcquirePerTab`). `ON CONFLICT DO UPDATE`로 nonce를 덮으면 실행 중 턴의 renew가 실패해 그 턴이 취소된다(`NonceOverwrite`). 둘 다 쓰지 않는다.
+- 자기 턴 장부만 키마다 잡고(OI:1493-1515), busy 가지는 "이미 잡은 턴에 쓴다"며 잡지 않는다. guard는 그 턴과 함께 drop된다(OI:1568). 이 때문에 바쁠 때 붙여넣은 입력이 A 뒤 자기 턴이 되면 lease 없이 돈다(모델 `CurrentBusy` RED `LeaseCovers`).
+
+목표: 새 child `src/services/cluster/execution_capacity/channel_lease.rs`(프로세스 안 채널별 표)
+- `hold(channel, guard)`: 턴을 시작한 쪽이 받은 `ExecutionGuard`를 채널 lease로 맡긴다. 맡기는 곳은 OI take_owned의 `capacity`(OI:1501-1515)와 Herdr 실행의 `_execution_guard`(`provider_dispatch.rs:623-628`)다. giant 두 곳에는 호출 교체만 한다.
+- `join(channel, nonce)`: §2.1 3단계, 키 전에 부른다.
+  - lease가 있으면 후속 입력 집합에 nonce를 더한다. DB 호출은 없다.
+  - 없으면 기존 `acquire`로 하나 잡아 `hold`한다. 거절되면 `NotSent(capacity)`(Hk)이고 키는 0이다.
+- `turn_ended(channel)`: OI:1568의 `drop(capacity)` 자리에서 부른다. 후속 입력이 남아 있으면 guard를 지킨다. renew는 같은 nonce로 계속된다.
+- `followup_done(channel, nonce)`: 후속 입력이 끝났을 때 부른다. 끝남은 그 입력이 연 native 턴의 `Closed`(J2·J3, reply_anchor가 결합 기록으로 앎), 합류한 턴의 종료, `awaiting_echo`의 철회·세션 종료·clear·Terminate 정산이다. 후속 입력도 실행 중 턴도 없으면 guard를 drop한다. 반납은 nonce로 DELETE한다(`store.rs:39-49`).
+- 다른 채널은 영향을 받지 않는다. node slot(`semaphore`, `execution_capacity.rs:123-153`)은 채널 lease 하나에 permit 하나다. 한 채널의 후속 입력은 slot을 더 쓰지 않는다.
+- 재시작: 프로세스 안 표와 renew loop는 사라진다. DB 행은 30초(`LEASE_SECONDS`) 뒤 만료된다. `awaiting_echo_boot`는 `AcceptedAwaitingNative`나 결합된 실행 중 후속 입력이 있는 채널에서 lease를 하나 다시 잡는다. 옛 행이 아직 살아 있어 PK 충돌이 나면 덮어쓰지 않고 만료까지 다시 시도한다(§12-5).
+
+### 5.5 Claude 키와 transcript 분리 (P1-2)
+
+지금 코드:
+- 두 adapter 모두 키 전에 `std::fs::metadata(request.transcript)`를 읽는다. 실패하면 history 등록 전에 `NotSent(TranscriptUnavailable)`다. Herdr는 `claude_tui/host_input/busy/herdr.rs:53-68`, tmux는 `claude_tui/busy_inject.rs:571-581`이다.
+- owner 모드의 V2 attempt는 live source가 없으면 이미 `pre_source`를 쓴다. `transcript`는 `PathBuf::new()`, 등록 지점은 `(host, session, None)`이다(OI:114-137, 1275-1280). 그래서 새 세션이나 source를 아직 모르는 세션에서는 빈 경로의 metadata를 읽다가 막힌다.
+- 등록이 통과해도 막힌다. owner 범위 등록 `history::v2::scoped_register`(`src/services/tui_input/human_frame/history/v2.rs:743-765`)는 결합된 source와 file id를 요구한다(`registry.source`·`registered`, `v2.rs:602-627`).
+
+목표 계약:
+- 키 전에 durable 등록이 끝나 있어야 한다. 대상은 anchor 목록·nonce·frame hash·target incarnation이고, 등록 지점은 V2 `prepare`(`v2.rs:370`)와 `awaiting_echo` `AwaitingAcceptance`다. source 경로·offset은 미정이어도 된다.
+- 새 child `src/services/tui_input/human_frame/history/v2/key_admit.rs`가 owner 범위의 키 허가를 맡는다. 확인하는 것은 nonce·provider·target owner·frame hash가 준비된 attempt와 같은지다. source가 `pre_source`면 경로·offset 비교를 건너뛴다. source가 결합돼 있으면 지금처럼 비교한다.
+- Herdr·tmux adapter는 `transcript` 인자를 `Option<&Path>`로 바꾼다. 등록 순서는 "owner 범위면 `key_admit` → 붙여넣기+Enter"가 된다. metadata 읽기는 owner 범위 밖 legacy 호출에만 남는다. 이것은 형식 전환 장치가 아니고, owner가 아닌 호출자의 기존 계약이다.
+- 결합은 나중에 한다. J2가 현재 incarnation의 source와 native user 행에서 같은 nonce·frame hash를 찾으면 V2 `bind`(`v2.rs:443`)로 source를 결합하고 원래 anchor에 묶는다. source가 늦어도 재주입은 0이다.
+- 붙여넣기+Enter의 전제는 composer 준비(Hc)·초안 없음(H1)·모달 없음(H2)뿐이다. transcript 파일 존재는 전제가 아니다.
 
 ## 6. 귀속 모델: 입력 anchor ↔ native 턴 ↔ 게시 답
 
@@ -251,6 +307,8 @@ U3로 H5에 포함된다. 조각 A4에서 `restore_inflight.rs:2248` kickoff →
    - 모델의 `ATarget`이 이 규칙이고, `AnswerBound`가 검사한다.
 2. **합류 입력은 합친 답 한 번으로 친다.**
    - 합류 입력에는 ➕ "진행 중 턴에 합류"를 단다. 지금 반응 `turn_view_reconciler/injected.rs:204-231`이 있고, Idle 관측에서 ✅로 바뀐다(`turn_presence/supervisor.rs:884`).
+   - ➕는 J2가 흡수를 확인한 뒤에만 단다(w3, 모델 `MarkOnlyJoined`, `MarkOnPaste` RED). 키 직후에는 달지 않는다.
+   - J2가 그 입력을 별도 턴의 opener로 결합하면 ➕를 달지 않는다. 이미 달린 ➕(배포 경계)가 있으면 거둔다.
    - 따로 답하지 않는다. 합친 답은 규칙 1의 anchor 하나에 건다.
    - 한 Discord 메시지에는 reference를 하나만 걸 수 있으므로 여러 anchor에 나누지 않는다.
 3. **게시 순서로 귀속하지 않는다**(`PostOrder` RED). "가장 오래된 미답 입력"에 붙이는 규칙은 외부 턴 A의 답을 Tab으로 대기한 B에 붙인다. 0단계 S1T의 "B 답이 A bridge 수명 안에서 게시"가 바로 이 모양이다.
@@ -306,11 +364,26 @@ i8328tab1은 답 대상 99건 중 본문·native 턴 일치 87건을 보고했�
 | S12 | 스레드 입력 | IG:228, 스레드마다 V2 owner | 스레드 채널마다 S1. THREAD-GUARD(IG:870-926)는 명시 보류로 유지 | 스레드 안 자기 메시지 |
 | S13 | TUI 직접 입력 | owner 밖(ExternalInput) | owner 입력이 아님. 사람 초안(H1)의 근원 | 그 입력이 연 턴은 anchor 없음 → 처음 합류한 Discord 입력 또는 none |
 
+### 7.1 composer 소유 분류 (H1, P2-2)
+
+판정은 키를 누를 composer 잠금 안의 capture 하나로 한다. 판정 함수는 Claude `draft_sighting`(`claude_tui/busy_inject/ownership.rs:26-40`)·`draft_unproven`(같은 파일 46-52), Codex `screen::draft_may_be_present`다.
+
+| composer 상태 | 지금 | 목표 |
+|---|---|---|
+| 빈 composer, stash 없음(`Settled`) | 주입 | **주입** |
+| 사람 글자, stash 없음(`PersonDraft`) | Claude C-s로 보관 → 주입 → 복원(`stash_tests.rs:333-345`) | managed stash 예외. C-s 뒤 같은 잠금의 capture로 composer가 비었고 stash가 그 글자인지 증명한 뒤에만 주입한다. 증명이 안 되면 **보류**(H1) |
+| 기존 stash A + 현재 사람 글자 B(`Unsettled`) | **paste+Enter로 B+frame 제출**(`stash_tests.rs:369-377`). 그 뒤 `draft_notice`(`effect/claude.rs:86-90`) | **보류**(H1). 키 0, 두 초안 모두 보존, 채널 알림(U1) |
+| 읽지 못한 composer(`Composer::Unknown`), 모달 footer | `Unsettled` | **보류**(H1/H2) |
+| AgentDesk가 쳤다가 남은 frame(`ComposerOwner::AgentDesk`) | 기존 처리 | 같은 nonce의 `awaiting_echo`가 있으면 그 입력의 몫이다. 재주입은 없다(§5.1) |
+| Codex 초안 | `draft_may_be_present` | **보류**(H1) |
+
+"제출 뒤 알림"(`draft_unproven` → `draft_notice`)은 목표에서 "키 전 거절"이 된다. 제출 뒤 알림으로 남겨 두는 변형은 mutant로 RED를 확인한다(조각 A3).
+
 U 결정(코드 근거, w1 그대로):
 - **U2 기계 시작: START_WAITS를 남긴다.** 근거: `target.rs:76-78`, OI:1219-1243, `routine_delivery`·Decision journal의 턴 경계 정산.
 - **U3 `reconcile_done=false`: 사람 입력은 토큰 유무와 무관하게 보류.** 근거: `recovery_kickoff.rs:39`(빈 slot만 claim), 복구 relay 범위.
 - **U4 허용 봇: 사람 취급 유지.** 근거: `ingress.rs:418-425`.
-- **U1 사람 초안: 알림만.**
+- **U1 사람 초안: 알림만.** 사람 소유이거나 소유를 모르는 composer 전부에 적용한다(§7.1, w3).
 
 ## 8. 재시작·부팅·incarnation 경로
 
@@ -327,6 +400,10 @@ U 결정(코드 근거, w1 그대로):
 | 세션 교체(`!clear`, Herdr pane 교체, 새 세션) | 옛 source id에 묶인 항목 | source id(dev·ino)가 다르므로 새 세션 조각에 옛 결합이 붙지 않는다. 옛 `awaiting_echo`는 clear(A3)·terminate(A2)·R13이 정산하고 알림 | 옛 입력은 알림으로 끝 |
 | R13 carried episode | 이전 generation 토큰 | 사람 입력은 합류 장부로 주입된다. 답 anchor는 J2 결합이 정하고 토큰과 무관 | 옛 episode로 잘못 귀속되지 않음 |
 | R9-R12 | 각자 보류 | 그대로. preclaim은 합류 장부에도 적용 | |
+| 키 전 등록 뒤, source 미정(`pre_source`) | V2 attempt(`pre_source`)와 `awaiting_echo` `AwaitingAcceptance` | 키를 눌렀는지 모르는 상태는 현행 `head_injection` 복구(R6)가 정한다. 키가 들어갔다면 J2가 새 source에서 같은 nonce·frame hash를 찾아 V2 `bind`로 결합한다 | 원래 anchor에 결합. 재주입 0 |
+| Codex 수락 뒤(`AcceptedAwaitingNative`) | `awaiting_echo` | 짧은 기한 없이 남는다. TUI 대기열에 있던 입력이 재시작 뒤 native 턴이 되면 J2가 결합한다 | 게시 1회, 재전송 요청 0 |
+| 채널 실행 lease | 프로세스 안 표, DB 행(30초 TTL) | 표는 사라지고 행은 만료된다. `awaiting_echo_boot`가 수락·실행 중 후속 입력이 있는 채널에서 lease를 하나 다시 잡는다. PK 충돌이면 덮어쓰지 않고 만료 뒤 다시 시도한다 | 채널당 행 ≤ 1. 공백 ≤ 30초(§12-5) |
+| 출력 소유 | boot policy·adoption | 부팅 때 `tui_o/cutover` 판정을 다시 한다. writer 준비 전(`channel_accepts` 거짓)에도 소유는 그대로다 | O 소유 채널에서 legacy 본문 0, writer 회복 뒤 O 본문 1 |
 
 ## 9. 인접 경로 전수
 
@@ -335,7 +412,7 @@ U 결정(코드 근거, w1 그대로):
 | # | 경로 | 진입 | 목표 계약 | 조각 |
 |---|---|---|---|---|
 | A1a | HTTP Cancel(보존) | `queue_api.rs:209` → `judged_stop.rs:59-69` | 합류 장부 입력은 토큰의 busy child라 함께 멈춘다. 토큰 없는 `Ok(None)` + `awaiting_echo`면 Claude `owned_input_stop`(`judged_stop.rs:458`), Codex Esc 1회. Codex는 대기열이 있을 때 Esc가 "중단 후 즉시 전송"이라 Tab 대기 B가 곧바로 시작한다. 알림에 남긴다. drain은 H11 뒤 | A2 |
-| A1b | Cancel(force) | `queue/http_force.rs:53` | `awaiting_echo` HostTerminated 정산 | A2 |
+| A1b | Cancel(force) | `queue/http_force.rs:53` | `awaiting_echo` HostTerminated 정산, 후속 입력 lease 정리(`followup_done`) | A2 |
 | A1c | `/cancel-queued` | `commands/control.rs:772` | 유지 | – |
 | A2 | Herdr Terminate | `herdr_terminate.rs:151,514`, `retired_wake.rs:47` | 전이 잠금을 키까지 쥐므로 `herdr_terminate.rs:514` 재확인이 본다. `awaiting_echo` 정산. 이미 게시된 답의 anchor는 그대로 | A2 |
 | A3 | clear | `commands/control.rs:548,835`, V2 `clear.rs:17,154`, `session_idle_cleanup.rs:87,180` | `protected`(`v2/clear.rs:39-43`)에 귀속 대기 id 포함. clear 뒤 새 source id에는 옛 결합이 이어지지 않는다(§8). composer 미준비는 Hc | A2 |
@@ -347,6 +424,8 @@ U 결정(코드 근거, w1 그대로):
 | A7 | presence wake | `supervisor.rs:657,695,884` | wake 조건에서 토큰 제외(owner 보관 front), unknown 알림 조건에 `awaiting_echo` 추가, ➕는 합류 결합 뒤에만 ◇ | A1(➕), A2(wake·알림) |
 | A8 | #3277 deadline | `turn_finalizer/reconcile.rs:223,270,331` | 토큰 턴 유지, 귀속 대기는 자기 deadline ◆ | A2 |
 | A9 | #8430 상한 | | 안전망 유지. 초안·모달·작업 중 화면에는 미적용(U1) | 별도 |
+| A11 | 실행 용량 | `execution_capacity::acquire`(OI:1501-1515, `provider_dispatch.rs:623-628`), renew 실패 취소(`execution_capacity.rs:178-184`) | 채널 lease 하나(§5.4). 후속 입력은 DB를 건드리지 않는다. 다른 채널은 기존 slot 상한 그대로 | A6 |
+| A12 | 출력 cutover fence | `tui_o/cutover.rs:76-92` `owned_in`, `claim_then_send`·`o_keeps_body`(`tui_o/cutover/channel_gate.rs:232-263`) | 관찰자 본문 게시는 소유 판정으로만 정한다. readiness(`channel_accepts`)로 legacy에 넘기지 않는다 | A3 |
 | A10 | tui_o 게시 확인·재게시 | `src/services/tui_o/writer/confirm.rs`, `src/services/tui_o/writer/local_retry.rs`, `tui_o/repost/` | 재게시·확인 스캔은 `Prepared.reply_to`를 그대로 쓴다. reference가 달라 같은 payload를 다른 조각으로 보는 일이 없게 한다 | A1 |
 
 ## 10. #8432·#8430 경계
@@ -368,47 +447,71 @@ giant 파일에는 블록 이동·호출 교체·필드나 enum 변형 추가만
 
 `src/services/tui_o/writer/deliver.rs`는 998줄이다. 조각에서 `reply_to` 전달 한 줄만 더하면 1000줄을 넘으므로, 같은 조각에서 `send_piece`의 Prepared 생성 블록(약 15줄)을 child로 옮긴다.
 
-순서: **A1 → A2 → A3 → A5 → A4**
+- `src/services/discord/router/message_handler/provider_dispatch.rs`(1144줄): A6에서 guard 맡기기 호출 교체만 한다.
+
+순서: **A1 → A2 → A6 → A3 → A5 → A4**. A6(채널 lease)은 A3(Claude 합류 장부의 자기 턴)과 A5(Codex Tab)가 모두 기대므로 둘보다 앞이다.
 
 ### A1 — 답 anchor 귀속 (핵심)
 - 파일(prod 10개):
-  - 새 child: `src/services/tui_o/writer/reply_anchor.rs`(+230: native 턴 추적, nonce 판독, 결합·합류 규칙), `src/services/tui_o/store/anchor_bindings.rs`(+130: durable journal), `src/services/tui_o/writer/deliver/prepared.rs`(블록 이동 +15)
-  - 수정: `src/services/tui_o/writer/pieces.rs`(+15, `reply_to` 운반), `src/services/tui_o/writer/mod.rs`(+8, 포트 인자), `src/services/tui_o/writer/deliver.rs`(-15 +3), `tui_o/store/ledger.rs`(+3, 선택 필드), `discord/outbound/o_writer_io.rs`(+20, message reference), `turn_view_reconciler/injected.rs`(+15, 합류 ➕), `src/services/tui_input/human_frame/history.rs` 또는 `src/services/tui_input/human_frame/history/v2.rs`(+25, nonce → anchor 조회)
-- 예상: prod 10파일 / 순 +450.
+  - 새 child: `src/services/tui_o/writer/reply_anchor.rs`(+240: native 턴 추적, nonce 판독, 결합·합류 규칙, 후속 턴 Closed 알림), `src/services/tui_o/store/anchor_bindings.rs`(+130: durable journal), `src/services/tui_o/writer/deliver/prepared.rs`(블록 이동 +15)
+  - 수정: `src/services/tui_o/writer/pieces.rs`(+15, `reply_to` 운반), `src/services/tui_o/writer/mod.rs`(+8, 포트 인자), `src/services/tui_o/writer/deliver.rs`(-15 +3), `tui_o/store/ledger.rs`(+3, 선택 필드), `discord/outbound/o_writer_io.rs`(+20, message reference), `turn_view_reconciler/injected.rs`(+30, 흡수 확인 뒤 ➕와 별도 턴이면 거두기), `src/services/tui_input/human_frame/history.rs` 또는 `src/services/tui_input/human_frame/history/v2.rs`(+25, nonce → anchor 조회)
+- 예상: prod 10파일 / 순 +475.
 - RED 계획(현행에서 실패 확인 뒤 구현):
   1. tui_o 조각 게시에 reference가 없다(현행 `post_unit`에 인자 없음). 목표는 opener anchor reply다.
   2. 외부 턴 A + Codex Tab 대기 B: A의 조각은 reference 없음, B의 조각은 B reply(게시 순서 귀속 금지).
   3. Claude 흡수(`absorbed_mid_turn` fixture): 합친 답은 A anchor, B에 ➕ 1회, B 별도 게시 0.
-  4. 한 user 행에 nonce 둘(실측 busy1 fixture): 첫 anchor reply, 둘째 ➕와 알림.
-  5. 재시작: `Prepared{reply_to}` 뒤 결과 모르는 POST 확인 스캔이 같은 조각으로 인정, `anchor_bindings`에서 anchor 복구.
-  6. 결합 근거 없는 nonce: reference 없이 게시하고 조각을 막지 않는다.
-  7. J5 관측 줄과 `relay_delivery` 1회.
+  4. **➕ 시점(P2-3)**: 바쁜 화면에 붙여넣었지만 A 뒤 자기 턴으로 돈 B는 ➕ 0, B 답 1회(B reply)다. 키 직후 ➕를 다는 변형(`MarkOnPaste`)은 RED다. 키 직후 달린 ➕가 있는 fixture에서 별도 턴 결합 뒤 ➕가 거둬진다.
+  5. **한 user 행에 nonce 둘(A1 두 nonce fixture, 실측 busy1 모양)**: 첫 anchor reply, 둘째 ➕와 알림.
+  6. 재시작: `Prepared{reply_to}` 뒤 결과 모르는 POST 확인 스캔이 같은 조각으로 인정, `anchor_bindings`에서 anchor 복구.
+  7. 결합 근거 없는 nonce: reference 없이 게시하고 조각을 막지 않는다.
+  8. J5 관측 줄과 `relay_delivery` 1회.
 - 검증: tui_o writer actor 시험군(`actor_tests.rs` 포트 하네스), ledger 시험, o_writer_io 시험.
 
 ### A2 — 귀속 대기 손잡이와 인접 경로
-- 파일(prod 11개):
-  - 새 child: `src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs`(+170), `src/services/discord/recovery_engine/awaiting_echo_boot.rs`(+50)
-  - 수정: `v2_types.rs`(+12), `v2.rs`(+20), `v2/clear.rs`(+8), `herdr_terminate.rs`(+25), `judged_stop.rs`(+35), `turn_lease.rs`(+15), `turn_presence/supervisor.rs`(+15), `v2/retained.rs`(+30), `destructive_cancel_gate.rs`(+10)
-- 예상: prod 11파일 / 순 +390.
-- RED 계획: clear protected, terminate 정산, echo 기한 retained(재주입 0), Hq 수락 표시, boot 재결합.
+- 파일(prod 12개):
+  - 새 child: `src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs`(+200: `AwaitingAcceptance`·`AcceptedAwaitingNative`, 철회 증거), `src/services/discord/recovery_engine/awaiting_echo_boot.rs`(+50)
+  - 수정: `v2_types.rs`(+12), `v2.rs`(+20), `v2/clear.rs`(+8), `v2/attempt.rs`(+10, 수락 전이가 `confirmation_deadline_ms`를 끝냄), `herdr_terminate.rs`(+25), `judged_stop.rs`(+35), `turn_lease.rs`(+15), `turn_presence/supervisor.rs`(+15), `v2/retained.rs`(+30), `destructive_cancel_gate.rs`(+10)
+- 예상: prod 12파일 / 순 +430.
+- RED 계획:
+  1. clear protected, terminate 정산, Hq 수락 표시, boot 재결합.
+  2. `AwaitingAcceptance` 기한 초과면 retained 재전송 요청 1회, 재주입 0.
+  3. **수락 뒤 기한(P2-1)**: 가상 시계에서 A가 60초 돌고 B가 Tab으로 수락됐다. 30초가 지나도 Unconfirmed 0, 재전송 요청 0이다. 재시작을 넘어 B가 결합되고 1회 게시된다. 수락 뒤에도 기한이 걸리는 변형(`AcceptedStillExpires`)은 RED다.
+  4. 철회 증거(Esc `Withdraw`, 세션 종료)가 있을 때만 재전송 요청이 나간다.
+
+### A6 — 채널 실행 lease 하나 (P1-1)
+- 파일(prod 7개):
+  - 새 child: `src/services/cluster/execution_capacity/channel_lease.rs`(+160: `hold`·`join`·`turn_ended`·`followup_done`)
+  - 수정: `src/services/cluster/execution_capacity.rs`(+3, mod), OI(take_owned `capacity` → `hold`, OI:1568 `drop` → `turn_ended`, +4/-2), `provider_dispatch.rs`(Herdr `_execution_guard` → `hold`, +3/-1), `awaiting_echo_boot.rs`(+20, 재시작 뒤 다시 잡기), `reply_anchor.rs`(+8, 후속 턴 Closed → `followup_done`), `v2/awaiting_echo.rs`(+8, 철회·종료 → `followup_done`)
+- 예상: prod 7파일 / 순 +205.
+- RED 계획(로컬 PG 시험 하네스, `execution_capacity/tests.rs` 방식):
+  1. slot 1, A 실행 중 + B Tab 수락 → 수락 성공, DB lease 행 1(현행 방식으로 B가 acquire하면 PK 충돌 또는 slot 거절).
+  2. slot 여유가 있어도 행은 1이다.
+  3. A가 끝나도 B가 남아 있으면 lease를 유지하고, B가 끝난 뒤 반납한다(행 0).
+  4. 다른 채널은 여전히 slot 상한에 걸린다.
+  5. Claude: 바쁜 화면 붙여넣기 뒤 A 뒤 자기 턴 B가 lease를 가진다(현행 `CurrentBusy` 모양, lease 0).
+  6. 변형 RED: Tab마다 acquire(`AcquirePerTab`), `ON CONFLICT DO UPDATE` nonce 덮어쓰기(`NonceOverwrite`). 덮어쓰기에서는 A의 renew가 실패해 A가 취소된다.
+  7. 재시작: 옛 행이 살아 있는 동안 boot 재획득은 덮어쓰지 않는다. 만료 뒤 행 1이다.
 
 ### A3 — 사람 입력 단일 경로(Claude 바로 주입·합류)
-- 파일(prod 9개):
-  - 새 child: `src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs`(+290), `src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs`(이동 +60)
-  - 수정·삭제: OI(-210), `busy_turn.rs`(삭제 -41), OB(-250), IT(-20), WF(관찰자 게시 끔 +8), `busy_retry.rs`(+5), `claude_tui/host_input/busy/herdr.rs`(history 등록에 message id +5)
-- 예상: prod 9파일 / 순 약 -150.
+- 파일(prod 15개):
+  - 새 child: `src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs`(+300), `src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs`(이동 +60), `src/services/tui_input/human_frame/history/v2/key_admit.rs`(+70, source 없는 키 허가)
+  - 수정·삭제: OI(-210), `busy_turn.rs`(삭제 -41), OB(-250), IT(-20), WF(관찰자 본문 게시를 소유 판정으로 +10), `busy_retry.rs`(+5), `claude_tui/host_input/busy/herdr.rs`(transcript `Option`, 등록 순서, 초안 보류 -15 +20), `claude_tui/busy_inject.rs`(같음 -10 +15), `src/services/tui_input/human_frame/history.rs`(+10, owner 범위면 `key_admit`), `claude_tui/busy_inject/ownership.rs`(+20, 키 전 보류 판정), `queue_io/input_owner/effect/claude.rs`(-10, 제출 뒤 알림 → 키 전 거절), Codex `warm_followup::owner_observer` 쪽 관찰자(+6, 소유 판정)
+- 예상: prod 15파일 / 순 약 -40.
 - RED 계획:
   1. #8432 모양(남은 토큰 + Idle) → Submitted 1회. 현행은 NotSent 반복이다.
   2. 토큰 없는 가지의 전이 잠금
   3. U3 보류
   4. iMessage reply_context 보존
   5. busy child가 키 전에 고정됨
+  6. **transcript 없는 주입(P1-2), Herdr·tmux 각각**: live=None 등록, composer 준비, 초안·모달 없음, transcript 파일 없음 → 붙여넣기 1회 + Enter 1회. 나중에 source가 생기면 같은 nonce가 원래 anchor에 결합되고 재주입은 0이다. 붙여넣기 전 transcript를 요구하는 변형(`RequireTranscriptBeforePaste`, 현행)은 두 host 모두 RED다.
+  7. **사람 초안 보류(P2-2), tmux·Herdr 각각**: stash A + 초안 B fixture → NotSent, paste/Enter 0, 두 초안 모두 보존. `Unsettled`를 통과시키는 변형과, 키 전 거절을 제출 뒤 알림으로 바꾸는 변형은 RED다. managed stash 예외는 C-s 뒤 빈 composer 증명이 있을 때만 주입한다.
+  8. **출력 소유(P2-4)**: O 소유 채널에서 `resumed=false` 또는 `stopping=true` → legacy 본문 0. writer 회복 뒤 O 본문 1. readiness 거짓을 legacy 게시로 바꾸는 변형은 RED다.
 
 ### A5 — Codex 항상 Tab
 - 파일(prod 10개):
-  - 새 child: `src/services/codex_tui/busy_inject/tab_protocol.rs`(+120: 반영 확인·수락 확인·veto 보강)
+  - 새 child: `src/services/codex_tui/busy_inject/tab_protocol.rs`(+130: 반영 확인·수락 확인·veto 보강, 키 전 `channel_lease::join`)
   - 수정: `session_host/submit.rs`(+8)·`tmux_host.rs`·`herdr_gate.rs`(+20), `codex_tui/input.rs`(enum +6), `codex_tui/busy_inject.rs`(+10/-20), `codex/herdr_turn/busy.rs`(+15/-15), `effect/codex.rs`(`idle_codex` 교체 +20/-70), `queue_io/input_owner/target.rs`(-20), OI(Codex 경로 합침 -35), `codex_tui/busy_inject/screen.rs`(action banner·질문 화면 veto +20), `codex_stop_delivery.rs`(+20)
-- 예상: prod 10파일 / 순 약 +60.
+- 예상: prod 10파일 / 순 약 +70.
 - RED 계획:
   1. Codex 바쁜 화면: 현행은 `NotSent("busy_turn: transcript unavailable")` 또는 Enter다. 목표는 Tab 1회다.
   2. idle 화면도 Tab(현행 `idle_codex`는 Enter).
@@ -417,6 +520,8 @@ giant 파일에는 블록 이동·호출 교체·필드나 enum 변형 추가만
   5. 수락 미확인이면 다음 front Hq.
   6. action banner·질문 화면 fixture면 보관.
   7. `/clear` 직후 readiness 전이면 Hc.
+  8. **A5 두 입력 fixture(불일치 b·c 모양)**: 붙여넣기 직후 Tab으로 두 입력이 한 사용자 메시지에 합쳐진 rollout, 앞 초안 잔류 + 다음 시작이 합쳐진 rollout. 각 입력의 답·➕·알림이 §6.3 "nonce 둘" 규칙대로 나오는지 본다. 목표 절차에서는 반영 확인·Hq 때문에 이 모양이 생기지 않는다(키 순서 시험).
+  9. Tab 수락이 채널 lease를 하나만 쓴다(A6 API 호출 1회, DB 호출 0).
 - 화면 fixture는 i8328tab1 `logs/tab-1/` 스냅샷에서 옮긴다(비밀값 없음 확인 뒤).
 
 ### A4 — intake 적재·wake와 재시작 정리
@@ -425,14 +530,16 @@ giant 파일에는 블록 이동·호출 교체·필드나 enum 변형 추가만
 - RED 계획: blocking 토큰이 있을 때 적재하면 owner wake 1회(현행 없음). kickoff → reconcile 순서를 고정한다.
 
 ### 합계
-- 서로 다른 prod 파일 약 40개, 순 약 +755(+450, +390, -150, +60, +5).
-- 조각 최대는 A1의 10파일·+450이다. 모두 30파일·+1500 상한과 PLAN_READY 선 +1200 아래다.
+- 서로 다른 prod 파일 약 50개, 순 약 +1145(+475, +430, +205, -40, +70, +5).
+- 조각 최대 증가는 A1(10파일·+475), 최대 파일 수는 A3(15파일·-40)이다. 모두 30파일·+1500 상한과 PLAN_READY 선 +1200 아래다.
+- 추정이다. 이 설계 레그의 실측(`pr_cap_prod.py`)은 prod 0이다(문서·모델만).
 
 ## 12. 남은 위험·미확인
 
-1. **owner 채널의 출력 주체가 언제나 tui_o writer인지**: `tui_o::writer::host::channel_accepts`가 거짓인 채널(legacy relay)은 J3·J4가 닿지 않는다. 그런 채널에서는 기존 관찰자가 게시한다(w1 방식). anchor는 J1·J2 결합 기록을 공유해 같은 규칙으로 단다. A1 첫 시험에서 owner 채널 목록과 `channel_accepts`의 관계를 고정한다.
+1. **출력 소유와 readiness(P2-4로 정정)**: w2는 `tui_o::writer::host::channel_accepts`가 거짓인 채널을 legacy relay 채널로 보았다. 이것은 틀렸다. `channel_accepts`(`tui_o/writer/host.rs:269-278`)는 readiness·gateway 소유·stopping·resumed를 함께 본다. 그래서 O 소유 채널에서도 재개 전이나 정지 중에는 거짓이다. 소유는 boot policy와 adoption 계약이다(`tui_o/cutover.rs:1-4,76-92`). 관찰자 게시는 소유 판정과 `claim_then_send`·`o_keeps_body` fence로만 정한다. legacy 소유 채널(소유 판정이 거짓)에서는 J3·J4가 닿지 않는다. 그런 채널에서는 기존 관찰자가 게시하고, anchor는 J1·J2 결합 기록을 공유해 같은 규칙으로 단다. A3 시험 8이 이 경계를 고정한다.
 2. **J2의 nonce 판독**: 사용자가 frame 헤더를 흉내 낸 텍스트를 TUI에 직접 치면 가짜 nonce가 생긴다. 결합은 `awaiting_echo`·history에 같은 nonce와 같은 frame hash(`src/services/tui_input/human_frame/history/v2/native.rs:40` `frame_hashes`)가 있을 때만 인정한다.
 3. **Codex Vim 모드·side conversation**: 운영 launch 설정을 읽지 않는 범위라 Vim 시작 여부를 확인하지 못했다. 화면 판정으로 보관한다.
-4. **Claude managed stash**(`busy/herdr.rs:77-98`): 초안을 제출하지 않으므로 U1과 충돌하지 않는다고 판단했다. **메인 확인 권장.**
-5. **Codex 실행 용량(execution capacity)**: 지금은 idle 경로만 `execution_capacity::acquire`를 잡는다(OI:1495-1515). 항상 Tab이면 키를 누를 때 B가 곧 시작할지 A 뒤에 시작할지 모른다. 그러나 B는 어느 쪽이든 자기 native 턴이 된다. 그래서 A5는 Codex Tab마다 용량을 잡고 B 턴이 끝날 때 놓는 것으로 정한다. A가 도는 동안 B가 용량을 미리 쥐는 시간이 생기고, 노드 용량이 빠듯하면 B가 `NotSent(capacity)` 보관이 된다. A5 RED 시험에 넣는다.
-6. 앞 턴 relay가 뒤 입력의 자기 턴 출력까지 앞 턴 몫으로 보내지 않는지(w1 위험 1)는 tui_o writer 하나가 게시하고 조각마다 턴 결합으로 anchor를 정하는 구조에서는 문제가 되지 않는다. 다만 legacy relay 채널(위 1)에서는 남는다.
+4. **Claude managed stash(P2-2로 정정)**: w2는 "초안을 제출하지 않으므로 U1과 충돌하지 않는다"고 보았다. 이것은 틀렸다. 기존 stash + 현재 사람 초안(`Unsettled`)에서 지금 코드는 B+frame을 제출한다(`stash_tests.rs:369-377`). 목표에서는 §7.1처럼 키 전에 보류한다. managed stash 예외는 C-s 뒤 빈 composer가 증명될 때만 남긴다. 이 예외를 아예 없앨지(모든 사람 글자를 보류)는 메인 결정으로 남긴다. 없애면 A3 `ownership.rs` 변경이 더 단순해진다.
+5. **실행 lease 재시작 공백(P1-1 결정 뒤 남는 것)**: 재시작하면 프로세스 안 lease 표와 renew loop가 사라진다. 같은 PK의 옛 행은 최대 30초(`LEASE_SECONDS`) 산다. 그동안 boot 재획득은 덮어쓰지 않고 기다린다. 이 공백 안에 TUI 대기열의 후속 입력이 시작되면 잠깐 lease 없이 돈다. 이것은 재시작 때 실행 중이던 모든 턴의 기존 성질과 같고, 새로 생긴 위험이 아니다. node 용량이 30초 동안 하나 적게 세어질 수 있다.
+6. 앞 턴 relay가 뒤 입력의 자기 턴 출력까지 앞 턴 몫으로 보내지 않는지(w1 위험 1)는 tui_o writer 하나가 게시하고 조각마다 턴 결합으로 anchor를 정하는 구조에서는 문제가 되지 않는다. 다만 legacy 소유 채널(위 1)에서는 남는다.
+7. **원시 증거 재집계**: 리뷰는 12건 불일치 분류의 원시 증거가 head에 없어 다시 셀 수 없었다고 적었다. 원시 증거(`logs/tab-1/attribution-*`)는 비밀값 검사 전이라 저장소에 넣지 않았다. 대신 A1 시험 5와 A5 시험 8이 같은 모양의 fixture를 저장소에 들인다.

@@ -1,22 +1,18 @@
 ---
-title: "owner 입력: busy 분기(현재) 대 바로 주입, 합류, Codex 항상 Tab, 답 anchor 귀속(목표)"
+title: "owner 입력: busy 분기(현재) 대 바로 주입, 합류 표시, 채널 lease 하나, Codex 항상 Tab, 답 anchor 귀속(목표)"
 ---
 stateDiagram-v2
-  s0: A 실행 중 #183; B 도착 전 #183; 토큰 A #183; 화면 Busy
-  s1: A 끝남 #183; B 도착 전 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A
-  s2: A 실행 중 #183; B 대기열 #183; 토큰 A #183; 화면 Busy
-  s3: A 끝남 #183; B 대기열 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A
-  s4: A 실행 중 #183; B 주입됨(echo 전) #183; 토큰 A #183; 화면 Busy, 합류 표시
-  s5: A 끝남 #183; B 주입됨(echo 전) #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A
-  s6: A 끝남 #183; B 주입됨(echo 전) #183; 토큰 A #183; 화면 Idle, 합류 표시, A 답 reply#8594;A
-  s7: A 실행 중 #183; B 진행 중 턴에 합류 #183; 토큰 A #183; 화면 Busy, 합류 표시
-  s8: A 끝남 #183; B 몫이 A 답에 합쳐 게시 #183; 토큰 A #183; 화면 Idle, 합류 표시, A 답 reply#8594;A
-  s9: A 끝남 #183; B 자기 턴 실행(echo 있음) #183; 토큰 A #183; 화면 Busy, A 답 reply#8594;A
-  s10: A 끝남 #183; B 자기 턴 실행(echo 있음) #183; 토큰 A #183; 화면 Busy, 합류 표시, A 답 reply#8594;A
-  s11: A 끝남 #183; B 끝, 답 게시 전 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A
-  s12: A 끝남 #183; B 끝, 답 게시 전 #183; 토큰 A #183; 화면 Idle, 합류 표시, A 답 reply#8594;A
-  s13: A 끝남 #183; B 답 게시 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, B 답 reply#8594;B
-  s14: A 끝남 #183; B 답 게시 #183; 토큰 A #183; 화면 Idle, 합류 표시, A 답 reply#8594;A, B 답 reply#8594;B
+  s0: A 실행 중 #183; B 도착 전 #183; 토큰 A #183; 화면 Busy, 채널 lease 1
+  s1: A 끝남 #183; B 도착 전 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, lease 없음
+  s2: A 실행 중 #183; B 대기열 #183; 토큰 A #183; 화면 Busy, 채널 lease 1
+  s3: A 끝남 #183; B 대기열 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, lease 없음
+  s4: A 실행 중 #183; B 주입됨(echo 전) #183; 토큰 A #183; 화면 Busy, 채널 lease 1
+  s5: A 끝남 #183; B 주입됨(echo 전) #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, 채널 lease 1
+  s6: A 실행 중 #183; B 진행 중 턴에 합류 #183; 토큰 A #183; 화면 Busy, 합류 표시, 채널 lease 1
+  s7: A 끝남 #183; B 몫이 A 답에 합쳐 게시 #183; 토큰 A #183; 화면 Idle, 합류 표시, A 답 reply#8594;A, lease 없음
+  s8: A 끝남 #183; B 자기 턴 실행(echo 있음) #183; 토큰 A #183; 화면 Busy, A 답 reply#8594;A, 채널 lease 1
+  s9: A 끝남 #183; B 끝, 답 게시 전 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, lease 없음
+  s10: A 끝남 #183; B 답 게시 #183; 토큰 A #183; 화면 Idle, A 답 reply#8594;A, B 답 reply#8594;B, lease 없음
   [*] --> s0
   s0 --> s1: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
   s0 --> s2: 사람 입력 B 도착
@@ -24,12 +20,9 @@ stateDiagram-v2
   s2 --> s3: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
   s2 --> s4: owner drive(Claude): 보류 조건만 보고 바로 붙여넣기+Enter
   s3 --> s5: owner drive(Claude): 보류 조건만 보고 바로 붙여넣기+Enter
-  s4 --> s6: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
-  s4 --> s7: Claude가 도구 경계에서 B를 진행 중 턴에 흡수
-  s5 --> s9: TUI가 B를 자기 턴으로 시작, transcript echo
-  s6 --> s10: TUI가 B를 자기 턴으로 시작, transcript echo
-  s7 --> s8: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
-  s9 --> s11: B 종료
-  s10 --> s12: B 종료
-  s11 --> s13: B 답 게시(echo 귀속)
-  s12 --> s14: B 답 게시(echo 귀속)
+  s4 --> s5: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s4 --> s6: Claude가 도구 경계에서 B를 진행 중 턴에 흡수 (목표: 이때 합류 표시)
+  s5 --> s8: TUI가 B를 자기 턴으로 시작, transcript echo
+  s6 --> s7: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s8 --> s9: B 종료 (마지막 후속 입력: lease 반납)
+  s9 --> s10: B 답 게시(echo 귀속)
