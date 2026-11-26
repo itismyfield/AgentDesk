@@ -113,13 +113,18 @@ it("renders AgentTiming spans and toggles AgentToolCalls summary when tool event
 
   await act(async () => toggle.click());
   const toolCalls = byTestId("turn-transcript-tool-calls")!;
-  expect(toolCalls.querySelector(".aui-agent-tool-calls")).not.toBeNull();
+  const embeddedScreen = toolCalls.querySelector<HTMLElement>(".aui-agent-tool-calls")!;
+  expect(embeddedScreen).not.toBeNull();
+  expect(embeddedScreen.dataset.embedded).toBe("true");
+  expect(embeddedScreen.querySelector("nav")).toBeNull();
   expect(toolCalls.querySelector(".aui-agent-tool-calls-live")).toBeNull();
   expect(toolCalls.textContent).toContain("Bash");
   expect(toolCalls.textContent).toContain("Write");
-  const statuses = [...toolCalls.querySelectorAll<HTMLElement>(".aui-agent-tool-calls-status")].map((el) => el.dataset.status);
-  expect(statuses).toContain("done");
-  expect(statuses).toContain("waiting");
+  const headers = [...embeddedScreen.querySelectorAll("th")].map((th) => th.textContent).filter(Boolean);
+  expect(headers).toEqual(["TIME", "TOOL", "INPUT", "STATUS", "DURATION", "TOKENS", "RUN"]);
+  const statusEls = [...toolCalls.querySelectorAll<HTMLElement>(".aui-agent-tool-calls-status")];
+  expect(statusEls.map((el) => el.dataset.status)).toEqual(expect.arrayContaining(["done", "waiting"]));
+  expect(statusEls.map((el) => el.textContent)).toEqual(expect.arrayContaining(["Done", "Waiting"]));
 
   // Switching to a turn with no tool events hides the tool summary section.
   const secondTurn = container.querySelectorAll<HTMLButtonElement>("[data-turn]")[1]!;

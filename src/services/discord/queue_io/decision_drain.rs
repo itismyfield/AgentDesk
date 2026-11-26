@@ -15,6 +15,8 @@ use crate::services::turn_orchestrator::{
     ChannelMailboxHandle, ChannelMailboxRegistry, DecisionHeld as Held,
 };
 
+pub(crate) mod queued;
+
 /// Whether a request body claims the Decision source, in its source or its input metadata.
 pub(crate) fn self_declared(source: Option<&str>, metadata: Option<&serde_json::Value>) -> bool {
     let named = |value: &str| value.trim().eq_ignore_ascii_case(SOURCE);
@@ -44,8 +46,23 @@ pub(crate) fn reject_handoff_source(
 
 /// Set once this process met an approved event; until then no settlement here reads PG.
 static OPEN: AtomicBool = AtomicBool::new(false);
-/// This process's start on the database clock, set by its boot recovery.
-static BOOT: OnceLock<chrono::DateTime<chrono::Utc>> = OnceLock::new();
+/// This process's run: its node and its start on the database clock, fixed once.
+static RUN: OnceLock<decisions::Run> = OnceLock::new();
+
+/// Fixes this run's start before the process moves any event, so a row it moves is never read
+/// as an earlier run's. Every entry that starts, journals or recovers an event asks here first.
+pub(crate) async fn run(pool: &PgPool) -> Result<&'static decisions::Run, sqlx::Error> {
+    if let Some(run) = RUN.get() {
+        return Ok(run);
+    }
+    let boot = decisions::clock(pool).await?;
+    Ok(RUN.get_or_init(|| decisions::Run::of(&node(), boot)))
+}
+
+/// The node this process runs as in the cluster's registry.
+fn node() -> String {
+    crate::services::cluster::node_registry::resolve_self_instance_id_without_config()
+}
 
 /// Marks that approved events exist, so the owner's drain settles them from now on.
 pub(crate) fn note_open() {
@@ -55,11 +72,49 @@ pub(crate) fn note_open() {
 const INTERRUPTED: &str = "interrupted_before_delivery";
 #[cfg(unix)]
 const CLOSED: &str = "NotSent(\"decision_closed\")";
+#[cfg(unix)]
+const UNAPPROVED: &str = "NotSent(\"decision_not_approved\")";
 
-/// The origin a queued original's kept context names, when it is a Decision input.
-fn origin_of(context: Option<&serde_json::Value>) -> Option<&str> {
-    let context = context.filter(|context| ChannelMailboxHandle::decision_input(context))?;
-    context.pointer("/metadata/human_input/origin_id")?.as_str()
+/// How a queued original's kept context relates to the Decision source.
+#[cfg(unix)]
+enum Claim<'a> {
+    /// Another source: the owner's ordinary handoff takes it.
+    Other,
+    /// The Decision source without an origin that names an event: it is never written.
+    Unfounded,
+    Event(Uuid, &'a str),
+}
+
+#[cfg(unix)]
+fn claim_of(context: Option<&serde_json::Value>) -> Claim<'_> {
+    let Some(context) = context else {
+        return Claim::Other;
+    };
+    let origin = (context.pointer("/metadata/human_input/origin_id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|_| ChannelMailboxHandle::decision_input(context));
+    match origin.and_then(|origin| Some((decisions::event_of_origin(origin)?, origin))) {
+        Some((event, origin)) => Claim::Event(event, origin),
+        None if self_declared(context["source"].as_str(), context.get("metadata")) => {
+            Claim::Unfounded
+        }
+        None => Claim::Other,
+    }
+}
+
+/// Removes a front that claims the Decision source without its event's approval: nothing of it
+/// is written and no event moves. The id alone names it, since its origin proves nothing.
+#[cfg(unix)]
+async fn refuse_unapproved(mailbox: &ChannelMailboxHandle, front: &Front) -> Result<(), String> {
+    let message = front.1.message_id;
+    let removed = mailbox.v2_request(move |slot| match slot.as_mut() {
+        Some(owner) => owner.discard_decision(message, "decision:"),
+        None => Ok(()),
+    });
+    if let Err(error) = removed.await {
+        tracing::warn!(message_id = message, %error, "unapproved decision front left queued");
+    }
+    Err(UNAPPROVED.into())
 }
 
 /// The message id the event's original is admitted under on its channel.
@@ -113,6 +168,23 @@ async fn step(
         .map_err(|error| error.to_string())
 }
 
+/// Ends a row whose holder's run PG shows over. The update checks that again, under `run` or
+/// this process's own; without a fixed run nothing proves the holder gone and the row stays.
+async fn end_abandoned(
+    pool: &PgPool,
+    row: &Unsettled,
+    states: (AttemptState, AttemptState),
+    detail: Option<&str>,
+    run: Option<&decisions::Run>,
+) -> Result<bool, String> {
+    let Some(run) = run.or(RUN.get()) else {
+        return Ok(false);
+    };
+    decisions::end_abandoned(pool, row.event_id, states, detail, run)
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Ends an event as failed: the closing fence first, then exactly its original leaves the
 /// owner, then the end is recorded. A crash in between leaves the fence for the next settlement.
 async fn fail(
@@ -152,13 +224,24 @@ pub(crate) async fn close_admitted(
     fail(pool, global_mailbox(channel_id).as_ref(), &row, reason).await
 }
 
-/// Settles one event from its owner's records and its turn's receipt; `written` is the result
-/// of the attempt that just ran. A waiting or still running event is left as it is.
+/// Settles one event under this process's own run.
 async fn settle(
     pool: &PgPool,
     mailbox: Option<&ChannelMailboxHandle>,
     row: &Unsettled,
     written: Option<&Result<(), String>>,
+) -> Result<(), String> {
+    settle_as(pool, mailbox, row, written, None).await
+}
+
+/// Settles one event from its owner's records and its turn's receipt; `written` is the attempt
+/// that just ran. A waiting or running event stays, and a stale one ends only under `run`.
+async fn settle_as(
+    pool: &PgPool,
+    mailbox: Option<&ChannelMailboxHandle>,
+    row: &Unsettled,
+    written: Option<&Result<(), String>>,
+    run: Option<&decisions::Run>,
 ) -> Result<(), String> {
     use AttemptState::{
         Closing, Delivered, MayHaveSent, NormalWait, Normalizing, Resolving, UnknownClosed,
@@ -174,7 +257,14 @@ async fn settle(
     let proven_unsent = written.and_then(|w| w.as_ref().err()).filter(|e| unsent(e));
     match (row.state, held) {
         (Closing, _) => fail(pool, mailbox, row, "").await,
-        (Resolving | Normalizing, _) if row.stale => fail(pool, mailbox, row, INTERRUPTED).await,
+        (Resolving | Normalizing, _) if row.stale => {
+            let fence = (row.state, Closing);
+            if end_abandoned(pool, row, fence, Some(INTERRUPTED), run).await? {
+                discard(mailbox, row).await?;
+                step(pool, row, (Closing, AttemptState::Failed), None).await?;
+            }
+            Ok(())
+        }
         (NormalWait | MayHaveSent, _) if sent => step(pool, row, (row.state, Delivered), None)
             .await
             .map(drop),
@@ -192,12 +282,17 @@ async fn settle(
         (MayHaveSent, Some(Held::Gone)) if proven_unsent.is_some() => {
             fail(pool, mailbox, row, proven_unsent.map_or("", String::as_str)).await
         }
-        // No proof either way: a journal an earlier process wrote, a write the owner never
-        // confirmed or a turn that ended incomplete closes without another write.
+        // No proof either way: a write the owner never confirmed, a turn that ended incomplete
+        // or a journal whose holder's run is over closes without another write.
         (MayHaveSent, held)
             if row.stale || held == Some(Held::Unconfirmed) || receipt == Some(false) =>
         {
-            if step(pool, row, (MayHaveSent, UnknownClosed), None).await? {
+            let end = (MayHaveSent, UnknownClosed);
+            let closed = match held == Some(Held::Unconfirmed) || receipt == Some(false) {
+                true => step(pool, row, end, None).await?,
+                false => end_abandoned(pool, row, end, None, run).await?,
+            };
+            if closed {
                 discard(mailbox, row).await?;
             }
             Ok(())
@@ -206,8 +301,8 @@ async fn settle(
     }
 }
 
-/// Runs the owner's idle handoff of `front`. A Decision front is journaled in PG first: a closed
-/// event's original is removed unrun, and the handoff's result settles the event.
+/// Runs the owner's idle handoff of `front`. A Decision front is first checked against its PG
+/// event and journaled: an unapproved or closed one leaves unrun, and the result settles it.
 #[cfg(unix)]
 pub(crate) async fn hand_idle(
     pool: Option<&PgPool>,
@@ -217,19 +312,37 @@ pub(crate) async fn hand_idle(
     idle: &Handoff,
 ) -> Result<(), String> {
     use AttemptState::{Closing, Delivered, Failed, MayHaveSent, UnknownClosed};
-    let Some(origin) = origin_of(context) else {
-        return idle(front).await;
+    let (event_id, origin) = match claim_of(context) {
+        Claim::Other => return idle(front).await,
+        Claim::Unfounded => return refuse_unapproved(mailbox, &front).await,
+        Claim::Event(event_id, origin) => (event_id, origin),
     };
     note_open();
     let unavailable = || "NotSent(\"decision_store_unavailable\")".to_string();
-    let (Some(pool), Some(event_id)) = (pool, decisions::event_of_origin(origin)) else {
+    let Some(pool) = pool else {
         return Err(unavailable());
+    };
+    if run(pool).await.is_err() {
+        return Err(unavailable());
+    }
+    // The journal below is taken only for the input PG approved under this very origin.
+    let approved = match decisions::load_event(pool, event_id).await {
+        Ok(event) => event.filter(|event| {
+            event.origin() == origin
+                && front.1.channel_id == Some(event.channel_id())
+                && front.1.author_id == event.actor_id()
+                && event.approves(&front.1.text)
+        }),
+        Err(_) => return Err(unavailable()),
+    };
+    let Some(approved) = approved else {
+        return refuse_unapproved(mailbox, &front).await;
     };
     let mut row = Unsettled {
         event_id,
         origin: origin.to_string(),
         agent_id: String::new(),
-        channel_id: front.1.channel_id.unwrap_or_default(),
+        channel_id: approved.channel_id(),
         state: MayHaveSent,
         stale: false,
     };
@@ -237,11 +350,20 @@ pub(crate) async fn hand_idle(
         Ok(true) => {}
         // Closed, or journaled by an attempt that is gone: this original never runs.
         Ok(false) => {
-            row.stale = true;
             match decisions::state_of(pool, event_id).await {
-                Ok(Some(state @ (Closing | MayHaveSent))) => {
-                    row.state = state;
+                Ok(Some(Closing)) => {
+                    row.state = Closing;
                     settle(pool, Some(mailbox), &row, None).await?;
+                }
+                // This owner still holds the original unattempted, so the attempt that
+                // journaled it is gone; only that turn's own receipt can call it delivered.
+                Ok(Some(MayHaveSent)) => {
+                    let to = match receipt(pool, &row).await {
+                        Some(true) => Delivered,
+                        _ => UnknownClosed,
+                    };
+                    step(pool, &row, (MayHaveSent, to), None).await?;
+                    discard(Some(mailbox), &row).await?;
                 }
                 Ok(Some(Delivered | Failed | UnknownClosed)) => {
                     discard(Some(mailbox), &row).await?;
@@ -259,50 +381,74 @@ pub(crate) async fn hand_idle(
     result
 }
 
-/// Settles every unsettled event of `channel` from its owner's records. The owner's notice drain
-/// runs this first, so a failed Decision original is gone before any resend notice is posted.
-pub(crate) async fn settle_channel(pool: &PgPool, mailbox: &ChannelMailboxHandle, channel: u64) {
-    if !OPEN.load(Ordering::Relaxed) {
-        return;
+/// Settles the channel's open events, then removes each original its owner still holds of an
+/// event PG closed. Returns the originals whose removal failed: only their notices wait.
+pub(crate) async fn settle_channel(
+    pool: &PgPool,
+    mailbox: &ChannelMailboxHandle,
+    channel: u64,
+) -> Vec<u64> {
+    let tickets = mailbox.v2_request(|slot| {
+        Ok((slot.as_ref()).map_or_else(Vec::new, |owner| owner.decision_tickets()))
+    });
+    let tickets = tickets.await.unwrap_or_default();
+    // Without an approved event met here or a Decision original held, nothing reads PG.
+    if !OPEN.load(Ordering::Relaxed) && tickets.is_empty() {
+        return Vec::new();
     }
-    let rows = decisions::unsettled(pool, Some(channel), BOOT.get().copied()).await;
+    let rows = decisions::unsettled(pool, Some(channel), RUN.get()).await;
     for row in rows.unwrap_or_default() {
         if let Err(error) = settle(pool, Some(mailbox), &row, None).await {
             tracing::warn!(event_id = %row.event_id, %error, "decision input left unsettled");
         }
     }
+    if tickets.is_empty() {
+        return Vec::new();
+    }
+    let closed = decisions::closed_under(pool, &tickets).await;
+    let mut owed = Vec::new();
+    for (origin, channel_id) in closed.unwrap_or_default() {
+        let row = Unsettled {
+            event_id: Uuid::nil(),
+            origin,
+            agent_id: String::new(),
+            channel_id,
+            state: AttemptState::Failed,
+            stale: false,
+        };
+        if let Err(error) = discard(Some(mailbox), &row).await {
+            tracing::warn!(origin = %row.origin, %error, "closed decision original still held");
+            owed.push(message_of(row.channel_id, &row.origin));
+        }
+    }
+    owed
 }
 
-/// Settles every row last written before `boot` without a second write; a waiting original
-/// keeps waiting under its ticket.
+/// Settles, without a second write, every row whose holder's run is over for this node's run
+/// started at `boot`; a waiting original keeps waiting under its ticket.
 async fn recover_before(
     pool: &PgPool,
     boot: chrono::DateTime<chrono::Utc>,
     mailbox_of: impl Fn(u64) -> Option<ChannelMailboxHandle>,
 ) -> Result<usize, sqlx::Error> {
-    let rows = decisions::unsettled(pool, None, Some(boot)).await?;
+    let run = decisions::Run::of(&node(), boot);
+    let rows = decisions::unsettled(pool, None, Some(&run)).await?;
     if !rows.is_empty() {
         note_open();
     }
     for row in &rows {
         let mailbox = mailbox_of(row.channel_id);
-        if let Err(error) = settle(pool, mailbox.as_ref(), row, None).await {
+        if let Err(error) = settle_as(pool, mailbox.as_ref(), row, None, Some(&run)).await {
             tracing::warn!(event_id = %row.event_id, %error, "decision input left unsettled");
         }
     }
     Ok(rows.len())
 }
 
-/// Boot recovery, called once before this process delivers any event; returns how many
-/// unsettled rows it read. The first call fixes the instant that tells an earlier process's rows.
+/// Boot recovery; returns how many unsettled rows it read. It runs beside the first deliveries:
+/// the run's start is fixed by whichever asks first, so it never ends a row this process moved.
 pub async fn recover_boot(pool: &PgPool) -> Result<usize, sqlx::Error> {
-    let boot = match BOOT.get() {
-        Some(boot) => *boot,
-        None => {
-            let now = decisions::clock(pool).await?;
-            *BOOT.get_or_init(|| now)
-        }
-    };
+    let boot = run(pool).await?.boot;
     recover_before(pool, boot, global_mailbox).await
 }
 

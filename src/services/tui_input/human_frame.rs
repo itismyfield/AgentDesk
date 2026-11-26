@@ -1,32 +1,18 @@
 //! Injected input uses the idle user header plus its attempt's nonce, ` · <nonce>]`; the durable
-//! ledger identifies injected frames. Untagged, v1 and `[📱 …]` frames remain readable.
+//! ledger identifies injected frames, tagged or untagged.
 
 pub(crate) mod history;
 
 const USER: &str = "[User: ";
-const SCHEMA: &str = " · 📱 v1 mode=";
 /// The schema marker with whitespace removed, as wrapped composer rows still show it.
 const SCHEMA_FOLDED: &str = "·📱v1mode=inject";
-/// Longest name a header keeps, in characters.
-const MAX_NAME_CHARS: usize = 64;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
-    /// A new turn's prompt.
-    New,
-    /// Input that joins the turn already running.
-    Inject,
-}
-
-/// The fields of one v1 header, as written.
+/// The fields of one durable-owned user header, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Header<'a> {
     pub(crate) name: &'a str,
     pub(crate) author: &'a str,
-    pub(crate) mode: Mode,
-    /// Empty for a plain header.
-    pub(crate) source: &'a str,
-    /// Empty for a plain header written without an attempt tag.
+    /// Empty for a header written without an attempt tag.
     pub(crate) nonce: &'a str,
 }
 
@@ -63,37 +49,6 @@ pub(crate) fn display_name<'a>(
         .flatten()
         .find(|name| !name.trim().is_empty())
         .unwrap_or(username)
-}
-
-/// The idle name with no control character or `·`, cut to a bounded length; applying it twice
-/// changes nothing, so a header read back rebuilds to the same bytes.
-fn header_name(name: &str, author: &str) -> String {
-    let plain: String = name
-        .chars()
-        .map(|c| match c {
-            '·' => '.',
-            c if c.is_control() => ' ',
-            c => c,
-        })
-        .collect();
-    let name: String = author_name(&plain, author)
-        .chars()
-        .take(MAX_NAME_CHARS)
-        .collect();
-    name.trim_end().to_string()
-}
-
-/// The source as one token: bytes outside a plain set are percent-encoded.
-fn source_key(source: &str) -> String {
-    let mut key = String::with_capacity(source.len());
-    for byte in source.bytes() {
-        if byte.is_ascii_alphanumeric() || b":._-/@+".contains(&byte) {
-            key.push(char::from(byte));
-        } else {
-            key.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    key
 }
 
 pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
@@ -171,117 +126,34 @@ pub(crate) fn untagged(inner: &str) -> (&str, &str) {
     }
 }
 
-/// The v1 formatter remains only for reconstructing already written frames.
-
-pub(crate) fn inject(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
-    let id: String = author
-        .chars()
-        .map(|c| if c.is_control() || c == ']' { ' ' } else { c })
-        .collect();
-    format!(
-        "{USER}{} (ID: {id}){SCHEMA}inject source={} · {nonce}]\n{body}",
-        header_name(name, author),
-        source_key(source),
-    )
-}
-
-/// The frame inputs were pasted with before v1, rebuilt only to read old transcripts.
-pub(crate) fn legacy_inject(source: &str, author: &str, nonce: &str, body: &str) -> String {
-    let clean = |value: &str| -> String {
-        value
-            .chars()
-            .map(|c| if c.is_control() || c == ']' { ' ' } else { c })
-            .collect()
-    };
-    format!(
-        "[📱 {} · {} · {nonce}]\n{body}",
-        clean(source),
-        clean(author)
-    )
-}
-
-/// Whether `text` opens with the pre-v1 frame `legacy_inject` wrote: a source, a numeric author
-/// and an 8-hex nonce.
-pub(crate) fn opens_legacy_inject(text: &str) -> bool {
-    let Some((header, _)) = text.trim_start().strip_prefix("[📱 ").and_then(|rest| {
-        rest.split_once("]\n")
-            .or_else(|| rest.strip_suffix(']').map(|header| (header, "")))
-    }) else {
-        return false;
-    };
-    let mut fields = header.rsplitn(3, " · ");
-    let (Some(nonce), Some(author), Some(source)) = (fields.next(), fields.next(), fields.next())
-    else {
-        return false;
-    };
-    is_nonce(nonce)
-        && !author.is_empty()
-        && author.bytes().all(|b| b.is_ascii_digit())
-        && !source.trim().is_empty()
-}
-
-/// A durable-owned plain user header, tagged or not, or a v1 header, with the bytes after its
-/// closing bracket. Metadata is read from the right, so a name that looks like it never supplies it.
+/// A durable-owned plain user header, tagged or not, with the bytes after its closing bracket.
+/// Metadata is read from the right, so a name that looks like it never supplies it.
 pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     let rest = text.strip_prefix(USER)?;
     let close = rest.find(']')?;
     let (inner, after) = (&rest[..close], &rest[close + 1..]);
-    if !inner.contains(SCHEMA) {
-        let (who, nonce) = untagged(inner);
-        let (name, author) = who.strip_suffix(')')?.rsplit_once(" (ID: ")?;
-        if name.is_empty()
-            || author.is_empty()
-            || !author.bytes().all(|b| b.is_ascii_digit())
-            || !history::known(text)
-        {
-            return None;
-        }
-        return Some((
-            Header {
-                name,
-                author,
-                mode: Mode::Inject,
-                source: "",
-                nonce,
-            },
-            after,
-        ));
-    }
-    let (meta, nonce) = inner.rsplit_once(" · ")?;
-    if !is_nonce(nonce) {
-        return None;
-    }
-    let (who, meta) = meta.rsplit_once(SCHEMA)?;
-    let (mode, source) = meta.split_once(" source=")?;
-    let mode = match mode {
-        "new" => Mode::New,
-        "inject" => Mode::Inject,
-        _ => return None,
-    };
+    let (who, nonce) = untagged(inner);
     let (name, author) = who.strip_suffix(')')?.rsplit_once(" (ID: ")?;
-    let digits = !author.is_empty() && author.bytes().all(|b| b.is_ascii_digit());
-    if name.is_empty() || !digits || source.contains(char::is_whitespace) {
+    if name.is_empty()
+        || author.is_empty()
+        || !author.bytes().all(|b| b.is_ascii_digit())
+        || !history::known(text)
+    {
         return None;
     }
-    let header = Header {
-        name,
-        author,
-        mode,
-        source,
-        nonce,
-    };
-    Some((header, after))
+    Some((
+        Header {
+            name,
+            author,
+            nonce,
+        },
+        after,
+    ))
 }
 
-/// Whether `text` opens with a durable-owned plain frame or an injected or damaged v1 header.
+/// Whether `text` opens with a durable-owned plain frame.
 pub(crate) fn opens_inject(text: &str) -> bool {
-    let Some(rest) = text.strip_prefix(USER) else {
-        return false;
-    };
-    let header = rest.split(']').next().unwrap_or_default();
-    history::known(text)
-        || header.contains(SCHEMA)
-            && !parse(text).is_some_and(|(header, _)| header.mode == Mode::New)
+    text.starts_with(USER) && history::known(text)
 }
 
 /// Whether screen rows, however Claude wrapped them, open with an inject header; whitespace is

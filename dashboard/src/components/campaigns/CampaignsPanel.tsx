@@ -338,7 +338,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} live={live[campaign.id]} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
-    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
+    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     pipeline={<CampaignPipeline source={{ kind: "legacy" }} campaign={campaign} tasks={legacyTasks} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
@@ -372,7 +372,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         recent={{ title: tr("최근 이벤트", "Recent events"), entries: shown?.events ? recentServerEvents(shown.events) : null, note: shown && shown.failedAfter !== null ? tr("이벤트를 갱신하지 못했습니다", "Could not refresh events") : null }}
         footer={<>{phone && commands}<ServerCampaignSections document={serverDoc} link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} /></>}
         selectedId={node} controls={controls} onOpen={setNode} campaignId={id} connection={connection} onApproved={() => refreshServer(id)} language={language} tr={tr} />}
-      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
+      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
       pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of, sequence: view.last_event_sequence }} title={definition.title} dispositions={Object.fromEntries(view.nodes.map((value) => [value.id, value.runtime.disposition]))}
         approvals={definition.workflow_options ?? DEFAULT_WORKFLOW_OPTIONS} leave={leave} onEditing={setPipelineEditing} tr={tr} />}

@@ -1867,7 +1867,7 @@ pub(in crate::services::discord) async fn claimed_owner_turn(
     let granted = mailbox.v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;
-        owner.grant_front(&front).map(|()| front)
+        owner.grant_front(&front).map(|_| front)
     });
     let front = granted.await.unwrap();
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await;

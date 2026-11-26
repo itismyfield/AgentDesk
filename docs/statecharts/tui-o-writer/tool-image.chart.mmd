@@ -1,0 +1,13 @@
+stateDiagram-v2
+    %% Image turn tracker (writer/tool_images/turns.rs), drawn by hand: the TLC state space
+    %% of every ToolImage config exceeds the 500-state chart budget.
+    [*] --> Idle: read from offset 0
+    [*] --> Unknown: read from a mid-file offset
+    Unknown --> Restored: row preparation finds a durable span holding the row
+    Unknown --> Open: prompt, assistant or turn start
+    Idle --> Open: prompt, assistant or turn start
+    Restored --> Idle: row offset reaches the durable Closed end
+    Open --> Idle: native idle (unnamed or this turn's name), verified physical end
+    Open --> Open: prompt inside the turn, another turn's named idle
+    Restored --> Restored: prompt inside the turn, another turn's named idle
+    Idle --> Idle: late result keeps its call's turn (memory or durable ImageCall)

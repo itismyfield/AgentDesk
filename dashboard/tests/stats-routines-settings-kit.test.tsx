@@ -210,6 +210,23 @@ describe("Slice 4 — Stats: one-click Claude account switch, email masking, Bre
     expect(view.textContent).toContain("토큰 영수증");
     expect(view.textContent).toContain("$1.25");
   });
+
+  it("renders distinct linear Y-axis ticks on MeteringChart for billion-token peaks", async () => {
+    const { MeteringChart } = await import("../src/kit/pro/metering-chart");
+    const { formatTokens } = await import("../src/components/stats/statsModel");
+    const view = await render(
+      <MeteringChart
+        title="Daily tokens"
+        days={[
+          { label: "11-23", total: 1.4e9 },
+          { label: "11-24", total: 2.7e9 },
+        ]}
+        format={formatTokens}
+      />,
+    );
+    const yLabels = Array.from(view.querySelectorAll(".aui-metering-chart-y span"), (el) => el.textContent);
+    expect(yLabels).toEqual(["3.0B", "2.0B", "1.0B", "0"]);
+  });
 });
 
 describe("Slice 4 — Routines: v3 ScheduledRuns board + one-click POST /api/routines/{id}/run-now", () => {
@@ -369,7 +386,7 @@ describe("Slice 4 — Settings: live runtime health truth, kit IntegrationSettin
     expect(view.textContent).not.toContain("아직 고르지 않았어요");
 
     const integrationGrid = view.querySelector("[data-testid='settings-integrations-grid']")!;
-    expect(integrationGrid.className).toContain("[&_.aui-integration-settings-collapse]:hidden!");
+    expect(integrationGrid.querySelector(".aui-integration-settings-collapse")).toBeNull();
     // Ready connector has no disabled reason banner
     expect(integrationGrid.querySelector(".aui-integration-settings-reason")).toBeNull();
 

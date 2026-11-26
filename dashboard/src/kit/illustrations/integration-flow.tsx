@@ -11,6 +11,8 @@ export interface IntegrationFlowItem {
 
 export interface IntegrationFlowProps {
   label?: string;
+  hubTitle?: string;
+  hubSubtitle?: string;
   items?: IntegrationFlowItem[];
   className?: string;
   style?: CSSProperties;
@@ -154,6 +156,8 @@ type Phase = "static" | "dwell" | "charge" | "beam" | "rest" | "move";
 
 export function IntegrationFlow({
   label = "연동이 분석 허브로 모이는 흐름",
+  hubTitle = "Data Analysis",
+  hubSubtitle = "Centralized Data Processing",
   items,
   className = "",
   style,
@@ -287,7 +291,7 @@ export function IntegrationFlow({
             <div className="aui-integration-flow-beam" />
             <div className="aui-integration-flow-hub" data-lit={!reduced && (phase === "beam" || phase === "rest") ? "true" : undefined}>
               <span className="aui-integration-flow-badge"><Pie /></span>
-              <span className="aui-integration-flow-copy"><strong>Data Analysis</strong><small>Centralized Data Processing</small></span>
+              <span className="aui-integration-flow-copy"><strong>{hubTitle}</strong><small>{hubSubtitle}</small></span>
             </div>
             {BASE_SLOTS.map((baseSlot, index) => {
               const rawSlot = (baseSlot + cycle) % 6;

@@ -723,7 +723,7 @@ const css = /* css */ `
 }
 
 /* Touch screens: bigger targets – the look stays */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-dialog-clean__btn { height: 36px; padding: 0 14px; }
   .aui-dialog-clean__close { width: 32px; height: 32px; margin: -5px -2px 0 0; }
 }
@@ -764,7 +764,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-dialog-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-dialog-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-dialog-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;

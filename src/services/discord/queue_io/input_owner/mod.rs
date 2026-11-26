@@ -14,6 +14,7 @@ pub(crate) mod ingress;
 mod native_intent_tests;
 pub(crate) mod notice;
 pub(crate) mod origin;
+pub(crate) mod pending_recovery;
 pub(crate) mod pump;
 pub(crate) mod recovery;
 pub(crate) mod restart_gate;

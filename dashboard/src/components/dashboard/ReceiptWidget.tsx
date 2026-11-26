@@ -53,6 +53,7 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
   const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [loadingSeconds, setLoadingSeconds] = useState(0);
+  const [retryNonce, setRetryNonce] = useState(0);
 
   useEffect(() => {
     setLoadingSeconds(0);
@@ -90,7 +91,7 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
     void load();
     const stop = pollWhileVisible(() => void load(), 60_000);
     return () => { mounted = false; stop(); };
-  }, [period]);
+  }, [period, retryNonce]);
 
   const providerOptions = useMemo(() => buildProviderOptions(data), [data]);
   const viewData = useMemo(() => deriveReceiptView(data, selectedProvider), [data, selectedProvider]);
@@ -110,11 +111,20 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
   if (!viewData) {
     return (
       <SectionCard title={title}>
-        <CardNote>
-          {loading
-            ? `${t({ ko: "서버가 영수증을 집계하는 중이에요. 1분 넘게 걸릴 수 있어요", en: "The server is aggregating the receipt; this can take over a minute", ja: "サーバーがレシートを集計中です。1分以上かかる場合があります", zh: "服务器正在汇总收据，可能需要一分钟以上" })} · ${loadingSeconds}s`
-            : t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
-        </CardNote>
+        {loading ? (
+          <CardNote>
+            {`${t({ ko: "서버가 영수증을 집계하는 중이에요. 1분 넘게 걸릴 수 있어요", en: "The server is aggregating the receipt; this can take over a minute", ja: "サーバーがレシートを集計中です。1分以上かかる場合があります", zh: "服务器正在汇总收据，可能需要一分钟以上" })} · ${loadingSeconds}s`}
+          </CardNote>
+        ) : (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3 pb-3 sm:px-4 sm:pb-3.5">
+            <CardNote className="!p-0">
+              {t({ ko: "영수증 데이터를 불러올 수 없습니다.", en: "Could not load receipt data.", ja: "レシートデータを読み込めません。", zh: "无法加载收据数据。" })}
+            </CardNote>
+            <Button variant="secondary" size="sm" onClick={() => { receiptFailedAt.delete(period); setRetryNonce((n) => n + 1); }}>
+              {t({ ko: "다시 시도", en: "Retry", ja: "再試行", zh: "重试" })}
+            </Button>
+          </div>
+        )}
       </SectionCard>
     );
   }
@@ -135,7 +145,7 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
         </div>
         {providerOptions.length > 1 ? (
           <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" variant={selectedProvider === "all" ? "primary" : "ghost"} onClick={() => setSelectedProvider("all")}>{t({ ko: "전체 프로바이더", en: "All providers", ja: "全プロバイダー", zh: "全部提供方" })}</Button>
+            <Button size="sm" variant={selectedProvider === "all" ? "primary" : "ghost"} onClick={() => setSelectedProvider("all")}>{t({ ko: "전체 프로바이더", en: "All providers", ja: "全プロ바이ダー", zh: "全部提供方" })}</Button>
             {providerOptions.map((p) => <Button key={p} size="sm" variant={providerKey(selectedProvider) === providerKey(p) ? "primary" : "ghost"} onClick={() => setSelectedProvider(p)}>{p}</Button>)}
           </div>
         ) : null}
@@ -144,9 +154,18 @@ export default function ReceiptWidget({ t }: { t: TFunction }) {
             <strong>{formatCost(viewData.total)}</strong>
             {viewData.cache_discount > 0.001 ? <Cap className="ml-1.5">-{formatCost(viewData.cache_discount)}</Cap> : null}
           </KeyValue>
-          <KeyValue dl label={t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "代币" })} num>{formatTokens(totalTokens)} · {viewData.models.length}</KeyValue>
+          <KeyValue dl label={t({ ko: "토큰", en: "Tokens", ja: "トークン", zh: "代币" })} num>
+            {formatTokens(totalTokens)} · {t({ ko: `모델 ${viewData.models.length}개`, en: `${viewData.models.length} models`, ja: `${viewData.models.length} モデル`, zh: `${viewData.models.length} 个模型` })}
+          </KeyValue>
           <KeyValue dl label={t({ ko: "활동", en: "Activity", ja: "稼働", zh: "活动" })} num>
-            {selectedProvider === "all" ? `${viewData.stats.total_messages.toLocaleString()} / ${viewData.stats.total_sessions}` : (viewData.providers[0]?.provider ?? selectedProvider)}
+            {selectedProvider === "all"
+              ? t({
+                  ko: `메시지 ${viewData.stats.total_messages.toLocaleString()} · 세션 ${viewData.stats.total_sessions.toLocaleString()}`,
+                  en: `${viewData.stats.total_messages.toLocaleString()} msgs · ${viewData.stats.total_sessions.toLocaleString()} sessions`,
+                  ja: `${viewData.stats.total_messages.toLocaleString()} 件 · ${viewData.stats.total_sessions.toLocaleString()} セッション`,
+                  zh: `${viewData.stats.total_messages.toLocaleString()} 条消息 · ${viewData.stats.total_sessions.toLocaleString()} 个会话`,
+                })
+              : (viewData.providers[0]?.provider ?? selectedProvider)}
           </KeyValue>
         </dl>
       </InspSection>

@@ -6,6 +6,7 @@ import type { RoutineRecord } from "../api/routines";
 import { getServerCampaignSummaries, type ServerCampaignSummary } from "../api/serverCampaigns";
 import { getSettingsConfig } from "../api/settingsRuntime";
 import type { Agent, Department, DispatchedSession, KanbanCard } from "../types";
+import { localeName } from "../i18n";
 import { isTestAgent } from "../lib/agentHelpers";
 import { CommandMenu, type CommandMenuCommand, type CommandMenuGroup, type CommandMenuLabels } from "../kit/pro/command-menu";
 import AgentPersona from "./AgentPersona";
@@ -314,14 +315,20 @@ export default function CommandPalette({
         id: "agents",
         label: tr("에이전트", "Agents"),
         recommended: false,
-        commands: realAgents.map((agent) => ({
-          id: agent.id,
-          label: agent.alias || agent.name_ko || agent.name,
-          hint: searchTerms(agent.department_name_ko, agent.status).join(" · ") || undefined,
-          icon: <AgentPersona agent={agent} size={24} />,
-          keywords: searchTerms(agent.id, agent.name, agent.name_ko, agent.alias, agent.avatar_emoji, agent.department_name_ko, agent.status),
-          onSelect: pick(() => onSelectAgent(agent)),
-        })),
+        commands: realAgents.map((agent) => {
+          const dept = departments.find((d) => d.id === agent.department_id);
+          const deptHint = dept
+            ? localeName(isKo ? "ko" : "en", dept)
+            : (isKo ? agent.department_name_ko : agent.department_name || agent.department_name_ko);
+          return {
+            id: agent.id,
+            label: agent.alias || localeName(isKo ? "ko" : "en", agent),
+            hint: searchTerms(deptHint, agent.status).join(" · ") || undefined,
+            icon: <AgentPersona agent={agent} size={24} />,
+            keywords: searchTerms(agent.id, agent.name, agent.name_ko, agent.alias, agent.avatar_emoji, agent.department_name, agent.department_name_ko, dept?.name, dept?.name_ko, agent.status),
+            onSelect: pick(() => onSelectAgent(agent)),
+          };
+        }),
       },
       {
         id: "sessions",
@@ -359,7 +366,7 @@ export default function CommandPalette({
         recommended: false,
         commands: departments.map((dept) => ({
           id: dept.id,
-          label: dept.name_ko || dept.name,
+          label: localeName(isKo ? "ko" : "en", dept),
           hint: typeof dept.agent_count === "number" ? tr(`에이전트 ${dept.agent_count}명`, `${dept.agent_count} agents`) : undefined,
           icon: <Folder />,
           keywords: searchTerms(dept.id, dept.name, dept.name_ko, dept.icon),

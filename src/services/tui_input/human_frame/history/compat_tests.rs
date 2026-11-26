@@ -37,10 +37,13 @@ fn history_v2_update_refuses_without_changing_recognition_evidence() {
         store.entries.clear();
         Ok(())
     });
-    assert!(result.is_err(), "V2 is inspection-only for this writer");
+    assert!(
+        result.is_err(),
+        "an undecodable V2 history refuses this writer"
+    );
     assert!(
         !applied.get(),
-        "read-only refusal must precede mutation callback"
+        "the refusal must precede the mutation callback"
     );
     assert_eq!(std::fs::read(path).unwrap(), bytes);
 }
@@ -61,10 +64,8 @@ fn history_v2_frames_stay_known_to_the_production_readers() {
         &frame,
     )
     .unwrap();
-    let path = path().unwrap();
-    let v1: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    let v2 = serde_json::json!({"version": 2, "live": v1["entries"], "passive": []});
-    std::fs::write(&path, v2.to_string()).unwrap();
+    let written = std::fs::read(path().unwrap()).unwrap();
+    assert!(written.starts_with(b"{\"version\":2,"));
     assert!(
         known(&frame),
         "a V2-recorded frame is still an injected frame"
@@ -72,10 +73,6 @@ fn history_v2_frames_stay_known_to_the_production_readers() {
     assert!(
         screen_pending(&session, &frame),
         "and still owns its composer"
-    );
-    assert!(
-        update(|_| Ok(())).is_err(),
-        "while the V2 file stays read-only"
     );
 }
 

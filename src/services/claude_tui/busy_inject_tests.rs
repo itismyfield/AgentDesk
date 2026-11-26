@@ -28,14 +28,9 @@ fn text() -> String {
     frame("iMessage", "200", "ann", NONCE, "are you there?")
 }
 
-fn v1_text() -> String {
-    crate::services::tui_input::human_frame::inject(
-        "iMessage",
-        "200",
-        "ann",
-        NONCE,
-        "are you there?",
-    )
+/// A v1 frame, as transcripts and composers written before the plain frame still show one.
+fn v1(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
+    format!("[User: {name} (ID: {author}) · 📱 v1 mode=inject source={source} · {nonce}]\n{body}")
 }
 
 // Claude draws continuation rows two columns in.
@@ -225,33 +220,32 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
     // Evidence before the offset never counts.
-    file.write_all(enqueue_record(&v1_text()).as_bytes())
-        .unwrap();
+    file.write_all(enqueue_record(&text()).as_bytes()).unwrap();
     let offset = fs::metadata(path).unwrap().len();
-    let marker_text = v1_text();
+    let marker_text = text();
     let ignored = [
         serde_json::json!({"type": "assistant", "message": {"content": [{"type": "text", "text": marker_text}]}}),
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": marker_text}]}}),
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": marker_text}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": marker_text}),
         serde_json::json!({"type": "queue-operation", "operation": "dequeue"}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "x")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "x")}),
     ];
     for record in ignored {
         writeln!(file, "{}", real(record)).unwrap();
     }
     assert!(!transcript_carries(path, offset, NONCE));
     // A record still being written has no newline yet.
-    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", v1_text())}});
+    let merged = serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": format!("first\n{}", text())}});
     write!(file, "{}", real(merged)).unwrap();
     assert!(!transcript_carries(path, offset, NONCE));
     writeln!(file).unwrap();
     assert!(transcript_carries(path, offset, NONCE));
 
     for record in [
-        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", v1_text())}}),
-        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": v1_text()}]}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": v1_text()}),
+        serde_json::json!({"type": "user", "message": {"content": format!("The user sent a new message while you were working:\n{}", text())}}),
+        serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": text()}]}}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": text()}),
     ] {
         let fresh = Fake::new();
         let offset = fs::metadata(&fresh.transcript).unwrap().len();
@@ -273,113 +267,30 @@ fn scanner_counts_only_complete_human_input_after_the_offset_by_containment() {
 }
 
 #[test]
-fn scanner_confirms_the_full_frame_and_rejects_same_nonce_contamination() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let expected = v1_text();
-    for body in [
-        expected.clone(),
-        format!("{expected}\noperator draft X"),
-        expected.lines().next().unwrap().to_string(),
-    ] {
-        let exact = body == expected;
-        let records = [
-            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": body}),
-            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": body}}),
-            serde_json::json!({"type": "user", "message": {"content": body}}),
-            serde_json::json!({"type": "user", "message": {"content": [{"type": "text", "text": body}]}}),
-        ];
-        for record in records {
-            let fake = Fake::new();
-            let offset = fs::metadata(&fake.transcript).unwrap().len();
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&fake.transcript)
-                .unwrap();
-            writeln!(file, "{}", real(record.clone())).unwrap();
-            assert_eq!(
-                transcript_submission(&fake.transcript, offset, NONCE, Some(&expected)),
-                Some(exact),
-                "same nonce must distinguish the submitted body: {record}"
-            );
-            assert_eq!(
-                transcript_submission(&fake.transcript, offset, NONCE, None),
-                Some(true),
-                "nonce-only callers retain their existing receipt contract: {record}"
-            );
-        }
-    }
-}
-
-#[test]
-fn scanner_rejects_nontext_blocks_without_changing_text_or_nonce_receipts() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let expected = v1_text();
-    let text_block = serde_json::json!({"type": "text", "text": expected});
-    let mut cases = vec![
-        (serde_json::json!(expected), true),
-        (serde_json::json!([text_block]), true),
-        (
-            serde_json::json!(
-                expected
-                    .lines()
-                    .map(|line| serde_json::json!({"type": "text", "text": line}))
-                    .collect::<Vec<_>>()
-            ),
-            true,
-        ),
-    ];
-    for extra in [
-        serde_json::json!({"type": "image", "source": {"type": "base64", "data": "AA=="}}),
-        serde_json::json!({"type": "tool_result", "content": "person input"}),
-        serde_json::json!({"type": "unknown"}),
-        serde_json::Value::Null,
-    ] {
-        cases.push((serde_json::json!([text_block, extra]), false));
-        cases.push((serde_json::json!([extra, text_block]), false));
-    }
-    for (content, exact) in cases {
-        for record in [
-            serde_json::json!({"type": "user", "message": {"content": content}}),
-            serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": content}),
-            serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": content}}),
-        ] {
-            let fake = Fake::new();
-            let offset = fs::metadata(&fake.transcript).unwrap().len();
-            let mut file = fs::OpenOptions::new()
-                .append(true)
-                .open(&fake.transcript)
-                .unwrap();
-            writeln!(file, "{}", real(record.clone())).unwrap();
-            assert_eq!(
-                transcript_submission(&fake.transcript, offset, NONCE, Some(&expected)),
-                Some(exact),
-                "{record}"
-            );
-            assert!(
-                transcript_carries(&fake.transcript, offset, NONCE),
-                "{record}"
-            );
-        }
-    }
-}
-
-#[test]
 fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let expected = v1_text();
+    let expected = text();
     let fake = Fake::new();
     let path = &fake.transcript;
     let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(enqueue_record(&expected).as_bytes())
         .unwrap();
     let offset = fs::metadata(path).unwrap().len();
+    let session = format!("scanner-{}", uuid::Uuid::new_v4());
+    crate::services::tui_input::human_frame::history::register(
+        ("claude", &session, NONCE, "200"),
+        path,
+        offset,
+        &expected,
+    )
+    .unwrap();
     for record in [
         serde_json::json!({"type": "assistant", "message": {"content": expected}}),
         serde_json::json!({"type": "user", "isMeta": true, "message": {"content": expected}}),
         serde_json::json!({"type": "user", "message": {"content": [{"type": "tool_result", "content": expected}]}}),
         serde_json::json!({"type": "queue-operation", "operation": "remove", "content": expected}),
         serde_json::json!({"type": "attachment", "attachment": {"type": "queued_command", "commandMode": "bash", "prompt": expected}}),
-        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": crate::services::tui_input::human_frame::inject("iMessage", "200", "ann", "ffff0000", "are you there?")}),
+        serde_json::json!({"type": "queue-operation", "operation": "enqueue", "content": frame("iMessage", "200", "ann", "ffff0000", "are you there?")}),
     ] {
         writeln!(file, "{}", real(record.clone())).unwrap();
         assert_eq!(
@@ -413,16 +324,6 @@ fn scanner_ignores_nonprompt_evidence_and_incomplete_or_prior_records() {
     );
 }
 
-#[test]
-fn the_header_names_the_person_and_cannot_start_a_command_or_close_early() {
-    let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let framed = crate::services::tui_input::human_frame::inject(
-        "iMessage", "200", "a]b\nc", NONCE, "/clear",
-    );
-    let header = "[User: a)b c (ID: 200) · 📱 v1 mode=inject source=iMessage · abcd1234]";
-    assert_eq!(framed, format!("{header}\n/clear"));
-}
-
 /// A running turn's input left in the composer, flat, wrapped or after a person's keys, is
 /// AgentDesk's frame: never a person's draft to stash, nor the stranded new-turn prompt a recovery may clear.
 #[test]
@@ -430,13 +331,7 @@ fn an_inject_frame_left_in_the_composer_is_neither_a_draft_nor_a_clearable_promp
     let _runtime = crate::config::TestRuntimeRootGuard::new();
     use crate::services::claude_tui::composer_lock::DraftSighting;
     let source = "discord:1479671298497183835:1561196979327869080";
-    let framed = crate::services::tui_input::human_frame::inject(
-        source,
-        "343742347365974026",
-        "0hbujang",
-        NONCE,
-        "status?",
-    );
+    let framed = v1(source, "343742347365974026", "0hbujang", NONCE, "status?");
     let header = framed.lines().next().unwrap();
     let (top, rest) = header.split_at(header.find("mode=").unwrap() + 2);
     let wrapped = format!("{}\n{rest}\nstatus?", top.trim_end());

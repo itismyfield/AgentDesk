@@ -34,6 +34,9 @@ pub mod round_trip;
 pub(crate) mod suspension;
 pub mod switch;
 mod tool_cards;
+pub(crate) mod tool_images;
+#[cfg(test)]
+mod tool_images_tests;
 mod tool_results;
 pub(crate) mod turn_summary;
 #[cfg(test)]
@@ -138,6 +141,24 @@ pub trait DiscordPort: Send + Sync + 'static {
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let _ = kind;
         self.post_origin(channel, content, origin)
+    }
+
+    /// One writer unit's image under its caption; a port without uploads sends nothing.
+    fn post_unit_attachment(
+        &self,
+        channel: u64,
+        caption: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+        bytes: Vec<u8>,
+        filename: String,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        let _ = (channel, caption, origin, kind, bytes, filename);
+        std::future::ready(PostOutcome::Withheld(
+            "writer port has no attachment upload".into(),
+        ))
     }
 
     /// Up to `confirm::HISTORY_PAGE` messages with ids above `after`, in any order.

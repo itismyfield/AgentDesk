@@ -465,15 +465,17 @@ async fn nested_observation_preserves_owner_fences_and_uncertain_results_pg() {
     pool.close().await;
 }
 
+fn o_rows() -> Vec<Value> {
+    let rows = census::health_json()["o_created"].as_array().cloned();
+    let rows = rows.unwrap_or_default().into_iter();
+    rows.filter(|row| row["channel"] == CHANNEL).collect()
+}
+
 fn o_count() -> u64 {
-    census::health_json()["o_created"]
-        .as_array()
-        .map_or(0, |rows| {
-            rows.iter()
-                .filter(|row| row["channel"] == CHANNEL)
-                .map(|row| row["confirmed"].as_u64().unwrap())
-                .sum()
-        })
+    o_rows()
+        .iter()
+        .map(|row| row["confirmed"].as_u64().unwrap())
+        .sum()
 }
 
 #[tokio::test]
@@ -496,6 +498,9 @@ async fn o_ack_counts_only_fresh_created_responses() {
         "refused",
         "unreadable",
         "history",
+        "attachment",
+        "attachment_refused",
+        "attachment_unreadable",
     ]
     .into_iter()
     .enumerate()
@@ -505,8 +510,10 @@ async fn o_ack_counts_only_fresh_created_responses() {
             | index as u64;
         let response = match case {
             "nonce_echo" => message(9001),
-            "refused" => reply("403 Forbidden", &[], r#"{"code":50013,"message":"denied"}"#),
-            "unreadable" => reply("200 OK", &[], "{"),
+            "refused" | "attachment_refused" => {
+                reply("403 Forbidden", &[], r#"{"code":50013,"message":"denied"}"#)
+            }
+            "unreadable" | "attachment_unreadable" => reply("200 OK", &[], "{"),
             _ => message(id),
         };
         let mock = Mock::start(vec![response]).await;
@@ -525,23 +532,43 @@ async fn o_ack_counts_only_fresh_created_responses() {
                 } else {
                     let result = if case == "post_origin" {
                         port.post_origin(CHANNEL, "body".into(), None).await
+                    } else if case.starts_with("attachment") {
+                        let (kind, png) = (
+                            crate::services::tui_o::shadow::UnitKind::ToolImage,
+                            b"\x89PNG\r\n\x1a\n",
+                        );
+                        port.post_unit_attachment(
+                            CHANNEL,
+                            "body".into(),
+                            None,
+                            kind,
+                            png.to_vec(),
+                            "a.png".into(),
+                        )
+                        .await
                     } else {
                         port.post(CHANNEL, "body".into()).await
                     };
                     assert_eq!(
                         matches!(result, PostOutcome::Created(_)),
-                        !matches!(case, "refused" | "unreadable")
+                        !matches!(
+                            case,
+                            "refused"
+                                | "unreadable"
+                                | "attachment_refused"
+                                | "attachment_unreadable"
+                        )
                     );
                 }
             }
         })
         .await;
         assert_eq!(mock.requests().len(), 1, "{case}");
-        assert_eq!(
-            o_count() - before,
-            u64::from(matches!(case, "post" | "post_origin" | "repost")),
-            "{case}"
-        );
+        let created = matches!(case, "post" | "post_origin" | "repost" | "attachment");
+        assert_eq!(o_count() - before, u64::from(created), "{case}");
+        // The count is kept under the created message's own id, never another number.
+        let latest = o_rows().iter().any(|row| row["latest_id"] == id);
+        assert_eq!(latest, created, "{case}");
         assert!(events(&log, case).is_empty(), "O is never a Legacy request");
     }
 }
