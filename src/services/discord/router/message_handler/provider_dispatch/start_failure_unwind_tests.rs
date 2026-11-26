@@ -36,9 +36,8 @@ type Key = Option<(Option<String>, u64)>;
 /// the row each owner reply saw.
 type Retried = (Result<bool, String>, [Key; 3], Vec<Key>);
 
-/// One owner start of `MESSAGE` whose input ended as `ended` over the row `shape` left on disk,
-/// its unsent failure exit after the reserve spent the claim, as the launch hook's reply and the
-/// front handoff's last reply meet it, then the same front's next create through the intake admission.
+/// One owner start whose input ended as `ended` over the row `shape` left, failing unsent after a
+/// reserve spent the claim through both owner replies, then the same front's next intake create.
 async fn held_then_retried(
     channel: u64,
     ended: (HerdrSubmission, bool),
