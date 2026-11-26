@@ -2650,6 +2650,8 @@ src/
 │   │   │   │   │   ├── replay_start_origin_tests.rs
 │   │   │   │   │   ├── replay_start_tests.rs
 │   │   │   │   │   ├── routine_metadata.rs
+│   │   │   │   │   ├── routine_result_process.rs
+│   │   │   │   │   ├── routine_result_process_tests.rs
 │   │   │   │   │   └── unverified_thread_tests.rs
 │   │   │   │   ├── input_payload/
 │   │   │   │   │   ├── tests/
@@ -3504,6 +3506,8 @@ src/
 │   │   │   │   ├── routine_stream_tests.rs
 │   │   │   │   └── runtime.rs
 │   │   │   ├── terminal_controller_cutover/
+│   │   │   │   ├── o_body/
+│   │   │   │   │   └── routine_process_tests.rs
 │   │   │   │   └── o_body.rs
 │   │   │   ├── terminal_outcome_delivery/
 │   │   │   │   ├── delivery_epilogue_tests/

@@ -284,6 +284,7 @@ pub(super) async fn enqueue_headless_delivery(
         delivery_bot,
         provider,
         intake_outbox_id,
+        process_thread,
         content,
         cancel_token,
         ..
@@ -444,7 +445,7 @@ pub(super) async fn enqueue_headless_delivery(
         }
     }
 
-    if output_origin.is_some() {
+    if process_thread || output_origin.is_some() {
         return HeadlessDeliveryOutcome::Ambiguous {
             surfaced_error: Some("original output remains held in PG".into()),
         };
@@ -551,7 +552,11 @@ async fn enqueue_headless_turn_row(
         runtime.provider,
         runtime.born_generation,
         delivery_cancel_token,
-        (output_origin, runtime.producer_turn_nonce),
+        (
+            output_origin,
+            runtime.producer_turn_nonce,
+            runtime.process_thread,
+        ),
     )
     .await
 }
@@ -605,6 +610,41 @@ pub(super) async fn enqueue_claimed_headless_delivery(
             }
         })
         .await
+}
+
+pub(in crate::services::discord) async fn recover_routine_process_body(
+    shared: &Arc<SharedData>,
+    state: &InflightTurnState,
+    channel: ChannelId,
+    content: &str,
+) -> bool {
+    let Some(provider) = state.provider_kind() else {
+        return false;
+    };
+    if state
+        .restore_process_thread_scope(channel.get())
+        .await
+        .is_err()
+    {
+        return false;
+    }
+    let arguments = assemble_headless_delivery_arguments(
+        state,
+        HeadlessDeliveryInputs {
+            shared,
+            channel_id: channel,
+            owning_user_msg_id: (state.user_msg_id != 0).then(|| MessageId::new(state.user_msg_id)),
+            session_key: state.session_key.as_deref(),
+            provider: &provider,
+            content,
+            cancel_token: None,
+        },
+    );
+    let claim = state.tui_body_claim(channel.get()).direct(false);
+    matches!(
+        enqueue_claimed_headless_delivery(Some(claim), arguments).await,
+        HeadlessDeliveryOutcome::Delivered
+    )
 }
 
 #[cfg(test)]

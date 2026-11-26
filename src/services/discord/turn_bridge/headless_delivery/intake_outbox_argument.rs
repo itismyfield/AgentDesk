@@ -22,6 +22,7 @@ pub(in crate::services::discord::turn_bridge) struct HeadlessDeliveryArguments<'
     provider: &'a ProviderKind,
     born_generation: u64,
     producer_turn_nonce: Option<&'a str>,
+    process_thread: bool,
     content: &'a str,
     cancel_token: Option<&'a CancelToken>,
 }
@@ -46,6 +47,7 @@ pub(super) struct HeadlessDeliveryRuntimeArguments<'a> {
     pub(super) provider: &'a ProviderKind,
     pub(super) born_generation: u64,
     pub(super) producer_turn_nonce: Option<&'a str>,
+    pub(super) process_thread: bool,
     pub(super) intake_outbox_id: Option<i64>,
     pub(super) body_source: BodySource,
     pub(super) content: &'a str,
@@ -67,6 +69,7 @@ impl<'a> HeadlessDeliveryArguments<'a> {
             provider: self.provider,
             born_generation: self.born_generation,
             producer_turn_nonce: self.producer_turn_nonce,
+            process_thread: self.process_thread,
             intake_outbox_id,
             body_source: self.body_source,
             content: self.content,
@@ -94,6 +97,7 @@ pub(in crate::services::discord::turn_bridge) fn assemble_headless_delivery_argu
             .turn_nonce
             .as_deref()
             .filter(|nonce| !nonce.is_empty()),
+        process_thread: inflight_state.routine_presentation.process_thread.is_some(),
         content: inputs.content,
         cancel_token: inputs.cancel_token,
     }

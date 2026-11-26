@@ -15,7 +15,7 @@ pub(crate) use channel_gate::{
     BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send,
     claim_then_send_at, claim_then_send_held_at, legacy_sends_report, o_keeps_body,
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
-    peek_o_owns_tui_output_for_channel_tmux,
+    peek_o_owns_tui_output_for_channel_tmux, resolve_process_thread, selects_process_parent,
 };
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;

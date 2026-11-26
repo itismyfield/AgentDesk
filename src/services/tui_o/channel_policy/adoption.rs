@@ -355,6 +355,26 @@ impl Candidate {
         origin: &'static std::panic::Location<'static>,
     ) -> BodyClaimed {
         let (state, reason) = self.take(channel);
+        self.count_body(channel, origin, state, reason)
+    }
+
+    pub(in crate::services::tui_o) fn claim_deferred_body(
+        &self,
+        channel: u64,
+        origin: &'static std::panic::Location<'static>,
+    ) -> Option<BodyClaimed> {
+        let state = self.lock();
+        (*state == Adoption::Deferred && self.late_adopt_origin())
+            .then(|| self.count_body(channel, origin, state, ClaimReason::Deferred))
+    }
+
+    fn count_body(
+        &self,
+        channel: u64,
+        origin: &'static std::panic::Location<'static>,
+        state: MutexGuard<'_, Adoption>,
+        reason: ClaimReason,
+    ) -> BodyClaimed {
         let owned = state.owned();
         #[cfg(any(test, feature = "test-support"))]
         if !owned {

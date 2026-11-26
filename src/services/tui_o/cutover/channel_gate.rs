@@ -45,7 +45,10 @@ struct Evidence<'a> {
     nonce: Option<[u8; 32]>,
     source: Option<[u8; 32]>,
     reserved: bool,
+    process_thread: Option<ProcessThreadScope>,
 }
+
+type ProcessThreadScope = Result<(u64, RuntimeHandoffKind), IdentityError>;
 
 /// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy, whose send
 /// stays counted until the answer's guard drops. Callers outside it are pinned in the census.
@@ -132,6 +135,7 @@ pub(crate) struct BodyClaim<'a> {
 enum KindOf<'a> {
     Known(Option<RuntimeHandoffKind>),
     Tmux(Option<&'a str>),
+    ProcessThread(ProcessThreadScope),
 }
 
 impl<'a> BodyClaim<'a> {
@@ -146,6 +150,14 @@ impl<'a> BodyClaim<'a> {
             source: None,
             reserved: false,
             origin: std::panic::Location::caller(),
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn process_thread(channel_id: u64, scope: ProcessThreadScope) -> Self {
+        Self {
+            kind: KindOf::ProcessThread(scope),
+            ..Self::new(channel_id, None)
         }
     }
 
@@ -199,9 +211,10 @@ impl<'a> BodyClaim<'a> {
 
     fn judge(self, usage: Use) -> Result<BodyClaimed, IdentityError> {
         let channel_id = self.channel_id;
-        let session = match self.kind {
-            KindOf::Known(_) => None,
-            KindOf::Tmux(session) => session,
+        let (session, process_thread) = match self.kind {
+            KindOf::Known(_) => (None, None),
+            KindOf::Tmux(session) => (session, None),
+            KindOf::ProcessThread(scope) => (None, Some(scope)),
         };
         decide_from(
             channel_id,
@@ -212,10 +225,12 @@ impl<'a> BodyClaim<'a> {
                 nonce: self.nonce,
                 source: self.source,
                 reserved: self.reserved,
+                process_thread,
             },
             || match self.kind {
                 KindOf::Known(kind) => kind,
                 KindOf::Tmux(session) => session_kind(channel_id, session),
+                KindOf::ProcessThread(_) => Some(RuntimeHandoffKind::ProcessBackend),
             },
         )
     }
@@ -280,7 +295,7 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
     if let Some(claim) = claim {
         super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
     }
-    let claimed = reserve_body(claim)?;
+    let claimed = reserve_body(claim, None)?;
     if claimed.owned {
         return Ok((BodySend::OwnedByO, None));
     }
@@ -423,7 +438,7 @@ pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T
     if let Some(claim) = claim {
         super::wait_codex_first_id(claim.channel_id, claim.nonce).await;
     }
-    let claimed = reserve_body(claim)?;
+    let claimed = reserve_body(claim, Some(site))?;
     let context = BodyTransport::inherited(site, claimed.send, claimed.reason);
     if claimed.owned {
         return Ok((BodySend::OwnedByO, context));
@@ -432,10 +447,18 @@ pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T
     Ok((BodySend::Sent(sent), context))
 }
 
-fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityError> {
+fn reserve_body(
+    claim: Option<BodyClaim<'_>>,
+    site: Option<BodySite>,
+) -> Result<BodyClaimed, IdentityError> {
     let Some(claim) = claim else {
         return Ok(legacy(ClaimReason::NoClaim));
     };
+    if matches!(claim.kind, KindOf::ProcessThread(_))
+        && (claim.direct || !matches!(site, Some(BodySite::BridgeHeadless)))
+    {
+        return Err(IdentityError::ChildDeliveryHeld.hold(claim.channel_id));
+    }
     let claimed = claim.claim()?;
     #[cfg(test)]
     CLAIMS
@@ -553,6 +576,10 @@ fn decide_with_snapshot(
     resolve_kind: impl FnOnce() -> Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
     let snapshot = snapshot.ok_or(IdentityError::MissingSnapshot)?;
+    if let Some(scope) = evidence.process_thread {
+        let (parent, kind) = scope?;
+        return judge_process_thread(snapshot, channel_id, parent, kind, usage, origin);
+    }
     // A verified empty list is O off: decided before any destination or kind is resolved.
     if snapshot.channels().is_empty() {
         return outside_selection(snapshot, channel_id, ClaimReason::EmptySelection);
@@ -691,6 +718,75 @@ fn decide_with_snapshot(
         return Ok(legacy(ClaimReason::NoCandidate));
     };
     fenced(candidate, None)
+}
+
+pub(crate) fn selects_process_parent(parent: u64, kind: RuntimeHandoffKind) -> bool {
+    super::test_override::with_channels(|snapshot| {
+        snapshot.is_some_and(|s| selected_process_parent(s, parent, kind))
+    })
+}
+
+fn selected_process_parent(snapshot: &BootChannels, parent: u64, kind: RuntimeHandoffKind) -> bool {
+    snapshot.channels().contains(&parent) && snapshot.kind(parent) == Some(kind)
+}
+
+pub(crate) async fn resolve_process_thread(
+    channel: u64,
+    parent: u64,
+    kind: RuntimeHandoffKind,
+) -> Result<(), IdentityError> {
+    if !selects_process_parent(parent, kind) {
+        return Err(IdentityError::ChildDeliveryHeld);
+    }
+    super::record_thread_child_by_id(channel, parent)
+        .await
+        .map_err(|_| IdentityError::ChildDeliveryHeld)?;
+    super::test_override::with_channels(|snapshot| {
+        let s = snapshot.ok_or(IdentityError::MissingSnapshot)?;
+        judge_process_thread(s, channel, parent, kind, Use::Peek, None).map(|_| ())
+    })
+}
+
+#[track_caller]
+fn judge_process_thread(
+    snapshot: &BootChannels,
+    channel: u64,
+    parent: u64,
+    kind: RuntimeHandoffKind,
+    usage: Use,
+    origin: Option<&'static std::panic::Location<'static>>,
+) -> Result<BodyClaimed, IdentityError> {
+    let child = snapshot
+        .child(channel)
+        .and_then(Result::ok)
+        .filter(|child| child.parent == parent && child.kind == kind)
+        .ok_or(IdentityError::ChildDeliveryHeld)?;
+    let candidate = &child.candidate;
+    if !selected_process_parent(snapshot, parent, kind)
+        || snapshot.child_dormant(channel)
+        || candidate.child_parked()
+        || !candidate.late_adopt_origin()
+        || snapshot
+            .execution(channel)
+            .is_some_and(|execution| execution.permit.is_err())
+    {
+        return Err(IdentityError::ChildDeliveryHeld);
+    }
+    let _fence = matches!(usage, Use::Body).then(|| candidate.lock_thread_body());
+    if kind == RuntimeHandoffKind::ClaudeTui
+        && super::claude_thread::resume_fenced(channel, None, Some(parent))
+    {
+        return Err(IdentityError::ChildDeliveryHeld);
+    }
+    match usage {
+        Use::Peek if candidate.peek() == channel_policy::Adoption::Deferred => {
+            Ok(legacy(ClaimReason::Deferred))
+        }
+        Use::Peek => Err(IdentityError::ChildDeliveryHeld),
+        Use::Body => candidate
+            .claim_deferred_body(channel, origin.unwrap_or_else(std::panic::Location::caller))
+            .ok_or(IdentityError::ChildDeliveryHeld),
+    }
 }
 
 #[cfg(test)]

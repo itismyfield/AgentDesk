@@ -396,7 +396,8 @@ pub(super) async fn run_bridge_stream_tick(
     );
     let body_claim =
         super::terminal_controller_cutover::bridge_body_claim(channel_id, &inflight_state, direct);
-    let body_held = o_body_cut.unwrap_or(true);
+    let body_held =
+        o_body_cut.unwrap_or(true) || inflight_state.routine_presentation.process_thread.is_some();
     if o_body_cut == Ok(true) {
         response_sent_offset = full_response.len();
         inflight_state.response_sent_offset = response_sent_offset;
