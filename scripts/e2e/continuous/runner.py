@@ -191,6 +191,8 @@ def _execute(lease, config, record, row, remaining):
                     "timeout", "dirty_residue", "usage", "actual_occurrence_key"):
             if key in report:
                 row[key] = report[key]
+        if failure := preflight_evidence.bounded(report.get("observation_failure")):
+            row["observation_failure"] = failure
     status = report.get("status") if isinstance(report, dict) else None
     if status == "UNEVALUABLE":
         failure = preflight_evidence.bounded(report.get("preflight_failure"))

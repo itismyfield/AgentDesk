@@ -239,6 +239,8 @@ def classify(
                            log_counts=log_counts, driver_rc=driver_rc, cell=cell,
                            channel_id=channel_id, launch_options=launch_options)
     outcome.update(classification="PASS" if passed else "FAIL", observed_reason=detail)
+    if not passed and (failure := preflight_evidence.bounded(row.get("observation_failure"))):
+        outcome["observation_failure"] = failure
     return outcome
 
 
@@ -370,7 +372,7 @@ def _cell_guard(args: argparse.Namespace) -> int:
 
 def preflight_busy_reasons(
     *, base_url: str, cell: str, channel_id: str, runtime_root: Path | None = None,
-    herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk", capture_failure: bool = False,
+    herdr_endpoint: str | None = None, herdr_status_bin: str = "agentdesk",
     herdr_allowed_degraded_reason: list[str] | None = None, herdr_foreign_degraded_only: bool = False,
 ) -> list[str]:
     """Busy reasons for the cell; an absent mailbox is idle, as the E-1 guard treats it."""
@@ -379,8 +381,7 @@ def preflight_busy_reasons(
         args = argparse.Namespace(base_url=base_url, cell=cell, channel_id=channel_id,
                                   herdr_endpoint=herdr_endpoint, herdr_status_bin=herdr_status_bin,
                                   herdr_allowed_degraded_reason=herdr_allowed_degraded_reason,
-                                  herdr_foreign_degraded_only=herdr_foreign_degraded_only,
-                                  capture_preflight_failure=capture_failure)
+                                  herdr_foreign_degraded_only=herdr_foreign_degraded_only)
         cell_driver.herdr.observe(cell_driver, args, cold=True)
         return []
     if runtime_root is None:
@@ -673,14 +674,13 @@ def main(argv: list[str] | None = None) -> int:
                 channel_id=args.channel_id,
                 runtime_root=Path(args.queue_runtime_root) if args.queue_runtime_root else None,
                 herdr_endpoint=args.herdr_endpoint, herdr_status_bin=args.herdr_status_bin,
-                capture_failure=args.failure_json,
                 herdr_allowed_degraded_reason=args.herdr_allowed_degraded_reason,
                 herdr_foreign_degraded_only=args.herdr_foreign_degraded_only,
             )
         except Exception as error:  # noqa: BLE001 - any unreadable snapshot is "not proven idle"
             return _preflight_failed(args, 2, f"unreadable: {type(error).__name__}: {error}",
                                      stage="health_read" if detail is None else "preflight", detail=detail,
-                                     observation=getattr(error, "herdr_preflight_failure", None))
+                                     observation=getattr(error, "herdr_observation_failure", None))
         # A refusing writer is the cause even when its held input also leaves the queue busy.
         if writer:
             return _preflight_failed(args, 1, "writer not ready: " + "; ".join([writer, *busy]),

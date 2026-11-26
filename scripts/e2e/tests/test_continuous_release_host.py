@@ -370,7 +370,130 @@ class Driver(Fixture):
             **degraded_detail(QUEUE + "1"), "mailboxes": [TARGET_BOX, FOREIGN_BOX]},
             before_final_observe=queue_moves_to_target)
         self.assertEqual(len(prompts), 3)
-        self.assertNotEqual(report["status"], "PASS")
+        self.assertEqual(report["status"], "FAIL")
+
+    def publish_fixture_report(self, report):
+        identity = release_host.identity(self.config["release_host"], DETAIL)
+        config = {**self.config, **identity, "required_assertions": {"E-50": [smoke_driver.ASSERTION]}}
+        row = {**plan.deploy_occurrences(plan.load())[0], **CONTRACT}
+        lease = mock.Mock()
+        lease.spawn.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps(report))
+        record = {**identity, "run_id": "fixture", "request": {}, "profile": "default", "occurrences": [row]}
+        runner._execute(lease, config, record, row, {"turns": 3, "tokens": 300, "time_s": 10})
+        return summary.build(record, config)
+
+    def assert_harness_observation(self, stage, read, turns, *, duplicate=False):
+        smoke = smoke_driver._smoke()[0]
+        driver, sent, messages, reads = smoke.cell_driver, [], [], 0
+        transcript = self.root / "transcript.jsonl"
+        status_file = self.root / "herdr-status.json"
+        markers = [f"[E2E:E50:{{run_id}}:{label}]" for label in ("T1", "T2", "AFTER_CLEAR")]
+        scenario = {"id": "E-50", "agent_mode": "real_live", "coverage_class": "live", "report_marker_counts": markers,
+                    "steps": [step for marker in markers for step in
+                              ({"send_discord_prompt": marker}, {"wait_for_discord_text": marker})]}
+
+        def health(*_args, **_kwargs):
+            nonlocal reads
+            reads += 1
+            if reads == read:
+                if stage == "health_read":
+                    return 503, {}
+                if turns == 0:
+                    status_file.write_text("{")  # CLI output reaches the real JSON parser.
+                else:
+                    status_file.unlink()  # The fixture CLI now exits nonzero.
+            return 200, DETAIL
+
+        def send(_client, channel, content):
+            driver.discord.input_gate(content)
+            sent.append(content)
+            lines(transcript, asked(content), claude(str(len(sent))))
+            for _ in range(2 if duplicate and len(sent) == 3 else 1):
+                messages.append({"id": str(len(messages) + 101), "channel_id": channel, "content": content,
+                                 "author": {"id": driver.assertions.provider_bot_id("claude"), "bot": True}})
+            return {"id": str(len(messages) + 101)}
+
+        def preflight(argv, **_kwargs):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.main(argv[2:]), 0)
+            return subprocess.CompletedProcess(argv, 0)
+
+        args = argparse.Namespace(scenario="E-50", cell="claude-herdr", run_id="harness", profile="default",
+                                  deploy_sha=None, budget=json.dumps({"turns": 3, "tokens": 300, "time_s": 10}))
+        with channel_lock.acquire(self.root / "state", RESOURCE) as held, contextlib.ExitStack() as stack:
+            env = {channel_lock.LEASE_ENV: json.dumps({"fd": held.fd, "device": held.identity.st_dev,
+                                                      "inode": held.identity.st_ino})}
+            for patch in (mock.patch.dict(os.environ, env),
+                          mock.patch.object(driver, "load_scenarios", return_value=[scenario]),
+                          mock.patch.object(driver, "_read_api_json", side_effect=health),
+                          mock.patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.root),
+                          mock.patch.object(driver.time, "sleep", return_value=None),
+                          mock.patch.object(driver.discord.urllib.request, "urlopen", side_effect=AssertionError("fixture only")),
+                          mock.patch.object(driver.discord.DiscordClient, "send", send),
+                          mock.patch.object(driver.discord.DiscordClient, "send_control", return_value={"id": "100"}),
+                          mock.patch.object(driver.discord.DiscordClient, "fetch_messages", side_effect=lambda *_a, **_kw: messages[:]),
+                          mock.patch.object(smoke_driver, "_transcripts", return_value=str(transcript))):
+                stack.enter_context(patch)
+            report = smoke_driver.run(args, self.config, spawn=preflight)
+        value = self.publish_fixture_report(report)
+        row = read_json(Path(report["evidence_paths"][0]), {})["scenarios"][0]
+        self.assertEqual(reads, read, row.get("reason"))
+        self.assertEqual((len(sent), report["native_turns"]), (turns, turns))
+        expected = ("FAIL", "FUNCTIONAL_FAILURE") if duplicate else ("UNEVALUABLE", "SERVER_UNOBSERVABLE")
+        self.assertEqual((value["result"], value["reason"]), expected)
+        self.assertEqual(report["status"], expected[0])
+        self.assertEqual(row.get("observation_failure", {}).get("stage"), stage)
+        self.assertEqual(value["occurrences"][0]["observation_failure"], row["observation_failure"])
+        if duplicate:
+            self.assertIn(2, row["marker_counts"].values())
+        else:
+            self.assertEqual(report["reason"], "SERVER_UNOBSERVABLE")
+
+    def test_harness_health_503_before_first_prompt(self):
+        self.assert_harness_observation("health_read", read=3, turns=0)
+
+    def test_harness_invalid_cli_json_before_first_prompt(self):
+        self.assert_harness_observation("herdr_status", read=3, turns=0)
+
+    def test_harness_health_loss_after_three_turns(self):
+        self.assert_harness_observation("health_read", read=4, turns=3)
+
+    def test_harness_cli_loss_after_three_turns(self):
+        self.assert_harness_observation("herdr_status", read=4, turns=3)
+
+    def test_harness_duplicate_with_observation_loss_keeps_functional_failure(self):
+        self.assert_harness_observation("herdr_status", read=4, turns=3, duplicate=True)
+
+    def test_mailbox_read_failure_is_unobservable_but_target_queue_is_busy(self):
+        for why, depth, expected in (("mailbox_snapshot_unavailable", 0, "SERVER_UNOBSERVABLE"),
+                                     (QUEUE + "1", 1, "CELL_NOT_IDLE")):
+            with self.subTest(reason=why):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(why), "mailboxes": [{**TARGET_BOX, "queue_depth": depth}]})
+                value = self.publish_fixture_report(report)
+                self.assertEqual((value["result"], value["reason"], prompts), ("UNEVALUABLE", expected, []))
+                if depth == 0:
+                    self.assertEqual(report["preflight_failure"]["stage"], "mailbox_read")
+
+    def test_final_identity_read_loss_is_unobservable_after_three_turns(self):
+        for duplicate, expected in ((False, ("UNEVALUABLE", "SERVER_UNOBSERVABLE")),
+                                    (True, ("FAIL", "FUNCTIONAL_FAILURE"))):
+            with self.subTest(duplicate=duplicate):
+                def lose_identity(state):
+                    self.detail.side_effect = OSError("fixture identity read failure")
+                    if duplicate:
+                        counts = state["row"]["marker_counts"]
+                        counts[next(iter(counts))] = 2
+
+                self.detail.side_effect = None
+                report, prompts, _ = self.drive(harness=lose_identity)
+                self.assertEqual((len(prompts), report["native_turns"]), (3, 3))
+                self.assertEqual(report["status"], expected[0])
+                self.assertEqual(report["assertions"][0]["complete"], duplicate)
+                if not duplicate:
+                    self.assertEqual(report["reason"], expected[1])
+                value = self.publish_fixture_report(report)
+                self.assertEqual((value["result"], value["reason"]), expected)
 
     def test_cli_input_hold_is_busy_and_cli_read_failure_is_observability(self):
         write_json(self.root / "herdr-status.json",

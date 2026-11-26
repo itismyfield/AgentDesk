@@ -71,7 +71,9 @@ manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr`
   양수인 큐 전부의 범위가 확인돼야 한다. mailbox 읽기 실패도 입력 전에 거절한다.
   Herdr의 hold·CLI 검사와 대상 mailbox의 활성 상태 검사는 별도로 적용한다.
   사유가 실제 busy 또는 준비 조건 거절이면 `CELL_NOT_IDLE`, health·CLI 관측에 실패하면
-  `SERVER_UNOBSERVABLE`로 기록한다. 두 경우 모두 `UNEVALUABLE`이다.
+  `SERVER_UNOBSERVABLE`로 기록한다. 서버가 mailbox 읽기 실패를 보고한 경우와 하네스 실행 중
+  health·CLI 또는 종료 시 서버 identity를 관측하지 못한 경우도 `SERVER_UNOBSERVABLE`이다.
+  관측이 끊겨도 이미 확인한 중복 전달·입력 거절은 `FAIL`이다.
 - **하네스는 driver 프로세스 안에서 돈다.** 채널 lease를 가진 프로세스가 곧 입력을 보내는 프로세스다. driver가 죽으면
   입력도 같이 끝나고, lease가 풀린 뒤 남아서 보내는 프로세스가 없다.
 - **턴마다 예산을 확인한다.** 하네스의 모든 채널 입력은 보내기 직전에 gate를 지난다(`tui_relay/discord.py`의 `input_gate`).
