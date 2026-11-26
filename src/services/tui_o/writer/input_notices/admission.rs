@@ -1,9 +1,9 @@
 //! Final notice admission stays synchronous through prepare and the first POST poll.
 
 use super::super::pieces::PieceWork;
-use super::{NoticeOrigin, observed_notice_attempt};
+use super::{NoticeOrigin, NoticeOwnership, observed_notice_attempt};
 use crate::services::discord::session_notice::input_notice;
-use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
+use crate::services::tui_input::human_frame::history;
 use crate::services::tui_o::shadow::{SourceId, UnitKind};
 use crate::services::tui_o::store::{ChannelStore, ledger::LedgerEntry};
 use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingEvent, BindingTarget};
@@ -118,8 +118,10 @@ pub(crate) fn admit_notice<R>(
         )
         .map_err(withheld)?
         {
-            ObservedAttempt::Known(_) => return exclude(piece, store, "input_notice_source"),
-            ObservedAttempt::Pending => {
+            NoticeOwnership::Known | NoticeOwnership::KnownCommand => {
+                return exclude(piece, store, "input_notice_source");
+            }
+            NoticeOwnership::Pending => {
                 match owners.map(|owners| owners.decision(origin, receipt_uuid, &prompt)) {
                     Some(history::notice_owner::Decision::Owned) => {
                         return exclude(piece, store, "input_notice_source");
@@ -130,7 +132,7 @@ pub(crate) fn admit_notice<R>(
                     }
                 }
             }
-            ObservedAttempt::None => {}
+            NoticeOwnership::Unowned => {}
         }
         match crate::services::session_host::thread_host::current_execution_cached(
             store.init().channel,

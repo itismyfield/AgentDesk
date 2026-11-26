@@ -174,8 +174,10 @@ pub(crate) fn may_be_claude_queued_command(raw: &[u8]) -> bool {
 
 /// A native input the writer can announce. Idle scanning still uses the user-only extractor.
 pub(crate) fn extract_claude_writer_input_with_entry_id(json: &Value) -> Option<ClaudeWriterInput> {
-    if json["type"] == "attachment" {
-        return claude_queued_command_input(json);
+    match json["type"].as_str() {
+        Some("attachment") => return claude_queued_command_input(json),
+        Some("queue-operation") => return claude_absorbed_input(json),
+        _ => {}
     }
     if let Some((prompt, uuid)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
         return Some(ClaudeWriterInput {
@@ -213,9 +215,7 @@ fn claude_queued_command_input(json: &Value) -> Option<ClaudeWriterInput> {
     if command["type"] != "queued_command"
         || command["commandMode"] != "prompt"
         || command["origin"]["kind"] != "human"
-        || json["isMeta"] == true
-        || json["isSidechain"] == true
-        || crate::services::tui_o::shadow::identity::record_is_compact_summary(json)
+        || !claude_notice_row(json)
     {
         return None;
     }
@@ -225,12 +225,42 @@ fn claude_queued_command_input(json: &Value) -> Option<ClaudeWriterInput> {
     let row = json["uuid"]
         .as_str()
         .filter(|id| !id.is_empty() && *id == id.trim())?;
-    let prompt = reject_synthetic_claude_user_prompt(non_empty(command["prompt"].as_str()?)?)?;
+    let prompt = reject_synthetic_claude_user_prompt(extract_content_text(&command["prompt"])?)?;
     Some(ClaudeWriterInput {
         prompt,
         // The queue's command UUID names the input. The attachment UUID names its receipt row.
         uuid: Some(uuid.into()),
         command_row_uuid: Some(row.into()),
+        scheduled: false,
+    })
+}
+
+fn claude_notice_row(json: &Value) -> bool {
+    json["isMeta"] != true
+        && json["isSidechain"] != true
+        && !crate::services::tui_o::shadow::identity::record_is_compact_summary(json)
+}
+
+fn claude_absorbed_input(json: &Value) -> Option<ClaudeWriterInput> {
+    if json["operation"] != "remove"
+        || json["reason"] != "absorbed_mid_turn"
+        || !claude_notice_row(json)
+    {
+        return None;
+    }
+    let uuid = json["commandUuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let prompt = reject_synthetic_claude_user_prompt(extract_content_text(&json["content"])?)?;
+    if starts_with_xmlish_tag(&prompt, "event")
+        || starts_with_xmlish_tag(&prompt, "cross-session-message")
+    {
+        return None;
+    }
+    Some(ClaudeWriterInput {
+        prompt,
+        uuid: Some(uuid.into()),
+        command_row_uuid: None,
         scheduled: false,
     })
 }
@@ -911,7 +941,11 @@ pub(super) fn normalize_provider(provider: &str) -> String {
 }
 
 fn extract_message_content_text(payload: &Value) -> Option<String> {
-    match payload.get("content")? {
+    extract_content_text(payload.get("content")?)
+}
+
+fn extract_content_text(content: &Value) -> Option<String> {
+    match content {
         Value::String(text) => non_empty(text),
         Value::Array(items) => {
             let mut parts = Vec::new();

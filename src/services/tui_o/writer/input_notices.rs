@@ -93,8 +93,8 @@ impl NativeInput {
 
 /// These native rows carry a type token. Other rows can skip the notice parse.
 fn may_be_input(line: &[u8]) -> bool {
-    line.windows(6).any(|window| window == b"\"user\"")
-        || tui_prompt_dedupe::may_be_claude_queued_command(line)
+    line.split(|&byte| byte == b'"')
+        .any(|token| matches!(token, b"user" | b"queued_command" | b"absorbed_mid_turn"))
 }
 
 /// Only a row that may become a notice needs its binding origin, which reads the whole binding log.
@@ -106,23 +106,32 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
             .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
 }
 
+enum NoticeOwnership {
+    Known,
+    KnownCommand,
+    Pending,
+    Unowned,
+}
+
 fn observed_notice_attempt(
     session: &str,
     prompts: &[String],
     input_uuid: &str,
     command_row_uuid: Option<&str>,
-) -> Result<ObservedAttempt, String> {
+) -> Result<NoticeOwnership, String> {
     let row = command_row_uuid.unwrap_or(input_uuid);
     let observed = |uuid| history::observed_attempt_checked("claude", session, prompts, Some(uuid));
-    let attempt = observed(row)?;
-    // A receipt for the original user row also owns its queued command.
-    if row != input_uuid
-        && matches!(attempt, ObservedAttempt::Pending)
-        && let known @ ObservedAttempt::Known(_) = observed(input_uuid)?
-    {
-        return Ok(known);
-    }
-    Ok(attempt)
+    Ok(match observed(row)? {
+        ObservedAttempt::Known(_) if command_row_uuid.is_some() => NoticeOwnership::KnownCommand,
+        ObservedAttempt::Known(_) => NoticeOwnership::Known,
+        ObservedAttempt::Pending
+            if row != input_uuid && matches!(observed(input_uuid)?, ObservedAttempt::Known(_)) =>
+        {
+            NoticeOwnership::Known
+        }
+        ObservedAttempt::Pending => NoticeOwnership::Pending,
+        ObservedAttempt::None => NoticeOwnership::Unowned,
+    })
 }
 
 #[derive(Default)]
@@ -195,12 +204,15 @@ impl Projection {
             &native_key,
             command_row_uuid.as_deref(),
         )? {
-            ObservedAttempt::Known(_) => return Ok(None),
-            // Unconfirmed ownership is kept as evidence and debt until a receipt decides it.
-            ObservedAttempt::Pending => {
+            NoticeOwnership::Known => return Ok(None),
+            // Keep the physical receipt row until ownership settles the original input key.
+            NoticeOwnership::KnownCommand => {
+                return Err("input notice awaiting ownership settlement".into());
+            }
+            NoticeOwnership::Pending => {
                 return Err("input notice injection ownership pending".into());
             }
-            ObservedAttempt::None => {}
+            NoticeOwnership::Unowned => {}
         }
         let unit_key = UnitKey {
             channel_id: channel,

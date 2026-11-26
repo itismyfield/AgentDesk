@@ -175,13 +175,6 @@ async fn absorbed_human_command_posts_one_writer_notice_across_restart() {
             "type": "queue-operation", "operation": "enqueue", "content": prompt
         }),
     );
-    append_value(
-        &path,
-        serde_json::json!({
-            "type": "queue-operation", "operation": "remove", "reason": "absorbed_mid_turn",
-            "commandUuid": "input-id", "deliveryId": "delivery-attachment-id", "content": prompt
-        }),
-    );
     capture_and_deliver(&mut actor).await;
     assert!(port.posts.lock().unwrap().is_empty());
 
