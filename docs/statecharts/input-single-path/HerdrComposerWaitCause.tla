@@ -22,26 +22,49 @@
 \* /stop ends the turn and drains the queue, /clear disposes of it with its notice. A quiet idle source
 \* with no turn in flight (quiet_idle) keeps the resend ask, as does a lost older source.
 \* Code (U): composer.rs `when_idle` -> `own_turn`; first_input.rs keeps a Waits hold at the front.
+\* #8441: the durable inflight row of a start attempt. Policy "Row" is U with that row modeled as main
+\* keeps it, "Unwind" the fix. row: "none" | "untouched" (its attempt ended held before the first key
+\* and this process still holds that token: Unsubmitted and FinishedUntouched,
+\* provider/herdr_before_start.rs `claude_observed_input`) | "touched" (the key may have reached the
+\* pane: Submitted or Unknown) | "orphan" (left by an earlier daemon run; no token evidence here).
+\* Nothing proves the own end of an untouched row (inflight/herdr_turn_evidence.rs `own_terminal`
+\* reads from a start no key followed), so watcher and finalizer keep it and every later start of the
+\* same front is refused at foreign_row.rs `admit`. FirstKeyHeld (the held branch of Attempt under
+\* Unwind) rewinds exactly the untouched row before the front may retry; a touched row is never
+\* rewound and ends on its own terminal (OwnRowEnds). RacerTurnStarts: a turn AgentDesk did not
+\* start (terminal input, task-notification) begins before the first key, up to MaxRacers times.
+\* keyed_hold: the first Enter's result is unknown and the attempt ends held with the body in the
+\* pane (first_input.rs `herdr_input_hold_pending`). racer_restart: the daemon dies mid-attempt.
 EXTENDS Naturals
 
 CONSTANTS Policy, Scenario, Mutant
 
-ASSUME Policy \in {"Before", "S0b", "Fixed", "U"}
+ASSUME Policy \in {"Before", "S0b", "Fixed", "U", "Row", "Unwind"}
 ASSUME Scenario \in {"source_none", "fence", "unread", "healthy", "launching", "dialog",
                       "dialog_stays", "dialog_unproven", "overlay", "tmux_lost",
                       "own_moved", "own_screen", "own_restart", "own_stop", "own_clear",
-                      "quiet_idle"}
+                      "quiet_idle", "racer", "racer_restart", "keyed_hold"}
 ASSUME Mutant \in {"None", "SettleAnyNoSource", "NoRewake", "NoWake", "RefuseMoved",
-                    "RetainScreen"}
+                    "RetainScreen", "NoUnwind", "UnwindTouched"}
 
 MaxTurns == 2
+MaxRacers == 2
 
-VARIABLES queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts
+VARIABLES queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts,
+          row, sends, racers, blocked, rewound, lost
 
-vars == <<queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts>>
+base == <<queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts>>
+rowVars == <<row, sends, racers, blocked, rewound, lost>>
+vars == <<base, rowVars>>
 
-\* Fixed's reads carry into U.
-FixedLike == Policy \in {"Fixed", "U"}
+\* U's reads carry into the row policies; Fixed's into all three.
+ULike == Policy \in {"U", "Row", "Unwind"}
+FixedLike == Policy = "Fixed" \/ ULike
+
+\* #8441: the attempt's durable row is modeled only under these policies and scenarios.
+RowModel == Policy \in {"Row", "Unwind"}
+RowScenario == Scenario \in {"racer", "racer_restart", "keyed_hold"}
+ASSUME RowModel <=> RowScenario
 
 \* #8128 U scenarios: the session's own turn runs while the front waits; quiet_idle has none.
 Own == Scenario \in {"own_moved", "own_screen", "own_restart", "own_stop", "own_clear"}
@@ -74,12 +97,21 @@ Init ==
     \* The own turn moved the transcript inside the wait (watched.rs `moved`, windows spent).
     /\ moved = (Own /\ Scenario # "own_screen")
     /\ restarts = 0
+    /\ row = "none"
+    \* sends: times the body reached the pane. racers: turns AgentDesk did not start.
+    /\ sends = 0
+    /\ racers = 0
+    \* blocked: the row kind that last refused a start. rewound: the row kind last rewound.
+    /\ blocked = "none"
+    /\ rewound = "none"
+    \* lost: a turn's answer ended with its row already rewound.
+    /\ lost = FALSE
 
 \* watched.rs `expired`: a moved transcript whose windows end on a screen showing no turn is Refused;
 \* an unmoved one is Retained, whatever its screen shows ("UnprovenTurn" names a turn on it).
 \* U (composer.rs `own_turn`): either trace of the session's own turn waits as "OwnTurn".
 UnprovenCause ==
-    IF /\ Policy = "U"
+    IF /\ ULike
        /\ \/ moved /\ Mutant # "RefuseMoved"
           \/ screen = "turn" /\ Mutant # "RetainScreen"
     THEN "OwnTurn"
@@ -106,26 +138,60 @@ Clear == screen \in {"empty", "overlay"}
 \* Only a causeless wait settles: a lost source of an execution older than this run, for the Herdr
 \* caller (S0b settled it for tmux too), or an unproven idle source (unchanged since base).
 Settles(c) ==
-    \/ /\ Policy \in {"S0b", "Fixed", "U"}
+    \/ /\ (Policy = "S0b" \/ FixedLike)
        /\ c = "NoSource"
        /\ (launch = "before" \/ Mutant = "SettleAnyNoSource")
        /\ (caller = "herdr" \/ Policy = "S0b")
     \/ c \in {"Unproven", "UnprovenTurn"}
 
+\* #8441 herdr_unsent_unwind: only the row of an attempt whose token shows Unsubmitted and Untouched
+\* is rewound, by its exact identity and without the Herdr own-end hold.
+Rewinds(kind) ==
+    /\ Policy = "Unwind"
+    /\ Mutant # "NoUnwind"
+    /\ (kind = "untouched" \/ Mutant = "UnwindTouched")
+
+\* The row an attempt of `kind` leaves when it ends unsent (FirstKeyHeld rewinds it first).
+LeftRow(kind) == IF ~RowModel \/ Rewinds(kind) THEN "none" ELSE kind
+Rewound(kind) == IF RowModel /\ Rewinds(kind) THEN kind ELSE rewound
+
+\* keyed_hold: the first attempt's Enter goes out but its result is unknown.
+KeyedHold == Scenario = "keyed_hold" /\ sends = 0
+
 Attempt ==
     /\ queued = "held"
     /\ wake
-    /\ IF proved /\ source = "ok" /\ fence = "none" /\ Clear /\ CauseOf # "Modal"
-         THEN /\ queued' = "sent"
-              /\ cause' = "none"
+    /\ IF row # "none"
+         \* foreign_row.rs `admit`: a durable row holds the channel; the front is requeued.
+         THEN /\ blocked' = row
               /\ wake' = FALSE
+              /\ UNCHANGED <<queued, cause, row, sends, rewound>>
+         ELSE IF proved /\ source = "ok" /\ fence = "none" /\ Clear /\ CauseOf # "Modal"
+         THEN IF KeyedHold
+              THEN /\ sends' = sends + 1
+                   /\ cause' = "HoldPending"
+                   /\ row' = LeftRow("touched")
+                   /\ rewound' = Rewound("touched")
+                   /\ wake' = FALSE
+                   /\ UNCHANGED <<queued, blocked>>
+              ELSE /\ queued' = "sent"
+                   /\ sends' = sends + 1
+                   /\ cause' = "none"
+                   \* A submitted turn's row answers until its own terminal.
+                   /\ row' = IF RowModel THEN "touched" ELSE "none"
+                   /\ wake' = FALSE
+                   /\ UNCHANGED <<blocked, rewound>>
          ELSE /\ cause' = CauseOf
               \* "refused": dropped for good with its notice, no body kept (refused.rs).
               /\ queued' = CASE Settles(CauseOf) -> "settled"
                               [] CauseOf = "Refused" -> "refused"
                               [] OTHER -> "held"
               /\ wake' = FALSE
-    /\ UNCHANGED <<turns, source, fence, screen, dialogs, proved, own, moved, restarts>>
+              \* FirstKeyHeld: no key went out; the row is rewound before the front may retry.
+              /\ row' = LeftRow("untouched")
+              /\ rewound' = Rewound("untouched")
+              /\ UNCHANGED <<sends, blocked>>
+    /\ UNCHANGED <<turns, source, fence, screen, dialogs, proved, own, moved, restarts, racers, lost>>
 
 \* A subagent task-notification turn ends and proves the source; the owner wakes. It clears no
 \* missing source, fence or dialog.
@@ -136,6 +202,7 @@ InternalTurnEnd ==
     /\ wake' = (queued = "held")
     /\ proved' = TRUE
     /\ UNCHANGED <<queued, source, fence, screen, cause, dialogs, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* A launch of this run publishes its source late; the preparation watch wakes the owner.
 SourceAppears ==
@@ -144,6 +211,7 @@ SourceAppears ==
     /\ source' = "ok"
     /\ wake' = (queued = "held")
     /\ UNCHANGED <<queued, turns, fence, screen, cause, dialogs, proved, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* A background agent's permission prompt covers the composer.
 DialogShown ==
@@ -154,6 +222,7 @@ DialogShown ==
     /\ screen' = "dialog"
     /\ dialogs' = 1
     /\ UNCHANGED <<queued, wake, turns, source, fence, cause, proved, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* A person answers the prompt after the front's first look saw it (a prompt gone before that look
 \* leaves the unproven source of base).
@@ -163,6 +232,7 @@ DialogDismissed ==
     /\ cause # "unset"
     /\ screen' = "empty"
     /\ UNCHANGED <<queued, wake, turns, source, fence, cause, dialogs, proved, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* A finished turn proves the restored source; nothing wakes the owner but the held watch.
 ProofAppears ==
@@ -170,6 +240,7 @@ ProofAppears ==
     /\ ~proved
     /\ proved' = TRUE
     /\ UNCHANGED <<queued, wake, turns, source, fence, screen, cause, dialogs, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* The held watch (first_input.rs probe, held_watch.rs `LOOK`): a proof, an empty composer and no
 \* dialog by the same `dialog_open` (an overlay footer passes it) wake a held front once.
@@ -180,6 +251,7 @@ WatchLook ==
     /\ proved /\ source = "ok" /\ fence = "none" /\ Clear
     /\ wake' = TRUE
     /\ UNCHANGED <<queued, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* The own turn ends with its Stop: the source is proven (readiness/mod.rs `evidence`), the screen idles
 \* and the turn boundary wakes a held owner (drive.rs `run`). /stop is the only end of own_stop's turn.
@@ -191,6 +263,7 @@ OwnTurnEnd ==
     /\ screen' = IF screen = "turn" THEN "empty" ELSE screen
     /\ wake' = (queued = "held" /\ Mutant # "NoWake")
     /\ UNCHANGED <<queued, turns, source, fence, cause, dialogs, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* /stop interrupts the own turn (its Stop proves the source) and drains the pending queue
 \* (commands/stop.rs `after_native_publish` -> `schedule_text_stop_pending_queue_drain`).
@@ -202,6 +275,7 @@ StopCommand ==
     /\ screen' = IF screen = "turn" THEN "empty" ELSE screen
     /\ wake' = (queued = "held" /\ Mutant # "NoWake")
     /\ UNCHANGED <<queued, turns, source, fence, cause, dialogs, moved, restarts>>
+    /\ UNCHANGED rowVars
 
 \* A daemon restart keeps the held front in the durable queue; the boot drive grants it again.
 Restart ==
@@ -211,6 +285,7 @@ Restart ==
     /\ restarts' = 1
     /\ wake' = (Mutant # "NoWake")
     /\ UNCHANGED <<queued, turns, source, fence, screen, cause, dialogs, proved, own, moved>>
+    /\ UNCHANGED rowVars
 
 \* /clear discards the channel's queue with its reply (commands/control.rs
 \* `clear_channel_session_state_with_session_key`): the person disposed of the input.
@@ -219,9 +294,59 @@ ClearCommand ==
     /\ queued = "held"
     /\ queued' = "cleared"
     /\ UNCHANGED <<wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts>>
+    /\ UNCHANGED rowVars
+
+\* #8441: a turn AgentDesk did not start (a person typing in the TUI, a task-notification) begins
+\* while the front waits, so the next first key meets a Running composer. No fairness: it may never
+\* come, and comes at most MaxRacers times.
+RacerTurnStarts ==
+    /\ Scenario \in {"racer", "racer_restart"}
+    /\ queued = "held"
+    /\ racers < MaxRacers
+    /\ own # "running"
+    /\ screen = "empty"
+    /\ racers' = racers + 1
+    /\ own' = "running"
+    /\ screen' = "turn"
+    /\ UNCHANGED <<queued, wake, turns, source, fence, cause, dialogs, proved, moved, restarts,
+                   row, sends, blocked, rewound, lost>>
+
+\* The turn of a row whose key reached the pane ends on its own terminal: the row is cleared and a
+\* front still held for it is settled as delivered. With that row already rewound the answer has no
+\* row to land on, and the turn boundary re-drives the front that nothing refuses any more.
+OwnRowEnds ==
+    /\ RowModel
+    /\ sends > 0
+    /\ \/ /\ row = "touched"
+          /\ row' = "none"
+          /\ queued' = IF queued = "held" THEN "sent" ELSE queued
+          /\ UNCHANGED <<wake, lost>>
+       \/ /\ row = "none"
+          /\ queued = "held"
+          /\ ~lost
+          /\ lost' = TRUE
+          /\ wake' = TRUE
+          /\ UNCHANGED <<row, queued>>
+    /\ UNCHANGED <<turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts,
+                   sends, racers, blocked, rewound>>
+
+\* The daemon dies while an attempt waits on a busy composer: its row stays and its token is gone.
+\* Boot re-drives the front; nothing in the new process proves that row untouched.
+CrashMidAttempt ==
+    /\ Scenario = "racer_restart"
+    /\ queued = "held"
+    /\ wake
+    /\ row = "none"
+    /\ screen = "turn"
+    /\ restarts = 0
+    /\ row' = "orphan"
+    /\ restarts' = 1
+    /\ UNCHANGED <<queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved,
+                   sends, racers, blocked, rewound, lost>>
 
 Moves == Attempt \/ InternalTurnEnd \/ SourceAppears \/ DialogShown \/ DialogDismissed
          \/ ProofAppears \/ WatchLook \/ OwnTurnEnd \/ StopCommand \/ Restart \/ ClearCommand
+         \/ RacerTurnStarts \/ OwnRowEnds \/ CrashMidAttempt
 
 \* Nothing left to do: the input is resolved, or held with no wake (the stuck case).
 Quiet == ~ENABLED Moves /\ UNCHANGED vars
@@ -232,6 +357,7 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Attempt) /\ WF_vars(InternalTurnEnd)
         /\ WF_vars(SourceAppears) /\ WF_vars(DialogShown) /\ WF_vars(DialogDismissed)
         /\ WF_vars(ProofAppears) /\ WF_vars(WatchLook) /\ WF_vars(OwnTurnEnd)
         /\ WF_vars(StopCommand) /\ WF_vars(Restart) /\ WF_vars(ClearCommand)
+        /\ WF_vars(OwnRowEnds)
 
 TypeOK ==
     /\ queued \in {"held", "sent", "settled", "refused", "cleared"}
@@ -241,12 +367,18 @@ TypeOK ==
     /\ fence \in {"none", "open"}
     /\ screen \in {"empty", "unread", "dialog", "overlay", "turn"}
     /\ cause \in {"unset", "none", "NoSource", "Fenced", "Observed", "Modal", "Unproven",
-                  "UnprovenTurn", "Refused", "OwnTurn"}
+                  "UnprovenTurn", "Refused", "OwnTurn", "HoldPending"}
     /\ dialogs \in 0..1
     /\ proved \in BOOLEAN
     /\ own \in {"none", "running", "ended"}
     /\ moved \in BOOLEAN
     /\ restarts \in 0..1
+    /\ row \in {"none", "untouched", "touched", "orphan"}
+    /\ sends \in 0..2
+    /\ racers \in 0..MaxRacers
+    /\ blocked \in {"none", "untouched", "touched", "orphan"}
+    /\ rewound \in {"none", "untouched", "touched"}
+    /\ lost \in BOOLEAN
 
 \* No key reaches a pane without its source, with an open fence, or over an unread composer.
 KeysNeedProof == queued = "sent" => (proved /\ source = "ok" /\ fence = "none" /\ Clear)
@@ -284,5 +416,18 @@ OwnDelivers == <>(queued = "sent")
 
 \* /clear during the own turn: delivered first, or disposed of by the person's command.
 ClearResolves == <>(queued \in {"sent", "cleared"})
+
+\* #8441: a retry of the same front is never refused by the row of an earlier attempt that this
+\* process proved never reached its first key.
+RetryNotRefusedByUntouched == blocked # "untouched"
+
+\* A row whose first key may have reached the pane is never rewound, so its answer keeps its row
+\* and the body reaches the pane at most once.
+TouchedRowKept == rewound # "touched"
+NoAnswerLost == ~lost
+AtMostOnce == sends <= 1
+
+\* Once an idle gap comes the held input is delivered (with AtMostOnce: exactly once).
+HeldInputDelivers == <>(queued = "sent")
 
 ====

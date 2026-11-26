@@ -129,3 +129,45 @@ Added: Policy `U`; scenarios `own_moved`, `own_screen`, `own_restart`, `own_stop
 | UOwnScreenMutRetainScreen | - | NoSilentLoss, OwnDelivers | U without the screen check |
 
 TLC 34/34 as expected (`scripts/ci/statecharts_tlc.py --base`).
+
+## #8441: the inflight row of a start held before its first key
+
+11-26: an AgentDesk start met a composer a person had just made Running (terminal input 0.24 s after
+the start). The first input ended held before its first key, but its durable inflight row stayed
+with a recorded Herdr turn start. No key followed that start, so the row's own end is never proven
+and watcher and finalizer keep it. Every later idle gap restarted the same front and
+`foreign_row::admit` refused it over its own earlier row (6 refusals in 13 min, never delivered).
+Model code SHA: `c28732c52c06a73515c15a6895b331661dc62180`. A design contract check, not a test of
+the code; the restart counterexample is not replayed against a restarted daemon.
+
+Added: policies `Row` (U with the attempt's row modeled as main keeps it) and `Unwind` (the fix);
+scenarios `racer`, `racer_restart`, `keyed_hold`; variables `row`, `sends`, `racers`, `blocked`,
+`rewound`, `lost`; actions `RacerTurnStarts`, `OwnRowEnds`, `CrashMidAttempt`, and the
+`FirstKeyHeld` rewind inside the held branch of `Attempt`; invariants `RetryNotRefusedByUntouched`,
+`TouchedRowKept`, `NoAnswerLost`, `AtMostOnce`; property `HeldInputDelivers`; mutants `NoUnwind`,
+`UnwindTouched`. The 34 earlier configs keep their results (`row` stays `none` there).
+
+| Model | Code |
+|---|---|
+| `row = "untouched"`: the attempt ended Unsubmitted and FinishedUntouched, token still in this process | `provider/herdr_before_start.rs` `claude_observed_input`, `finish_input` |
+| `row = "touched"`: Submitted or Unknown, or text typed without Enter | same; `claude/herdr_turn/first_input.rs` `herdr_input_hold_pending` |
+| `row = "orphan"`: a row of an earlier daemon run, no token here | `recovery_engine/herdr_row_end.rs` `held_at_restore` |
+| `Attempt` refused over a row (`blocked`) | `router/message_handler/foreign_row.rs` `admit` |
+| `FirstKeyHeld` (`Rewinds("untouched")`) | `provider_dispatch/start_failure/herdr_unsent_unwind.rs` `unwind`, called from `Failure::finish` |
+| an untouched row no path ends | `inflight/herdr_turn_evidence.rs` `own_terminal`; `turn_finalizer/cleanup/terminal_release.rs`, `tmux_watcher/terminal_commit_epilogue.rs` |
+| `RacerTurnStarts` | a person's terminal input or a task-notification turn; composer Running at `claude/herdr_turn/composer.rs` |
+| `OwnTurnEnd` wake for a racer | `queue_io/input_owner/drive.rs`, `held_watch.rs` |
+| `OwnRowEnds` | the row's own terminal: watcher terminal commit, bridge epilogue |
+
+| cfg | Row (main) | Unwind (fix) | meaning |
+|---|---|---|---|
+| RowRacer / UnwindRacer | RetryNotRefusedByUntouched, HeldInputDelivers | - | the incident: after one racer the front is refused for good; with the rewind it is delivered once in the next idle gap |
+| RowKeyedHold / UnwindKeyedHold | - | - | a row whose key may have reached the pane stays and ends on its own terminal |
+| RowRacerRestart / UnwindRacerRestart | RetryNotRefusedByUntouched, HeldInputDelivers | HeldInputDelivers | a daemon death mid-attempt leaves a row no token proves untouched; the fix does not cover it (hold cap backstop, #8430) |
+| UnwindRacerMutNoUnwind | | RetryNotRefusedByUntouched, HeldInputDelivers | the fix without its rewind is main |
+| UnwindKeyedHoldMutUnwindTouched | | TouchedRowKept, NoAnswerLost, AtMostOnce | a rewind that skips the Untouched check drops an answering row and lets the front send twice |
+
+`AtMostOnce` in the last row shows the row's part only; the #8201 input hold is a second guard
+outside this model.
+
+TLC 42/42 as expected (`scripts/ci/statecharts_tlc.py --base`).
