@@ -220,7 +220,7 @@ S8c 활성화 시험은 **`env -i` + 승인된 launchd.env 로더 + 실제 provi
 | `src/domain/provider/naming.rs:15` | 채널 문자를 alphanumeric/[-_]로 치환, 44바이트 절단, -t숫자 보존, provider 접두어 붙임 | 새 생성기는 agent label+명시적 thread ID를 별도 인자로 받음; provider는 M/S |
 | `src/domain/session_identity/naming.rs:7` | prefix/provider/채널 segment 디코딩, provider 없으면 기본 Claude 계열 | legacy decoder만 유지; 새 이름은 M/S/I/B/H |
 | `src/domain/session_identity/naming.rs:31` | SessionIdentity.provider_and_channel wrapper | caller가 S/I/B에서 명시적 provider·채널을 받게 함 |
-| `src/cli/doctor/orchestrator.rs:1011` | prefix 있는 세션만 현재 runtime owner 파일 확인 후 server PID 수집 | M + `.owner`; PID 수집 범위만 치환 |
+| `src/cli/doctor/orchestrator.rs:354` | prefix 있는 세션만 현재 runtime owner 파일 확인 후 server PID 수집 | M + `.owner`; PID 수집 범위만 치환 |
 | `src/cli/utils.rs:178` | prefix면 host marker refusal 검사 | M/legacy owner 확인 뒤 동일 refusal 검사 |
 | `src/cli/utils.rs:185` | prefix면 reset-tmux kill 대상 | M + 현재 runtime 소유 대조; 미표식 타인 세션 제외. 기존 prefix만으로 kill하던 main 결함을 넓히지 않음 |
 | `src/services/discord/health/o_transition/codex_census.rs:47` | prefix 세션을 Codex census live 집합에 넣음 | M/B가 현재 runtime의 managed locator인지 대조 |
