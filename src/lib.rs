@@ -99,6 +99,7 @@ pub(crate) use adk_runtime::credential;
 use adk_runtime::db;
 mod dispatch;
 use adk_runtime::domain;
+#[cfg(unix)]
 use adk_runtime::intake_consent_authority;
 // Policy-engine loader/runtime helpers cover hot-reload and test-only entry
 // points outside the default server launch path.
