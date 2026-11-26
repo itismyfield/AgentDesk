@@ -39,7 +39,7 @@ pub(crate) struct FreshSelection {
 }
 
 impl ChannelStore {
-    pub(crate) fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
+    pub fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
         let read: Option<FreshSelection> =
             durable::read_json(&self.dir.join(FRESH_SELECTION_FILE))?;
         if let Some(record) = &read {

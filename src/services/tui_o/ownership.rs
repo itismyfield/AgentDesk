@@ -91,7 +91,7 @@ impl OwnershipGate {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn locked_for_test(&self) -> bool {
+    pub fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)

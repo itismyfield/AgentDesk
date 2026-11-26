@@ -488,7 +488,7 @@ impl ChannelStore {
 
     /// Small segments let a test see GC keep or drop a source's older records.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_segment_max_for_tests(&mut self, max: u64) {
+    pub fn set_segment_max_for_tests(&mut self, max: u64) {
         self.segment_max = max;
     }
 

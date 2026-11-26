@@ -210,7 +210,7 @@ pub struct ChannelWriter<P, L, A> {
     pub(crate) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) notice_missing: std::collections::HashSet<UnitKey>,
     pub(crate) boot: super::boot::Trace,
-    pub(crate) suspension: super::suspension::Suspension,
+    pub suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
@@ -323,12 +323,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Gives the writer its re-post turn, if its host has one.
-    pub(crate) fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
+    pub fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
         self.repost = hook;
         self
     }
 
-    pub(crate) fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
+    pub fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
         self.repost_stops.push(stop);
         self
     }
@@ -338,7 +338,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Outstanding ordinary pieces pin retired cursors; re-post turns have nothing owed.
-    pub(crate) fn delivery_allowed(&self, owing: bool) -> bool {
+    pub fn delivery_allowed(&self, owing: bool) -> bool {
         source_delivery_allowed(
             self.channel,
             self.store

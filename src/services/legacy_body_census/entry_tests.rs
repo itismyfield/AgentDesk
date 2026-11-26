@@ -399,8 +399,7 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
 fn journal_initialization_is_pinned_before_recovery_and_drain() {
     let source = |path: &str, compiled: &str| {
         assert!(!compiled.is_empty());
-        std::fs::read_to_string(std::path::Path::new(env!("ADK_REPO_ROOT")).join(path))
-            .unwrap()
+        std::fs::read_to_string(std::path::Path::new(env!("ADK_REPO_ROOT")).join(path)).unwrap()
     };
     let lib = source("src/lib.rs", include_str!("../../lib.rs"));
     let entry = lib.split("pub fn run_from_args()").nth(1).unwrap();

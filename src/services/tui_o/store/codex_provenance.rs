@@ -70,7 +70,7 @@ thread_local! {
 }
 
 impl ChannelStore {
-    pub(crate) fn codex_provenance(&self) -> Sidecar {
+    pub fn codex_provenance(&self) -> Sidecar {
         #[cfg(test)]
         SIDECAR_IO.with(|io| io.set((io.get().0 + 1, io.get().1)));
         if let Some(read) = submit_floor::read(self) {
