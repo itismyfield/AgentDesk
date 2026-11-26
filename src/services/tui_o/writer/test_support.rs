@@ -31,6 +31,7 @@ use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
+pub(crate) mod codex_ready;
 pub(crate) mod transition;
 
 pub(crate) const BOT: u64 = 42;

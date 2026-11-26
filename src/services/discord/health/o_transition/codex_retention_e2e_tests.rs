@@ -2,7 +2,7 @@
 use super::*;
 use crate::services::discord::health::o_transition::automatic::test_support;
 use crate::services::tui_o::shadow::SourceId;
-use crate::services::tui_o::writer::tests::with_ready_codex_backlog;
+use crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex_backlog;
 use crate::services::turn_orchestrator::{ChannelMailboxSnapshot, registry_purge::MailboxRefusal};
 use crate::test_support::wait::{WAIT_CAP, join_within};
 

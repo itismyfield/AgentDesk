@@ -4936,6 +4936,7 @@ src/
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── test_support/
+│   │   │   │   ├── codex_ready.rs
 │   │   │   │   └── transition.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs

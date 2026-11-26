@@ -218,7 +218,7 @@ fn codex_prepare_unknown_preserves_nonce_component_in_stats_and_log() {
         shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
         let registry = HealthRegistry::new();
         registry.register("codex".into(), shared).await;
-        crate::services::tui_o::writer::tests::with_ready_codex(
+        crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex(
             fixture.source.clone(),
             CHANNEL,
             |ready| async move {
@@ -258,7 +258,7 @@ async fn codex_sweep_timeout_keeps_later_observations_running() {
     let shared = fixture.shared(None);
     shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
     registry.register("codex".into(), shared).await;
-    crate::services::tui_o::writer::tests::with_blocked_codex(
+    crate::services::tui_o::writer::test_support::codex_ready::with_blocked_codex(
         fixture.source.clone(),
         |ready, _suspend| async move {
             use super::super::automatic::test_support;
@@ -287,7 +287,7 @@ async fn codex_sweep_classifies_existing_and_inflight_suspension() {
     let shared = fixture.shared(None);
     shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
     registry.register("codex".into(), shared).await;
-    crate::services::tui_o::writer::tests::with_blocked_codex(
+    crate::services::tui_o::writer::test_support::codex_ready::with_blocked_codex(
         fixture.source.clone(),
         |ready, suspend| async move {
             use super::super::automatic::test_support;
@@ -560,7 +560,7 @@ fn existing_codex_sweep_reaches_the_actual_actor_with_complete_legacy_evidence()
         shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
         let registry = HealthRegistry::new();
         registry.register("codex".into(), shared).await;
-        crate::services::tui_o::writer::tests::with_ready_codex(
+        crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex(
             fixture.source.clone(),
             CHANNEL,
             |ready| async move {
@@ -621,7 +621,7 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
         shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
         let health = HealthRegistry::new();
         health.register("codex".into(), shared.clone()).await;
-        crate::services::tui_o::writer::tests::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async move {
+        crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex(fixture.source.clone(), CHANNEL, |ready| async move {
             let reply = super::super::automatic::test_support::codex_sweep_for_test(&health, &ready, CHANNEL).await.unwrap();
             assert!(reply.refused.is_none(), "{reply:?}");
             let diagnostics = serde_json::to_value(reply.diagnostics.as_ref().unwrap()).unwrap();
@@ -641,7 +641,7 @@ async fn assert_actual_codex_sweep(fixture: &Fixture) {
     shared.settings.write().await.allowed_channel_ids = vec![CHANNEL];
     let registry = HealthRegistry::new();
     registry.register("codex".into(), shared).await;
-    crate::services::tui_o::writer::tests::with_ready_codex(
+    crate::services::tui_o::writer::test_support::codex_ready::with_ready_codex(
         fixture.source.clone(),
         CHANNEL,
         |ready| async move {

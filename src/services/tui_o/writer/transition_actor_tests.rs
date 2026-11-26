@@ -5,18 +5,15 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::SystemTime;
 
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::*;
 use crate::services::tui_o::store::CURSOR_DIR;
 use crate::services::tui_o::store::fault::{self, Step};
-use crate::services::tui_o::store::rotation::{Rotation, Successor};
 use crate::services::tui_o::store::spool::Cursor;
-use crate::services::tui_o::writer::actor::{
-    Owing, force_execution_for_tests, spawn_projecting, transition_hooks as hooks,
-};
+use crate::services::tui_o::writer::ReaderConfig;
+use crate::services::tui_o::writer::actor::{force_execution_for_tests, transition_hooks as hooks};
 use crate::services::tui_o::writer::rotation::RETIRED_WATCH;
 use crate::services::tui_o::writer::rotation::transition::Watch;
 use crate::services::tui_o::writer::test_support::transition::*;
@@ -24,9 +21,8 @@ use crate::services::tui_o::writer::transition_cleanup::{
     Owed, Refusal, Request, Termination, Unclear, Verdict,
 };
 use crate::services::tui_o::writer::transition_port::{
-    self, Context, Hold, Kind, Operation, Outcome, Refused, Reply, ScopeDigest, TransitionPort,
+    Context, Hold, Kind, Operation, Outcome, Refused, Reply, ScopeDigest,
 };
-use crate::services::tui_o::writer::{ReaderConfig, WriterConfig};
 
 fn grown(harness: &Harness) -> Vec<WriterAlarm> {
     harness.alarms.taken().into_iter().filter(grew).collect()
