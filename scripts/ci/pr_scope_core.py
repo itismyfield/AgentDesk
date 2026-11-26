@@ -97,7 +97,8 @@ def _load_core(repo):
         targeted_filters = [(_test_name(sel), 1) for _, sel in selectors if not sel.startswith("=")]
 
         source = "PG15 exact IDs"
-        pg15 = (repo / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
+        pg15 = [name for lane in ("pg15_required_ids.txt", "pg15_required_runtime_ids.txt")
+                for name in (repo / "scripts/ci" / lane).read_text(encoding="utf-8").split()]
         if not pg15:
             raise ValueError("no PG15 exact IDs")
         exact = {_test_name(name) for name in pg15}

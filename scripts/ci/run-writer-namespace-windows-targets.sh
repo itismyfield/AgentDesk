@@ -22,17 +22,18 @@ readonly interpreter
 readonly worker_recovery="src/server/worker_recovery.rs"
 readonly runtime_store="src/services/discord/runtime_store.rs"
 "$interpreter" "$engine" run --repo-root "$root" --platform windows \
-  --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
+  --pass-prefix DIR_FSYNC_WINDOWS_TARGET --package agentdesk src/lib.rs \
   --gate server src/lib.rs server src/server/mod.rs optional \
   --owner worker_recovery server src/server/mod.rs worker_recovery "$worker_recovery" \
     server::worker_recovery::windows_contract::tests required \
   --owner-id worker_recovery \
     server::worker_recovery::windows_contract::tests::first_fatal_exit_persists_ledger_and_exits \
   || exit
+# adk-runtime declares `services::discord` inline, so its gate is the `mod runtime_store;` line itself.
 "$interpreter" "$engine" run --repo-root "$root" --platform windows \
-  --pass-prefix DIR_FSYNC_WINDOWS_TARGET \
-  --gate discord src/services/mod.rs discord src/services/discord/mod.rs optional \
-  --owner runtime_store discord src/services/discord/mod.rs runtime_store "$runtime_store" \
+  --pass-prefix DIR_FSYNC_WINDOWS_TARGET --package adk-runtime src/adk_runtime_lib.rs \
+  --gate discord src/adk_runtime_lib.rs runtime_store "$runtime_store" optional \
+  --owner runtime_store discord src/adk_runtime_lib.rs runtime_store "$runtime_store" \
     services::discord::runtime_store::windows_contract::tests required \
   --owner-id runtime_store \
     services::discord::runtime_store::windows_contract::tests::windows_parent_dir_sync_succeeds_without_flushing \
