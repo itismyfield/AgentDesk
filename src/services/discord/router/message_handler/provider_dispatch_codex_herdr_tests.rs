@@ -27,7 +27,7 @@ use crate::services::herdr_launch::{
 };
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::session_host::{EvidenceGap, HerdrTarget, RestoreResume, ServerWitness};
-use crate::services::tui_o::writer::tests::codex_herdr_drive::{O_CHANNEL, ODrive};
+use crate::services::tui_o::writer::test_support::{O_CHANNEL, ODrive};
 use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingTarget, SourceId, binding_events_since,

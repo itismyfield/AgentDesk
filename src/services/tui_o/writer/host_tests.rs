@@ -25,8 +25,8 @@ use crate::services::tui_o::writer::binding::{
 };
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork, UnitDeriver};
-use crate::services::tui_o::writer::tests::actor::*;
-use crate::services::tui_o::writer::tests::{
+use crate::services::tui_o::writer::test_support::*;
+use crate::services::tui_o::writer::test_support::{
     BOT, CHANNEL, FakeLease, FakePort, Harness, RESTART_POLICY_CALLS, Reply, Writer, ledger_path,
     outcome, piece, unit,
 };

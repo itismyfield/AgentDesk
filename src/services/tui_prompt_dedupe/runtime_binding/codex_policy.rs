@@ -312,9 +312,12 @@ mod provenance_tests;
 #[path = "codex_policy/observation_tests.rs"]
 mod observation_tests;
 
-pub fn codex_verified_o_source_allowed(channel: u64, source: &binding_events::SourceId) -> bool {
-    #[cfg(all(test, unix))]
-    crate::services::tui_o::writer::tests::restart_policy_call(channel);
+pub fn codex_verified_o_source_allowed(
+    channel: u64,
+    source: &binding_events::SourceId,
+) -> bool {
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    crate::services::tui_o::writer::test_support::restart_policy_call(channel);
     // O's cursor keeps the dev it first stored; the proof reads the file's dev now.
     let same = crate::services::tui_o::shadow::capture::same_file;
     verified_panes(channel).into_iter().all(|tmux| {
