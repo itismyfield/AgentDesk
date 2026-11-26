@@ -30,7 +30,6 @@ GATED_STEPS = {"send_discord_prompt", "wait_for_discord_text", "wait_for_raw_dis
                "relay_author", "timeout_s"}
 # Only the shared release's two core Herdr cells opt in to proven foreign reasons.
 RELEASE_HERDR_CELLS = {("default", "E-50", "claude-herdr"), ("default", "E-51", "codex-herdr")}
-RELEASE_HERDR_REASONS = ("turn_presence_unknown:*", "tui_o:reader_retention_stalled:*", "relay_verdict_unknown_*")
 
 
 def _smoke():
@@ -48,6 +47,9 @@ def observation(outcome, row, only_log_missing, withheld=None):
     steps = row.get("step_timings") if isinstance(row.get("step_timings"), list) else []
     last = steps[-1].get("step") if steps and isinstance(steps[-1], dict) else ""
     seen = any(type(hits) is int and hits > 1 for hits in counts.values()) or row.get("input_refusals")
+    failure = outcome.get("observation_failure", {})
+    if not seen and failure.get("stage") in preflight_evidence.OBSERVATION_FAILURE_STAGES:
+        return "UNEVALUABLE", "SERVER_UNOBSERVABLE"
     if not seen and withheld:
         # The budget gate refused an input, so the turns it kept back are not a product failure.
         return "UNEVALUABLE", withheld
@@ -152,8 +154,6 @@ def run(args, config, spawn=subprocess.run):
         host_args = ["--herdr-endpoint", next(iter(endpoints)), "--herdr-status-bin", host["binary"]]
         if (args.profile, args.scenario, args.cell) in RELEASE_HERDR_CELLS:
             host_args += ["--herdr-foreign-degraded-only"]
-            for pattern in RELEASE_HERDR_REASONS:
-                host_args += ["--herdr-allowed-degraded-reason", pattern]
     run_id = f"{args.run_id}-{args.scenario}-{harness_cell}"
     markers = smoke.expected_markers(SCENARIOS, args.scenario, run_id)
     remaining, limit = json.loads(args.budget), cell["turn_tokens"]
@@ -203,6 +203,8 @@ def run(args, config, spawn=subprocess.run):
                               launch_options=options)
 
     outcome = judged(counts)
+    if "observation_failure" in outcome:
+        report["observation_failure"] = outcome["observation_failure"]
     rows = result.get("scenarios") if isinstance(result, dict) else None
     row = rows[0] if isinstance(rows, list) and len(rows) == 1 and isinstance(rows[0], dict) else {}
     # The log alone is missing when the same evidence passes with a clean excerpt of this cell.
@@ -226,6 +228,8 @@ def run(args, config, spawn=subprocess.run):
             status, reason = ("FAIL" if status == "FAIL" else "UNEVALUABLE"), "SERVER_CHANGED_DURING_RUN"
     except (OSError, ValueError, KeyError, TypeError):
         after = None
+        if status != "FAIL":
+            status, reason = "UNEVALUABLE", "SERVER_UNOBSERVABLE"
     report.update(status=status, real_provider_contacted=row.get("real_provider_contacted") is True,
                   evidence_paths=[str(out / name) for name in (f"report.{harness_cell}.json", "relay.log")],
                   assertions=[{"key": ASSERTION, "status": status, "complete": status != "UNEVALUABLE"}],

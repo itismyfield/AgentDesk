@@ -392,6 +392,22 @@ class HerdrDegradedWaiver(unittest.TestCase):
             self.assertIn("readiness failed", result["reason"])
             self.assertEqual(result["herdr_observations"][-1]["readiness"]["degraded_reason_waiver"], "withheld")
 
+    def test_explicit_foreign_only_applies_to_scenario_health(self):
+        self.args = arguments("--herdr-foreign-degraded-only", "--herdr-allowed-degraded-reason", "relay_verdict_unknown_*")
+        foreign = "relay_verdict_unknown_claude_1574279895679504388"
+        client = Mock()
+        client.send_control.return_value = {"id": "100"}
+        client.fetch_messages.return_value = []
+        scenario = dict(id="E-18", agent_mode="real_live", coverage_class="live",
+                        steps=[{"assert_health": {}}], assertions=[])
+        for reason, expected in ((foreign, "not_applicable"), ("relay_verdict_unknown_claude_41", "fail")):
+            self.http.side_effect = [(200, degraded([foreign])), (200, degraded([reason])), (200, degraded([foreign]))]
+            with self.subTest(reason=reason), redirect_stdout(io.StringIO()), patch.object(herdr.time, "sleep"):
+                result = driver.run_scenario(scenario, args=self.args, client=client, run_id="test")
+            self.assertEqual(result["status"], expected)
+            observed = result["herdr_observations"][1]
+            self.assertEqual(observed["readiness"]["degraded_reason_waiver"], "applied" if expected != "fail" else "unused")
+
     def test_early_exits_and_text_stop_composite_record_waiver_summary(self):
         plain = dict(id="E-1", agent_mode="real_live", coverage_class="live", steps=[], assertions=[])
         cases = (("agent mode", dict(plain, agent_mode="controlled"), {"required_agent_mode": "real_live"}, "fail"),

@@ -1,12 +1,14 @@
-"""Bounded diagnostic fields passed from preflight to the continuous summary."""
+"""Bounded diagnostics for preflight and in-run observations."""
 
 from . import health_readiness
 
 
-STAGES = ("health_read", "detail_readiness", "herdr_readiness", "herdr_status",
+STAGES = ("health_read", "mailbox_read", "detail_readiness", "herdr_readiness", "herdr_status",
           "writer_not_ready", "busy", "reset_state", "preflight")
+OBSERVATION_FAILURE_STAGES = {"health_read", "mailbox_read", "herdr_status", "preflight"}
 STATUSES = ("healthy", "degraded", "unhealthy")
-CODES = ("turn_presence_unknown", "tui_o:reader_retention_stalled", "relay_verdict_unknown", "herdr", "unclassified")
+CODES = ("turn_presence_unknown", "tui_o:reader_retention_stalled", "relay_verdict_unknown", "herdr", "unclassified",
+         "tui_o:binding_missing", "provider:pending_queue_depth")
 SCOPES = ("target", "foreign", "unknown")
 
 

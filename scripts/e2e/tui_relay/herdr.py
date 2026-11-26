@@ -21,6 +21,9 @@ TMUX_STEPS = {
 # Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
 AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
 CHANNEL_ID = re.compile(r"\d{17,}")
+FOREIGN_DEGRADED_REASONS = ("turn_presence_unknown:*", "tui_o:reader_retention_stalled:*", "relay_verdict_unknown_*",
+                           "tui_o:binding_missing:*", "provider:claude:pending_queue_depth:1",
+                           "provider:codex:pending_queue_depth:1")
 # Text !clear refusals as worded in commands/control/native.rs and control.rs, which share this prefix.
 # A wording change only loses the fail-fast: the acknowledgement wait then times out as before.
 CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:",)
@@ -87,7 +90,7 @@ def add_degraded_reason_arguments(parser):
              "Herdr and target-channel reasons are never waived.")
     parser.add_argument(
         "--herdr-foreign-degraded-only", action="store_true",
-        help="Require same-response evidence that each waived reason belongs to another channel.")
+        help="Waive proven foreign degraded reasons using the shared defaults or explicitly supplied patterns.")
 
 
 def validate_arguments(parser, args):
@@ -96,6 +99,13 @@ def validate_arguments(parser, args):
         parser.error("--herdr-allowed-degraded-reason applies only to Herdr cells")
     if any(pattern.strip() in ("", "*") for pattern in allowed):
         parser.error("--herdr-allowed-degraded-reason must name a reason or prefix; empty or bare '*' waives everything")
+
+
+def degraded_patterns(args):
+    explicit = getattr(args, "herdr_allowed_degraded_reason", None)
+    if explicit:
+        return list(explicit)
+    return list(FOREIGN_DEGRADED_REASONS) if getattr(args, "herdr_foreign_degraded_only", False) else []
 
 
 def detail_ready(driver, http_status, payload, *, allowed, channel, foreign_only=False):
@@ -146,7 +156,7 @@ def unattributed(reasons):
 
 
 def waiver_summary(args, observations):
-    allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    allowed = degraded_patterns(args)
     readiness = [o.get("readiness") or {} for o in observations if isinstance(o, dict)]
     ignored = sorted({r for item in readiness for r in item.get("ignored_degraded_reasons", [])})
     # Derived from the union, so observations recorded before the marker existed are still marked.
@@ -204,13 +214,17 @@ def published_row(block, status, *, channel, provider):
     return current_row(status, channel=channel, provider=provider)
 
 
+class CellBusy(assertions.AssertionError):
+    """A measured input hold or an active target mailbox."""
+
+
 def current_row(status, *, channel, provider, cold=False):
     rows = status.get("executions") if isinstance(status, dict) else None
     holds = status.get("other_input_holds") if isinstance(status, dict) else None
     if not isinstance(rows, list) or not isinstance(holds, list):
         raise assertions.AssertionError("Herdr status executions/other_input_holds missing")
     if holds:
-        raise assertions.AssertionError("Herdr current CLI status has other input holds")
+        raise CellBusy("Herdr current CLI status has other input holds")
     for row in rows:
         if (not isinstance(row, dict) or row.get("record") == "unreadable"
                 or any(key not in row for key in ("channel", "provider", "state", "input_hold"))
@@ -218,7 +232,7 @@ def current_row(status, *, channel, provider, cold=False):
                 or not str(row["channel"]) or not row.get("provider") or not row.get("state")):
             raise assertions.AssertionError("Herdr status row unreadable or incomplete")
         if row["input_hold"] is not None:
-            raise assertions.AssertionError("Herdr current CLI status has an input hold")
+            raise CellBusy("Herdr current CLI status has an input hold")
     matches = [r for r in rows if str(r["channel"]) == str(channel) and r["state"] != "retired"]
     if not matches and cold:
         return None
@@ -233,8 +247,7 @@ def current_row(status, *, channel, provider, cold=False):
 
 
 def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
-    # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
-    operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    operator = degraded_patterns(args)
     allowed = operator if waivable else []
     foreign_only = getattr(args, "herdr_foreign_degraded_only", False)
     # Waiver metadata precedes the request so refused or failed requests still record it.
@@ -248,14 +261,20 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
         if not http_auth.loopback_origin(args.base_url):
             raise assertions.AssertionError("Herdr observations require target-node loopback API and local CLI")
         status, payload = driver._read_api_json(args.base_url, "/api/health/detail", timeout=5)
-        stage = "detail_readiness"
         evidence["http_status"] = status
         if not isinstance(payload, dict):
             raise assertions.AssertionError("Herdr detail health must be an object")
+        if status == 200:
+            stage = "detail_readiness"
         evidence["readiness"].update({k: payload[k] for k in
                                       ("status", "ok", "fully_recovered", "degraded", "degraded_reasons") if k in payload})
         evidence["server_values"] = {k: payload[k] for k in
                                      ("uptime_secs", "started_at", "process_started_at_unix", "boot_incarnation") if k in payload}
+        reasons = payload.get("degraded_reasons")
+        if (status == 200 and payload.get("status") == "degraded" and isinstance(reasons, list)
+                and "mailbox_snapshot_unavailable" in reasons):
+            stage = "mailbox_read"
+            raise assertions.AssertionError("Herdr detail mailbox snapshot unavailable")
         ignored = detail_ready(driver, status, payload, allowed=allowed, channel=args.channel_id,
                                foreign_only=foreign_only)
         if ignored:
@@ -263,6 +282,11 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
                                          ignored_degraded_reasons_unattributed=[] if foreign_only else unattributed(ignored))
             if any(health_readiness.unknown_family(r) for r in ignored):
                 evidence["readiness"]["presence_unknown_waiver"] = "verified_foreign"
+            if foreign_only and cold and isinstance(boxes := payload.get("mailboxes"), list):
+                targets = health_readiness.target_channels(payload, args.channel_id)
+                if any(isinstance(box, dict) and health_readiness.channel_id(box.get("channel_id")) in targets
+                       and driver._mailbox_busy_reasons(box) for box in boxes):
+                    raise CellBusy("Herdr target mailbox is busy")
         stage = "herdr_readiness"
         block = ready(payload, endpoint=getattr(args, "herdr_endpoint", None), channel=args.channel_id)
         evidence["herdr"] = {k: block[k] for k in
@@ -283,9 +307,8 @@ def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
     except Exception as error:
         evidence["readiness"]["error"] = str(error)
         error.herdr_observation = evidence
-        if getattr(args, "capture_preflight_failure", False):
-            error.herdr_preflight_failure = preflight_evidence.capture(stage, payload, channel=args.channel_id,
-                                                                      http_status=status)
+        error.herdr_observation_failure = preflight_evidence.capture(
+            "busy" if isinstance(error, CellBusy) else stage, payload, channel=args.channel_id, http_status=status)
         raise
 
 
@@ -721,7 +744,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         time.sleep(2)
                 result["herdr_observations"].append(evidence)
             elif "assert_health" in step:
-                result["herdr_observations"].append(observe(driver, args, waivable=False))
+                result["herdr_observations"].append(
+                    observe(driver, args, waivable=getattr(args, "herdr_foreign_degraded_only", False)))
             else:
                 raise ValueError(f"unsupported Herdr step: {step}")
         phase = "assertions"
@@ -766,6 +790,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
     except Exception as error:
         if hasattr(error, "herdr_observation"):
             result["herdr_observations"].append(error.herdr_observation)
+        if hasattr(error, "herdr_observation_failure"):
+            result["observation_failure"] = error.herdr_observation_failure
         result.update(status="fail", reason=f"{type(error).__name__}: {error}")
         result["failure_attribution"] = {"source": phase, "raw_reason": str(error)}
         if profile and gap_failure:
@@ -776,7 +802,7 @@ def _run_checked(driver, scenario, args, client, run_id, result):
             try:
                 driver.send_teardown_marker(client=client, channel_id=args.channel_id, scenario_id=scenario["id"], cell=args.cell, run_id=run_id)
             except Exception as error:
-                result.update(status="fail", reason=f"Herdr teardown failed: {error}")
+                result.update(status="fail", reason=f"Herdr teardown failed: {error}", teardown_error=str(error))
         driver._update_record_window_snapshot(result, window)
         result["track_marker_prompts"] = scenario["id"] in {"E-50", "E-51"}
         driver._record_marker_counts(result, window, [m.replace("{run_id}", run_id) for m in scenario.get("report_marker_counts", [])])

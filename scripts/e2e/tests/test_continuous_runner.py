@@ -219,6 +219,28 @@ print(json.dumps(report))
         self.assertEqual(summary.build(published, self.config)["result"], "UNEVALUABLE")
         self.assertEqual(legacy_path.read_bytes(), before)
 
+    def test_observation_failures_publish_fixed_reasons_without_changing_verdict(self):
+        self.config.update(IDENTITY)
+        cases = ((None, "SERVER_UNOBSERVABLE"), ("health_read", "SERVER_UNOBSERVABLE"),
+                 ("herdr_status", "SERVER_UNOBSERVABLE"), ("preflight", "SERVER_UNOBSERVABLE"),
+                 ("busy", "CELL_NOT_IDLE"), ("herdr_readiness", "CELL_NOT_IDLE"))
+        for index, (stage, reason) in enumerate(cases):
+            with self.subTest(stage=stage):
+                raw = {"schema_version": 2, "status": "UNEVALUABLE", "native_turns": 0, "tokens": 0,
+                       "budget_checked": 0, "usage": dict.fromkeys(summary.USAGE, 0)}
+                raw["reason"] = "SERVER_UNOBSERVABLE" if stage is None else "private fixture error"
+                if stage:
+                    raw["preflight_failure"] = {"stage": stage, "private_extra": "fixture-private"}
+                (self.root / "driver.py").write_text(f"import json\nprint(json.dumps({raw!r}))\n")
+                self.submit(f"observation-{index}")
+                self.assertEqual(self.tick(self.now, rotation_interval_s=None)["status"], "UNEVALUABLE")
+                value = read_json(self.state / "summary.json", {})
+                self.assertEqual((value["result"], value["reason"]), ("UNEVALUABLE", reason))
+                for row in value["occurrences"][:2]:
+                    self.assertEqual((row["status"], row["reason"], row["native_turns"]), ("UNEVALUABLE", reason, 0))
+                    self.assertEqual(row.get("preflight_failure"), {"stage": stage} if stage else None)
+                    self.assertEqual(read_json(Path(row["driver_report_path"]), {}), raw)
+
 
 
 class Recovery(Runner):

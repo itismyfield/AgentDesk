@@ -16,6 +16,7 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
+from scripts.e2e.continuous import __main__ as cli  # noqa: E402
 from scripts.e2e.continuous import (budget, channel_lock, consumer, plan, publication, release_host, runner,  # noqa: E402
                                     smoke_driver, summary, turn_gate, usage)
 from scripts.e2e.continuous.store import read_json, write_json  # noqa: E402
@@ -35,6 +36,10 @@ SESSION = "AgentDesk-claude-adk-claude-tui-2-e2e"
 FOREIGN_RETENTION = "tui_o:reader_retention_stalled:30"
 TARGET_RETENTION = "tui_o:reader_retention_stalled:20"
 UNATTRIBUTED_RETENTION = "tui_o:reader_retention_stalled:unattributed"
+BINDING = "tui_o:binding_missing:"
+QUEUE = "provider:claude:pending_queue_depth:"
+TARGET_BOX = {"provider": "claude", "channel_id": 20, "queue_depth": 0, "agent_turn_status": "idle"}
+FOREIGN_BOX = {"provider": "claude", "channel_id": 40, "queue_depth": 1, "agent_turn_status": "idle"}
 
 
 def degraded_detail(*reasons):
@@ -294,6 +299,277 @@ class Driver(Fixture):
         self.assertEqual(len(row["herdr_observations"]), 2)
         for observation in row["herdr_observations"]:
             self.assertEqual(observation["readiness"]["ignored_degraded_reasons_unattributed"], [])
+
+    def test_release_allows_binding_and_bounded_queue_proven_foreign(self):
+        codex_queue = "provider:codex:pending_queue_depth:1"
+        for reasons, foreign in (([BINDING + "40"], FOREIGN_BOX), ([QUEUE + "1"], FOREIGN_BOX),
+                                 ([BINDING + "40", QUEUE + "1"], FOREIGN_BOX),
+                                 ([codex_queue], {**FOREIGN_BOX, "provider": "codex"})):
+            with self.subTest(reasons=reasons):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(*reasons), "mailboxes": [TARGET_BOX, foreign]})
+                self.assertEqual((report["status"], len(prompts), report["native_turns"]), ("PASS", 3, 3))
+                row = read_json(Path(report["evidence_paths"][0]), {})["scenarios"][0]
+                self.assertEqual(len(row["herdr_observations"]), 2)
+                for observation in row["herdr_observations"]:
+                    self.assertEqual(observation["readiness"]["ignored_degraded_reasons"], reasons)
+
+    def test_release_blocks_child_reasons_from_either_end_of_thread_proof(self):
+        group = "turn_presence_unknown:claude:other:session_identity_unresolved:none:2:80"
+        presence = [{"channel_id": channel, "provider": "claude", "agent_id": "other",
+                     "reason": "session_identity_unresolved", "hold_leaf": None, "elapsed_secs": 80,
+                     "unknown_since": "2026-11-20T00:00:00Z"} for channel in (40, 41)]
+        parent = {**TARGET_BOX, "relay_health": {"thread_channel_id": 40}}
+        child = {**FOREIGN_BOX, "relay_health": {"parent_channel_id": 20}}
+        for reason, code, boxes in (
+            (group, "turn_presence_unknown", [parent]),
+            ("relay_verdict_unknown_codex_40", "relay_verdict_unknown", [TARGET_BOX, child]),
+            (BINDING + "40", "tui_o:binding_missing", [parent]),
+            (QUEUE + "1", "provider:pending_queue_depth", [TARGET_BOX, child]),
+        ):
+            with self.subTest(reason=reason):
+                detail = {**degraded_detail(reason), "mailboxes": boxes}
+                if reason == group:
+                    detail["turn_presence_unknown"] = presence
+                report, prompts, _ = self.drive(detail_fields=detail)
+                self.assertEqual((report["status"], prompts, report["native_turns"]), ("UNEVALUABLE", [], 0))
+                self.assertIn({"code": code, "scope": "target"}, report["preflight_failure"]["reasons"])
+
+    def test_release_rejects_unproven_queue_and_binding_or_busy_target(self):
+        cases = [
+            ("target-binding", [BINDING + "20"], [TARGET_BOX], {}),
+            ("noncanonical-binding", [BINDING + "040"], [TARGET_BOX], {}),
+            ("overflow-binding", [BINDING + str(2**64)], [TARGET_BOX], {}),
+            ("above-cap", [QUEUE + "2"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": 2}], {}),
+            ("target-queue", [QUEUE + "1"], [{**TARGET_BOX, "queue_depth": 1}], {}),
+            ("sum-mismatch", [QUEUE + "1"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": 2}], {}),
+            ("duplicate-box", [QUEUE + "1"], [TARGET_BOX, FOREIGN_BOX, {**FOREIGN_BOX, "channel_id": "40", "queue_depth": 0}], {}),
+            ("duplicate-reason", [QUEUE + "1"] * 2, [TARGET_BOX, FOREIGN_BOX], {}),
+            ("missing-mailboxes", [QUEUE + "1"], None, {}),
+            ("missing-target", [QUEUE + "1"], [FOREIGN_BOX], {}),
+            ("bad-depth", [QUEUE + "1"], [TARGET_BOX, {**FOREIGN_BOX, "queue_depth": True}], {}),
+            ("mailbox-read-failure", [QUEUE + "1", "mailbox_snapshot_unavailable"], [TARGET_BOX, FOREIGN_BOX],
+             {"mailbox_observation_failures": [{"channel_id": 41}]}),
+            ("incomplete-read-proof", [QUEUE + "1"], [TARGET_BOX, FOREIGN_BOX],
+             {"mailbox_observation_failures": [{"channel_id": 41}]}),
+            ("busy-target", [BINDING + "40", QUEUE + "1"], [{**TARGET_BOX, "agent_turn_status": "active"}, FOREIGN_BOX], {}),
+            ("global-degradation", [BINDING + "40", QUEUE + "1", "db_slow"], [TARGET_BOX, FOREIGN_BOX], {}),
+        ]
+        for label, reasons, mailboxes, extra in cases:
+            with self.subTest(label=label):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(*reasons), "mailboxes": mailboxes, **extra})
+                self.assertEqual((report["status"], prompts, report["real_provider_contacted"]), ("UNEVALUABLE", [], False))
+                if label == "busy-target":
+                    self.assertEqual(report["preflight_failure"]["stage"], "busy")
+
+    def test_release_rechecks_queue_scope_after_the_first_observation(self):
+        def queue_moves_to_target(detail):
+            detail["mailboxes"] = [{**TARGET_BOX, "queue_depth": 1}, {**FOREIGN_BOX, "queue_depth": 0}]
+
+        report, prompts, _ = self.drive(detail_fields={
+            **degraded_detail(QUEUE + "1"), "mailboxes": [TARGET_BOX, FOREIGN_BOX]},
+            before_final_observe=queue_moves_to_target)
+        self.assertEqual(len(prompts), 3)
+        self.assertEqual(report["status"], "FAIL")
+
+    def test_live_reason_shapes_share_preflight_policy_with_direct_harness(self):
+        smoke = smoke_driver._smoke()[0]
+        driver = smoke.cell_driver
+        target, relay, binding, queue, presence = (
+            1509350778043895902, 1574279895679504388, 1473922824350601297, 70, 71)
+        reasons = ["relay_verdict_unknown_claude_1574279895679504388",
+                   "tui_o:binding_missing:1473922824350601297", "provider:claude:pending_queue_depth:1",
+                   "turn_presence_unknown:claude:ch-ad:session_identity_unresolved:hosted_active_or_unknown:1:602",
+                   "turn_presence_unknown:claude:ch-dd:session_identity_unresolved:hosted_active_or_unknown:1:596"]
+        codes = ("relay_verdict_unknown", "tui_o:binding_missing", "provider:pending_queue_depth", "turn_presence_unknown")
+        cell = "codex-herdr"
+        self.config["release_host"]["cells"][cell] = {
+            **self.config["release_host"]["cells"]["claude-herdr"], "channel_id": str(target)}
+        write_json(self.root / "herdr-status.json", {
+            "executions": [{**RUNNING, "provider": "codex", "channel": str(target)}], "other_input_holds": []})
+        scenario = {"id": "E-51", "agent_mode": "real_live", "coverage_class": "live", "steps": []}
+        for child, code in ((None, None), *zip((relay, binding, queue, presence), codes),
+                            (target, "turn_presence_unknown"), ("missing", "turn_presence_unknown")):
+            with self.subTest(child=child):
+                target_box = {**TARGET_BOX, "provider": "codex", "channel_id": target}
+                if code and child not in (target, "missing"):
+                    target_box["relay_health"] = {"thread_channel_id": child}
+                detail = {**degraded_detail(*reasons), "mailboxes": [target_box, {**FOREIGN_BOX, "channel_id": queue}],
+                          "tui_o_writer_readiness": [{"provider": "codex", "channel_id": str(target), "accepts": True}],
+                          "turn_presence_unknown": [] if child == "missing" else [
+                              {"channel_id": owner, "provider": "claude", "agent_id": agent, "elapsed_secs": age,
+                               "reason": "session_identity_unresolved", "hold_leaf": "hosted_active_or_unknown",
+                               "unknown_since": "2026-11-22T00:00:00Z"}
+                              for owner, agent, age in [(target if child == target else presence, "ch-ad", 602),
+                                                        (72, "ch-dd", 596)]]}
+                herdr = {"configured_channels": [str(target)]}
+                with mock.patch.object(smoke_driver, "_harness", return_value=2) as harness:
+                    report, _, _ = self.drive(scenario="E-51", cell=cell, detail_fields=detail, herdr=herdr)
+                self.assertEqual(harness.called, code is None, report)
+
+                out = self.root / "direct"
+                argv = ["run_tui_relay.py", "--cell", cell, "--filter", "E-51", "--channel-id", str(target),
+                        "--base-url", "http://127.0.0.1:9", "--herdr-endpoint", "ep",
+                        "--herdr-status-bin", self.config["release_host"]["binary"],
+                        "--herdr-foreign-degraded-only", "--output", str(out)]
+                client = mock.Mock()
+                client.send_control.return_value = {"id": "100"}
+                client.fetch_messages.return_value = []
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.root), \
+                        mock.patch.object(driver, "load_scenarios", return_value=[scenario]), \
+                        mock.patch.object(driver.discord, "DiscordClient", return_value=client), \
+                        mock.patch.object(driver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(driver.main(), 0 if code is None else 1)
+                row = read_json(out / f"report.{cell}.json", {})["scenarios"][0]
+                if code is None:
+                    self.assertEqual(row["herdr_readiness_waiver"]["ignored_degraded_reasons"], sorted(reasons))
+                else:
+                    expected = {"code": code, "scope": "unknown" if child == "missing" else "target"}
+                    self.assertIn(expected, report["preflight_failure"]["reasons"])
+                    self.assertIn(expected, row["observation_failure"]["reasons"])
+                    client.send_control.assert_not_called()
+
+    def publish_fixture_report(self, report):
+        identity = release_host.identity(self.config["release_host"], DETAIL)
+        config = {**self.config, **identity, "required_assertions": {"E-50": [smoke_driver.ASSERTION]}}
+        row = {**plan.deploy_occurrences(plan.load())[0], **CONTRACT}
+        lease = mock.Mock()
+        lease.spawn.return_value = subprocess.CompletedProcess([], 0, stdout=json.dumps(report))
+        record = {**identity, "run_id": "fixture", "request": {}, "profile": "default", "occurrences": [row]}
+        runner._execute(lease, config, record, row, {"turns": 3, "tokens": 300, "time_s": 10})
+        return summary.build(record, config)
+
+    def assert_harness_observation(self, stage, read, turns, *, duplicate=False):
+        smoke = smoke_driver._smoke()[0]
+        driver, sent, messages, reads = smoke.cell_driver, [], [], 0
+        transcript = self.root / "transcript.jsonl"
+        status_file = self.root / "herdr-status.json"
+        markers = [f"[E2E:E50:{{run_id}}:{label}]" for label in ("T1", "T2", "AFTER_CLEAR")]
+        scenario = {"id": "E-50", "agent_mode": "real_live", "coverage_class": "live", "report_marker_counts": markers,
+                    "steps": [step for marker in markers for step in
+                              ({"send_discord_prompt": marker}, {"wait_for_discord_text": marker})]}
+
+        def health(*_args, **_kwargs):
+            nonlocal reads
+            reads += 1
+            if reads == read:
+                if stage == "health_read":
+                    return 503, {}
+                if turns == 0:
+                    status_file.write_text("{")  # CLI output reaches the real JSON parser.
+                else:
+                    status_file.unlink()  # The fixture CLI now exits nonzero.
+            return 200, DETAIL
+
+        def send(_client, channel, content):
+            driver.discord.input_gate(content)
+            sent.append(content)
+            lines(transcript, asked(content), claude(str(len(sent))))
+            for _ in range(2 if duplicate and len(sent) == 3 else 1):
+                messages.append({"id": str(len(messages) + 101), "channel_id": channel, "content": content,
+                                 "author": {"id": driver.assertions.provider_bot_id("claude"), "bot": True}})
+            return {"id": str(len(messages) + 101)}
+
+        def preflight(argv, **_kwargs):
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(smoke.main(argv[2:]), 0)
+            return subprocess.CompletedProcess(argv, 0)
+
+        args = argparse.Namespace(scenario="E-50", cell="claude-herdr", run_id="harness", profile="default",
+                                  deploy_sha=None, budget=json.dumps({"turns": 3, "tokens": 300, "time_s": 10}))
+        with channel_lock.acquire(self.root / "state", RESOURCE) as held, contextlib.ExitStack() as stack:
+            env = {channel_lock.LEASE_ENV: json.dumps({"fd": held.fd, "device": held.identity.st_dev,
+                                                      "inode": held.identity.st_ino})}
+            for patch in (mock.patch.dict(os.environ, env),
+                          mock.patch.object(driver, "load_scenarios", return_value=[scenario]),
+                          mock.patch.object(driver, "_read_api_json", side_effect=health),
+                          mock.patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.root),
+                          mock.patch.object(driver.time, "sleep", return_value=None),
+                          mock.patch.object(driver.discord.urllib.request, "urlopen", side_effect=AssertionError("fixture only")),
+                          mock.patch.object(driver.discord.DiscordClient, "send", send),
+                          mock.patch.object(driver.discord.DiscordClient, "send_control", return_value={"id": "100"}),
+                          mock.patch.object(driver.discord.DiscordClient, "fetch_messages", side_effect=lambda *_a, **_kw: messages[:]),
+                          mock.patch.object(smoke_driver, "_transcripts", return_value=str(transcript))):
+                stack.enter_context(patch)
+            report = smoke_driver.run(args, self.config, spawn=preflight)
+        value = self.publish_fixture_report(report)
+        row = read_json(Path(report["evidence_paths"][0]), {})["scenarios"][0]
+        self.assertEqual(reads, read, row.get("reason"))
+        self.assertEqual((len(sent), report["native_turns"]), (turns, turns))
+        expected = ("FAIL", "FUNCTIONAL_FAILURE") if duplicate else ("UNEVALUABLE", "SERVER_UNOBSERVABLE")
+        self.assertEqual((value["result"], value["reason"]), expected)
+        self.assertEqual(report["status"], expected[0])
+        self.assertEqual(row.get("observation_failure", {}).get("stage"), stage)
+        self.assertEqual(value["occurrences"][0]["observation_failure"], row["observation_failure"])
+        if duplicate:
+            self.assertIn(2, row["marker_counts"].values())
+        else:
+            self.assertEqual(report["reason"], "SERVER_UNOBSERVABLE")
+
+    def test_harness_health_503_before_first_prompt(self):
+        self.assert_harness_observation("health_read", read=3, turns=0)
+
+    def test_harness_invalid_cli_json_before_first_prompt(self):
+        self.assert_harness_observation("herdr_status", read=3, turns=0)
+
+    def test_harness_health_loss_after_three_turns(self):
+        self.assert_harness_observation("health_read", read=4, turns=3)
+
+    def test_harness_cli_loss_after_three_turns(self):
+        self.assert_harness_observation("herdr_status", read=4, turns=3)
+
+    def test_harness_duplicate_with_observation_loss_keeps_functional_failure(self):
+        self.assert_harness_observation("herdr_status", read=4, turns=3, duplicate=True)
+
+    def test_mailbox_read_failure_is_unobservable_but_target_queue_is_busy(self):
+        for why, depth, expected in (("mailbox_snapshot_unavailable", 0, "SERVER_UNOBSERVABLE"),
+                                     (QUEUE + "1", 1, "CELL_NOT_IDLE")):
+            with self.subTest(reason=why):
+                report, prompts, _ = self.drive(detail_fields={
+                    **degraded_detail(why), "mailboxes": [{**TARGET_BOX, "queue_depth": depth}]})
+                value = self.publish_fixture_report(report)
+                self.assertEqual((value["result"], value["reason"], prompts), ("UNEVALUABLE", expected, []))
+                if depth == 0:
+                    self.assertEqual(report["preflight_failure"]["stage"], "mailbox_read")
+
+    def test_final_identity_read_loss_is_unobservable_after_three_turns(self):
+        for duplicate, expected in ((False, ("UNEVALUABLE", "SERVER_UNOBSERVABLE")),
+                                    (True, ("FAIL", "FUNCTIONAL_FAILURE"))):
+            with self.subTest(duplicate=duplicate):
+                def lose_identity(state):
+                    self.detail.side_effect = OSError("fixture identity read failure")
+                    if duplicate:
+                        counts = state["row"]["marker_counts"]
+                        counts[next(iter(counts))] = 2
+
+                self.detail.side_effect = None
+                report, prompts, _ = self.drive(harness=lose_identity)
+                self.assertEqual((len(prompts), report["native_turns"]), (3, 3))
+                self.assertEqual(report["status"], expected[0])
+                self.assertEqual(report["assertions"][0]["complete"], duplicate)
+                if not duplicate:
+                    self.assertEqual(report["reason"], expected[1])
+                value = self.publish_fixture_report(report)
+                self.assertEqual((value["result"], value["reason"]), expected)
+
+    def test_cli_input_hold_is_busy_and_cli_read_failure_is_observability(self):
+        write_json(self.root / "herdr-status.json",
+                   {"executions": [{**RUNNING, "input_hold": {"recorded_at": "now"}}], "other_input_holds": []})
+        for cli, stage in ((True, "busy"), (False, "herdr_status")):
+            with self.subTest(stage=stage):
+                report, prompts, _ = self.drive(cli=cli)
+                self.assertEqual((report["status"], prompts, report["preflight_failure"]["stage"]),
+                                 ("UNEVALUABLE", [], stage))
+
+    def test_non_200_second_health_read_reports_observability(self):
+        smoke = smoke_driver._smoke()[0]  # noqa: SLF001
+        out = io.StringIO()
+        with mock.patch.object(smoke.cell_driver, "_read_api_json", side_effect=[(200, DETAIL), (503, {})]), \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(smoke.main(["preflight", "--failure-json", "--base-url", "http://127.0.0.1:9",
+                                         "--cell", "claude-herdr", "--channel-id", "20"]), 2)
+        self.assertEqual(json.loads(out.getvalue()), {"stage": "health_read", "http_status": 503})
 
     def test_release_herdr_policy_refuses_target_and_unattributed_reasons(self):
         for reason in (TARGET_RETENTION, UNATTRIBUTED_RETENTION, "relay_verdict_unknown_codex_20",
@@ -601,6 +877,68 @@ class AfterDeploy(Fixture):
                 # EOF proves the stalled process closed its inherited descriptor even if its PID is being reaped.
                 self.assertTrue(select.select([exited], [], [], 15)[0], "the stalled process kept its descriptor")
                 self.assertEqual(exited.read(1), b"")
+
+
+class ChannelLockStatus(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.state = self.root / "state"
+        self.config = self.root / "config.json"
+        self.config.write_text(json.dumps({"state_dir": str(self.state), "resource": RESOURCE}))
+        self.path = self.state / "locks" / f"{channel_lock.resource_key(RESOURCE)}.lock"
+
+    def inspect(self, expected, exit_code=0):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                code = cli.main(["--config", str(self.config), "lease-status"])
+            except SystemExit as error:
+                self.fail(f"lease-status rejected by parser: {error}")
+        self.assertEqual(code, exit_code)
+        self.assertEqual(json.loads(out.getvalue())["status"], expected)
+
+    def test_dead_process_metadata_does_not_hide_reacquirable_lock(self):
+        subprocess.run([sys.executable, "-c", """
+import json, os, sys
+from scripts.e2e.continuous import channel_lock
+held = channel_lock.acquire(sys.argv[1], json.loads(sys.argv[2]))
+held.publish_owner({'pid': os.getpid(), 'kind': 'fixture'})
+os._exit(0)
+""", str(self.state), json.dumps(RESOURCE)], cwd=REPO, check=True, timeout=10)
+        raw, inode = self.path.read_bytes(), self.path.stat().st_ino
+        self.assertGreater(json.loads(raw)["pid"], 0)
+        self.inspect("FREE")
+        with channel_lock.acquire(self.state, RESOURCE) as recovered:
+            self.assertEqual(recovered.identity.st_ino, inode)
+            self.assertEqual(self.path.read_bytes(), raw)
+            self.inspect("HELD")
+
+    def test_actual_holder_blocks_with_live_remote_or_missing_pid_evidence(self):
+        with channel_lock.acquire(self.state, RESOURCE) as held:
+            for owner in ({"pid": os.getpid()}, {"pid": 99049, "host": "different-host"}, {}):
+                with self.subTest(owner=owner):
+                    held.publish_owner(owner)
+                    raw = self.path.read_bytes()
+                    self.inspect("HELD")
+                    with self.assertRaises(channel_lock.LeaseBusy):
+                        channel_lock.acquire(self.state, RESOURCE)
+                    self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_unreadable_flock_is_rejected_and_absent_state_is_not_created(self):
+        self.inspect("FREE")
+        self.assertFalse(self.state.exists())
+        with channel_lock.acquire(self.state, RESOURCE):
+            raw = self.path.read_bytes()
+        with mock.patch.object(channel_lock.fcntl, "flock", side_effect=PermissionError("fixture denied")):
+            self.inspect("REJECTED", exit_code=2)
+            with self.assertRaises(PermissionError):
+                channel_lock.acquire(self.state, RESOURCE)
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.path.unlink()
+        os.mkfifo(self.path, 0o600)
+        result = subprocess.run([sys.executable, "-m", "scripts.e2e.continuous", "--config", str(self.config), "lease-status"],
+                                cwd=REPO, capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, json.loads(result.stdout)["status"]), (2, "REJECTED"))
 
 
 if __name__ == "__main__":
