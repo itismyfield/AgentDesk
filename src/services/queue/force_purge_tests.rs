@@ -7,6 +7,7 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::queue::force_purge_channel_mailbox;
+use crate::services::turn_lifecycle::TurnLifecycleTarget;
 use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, EnqueueRefusalReason, Intervention, InterventionMode,
     QueuePersistenceContext, save_channel_queue,
