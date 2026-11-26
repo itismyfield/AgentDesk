@@ -48,10 +48,10 @@ struct Fixture {
 /// The provider CLI is pinned to a stub that holds its turn open until `release`, or until its
 /// directory goes away with a failed test; it then answers with the `answer` file or fails.
 async fn fixture() -> Fixture {
-    fixture_for(ProviderKind::Claude).await
+    fixture_for(ProviderKind::Claude, false).await
 }
 
-async fn fixture_for(provider: ProviderKind) -> Fixture {
+async fn fixture_for(provider: ProviderKind, boot_process_generation: bool) -> Fixture {
     let root = crate::config::TestRuntimeRootGuard::new();
     // A config override in the environment would hide the agent written under this root.
     let unset = crate::config::TestEnvVarGuard::remove_after_shared_test_env_lock;
@@ -104,6 +104,14 @@ async fn fixture_for(provider: ProviderKind) -> Fixture {
     // A real token hash shape, so the runtime API accepts the identity a session hook names.
     let mut shared = shared_on(&pool).await;
     let writable = Arc::get_mut(&mut shared).unwrap();
+    if boot_process_generation {
+        use crate::services::discord::runtime_store;
+
+        let _publication = runtime_store::allocate_and_publish_process_generation_for_tests(true);
+        let generation = runtime_store::load_generation();
+        assert_ne!(generation, 0, "fixture process generation");
+        writable.restart.current_generation = generation;
+    }
     writable.token_hash = "discord_8117811781178117".to_string();
     writable.provider = provider.clone();
     shared.settings.write().await.provider = provider.clone();

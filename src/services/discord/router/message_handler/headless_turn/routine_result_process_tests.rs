@@ -175,6 +175,10 @@ async fn publish_process(fixture: &Fixture, kind: RuntimeHandoffKind, order: Thr
     assert_deferred(kind);
     let before =
         load_inflight_state_read_only(provider, THREAD.get()).expect("routine producer held open");
+    assert_eq!(
+        before.born_generation,
+        fixture.shared.restart.current_generation
+    );
     assert!(before.tmux_session_name.is_none() && before.input_fifo_path.is_none());
     assert!(
         fixture
@@ -253,7 +257,7 @@ async fn routine_process_claude_publishes_selected_thread_pg() {
         return;
     }
     let _boot = cutover::test_override::force_candidates(&[(PRIMARY.get(), ClaudeTui)]);
-    let fixture = fixture().await;
+    let fixture = fixture_for(Claude, true).await;
     publish_process(&fixture, ClaudeTui, ThreadOrder::MessageBeforeRun).await;
     fixture.db.drop().await;
 }
@@ -264,7 +268,7 @@ async fn routine_process_codex_publishes_selected_thread_pg() {
         return;
     }
     let _boot = cutover::test_override::force_candidates(&[(PRIMARY.get(), CodexTui)]);
-    let fixture = fixture_for(Codex).await;
+    let fixture = fixture_for(Codex, true).await;
     publish_process(&fixture, CodexTui, ThreadOrder::MessageBeforeRun).await;
     fixture.db.drop().await;
 }
@@ -276,7 +280,7 @@ async fn routine_process_records_thread_before_message_event_pg() {
     }
     for order in [ThreadOrder::RunBeforeMessage, ThreadOrder::CreateAtRun] {
         let _boot = cutover::test_override::force_candidates(&[(PRIMARY.get(), ClaudeTui)]);
-        let fixture = fixture().await;
+        let fixture = fixture_for(Claude, true).await;
         publish_process(&fixture, ClaudeTui, order).await;
         assert!(
             !cutover::record_thread_child_by_id(THREAD.get(), PRIMARY.get())
@@ -331,7 +335,7 @@ async fn routine_process_reply_cold_fresh_then_verified_resume_pg() {
     use crate::services::tui_prompt_dedupe::binding_events as bindings;
     const VERIFIED: &str = "81170000-0000-4000-8000-000000000002";
     let _boot = cutover::test_override::force_candidates(&[(PRIMARY.get(), ClaudeTui)]);
-    let fixture = fixture().await;
+    let fixture = fixture_for(Claude, true).await;
     publish_process(&fixture, ClaudeTui, ThreadOrder::MessageBeforeRun).await;
     bindings::set_test_root(Some(fixture._root.path()));
     let tmux = Claude.build_tmux_session_name("thread-agent");
