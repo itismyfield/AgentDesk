@@ -1,7 +1,11 @@
 use super::*;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
 use serde_json::json;
 use std::sync::atomic::Ordering;
+
+const PARENT: u64 = discord_mock::CHANNEL_ID + 201;
+const SIBLING: u64 = discord_mock::CHANNEL_ID + 202;
 
 fn component_fixture(custom_id: &str) -> serenity::ComponentInteraction {
     let message = discord_mock::user_message(940_487_400_000_041, "a card");
@@ -136,6 +140,7 @@ fn consent_card_ids_carry_only_an_opaque_nonce() {
 
 #[derive(Clone)]
 struct InteractionHttp {
+    parent: Option<u64>,
     calls: Arc<std::sync::Mutex<Vec<(String, serde_json::Value)>>>,
 }
 async fn interaction_http(
@@ -167,7 +172,17 @@ async fn interaction_http(
     if method == axum::http::Method::GET
         && path.ends_with(&format!("/channels/{}", discord_mock::CHANNEL_ID))
     {
+        if let Some(parent) = state.parent {
+            return axum::Json(json!({"id":discord_mock::CHANNEL_ID.to_string(),"type":11,"guild_id":"96326000999","name":"consent-child","position":0,"permission_overwrites":[],"nsfw":false,"parent_id":parent.to_string(),"thread_metadata":{"archived":false,"auto_archive_duration":60,"archive_timestamp":"2026-01-01T00:00:00Z","locked":false}})).into_response();
+        }
         return axum::Json(json!({"id":discord_mock::CHANNEL_ID.to_string(),"type":0,"guild_id":"96326000999","name":"service-consent-cc","position":0,"permission_overwrites":[],"nsfw":false,"parent_id":null})).into_response();
+    }
+    if method == axum::http::Method::GET
+        && state
+            .parent
+            .is_some_and(|parent| path.ends_with(&format!("/channels/{parent}")))
+    {
+        return axum::Json(json!({"id":state.parent.unwrap().to_string(),"type":0,"guild_id":"96326000999","name":"service-consent-cc","position":0,"permission_overwrites":[],"nsfw":false,"parent_id":null})).into_response();
     }
     let mut response = serde_json::to_value(discord_mock::user_message(
         940_487_400_000_051,
@@ -195,6 +210,7 @@ async fn actual_component_owner_guard_precedes_store_for_allowed_allowall_and_mi
     let app = axum::Router::new()
         .fallback(interaction_http)
         .with_state(InteractionHttp {
+            parent: None,
             calls: calls.clone(),
         });
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -281,6 +297,7 @@ async fn actual_component_rejects_stale_nonce_and_wrong_message_before_peer_or_a
     let app = axum::Router::new()
         .fallback(interaction_http)
         .with_state(InteractionHttp {
+            parent: None,
             calls: calls.clone(),
         });
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -471,14 +488,29 @@ impl Drop for ScopedPeer {
 // Real Discord adapters and durable mailbox sink use a fake checker and a drain executor.
 #[tokio::test(flavor = "current_thread")]
 async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_payload() {
+    owner_retry_card_flow(None).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_consent_issues_and_retries_its_card_against_the_parent() {
+    owner_retry_card_flow(Some(PARENT)).await;
+}
+
+async fn owner_retry_card_flow(parent: Option<u64>) {
     use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
     use crate::services::turn_orchestrator::{
         Intervention, InterventionMode, QueuePersistenceContext,
     };
     let runtime = tempfile::tempdir().unwrap();
     let _runtime = crate::config::set_agentdesk_root_for_test(runtime.path());
-    let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
+    let policy_channel = parent.unwrap_or(discord_mock::CHANNEL_ID);
+    let _boot = session_hosts::force_for_test(Some("node"), &[(policy_channel, "node")])
         .with_mode(EndpointMode::UserDefault);
+    let _child = parent.map(|parent| {
+        force_relation_for_test(discord_mock::CHANNEL_ID, Relation::Child { parent })
+    });
+    let _sibling =
+        parent.map(|parent| force_relation_for_test(SIBLING, Relation::Child { parent }));
     let (config_dir, peer) = preview::tests::fixture(
         r#"if [ "$HERDR_CONFIG_PATH" = "$HOME/config.toml" ]; then printf 'apply\n' >> "$HOME/apply.calls"; fi; printf 'config: ok\n'"#,
     );
@@ -487,7 +519,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let _peer = ScopedPeer(previous);
     let fixture_config = crate::runtime_layout::config_file_path(runtime.path());
     std::fs::create_dir_all(fixture_config.parent().unwrap()).unwrap();
-    std::fs::write(&fixture_config,serde_json::to_vec(&json!({"server":{},"agents":[{"id":"service-consent","name":"Consent fixture","provider":"claude","channels":{"claude":{"id":discord_mock::CHANNEL_ID.to_string(),"name":"service-consent-cc","workspace":config_dir.path(),"runtime":"tui"}}}]})).unwrap()).unwrap();
+    std::fs::write(&fixture_config,serde_json::to_vec(&json!({"server":{},"agents":[{"id":"service-consent","name":"Consent fixture","provider":"claude","channels":{"claude":{"id":policy_channel.to_string(),"name":"service-consent-cc","workspace":config_dir.path(),"runtime":"tui"}}}]})).unwrap()).unwrap();
     let _config = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CONFIG",
         &fixture_config,
@@ -500,6 +532,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let app = axum::Router::new()
         .fallback(interaction_http)
         .with_state(InteractionHttp {
+            parent,
             calls: calls.clone(),
         });
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -510,7 +543,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let shared = crate::services::discord::make_shared_data_for_tests();
     let message = discord_mock::user_message(940_487_400_000_061, "!herdr consent retry");
     let binding = crate::services::discord::settings::resolve_role_binding(
-        message.channel_id,
+        serenity::ChannelId::new(policy_channel),
         Some("service-consent-cc"),
     );
     assert!(
@@ -522,7 +555,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     {
         let mut settings = shared.settings.write().await;
         settings.owner_user_id = Some(message.author.id.get());
-        settings.allowed_channel_ids = vec![message.channel_id.get()];
+        settings.allowed_channel_ids = vec![policy_channel, message.channel_id.get()];
     }
     startup::restore(&ctx.http, &shared, &ProviderKind::Claude)
         .await
@@ -563,29 +596,61 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         enqueued.enqueued && enqueued.persistence_error.is_none(),
         "positive service fixture must own one durable original mailbox input"
     );
-    let pending = store()
-        .hold(
-            consent::Question {
-                key: key.clone(),
-                preview: prepared.token,
-                owner: message.author.id.get(),
-                bot: ctx.cache.current_user().id.get(),
-                provider: "claude".into(),
-                channel: message.channel_id.get(),
-                message: 940_487_400_000_062,
-                intent: consent::IntentRef {
-                    store: "mailbox".into(),
-                    id: format!("{}:17", message.id.get()),
-                    provider: "claude".into(),
-                    channel: message.channel_id.get(),
-                    source_message: message.id.get(),
-                    fifo: 17,
-                },
+    let question = |message_id| consent::Question {
+        key: key.clone(),
+        preview: prepared.token.clone(),
+        owner: message.author.id.get(),
+        bot: ctx.cache.current_user().id.get(),
+        provider: "claude".into(),
+        channel: message.channel_id.get(),
+        message: message_id,
+        intent: consent::IntentRef {
+            store: "mailbox".into(),
+            id: format!("{}:17", message.id.get()),
+            provider: "claude".into(),
+            channel: message.channel_id.get(),
+            source_message: message.id.get(),
+            fifo: 17,
+        },
+    };
+    let pending = if parent.is_some() {
+        let held = store()
+            .hold_unbound(question(0), now())
+            .unwrap()
+            .into_consent();
+        run(
+            &ctx.http,
+            &shared,
+            &ProviderKind::Claude,
+            held,
+            Event::Hold {
+                question: Box::new(question(0)),
+                now: now(),
+                request: consent::workflow::Request::ExplicitLaunch,
             },
-            now(),
+            None,
         )
-        .unwrap()
-        .into_consent();
+        .await
+        .expect("a child must issue its first card using the parent endpoint");
+        let issued = store().load(&key).unwrap().unwrap();
+        assert_eq!(issued.card, consent::CardState::Bound);
+        assert_eq!(issued.channel, message.channel_id.get());
+        assert_eq!(issued.intents, vec![question(0).intent]);
+        issued
+    } else {
+        store()
+            .hold(question(940_487_400_000_062), now())
+            .unwrap()
+            .into_consent()
+    };
+    // The child has a different own endpoint by retry time. Its existing consent is still the parent's.
+    let _child_own = parent.map(|parent| {
+        session_hosts::force_for_test(
+            Some("node"),
+            &[(parent, "node"), (discord_mock::CHANNEL_ID, "other-node")],
+        )
+        .with_mode(EndpointMode::UserDefault)
+    });
     store()
         .decide(&pending, message.author.id.get(), false, now())
         .unwrap();
@@ -699,6 +764,16 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         0,
         "stale interactions must preserve the original mailbox payload before approval"
     );
+    if parent.is_some() {
+        let mut sibling_click = click.clone();
+        sibling_click.channel_id = serenity::ChannelId::new(SIBLING);
+        sibling_click.message.channel_id = sibling_click.channel_id;
+        assert!(matches!(
+            super::component(&ctx, &sibling_click, &data).await,
+            Ok(true)
+        ));
+        assert_eq!(store().load(&key).unwrap().unwrap(), bound);
+    }
     for _ in 0..2 {
         assert!(
             matches!(super::component(&ctx, &click, &data).await, Ok(true)),
@@ -760,9 +835,12 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
             .collect();
         assert_eq!(
             sends.len(),
-            1,
-            "owner retry and duplicate decisions must send only one card"
+            if parent.is_some() { 2 } else { 1 },
+            "each card generation must be sent once"
         );
+        assert!(sends.iter().all(|(path, _)| {
+            path.ends_with(&format!("/channels/{}/messages", message.channel_id))
+        }));
         assert_eq!(
             sends[0].1["components"][0]["components"][0]["disabled"], true,
             "the actual transport must initially send disabled buttons"
@@ -877,7 +955,8 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         .filter(|(path, body)| path.ends_with("/messages") && body.get("components").is_some())
         .count();
     assert_eq!(
-        sends, 1,
+        sends,
+        if parent.is_some() { 2 } else { 1 },
         "startup Applied replay must send zero new consent cards"
     );
     http_server.abort();
@@ -886,6 +965,15 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
 
 #[tokio::test(flavor = "current_thread")]
 async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_later_once() {
+    applied_startup_retry_flow(None).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_applied_replay_releases_exact_originals_once() {
+    applied_startup_retry_flow(Some(PARENT)).await;
+}
+
+async fn applied_startup_retry_flow(parent: Option<u64>) {
     use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
     use crate::services::turn_orchestrator::{
         Intervention, InterventionMode, QueuePersistenceContext,
@@ -893,8 +981,11 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
     let runtime = tempfile::tempdir().unwrap();
     let _runtime = crate::config::set_agentdesk_root_for_test(runtime.path());
     let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
-    let _boot = session_hosts::force_for_test(Some("node"), &[(channel.get(), "node")])
-        .with_mode(EndpointMode::UserDefault);
+    let _boot =
+        session_hosts::force_for_test(Some("node"), &[(parent.unwrap_or(channel.get()), "node")])
+            .with_mode(EndpointMode::UserDefault);
+    let _child =
+        parent.map(|parent| force_relation_for_test(channel.get(), Relation::Child { parent }));
     let (config_dir, peer) = preview::tests::fixture("printf 'config: ok\\n'");
     peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
     let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
@@ -911,6 +1002,7 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
     let app = axum::Router::new()
         .fallback(interaction_http)
         .with_state(InteractionHttp {
+            parent: None,
             calls: Arc::new(std::sync::Mutex::new(Vec::new())),
         });
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1139,6 +1231,7 @@ async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_me
     let app = axum::Router::new()
         .fallback(interaction_http)
         .with_state(InteractionHttp {
+            parent: None,
             calls: calls.clone(),
         });
     let http_server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -1317,4 +1410,125 @@ async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_me
         "held_replay_never_repeats_open_or_already_replayed_consents_contract"
     );
     http_server.abort();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_applied_replay_rearms_the_exact_worker_original_once_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::db::intake_outbox::{consent_handoff, owner_fence_pg_tests::snapshot};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let child = discord_mock::CHANNEL_ID;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(PARENT, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let _child = force_relation_for_test(child, Relation::Child { parent: PARENT });
+    let (config, peer) = preview::tests::fixture("printf 'config: ok\n'");
+    peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
+    let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
+    let _peer = ScopedPeer(previous);
+    let prepared = preview::prepare(peer, 1).await.unwrap();
+
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let (row, _fixture, _old_store, _old_consent, intent) =
+        consent_handoff::tests::setup(&pool, &child.to_string()).await;
+    let original = snapshot(&pool, row.id).await;
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let store = store();
+    let key = consent::ConsentKey {
+        node: "node".into(),
+        user: unsafe { libc::geteuid() },
+        socket: "/adk/herdr/agentdesk.sock".into(),
+        named_session: "agentdesk".into(),
+        config: prepared.logical().into(),
+        target: prepared.target().into(),
+    };
+    let held = store
+        .hold(
+            consent::Question {
+                key: key.clone(),
+                preview: prepared.token,
+                owner: 1,
+                bot: 940_487_400_000_003,
+                provider: "claude".into(),
+                channel: child,
+                message: 940_487_400_000_061,
+                intent: intent.clone(),
+            },
+            now(),
+        )
+        .unwrap()
+        .into_consent();
+    consent_handoff::tests::hold_before_effects(&pool, &row, &store, &held, &intent)
+        .await
+        .unwrap();
+    let accepted = store.decide(&held, 1, true, now()).unwrap();
+    let applied = store
+        .record_apply(
+            &accepted,
+            consent::ApplyResult {
+                before: Some([1; 32]),
+                after: Some([2; 32]),
+                backup: None,
+                detail: None,
+            },
+        )
+        .unwrap();
+    let config_bytes = std::fs::read(&key.config).unwrap();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(interaction_http)
+        .with_state(InteractionHttp {
+            parent: Some(PARENT),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let provider = ProviderKind::Claude;
+    for _ in 0..2 {
+        recover(
+            &http,
+            &shared,
+            &provider,
+            Replay::Excluding(&Default::default()),
+        )
+        .await
+        .expect("the parent endpoint must replay this child receipt");
+    }
+    let released = snapshot(&pool, row.id).await;
+    assert_eq!(released["status"], "pending");
+    for field in [
+        "id",
+        "channel_id",
+        "user_msg_id",
+        "user_text",
+        "attempt_no",
+        "parent_outbox_id",
+    ] {
+        assert_eq!(released[field], original[field], "{field}");
+    }
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM intake_outbox")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1);
+    let current = store.load(&key).unwrap().unwrap();
+    assert_eq!(current.nonce, applied.nonce);
+    assert_eq!(current.apply, applied.apply);
+    assert_eq!(current.settlements.len(), 1);
+    assert!(current.unresolved_intents().is_empty());
+    assert_eq!(std::fs::read(&key.config).unwrap(), config_bytes);
+    assert!(config.path().is_dir());
+    server.abort();
+    drop(shared);
+    pool.close().await;
+    db.drop().await;
 }

@@ -1947,3 +1947,34 @@ pub(in crate::services::discord::router) fn override_final_local_probe(
 
 #[path = "admission_thread_tests.rs"]
 mod thread;
+
+#[tokio::test(flavor = "current_thread")]
+async fn checked_child_retains_consent_checkpoint_and_original_queue_origin() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+
+    let f = Fixture::new("disabled").await;
+    let child = discord_mock::CHANNEL_ID;
+    let parent = child + 201;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(parent, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    let mut input = submission(8_916_141, IntakeOrigin::SlashSkill);
+    let absorbed = MessageId::new(8_916_142);
+    input.request.source_message_ids.push(absorbed);
+    assert!(intake::checkpoint_waits_for_admission(
+        input.request.channel_id
+    ));
+    assert!(intake::defer_live_submission(&f.deps(), input, true).await);
+    let queue = f.disk();
+    let item = &queue[0];
+    assert_eq!(item.text, "expanded prompt 8916141");
+    assert!(
+        item.source_message_queued_generations()
+            .iter()
+            .any(|source| {
+                source.message_id == absorbed
+                    && source.queued_generation == item.queued_generation
+                    && source.origin.as_deref() == Some("SlashSkill")
+            })
+    );
+}

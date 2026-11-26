@@ -300,3 +300,57 @@ async fn user_default_actual_general_clear_settles_exact_consent_once_pg() {
 async fn user_default_actual_herdr_clear_early_return_settles_exact_consent_once_pg() {
     actual_user_default_clear_settlement(true).await;
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_clear_discards_only_its_confirmed_generation_on_the_parent_endpoint() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let parent = CHANNEL + 1;
+    let sibling = CHANNEL + 2;
+    let _boot = session_hosts::force_for_test(Some("node"), &[(parent, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let _child = force_relation_for_test(CHANNEL, Relation::Child { parent });
+    let _sibling = force_relation_for_test(sibling, Relation::Child { parent });
+    let shared = make_shared_data_for_tests();
+    let channel = ChannelId::new(CHANNEL);
+    let provider = ProviderKind::Claude;
+    let persistence = QueuePersistenceContext::new(&provider, &shared.token_hash, None);
+    let mailbox = shared.mailbox(channel);
+    let queued = mailbox.enqueue(input(), persistence.clone()).await;
+    assert!(queued.enqueued && queued.persistence_error.is_none());
+
+    let store = herdr_consent::store();
+    let held = store.hold(question(), 100).unwrap().into_consent();
+    for (channel, generation) in [(CHANNEL, GENERATION + 1), (sibling, GENERATION + 2)] {
+        let mut next = question();
+        next.intent.channel = channel;
+        next.intent.fifo = generation;
+        next.intent.id = format!("{SOURCE}:{generation}");
+        store.hold(next, 100).unwrap();
+    }
+    let mut foreign = question();
+    foreign.key.node = "other-node".into();
+    let foreign = store.hold(foreign, 100).unwrap().into_consent();
+
+    let cleared = mailbox.clear(persistence).await;
+    assert!(cleared.persistence.failed.is_empty() && !cleared.persistence.count_unknown);
+    let mut report = ClearReport::default();
+    report.absorb(&cleared);
+    for _ in 0..2 {
+        report
+            .settle_consents(&shared, &provider, channel, &cleared)
+            .await;
+    }
+    let current = store.load(&held.key).unwrap().unwrap();
+    assert_eq!(current.settlements.len(), 1);
+    assert_eq!(
+        current
+            .unresolved_intents()
+            .iter()
+            .map(|i| (i.channel, i.fifo))
+            .collect::<Vec<_>>(),
+        vec![(CHANNEL, GENERATION + 1), (sibling, GENERATION + 2)]
+    );
+    assert_eq!(store.load(&foreign.key).unwrap().unwrap(), foreign);
+}
