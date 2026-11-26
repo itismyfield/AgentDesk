@@ -11,34 +11,29 @@ stateDiagram-v2
   class lg1 bugPath
   class lg2 repeats
   s0: 사람 입력 front 대기
-  s1: 보류(시계 진행)
+  s1: 보류(Readiness 기한 있음)
   s2: 보류 뒤 재구동
   s3: 어느 입력인지 모르는 안내로 버림
   s4: 1회 전달
   s5: 새 턴 완료
   s6: 상한 시각 뒤 재구동
-  s7: 보류(상한 시각 경과, Idle 확인 중)
-  s8: 보류(Idle 연속 관측됨)
   [*] --> s0
   s0 --> s1: owner drive
-  s1 --> s1: Readiness 10초 기한 경과 or 옛 턴 실제 종료 or 옛 terminal 원장 정산
-  s1 --> s2: held_watch 2초 깨움 or 턴 끝 drain 깨움
+  s0 --> s0: 옛 턴 실제 종료
+  s1 --> s1: Readiness 10초 기한 경과 or 옛 terminal 원장 정산
+  s1 --> s2: held_watch 2초 깨움 or QueueEligible 완료 kick
   s1 --> s3: 기한 만료로 front 버림
   s0 --> s4: owner drive
   s2 --> s1: owner drive
-  s1 --> s0: 턴 끝 drain 깨움
-  s1 --> s6: held_watch 2초 깨움
+  s1 --> s0: QueueEligible 완료 kick
+  s1 --> s6: held_watch 2초 깨움 or 같은 보류 반복 or QueueEligible 완료 kick
   s4 --> s5: 새 턴 종료
   s2 --> s4: owner drive
-  s6 --> s7: owner drive
-  s7 --> s6: 같은 보류 반복 or 턴 끝 drain 깨움
+  s6 --> s1: owner drive
   s0 --> s3: owner drive
   s2 --> s3: owner drive
-  s6 --> s8: owner drive
-  s8 --> s6: 같은 보류 반복 or 턴 끝 drain 깨움
-  s7 --> s3: 기한 만료로 front 버림
+  s3 --> s3: QueueEligible 완료 kick
   s6 --> s4: owner drive
-  s8 --> s3: 기한 만료로 front 버림
   s6 --> s3: owner drive
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
@@ -47,4 +42,3 @@ stateDiagram-v2
   class s3 breaks
   class s3 bugPath
   class s3 repeats
-  class s6 bugPath

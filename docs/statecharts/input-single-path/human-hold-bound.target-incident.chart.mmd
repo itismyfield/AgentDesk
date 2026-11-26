@@ -7,15 +7,17 @@ stateDiagram-v2
   s2: 보류 뒤 재구동
   s3: 상한 시각 뒤 재구동
   s4: 보류(Idle 연속 관측됨)
-  s5: 옛 턴 정리됨, 전달 대기
-  s6: 상한 정리 뒤 1회 전달
-  s7: 새 턴 완료
+  s5: lease 정리됨, 완료 kick 대기
+  s6: 옛 턴 정리됨, 전달 대기
+  s7: 상한 정리 뒤 1회 전달
+  s8: 새 턴 완료
   [*] --> s0
   s0 --> s1: owner drive
   s1 --> s2: held_watch 2초 깨움
   s2 --> s1: owner drive
   s1 --> s3: held_watch 2초 깨움
   s3 --> s4: owner drive
-  s4 --> s5: 상한: 옛 episode CAS 정리
-  s5 --> s6: owner drive
-  s6 --> s7: 새 턴 종료
+  s4 --> s5: 상한: 옛 episode#183;행 정리(mute)
+  s5 --> s6: QueueEligible 완료 kick
+  s6 --> s7: owner drive
+  s7 --> s8: 새 턴 종료

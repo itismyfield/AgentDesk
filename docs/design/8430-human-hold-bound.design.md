@@ -1,8 +1,9 @@
-# #8430 사람 입력 보류 상한 설계 w1 (T0)
+# #8430 사람 입력 보류 상한 설계 w2 (T0)
 
 기준 코드 `a53f299560`. 이번 레그는 설계만 한다(prod 코드 변경 0, cargo 0).
 상태 차트: [`HumanHoldBound.tla`](../statecharts/input-single-path/HumanHoldBound.tla), [보고서](../statecharts/input-single-path/human-hold-bound.report.md).
 w1 이어서 범위 추가: i8343(`!clear` 직후 둘째 입력 버림), i8372(루틴 스레드 첫 답장 거절).
+w2: pro 리뷰 review-design-1 반영. P1-1 Codex 화면 근거(§4), P2-1 모델 R1 정합(§6.4, 상태 차트), P2-2 headless 행 종료 근거(§6.5 R5b), P2-3 행 전용 정산·깨움 계약(§6.1, §6.5 R5c), P2-4 non-Managed 행·incarnation(§2.2 C37·C38, §6.5 R5a), P2-5 묶음 전체 특정(§6.4 R3).
 
 약어: **OI** `src/services/discord/router/message_handler/provider_dispatch/owner_input.rs`, **OB** `src/services/discord/router/message_handler/intake_turn/owned_busy.rs`, **IO** `src/services/discord/queue_io/input_owner/`, **QH** `src/services/turn_orchestrator/queued_head/`, **CT** `src/services/claude_tui/`, **D** `src/services/discord/`, **TO** `src/services/turn_orchestrator.rs`.
 
@@ -68,7 +69,7 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 | E37 | IO/effect.rs:42-48, 96-146 | refused / run | Completion::Held/ReadinessHeld → hold_not_sent, 그 외 retain/refuse | leaf NotSentProof | NotSent 기록 지점. 상한 전달도 이 경로를 그대로 탄다 |
 | E38 | IO/effect.rs:216-262 | idle_claude | Modal→Held, ReadinessHeld, OWNER_READINESS_DEADLINE→Refused | PreparationHold, `observe_draft`, `focus_modal` | Idle 판정 술어를 재사용할 곳 |
 | E39 | IO/effect/codex.rs:70-72, 176-256; OI:1713-1747 | idle_codex / CodexBusy | Codex Veto 대부분 waits, `busy_turn: transcript unavailable` | composer lock, rollout | #8426 착지 뒤 대부분 사라진다. witness가 있으면 상한 대상 |
-| E40 | D/health/turn_deliver.rs:131-142, 166-181 | external_turn_holds_channel / hold_for_start | Row/Busy/Unknown | inflight row(`turn_source`), activity | Managed 행은 false라 E33으로 간다 |
+| E40 | D/health/turn_deliver.rs:128-142, 166-181 | external_turn_holds_channel / hold_for_start | `turn_source != Managed` 행(또는 이전 프로세스 Herdr 행) 하나만으로 채널 점유 → owner_drive가 토큰 없이도 active=true(OI:249) → hand_busy 보류 | inflight row(`turn_source`), activity | **상한 대상(행 모양)**. 토큰 CAS에 들어가지 못하므로 R5a(pane 있는 행, 출처 무관)로 다룬다. Managed 행은 false라 E33으로 간다 |
 
 ### 2.2 ② 상한이 정리할 상태를 만들고 바꾸고 지우는 곳 (C행)
 
@@ -110,8 +111,10 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 | C34 | src/services/tui_prompt_dedupe/runtime_binding.rs:256 | publish_runtime_binding | host binding(output_path, session_id) | 상한은 바꾸지 않는다 |
 | C35 | D/headless_turn.rs:1010-1020 → headless_turn/replay_start.rs:64-88 | headless 행 기록 | routine process 턴의 Managed 행 | i8372 행의 출처 |
 | C36 | D/turn_bridge/terminal_outcome_delivery/contracts.rs:244-268; D/headless_turn/process_mailbox.rs:100-152 | Unresolved → relinquish | 게시 미확정이면 행을 남기고 :125-152 정리 루프를 건너뜀 | i8372 행이 남는 이유 |
+| C37 | D/tmux_watcher/liveness.rs:462-473(`build_watcher_reacquire_inflight_state`), 호출 `reacquire_watcher_inflight_for_active_stream` | watcher self-heal | 메일박스 토큰 없이 `ExternalInput`·`user_msg_id=0`·Watcher 소유 행을 저장 | non-Managed 행 모양의 생산자. 그 뒤 terminal이 빠지면 E40으로 보류가 생긴다 → R5a. 모든 TUI-direct가 이 상태라는 뜻은 아니다 |
+| C38 | src/services/turn_orchestrator/incarnation.rs:1-4(+ `registry_purge.rs`) | 메일박스 actor incarnation 교체 | purge가 registry entry를 새 actor로 바꿀 수 있다. 수락된 요청의 후속은 보낸 handle에 묶고 채널로 다시 찾지 않는다 | 상한 check는 시계를 열 때의 `ChannelMailboxHandle`을 쥐고, 판독·정리 직전에 현재 registry handle과 같은지(Arc 동일성) 본다. 바뀌었으면 정리 0, 시계 삭제, `declined reason=incarnation_replaced` |
 
-합계: ① 40행 + ② 36행 = **76행**.
+합계: ① 40행 + ② 38행 = **78행**(w1 76행 + C37·C38).
 
 ### 2.3 보류된 사람 입력이 '버림'으로 끝나는 경로 (D행, i8343 요구)
 
@@ -166,10 +169,23 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 
 | 조건 | herdr Claude | herdr Codex | tmux Claude | tmux Codex |
 |---|---|---|---|---|
-| prompt_ready·빈 composer·모달 없음 (화면 근거) | `composer::restored_screen_idle`(src/services/claude/herdr_turn/composer.rs:106-117: 빈 composer, 모달 없음, `ready_for_input`, `!busy`) | `codex_tui/busy_inject/screen.rs:42-72` `Screen{modal,queued,composer}`: modal 없음, queued 없음, `Composer::Empty` | `prompt_readiness_snapshot`·`final_prompt_ready`(CT/input.rs:106-112, 188, 478-482), `prompt_draft_detected` false | `codex_tui::readiness::judge_in`(readiness.rs:224-276) `Verdict::Idle` |
+| prompt_ready·빈 composer·모달 없음 (화면 근거) | `composer::restored_screen_idle`(src/services/claude/herdr_turn/composer.rs:106-117: 빈 composer, 모달 없음, `ready_for_input`, `!busy`) | **Codex 공통 화면 gate**(아래). capture는 `HerdrTarget::capture_ansi(-80)`(src/services/codex/herdr_turn/busy.rs:47과 같은 판독) | `prompt_readiness_snapshot`·`final_prompt_ready`(CT/input.rs:106-112, 188, 478-482), `prompt_draft_detected` false | **Codex 공통 화면 gate**(아래). capture는 tmux `capture-pane -p -e`(src/services/codex_tui/busy_inject.rs:189-195 `composer_proof`와 같은 판독) |
 | foreground 도구 없음 | 화면 busy footer 없음(tmux_common.rs:480, `HeldRead::Busy` screen.rs:213-215) + transcript에 열린 tool 요청 없음(claude_meta.rs:285 `requests_tool` → :213-232). herdr `ForegroundProcesses::Listed`에 도구가 있으면 거부, `Unreported`는 거부 근거로 쓰지 않음(contract.rs:350-373) | 같은 herdr process_info + rollout 열린 턴 없음 | `Descendants::NoneObserved`(CT/activity/processes.rs:13-24). `Unknown`이면 Unknown | 같은 Descendants(readiness.rs:352) |
-| 턴 끝 (transcript 근거) | `jsonl_completion_scan_idle`(completion_scan.rs:29-37; result, `system{turn_duration\|stop_hook_summary}`, interrupt marker) 또는 `readiness::observe` Proof(readiness/mod.rs:128-140) | `read_native_end`(rollout.rs:105) == `Ended`, 또는 `readiness::Verdict::Idle(Proof{Record\|StopHook})`(readiness.rs:74-80). `jsonl_completion_scan_idle`은 쓰지 않는다(Codex는 `turn.completed`만 인정하고 TUI rollout의 `task_complete`는 종료 표식이 아님, tui_turn_state.rs:2293-2304) | herdr Claude와 같다 | herdr Codex와 같다 |
-| 관측 실패 | capture 실패, `HeldRead::Unread`, `TuiTurnState::Unknown`, binding 없음 → **Unknown** | `Composer::Unread`, `Verdict::Unknown`, `NativeEnd::Unknown` → **Unknown** | `Screen::Unknown`, `PaneLiveness::ProbeError` → **Unknown** | 같음 |
+| 턴 끝 (transcript 근거) | `jsonl_completion_scan_idle`(completion_scan.rs:29-37; result, `system{turn_duration\|stop_hook_summary}`, interrupt marker) 또는 `readiness::observe` Proof(readiness/mod.rs:128-140) | `read_native_end`(rollout.rs:105) == `Ended`, 또는 `readiness::Verdict::Idle(Proof{Record\|StopHook})`(readiness.rs:74-80). `jsonl_completion_scan_idle`은 쓰지 않는다(Codex는 `turn.completed`만 인정하고 TUI rollout의 `task_complete`는 종료 표식이 아님, tui_turn_state.rs:2293-2304) | herdr Claude와 같다 | herdr Codex와 같다. `judge_in`(readiness.rs:224-276) `Verdict::Idle`은 **여기(transcript·실행 근거)에만** 쓴다. 화면을 읽지 않으므로(readiness.rs:224, 318, 387) 화면 근거로 세지 않는다 |
+| 관측 실패 | capture 실패, `HeldRead::Unread`, `TuiTurnState::Unknown`, binding 없음 → **Unknown** | capture 실패·빈 capture, `Composer::Unread`, `Verdict::Unknown`, `NativeEnd::Unknown` → **Unknown** | `Screen::Unknown`, `PaneLiveness::ProbeError` → **Unknown** | capture 실패·빈 capture, `Composer::Unread`, `Verdict::Unknown` → **Unknown** |
+
+**Codex 공통 화면 gate**(P1-1, herdr Codex·tmux Codex 공통). 새 UI 파서를 만들지 않고 기존 `codex_tui::busy_inject::screen::read`(screen.rs:50-72)와 `delivery_veto`(screen.rs:75-83)를 재사용한다. 다음을 모두 만족해야 화면 근거가 양성이다.
+
+```
+capture 성공 ∧ capture.trim() 비어 있지 않음
+∧ delivery_veto(capture) == None      (제출 모달·action menu·completion popup·modal footer)
+∧ !screen.modal
+∧ !screen.queued
+∧ !screen.attachments                 (이미지만 첨부한 초안도 사람 초안이다, screen.rs:256-272)
+∧ screen.composer == Composer::Empty  (Text·Unread는 아님. Unread는 Unknown)
+```
+
+이 조건은 legacy steering이 이미 쓰는 조건(src/services/codex/herdr_turn/busy.rs:57-62, `composer != Empty || attachments`면 거부)과 같다. tmux Codex의 `judge_in`과 두 호스트의 `read_native_end`는 transcript·실행 근거로만 쓴다. 따라서 Codex 한 회는 "공통 화면 gate 양성 ∧ transcript·실행 근거 양성"이다.
 
 - **연속 Idle**: 상한 시각(머리가 처음 보류된 뒤 180초)이 지난 뒤, 2초 간격 판독 3회가 모두 `Idle`이어야 한다(창 4초 이상). 화면 근거와 transcript 근거가 **둘 다** 양성이어야 한 회로 센다. `NotIdle` 또는 `Unknown`이 한 번이라도 나오면 횟수를 0으로 되돌린다.
 - **관측 실패는 상한 미적용**(안전 방향). 상한은 30초 뒤 다시 시도한다(§5). 상한 시각이 지나도 계속 Idle이 아니면 한 번만 "보류 중" 안내를 낸다(§6.6). 정리는 하지 않는다.
@@ -185,6 +201,7 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 ## 6. 정리와 전달
 
 ### 6.1 흐름(순서 고정: 옛 턴 정리 → 전달)
+0. 시계를 열 때 쥔 `ChannelMailboxHandle`이 현재 registry handle과 같은지 본다(C38). 다르면 정리 0, 시계 삭제.
 1. `hold_bound::check(channel)`이 SessionTransitionLease를 `try_acquire`한다(#8422 계약 L). 못 쥐면 30초 뒤 다시 본다.
 2. 게이트를 확인한다. restart_gate 활성(C30), writer boot custody(E3·E4), root recovery(E31), retry wait(E30), readiness/identity hold가 **idle 경로**에서 걸린 경우(E27이 토큰 없이 걸린 것, R2)면 발동하지 않는다.
 3. front가 아직 unattempted이고(`Owner::front()`, `head_injection` 없음), 출처가 §3 적용 행인지 확인한다.
@@ -192,16 +209,16 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
    - (a) 토큰 모양(11:48·i8343 잔여): `turn_lease::identity()`(C17)로 `LeaseIdentity`를 읽는다. `restart_mode`, `rebind_origin`, `user_message_id == 0`이면 거절한다(`input_hold_bound_declined`).
    - (b) 행만 남은 모양(i8372): §6.5.
 5. witness 3회(§4)가 모두 Idle이면 정리한다. 하나라도 아니면 횟수를 0으로 하고 30초 뒤 다시 본다.
-6. **정리는 정식 finalizer로 한다.** 새 crate 내부 함수 `turn_lease::release_for_hold_bound(shared, provider, channel, expected)`를 둔다. 이 함수는 `release_on`(C18)을 `reason = "input_hold_bound"`로 부르는 얇은 래퍼다. 흐름은 `TerminalEvent::OperatorRelease` → `submit_terminal`(C13) → actor `claim`(C14: identity 재비교 → `release_turn_lease_if_matches` CAS(C7) → `clear_inflight_state_for_captured_episode`(C25) → Finalized entry 재개방) → `publish_release`(`TurnCompletionEvent::mailbox_released`)다. `herdr_terminate::settle_captured`(C20)는 쓰지 않는다. pane을 죽이고, 재발 (b)처럼 ledger가 이미 Finalized이면 실패하기 때문이다.
-7. **전달은 상한이 직접 하지 않는다.** `mailbox_released` drain이 owner drive를 깨운다. drive는 `has_active_turn()=false`를 보고 기존 `hand_idle` 경로로 그 front를 한 번 전달한다. 대기열 메시지는 그대로 있다(front는 큐에서 빠지지 않았다). 그래서 중복 방지는 owner grant·`approve_first_key`·`head_injection`이라는 기존 장치가 그대로 맡는다.
+6. **정리는 정식 finalizer로 한다.** 새 crate 내부 함수 `turn_lease::release_for_hold_bound(shared, provider, channel, expected)`를 둔다. 이 함수는 `release_on`(C18)을 `reason = "input_hold_bound"`로 부르는 얇은 래퍼다. 흐름은 `TerminalEvent::OperatorRelease` → `submit_terminal`(C13) → actor `claim`(C14: identity 재비교 → `release_turn_lease_if_matches` CAS(C7) → `clear_inflight_state_for_captured_episode`(C25) → Finalized entry 재개방)다. OperatorRelease는 `is_mute_settlement`가 true인 두 이벤트 가운데 하나라 완료 반응을 내지 않는다(turn_finalizer.rs:288-295). `herdr_terminate::settle_captured`(C20)는 쓰지 않는다. pane을 죽이고, 재발 (b)처럼 ledger가 이미 Finalized이면 실패하기 때문이다.
+7. **전달은 상한이 직접 하지 않는다.** 토큰 모양에서는 CAS가 `removed_token`을 돌려주므로 `publish_release`가 `MailboxReleased`를 낸다(episode.rs:32-43). 다만 idle queue listener는 `queue_is_eligible()`가 아닌 이벤트를 무시한다(queue_io/backstop.rs:692-700). 실제 깨움은 completion admission이 `mailbox_released ∧ operator_released`로 `QueueEligible`을 발행할 때 생긴다(turn_finalizer/completion_admission.rs:85). 이 drain이 owner drive를 깨운다. 행 모양의 깨움은 §6.5 R5c다. drive는 `has_active_turn()=false`를 보고 기존 `hand_idle` 경로로 그 front를 한 번 전달한다. 대기열 메시지는 그대로 있다(front는 큐에서 빠지지 않았다). 그래서 중복 방지는 owner grant·`approve_first_key`·`head_injection`이라는 기존 장치가 그대로 맡는다.
 8. 결과 로그와 안내(§6.6). 시계 entry를 지운다.
 
 ### 6.2 거절과 남은 위험
-- id 0 lease(recovery·TUI-direct·Monitor 자동 턴): CAS 키가 없어 정리할 수 없다(turn_lease.rs:186-191과 같은 이유). `declined reason=unbound_message_identity`를 남기고 입력을 특정한 "보류 중" 안내를 한 번 낸다. 이것은 남은 위험이며 보고서에 적는다.
+- id 0 lease: CAS 키가 없어 정리할 수 없다(turn_lease.rs:189-194와 같은 이유). `declined reason=unbound_message_identity`를 남기고 입력을 특정한 "보류 중" 안내를 한 번 낸다. 리뷰(w1) 확인 결과, 실제로 추적한 Monitor·recovery·TUI-direct 경로는 0이 아닌 active identity를 쓴다. `row.user_msg_id=0`(예: watcher 재획득 행 C37)과 `LeaseIdentity.user_message_id=0`은 같은 뜻이 아니다. 행 쪽 0은 R5a가 행 식별자(`turn_nonce`)로 다루고, lease 쪽 0만 드문 예외로 남는다.
 - `release_for_hold_bound`가 `Err("lease changed …")`를 돌려주면 새 턴이 섰다는 뜻이다. 상한은 아무것도 하지 않고 시계를 지운다(다음 hold가 다시 시작한다).
 
 ### 6.3 옛 턴의 늦은 terminal 제출·답 재게시와의 중복 0
-- 같은 key, TTL(10분, turn_finalizer.rs:125) 안: entry가 Finalized라 `AlreadyFinalized`, 아무 일도 하지 않는다(terminal_handler.rs:112-114).
+- 같은 key, TTL(10분, turn_finalizer.rs:125) 안: entry가 Finalized라 `AlreadyFinalized`, 아무 일도 하지 않는다(terminal_handler.rs:112-114). 다만 모든 늦은 terminal이 같은 ledger key로 온다고 일반화하지는 않는다(Monitor 등은 key가 다를 수 있다). 그런 경우에도 아래 nonce 울타리가 후속 턴을 보호한다.
 - GC 뒤: 후속 턴 토큰이 다른 nonce로 살아 있으면 `episode.rs:82-89`에서 Err, 아무 일도 하지 않는다. 채널이 비어 있으면 `episode_row_miss`(:90-92)가 후속 행을 보호한다.
 - id 0 키의 무방비 `mailbox_finish_turn`(finalize.rs:190)은 남은 위험이다. 상한은 id 0 lease를 정리하지 않으므로 이 위험을 늘리지 않는다.
 - 답 재게시: finalizer는 본문을 게시하지 않는다. 11:48에는 terminate 직후 wrapper 세대가 바뀌어 relay watermark가 리셋됐다(02:58:04). 상한은 pane을 건드리지 않으므로 wrapper 세대가 바뀌지 않고, 이 리셋 경로를 타지 않는다. 시험 T6이 이를 고정한다.
@@ -211,8 +228,8 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 - 원인: `!clear` 직후 새 세션 source가 아직 pin되지 않았다. 그래서 `Context::read`가 Held를 냈고(CT/host_input/busy/herdr.rs:303-343, `current_source` :399-413), `source_hold`가 Readiness 10초 기한을 걸었다(OB:24-30 → readiness_hold.rs:25-46). 그 기한이 턴 A가 끝나기 전에, 또는 턴이 끝난 직후 cold start의 첫 키에서 만료됐다(재현 1 D1, 재현 2 D2). 안내는 어느 입력인지 밝히지 않았다.
 - 규칙 R1: **메일박스 토큰이 있는 동안(`has_active_turn()`=true) 건 보류는 Readiness 기한을 걸지 않는다.** `source_hold(state)`(OB:24-30)를 `source_hold(state, active_turn)`로 바꾼다. `active_turn`이면 Held도 Observe를 돌려준다. 이 함수를 부르는 OB `running`(늘 토큰 있음)·`early`(E10)·`late`(E13)가 모두 같은 규칙을 따른다. liveness는 턴 끝 drain wake(기존)와 이번 상한이 맡는다.
 - 규칙 R2: **토큰 없이 건 기한은 지금과 같다.** 토큰이 없을 때 Held로 걸린 기한(예: idle 경로의 초안·모달·composer 미준비)은 그대로 10초 뒤 버림으로 끝난다. 이것을 턴 경계에서 지우면 그 보류는 기한도 상한도 없이 남는다(상한은 토큰·행이 있어야 발동한다). 그래서 지우지 않는다. 결과적으로 모델의 "턴 경계에서 기한을 다시 잡음"은 R1(토큰이 있는 동안에는 기한 자체가 없음)으로 구현된다. 저장된 `ReadinessHold` 형식은 바뀌지 않는다.
-- 규칙 R3: **그래도 버릴 수밖에 없으면 입력을 특정한다.** D1·D2·D4·D5·D6·D7·D8의 안내에 입력의 짧은 발췌(최대 40자, 한 줄)와 Discord 메시지 ID를 붙인다. 발췌는 버리거나 보관하는 시점의 `PendingQueueItem` 본문에서 만든다. 안내 identity JSON(`input.excerpt`)에 실어 `retained_notice::enqueue` 한 곳에서 본문에 넣는다.
-- 모델: `HumanHoldBoundCurrentClearDrop`에서 **INVARIANT `NoSilentLoss`가 RED**다(3단계 반례: owner drive → Readiness 기한 경과 → 기한 만료로 front 버림, 안내가 입력을 특정하지 않음). `IdleEventuallyDelivered`도 RED다. `HumanHoldBoundTargetClearDrop`은 GREEN이다. `MutNoRebase`(R1 제거: 토큰이 있는 동안 건 기한이 턴 경계를 넘어 남음)는 liveness RED다.
+- 규칙 R3: **그래도 버리거나 보관할 수밖에 없으면, 그 unit의 모든 member를 특정한다**(P2-5). 실제 버림 단위는 원문 하나가 아니다. `refuse_readiness_front`는 front + `matching_followers`를 함께 지우고 `RefusedFront` 하나를 만든다(readiness_hold.rs:115-141). `refuse_not_sent`도 attempt의 모든 member를 지우고 `RefusedInput` 하나를 만든다(refused.rs:12-50). notice drain은 entry당 안내 하나를 보낸다(input_owner/notice.rs:82-115). 그래서 원문을 지우기 **전에** 각 member의 Discord 메시지 ID와 짧은 발췌(최대 40자, 한 줄)를 모아 entry의 notice identity JSON(`input.members[]`)에 싣는다. `retained_notice::enqueue` 한 곳에서 목록을 본문에 넣는다(member가 많으면 앞 5개 + "외 n건"). entry당 outbox 1건과 기존 persistent dedupe 키(identity·attempt nonce·kind, retained_notice.rs:15-26)는 그대로 둔다. 대상은 D1·D2·D4·D5·D6·D7·D8이다.
+- 모델: `HumanHoldBoundCurrentClearDrop`에서 **INVARIANT `NoSilentLoss`가 RED**다(3단계 반례: owner drive → Readiness 기한 경과 → 기한 만료로 front 버림, 안내가 입력을 특정하지 않음). `IdleEventuallyDelivered`도 RED다. `HumanHoldBoundTargetClearDrop`은 GREEN이다. w2 모델은 R1을 그대로 옮겼다. Target Drive는 토큰이 있으면 기한을 만들지 않고, w1의 두 보완 장치(DueDrop의 토큰 예외, OldTerminal의 기한 초기화)는 지웠다. R1을 직접 단언하는 `R1NoDueWhileLeased`를 Target cfg의 검증 가드로 넣었다. w1 모델에 이 가드를 붙이면 Init→Drive 1전이에서 RED다(리뷰어 재현과 일치). `MutNoR1`(기한 생성 금지만 제거)은 `R1NoDueWhileLeased`와 `IdleEventuallyDelivered`가 RED다. R2(idle 경로 기한 유지)는 `CurrentIdleDue`(`NoSilentLoss` RED)와 `TargetIdleDue`(GREEN)로 따로 보고, `MutFirstOnly`(첫 member만 특정)는 `NoSilentLoss` RED다.
 - **#8328 S1과의 분담**: S1(미착지)은 E8 `busy_source_unavailable` 보류 자체와 G2 `Context::read`→Held를 지운다. 토큰이 있으면 즉시 붙여넣고 source는 나중에 pin한다(설계 §5.5.3). 그래서 S1이 착지하면 i8343의 두 재현 모두 전달된다. 이번 상한이 맡는 몫은 S1 뒤에도 남는 것이다. (a) H1 초안·H2 모달·Hc composer 미준비·H8 잠금 경합의 Readiness 기한이 버림으로 끝나는 경로의 특정 안내(R3). (b) 토큰이 있는 동안 건 기한이 턴 경계를 넘어가는 문제(R1, S1 뒤에도 `early`·`late`에 남는 Held). (c) 토큰이 끝내 안 풀리는 Observe 보류(상한 본체). (d) 정지 상태 front(i8372, §6.5).
 
 ### 6.5 i8372 판정: 같은 상태가 아니다. 이번 상한이 보류로 바꿔 함께 푼다
@@ -223,9 +240,15 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
   - 막는 것은 Unresolved로 끝난 턴이 남긴 **Managed inflight 행**이다(C35·C36).
 - 그래도 결과는 같은 부류(조용한 정지, liveness 없음)다. 그래서 이번 상한이 다음 두 가지를 맡는다.
   - 규칙 R4: E33의 foreign-row 거절을 사람 front에서는 **보류로 기록한다**(`hold_start`, 사유 `foreign_row`). 상한 시계가 돌고, 30초 Observe 재시도로 다시 판정한다. owner_input.rs(giant)에는 호출 한 줄만 바꾸고, 본체는 `hold_bound/row_only.rs`에 둔다.
-  - 규칙 R5: **행만 남은 모양의 정리.** 토큰이 없고 행의 `turn_source`가 Managed일 때, 행 종료 근거가 3회 연속 양성이면 그 행을 캡처한 episode 식별자로 지운다(`clear_inflight_state_for_captured_episode`, C25). 행 종료 근거는 다음 모두다. ① 판독할 때마다 메일박스 `cancel_token`이 None이다(또는 그 nonce가 행의 `turn_nonce`가 아니다). ② 행의 세션이 pane 없는 종류(`routine-process` 라벨)면 그 턴의 `routine_runs` 행이 `running`이 아니다(routines/store/recovery.rs:38,64). pane 있는 종류면 §4 witness가 Idle이다. ③ 행의 `restart_mode`·`rebind_origin`이 없다. ledger entry가 Pending으로 남아 있으면 같은 TurnKey로 `submit_terminal(GateTimeout)`을 보내 Finalized로 만든다(mute). 그 뒤 drive가 E33을 다시 지나 전달한다.
+  - 규칙 R5: **행만 남은 모양(토큰 없음 + 행 있음)의 정리.** 먼저 pane 유무와 종료 근거 종류로 나눈다(P2-4). 어느 쪽이든 삭제는 캡처한 episode 식별자로만 한다(`clear_inflight_state_for_captured_episode`, C25). 행의 `restart_mode`·`rebind_origin`이 있으면 거절한다. 판독할 때마다 메일박스 `cancel_token`이 None이어야 한다(또는 그 nonce가 행의 `turn_nonce`가 아니어야 한다).
+    - **R5a pane 있는 행**(출처 무관: Managed·`ExternalInput`·watcher 재획득 C37): §4 witness 두 근거를 3회 연속 적용한다. `turn_source == Managed` 제한은 두지 않는다.
+    - **R5b headless routine 행**(pane 없음, `routine-process` 라벨, P2-2): 다음을 모두 만족해야 한 회 양성이다. 하나라도 조회 실패·행 없음·식별자 불일치면 **Unknown**이다.
+      1. **결합**: 캡처한 row의 finalizer turn id(`discord:<channel>:<n>`)로 `routine_runs`를 정확히 찾는다(`turn_id` 열, routines/store/recovery.rs:16-23). 라벨에는 run ID가 아니라 turn ID의 마지막 구성요소만 있으므로(routines/agent_executor/execution.rs:58-70, `turn_id.rsplit(':')`) 라벨만으로 결합하지 않는다. 그 run의 attempt와 행의 `turn_nonce`가 같아야 한다.
+      2. **명시 terminal 상태**: `!= running`이 아니라 store가 정의한 종료 값(`succeeded`, `failed`, `interrupted`)인지 본다.
+      3. **producer 종료 receipt**: run 종료와 producer 종료는 같은 사실이 아니다. 루틴은 `complete_agent_run` 뒤에 세션 teardown을 하고(agent_executor.rs:445-459), ProcessMailbox는 final frame이 CLI 종료보다 먼저 올 수 있다고 명시한다(process_mailbox.rs:105-106). Unresolved 분기는 producer를 join하지 않고 반환한다(:115-118). 그래서 ProcessMailbox가 retained로 끝나는 분기에서도 producer를 join하고, 그 결과를 행에 `producer_exited` receipt로 남기게 한다(행의 `turn_nonce`로 fence한 기존 저장). 새 장기 감시 장치는 두지 않는다. receipt가 없으면 Unknown이다(이전 프로세스의 행이 여기에 해당한다. 남은 위험으로 적는다).
+    - **R5c 성공 계약**(P2-3): 캡처한 행 제거 → **해당 원장 entry만** mute 정산 → transition lease 해제 → owner wake. GateTimeout은 쓰지 않는다. `is_mute_settlement`는 OperatorRelease·HostTerminated만 true이고(turn_finalizer.rs:288-295), GateTimeout의 의미를 바꾸면 기존 호출자에 영향이 크다. 그래서 좁은 경로 하나를 둔다. `TerminalEvent`에 행 전용 변형 하나와 `is_mute_settlement` 한 줄을 더하고(giant turn_finalizer.rs에는 이 두 줄만), 처리 본체는 새 child `turn_finalizer/row_end.rs`에 둔다. 원장 entry가 없으면 정산을 건너뛴다. 토큰이 없으므로 `publish_release`는 이벤트 없이 돌아온다(episode.rs:32-35). 그래서 깨움은 `MailboxReleased`에 기대지 않는다. 상한이 transition lease를 놓은 뒤 기존 `drive::wake(drive)`(drive.rs:159-161의 deadline tick과 같은 함수)를 직접 부른다. drive가 E33·E40을 다시 지나 전달한다. 정산은 완료 반응이나 성공 전달 증거를 새로 만들지 않는다.
 - 결과 미게시 원인(tui_o "selected channel runtime kind is unknown")은 별도 조사 레그가 맡는다. 겹치는 파일만 적는다: `src/services/tui_o/cutover/channel_gate.rs`(:18-19, :475-485, :512-522, :636-665), `tui_o/cutover/claude_thread.rs`, `tui_prompt_dedupe` `runtime_binding_for_tmux_session`, `tmux_common` `resolve_tmux_runtime_kind_marker`, `tui_o/alarm.rs`, `D/headless_turn.rs:440`, `D/headless_turn/replay_start.rs:90-98`, `D/turn_bridge/terminal_outcome_delivery/contracts.rs:244-268`, `D/headless_turn/process_mailbox.rs:100-152`. 이번 상한은 이 파일들 가운데 아무것도 바꾸지 않는다.
-- 모델: `HumanHoldBoundCurrentRowOnly`에서 `OrphanEventuallyDelivered`가 RED(1단계: owner drive → 남은 행에 막혀 깨움 없이 멈춤)다. `TargetRowOnly`는 GREEN이다.
+- 모델: `CurrentRowOnly`는 `OrphanEventuallyDelivered` RED(1단계: owner drive → 남은 행에 막혀 깨움 없이 멈춤)이고 `TargetRowOnly`는 GREEN이다. `CurrentRowPane`(watcher 재획득 행 + pane Idle)은 `IdleEventuallyDelivered` RED이고 `TargetRowPane`은 GREEN이다. `TargetRunLive`(run 종료, producer 생존)는 producer가 끝날 때까지 정리 0이다. mutant `MutRunOnly`(producer 조건 제거)는 `NoBoundOnBusySession` RED, `MutNoWake`(R5c 깨움 제거)는 `OrphanEventuallyDelivered` RED, `MutGateTimeout`(GateTimeout 정산)은 `BoundSettlesMute` RED, `MutManagedOnly`(Managed 제한 복원)는 `IdleEventuallyDelivered` RED다.
 
 ### 6.6 이벤트 이름(고정)과 채널 notice
 | 이벤트 | 수준 | 필드 | 언제 |
@@ -244,7 +267,7 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 
 | 작업 | ref | 겹치는 파일·함수 | 계약 | 착지 순서 |
 |---|---|---|---|---|
-| #8328 S1(S1-A 구현 진행 중) | `refs/review/i8328-design-5` 8893cb82e9, `docs/design/8328-owner-input-busy-inject.md` | S1-A는 `tui_o/writer/reply_anchor.rs`, `tui_o/store/anchor_bindings.rs`, `deliver/prepared.rs`, `pieces.rs`, `writer/mod.rs`, `deliver.rs`, `store/ledger.rs`, `o_writer_io.rs`, `turn_view_reconciler/injected.rs`, `human_frame/history/v2.rs`, `rotation/owe.rs`만 바꾼다. **이번 상한과 파일 겹침 0.** S1-B(`busy.rs` `admits`, `busy/herdr.rs`), S1-C(`v2/retained.rs`, `turn_lease.rs`, `supervisor.rs`), S1-D(OB:33-97 `running`·OI:407-491 `hand_busy` 삭제)는 겹친다 | S1 설계 L479 A9 "`#8430 상한` \| 안전망 유지. 초안·모달·작업 중 화면에는 미적용(U1) \| 별도", L488 "#8430은 안전망으로 남는다", L160·L163 §2.2 표(H1만 "알림만", H2–H11 "불필요"). **계약 충돌 없음.** 다만 넷을 지킨다. (1) 상한 본체를 S1-D가 지울 `running`/`hand_busy`에 두지 않는다(→ `IO/hold_bound.rs`). (2) S1-C 뒤에는 `awaiting_echo`가 비어 있을 때만 발동한다(L235·L478 귀속 대기는 자기 기한). 이번 조각에서 `hold_bound::check`의 게이트 함수 한 곳에 S1-C 결합점을 남긴다. (3) unattempted front만 전달한다(L63). (4) R1의 `source_hold` 변경은 S1-D가 그 경로를 지울 때 함께 사라진다 | **T0 묶음(이번 S1~S3) 먼저**, S1-A는 파일 겹침이 없어 순서 무관. S1-B~D가 나중에 맞춘다(OB·`turn_lease.rs`·`v2/retained.rs` 병합 지점) |
+| #8328 S1(S1-A 구현 진행 중) | `refs/review/i8328-design-5` 8893cb82e9, `docs/design/8328-owner-input-busy-inject.md` | S1-A는 `tui_o/writer/reply_anchor.rs`, `tui_o/store/anchor_bindings.rs`, `deliver/prepared.rs`, `pieces.rs`, `writer/mod.rs`, `deliver.rs`, `store/ledger.rs`, `o_writer_io.rs`, `turn_view_reconciler/injected.rs`, `human_frame/history/v2.rs`, `rotation/owe.rs`만 바꾼다. **이번 상한과 파일 겹침 0.** S1-B(`busy.rs` `admits`, `busy/herdr.rs`), S1-C(`v2/retained.rs`, `turn_lease.rs`, `supervisor.rs`), S1-D(OB:33-97 `running`·OI:407-491 `hand_busy` 삭제)는 겹친다 | S1 설계 L479 A9 "`#8430 상한` \| 안전망 유지. 초안·모달·작업 중 화면에는 미적용(U1) \| 별도", L488 "#8430은 안전망으로 남는다", L160·L163 §2.2 표(H1만 "알림만", H2–H11 "불필요"). **계약 충돌 없음.** 다만 넷을 지킨다. (1) 상한 본체를 S1-D가 지울 `running`/`hand_busy`에 두지 않는다(→ `IO/hold_bound.rs`). (2) S1-C 뒤에는 `awaiting_echo`가 비어 있을 때만 발동한다(L235·L478 귀속 대기는 자기 기한). 이번 조각에서 `hold_bound::check`의 게이트 함수 한 곳에 S1-C 결합점을 남긴다. (3) unattempted front만 전달한다(L63). (4) R1의 `source_hold` 변경은 S1-D가 그 경로를 지울 때 함께 사라진다 | **T0 묶음(이번 S1~S3) 먼저**, S1-A는 파일 겹침이 없어 순서 무관. w2의 S3는 `turn_finalizer.rs`(enum 변형·mute 한 줄)과 새 `turn_finalizer/row_end.rs`를 더한다. #8432 겹침 목록(`turn_finalizer/reconcile.rs:223-358`)과는 다른 함수다. S1-B~D가 나중에 맞춘다(OB·`turn_lease.rs`·`v2/retained.rs` 병합 지점) |
 | #8437 tui_o 입력 공지 | `refs/review/i8437-fix-w1-wip` 069f818b50 | `tui_prompt_dedupe/extract.rs`, `tui_o/writer/input_notices*`, `store/ledger/input_notices.rs`, `actor/notice_*` | 파일 겹침 0. 상한 notice는 owner outbox 경로라 tui_o 입력 공지와 다르다. 다만 상한이 전달한 front가 실제로는 돌던 턴에 흡수되면 #8437의 `command_row_uuid` receipt 경로를 탄다. Idle 2근거로 막는 오판 시나리오와 같다 | 무관 |
 | #8422 synthetic dead Bound | `refs/review/i8422-impl-w2` c0285b2891 | OB(`early`, `owned_busy/dead_bound.rs`), OI(`start_waits`, `start_idle`), `missing_watch.rs`, `v2/control.rs`, `turn_start.rs` | 계약 L(SessionTransitionLease)을 따른다. 계약 T와는 대상이 달라 충돌하지 않는다(§3) | #8422가 먼저 착지하면 R1의 OB 변경을 그 위에 맞춘다(3줄) |
 | #8426 herdr Codex busy | `refs/review/i8426-s1-w1` 0dec337a74 | OI `hand_busy` → `owner_input/busy_source.rs::live_source` | 파일 겹침은 OI 한 곳(이번에는 OI:1121 호출 한 줄만 바꿈). #8426 뒤 Codex의 남은 토큰 + Idle 모양은 대부분 주입되므로 상한 발동이 줄어든다 | 무관 |
@@ -255,7 +278,7 @@ terminal이 빠진 상류 원인도 있다. 02:47:35에 watcher instance 7이 �
 
 | 안 | 흐름 | 비용 | 위험 |
 |---|---|---|---|
-| **A. owner drive 상한(채택)** | front 보류 시계 → 3분 + Idle 2근거 3회 → 기존 OperatorRelease CAS(정식 finalizer)로 옛 episode 정리 → 기존 drain이 1회 전달 | 새 child 3개 + 호출 교체. 약 13파일/+620 | 정리가 돌고 있는 턴을 지울 위험 → 2근거·연속 3회·unattempted·CAS로 막음. id 0 lease는 남은 위험 |
+| **A. owner drive 상한(채택)** | front 보류 시계 → 3분 + Idle 2근거 3회 → 기존 OperatorRelease CAS(정식 finalizer)로 옛 episode 정리 → 기존 drain이 1회 전달 | 새 child 5개 + 호출 교체. 약 19파일/+950 | 정리가 돌고 있는 턴을 지울 위험 → 2근거·연속 3회·unattempted·CAS로 막음. id 0 lease는 남은 위험 |
 | B. 막힌 정리 경로 각각 수리 | finalizer 조용한 출구 3곳 로그·재시도, stale-age의 Herdr 생사를 herdr pane 상태로 판정, `running`의 Idle을 idle 전달로 넘김, release API 진단 | giant 4개(turn_finalizer.rs 4803, inflight.rs 6345, removal.rs 1694, OI 1795)를 고침. 약 10파일/+400 | 원인마다 따로 막는다. 다음 새 원인에는 liveness가 보장되지 않는다(이슈가 말한 근본 구조 그대로). Idle 전달은 남은 lease 위에 새 턴을 얹어 귀속이 섞인다 |
 
 B는 원인 하나하나에는 싸지만 "결국 전달"을 보장하지 못한다. A는 보류 사유와 무관하게 상한을 건다. 정리도 기존 운영자 해제와 같은 CAS를 쓴다. **A를 고른다.** B의 진단 로그(finalizer 출구 (i)(ii), release 경로)는 별도 일감 후보로 보고서에 적는다.
@@ -264,22 +287,28 @@ B는 원인 하나하나에는 싸지만 "결국 전달"을 보장하지 못한�
 
 | 조각 | 내용 | prod 파일(추정) | 순 +줄(추정) |
 |---|---|---|---|
-| S1 상한 본체(T0) | `IO/hold_bound.rs`(시계 map, due, check, 게이트, 이벤트), `IO/hold_bound/witness.rs`(§4 판독 4종), `IO/mod.rs` 등록, `IO/drive.rs` settle_due 결합·시계 초기화 훅, `D/turn_lease.rs` `release_for_hold_bound`, `D/queue_io/retained_notice.rs` released/waiting 안내 | 6 | +430 |
-| S2 i8343 무유실 | `OB` `source_hold(state, active_turn)`와 호출 3곳(R1), `retained_notice.rs` 발췌·ID 삽입, `QH/v2/readiness_hold.rs`·`QH/v2/refused.rs`·`QH/v2/retained.rs`·`QH/v2/start_failure.rs` 발췌 전달(R3) | 6(retained_notice는 S1과 중복) | +100 |
-| S3 i8372 행만 남은 모양 | `IO/hold_bound/row_only.rs`(R4 보류화, R5 근거·정리), OI:1121 호출 한 줄 교체, routine run 상태 판독 1곳 | 3 | +180 |
-| 합계 | | **13파일**(중복 제외) | **+710** |
+| S1 상한 본체(T0) | `IO/hold_bound.rs`(시계 map, 시계를 연 actor handle, due, check, 게이트, 이벤트), `IO/hold_bound/witness.rs`(§4 판독 4종 + Codex 공통 화면 gate), `IO/mod.rs` 등록, `IO/drive.rs` settle_due 결합·시계 초기화 훅, `D/turn_lease.rs` `release_for_hold_bound`, `D/queue_io/retained_notice.rs` released/waiting 안내 | 6 | +470 |
+| S2 i8343 무유실 | `OB` `source_hold(state, active_turn)`와 호출 3곳(R1), `retained_notice.rs` member 목록 본문(R3), `QH/v2/readiness_hold.rs`·`QH/v2/refused.rs`·`QH/v2/retained.rs`·`QH/v2/start_failure.rs`·`QH/v2/claude_handoff.rs` 제거 전 member ID·발췌 수집 | 7(retained_notice는 S1과 중복) | +150 |
+| S3 행만 남은 모양 | `IO/hold_bound/row_only.rs`(R4 보류화, R5a·R5b 근거, R5c 순서·wake), OI:1121 호출 한 줄 교체, routine run 결합 판독(`routines/store` 쿼리 1개), `headless_turn/process_mailbox.rs` retained 분기 producer join·receipt, `inflight/model.rs` receipt 필드 1개, `turn_finalizer.rs` 행 전용 변형·mute 한 줄, 새 `turn_finalizer/row_end.rs` | 7 | +330 |
+| 합계 | | **19파일**(중복 제외) | **+950** |
 
-모든 조각이 상한(30파일/+1500)과 PLAN_READY 정지선(+1200) 안에 든다. giant(OI 1795, turn_finalizer.rs 4803 등)에는 새 책임을 얹지 않는다. OI는 호출 한 줄만 바꾼다. OB(813)·drive.rs(227)·turn_lease.rs(340)·retained_notice.rs(173)는 1000줄 미만이다.
+모든 조각이 상한(30파일/+1500)과 PLAN_READY 정지선(+1200) 안에 든다. 합계도 +1200 안이다. giant에는 새 책임을 얹지 않는다. OI(1795)는 호출 한 줄, turn_finalizer.rs(4803)는 enum 변형 하나와 mute 판정 한 줄, inflight/model.rs(1446)는 필드 하나만 바꾸고, 본체는 새 child(`hold_bound*`, `row_end.rs`)에 둔다. OB(813)·drive.rs(227)·turn_lease.rs(340)·retained_notice.rs(173)·process_mailbox.rs(294)는 1000줄 미만이다.
 
 시험(→ 상태 차트 cfg):
 - T1(이슈 1) terminal 미제출 + inflight·토큰 잔존 + Herdr Idle → 180초 + 3회 Idle 뒤 `input_hold_bound_released`, front 1회 전달, notice 1건 (`TargetIncident`)
 - T2(이슈 2) 같은 모양 + 사람 초안 / 모달 / 작업 중(transcript 열림, 도구 사이 Idle처럼 보임) → 발동 0, waiting 안내 1건 (`TargetDraft`·`TargetModal`·`TargetRunning`, `MutNoIdle*`·`MutNoTranscript` RED)
-- T3(이슈 3) 상한 정리 직후 drain과 held_watch wake가 겹쳐도 전달 1회, `head_injection` 있는 front에는 발동 0 (`MutNoDedupe` RED)
+- **T2c(P1-1)** herdr Codex·tmux Codex 두 호스트 × {텍스트 초안, 모달, 이미지 전용 초안(`attachments` ∧ `Composer::Empty`)}에서 종료 rollout·잔여 lease·같은 front를 고정하고 각각 3회 관측 → 정리 0, lease·행 보존, 전달 0. 차단 요소를 지우면 정리 1·전달 1. tmux Codex에서 `judge_in`=Idle이어도 화면 gate가 음성이면 정리 0 (`TargetImageDraft`, `MutNoScreenGate`·`MutNoAttachments` RED)
+- T3(이슈 3) 상한 정리 직후 QueueEligible drain과 held_watch wake가 겹쳐도 전달 1회, `head_injection` 있는 front에는 발동 0 (`MutNoDedupe` RED)
 - T4 재시작 뒤: 시계 0부터, lease 재등록 뒤 다시 180초 후 발동 (`TargetRestart`)
-- T5 관측 실패: capture 실패·`TuiTurnState::Unknown`이 끼면 횟수 0, 발동 0, 회복 뒤 3회 연속이면 발동 (`TargetFlicker`)
+- T5 관측 실패: capture 실패·`TuiTurnState::Unknown`·`Composer::Unread`가 끼면 횟수 0, 발동 0, 회복 뒤 3회 연속이면 발동 (`TargetFlicker`)
 - T6 늦은 terminal 제출: 정리 뒤 옛 `Complete`가 오면 `AlreadyFinalized`, 새 턴 lease 유지, 답 재게시 0(relay watermark 리셋 없음) (`TargetLate`, `MutNoLedgerFence` RED)
 - T7 id 0 lease: 발동 거절 `declined reason=unbound_message_identity` + waiting 안내 1건
-- T8(i8343) `!clear` 직후 source 미pin + busy 보류 → 턴 A 끝 뒤 cold start 첫 키가 거부되지 않고 1회 전달. 10초가 지나도 버림 0 (`TargetClearDrop`, `CurrentClearDrop` RED, `MutNoRebase` RED)
-- T9(i8343) idle 경로 Readiness 기한 버림(초안이 남은 채 10초) → 안내에 발췌·메시지 ID 포함
-- T10(i8372) 토큰 없음 + Managed 행 + routine run 종료 → foreign_row 거절이 보류로 기록되고, 상한 뒤 행 정리 + 전달 1회 (`TargetRowOnly`, `CurrentRowOnly` RED)
+- T8(i8343) `!clear` 직후 source 미pin + busy 보류 → 기한이 생기지 않고(R1), 턴 A 끝 뒤 cold start 첫 키가 거부되지 않고 1회 전달. 10초가 지나도 버림 0 (`TargetClearDrop` + 가드 `R1NoDueWhileLeased`, `CurrentClearDrop` RED, `MutNoR1` RED)
+- T9(i8343·R2) idle 경로 Readiness 기한 버림(초안이 남은 채 10초)은 그대로 일어나고 안내에 member 목록이 들어간다 (`TargetIdleDue`, `CurrentIdleDue` RED)
+- **T9b(P2-5)** 서로 다른 A·B를 한 unit으로 묶어 Readiness 만료와 `refuse_not_sent`를 각각 실행 → 안내 1건에 A·B 둘 다. drain 재실행·재시작 뒤에도 안내 1건 (`MutFirstOnly` RED)
+- T10(i8372) 토큰 없음 + Managed 행 + run `succeeded` + producer receipt → foreign_row 거절이 보류로 기록되고, 상한 뒤 행 정리 + 전달 1회 (`TargetRowOnly`, `CurrentRowOnly` RED)
+- **T10b(P2-2)** run은 종료 상태지만 producer 생존(receipt 없음) → 정리 0. receipt가 생기면 정리 1·전달 1. 다른 attempt·조회 실패·행 없음 → 정리 0 (`TargetRunLive`, `MutRunOnly` RED)
+- **T10c(P2-3)** 토큰 없이 Pending 원장 + Managed 행 fixture, `MailboxReleased`가 한 번도 나오지 않아도 정리 뒤 front 1회 전달. 정산이 완료 반응·성공 전달 증거를 만들지 않음 (`MutNoWake`·`MutGateTimeout` RED)
+- **T10d(P2-4)** 토큰 없는 Managed·`ExternalInput`(watcher 재획득) pane 행: Idle이면 정리·전달 1회, Busy·Unknown이면 정리 0 (`TargetRowPane`, `CurrentRowPane` RED, `MutManagedOnly` RED)
+- **T10e(P2-4)** actor incarnation 교체: 옛 actor handle로 시작한 check가 새 actor의 lease·행을 정리하지 않음(`declined reason=incarnation_replaced`)
 - T11 상한 정리 중 새 턴이 lease를 잡음 → `lease_changed`, 정리 0, 새 턴 행 보존
