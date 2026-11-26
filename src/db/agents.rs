@@ -316,7 +316,7 @@ mod tests {
 
     /// #3594 (T3, codex R2 Finding 2): the dispatch-channel resolver
     /// (`resolve_agent_dispatch_channel_pg`) and the delivery router
-    /// (`outbox_route::use_counter_model_channel`) MUST classify counter-model
+    /// (`domain::dispatch_route::use_counter_model_channel`) MUST classify counter-model
     /// channels identically. The resolver now calls the shared predicate, so this
     /// pins the contract: `plan-review` (the channel that regressed) and the
     /// review family resolve to the counter-model channel, while the

@@ -114,11 +114,8 @@ fn recursive_files(
 async fn exact_off_pg_statement_trace_and_files_zero() {
     crate::services::discord::health::test_support::install_runtime_ports_for_tests();
     if let Ok(url) = std::env::var("C2A_OFF_DATABASE") {
-        let proxy = crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy::start(
-            &url,
-            std::time::Duration::ZERO,
-        )
-        .await;
+        let proxy =
+            crate::db::pg_wire_proxy::PgWireProxy::start(&url, std::time::Duration::ZERO).await;
         let pool = proxy.pool(1);
         let root = crate::config::runtime_root().expect("actual runtime root");
         let before = recursive_files(&root);

@@ -7,7 +7,7 @@ use futures::FutureExt;
 
 use super::contract_tests::{seed, until, write};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+use crate::db::pg_wire_proxy::PgWireProxy;
 
 const EPOCHS: usize = 4;
 /// Main, tick and their two reload Contexts.

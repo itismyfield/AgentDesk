@@ -3,9 +3,7 @@ use std::sync::Arc;
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId};
 
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
-};
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 
 use super::delivery::{deliver_outbound, first_raw_message_id};
 use super::message::{DiscordOutboundMessage, OutboundReferenceContext, OutboundTarget};

@@ -114,9 +114,7 @@ pub(super) async fn redirect_dispatch(
             // Use cached dispatch metadata for thread reuse and cross-channel role override
             let dispatch_info = dispatch_info_cached;
             let is_counter_model_dispatch =
-                crate::services::dispatches::outbox_route::use_counter_model_channel(
-                    dispatch_type_str,
-                );
+                crate::domain::dispatch_route::use_counter_model_channel(dispatch_type_str);
             let alt_channel_id = dispatch_info
                 .as_ref()
                 .and_then(|i| i.discord_channel_alt.as_deref())

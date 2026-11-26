@@ -6,9 +6,9 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 use crate::services::engine_runtime::health_port::QueueCancelPort;
 use crate::services::provider::ProviderKind;
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
 use crate::services::turn_lifecycle::{
     ForceKillRow, LifecycleStopPort, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
     stop_turn_preserving_queue_without_cancel_event,

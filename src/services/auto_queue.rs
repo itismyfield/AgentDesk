@@ -13,7 +13,7 @@ use crate::db::auto_queue::{
     StatusFilter,
 };
 use crate::engine::PolicyEngine;
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 use crate::utils::github_links::normalize_optional_github_repo_id;
 
 pub use crate::domain::auto_queue_log::AutoQueueLogContext;
@@ -1314,7 +1314,7 @@ fn dispatch_thread_channel_id(
     bindings: Option<&crate::db::agents::AgentChannelBindings>,
 ) -> Option<u64> {
     let bindings = bindings?;
-    let channel = if crate::services::dispatches::outbox_route::use_counter_model_channel(
+    let channel = if crate::domain::dispatch_route::use_counter_model_channel(
         fact.dispatch_type.as_deref(),
     ) {
         bindings.counter_model_channel()

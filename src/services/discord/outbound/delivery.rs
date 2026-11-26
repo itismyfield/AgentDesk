@@ -10,11 +10,9 @@ use std::time::Duration;
 
 use poise::serenity_prelude::ChannelId;
 
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use crate::services::discord::formatting::{
     byte_index_at_discord_message_units, discord_message_units,
-};
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 use crate::services::provider::{CancelToken, cancel_requested};
 

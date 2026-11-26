@@ -1,5 +1,5 @@
 use super::{AutoQueueLogContext, AutoQueueService};
-use crate::services::service_error::{ErrorCode, ServiceError, ServiceResult};
+use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 

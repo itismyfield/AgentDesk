@@ -5486,7 +5486,6 @@ src/
 │   ├── running_binary.rs
 │   ├── scheduled_messages.rs
 │   ├── scheduling.rs
-│   ├── service_error.rs
 │   ├── session_activity.rs
 │   ├── session_backend.rs
 │   ├── session_evidence.rs

@@ -1,13 +1,9 @@
 use sqlx::PgPool;
 
-pub(crate) use crate::domain::outbound::port::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
-};
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 
-// Dispatch delivery result and follow-up types owned by this service; post errors
-// are the outbound port's and are re-exported for existing paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReviewFollowupKind {
     Pass,

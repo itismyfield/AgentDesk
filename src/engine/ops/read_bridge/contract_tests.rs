@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::utils::bridge_deadline::ScopedBridgeDeadline;
 
 /// config scalar, config blob fallback, kv live, kv expiring later, kv missing.

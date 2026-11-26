@@ -159,8 +159,6 @@ pub async fn is_recent_cluster_worker(
         == Some("worker")
 }
 
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::db::pg_wire_proxy;
 mod request_batch;
 mod session_state;
 #[cfg(test)]
