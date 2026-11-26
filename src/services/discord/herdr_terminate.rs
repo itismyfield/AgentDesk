@@ -1,6 +1,7 @@
 //! Explicit termination of one Herdr execution, by the operator route, a user clear or an HTTP
 //! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
+mod idle_expire;
 mod never_started;
 pub(crate) mod restart_recovery;
 mod retired_wake;
@@ -8,6 +9,8 @@ pub(crate) mod root_replaced;
 
 pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
 pub(crate) use crate::services::turn_orchestrator::RetiredExclusion;
+use idle_expire::AutoEnd;
+pub(crate) use idle_expire::{IdleEnd, expire_idle_herdr};
 pub(in crate::services::discord) use never_started::{
     NeverStartedTerminate, terminate_never_started,
 };
@@ -458,7 +461,7 @@ async fn terminate_scoped(
     expected: Option<http_force::Expected>,
     resume_retired: bool,
     by_pane: bool,
-    never_started: Option<&NeverStartedTerminate>,
+    auto: Option<AutoEnd<'_>>,
 ) -> Result<(RetiredExclusion, retired_wake::RetiredWake), TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
@@ -480,8 +483,8 @@ async fn terminate_scoped(
     {
         return Err(Refused("execution identity differs".into()));
     }
-    if never_started.is_some_and(|asked| !asked.admits(record)) {
-        return Err(Refused("execution is not a never-started pending".into()));
+    if let Some(why) = auto.as_ref().and_then(|auto| auto.refuses(record)) {
+        return Err(Refused(why.into()));
     }
     let Some(provider) = ProviderKind::from_str(&record.owner.provider) else {
         return Err(Refused("unknown provider".into()));
@@ -499,7 +502,7 @@ async fn terminate_scoped(
         .await
         .map_err(Refused)?;
     // An automatic end settles no turn: any turn holding the channel refuses it before a fence.
-    if never_started.is_some() && turn.is_some() {
+    if auto.is_some() && turn.is_some() {
         return Err(Refused("turn active".into()));
     }
     #[cfg(test)]
@@ -542,8 +545,11 @@ async fn terminate_scoped(
         })
     };
     let fence = if let Some(target) = &target {
-        let shut = match never_started {
-            Some(asked) => asked.fence(&shared, channel, record, target).await,
+        let shut = match &auto {
+            Some(auto) => {
+                auto.fence(&shared, &provider, channel, record, target)
+                    .await
+            }
             None => target
                 .termination_fence()
                 .map_err(|error| Refused(format!("{error:?}"))),

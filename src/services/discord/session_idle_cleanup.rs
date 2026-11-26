@@ -71,7 +71,8 @@ async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     };
     let mut safe_expired = Vec::new();
     for mut candidate in expired {
-        // A Herdr-configured channel keeps its session, returned input, mailbox and worktree.
+        // A Herdr-configured channel keeps its session, returned input, mailbox and worktree;
+        // its idle pane is ended by the idle-kill policy through kill-tmux.
         let configured = super::host_defer_gate::configured_refusal;
         if configured(shared, &provider, candidate.channel_id.get())
             .await

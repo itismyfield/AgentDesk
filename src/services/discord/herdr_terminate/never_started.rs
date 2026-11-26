@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use sqlx::PgPool;
 
-use super::{ChannelId, OperatorTerminate, SharedData, TerminationResult, terminate_scoped};
+use super::{
+    AutoEnd, ChannelId, OperatorTerminate, SharedData, TerminationResult, terminate_scoped,
+};
 use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedState};
 use crate::services::discord::queue_io::input_owner::drive::Front;
 use crate::services::session_host::{HerdrTarget, TerminationFence};
@@ -76,7 +78,8 @@ pub(in crate::services::discord) async fn terminate_never_started(
         session_key: request.session_key.clone(),
         execution_nonce: request.execution_nonce.clone(),
     };
-    match terminate_scoped(scoped, shared, pool, None, false, false, Some(&request)).await {
+    let auto = Some(AutoEnd::NeverStarted(&request));
+    match terminate_scoped(scoped, shared, pool, None, false, false, auto).await {
         Ok((exclusion, _wake)) => {
             drop(exclusion);
             TerminationResult::Retired

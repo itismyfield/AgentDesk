@@ -9,6 +9,7 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions as dispatched_sessions_db;
 use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::services::tmux_turn_liveness::cleanup_host::CleanupHostRefusal;
 
 use super::{
     ProviderOutputEvidence, RawProviderTranscriptObservationMode,
@@ -111,9 +112,18 @@ pub(super) async fn kill_tmux_session_impl(
         session_key,
     )
     .await;
+    let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
     if let Err(refusal) = host {
-        // Non-legacy hosts (herdr, hosted E2E) have no idle-cleanup path in this route;
-        // the host owns teardown. One WARN per session key, then debug.
+        // The idle policy's Herdr row gets the idle end instead of a preserve alarm.
+        let idle_policy = reason_is_idle_cleanup && minimum_idle_minutes.is_some();
+        if idle_policy && refusal == CleanupHostRefusal::NotLegacyTmux {
+            let herdr = super::herdr_idle::herdr_idle_kill(state, pool, session_key, &tmux_name);
+            if let Some(reply) = herdr.await {
+                return reply;
+            }
+        }
+        // Other non-legacy hosts (hosted E2E, marker-only) have no idle-cleanup path in this
+        // route; the host owns teardown. One WARN per session key, then debug.
         if host_refusal_first_sighting(session_key) {
             tracing::warn!(
                 session_key,
@@ -131,7 +141,6 @@ pub(super) async fn kill_tmux_session_impl(
         }
         return preserved_without_probe(pool, session_key, &tmux_name, refusal.reason()).await;
     }
-    let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
     let tmux_presence = crate::services::platform::tmux::session_presence(&tmux_name);
     // A failed probe is not a missing session: no kill and no disconnected row.
     if tmux_presence == crate::services::platform::tmux::SessionPresence::ProbeFailed {
@@ -591,7 +600,7 @@ pub(super) fn idle_kill_skip_decision(
 }
 
 /// True the first time this process refuses a session key for its host, false on repeats.
-fn host_refusal_first_sighting(session_key: &str) -> bool {
+pub(super) fn host_refusal_first_sighting(session_key: &str) -> bool {
     static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
     SEEN.get_or_init(Default::default)

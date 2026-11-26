@@ -1,0 +1,429 @@
+---
+title: "Herdr 6시간 유휴 자동 종료"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks AlarmNotRepeated
+    lg1: Path to the AlarmNotRepeated or IdleEventuallyCloses bug
+    lg2: Repeats forever, so IdleEventuallyCloses breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 실행 Bound#183;pane 살아 있음 #183; 작업 없음
+  s1: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감
+  s2: 실행 Bound#183;pane 살아 있음 #183; 활성 턴
+  s3: 실행 Bound#183;pane 살아 있음 #183; active_dispatch
+  s4: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 6시간 유휴
+  s5: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감
+  s6: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감 #183; 6시간 유휴
+  s7: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전
+  s8: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch
+  s9: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행
+  s10: 실행 Bound#183;pane 살아 있음 #183; 활성 턴 #183; 6시간 유휴
+  s11: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 6시간 유휴
+  s12: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 6시간 유휴 #183; 보류 경보 1회
+  s13: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감
+  s14: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감 #183; 6시간 유휴
+  s15: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 1회
+  s16: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전
+  s17: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch
+  s18: 실행 Bound#183;pane 살아 있음 #183; 활성 턴 #183; 보류 경보 1회
+  s19: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 보류 경보 1회
+  s20: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전 #183; 6시간 유휴
+  s21: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch #183; 6시간 유휴
+  s22: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행 #183; 6시간 유휴
+  s23: 실행 Bound#183;pane 살아 있음 #183; 활성 턴 #183; 6시간 유휴 #183; 보류 경보 1회
+  s24: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 6시간 유휴 #183; 보류 경보 2회
+  s25: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감
+  s26: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감 #183; 보류 경보 1회
+  s27: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감 #183; 보류 경보 1회
+  s28: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감 #183; 6시간 유휴
+  s29: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 2회
+  s30: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전
+  s31: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 보류 경보 1회
+  s32: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch #183; 보류 경보 1회
+  s33: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행 #183; 보류 경보 1회
+  s34: 실행 Bound#183;pane 살아 있음 #183; 활성 턴 #183; 보류 경보 2회
+  s35: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 보류 경보 2회
+  s36: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전 #183; 6시간 유휴
+  s37: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch #183; 6시간 유휴
+  s38: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 1회
+  s39: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 6시간 유휴 #183; 보류 경보 1회
+  s40: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행 #183; 6시간 유휴 #183; 보류 경보 1회
+  s41: 실행 Bound#183;pane 살아 있음 #183; 활성 턴 #183; 6시간 유휴 #183; 보류 경보 2회
+  s42: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감 #183; 보류 경보 1회
+  s43: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 서버 내려감 #183; 보류 경보 2회
+  s44: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감 #183; 보류 경보 2회
+  s45: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감 #183; 6시간 유휴
+  s46: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 1회
+  s47: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 1회
+  s48: 실행 Bound#183;pane 살아 있음 #183; inflight 행
+  s49: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전
+  s50: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전 #183; 보류 경보 1회
+  s51: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전 #183; 보류 경보 1회
+  s52: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch #183; 보류 경보 1회
+  s53: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 보류 경보 2회
+  s54: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch #183; 보류 경보 2회
+  s55: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행 #183; 보류 경보 2회
+  s56: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전 #183; 6시간 유휴
+  s57: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 1회
+  s58: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 2회
+  s59: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 6시간 유휴 #183; 보류 경보 2회
+  s60: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행 #183; 6시간 유휴 #183; 보류 경보 2회
+  s61: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감 #183; 보류 경보 1회
+  s62: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감 #183; 보류 경보 2회
+  s63: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 2회
+  s64: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 2회
+  s65: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch
+  s66: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전 #183; 보류 경보 1회
+  s67: 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; runtime 등록 전 #183; 보류 경보 2회
+  s68: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전 #183; 보류 경보 2회
+  s69: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch #183; 보류 경보 2회
+  s70: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 6시간 유휴
+  s71: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전 #183; 6시간 유휴
+  s72: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 1회
+  s73: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 1회
+  s74: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 1회
+  s75: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 2회
+  s76: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감 #183; 보류 경보 2회
+  s77: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 1회
+  s78: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 보류 경보 1회
+  s79: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전 #183; 보류 경보 1회
+  s80: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전 #183; 보류 경보 2회
+  s81: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 6시간 유휴
+  s82: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 6시간 유휴 #183; 보류 경보 1회
+  s83: 실행 Bound#183;pane 살아 있음 #183; active_dispatch #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 2회
+  s84: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 2회
+  s85: 실행 Bound#183;pane 살아 있음 #183; 활성 턴#183;inflight 행#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 2회
+  s86: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 서버 내려감 #183; 6시간 유휴 #183; 보류 경보 2회
+  s87: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 보류 경보 1회
+  s88: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 보류 경보 2회
+  s89: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전 #183; 보류 경보 2회
+  s90: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 1회
+  s91: 실행 Bound#183;pane 살아 있음 #183; inflight 행 #183; 6시간 유휴 #183; 보류 경보 2회
+  s92: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 보류 경보 2회
+  s93: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 1회
+  s94: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; runtime 등록 전 #183; 6시간 유휴 #183; 보류 경보 2회
+  s95: 실행 Bound#183;pane 살아 있음 #183; inflight 행#183;active_dispatch #183; 6시간 유휴 #183; 보류 경보 2회
+  [*] --> s0
+  s0 --> s1: dcserver 재시작
+  s0 --> s2: 사람#183;봇#183;task-notification 입력
+  s0 --> s3: dispatch 부착
+  s0 --> s4: 6시간 경과
+  s1 --> s6: 6시간 경과
+  s1 --> s7: 부팅
+  s2 --> s0: 턴 끝
+  s2 --> s1: dcserver 재시작
+  s2 --> s8: dispatch 부착
+  s2 --> s9: inflight 행 저장
+  s2 --> s10: 6시간 경과
+  s3 --> s5: dcserver 재시작
+  s3 --> s8: 사람#183;봇#183;task-notification 입력
+  s3 --> s11: 6시간 경과
+  s4 --> s2: 사람#183;봇#183;task-notification 입력
+  s4 --> s3: dispatch 부착
+  s4 --> s6: dcserver 재시작
+  s4 --> s12: idle-kill 틱
+  s5 --> s14: 6시간 경과
+  s5 --> s16: 부팅
+  s6 --> s20: 부팅
+  s7 --> s0: runtime 등록
+  s7 --> s1: dcserver 재시작
+  s7 --> s16: dispatch 부착
+  s7 --> s20: 6시간 경과
+  s8 --> s0: 턴 끝
+  s8 --> s5: dcserver 재시작
+  s8 --> s17: inflight 행 저장
+  s8 --> s21: 6시간 경과
+  s9 --> s0: 턴 끝
+  s9 --> s13: dcserver 재시작
+  s9 --> s17: dispatch 부착
+  s9 --> s22: 6시간 경과
+  s10 --> s4: 턴 끝
+  s10 --> s6: dcserver 재시작
+  s10 --> s8: dispatch 부착
+  s10 --> s22: inflight 행 저장
+  s10 --> s23: idle-kill 틱
+  s11 --> s8: 사람#183;봇#183;task-notification 입력
+  s11 --> s14: dcserver 재시작
+  s12 --> s15: dcserver 재시작
+  s12 --> s18: 사람#183;봇#183;task-notification 입력
+  s12 --> s19: dispatch 부착
+  s12 --> s24: idle-kill 틱
+  s13 --> s28: 6시간 경과
+  s13 --> s30: 부팅
+  s14 --> s36: 부팅
+  s15 --> s38: 부팅
+  s16 --> s3: runtime 등록
+  s16 --> s5: dcserver 재시작
+  s16 --> s36: 6시간 경과
+  s17 --> s0: 턴 끝
+  s17 --> s25: dcserver 재시작
+  s17 --> s37: 6시간 경과
+  s18 --> s23: 6시간 경과
+  s18 --> s26: dcserver 재시작
+  s18 --> s31: 턴 끝
+  s18 --> s32: dispatch 부착
+  s18 --> s33: inflight 행 저장
+  s19 --> s27: dcserver 재시작
+  s19 --> s32: 사람#183;봇#183;task-notification 입력
+  s19 --> s39: 6시간 경과
+  s20 --> s4: runtime 등록
+  s20 --> s6: dcserver 재시작
+  s20 --> s16: dispatch 부착
+  s20 --> s38: idle-kill 틱
+  s21 --> s4: 턴 끝
+  s21 --> s14: dcserver 재시작
+  s21 --> s37: inflight 행 저장
+  s22 --> s4: 턴 끝
+  s22 --> s17: dispatch 부착
+  s22 --> s28: dcserver 재시작
+  s22 --> s40: idle-kill 틱
+  s23 --> s12: 턴 끝
+  s23 --> s15: dcserver 재시작
+  s23 --> s32: dispatch 부착
+  s23 --> s40: inflight 행 저장
+  s23 --> s41: idle-kill 틱
+  s24 --> s29: dcserver 재시작
+  s24 --> s34: 사람#183;봇#183;task-notification 입력
+  s24 --> s35: dispatch 부착
+  s25 --> s45: 6시간 경과
+  s25 --> s49: 부팅
+  s26 --> s15: 6시간 경과
+  s26 --> s50: 부팅
+  s27 --> s46: 6시간 경과
+  s27 --> s51: 부팅
+  s28 --> s56: 부팅
+  s29 --> s58: 부팅
+  s30 --> s13: dcserver 재시작
+  s30 --> s48: runtime 등록
+  s30 --> s49: dispatch 부착
+  s30 --> s56: 6시간 경과
+  s31 --> s12: 6시간 경과
+  s31 --> s18: 사람#183;봇#183;task-notification 입력
+  s31 --> s19: dispatch 부착
+  s31 --> s26: dcserver 재시작
+  s32 --> s27: dcserver 재시작
+  s32 --> s31: 턴 끝
+  s32 --> s52: inflight 행 저장
+  s32 --> s57: 6시간 경과
+  s33 --> s31: 턴 끝
+  s33 --> s40: 6시간 경과
+  s33 --> s42: dcserver 재시작
+  s33 --> s52: dispatch 부착
+  s34 --> s41: 6시간 경과
+  s34 --> s43: dcserver 재시작
+  s34 --> s53: 턴 끝
+  s34 --> s54: dispatch 부착
+  s34 --> s55: inflight 행 저장
+  s35 --> s44: dcserver 재시작
+  s35 --> s54: 사람#183;봇#183;task-notification 입력
+  s35 --> s59: 6시간 경과
+  s36 --> s11: runtime 등록
+  s36 --> s14: dcserver 재시작
+  s37 --> s4: 턴 끝
+  s37 --> s45: dcserver 재시작
+  s38 --> s12: runtime 등록
+  s38 --> s15: dcserver 재시작
+  s38 --> s51: dispatch 부착
+  s38 --> s58: idle-kill 틱
+  s39 --> s32: 사람#183;봇#183;task-notification 입력
+  s39 --> s46: dcserver 재시작
+  s40 --> s12: 턴 끝
+  s40 --> s47: dcserver 재시작
+  s40 --> s52: dispatch 부착
+  s40 --> s60: idle-kill 틱
+  s41 --> s24: 턴 끝
+  s41 --> s29: dcserver 재시작
+  s41 --> s54: dispatch 부착
+  s41 --> s60: inflight 행 저장
+  s42 --> s47: 6시간 경과
+  s42 --> s66: 부팅
+  s43 --> s29: 6시간 경과
+  s43 --> s67: 부팅
+  s44 --> s63: 6시간 경과
+  s44 --> s68: 부팅
+  s45 --> s71: 부팅
+  s46 --> s72: 부팅
+  s47 --> s73: 부팅
+  s48 --> s9: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s48 --> s13: dcserver 재시작
+  s48 --> s65: dispatch 부착
+  s48 --> s70: 6시간 경과
+  s49 --> s25: dcserver 재시작
+  s49 --> s65: runtime 등록
+  s49 --> s71: 6시간 경과
+  s50 --> s26: dcserver 재시작
+  s50 --> s31: runtime 등록
+  s50 --> s38: 6시간 경과
+  s50 --> s51: dispatch 부착
+  s51 --> s19: runtime 등록
+  s51 --> s27: dcserver 재시작
+  s51 --> s72: 6시간 경과
+  s52 --> s31: 턴 끝
+  s52 --> s61: dcserver 재시작
+  s52 --> s74: 6시간 경과
+  s53 --> s24: 6시간 경과
+  s53 --> s34: 사람#183;봇#183;task-notification 입력
+  s53 --> s35: dispatch 부착
+  s53 --> s43: dcserver 재시작
+  s54 --> s44: dcserver 재시작
+  s54 --> s53: 턴 끝
+  s54 --> s69: inflight 행 저장
+  s54 --> s75: 6시간 경과
+  s55 --> s53: 턴 끝
+  s55 --> s60: 6시간 경과
+  s55 --> s62: dcserver 재시작
+  s55 --> s69: dispatch 부착
+  s56 --> s28: dcserver 재시작
+  s56 --> s49: dispatch 부착
+  s56 --> s70: runtime 등록
+  s56 --> s73: idle-kill 틱
+  s57 --> s12: 턴 끝
+  s57 --> s46: dcserver 재시작
+  s57 --> s74: inflight 행 저장
+  s58 --> s24: runtime 등록
+  s58 --> s29: dcserver 재시작
+  s58 --> s68: dispatch 부착
+  s59 --> s54: 사람#183;봇#183;task-notification 입력
+  s59 --> s63: dcserver 재시작
+  s60 --> s24: 턴 끝
+  s60 --> s64: dcserver 재시작
+  s60 --> s69: dispatch 부착
+  s61 --> s77: 6시간 경과
+  s61 --> s79: 부팅
+  s62 --> s64: 6시간 경과
+  s62 --> s80: 부팅
+  s63 --> s83: 부팅
+  s64 --> s84: 부팅
+  s65 --> s17: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s65 --> s25: dcserver 재시작
+  s65 --> s81: 6시간 경과
+  s66 --> s42: dcserver 재시작
+  s66 --> s73: 6시간 경과
+  s66 --> s78: runtime 등록
+  s66 --> s79: dispatch 부착
+  s67 --> s43: dcserver 재시작
+  s67 --> s53: runtime 등록
+  s67 --> s58: 6시간 경과
+  s67 --> s68: dispatch 부착
+  s68 --> s35: runtime 등록
+  s68 --> s44: dcserver 재시작
+  s68 --> s83: 6시간 경과
+  s69 --> s53: 턴 끝
+  s69 --> s76: dcserver 재시작
+  s69 --> s85: 6시간 경과
+  s70 --> s9: 사람#183;봇#183;task-notification 입력
+  s70 --> s22: inflight 턴 복원
+  s70 --> s28: dcserver 재시작
+  s70 --> s65: dispatch 부착
+  s70 --> s82: idle-kill 틱
+  s71 --> s45: dcserver 재시작
+  s71 --> s81: runtime 등록
+  s72 --> s39: runtime 등록
+  s72 --> s46: dcserver 재시작
+  s73 --> s47: dcserver 재시작
+  s73 --> s79: dispatch 부착
+  s73 --> s82: runtime 등록
+  s73 --> s84: idle-kill 틱
+  s74 --> s12: 턴 끝
+  s74 --> s77: dcserver 재시작
+  s75 --> s24: 턴 끝
+  s75 --> s63: dcserver 재시작
+  s75 --> s85: inflight 행 저장
+  s76 --> s86: 6시간 경과
+  s76 --> s89: 부팅
+  s77 --> s90: 부팅
+  s78 --> s33: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s78 --> s42: dcserver 재시작
+  s78 --> s82: 6시간 경과
+  s78 --> s87: dispatch 부착
+  s79 --> s61: dcserver 재시작
+  s79 --> s87: runtime 등록
+  s79 --> s90: 6시간 경과
+  s80 --> s62: dcserver 재시작
+  s80 --> s84: 6시간 경과
+  s80 --> s88: runtime 등록
+  s80 --> s89: dispatch 부착
+  s81 --> s17: 사람#183;봇#183;task-notification 입력
+  s81 --> s37: inflight 턴 복원
+  s81 --> s45: dcserver 재시작
+  s82 --> s33: 사람#183;봇#183;task-notification 입력
+  s82 --> s40: inflight 턴 복원
+  s82 --> s47: dcserver 재시작
+  s82 --> s87: dispatch 부착
+  s82 --> s91: idle-kill 틱
+  s83 --> s59: runtime 등록
+  s83 --> s63: dcserver 재시작
+  s84 --> s64: dcserver 재시작
+  s84 --> s89: dispatch 부착
+  s84 --> s91: runtime 등록
+  s85 --> s24: 턴 끝
+  s85 --> s86: dcserver 재시작
+  s86 --> s94: 부팅
+  s87 --> s52: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s87 --> s61: dcserver 재시작
+  s87 --> s93: 6시간 경과
+  s88 --> s55: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s88 --> s62: dcserver 재시작
+  s88 --> s91: 6시간 경과
+  s88 --> s92: dispatch 부착
+  s89 --> s76: dcserver 재시작
+  s89 --> s92: runtime 등록
+  s89 --> s94: 6시간 경과
+  s90 --> s77: dcserver 재시작
+  s90 --> s93: runtime 등록
+  s91 --> s55: 사람#183;봇#183;task-notification 입력
+  s91 --> s60: inflight 턴 복원
+  s91 --> s64: dcserver 재시작
+  s91 --> s92: dispatch 부착
+  s92 --> s69: 사람#183;봇#183;task-notification 입력 or inflight 턴 복원
+  s92 --> s76: dcserver 재시작
+  s92 --> s95: 6시간 경과
+  s93 --> s52: 사람#183;봇#183;task-notification 입력
+  s93 --> s74: inflight 턴 복원
+  s93 --> s77: dcserver 재시작
+  s94 --> s86: dcserver 재시작
+  s94 --> s95: runtime 등록
+  s95 --> s69: 사람#183;봇#183;task-notification 입력
+  s95 --> s85: inflight 턴 복원
+  s95 --> s86: dcserver 재시작
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s4 bugPath
+  class s12 bugPath
+  class s24 breaks
+  class s24 bugPath
+  class s24 repeats
+  class s29 breaks
+  class s34 breaks
+  class s35 breaks
+  class s41 breaks
+  class s43 breaks
+  class s44 breaks
+  class s53 breaks
+  class s54 breaks
+  class s55 breaks
+  class s58 breaks
+  class s59 breaks
+  class s60 breaks
+  class s62 breaks
+  class s63 breaks
+  class s64 breaks
+  class s67 breaks
+  class s68 breaks
+  class s69 breaks
+  class s75 breaks
+  class s76 breaks
+  class s80 breaks
+  class s83 breaks
+  class s84 breaks
+  class s85 breaks
+  class s86 breaks
+  class s88 breaks
+  class s89 breaks
+  class s91 breaks
+  class s92 breaks
+  class s94 breaks
+  class s95 breaks

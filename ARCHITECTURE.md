@@ -2006,6 +2006,7 @@ src/
 │   │   │   └── watcher_respawn.rs
 │   │   ├── herdr_terminate/
 │   │   │   ├── http_force_tests/
+│   │   │   │   ├── idle_expire_tests.rs
 │   │   │   │   ├── restart_channel_tests.rs
 │   │   │   │   └── restart_refusal_tests.rs
 │   │   │   ├── root_replaced/
@@ -2021,6 +2022,7 @@ src/
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── http_force_v2_tests.rs
 │   │   │   ├── http_force_writer_tests.rs
+│   │   │   ├── idle_expire.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
 │   │   │   ├── never_started.rs
@@ -4029,6 +4031,7 @@ src/
 │   │   ├── canonical_identity.rs
 │   │   ├── current_key.rs
 │   │   ├── force_kill.rs
+│   │   ├── herdr_idle.rs
 │   │   ├── herdr_kill.rs
 │   │   ├── hook.rs
 │   │   ├── hosted_cleanup.rs

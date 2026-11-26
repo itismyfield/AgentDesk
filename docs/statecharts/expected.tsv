@@ -1671,6 +1671,11 @@ session-lifecycle/HerdrHintANoOutboxDiscovery.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryFixed.cfg	HerdrSession	-	-
 session-lifecycle/HerdrHintARetryNoBudget.cfg	HerdrSession	-	AProgress
 session-lifecycle/HerdrHintARetryNoController.cfg	HerdrSession	-	AProgress
+session-lifecycle/HerdrIdleExpireAfter.cfg	HerdrIdleExpire	-	-
+session-lifecycle/HerdrIdleExpireBefore.cfg	HerdrIdleExpire	AlarmNotRepeated	IdleEventuallyCloses
+session-lifecycle/HerdrIdleExpireBeforeLiveness.cfg	HerdrIdleExpire	-	IdleEventuallyCloses
+session-lifecycle/HerdrIdleExpireMutInflight.cfg	HerdrIdleExpire	NeverClosesBusy	-
+session-lifecycle/HerdrIdleExpireMutTurn.cfg	HerdrIdleExpire	NeverClosesBusy	-
 session-lifecycle/HerdrMissingBoundAttachAfter.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundAttachAfterStale.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundAttachBefore.cfg	HerdrMissingBound	NoLiveRestore	-

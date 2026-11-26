@@ -1,0 +1,2 @@
+key: session-lifecycle-herdr-idle-expire
+| `session-lifecycle` Herdr 6시간 유휴 자동 종료 (#8128 I-1) | `c28732c52c` | Before: idle-kill 이 Herdr 행을 매 틱 보류하고 경보만 반복(AlarmNotRepeated·IdleEventuallyCloses RED) | `HerdrIdleExpire` 5cfg: After GREEN, Before·BeforeLiveness·MutTurn·MutInflight 기대 RED. 활성 턴·inflight 행·active_dispatch 가 있으면 닫지 않고 provider 세션을 보존. [보고서](session-lifecycle/herdr-idle-expire.report.md) |
