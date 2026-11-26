@@ -6,8 +6,9 @@ use crate::services::discord::health::o_verdict_for_tests;
 use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::writer::actor::{POLL_INTERVAL, run_channel};
 use crate::services::tui_o::writer::binding::BindingCause;
-use crate::services::tui_o::writer::owed::tests::verified::*;
-use crate::services::tui_o::writer::owed::tests::*;
+use crate::services::tui_o::writer::owed::test_support::{
+    Bindings, Gate, LEASE_BUSY, opened, owed_writer, switched_on, turn,
+};
 use crate::services::tui_o::writer::progress;
 use tokio::sync::watch;
 

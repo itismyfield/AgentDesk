@@ -228,7 +228,7 @@ fn lock_logs() -> MutexGuard<'static, HashMap<PathBuf, ChannelLog>> {
     LOGS.lock().unwrap_or_else(|poison| poison.into_inner())
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     let root = crate::config::runtime_root()
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "runtime root unavailable"))?;
@@ -1019,7 +1019,7 @@ thread_local! {
 }
 
 /// Test builds log only under a root the test sets, never under the real runtime root.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     let root = TEST_ROOT.with(|root| root.borrow().clone());
     Ok(root.map(|root| root.join(BINDING_EVENTS_DIR)))

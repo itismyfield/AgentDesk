@@ -295,5 +295,8 @@ pub(crate) mod test_support;
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod source_read_support;
+
 #[cfg(test)]
 pub(crate) mod source_read_tests;
