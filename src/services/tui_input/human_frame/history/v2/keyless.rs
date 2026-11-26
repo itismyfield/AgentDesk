@@ -95,6 +95,9 @@ fn keyless(entry: Entry) -> Passive {
     }
 }
 
+#[cfg(test)]
+#[path = "keyless_platform_tests.rs"]
+mod platform_tests;
 #[cfg(all(test, unix))]
 #[path = "keyless_tests.rs"]
 mod tests;

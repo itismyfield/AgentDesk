@@ -289,6 +289,8 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             "nextest run --lib --profile ci --no-tests fail -E "
             "test(=services::discord::health::turn_deliver::inject::queued_reconcile::"
             "mismatched_file_identity_refuses_transcript_proof) | "
+            "test(=services::tui_input::human_frame::history::v2::keyless::platform_tests::"
+            "keyless_first_register_succeeds_unless_a_directory_fsync_fails) | "
             "test(=cli::args::tests::cli_parse_fits_in_the_windows_default_main_thread_stack) | "
             "test(=services::tui_input::human_frame::history::notice_owner::census::tests::native_census_without_unix_change_witness_scans_each_time) | "
             "test(=runtime_layout::skill_sync::provider_sync_tests::retired_gemini_removes_deleted_directory_symlinks_windows) | "

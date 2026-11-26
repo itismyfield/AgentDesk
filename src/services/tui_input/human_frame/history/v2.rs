@@ -275,11 +275,11 @@ impl Registry {
             Ledger::V1 => Err("a migrating transaction found a V1 store".into()),
         })
     }
-    /// One transaction under the `cached` mutex and the `.lock` flock; with `keep_v1`, a V1 file
-    /// is handed to `apply` as [`Ledger::V1`] under those same locks instead of migrating.
+    /// One transaction under the `cached` mutex and the `.lock` flock. A `keyless` writer gets a V1
+    /// file as [`Ledger::V1`] instead of migrating, and V1's success without a directory fsync.
     fn locked<T>(
         &self,
-        keep_v1: bool,
+        keyless: bool,
         apply: impl FnOnce(Ledger<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
         use crate::services::discord::runtime_store::{
@@ -318,7 +318,7 @@ impl Registry {
             }
             *pending = None;
         }
-        if keep_v1
+        if keyless
             && present
             && !compat::v2_head(raw.as_bytes())
             && matches!(migration::decode(&raw)?, migration::Decoded::Legacy(_))
@@ -350,6 +350,11 @@ impl Registry {
         super::stamped::published();
         match published {
             Ok(FlushStatus::Flushed) => {
+                cached.published(candidate)?;
+                Ok(result)
+            }
+            // The V1 writer it replaces confirms a rename alone on Windows (no directory fsync).
+            Ok(FlushStatus::UnflushedPlatform) if keyless => {
                 cached.published(candidate)?;
                 Ok(result)
             }
