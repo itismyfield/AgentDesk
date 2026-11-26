@@ -374,7 +374,7 @@ mod tests {
             &ProviderKind::Claude,
             2,
             None,
-            (true, Some(&artifact), None),
+            (true, Some(&artifact), None, false),
         )
         .await
         .unwrap();
@@ -401,7 +401,7 @@ mod tests {
             &ProviderKind::Claude,
             2,
             None,
-            (true, Some(&changed_artifact), None),
+            (true, Some(&changed_artifact), None, false),
         )
         .await
         .unwrap();
@@ -427,7 +427,7 @@ mod tests {
                 &ProviderKind::Claude,
                 2,
                 None,
-                (true, Some(&wrong), None),
+                (true, Some(&wrong), None, false),
             )
             .await
             .is_err()

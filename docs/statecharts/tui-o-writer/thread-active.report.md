@@ -81,4 +81,6 @@ The model covers one child and one parent. Sibling isolation is checked in the R
 
 The model treats "the late turn has closed" as a fact apart from the Legacy send counter. So a resolution that makes a new adoption (and loses the counted send) is invisible here: `lateTurn` still blocks the `init`. In the code, the late takeover reads that same counter, so the Rust test `thread_child_boot_reservation_counts_legacy_and_keeps_that_send_through_resolution` covers the regenerated-adoption mutant instead. Counterexamples for the recorded-child rules are replayed by `thread_children_*` and `thread_child_*` tests.
 
+The routine-process model and T6 support restart deduplication once PostgreSQL records the outbox row as `sent`. A crash between Discord accepting the post and PostgreSQL recording `sent` can cause the worker to retry delivery.
+
 Logs: `~/.adk/release/lane-runs/hl-20260925/i8118/logs/ob-tlc`, revision `logs/ob3/tlc`.
