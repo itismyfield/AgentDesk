@@ -1,5 +1,7 @@
 use super::*;
 
+#[path = "notice_owner_absorbed_tests.rs"]
+mod absorbed_tests;
 #[path = "notice_owner_command_order_tests.rs"]
 mod command_order_tests;
 
