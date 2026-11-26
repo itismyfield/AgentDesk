@@ -578,9 +578,9 @@ input-single-path/HerdrSyntheticStartBeforeForeign.cfg	HerdrSyntheticStart	-	Own
 input-single-path/HerdrSyntheticStartBeforePersonMissing.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartBeforePersonShell.cfg	HerdrSyntheticStart	-	OwnedStartDelivered,SyntheticSettles
 input-single-path/HerdrSyntheticStartBeforeShell.cfg	HerdrSyntheticStart	-	OwnedStartDelivered,SyntheticSettles
-input-single-path/HerdrSyntheticStartCodexClosedRolloutBefore.cfg	HerdrSyntheticStart	-	-
-input-single-path/HerdrSyntheticStartCodexClosedRolloutLiveUnknownOnly.cfg	HerdrSyntheticStart	-	-
-input-single-path/HerdrSyntheticStartCodexClosedRolloutUnknownOnly.cfg	HerdrSyntheticStart	-	-
+input-single-path/HerdrSyntheticStartCodexClosedRolloutBefore.cfg	HerdrSyntheticStart	-	OwnedStartDelivered
+input-single-path/HerdrSyntheticStartCodexClosedRolloutLiveUnknownOnly.cfg	HerdrSyntheticStart	-	OwnedStartDelivered
+input-single-path/HerdrSyntheticStartCodexClosedRolloutUnknownOnly.cfg	HerdrSyntheticStart	-	OwnedStartDelivered
 input-single-path/HerdrSyntheticStartCodexEarlyReturn.cfg	HerdrSyntheticStart	-	OwnedStartDelivered,SyntheticSettles
 input-single-path/HerdrSyntheticStartFixed.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartFixedBusy.cfg	HerdrSyntheticStart	-	-

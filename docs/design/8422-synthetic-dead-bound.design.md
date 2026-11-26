@@ -121,7 +121,8 @@ inflight 행이 없는 채널의 Bound 행을, 사람 입력 없이 자동으로
 
 ### 안 A(권함, 리뷰도 유지 권고) — 공통 '죽은 Bound recovery'를 provider와 상관없이 claim 전 판독이 묻는다
 
-- 흐름: `observe`가 Bound 행의 provider 판독에서 보류(Claude `BusyState::Held|Legacy`, Codex `Activity::Unknown`)를 얻으면 공통 함수 `dead_bound::recover`를 부른다. busy(Blocked)·Ready는 지금의 빠른 길을 그대로 탄다.
+- 흐름: `observe`가 Bound 행의 provider 판독에서 보류(Claude `BusyState::Held|Legacy`, Codex `Activity::Unknown`)를 얻으면 공통 함수 `dead_bound::recover`를 부른다. busy(Blocked)·Ready는 **그 실행이 살아 있음이 확인된 경우에만** 빠른 길을 탄다(impl-w2, 9절).
+  - 원칙: rollout의 Idle은 턴 종료 증거이지 실행 생존 증거가 아니다. Codex의 activity 판독이 Ready/Blocked여도 정확한 endpoint·실행의 `execution_alive()`가 거짓이면 Unknown으로 보고 recovery로 보낸다.
   - `Retired`면 행을 다시 읽어 Ready → `Wait::Go` → claim → `read_as`의 `bound_herdr`가 None → `Phase::Absent` → 새 실행(새 nonce) launch(Cold).
   - `Reobserve`·`Retry`(증명 안 됨, token·inflight 있음, lease 못 얻음, CAS Stale, endpoint 없음)면 지금처럼 Unknown → watch. watch probe가 `observe`를 다시 부르므로 판독마다 recovery를 다시 묻는다.
   - `Refused`(소유자·endpoint 불일치, 행 판독 불가)면 `Wait::Reject(reason)` → claim → `fail_claimed_locally` → Failed 정산.
@@ -258,16 +259,17 @@ token 등록(`mailbox_try_start_turn*`, `try_start_turn_with_stale_busy_heal`, `
 | 1 | router/turn_start.rs:142-179 `claim_reserved_headless_turn` | token | `acquire`(:151) | 예 | 이미 배제 |
 | 2 | intake_turn.rs:663 → 1011 사람 intake(`try_start_turn_with_stale_busy_heal`, message_handler.rs:110-150) | token | intake guard | 예 | 이미 배제, recovery는 borrow |
 | 3 | tui_prompt_relay/synthetic_start/claim/admitted.rs:279 → tui_direct_pending_start/state.rs:403, bridge_handoff.rs:889 | inflight·token | AdmissionFence lease(admission_fence.rs:40-44) | 예 | 이미 배제 |
-| 4 | recovery_engine/runtime.rs:325 `reregister_active_turn_from_inflight_inner` | token | 없음 | 기존 inflight 행이 있어야 함 | ③ inflight 판독이 먼저 막음 |
+| 4 | recovery_engine/runtime.rs:189-386 `reregister_active_turn_from_inflight(_under_episode_guard)` | token | 없음 | caller별: (a) 부팅 inflight 복원 restore_inflight.rs:793·1962(`restore_inflight_states`, 아래 #11의 부팅 barrier 안), (b) 운영자 rebind의 episode handoff manual_rebind/episode_handoff.rs:97(`LockedInflightEpisode`를 쥐고, 살아 있는 tmux 세션 확인이 먼저), (c) runtime.rs:885는 시험 | 모두 기존 inflight 행을 전제로 하므로 ③ inflight 판독이 먼저 막는다 |
 | 5 | provider_isolation.rs:278 `save_intake_inflight` | inflight | (#2 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |
 | 6 | foreign_row.rs:47, headless_turn/replay_start.rs:73, headless_turn.rs:1015 | inflight | (#1 뒤) | token 등록 뒤 | ③ token 판독이 먼저 막음 |
-| 7 | tmux_watcher/liveness.rs:473-529 `reacquire_watcher_inflight_for_active_stream`(호출 streaming_status_tick.rs:282, loop_poll_prologue.rs:436) | inflight 단독 | 없었음 | 예(watcher가 Herdr도 돌고 `transcript_turns`가 보장되지 않음) | **lease 적용**: `reacquire_under_transition`이 `try_acquire`, 바쁘면 다음 tick |
+| 7 | tmux_watcher/liveness.rs:473-529 `reacquire_watcher_inflight_for_active_stream`(호출 streaming_status_tick.rs:282, loop_poll_prologue.rs:436) | inflight 단독 | 없었음 | **아니오**(impl-w2 정정): 두 호출자 모두 `watcher_pane_actively_streaming`(liveness.rs:386-388)을 요구하고, 이 함수는 `HostSnapshot::tmux_only`(watch_host.rs:99-105)가 Herdr에서 `None`이라 거짓이다. 시험 `a_herdr_snapshot_never_reads_a_streaming_pane_so_no_reacquire_runs` | 보수적 보호로 lease 유지(`reacquire_under_transition`, `try_acquire`) |
 | 8 | tmux.rs:614-680 `start_monitor_auto_turn_when_available`(+ monitor_auto_turn_inflight.rs:54) | token(+ 뒤따르는 inflight) | 없었음 | 예(같은 watcher) | **lease 적용**: headless claim처럼 `acquire`(최대 3초), 실패는 기존 deferred 경로 |
 | 9 | recovery_engine/manual_rebind/mod.rs:770 | inflight | 없음 | 아니오: 운영자 `/rebind`, 살아 있는 tmux 세션 확인이 먼저 | 근거만 |
 | 10 | turn_orchestrator.rs:799 `restore_active_turn_kinded` | (정의 wrapper) | — | — | 해당 없음 |
+| 11 | recovery_engine/restore_inflight.rs:2248 → queue_io/turn_admission.rs:219-245 `mailbox_recovery_kickoff` | token | 없음 | 부팅 inflight 복원 안에서만 돈다 | 부팅 barrier: 복원 완료(`reconcile_done`) 전에는 ingress가 `Hold::RestartRecovery`(input_owner/ingress.rs:191-198)이고 `start_waits`도 `boot_ready` 전에는 Event(owner_input.rs:771-774)라 recovery와 겹치지 않는다. 완료 뒤 owner wake. 기존 시험 `owner_ingress_tests::automatic_ingress_and_handoff_keep_the_first_hold_reason`, `owner_input_idle_tests::active_reconcile_completion_resumes_the_busy_owner_once` |
 
 시험 전용 호출(분리): outbound/o_writer_io/agy.rs:184·199, tmux_reaper.rs:951·996·1085·1160·1210·1305·1476, turn_finalizer/cleanup/terminal_release.rs:182·205·264·284, tui_prompt_relay/bridge_completion.rs:121·135·150·205·281·360, tmux_watcher/placeholder_reclaim.rs:193, health/turn_deliver.rs:696(`seed_*_for_tests`), health/{recovery,watcher_respawn,snapshot}.rs의 시험 모듈, turn_finalizer/episode.rs:884, router/message_handler/turn_lifecycle.rs:242.
-감사 경로 10, lease 적용 2(#7, #8). 상태 차트에 `InflightStart`(watcher의 inflight 단독 생성)와 뮤턴트 `inflightNoLease`를 넣었다.
+감사 경로 11, lease 적용 2(#7 보수적 보호, #8). 상태 차트의 `InflightStart`(watcher의 inflight 단독 생성)와 뮤턴트 `inflightNoLease`는 보수적 경합 모델이다. 실제 Herdr #7 경로의 도달 증거가 아니다.
 
 ### 8.3 리뷰 xh P2-2: 사람 입력의 Ended 확장과 Missing watch
 `owned_busy/missing_watch.rs`는 이제 Missing만이 아니라 CLI와 같은 `view.ended`(Missing 또는 기록된 root shell만 남음)를 읽는다. 무턴(token 없음)이고 inflight가 정확히 `Ok(None)`이면 Ready로 owner를 깨운다.
@@ -280,3 +282,14 @@ CLI `retire::observed(Scope::Ended)`는 marker를 남기지 않는다(그대로)
 Codex Herdr 시험 rig(`provider_dispatch_codex_herdr_tests.rs`)는 provider 실행 단계(`fx.turn`)용이다. owner 판독 단계(runtime root, 세션 키, session_hosts)가 구성되어 있지 않다.
 이번 조각은 provider에 따라 갈리는 owner 비교를 순수 함수 `owner_differs`로 떼어 Claude·Codex 단위 시험으로 고정했다(뮤턴트 OwnerClaudeConst RED).
 Codex 판독 경로의 조기 반환은 코드에서 없앴다(두 provider가 같은 `screen == Unknown && bound` 분기를 지남). T1x·T2x·T4x·T9x E2E는 Codex owner rig가 필요해 남는 일로 둔다.
+
+## 9. impl-w2 리뷰 대응(WebGPT pro impl-1: P1 1·P2 3)
+
+| 리뷰 | 대응 |
+|---|---|
+| P1-1 Codex 닫힌 rollout Idle이 죽은 Bound를 가림 | `owner_input_start_wait::observe`: Codex Bound의 Ready/Blocked에 `execution_alive()`(정확한 endpoint·실행, `claude_handoff::bound_herdr` → `HerdrTarget::execution_alive`, blocking이라 `spawn_blocking`)를 결합한다. 살아 있지 않거나 확인하지 못하면 Unknown으로 보고 공통 recovery(prove → no_turn → on_reading)로 간다. 판정은 `live_rollout` 순수 함수다. Claude는 busy 판독 `Context::read`(busy/herdr.rs:303-306)가 `execution_alive()`를 먼저 보고 Held를 내므로 같은 원칙이 이미 성립한다(변경 없음). 상태 차트: 물리 실행(exec)과 rollout을 별도 축으로, 죽은 Bound로의 followup은 start 실패(Failed)로, 불변식 `DeliveredNeedsExecution` |
+| P2-1 감사표 #7·kickoff·#4 | 8.2 표의 #7을 정정(tmux_only 배제, Herdr 미도달)하고 #4 caller별 근거, #11 kickoff 부팅 barrier를 넣었다. lease 코드는 유지한다 |
+| P2-2 T11b 실제 경쟁자 | barrier hook 안에서 실제 `start_monitor_auto_turn_when_available`(tmux.rs, cfg(test) 래퍼 `monitor_start_for_test`)를 띄우고, lease 안에서 token이 생기지 않음(`poll_within` 500ms 창)과 lease 해제 뒤 등록됨을 확인한다. tmux.rs의 실제 `acquire`를 지우면 창 안에서 token이 생겨 RED |
+| P2-3 직접 timeout | 새 시험의 직접 `tokio::time::timeout` 8곳을 `await_within`/`poll_within`으로 바꿨다 |
+
+Codex owner 단계 E2E(닫힌 rollout Idle을 먼저 확인한 뒤 물리 상태만 바꾸고 실제 wake-watch HttpStart, retire CAS 1·new nonce·Cold 1·old pane write 0·retained 0)는 이 저장소에 Codex Herdr owner rig가 없어 작성하지 않았다. 대신 판정 함수 시험과 HerdrRig 위의 생존 판독 시험으로 고정했다.

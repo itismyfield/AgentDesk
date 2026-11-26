@@ -81,7 +81,11 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
             Activity::Busy => Screen::Blocked,
             Activity::Unknown => Screen::Unknown,
         };
-        (screen, None)
+        let alive = match screen {
+            Screen::Ready | Screen::Blocked if bound => execution_alive(&host).await,
+            _ => true,
+        };
+        (live_rollout(screen, bound, alive), None)
     } else {
         let logical = match bound {
             true => match start_target(shared, channel, context).await {
@@ -101,7 +105,8 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
         };
         (screen, logical)
     };
-    // A live Ready or Busy read keeps its fast path; only a held Bound read may be a dead one.
+    // Ready or Busy is a live execution's read here (Claude's reader checks it first); anything
+    // else on a Bound row may be a dead one.
     if screen != Screen::Unknown || !bound {
         return Observed::Native(screen);
     }
@@ -122,6 +127,28 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
             Observed::Unrecovered(reason)
         }
     }
+}
+
+/// A rollout's Idle or Busy reads its last turn, never that the execution still runs: on a Bound
+/// row it counts only while that execution is alive.
+fn live_rollout(screen: Screen, bound: bool, alive: bool) -> Screen {
+    match screen {
+        Screen::Ready | Screen::Blocked if bound && !alive => Screen::Unknown,
+        screen => screen,
+    }
+}
+
+/// Whether the host's Bound execution still runs at its exact endpoint; an unread one does not.
+async fn execution_alive(host: &TurnHost) -> bool {
+    let TurnHost::Herdr(plan) = host else {
+        return false;
+    };
+    let Some((target, _, _)) = claude_handoff::bound_herdr(plan) else {
+        return false;
+    };
+    tokio::task::spawn_blocking(move || target.execution_alive())
+        .await
+        .unwrap_or(false)
 }
 
 /// How a start that read its channel's execution waits: Ready goes on, a refusal is settled after
