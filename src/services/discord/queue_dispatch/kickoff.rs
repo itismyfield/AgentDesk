@@ -126,6 +126,9 @@ async fn kickoff_queue_channel_inner(
         (shared.router_ports.owner_wake)(shared, channel_id);
         return IdleQueueKickoffChannelOutcome::default();
     }
+    // No owner drives this queue, so its Decision starts settle here, at each turn boundary.
+    let pool = shared.pg_pool.as_ref();
+    queue_io::decision_drain::queued::settle_started(pool, channel_id.get()).await;
     let settings_snapshot = shared.settings.read().await.clone();
     let thread_parent = match session_runtime::validate_rest_channel_routing_with_parent(
         deps.http,
@@ -281,6 +284,13 @@ async fn kickoff_queue_channel_inner(
                 "  [{ts}]   ⚠ KICKOFF: failed to start turn for channel {}: {e}",
                 channel_id
             );
+            // A Decision start that failed after its journal is closed: it never runs again.
+            if queue_io::decision_drain::queued::origin(&intervention).is_some() {
+                let abandon = crate::services::discord::mailbox_abandon_pending_dispatch;
+                let _ = abandon(shared, provider, channel_id, intervention.message_id).await;
+                drop(dispatch_lease);
+                return IdleQueueKickoffChannelOutcome { started: false };
+            }
             let restored = mailbox_restore_dequeued_head(
                 shared,
                 provider,
