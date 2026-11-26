@@ -113,6 +113,7 @@ function BreakdownDetail({
   showTitle,
   series,
   agentSkills,
+  skillsLoading = false,
 }: {
   t: TFunction;
   item: BreakdownItem | null;
@@ -120,6 +121,7 @@ function BreakdownDetail({
   showTitle: boolean;
   series: DailySeriesDescriptor[];
   agentSkills: AgentSkillRow[];
+  skillsLoading?: boolean;
 }) {
   if (!item) {
     return missing ? (
@@ -181,6 +183,8 @@ function BreakdownDetail({
                 </li>
               ))}
             </ul>
+          ) : skillsLoading ? (
+            <p className="text-xs leading-5 text-[var(--fg-muted)]">{t(msg("스킬 호출 집계를 불러오는 중입니다.", "Loading skill calls."))}</p>
           ) : (
             <p className="text-xs leading-5 text-[var(--fg-muted)]">{t(msg("이 기간에 기록된 스킬 호출이 없어요.", "No skill calls were recorded in this range."))}</p>
           )}
@@ -214,6 +218,8 @@ export function StatsBreakdown({
   overallCacheHitRate,
   agentSkillRows,
   series,
+  skillsLoading = false,
+  onAgentInspect,
 }: {
   t: TFunction;
   loading: boolean;
@@ -223,6 +229,8 @@ export function StatsBreakdown({
   overallCacheHitRate: number;
   agentSkillRows: AgentSkillRow[];
   series: DailySeriesDescriptor[];
+  skillsLoading?: boolean;
+  onAgentInspect?: () => void;
 }) {
   const id = useId();
   const panelId = `${id}-panel`;
@@ -247,6 +255,7 @@ export function StatsBreakdown({
   const openRow = (rowId: string) => {
     const item = list.find((entry) => entry.id === rowId);
     if (!item) return;
+    if (item.category === "agents") onAgentInspect?.();
     setSelection({ category: item.category, id: item.id });
     if (!split) setDrawerOpen(true);
   };
@@ -299,7 +308,7 @@ export function StatsBreakdown({
   }
 
   const detail = (
-    <BreakdownDetail t={t} item={selectedItem} missing={missing} showTitle={split} series={series} agentSkills={selectedSkills} />
+    <BreakdownDetail t={t} item={selectedItem} missing={missing} showTitle={split} series={series} agentSkills={selectedSkills} skillsLoading={skillsLoading} />
   );
 
   return (

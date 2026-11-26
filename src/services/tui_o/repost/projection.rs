@@ -82,8 +82,6 @@ impl ReceiptOverlay {
         (0..ledger.next_serial())
             .filter_map(|serial| ledger.piece(serial))
             .filter(|piece| ledger.excluded(&piece.unit_key).is_none())
-            // An image Discord refused on its own is omitted with a notice, not a blocked channel.
-            .filter(|piece| ledger.tool_images().omitted(&piece.unit_key).is_none())
             .find_map(
                 |piece| match self.disposition(ledger, &piece.unit_key, piece.piece_index) {
                     PieceDisposition::Blocked { serial, status } => Some((serial, status)),

@@ -96,6 +96,35 @@ impl ChannelMailboxRegistry {
         GLOBAL_CHANNEL_MAILBOXES.insert(channel_id, handle);
     }
 
+    pub(crate) fn insert_snapshot_until_finish_for_test(
+        &self,
+        channel: ChannelId,
+        snapshot: super::ChannelMailboxSnapshot,
+    ) {
+        let (sender, mut receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(message) = receiver.recv().await {
+                match message {
+                    super::ChannelMailboxMsg::Snapshot { reply } => {
+                        let _ = reply.send(snapshot.clone());
+                    }
+                    super::ChannelMailboxMsg::FinishTurnIfMatches { reply, .. } => {
+                        receiver.close();
+                        drop(reply);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        });
+        let handle = ChannelMailboxHandle {
+            sender,
+            recovery_done: Arc::new(RecoveryDoneSignal::new()),
+        };
+        self.handles.insert(channel, handle.clone());
+        GLOBAL_CHANNEL_MAILBOXES.insert(channel, handle);
+    }
+
     /// An actor that keeps every request and answers none, so each read waits until it is cut.
     #[cfg(unix)]
     pub(crate) fn insert_silent_for_test(&self, channel_id: ChannelId) {

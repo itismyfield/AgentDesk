@@ -1168,7 +1168,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py c19a273c124eb7869a0e5dc489b99379974b9632d35224ccb613a6af00f78d6f
-          pin scripts/check-ci-runner-hardening.sh 363f3ec3b2e5f4c177865cad23a59e1344ecb3168a5e05015dd741fc7f97e7fe
+          pin scripts/check-ci-runner-hardening.sh 2e927396fe4d8e73cff38c092636dbc0402eccc7c973c7a995df4af0d17e373b
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1458,7 +1458,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p target/clippy-observation
-          cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+          cargo clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
           ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"
 
       - name: End runner memory step
