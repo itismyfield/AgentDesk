@@ -102,7 +102,7 @@ where
     let deriver = super::super::fresh_resume::configured_deriver(
         channel,
         ShadowProvider::Codex,
-        writer.store(),
+        writer.store().ledger(),
     );
     let (_stop, stopped) = watch::channel(false);
     let gate = Arc::new(OwnershipGate::default());
@@ -334,7 +334,7 @@ where
     let deriver = super::super::fresh_resume::configured_deriver(
         channel,
         ShadowProvider::Codex,
-        writer.store(),
+        writer.store().ledger(),
     );
     let (_stop, stopped) = watch::channel(false);
     let gate = Arc::new(OwnershipGate::default());

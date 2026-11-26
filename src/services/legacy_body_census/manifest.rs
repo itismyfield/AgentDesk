@@ -6,7 +6,7 @@ use std::{collections::BTreeSet, sync::LazyLock};
 const EMBEDDED: &str = include_str!("../../../scripts/tui_o_body_probes.json");
 
 pub(super) const EXPECTED_PROBE_ROWS: usize = 68;
-const EXPECTED_TRANSPORT_ROWS: usize = 19;
+const EXPECTED_TRANSPORT_ROWS: usize = 18;
 
 pub(super) fn snapshot() -> Value {
     static SNAPSHOT: LazyLock<Value> = LazyLock::new(|| inspect(EMBEDDED));
