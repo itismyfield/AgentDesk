@@ -258,8 +258,11 @@ async fn live_case(mut body: String, tool: bool, control: &str) {
         },
     );
     let (posted, ledger) =
-        crate::services::tui_o::writer::tests::post_codex_records_for_test(DRIVER_CHANNEL_ID, &raw)
-            .await;
+        crate::services::tui_o::writer::test_support::post_codex_records_for_test(
+            DRIVER_CHANNEL_ID,
+            &raw,
+        )
+        .await;
     assert!(!posted.is_empty());
     assert!(ledger.contains("posted"));
     assert!(ledger.contains("#turn_end"));

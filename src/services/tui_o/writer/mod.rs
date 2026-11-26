@@ -289,6 +289,8 @@ pub(crate) mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.
 pub(crate) mod transition_port;
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;

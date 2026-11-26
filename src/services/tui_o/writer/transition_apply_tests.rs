@@ -10,11 +10,10 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::actor::{force_execution_for_tests, transition_hooks as hooks};
 use crate::services::tui_o::writer::binding::BindingCause;
 use crate::services::tui_o::writer::host::Readiness;
-use crate::services::tui_o::writer::tests::CHANNEL;
+use crate::services::tui_o::writer::test_support::{CHANNEL, FakeBindings, halt, polls, row};
 use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::hop_at;
 use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::*;
 use crate::services::tui_o::writer::tests::actor::rotation::transcript;
-use crate::services::tui_o::writer::tests::actor::{FakeBindings, halt, polls, row};
 use crate::services::tui_o::writer::transition_cleanup::scope::ScopeApproval;
 use crate::services::tui_o::writer::transition_cleanup::{Request, Termination};
 use crate::services::tui_o::writer::transition_port::{
