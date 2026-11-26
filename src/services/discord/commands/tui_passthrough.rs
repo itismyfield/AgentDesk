@@ -90,12 +90,13 @@ pub(super) async fn effort_save_notice(
         Err(reason) => return format!("effort를 바꾸지 않았습니다: {reason}"),
     };
     // A Herdr Codex pane restarts on its own thread; a Herdr Claude pane takes the level in place.
+    let herdr = super::config::herdr_now(shared, provider, channel_id).await;
     #[cfg(unix)]
-    if super::config::herdr_codex(provider, channel_id) {
-        let herdr = super::effort_restart::herdr_notice;
-        return herdr(shared, token, channel_id, provider, level).await;
+    if super::config::herdr_codex(provider, channel_id, herdr) {
+        let restart = super::effort_restart::herdr_notice;
+        return restart(shared, token, channel_id, provider, level).await;
     }
-    if super::config::herdr_now(shared, provider, channel_id).await {
+    if herdr {
         return match herdr_settings::effort(shared, token, channel_id, level).await {
             // Claude Code keeps `max` for the running session only, unlike the other levels.
             Ok(()) if level == "max" => "effort를 `max`로 적용했습니다. max는 이 Claude 세션에만 유지되어 pane을 새로 띄우면 Claude 기본값으로 돌아갑니다.".into(),

@@ -143,15 +143,17 @@ pub(in crate::services::discord) async fn herdr_now(
 }
 
 /// A Herdr Codex TUI channel: `/effort` ends its exact execution and resumes the thread.
+/// `herdr` is [`herdr_now`]'s answer, so a thread's pane on its parent's endpoint counts too.
 pub(in crate::services::discord) fn herdr_codex(
     provider: &ProviderKind,
     channel: serenity::ChannelId,
+    herdr: bool,
 ) -> bool {
     use crate::services::provider_hosting::{
         ProviderSessionDriver, resolve_provider_session_selection_with_channel,
     };
     matches!(provider, ProviderKind::Codex)
-        && crate::config::session_hosts::has_herdr_endpoint(channel.get())
+        && herdr
         && crate::services::turn_host::herdr_turn_switched_on_for(provider)
         && resolve_provider_session_selection_with_channel(provider, true, Some(channel.get()))
             .driver
@@ -182,6 +184,7 @@ async fn read_entry_capability<T: Send + 'static>(
     }
     let (model, cwd) = launch_model(shared, provider, channel).await;
     let herdr = herdr_now(shared, provider, channel).await;
+    let codex = herdr_codex(provider, channel, herdr);
     let provider = provider.clone();
     tokio::task::spawn_blocking(move || {
         let known = matches!(provider, ProviderKind::Claude | ProviderKind::Codex);
@@ -196,7 +199,7 @@ async fn read_entry_capability<T: Send + 'static>(
                 && driver == ProviderSessionDriver::TuiHosting
             {
                 herdr_claude()
-            } else if herdr_codex(&provider, channel) {
+            } else if codex {
                 for_model(&provider, model.as_deref(), channel, cwd.as_deref())
             } else {
                 refused("Herdr /effort는 live Claude TUI pane에서만 지원합니다.".into())
@@ -254,12 +257,9 @@ pub(in crate::services::discord) async fn update_channel_effort(
     level: &str,
 ) -> io::Result<bool> {
     shared.check_settings_owner(provider, channel).await?;
-    let local = local_tui(
-        provider,
-        channel,
-        herdr_now(shared, provider, channel).await,
-    );
-    if !local && !herdr_codex(provider, channel) {
+    let herdr = herdr_now(shared, provider, channel).await;
+    let local = local_tui(provider, channel, herdr);
+    if !local && !herdr_codex(provider, channel, herdr) {
         return Err(io::Error::other(not_local(provider)));
     }
     if !EFFORT_LEVELS.contains(&level) {

@@ -533,19 +533,19 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
     let _on = crate::services::turn_host::force_codex_switch_for_test(Some(true));
     // The Claude Herdr turn is on too, so only the provider keeps a Claude pane off the restart.
     let _claude = crate::services::turn_host::force_switch_for_test(Some(true));
-    assert!(herdr_codex(&ProviderKind::Codex, channel));
+    assert!(herdr_codex(&ProviderKind::Codex, channel, true));
     assert!(
-        !herdr_codex(&ProviderKind::Claude, channel),
+        !herdr_codex(&ProviderKind::Claude, channel, true),
         "a Herdr Claude pane is never restarted for effort"
     );
     let elsewhere = serenity::ChannelId::new(821_741);
     assert!(
-        !herdr_codex(&ProviderKind::Codex, elsewhere),
+        !herdr_codex(&ProviderKind::Codex, elsewhere, false),
         "a local TUI keeps the tmux path"
     );
     let _off = crate::services::turn_host::force_codex_switch_for_test(Some(false));
     assert!(
-        !herdr_codex(&ProviderKind::Codex, channel),
+        !herdr_codex(&ProviderKind::Codex, channel, true),
         "the Codex Herdr switch gates it"
     );
 }

@@ -360,8 +360,8 @@ async fn a_refused_turn_without_a_verified_bound_row_records_no_current_pane() {
 // The record table: verified evidence sets it, the row's own refusal or a return forgets it.
 #[test]
 fn the_recorded_execution_is_the_verified_evidence_not_the_turns_permission() {
-    let refused = |refusal| recorded_execution(&TurnHost::Refused(refusal));
-    assert_eq!(recorded_execution(&TurnHost::Tmux), Some(false));
+    let refused = |refusal| recorded_execution(&TurnHost::Refused(refusal), true);
+    assert_eq!(recorded_execution(&TurnHost::Tmux, true), Some(false));
     for gate in [
         HerdrRefusal::ProviderUnsupported {
             provider: "codex".into(),
