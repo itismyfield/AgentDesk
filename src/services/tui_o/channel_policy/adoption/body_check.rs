@@ -32,7 +32,7 @@ pub struct BodyCheck {
 
 impl BodyCheck {
     /// Watches `channel`'s adoption in this thread's forced snapshot.
-    pub(crate) fn watch(channel: u64, body: &str) -> Self {
+    pub fn watch(channel: u64, body: &str) -> Self {
         let candidate = crate::services::tui_o::cutover::test_override::with_channels(|boot| {
             boot?.candidate(channel).cloned()
         })
@@ -51,13 +51,13 @@ impl BodyCheck {
         }
     }
 
-    pub(crate) fn adoption(&self) -> Adoption {
+    pub fn adoption(&self) -> Adoption {
         self.candidate.peek()
     }
 
     /// A sink is about to write `content` to `channel`. When it carries the body to the watched
     /// channel, the claim must already have released the adoption, and that release is settled.
-    pub(crate) fn sink(&self, channel: u64, op: SinkOp, content: &str) {
+    pub fn sink(&self, channel: u64, op: SinkOp, content: &str) {
         if !content.contains(&self.body) {
             return;
         }
@@ -74,7 +74,7 @@ impl BodyCheck {
 
     /// An HTTP sink's request: the channel comes from its `/channels/{id}` path, and only a POST
     /// or PATCH writes. Any other request, or a path with no channel, is not a write.
-    pub(crate) fn sink_request(&self, method: &str, path: &str, content: &str) {
+    pub fn sink_request(&self, method: &str, path: &str, content: &str) {
         let op = match method {
             "POST" => SinkOp::Post,
             "PATCH" => SinkOp::Patch,
@@ -93,7 +93,7 @@ impl BodyCheck {
 
     /// Scenario end: the body never left before its claim, and no claim released the adoption
     /// without the body following.
-    pub(crate) fn assert_settled(&self) {
+    pub fn assert_settled(&self) {
         let early = self.early.lock().unwrap().clone();
         assert!(
             early.is_empty(),

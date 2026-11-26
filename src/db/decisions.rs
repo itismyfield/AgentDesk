@@ -144,7 +144,7 @@ impl AttemptState {
         }
     }
 
-    pub(crate) fn parse(state: &str) -> Option<Self> {
+    pub fn parse(state: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|known| known.as_str() == state)
     }
 }

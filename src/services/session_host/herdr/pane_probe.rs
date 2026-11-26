@@ -72,7 +72,7 @@ pub(crate) type PaneProcesses = (
 );
 
 /// OS reads of another process; tests inject a fake.
-pub(crate) trait ProcessOs: Send + Sync {
+pub trait ProcessOs: Send + Sync {
     fn exists(&self, _pid: u32) -> Result<bool, RestoreUnverified> {
         Err(RestoreUnverified::ProcessUnreadable)
     }
@@ -193,7 +193,7 @@ pub(crate) struct ProbeRequest<'a> {
 }
 
 /// The stored text of a process start; equal text is the same start.
-pub(crate) fn start_text(start: StartIdentity) -> String {
+pub fn start_text(start: StartIdentity) -> String {
     match start {
         StartIdentity::Darwin { seconds, micros } => format!("darwin:{seconds}.{micros:06}"),
         StartIdentity::LinuxTicks(ticks) => format!("linux-ticks:{ticks}"),
@@ -431,7 +431,7 @@ fn check_environment(
 /// The fake OS and launch context the probe tests and the herdr socket rig share (KRX-TS).
 #[cfg(any(test, feature = "test-support"))]
 #[path = "pane_probe_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "pane_probe_tests.rs"]

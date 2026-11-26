@@ -248,7 +248,7 @@ fn all_tui_kinds(config: &Config) -> Result<BTreeMap<u64, RuntimeHandoffKind>> {
 }
 
 impl BootChannels {
-    pub(crate) fn validate(config: &Config) -> Result<Self> {
+    pub fn validate(config: &Config) -> Result<Self> {
         let tui_o = tui_o_of(config);
         let mut kinds = selected_kinds(config, true)?;
         let all_selected: BTreeSet<u64> = kinds.keys().copied().collect();
@@ -448,7 +448,7 @@ impl BootChannels {
     }
 
     /// The adoption of a selected channel; none off the home or while the writer is off.
-    pub(crate) fn candidate(&self, channel: u64) -> Option<&Candidate> {
+    pub fn candidate(&self, channel: u64) -> Option<&Candidate> {
         self.candidates.get(&channel)
     }
 
@@ -629,7 +629,7 @@ impl BootChannels {
 
     /// Every selected channel starts in `state`, as `seeded` would leave it on the home.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn adopted(mut self, state: Adoption) -> Self {
+    pub fn adopted(mut self, state: Adoption) -> Self {
         self.candidates = self
             .channels
             .iter()

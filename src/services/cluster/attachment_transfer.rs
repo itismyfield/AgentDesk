@@ -59,7 +59,7 @@ pub struct AttachmentBundleV1 {
 pub struct ValidatedAttachmentBundle(AttachmentBundleV1);
 
 impl ValidatedAttachmentBundle {
-    pub(crate) fn as_bundle(&self) -> &AttachmentBundleV1 {
+    pub fn as_bundle(&self) -> &AttachmentBundleV1 {
         &self.0
     }
 }

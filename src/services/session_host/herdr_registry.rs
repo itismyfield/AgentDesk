@@ -142,7 +142,7 @@ impl HerdrRegistry {
     };
 
     /// The endpoints whose `execution_node` is this node. No socket is dialled here.
-    pub(crate) fn build(boot: &BootSessionHosts) -> Self {
+    pub fn build(boot: &BootSessionHosts) -> Self {
         let Some(local) = boot.local_node() else {
             return Self::EMPTY;
         };
@@ -204,10 +204,7 @@ impl HerdrRegistry {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_transport(
-        endpoint: HerdrEndpoint,
-        transport: Arc<dyn HerdrTransport>,
-    ) -> Self {
+    pub fn with_transport(endpoint: HerdrEndpoint, transport: Arc<dyn HerdrTransport>) -> Self {
         Self {
             endpoints: vec![Registered::new(endpoint, Shared(transport))],
             ..Self::EMPTY
@@ -221,7 +218,7 @@ impl HerdrRegistry {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_reads(self, reads: TestReads) -> Self {
+    pub fn with_reads(self, reads: TestReads) -> Self {
         Self {
             reads: Some(reads),
             ..self

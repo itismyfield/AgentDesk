@@ -11,14 +11,14 @@ pub(crate) enum Home<'a> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Availability {
+pub enum Availability {
     Available,
     Unavailable,
     Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Held {
+pub enum Held {
     NoGateway,
     HomeUnknown,
     HomeConflict,

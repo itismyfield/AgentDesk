@@ -55,7 +55,7 @@ pub fn record() -> Recorder {
 }
 
 impl Recorder {
-    pub(crate) fn channels(&self) -> Vec<u64> {
+    pub fn channels(&self) -> Vec<u64> {
         RUNS.with(|runs| runs.borrow().clone().unwrap_or_default())
     }
 }

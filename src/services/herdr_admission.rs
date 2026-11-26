@@ -39,7 +39,7 @@ pub struct Admission {
 
 impl Admission {
     /// A resolved environment switch decides admission independently of the stop file.
-    pub(crate) fn new(enabled: bool, stop_file: Option<PathBuf>) -> Self {
+    pub fn new(enabled: bool, stop_file: Option<PathBuf>) -> Self {
         Self {
             env_stopped: !enabled,
             stop_file,

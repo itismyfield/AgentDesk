@@ -572,13 +572,7 @@ impl Registry {
                 .ok_or_else(|| "source not bound".into())
         })
     }
-    pub(crate) fn registered(
-        &self,
-        namespace: &str,
-        key: &Value,
-        path: &Path,
-        frame: &str,
-    ) -> bool {
+    pub fn registered(&self, namespace: &str, key: &Value, path: &Path, frame: &str) -> bool {
         self.inspect(|state| {
             Ok(state.locate(namespace, key).is_some_and(|(r, e)| {
                 r.frame.hash == hash(frame)
@@ -590,7 +584,7 @@ impl Registry {
         })
         .unwrap_or(false)
     }
-    pub(crate) fn receipt(
+    pub fn receipt(
         &self,
         namespace: &str,
         key: &Value,
@@ -656,7 +650,7 @@ impl Registry {
         .ok()
         .flatten()
     }
-    pub(crate) fn json(&self) -> Result<Value, String> {
+    pub fn json(&self) -> Result<Value, String> {
         self.inspect(|state| serde_json::to_value(state).map_err(|e| e.to_string()))
     }
 }

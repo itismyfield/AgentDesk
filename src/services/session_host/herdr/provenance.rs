@@ -24,7 +24,7 @@ pub enum StartIdentity {
 
 /// A process start: its identity, and the wall-clock time E7 compares other times with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ProcessStart {
+pub struct ProcessStart {
     pub identity: StartIdentity,
     pub wall_clock: SystemTime,
 }
@@ -212,7 +212,7 @@ fn bsd_info(pid: u32) -> Result<libc::proc_bsdinfo, RestoreUnverified> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+pub fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     let info = bsd_info(pid)?;
     let (seconds, micros) = (info.pbi_start_tvsec, info.pbi_start_tvusec);
     if seconds == 0 {
@@ -356,7 +356,7 @@ pub(crate) fn process_argv(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn process_exec_path(pid: u32) -> Option<String> {
+pub fn process_exec_path(pid: u32) -> Option<String> {
     procargs2_exec_path(&procargs2(pid).ok()?)
 }
 
@@ -477,7 +477,7 @@ pub(crate) fn socket_peer_token(stream: &std::os::unix::net::UnixStream) -> Opti
 
 /// The pid and start of the process that accepted this connection.
 #[cfg(unix)]
-pub(crate) fn socket_peer(
+pub fn socket_peer(
     stream: &std::os::unix::net::UnixStream,
 ) -> Result<(u32, ProcessStart), RestoreUnverified> {
     let pid = socket_peer_pid(stream).ok_or(RestoreUnverified::NoPeer)?;

@@ -28,7 +28,7 @@ impl SubmissionError {
             stopped => Err(Self::Guarded(stopped)),
         }
     }
-    pub(crate) fn into_legacy(self) -> String {
+    pub fn into_legacy(self) -> String {
         match self {
             Self::Legacy(error) => error,
             Self::Guarded(run) => {

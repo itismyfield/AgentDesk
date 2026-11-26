@@ -63,7 +63,7 @@ impl ClaudeBinary {
         Ok((binary, resolution))
     }
 
-    pub(crate) fn from_tmux_wrapper_argv(program: &str) -> Self {
+    pub fn from_tmux_wrapper_argv(program: &str) -> Self {
         Self {
             program: OsString::from(program),
         }

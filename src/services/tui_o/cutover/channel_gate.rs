@@ -184,7 +184,7 @@ impl<'a> BodyClaim<'a> {
         Self { reserved, ..self }
     }
 
-    pub(crate) fn peek(self) -> Result<bool, IdentityError> {
+    pub fn peek(self) -> Result<bool, IdentityError> {
         self.judge(Use::Peek).map(|claimed| claimed.owned)
     }
 

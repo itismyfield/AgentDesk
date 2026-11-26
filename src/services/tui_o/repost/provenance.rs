@@ -39,7 +39,7 @@ pub enum ProvenanceEntry {
 
 impl ProvenanceEntry {
     /// The intent for `record` about to be posted, or `None` when no re-post may ever cover it.
-    pub(crate) fn intent(serial: u64, record: &PieceRecord, generation: u64) -> Option<Self> {
+    pub fn intent(serial: u64, record: &PieceRecord, generation: u64) -> Option<Self> {
         let key = piece_of(record)?;
         let ids = RepostIds::for_piece(&marker(&key))?;
         Some(Self::Intent {
@@ -75,7 +75,7 @@ pub(crate) struct Intent {
 
 /// The replayed sidecar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Provenance {
+pub struct Provenance {
     /// Every activation by generation; a later one never takes an earlier one's originals.
     activations: BTreeMap<u64, u64>,
     intents: BTreeMap<u64, Intent>,
@@ -164,13 +164,13 @@ pub struct ProvenanceLog {
     /// written until a reopen cuts them.
     poisoned: bool,
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fail_after: Option<usize>,
+    pub fail_after: Option<usize>,
 }
 
 impl ProvenanceLog {
     /// Opens or creates the sidecar. A damaged line is an error: without the file nothing proves
     /// a piece was an on original, so nothing may be re-posted.
-    pub(crate) fn open(path: &Path) -> io::Result<Self> {
+    pub fn open(path: &Path) -> io::Result<Self> {
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -188,12 +188,12 @@ impl ProvenanceLog {
         })
     }
 
-    pub(crate) fn state(&self) -> &Provenance {
+    pub fn state(&self) -> &Provenance {
         &self.state
     }
 
     /// Counts the entry only once it is synced.
-    pub(crate) fn append(&mut self, entry: ProvenanceEntry) -> io::Result<()> {
+    pub fn append(&mut self, entry: ProvenanceEntry) -> io::Result<()> {
         let line = ProvenanceLine {
             at: Utc::now(),
             entry: entry.clone(),
@@ -223,7 +223,7 @@ impl ProvenanceLog {
     }
 
     /// Records an observed off-to-on switch; pieces prepared before `frontier` stay out.
-    pub(crate) fn activate(&mut self, frontier: u64) -> io::Result<Activation> {
+    pub fn activate(&mut self, frontier: u64) -> io::Result<Activation> {
         let generation = self
             .state
             .activation()

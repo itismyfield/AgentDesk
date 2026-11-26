@@ -29,7 +29,7 @@ pub(crate) struct CodexProvenance {
 
 /// A snapshot only this module's validation constructs; an origin is read from nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor::Schema2>);
+pub struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor::Schema2>);
 
 impl ValidatedCodexProvenance {
     pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {

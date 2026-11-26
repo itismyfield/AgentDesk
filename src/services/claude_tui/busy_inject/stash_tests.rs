@@ -22,7 +22,7 @@ static STASH_CHANNELS: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::de
 pub struct StashChannelGuard(u64);
 
 impl StashChannelGuard {
-    pub(crate) fn new(channel: u64) -> Self {
+    pub fn new(channel: u64) -> Self {
         let mut channels = STASH_CHANNELS
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

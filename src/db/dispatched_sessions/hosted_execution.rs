@@ -111,11 +111,7 @@ fn filled(values: &[&str]) -> bool {
 
 impl HostedExecution {
     /// A new incarnation's first record: no pane or process evidence yet.
-    pub(crate) fn pending(
-        owner: HostedOwner,
-        execution_nonce: String,
-        source_ref: SourceRef,
-    ) -> Self {
+    pub fn pending(owner: HostedOwner, execution_nonce: String, source_ref: SourceRef) -> Self {
         Self {
             schema: HOSTED_EXECUTION_SCHEMA,
             state: HostedState::Pending,

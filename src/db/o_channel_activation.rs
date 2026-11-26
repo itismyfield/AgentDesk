@@ -13,7 +13,7 @@ pub struct IntakeFence {
 
 impl IntakeFence {
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn empty_for_test() -> Self {
+    pub fn empty_for_test() -> Self {
         Self { _transaction: None }
     }
 

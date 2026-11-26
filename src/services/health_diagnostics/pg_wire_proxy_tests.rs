@@ -38,7 +38,7 @@ impl Drop for PgWireProxy {
 
 impl PgWireProxy {
     /// Proxies `database_url`, adding `delay` to every client message (so to every round trip).
-    pub(crate) async fn start(database_url: &str, delay: Duration) -> Self {
+    pub async fn start(database_url: &str, delay: Duration) -> Self {
         let upstream_options: sqlx::postgres::PgConnectOptions =
             database_url.parse().expect("test database url parses");
         let upstream = (
@@ -80,7 +80,7 @@ impl PgWireProxy {
     }
 
     /// A pool through the proxy with the runtime pool's `test_before_acquire` behavior.
-    pub(crate) fn pool(&self, max_connections: u32) -> sqlx::PgPool {
+    pub fn pool(&self, max_connections: u32) -> sqlx::PgPool {
         let options = self.connect_options();
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(max_connections)
@@ -108,38 +108,38 @@ impl PgWireProxy {
         .expect("proxy execution reached the stall");
     }
 
-    pub(crate) fn set_delay(&self, delay: Duration) {
+    pub fn set_delay(&self, delay: Duration) {
         *self.shared.delay.lock().unwrap() = delay;
     }
 
     /// Holds every later execution whose SQL contains `needle` until [`Self::release`].
-    pub(crate) fn stall(&self, needle: &str) {
+    pub fn stall(&self, needle: &str) {
         self.shared.stalls.lock().unwrap().push(needle.to_string());
     }
 
     /// Clears every stall and lets held executions through.
-    pub(crate) fn release(&self) {
+    pub fn release(&self) {
         self.shared.stalls.lock().unwrap().clear();
         self.release.send_modify(|generation| *generation += 1);
     }
 
     /// SQL texts of the Execute and simple Query messages seen since the last reset.
     /// A `test_before_acquire` ping is a bare Sync, so it is not counted.
-    pub(crate) fn executions(&self) -> Vec<String> {
+    pub fn executions(&self) -> Vec<String> {
         self.shared.executions.lock().unwrap().clone()
     }
 
-    pub(crate) fn reset_executions(&self) {
+    pub fn reset_executions(&self) {
         self.shared.executions.lock().unwrap().clear();
     }
 
     /// PostgreSQL v3 startups accepted since the proxy started.
-    pub(crate) fn accepted(&self) -> usize {
+    pub fn accepted(&self) -> usize {
         self.shared.accepted.load(Ordering::SeqCst)
     }
 
     /// PostgreSQL connections still being relayed.
-    pub(crate) fn open(&self) -> usize {
+    pub fn open(&self) -> usize {
         self.shared.open.load(Ordering::SeqCst)
     }
 }

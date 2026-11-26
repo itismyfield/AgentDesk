@@ -361,7 +361,7 @@ pub mod kill_requests {
     }
 
     /// How many kills were requested for exactly `session_name`.
-    pub(crate) fn count(session_name: &str) -> usize {
+    pub fn count(session_name: &str) -> usize {
         let requested = REQUESTED
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());

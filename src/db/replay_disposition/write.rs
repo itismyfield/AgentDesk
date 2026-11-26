@@ -61,7 +61,7 @@ impl ExactAttempt {
         self.receipt_id
     }
 
-    pub(crate) fn nonce(&self) -> &str {
+    pub fn nonce(&self) -> &str {
         &self.nonce
     }
 

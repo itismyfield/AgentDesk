@@ -254,7 +254,7 @@ impl LiveAttempt {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record(&self, seen: Seen) {
+    pub fn record(&self, seen: Seen) {
         lock(&self.observation).seal = seal::Seal::fixture();
         self.record_fact(seen);
     }

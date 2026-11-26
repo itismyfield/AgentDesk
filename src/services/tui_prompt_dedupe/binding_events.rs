@@ -87,7 +87,7 @@ pub struct BindingEvent {
 }
 /// A binding change whose event could not be persisted; the binding was not published.
 #[derive(Debug)]
-pub(crate) struct BindingPersistError {
+pub struct BindingPersistError {
     pub tmux_session: String,
     pub error: io::Error,
 }

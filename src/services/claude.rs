@@ -1499,7 +1499,7 @@ pub(crate) fn emit_followup_restart_suppressed_notice(
 #[derive(Debug, Clone)]
 pub struct ClaudeTuiSessionResolution {
     pub session_id: String,
-    pub(crate) transcript_path: std::path::PathBuf,
+    pub transcript_path: std::path::PathBuf,
     pub resume: bool,
 }
 

@@ -172,7 +172,7 @@ impl AlarmHealth {
     }
 
     /// Conditions in force at `now`; NotFound frequency is re-counted against the window here.
-    pub(crate) fn current_at(&self, now: Instant) -> Vec<String> {
+    pub fn current_at(&self, now: Instant) -> Vec<String> {
         let mut current = locked(&self.active).clone();
         locked(&self.not_found).retain(|channel, hits| {
             hits.retain(|hit| within_window(*hit, now));
@@ -246,7 +246,7 @@ pub struct AlarmRouter {
 }
 
 impl AlarmRouter {
-    pub(crate) fn new(
+    pub fn new(
         alert_channel: Option<u64>,
         notifier: Option<Arc<dyn AlarmNotifier>>,
         health: Arc<AlarmHealth>,

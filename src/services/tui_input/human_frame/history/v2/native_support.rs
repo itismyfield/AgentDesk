@@ -3,22 +3,17 @@
 use super::native::{Disposition, Episode, Outcome, Ticket};
 use super::*;
 
-pub(crate) struct Fixture {
-    pub(crate) history: Registry,
-    pub(crate) ticket: Ticket,
-    pub(crate) input: Value,
+pub struct Fixture {
+    pub history: Registry,
+    pub ticket: Ticket,
+    pub input: Value,
 }
 
 impl Fixture {
-    pub(crate) fn at(path: PathBuf, channel: u64, primary: bool) -> Self {
+    pub fn at(path: PathBuf, channel: u64, primary: bool) -> Self {
         Self::at_execution(path, channel, primary, "incarnation-1")
     }
-    pub(crate) fn at_execution(
-        path: PathBuf,
-        channel: u64,
-        primary: bool,
-        execution: &str,
-    ) -> Self {
+    pub fn at_execution(path: PathBuf, channel: u64, primary: bool, execution: &str) -> Self {
         Self::at_target(
             path,
             channel,
@@ -27,7 +22,7 @@ impl Fixture {
         )
     }
 
-    pub(crate) fn at_target(path: PathBuf, channel: u64, primary: bool, target: Value) -> Self {
+    pub fn at_target(path: PathBuf, channel: u64, primary: bool, target: Value) -> Self {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let transcript = path.with_extension("jsonl");
         std::fs::write(&transcript, "native input\n").unwrap();

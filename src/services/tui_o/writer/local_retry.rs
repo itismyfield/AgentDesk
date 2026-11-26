@@ -13,7 +13,7 @@ mod notice_selection;
 
 pub const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 
-pub(crate) struct Pending {
+pub struct Pending {
     pub root_serial: u64,
     pub piece: PieceWork,
     pub due: DateTime<Utc>,

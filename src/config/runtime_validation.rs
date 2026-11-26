@@ -32,10 +32,9 @@ pub mod test_support {
     use crate::config::{AgentChannel, AgentChannelConfig, AgentDef, Config, ProviderConfig};
     use crate::services::provider_hosting;
 
-    pub(crate) const REMOVED: &str =
-        "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
+    pub const REMOVED: &str = "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
 
-    pub(crate) struct ResetHosting;
+    pub struct ResetHosting;
 
     impl Drop for ResetHosting {
         fn drop(&mut self) {
@@ -43,7 +42,7 @@ pub mod test_support {
         }
     }
 
-    pub(crate) fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
+    pub fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
         let mut config = Config::default();
         if channel {
             let mut agent: AgentDef = serde_yaml::from_str("id: fixture\nname: Fixture\n").unwrap();
@@ -67,7 +66,7 @@ pub mod test_support {
         config
     }
 
-    pub(crate) fn write_config(path: &std::path::Path, config: &Config) {
+    pub fn write_config(path: &std::path::Path, config: &Config) {
         let mut yaml = serde_yaml::to_value(config).unwrap();
         // The config serializer omits targetless channel maps; validate their raw input too.
         for (index, agent) in config.agents.iter().enumerate() {

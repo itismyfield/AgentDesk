@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(crate) struct SettledSource {
+pub struct SettledSource {
     pub source: SourceId,
     pub execution_nonce: Option<String>,
     pub binding_seq: u64,

@@ -153,7 +153,7 @@ impl HookBindingEnvelope {
         Self::capture_from_env(provider, |name| std::env::var_os(name))
     }
 
-    pub(crate) fn capture_from_env(
+    pub fn capture_from_env(
         provider: &str,
         env: impl Fn(&str) -> Option<std::ffi::OsString>,
     ) -> Self {
@@ -186,7 +186,7 @@ impl HookBindingEnvelope {
         }
     }
 
-    pub(crate) fn encode(&self) -> Result<String, String> {
+    pub fn encode(&self) -> Result<String, String> {
         serde_json::to_vec(self)
             .map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
             .map_err(|e| e.to_string())
@@ -305,7 +305,7 @@ pub(super) fn durable_directory(path: &Path) -> io::Result<()> {
 }
 
 impl PreparedIncarnation {
-    pub(crate) fn prepare(
+    pub fn prepare(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -319,7 +319,7 @@ impl PreparedIncarnation {
     }
 
     /// Records `provider_root` as the source root the launched child will write under.
-    pub(crate) fn prepare_at(
+    pub fn prepare_at(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -339,7 +339,7 @@ impl PreparedIncarnation {
     }
 
     /// Pins the exact argv digest and source policy before immutable publication.
-    pub(crate) fn prepare_pinned(
+    pub fn prepare_pinned(
         provider: &str,
         tmux: &str,
         channel_id: Option<u64>,
@@ -373,7 +373,7 @@ impl PreparedIncarnation {
         Self::create(context).map_err(|e| format!("create binding context: {e}"))
     }
 
-    pub(crate) fn create(context: BindingContext) -> io::Result<Self> {
+    pub fn create(context: BindingContext) -> io::Result<Self> {
         let path = context_path(&context.provider, &context.execution_nonce)?;
         let parent = path
             .parent()
@@ -464,14 +464,14 @@ impl PreparedIncarnation {
         })
     }
 
-    pub(crate) fn env_lines(&self) -> String {
+    pub fn env_lines(&self) -> String {
         format!(
             "{UNSET_CONTEXT}export AGENTDESK_BINDING_CONTEXT={}\n",
             crate::services::process::shell_escape(&self.path.to_string_lossy())
         )
     }
 
-    pub(crate) fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
+    pub fn finish_spawn(&self, result: io::Result<String>) -> Result<(), String> {
         result.map(|_| ()).map_err(|error| {
             crate::services::session_host::TmuxHost.kill(
                 &self.context.tmux_session,

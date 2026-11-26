@@ -117,7 +117,7 @@ pub mod test_support {
     use crate::services::tmux_common as tc;
     use crate::services::tui_o::store::codex_end::{self, CodexEnd, ContextSnapshot, EndBasis};
 
-    pub(crate) fn install_clear_end(channel: u64, pane: &str) -> CodexEnd {
+    pub fn install_clear_end(channel: u64, pane: &str) -> CodexEnd {
         use crate::services::tui_o::shadow::SourceId;
         let root = crate::config::runtime_root().unwrap();
         let old_nonce = "a".repeat(32);

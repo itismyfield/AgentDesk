@@ -87,7 +87,7 @@ pub async fn prepare(pool: &PgPool, request: StartRequest<'_>) -> Result<OwnerSt
 }
 
 impl OwnerStartPermit {
-    pub(crate) fn output_origin(&self) -> super::output::Origin {
+    pub fn output_origin(&self) -> super::output::Origin {
         super::output::Origin {
             delivery: self.delivery,
             provider: self.identity.provider().into(),
@@ -102,7 +102,7 @@ impl OwnerStartPermit {
     }
 
     /// Move this entire future into the physical writer task; the guard lasts through its raw IO.
-    pub(crate) async fn submit<R, F: Future<Output = R>>(
+    pub async fn submit<R, F: Future<Output = R>>(
         self,
         frame: &str,
         native_binding: &serde_json::Value,

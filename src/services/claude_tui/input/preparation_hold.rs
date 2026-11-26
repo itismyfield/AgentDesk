@@ -11,7 +11,7 @@ pub enum EffectPhase {
 pub struct PreparationHold {
     pub target: String,
     pub reason: &'static str,
-    pub(crate) phase: EffectPhase,
+    pub phase: EffectPhase,
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
     pub modal: bool,

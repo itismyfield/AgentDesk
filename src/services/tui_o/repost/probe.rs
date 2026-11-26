@@ -98,7 +98,7 @@ pub struct ProbeSession {
 }
 
 impl ProbeSession {
-    pub(crate) fn new(scope: EvidenceScope, proof_ids: Vec<u64>, settled_at: Instant) -> Self {
+    pub fn new(scope: EvidenceScope, proof_ids: Vec<u64>, settled_at: Instant) -> Self {
         Self {
             scope,
             proof_ids,
@@ -111,7 +111,7 @@ impl ProbeSession {
     }
 
     /// What this session's reads show of the piece, judged by the latest snapshot.
-    pub(crate) fn attribution(&self) -> &Attribution {
+    pub fn attribution(&self) -> &Attribution {
         &self.seen
     }
 
@@ -154,7 +154,7 @@ impl ProbeSession {
     }
 
     /// Reads up to `PAGES_PER_STEP` pages of the current pass, starting one when it is due.
-    pub(crate) async fn advance(
+    pub async fn advance(
         &mut self,
         reader: &impl ProbeRead,
         run: &RunScope,

@@ -111,7 +111,7 @@ pub enum DraftGuard {
 /// What a capture of a protected pane shows: no stash with an empty composer, no stash with the
 /// person's text, or anything else.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DraftSighting {
+pub enum DraftSighting {
     Settled,
     PersonDraft,
     Unsettled,

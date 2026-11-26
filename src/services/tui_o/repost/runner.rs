@@ -213,7 +213,7 @@ impl Runner {
 
     /// The pre-grant checks in order, then the grant. Only a committed grant becomes a permit;
     /// every other answer sends nothing, and a refusal after the grant still keeps the slot.
-    pub(crate) async fn try_next_dispatch<W: RepostWriter>(
+    pub async fn try_next_dispatch<W: RepostWriter>(
         &mut self,
         writer: &mut W,
         intent: DispatchIntent<'_>,
@@ -564,9 +564,7 @@ where
 // Test seams for the re-post turn tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl Runner {
-    pub(in crate::services) fn probes_mut(
-        &mut self,
-    ) -> &mut BTreeMap<PieceKey, (EvidenceScope, ProbeSession)> {
+    pub fn probes_mut(&mut self) -> &mut BTreeMap<PieceKey, (EvidenceScope, ProbeSession)> {
         &mut self.probes
     }
 }
@@ -577,11 +575,11 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
         &mut self.runner
     }
 
-    pub(in crate::services) fn sidecar_mut(&mut self) -> &mut PathBuf {
+    pub fn sidecar_mut(&mut self) -> &mut PathBuf {
         &mut self.sidecar
     }
 
-    pub(in crate::services) fn log_slot(&mut self) -> &mut Option<ProvenanceLog> {
+    pub fn log_slot(&mut self) -> &mut Option<ProvenanceLog> {
         &mut self.log
     }
 

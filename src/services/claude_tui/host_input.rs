@@ -1084,7 +1084,7 @@ mod spy {
 
     #[cfg(unix)]
     impl FakeDraftPane {
-        pub(crate) fn new(session: &str) -> Self {
+        pub fn new(session: &str) -> Self {
             use std::os::unix::fs::PermissionsExt;
             let dir = tempfile::tempdir().unwrap();
             let d = dir.path().display();
@@ -1103,12 +1103,12 @@ mod spy {
             }
         }
 
-        pub(crate) fn show(&self, pane: &str) {
+        pub fn show(&self, pane: &str) {
             std::fs::write(self.dir.path().join("pane"), pane).unwrap();
         }
 
         /// How many `-e` captures read this pane.
-        pub(crate) fn draft_reads(&self) -> usize {
+        pub fn draft_reads(&self) -> usize {
             let log = std::fs::read_to_string(self.dir.path().join("log")).unwrap_or_default();
             log.lines().filter(|line| line.contains(" -e ")).count()
         }
@@ -1125,7 +1125,7 @@ mod spy {
     pub struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
     impl SpyGuard {
-        pub(crate) fn install(state: SpyState) -> Self {
+        pub fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let spy: Box<dyn InputTransport> = Box::new(Spy(state.clone()));
             INJECTED.with(|slot| *slot.borrow_mut() = Some(spy));

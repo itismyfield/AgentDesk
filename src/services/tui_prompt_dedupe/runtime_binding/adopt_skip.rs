@@ -4,7 +4,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdoptSkip {
+pub enum AdoptSkip {
     PayloadNotUuid,
     UnmappedCommandSession,
     NotClaudeTui,

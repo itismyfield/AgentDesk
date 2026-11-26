@@ -17,7 +17,7 @@ use crate::services::session_host::model::HostError;
 pub const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
 /// The only config a dedicated server may run with: any other byte, a missing file or a
 /// parse error leaves Herdr on its default, which resumes agents on restore.
-pub(crate) const CANONICAL_CONFIG: &[u8] = b"[session]\nresume_agents_on_restore = false\n";
+pub const CANONICAL_CONFIG: &[u8] = b"[session]\nresume_agents_on_restore = false\n";
 /// A config written this close to the server's start may have been read in its old form.
 const START_MARGIN: Duration = Duration::from_secs(1);
 
@@ -65,13 +65,13 @@ impl RestoreResume {
 
 /// One read of the config file: bytes and modification time from the same open file.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ConfigRead {
+pub struct ConfigRead {
     pub bytes: Vec<u8>,
     pub modified: SystemTime,
 }
 
 /// OS reads E7 needs about the server process and its config file.
-pub(crate) trait ServerProvenance {
+pub trait ServerProvenance {
     fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified>;
     /// Every value `pid`'s environment holds for `key`.
     fn process_env(&self, pid: u32, key: &str) -> Result<Vec<String>, RestoreUnverified>;
@@ -82,7 +82,7 @@ pub(crate) trait ServerProvenance {
 }
 
 /// E7 over the production OS reads.
-pub(crate) fn read_restore_resume<T: HerdrTransport + ?Sized>(
+pub fn read_restore_resume<T: HerdrTransport + ?Sized>(
     transport: &T,
     endpoint: &HerdrEndpoint,
 ) -> RestoreResume {
@@ -91,7 +91,7 @@ pub(crate) fn read_restore_resume<T: HerdrTransport + ?Sized>(
 
 /// No API reads effective settings, so `Off` is proven from provenance: a verified server
 /// started with this endpoint's config and XDG home, the file canonical and older than it.
-pub(crate) fn read_restore_resume_with<T: HerdrTransport + ?Sized>(
+pub fn read_restore_resume_with<T: HerdrTransport + ?Sized>(
     transport: &T,
     endpoint: &HerdrEndpoint,
     provenance: &dyn ServerProvenance,

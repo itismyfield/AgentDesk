@@ -227,7 +227,7 @@ impl Entry {
 }
 
 #[cfg(unix)]
-pub(crate) struct TmuxPublisherObservation {
+pub struct TmuxPublisherObservation {
     session: String,
     entries: Vec<Entry>,
     witnesses: Vec<Vec<Option<Witness>>>,

@@ -287,7 +287,7 @@ fn persist_claude_continuation_session_files(
 
 /// The launch inputs a Claude TUI process takes from its channel's settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct ClaudeTuiLaunchSettings<'a> {
+pub struct ClaudeTuiLaunchSettings<'a> {
     pub(crate) model: Option<&'a str>,
     /// `None` leaves fast mode to the CLI's own settings.
     pub(crate) fast_mode: Option<bool>,

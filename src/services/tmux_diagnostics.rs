@@ -79,7 +79,7 @@ pub struct PaneLivenessOverrideGuard {
 
 #[cfg(any(test, feature = "test-support"))]
 impl PaneLivenessOverrideGuard {
-    pub(crate) fn set(
+    pub fn set(
         tmux_session_name: &str,
         liveness: crate::services::platform::tmux::PaneLiveness,
     ) -> Self {

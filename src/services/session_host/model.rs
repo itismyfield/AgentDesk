@@ -25,7 +25,7 @@ impl<'a> HostSessionRef<'a> {
         }
     }
 
-    pub(crate) fn herdr_pane(pane_id: &'a str) -> Self {
+    pub fn herdr_pane(pane_id: &'a str) -> Self {
         Self {
             kind: HostKind::Herdr,
             name: pane_id,

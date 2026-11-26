@@ -230,7 +230,7 @@ pub struct CancelToken {
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
     /// Tmux binding for cleanup on cancel.
-    pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
+    pub tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
     /// Normal turn-completion cleanup marker. The Discord bridge may flip
     /// `cancelled` after a terminal frame only to release lingering token
     /// observers; provider cancel watchdogs must not treat that as a live
@@ -334,7 +334,7 @@ impl CancelToken {
         self.completion_cleanup.load(Ordering::Acquire)
     }
 
-    pub(crate) fn store_child_pid(&self, pid: u32) {
+    pub fn store_child_pid(&self, pid: u32) {
         let captured = CapturedProcess::capture(pid);
         let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
@@ -381,7 +381,7 @@ impl CancelToken {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn store_child_process_for_test(&self, process: CapturedProcess) {
+    pub fn store_child_process_for_test(&self, process: CapturedProcess) {
         let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
         *child = Some(process);

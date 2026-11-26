@@ -234,7 +234,7 @@ pub async fn start<W: RepostWriter>(
 impl Started {
     /// Waits for the request, records it with the writer and settles the slot in PostgreSQL. A
     /// response that kept the marker also becomes the piece's receipt.
-    pub(crate) async fn finish<W: RepostWriter>(
+    pub async fn finish<W: RepostWriter>(
         self,
         writer: &mut W,
         pool: &PgPool,

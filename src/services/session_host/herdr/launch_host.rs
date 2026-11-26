@@ -197,7 +197,7 @@ pub(crate) fn accepting_pid(socket: &Path, wait: Duration) -> Option<u32> {
 
 impl SocketHerdrLaunchHost {
     /// No I/O: every call dials its own connection.
-    pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
+    pub fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
         let endpoints = endpoints
             .into_iter()
             .map(|endpoint| {

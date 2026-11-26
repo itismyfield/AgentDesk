@@ -175,7 +175,7 @@ pub enum Authority {
     Policy,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Settlement {
+pub enum Settlement {
     Outstanding,
     Settled,
 }

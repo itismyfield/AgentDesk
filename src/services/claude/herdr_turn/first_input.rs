@@ -603,7 +603,7 @@ pub mod regression_tests {
         drop(root_guard);
     }
 
-    pub(crate) fn regression_attached(
+    pub fn regression_attached(
         rig: &crate::services::session_host::herdr_socket_rig_tests::HerdrRig,
         logical: &str,
         transcript: &Path,

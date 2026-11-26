@@ -212,8 +212,8 @@ pub struct NewDelivery {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryRow {
     pub(crate) key: PieceKey,
-    pub(crate) payload: String,
-    pub(crate) payload_sha256: String,
+    pub payload: String,
+    pub payload_sha256: String,
     pub(crate) identity_version: i32,
     pub(crate) split_version: i32,
     pub(crate) original_anchor: u64,
@@ -222,8 +222,8 @@ pub struct DeliveryRow {
     pub(crate) origin_serial: u64,
     pub(crate) origin_node: String,
     pub(crate) failure: Option<Failure>,
-    pub(crate) conflict_sha256: Option<String>,
-    pub(crate) revision: i64,
+    pub conflict_sha256: Option<String>,
+    pub revision: i64,
 }
 
 impl DeliveryRow {

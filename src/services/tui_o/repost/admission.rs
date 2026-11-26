@@ -20,7 +20,7 @@ use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OriginalAttempt {
     pub(crate) serial: u64,
-    pub(crate) key: PieceKey,
+    pub key: PieceKey,
     pub(crate) payload: String,
     pub(crate) anchor: u64,
 }
@@ -99,7 +99,7 @@ pub fn classify(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BacklogEntry {
+pub struct BacklogEntry {
     pub(crate) serial: u64,
     pub(crate) unit_key: UnitKey,
     pub(crate) piece_index: u32,
@@ -241,7 +241,7 @@ pub struct Admitter<'a> {
 }
 
 impl<'a> Admitter<'a> {
-    pub(crate) fn new(pool: &'a PgPool, node: &'a str, sender_id: u64) -> Self {
+    pub fn new(pool: &'a PgPool, node: &'a str, sender_id: u64) -> Self {
         Self {
             pool,
             node,
@@ -269,7 +269,7 @@ impl<'a> Admitter<'a> {
 
     /// Admits an uncertain on original with slot 0 spent: sidecar pending, PostgreSQL, admitted. A
     /// failure leaves it pending for [`Self::resume_pending`]; the original is never sent again.
-    pub(crate) async fn adopt_uncertain(
+    pub async fn adopt_uncertain(
         &self,
         log: &mut ProvenanceLog,
         original: &OriginalAttempt,

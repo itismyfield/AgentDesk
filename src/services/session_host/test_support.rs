@@ -42,7 +42,7 @@ pub struct InjectedLivenessGuard {
 }
 
 impl InjectedLivenessGuard {
-    pub(crate) fn set(session: HostSessionRef<'_>, liveness: HostLiveness) -> Self {
+    pub fn set(session: HostSessionRef<'_>, liveness: HostLiveness) -> Self {
         inject_liveness(session, Some(liveness));
         Self {
             kind: session.kind,
@@ -78,7 +78,7 @@ pub struct InjectedPresenceGuard {
 }
 
 impl InjectedPresenceGuard {
-    pub(crate) fn set(session: HostSessionRef<'_>, presence: HostPresence) -> Self {
+    pub fn set(session: HostSessionRef<'_>, presence: HostPresence) -> Self {
         let key = (session.kind, session.name.to_string());
         let mut injected = INJECTED_PRESENCE
             .lock()

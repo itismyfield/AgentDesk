@@ -84,7 +84,7 @@ impl From<&BindingContext> for ContextSnapshot {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SuccessorSeal {
+pub struct SuccessorSeal {
     pub execution_nonce: String,
     pub binding_seq: u64,
     pub source: SourceId,

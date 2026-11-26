@@ -439,7 +439,7 @@ pub fn reserve(proof: Proof) -> Option<Reservation> {
     test_support::after_reserve();
     Some(reservation)
 }
-pub(crate) struct Reservation {
+pub struct Reservation {
     source: Source,
     origin: ProofOrigin,
     stamp: Option<Stamp>,

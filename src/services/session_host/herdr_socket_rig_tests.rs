@@ -194,7 +194,7 @@ fn off_where_dialled(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> Resto
 }
 
 impl HerdrRig {
-    pub(crate) fn start() -> Self {
+    pub fn start() -> Self {
         static SOCKETS: AtomicU64 = AtomicU64::new(0);
         let n = SOCKETS.fetch_add(1, Ordering::SeqCst);
         let path = PathBuf::from("/tmp").join(format!("adk-ht-{}-{n}.sock", std::process::id()));
@@ -278,18 +278,18 @@ impl HerdrRig {
         }
     }
 
-    pub(crate) fn socket(&self) -> &Path {
+    pub fn socket(&self) -> &Path {
         &self.path
     }
 
     /// This node's registry over the rig, installed on the calling thread until dropped.
-    pub(crate) fn registry_on_this_thread(&self) -> ForcedRegistry {
+    pub fn registry_on_this_thread(&self) -> ForcedRegistry {
         self.registry_as_on_this_thread(NODE, KEY, &self.path, SESSION)
     }
 
     /// The registry of `node`'s endpoint `key` at `at`, as a channel's config names it, with every
     /// dial reaching the rig; installed on the calling thread until dropped.
-    pub(crate) fn registry_as_on_this_thread(
+    pub fn registry_as_on_this_thread(
         &self,
         node: &str,
         key: &str,
@@ -358,13 +358,13 @@ impl HerdrRig {
     }
 
     /// Writes launch context `nonce`'s file, as a launch does, and returns its path.
-    pub(crate) fn context(&self, nonce: &str) -> PathBuf {
+    pub fn context(&self, nonce: &str) -> PathBuf {
         context(nonce)
     }
 
     /// The pane runs the provider of the execution whose launch context is `context`;
     /// `replaced` restarts that provider after the launch recorded it.
-    pub(crate) fn run_provider(&self, context: &Path, replaced: bool) {
+    pub fn run_provider(&self, context: &Path, replaced: bool) {
         let os = FakeOs::launched(env_naming(context));
         let os = if replaced {
             os.starting(PROVIDER, &[start(1_005)])
@@ -398,7 +398,7 @@ impl HerdrRig {
     }
 
     /// Every later read of whether `pid` exists answers `exists`.
-    pub(crate) fn exists(&self, pid: u32, exists: bool) {
+    pub fn exists(&self, pid: u32, exists: bool) {
         self.os.exists.lock().unwrap().insert(pid, exists);
     }
 
@@ -408,7 +408,7 @@ impl HerdrRig {
     }
 
     /// Replies with `result` to every later `method` request.
-    pub(crate) fn answer(&self, method: &str, result: Value) {
+    pub fn answer(&self, method: &str, result: Value) {
         self.answer_sequence(method, [result]);
     }
 
@@ -420,7 +420,7 @@ impl HerdrRig {
     }
 
     /// Replies with `result` to every `method` request after the next pane write.
-    pub(crate) fn answer_after_send(&self, method: &str, result: Value) {
+    pub fn answer_after_send(&self, method: &str, result: Value) {
         self.answer(&format!("{AFTER_SEND}{method}"), result);
     }
 
@@ -430,17 +430,17 @@ impl HerdrRig {
     }
 
     /// Runs `hook` on the params of every later pane write before the server answers it.
-    pub(crate) fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
+    pub fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
         *self.on_send.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Pauses a caller after a real socket reply, while the server can serve another writer.
-    pub(crate) fn on_reply(&self, hook: impl Fn(&HerdrCall) + Send + Sync + 'static) {
+    pub fn on_reply(&self, hook: impl Fn(&HerdrCall) + Send + Sync + 'static) {
         *self.on_reply.lock().unwrap() = Some(Arc::new(hook));
     }
 
     /// Every later snapshot is complete and lists exactly `panes`.
-    pub(crate) fn show_panes(&self, panes: &[&str]) {
+    pub fn show_panes(&self, panes: &[&str]) {
         let panes: Vec<Value> = panes
             .iter()
             .map(|pane| {
@@ -484,7 +484,7 @@ impl HerdrRig {
     }
 
     /// The launch evidence of the pane's root shell and provider, for `nonce`.
-    pub(crate) fn expected(&self, nonce: &str) -> ExpectedExecution {
+    pub fn expected(&self, nonce: &str) -> ExpectedExecution {
         let stamp = |pid, seconds| ProcessStamp {
             pid,
             start: format!("darwin:{seconds}.000000"),
@@ -500,7 +500,7 @@ impl HerdrRig {
 
     /// Pane writes leave without a reply while `unanswered`: the client cannot tell whether
     /// they landed.
-    pub(crate) fn leave_sends_unanswered(&self, unanswered: bool) {
+    pub fn leave_sends_unanswered(&self, unanswered: bool) {
         self.unanswered_sends.store(unanswered, Ordering::SeqCst);
         self.answered_sends.store(usize::MAX, Ordering::SeqCst);
     }
@@ -510,12 +510,12 @@ impl HerdrRig {
         self.answered_sends.store(answered, Ordering::SeqCst);
     }
 
-    pub(crate) fn requests(&self) -> Vec<Value> {
+    pub fn requests(&self) -> Vec<Value> {
         self.requests.lock().unwrap().clone()
     }
 
     /// The params of every pane write that reached the server, in order.
-    pub(crate) fn sends(&self) -> Vec<Value> {
+    pub fn sends(&self) -> Vec<Value> {
         let sends = self.requests().into_iter().filter(|r| {
             r["method"]
                 .as_str()
@@ -582,13 +582,13 @@ impl NativeHerdrRig {
         panic!("native server did not bind");
     }
 
-    pub(crate) fn socket(&self) -> PathBuf {
+    pub fn socket(&self) -> PathBuf {
         self.root.path().join("herdr.sock")
     }
     pub(crate) fn home(&self) -> PathBuf {
         self.root.path().join("home")
     }
-    pub(crate) fn requests(&self) -> Vec<Value> {
+    pub fn requests(&self) -> Vec<Value> {
         std::fs::read_to_string(self.root.path().join("requests.jsonl"))
             .unwrap_or_default()
             .lines()

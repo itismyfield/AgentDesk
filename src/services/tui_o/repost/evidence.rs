@@ -37,16 +37,12 @@ pub struct EvidenceScope {
     pub(crate) checked_slots: Vec<u8>,
     /// The piece's own stored anchor, never the ledger's latest one.
     pub(crate) original_anchor: u64,
-    pub(crate) run: RunScope,
+    pub run: RunScope,
 }
 
 impl EvidenceScope {
     /// The scope of `row` as read now; `Err(slot)` while a slot is open, as its send may land.
-    pub(crate) fn of(
-        row: &DeliveryRow,
-        attempts: &[AttemptRow],
-        run: &RunScope,
-    ) -> Result<Self, u8> {
+    pub fn of(row: &DeliveryRow, attempts: &[AttemptRow], run: &RunScope) -> Result<Self, u8> {
         if let Some(open) = attempts.iter().find(|attempt| attempt.result.is_none()) {
             return Err(open.slot);
         }

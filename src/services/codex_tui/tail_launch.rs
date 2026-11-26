@@ -21,7 +21,7 @@ thread_local! {
 }
 
 /// A resume carries `(rollout_path, start_offset, selected_session_id)`; `None` tails fresh.
-pub(crate) struct ValidatedTail {
+pub struct ValidatedTail {
     resume: Option<(PathBuf, u64, String)>,
     context: BindingContext,
 }

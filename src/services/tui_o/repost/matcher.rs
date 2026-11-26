@@ -12,7 +12,7 @@ use crate::services::tui_o::repost::send::{RepostEnvelope, RepostIds};
 /// A message as Discord returned it. `nonce` is only what came back, never what was sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedMessage {
-    pub(crate) id: u64,
+    pub id: u64,
     pub(crate) channel_id: u64,
     pub(crate) author_id: u64,
     pub(crate) content: String,

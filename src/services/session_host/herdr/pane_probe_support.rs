@@ -21,7 +21,7 @@ pub(crate) fn at(seconds: u64) -> ProcessStart {
 
 /// Parents by pid; starts and environments in order per pid, the last one repeating. A pid
 /// with no environments of its own reads `environ`.
-pub(crate) struct FakeOs {
+pub struct FakeOs {
     pub(crate) parents: HashMap<u32, u32>,
     pub(crate) starts: Mutex<HashMap<u32, VecDeque<ProcessStart>>>,
     pub(crate) environ: Result<Vec<String>, RestoreUnverified>,
@@ -107,7 +107,7 @@ impl ProcessOs for FakeOs {
 }
 
 /// Launch context `nonce`'s file under the test runtime root, as a launch publishes it.
-pub(crate) fn context(nonce: &str) -> PathBuf {
+pub fn context(nonce: &str) -> PathBuf {
     let context = BindingContext {
         schema: 1,
         provider: "claude".into(),
@@ -127,9 +127,9 @@ pub(crate) fn context(nonce: &str) -> PathBuf {
     PreparedIncarnation::create(context).unwrap().path
 }
 
-pub(crate) const NONCE: &str = "0123456789abcdef0123456789abcdef";
+pub const NONCE: &str = "0123456789abcdef0123456789abcdef";
 
-pub(crate) fn env_naming(path: &Path) -> Vec<String> {
+pub fn env_naming(path: &Path) -> Vec<String> {
     vec![
         "HOME=/Users/x".into(),
         format!("AGENTDESK_BINDING_CONTEXT={}", path.display()),

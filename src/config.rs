@@ -2890,7 +2890,7 @@ pub mod test_env_lock {
             const { std::cell::Cell::new(false) };
     }
 
-    pub(crate) struct SharedTestEnvLockGuard {
+    pub struct SharedTestEnvLockGuard {
         _lock: std::sync::MutexGuard<'static, ()>,
     }
 
@@ -2902,7 +2902,7 @@ pub mod test_env_lock {
     }
 
     /// Panics unless this thread took the lock through `acquire_shared_test_env_lock`.
-    pub(crate) fn assert_shared_test_env_lock_held() {
+    pub fn assert_shared_test_env_lock_held() {
         let held = SHARED_TEST_ENV_LOCK_HELD.with(|held| held.get());
         assert!(
             held,
@@ -2911,7 +2911,7 @@ pub mod test_env_lock {
     }
 
     #[track_caller]
-    pub(crate) fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
+    pub fn acquire_shared_test_env_lock() -> SharedTestEnvLockGuard {
         // Resolve the mutex first: the accessor carries the `E`-after-`P`
         // ordering tripwire, and running it before the re-entry flag is armed
         // keeps an ordering panic from stranding `SHARED_TEST_ENV_LOCK_HELD`

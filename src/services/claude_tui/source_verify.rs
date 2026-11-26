@@ -310,7 +310,7 @@ pub(crate) enum SourceVerdict {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceRejection {
+pub enum SourceRejection {
     InvalidSessionId,
     /// The path is not `<projects root>/<project>/<session_id>.jsonl`.
     NotTopLevelTranscript,

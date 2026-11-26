@@ -83,7 +83,7 @@ impl OStore {
         std::sync::Arc::new(InitScope::fixture(channels))
     }
 
-    pub(crate) fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
+    pub fn init_fixture_channel(&self, init: &Initialized) -> Result<(), StoreError> {
         self.init_channel(init, &Self::fixture_scope(&[init.channel]))
     }
 
@@ -103,7 +103,7 @@ impl OStore {
         self.begin_era_as(init, origin, &Self::fixture_scope(&[init.channel]), None)
     }
 
-    pub(crate) fn begin_fixture_era(
+    pub fn begin_fixture_era(
         &self,
         channels: &[u64],
         at: chrono::DateTime<chrono::Utc>,

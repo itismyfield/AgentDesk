@@ -272,7 +272,7 @@ impl BeginAck {
         &self.binding
     }
 
-    pub(crate) fn into_parts(self) -> (ExactAttempt, String, String) {
+    pub fn into_parts(self) -> (ExactAttempt, String, String) {
         (self.attempt, self.effect_target, self.input_hash)
     }
 }

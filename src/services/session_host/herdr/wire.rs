@@ -8,7 +8,7 @@ use std::io::{self, BufRead, Write};
 use super::model::{HerdrCall, HerdrReply};
 
 /// Largest reply frame read before the connection is dropped.
-pub(crate) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FrameError {
@@ -40,14 +40,14 @@ fn io_error(error: io::Error) -> FrameError {
     }
 }
 
-pub(crate) trait HerdrFraming: Send + Sync {
+pub trait HerdrFraming: Send + Sync {
     fn encode(&self, call: &HerdrCall) -> Result<Vec<u8>, String>;
     fn read_frame(&self, reader: &mut dyn BufRead, max_bytes: usize)
     -> Result<Vec<u8>, FrameError>;
 }
 
 /// One JSON object per `\n`-terminated line.
-pub(crate) struct LineJsonFraming;
+pub struct LineJsonFraming;
 
 impl HerdrFraming for LineJsonFraming {
     fn encode(&self, call: &HerdrCall) -> Result<Vec<u8>, String> {

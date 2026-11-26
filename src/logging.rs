@@ -753,7 +753,7 @@ pub mod test_capture {
 
     /// Call before installing a capture subscriber. Two permanent registrations
     /// keep tracing-core off its single-dispatcher path for the whole process.
-    pub(crate) fn pin_callsite_interest() {
+    pub fn pin_callsite_interest() {
         static PINS: OnceLock<[Dispatch; 2]> = OnceLock::new();
         PINS.get_or_init(|| [Dispatch::new(InterestPin), Dispatch::new(InterestPin)]);
     }

@@ -50,7 +50,7 @@ impl Candidate {
             .subscribe()
     }
 
-    pub(crate) fn legacy_run(&self) -> Option<LegacyRun> {
+    pub fn legacy_run(&self) -> Option<LegacyRun> {
         self.child_run
             .lock()
             .unwrap_or_else(PoisonError::into_inner)

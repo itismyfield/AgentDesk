@@ -234,7 +234,7 @@ mod projection {
     }
     impl Projection {
         /// Only the existing reopen hash pass can publish an authenticated seed.
-        pub(crate) fn reopen(
+        pub fn reopen(
             binding: SourceBinding,
             through: u64,
             hash: &str,
@@ -270,11 +270,11 @@ mod projection {
         ) -> Result<Vec<Evidence>, String> {
             self.analyze(registrations).map(|a| a.evidence)
         }
-        pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
+        pub fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
             self.analyze_closed(registrations, None)
         }
         /// `raw` adds one closing edge after the last complete record; it is never a record.
-        pub(crate) fn analyze_closed(
+        pub fn analyze_closed(
             &self,
             registrations: &[Registration],
             raw: Option<&terminal::RawWitness>,
@@ -342,7 +342,7 @@ mod projection {
             })
             .collect()
         }
-        pub(crate) fn idle(&self) -> bool {
+        pub fn idle(&self) -> bool {
             self.state == super::super::TurnState::Idle
         }
         pub(crate) fn append(

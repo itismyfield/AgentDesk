@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _env: [Env; 4],
-    pub(crate) root: tempfile::TempDir,
+    pub root: tempfile::TempDir,
     pub(crate) real: PathBuf,
     pub(crate) socket: String,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
@@ -92,7 +92,7 @@ while True:
         }
     }
 
-    pub(crate) fn tmux(&self, args: &[&str]) -> String {
+    pub fn tmux(&self, args: &[&str]) -> String {
         let mut command = Command::new(&self.real);
         command.args(["-L", &self.socket, "-f", "/dev/null"]);
         if args.first() == Some(&"new-session") {

@@ -18,7 +18,7 @@ pub(crate) const MIN_HERDR_VERSION: [u64; 3] = [0, 9, 3];
 
 /// The one server gate for the user-default peer and E7: our protocol and a stable
 /// `MAJOR.MINOR.PATCH` release at or above the minimum. Pre-release or unreadable versions fail.
-pub(crate) fn supported_herdr_server(version: &str, protocol: u32) -> bool {
+pub fn supported_herdr_server(version: &str, protocol: u32) -> bool {
     protocol == HERDR_PROTOCOL && stable_release(version).is_some_and(|v| v >= MIN_HERDR_VERSION)
 }
 
@@ -185,7 +185,7 @@ impl HerdrObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HerdrReadSource {
+pub enum HerdrReadSource {
     Visible,
     Recent,
     RecentUnwrapped,
@@ -195,7 +195,7 @@ pub(crate) enum HerdrReadSource {
 /// A `pane.read` rendering other than Herdr's default `text`; only `Ansi` keeps SGR styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HerdrReadFormat {
+pub enum HerdrReadFormat {
     Ansi,
 }
 
@@ -266,7 +266,7 @@ pub struct HerdrCall {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrPane {
+pub struct HerdrPane {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
@@ -276,7 +276,7 @@ pub(crate) struct HerdrPane {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrSnapshot {
+pub struct HerdrSnapshot {
     pub version: String,
     pub protocol: u32,
     pub panes: Vec<HerdrPane>,
@@ -286,7 +286,7 @@ pub(crate) struct HerdrSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrWorkspace {
+pub struct HerdrWorkspace {
     pub workspace_id: String,
     pub label: String,
     pub pane_count: u32,
@@ -294,7 +294,7 @@ pub(crate) struct HerdrWorkspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrProcessInfo {
+pub struct HerdrProcessInfo {
     pub pane_id: String,
     pub shell_pid: Option<u32>,
     pub foreground_process_group_id: Option<u32>,
@@ -304,13 +304,13 @@ pub(crate) struct HerdrProcessInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrForegroundProcess {
+pub struct HerdrForegroundProcess {
     pub pid: u32,
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrRead {
+pub struct HerdrRead {
     pub pane_id: String,
     pub source: HerdrReadSource,
     pub text: String,
@@ -320,7 +320,7 @@ pub(crate) struct HerdrRead {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum HerdrResult {
+pub enum HerdrResult {
     Pong {
         version: String,
         protocol: u32,
@@ -361,7 +361,7 @@ struct RawReply {
 /// One correlated reply: exactly one of `result` / `error`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawReply")]
-pub(crate) struct HerdrReply {
+pub struct HerdrReply {
     pub id: String,
     pub body: Result<HerdrResult, HerdrErrorBody>,
 }

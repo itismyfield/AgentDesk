@@ -379,7 +379,7 @@ pub mod flush_probe {
 
     /// One write or flush step, with the target's bytes as they stood when it ran.
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub(crate) struct Event {
+    pub struct Event {
         pub(crate) target: PathBuf,
         pub(crate) step: Step,
         pub(crate) dir: PathBuf,
@@ -395,12 +395,12 @@ pub mod flush_probe {
     }
 
     impl Gate {
-        pub(crate) fn release(&self) {
+        pub fn release(&self) {
             self.state.lock().unwrap_or_else(|e| e.into_inner()).1 = true;
             self.changed.notify_all();
         }
 
-        pub(crate) fn wait_entered(&self, timeout: std::time::Duration) -> bool {
+        pub fn wait_entered(&self, timeout: std::time::Duration) -> bool {
             let guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let (guard, _) = self
                 .changed
@@ -440,7 +440,7 @@ pub mod flush_probe {
     pub struct Watch(PathBuf);
 
     impl Watch {
-        pub(crate) fn new(scope: &Path, plan: Plan) -> Self {
+        pub fn new(scope: &Path, plan: Plan) -> Self {
             WATCHED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -452,7 +452,7 @@ pub mod flush_probe {
             Self(scope.to_path_buf())
         }
 
-        pub(crate) fn events(&self) -> Vec<Event> {
+        pub fn events(&self) -> Vec<Event> {
             WATCHED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())

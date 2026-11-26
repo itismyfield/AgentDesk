@@ -22,7 +22,7 @@ pub struct Port {
     send: mpsc::Sender<Request>,
 }
 
-pub(crate) struct Receiver {
+pub struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Request>,
@@ -123,7 +123,7 @@ impl Port {
         self.suspension.is_empty()
     }
 
-    pub(crate) fn new(generation: u64) -> (Self, Receiver) {
+    pub fn new(generation: u64) -> (Self, Receiver) {
         let run = Arc::new(());
         let (send, receive) = mpsc::channel(4);
         let receiver = Receiver {

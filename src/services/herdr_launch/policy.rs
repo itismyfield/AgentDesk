@@ -27,7 +27,7 @@ pub trait LaunchGrantStore: Send + Sync {
     async fn save(&self, grant: LaunchAdmissionGrant) -> Result<(), String>;
 }
 
-pub(crate) struct UnintroducedGrantStore;
+pub struct UnintroducedGrantStore;
 #[async_trait::async_trait]
 impl LaunchGrantStore for UnintroducedGrantStore {
     async fn load(

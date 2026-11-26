@@ -113,7 +113,7 @@ impl ReceiptSink {
             .map(Ok)
             .or_else(|| self.rejected.load(Ordering::Acquire).then_some(Err(())))
     }
-    pub(crate) fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
+    pub fn observe(&self) -> Option<Result<NativeUserPin, ()>> {
         if let Some(result) = self.cached() {
             self.notify(false);
             return Some(result);

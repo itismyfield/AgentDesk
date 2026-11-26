@@ -27,7 +27,7 @@ pub struct RepostIds {
 
 impl RepostIds {
     /// `None` when the marker cannot travel intact; there is no re-post without one.
-    pub(crate) fn for_piece(marker: &str) -> Option<Self> {
+    pub fn for_piece(marker: &str) -> Option<Self> {
         let footer_chars = REPOST_NOTE.chars().count() + 1 + marker.chars().count();
         if marker.trim().is_empty() || footer_chars > FOOTER_MAX_CHARS {
             return None;
@@ -40,7 +40,7 @@ impl RepostIds {
         })
     }
 
-    pub(crate) fn nonce(&self) -> &str {
+    pub fn nonce(&self) -> &str {
         &self.nonce
     }
 
@@ -87,7 +87,7 @@ impl RepostEnvelope {
         &self.content
     }
 
-    pub(crate) fn message(&self) -> CreateMessage {
+    pub fn message(&self) -> CreateMessage {
         let nonce = serenity::model::channel::Nonce::String(self.ids.nonce.clone());
         let message = crate::services::discord::outbound::notification_policy::silence(
             CreateMessage::new(),
@@ -153,7 +153,7 @@ pub struct AttemptGuard {
 
 impl AttemptGuard {
     /// Refuses once a counted request went out or `live` (holder, source, deadline) says stop.
-    pub(crate) fn begin(&self) -> Result<(), String> {
+    pub fn begin(&self) -> Result<(), String> {
         if self.count.counted.load(Ordering::SeqCst) > 0 {
             return Err("this dispatch already sent its counted POST".into());
         }
@@ -166,7 +166,7 @@ impl AttemptGuard {
     }
 
     /// The request just sent drew a 429, so it leaves the count.
-    pub(crate) fn throttled(&self) {
+    pub fn throttled(&self) {
         self.count.counted.fetch_sub(1, Ordering::SeqCst);
         self.count.throttled.fetch_add(1, Ordering::SeqCst);
     }
@@ -190,7 +190,7 @@ pub trait BoundedTransport {
 }
 
 /// The counts of one handed-over dispatch: the same cells its guard writes.
-pub(crate) struct DispatchCounts(Arc<WireCount>);
+pub struct DispatchCounts(Arc<WireCount>);
 
 impl DispatchCounts {
     pub(crate) fn report(&self, outcome: WireOutcome) -> DispatchReport {

@@ -53,7 +53,7 @@ pub struct HerdrTurnStart {
 
 impl HerdrInterruptState {
     /// Records the turn start once; a different second start is refused, never overwritten.
-    pub(crate) fn record_turn_start(&self, start: HerdrTurnStart) -> bool {
+    pub fn record_turn_start(&self, start: HerdrTurnStart) -> bool {
         match self.turn_start.set(start) {
             Ok(()) => true,
             Err(start) => self.turn_start.get() == Some(&start),
@@ -132,7 +132,7 @@ impl HerdrInterruptState {
 
 impl HerdrTurnStart {
     /// The start of input to `source` at its current end, read before the input is written.
-    pub(crate) fn at_end_of(
+    pub fn at_end_of(
         execution_nonce: &str,
         source: &std::path::Path,
         submitted_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -402,7 +402,7 @@ impl CancelToken {
 
     /// [`Self::try_prepare_herdr_interrupt`] for a test turn that must take its state.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn prepare_herdr_interrupt(
+    pub fn prepare_herdr_interrupt(
         &self,
         provider: ProviderKind,
         owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
@@ -413,7 +413,7 @@ impl CancelToken {
 
     /// Install observation before input; only Herdr executors use this slot. `None`, installing
     /// nothing, once a cancel landed first or when the slot holds another owner's turn.
-    pub(crate) fn try_prepare_herdr_interrupt(
+    pub fn try_prepare_herdr_interrupt(
         &self,
         provider: ProviderKind,
         owner: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,

@@ -778,7 +778,7 @@ pub mod spy {
         tmux_key_name,
     };
 
-    pub(crate) struct SpyState {
+    pub struct SpyState {
         pub calls: Vec<String>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
@@ -982,7 +982,7 @@ pub mod spy {
         }
     }
 
-    pub(crate) fn resolved(host: TargetHost) -> InputTarget {
+    pub fn resolved(host: TargetHost) -> InputTarget {
         InputTarget::from_session_target(&ResolvedSessionTarget {
             input: SessionTargetInput::RawName("AgentDesk-codex-p6b".to_string()),
             session_key: None,
@@ -990,7 +990,7 @@ pub mod spy {
         })
     }
 
-    pub(crate) fn known(kind: HostKind) -> TargetHost {
+    pub fn known(kind: HostKind) -> TargetHost {
         TargetHost::Known {
             kind,
             source: TargetSource::SessionRecord,
@@ -1025,10 +1025,10 @@ pub mod spy {
     }
 
     /// Routes this thread's legacy Codex input through a spy until dropped.
-    pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
+    pub struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
     impl SpyGuard {
-        pub(crate) fn install(state: SpyState) -> Self {
+        pub fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let injected: Injected = (
                 Box::new(Spy(state.clone())),
@@ -1038,7 +1038,7 @@ pub mod spy {
             Self(state)
         }
 
-        pub(crate) fn calls(&self) -> Vec<String> {
+        pub fn calls(&self) -> Vec<String> {
             self.0.borrow().calls.clone()
         }
     }

@@ -85,9 +85,9 @@ fn parse<T: Copy>(all: &[T], name: fn(T) -> &'static str, raw: &str) -> Result<T
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptRow {
-    pub(crate) slot: u8,
+    pub slot: u8,
     pub(crate) kind: AttemptKind,
-    pub(crate) result: Option<AttemptResult>,
+    pub result: Option<AttemptResult>,
 }
 
 pub struct GrantRequest<'a> {
@@ -116,7 +116,7 @@ impl SlotGrant {
         &self.key
     }
 
-    pub(crate) fn slot(&self) -> u8 {
+    pub fn slot(&self) -> u8 {
         self.slot
     }
 

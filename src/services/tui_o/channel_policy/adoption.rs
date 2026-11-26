@@ -191,7 +191,7 @@ impl Candidate {
         }
     }
 
-    pub(crate) fn new(state: Adoption) -> Self {
+    pub fn new(state: Adoption) -> Self {
         Self {
             init_scope: None,
             state: Arc::new(Mutex::new(state)),
@@ -399,7 +399,7 @@ impl Candidate {
     }
 
     /// Legacy body sends this channel started and finished so far; callers hold the state lock.
-    pub(crate) fn sends(&self) -> (u64, u64) {
+    pub fn sends(&self) -> (u64, u64) {
         let sends = &self.sends;
         let started = sends.started.load(Ordering::SeqCst);
         (started, sends.finished.load(Ordering::SeqCst))

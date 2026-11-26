@@ -209,7 +209,7 @@ impl Launching {
         Ok(guard)
     }
 
-    pub(crate) fn for_launch(owner: &HostedOwner) -> Result<Self, String> {
+    pub fn for_launch(owner: &HostedOwner) -> Result<Self, String> {
         let key = (
             owner.provider.clone(),
             owner.discord_token_hash.clone(),

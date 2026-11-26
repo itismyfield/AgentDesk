@@ -398,7 +398,7 @@ impl BootChannels {
     }
 
     /// What the shared view holds for `channel`: `None` leaves it to boot membership.
-    pub(crate) fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
+    pub fn child(&self, channel: u64) -> Option<Result<Child, ChildHeld>> {
         let entries = self
             .children
             .entries

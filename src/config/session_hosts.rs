@@ -456,7 +456,7 @@ pub fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
 
 #[cfg(any(test, feature = "test-support"))]
 impl ForcedSessionHosts {
-    pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
+    pub fn with_mode(self, mode: EndpointMode) -> Self {
         FORCED.with(|forced| {
             if let Some(boot) = forced.borrow_mut().as_mut() {
                 for endpoint in boot.config.herdr.endpoints.values_mut() {

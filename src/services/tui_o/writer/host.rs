@@ -320,12 +320,12 @@ impl Readiness {
         tokio::time::timeout(limit, answer).await.ok()?
     }
 
-    pub(crate) fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
+    pub fn submission(&self, channel: u64) -> Option<actor::codex_submission::Port> {
         locked(&self.live).get(&channel)?.submission.clone()
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn drop_submission_for_tests(&self, channel: u64) {
+    pub fn drop_submission_for_tests(&self, channel: u64) {
         if let Some(live) = locked(&self.live).get_mut(&channel) {
             live.submission = None;
         }
@@ -355,7 +355,7 @@ impl Readiness {
 
     /// Hosts `owed` for `channel` as a running actor would publish it, with no actor behind it.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn track_owed_for_test(&self, channel: u64, owed: OwedView) {
+    pub fn track_owed_for_test(&self, channel: u64, owed: OwedView) {
         let gate = Arc::new(OwnershipGate::default());
         self.track(
             channel,

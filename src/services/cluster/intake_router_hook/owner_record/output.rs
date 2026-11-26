@@ -33,7 +33,7 @@ pub(crate) fn hash(payload: &str) -> String {
 
 impl Origin {
     /// Called when the output artifact is created, never by a recovery sender.
-    pub(crate) fn seal(&self, payload: &str) -> Artifact {
+    pub fn seal(&self, payload: &str) -> Artifact {
         Artifact {
             origin: Box::new(self.clone()),
             payload_hash: hash(payload),

@@ -31,7 +31,7 @@ pub struct ReadOutputFailure {
 }
 
 impl ReadOutputFailure {
-    pub(crate) fn new(error: impl Into<String>, last_offset: u64, source_changed: bool) -> Self {
+    pub fn new(error: impl Into<String>, last_offset: u64, source_changed: bool) -> Self {
         Self {
             error: error.into(),
             last_offset,

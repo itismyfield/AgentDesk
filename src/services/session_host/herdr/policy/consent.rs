@@ -281,7 +281,7 @@ impl ConsentStore {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
+    pub fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, false)
     }
 

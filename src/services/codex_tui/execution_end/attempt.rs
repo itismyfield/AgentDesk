@@ -28,7 +28,7 @@ impl Scope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct AttemptId {
+pub struct AttemptId {
     scope: Scope,
     token: u64,
 }
@@ -136,7 +136,7 @@ impl Registry {
 }
 
 /// Dispatch is synchronous; this guard cannot move its calling-thread identity to another thread.
-pub(crate) struct AttemptGuard {
+pub struct AttemptGuard {
     observed: Option<(AttemptId, bool)>,
     context: u64,
     _same_thread: PhantomData<Rc<()>>,

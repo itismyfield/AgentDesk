@@ -54,11 +54,11 @@ impl Drop for DispatchPostgresTestDb {
 
 impl DispatchPostgresTestDb {
     /// Keeps the legacy Option adapter while treating unavailable PostgreSQL as a fixture failure.
-    pub(crate) async fn try_create(prefix: &str, label: &str) -> Option<Self> {
+    pub async fn try_create(prefix: &str, label: &str) -> Option<Self> {
         Some(Self::create(prefix, label).await)
     }
 
-    pub(crate) async fn create(prefix: &str, label: &str) -> Self {
+    pub async fn create(prefix: &str, label: &str) -> Self {
         let lock = crate::db::postgres::lock_test_lifecycle();
         let base = crate::db::postgres::postgres_test_database_url_base()
             .expect("POSTGRES_TEST_DATABASE_URL_BASE required for PostgreSQL fixtures"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
@@ -87,7 +87,7 @@ impl DispatchPostgresTestDb {
         &self.database_name
     }
 
-    pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
+    pub async fn connect_and_migrate(&self) -> sqlx::PgPool {
         crate::db::postgres::connect_test_pool_and_migrate(&self.database_url, &self.label)
             .await
             .unwrap_or_else(|err| {
@@ -95,7 +95,7 @@ impl DispatchPostgresTestDb {
             })
     }
 
-    pub(crate) async fn connect_and_migrate_with_max_connections(
+    pub async fn connect_and_migrate_with_max_connections(
         &self,
         max_connections: u32,
     ) -> sqlx::PgPool {

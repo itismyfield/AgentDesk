@@ -22,7 +22,7 @@ pub struct Posts {
 }
 
 impl Posts {
-    pub(crate) fn to(&self, channel: u64) -> Vec<String> {
+    pub fn to(&self, channel: u64) -> Vec<String> {
         let posts = locked(&self.records);
         let to = posts.iter().filter(|(c, _)| *c == channel);
         to.map(|(_, message)| message.content.clone()).collect()
@@ -100,7 +100,7 @@ impl DeliveryLease for AnyLease {
 }
 
 #[derive(Clone, Default)]
-pub struct Alarms(pub(crate) Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
+pub struct Alarms(pub Arc<Mutex<Vec<(u64, WriterAlarm)>>>);
 
 impl AlarmSink for Alarms {
     fn raise(&self, channel: u64, alarm: WriterAlarm) {
@@ -130,11 +130,11 @@ type CustodyProbe = Option<fn(u64) -> bool>;
 /// Reports `facts` for every channel (none blocking by default); the store's own checks and
 /// the adoption still apply. `on_facts` runs once as the next facts are read.
 pub struct TestHost {
-    pub(crate) posts: Arc<Posts>,
-    pub(crate) alarms: Alarms,
+    pub posts: Arc<Posts>,
+    pub alarms: Alarms,
     sources: BTreeMap<u64, SourceId>,
-    pub(crate) facts: Mutex<ActivationFacts>,
-    pub(crate) on_facts: Mutex<FactsHook>,
+    pub facts: Mutex<ActivationFacts>,
+    pub on_facts: Mutex<FactsHook>,
     /// Legacy's relay state for channels that already hold output; fails closed when unset.
     pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     /// The tmux session each channel's binding names, `host-<channel>` when unset.
@@ -147,7 +147,7 @@ pub struct TestHost {
 }
 
 impl TestHost {
-    pub(crate) fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
+    pub fn new(sources: impl IntoIterator<Item = (u64, SourceId)>) -> Arc<Self> {
         Arc::new(Self {
             posts: Arc::default(),
             alarms: Alarms::default(),

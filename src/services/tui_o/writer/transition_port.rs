@@ -218,7 +218,7 @@ pub struct TransitionPort {
     send: mpsc::Sender<Envelope>,
 }
 
-pub(crate) struct Receiver {
+pub struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Envelope>,
@@ -242,7 +242,7 @@ impl TransitionPort {
         self.provider
     }
 
-    pub(crate) fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
+    pub fn with_suspension(mut self, suspension: super::suspension::Suspension) -> Self {
         self.suspension = suspension;
         self
     }
@@ -251,7 +251,7 @@ impl TransitionPort {
         self.suspension.is_empty()
     }
 
-    pub(crate) fn new(
+    pub fn new(
         generation: u64,
         gate: Arc<OwnershipGate>,
         wall: Wall,

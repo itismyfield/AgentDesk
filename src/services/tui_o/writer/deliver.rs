@@ -253,7 +253,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::new`], judging the recovered refusals with the shared receipts read before start.
-    pub(crate) fn with_receipts(
+    pub fn with_receipts(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,
@@ -307,7 +307,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::with_receipts`] over the receipts `repost` reads first, then gives it the turn.
-    pub(crate) async fn hosted(
+    pub async fn hosted(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,

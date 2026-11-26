@@ -111,14 +111,14 @@ pub struct TestConfirmation(u64);
 
 #[cfg(any(test, feature = "test-support"))]
 impl TestConfirmation {
-    pub(crate) fn new(channel: u64) -> Self {
+    pub fn new(channel: u64) -> Self {
         assert!(!transcript_turns(channel));
         confirm(channel);
         Self(channel)
     }
 
     /// Takes over removal of a channel production code already confirmed.
-    pub(crate) fn confirmed(channel: u64) -> Self {
+    pub fn confirmed(channel: u64) -> Self {
         assert!(transcript_turns(channel));
         Self(channel)
     }
@@ -315,13 +315,13 @@ pub mod test_tick {
     static TICK: std::sync::Mutex<Option<(u64, tokio::sync::oneshot::Sender<()>)>> =
         std::sync::Mutex::new(None);
 
-    pub(crate) fn signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
+    pub fn signal(channel: u64) -> tokio::sync::oneshot::Receiver<()> {
         let (tx, rx) = tokio::sync::oneshot::channel();
         *TICK.lock().unwrap_or_else(|e| e.into_inner()) = Some((channel, tx));
         rx
     }
 
-    pub(crate) fn completed(channel: u64) {
+    pub fn completed(channel: u64) {
         let mut tick = TICK.lock().unwrap_or_else(|e| e.into_inner());
         if tick.as_ref().is_some_and(|(id, _)| *id == channel) {
             let (_, tx) = tick.take().unwrap();
