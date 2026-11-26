@@ -1,19 +1,21 @@
 // @vitest-environment happy-dom
-import { act, useEffect } from "react";
+import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Campaign } from "../src/api/campaigns";
-import { request } from "../src/api/httpClient";
+import { deleteCampaign, type Campaign } from "../src/api/campaigns";
+import { ApiRequestError, request } from "../src/api/httpClient";
+import CampaignsPanel from "../src/components/campaigns/CampaignsPanel";
 import { bulkKanbanAction } from "../src/api/kanban";
 import { getDefaultPipelineTemplate, saveServerCampaignPipeline, validateServerCampaignPipeline, type CampaignPipeline as PipelineDetail } from "../src/api/serverCampaignPipeline";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
-import { CampaignBatchTracker, CampaignGateApprovalCard, buildBatchTracker } from "../src/components/campaigns/CampaignApprovalBanner";
+import { CampaignBatchTracker, CampaignGateApprovalCard, buildBatchTracker, isLedgerLandReadyCandidate } from "../src/components/campaigns/CampaignApprovalBanner";
 import CampaignBoard from "../src/components/campaigns/CampaignBoard";
 import { legacyBoard } from "../src/components/campaigns/campaignBoardModel";
 import CampaignOverview, { type TaskView } from "../src/components/campaigns/CampaignOverview";
 import { legacyTask, serverTasks } from "../src/components/campaigns/campaignOverviewModel";
 import CampaignPipeline from "../src/components/campaigns/CampaignPipeline";
 import CampaignQueueTab from "../src/components/campaigns/CampaignQueueTab";
+import CampaignRelations from "../src/components/campaigns/CampaignRelations";
 import { makeCampaignNode } from "../src/components/campaigns/campaignTestFixtures";
 import RelationsInspector from "../src/components/campaigns/RelationsInspector";
 import {
@@ -53,11 +55,36 @@ vi.mock("../src/api/serverCampaignPipeline", async (importOriginal) => ({
 
 vi.mock("@xyflow/react", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@xyflow/react")>()),
-  ReactFlow: ({ nodes, onInit }: { nodes: Array<{ id: string }>; onInit?: (instance: unknown) => void }) => {
+  ReactFlow: ({
+    nodes,
+    onInit,
+    onNodesChange,
+    onNodeDoubleClick,
+    children,
+  }: {
+    nodes: Array<{ id: string }>;
+    onInit?: (instance: unknown) => void;
+    onNodesChange?: (changes: unknown[]) => void;
+    onNodeDoubleClick?: (event: unknown, node: { id: string }) => void;
+    children?: ReactNode;
+  }) => {
     useEffect(() => {
       onInit?.({ fitView: vi.fn(), setViewport: vi.fn(), zoomIn: vi.fn(), zoomOut: vi.fn() });
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
-    return <div data-testid="mock-reactflow" data-node-count={nodes.length} />;
+    return (
+      <div data-testid="mock-reactflow" data-node-count={nodes.length}>
+        {nodes.map((node) => (
+          <button
+            key={node.id}
+            type="button"
+            data-rf-node={node.id}
+            onClick={() => onNodesChange?.([{ type: "select", id: node.id, selected: true }])}
+            onDoubleClick={() => onNodeDoubleClick?.({}, node)}
+          />
+        ))}
+        {children}
+      </div>
+    );
   },
   Background: () => null,
   MiniMap: () => null,
@@ -215,18 +242,27 @@ describe("ApprovalCard landing banner & forum approval wiring", () => {
   });
 
   it("identifies open LAND_READY ledger tasks without false-positives on completed, blocked, failed, or summary-only text", async () => {
-    const openReady = makeCampaignNode("n1", { status: "running", stage: "LAND_READY · 배치 착지 대기", evidence: ["vitest clean"] });
+    const openReady = makeCampaignNode("n1", { status: "running", stage: "LAND_READY · 착지 승인 대기", evidence: ["vitest clean"] });
+    const bareReady = makeCampaignNode("n-bare", { status: "running", stage: "LAND_READY · 배치 착지 대기" });
+    const historicalReady = makeCampaignNode("n-hist", { status: "running", stage: "LAND_READY d5040b28cc → 착지 묶음 1121f → 배포 뒤 확인" });
     const closedOld = makeCampaignNode("n2", { status: "completed", stage: "사용자 승인으로 착지 승인 대기 종료" });
     const blockedNode = makeCampaignNode("n3", { status: "blocked", stage: "LAND_READY", blocker: "CI 실패 확인 필요" });
     const failedNode = makeCampaignNode("n4", { status: "failed", stage: "LAND_READY" });
     const summaryOnly = makeCampaignNode("n5", { status: "running", stage: "구현 중", summary: "완료 후 LAND_READY 예정" });
     expect(legacyTask(openReady).gate?.gate).toBe("landing");
+    expect(legacyTask(bareReady).gate).toBeNull();
+    expect(legacyTask(historicalReady).gate).toBeNull();
     expect(legacyTask(closedOld).gate).toBeNull();
     expect(legacyTask(blockedNode).gate).toBeNull();
     expect(legacyTask(blockedNode).attention).toBe(true);
     expect(legacyTask(failedNode).gate).toBeNull();
     expect(legacyTask(failedNode).attention).toBe(true);
     expect(legacyTask(summaryOnly).gate).toBeNull();
+
+    expect(isLedgerLandReadyCandidate(historicalReady)).toBe(false);
+    expect(isLedgerLandReadyCandidate({ stage: "배포 확인 중", summary: "착지 승인 배너 수리" })).toBe(false);
+    expect(isLedgerLandReadyCandidate(bareReady)).toBe(true);
+    expect(isLedgerLandReadyCandidate({ stage: "구현 완료 → LAND_READY d5040b28cc" })).toBe(true);
 
     await act(async () => {
       root.render(
@@ -429,6 +465,115 @@ describe("Batch landing header tracker & 486+ scale UX", () => {
     const removeDepBtn = container.querySelector<HTMLButtonElement>('button[aria-label*="빼기"]')!;
     expect(removeDepBtn.className).toContain("max-[899px]:!size-11");
   });
+
+  it("renders interactive PipelineCanvas and CampaignGroupOverview/CampaignGroupTasks on phone (<900px) with SegmentedControl list toggles", async () => {
+    const mqSpy = vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          matches: query.includes("max-width: 899px") || query.includes("max-width"),
+          media: query,
+          onchange: null,
+          addListener: vi.fn(),
+          removeListener: vi.fn(),
+          addEventListener: vi.fn(),
+          removeEventListener: vi.fn(),
+          dispatchEvent: vi.fn(),
+        }) as unknown as MediaQueryList,
+    );
+
+    try {
+      vi.mocked(getDefaultPipelineTemplate).mockResolvedValue({
+        template: { id: "campaign-development-9", version: 1 },
+        pipeline: {
+          schema_version: 1,
+          vocabulary_version: 1,
+          evaluator_version: 1,
+          registry_version: 1,
+          start: "requirements",
+          states: [
+            { id: "requirements", kind: "auto_check", title: "요구사항" },
+            { id: "complete", kind: "end_success", title: "완료" },
+          ],
+          transitions: [
+            { id: "t1", from: "requirements", to: "complete", priority: 10, condition: { field: "state.outcome", op: "eq", value: "succeeded" } },
+          ],
+          events: [],
+          effect_gates: [],
+        },
+      });
+
+      const mobileCampaign: Campaign = {
+        id: "mobile-dag",
+        title: "모바일 캠페인",
+        description: "",
+        status: "active",
+        round: 1,
+        revision: 1,
+        auto_queue: false,
+        created_at: "2026-11-25T00:00:00Z",
+        updated_at: "2026-11-25T00:00:00Z",
+        nodes: [
+          makeCampaignNode("g1", { title: "게이트웨이 설계", group: "Gateway", status: "completed", stage: "done" }),
+          makeCampaignNode("g2", { title: "게이트웨이 구현", group: "Gateway", status: "running", stage: "구현 중" }),
+          makeCampaignNode("r1", { title: "릴레이 연동", group: "Relay", status: "pending", dependencies: ["g1"] }),
+        ],
+      };
+
+      // (a) CampaignPipeline on phone: Korean labels on AgentStateMachine + interactive PipelineCanvas + 단계 목록 toggle
+      await act(async () => {
+        root.render(<CampaignPipeline source={{ kind: "legacy" }} campaign={mobileCampaign} tr={koTr} />);
+      });
+      await act(async () => { await Promise.resolve(); });
+
+      const machine = container.querySelector(".aui-agent-state-machine")!;
+      expect(machine).not.toBeNull();
+      expect(machine.textContent).toContain("전환");
+      expect(machine.textContent).toContain("도달 전");
+
+      const previewBtn = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("기본 9단계 템플릿 미리보기"))!;
+      await act(async () => previewBtn.click());
+      expect(container.textContent).not.toContain("폰에서는 보기만 해요");
+      expect(container.querySelector('[data-testid="mock-reactflow"]')).not.toBeNull();
+
+      const stateListTab = [...container.querySelectorAll('[aria-label="파이프라인 보기 방식"] button')].find((b) => b.textContent?.includes("단계 목록"))!;
+      await act(async () => (stateListTab as HTMLButtonElement).click());
+      expect(container.querySelector('[data-testid="mock-reactflow"]')).toBeNull();
+      expect(container.textContent).toContain("요구사항");
+
+      // (b) CampaignRelations on phone: Wave GanttTimeline by default -> switch to 그래프 -> interactive CampaignGroupOverview -> drill into CampaignGroupTasks -> switch to 목록 GroupList
+      await act(async () => {
+        root.render(<CampaignRelations campaign={mobileCampaign} selectedId={null} onOpen={vi.fn()} tr={koTr} />);
+      });
+      expect(container.querySelector('.aui-gantt-timeline-root[data-axis="wave"]')).not.toBeNull();
+
+      const graphModeBtn = [...container.querySelectorAll('[aria-label="관계도 보기 방식"] button')].find((b) => b.textContent?.trim() === "그래프")!;
+      await act(async () => (graphModeBtn as HTMLButtonElement).click());
+      expect(container.querySelector('[data-testid="mock-reactflow"]')?.getAttribute("data-node-count")).toBe("2");
+      expect(container.querySelector('[aria-label="그룹 목록"]')).toBeNull();
+
+      const gatewayNode = container.querySelector<HTMLButtonElement>('[data-rf-node="campaign-group:Gateway"]')!;
+      await act(async () => gatewayNode.click());
+      const openGroupBtn = [...container.querySelectorAll("button")].find((b) => b.textContent?.trim() === "그룹 열기")!;
+      await act(async () => openGroupBtn.click());
+
+      expect(container.querySelector('[aria-label="이동 줄"]')?.textContent).toContain("전체 그룹");
+      expect(container.querySelector('[aria-label="이동 줄"]')?.textContent).toContain("Gateway");
+      expect(container.querySelector('[data-testid="mock-reactflow"]')?.getAttribute("data-node-count")).toBe("3");
+
+      const allGroupsBtn = [...container.querySelectorAll('[aria-label="이동 줄"] button')].find((b) => b.textContent?.trim() === "전체 그룹")!;
+      await act(async () => (allGroupsBtn as HTMLButtonElement).click());
+
+      const listLayoutBtn = [...container.querySelectorAll('[aria-label="모바일 그래프 표시"] button')].find((b) => b.textContent?.trim() === "목록")!;
+      await act(async () => (listLayoutBtn as HTMLButtonElement).click());
+      expect(container.querySelector('[data-testid="mock-reactflow"]')).toBeNull();
+      const groupList = container.querySelector('[aria-label="그룹 목록"]')!;
+      expect(groupList).not.toBeNull();
+      expect(groupList.textContent).toContain("선행 그룹 0 · 다음 그룹 1");
+      expect(groupList.textContent).toContain("선행 그룹 1 · 다음 그룹 0");
+    } finally {
+      mqSpy.mockRestore();
+    }
+  });
 });
 
 describe("Shared editor history & saving-leave guard (#8369 P2-a, P2-c, P2-4)", () => {
@@ -506,5 +651,101 @@ describe("Shared editor history & saving-leave guard (#8369 P2-a, P2-c, P2-4)", 
     });
     // Re-create root for afterEach cleanup
     root = createRoot(container);
+  });
+
+  it("wires #8340 ledger campaign deletion: disables active delete, handles 409 conflict, and removes deleted campaigns", async () => {
+    const activeLedger: Campaign = {
+      id: "active-1",
+      title: "진행 중인 원장 캠페인",
+      description: "",
+      status: "active",
+      round: 1,
+      revision: 2,
+      auto_queue: false,
+      created_at: "2026-11-20T00:00:00Z",
+      updated_at: "2026-11-26T00:00:00Z",
+      nodes: [makeCampaignNode("n1", { status: "running" })],
+    };
+    const completedLedger: Campaign = {
+      id: "done-1",
+      title: "완료된 옛 캠페인",
+      description: "",
+      status: "completed",
+      round: 1,
+      revision: 4,
+      auto_queue: false,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-10T00:00:00Z",
+      nodes: [makeCampaignNode("n2", { status: "completed" })],
+    };
+
+    vi.mocked(request).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/campaigns?limit=")) {
+        return { campaigns: [activeLedger, completedLedger], live: {}, limit: 100, offset: 0 };
+      }
+      if (url === "/api/server-campaigns?view=summary&limit=100&offset=0") {
+        return { campaigns: [], limit: 100, offset: 0 };
+      }
+      if (url === "/api/campaigns/active-1") {
+        return { campaign: activeLedger, live: {} };
+      }
+      if (url === "/api/campaigns/done-1" && (!init?.method || init.method === "GET")) {
+        return { campaign: completedLedger, live: {} };
+      }
+      return { runs: [] };
+    });
+
+    await act(async () => {
+      root.render(<CampaignsPanel language="ko" />);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Active campaign has disabled delete button
+    const activeDeleteBtn = container.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-trigger']")!;
+    expect(activeDeleteBtn).not.toBeNull();
+    expect(activeDeleteBtn.disabled).toBe(true);
+
+    // Switch to Done bucket and select completed campaign
+    const doneTab = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("끝남"))!;
+    await act(async () => doneTab.click());
+    const completedCard = container.querySelector<HTMLButtonElement>('[data-campaign-key="legacy:done-1"]')!;
+    await act(async () => completedCard.click());
+
+    const enabledDeleteBtn = container.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-trigger']")!;
+    expect(enabledDeleteBtn.disabled).toBe(false);
+    await act(async () => enabledDeleteBtn.click());
+
+    expect(document.querySelector("[data-testid='campaign-delete-modal']")?.textContent).toContain("완료된 옛 캠페인");
+
+    // Simulate 409 Conflict first
+    vi.mocked(request).mockImplementationOnce(async () => {
+      throw new ApiRequestError("active campaign cannot be deleted", { status: 409 });
+    });
+    const confirmBtn = document.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-confirm']")!;
+    await act(async () => confirmBtn.click());
+    expect(document.querySelector("[data-testid='campaign-delete-error']")?.textContent).toContain("진행 중인 캠페인은 삭제할 수 없어요");
+
+    // Simulate 200 OK delete
+    vi.mocked(request).mockImplementationOnce(async (url, init) => {
+      expect(url).toBe("/api/campaigns/done-1");
+      expect(init?.method).toBe("DELETE");
+      return { deleted: "done-1", deleted_revisions: 4 };
+    });
+    await act(async () => confirmBtn.click());
+
+    expect(document.querySelector("[data-testid='campaign-delete-modal']")).toBeNull();
+    expect(container.querySelector('[data-campaign-key="legacy:done-1"]')).toBeNull();
+
+    // Direct API helper check
+    vi.mocked(request).mockResolvedValueOnce({ deleted: "slug/a", deleted_revisions: 1 });
+    const res = await deleteCampaign("slug/a");
+    expect(res).toEqual({ deleted: "slug/a", deleted_revisions: 1 });
+    expect(vi.mocked(request)).toHaveBeenLastCalledWith(
+      "/api/campaigns/slug%2Fa",
+      { method: "DELETE", suppressErrorToast: true },
+      expect.anything(),
+    );
   });
 });

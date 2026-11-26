@@ -1,6 +1,7 @@
 import { ChevronDown, Search } from "lucide-react";
 import { useId, useMemo, useState, type CSSProperties } from "react";
 import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
+import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { Select } from "../../kit/free/select-clean";
@@ -39,14 +40,13 @@ function look(task: TaskView, chip?: BoardCard["chip"]): { tone: ChipTone; label
   return { ...CHIPS[chip ?? (task.attention && task.status !== "failed" ? "blocked" : task.status)], style: borderColor ? { borderColor } : undefined };
 }
 
-function Card({ card, selected, controls, onOpen, roster, retry, tr }: {
-  card: BoardCard; selected: boolean; controls?: string; onOpen: (id: string) => void; roster: Agent[] | null; retry?: BoardRetry; tr: Tr;
+function Card({ card, selected, controls, onOpen, roster, retry, language, tr }: {
+  card: BoardCard; selected: boolean; controls?: string; onOpen: (id: string) => void; roster: Agent[] | null; retry?: BoardRetry; language?: string; tr: Tr;
 }) {
   const { task } = card;
   const agent = findAgent(roster, task.agent);
   const { tone, label, style } = look(task, card.chip);
-  const waiting = tr("승인 API 준비 중(#8249)", "Approval API in progress (#8249)");
-  const who = [agent && (agent.name_ko || agent.name), task.number].filter(Boolean).join(" · ");
+  const who = [agent && localeName(language ?? "ko", agent), task.number].filter(Boolean).join(" · ");
   const cardStyle = selected
     ? { borderColor: "var(--accent)", background: "color-mix(in srgb, var(--accent) 7%, var(--bg-2))", "--ui-crdc-shadow-selected": "none" } as CSSProperties
     : style;
@@ -63,10 +63,11 @@ function Card({ card, selected, controls, onOpen, roster, retry, tr }: {
       </span>}
       <span className="flex min-w-0 flex-wrap items-center gap-1.5"><Chip data-status-chip tone={tone} dot={tone === "info"}>{tr(...label)}</Chip><LiveChip live={task.live} tr={tr} /></span>
     </button>
-    {task.gate && <>
-      <Button variant="primary" size="sm" disabled title={waiting} className="w-full">{tr("승인", "Approve")}</Button>
-      <Cap>{waiting}</Cap>
-    </>}
+    {task.gate && (
+      <Button variant="secondary" size="sm" onClick={() => onOpen(task.id)} className="w-full">
+        {tr("승인 검토", "Review approval")}
+      </Button>
+    )}
     {card.retry && retry && <>
       <AlertDialog title={tr("다시 시도를 준비할까요?", "Prepare a retry?")} description={tr("실패한 작업에 새 시도를 준비해요. 지난 실패 기록은 그대로 남아요.", "A new try is prepared for this failed task. Its past failures stay on record.")}
         confirmLabel={tr("다시 시도 준비", "Prepare retry")} cancelLabel={tr("취소", "Cancel")} onConfirm={() => retry.onRetry(task.id)}
@@ -79,8 +80,8 @@ function Card({ card, selected, controls, onOpen, roster, retry, tr }: {
 const UNGROUPED_KEY = "__ungrouped__";
 
 /** The 단계 보드 tab: instant search + group/status filters at top; finished columns (`완료` · `건너뜀`) start folded as compact summaries so active columns get full width even at 1032px tablet width. */
-export default function CampaignBoard({ columns, tasks, selectedId, controls, onOpen, retry, tr }: {
-  columns: BoardColumn[]; tasks: TaskView[]; selectedId: string | null; controls?: string; onOpen: (id: string) => void; retry?: BoardRetry; tr: Tr;
+export default function CampaignBoard({ columns, tasks, selectedId, controls, onOpen, retry, language, tr }: {
+  columns: BoardColumn[]; tasks: TaskView[]; selectedId: string | null; controls?: string; onOpen: (id: string) => void; retry?: BoardRetry; language?: string; tr: Tr;
 }) {
   const phone = useIsMobile();
   const roster = useWorkspaceAgents();
@@ -145,7 +146,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
     const recent = column.done && column.cards.some(({ task }) => task.updatedAt);
     return <>
       {column.cards.length === 0 && <Cap className="block py-3 text-center">{tr("비어 있어요", "Empty")}</Cap>}
-      {visible.map((card) => <Card key={card.task.id} card={card} selected={card.task.id === selectedId} controls={controls} onOpen={onOpen} roster={roster} retry={retry} tr={tr} />)}
+      {visible.map((card) => <Card key={card.task.id} card={card} selected={card.task.id === selectedId} controls={controls} onOpen={onOpen} roster={roster} retry={retry} language={language} tr={tr} />)}
       {rest > 0 && <Button variant="ghost" size="sm" onClick={() => setShown((current) => ({ ...current, [column.key]: visible.length + step }))}>
         {visible.length ? tr(`${step}개 더 보기`, `Show ${step} more`) : recent ? tr(`최근 ${step}개 보기`, `Show latest ${step}`) : tr(`${step}개 보기`, `Show ${step}`)}
       </Button>}
@@ -231,7 +232,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
           className={cn(
             "flex flex-col gap-2 p-2",
             foldedDone
-              ? "w-auto min-w-[6.75rem] max-w-[8.5rem] shrink-0 @max-[46rem]/board:order-first @max-[46rem]/board:max-w-none @max-[46rem]/board:flex-row @max-[46rem]/board:items-center @max-[46rem]/board:py-1.5"
+              ? "w-auto min-w-[6.75rem] max-w-[10.5rem] shrink-0 @max-[46rem]/board:order-first @max-[46rem]/board:max-w-none @max-[46rem]/board:flex-row @max-[46rem]/board:items-center @max-[46rem]/board:py-1.5"
               : "min-h-[20rem] min-w-[11rem] flex-[1_1_12rem]",
           )}>
           <h3 className="m-0 flex items-center justify-between gap-2 px-1 pt-1 !text-[13px] !font-semibold text-[var(--fg)]">
@@ -253,6 +254,7 @@ export default function CampaignBoard({ columns, tasks, selectedId, controls, on
                 <Button
                   variant="ghost"
                   size="sm"
+                  className="whitespace-nowrap [&_.aui-button-clean__label]:whitespace-nowrap"
                   aria-expanded={false}
                   onClick={() => setShown((current) => ({ ...current, [column.key]: step }))}
                 >

@@ -90,16 +90,13 @@ impl QueuedProvider {
 
     pub(super) fn proof(
         self,
-        channel: ChannelId,
         identity: &QueueIdentity,
         original: &PendingQueueItem,
         recorded: Option<Recorded>,
         bound: &Bound,
     ) -> Option<Proof> {
         match self {
-            Self::Claude => {
-                queued_reconcile::claude_proof(channel, identity, original, recorded, bound)
-            }
+            Self::Claude => queued_reconcile::claude_proof(identity, original, recorded, bound),
             Self::Codex => {
                 let recorded = recorded.filter(|attempt| attempt.matches(bound))?;
                 codex_inject::submitted(&bound.path, recorded.offset, &recorded.nonce)?;

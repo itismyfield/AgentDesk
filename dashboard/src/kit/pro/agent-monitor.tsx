@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
 import { ArrowUpRight, Check, ChevronsUpDown, FileText, Globe, Pause, Pencil, Play, RotateCcw, Search, Sparkles, Terminal, TriangleAlert, X } from "lucide-react";
 
@@ -1028,7 +1028,7 @@ const agentMonitorStyles = `
   .aui-agent-monitor-output { white-space: pre-wrap; overflow-wrap: anywhere; }
   .aui-agent-monitor-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-agent-monitor { --aui-agent-monitor-row-h: 44px; }
   .aui-agent-monitor-fold { width: 44px; height: 44px; margin-right: 0; }
   .aui-agent-monitor-close { width: 44px; height: 44px; margin: -8px -8px 0 0; }

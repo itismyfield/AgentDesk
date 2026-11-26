@@ -496,6 +496,11 @@ export default function TurnTranscriptPanel({
                 <div data-testid="turn-transcript-timing" className="min-w-0">
                   <AgentTiming
                     title={tr("실행 타이밍", "Execution timing")}
+                    labels={{
+                      title: tr("실행 타이밍", "Execution timing"),
+                      idle: tr("대기", "Idle"),
+                      active: tr("진행 중", "Running"),
+                    }}
                     actors={timing.actors}
                     spans={timing.spans}
                     duration={timing.duration}
@@ -525,15 +530,41 @@ export default function TurnTranscriptPanel({
                     {tr("도구 호출", "Tool calls")}
                   </DetailHeading>
                   {showToolCalls && (
-                    <div data-testid="turn-transcript-tool-calls" className="min-w-0 overflow-hidden rounded-xl border border-th-border-subtle">
+                    <div data-testid="turn-transcript-tool-calls" className="min-w-0">
                       <AgentToolCalls
+                        embedded
                         live={false}
                         workspace="AgentDesk"
                         agent={selectedTranscript.agent_id || transcriptSelectionLabel(selectedTranscript, isKo)}
                         model={(selectedTranscript.provider ?? "unknown").toUpperCase()}
                         tools={toolSummary.tools}
                         calls={toolSummary.calls}
-                        style={{ minHeight: 0 }}
+                        labels={{
+                          loading: tr("불러오는 중", "Loading"),
+                          empty: tr("연결된 도구와 호출이 없습니다.", "No connected tools or calls."),
+                          callsCount: (n) => tr(`${n}회 호출`, `${n} calls`),
+                          noCalls: tr("호출 없음", "No calls"),
+                          askFirst: tr("먼저 확인", "Ask first"),
+                          colTime: tr("시각", "TIME"),
+                          colTool: tr("도구", "TOOL"),
+                          colInput: tr("입력", "INPUT"),
+                          colStatus: tr("상태", "STATUS"),
+                          colDuration: tr("소요", "DURATION"),
+                          colTokens: tr("토큰", "TOKENS"),
+                          colRun: tr("실행", "RUN"),
+                          status: {
+                            running: tr("실행 중", "Running"),
+                            done: tr("완료", "Done"),
+                            failed: tr("실패", "Failed"),
+                            waiting: tr("대기", "Waiting"),
+                          },
+                          open: tr("열기", "Open"),
+                          close: tr("닫기", "Close"),
+                          approve: tr("승인", "Approve"),
+                          reject: tr("거절", "Reject"),
+                          failedOnly: (n) => tr(`실패만 ${n}`, `Failed only ${n}`),
+                          detailAria: tr("호출 상세", "Call details"),
+                        }}
                       />
                     </div>
                   )}

@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { getAgentExecutionNode, setAgentExecutionNode } from "../../api/agentExecutionNode";
 import { getClusterNodes, type ClusterNode } from "../../api/clusterNodes";
 import { Button } from "../../kit/free/button-clean";
+import { Select } from "../../kit/free/select-clean";
 import { KitCard, StatusDot } from "../common/KitPrimitives";
 import type { Translator } from "./types";
 import { nodePlatformLabel, nodeRoleLabel } from "../../lib/nodeLabels";
@@ -64,39 +65,42 @@ export function AgentExecutionNodeSelect({ agentId, provider, tr, onSaved }: {
   const node = nodes.find((entry) => entry.instance_id === selected);
   const readiness = node?.execution_readiness?.providers[provider];
   const unavailable = selected !== "" && (!node || node.status !== "online" || !readiness?.eligible);
+  const labelText = tr("우선 실행 장비", "Preferred execution device");
+  const options = [
+    { value: "", label: tr("기본 정책 사용", "Use default policy") },
+    ...(selected && !node ? [{ value: selected, label: `${selected} — ${tr("등록 정보 없음", "Not registered")}` }] : []),
+    ...nodes.map((entry) => ({
+      value: entry.instance_id,
+      disabled: !enforced,
+      label: `${entry.hostname || entry.instance_id} · ${nodeRoleLabel(entry.effective_role, tr)} · ${nodePlatformLabel(entry.capabilities.execution_readiness?.os, tr)}${entry.status !== "online" ? ` · ${tr("오프라인", "Offline")}` : ""}`,
+    })),
+  ];
 
   return (
     <KitCard pad="md" className="min-w-0 md:col-span-2">
       <div className="min-w-0 space-y-3">
         <div className="min-w-0">
           <h4 className="m-0 text-sm font-semibold leading-5 text-[var(--fg)]">
-            {tr("우선 실행 장비", "Preferred execution device")}
+            {labelText}
           </h4>
           <p className="m-0 mt-1 text-xs leading-5 text-[var(--fg-muted)] [overflow-wrap:anywhere]">
             {tr("Discord에서 이 에이전트의 새 세션을 우선 시작할 장비를 선택합니다.", "Choose the preferred device for this agent's new Discord sessions.")}
           </p>
         </div>
         <div>
-          <label htmlFor={id} className="mb-1.5 block text-xs font-medium text-[var(--fg-dim)]">
-            {tr("우선 실행 장비", "Preferred execution device")}
-          </label>
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              id={id}
-              value={selected}
-              disabled={!ready || loading || saving}
-              className="min-h-11 w-full min-w-0 rounded-[var(--r-sm)] border border-[var(--line)] bg-[var(--bg-1)] px-2.5 py-2 text-sm text-[var(--fg)] sm:w-auto sm:flex-1"
-              onChange={(event) => { setSelected(event.target.value); setSuccess(false); }}
-            >
-              <option value="">{tr("기본 정책 사용", "Use default policy")}</option>
-              {selected && !node && <option value={selected}>{selected} — {tr("등록 정보 없음", "Not registered")}</option>}
-              {nodes.map((entry) => (
-                <option key={entry.instance_id} value={entry.instance_id} disabled={!enforced}>
-                  {entry.hostname || entry.instance_id} · {nodeRoleLabel(entry.effective_role, tr)} · {nodePlatformLabel(entry.capabilities.execution_readiness?.os, tr)}
-                  {entry.status !== "online" ? ` · ${tr("오프라인", "Offline")}` : ""}
-                </option>
-              ))}
-            </select>
+            <div className="w-full min-w-0 sm:w-auto sm:flex-1">
+              <Select
+                id={id}
+                name="execution_node"
+                size="lg"
+                aria-label={labelText}
+                value={selected}
+                disabled={!ready || loading || saving}
+                options={options}
+                onChange={(value) => { setSelected(value); setSuccess(false); }}
+              />
+            </div>
             <Button
               variant="primary"
               size="lg"

@@ -1,9 +1,10 @@
-import { ArrowLeft, Monitor, PencilLine, Undo2 } from "lucide-react";
+import { ArrowLeft, PencilLine, Undo2 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { getDefaultPipelineTemplate, getServerCampaignPipeline, type CampaignPipeline as Detail, type PipelineDefinition, type PipelineDiagnostic } from "../../api/serverCampaignPipeline";
 import { Button } from "../../kit/free/button-clean";
 import { Dialog } from "../../kit/free/dialog-clean";
+import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { AgentMetroMap, type MetroLine, type MetroStation } from "../../kit/pro/agent-metro-map";
 import { AgentStateMachine, type MachineEdge, type MachineState } from "../../kit/pro/agent-state-machine";
 import { Cap, Chip, Desc, InspSection, Num } from "../common/KitPrimitives";
@@ -70,7 +71,7 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
 
     const detailFor = (bucket: StageBucket) => {
       const list = byBucket[bucket];
-      if (!list.length) return tr("작업 0개", "0 tasks");
+      if (!list.length) return undefined;
       const running = list.filter((t) => t.status === "running").length;
       return running > 0
         ? tr(`작업 ${list.length}개 · 진행 ${running}`, `${list.length} tasks · ${running} running`)
@@ -171,19 +172,30 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
   }, [resolved, tr]);
 
   return (
-    <div className={`grid min-w-0 gap-3 p-3 sm:p-4 ${activeLines.length > 0 ? "min-[1280px]:grid-cols-2" : ""}`}>
-      <AgentStateMachine
-        title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
-        agent={tr(`작업 ${resolved.length}개`, `${resolved.length} tasks`)}
-        current={current}
-        states={states}
-        edges={edges}
-      />
+    <div className="grid min-w-0 grid-cols-1 gap-4 p-3 sm:p-4">
+      <div className="min-w-0">
+        <AgentStateMachine
+          title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
+          agent={tr(`작업 ${resolved.length}개`, `${resolved.length} tasks`)}
+          current={current}
+          states={states}
+          edges={edges}
+          labels={{
+            transitions: (n) => tr(`전환 ${n.toLocaleString()}회`, `${n} transitions`),
+            waiting: tr("승인 대기", "Waiting for you"),
+            notReached: tr("도달 전", "Not reached"),
+            approve: tr("승인", "Approve"),
+            reject: tr("거부", "Reject"),
+          }}
+          className="[&_.aui-agent-state-machine-head]:flex-wrap [&_.aui-agent-state-machine-head_strong]:min-w-0 [&_.aui-agent-state-machine-head_strong]:truncate [&_.aui-agent-state-machine-head_em]:shrink-0 [&_.aui-agent-state-machine-head_em]:whitespace-nowrap"
+        />
+      </div>
       {activeLines.length > 0 && (
         <AgentMetroMap
           title={tr("활성 작업 위치 노선도", "Active task stage map")}
           lines={activeLines}
           stations={stations}
+          className="[&_.aui-agent-metro-map-head]:flex-wrap [&_.aui-agent-metro-map-head_strong]:shrink-0 [&_.aui-agent-metro-map-head_strong]:whitespace-nowrap"
         />
       )}
     </div>
@@ -207,6 +219,7 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
   onEditing?: (editing: boolean) => void;
 }) {
   const phone = useIsMobile();
+  const [phoneView, setPhoneView] = useState<"graph" | "list">("graph");
   const [loaded, setLoaded] = useState<Loaded | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -333,11 +346,27 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
       {!detail && <LedgerStageSummary campaign={campaign} tasks={ledgerTasks} tr={tr} />}
       {!detail && !templatePreviewOpen ? <div className="flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line-soft)] px-4 py-3 text-xs text-[var(--fg-muted)]">
         <span>{tr("원장 캠페인은 작업별 상태·선행 DAG로 진행되며 서버 파이프라인 런타임을 실행하지 않아요. 필요할 때 위 버튼으로 기본 9단계 템플릿 구조를 펼쳐 볼 수 있어요.", "Ledger campaigns run on the task DAG rather than the server pipeline runtime. Expand the preview above to inspect the built-in 9-stage template.")}</span>
-      </div> : phone ? <div className="grid gap-3 p-3">
-        <p className="m-0 flex items-center gap-2 rounded-lg border border-[var(--line-soft)] bg-[var(--bg-2)] px-3 py-2 text-[13px] text-[var(--fg-dim)]"><Monitor aria-hidden className="size-4 shrink-0" />{detail ? tr("상태와 전환은 넓은 화면에서 고쳐요. 폰에서는 보기만 해요.", "States and transitions are edited on wider screens. Phones only show them.")
-          : tr("폰에서는 보기만 해요. 넓은 화면에서 그래프로 볼 수 있어요.", "Phones only show the list. Wider screens draw the graph.")}</p>
-        <PipelineStateList graph={graph} chosen={chosen} onChoose={setChosen} tr={tr} />
-      </div> : <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} tr={tr}
+      </div> : phone ? <>
+        <div className="border-t border-[var(--line-soft)] px-3 py-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="w-44">
+            <SegmentedControl<"graph" | "list">
+              variant="tray"
+              fullWidth
+              size="sm"
+              aria-label={tr("파이프라인 보기 방식", "Pipeline view mode")}
+              value={phoneView}
+              onChange={setPhoneView}
+              options={[
+                { value: "graph", label: tr("그래프", "Graph") },
+                { value: "list", label: tr("단계 목록", "State list") },
+              ]}
+            />
+          </div>
+          {detail && <Cap>{tr("편집은 넓은 화면에서 할 수 있어요.", "Editing is available on wider screens.")}</Cap>}
+        </div>
+        {phoneView === "graph" ? <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} height="360px" defaultMinimapOpen={false} inspector={<PipelineInspector graph={graph} id={chosen} summary={summary} tr={tr} />} tr={tr}><div className="sr-only"><PipelineStateList graph={graph} open tr={tr} /></div></PipelineCanvas>
+          : <div className="p-3"><PipelineStateList graph={graph} chosen={chosen} onChoose={setChosen} tr={tr} /></div>}
+      </> : <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} tr={tr}
         edit={edit ? { busy: editor.saving, onLink: link, onDrop: (state, pin, at) => { setChosen(state); setPicking({ from: { state, pin }, anchor: spot, at }); }, onAdd: (button) => setPicking({ from: null, anchor: { current: button } }) } : undefined}
         checks={edit && <PipelineChecks checks={checks} graphs={[edit.draft, edit.base]} onPick={(value) => { const id = placeOf(value); if (id) choose(id); }} tr={tr} />}
         inspector={edit ? <PipelineEditPanel graph={graph} draft={edit.draft} revision={edit.revision} chosen={chosen} flagged={flagged} changes={changes} busy={editor.saving} update={editor.update} onChoose={setChosen}

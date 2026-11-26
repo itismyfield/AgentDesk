@@ -24,8 +24,9 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
     provider: &ProviderKind,
     channel_id: ChannelId,
     tmux_session_name: &str,
-    (expected_identity, native_held): (
+    (expected_identity, native_held, herdr_held): (
         Option<&crate::services::discord::inflight::InflightTurnIdentity>,
+        bool,
         bool,
     ),
     full_response: &str,
@@ -80,6 +81,7 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             last_watcher_relayed_offset: Some(turn_data_start_offset),
             last_watcher_relayed_generation_mtime_ns: generation_mtime_ns,
             scheduled_outcome,
+            ends_turn: !herdr_held,
         },
     );
     crate::services::discord::inflight::terminal_delivery_evidence_loss::warn_for_watcher_terminal_commit_outcome(
@@ -92,7 +94,7 @@ pub(super) fn mark_watcher_terminal_delivery_committed(
             last_offset,
             turn_data_start_offset,
         },
-    )
+    ) && !herdr_held
 }
 
 #[cfg(test)]

@@ -30,6 +30,8 @@ src/
 │   ├── dcserver/
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
+│   ├── decision/
+│   │   └── owner_cache.rs
 │   ├── dev_instance/
 │   │   └── tests.rs
 │   ├── direct/
@@ -96,6 +98,8 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
+│   ├── decision.rs
+│   ├── decision_tests.rs
 │   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
@@ -238,6 +242,8 @@ src/
 │   │   └── tests.rs
 │   ├── channel_home_preferences/
 │   │   └── pg_tests.rs
+│   ├── decisions/
+│   │   └── requests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
@@ -691,6 +697,7 @@ src/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints/
 │   │   │   │       ├── cluster_execution.rs
+│   │   │   │       ├── decisions.rs
 │   │   │   │       ├── kakao_calendar.rs
 │   │   │   │       ├── mod.rs
 │   │   │   │       ├── part_01.rs
@@ -830,6 +837,8 @@ src/
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs
 │   │   ├── cron_api.rs
+│   │   ├── decisions.rs
+│   │   ├── decisions_tests.rs
 │   │   ├── departments.rs
 │   │   ├── discord.rs
 │   │   ├── dispatched_sessions.rs
@@ -1158,7 +1167,9 @@ src/
 │   │   │   ├── hold_resolve_tests.rs
 │   │   │   ├── live_reader.rs
 │   │   │   ├── never_attached.rs
+│   │   │   ├── pending.rs
 │   │   │   ├── provider_terminal_tests.rs
+│   │   │   ├── retry_probe.rs
 │   │   │   ├── start_offset.rs
 │   │   │   ├── start_offset_tests.rs
 │   │   │   └── terminal_replay.rs
@@ -1793,6 +1804,12 @@ src/
 │   │   │   ├── tool_call_tests.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── decisions/
+│   │   │   ├── ask_tests.rs
+│   │   │   ├── ingress.rs
+│   │   │   ├── ingress_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   └── requester.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   └── tests.rs
@@ -1999,14 +2016,18 @@ src/
 │   │   │   ├── http_force_hydrate_tests.rs
 │   │   │   ├── http_force_identity_tests.rs
 │   │   │   ├── http_force_purge_tests.rs
+│   │   │   ├── http_force_retired_wake_tests.rs
 │   │   │   ├── http_force_terminal_tests.rs
 │   │   │   ├── http_force_tests.rs
 │   │   │   ├── http_force_v2_tests.rs
 │   │   │   ├── http_force_writer_tests.rs
 │   │   │   ├── missing_marker_tests.rs
 │   │   │   ├── missing_marker_turn_tests.rs
+│   │   │   ├── never_started.rs
+│   │   │   ├── never_started_tests.rs
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
+│   │   │   ├── retired_wake.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_liveness/
 │   │   │   ├── krx_discord_dl_tests.rs
@@ -2109,6 +2130,8 @@ src/
 │   │   │   ├── destructive_commit.rs
 │   │   │   ├── episode_guard.rs
 │   │   │   ├── finalizer_identity.rs
+│   │   │   ├── herdr_turn_evidence.rs
+│   │   │   ├── herdr_turn_evidence_tests.rs
 │   │   │   ├── host_locator.rs
 │   │   │   ├── host_recovery_guard.rs
 │   │   │   ├── host_recovery_guard_keyed_tests.rs
@@ -2190,7 +2213,8 @@ src/
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_io/
-│   │   │   │   └── agy.rs
+│   │   │   │   ├── agy.rs
+│   │   │   │   └── attachment.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -2209,6 +2233,8 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── image_format.rs
+│   │   │   ├── image_format_tests.rs
 │   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
@@ -2308,6 +2334,9 @@ src/
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
+│   │   │   ├── decision_drain/
+│   │   │   │   ├── queued.rs
+│   │   │   │   └── queued_tests.rs
 │   │   │   ├── input_owner/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
@@ -2315,7 +2344,8 @@ src/
 │   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── drive_tests/
-│   │   │   │   │   └── claimed_followers_tests.rs
+│   │   │   │   │   ├── claimed_followers_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2347,6 +2377,7 @@ src/
 │   │   │   │   ├── notice_tests.rs
 │   │   │   │   ├── origin.rs
 │   │   │   │   ├── owed_drop_tests.rs
+│   │   │   │   ├── pending_recovery.rs
 │   │   │   │   ├── pump.rs
 │   │   │   │   ├── pump_tests.rs
 │   │   │   │   ├── recovery.rs
@@ -2556,6 +2587,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── decision_tests.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
@@ -2588,6 +2620,7 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
+│   │   │   │   ├── decision_guard_tests.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
@@ -2678,7 +2711,9 @@ src/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
-│   │   │   │   │   │   └── native_input.rs
+│   │   │   │   │   │   ├── native_input.rs
+│   │   │   │   │   │   ├── pending_attached.rs
+│   │   │   │   │   │   └── preclaim_wait.rs
 │   │   │   │   │   ├── owner_input_idle_tests/
 │   │   │   │   │   │   ├── metadata_hold/
 │   │   │   │   │   │   │   └── review_tests.rs
@@ -2696,6 +2731,7 @@ src/
 │   │   │   │   │   ├── owner_input_codex_tests.rs
 │   │   │   │   │   ├── owner_input_common_operation_tests.rs
 │   │   │   │   │   ├── owner_input_effort_refused_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_attached_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
@@ -2730,7 +2766,9 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests/
 │   │   │   │   │   └── thread_ingress_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_tests/
-│   │   │   │   │   └── clear_execute_tests.rs
+│   │   │   │   │   ├── clear_execute_tests.rs
+│   │   │   │   │   ├── closing_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -2738,6 +2776,7 @@ src/
 │   │   │   │   │   ├── handoff_launch_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
+│   │   │   │   │   ├── preclaim_retry_wait_tests.rs
 │   │   │   │   │   ├── preclaim_tests.rs
 │   │   │   │   │   ├── recheck_tests.rs
 │   │   │   │   │   └── wake_tests.rs
@@ -3670,6 +3709,7 @@ src/
 │   │   │   │   │   ├── herdr_bound.rs
 │   │   │   │   │   ├── herdr_bound_tests.rs
 │   │   │   │   │   ├── herdr_chain_tests.rs
+│   │   │   │   │   ├── herdr_unsent_retire_tests.rs
 │   │   │   │   │   ├── hold_leaf.rs
 │   │   │   │   │   ├── hold_leaf_log_tests.rs
 │   │   │   │   │   ├── inflight_bound.rs
@@ -3692,6 +3732,7 @@ src/
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
+│   │   │   │   │   ├── retired_unplaced_tests.rs
 │   │   │   │   │   ├── routine_owner.rs
 │   │   │   │   │   ├── routine_owner_tests.rs
 │   │   │   │   │   ├── routine_registered_receipt_tests.rs
@@ -4525,6 +4566,7 @@ src/
 │   │   │   ├── unplaced_rig_tests.rs
 │   │   │   └── wire.rs
 │   │   ├── herdr_gate/
+│   │   │   ├── closing.rs
 │   │   │   ├── enter_readmit_tests.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
@@ -4645,6 +4687,9 @@ src/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
 │   │   │   │   │   ├── collision.rs
+│   │   │   │   │   ├── keyless.rs
+│   │   │   │   │   ├── keyless_platform_tests.rs
+│   │   │   │   │   ├── keyless_tests.rs
 │   │   │   │   │   ├── migration.rs
 │   │   │   │   │   ├── native.rs
 │   │   │   │   │   ├── native_barrier.rs
@@ -4784,7 +4829,9 @@ src/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── input_notices.rs
-│   │   │   │   └── test_access.rs
+│   │   │   │   ├── test_access.rs
+│   │   │   │   ├── tool_images.rs
+│   │   │   │   └── tool_images_tests.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4948,6 +4995,10 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── tool_images/
+│   │   │   │   ├── kind_tests.rs
+│   │   │   │   ├── turns.rs
+│   │   │   │   └── turns_tests.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
@@ -5091,6 +5142,8 @@ src/
 │   │   │   ├── tool_card_replay_tests.rs
 │   │   │   ├── tool_card_tests.rs
 │   │   │   ├── tool_cards.rs
+│   │   │   ├── tool_images.rs
+│   │   │   ├── tool_images_tests.rs
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs
@@ -5296,6 +5349,8 @@ src/
 │   │   │   │   ├── refused.rs
 │   │   │   │   ├── requeue_tests.rs
 │   │   │   │   ├── retained.rs
+│   │   │   │   ├── retry_wait.rs
+│   │   │   │   ├── retry_wait_tests.rs
 │   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
@@ -5304,7 +5359,8 @@ src/
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── v2_types/
 │   │   │   │   ├── cold_source.rs
-│   │   │   │   └── effort_restart.rs
+│   │   │   │   ├── effort_restart.rs
+│   │   │   │   └── retry_wait.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs

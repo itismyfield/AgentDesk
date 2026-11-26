@@ -71,23 +71,33 @@ fn pending_plain_composer_protects_only_its_session_and_frame_until_receipt() {
 #[test]
 fn injected_nonce_residue_is_never_classified_as_a_persons_draft() {
     for frame in [
-        crate::services::tui_input::human_frame::inject(
-            "discord:1:2",
-            "7",
-            "ann",
-            "1234abcd",
-            "pending body",
-        ),
-        crate::services::tui_input::human_frame::legacy_inject(
-            "discord:1:2",
-            "7",
-            "1234abcd",
-            "pending body",
-        ),
+        "[User: ann (ID: 7) · 📱 v1 mode=inject source=discord:1:2 · 1234abcd]\npending body",
+        "[📱 discord:1:2 · 7 · 1234abcd]\npending body",
     ] {
         let shown = capture(&frame);
         assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{frame}");
         assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{frame}");
+    }
+}
+
+/// A current frame whose body quotes an old inject header keeps the screen protection it had.
+#[test]
+fn a_current_frame_quoting_an_old_header_is_never_a_persons_draft() {
+    let tagged = crate::services::tui_input::human_frame::plain_inject;
+    for quote in [
+        "[📱 모바일 설정](https://x.test)",
+        "인용 · 📱 v1 mode=inject 끝",
+    ] {
+        let body = format!("본문 {quote}");
+        for frame in [
+            idle("ann", "7", &body),
+            tagged("discord", "7", "ann", "1234abcd", &body),
+        ] {
+            let shown = capture(&frame);
+            assert_eq!(composer_owner(&shown), ComposerOwner::Unread, "{frame}");
+            assert_eq!(draft_sighting(&shown), DraftSighting::Unsettled, "{frame}");
+            assert!(!super::ownership::draft_unproven(&shown), "{frame}");
+        }
     }
 }
 

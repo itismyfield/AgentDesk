@@ -608,6 +608,7 @@ async fn queued_foreign_owner_forwards_without_local_body_pg() {
         QueuedAdmissionDisposition::Deferred
         | QueuedAdmissionDisposition::RejectedNonPortableAttachment
         | QueuedAdmissionDisposition::ConsumedToHold
+        | QueuedAdmissionDisposition::ClosedDecision
         | QueuedAdmissionDisposition::RejectedRestore => {
             panic!("live foreign owner should forward")
         }

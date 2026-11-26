@@ -7,8 +7,8 @@ import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import type { Agent, TaskDispatch } from "../../types";
 import AgentPersona from "../AgentPersona";
-import { Cap, CardNote, Chip, HeaderLink, Row, RowButton, RowLink, SectionCard } from "../common/KitPrimitives";
-import { QUEUE_PATH, buildTodoItems, todoStatus, type SourceState, type Tr } from "../home/homeModel";
+import { Cap, CardNote, Chip, Row, RowButton, RowLink, SectionCard } from "../common/KitPrimitives";
+import { buildTodoItems, todoStatus, type SourceState, type Tr } from "../home/homeModel";
 import { buildAttention, type AttentionEntry } from "./agentsAttention";
 
 export interface AgentsAttention {
@@ -55,7 +55,6 @@ export function AgentsAttentionCard({ attention, locale, isMobile, tr, onOpenAge
       title={tr("살펴볼 것", "Needs a look")}
       count={entries.length || null}
       countTone="warn"
-      aside={<HeaderLink to={QUEUE_PATH}>{tr("대기열에서 보기", "Open queue")}</HeaderLink>}
       testId="agents-attention"
     >
       {entries.length > 0 ? (

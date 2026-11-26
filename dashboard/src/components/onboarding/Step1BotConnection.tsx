@@ -83,13 +83,13 @@ export function Step1BotConnection({
   validateStep1,
   goToStep,
 }: Step1BotConnectionProps) {
+  const hubTitle = tr("AgentDesk 허브", "AgentDesk Hub");
+  const hubSub = tr("Discord 실행·통신 봇 오케스트레이션", "Discord Command & Comms Orchestration");
   const integrationItems: IntegrationFlowItem[] = [
     { name: "Discord", title: tr("봇·채널 허브", "Bots & Channels") },
-    { name: "AgentDesk", title: tr("에이전트 오케스트레이터", "Agent Orchestrator") },
-    ...COMMAND_PROVIDERS.map((provider) => ({
-      name: providerLabel(provider),
-      title: tr("AI 프로바이더", "AI Provider"),
-    })),
+    { name: "Claude", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Codex", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Antigravity", title: tr("클라우드 에이전트", "Cloud Agent") },
   ];
 
   return (
@@ -108,17 +108,17 @@ export function Step1BotConnection({
 
       <div
         data-testid="step1-integration-flow"
-        className="flex max-h-48 items-center justify-center overflow-hidden rounded-xl border border-[var(--th-border-subtle)] bg-[var(--th-overlay-subtle)]"
+        className="mx-auto w-full max-w-[440px] overflow-hidden rounded-xl border border-[var(--th-border-subtle)] bg-[var(--th-overlay-subtle)]"
       >
-        <div className="w-full max-w-md">
-          <IntegrationFlow
-            label={tr(
-              "Discord 봇과 AgentDesk, AI 프로바이더 연동 흐름",
-              "Discord bots, AgentDesk, and AI provider integration flow",
-            )}
-            items={integrationItems}
-          />
-        </div>
+        <IntegrationFlow
+          label={tr(
+            "Discord 봇과 AgentDesk, AI 프로바이더 연동 흐름",
+            "Discord bots, AgentDesk, and AI provider integration flow",
+          )}
+          hubTitle={hubTitle}
+          hubSubtitle={hubSub}
+          items={integrationItems}
+        />
       </div>
 
       <div

@@ -73,6 +73,7 @@ describe("onboarding form semantics", () => {
     expect(banner?.querySelector('.aui-integration-flow[role="img"]')).not.toBeNull();
     expect(banner?.textContent).toContain("Discord");
     expect(banner?.textContent).toContain("AgentDesk");
+    expect(banner?.textContent).not.toContain("Data Analysis");
     const html = koStep.innerHTML;
     expect(html.indexOf('data-testid="step1-integration-flow"')).toBeLessThan(html.indexOf("봇 토큰을 얻는 방법"));
   });
@@ -210,8 +211,9 @@ describe("onboarding form semantics", () => {
     const selectMode = render(
       <Step4ChannelSetup {...commonProps} guild={selectedGuild} />,
     );
+    expect(selectMode.querySelectorAll("select")).toHaveLength(0);
     expect(
-      Array.from(selectMode.querySelectorAll("select"), (select) =>
+      Array.from(selectMode.querySelectorAll('[role="combobox"]'), (select) =>
         select.getAttribute("aria-label"),
       ),
     ).toEqual(["Discord server", "Channel for Reviewer"]);

@@ -731,17 +731,10 @@ async fn s2b_actual_router_kickoff_injects_only_the_canonical_head_and_settles_i
     let (header, text) = crate::services::tui_input::human_frame::parse(&buffer).unwrap();
     assert_eq!(text, " status?", "the owner must paste the original H body");
     let nonce = fixture.pane.nonce().expect("hidden attempt id");
-    assert_eq!(
-        (header.name, header.source, header.nonce),
-        (AUTHOR_NAME, "", nonce.as_str())
-    );
+    assert_eq!((header.name, header.nonce), (AUTHOR_NAME, nonce.as_str()));
     assert_eq!(
         header.author, "200",
         "H's author must not become holder A's author"
-    );
-    assert_eq!(
-        header.mode,
-        crate::services::tui_input::human_frame::Mode::Inject
     );
     assert!(
         crate::services::tui_input::human_frame::history::registered(
@@ -803,8 +796,8 @@ async fn s2b_a_received_queued_head_lets_the_same_body_be_injected_again_pg() {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        stored["entries"].as_array().is_some_and(|entries| {
-            entries.iter().any(|entry| {
+        stored["passive"].as_array().is_some_and(|passive| {
+            passive.iter().map(|p| &p["entry"]).any(|entry| {
                 entry["id"] == nonce.as_str()
                     && entry["events"].as_array().is_some_and(|e| !e.is_empty())
             })

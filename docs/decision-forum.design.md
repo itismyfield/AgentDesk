@@ -1,6 +1,6 @@
 # Decision 포럼 설계 (#8211)
 
-<!-- doc-path-refs: proposed src/cli/args/decision.rs src/cli/decision.rs src/cli/decision/owner_cache.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/server/routes/decisions.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/ingress.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/requester.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs -->
+<!-- doc-path-refs: proposed src/cli/args/decision.rs src/db/decisions/followups.rs src/db/decisions/messages.rs src/db/decisions/selection.rs src/server/routes/agents_turn_deliver/decision.rs src/services/discord/decisions/action_handle.rs src/services/discord/decisions/classify.rs src/services/discord/decisions/component.rs src/services/discord/decisions/followup.rs src/services/discord/decisions/lifecycle.rs src/services/discord/decisions/opinion.rs src/services/discord/decisions/scan.rs src/services/discord/decisions/thread_target.rs src/services/discord/decisions/transport.rs src/services/discord/decisions/worker.rs -->
 
 설계 기준 코드는 `1161162a18`이다. 이 문서는 #8211 설계 개정 3(독립 리뷰 P0 0·P1 0·P2 3)의 요지이며, 리뷰 P2 3건을 다음 조각의 수용 조건으로 넣었다. 상태 모델은 [decision-request 모델](statecharts/decision-request/decision-request.report.md)에 있다. 줄 번호는 설계 기준 코드의 좌표이며 이후 편집으로 밀릴 수 있다.
 
@@ -47,7 +47,7 @@
 | decision_choices | request_id PK, actor/time, winning source, canonical selection_event_id. 최초 INSERT 승자만 선택 |
 | decision_messages | UNIQUE(thread_id, message_id), actor/bot/webhook, content hash, raw_content nullable, kind, 결과·사유, input_event_id |
 | decision_input_events | event_id PK, selection/opinion, source key UNIQUE, 승인 actor/text hash, admission_sequence, origin UNIQUE |
-| decision_delivery_attempts | event_id PK, workflow ticket, not_started/resolving/normal_wait/normalizing/may_have_sent/closing/delivered/failed/unknown_closed, normalization_used, 시도 session 증거. retry_at 없음 |
+| decision_delivery_attempts | event_id PK, workflow ticket, not_started/resolving/normal_wait/normalizing/may_have_sent/closing/delivered/failed/unknown_closed, normalization_used, 시도 session 증거, holder_instance_id(행을 마지막으로 옮긴 노드). retry_at 없음 |
 | decision_scan_cursors | thread PK, covered_through, scan_anchor_high/next_before, version, scan error |
 | decision_followups | request+idempotency key UNIQUE, reply/close/opinion_notice, post_state, nonce/message ID |
 
@@ -58,7 +58,7 @@
 
 ### 5. API·CLI·requester capability
 
-- `POST /api/decisions`, `GET /api/decisions/{id}`는 기존 HumanInputCaller 인증을 쓴다. body는 agent_id, target.channel_id, provider_hint, ref/idempotency_key, title/context, options 2~5개, recommendation이다. category·forum·operator·선택 결과는 body가 정하지 못한다.
+- `POST /api/decisions`, `GET /api/decisions/{id}`는 기존 HumanInputCaller 인증을 쓴다. GET은 그 요청을 물은 cap도 요구한다: cap이 없거나 다른 requester의 것이면 403이고 요청 본문을 돌려주지 않는다(없는 id도 같은 403). CLI `get`은 사설 cache에서 그 요청의 cap을 찾아 자동으로 붙인다. body는 agent_id, target.channel_id, provider_hint, ref/idempotency_key, title/context, options 2~5개, recommendation이다. category·forum·operator·선택 결과는 body가 정하지 못한다.
 - ask CLI는 요청 전에 256-bit requester capability를 만들어 현재 agent/logical channel 사설 cache(디렉터리 0700, 파일 0600)에 저장하고 `X-AgentDesk-Decision-Owner` 헤더로 보낸다. 서버는 hash와 scope만 저장한다. 같은 idempotency key는 같은 cap hash를 요구한다. GET·표시·오류·기본 출력·로그에는 cap을 내보내지 않는다.
 - `POST /api/decisions/{id}/reply`({text, idempotency_key}), `POST /api/decisions/{id}/close`({conclusion, idempotency_key})는 HumanInputCaller와 그 요청의 cap이 모두 필요하다. 다른 agent·다른 요청의 cap이나 cap 없음은 403이고 게시·수명 변경은 0이다.
 - CLI: `agentdesk decision ask --json-file <path|->`, `get <id>`, `reply <ref> "<답>" [--request-id]`, `close <ref> "<결론>" [--request-id]`. ref는 현재 requester scope에서만 해석하고 모호하면 `ambiguous_ref`다.
@@ -175,6 +175,7 @@ agent_handoff의 source=decision 거절과 owner 경로 안의 claude_handoff �
 - 아직 caller가 없는 DAO·renderer·enum variant를 미리 넣지 않는다. 테이블·DAO는 실제 caller가 들어오는 조각에서 만든다.
 - 1,000줄 넘는 기존 파일에는 module/re-export/호출 줄만 넣고 본체는 새 child에 둔다.
 - 조각 3은 단독으로 기능 완료를 주장하지 않는다. 조각 4 뒤에 활성 버튼, 조각 5 뒤에 자유 의견 안내를 노출한다(§13 P2-3).
+- 조각 3은 3a(요청 저장·API·CLI·requester cap·intake 차단, 게시 없이 202 `publication: pending`)와 3b(게시·회수·비활성 버튼)로 나눈다. intake 차단은 저장된 thread id가 아니라 부모가 Decision 포럼인 thread를 기준으로 한다. 게시 응답을 잃어 thread id가 아직 없는 구간에도 막기 위해서다.
 
 수정 전 RED→GREEN 계획:
 
@@ -300,7 +301,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 
 ## 상태 모델
 
-[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 38개(정상 7, 의도한 반례 31)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
+[decision-request 모델 보고서](statecharts/decision-request/decision-request.report.md)가 DecisionRequest(입력 workflow), DecisionForum(포럼 생성), DecisionDiscussion(의견·cursor·reply/close)를 설명한다. 기대값은 [expected.tsv](statecharts/expected.tsv)의 decision-request 행 54개(정상 8, 의도한 반례 46)다. ForumRace는 잠금 없는 생성, ForumUnknown은 결과 불명 뒤 재POST가 NoDuplicateForum을 깨는 대조다. 상징 모델 PASS는 코드 자체의 증명이 아니며 조각별 RED→GREEN 시험이 실제 경계를 확인한다.
 
 ## 미확인
 

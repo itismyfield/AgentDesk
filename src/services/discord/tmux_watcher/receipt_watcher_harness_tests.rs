@@ -529,3 +529,91 @@ async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     pool.close().await;
     db.drop().await;
 }
+
+/// A Herdr ending on the real loop, its row managed with a started mailbox turn; `storage` is the
+/// watcher's pool, `pool` holds the channel's hosted record.
+async fn herdr_ending(
+    case: u64,
+    storage: sqlx::PgPool,
+    pool: &sqlx::PgPool,
+    herdr: crate::services::discord::inflight::herdr_turn_evidence_tests::HerdrCase,
+) -> (
+    Harness,
+    InflightTurnState,
+    Arc<crate::services::provider::CancelToken>,
+) {
+    let seed = format!("{}{}{}", user("T0"), said(T0), stop());
+    let mut h = Harness::on(case, &seed, Some(storage)).await;
+    let f = seed.len() as u64;
+    h.commit(0, f);
+    let mut row = h.row_at(f);
+    row.turn_source = TurnSource::Managed;
+    row.user_msg_id = 8_399_000_100 + case;
+    row.input_origin_ids = vec![ORIGIN.to_string()];
+    let source = std::path::PathBuf::from(format!("{}-herdr", h.path));
+    let mark = crate::services::discord::inflight::herdr_turn_evidence_tests::mark_herdr;
+    mark(pool, &h.shared.token_hash, &mut row, &source, herdr).await;
+    h.save(&row);
+    let token = Arc::new(crate::services::provider::CancelToken::new());
+    token.bind_claude_tmux_session(&h.tmux);
+    let (author, user_msg) = (
+        serenity::UserId::new(7),
+        serenity::MessageId::new(row.user_msg_id),
+    );
+    let start = crate::services::discord::mailbox_try_start_turn;
+    assert!(start(&h.shared, h.channel, token.clone(), author, user_msg).await);
+    let restored =
+        crate::services::discord::tmux::restored_watcher_turn_from_inflight(&row, &h.tmux, true);
+    h.spawn_restoring(f, restored);
+    h.append(format!("{}{}{}", user("T1"), said(BODY), stop()).as_bytes());
+    h.drained("terminal frame").await;
+    assert!(h.showing(BODY), "the watcher delivered the answer");
+    (h, row, token)
+}
+
+/// A Herdr ending whose own end is unproven records no receipt and leaves no mark, so neither
+/// boot nor the next admission removes its row, mailbox or token; its own end commits once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_herdr_ending_without_its_own_end_issues_no_receipt_pg() {
+    use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, OWN};
+    let test = "a_herdr_ending_without_its_own_end_issues_no_receipt_pg";
+    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+        return;
+    }
+    let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let blocked = sqlx::postgres::PgPoolOptions::new()
+        .acquire_timeout(std::time::Duration::from_millis(50))
+        .connect_lazy("postgres://agentdesk@127.0.0.1:1/blocked")
+        .unwrap();
+    for (n, (storage, herdr)) in [(&pool, HELD[0]), (&blocked, HELD[0]), (&pool, OWN)]
+        .into_iter()
+        .enumerate()
+    {
+        let (mut h, row, token) = herdr_ending(90 + n as u64, storage.clone(), &pool, herdr).await;
+        let kept = h.row().filter(|kept| kept.user_msg_id == row.user_msg_id);
+        let receipt = receipt(&pool, row.user_msg_id, h.channel).await;
+        let fresh =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let settle = crate::services::discord::receipt_settle::settle_marked_row;
+        if herdr == OWN {
+            assert_eq!(receipt, Some((vec![ORIGIN.into()], "completed".into())));
+            assert!(kept.is_none(), "its own end settles the row");
+        } else {
+            let kept = kept.expect("the held row stays");
+            assert_eq!((receipt, kept.terminal_receipt), (None, None), "case {n}");
+            let active = crate::services::discord::mailbox_snapshot(&h.shared, h.channel).await;
+            assert_eq!(
+                active.active_user_message_id,
+                Some(serenity::MessageId::new(row.user_msg_id))
+            );
+            assert!(!settle(&fresh, &CLAUDE, h.channel.get()).await, "case {n}");
+            crate::services::discord::receipt_settle::settle_boot(&fresh, vec![kept]).await;
+            assert!(h.row().is_some() && !token.cancelled.load(Ordering::Relaxed));
+        }
+        h.cancel();
+        h.exited("watcher exit").await;
+    }
+    pool.close().await;
+    db.drop().await;
+}

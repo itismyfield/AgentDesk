@@ -418,14 +418,12 @@ mod tests {
     fn an_inject_frame_body_is_never_a_card() {
         let xml =
             "<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
-        let inject = crate::services::tui_input::human_frame::inject;
-        let frame = inject(
-            "discord:1:2",
-            "343742347365974026",
-            "0hbujang",
-            "abcdef12",
-            xml,
-        );
+        use crate::services::tui_input::human_frame::{history, plain_inject};
+        let _runtime = crate::config::TestRuntimeRootGuard::new();
+        let frame = plain_inject("", "343742347365974026", "0hbujang", "abcdef12", xml);
+        let transcript = tempfile::NamedTempFile::new().unwrap();
+        let who = ("claude", "card-pane", "abcdef12", "343742347365974026");
+        history::register(who, transcript.path(), 0, &frame).unwrap();
         assert!(!is_start_anchored_subagent_notification(&frame));
         assert!(sanitize_start_anchored_subagent_notification(&frame).is_none());
     }

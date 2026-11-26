@@ -109,7 +109,7 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
                 tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
             }
             // A front refused before any key for a reason a later look may clear waits for a real
-            // wake: a turn boundary, new input, or its pane's screen recovering. Never by time.
+            // wake (a turn boundary, new input, its pane's screen recovering) or its retry due.
             if result.is_err() && held(&drive, message).await {
                 super::held_watch::watch(drive.clone(), message);
                 break;
@@ -190,8 +190,11 @@ async fn grant(drive: &Drive, stalled: bool) -> Option<Front> {
                 return Ok(None);
             }
             let front = owner.front();
-            if let Some(front) = &front {
-                owner.grant_front(front)?;
+            // A front in an armed retry wait waits for its due or a read of its cause.
+            if let Some(front) = &front
+                && !owner.grant_front(front)?
+            {
+                return Ok(None);
             }
             Ok(front)
         })

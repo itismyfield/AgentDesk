@@ -9,6 +9,12 @@ pub(in crate::services::discord) mod anchor_repost;
 pub(in crate::services::discord) mod budget;
 mod destructive_commit;
 mod finalizer_identity;
+mod herdr_turn_evidence;
+#[cfg(all(test, unix))]
+pub(in crate::services::discord) mod herdr_turn_evidence_tests;
+pub(in crate::services::discord) use herdr_turn_evidence::{
+    herdr_fresh_idle_signal, herdr_turn_held, install_turn_start_sink,
+};
 mod host_locator;
 pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
@@ -638,6 +644,7 @@ fn bump_save_generation_for_write(
     super::relay_recovery::circuit_evidence::carry_forward(existing.as_ref(), state)?;
     managed_submission::carry_forward(existing.as_ref(), state);
     native_stop_pin::carry_forward(existing.as_ref(), state);
+    herdr_turn_evidence::carry_forward(existing.as_ref(), state);
     state.carry_before_start_receipt_from(existing.as_ref())?;
     let existing_generation = existing
         .map(|existing| existing.save_generation)
@@ -1724,6 +1731,7 @@ mod stall_recovery_tests {
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(7),
                 scheduled_outcome: None,
+                ends_turn: true,
             },
         );
         assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);
@@ -1780,6 +1788,7 @@ mod stall_recovery_tests {
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(9),
                 scheduled_outcome: None,
+                ends_turn: true,
             },
         );
 
@@ -1812,6 +1821,7 @@ mod stall_recovery_tests {
                 last_watcher_relayed_offset: Some(64),
                 last_watcher_relayed_generation_mtime_ns: Some(9),
                 scheduled_outcome: None,
+                ends_turn: true,
             },
         );
         assert_eq!(outcome, WatcherTerminalCommitOutcome::Committed);

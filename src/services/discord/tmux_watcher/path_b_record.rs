@@ -35,6 +35,8 @@ pub(super) struct PathBTranscript<'a> {
     pub(super) settle_pin: Option<&'a InflightTurnState>,
     /// Native custody of `(pin, late)`; a held row's records belong to its native completion.
     pub(super) native_held: (bool, bool),
+    /// The pre-relay row is a Herdr turn whose own end is unproven; it settles no outcome.
+    pub(super) herdr_held: bool,
 }
 
 /// Whether native custody holds `row`, so the watcher records nothing of it.
@@ -148,7 +150,7 @@ impl<'a> PathBRecord<'a> {
             return;
         }
         let held = match target.settle_pin {
-            Some(_) => target.native_held.0,
+            Some(_) => target.native_held.0 || target.herdr_held,
             None => self.held(target),
         };
         settle_committed_range(

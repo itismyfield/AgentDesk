@@ -5,6 +5,8 @@ mod first_input;
 mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
+#[cfg(all(test, unix))]
+pub(crate) use first_input::owned_pending_prompt_for_tests;
 #[cfg(test)]
 pub(crate) use first_input::regression_tests::regression_attached;
 #[cfg(any(test, feature = "test-support"))]
@@ -321,10 +323,9 @@ pub(crate) fn execute(
             }
             Some(HostedRecord::Known(record)) if record.state == HostedState::Pending => {
                 legacy_not_held(&record.execution_nonce)?;
-                (
-                    pending_source(&turn, &runtime, ports, record)?,
-                    Lineage::Pending,
-                )
+                first_input::pending_handover(record, |record| {
+                    pending_source(&turn, &runtime, ports, record)
+                })?
             }
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
@@ -450,71 +451,36 @@ fn cleared_source(
     })
 }
 
-/// A Pending execution from an earlier turn, only once the log holds its own record for the
-/// session its launch named: only an attach after SessionStart, or the pane's hooks, write one.
-fn pending_source(
-    turn: &HerdrTurn<'_>,
-    runtime: &Handle,
-    ports: &dyn HerdrTurnPorts,
-    record: &HostedExecution,
-) -> Result<Attached, String> {
-    let nonce = &record.execution_nonce;
-    let adopted = record.location.is_none() && record.expected.is_none();
-    if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {
-        return launched_source(turn, runtime, ports);
-    }
-    let session_id = execution_context("claude", nonce)?
-        .expected_native_session_id
-        .ok_or("herdr turn: the pending launch named no session")?;
-    let started = latest_logged(turn).is_some_and(|event| {
-        event.execution_nonce.as_deref() == Some(nonce.as_str())
-            && logged_session(&event.new) == Some(session_id.as_str())
-    });
-    if !started && adopted {
-        return Err(format!(
-            "herdr turn: pending execution {nonce} took its launched pane; no start of \
-             {session_id} is logged yet"
-        ));
-    }
-    if !started {
-        let refused = never_attached::refusal(turn, runtime, ports, record, &session_id);
-        return Err(refused);
-    }
-    if record.expected.is_none() && !adopted {
-        never_attached::probe_again(turn, runtime, ports)?;
-    }
-    attach(turn, runtime, ports, nonce, &session_id)
+/// Whether the pane's latest logged record is execution `nonce`'s start of `session_id`.
+pub(crate) fn start_logged(channel: u64, logical: &str, nonce: &str, session_id: &str) -> bool {
+    start_log_read(channel, logical, nonce, session_id).unwrap_or(false)
 }
 
-/// The turn's resolution of its unplaced Pending `nonce`: adopted, or retired for a fresh launch.
-fn unplaced_resolved(
-    turn: &HerdrTurn<'_>,
-    runtime: &Handle,
-    ports: &dyn HerdrTurnPorts,
+/// As `start_logged`, but a log that cannot be read is an error rather than a missing start.
+pub(crate) fn start_log_read(
+    channel: u64,
+    logical: &str,
     nonce: &str,
-) -> Result<Resolution, String> {
-    let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
-    let target = Unplaced {
-        pool: turn.pool,
-        owner: &turn.owner,
-        nonce,
-        endpoint: &turn.endpoint,
-        host,
-        quiet: unplaced::quiet(),
-        close_unrecorded: ports.owner_port().close_unrecorded,
-    };
-    unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
+    session_id: &str,
+) -> std::io::Result<bool> {
+    Ok(latest_logged_read(channel, logical)?.is_some_and(|event| {
+        event.execution_nonce.as_deref() == Some(nonce)
+            && logged_session(&event.new) == Some(session_id)
+    }))
 }
 
 /// The pane's latest logged record that moved it; refusal audits do not.
-fn latest_logged(turn: &HerdrTurn<'_>) -> Option<BindingEvent> {
-    let logical = turn.owner.logical_key.as_str();
-    let events = binding_events_since(turn.channel_id, 0).ok()?;
-    events
+fn latest_logged(channel: u64, logical: &str) -> Option<BindingEvent> {
+    latest_logged_read(channel, logical).ok().flatten()
+}
+
+fn latest_logged_read(channel: u64, logical: &str) -> std::io::Result<Option<BindingEvent>> {
+    let events = binding_events_since(channel, 0)?;
+    Ok(events
         .into_iter()
         .rev()
         .filter(|event| event.tmux_session == logical)
-        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. }))
+        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. })))
 }
 
 fn logged_session(target: &BindingTarget) -> Option<&str> {
@@ -685,19 +651,26 @@ pub(crate) fn launched(
     }
 }
 
-/// Waits for the launched session's SessionStart: its provider and hooks are up. A resume waits
-/// for its own execution's `source=resume` start, never for another start of the same session.
+/// Waits for execution `nonce`'s SessionStart (a resume for its own `source=resume` start); a wait
+/// that ran out, not one cancelled, is refused as this launch's own timeout.
 fn session_started(
     runtime: &Handle,
     hooks: &mut broadcast::Receiver<HookEvent>,
-    (session_id, resume): (&str, Option<&str>),
+    (session_id, nonce, resume): (&str, &str, bool),
     cancel: Option<&CancelToken>,
 ) -> Result<(), String> {
     let deadline = Instant::now() + SESSION_START_WAIT;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
-        if cancel_requested(cancel) || left.is_zero() {
-            return Err(format!("herdr turn: no SessionStart of {session_id}"));
+        let missing = || format!("herdr turn: no SessionStart of {session_id}");
+        if cancel_requested(cancel) {
+            return Err(missing());
+        }
+        if left.is_zero() {
+            let cause = crate::services::turn_orchestrator::RetryWaitCause::OwnLaunchTimeout {
+                nonce: nonce.to_owned(),
+            };
+            return Err(cause.refusal(&missing()));
         }
         let poll = left.min(Duration::from_millis(200));
         match runtime.block_on(tokio::time::timeout(poll, hooks.recv())) {
@@ -705,9 +678,7 @@ fn session_started(
                 if event.provider == "claude"
                     && event.kind == HookEventKind::SessionStart
                     && event.session_id == session_id
-                    && resume.is_none_or(|nonce| {
-                        session_handoff::resumed_start(&event, session_id, nonce)
-                    }) =>
+                    && (!resume || session_handoff::resumed_start(&event, session_id, nonce)) =>
             {
                 return Ok(());
             }
@@ -939,7 +910,7 @@ fn is_turn_prompt(line: &str) -> bool {
 /// call bound it; until then it stays Pending and the next turn attaches it again.
 async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
     let logical = turn.owner.logical_key.as_str();
-    let logged = latest_logged(turn).is_some_and(|event| {
+    let logged = latest_logged(turn.channel_id, logical).is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
             && matches!(
                 event.new,
@@ -961,7 +932,11 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
 
 mod live_reader;
 mod never_attached;
+mod pending;
+use pending::pending_source;
+pub(crate) mod retry_probe;
 use live_reader::read_to_provider_terminal;
+pub(crate) use retry_probe::take as take_retry_probe;
 pub(crate) mod start_offset;
 mod terminal_replay;
 pub(crate) use terminal_replay::{

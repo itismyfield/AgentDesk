@@ -12,14 +12,17 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
+        Self::of("codex")
+    }
+    fn of(provider: &str) -> Self {
         let root = crate::config::TestRuntimeRootGuard::new();
         let temp = crate::config::test_env::kept_test_tmpdir("herdr-runtime-marker");
         let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
         let temp_guard = set("TMPDIR", &temp);
         let namespace = set("TMUX_TMPDIR", &root.path().canonicalize().unwrap());
         let mut owner = owner("698069001");
-        owner.provider = "codex".into();
-        owner.logical_key = "codex-marker-fixture".into();
+        owner.provider = provider.into();
+        owner.logical_key = format!("{provider}-marker-fixture");
         owner.runtime_root = root.path().display().to_string();
         let rig = Self {
             owner,
@@ -29,7 +32,7 @@ impl Rig {
         };
         rig.write("host_kind", "herdr");
         rig.write("spawn_nonce", NONCE);
-        rig.write(tc::TMUX_RUNTIME_KIND_TEMP_EXT, "codex_tui");
+        rig.write(tc::TMUX_RUNTIME_KIND_TEMP_EXT, &format!("{provider}_tui"));
         rig
     }
     fn path(&self, ext: &str) -> PathBuf {
@@ -40,7 +43,7 @@ impl Rig {
     }
     fn retired(&self) -> HostedExecution {
         let mut execution = record(&self.owner, NONCE, HostedState::Retired);
-        execution.expected.as_mut().unwrap().binding_provider = "codex".into();
+        execution.expected.as_mut().unwrap().binding_provider = self.owner.provider.clone();
         execution
     }
     fn runtime(&self) -> String {
@@ -155,20 +158,22 @@ async fn i8069_foreign_legacy_fallback_keeps_canonical_runtime_too() {
     assert_eq!(std::fs::read_to_string(legacy).unwrap(), "process_backend");
 }
 
+fn tmux(args: &[&str]) {
+    let output = runtime_command("tmux")
+        .unwrap()
+        .args(args)
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{args:?}: {output:?}");
+}
+
 #[tokio::test]
 async fn i8069_live_tui_marker_is_preserved_on_private_tmux() {
     let rig = Rig::new();
     let name = &rig.owner.logical_key;
-    let run = |args: &[&str]| {
-        let output = runtime_command("tmux")
-            .unwrap()
-            .args(args)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{args:?}: {output:?}");
-    };
+    let run = tmux;
     run(&["-f", "/dev/null", "new-session", "-d", "-s", name, "cat"]);
     assert_eq!(tmux::session_presence(name), SessionPresence::Present);
     let result = clear_retired(&rig.retired()).await;
@@ -189,4 +194,39 @@ async fn i8069_fresh_claim_clears_before_provider_and_keeps_new_nonce() {
         std::fs::read_to_string(rig.path("spawn_nonce")).unwrap(),
         NONCE
     );
+}
+
+// A retired Claude execution's hint goes with it; a cleanup arriving after the next incarnation
+// stamped its nonce leaves that incarnation's hint and admission alone.
+#[tokio::test]
+async fn late_old_nonce_cleanup_keeps_new_marker_and_admission() {
+    use crate::services::tui_prompt_dedupe as dedupe;
+    const NEW: &str = "22222222222222222222222222222222";
+    let rig = Rig::of("claude");
+    let logical = rig.owner.logical_key.clone();
+    assert!(clear_retired(&rig.retired()).await.is_ok());
+    assert!(!rig.path(tc::TMUX_RUNTIME_KIND_TEMP_EXT).exists());
+    rig.write("spawn_nonce", NEW);
+    rig.write(tc::TMUX_RUNTIME_KIND_TEMP_EXT, "claude_tui");
+    dedupe::install_herdr_execution(&logical, NEW);
+    dedupe::admit_herdr_execution(&logical, NEW);
+    assert!(clear_retired(&rig.retired()).await.is_err());
+    assert_eq!(rig.runtime(), "claude_tui");
+    assert!(dedupe::herdr_claim_admission(&logical, true).is_ok());
+}
+
+// A fresh Claude move leaves its tmux Claude running: neither the fresh claim nor a retired
+// cleanup removes the hint that tmux run still owns.
+#[tokio::test]
+async fn claude_fresh_move_keeping_tmux_is_unchanged() {
+    let rig = Rig::of("claude");
+    let name = rig.owner.logical_key.clone();
+    let fence = RuntimeHintFence::acquire(&name).unwrap();
+    clear_fresh(&rig.owner, NONCE, &fence).unwrap();
+    drop(fence);
+    assert_eq!(rig.runtime(), "claude_tui");
+    tmux(&["-f", "/dev/null", "new-session", "-d", "-s", &name, "cat"]);
+    let _refused = clear_retired(&rig.retired()).await;
+    tmux(&["kill-session", "-t", &format!("={name}")]);
+    assert_eq!(rig.runtime(), "claude_tui");
 }

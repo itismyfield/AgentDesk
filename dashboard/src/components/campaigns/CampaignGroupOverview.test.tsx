@@ -11,7 +11,7 @@ import CampaignGroupOverview, { buildCampaignGroupOverview } from "./CampaignGro
 import { TAIL_HEIGHT, buildGroupTasks } from "./CampaignGroupTasks";
 import { GROUP_WIDTH, TASK_HEIGHT } from "./campaignGroupLayout";
 import type { LineData } from "./RelationsCanvasChrome";
-import { RelationsGroupNode, type GroupNodeData } from "./RelationsTaskNode";
+import { RelationsGroupNode, ViewTaskNode, type GroupNodeData, type ViewTaskData } from "./RelationsTaskNode";
 
 vi.mock("../../api/campaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/campaigns")>()), updateCampaignNode: vi.fn(), setCampaignAutoQueue: vi.fn(),
@@ -186,4 +186,33 @@ it("keeps every card clear of the others when tails stack past the linked tasks 
   const box = ([id, { x, y }]: [string, { x: number; y: number }]) => ({ id, x, y, bottom: y + (id.startsWith("tail:") ? TAIL_HEIGHT : TASK_HEIGHT) });
   const boxes = [...graph.positions].map(box);
   expect(boxes.flatMap((a, index) => boxes.slice(index + 1).filter((b) => Math.abs(a.x - b.x) < GROUP_WIDTH && a.y < b.bottom && b.y < a.bottom).map((b) => `${a.id}/${b.id}`))).toEqual([]);
+});
+
+it("renders ViewTaskNode with the unified 3-row editor card and reflects live/running blockers in the inspector", async () => {
+  view.zoom = 0.4;
+  const taskData: ViewTaskData = {
+    title: "Unify group task card without shrinking",
+    code: "#7991",
+    meta: "Gateway",
+    status: "running",
+    statusLabel: "Running",
+    tone: "progress",
+    ratio: 0.5,
+    summary: "Review · 2 deps",
+    note: { tone: "warn", text: "Blocked" },
+    locked: false,
+    error: false,
+    picked: false,
+  };
+  await act(async () => root.render(<ViewTaskNode {...{ id: "i7991", data: taskData, selected: false } as unknown as NodeProps} />));
+  expect(container.querySelector("[data-far]")).toBeNull();
+  expect(container.textContent).toContain("#7991");
+  expect(container.textContent).toContain("Unify group task card without shrinking");
+  expect(container.textContent).toContain("Review · 2 deps");
+  view.zoom = 1;
+
+  const runningBlocked = { ...node("r1", "A", [], "pending"), blocker: "Waiting on CI" };
+  const live = { r1: { card_id: "c1", card_status: "in_progress", dispatch_type: "implementation", dispatch_status: "dispatched", session_status: "turn_active", session_seen_at: null, running: true, queue_status: null } };
+  await act(async () => root.render(<CampaignGroupOverview campaignId="c1" nodes={[runningBlocked]} live={live} chosen={null} onChoose={vi.fn()} onOpenGroup={vi.fn()} onOpenTask={vi.fn()} tr={en} />));
+  expect(container.querySelector('[aria-label="Campaign summary"]')?.textContent).toContain("A1 blocked");
 });

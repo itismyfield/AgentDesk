@@ -253,7 +253,12 @@ pub(crate) fn observe_launch_hook(
 ) -> Result<(), NotDurableReason> {
     let tmux = observation_pane(session_id, envelope);
     with_tmux_source_authority(&tmux, |authority| {
-        execution_current(&tmux, captured_nonce(envelope).as_deref())?;
+        let nonce = captured_nonce(envelope);
+        execution_current(&tmux, nonce.as_deref())?;
+        // A termination that chose this execution takes no start of it any more.
+        if nonce.is_some_and(|nonce| crate::services::session_host::execution_closing(&nonce)) {
+            return Err(NotDurableReason::ExecutionChanged);
+        }
         let reclaimed =
             reclaim_with_current_prompt(authority, session_id, hook).map_err(|error| {
                 tracing::warn!(tmux, %error, "Claude launch source verification not persisted");

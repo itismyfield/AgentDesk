@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createContext, createElement, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { getCampaigns, type HomeLegacyCampaignSummary } from "../../api/campaigns";
+import { getCampaigns } from "../../api/campaigns";
 import { healthDetailBlocked, noteHealthDetailError } from "../../api/healthDetailAccess";
 import { ApiRequestError, request } from "../../api/httpClient";
 import type { RoutineRecord } from "../../api/routines";
@@ -11,8 +11,18 @@ import {
   type ServerCampaignSummary,
 } from "../../api/serverCampaigns";
 import type { RuntimeConfigResponse } from "../../api/settingsRuntime";
+import { isTestAgent } from "../../lib/agentHelpers";
 import { pollWhileVisible } from "../../lib/pollWhileVisible";
-import { isOpenServerCampaign, type HomeHealth, type HomeTurn, type RawUsageProvider, type SourceState } from "./homeModel";
+import type { Agent } from "../../types";
+import {
+  isOpenServerCampaign,
+  type HomeHealth,
+  type HomeLegacySummary,
+  type HomeMementoStatus,
+  type HomeTurn,
+  type RawUsageProvider,
+  type SourceState,
+} from "./homeModel";
 
 export interface Loaded<T> {
   data: T | null;
@@ -55,7 +65,7 @@ export function usePolled<T>(load: () => Promise<T>, intervalMs: number, enabled
 export const DETAIL_CAMPAIGNS = 8;
 
 export interface HomeCampaigns {
-  legacy: HomeLegacyCampaignSummary[] | null;
+  legacy: HomeLegacySummary[] | null;
   summaries: ServerCampaignSummary[] | null;
   documents: ServerCampaignDocument[];
   /** Open server campaigns whose detail read failed, and those past `DETAIL_CAMPAIGNS`: their to-dos are unknown. */
@@ -281,4 +291,50 @@ export function useAgentTurns(ids: string[], intervalMs = 30_000): Map<string, H
 
 export function loadRuntimeConfig(): Promise<RuntimeConfigResponse> {
   return request<RuntimeConfigResponse>("/api/settings/runtime-config", { suppressErrorToast: true });
+}
+
+function pickBoundAuditTargets(agents: ReadonlyArray<Agent>): Array<{ id: string; provider: "claude" | "codex" }> {
+  const real = agents.filter((agent) => !agent.id.startsWith("dispatched:"));
+  const ordered = [...real.filter((agent) => !isTestAgent(agent)), ...real.filter(isTestAgent)];
+  const targets: Array<{ id: string; provider: "claude" | "codex" }> = [];
+  for (const agent of ordered) {
+    if (agent.discord_channel_cc?.trim()) targets.push({ id: agent.id, provider: "claude" });
+    else if (agent.discord_channel_cdx?.trim() || agent.discord_channel_alt?.trim()) targets.push({ id: agent.id, provider: "codex" });
+    else if (agent.discord_channel_id?.trim()) targets.push({ id: agent.id, provider: agent.cli_provider === "codex" ? "codex" : "claude" });
+  }
+  return targets;
+}
+
+/** Reads live Memento backend status via anchor audit snapshot or operator connectors. */
+export async function loadHomeMemento(agents: ReadonlyArray<Agent> = []): Promise<HomeMementoStatus | null> {
+  for (const target of pickBoundAuditTargets(agents).slice(0, 2)) {
+    try {
+      const data = await request<{ memento?: { status?: string } }>(
+        `/api/agents/${encodeURIComponent(target.id)}/anchors?provider=${target.provider}`,
+        { cache: "no-store", suppressErrorToast: true },
+      );
+      const status = data?.memento?.status;
+      if (status === "connected") return { connected: true, status: "connected" };
+      if (status === "disconnected") return { connected: false, status: "disconnected" };
+      if (status === "unconfigured") return { connected: false, status: "unconfigured" };
+      if (status === "unknown") return null;
+    } catch {
+      // Try next bound target or fall back to operator connectors.
+    }
+  }
+  try {
+    const response = await request<{ connectors?: Array<{ id?: string; state?: string }> }>(
+      "/api/settings/operator-connectors",
+      { suppressErrorToast: true },
+    );
+    const connector = response.connectors?.find((item) => /memento/i.test(item.id ?? ""));
+    if (!connector) return null;
+    if (connector.state === "ready") return { connected: true, status: "connected" };
+    if (connector.state === "skipped" || connector.state === "missing_config") {
+      return { connected: false, status: "unconfigured" };
+    }
+    return { connected: false, status: "disconnected" };
+  } catch {
+    return null;
+  }
 }

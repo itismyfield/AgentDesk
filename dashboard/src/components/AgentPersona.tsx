@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Agent } from "../types";
+import { localeName, useI18n, type UiLanguage } from "../i18n";
 import AnimatedBotAvatar from "./agent-avatar/AnimatedBotAvatar";
 import { avatarRoster, botAvatarBlinking, botAvatarFor, botAvatarStill } from "./agent-avatar/botAvatar";
 import { useWorkspaceAgents } from "../contexts/WorkspaceContext";
@@ -7,7 +8,7 @@ import { useWorkspaceAgents } from "../contexts/WorkspaceContext";
 export type PersonaState = "idle" | "working" | "waiting" | "error" | "offline";
 
 type PersonaAgent = Pick<Agent, "id" | "name"> &
-  Partial<Pick<Agent, "name_ko" | "alias" | "status">>;
+  Partial<Pick<Agent, "name_ko" | "name_ja" | "name_zh" | "alias" | "status">>;
 
 interface AgentPersonaProps {
   agent: PersonaAgent | undefined;
@@ -44,12 +45,11 @@ const STATE_DOT: Record<PersonaState, string> = {
   offline: "border border-[var(--th-text-muted)] bg-[var(--th-bg-surface)]",
 };
 
-const STATE_LABEL_KO: Record<PersonaState, string> = {
-  idle: "대기",
-  working: "작업 중",
-  waiting: "확인 필요",
-  error: "오류",
-  offline: "오프라인",
+const STATE_LABELS: Record<UiLanguage, Record<PersonaState, string>> = {
+  ko: { idle: "대기", working: "작업 중", waiting: "확인 필요", error: "오류", offline: "오프라인" },
+  en: { idle: "Idle", working: "Working", waiting: "Needs attention", error: "Error", offline: "Offline" },
+  ja: { idle: "待機中", working: "作業中", waiting: "要確認", error: "エラー", offline: "オフライン" },
+  zh: { idle: "空闲", working: "工作中", waiting: "待确认", error: "错误", offline: "离线" },
 };
 
 export function personaStateFromAgent(status: Agent["status"] | undefined): PersonaState {
@@ -64,15 +64,17 @@ export default function AgentPersona({ agent, state, size = 32, animated, classN
   const [hovered, setHovered] = useState(false);
   const [inView, setInView] = useState(true);
   const reducedMotion = useSyncExternalStore(subscribeReducedMotion, getReducedMotionSnapshot, () => false);
+  const i18n = useI18n();
+  const lang: UiLanguage = i18n.__fromProvider ? i18n.language : "ko";
   const resolvedState = state ?? personaStateFromAgent(agent?.status);
   const agentKey = agent?.id ?? "agent";
-  const displayName = agent?.name_ko || agent?.alias || agent?.name || "Agent";
+  const displayName = (agent ? localeName(lang, agent) : "") || "Agent";
   const roster = useWorkspaceAgents();
   const avatar = botAvatarFor(agentKey, roster ? avatarRoster(roster) : undefined);
   const tone = avatar.color;
   const face = Math.round(size * 0.8);
   const dotSize = Math.max(6, Math.round(size * 0.2));
-  const label = `${displayName} · ${STATE_LABEL_KO[resolvedState]}`;
+  const label = `${displayName} · ${STATE_LABELS[lang][resolvedState]}`;
 
   useEffect(() => {
     if (animated === false || resolvedState === "offline" || reducedMotion) return;

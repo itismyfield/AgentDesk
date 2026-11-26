@@ -7,8 +7,11 @@ import * as providers from "../../api/providers";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Agent, DispatchedSession } from "../../types";
+import type { Agent, Department, DispatchedSession } from "../../types";
 import AgentsTab from "./AgentsTab";
+import AgentFormModal from "./AgentFormModal";
+import AgentSetupWizard from "./AgentSetupWizard";
+import { AgentsUnlinkedSessions } from "./AgentsSummaryPane";
 import { agentSecondaryLine } from "./AgentRow";
 import { classifyRoster, filterAndSortAgents, isStandIn, type AgentSortMode, type AgentStatusFilter } from "./agent-list-controls";
 
@@ -23,6 +26,13 @@ vi.mock("../../api", () => ({
   getDiscordChannelInfo: vi.fn(async () => null),
   getTaskDispatches: vi.fn(async () => []),
   updateAgent: vi.fn(async () => ({})),
+  setupAgent: vi.fn(async () => ({ ok: true })),
+  duplicateAgent: vi.fn(async () => ({ ok: true })),
+}));
+vi.mock("../../api/agentsSetup", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/agentsSetup")>()),
+  dryRunSetupAgent: vi.fn(async () => ({ ok: true })),
+  dryRunDuplicateAgent: vi.fn(async () => ({ ok: true })),
 }));
 vi.mock("../../contexts/KanbanContext", () => ({ useKanban: () => ({ kanbanCards: [], kanbanCardsState: "ready" }) }));
 vi.mock("../home/useHomeData", () => ({ useAgentTurns: () => new Map() }));
@@ -338,5 +348,217 @@ describe("agentSecondaryLine", () => {
     expect(agentSecondaryLine(AGENTS[0], "en")).toBe("Ada Dashboard");
     expect(agentSecondaryLine(AGENTS[1], "ko")).toBe("Luna Ops");
     expect(agentSecondaryLine(AGENTS[1], "en")).toBe("루나");
+  });
+});
+
+describe("provider summary, attention header, and active provider resolution", () => {
+  it("renders provider distribution in summary pane without queue link on attention card", async () => {
+    setViewport(false);
+    act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
+    await flush();
+    const summaryText = document.querySelector('[data-testid="agents-summary"]')!.textContent ?? "";
+    expect(summaryText).toContain("Agents by provider");
+    expect(summaryText).toContain("Claude");
+    expect(summaryText).toContain("Codex");
+    expect(document.querySelector('[data-testid="agents-attention"]')!.textContent).not.toContain("Open queue");
+  });
+
+  it("prefers Antigravity agent provider over default claude turn fallback when no -cc channel exists", async () => {
+    const { resolveActiveAgentProvider } = await import("./AgentInfoCardContent");
+    expect(
+      resolveActiveAgentProvider(
+        { cli_provider: "antigravity", discord_channel_cc: null },
+        [],
+        "claude",
+      ),
+    ).toBe("antigravity");
+    expect(
+      resolveActiveAgentProvider(
+        { cli_provider: "codex", discord_channel_cc: "123456789012345678" },
+        [{ provider: "claude" }],
+        "claude",
+      ),
+    ).toBe("claude");
+  });
+
+  it("hides retired department controls in AgentsTab/detail and formats raw Discord channel snowflakes cleanly", async () => {
+    setViewport(false);
+    const ko = (k: string) => k;
+    const dept: Department = {
+      id: "dept-infra", name: "Infra", name_ko: "인프라팀", icon: "🛠️", color: "#38bdf8",
+      description: null, prompt: null, sort_order: 0, created_at: 0,
+    };
+    vi.mocked(api.getDiscordBindings).mockResolvedValueOnce([
+      { agentId: "agent-ada", channelId: "1490145076658307999", counterModelChannelId: "1490145076658307888", source: "primary" },
+    ]);
+    vi.mocked(api.getDiscordChannelInfo).mockResolvedValue(null as never);
+    const entries = classifyRoster([{ ...AGENTS[0], department_id: "dept-infra" }, AGENTS[1]], SESSIONS, false);
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <AgentsTab
+            tr={ko} locale="ko" isKo entries={entries} sortedEntries={entries.filter((e) => !isStandIn(e.agent))}
+            departments={[dept]} deptTab="all" setDeptTab={vi.fn()} search="" setSearch={vi.fn()}
+            statusFilter="all" setStatusFilter={vi.fn()} sortMode="status" setSortMode={vi.fn()}
+            includeTests={false} setIncludeTests={vi.fn()} selectedAgentId="agent-ada" onSelectAgent={vi.fn()}
+            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+            onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+    await flush();
+
+    expect(container.querySelector('[aria-label="소속 부서"]')).toBeNull();
+    expect(container.textContent).not.toContain("전체 부서");
+    expect(container.querySelector('[data-testid="agent-detail-run"]')?.textContent).not.toContain("소속 부서");
+    expect(container.querySelector('[data-testid="agent-detail-now"]')?.textContent).not.toContain("부서 미배정");
+
+    const conn = container.querySelector('[data-testid="agent-detail-connections"]')!;
+    const monoSpan = conn.querySelector<HTMLElement>('span[title="1490145076658307999"]')!;
+    expect(monoSpan).not.toBeNull();
+    expect(monoSpan.textContent).toBe("#채널 · ...307999");
+    expect(monoSpan.className).toContain("font-mono");
+    expect(monoSpan.className).toContain("text-xs");
+    const counterSpan = conn.querySelector<HTMLElement>('span[title="1490145076658307888"]')!;
+    expect(counterSpan?.textContent).toBe("#채널 · ...307888");
+  });
+
+  it("suppresses premature Step 1/2 errors and hides retired department field in AgentSetupWizard", async () => {
+    setViewport(false);
+    const ko = (k: string) => k;
+    const dept: Department = {
+      id: "dept-infra", name: "Infra", name_ko: "인프라팀", icon: "🛠️", color: "#38bdf8",
+      description: null, prompt: null, sort_order: 0, created_at: 0,
+    };
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <AgentSetupWizard
+            open
+            mode="create"
+            departments={[dept]}
+            locale="ko"
+            tr={ko}
+            onClose={vi.fn()}
+            onDone={vi.fn()}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const wizard = document.querySelector('[data-testid="agent-setup-wizard"]')!;
+    const roleIdInput = wizard.querySelector<HTMLInputElement>("#wizard-role-id")!;
+    expect(roleIdInput).not.toBeNull();
+    expect(document.activeElement).toBe(roleIdInput);
+    expect(wizard.textContent).not.toContain("역할 ID는 영문·숫자·_·- 2자 이상이어야 해요.");
+    expect(Array.from(wizard.querySelectorAll("label"), (l) => l.textContent)).not.toContain("부서");
+    const nextBtn = () => Array.from(wizard.querySelectorAll<HTMLButtonElement>("button")).find((b) => b.textContent === "다음")!;
+    expect(nextBtn().disabled).toBe(true);
+
+    const inputByPlaceholder = (ph: string) => wizard.querySelector<HTMLInputElement>(`input[placeholder="${ph}"]`)!;
+    const setInput = (el: HTMLInputElement, val: string) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      setter?.call(el, val);
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+
+    act(() => setInput(inputByPlaceholder("adk-researcher"), "a"));
+    await flush();
+    expect(wizard.textContent).toContain("역할 ID는 영문·숫자·_·- 2자 이상이어야 해요.");
+
+    act(() => {
+      setInput(inputByPlaceholder("adk-researcher"), "adk-researcher");
+      setInput(inputByPlaceholder("Researcher"), "Researcher");
+    });
+    await flush();
+    expect(wizard.textContent).not.toContain("역할 ID는 영문·숫자·_·- 2자 이상이어야 해요.");
+    expect(nextBtn().disabled).toBe(false);
+
+    act(() => nextBtn().click());
+    await flush();
+    expect(wizard.textContent).not.toContain("채널 ID는 숫자여야 해요.");
+  });
+
+  it("uses sm segmented tabs with compact 대기 label on Korean mobile and deduplicates AgentFormModal personality label", async () => {
+    setViewport(true);
+    const ko = (k: string) => k;
+    const entries = classifyRoster(AGENTS, SESSIONS, false);
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <AgentsTab
+            tr={ko} locale="ko" isKo entries={entries} sortedEntries={entries.filter((e) => !isStandIn(e.agent))}
+            departments={[]} deptTab="all" setDeptTab={vi.fn()} search="" setSearch={vi.fn()}
+            statusFilter="all" setStatusFilter={vi.fn()} sortMode="status" setSortMode={vi.fn()}
+            includeTests={false} setIncludeTests={vi.fn()} selectedAgentId={null} onSelectAgent={vi.fn()}
+            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+            onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
+          />
+          <AgentFormModal
+            isKo locale="ko" tr={ko} isEdit={false} saving={false} departments={[]}
+            onSave={vi.fn()} onClose={vi.fn()}
+            form={{
+              name: "", name_ko: "", name_ja: "", name_zh: "", department_id: "",
+              cli_provider: "claude", avatar_emoji: "🤖", personality: "", prompt_content: "", auto_commit: false,
+            }}
+          />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+
+    const seg = container.querySelector<HTMLElement>(".aui-segmented-control-clean")!;
+    expect(seg.getAttribute("data-size")).toBe("sm");
+    const tabLabels = Array.from(seg.querySelectorAll(".aui-segmented-control-clean__label"), (el) => el.textContent);
+    expect(tabLabels).toEqual(["전체", "작업 중", "대기", "쉬는 중", "세션 없음"]);
+
+    const detailsHeading = document.body.querySelector("#agent-form-details")!;
+    expect(detailsHeading.textContent).toBe("역할 · 성격");
+    expect(document.body.querySelector('label[for="agent-personality"]')).toBeNull();
+    const personalityArea = document.body.querySelector<HTMLTextAreaElement>("#agent-personality")!;
+    expect(personalityArea.getAttribute("aria-label")).toBe("성격");
+  });
+
+  it("removes department copy and collapses idle toolu_* subagent sessions in AgentsUnlinkedSessions modal", async () => {
+    setViewport(false);
+    const ko = (k: string) => k;
+    const baseKey = "claude/discord_1/mac-mini:AgentDesk-claude-adk-cc-t1570308839910412348";
+    const unlinked: DispatchedSession[] = [
+      { id: "p1", session_key: baseKey, name: "adk-cc", provider: "claude", status: "working", last_seen_at: Date.now() } as DispatchedSession,
+      ...["01A", "01B", "01C", "01D"].map((suffix, idx) => ({
+        id: `t${idx}`,
+        session_key: `${baseKey}:child:toolu_${suffix}`,
+        name: `${baseKey}:child:toolu_${suffix}`,
+        provider: "claude",
+        status: "idle",
+        last_seen_at: Date.now() - 10_000,
+      } as DispatchedSession)),
+    ];
+    act(() => {
+      root.render(<AgentsUnlinkedSessions sessions={unlinked} locale="ko" tr={ko} isKo />);
+    });
+    await flush();
+
+    act(() => {
+      Array.from(container.querySelectorAll("button")).find((b) => b.textContent === "보기")!.click();
+    });
+    await flush();
+
+    const modal = document.querySelector('[data-testid="agents-sessions"]')!;
+    expect(modal.textContent).toContain("세션을 에이전트에 붙이는 저장은 아직 지원하지 않으며");
+    expect(modal.textContent).not.toContain("나 부서");
+    expect(modal.querySelector('[data-session-row="p1"]')).not.toBeNull();
+    expect(modal.querySelector('[data-session-row="t0"]')).toBeNull();
+
+    const toggle = modal.querySelector<HTMLButtonElement>('[data-testid="toggle-subtool-sessions"]')!;
+    expect(toggle.textContent).toContain("하위 도구 세션 4개 보기");
+    act(() => toggle.click());
+    await flush();
+    expect(modal.querySelectorAll('[data-testid="agents-subtool-sessions"] li')).toHaveLength(4);
+    expect(toggle.textContent).toContain("하위 도구 세션 4개 접기");
   });
 });

@@ -4,7 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_SETTINGS } from "./types";
 
 const fetchDashboardBootstrap = vi.hoisted(() => vi.fn());
@@ -32,16 +32,23 @@ async function settle() {
 describe("dashboard bootstrap", () => {
   let container: HTMLDivElement;
   let root: Root;
+  beforeEach(() => {
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ cards: [], dispatches: [] }), { status: 200, headers: { "Content-Type": "application/json" } })),
+    );
+  });
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
     fetchDashboardBootstrap.mockReset();
     fetchBootstrapSessions.mockReset();
     fetchBootstrapStats.mockReset();
+    vi.unstubAllGlobals();
   });
 
   it("shows a retry when the first load fails instead of spinning forever", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     fetchDashboardBootstrap.mockRejectedValue(new Error("offline"));
     fetchBootstrapSessions.mockResolvedValue([]);
     fetchBootstrapStats.mockResolvedValue(null);
@@ -62,7 +69,6 @@ describe("dashboard bootstrap", () => {
   });
 
   it("mounts the shell as soon as core bootstrap resolves while stats and sessions are still in flight", async () => {
-    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     fetchDashboardBootstrap.mockResolvedValue({
       agents: [],
       departments: [],
