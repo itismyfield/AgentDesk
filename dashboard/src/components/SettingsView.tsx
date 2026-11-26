@@ -272,16 +272,21 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
         title={tr("런타임 연결 및 커넥터", "Runtime connections & connectors")}
         description={tr("실시간 서버 상태(GET /api/health)와 외부 연동 커넥터의 연결 여부를 보여 줘요.", "Live connection status from server health and operator connectors.")}
       />
-      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 [&_.aui-integration-settings]:max-w-none! [&_.aui-integration-settings-collapse]:hidden!" data-testid="settings-integrations-grid">
+      <div className="grid min-w-0 grid-cols-1 gap-3 lg:grid-cols-2 [&_.aui-integration-settings]:max-w-none!" data-testid="settings-integrations-grid">
         {integrationCards.map((card) => (
           <IntegrationSettings
             key={`${card.id}:${card.enabled}`}
             name={card.name}
             count={card.count}
             meta={card.meta}
+            hideFields
             defaultValues={{ enabled: card.enabled }}
             actionDisabledReason={card.disabledReason}
-            labels={{ paused: card.pausedLabel }}
+            labels={{
+              paused: card.pausedLabel,
+              region: (n) => tr(`${n} 설정`, `${n} settings`),
+              sync: (n) => tr(`${n} 동기화`, `Sync ${n}`),
+            }}
           />
         ))}
       </div>
@@ -352,7 +357,7 @@ export default function SettingsView({ isKo, language, theme, onSaveSettings, on
         ref={searchRef}
         type="search"
         size="lg"
-        className="[--fs:13px]! [--h:40px]! pointer-coarse:[--fs:16px]! pointer-coarse:[--h:44px]!"
+        className="[--fs:13px]! [--h:40px]! max-[899px]:[--fs:16px]! max-[899px]:[--h:44px]! pointer-coarse:[--fs:16px]! pointer-coarse:[--h:44px]!"
         aria-label={tr("설정 찾기", "Search settings")}
         placeholder={tr("이름·키·설명으로 찾기", "Search by name, key or description")}
         prefix={<Search aria-hidden />}

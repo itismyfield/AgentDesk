@@ -369,7 +369,7 @@ describe("Slice 4 — Settings: live runtime health truth, kit IntegrationSettin
     expect(view.textContent).not.toContain("아직 고르지 않았어요");
 
     const integrationGrid = view.querySelector("[data-testid='settings-integrations-grid']")!;
-    expect(integrationGrid.className).toContain("[&_.aui-integration-settings-collapse]:hidden!");
+    expect(integrationGrid.querySelector(".aui-integration-settings-collapse")).toBeNull();
     // Ready connector has no disabled reason banner
     expect(integrationGrid.querySelector(".aui-integration-settings-reason")).toBeNull();
 

@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { cloneElement, isValidElement, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ImgHTMLAttributes, type KeyboardEvent, type ReactNode, type SyntheticEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, CircleAlert, Clock3, Copy, Eye, EyeOff, KeyRound, LoaderCircle, Plug, X } from 'lucide-react';
@@ -24,6 +24,8 @@ export interface IntegrationSettingsProps {
   /** Defaults to `labels.siteHint`. */
   siteHint?: string;
   timeZones?: string[];
+  /** Omits the collapsible API key, site URL and time zone body for summary-only cards. */
+  hideFields?: boolean;
   /** Draws key issuing when `onSave` is also present (an issued key is part of the saved draft). Nothing invents a key without it. */
   onGenerateKey?: () => string | Promise<string>;
   /**
@@ -160,7 +162,7 @@ function LogoMark({ logo, name }: { logo: ReactNode; name: string }) {
 
 export function IntegrationSettings({
   name: nameProp, logo, count, meta = '', defaultValues,
-  siteHint: siteHintProp, timeZones = integrationTimeZones,
+  siteHint: siteHintProp, timeZones = integrationTimeZones, hideFields = false,
   onGenerateKey, onSave, onToggle, onCopyKey, actionDisabledReason, labels, className = '', style,
 }: IntegrationSettingsProps) {
   const id = useId();
@@ -380,7 +382,7 @@ export function IntegrationSettings({
         {(onToggle || reason) && <button ref={toggleRef} type="button" role="switch" aria-checked={values.enabled} aria-label={text.sync(name)} onClick={toggle} className="aui-integration-settings-switch" {...inert}><span><span /></span></button>}
       </header>
       {reason && <p id={reasonId} className="aui-integration-settings-reason" dir="auto">{reason}</p>}
-      <div ref={settingsRef} className="aui-integration-settings-collapse" data-open={values.enabled} inert={!values.enabled} aria-hidden={!values.enabled}>
+      {!hideFields && <div ref={settingsRef} className="aui-integration-settings-collapse" data-open={values.enabled} inert={!values.enabled} aria-hidden={!values.enabled}>
         <div className="aui-integration-settings-collapse-inner">
           <div className="aui-integration-settings-card">
             {(shown.apiKey || showGenerate) && <div className="aui-integration-settings-section" aria-label={text.apiKey} aria-busy={generating}>
@@ -423,7 +425,7 @@ export function IntegrationSettings({
             <div className="aui-integration-settings-footer-inner"><div ref={footerRef} className="aui-integration-settings-savebar"><span>{text.unsaved}</span><div><button type="button" className="aui-integration-settings-discard" onClick={discard}>{text.discard}</button><button type="button" className="aui-integration-settings-save" disabled={invalid || saving} onClick={() => void save()}>{saving && <LoaderCircle size={14} className="aui-integration-settings-spinner" aria-hidden="true" />}{saving ? text.saving : text.save}</button></div></div></div>
           </div>
         </div>
-      </div>
+      </div>}
     </div>
     {open && mobile && editable && createPortal(<div className="aui-integration-settings aui-integration-settings-overlay" style={{ ...portalTokens, '--aui-integration-settings-visible-height': `${viewport?.height ?? window.innerHeight}px`, '--aui-integration-settings-visible-top': `${viewport?.top ?? 0}px` } as CSSProperties}><div className="aui-integration-settings-backdrop" aria-hidden="true" onClick={() => closeMenu(false)} />{menu}</div>, document.body)}
   </section>;
@@ -438,7 +440,7 @@ const settingsStyles = `
 .aui-integration-settings-footer-collapse{display:grid;grid-template-rows:0fr;visibility:hidden;transition:grid-template-rows 360ms var(--aui-integration-settings-ease),visibility 0s 360ms}.aui-integration-settings-footer-collapse[data-open="true"]{grid-template-rows:1fr;visibility:visible;transition-delay:0s}.aui-integration-settings-footer-inner{min-width:0;min-height:0;overflow:hidden}.aui-integration-settings-savebar{min-width:0;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 8px 8px 18px;color:var(--aui-integration-settings-body);font-size:13px}.aui-integration-settings-savebar>div{display:flex;gap:6px;flex:none}.aui-integration-settings-discard,.aui-integration-settings-save{display:flex;align-items:center;justify-content:center;gap:6px;min-height:32px;padding:0 12px;border:0;border-radius:var(--aui-integration-settings-r-md);font-size:13px!important;font-weight:500!important}.aui-integration-settings-discard{background:var(--aui-integration-settings-raised);box-shadow:var(--aui-shadow-sm,0 0 0 1px var(--aui-integration-settings-line),0 1px 2px #0000000a)}.aui-integration-settings-discard:hover{background:var(--aui-integration-settings-raised-hover)}.aui-integration-settings-save{background:var(--aui-integration-settings-save-bg);color:var(--aui-integration-settings-save-fg)!important;box-shadow:var(--aui-integration-settings-save-shadow)}.aui-integration-settings-save:hover:not(:disabled){background:var(--aui-integration-settings-save-hover)}.aui-integration-settings-error{display:flex;align-items:flex-start;gap:6px;margin:8px 0 0;color:var(--aui-integration-settings-err);font-size:12.5px}.aui-integration-settings-error>svg{margin-top:3px}.aui-integration-settings-message{padding:0 18px 18px}.aui-integration-settings-sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap;border:0}.aui-integration-settings-spinner{animation:aui-integration-settings-spin 700ms linear infinite}
 .aui-integration-settings-overlay{container-type:normal;position:fixed;z-index:1000;inset:var(--aui-integration-settings-visible-top,0px) 0 auto;display:flex;align-items:flex-end;width:100%;max-width:none;height:var(--aui-integration-settings-visible-height,100dvh);padding:env(safe-area-inset-top) env(safe-area-inset-right) 0 env(safe-area-inset-left)}.aui-integration-settings-backdrop{position:absolute;inset:0;background:var(--aui-overlay,#0007)}.aui-integration-settings-sheet{position:relative;inset:auto;width:100%;max-height:min(620px,100%);display:flex;flex-direction:column;padding:12px max(16px,env(safe-area-inset-right)) max(16px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left));border-radius:calc(var(--aui-integration-settings-r-lg) + 6px) calc(var(--aui-integration-settings-r-lg) + 6px) 0 0}.aui-integration-settings-sheet-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px}.aui-integration-settings-sheet-header h3{margin:0;font-size:16px;font-weight:600}.aui-integration-settings-close{display:grid;place-items:center;width:44px;height:44px;padding:0;border:0;border-radius:calc(var(--aui-integration-settings-r-md) - 1px);background:var(--aui-integration-settings-well);color:var(--aui-integration-settings-body)}.aui-integration-settings-sheet .aui-integration-settings-search{flex:none;height:44px}.aui-integration-settings-sheet .aui-integration-settings-options{max-height:none;min-height:0;flex:1;touch-action:pan-y}.aui-integration-settings-sheet .aui-integration-settings-option{min-height:44px}
 @container(max-width:440px){.aui-integration-settings-header{gap:10px;padding-inline:10px}.aui-integration-settings-key-row{height:auto;display:grid;grid-template-columns:minmax(0,1fr);gap:5px;padding:8px}.aui-integration-settings-key{width:100%;padding:2px 6px;min-height:26px}.aui-integration-settings-key-actions{justify-content:flex-end}.aui-integration-settings-savebar{flex-direction:column;align-items:stretch;padding:10px}.aui-integration-settings-savebar>div{width:100%}.aui-integration-settings-savebar>div>button{flex:1}}
-@media(pointer:coarse){.aui-integration-settings-generate,.aui-integration-settings-key-row,.aui-integration-settings-domain,.aui-integration-settings-zone-button,.aui-integration-settings-search,.aui-integration-settings-option,.aui-integration-settings-discard,.aui-integration-settings-save{min-height:44px}.aui-integration-settings-domain{height:46px}.aui-integration-settings-domain input{height:44px}.aui-integration-settings-generate{height:44px}.aui-integration-settings-icon-button{width:44px;height:44px}.aui-integration-settings-regenerate{min-height:44px}.aui-integration-settings-key-row{height:auto;padding-block:4px}.aui-integration-settings-search{height:44px}}@media(pointer:coarse),(max-width:899px){.aui-integration-settings-domain input{font-size:16px}.aui-integration-settings-search{font-size:16px!important}}
+@media(pointer:coarse),(max-width:899px){.aui-integration-settings-generate,.aui-integration-settings-key-row,.aui-integration-settings-domain,.aui-integration-settings-zone-button,.aui-integration-settings-search,.aui-integration-settings-option,.aui-integration-settings-discard,.aui-integration-settings-save{min-height:44px}.aui-integration-settings-domain{height:46px}.aui-integration-settings-domain input{height:44px;font-size:16px}.aui-integration-settings-generate{height:44px}.aui-integration-settings-icon-button{width:44px;height:44px}.aui-integration-settings-regenerate{min-height:44px}.aui-integration-settings-key-row{height:auto;padding-block:4px}.aui-integration-settings-search{height:44px;font-size:16px!important}}
 @keyframes aui-integration-settings-spin{to{transform:rotate(360deg)}}@keyframes aui-integration-settings-key-in{from{opacity:0;transform:translateY(2px)}to{opacity:1;transform:none}}@keyframes aui-integration-settings-menu-in{from{opacity:0;transform:translateY(-4px) scale(.98)}to{opacity:1;transform:none}}
 @media(prefers-reduced-motion:reduce){.aui-integration-settings *,.aui-integration-settings *::before,.aui-integration-settings *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
 }

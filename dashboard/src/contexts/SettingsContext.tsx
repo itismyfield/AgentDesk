@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
-import type { UiLanguage } from "../i18n";
+import { I18nProvider, LANGUAGE_STORAGE_KEY, type UiLanguage } from "../i18n";
+import { writeLocalStorageValue } from "../lib/useLocalStorage";
 import * as api from "../api/client";
 
 // ── Context value ──
@@ -77,13 +78,18 @@ export function SettingsProvider({ initialSettings, initialStats, initialStatsPe
     };
   }, [refreshStats]);
 
+  useEffect(() => {
+    writeLocalStorageValue(LANGUAGE_STORAGE_KEY, settings.language);
+    if (typeof window !== "undefined") window.dispatchEvent(new Event("climpire-language-change"));
+  }, [settings.language]);
+
   const isKo = settings.language === "ko";
   const locale = settings.language;
   const tr = useCallback((ko: string, en: string) => (settings.language === "ko" ? ko : en), [settings.language]);
 
   return (
     <SettingsContext.Provider value={{ settings, setSettings, stats, initialStatsPending, refreshStats, refreshingStats, isKo, locale, tr }}>
-      {children}
+      <I18nProvider language={settings.language}>{children}</I18nProvider>
     </SettingsContext.Provider>
   );
 }

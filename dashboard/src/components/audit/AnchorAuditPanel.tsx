@@ -132,7 +132,7 @@ function AnchorDetailSections({
         {(anchor.type || anchor.scope || marks.length > 0) ? (
           <div className="flex flex-wrap gap-1.5">
             {anchor.type ? <Chip tone="neutral">{anchor.type}</Chip> : null}
-            {anchor.scope ? <Chip tone="accent">{anchor.scope}</Chip> : null}
+            {anchor.scope ? <Chip tone="accent">{anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope}</Chip> : null}
             {!phone ? marks : null}
           </div>
         ) : null}
@@ -210,7 +210,7 @@ function AnchorDetailSections({
       </InspSection>
 
       <InspSection>
-        <KeyValue label={tr("범위", "Scope")}>{anchor.scope ?? tr("범위 없음", "No scope")}</KeyValue>
+        <KeyValue label={tr("범위", "Scope")}>{(anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope) ?? tr("범위 없음", "No scope")}</KeyValue>
         {anchor.id ? <KeyValue label="ID" valueClassName="font-mono">{anchor.id}</KeyValue> : null}
         {startedAt ? <KeyValue label={tr("세션 시작", "Session start")}>{formatTranscriptTimestamp(startedAt, isKo)}</KeyValue> : null}
         <div className="mt-1 flex flex-wrap gap-2">
@@ -348,10 +348,11 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
               <KitCard>
                 {anchorGroups(visible).map((group) => {
                   const isGlobalScope = group.scope === "모든 에이전트";
+                  const scopeLabel = isGlobalScope ? tr("모든 에이전트", "All agents") : group.scope;
                   return (
                     <section
                       key={group.scope ?? ""}
-                      aria-label={group.scope ?? tr("앵커", "Anchors")}
+                      aria-label={scopeLabel ?? tr("앵커", "Anchors")}
                       className="border-t border-[var(--line-soft)] first:border-t-0"
                       data-testid="audit-anchor-group"
                     >
@@ -362,7 +363,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
                               ? <Globe size={15} aria-hidden className="shrink-0 text-[var(--accent-fg)]" />
                               : <Folder size={15} aria-hidden className="shrink-0 text-[var(--accent-fg)]" />
                           ) : null}
-                          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{group.scope ?? tr("범위 없음", "No scope")}</span>
+                          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{scopeLabel ?? tr("범위 없음", "No scope")}</span>
                           <Cap className="font-display tabular-nums font-normal">{group.rows.length}</Cap>
                         </h3>
                       ) : null}
@@ -398,7 +399,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
                                   {marks.length > 0 ? (
                                     <span className="mt-1 flex flex-wrap gap-1">{marks}</span>
                                   ) : !grouped && anchor.scope ? (
-                                    <Cap className="mt-0.5 block truncate">{anchor.scope}</Cap>
+                                    <Cap className="mt-0.5 block truncate">{anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope}</Cap>
                                   ) : null}
                                 </span>
                               ) : (
