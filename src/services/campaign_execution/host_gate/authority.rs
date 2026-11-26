@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::domain::campaign::model::ActionKind;
-use crate::services::campaign_execution::verification_run::{
+use crate::domain::campaign::verification_run::{
     AuthoritySource, Digest, VerificationStartAuthority, phase_action_id,
 };
 

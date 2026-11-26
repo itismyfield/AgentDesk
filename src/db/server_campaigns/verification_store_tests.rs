@@ -3,16 +3,17 @@ use crate::domain::campaign::evidence::{
     EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission,
 };
 use crate::domain::campaign::model::*;
+use crate::domain::campaign::profile::{ExecutedTest, ExecutionEnvironment, TestOutcome};
+use crate::domain::campaign::verification_run::{
+    ArtifactRef, ListedTest, NotSentReason, PhaseInitiation, PhaseInput, PhaseKind, PhaseOutput,
+    ProcessIdentity, TerminationObservation, TreeState, VerificationCollection, digest_of,
+    plan_scope,
+};
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{REPO, workspace},
-    profile::{ExecutedTest, ExecutionEnvironment, TestOutcome},
     stage_fsm::tests as fsm,
-    verification_run::{
-        ArtifactRef, ListedTest, NotSentReason, PhaseInitiation, PhaseInput, PhaseKind,
-        PhaseOutput, ProcessIdentity, TerminationObservation, TreeState, VerificationCollection,
-        digest_of, plan_scope, tests as a1,
-    },
+    verification_run::tests as a1,
 };
 use crate::services::krx_db_tests::server_campaigns_storage::{
     Harness, applied, envelope, execute, send, stop,

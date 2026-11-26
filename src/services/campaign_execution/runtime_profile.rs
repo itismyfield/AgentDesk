@@ -10,9 +10,9 @@ use super::adk_profile::{
     ResolvedAdkProfile, RoleSettingObservation,
 };
 use super::pipeline_rules::{PipelineSource, REQUIRED_RULE_SOURCES, resolve_minimal_adk_profile};
-use super::profile::Observation;
-use super::verification_run::VerificationSpec;
 use crate::domain::campaign::model::{HostGate, Role, SessionIdentity};
+use crate::domain::campaign::profile::Observation;
+use crate::domain::campaign::verification_run::VerificationSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMarker {

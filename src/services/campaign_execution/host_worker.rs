@@ -22,8 +22,10 @@ use super::host_identity;
 use super::host_journal::{JournalDir, OpenError};
 use super::resource_admission::ResourceAdmission;
 use super::scheduler::next_action;
-use super::verification_run::{Digest, PhaseKind, PhaseResult, TreeState, digest_of};
 use super::verification_runner::{LaunchContext, process_tree_state};
+use crate::domain::campaign::verification_run::{
+    Digest, PhaseKind, PhaseResult, TreeState, digest_of,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum WorkerError {

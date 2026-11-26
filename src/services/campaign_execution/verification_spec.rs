@@ -1,8 +1,8 @@
-use super::profile::{CheckKind, EnvironmentComponent};
-use super::verification_run::{
+use crate::domain::campaign::model::Repository;
+use crate::domain::campaign::profile::{CheckKind, EnvironmentComponent};
+use crate::domain::campaign::verification_run::{
     CommandPolicy, PhaseKind, PhaseTemplate, SelectionRule, SpecCheck, VerificationSpec,
 };
-use crate::domain::campaign::model::Repository;
 
 pub const ADK_NON_PG: &str = "adk-non-pg";
 

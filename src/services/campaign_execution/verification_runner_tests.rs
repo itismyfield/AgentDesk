@@ -2,16 +2,14 @@ use std::collections::BTreeMap;
 
 use super::*;
 use crate::domain::campaign::model::{Action, ActionState};
-use crate::services::campaign_execution::adk_resources::{ResourceFact, resource};
-use crate::services::campaign_execution::profile::{
-    Observation, PlannedTest, ResourceKind, TestOutcome,
-};
-use crate::services::campaign_execution::verification_run::tests as run_tests;
-use crate::services::campaign_execution::verification_run::{
+use crate::domain::campaign::profile::{Observation, PlannedTest, ResourceKind, TestOutcome};
+use crate::domain::campaign::verification_run::{
     PhaseInput, SelectionRule, VerificationCollection, VerificationRun, VerificationSpec, digest_of,
 };
 #[cfg(unix)]
-use crate::services::campaign_execution::verification_run::{Slot, VerificationError};
+use crate::domain::campaign::verification_run::{Slot, VerificationError};
+use crate::services::campaign_execution::adk_resources::{ResourceFact, resource};
+use crate::services::campaign_execution::verification_run::tests as run_tests;
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T09:00:00Z")

@@ -5,13 +5,13 @@ use crate::domain::campaign::execution_pin::{
 use crate::domain::campaign::model::{
     CampaignControl, Command, ExecutionReadiness, RejectionCode, Repository,
 };
+use crate::domain::campaign::verification_run::CommandPolicy;
 use crate::services::campaign_execution::{
     adk_profile::{ObservedModel, ProviderCapability, ResolvedAdkProfile, RoleSettingObservation},
     control::{
         self,
         tests::{envelope, now, prepared, running},
     },
-    verification_run::CommandPolicy,
     view::{self, PublicCommand},
 };
 
@@ -287,7 +287,7 @@ fn legacy_profile_keeps_its_hash_and_cannot_adopt_a_new_snapshot_quietly() {
     old.as_object_mut().unwrap().remove("pipeline_rules");
     let restored: ResolvedAdkProfile = serde_json::from_value(old.clone()).unwrap();
     assert!(restored.pipeline_rules.is_none());
-    let legacy_hash = super::super::verification_run::digest_of(&(
+    let legacy_hash = crate::domain::campaign::verification_run::digest_of(&(
         &restored.profile_version,
         &restored.profile_hash,
         &restored.roles,

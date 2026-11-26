@@ -1,4 +1,5 @@
-pub use crate::domain::campaign::profile::*;
+#[cfg(test)]
+use crate::domain::campaign::profile::*;
 
 #[cfg(test)]
 use crate::domain::campaign::definition::{

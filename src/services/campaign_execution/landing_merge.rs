@@ -20,10 +20,10 @@ use super::host_gate::{EffectAuthority, EffectEnvelope, Initiated, Initiation, J
 use super::host_worker::{HostWorker, WorkerError};
 use super::lifecycle;
 use super::main_integration::judge_single_landing;
-use super::profile::{IntegrationMethod, NodeArtifact, Observation};
 use super::stage_fsm::Transition;
-use super::verification_run::digest_of;
 use crate::domain::campaign::model::*;
+use crate::domain::campaign::profile::{IntegrationMethod, NodeArtifact, Observation};
+use crate::domain::campaign::verification_run::digest_of;
 
 const WAIT_LIMIT: TimeDelta = TimeDelta::minutes(240);
 
@@ -336,7 +336,7 @@ fn checked_review(
     pr: &OpenedPr,
     pin: &str,
 ) -> Option<(NodeArtifact, Vec<String>)> {
-    use super::profile::Candidate;
+    use crate::domain::campaign::profile::Candidate;
     let work = &opened.binding;
     let (action, review) = run
         .reviews

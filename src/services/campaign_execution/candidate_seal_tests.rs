@@ -1,9 +1,11 @@
 use super::*;
+use crate::domain::campaign::{
+    profile::{ContractError, TestOutcome},
+    verification_run::VerificationCollection,
+};
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{OUTPUT, REPO, claim, collected, plan, seal, workspace},
-    profile::{ContractError, TestOutcome},
-    verification_run::VerificationCollection,
 };
 
 #[test]

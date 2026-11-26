@@ -452,7 +452,7 @@ async fn m4_regression_a_late_launch_keeps_the_finish_fence_at_the_same_version_
         super::super::stage_fsm::validate_verification_start(&observed, observed_v, &binding)
             .unwrap()
             .source,
-        super::super::verification_run::AuthoritySource::FinishPlan { .. }
+        crate::domain::campaign::verification_run::AuthoritySource::FinishPlan { .. }
     ));
     pool.close().await;
     db.drop().await;
@@ -462,9 +462,10 @@ async fn m4_regression_a_late_launch_keeps_the_finish_fence_at_the_same_version_
 #[tokio::test]
 async fn a_retained_phase_result_is_committed_once_and_then_acknowledged_pg() {
     use crate::domain::campaign::evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission};
+    use crate::domain::campaign::verification_run::{PhaseOutput, ProcessIdentity};
     use crate::services::campaign_execution::{
         evidence_gate::tests::{REPO, workspace},
-        verification_run::{PhaseOutput, ProcessIdentity, tests as a1},
+        verification_run::tests as a1,
     };
 
     let db = TestPostgresDb::create().await;

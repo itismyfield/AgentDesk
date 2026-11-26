@@ -9,9 +9,9 @@ use chrono::{DateTime, Utc};
 use sha2::Digest as _;
 
 use super::adk_resources::ResourceObservation;
-use super::profile::{ExecutedTest, TestOutcome};
-pub use super::verification_run::TreeState;
-use super::verification_run::{
+use crate::domain::campaign::profile::{ExecutedTest, TestOutcome};
+use crate::domain::campaign::verification_run::TreeState;
+use crate::domain::campaign::verification_run::{
     ArtifactRef, BoundInput, CommandPolicy, CommandRecord, CommandSpec, Digest, ExpectedArtifact,
     ListedTest, NotSentReason, PhaseInitiation, PhaseKind, PhaseOutput, PhaseResult,
     ProcessIdentity, SelectionRule, Termination, plan_scope,

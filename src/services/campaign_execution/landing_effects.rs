@@ -16,8 +16,8 @@ use super::host_worker::{HostWorker, WorkerError};
 use super::landing_prepare::{LandingChecks, require_checkout};
 use super::lifecycle::{GateTarget, landing_candidate, require_gate};
 use super::stage_fsm::Transition;
-use super::verification_run::digest_of;
 use crate::domain::campaign::model::*;
+use crate::domain::campaign::verification_run::digest_of;
 
 const CI_WAIT: &str = "landing waits for idle CI";
 

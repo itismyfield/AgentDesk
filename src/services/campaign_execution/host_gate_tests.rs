@@ -11,15 +11,13 @@ use crate::domain::campaign::model::{
     ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
     RejectionCode,
 };
+use crate::domain::campaign::verification_run::{AuthoritySource, PhaseInput, tests as a1};
 use crate::services::campaign_execution::control::{decide, tests as domain};
 use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,
 };
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,
-};
-use crate::services::campaign_execution::verification_run::{
-    AuthoritySource, PhaseInput, tests as a1,
 };
 
 const PHASE: &str = "archive";
@@ -668,7 +666,7 @@ fn recovery_offers_only_recovered_effects_and_kept_results_until_delivered() {
 #[cfg(unix)]
 #[test]
 fn a_phase_runs_only_the_input_and_host_its_payload_was_approved_for() {
-    use super::super::verification_run::CommandSpec;
+    use crate::domain::campaign::verification_run::CommandSpec;
 
     let dir = tempdir().unwrap();
     let marker = dir.path().join("spawned");
@@ -739,8 +737,10 @@ fn a_phase_runs_only_the_input_and_host_its_payload_was_approved_for() {
 #[cfg(unix)]
 #[test]
 fn restart_observes_a_phase_child_without_turning_it_into_a_result() {
-    use super::super::verification_run::{CommandSpec, Termination, VerificationCollection};
     use super::super::verification_runner::{Settled, process_tree_state};
+    use crate::domain::campaign::verification_run::{
+        CommandSpec, Termination, VerificationCollection,
+    };
 
     let dir = tempdir().unwrap();
     let marker = dir.path().join("spawns");

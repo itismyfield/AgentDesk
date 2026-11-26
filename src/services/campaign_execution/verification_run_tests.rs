@@ -2,7 +2,7 @@ use super::*;
 use crate::domain::campaign::definition;
 use crate::domain::campaign::definition::{PROFILE_VERSION, WORKFLOW_VERSION};
 use crate::domain::campaign::model::{Role, SessionIdentity};
-use crate::services::campaign_execution::profile::{Checkout, ResourceKind};
+use crate::domain::campaign::profile::{Checkout, ResourceKind};
 
 pub(crate) fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T07:00:00Z")

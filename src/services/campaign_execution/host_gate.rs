@@ -8,12 +8,12 @@ use serde::{Deserialize, Serialize};
 use super::adk_resources::ResourceObservation;
 pub use super::effect_envelope::VerifiedPhaseLaunch;
 use super::host_journal::{JournalDir, OpenError};
-use super::verification_run::{
+use super::verification_runner::{self, Launch, LaunchContext, RunningPhase};
+use crate::domain::campaign::model::{ActionKind, FenceAcknowledgement, HostGate, StopMode};
+use crate::domain::campaign::verification_run::{
     BoundInput, Digest, NotSentReason, PhaseInitiation, PhaseKind, PhaseResult, ProcessIdentity,
     TerminationObservation, TreeState, VerificationRun,
 };
-use super::verification_runner::{self, Launch, LaunchContext, RunningPhase};
-use crate::domain::campaign::model::{ActionKind, FenceAcknowledgement, HostGate, StopMode};
 
 const FENCES: &str = "fences.json";
 const HOME: &str = "gate.json";

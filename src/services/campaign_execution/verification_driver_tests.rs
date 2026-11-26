@@ -7,15 +7,15 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::domain::campaign::evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission};
 use crate::domain::campaign::execution_pin::IssueObservation;
 use crate::domain::campaign::pipeline_rules::MinimalPipelineScope;
+use crate::domain::campaign::profile::Observation;
+use crate::domain::campaign::verification_run::PhaseOutput;
 use crate::services::campaign_execution::{
     adk_resources::AdkResources,
     adk_workspace,
     control::tests as domain,
     host_identity,
-    profile::Observation,
     runtime_profile::tests::{rule_files, witness},
     stage_fsm::tests as fsm,
-    verification_run::PhaseOutput,
     verification_spec::ADK_NON_PG,
 };
 

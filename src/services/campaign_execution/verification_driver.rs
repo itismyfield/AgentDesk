@@ -17,9 +17,9 @@ use super::commands;
 use super::host_worker::{HostWorker, WorkerError, WorkerTurn};
 use super::runtime_profile::{RuntimeError, RuntimeProfile};
 use super::stage_fsm::validate_verification_start;
-use super::verification_run::{PhaseInitiation, PhaseKind, VerificationError};
 use super::verification_runner::{LaunchContext, RunningPhase, Settled};
 use super::verification_spec::adk_verification_spec;
+use crate::domain::campaign::verification_run::{PhaseInitiation, PhaseKind, VerificationError};
 
 pub struct VerificationRequest<'a> {
     pub execution: &'a str,
