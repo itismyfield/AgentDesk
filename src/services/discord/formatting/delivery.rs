@@ -291,9 +291,7 @@ pub(super) async fn send_channel_message_with_optional_reference(
     }
 }
 
-pub(in crate::services::discord) use crate::domain::message_split::{
-    needs_multiple_messages, split_message,
-};
+use crate::domain::message_split::{needs_multiple_messages, split_message};
 
 /// Build an `(inline_message, attachment)` pair for content that exceeds
 /// `DISCORD_MSG_LIMIT`. The attachment carries the full unmodified `text` as a
@@ -450,7 +448,7 @@ mod discord_unit_tests {
             __non_exhaustive: (),
         });
         let content = "<@1234> @everyone @here <@&5678> 한글\n".repeat(100);
-        let chunks = super::split_message(&content);
+        let chunks = crate::domain::message_split::split_message(&content);
         assert!(chunks.len() > 1, "fixture must reach channel followups");
 
         let result = tokio::time::timeout(
@@ -485,7 +483,8 @@ mod discord_unit_tests {
             );
         }
     }
-    use super::{discord_message_units, needs_multiple_messages, split_message};
+    use super::discord_message_units;
+    use crate::domain::message_split::{needs_multiple_messages, split_message};
     use crate::services::discord::DISCORD_MSG_LIMIT;
 
     #[test]

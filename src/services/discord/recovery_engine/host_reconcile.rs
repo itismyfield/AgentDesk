@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedRecord, HostedState, load_hosted_execution_pg,
 };
-use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
+use crate::services::session_host::HerdrExecutionMatch;
 pub(crate) use crate::services::session_host::{
     HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading, NoHerdrEndpoint,
 };

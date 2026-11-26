@@ -20,7 +20,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     bind_pg, load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
+use crate::services::session_host::HerdrExecutionMatch;
 use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::{
     self, BindingEvent, BindingTarget, SourceId,
