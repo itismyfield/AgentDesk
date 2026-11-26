@@ -126,17 +126,19 @@ pub(in crate::services::discord) async fn clear_exited_early(
     channel_id: ChannelId,
     events: &[&crate::services::turn_orchestrator::QueueExitEvent],
 ) {
+    // Collected before the await: a borrowing flat_map closure held across it makes callers'
+    // spawned futures fail the higher-ranked Send check.
     #[cfg(unix)]
-    input_owner::early_pending::clear_left(
-        shared,
-        channel_id,
-        events.iter().flat_map(|event| {
+    let ids: Vec<MessageId> = events
+        .iter()
+        .flat_map(|event| {
             let sources = event.intervention.source_message_ids.iter().copied();
             std::iter::once(event.intervention.message_id).chain(sources)
-        }),
-        "queue_exit_accept_pending",
-    )
-    .await;
+        })
+        .collect();
+    #[cfg(unix)]
+    input_owner::early_pending::clear_left(shared, channel_id, ids, "queue_exit_accept_pending")
+        .await;
     #[cfg(not(unix))]
     let _ = (shared, channel_id, events);
 }
