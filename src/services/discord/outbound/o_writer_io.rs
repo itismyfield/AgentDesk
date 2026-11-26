@@ -236,7 +236,7 @@ impl DiscordPort for GatewayPort {
             reply_to,
             ..self.clone()
         };
-        port.post_unit(channel, content, origin, kind)
+        async move { port.post_unit(channel, content, origin, kind).await }
     }
 
     fn mark_joined(&self, channel: u64, message: u64) -> impl Future<Output = ()> + Send + 'static {

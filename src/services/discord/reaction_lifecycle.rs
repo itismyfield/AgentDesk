@@ -274,7 +274,6 @@ async fn try_reaction_raw_with_shared_detailed(
     }
 }
 
-#[cfg(not(test))]
 /// Adds a reaction with only the HTTP client, retrying once against a thread's parent channel.
 pub(in crate::services::discord) async fn try_add_reaction_raw_detailed(
     http: &serenity::Http,
@@ -286,6 +285,7 @@ pub(in crate::services::discord) async fn try_add_reaction_raw_detailed(
     try_reaction_raw_on_channel_detailed(http, channel_id, message_id, emoji, action).await
 }
 
+#[cfg(not(test))]
 pub(in crate::services::discord) async fn try_add_reaction_raw_with_shared_detailed(
     http: &serenity::Http,
     shared: &SharedData,
