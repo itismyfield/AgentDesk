@@ -1015,7 +1015,7 @@ impl Writer {
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_ROOT: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    pub(crate) static APPEND_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
+    pub static APPEND_FAULT: std::cell::Cell<Option<&'static str>> = const { std::cell::Cell::new(None) };
 }
 
 /// Test builds log only under a root the test sets, never under the real runtime root.

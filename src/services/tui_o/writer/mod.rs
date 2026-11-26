@@ -290,7 +290,7 @@ pub mod transition_cleanup;
 pub mod transition_port;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support;
+pub mod test_support;
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;
