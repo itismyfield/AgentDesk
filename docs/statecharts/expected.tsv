@@ -2186,3 +2186,13 @@ turn-view/EmptyMailbox.cfg	TurnView	-	-
 turn-view/HeldFrontFollower.cfg	HeldFrontFollower	-	-
 turn-view/HeldFrontFollowerBefore.cfg	HeldFrontFollower	HeldFollowerVisible	FollowerEventuallyVisible
 turn-view/QueueMembershipBefore.cfg	TurnView	NoInvisibleSettled,ClosedGateKeepsPending	AcceptedEventuallyVisible
+input-single-path/OwnerInputBusySplitCurrent8432.cfg	OwnerInputBusySplit	-	IdleDelivers,ReplyPosted
+input-single-path/OwnerInputBusySplitCurrentBusy.cfg	OwnerInputBusySplit	-	-
+input-single-path/OwnerInputBusySplitTarget8432.cfg	OwnerInputBusySplit	-	-
+input-single-path/OwnerInputBusySplitTargetBusy.cfg	OwnerInputBusySplit	-	-
+input-single-path/OwnerInputBusySplitTargetDraftStuck.cfg	OwnerInputBusySplit	-	IdleDelivers,ReplyPosted
+input-single-path/OwnerInputBusySplitTargetDraftStuckCap.cfg	OwnerInputBusySplit	-	-
+input-single-path/OwnerInputBusySplitTargetHoldCleared.cfg	OwnerInputBusySplit	-	-
+input-single-path/OwnerInputBusySplitTargetResendBeforeEcho.cfg	OwnerInputBusySplit	NoDuplicate	-
+input-single-path/OwnerInputBusySplitTargetTokenAttribution.cfg	OwnerInputBusySplit	ReplyExactlyOnce	ReplyPosted
+input-single-path/OwnerInputBusySplitTargetTuiDrop.cfg	OwnerInputBusySplit	NoSilentLoss	ReplyPosted
