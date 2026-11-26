@@ -7,6 +7,8 @@ pub(crate) mod drive;
 pub(crate) mod effect;
 pub(crate) mod effort_continue;
 pub(crate) mod held_watch;
+#[cfg(all(test, unix))]
+mod hold_bound_tests;
 pub(crate) mod ingress;
 #[cfg(all(test, unix))]
 mod native_intent_tests;
