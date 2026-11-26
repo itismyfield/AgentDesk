@@ -32,14 +32,14 @@ fn registry() -> MutexGuard<'static, HashMap<EpisodeKey, Arc<EpisodePermissionRe
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READY: std::cell::RefCell<std::collections::HashSet<u64>> = Default::default();
 }
 
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
 pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if READY.with(|ready| ready.borrow().contains(&channel)) {
         return true;
     }
@@ -114,7 +114,7 @@ pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
     READY.with(|set| match ready {
         true => set.borrow_mut().insert(channel),
@@ -123,7 +123,7 @@ pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
 }
 
 /// Test seam for P4-2's issuance: one Arc per exact episode, a conflict never replaces it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn issue_for_tests(
     execution: ExecutionProofRef,
     episode: TurnEpisodeRef,
@@ -174,7 +174,7 @@ fn issue(
     Ok(record)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn forget_channel_for_tests(channel: u64) {
     registry().retain(|key, _| key.0 != channel);
 }

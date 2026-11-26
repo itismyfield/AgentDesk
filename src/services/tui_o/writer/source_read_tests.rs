@@ -4,7 +4,7 @@
 use super::{
     actor,
     binding::{BindingEvents, ChannelBindingLog},
-    owed::tests::owed_writer,
+    owed::test_support::owed_writer,
     *,
 };
 use crate::config::TestEnvVarGuard;
