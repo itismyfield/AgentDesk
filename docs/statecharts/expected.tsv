@@ -1975,7 +1975,7 @@ thread-host/ThreadHostS1bMutW3ArchiveAfterRelease.cfg	ThreadHostS1b	ArchiveSpare
 thread-host/ThreadHostS1bMutW3NoPlacedResidue.cfg	ThreadHostS1b	-	FirstInputResolves
 thread-host/ThreadHostS1bMutW3NoPristine.cfg	ThreadHostS1b	TouchedResidueHeld	-
 thread-host/ThreadHostS1bMutW3ResidueByAbsence.cfg	ThreadHostS1b	ResidueNeverRan	FirstInputResolves
-thread-host/ThreadHostS1bMutW4MissingNoCas.cfg	ThreadHostS1b	RetireOwnGeneration	-
+thread-host/ThreadHostS1bMutW4MissingNoCas.cfg	ThreadHostS1b	NoDuplicatePane,RetireOwnGeneration	FirstInputResolves
 thread-host/ThreadHostS1bMutW4MissingResubmits.cfg	ThreadHostS1b	SingleSubmit	-
 thread-host/ThreadHostS1bMutW4PendingEarlyReturn.cfg	ThreadHostS1b	-	FirstInputResolves
 thread-host/ThreadHostS1bMutW4UnreadAsMissing.cfg	ThreadHostS1b	NoDuplicatePane	-
