@@ -284,7 +284,7 @@ pub struct ClaimedDeadLetter {
 /// `min_age_secs` leaves the normal delivery path time to settle the turn;
 /// `max_age_secs` bounds the window to one in which the consumer's
 /// already-delivered witnesses can still answer.
-pub(crate) async fn claim_pending_redeliveries(
+pub async fn claim_pending_redeliveries(
     pool: &PgPool,
     kind: &str,
     min_age_secs: i64,

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SendOutcome {
+pub enum SendOutcome {
     /// The write has not recorded its result: the paste and the Enter may have gone.
     InFlight,
     EnterRefused,
@@ -18,7 +18,7 @@ pub(crate) enum SendOutcome {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum UnsentProof {
+pub enum UnsentProof {
     None,
     SendOutcome,
     ExactTextSeen,
@@ -61,7 +61,7 @@ pub(crate) struct HoldRecord {
 
 /// A hold as read: a pre-deploy v1 file holds only a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Held {
+pub enum Held {
     V1 { hold_id: String },
     V2(Box<HoldRecord>),
 }

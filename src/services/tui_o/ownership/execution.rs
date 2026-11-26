@@ -7,7 +7,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionRef {
+pub enum SessionRef {
     Fresh,
     Bound(Value),
 }

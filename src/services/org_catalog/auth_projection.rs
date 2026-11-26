@@ -15,7 +15,7 @@ pub(crate) struct ProfileBindingInput {
 }
 
 #[derive(Debug)]
-pub(crate) struct AuthCatalogSnapshot {
+pub struct AuthCatalogSnapshot {
     pub profiles: HashMap<String, ProviderAuthProfileDef>,
     pub primary_profiles: PrimaryProfileMap,
     pub fallback_policies: HashMap<String, FallbackPolicy>,

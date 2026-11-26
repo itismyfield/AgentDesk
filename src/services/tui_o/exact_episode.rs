@@ -169,7 +169,7 @@ impl EpisodeMetadata {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Authority {
+pub enum Authority {
     Pending,
     Body,
     Policy,

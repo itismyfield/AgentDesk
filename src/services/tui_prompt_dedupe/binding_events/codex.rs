@@ -24,13 +24,13 @@ mod observation;
 pub use observation::observe_channel;
 mod commit;
 #[cfg(unix)]
-pub(crate) mod settled;
+pub mod settled;
 mod terminal;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use commit::commit_claim;
+pub use commit::commit_claim;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
-pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
+pub use commit::{commit_claim_published, commit_executed_resume_published};
 pub(crate) use terminal::{SettledCompanions, terminal_pending_at_seq};
 
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
@@ -342,7 +342,7 @@ pub struct Fold {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Decision {
+pub enum Decision {
     Pending,
     Verified(SourceId),
     Rejected(String),

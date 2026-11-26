@@ -11,7 +11,7 @@
 //! - `model` owns shared row/data shapes.
 
 mod claim;
-pub(crate) mod delivery;
+pub mod delivery;
 mod diagnostics;
 mod followup;
 mod model;
@@ -35,7 +35,7 @@ pub use followup::{
     clear_all_dispatch_threads_pg, load_card_status_pg, load_completed_dispatch_info_pg,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use model::DispatchOutboxClaimCandidate;
+pub use model::DispatchOutboxClaimCandidate;
 pub use model::{CompletedDispatchInfo, DispatchOutboxRow};
 pub use notify::requeue_dispatch_notify_pg;
 pub use retry::schedule_outbox_retry_pg;

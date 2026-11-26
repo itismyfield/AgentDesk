@@ -7,7 +7,7 @@ pub mod busy;
 #[cfg(unix)]
 pub use busy::{BusyOperation, BusyOutcome};
 mod transport;
-pub(crate) use transport::InputTransport;
+pub use transport::InputTransport;
 
 use super::input::{
     POST_LITERAL_SETTLE, POST_PASTE_BUFFER_SETTLE, PROMPT_READY_CANCELLED_ERROR,
@@ -123,7 +123,7 @@ impl InputTarget {
 }
 
 /// Checked before every pane mutation; the execution validator implements it.
-pub(crate) trait MutationGate {
+pub trait MutationGate {
     fn admit(&self, session: &str) -> Result<(), InputRefusal>;
     /// A cancel key only stops work; a gate may admit it where it admits no other input.
     fn admit_cancel(&self, session: &str) -> Result<(), InputRefusal> {
@@ -180,7 +180,7 @@ impl HerdrTarget {
 }
 
 /// Legacy tmux keeps no stored execution evidence to re-check, so it admits.
-pub(crate) struct LegacyTmuxGate;
+pub struct LegacyTmuxGate;
 
 impl MutationGate for LegacyTmuxGate {
     fn admit(&self, _session: &str) -> Result<(), InputRefusal> {
@@ -248,7 +248,7 @@ impl InputTransport for TmuxInput {
 
 /// Input to a Herdr pane: each write goes out under the judgment its gate pinned just
 /// before it, and retire kills nothing.
-pub(crate) struct HerdrInput<'a> {
+pub struct HerdrInput<'a> {
     target: &'a HerdrTarget,
     buffers: std::collections::HashMap<String, String>,
 }
@@ -400,7 +400,7 @@ fn refused_message(refusal: InputRefusal) -> String {
 }
 
 /// Runs `actions` on `target`, admitting every pane mutation through `gate`.
-pub(crate) fn run_plan(
+pub fn run_plan(
     target: &InputTarget,
     gate: &dyn MutationGate,
     transport: &mut dyn InputTransport,
@@ -839,9 +839,9 @@ pub fn classify(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use spy::{FakeDraftPane, watch_actions};
+pub use spy::{FakeDraftPane, watch_actions};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use spy::{SpyGuard, SpyState};
+pub use spy::{SpyGuard, SpyState};
 
 /// Recording transport the Claude TUI input tests install in place of tmux.
 #[cfg(any(test, feature = "test-support"))]
@@ -870,7 +870,7 @@ mod spy {
         }
     }
     #[cfg(unix)]
-    pub(crate) fn watch_actions(
+    pub fn watch_actions(
         target: HerdrTarget,
         hook: impl Fn(&TuiInputAction) + Send + Sync + 'static,
     ) -> ActionWatch {
@@ -895,7 +895,7 @@ mod spy {
         }
     }
 
-    pub(crate) struct SpyState {
+    pub struct SpyState {
         pub calls: Vec<String>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
@@ -1077,7 +1077,7 @@ mod spy {
     /// A tmux stand-in for one session's draft capture on any thread: `-e` prints the `pane` file
     /// as written, a capture without it drops attributes, and every call is logged.
     #[cfg(unix)]
-    pub(crate) struct FakeDraftPane {
+    pub struct FakeDraftPane {
         dir: tempfile::TempDir,
         session: String,
     }
@@ -1122,7 +1122,7 @@ mod spy {
     }
 
     /// Routes this thread's legacy input through a spy until dropped.
-    pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
+    pub struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
     impl SpyGuard {
         pub(crate) fn install(state: SpyState) -> Self {

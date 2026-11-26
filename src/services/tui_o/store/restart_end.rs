@@ -146,7 +146,7 @@ fn read_one(path: &Path, channel: u64) -> Result<RestartEnd, String> {
 }
 
 /// Missing is empty. Records are never evicted, and source files are checked only by consumers.
-pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
+pub fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
     let entries = match fs::read_dir(dir(root, channel)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),

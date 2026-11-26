@@ -18,7 +18,7 @@ const PROBE_INTERVAL: Duration = Duration::from_millis(PROBE_TTL_MS as u64 / 4);
 static SNAPSHOT: LazyLock<RwLock<Option<ExecutionProbe>>> = LazyLock::new(|| RwLock::new(None));
 static POLLERS: LazyLock<RwLock<BTreeMap<String, i64>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
-pub(crate) fn boot_id() -> String {
+pub fn boot_id() -> String {
     crate::services::process_boot::initialize().id.clone()
 }
 

@@ -291,7 +291,7 @@ fn hook_retired(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install_codex_tui_runtime_binding(
+pub fn install_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,

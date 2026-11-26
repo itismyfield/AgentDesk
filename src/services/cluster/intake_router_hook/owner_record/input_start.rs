@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use std::future::Future;
 
-pub(crate) struct StartRequest<'a> {
+pub struct StartRequest<'a> {
     pub delivery_id: i64,
     pub executor: &'a str,
     pub claim_owner: &'a str,
@@ -46,10 +46,7 @@ fn hash(frame: &str) -> String {
 }
 
 /// The frame and exact native binding must already be prepared; this commits begin before raw IO.
-pub(crate) async fn prepare(
-    pool: &PgPool,
-    request: StartRequest<'_>,
-) -> Result<OwnerStartPermit, String> {
+pub async fn prepare(pool: &PgPool, request: StartRequest<'_>) -> Result<OwnerStartPermit, String> {
     let row: Ready = sqlx::query_as("SELECT d.provider,d.channel_id,d.owner_generation,d.routing_receipt_id,r.replay_episode_nonce FROM intake_outbox d JOIN intake_outbox r ON r.id=d.routing_receipt_id JOIN intake_session_owners o ON o.provider=d.provider AND o.raw_channel_id=d.channel_id AND o.owner_instance_id=d.owner_instance_id AND o.generation=d.owner_generation AND o.status='active' AND o.routing_cleanup IS NULL WHERE d.id=$1 AND d.routing_state='admitted' AND d.status='spawned' AND d.target_instance_id=$2 AND d.claim_owner=$3 AND r.replay_disposition='registered_not_started'")
         .bind(request.delivery_id).bind(request.executor).bind(request.claim_owner).fetch_one(pool).await.map_err(error)?;
     let target = EffectTarget::ProviderStart {

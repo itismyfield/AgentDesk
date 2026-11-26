@@ -24,7 +24,7 @@ pub mod watcher_latency;
 // boundaries (helpers / emit / worker / retention / pg I/O) without
 // changing the public API. Global state (`OnceLock` runtime) stays in this
 // module to avoid relocating the singleton.
-pub(crate) mod emit;
+pub mod emit;
 mod helpers;
 mod pg_io;
 mod relay_signal_alert;
@@ -48,7 +48,7 @@ pub use emit::{
 // `RelaySignalAlerterJob` maintenance job (see `server::maintenance`). #5993:
 // reports are WARN lines plus observability events, never Discord messages.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use relay_signal_alert::idle_cleanup_preserved_count;
+pub use relay_signal_alert::idle_cleanup_preserved_count;
 pub use relay_signal_alert::{
     record_idle_cleanup_preserved, report_relay_signal_threshold_crossings_pg,
 };
@@ -464,7 +464,7 @@ pub fn init_observability(pg_pool: Option<PgPool>) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn reset_for_tests() {
+pub fn reset_for_tests() {
     let runtime = runtime();
     runtime.counters.clear();
     events::global().clear();
@@ -479,4 +479,4 @@ pub(crate) fn reset_for_tests() {
 #[cfg(any(test, feature = "test-support"))]
 mod test_support;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use test_support::{lock_env_then_runtime, test_runtime_lock};
+pub use test_support::{lock_env_then_runtime, test_runtime_lock};

@@ -49,7 +49,7 @@ fn prepare_for_execution(request: &ProviderTurnRequest) -> Result<PreparedComman
     prepare(request)
 }
 
-pub(crate) fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
+pub fn build_argv(request: &ProviderTurnRequest) -> Result<Vec<String>, String> {
     let composed = compose_envelope(
         request.system_prompt.as_deref().unwrap_or(""),
         &request.prompt,

@@ -73,7 +73,7 @@ pub struct IntakeOutboxRow {
 /// `intake_outbox` payload columns (excluding bookkeeping like status,
 /// attempt_no, parent_outbox_id which the caller computes separately).
 #[derive(Clone, Debug)]
-pub(crate) struct InsertPendingPayload {
+pub struct InsertPendingPayload {
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
     pub required_labels: Value,
@@ -113,7 +113,7 @@ pub(crate) struct InsertPendingPayload {
 /// user_msg_id, attempt_no)`) or `intake_outbox_one_open_route_per_channel`
 /// (another row for the same channel is in an OPEN status). Callers
 /// distinguish via `error.constraint_name()` per the design doc §B-bis.
-pub(crate) async fn insert_pending(
+pub async fn insert_pending(
     pool: &PgPool,
     payload: &InsertPendingPayload,
     attempt_no: i32,
@@ -231,7 +231,7 @@ pub(crate) async fn family_max_attempt(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum FailedPreAcceptSweepOutcome {
+pub enum FailedPreAcceptSweepOutcome {
     Empty,
     Retried {
         source_id: i64,
@@ -249,7 +249,7 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
 
 pub(crate) mod pre_accept_sweep;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
+pub use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
 
 pub mod consent_handoff;
 pub mod consent_projection;
@@ -257,8 +257,8 @@ mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use worker_status::{claim_pending_for_target, sweep_stale_pre_accept_claims};
-pub(crate) use worker_status::{
+pub use worker_status::{claim_pending_for_target, sweep_stale_pre_accept_claims};
+pub use worker_status::{
     claim_pending_for_target_except, mark_accepted, mark_done, mark_failed_post_accept,
     mark_failed_pre_accept, mark_spawned, return_claimed_to_pending, sweep_stamped_claims,
 };

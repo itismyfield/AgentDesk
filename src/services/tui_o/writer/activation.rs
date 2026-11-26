@@ -382,7 +382,7 @@ pub(super) fn still_empty(source: &SourceId) -> Result<(), String> {
 
 /// Pauses a first activation at a step or fails it there; the write steps run under the adoption lock.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_hook {
+pub mod test_hook {
     use std::sync::Mutex;
 
     #[derive(Clone, Copy, PartialEq, Eq)]

@@ -40,7 +40,7 @@ pub struct CodexEpisodeDeny {
 }
 
 pub mod admission;
-pub(crate) mod dormant;
+pub mod dormant;
 
 pub(crate) mod permission;
 

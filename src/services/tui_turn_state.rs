@@ -16,7 +16,7 @@ pub(crate) use claude_meta::{
 mod completion_scan;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "tui_turn_state/idle_compaction_tests.rs"]
-pub(crate) mod idle_compaction_tests;
+pub mod idle_compaction_tests;
 pub use self::completion_scan::{
     envelope_is_turn_end_terminator, jsonl_completion_scan_idle, jsonl_strict_terminator_idle,
     jsonl_turn_end_terminator_idle,
@@ -356,7 +356,7 @@ pub(crate) fn observe_claude_jsonl_running_turn_state(path: &Path) -> TuiTurnSta
     claude_meta::observe_running(path)
 }
 
-pub(crate) fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
+pub fn observe_codex_jsonl_turn_state(path: &Path) -> TuiTurnState {
     let Ok(window) = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES) else {
         return TuiTurnState::Unknown;
     };

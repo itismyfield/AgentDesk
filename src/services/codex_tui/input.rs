@@ -106,7 +106,7 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_content;
 mod composer_lock;
-pub(crate) mod submission;
+pub mod submission;
 pub use submission::owned_preserved_plan;
 pub use submission::{
     notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,
@@ -967,7 +967,7 @@ enum PromptSubmitConfirmation {
 /// `Unconfirmed` is deliberately terminal so an Enter that may have reached
 /// Codex is never replayed.
 #[derive(Debug)]
-pub(crate) enum CodexFollowupPromptSubmitOutcome {
+pub enum CodexFollowupPromptSubmitOutcome {
     Submitted,
     /// Planning or delivery failed before any Enter attempt. The caller may
     /// cold-fallback only if the pinned rollout also remained unchanged.

@@ -107,7 +107,7 @@ pub fn same_file(a: &SourceId, b: &SourceId) -> bool {
 
 /// Renumbers chosen files' dev as a reboot would, keyed by their real (dev, ino).
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod renumber {
+pub mod renumber {
     use std::collections::HashMap;
     use std::path::Path;
     use std::sync::{LazyLock, Mutex};

@@ -4,7 +4,7 @@ use super::cancel_token_claude_interrupt::{HerdrInterruptState, HerdrSubmission,
 use std::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InputPhase {
+pub enum InputPhase {
     BeforeInput,
     Attempting,
     FinishedNoAttempt,
@@ -49,7 +49,7 @@ impl Default for HerdrInputState {
 }
 
 /// A Closed result never invokes the host input runner.
-pub(crate) enum InputRun<T> {
+pub enum InputRun<T> {
     Ran(T),
     Closed,
 }
@@ -128,7 +128,7 @@ impl HerdrInterruptState {
 }
 
 /// Runs only on the blocking executor thread, after all Result exits converge; `failed` is an `Err`.
-pub(crate) fn finish_execution(token: Option<&CancelToken>, failed: bool) {
+pub fn finish_execution(token: Option<&CancelToken>, failed: bool) {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && crate::services::tui_o::exact_submission::logical_key().is_none()
     {
@@ -158,7 +158,7 @@ pub(crate) fn observed_execution(
     result
 }
 
-pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
+pub fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
         return Ok(false);
     }
@@ -241,7 +241,7 @@ pub fn seal_exit(token: &CancelToken, cancelled: bool, terminal_admitted: bool) 
     decision
 }
 
-pub(crate) fn claude_observed_input(
+pub fn claude_observed_input(
     cancel: Option<&super::CancelToken>,
     start: impl FnOnce() -> crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart,
     write: impl FnOnce() -> crate::services::claude_tui::host_input::InputRun,

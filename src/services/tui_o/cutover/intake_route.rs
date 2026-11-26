@@ -6,7 +6,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod input;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use input::{InputProbe, install_probe};
+pub use input::{InputProbe, install_probe};
 pub use input::{
     for_claimed_input, for_input_placement, held_input_channels, selected_codex_input,
     text_for_input_placement,
@@ -41,7 +41,7 @@ pub(crate) fn route_text(provider: &str, channel: &str) -> IntakeRoute {
 
 /// For a new placement rather than a claim: a selected channel is held off the O home, and on it a
 /// pending adoption is released before routing as `route` does.
-pub(crate) fn route_for_placement(provider: &str, channel: u64) -> IntakeRoute {
+pub fn route_for_placement(provider: &str, channel: u64) -> IntakeRoute {
     placed(provider, Some(channel))
 }
 
@@ -184,7 +184,7 @@ pub(super) fn accepts(channel: u64) -> bool {
 
 /// Stands in for this process's writer readiness on the current thread.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_probe {
+pub mod test_probe {
     use std::cell::RefCell;
 
     type Probe = Box<dyn FnMut(u64) -> bool>;

@@ -27,10 +27,7 @@ pub fn enabled_for(tmux: &str) -> bool {
         && codex_source_mode_snapshot() == CodexSourceMode::Verified
 }
 
-pub(crate) fn launch_policy(
-    tmux: &str,
-    channel: Option<u64>,
-) -> Result<&'static str, &'static str> {
+pub fn launch_policy(tmux: &str, channel: Option<u64>) -> Result<&'static str, &'static str> {
     launch_decision(codex_source_mode_snapshot(), classify_target(tmux, channel))
         .map(SourceLaunchPolicy::as_str)
 }

@@ -38,7 +38,7 @@ pub use super::actor::native_input::RepostTurn;
 use super::actor::native_input::{hold, stopped, unless_stopped};
 pub use activation_io::{Custody, FencedFacts};
 pub use child_retirement::{ChildStores, keep_stoppable};
-pub(crate) use fresh_input::initial_fresh_refusal;
+pub use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
 /// Only pane writers enter the native turn retirement callback.
 pub enum PaneAdoptionProvider {
@@ -415,7 +415,7 @@ thread_local! {
 
 /// Reports `unsettled` for every channel on this thread until dropped, as a running actor would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
+pub fn force_unsettled_for_test(unsettled: Option<usize>) -> impl Drop {
     struct Restore(Option<Option<usize>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -935,7 +935,7 @@ async fn publish(
 /// channel, and each channel binds the one source it was given.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "host_io_tests.rs"]
-pub(crate) mod test_io;
+pub mod test_io;
 
 #[cfg(test)]
 mod claim_tests {

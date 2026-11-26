@@ -65,7 +65,7 @@ pub fn o_owns_tui_output_for_channel_reserving(
 
 /// Test builds: the raw claim's answer alone, its send counted as finished at once.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_owns_tui_output_for_channel(
+pub fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
@@ -464,7 +464,7 @@ static CLAIMS: std::sync::Mutex<Vec<(u64, bool)>> = std::sync::Mutex::new(Vec::n
 
 /// The body claims judged for `channel` so far, true where O took the body.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn claims_judged(channel: u64) -> Vec<bool> {
+pub fn claims_judged(channel: u64) -> Vec<bool> {
     let claims = CLAIMS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);

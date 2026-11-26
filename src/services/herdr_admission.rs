@@ -31,7 +31,7 @@ impl StopCause {
 }
 
 #[derive(Debug)]
-pub(crate) struct Admission {
+pub struct Admission {
     env_stopped: bool,
     stop_file: Option<PathBuf>,
     latched: AtomicBool,
@@ -105,10 +105,10 @@ thread_local! {
 
 /// Replaces the process switch on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedAdmission(Option<std::sync::Arc<Admission>>);
+pub struct ForcedAdmission(Option<std::sync::Arc<Admission>>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_for_test(admission: Admission) -> ForcedAdmission {
+pub fn force_for_test(admission: Admission) -> ForcedAdmission {
     let forced = Some(std::sync::Arc::new(admission));
     ForcedAdmission(FORCED.with(|cell| cell.replace(forced)))
 }

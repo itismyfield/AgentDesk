@@ -87,7 +87,7 @@ impl Execution {
 static JUDGED: Mutex<BTreeMap<u64, bool>> = Mutex::new(BTreeMap::new());
 
 /// Records the turn host's final judgement of a thread; `None` (refused or returning) forgets it.
-pub(crate) fn record_judged(channel: u64, herdr: Option<bool>) {
+pub fn record_judged(channel: u64, herdr: Option<bool>) {
     if !matches!(relation(channel), Relation::Child { .. }) {
         return;
     }

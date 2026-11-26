@@ -456,7 +456,7 @@ pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
 
 /// Runs `test` with this thread's PID kills sent for real instead of counted.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
+pub fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
     struct Restore;
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -470,17 +470,17 @@ pub(crate) fn with_real_pid_kill<T>(test: impl FnOnce() -> T) -> T {
 
 /// The intents this thread has requested since the last call.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
+pub fn take_requested_intents_for_test() -> Vec<TmuxCleanupIntent> {
     REQUESTED_INTENTS.with(|intents| std::mem::take(&mut *intents.borrow_mut()))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn pid_kill_dispatches_for_test() -> usize {
+pub fn pid_kill_dispatches_for_test() -> usize {
     PID_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn tmux_kill_dispatches_for_test() -> usize {
+pub fn tmux_kill_dispatches_for_test() -> usize {
     TMUX_KILL_DISPATCHES.load(Ordering::Relaxed)
 }
 
@@ -498,7 +498,7 @@ static PID_DISPATCH_BARRIERS: std::sync::Mutex<
 > = std::sync::Mutex::new(None);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
+pub fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 
     static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();

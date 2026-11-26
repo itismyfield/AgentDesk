@@ -123,18 +123,18 @@ mod tests {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use commit_barrier::{COMMIT_BARRIER, CommitBarrier, before_commit};
+pub use commit_barrier::{COMMIT_BARRIER, CommitBarrier, before_commit};
 #[cfg(any(test, feature = "test-support"))]
 mod commit_barrier {
     use uuid::Uuid;
-    pub(crate) struct CommitBarrier {
+    pub struct CommitBarrier {
         pub episode: Uuid,
         pub entered: tokio::sync::oneshot::Sender<i32>,
         pub release: tokio::sync::oneshot::Receiver<()>,
     }
-    pub(crate) static COMMIT_BARRIER: std::sync::Mutex<Option<CommitBarrier>> =
+    pub static COMMIT_BARRIER: std::sync::Mutex<Option<CommitBarrier>> =
         std::sync::Mutex::new(None);
-    pub(crate) async fn before_commit(
+    pub async fn before_commit(
         transaction: &mut sqlx::PgConnection,
         payload: &serde_json::Value,
     ) -> Result<(), sqlx::Error> {

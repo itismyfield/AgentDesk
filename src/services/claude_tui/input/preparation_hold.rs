@@ -2,7 +2,7 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EffectPhase {
+pub enum EffectPhase {
     BeforePayload,
     PayloadUncertain,
 }

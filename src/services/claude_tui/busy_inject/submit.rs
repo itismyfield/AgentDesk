@@ -33,12 +33,7 @@ pub fn inject_report_any_turn(
 /// The input owner's entry for a running pane: pasted whatever turn the transcript reads and a
 /// person's draft parked; the answer is declared only for a caller that reads it itself.
 #[cfg(unix)]
-pub(crate) fn inject_owned(
-    pane: &Pane,
-    request: &Request<'_>,
-    timing: &Timing,
-    declared: bool,
-) -> Report {
+pub fn inject_owned(pane: &Pane, request: &Request<'_>, timing: &Timing, declared: bool) -> Report {
     let policy = Policy {
         gate: TurnGate::AnyTurn,
         answer: match declared {

@@ -53,7 +53,7 @@ pub fn requested(channel: &str) -> bool {
 
 /// The activation supplier of tests: producers turn on only for the channels a guard names.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_activation {
+pub mod test_activation {
     static ACTIVE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     pub(crate) fn active(channel: &str) -> bool {
@@ -75,7 +75,7 @@ pub(crate) mod test_activation {
     }
 }
 
-pub(crate) fn production_requested(channel: &str) -> bool {
+pub fn production_requested(channel: &str) -> bool {
     PROCESS.selected(channel)
 }
 
@@ -137,10 +137,10 @@ mod tests {
 static READS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
     LazyLock::new(Default::default);
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn record_read(key: &str) {
+pub fn record_read(key: &str) {
     *READS.lock().unwrap().entry(key.into()).or_default() += 1;
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn reads(key: &str) -> u64 {
+pub fn reads(key: &str) -> u64 {
     *READS.lock().unwrap().get(key).unwrap_or(&0)
 }

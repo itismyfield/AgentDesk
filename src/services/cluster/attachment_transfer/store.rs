@@ -118,7 +118,7 @@ pub async fn put(
     })
 }
 
-pub(crate) async fn load(
+pub async fn load(
     pool: &PgPool,
     reference: &BundleRef,
 ) -> Result<ValidatedAttachmentBundle, ReadError> {

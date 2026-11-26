@@ -219,7 +219,7 @@ pub async fn load_live_bound_session_ids_pg(
 /// needing a distinct raw id must widen this signature. Acceptable today because
 /// the only non-Claude entry is an explicit `session_id` the caller already
 /// treats as the provider resume token.
-pub(crate) async fn rebind_session_provider_pg(
+pub async fn rebind_session_provider_pg(
     pool: &PgPool,
     session_key: &str,
     target_cwd: &str,
@@ -355,7 +355,7 @@ async fn select_retry_owner_on_pg_tx(
     }
 }
 
-pub(crate) async fn prepare_retry_owner_on_pg_tx(
+pub async fn prepare_retry_owner_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
 ) -> Result<Option<RetryAutoQueueOwner>, String> {
@@ -1869,7 +1869,7 @@ pub struct UpdateSessionParams<'a> {
 /// which races with concurrent hook calls on the same `session_key`. The new
 /// signature decides inside the same INSERT statement via `xmax = 0` so the
 /// caller can emit the correct WS event even under cluster hand-off.
-pub(crate) async fn upsert_hook_session_pg(
+pub async fn upsert_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<bool, String> {

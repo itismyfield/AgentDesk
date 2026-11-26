@@ -6,7 +6,7 @@ mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
 #[cfg(unix)]
-pub(crate) mod tui_session_launch;
+pub mod tui_session_launch;
 #[cfg(unix)]
 use tui_session_launch::prepare_and_create_claude_tui_session;
 
@@ -82,7 +82,7 @@ use crate::services::{
 };
 
 #[cfg(unix)]
-pub(crate) const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+pub const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -1857,7 +1857,7 @@ fn execute_streaming_local_tui_tmux(
     )
 }
 #[cfg(unix)]
-pub(crate) mod first_input;
+pub mod first_input;
 #[cfg(unix)]
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;
@@ -1866,7 +1866,7 @@ pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn tmux_tui_turn_for_tests(
+pub fn tmux_tui_turn_for_tests(
     working_dir: &str,
     session_id: Option<&str>,
     cancel_token: std::sync::Arc<CancelToken>,
@@ -1950,7 +1950,7 @@ fn claude_tui_fresh_prompt_ready_backoff(completed_attempts: usize) -> Duration 
 }
 
 #[cfg(unix)]
-pub(crate) fn emit_claude_tui_watcher_handoff(
+pub fn emit_claude_tui_watcher_handoff(
     sender: &Sender<StreamMessage>,
     transcript_path_string: &str,
     tmux_session_name: &str,

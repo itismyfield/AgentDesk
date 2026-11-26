@@ -18,7 +18,7 @@ pub use adk_base::domain::lifecycle;
 pub use adk_base::domain::memory;
 pub mod message_split;
 pub mod outbound;
-pub(crate) mod process_incarnation;
+pub mod process_incarnation;
 pub use adk_base::domain::provider;
 pub use adk_base::domain::provider_auth_profile;
 pub mod replay_evidence;

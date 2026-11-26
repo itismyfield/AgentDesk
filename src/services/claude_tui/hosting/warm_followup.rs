@@ -49,7 +49,7 @@ pub(crate) enum ClaudeTuiDraftRecoveryOutcome {
 
 /// Outcome of an attempted warm follow-up against a live Claude TUI session.
 #[cfg(unix)]
-pub(crate) enum ClaudeTuiWarmFollowupOutcome {
+pub enum ClaudeTuiWarmFollowupOutcome {
     /// Handled (delivered, aborted, or errored); return this without launch.
     Terminal(Result<(), String>),
     /// Could not proceed; fall through to fresh launch with this resolution.
@@ -958,7 +958,7 @@ mod followup_wait_error_requeue_tests {
 /// Mirrors the pre-refactor live-session branch: recovery, busy wait, submit/read/classify; `Terminal` returns before fresh-launch side effects, `Recreate` carries fall-through resolution.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn try_claude_tui_warm_followup(
+pub fn try_claude_tui_warm_followup(
     mut resolved_session_id: String,
     mut transcript_path: std::path::PathBuf,
     mut transcript_path_string: String,

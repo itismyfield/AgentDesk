@@ -91,8 +91,7 @@ static PROVIDER_RUNTIME_MODE_BY_CHANNEL: LazyLock<RwLock<BTreeMap<(String, u64),
 
 /// Serializes tests that install the process-wide hosting config.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> =
-    LazyLock::new(Default::default);
+pub static TEST_CONFIG_LOCK: LazyLock<std::sync::Mutex<()>> = LazyLock::new(Default::default);
 
 pub fn install_provider_hosting_config(config: &Config) {
     let mut values = BTreeMap::new();

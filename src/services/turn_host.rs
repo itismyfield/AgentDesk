@@ -359,7 +359,7 @@ pub fn herdr_turn_switched_on() -> bool {
 pub(crate) struct ForcedSwitch(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
+pub fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {
     ForcedSwitch(FORCED_SWITCH.with(|cell| cell.replace(on)))
 }
 
@@ -375,7 +375,7 @@ impl Drop for ForcedSwitch {
 pub(crate) struct ForcedCodexSwitch(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
+pub fn force_codex_switch_for_test(on: Option<bool>) -> ForcedCodexSwitch {
     ForcedCodexSwitch(FORCED_CODEX_SWITCH.with(|cell| cell.replace(on)))
 }
 

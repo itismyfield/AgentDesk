@@ -521,7 +521,7 @@ impl UserReceipt {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! { static NATIVE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn native_read_byte_total() -> u64 {
+pub fn native_read_byte_total() -> u64 {
     NATIVE_READ_BYTES.with(std::cell::Cell::get)
 }
 

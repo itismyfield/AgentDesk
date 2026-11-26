@@ -377,7 +377,7 @@ thread_local! {
 
 /// Replaces the boot section on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
+pub struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
 
 /// Installs a real selection's hosts and migration metadata on this thread until dropped.
 #[cfg(all(test, unix))]
@@ -392,10 +392,7 @@ pub(crate) fn force_selected_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_for_test(
-    local_node: Option<&str>,
-    channels: &[(u64, &str)],
-) -> ForcedSessionHosts {
+pub fn force_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) -> ForcedSessionHosts {
     let endpoint = |execution_node: &str| ChannelEndpoint {
         key: format!("{execution_node}-endpoint"),
         execution_node: execution_node.to_owned(),
@@ -435,7 +432,7 @@ pub(crate) fn force_for_test(
 
 /// Boots this thread with the section `config` validates to, until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
+pub fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
     let boot = BootSessionHosts::from_config(config).expect("valid session_hosts");
     ForcedSessionHosts(
         FORCED.with(|forced| forced.replace(Some(boot))),

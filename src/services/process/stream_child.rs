@@ -164,4 +164,4 @@ pub fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod test_fixture;
+pub mod test_fixture;

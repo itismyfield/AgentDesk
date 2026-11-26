@@ -427,7 +427,7 @@ pub async fn resolve_agent_channel_for_provider_pg(
 
 /// Seeds a Claude-primary agent row with the given cc/cdx channel bindings.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn insert_agent_channels_for_tests(
+pub async fn insert_agent_channels_for_tests(
     pool: &PgPool,
     agent_id: &str,
     cc: Option<&str>,

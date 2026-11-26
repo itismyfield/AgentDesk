@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-pub(crate) mod append;
+pub mod append;
 #[cfg(test)]
 mod checked_tests;
 mod compat;
@@ -14,7 +14,7 @@ mod compat_tests;
 mod input_notice_memo_tests;
 #[cfg(unix)]
 pub mod native_row;
-pub(crate) mod notice_owner;
+pub mod notice_owner;
 mod screen;
 #[cfg(test)]
 mod screen_tests;
@@ -390,7 +390,7 @@ pub(crate) fn screen_pending(session: &str, text: &str) -> bool {
 }
 
 /// Claims a complete exact record once; a known record identity cannot move between attempts.
-pub(crate) fn receipt(
+pub fn receipt(
     id: &str,
     transcript: &Path,
     offset: u64,
@@ -876,7 +876,7 @@ pub(crate) fn attempt_row(provider: &str, session: &str, id: &str) -> Option<(u6
         )
 }
 
-pub(crate) fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
+pub fn receipt_row(id: &str, transcript: &Path) -> Option<String> {
     if let Some(row) = v2::scoped_receipt_row(id, transcript) {
         return row;
     }

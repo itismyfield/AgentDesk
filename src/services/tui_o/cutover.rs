@@ -24,7 +24,7 @@ mod child_funnel_tests;
 #[cfg(all(test, unix))]
 mod thread_child_record_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use channel_gate::{
+pub use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
 
@@ -455,7 +455,7 @@ mod test_override {
 
 /// Test builds (and `test-support` dependents) force the boot channel snapshot per thread or for a whole child process.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_override {
+pub mod test_override {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use std::path::Path;
 

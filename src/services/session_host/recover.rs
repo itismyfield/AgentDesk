@@ -120,7 +120,7 @@ impl HerdrExecutionReader for SocketHerdrReader {
 
 /// The session's `.host_kind` marker as its reader classified it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HerdrMarkerEvidence {
+pub enum HerdrMarkerEvidence {
     Herdr,
     OtherHost,
     /// Absent, unreadable or unrecognized.
@@ -129,7 +129,7 @@ pub(crate) enum HerdrMarkerEvidence {
 
 /// What a reader saw for the pane now. `None` means the value could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrCurrentExecution {
+pub struct HerdrCurrentExecution {
     pub location: HostedLocation,
     pub binding_nonce: Option<String>,
     pub root: Option<ProcessStamp>,
@@ -169,7 +169,7 @@ fn stamp(stored: &ProcessStamp, current: Option<&ProcessStamp>) -> Option<bool> 
 }
 
 /// Match needs every stored field confirmed; an unreadable value is Unknown, never Mismatch.
-pub(crate) fn compare_herdr_execution(
+pub fn compare_herdr_execution(
     stored: &HostedExecution,
     current: &HerdrCurrentExecution,
 ) -> HerdrExecutionMatch {

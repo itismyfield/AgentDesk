@@ -172,7 +172,7 @@ pub(crate) struct Fault {
 
 /// One upkeep pass over the booted dedicated homes. A refused or failing home never blocks
 /// another; a busy home keeps its last record until the next tick.
-pub(crate) fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: bool) -> Vec<Fault> {
+pub fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: bool) -> Vec<Fault> {
     pass_with(boot, personal, &|key| {
         observe.then(|| read_e7(boot, key)).flatten()
     })

@@ -174,7 +174,7 @@ mod test_support;
 mod tests;
 
 #[cfg(unix)]
-pub(crate) type Projection = projection::Projection;
+pub type Projection = projection::Projection;
 
 #[cfg(unix)]
 mod projection {

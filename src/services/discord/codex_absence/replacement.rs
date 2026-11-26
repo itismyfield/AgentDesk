@@ -51,7 +51,7 @@ fn state(key: &Key) -> Arc<State> {
 }
 
 /// Owns only the kill/create interval; every early return releases it.
-pub(crate) struct Replacement {
+pub struct Replacement {
     state: Arc<State>,
     completed: bool,
 }

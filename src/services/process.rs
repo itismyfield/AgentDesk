@@ -516,7 +516,7 @@ pub fn kill_pid_tree(pid: u32) {
 }
 
 #[cfg(unix)]
-pub(crate) fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
+pub fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if !identity.has_baseline() {
         tracing::debug!(

@@ -222,7 +222,7 @@ pub fn generation_path() -> Option<PathBuf> {
 
 /// How this process's generation was selected; variants describe observed calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services::discord) enum GenerationAllocationRoute {
+pub enum GenerationAllocationRoute {
     /// `read_generation_counter` returned `Parsed` or `Absent`, `atomic_write`
     /// returned `Ok`, `next != current`, and `fsync_parent_dir` returned `Ok`
     /// after flushing the parent directory.
@@ -361,14 +361,13 @@ mod test_generation_publication {
     }
 
     /// The route a successful advance takes on this platform.
-    pub(in crate::services::discord) const ADVANCED: GenerationAllocationRoute =
-        if PARENT_DIR_FSYNC_FLUSHES {
-            GenerationAllocationRoute::AdvancedWithSyncedRename
-        } else {
-            GenerationAllocationRoute::AdvancedWithUnflushedRename
-        };
+    pub const ADVANCED: GenerationAllocationRoute = if PARENT_DIR_FSYNC_FLUSHES {
+        GenerationAllocationRoute::AdvancedWithSyncedRename
+    } else {
+        GenerationAllocationRoute::AdvancedWithUnflushedRename
+    };
 
-    pub(in crate::services::discord) fn allocation(
+    pub fn allocation(
         generation: u64,
         route: GenerationAllocationRoute,
     ) -> ProcessGenerationAllocation {
@@ -379,17 +378,13 @@ mod test_generation_publication {
         Err(std::io::Error::other("injected parent sync failure"))
     }
 
-    pub(in crate::services::discord) fn publish(
-        allocated: ProcessGenerationAllocation,
-    ) -> Publication {
+    pub fn publish(allocated: ProcessGenerationAllocation) -> Publication {
         Publication {
             previous_binding: BINDING.replace(Some(allocated)),
         }
     }
 
-    pub(in crate::services::discord) fn allocate_and_publish(
-        parent_sync_succeeds: bool,
-    ) -> Publication {
+    pub fn allocate_and_publish(parent_sync_succeeds: bool) -> Publication {
         let _allocation = lock_unpoisoned(&PROCESS_GENERATION_ALLOCATION_TRANSACTION);
         let allocated = allocate_generation_epoch_with_io(GenerationIo {
             path: generation_path(),
@@ -409,7 +404,7 @@ mod test_generation_publication {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services::discord) use test_generation_publication::{
+pub use test_generation_publication::{
     ADVANCED as ADVANCED_ROUTE_FOR_TESTS,
     allocate_and_publish as allocate_and_publish_process_generation_for_tests,
     allocation as process_generation_allocation_for_tests,

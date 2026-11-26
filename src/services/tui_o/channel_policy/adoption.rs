@@ -531,10 +531,7 @@ pub(crate) fn stored_with_committed(
 
 /// The adoption each selected channel starts with, from the local store as it is on disk.
 /// A readable `init` commits; unreadable, orphaned or era-only state holds; absent is pending.
-pub(crate) fn stored(
-    runtime_root: Option<&Path>,
-    channels: &BTreeSet<u64>,
-) -> BTreeMap<u64, Adoption> {
+pub fn stored(runtime_root: Option<&Path>, channels: &BTreeSet<u64>) -> BTreeMap<u64, Adoption> {
     let all = |state| channels.iter().map(|&channel| (channel, state)).collect();
     let Some(root) = runtime_root else {
         return all(Adoption::Held);

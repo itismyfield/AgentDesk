@@ -107,7 +107,7 @@ pub fn confirm_selected(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct TestConfirmation(u64);
+pub struct TestConfirmation(u64);
 
 #[cfg(any(test, feature = "test-support"))]
 impl TestConfirmation {

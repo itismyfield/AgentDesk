@@ -73,7 +73,7 @@ impl VerifiedSourceSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeliveryPermission {
+pub enum DeliveryPermission {
     Allowed,
     Cancelled,
     Unknown,
@@ -525,7 +525,7 @@ pub(super) fn publish_proof(
 
 /// Records the source a successful resume spawn executed as that execution's ExplicitResume proof;
 /// the published native cursor then starts at the resume point instead of replaying history.
-pub(crate) fn record_executed_resume(
+pub fn record_executed_resume(
     context: &BindingContext,
     selected_session_id: &str,
     selected_rollout_path: &Path,

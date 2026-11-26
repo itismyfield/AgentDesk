@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::{path::Path, sync::RwLock, time::Instant};
 
 #[derive(Default)]
-pub(crate) struct ProjectionCache {
+pub struct ProjectionCache {
     value: RwLock<Option<(Instant, Value)>>,
 }
 

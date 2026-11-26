@@ -158,7 +158,7 @@ fn is_nonce(text: &str) -> bool {
 }
 
 /// A plain header's inside without its attempt tag, and the tag, empty when there is none.
-pub(crate) fn untagged(inner: &str) -> (&str, &str) {
+pub fn untagged(inner: &str) -> (&str, &str) {
     match inner.rsplit_once(" · ") {
         Some((who, nonce)) if who.ends_with(')') && is_nonce(nonce) => (who, nonce),
         _ => (inner, ""),

@@ -196,7 +196,7 @@ impl Drop for EffectPermit {
     }
 }
 
-pub(crate) struct Launching {
+pub struct Launching {
     scope: Arc<Scope>,
     previous: Option<Option<Arc<Scope>>>,
 }

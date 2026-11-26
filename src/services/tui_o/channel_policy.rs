@@ -22,7 +22,7 @@ pub use adoption::{
     LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use adoption::{
+pub use adoption::{
     body_check::{BodyCheck, SinkOp},
     stored,
 };

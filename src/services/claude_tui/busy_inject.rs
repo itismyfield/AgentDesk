@@ -14,7 +14,7 @@ mod submit;
 #[cfg(test)]
 pub(crate) use submit::inject;
 #[cfg(unix)]
-pub(crate) use submit::inject_owned;
+pub use submit::inject_owned;
 #[cfg(all(test, unix))]
 use submit::{inject_gated, inject_listed};
 pub use submit::{inject_report, inject_report_any_turn};
@@ -65,7 +65,7 @@ pub mod stash;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 mod stash_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use stash_tests::{FAKE_TUI as FAKE_STASH_TUI, StashChannelGuard};
+pub use stash_tests::{FAKE_TUI as FAKE_STASH_TUI, StashChannelGuard};
 
 use std::io::{BufRead, Seek, SeekFrom};
 use std::path::{Path, PathBuf};

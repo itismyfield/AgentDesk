@@ -6,7 +6,7 @@ pub mod remote;
 pub mod repo_resolver;
 pub mod runner;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_origin_fixture;
+pub mod test_origin_fixture;
 pub mod worktree_resolver;
 
 pub use branch_resolver::is_mainlike_branch;

@@ -301,7 +301,7 @@ fn home_now(gate: &OwnershipGate) -> Home {
 
 /// The pinned source and history of the pane's execution, read only while its spawn nonce is
 /// still the one the request was checked against.
-pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
+pub fn execution_read(channel: u64, context: &Context) -> Execution {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_EXECUTION.with(|forced| forced.borrow().clone()) {
         return forced;
@@ -316,7 +316,7 @@ pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
 
 /// The sources the execution holds by its history. A history not known whole, without a current
 /// session, or with an unpinned session a candidate may be is an error, never an empty set.
-pub(crate) fn execution_sources(
+pub fn execution_sources(
     history: &SourceHistory,
     candidates: &BTreeSet<&str>,
 ) -> Result<Vec<SourceId>, String> {
@@ -351,7 +351,7 @@ thread_local! {
 
 /// Answers every execution read on this thread with `read` until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
+pub fn force_execution_for_tests(read: Execution) -> impl Drop {
     struct Restore(Option<Execution>);
     impl Drop for Restore {
         fn drop(&mut self) {

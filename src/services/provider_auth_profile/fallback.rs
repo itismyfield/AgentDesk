@@ -10,7 +10,7 @@ use crate::services::provider::ProviderKind;
 
 pub use crate::domain::provider_auth_profile::FallbackPolicy;
 
-pub(crate) trait FallbackPolicyRuntime {
+pub trait FallbackPolicyRuntime {
     fn validate(
         &self,
         provider: &ProviderKind,
@@ -222,7 +222,7 @@ fn router() -> &'static Mutex<Router> {
     ROUTER.get_or_init(|| Mutex::new(Router::default()))
 }
 
-pub(crate) fn select_for_launch(
+pub fn select_for_launch(
     provider: &ProviderKind,
     channel: u64,
     candidates: &[String],

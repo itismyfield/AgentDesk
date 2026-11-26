@@ -283,7 +283,7 @@ fn channel_pairs_after_clear_boundary(
         .collect()
 }
 
-pub(crate) fn chronological_channel_pairs_from_desc(
+pub fn chronological_channel_pairs_from_desc(
     mut pairs: Vec<ChannelTranscriptPair>,
 ) -> Vec<ChannelTranscriptPair> {
     pairs.reverse();

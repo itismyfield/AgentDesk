@@ -265,7 +265,7 @@ pub trait CustodySink: Send {
     async fn wake(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
 }
 
-pub(crate) async fn release(
+pub async fn release(
     store: &ConsentStore,
     expected: &Consent,
     sink: &mut impl CustodySink,

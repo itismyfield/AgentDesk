@@ -510,7 +510,7 @@ where
 
 mod fresh_resume;
 mod notice_settlement;
-pub(crate) mod notice_work;
+pub mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
@@ -520,7 +520,7 @@ pub mod codex_retention;
 pub(crate) mod transition;
 mod transition_snapshot;
 
-pub(crate) mod codex_submission;
+pub mod codex_submission;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     fn project_operator_resumes(&mut self) {
@@ -923,9 +923,7 @@ pub(crate) use transition::scoped_tests::{
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use transition::test_hooks as transition_hooks;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition_snapshot::{
-    execution_read, execution_sources, force_execution_for_tests,
-};
+pub use transition_snapshot::{execution_read, execution_sources, force_execution_for_tests};
 
 #[cfg(test)]
 mod test_support {

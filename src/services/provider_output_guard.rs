@@ -8,9 +8,9 @@ use pulldown_cmark::{Event, Options, Parser, Tag};
 
 use crate::services::provider::ProviderKind;
 
-pub(crate) const BLOCKED_PROVIDER_OUTPUT_BODY: &str =
+pub const BLOCKED_PROVIDER_OUTPUT_BODY: &str =
     "⚠️ 내부 제어 데이터가 섞인 응답을 차단했습니다. 원문은 전송하지 않았습니다.";
-pub(crate) const HELD_PROVIDER_OUTPUT_BODY: &str =
+pub const HELD_PROVIDER_OUTPUT_BODY: &str =
     "⚠️ 응답에 내부 제어 데이터 가능성이 있어 확인될 때까지 전송을 보류했습니다.";
 
 const SYSTEM_BANNER: &str = "[SYSTEM NOTIFICATION - NOT USER INPUT]";
@@ -56,10 +56,7 @@ pub enum ProviderOutputVerdict {
     Blocked { kind: ProviderOutputKind },
 }
 
-pub(crate) fn inspect_provider_output(
-    provider: &ProviderKind,
-    text: &str,
-) -> ProviderOutputVerdict {
+pub fn inspect_provider_output(provider: &ProviderKind, text: &str) -> ProviderOutputVerdict {
     if !matches!(provider, ProviderKind::Claude) {
         return ProviderOutputVerdict::Clean;
     }
@@ -109,7 +106,7 @@ pub fn safe_blocked_body(_kind: ProviderOutputKind) -> &'static str {
     BLOCKED_PROVIDER_OUTPUT_BODY
 }
 
-pub(crate) fn safe_held_body(_kind: ProviderOutputKind) -> &'static str {
+pub fn safe_held_body(_kind: ProviderOutputKind) -> &'static str {
     HELD_PROVIDER_OUTPUT_BODY
 }
 

@@ -301,7 +301,7 @@ fn replace_file(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support {
+pub mod test_support {
     use std::path::Path;
 
     pub(crate) const SERVER_TOKEN: &str = "server-secret-token";

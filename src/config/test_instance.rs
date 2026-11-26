@@ -73,7 +73,7 @@ pub fn initialize() -> Result<(), String> {
         .map_err(Clone::clone)
 }
 
-pub(crate) fn current() -> Result<Option<&'static TestInstance>, String> {
+pub fn current() -> Result<Option<&'static TestInstance>, String> {
     match INSTANCE.get() {
         Some(result) => result.as_ref().map(Some).map_err(Clone::clone),
         None if requested() => Err(rejected()),
@@ -557,7 +557,7 @@ pub(crate) mod tests;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/login_test_support.rs"]
-pub(crate) mod login_test_support;
+pub mod login_test_support;
 
 /// Fixtures upper-crate tests reuse (KRX-TS); the unit tests in `tests` import them.
 #[cfg(all(any(test, feature = "test-support"), unix))]

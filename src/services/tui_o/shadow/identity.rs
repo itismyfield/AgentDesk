@@ -170,7 +170,7 @@ thread_local! {
 
 /// Captures a store using the old thinking-skip rule without creating thinking ledger entries.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct V5Rule(());
+pub struct V5Rule(());
 
 #[cfg(any(test, feature = "test-support"))]
 impl V5Rule {

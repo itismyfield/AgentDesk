@@ -350,7 +350,7 @@ pub(crate) async fn resolve_session_id_for_mutation_pg(
     resolve_evidence(exact, alias, None, None).map(|target| target.map(|evidence| evidence.id))
 }
 
-pub(crate) async fn upsert_legacy_hook_session_pg(
+pub async fn upsert_legacy_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
 ) -> Result<HookSessionUpsertOutcome, HookSessionUpsertError> {

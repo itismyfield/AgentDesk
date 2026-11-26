@@ -190,7 +190,7 @@ async fn release_expired_outbox_dedupe_key_pg(
     Ok(())
 }
 
-pub(crate) async fn enqueue_outbox_pg_returning_id(
+pub async fn enqueue_outbox_pg_returning_id(
     pool: &PgPool,
     message: OutboxMessage<'_>,
 ) -> Result<Option<i64>, OutboxEnqueueError> {
@@ -600,7 +600,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn monitor_alert_rows_for_test(
+pub async fn monitor_alert_rows_for_test(
     pool: &PgPool,
 ) -> Result<Vec<(String, String, String, String, String, String, bool)>, sqlx::Error> {
     sqlx::query_as(
@@ -706,7 +706,7 @@ pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(
     Ok(id)
 }
 
-pub(crate) async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn activate_staged_outbox_pg(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
     Ok(sqlx::query(
         "UPDATE message_outbox SET status='pending'
               WHERE id=$1 AND status='held' AND circuit_open_generation IS NULL",
@@ -820,14 +820,14 @@ pub async fn enqueue_outbox_best_effort(
 }
 
 /// Validated no-dedupe insert for callers already holding a PostgreSQL transaction.
-pub(crate) async fn enqueue_outbox_pg_on_tx(
+pub async fn enqueue_outbox_pg_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
 ) -> Result<i64, OutboxEnqueueError> {
     enqueue_outbox_pg_on_tx_with_attachment(tx, message, None).await
 }
 
-pub(crate) async fn enqueue_outbox_pg_on_tx_with_attachment(
+pub async fn enqueue_outbox_pg_on_tx_with_attachment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
     attachment: Option<OutboxAttachment<'_>>,
@@ -853,7 +853,7 @@ async fn enqueue_plain_on_tx(
     plain::insert_on_tx(tx, message, attachment, notice).await
 }
 
-pub(crate) async fn enqueue_lifecycle_notification_pg(
+pub async fn enqueue_lifecycle_notification_pg(
     pool: &PgPool,
     target: &str,
     session_key: Option<&str>,

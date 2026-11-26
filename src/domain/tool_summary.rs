@@ -522,7 +522,7 @@ pub fn safe_section(raw: &str) -> Option<String> {
     Some(masked.replace('@', "@\u{200b}"))
 }
 
-pub(crate) fn text(raw: &str, limit: usize) -> Option<String> {
+pub fn text(raw: &str, limit: usize) -> Option<String> {
     text_masked(&sanitized(raw)?, limit)
 }
 
@@ -819,7 +819,7 @@ fn patch_summary(input: &str, cwd: Option<&str>) -> Option<String> {
     Some(format!("{path} (+{added} −{removed})"))
 }
 
-pub(crate) fn description_text(description: &str, reject_credentials: bool) -> Option<String> {
+pub fn description_text(description: &str, reject_credentials: bool) -> Option<String> {
     if description.lines().any(credential_executable_line) {
         return None;
     }

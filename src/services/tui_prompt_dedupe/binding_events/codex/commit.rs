@@ -10,7 +10,7 @@ pub(crate) use resume_companions::{
 };
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn commit_claim(
+pub fn commit_claim(
     context: &BindingContext,
     claim: &Claim,
     decision: Decision,
@@ -21,7 +21,7 @@ pub(crate) fn commit_claim(
 
 /// Caller holds source authority; revalidate canonical/current context and descriptor inside `validate_current`.
 /// The callback must not reacquire the channel log mutex or publish runtime state.
-pub(crate) fn commit_claim_published(
+pub fn commit_claim_published(
     context: &BindingContext,
     claim: &Claim,
     decision: Decision,
@@ -40,7 +40,7 @@ pub(crate) fn commit_claim_published(
 
 /// Settles same-source companion observations before the executed resume's initial proof.
 /// Every append revalidates the current execution and opened descriptor.
-pub(crate) fn commit_executed_resume_published(
+pub fn commit_executed_resume_published(
     context: &BindingContext,
     claim: &Claim,
     source: SourceId,

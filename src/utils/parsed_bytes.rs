@@ -64,7 +64,7 @@ pub fn reuse<T: Any + Send + Sync>(
 
 /// Forgets every value kept for `path`, as a restart would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget(path: &Path) {
+pub fn forget(path: &Path) {
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);
     kept.retain(|(kept_path, _), _| kept_path != path);
 }

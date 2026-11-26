@@ -38,7 +38,7 @@ pub fn session_host_label() -> String {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
+pub fn with_session_host_label_path_for_test<R>(path: &Path, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {
         fn drop(&mut self) {

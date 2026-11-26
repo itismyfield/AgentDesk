@@ -160,7 +160,7 @@ fn note(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct InputProbe {
+pub struct InputProbe {
     pub channel: u64,
     pub entered: std::sync::mpsc::Sender<std::thread::ThreadId>,
     pub scheduled: tokio::sync::oneshot::Sender<()>,
@@ -174,7 +174,7 @@ static PROBE: std::sync::Mutex<Option<InputProbe>> = std::sync::Mutex::new(None)
 pub(crate) struct ProbeGuard;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install_probe(probe: InputProbe) -> ProbeGuard {
+pub fn install_probe(probe: InputProbe) -> ProbeGuard {
     let mut slot = PROBE.lock().unwrap();
     assert!(slot.is_none(), "an O input probe is already installed");
     *slot = Some(probe);

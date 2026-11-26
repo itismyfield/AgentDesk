@@ -18,7 +18,7 @@ use std::{
 pub(crate) const UNSET_CONTEXT: &str = "unset AGENTDESK_BINDING_CONTEXT\n";
 pub(crate) mod herdr_resume;
 mod inventory;
-pub(crate) use herdr_resume::ResumeStart;
+pub use herdr_resume::ResumeStart;
 pub use inventory::inventory;
 use inventory::read_hook_context;
 
@@ -72,7 +72,7 @@ pub fn stable_host_identity() -> Option<String> {
         .find(|id| !id.is_empty())
 }
 
-pub(crate) fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
+pub fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
     if !matches!(provider, "claude" | "codex")
         || nonce.len() != 32
         || !nonce.bytes().all(|b| b.is_ascii_hexdigit())
@@ -118,7 +118,7 @@ pub fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
 
 // Hook capture reads this value without consulting mutable markers.
 const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT";
-pub(crate) const BINDING_HEADER: &str = "x-agentdesk-binding-context";
+pub const BINDING_HEADER: &str = "x-agentdesk-binding-context";
 const CONTEXT_LIMIT: u64 = 16 * 1024;
 const HEADER_LIMIT: usize = 32 * 1024;
 

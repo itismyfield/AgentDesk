@@ -264,14 +264,14 @@ pub fn detail_json() -> Value {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use cache::ProjectionCache;
+pub use cache::ProjectionCache;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use collector::Collector;
+pub use collector::Collector;
 pub use evaluation::evaluate;
 #[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { static TEST_PROJECTION: (Arc<ProjectionCache>, i64); }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn with_projection_for_test<T>(
+pub async fn with_projection_for_test<T>(
     cache: Arc<ProjectionCache>,
     now: i64,
     next: impl std::future::Future<Output = T>,

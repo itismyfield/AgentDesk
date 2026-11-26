@@ -9,7 +9,7 @@ pub mod network;
 mod session_host_label;
 pub use session_host_label::session_host_label;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use session_host_label::with_session_host_label_path_for_test;
+pub use session_host_label::with_session_host_label_path_for_test;
 pub mod shell;
 pub mod tmux;
 #[cfg(windows)]
@@ -18,7 +18,7 @@ pub(crate) mod windows_job;
 /// Test builds mark the thread inside the watcher registry's owner publication, so tmux
 /// namespace I/O can assert it never runs under that fence.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod owner_publication_fence {
+pub mod owner_publication_fence {
     thread_local! {
         static HELD: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }

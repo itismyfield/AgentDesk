@@ -1,6 +1,6 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
-pub(crate) mod admission;
+pub mod admission;
 pub(super) mod evidence;
 
 use std::collections::HashMap;
@@ -123,7 +123,7 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
 }
 
 #[derive(Default)]
-pub(crate) struct Projection {
+pub struct Projection {
     enabled: bool,
     seals: HashMap<UnitKey, [u8; 32]>,
     pending: Vec<crate::services::tui_o::store::ledger::input_notices::NoticeEvidence>,

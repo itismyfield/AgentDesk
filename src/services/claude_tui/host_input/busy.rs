@@ -1,5 +1,5 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
-pub(crate) mod herdr;
+pub mod herdr;
 mod tmux;
 pub use herdr::observe as observe_herdr;
 pub use tmux::{cause, loads};
@@ -275,7 +275,7 @@ fn observe(nonce: &str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn observed(nonce: &str) -> usize {
+pub fn observed(nonce: &str) -> usize {
     OBSERVED
         .lock()
         .unwrap_or_else(|error| error.into_inner())

@@ -9,7 +9,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
-pub(crate) use super::transition_cleanup::scope::ScopeDigest;
+pub use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
 pub use super::transition_cleanup::{Request, Termination, Verdict};
 use crate::services::tui_o::ownership::OwnershipGate;

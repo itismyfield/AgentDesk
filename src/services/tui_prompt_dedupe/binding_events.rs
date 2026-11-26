@@ -23,7 +23,7 @@ pub use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use herdr_resume::resumes_under_new_execution;
 pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
-pub(crate) const BINDING_EVENTS_DIR: &str = "binding_events";
+pub const BINDING_EVENTS_DIR: &str = "binding_events";
 pub(crate) mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
@@ -129,14 +129,14 @@ impl HookSignal {
 }
 /// Launch reads the execution's context, but only for the first record of that execution.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CauseSource {
+pub enum CauseSource {
     Hook(BindingCause),
     Launch,
     Observed,
 }
 /// A source proposed for one pane of a channel; `replaced` is the binding it would overwrite.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Proposal<'a> {
+pub struct Proposal<'a> {
     pub channel_id: u64,
     pub provider: &'a str,
     pub tmux_session: &'a str,
@@ -425,7 +425,7 @@ pub(crate) fn record_source(proposal: &Proposal) -> io::Result<Committed> {
 
 /// How a Pending judgment stands in the log once `record_pending` returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRecord {
+pub enum PendingRecord {
     Recorded,
     /// A Pending for the same candidate was already logged.
     AlreadyPending,
@@ -442,7 +442,7 @@ pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
 
 /// Records exactly `source`, the identity the check read, unless the pane's pin holds another file;
 /// the path is not looked at again.
-pub(crate) fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
+pub fn record_verified(proposal: &Proposal, source: &SourceId) -> io::Result<Committed> {
     commit(proposal, Plan::Verified(source))
 }
 
@@ -504,7 +504,7 @@ pub(crate) fn pinned_source_at(
 
 /// The pane's pinned source and its Claude history in execution `nonce`, read from the writer that
 /// records them.
-pub(crate) fn claude_history(
+pub fn claude_history(
     channel_id: u64,
     tmux_session: &str,
     nonce: Option<&str>,
@@ -1034,18 +1034,18 @@ fn fault(step: &str) -> io::Result<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn test_root() -> Option<PathBuf> {
+pub fn test_root() -> Option<PathBuf> {
     TEST_ROOT.with(|slot| slot.borrow().clone())
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_test_root(root: Option<&Path>) {
+pub fn set_test_root(root: Option<&Path>) {
     TEST_ROOT.with(|slot| *slot.borrow_mut() = root.map(Path::to_path_buf));
 }
 
 /// Drops what this process remembers about `channel_id`, as a restart would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_channel_for_tests(channel_id: u64) {
+pub fn forget_channel_for_tests(channel_id: u64) {
     if let Ok(Some(path)) = log_path(channel_id) {
         let mut logs = lock_logs();
         logs.remove(&path);

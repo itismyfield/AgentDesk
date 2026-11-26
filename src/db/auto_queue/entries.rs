@@ -1219,7 +1219,7 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
+pub fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
     let context = context
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .filter(|value| value.is_object())?;

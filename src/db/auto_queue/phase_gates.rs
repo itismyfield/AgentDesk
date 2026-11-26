@@ -595,9 +595,7 @@ pub(crate) struct ParsedPhaseGateContext {
     pub final_phase: bool,
 }
 
-pub(crate) fn parse_phase_gate_context(
-    context_json: Option<&str>,
-) -> Option<ParsedPhaseGateContext> {
+pub fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhaseGateContext> {
     let raw = context_json?.trim();
     if raw.is_empty() {
         return None;

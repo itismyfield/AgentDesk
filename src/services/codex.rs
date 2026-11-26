@@ -26,14 +26,14 @@ use followup_reader::send_followup_to_tmux;
 mod herdr_guard_tests;
 #[cfg(unix)]
 pub mod herdr_turn;
-pub(crate) mod tui_session_launch;
+pub mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
+pub use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(unix)]
 pub use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
@@ -245,7 +245,7 @@ pub use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
 
-pub(crate) fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+pub fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
     log_codex_binary_probe(&probe);
     probe.resolution
@@ -475,7 +475,7 @@ fn base_tui_args(
     build_codex_tui_args(&options)
 }
 
-pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = codex_tui_option_args(options);
     args.extend(["--".to_string(), options.prompt.to_string()]);
     args

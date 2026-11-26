@@ -4,7 +4,7 @@
 #[path = "evidence.rs"]
 pub mod evidence;
 #[path = "matcher.rs"]
-pub(crate) mod matcher;
+pub mod matcher;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -44,7 +44,7 @@ pub trait ProbeRead {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Progress {
+pub enum Progress {
     /// Too early for the next pass.
     Waiting { until: Instant },
     /// The page budget ran out above the anchor; this session may resume the pass.
@@ -84,7 +84,7 @@ pub(crate) struct PassCursor {
     proof_listed: bool,
 }
 
-pub(crate) struct ProbeSession {
+pub struct ProbeSession {
     scope: EvidenceScope,
     /// Known messages of the sender in this channel, the anchor first, to prove read permission.
     proof_ids: Vec<u64>,

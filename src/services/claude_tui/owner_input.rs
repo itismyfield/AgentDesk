@@ -235,7 +235,7 @@ pub(crate) fn pinned() -> Result<Option<(String, String)>, String> {
     let pane = epoch().ok_or("epoch not observed")?.physical[3].clone();
     Ok(Some((pane, condition(owner, "1")?)))
 }
-pub(crate) fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
+pub fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String> {
     before_payload()?;
     keyed();
     send()
@@ -560,7 +560,7 @@ pub fn capture_owner_scope<R>(
     (result, proof)
 }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn with_scope<R>(
+pub fn with_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,

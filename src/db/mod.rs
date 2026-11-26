@@ -15,7 +15,7 @@ mod discarded_tx_result_scan_tests;
 pub mod dispatch_semaphores;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "dispatch_test_db_tests.rs"]
-pub(crate) mod dispatch_test_db;
+pub mod dispatch_test_db;
 #[path = "dispatched_sessions/canonical_identity.rs"]
 pub mod dispatched_session_canonical_identity;
 #[path = "dispatched_sessions/rebind_override.rs"]
@@ -31,7 +31,7 @@ pub mod intake_outbox_delivery_proof;
 pub(crate) mod intake_outbox_dispatch_stamp;
 pub mod intake_outbox_dispatched_audit;
 pub mod intake_outbox_force_fail;
-pub(crate) mod intake_outbox_open_status;
+pub mod intake_outbox_open_status;
 pub mod intake_outbox_status;
 pub mod kanban;
 pub mod kanban_cards;
@@ -40,7 +40,7 @@ pub mod o_channel_activation;
 // Stays at its allowlisted path: its forwarding loop waits on a channel without a cap.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "../services/health_diagnostics/pg_wire_proxy_tests.rs"]
-pub(crate) mod pg_wire_proxy;
+pub mod pg_wire_proxy;
 pub mod postgres;
 pub mod prompt_manifests;
 pub use adk_store::provider_session_prompts;

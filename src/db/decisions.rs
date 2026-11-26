@@ -20,7 +20,7 @@ pub fn event_of_origin(origin: &str) -> Option<Uuid> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EventKind {
+pub enum EventKind {
     Selection,
     Opinion,
 }
@@ -283,4 +283,4 @@ pub async fn clock(pool: &PgPool) -> Result<chrono::DateTime<chrono::Utc>, sqlx:
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "decisions_support_tests.rs"]
-pub(crate) mod test_support;
+pub mod test_support;

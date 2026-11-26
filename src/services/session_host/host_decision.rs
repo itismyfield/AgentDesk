@@ -311,7 +311,7 @@ fn presence(name: &str) -> SessionPresence {
 
 /// Answers the tmux probe of `name` with `presence` for this test.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_presence_for_test(name: &str, presence: SessionPresence) {
+pub fn force_presence_for_test(name: &str, presence: SessionPresence) {
     FORCED_PRESENCE
         .lock()
         .unwrap()

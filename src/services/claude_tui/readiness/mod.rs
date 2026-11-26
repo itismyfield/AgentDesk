@@ -1,7 +1,7 @@
 //! Current-source Idle readiness; external Busy injection keeps its own entry path.
 mod clear;
 mod closed_turn;
-pub(crate) mod compact;
+pub mod compact;
 #[cfg(unix)]
 pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
@@ -14,7 +14,7 @@ mod source;
 pub(crate) use source::launch_start_hook;
 /// Ledger fixtures and the reservation hook upper-crate tests reuse (KRX-TS).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support;
+pub mod test_support;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
 pub(crate) mod tests;

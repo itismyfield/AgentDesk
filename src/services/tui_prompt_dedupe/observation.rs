@@ -125,7 +125,7 @@ pub fn observe_prompt_by_provider_session_with_prompt_id_at(
 }
 
 /// Codex entry for a live hook naming the native turn the input opens or steers.
-pub(crate) fn observe_codex_prompt_in_turn_at(
+pub fn observe_codex_prompt_in_turn_at(
     tmux_session_name: &str,
     prompt: &str,
     entry_id: Option<&str>,
@@ -644,7 +644,7 @@ pub(super) fn observe_inner(
     PromptObservation::PublishedSshDirect
 }
 
-pub(crate) fn record_external_input_relay_lease(
+pub fn record_external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     channel_id: Option<u64>,
@@ -711,7 +711,7 @@ pub fn external_input_relay_lease_present(
     external_input_relay_lease(provider, tmux_session_name, channel_id).is_some()
 }
 
-pub(crate) fn clear_external_input_relay_lease(
+pub fn clear_external_input_relay_lease(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,

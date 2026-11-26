@@ -24,7 +24,7 @@ pub enum Ensured {
 
 /// Where one start reads and writes; production derives it from this process.
 #[derive(Debug, Clone)]
-pub(crate) struct Context {
+pub struct Context {
     pub env: Environment,
     pub local_node: Option<String>,
     /// The start records and the started server's output; `None` refuses every start.
@@ -374,7 +374,7 @@ thread_local! {
 
 /// How many times this thread entered `ensure`; entry points are tested by this count.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn ensured_on_this_thread() -> usize {
+pub fn ensured_on_this_thread() -> usize {
     ENSURED.with(std::cell::Cell::get)
 }
 

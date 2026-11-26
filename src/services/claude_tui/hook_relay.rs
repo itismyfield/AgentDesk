@@ -39,8 +39,8 @@ pub(crate) fn start_relay_recovery_owner() -> Option<OrderedHookRelayRecoveryOwn
 const RELAY_TIMEOUT: Duration = Duration::from_secs(2);
 const STOP_RELAY_TIMEOUT: Duration = Duration::from_millis(750);
 const FAILURE_MARKER_TTL_SECS: i64 = 24 * 60 * 60;
-pub(crate) const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER";
-pub(crate) const NON_WAIT_RELAY_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER";
+pub const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_WORKER";
+pub const NON_WAIT_RELAY_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER";
 
 #[cfg(test)]
 const FAILURE_MARKER_PARENT_TEST_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER_PARENT_TEST";

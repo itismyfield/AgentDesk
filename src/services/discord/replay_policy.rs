@@ -22,7 +22,7 @@ use sqlx::PgPool;
 pub use crate::domain::process_incarnation::incarnation;
 
 #[derive(Debug)]
-pub(crate) enum ReplayDecision {
+pub enum ReplayDecision {
     /// No protected attempt is attached; the existing path runs unchanged.
     NotApplicable,
     AllowStartupRetry(RetryPermit),
@@ -33,7 +33,7 @@ pub(crate) enum ReplayDecision {
 }
 
 /// Decides a stale attempt; anything short of committed no-effect evidence withholds.
-pub(in crate::services::discord) async fn decide_stale(
+pub async fn decide_stale(
     pool: &PgPool,
     attempt: Option<ExactAttempt>,
     observation: &RawObservation,

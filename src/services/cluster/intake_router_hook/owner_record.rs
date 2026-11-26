@@ -14,11 +14,11 @@ pub(crate) mod adoption;
 pub mod cleanup;
 pub mod custody;
 pub mod event;
-pub(crate) mod fallback;
+pub mod fallback;
 pub mod input_start;
 pub mod output;
-pub(crate) mod plan;
-pub(crate) mod snapshot;
+pub mod plan;
+pub mod snapshot;
 
 pub use crate::domain::intake_identity::OwnerIdentity;
 
@@ -27,7 +27,7 @@ pub use crate::domain::intake_identity::OwnerIdentity;
 /// key, so the unique index `intake_outbox_idempotency_key_uq` dedups them and
 /// the admission SAVEPOINT resolves the collision as an idempotent hit. The
 /// `\u{1f}` (unit separator) join keeps the components unambiguous.
-pub(crate) fn idempotency_key(
+pub fn idempotency_key(
     provider: &str,
     raw_channel_id: &str,
     user_message_id: &str,
@@ -52,7 +52,7 @@ pub struct OwnerRecordSnapshot {
 
 /// Result of `acquire_owner_in_tx` (§3.3.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AcquireOutcome {
+pub enum AcquireOutcome {
     /// Ownership could not be determined safely (e.g. the index-guarded
     /// impossible multi-active state). Caller rolls back and fails closed.
     Blocked { reason: String },
@@ -98,7 +98,7 @@ pub(crate) enum AdoptOutcome {
 /// Local vs forwarded admission (§3.5.2). Drives `admission_kind` and the
 /// initial outbox status.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AdmissionKind {
+pub enum AdmissionKind {
     /// The leader is both owner and executor: claim/accept collapse into the
     /// initial `spawned` state.
     Local,
@@ -126,7 +126,7 @@ impl AdmissionKind {
 
 /// Result of `insert_admission_savepoint` (§3.3.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AdmissionOutcome {
+pub enum AdmissionOutcome {
     /// A fresh outbox row was inserted.
     Inserted { outbox_id: i64 },
     /// The idempotency key already existed (ambiguous-commit retry): the prior
@@ -185,7 +185,7 @@ struct LatestOwnerAndCount {
 ///
 /// Writes an owner row only on the `AcquiredLocal` reclaim / re-acquire /
 /// fresh paths; `ObservedForeign` and same-owner reuse write nothing.
-pub(crate) async fn acquire_owner_in_tx<F>(
+pub async fn acquire_owner_in_tx<F>(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
     self_instance_id: &str,
@@ -360,7 +360,7 @@ pub(crate) async fn adopt_owner_from_session_in_tx(
 /// (the target generation already exists — concurrent contention) returns
 /// `CasConflict` so the caller's rollback restores the prior `active` owner,
 /// rather than committing a channel with a superseded-but-not-replaced owner.
-pub(crate) async fn transfer_owner_in_tx(
+pub async fn transfer_owner_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
     expected_owner: &str,
@@ -495,7 +495,7 @@ struct OpenRouteRow {
 /// local, the foreign owner for forwarded). The caller MUST hold the channel
 /// advisory lock so the acquire/observe decision and this stamp are atomic.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn insert_admission_savepoint(
+pub async fn insert_admission_savepoint(
     tx: &mut Transaction<'_, Postgres>,
     payload: &InsertPendingPayload,
     kind: AdmissionKind,

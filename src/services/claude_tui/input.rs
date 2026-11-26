@@ -14,11 +14,11 @@ pub mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
 #[cfg(unix)]
-pub(crate) use preparation_hold::EffectPhase;
+pub use preparation_hold::EffectPhase;
 pub use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use user_receipt::native_read_byte_total;
+pub use user_receipt::native_read_byte_total;
 pub use user_receipt::revalidate_native_pin;
 pub use user_receipt::{PaneIdentity, UserReceipt};
 

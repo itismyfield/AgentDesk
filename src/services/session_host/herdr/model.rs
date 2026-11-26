@@ -41,7 +41,7 @@ fn endpoint_missing() -> HostError {
 
 /// Where Herdr panes live. Every field is explicit; there is no default socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrEndpoint {
+pub struct HerdrEndpoint {
     execution_node: String,
     config_key: String,
     socket_path: PathBuf,

@@ -6,7 +6,7 @@ pub mod recovery;
 
 /// A terminal the provider itself reported, not one a wrapper synthesised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TerminalKind {
+pub enum TerminalKind {
     Done,
     Error,
 }

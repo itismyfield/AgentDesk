@@ -14,9 +14,9 @@ pub mod durable;
 #[cfg(unix)]
 pub(crate) mod editor;
 pub mod file;
-pub(crate) mod grant_store;
+pub mod grant_store;
 pub mod peer;
-pub(crate) mod permit;
+pub mod permit;
 mod types;
 mod witness_codec;
 #[cfg(unix)]

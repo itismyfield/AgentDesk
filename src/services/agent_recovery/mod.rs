@@ -545,7 +545,7 @@ pub fn peek_restore_packet(channel: &str) -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn stage_restore_packet_for_test(channel: &str, packet: &str) {
+pub fn stage_restore_packet_for_test(channel: &str, packet: &str) {
     durable::lock(&durable::coordinator().runtime)
         .pending_restore
         .insert(channel.into(), packet.into());

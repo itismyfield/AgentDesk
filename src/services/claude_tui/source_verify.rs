@@ -78,7 +78,7 @@ impl ClaudeHookSource {
 
 /// A pane's Claude sessions in its current execution, as the binding log's records moved it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SourceHistory {
+pub struct SourceHistory {
     pub current: Option<Visit>,
     pub awaiting: Option<Visit>,
     pub left: BTreeMap<String, Left>,
@@ -88,7 +88,7 @@ pub(crate) struct SourceHistory {
 
 /// `since`: publish time of the hook that moved the pane here, if a hook did; `seen`: the record's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Visit {
+pub struct Visit {
     pub session: String,
     pub pin: Option<SourceId>,
     /// Commit time of the record that pinned `pin`.
@@ -99,7 +99,7 @@ pub(crate) struct Visit {
 
 /// A session the pane moved on from: its pin then, and the time of the record that moved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Left {
+pub struct Left {
     pub pin: Option<SourceId>,
     /// Commit time of the record that pinned `pin`.
     pub pinned_at: Option<DateTime<Utc>>,

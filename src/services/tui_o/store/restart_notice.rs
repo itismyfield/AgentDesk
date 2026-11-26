@@ -98,7 +98,7 @@ pub fn record(root: &Path, intent: &Intent) -> Result<(), String> {
 }
 
 /// This channel's recorded, unsettled episodes; an unreadable file stays for a later pass.
-pub(crate) fn pending(root: &Path, channel: u64) -> Vec<Intent> {
+pub fn pending(root: &Path, channel: u64) -> Vec<Intent> {
     let Ok(entries) = fs::read_dir(dir(root, channel)) else {
         return Vec::new();
     };

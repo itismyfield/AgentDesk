@@ -345,7 +345,7 @@ pub(in crate::services::discord) fn format_subagent_notification_card(
 }
 
 /// Canonical command kind for slash-control dedupe and kind-only notes.
-pub(in crate::services::discord) fn slash_command_control_kind(prompt: &str) -> String {
+pub fn slash_command_control_kind(prompt: &str) -> String {
     let (normalized, _peeled_caveat) = normalize_slash_command_control_prompt(prompt);
     if starts_with_compacted_local_command_stdout(&normalized) {
         return "/compact".to_string();

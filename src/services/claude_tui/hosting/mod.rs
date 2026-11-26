@@ -9,9 +9,9 @@ pub(crate) use followup_support::{
     claude_tui_followup_stranded_prompt_draft_state,
     claude_tui_unknown_transcript_draft_recreate_allowed, claude_tui_warm_followup_submit_plan,
 };
-pub(crate) use host_draft::FollowupHost;
+pub use host_draft::FollowupHost;
 #[cfg(test)]
 pub(crate) use warm_followup::{ClaudeTuiDraftRecoveryOutcome, ClaudeTuiRecreateState};
-pub(crate) use warm_followup::{ClaudeTuiWarmFollowupOutcome, try_claude_tui_warm_followup};
+pub use warm_followup::{ClaudeTuiWarmFollowupOutcome, try_claude_tui_warm_followup};
 #[cfg(unix)]
 pub use warm_followup::{busy_owner_observer, owner_observer};

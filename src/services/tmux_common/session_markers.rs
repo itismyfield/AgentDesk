@@ -110,7 +110,7 @@ pub fn claude_session_auth(session_name: &str, session_id: &str) -> Result<Optio
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn write_tmux_runtime_kind_marker(
+pub fn write_tmux_runtime_kind_marker(
     tmux_session_name: &str,
     runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,
 ) -> Result<(), String> {

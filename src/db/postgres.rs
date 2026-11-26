@@ -629,7 +629,7 @@ fn database_url_override() -> Option<String> {
 /// a missing base into a soft-skip. Every fixture that creates a database must
 /// use this authority; callers that can skip return `None`, while required
 /// lanes still get the hard failure below when `AGENTDESK_REQUIRE_PG=1`.
-pub(crate) fn postgres_test_database_url_base() -> Option<String> {
+pub fn postgres_test_database_url_base() -> Option<String> {
     let override_value = FIXTURE_BASE_OVERRIDE.with(|slot| slot.borrow().clone());
     let base = override_value.unwrap_or_else(|| {
         std::env::var("POSTGRES_TEST_DATABASE_URL_BASE")
@@ -810,7 +810,7 @@ fn lock_test_setup() -> std::sync::MutexGuard<'static, ()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct PostgresTestLifecycleGuard {
+pub struct PostgresTestLifecycleGuard {
     _guard: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -827,7 +827,7 @@ impl Drop for PostgresTestLifecycleGuard {
 
 #[cfg(any(test, feature = "test-support"))]
 #[track_caller]
-pub(crate) fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
+pub fn lock_test_lifecycle() -> PostgresTestLifecycleGuard {
     let mutex = POSTGRES_TEST_LIFECYCLE_LOCK.get_or_init(|| std::sync::Mutex::new(()));
     let guard = crate::test_support::lock_holder::PG_LIFECYCLE_LOCK.hold(|| {
         mutex
@@ -927,7 +927,7 @@ async fn connect_test_pool_with_max_connections_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_with_max_connections(
+pub async fn connect_test_pool_with_max_connections(
     database_url: &str,
     label: &str,
     max_connections: u32,
@@ -938,7 +938,7 @@ pub(crate) async fn connect_test_pool_with_max_connections(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
+pub async fn connect_test_pool(database_url: &str, label: &str) -> Result<PgPool, String> {
     // Test helpers frequently create many isolated pools in parallel on CI.
     // Keep the default test pool lean so PG-backed route tests do not exhaust
     // the shared runner database just by setting up fixtures.
@@ -959,7 +959,7 @@ pub(crate) async fn connect_test_pool(database_url: &str, label: &str) -> Result
 // the awaits would reintroduce the CI race this lock was added to fix. Test-only.
 #[allow(clippy::await_holding_lock)]
 /// Created through `test_db_reclaim`, whose first-create sweep reclaims databases of provably dead test processes.
-pub(crate) async fn create_test_database(
+pub async fn create_test_database(
     admin_url: &str,
     database_name: &str,
     label: &str,
@@ -1194,7 +1194,7 @@ async fn connect_test_pool_and_migrate_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_and_migrate(
+pub async fn connect_test_pool_and_migrate(
     database_url: &str,
     label: &str,
 ) -> Result<PgPool, String> {
@@ -1361,7 +1361,7 @@ async fn drop_test_database_with_options(
 // `create_test_database` — `lock_test_setup()` is held across the teardown
 // awaits to keep concurrent PG test DB drops from racing. Test-only.
 #[allow(clippy::await_holding_lock)]
-pub(crate) async fn drop_test_database(
+pub async fn drop_test_database(
     admin_url: &str,
     database_name: &str,
     label: &str,

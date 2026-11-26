@@ -210,7 +210,7 @@ fn bump_generation_mtime_past_previous(
 /// best-effort: see `bump_generation_mtime_past_previous` for what it does and
 /// does not guarantee.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn stamp_session_generation_marker(tmux_session_name: &str) -> Option<i64> {
+pub fn stamp_session_generation_marker(tmux_session_name: &str) -> Option<i64> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         stamp_session_generation_marker_under_source_authority(authority, tmux_session_name)
     })
@@ -311,7 +311,7 @@ pub fn stamp_spawn_markers(
 
 /// Create a fresh nonce for legacy callers; production spawns use the combined gate.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
+pub fn write_spawn_nonce(tmux_session_name: &str) -> std::io::Result<String> {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         write_spawn_nonce_value(
             authority,

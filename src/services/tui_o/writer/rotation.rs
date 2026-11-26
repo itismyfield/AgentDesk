@@ -870,7 +870,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod probe {
+pub mod probe {
     //! Reads a live reader's rotation start, which no store row or alarm shows.
     use super::{Instant, SourceId, Sources};
 

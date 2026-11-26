@@ -202,7 +202,7 @@ pub fn herdr_claim_admission(
 
 /// A launch installed execution `nonce` on `logical`: it is held until a reconcile admits it, and
 /// an earlier execution's admission ends here.
-pub(crate) fn install_herdr_execution(logical: &str, nonce: &str) {
+pub fn install_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| {
         executions.insert(logical.to_owned(), (nonce.to_owned(), false));
     });

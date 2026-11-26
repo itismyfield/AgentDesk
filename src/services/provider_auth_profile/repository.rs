@@ -17,7 +17,7 @@ pub fn set_provider_primary_profile(provider: &str, profile_id: &str) -> Result<
     set_provider_primary_profile_at(&org_yaml_path()?, provider, profile_id)
 }
 
-pub(crate) fn set_provider_primary_profile_at(
+pub fn set_provider_primary_profile_at(
     org_path: &Path,
     provider: &str,
     profile_id: &str,
@@ -54,7 +54,7 @@ pub fn append_provider_auth_profile(
     append_provider_auth_profile_at(&org_yaml_path()?, profile_id, def)
 }
 
-pub(crate) fn append_provider_auth_profile_at(
+pub fn append_provider_auth_profile_at(
     org_path: &Path,
     profile_id: &str,
     def: ProviderAuthProfileDef,
@@ -80,7 +80,7 @@ pub fn set_agent_auth_profile(role_id: &str, auth_profile: Option<&str>) -> Resu
     set_agent_auth_profile_at(&org_yaml_path()?, role_id, auth_profile)
 }
 
-pub(crate) fn set_agent_auth_profile_at(
+pub fn set_agent_auth_profile_at(
     org_path: &Path,
     role_id: &str,
     auth_profile: Option<&str>,
@@ -129,7 +129,7 @@ pub fn set_channel_auth_profile(
     set_channel_auth_profile_at(&org_yaml_path()?, channel_id, auth_profile)
 }
 
-pub(crate) fn set_channel_auth_profile_at(
+pub fn set_channel_auth_profile_at(
     org_path: &Path,
     channel_id: &str,
     auth_profile: Option<&str>,
@@ -192,7 +192,7 @@ pub fn remove_provider_auth_profile(profile_id: &str, provider: &str) -> Result<
     remove_provider_auth_profile_at(&org_yaml_path()?, profile_id, provider)
 }
 
-pub(crate) fn remove_provider_auth_profile_at(
+pub fn remove_provider_auth_profile_at(
     org_path: &Path,
     profile_id: &str,
     provider: &str,

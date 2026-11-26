@@ -1,5 +1,5 @@
 mod local;
-pub(crate) mod memento;
+pub mod memento;
 mod memento_throttle;
 pub mod memento_writer_guard;
 mod runtime_state;
@@ -14,7 +14,7 @@ use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use memento::with_memento_test_endpoint;
+pub use memento::with_memento_test_endpoint;
 pub use memento::{
     MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_snapshot,
     resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,

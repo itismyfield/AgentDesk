@@ -27,13 +27,13 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const READER_RETENTION_GRACE: Duration = Duration::from_secs(2 * 3600);
 
 /// Sends one alarm line to the operator channel.
-pub(crate) trait AlarmNotifier: Send + Sync {
+pub trait AlarmNotifier: Send + Sync {
     fn notify(&self, alert_channel: u64, alarm: AlarmNotification, attempt: NotificationAttempt);
 }
 
 /// History and current health conditions are independent of operator enqueue attempts.
 #[derive(Default)]
-pub(crate) struct AlarmHealth {
+pub struct AlarmHealth {
     raised: Mutex<BTreeSet<String>>,
     notifications: Mutex<HashMap<String, NotificationState>>,
     active: Mutex<BTreeSet<String>>,
@@ -50,7 +50,7 @@ enum NotificationState {
     Existing,
 }
 
-pub(crate) struct AlarmNotification {
+pub struct AlarmNotification {
     channel: u64,
     kind: &'static str,
     incident: Option<String>,
@@ -58,7 +58,7 @@ pub(crate) struct AlarmNotification {
 }
 
 /// Holds one incident's slot through retries; cancellation releases it without reporting success.
-pub(crate) struct NotificationAttempt {
+pub struct NotificationAttempt {
     health: Arc<AlarmHealth>,
     reason: String,
     finished: bool,
@@ -199,7 +199,7 @@ pub fn health_reasons() -> Vec<String> {
 }
 
 /// The channel's writer posted again under an owned gateway, so its pause is over.
-pub(crate) fn gateway_resumed(channel: u64) {
+pub fn gateway_resumed(channel: u64) {
     PROCESS_HEALTH.resume_gateway(channel);
 }
 

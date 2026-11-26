@@ -1,8 +1,8 @@
 //! A Claude turn on a Herdr pane behind the default-off `runtime.herdr_turn_enabled` switch: one
 //! gated prompt after SessionStart, never resent or relaunched; an unclear send holds later ones.
 
-pub(crate) mod first_input;
-pub(crate) mod handoff;
+pub mod first_input;
+pub mod handoff;
 pub mod hold_record;
 pub(crate) mod hold_resolve;
 use handoff::launched_source;
@@ -204,7 +204,7 @@ pub trait HerdrTurnPorts {
 pub type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 /// The source a prompt goes to.
-pub(crate) struct Attached {
+pub struct Attached {
     pub(crate) nonce: String,
     pub(crate) session_id: String,
     pub(crate) transcript: PathBuf,
@@ -217,7 +217,7 @@ pub(crate) struct Attached {
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_prompt_for_tests(
+pub fn owned_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
     (session_id, transcript): (&str, PathBuf),
@@ -238,7 +238,7 @@ pub(crate) fn owned_prompt_for_tests(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn observe_cold_prompt_for_tests(
+pub fn observe_cold_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
     (session_id, transcript): (&str, PathBuf),
@@ -603,7 +603,7 @@ pub fn input_held(nonce: &str) -> Result<bool, String> {
 }
 
 /// Refuses the turn while an earlier prompt may sit in the composer; nothing here clears it.
-pub(crate) fn not_held(nonce: &str) -> Result<(), String> {
+pub fn not_held(nonce: &str) -> Result<(), String> {
     match input_held(nonce)? {
         false => Ok(()),
         true => Err(format!(
@@ -620,7 +620,7 @@ fn legacy_not_held(nonce: &str) -> Result<(), String> {
 }
 
 /// Recorded and synced before the first write, so even a crash mid-send leaves it.
-pub(crate) fn hold(nonce: &str) -> Result<PathBuf, String> {
+pub fn hold(nonce: &str) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = hold_path(nonce)?;
     let written = std::fs::create_dir_all(path.parent().unwrap_or(&path))
@@ -699,7 +699,7 @@ fn session_started(
 }
 
 /// The gated pane of a stored execution on this node's registered endpoint.
-pub(crate) fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
+pub fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
     herdr_endpoints()
         .target(record)
         .ok_or_else(|| "herdr turn: the execution is not on a registered endpoint".into())
@@ -867,7 +867,7 @@ impl HerdrTurnLines {
 
 /// The typed frame the Herdr reader would send for `transcript` read from `start`, for admission tests.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn herdr_terminal_frame(
+pub fn herdr_terminal_frame(
     transcript: &str,
     start: u64,
     logical: &str,
@@ -960,7 +960,7 @@ mod coldstop_input_tests;
 #[cfg(all(test, unix))]
 mod boot_host_tests;
 
-pub(crate) mod composer;
+pub mod composer;
 
 thread_local! { static OWNER_BOUND_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 pub fn take_owner_bound_failure() -> bool {

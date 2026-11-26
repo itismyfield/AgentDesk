@@ -6,7 +6,7 @@ pub mod bounded_tmux;
 pub mod human_frame;
 pub mod input_key;
 pub(crate) mod submission;
-pub(crate) mod submission_tmux;
+pub mod submission_tmux;
 
 #[cfg(test)]
 mod ansi_tests;

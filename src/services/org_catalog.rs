@@ -2,7 +2,7 @@
 mod auth_projection;
 mod document;
 
-pub(crate) use auth_projection::{
+pub use auth_projection::{
     AuthCatalogSnapshot, PrimaryProfileMap, ProfileBindingInput, configured_auth_profile,
     provider_primary_profile,
 };

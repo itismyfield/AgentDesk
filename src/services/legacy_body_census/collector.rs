@@ -12,7 +12,7 @@ const MAX_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_FILE: u64 = 16 * 1024 * 1024;
 
 #[derive(Default)]
-pub(crate) struct Collector {
+pub struct Collector {
     closed: BTreeMap<String, (u64, String)>,
     known_violation: Option<Value>,
     previous_cut: Option<i64>,

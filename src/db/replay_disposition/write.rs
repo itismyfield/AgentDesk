@@ -86,7 +86,7 @@ async fn settle(
 }
 
 /// Classifies the attempt as an ordinary terminal; only then may ordinary completion or retry run.
-pub(crate) async fn classify_normal(
+pub async fn classify_normal(
     pool: &PgPool,
     attempt: &ExactAttempt,
     terminal: &TerminalEvidence,
@@ -111,7 +111,7 @@ impl NoEffectAck {
     }
 }
 
-pub(crate) async fn classify_no_effect(
+pub async fn classify_no_effect(
     pool: &PgPool,
     attempt: ExactAttempt,
     evidence: &NoEffectEvidence,
@@ -130,7 +130,7 @@ pub(crate) async fn classify_no_effect(
 
 /// Holds the attempt with its reason and preserved result; the receipt keeps blocking either way.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn withhold(
+pub async fn withhold(
     pool: &PgPool,
     attempt: &ExactAttempt,
     reason: &str,
@@ -201,7 +201,7 @@ impl std::fmt::Debug for NoEffectAck {
 }
 
 /// Preserves one receipt while its delivery loses ownership; the caller holds the channel lock.
-pub(crate) async fn withhold_owner_loss_on_tx(
+pub async fn withhold_owner_loss_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     receipt_id: i64,
 ) -> Result<(), sqlx::Error> {

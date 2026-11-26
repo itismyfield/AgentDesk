@@ -16,7 +16,7 @@ struct Observed {
 }
 static OBSERVED: OnceLock<Mutex<Observed>> = OnceLock::new();
 
-pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
+pub fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
         let capped = |bytes| {
             String::from_utf8_lossy(bytes)

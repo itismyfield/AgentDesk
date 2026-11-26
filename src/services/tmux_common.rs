@@ -7,7 +7,7 @@ mod session_markers;
 pub mod spawn_markers;
 pub mod unified_thread;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use session_markers::write_tmux_runtime_kind_marker;
+pub use session_markers::write_tmux_runtime_kind_marker;
 pub use session_markers::{
     AuthMarkers, advance_claude_session_auth, claude_session_auth,
     resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
@@ -43,9 +43,7 @@ thread_local! {
 struct SourceAuthorityContention(String);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn source_authority_contention_key_for_tests(
-    operation: impl FnOnce(),
-) -> Option<String> {
+pub fn source_authority_contention_key_for_tests(operation: impl FnOnce()) -> Option<String> {
     SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(true));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation));
     SOURCE_AUTHORITY_CONTENTION_ARMED.with(|armed| armed.set(false));
@@ -1053,7 +1051,7 @@ const SESSIONS_SUBDIR: &str = "runtime/sessions";
 pub const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
 pub const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
-pub(crate) const CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT: &str = "codex-tui-rollout.json";
+pub const CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT: &str = "codex-tui-rollout.json";
 pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
 pub const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
 pub(crate) const TMUX_CHANNEL_TEMP_EXT: &str = "channel";

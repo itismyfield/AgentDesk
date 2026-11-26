@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub mod decision_gate;
 pub mod decisions;
 mod runtime_settings;
-pub(crate) mod runtime_validation;
+pub mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 
 mod agent_memory;

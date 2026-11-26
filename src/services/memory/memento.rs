@@ -60,7 +60,7 @@ tokio::task_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn with_memento_test_endpoint<T>(
+pub async fn with_memento_test_endpoint<T>(
     endpoint: String,
     run: impl std::future::Future<Output = T>,
 ) -> T {

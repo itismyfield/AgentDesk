@@ -69,7 +69,7 @@ impl Drop for ReceiptEnd {
     }
 }
 #[cfg(unix)]
-pub(crate) fn seal_on_exit(session: &str) -> ReceiptEnd {
+pub fn seal_on_exit(session: &str) -> ReceiptEnd {
     ReceiptEnd {
         owner: OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone())),
         session: session.into(),
@@ -125,7 +125,7 @@ pub(crate) fn capture<R>(run: impl FnOnce() -> R) -> (R, Option<InputRun>) {
     let (result, scope) = scoped(owner, run);
     (result, scope.result)
 }
-pub(crate) fn capture_preparation(
+pub fn capture_preparation(
     run: impl FnOnce() -> Result<(), SubmissionError>,
 ) -> Result<(), SubmissionError> {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
@@ -204,7 +204,7 @@ pub(crate) fn set_receipt_session_id(sid: &str) {
         }
     });
 }
-pub(crate) fn receipt(session: &str, prompt: &str) {
+pub fn receipt(session: &str, prompt: &str) {
     let (owner, sid, fresh_path) = OWNER.with(|slot| {
         let scope = slot.borrow();
         (
@@ -236,7 +236,7 @@ pub(crate) fn receipt(session: &str, prompt: &str) {
 }
 
 #[cfg(unix)]
-pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
+pub fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
     set_fresh_receipt_source(path, sid);
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner
@@ -264,13 +264,13 @@ pub(crate) fn set_fresh_receipt_source(path: &str, sid: &str) {
         }
     });
 }
-pub(crate) fn begin() {
+pub fn begin() {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner {
         owner.started();
     }
 }
-pub(crate) fn finish(run: &InputRun) {
+pub fn finish(run: &InputRun) {
     if let Some(sink) = RECEIPT_SINK.with(|slot| slot.borrow().clone()) {
         sink.finished(run);
     }

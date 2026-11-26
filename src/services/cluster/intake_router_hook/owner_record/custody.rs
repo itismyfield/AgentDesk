@@ -31,14 +31,14 @@ fn canonical(
     }
 }
 
-pub(crate) struct StageRequest<'a> {
+pub struct StageRequest<'a> {
     pub payload: &'a InsertPendingPayload,
     pub home_revision: i64,
     pub wait_generation: Option<i64>,
     pub grace_seconds: i32,
 }
 
-pub(crate) async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i64, sqlx::Error> {
+pub async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i64, sqlx::Error> {
     let p = request.payload;
     let id = OwnerIdentity::new(&p.provider, &p.channel_id);
     if request.grace_seconds < 0 {
@@ -120,10 +120,10 @@ pub(crate) async fn stage(pool: &PgPool, request: StageRequest<'_>) -> Result<i6
     Ok(outbox_id)
 }
 
-pub(crate) use crate::db::channel_custody_lock::lock;
+pub use crate::db::channel_custody_lock::lock;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SwitchReadiness {
+pub enum SwitchReadiness {
     Wait,
     NormalEnd,
     Unavailable,

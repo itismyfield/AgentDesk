@@ -63,7 +63,7 @@ pub(crate) fn with_current_scope_nonce<T>(
     })
 }
 
-pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
+pub fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     let tmux = input_target(channel)?;
     let observation = crate::services::discord::codex_absence::readiness(channel, &tmux)?;
     #[cfg(unix)]
@@ -78,7 +78,7 @@ pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     (reason.captured().context.channel_id == Some(channel)).then_some(reason)
 }
 
-pub(crate) fn input_hold_reason_for_channel(channel: u64) -> &'static str {
+pub fn input_hold_reason_for_channel(channel: u64) -> &'static str {
     let Some(tmux) = input_target(channel) else {
         return "fresh_evidence_missing";
     };
@@ -110,7 +110,7 @@ fn input_reason(
     absent_open::capture_under(authority, observation).map(FreshReason::ExactAbsence)
 }
 
-pub(crate) fn successor_unproved_for_channel(channel: u64) -> bool {
+pub fn successor_unproved_for_channel(channel: u64) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };

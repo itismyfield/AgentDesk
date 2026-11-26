@@ -226,7 +226,7 @@ fn own_turn_step(
 }
 
 /// Bytes one backstop poll reads of a held turn; a longer turn is read on at later polls.
-pub(crate) const OWN_TURN_POLL_BUDGET: u64 = 256 * 1024;
+pub const OWN_TURN_POLL_BUDGET: u64 = 256 * 1024;
 
 /// The backstop's read of a held turn from its own input start.
 #[derive(Default)]

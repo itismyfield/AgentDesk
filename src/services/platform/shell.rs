@@ -217,7 +217,7 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
+pub fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {
         fn drop(&mut self) {

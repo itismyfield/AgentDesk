@@ -6,7 +6,7 @@
 pub(crate) mod root_replaced;
 
 #[path = "herdr_gate/legacy_return.rs"]
-pub(crate) mod legacy_return;
+pub mod legacy_return;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

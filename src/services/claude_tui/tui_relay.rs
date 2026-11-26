@@ -215,7 +215,7 @@ pub fn router() -> Router {
     router_with_send_backend(Arc::new(TmuxSendBackend))
 }
 
-pub(crate) fn router_with_send_backend(backend: Arc<dyn SendBackend>) -> Router {
+pub fn router_with_send_backend(backend: Arc<dyn SendBackend>) -> Router {
     Router::new()
         .route("/tui/send", post(handle_send))
         .route("/tui/wait", post(handle_wait))
@@ -633,7 +633,7 @@ fn draft_recovery_hold_json() -> (StatusCode, Json<Value>) {
 /// auth-boundary assertions live under `crate::server` because middleware
 /// composition is a server-layer responsibility (#3311).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct FakeSendBackend;
+pub struct FakeSendBackend;
 
 #[cfg(any(test, feature = "test-support"))]
 impl SendBackend for FakeSendBackend {

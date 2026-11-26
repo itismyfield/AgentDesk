@@ -102,7 +102,7 @@ pub(crate) enum TaskCompletionV1Rejection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TaskCompletionV1Admission {
+pub enum TaskCompletionV1Admission {
     Legacy,
     TypedCandidate(TaskCompletionV1),
     Rejected(TaskCompletionV1Rejection),
@@ -373,7 +373,7 @@ impl<'de> Visitor<'de> for AdmissionVisitor<'_> {
     }
 }
 
-pub(crate) fn admit_raw(line: &str) -> TaskCompletionV1Admission {
+pub fn admit_raw(line: &str) -> TaskCompletionV1Admission {
     let mut probe = AdmissionProbe::default();
     let mut deserializer = serde_json::Deserializer::from_str(line);
     let parsed = deserializer.deserialize_any(AdmissionVisitor { probe: &mut probe });

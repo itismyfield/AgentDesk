@@ -19,7 +19,7 @@ mod capture_tests;
 #[cfg(test)]
 mod overflow_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_capture;
+pub mod test_capture;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -194,7 +194,7 @@ impl EventLog {
     }
 }
 
-pub(crate) static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
+pub static GLOBAL_EVENT_LOG: OnceLock<Arc<EventLog>> = OnceLock::new();
 static FLUSHER_STARTED: OnceLock<()> = OnceLock::new();
 
 pub fn global() -> Arc<EventLog> {

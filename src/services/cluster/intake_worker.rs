@@ -245,7 +245,7 @@ impl Default for IntakeWorkerConfig {
 /// Outcome of running a single claimed row through the executor. Used
 /// by the loop to decide the next sleep interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TickOutcome {
+pub enum TickOutcome {
     /// No row was eligible for claim. Loop should sleep longer.
     QueueEmpty,
     /// Loop claimed a row and the executor ran (whether it succeeded
@@ -267,7 +267,7 @@ pub(crate) enum TickOutcome {
 ///
 /// This is the unit a poll loop schedules — extracted so tests can
 /// drive single-tick scenarios without spawning a long-running task.
-pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(
+pub async fn run_intake_worker_tick<S: IntakeHost>(
     pool: &PgPool,
     shared: &Arc<S>,
     target_instance_id: &str,
@@ -959,4 +959,4 @@ mod drain_tests;
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "intake_worker/test_executor.rs"]
-pub(crate) mod test_executor;
+pub mod test_executor;

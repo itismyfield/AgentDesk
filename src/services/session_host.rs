@@ -2,7 +2,7 @@
 //! create, terminate and restart-read effects on it. Admission, identity and cancel routing stay
 //! with owners.
 
-pub(crate) mod herdr {
+pub mod herdr {
     #[cfg(unix)]
     pub mod autostart;
     pub(crate) mod contract;
@@ -22,28 +22,28 @@ pub(crate) mod herdr {
 }
 mod consumer_guard;
 mod create;
-pub(crate) use create::HostCreate;
+pub use create::HostCreate;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use create::create_in_effect;
-pub(crate) mod herdr_gate;
-pub(crate) mod herdr_host;
-pub(crate) mod herdr_registry;
+pub mod herdr_gate;
+pub mod herdr_host;
+pub mod herdr_registry;
 pub mod host_decision;
 pub mod surface_policy;
 pub mod thread_host;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use herdr_registry::HerdrRegistry;
+pub use herdr_registry::HerdrRegistry;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod herdr_socket_rig_tests;
+pub mod herdr_socket_rig_tests;
 pub mod legacy_collapse;
-pub(crate) mod model;
+pub mod model;
 pub mod operation_policy;
 mod process_host;
 // Only unix keeps a Herdr execution to read again after a restart.
 #[cfg(unix)]
 mod recover;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use recover::{
+pub use recover::{
     HerdrCurrentExecution, HerdrMarkerEvidence, compare_herdr_execution, recover_in_effect,
 };
 #[cfg(unix)]
@@ -60,20 +60,20 @@ pub(crate) use submit::SubmitSpy;
 pub use submit::WrapperFrame;
 mod termination;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support;
+pub mod test_support;
 mod tmux_host;
-pub(crate) mod traits;
+pub mod traits;
 
-pub(crate) use herdr::contract::ServerWitness;
+pub use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
 #[cfg(unix)]
 pub use herdr::autostart;
 #[cfg(unix)]
 pub use herdr::managed_config;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use herdr::model::HerdrEndpoint;
+pub use herdr::model::HerdrEndpoint;
 pub use herdr::policy;
-pub(crate) use herdr_gate::legacy_return;
+pub use herdr_gate::legacy_return;
 pub use herdr_gate::{restore_execution_fence, try_notice_fence};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
@@ -86,11 +86,11 @@ pub use herdr_registry::registry as herdr_endpoints;
 // Dormant: activation constructs it for a configured endpoint.
 #[cfg(unix)]
 #[cfg_attr(not(test), allow(unused_imports))]
-pub(crate) use herdr::launch_host::SocketHerdrLaunchHost;
+pub use herdr::launch_host::SocketHerdrLaunchHost;
 #[cfg(unix)]
 pub use herdr::launch_host::{GrantedServer, ReplacedServer};
-pub(crate) use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
-pub(crate) use herdr::pane_probe::{EvidenceGap, PaneOccupant, START_SLACK};
+pub use herdr::observe::{RESTORE_RESUME_NOT_OFF, RestoreResume, RestoreUnverified};
+pub use herdr::pane_probe::{EvidenceGap, PaneOccupant, START_SLACK};
 #[cfg(unix)]
 pub use herdr::provenance::{StartIdentity, boot_time};
 pub use model::{

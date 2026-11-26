@@ -7,7 +7,7 @@ use crate::services::session_host::{HostedRuntimeLocator, InteractiveSessionHost
 mod contract;
 
 use contract::TerminateProof;
-pub(crate) use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
+pub use contract::{HostTerminateEffect, HostTerminateWarrant, TERMINATE_OP};
 
 /// The execution-identity owner's comparison for the target, as it returned it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,7 +43,7 @@ impl HostTerminateWarrant<'_> {
     }
 }
 
-pub(crate) fn terminate_hosted_session(
+pub fn terminate_hosted_session(
     host: &dyn InteractiveSessionHost,
     warrant: HostTerminateWarrant<'_>,
 ) -> HostTerminateEffect {

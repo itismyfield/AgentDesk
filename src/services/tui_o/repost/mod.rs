@@ -1,13 +1,13 @@
 //! Re-posting a piece whose first post went unconfirmed and is later found absent, within a fixed
 //! per-piece budget.
 
-pub(crate) mod admission;
-pub(crate) mod dispatch;
-pub(crate) mod identity;
+pub mod admission;
+pub mod dispatch;
+pub mod identity;
 pub mod projection;
-pub(crate) mod provenance;
+pub mod provenance;
 pub mod runner;
-pub(crate) mod send;
+pub mod send;
 
 // Discord side of `send`, sharing the writer's transport.
 #[path = "../../discord/outbound/o_writer_repost_io.rs"]
@@ -15,7 +15,7 @@ pub mod io;
 
 // The shared PostgreSQL budget.
 #[path = "../../../db/o_piece_attempts.rs"]
-pub(crate) mod o_piece_attempts;
+pub mod o_piece_attempts;
 #[path = "../../../db/o_piece_delivery.rs"]
 pub mod o_piece_delivery;
 #[cfg(test)]

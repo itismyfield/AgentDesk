@@ -132,7 +132,7 @@ impl Artifact {
     }
 }
 
-pub(crate) async fn enqueue_on_tx(
+pub async fn enqueue_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     message: crate::services::message_outbox::OutboxMessage<'_>,
     origin: &Artifact,

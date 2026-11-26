@@ -73,7 +73,7 @@ pub(crate) fn set_pane_liveness_override_for_tests(
 /// not of this helper. The guard clears on unwind.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use = "the override is cleared when this guard is dropped"]
-pub(crate) struct PaneLivenessOverrideGuard {
+pub struct PaneLivenessOverrideGuard {
     tmux_session_name: String,
 }
 

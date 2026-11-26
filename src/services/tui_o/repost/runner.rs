@@ -32,11 +32,11 @@ pub(crate) const GRANT_TTL: Duration = Duration::from_secs(180);
 
 /// The O side's proof that an approval is current: the key's latest disposition is this
 /// rejection's Authorized, the id matches and is unconsumed, and key and payload are the same.
-pub(crate) trait ApprovalCheck {
+pub trait ApprovalCheck {
     fn current(&self, approval_id: &str, approved: &ApprovedRejected) -> Result<(), String>;
 }
 
-pub(crate) enum DispatchIntent<'a> {
+pub enum DispatchIntent<'a> {
     Auto(Box<NotFoundEvidence>),
     OperatorResume {
         approval_id: String,
@@ -48,7 +48,7 @@ pub(crate) enum DispatchIntent<'a> {
 
 /// What the O consumer does with an admission; each variant has exactly one step.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TurnStep {
+pub enum TurnStep {
     Dispatch,
     Legacy,
     Wait,
@@ -56,7 +56,7 @@ pub(crate) enum TurnStep {
     Stopped,
 }
 
-pub(crate) fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
+pub fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
     match admission {
         Admission::Granted { .. } => TurnStep::Dispatch,
         Admission::LegacyOff => TurnStep::Legacy,
@@ -82,7 +82,7 @@ pub(crate) struct TickReport {
 }
 
 #[derive(Debug)]
-pub(crate) enum Tick {
+pub enum Tick {
     Ran(TickReport),
 }
 
@@ -300,14 +300,14 @@ impl Runner {
 }
 
 /// What a channel writer lends its re-post turn beyond one dispatch.
-pub(crate) trait TurnWriter: RepostWriter + Send {
+pub trait TurnWriter: RepostWriter + Send {
     fn channel(&self) -> u64;
     fn ledger(&mut self) -> &LedgerState;
     /// Whether a re-post request may still leave; read by every dispatch's wire guard.
     fn set_live(&self, live: bool);
 }
 
-pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+pub type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The re-post side of one channel's writer, run only from that writer's actor turn, so it never
 /// sends beside the writer's own posts.

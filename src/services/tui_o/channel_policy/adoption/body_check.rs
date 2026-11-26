@@ -12,7 +12,7 @@ pub(super) fn note_release(candidate: &Candidate) {
 
 /// The write that carried content to a sink.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SinkOp {
+pub enum SinkOp {
     Post,
     Patch,
 }
@@ -20,7 +20,7 @@ pub(crate) enum SinkOp {
 /// One selected channel's adoption, watched against a distinctive part of the assistant body its
 /// scenario would send. Clones share the watch, so a sink on another task or thread can hold one.
 #[derive(Clone, Debug)]
-pub(crate) struct BodyCheck {
+pub struct BodyCheck {
     channel: u64,
     candidate: Candidate,
     body: String,

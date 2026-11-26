@@ -15,7 +15,7 @@ mod fresh_admission;
 pub(crate) mod herdr_bootstrap;
 #[cfg(test)]
 pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
-pub(crate) use fresh_admission::{
+pub use fresh_admission::{
     FRESH_SCOPE_BUSY, fresh_scope_eligible, fresh_scope_pending, input_hold_reason_for_channel,
     input_reason_for_channel, successor_unproved_for_channel, with_current_scope_nonce,
     with_fresh_scope,
@@ -135,7 +135,7 @@ fn vacant_under(authority: &TmuxSourceAuthority<'_>) -> bool {
     unowned && dead(tmux)
 }
 
-pub(crate) fn vacant(tmux: &str) -> bool {
+pub fn vacant(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, vacant_under)
 }
 
@@ -174,7 +174,7 @@ pub fn absent_capture(
     })
 }
 
-pub(crate) fn absent_matches(
+pub fn absent_matches(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
     captured: &Captured,

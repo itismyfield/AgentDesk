@@ -38,7 +38,7 @@ pub fn health_tmux_command(
 }
 
 /// `prepare` yields the `tmux -u` command; a cold PATH yields `None` and nothing is spawned.
-pub(crate) fn health_tmux_command_using(
+pub fn health_tmux_command_using(
     query: HealthTmuxQuery,
     session: &str,
     prepare: impl FnOnce() -> Option<Command>,

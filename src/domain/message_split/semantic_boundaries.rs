@@ -194,7 +194,7 @@ pub fn semantic_sentence_split_boundary(text: &str) -> Option<usize> {
     semantic_sentence_split_boundary_from(text, false)
 }
 
-pub(crate) fn message_split_boundary(
+pub fn message_split_boundary(
     remaining: &str,
     safe_end: usize,
     starts_in_code_block: bool,

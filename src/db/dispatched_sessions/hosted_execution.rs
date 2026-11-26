@@ -17,9 +17,9 @@ use crate::db::dispatched_session_canonical_identity::{
 #[path = "hosted_execution/http_force.rs"]
 pub mod http_force;
 #[path = "hosted_execution/legacy_return.rs"]
-pub(crate) mod legacy_return;
+pub mod legacy_return;
 
-pub(crate) const HOSTED_EXECUTION_SCHEMA: u32 = 1;
+pub const HOSTED_EXECUTION_SCHEMA: u32 = 1;
 const HERDR_HOST: &str = "herdr";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,7 +402,7 @@ pub enum HostedTransitionError {
 }
 
 /// Install a new incarnation's Pending record over a legacy row or a retired older nonce.
-pub(crate) async fn install_pending_pg(
+pub async fn install_pending_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     next: HostedExecution,
@@ -424,7 +424,7 @@ pub(crate) async fn record_pane_location_pg(
 }
 
 /// Fill the pane location and launch evidence once, only for the same Pending nonce.
-pub(crate) async fn record_launch_evidence_pg(
+pub async fn record_launch_evidence_pg(
     pool: &PgPool,
     observed: &HostedObservation,
     owner: &HostedOwner,

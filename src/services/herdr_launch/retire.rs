@@ -68,7 +68,7 @@ pub async fn observed(
 }
 
 /// The hold goes only after this observation's CAS wrote Retired.
-pub(crate) async fn on_reading(
+pub async fn on_reading(
     pool: &PgPool,
     row: &HostedObservation,
     record: &HostedExecution,
