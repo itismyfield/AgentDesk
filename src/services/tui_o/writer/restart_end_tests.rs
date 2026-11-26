@@ -68,6 +68,17 @@ impl DiscordPort for Port {
     fn bot_id(&self) -> u64 {
         BOT
     }
+    fn post_unit_attachment(
+        &self,
+        channel: u64,
+        caption: String,
+        _: Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+        _: UnitKind,
+        _: Vec<u8>,
+        _: String,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        self.post(channel, caption)
+    }
     fn post(&self, _: u64, content: String) -> impl Future<Output = PostOutcome> + Send + 'static {
         let message = self.record_post(content);
         let after_post = self.after_post.lock().unwrap().take();
@@ -176,10 +187,18 @@ impl Harness {
         Self::build(channel, false)
     }
     fn build(channel: u64, late_end: bool) -> Self {
+        let new = [prompt("new-question", "2026-11-12T00:01:00Z"), body("new-body", NEW_BODY),
+            native(json!({"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-12T00:01:07Z"}))].concat();
+        let opener = prompt("old-question", "2026-11-12T00:00:00Z");
+        let tail = body("old-body", OLD_BODY);
+        Self::build_with(channel, late_end, [opener, tail, new], 0)
+    }
+    /// `[opener, rest of the old turn, rows after the verified end]`; capture starts at `from`.
+    fn build_with(channel: u64, late_end: bool, rows: [Vec<u8>; 3], from: usize) -> Self {
+        let [opener, tail, new] = rows;
         let runtime = tempfile::tempdir().unwrap();
         let path = runtime.path().join("native.jsonl");
-        let opener = prompt("old-question", "2026-11-12T00:00:00Z");
-        let old = [opener.clone(), body("old-body", OLD_BODY)].concat();
+        let old = [opener.clone(), tail].concat();
         std::fs::write(&path, &old).unwrap();
         let source = source_id_for("same-native-session", &path).unwrap();
         let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, runtime.path())
@@ -192,8 +211,8 @@ impl Harness {
                     channel,
                     sources: vec![InitSource {
                         source_id: source.clone(),
-                        delivery_start: 0,
-                        prefix_hash: hex::encode(Sha256::digest(b"")),
+                        delivery_start: from as u64,
+                        prefix_hash: hex::encode(Sha256::digest(&old[..from])),
                     }],
                     initial_anchor: 100,
                     build_digest: "fixture".into(),
@@ -214,8 +233,6 @@ impl Harness {
             open_after: opener.len() as u64,
             native_turn_id: Some("old-question".into()),
         };
-        let new = [prompt("new-question", "2026-11-12T00:01:00Z"), body("new-body", NEW_BODY),
-            native(json!({"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-12T00:01:07Z"}))].concat();
         let port = Arc::<Port>::default();
         let publish = {
             let runtime = runtime.path().to_owned();
@@ -537,4 +554,79 @@ async fn a_warm_actor_keeps_readiness_while_restart_storage_blocks_capture() {
         "unverified new native records stay uncaptured"
     );
     assert_eq!(harness.channel().ledger().next_serial(), 1);
+}
+
+fn image_result(uuid: &str, call: &str) -> Vec<u8> {
+    use base64::Engine as _;
+    let data = base64::engine::general_purpose::STANDARD.encode(b"\x89PNG\r\n\x1a\nX");
+    native(
+        json!({"type":"user","uuid":uuid,"message":{"role":"user","content":[{"type":"tool_result",
+        "tool_use_id":call,"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":data}}]}]}}),
+    )
+}
+
+/// Capture starts after the old opener, so the projection cannot apply the verified end; the
+/// image turn restored from its span still closes there and the new prompt's image is its own.
+#[tokio::test(start_paused = true)]
+async fn verified_end_without_opener_closes_the_restored_image_turn() {
+    let channel = 810_921_105;
+    let _live = crate::config_live_reload::test_live_guard(
+        crate::config::test_env_lock::acquire_shared_test_env_lock(),
+    );
+    crate::config_live_reload::install(crate::config::Config {
+        tui_o: Some(crate::services::tui_o::shadow::tap::TuiOConfig::default()),
+        ..crate::config::Config::default()
+    });
+    crate::services::tui_prompt_dedupe::codex_verified::provenance::admission::set_ready_for_tests(
+        channel, false,
+    );
+    let opener = prompt("old-question", "2026-11-12T00:00:00Z");
+    let new = [prompt("new-question", "2026-11-12T00:01:00Z"), image_result("r-new", "c-new"),
+        native(json!({"type":"system","subtype":"stop_hook_summary","timestamp":"2026-11-12T00:01:07Z"}))].concat();
+    let from = opener.len();
+    let old_len = (from + image_result("r-old", "c-old").len()) as u64;
+    let rows = [opener, image_result("r-old", "c-old"), new];
+    let harness = Harness::build_with(channel, false, rows, from);
+    let _root = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "AGENTDESK_ROOT_DIR",
+        harness.runtime.path(),
+    );
+    let source = source_id_for(
+        "same-native-session",
+        &harness.runtime.path().join("native.jsonl"),
+    )
+    .unwrap();
+    // An earlier run saw the opener and recorded the old turn's span before the opener's GC.
+    use crate::services::tui_o::store::ledger::tool_images::ImageEntry;
+    let opened = ImageEntry::ImageTurnOpened {
+        source: source.clone(),
+        opener_offset: 0,
+        turn: "old-question".into(),
+    };
+    let entry = LedgerEntry::ToolImage {
+        entry: Box::new(opened),
+    };
+    harness.channel().append_ledger(entry).unwrap();
+    let (stop, actor, ready) = harness.start();
+    finish(stop, actor, ready).await;
+    let store = harness.channel();
+    let images = store.ledger().tool_images();
+    let span = images.span_of(&source, "old-question").cloned().unwrap();
+    assert_eq!(
+        span.end_offset,
+        Some(old_len),
+        "the verified cut closes the restored turn"
+    );
+    let new_turn = images.span_of(&source, "new-question");
+    assert!(
+        new_turn.is_some(),
+        "the new prompt opens its own image turn"
+    );
+    let captions = harness
+        .port
+        .posted()
+        .into_iter()
+        .filter(|p| p.starts_with("-# 이미지"))
+        .count();
+    assert_eq!(captions, 2, "the same bytes post once per turn");
 }
