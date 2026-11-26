@@ -235,7 +235,7 @@ mod tests {
     // Both reacquire callers need a streaming pane, which a Herdr snapshot never reads: no row.
     #[test]
     fn a_herdr_snapshot_never_reads_a_streaming_pane_so_no_reacquire_runs() {
-        use crate::services::discord::watchers::lifecycle::{HostSnapshot, WatchHost};
+        use crate::services::discord::tmux::{HostSnapshot, WatchHost};
         let herdr = HostSnapshot::new(WatchHost::Herdr);
         let name = "AgentDesk-claude-herdr-reacquire";
         assert!(!super::watcher_pane_actively_streaming(name, &herdr));
