@@ -361,7 +361,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
-    pub(crate) async fn repost_turn(&mut self) {
+    pub async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();
         if !allowed {
             return;

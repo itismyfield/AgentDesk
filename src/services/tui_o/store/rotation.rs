@@ -34,7 +34,7 @@ pub struct TakeoverEnd {
 pub struct FreshSelection {
     schema: u32,
     channel: u64,
-    pub(crate) nonce: String,
+    pub nonce: String,
     pub(crate) keys: Vec<String>,
 }
 
