@@ -973,6 +973,192 @@ async fn child_applied_replay_releases_exact_originals_once() {
     applied_startup_retry_flow(Some(PARENT)).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn restored_child_init_releases_the_applied_original_at_boot_once() {
+    use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
+    use crate::services::tui_o::{channel_policy, cutover::test_override, store::Initialized};
+    use crate::services::turn_orchestrator::{
+        Intervention, InterventionMode, QueuePersistenceContext,
+    };
+    use std::sync::atomic::AtomicUsize;
+
+    if !test_override::isolated_binding_case(concat!(
+        module_path!(),
+        "::restored_child_init_releases_the_applied_original_at_boot_once"
+    )) {
+        return;
+    }
+    let runtime = crate::config::TestRuntimeRootGuard::with_isolated_config();
+    let child = discord_mock::CHANNEL_ID;
+    let channel = serenity::ChannelId::new(child);
+    let source = serenity::MessageId::new(940_487_400_000_071);
+    let provider = ProviderKind::Claude;
+    let _hosts = session_hosts::force_for_test(Some("node"), &[(PARENT, "node")])
+        .with_mode(EndpointMode::UserDefault);
+    let child_store = runtime.path().join("o_store").join(child.to_string());
+    std::fs::create_dir_all(&child_store).unwrap();
+    let stored_init = Initialized {
+        channel: child,
+        sources: vec![],
+        initial_anchor: 100,
+        build_digest: "fixture".into(),
+        at: chrono::Utc::now(),
+        policy_parent: Some(PARENT),
+    };
+    std::fs::write(
+        child_store.join("init"),
+        serde_json::to_vec(&stored_init).unwrap(),
+    )
+    .unwrap();
+    let config = serde_json::from_value(json!({
+        "server": {},
+        "agents": [{"id": "consent-boot", "name": "Consent boot",
+            "channels": {"claude": {"id": PARENT.to_string(), "runtime": "tui"}}}],
+        "tui_o": {"writer": {"channels": [PARENT]}}
+    }))
+    .unwrap();
+
+    let (_config_dir, peer) = preview::tests::fixture("printf 'config: ok\n'");
+    peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
+    let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
+    let _peer = ScopedPeer(previous);
+    let prepared = preview::prepare(peer, 1).await.unwrap();
+    let key = consent::ConsentKey {
+        node: "node".into(),
+        user: unsafe { libc::geteuid() },
+        socket: "/adk/herdr/agentdesk.sock".into(),
+        named_session: "agentdesk".into(),
+        config: prepared.logical().into(),
+        target: prepared.target().into(),
+    };
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let held = shared
+        .mailbox(channel)
+        .enqueue(
+            Intervention {
+                author_id: serenity::UserId::new(1),
+                author_is_bot: false,
+                message_id: source,
+                queued_generation: 17,
+                source_message_ids: vec![source],
+                source_message_queued_generations: vec![],
+                source_text_segments: vec![],
+                text: "original before boot".into(),
+                mode: InterventionMode::Soft,
+                created_at: std::time::Instant::now(),
+                reply_context: None,
+                has_reply_boundary: false,
+                merge_consecutive: false,
+                pending_uploads: vec![],
+            },
+            QueuePersistenceContext::new(&provider, &shared.token_hash, None),
+        )
+        .await;
+    assert!(held.enqueued && held.persistence_error.is_none());
+    let store = store();
+    let receipt = store
+        .hold(
+            consent::Question {
+                key: key.clone(),
+                preview: prepared.token,
+                owner: 1,
+                bot: 940_487_400_000_003,
+                provider: "claude".into(),
+                channel: child,
+                message: source.get() + 100,
+                intent: consent::IntentRef {
+                    store: "mailbox".into(),
+                    id: format!("{source}:17"),
+                    provider: "claude".into(),
+                    channel: child,
+                    source_message: source.get(),
+                    fifo: 17,
+                },
+            },
+            now(),
+        )
+        .unwrap()
+        .into_consent();
+    let accepted = store.decide(&receipt, 1, true, now()).unwrap();
+    let applied = store
+        .record_apply(
+            &accepted,
+            consent::ApplyResult {
+                before: Some([1; 32]),
+                after: Some([2; 32]),
+                backup: None,
+                detail: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(applied.releasable_intents().len(), 1);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy = format!("http://{}", listener.local_addr().unwrap());
+    let app = axum::Router::new()
+        .fallback(interaction_http)
+        .with_state(InteractionHttp {
+            parent: Some(PARENT),
+            calls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        });
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let http = Arc::new(
+        serenity::HttpBuilder::new("test-token")
+            .proxy(proxy)
+            .ratelimiter_disabled(true)
+            .build(),
+    );
+    let releases = Arc::new(AtomicUsize::new(0));
+    let observed = releases.clone();
+    let _executor = queue_io::set_idle_queue_kick_hook_for_tests(Arc::new(
+        move |shared, provider, awakened, _| {
+            let observed = observed.clone();
+            Box::pin(async move {
+                assert_eq!(awakened, channel);
+                let taken = shared
+                    .mailbox(awakened)
+                    .take_next_soft(QueuePersistenceContext::new(
+                        &provider,
+                        &shared.token_hash,
+                        None,
+                    ))
+                    .await;
+                let item = taken
+                    .intervention
+                    .expect("wake must take the held original");
+                assert_eq!((item.message_id, item.queued_generation), (source, 17));
+                assert_eq!(item.text, "original before boot");
+                crate::services::discord::mailbox_abandon_unclaimed_dispatch_after_success(
+                    &shared,
+                    &provider,
+                    awakened,
+                    source,
+                    taken.dispatch_lease.expect("original dispatch lease"),
+                )
+                .await;
+                observed.fetch_add(1, Ordering::SeqCst);
+                Some(IdleQueueKickoffChannelOutcome { started: true })
+            })
+        },
+    ));
+
+    assert!(channel_policy::boot().is_none() && endpoint(child).is_none());
+    channel_policy::install(&config).unwrap();
+    let restored = startup::restore(&http, &shared, &provider).await;
+    assert_eq!(
+        releases.load(Ordering::SeqCst),
+        1,
+        "the first restore must release through the parent read from child init: {restored:?}"
+    );
+    restored.unwrap();
+    startup::restore(&http, &shared, &provider).await.unwrap();
+    assert_eq!(releases.load(Ordering::SeqCst), 1);
+    let replayed = store.load(&key).unwrap().unwrap();
+    assert_eq!(replayed.settlements.len(), 1);
+    assert_eq!(replayed.apply, applied.apply);
+    server.abort();
+}
+
 async fn applied_startup_retry_flow(parent: Option<u64>) {
     use crate::services::discord::{IdleQueueKickoffChannelOutcome, queue_io};
     use crate::services::turn_orchestrator::{
