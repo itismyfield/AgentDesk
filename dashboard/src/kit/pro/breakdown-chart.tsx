@@ -1,3 +1,4 @@
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Check, ChevronDown, CircleSlash, Clock3, Eye, Inbox, Square, SquareCheck, X } from 'lucide-react';
@@ -13,6 +14,48 @@ export interface BreakdownMeasure {
   /** Omit or leave empty to count records. Numeric strings are accepted. */
   field?: string;
 }
+export interface BreakdownChartLabels {
+  title: string;
+  measurePicker: string;
+  slicePicker: string;
+  segmentPicker: string;
+  noSegment: string;
+  unconfiguredValue: string;
+  closePicker: (label: string) => string;
+  emptySetupTitle: string;
+  emptySetupBody: string;
+  zeroRecordsNote: string;
+  clearSelection: string;
+  readoutHint: string;
+  tableCaption: (title: string) => string;
+  hiddenInChart: string;
+  emptySliceTitle: string;
+  emptySliceBody: string;
+  legendToggleLabel: (label: string) => string;
+  unsegmentedHint: string;
+  restoreAll: string;
+}
+export const breakdownChartDefaultLabels: BreakdownChartLabels = {
+  title: '에이전트 실행 분포',
+  measurePicker: '집계 방식',
+  slicePicker: '가로축 분류',
+  segmentPicker: '누적 구분',
+  noSegment: '분할 없음',
+  unconfiguredValue: '설정 없음',
+  closePicker: (label) => `${label} 닫기`,
+  emptySetupTitle: '차트 설정을 확인해 주세요',
+  emptySetupBody: '분류와 집계 정의가 각각 하나 이상 필요합니다.',
+  zeroRecordsNote: '실행 기록을 기다리는 중입니다. 정의된 분류의 0값을 표시합니다.',
+  clearSelection: '선택 해제',
+  readoutHint: '막대나 아래 행을 탭해 상세 수치를 확인하세요.',
+  tableCaption: (title) => `${title} 상세 수치. 합계는 현재 보이는 구분만 포함합니다. 흐린 열은 감춘 구분의 원래 수치입니다.`,
+  hiddenInChart: ' (차트에서 감춤)',
+  emptySliceTitle: '가로축에 표시할 분류값이 없습니다',
+  emptySliceBody: '분류 정의에 값을 추가하면 막대와 표를 표시합니다.',
+  legendToggleLabel: (label) => `${label} 표시 토글`,
+  unsegmentedHint: '누적 구분을 선택해 작업의 구성을 살펴보세요.',
+  restoreAll: '전체 복원',
+};
 export interface BreakdownChartProps {
   records: BreakdownRecord[];
   dimensions: BreakdownDimension[];
@@ -22,6 +65,7 @@ export interface BreakdownChartProps {
   defaultSlice?: string;
   /** null or an empty string selects the unsegmented view. */
   defaultSegment?: string | null;
+  labels?: Partial<BreakdownChartLabels>;
   className?: string;
   style?: CSSProperties;
 }
@@ -55,7 +99,7 @@ function segmentHeights(amounts: number[], height: number) {
   return sizes;
 }
 
-function Picker({ label, value, options, onChange, disabled }: { label: string; value: string; options: { id: string; label: string }[]; onChange: (value: string) => void; disabled: boolean }) {
+function Picker({ label, value, options, onChange, disabled, unconfiguredValue, closePicker }: { label: string; value: string; options: { id: string; label: string }[]; onChange: (value: string) => void; disabled: boolean; unconfiguredValue: string; closePicker: (label: string) => string }) {
   const id = useId(), trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false), [mobile, setMobile] = useState(false);
   const [themeStyle, setThemeStyle] = useState<CSSProperties>({});
@@ -113,12 +157,12 @@ function Picker({ label, value, options, onChange, disabled }: { label: string; 
   return <div className="aui-breakdown-chart-picker">
     <span id={id + '-label'} title={label}>{label}</span>
     <button ref={trigger} data-hit-slop="5" className="aui-breakdown-chart-picker-button" type="button" aria-labelledby={id + '-label ' + id + '-value'} aria-haspopup="listbox" aria-controls={open ? id + '-panel' : undefined} aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
-      <span id={id + '-value'} dir="auto" title={options.find(option => option.id === value)?.label ?? value}>{(options.find(option => option.id === value)?.label ?? value) || '설정 없음'}</span><ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
+      <span id={id + '-value'} dir="auto" title={options.find(option => option.id === value)?.label ?? value}>{(options.find(option => option.id === value)?.label ?? value) || unconfiguredValue}</span><ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
     </button>
     {open && createPortal(<div className={'aui-breakdown-chart aui-breakdown-chart-overlay' + (mobile ? ' aui-breakdown-chart-overlay-mobile' : '')} style={themeStyle} onKeyDown={keyDown}>
       {mobile && <div className="aui-breakdown-chart-backdrop" onClick={() => close(true)} />}
       <div id={id + '-panel'} ref={panel} className="aui-breakdown-chart-menu" role={mobile ? 'dialog' : undefined} aria-modal={mobile || undefined} aria-labelledby={mobile ? id + '-sheet' : undefined} style={mobile ? undefined : position}>
-        {mobile && <header className="aui-breakdown-chart-sheet-heading"><strong id={id + '-sheet'}>{label}</strong><button type="button" aria-label={label + ' 닫기'} onClick={() => close(true)}><X size={18} aria-hidden="true" /></button></header>}
+        {mobile && <header className="aui-breakdown-chart-sheet-heading"><strong id={id + '-sheet'}>{label}</strong><button type="button" aria-label={closePicker(label)} onClick={() => close(true)}><X size={18} aria-hidden="true" /></button></header>}
         <div className="aui-breakdown-chart-list" role="listbox" aria-labelledby={id + '-label'}>{options.map(option => <button type="button" role="option" aria-selected={value === option.id} className="aui-breakdown-chart-option" key={option.id} title={option.label} onClick={() => { onChange(option.id); close(true); }}><span dir="auto">{option.label}</span>{value === option.id && <Check size={14} strokeWidth={1.5} aria-hidden="true" />}</button>)}</div>
       </div>
     </div>, document.body)}
@@ -131,8 +175,10 @@ export function BreakdownChart(props: BreakdownChartProps) {
   return <BreakdownChartBody {...props} />;
 }
 
-function BreakdownChartBody({ records, dimensions, measures, title = '에이전트 실행 분포', defaultMeasure, defaultSlice, defaultSegment, className = '', style }: BreakdownChartProps) {
+function BreakdownChartBody({ records, dimensions, measures, title: titleProp, defaultMeasure, defaultSlice, defaultSegment, labels, className = '', style }: BreakdownChartProps) {
   const id = useId(), tableContent = useRef<HTMLDivElement>(null);
+  const text: BreakdownChartLabels = { ...breakdownChartDefaultLabels, ...labels };
+  const title = titleProp ?? text.title;
   const card = useRef<HTMLDivElement>(null), plot = useRef<HTMLDivElement>(null), tip = useRef<HTMLDivElement>(null);
   const [measureId, setMeasureId] = useState(defaultMeasure ?? measures[0]?.id ?? '');
   const [sliceId, setSliceId] = useState(defaultSlice ?? dimensions[0]?.id ?? '');
@@ -239,12 +285,12 @@ function BreakdownChartBody({ records, dimensions, measures, title = '에이전�
       <header className="aui-breakdown-chart-heading"><h2 id={id + '-title'} title={title} dir="auto">{title}</h2><span><strong>{format(total)}</strong> {measure?.unit ?? ''}</span></header>
       <div className="aui-breakdown-chart-card" ref={card}>
         <div className="aui-breakdown-chart-pickers">
-          <Picker label="집계 방식" value={measure?.id ?? ''} options={measures} onChange={setMeasureId} disabled={!configured} />
-          <Picker label="가로축 분류" value={slice?.id ?? ''} options={dimensions} onChange={next => { setSliceId(next); if (next === segment?.id) { setSegmentId(''); setExcluded([]); } }} disabled={!configured} />
-          <Picker label="누적 구분" value={segment?.id ?? ''} options={[{ id: '', label: '분할 없음' }, ...dimensions.filter(value => value.id !== slice?.id)]} onChange={next => { if (next !== (segment?.id ?? '')) { setSegmentId(next); setExcluded([]); } }} disabled={!configured} />
+          <Picker label={text.measurePicker} value={measure?.id ?? ''} options={measures} onChange={setMeasureId} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
+          <Picker label={text.slicePicker} value={slice?.id ?? ''} options={dimensions} onChange={next => { setSliceId(next); if (next === segment?.id) { setSegmentId(''); setExcluded([]); } }} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
+          <Picker label={text.segmentPicker} value={segment?.id ?? ''} options={[{ id: '', label: text.noSegment }, ...dimensions.filter(value => value.id !== slice?.id)]} onChange={next => { if (next !== (segment?.id ?? '')) { setSegmentId(next); setExcluded([]); } }} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
         </div>
-        {!configured ? <div className="aui-breakdown-chart-empty" role="status"><BarChart3 size={28} aria-hidden="true" /><strong>차트 설정을 확인해 주세요</strong><p>분류와 집계 정의가 각각 하나 이상 필요합니다.</p></div> : rows.length ? <>
-          {!records.length && <p className="aui-breakdown-chart-zero-note">실행 기록을 기다리는 중입니다. 정의된 분류의 0값을 표시합니다.</p>}
+        {!configured ? <div className="aui-breakdown-chart-empty" role="status"><BarChart3 size={28} aria-hidden="true" /><strong>{text.emptySetupTitle}</strong><p>{text.emptySetupBody}</p></div> : rows.length ? <>
+          {!records.length && <p className="aui-breakdown-chart-zero-note">{text.zeroRecordsNote}</p>}
           <div className="aui-breakdown-chart-chart">
             <div className="aui-breakdown-chart-scroll">
               <div className="aui-breakdown-chart-plot" ref={plot} style={{ minWidth: (rows.length * 44 + Math.max(0, rows.length - 1) * 4) + 'px' }}>
@@ -266,20 +312,20 @@ function BreakdownChartBody({ records, dimensions, measures, title = '에이전�
             </div>
             <div className="aui-breakdown-chart-ticks" aria-hidden="true">{Array.from({ length: 6 }, (_, index) => <span key={index} style={{ top: (index * 40 - 8) + 'px' }}>{formatTick(ceiling * (5 - index) / 5)}</span>)}</div>
           </div>
-          <div className="aui-breakdown-chart-readout" role="status" aria-live="polite">{active ? <>{detailContent}<button type="button" onClick={clear}>선택 해제</button></> : <span>막대나 아래 행을 탭해 상세 수치를 확인하세요.</span>}</div>
+          <div className="aui-breakdown-chart-readout" role="status" aria-live="polite">{active ? <>{detailContent}<button type="button" onClick={clear}>{text.clearSelection}</button></> : <span>{text.readoutHint}</span>}</div>
           <div className="aui-breakdown-chart-table-shell" style={{ height: tableHeight }} data-ready={heightReady}>
             <div ref={tableContent}>
               <div className="aui-breakdown-chart-table-scroll"><table className="aui-breakdown-chart-table">
-                <caption className="aui-breakdown-chart-sr">{title} 상세 수치. 합계는 현재 보이는 구분만 포함합니다. 흐린 열은 감춘 구분의 원래 수치입니다.</caption>
+                <caption className="aui-breakdown-chart-sr">{text.tableCaption(title)}</caption>
                 <thead><tr><th scope="col">{slice.label}</th><th scope="col">{measure.label}</th>{aggregation.segments.map(value => <th scope="col" key={value.id} data-hidden={hidden.includes(value.id)} title={value.label}><span><i style={{ background: value.color }} /><span className="aui-breakdown-chart-name" dir="auto">{value.label}</span></span></th>)}</tr></thead>
                 <tbody>{rows.map(row => <tr key={row.id} data-breakdown-target={row.id} data-active={selected === row.id} onPointerEnter={event => { if (event.pointerType === 'mouse' && !pinned) setSelected(row.id); }} onPointerLeave={() => { if (!pinned) setSelected(null); }} onClick={() => { if (lastPointer.current === 'touch') toggleTarget(row.id); }}><th scope="row" title={row.label}><span>{row.icon && <span className="aui-breakdown-chart-icon" aria-hidden="true">{row.icon}</span>}<span className="aui-breakdown-chart-name" dir="auto">{row.label}</span></span></th><td>{format(row.total)}</td>{aggregation.segments.map(value => <td key={value.id} data-hidden={hidden.includes(value.id)}>{format(row.values[value.id])}</td>)}</tr>)}</tbody>
               </table></div>
-              <div className="aui-breakdown-chart-mobile-rows">{rows.map(row => <article key={row.id} data-active={selected === row.id} className="aui-breakdown-chart-mobile-row"><button type="button" data-breakdown-target={row.id} aria-pressed={selected === row.id} onClick={() => toggleTarget(row.id)}><span>{row.icon && <span className="aui-breakdown-chart-icon" aria-hidden="true">{row.icon}</span>}{row.label}</span><strong>{format(row.total)}</strong></button>{segment && <dl>{aggregation.segments.map(value => <div key={value.id} data-hidden={hidden.includes(value.id)}><dt><i style={{ background: value.color }} />{value.label}{hidden.includes(value.id) && <span className="aui-breakdown-chart-sr"> (차트에서 감춤)</span>}</dt><dd>{format(row.values[value.id])}</dd></div>)}</dl>}</article>)}</div>
+              <div className="aui-breakdown-chart-mobile-rows">{rows.map(row => <article key={row.id} data-active={selected === row.id} className="aui-breakdown-chart-mobile-row"><button type="button" data-breakdown-target={row.id} aria-pressed={selected === row.id} onClick={() => toggleTarget(row.id)}><span>{row.icon && <span className="aui-breakdown-chart-icon" aria-hidden="true">{row.icon}</span>}{row.label}</span><strong>{format(row.total)}</strong></button>{segment && <dl>{aggregation.segments.map(value => <div key={value.id} data-hidden={hidden.includes(value.id)}><dt><i style={{ background: value.color }} />{value.label}{hidden.includes(value.id) && <span className="aui-breakdown-chart-sr">{text.hiddenInChart}</span>}</dt><dd>{format(row.values[value.id])}</dd></div>)}</dl>}</article>)}</div>
             </div>
           </div>
-        </> : <div className="aui-breakdown-chart-empty" role="status"><BarChart3 size={28} aria-hidden="true" /><strong>가로축에 표시할 분류값이 없습니다</strong><p>분류 정의에 값을 추가하면 막대와 표를 표시합니다.</p></div>}
+        </> : <div className="aui-breakdown-chart-empty" role="status"><BarChart3 size={28} aria-hidden="true" /><strong>{text.emptySliceTitle}</strong><p>{text.emptySliceBody}</p></div>}
       </div>
-      <footer className="aui-breakdown-chart-footer">{segment ? <div className="aui-breakdown-chart-legend" role="group" aria-label={segment.label + ' 표시 토글'}>{aggregation.segments.map(value => <button type="button" key={value.id} title={value.label} aria-pressed={!hidden.includes(value.id)} onClick={() => setExcluded(previous => previous.includes(value.id) ? previous.filter(item => item !== value.id) : visible.length > 1 ? [...previous.filter(id => aggregation.segments.some(item => item.id === id)), value.id] : previous)}><i style={{ background: value.color }} /><span className="aui-breakdown-chart-name" dir="auto">{value.label}</span></button>)}</div> : <span className="aui-breakdown-chart-hint">누적 구분을 선택해 작업의 구성을 살펴보세요.</span>}{hidden.length > 0 && <button className="aui-breakdown-chart-restore" type="button" onClick={() => setExcluded([])}>전체 복원</button>}</footer>
+      <footer className="aui-breakdown-chart-footer">{segment ? <div className="aui-breakdown-chart-legend" role="group" aria-label={text.legendToggleLabel(segment.label)}>{aggregation.segments.map(value => <button type="button" key={value.id} title={value.label} aria-pressed={!hidden.includes(value.id)} onClick={() => setExcluded(previous => previous.includes(value.id) ? previous.filter(item => item !== value.id) : visible.length > 1 ? [...previous.filter(id => aggregation.segments.some(item => item.id === id)), value.id] : previous)}><i style={{ background: value.color }} /><span className="aui-breakdown-chart-name" dir="auto">{value.label}</span></button>)}</div> : <span className="aui-breakdown-chart-hint">{text.unsegmentedHint}</span>}{hidden.length > 0 && <button className="aui-breakdown-chart-restore" type="button" onClick={() => setExcluded([])}>{text.restoreAll}</button>}</footer>
     </div>
   </section>;
 }
@@ -396,7 +442,7 @@ const styles = `
  .aui-breakdown-chart-footer { flex-wrap:wrap; }
 }
 @media (pointer:coarse) and (min-width:900px) { .aui-breakdown-chart-picker-button { position:relative; z-index:2; min-width:44px; } .aui-breakdown-chart-picker-button::before { content:''; position:absolute; inset:-7px 0; } .aui-breakdown-chart-option { min-width:44px; min-height:44px; } .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; margin-block:-8px; } }
-@media (pointer:coarse) and (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
+@media (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
 .aui-breakdown-chart-overlay-mobile { pointer-events:auto; }
 .aui-breakdown-chart-backdrop { position:absolute; inset:0; background:var(--aui-breakdown-chart-backdrop,#0006); }
 .aui-breakdown-chart-overlay-mobile .aui-breakdown-chart-menu { top:auto; left:max(8px,env(safe-area-inset-left)); right:max(8px,env(safe-area-inset-right)); bottom:0; max-height:calc(100dvh - env(safe-area-inset-top) - 24px); padding:8px 8px max(12px,env(safe-area-inset-bottom)); border-radius:18px 18px 0 0; }

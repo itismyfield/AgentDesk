@@ -473,9 +473,6 @@ pub(crate) fn submitted(path: &Path, offset: u64, nonce: &str) -> Option<Option<
         return None;
     }
     file.seek(SeekFrom::Start(offset)).ok()?;
-    let marker = format!(" · {nonce}]");
-    let allows_legacy =
-        crate::services::tui_input::human_frame::history::allows_legacy(nonce, path);
     let mut reader = std::io::BufReader::new(file);
     let mut line = Vec::new();
     let mut position = offset;
@@ -495,14 +492,6 @@ pub(crate) fn submitted(path: &Path, offset: u64, nonce: &str) -> Option<Option<
                 }
                 line.clear();
                 continue;
-            }
-            let legacy = !input.starts_with("[User: ")
-                || input
-                    .split(']')
-                    .next()
-                    .is_some_and(|header| header.contains(" · 📱 v1 mode="));
-            if allows_legacy && legacy && input.contains(&marker) {
-                return Some(turn);
             }
             // The UserMessage completion owns a native item id; its paired response item does not.
             if text(&record, "type") != Some("event_msg") {

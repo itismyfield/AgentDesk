@@ -442,7 +442,7 @@ fn owner_herdr_modal_holds_the_front_without_a_key() {
 }
 
 /// One busy Claude screen per composer case, and whether the owner parks it with C-s.
-fn composer_cases() -> [(&'static str, String, usize); 5] {
+fn composer_cases() -> [(&'static str, String, usize); 6] {
     let border = "─".repeat(60);
     let thinking = "⏺ Working on it.\n\n✻ Thinking… (12s · esc to interrupt)\n";
     let screen = |above: &str, composer: &str| {
@@ -455,6 +455,14 @@ fn composer_cases() -> [(&'static str, String, usize); 5] {
         (
             "injected frame",
             screen("", "[📱 tester] earlier question"),
+            0,
+        ),
+        (
+            "current frame quoting an old header",
+            screen(
+                "",
+                &busy_inject::frame("discord", "7", "tester", "0a1b2c3d", "see [📱 a](x)"),
+            ),
             0,
         ),
         ("existing stash", screen("› stashed", "half typed"), 0),

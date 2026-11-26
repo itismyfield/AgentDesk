@@ -1,5 +1,5 @@
-//! The native turn an image belongs to. Pure: the writer wiring feeds it each record's facts
-//! and appends the spans it reports.
+//! The native turn an image belongs to. Pure: `derive.rs` feeds it each record's facts and
+//! queues the spans it reports.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -202,6 +202,28 @@ impl ImageTurns {
 
     fn edge_turn(&self) -> NativeTurn {
         NativeTurn::new(format!("edge:{}:{}", source_key(&self.source), self.origin))
+    }
+
+    pub(crate) fn source(&self) -> &SourceId {
+        &self.source
+    }
+
+    /// The turn this source is in, observed or restored from its span.
+    pub(crate) fn open_turn(&self) -> Option<&NativeTurn> {
+        match &self.state {
+            State::Open(open) => Some(&open.turn),
+            State::Idle | State::Unknown => None,
+        }
+    }
+
+    /// The open turn's opener offset and its calls still waiting for a result.
+    pub(crate) fn open_evidence(&self) -> Option<(u64, Vec<String>)> {
+        let State::Open(open) = &self.state else {
+            return None;
+        };
+        let of_turn = |call: &&String| self.calls.get(*call) == Some(&open.turn);
+        let waiting = self.pending.iter().filter(of_turn).cloned().collect();
+        Some((open.opener_offset, waiting))
     }
 
     /// Whether GC may collect the segment holding `turn`'s opener: an open turn or an unclosed

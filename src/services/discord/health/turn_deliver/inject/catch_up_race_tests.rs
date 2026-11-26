@@ -633,12 +633,10 @@ async fn catch_up_mended_head_clears_pending_marker_without_another_paste_pg() {
     )
     .await;
     assert!(transport.pending_present());
-    let frame = crate::services::tui_input::human_frame::legacy_inject(
-        &format!("discord:{channel}:{message}"),
-        "200",
-        nonce,
-        TEXT,
-    );
+    let frame =
+        crate::services::tui_input::human_frame::plain_inject("", "200", "ann", nonce, TEXT);
+    let who = ("claude", InjectPane::SESSION, nonce, "200");
+    crate::services::tui_input::human_frame::history::register(who, &path, 0, &frame).unwrap();
     let stamp = chrono::Utc::now().to_rfc3339();
     let mut transcript = std::fs::OpenOptions::new().append(true).open(path).unwrap();
     for record in [

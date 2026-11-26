@@ -83,8 +83,8 @@ before/after/mutant는 검증 설정이며 새 운영 설정값이 아니다.
 | slash | machine envelope/local-only 정책 → input_notice_content | 기존 정책이 None인 경우 불필요; 임의 bare `/…` 전체를 새로 제외하지 않음 |
 
 새 입력도 막히는 코드상 경로는 다음과 같다. `discord_input`은
-`is_discord_relayed_user_prompt`를 부른다. 이 함수는 `extract.rs:202`에서 opens_inject이면 false이고,
-opens_inject는 `human_frame.rs:230`의 전역 history::known을 읽는다. 따라서 평범한 헤더도 등록이 있으면
+`is_discord_relayed_user_prompt`를 부른다. 이 함수는 `extract.rs:237`에서 opens_inject이면 false이고,
+opens_inject는 `human_frame.rs:156`의 전역 history::known을 읽는다. 따라서 평범한 헤더도 등록이 있으면
 notice 후보가 되고, exact native receipt가 없으면 project는 Pending evidence를 남긴다.
 Batch::candidates는 `notice_owner.rs:225`의 source/관련 execution 확인 또는 `:241`의 historical_match
 실패를 hash별 blocked에 넣는다. attribute는 `:407`에서 blocked를 매번 Pending으로 반환한다.

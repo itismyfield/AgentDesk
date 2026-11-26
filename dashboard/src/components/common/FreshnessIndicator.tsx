@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useI18n, type UiLanguage } from "../../i18n";
 import { useNow } from "../../lib/useNow";
 import { getSystemHealthTone, type SystemHealthTone } from "../../theme/statusTokens";
 
@@ -12,7 +13,7 @@ interface FreshnessIndicatorProps {
   staleAfterSeconds?: number;
   /** Seconds after which the value is considered critically stale. Default 120. */
   criticalAfterSeconds?: number;
-  /** Custom label prefix; defaults to "업데이트". */
+  /** Custom label prefix; defaults to localized "업데이트" / "Updated". */
   label?: string;
   /** Label shown when `timestamp` is null/undefined. Defaults to "—". */
   emptyLabel?: string;
@@ -40,12 +41,24 @@ function toMs(value: number | string | null | undefined): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function formatRelative(deltaSeconds: number): string {
-  if (deltaSeconds < 5) return "방금";
-  if (deltaSeconds < 60) return `${Math.floor(deltaSeconds)}초 전`;
-  if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}분 전`;
-  if (deltaSeconds < 86400) return `${Math.floor(deltaSeconds / 3600)}시간 전`;
-  return `${Math.floor(deltaSeconds / 86400)}일 전`;
+function formatRelative(deltaSeconds: number, lang: UiLanguage): string {
+  if (deltaSeconds < 5) {
+    return lang === "ko" ? "방금" : lang === "ja" ? "たった今" : lang === "zh" ? "刚刚" : "just now";
+  }
+  if (deltaSeconds < 60) {
+    const s = Math.floor(deltaSeconds);
+    return lang === "ko" ? `${s}초 전` : lang === "ja" || lang === "zh" ? `${s}秒前` : `${s}s ago`;
+  }
+  if (deltaSeconds < 3600) {
+    const m = Math.floor(deltaSeconds / 60);
+    return lang === "ko" ? `${m}분 전` : lang === "ja" ? `${m}分前` : lang === "zh" ? `${m}分钟前` : `${m}m ago`;
+  }
+  if (deltaSeconds < 86400) {
+    const h = Math.floor(deltaSeconds / 3600);
+    return lang === "ko" ? `${h}시간 전` : lang === "ja" ? `${h}時間前` : lang === "zh" ? `${h}小时前` : `${h}h ago`;
+  }
+  const d = Math.floor(deltaSeconds / 86400);
+  return lang === "ko" ? `${d}일 전` : lang === "ja" ? `${d}日前` : lang === "zh" ? `${d}天前` : `${d}d ago`;
 }
 
 type FreshnessTone = SystemHealthTone;
@@ -77,7 +90,7 @@ export function FreshnessIndicator({
   timestamp,
   staleAfterSeconds = 30,
   criticalAfterSeconds = 120,
-  label = "업데이트",
+  label,
   emptyLabel = "—",
   tickMs = 5_000,
   className,
@@ -85,6 +98,9 @@ export function FreshnessIndicator({
   compact = false,
   announceToneChange = false,
 }: FreshnessIndicatorProps) {
+  const i18n = useI18n();
+  const lang: UiLanguage = i18n.__fromProvider ? i18n.language : "ko";
+  const resolvedLabel = label ?? (lang === "ko" ? "업데이트" : lang === "ja" || lang === "zh" ? "更新" : "Updated");
   const now = useNow(tickMs, timestamp != null);
 
   const ms = toMs(timestamp);
@@ -109,9 +125,9 @@ export function FreshnessIndicator({
     setLiveMessage(
       currentTone === "empty"
         ? emptyLabel
-        : `${label}: ${currentTone}`,
+        : `${resolvedLabel}: ${currentTone}`,
     );
-  }, [announceToneChange, currentTone, emptyLabel, label]);
+  }, [announceToneChange, currentTone, emptyLabel, resolvedLabel]);
 
   if (ms == null) {
     const tone = getSystemHealthTone("unknown");
@@ -147,11 +163,11 @@ export function FreshnessIndicator({
 
   const tone = getSystemHealthTone(currentTone as FreshnessTone);
   const deltaSeconds = Math.max(0, (now - ms) / 1000);
-  const text = formatRelative(deltaSeconds);
+  const text = formatRelative(deltaSeconds, lang);
 
   return (
     <span
-      title={new Date(ms).toLocaleString()}
+      title={new Date(ms).toLocaleString(i18n.__fromProvider ? i18n.locale : undefined)}
       className={className}
       style={{
         display: "inline-flex",
@@ -172,7 +188,7 @@ export function FreshnessIndicator({
           flexShrink: 0,
         }}
       />
-      {compact ? text : `${label} · ${text}`}
+      {compact ? text : `${resolvedLabel} · ${text}`}
       {announceToneChange ? (
         <span
           role="status"

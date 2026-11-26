@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { KanbanCard, WSEvent } from "./types";
 import { onApiError } from "./api/client";
@@ -33,6 +33,11 @@ export default function App() {
     queryKey: dashboardBootstrapStatsQueryKey,
     queryFn: fetchBootstrapStats,
   });
+  const data = bootstrapQuery.data;
+  const { t } = useI18n();
+  const { t: bootT } = useI18n(data?.settings.language);
+  const tRef = useRef(bootT);
+  tRef.current = data ? t : bootT;
 
   useEffect(() => {
     const lastFired = new Map<string, number>();
@@ -44,7 +49,8 @@ export default function App() {
       const last = lastFired.get(throttleKey) ?? 0;
       if (now - last < 3000) return;
       lastFired.set(throttleKey, now);
-      pushNotification(`API 오류: ${apiPath} - ${error.message}`, "error");
+      const prefix = tRef.current({ ko: "API 오류", en: "API error", ja: "APIエラー", zh: "API 错误" });
+      pushNotification(`${prefix}: ${apiPath} - ${error.message}`, "error");
     });
     return () => onApiError(null);
   }, [pushNotification]);
@@ -53,14 +59,13 @@ export default function App() {
     if (event.type === "kanban_card_created") {
       const card = event.payload as KanbanCard;
       if (card.status === "requested") {
-        pushNotification(`새 작업 접수: ${card.title}`, "info");
+        const prefix = tRef.current({ ko: "새 작업 접수", en: "New task requested", ja: "新しいタスクを受付", zh: "已接收新任务" });
+        pushNotification(`${prefix}: ${card.title}`, "info");
       }
     }
   };
 
   const { wsConnected, lastEventTs } = useDashboardSocket(handleWsEvent);
-  const { t } = useI18n();
-  const data = bootstrapQuery.data;
 
   if (bootstrapQuery.isError) {
     return (
@@ -109,6 +114,7 @@ export default function App() {
       initialDepartments={data.departments}
       initialSessions={resolvedSessions}
       pushNotification={pushNotification}
+      language={data.settings.language}
     >
       <SettingsProvider
         initialSettings={data.settings}

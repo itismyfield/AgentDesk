@@ -7,10 +7,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { getDispatchedSessions } from "../../api/agentActivity";
 import type { Agent, DispatchedSession } from "../../types";
 import HomePageView from "./HomePageView";
-import { cleanupStaleIdleSession, reconcileStaleSessionTurn, stopAgentTurn } from "./useHomeData";
+import { cleanupStaleIdleSession, loadHomeCampaigns, loadHomeHealth, reconcileStaleSessionTurn, stopAgentTurn } from "./useHomeData";
 
 const setSessionsMock = vi.fn();
 let mockSessions: DispatchedSession[] = [];
+const usePolledMock = vi.hoisted(() => vi.fn((_load?: unknown) => ({ data: null as unknown, failed: false, at: 1 })));
 
 vi.mock("../../api/agentActivity", () => ({
   getDispatchedSessions: vi.fn(async () => mockSessions),
@@ -31,7 +32,7 @@ vi.mock("./useHomeData", async (importOriginal) => {
   const actual = await importOriginal<typeof import("./useHomeData")>();
   return {
     ...actual,
-    usePolled: () => ({ data: null, failed: false, at: 1 }),
+    usePolled: (load: unknown) => usePolledMock(load),
     useAgentTurns: () => new Map(),
     cleanupStaleIdleSession: vi.fn(async () => ({ disconnected: true })),
     reconcileStaleSessionTurn: vi.fn(async () => ({ ok: true, reconciled: false, reason: "still live" })),
@@ -45,6 +46,7 @@ const TEN_DAYS_AGO = new Date(Date.now() - 10 * 86_400_000).toISOString();
 describe("HomePageView stale session cleanup", () => {
   afterEach(() => {
     vi.clearAllMocks();
+    usePolledMock.mockImplementation(() => ({ data: null, failed: false, at: 1 }));
     mockSessions = [];
     document.body.innerHTML = "";
   });
@@ -153,6 +155,77 @@ describe("HomePageView stale session cleanup", () => {
     await act(async () => { confirmBtn!.click(); });
 
     expect(stopAgentTurn).toHaveBeenCalledWith("ada");
+    await act(async () => root.unmount());
+  });
+
+  it("hides duplicate HomeSystemCard on mobile when health is degraded and other system rows are healthy, while rendering both on desktop", async () => {
+    let queueDepth = 0;
+    usePolledMock.mockImplementation((load: unknown) => {
+      if (load === loadHomeHealth) {
+        return {
+          data: {
+            status: "degraded",
+            degraded_reasons: ["turn_presence_unknown:claude:123:none:1:60"],
+            providers: [{ name: "claude", connected: true }],
+            queue_depth: queueDepth,
+          },
+          failed: false,
+          at: 1,
+        };
+      }
+      if (load === loadHomeCampaigns) {
+        return {
+          data: {
+            legacy: [],
+            summaries: [],
+            documents: [],
+            detailFailed: 0,
+            detailsCut: 0,
+          },
+          failed: false,
+          at: 1,
+        };
+      }
+      return { data: null, failed: false, at: 1 };
+    });
+
+    const container = document.createElement("div");
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <HomePageView isKo isMobileViewport={true} agents={[]} onOpenAgent={vi.fn()} />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(container.querySelector('[data-testid="home-triage-health"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="home-system"]')).toBeNull();
+
+    queueDepth = 4;
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <HomePageView isKo isMobileViewport={true} agents={[]} onOpenAgent={vi.fn()} />
+        </MemoryRouter>,
+      );
+    });
+    expect(container.querySelector('[data-testid="home-triage-health"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="home-system"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="home-system-reasons-toggle"]')).toBeNull();
+
+    queueDepth = 0;
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <HomePageView isKo isMobileViewport={false} agents={[]} onOpenAgent={vi.fn()} />
+        </MemoryRouter>,
+      );
+    });
+    expect(container.querySelector('[data-testid="home-triage-health"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="home-system"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="home-system-reasons-toggle"]')).toBeTruthy();
+
     await act(async () => root.unmount());
   });
 });

@@ -21,6 +21,7 @@ pub(crate) mod projection;
 mod readiness_hold;
 mod refused;
 mod retained;
+pub(crate) mod retry_wait;
 pub(crate) mod routine_settlement;
 pub(crate) mod source_admission;
 mod sources;
@@ -47,6 +48,9 @@ pub(crate) struct Owner {
     claimed_followers: Vec<PendingQueueItem>,
     /// The current claim's process-unique number: another owner's or an earlier claim never reserves.
     claim_number: u64,
+    /// The current grant's process-unique number: an earlier grant of the same front never waits.
+    #[cfg(unix)]
+    grant_number: u64,
     /// The front a refusal before any key returned to wait for a real wake; never persisted.
     held: Option<u64>,
     /// The attempt whose first key its original's readiness due refused; never persisted.
@@ -200,6 +204,7 @@ impl Owner {
                 owed_drop_receipts: Vec::new(),
                 unfinished_handoff: None,
                 effort_restart: None,
+                retry: Default::default(),
             },
         };
         let mut owner = Self {
@@ -216,6 +221,8 @@ impl Owner {
             due_refused: None,
             first_key_approved: None,
             claim_number: 0,
+            #[cfg(unix)]
+            grant_number: 0,
             incarnation: uuid::Uuid::new_v4(),
             last_success_sequence: 0,
             starts: start_failure::Starts::default(),
@@ -415,22 +422,7 @@ impl Owner {
         if self.effort_blocks(Some(&original)) {
             return None;
         }
-        let item = self.snapshot.queued_digest(0)?;
-        let ticket = self
-            .snapshot
-            .admission_binds
-            .iter()
-            .find_map(|b| match &b.at {
-                BindAt::Queued { index: 0, item: at } if *at == item => Some(
-                    b.receipt
-                        .strip_prefix("tk:")?
-                        .rsplit_once(':')?
-                        .0
-                        .to_string(),
-                ),
-                _ => None,
-            });
-        Some((ticket, original))
+        Some((self.snapshot.front_ticket(), original))
     }
 
     /// The queued originals behind the front that join its one prompt, merged as the legacy queue
@@ -468,16 +460,31 @@ impl Owner {
         }
     }
 
-    /// Lets one owner claim presenting exactly this front start a turn.
-    pub(crate) fn grant_front(&mut self, front: &Front) -> Result<(), String> {
+    /// Lets one owner claim presenting exactly this front start a turn; `false` grants nothing
+    /// while the front sits in an armed retry wait.
+    pub(crate) fn grant_front(&mut self, front: &Front) -> Result<bool, String> {
         self.held = None;
         match self.front() {
+            Some(now) if is_front(&now, front) && self.retry_waiting(&now) => Ok(false),
             Some(now) if is_front(&now, front) => {
+                #[cfg(unix)]
+                {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static GRANTS: AtomicU64 = AtomicU64::new(1);
+                    self.grant_number = GRANTS.fetch_add(1, Ordering::Relaxed);
+                }
                 self.front_grant = Some(now);
-                Ok(())
+                Ok(true)
             }
             _ => Err("not the owner's unattempted front".into()),
         }
+    }
+
+    /// The number of the grant `front` holds while no claim spent it.
+    #[cfg(unix)]
+    pub(crate) fn grant_number_of(&self, front: &Front) -> Option<u64> {
+        let granted = (self.front_grant.as_ref()).is_some_and(|g| is_front(g, front));
+        (granted && self.front_claim.is_none()).then_some(self.grant_number)
     }
 
     /// The owner's turn claim spends the grant only when it and the current front are exactly
@@ -666,6 +673,9 @@ pub(super) fn front_holds(items: &[PendingQueueItem], input: &InputAttempt) -> b
 #[path = "v2/owner_tests.rs"]
 mod tests;
 // Unit fixtures adopt real owner files, which need a confirmed parent directory fsync.
+#[cfg(all(test, unix))]
+#[path = "v2/retry_wait_tests.rs"]
+pub(crate) mod retry_wait_tests;
 #[cfg(all(test, unix))]
 #[path = "v2/unit_tests.rs"]
 mod unit_tests;

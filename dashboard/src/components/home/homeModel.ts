@@ -20,16 +20,7 @@ import { formatClock, parseTime } from "../dashboard/routineModel";
 export type Tr = (ko: string, en: string) => string;
 export type HomeTone = "ok" | "info" | "warn" | "err" | "neutral";
 
-export interface HomeLegacyNode extends HomeCampaignNodeSummary {
-  id?: string;
-  title?: string;
-  stage?: string;
-  next_action?: string | null;
-  blocker?: string | null;
-  assignee?: string | null;
-  issue_url?: string | null;
-  updated_at?: string;
-}
+export type HomeLegacyNode = Pick<HomeCampaignNodeSummary, "status"> & Partial<Omit<HomeCampaignNodeSummary, "status">>;
 
 export type HomeLegacySummary = Omit<HomeLegacyCampaignSummary, "nodes"> & {
   nodes: ReadonlyArray<HomeLegacyNode>;

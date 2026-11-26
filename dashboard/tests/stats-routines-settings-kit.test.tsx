@@ -11,6 +11,7 @@ import type { TFunction } from "../src/components/dashboard/model";
 import ReceiptWidget from "../src/components/dashboard/ReceiptWidget";
 import { buildScheduledRunsModel, RoutinesTimelineWidget } from "../src/components/dashboard/RoutinesTimelineWidget";
 import SettingsView from "../src/components/SettingsView";
+import StatsPageView from "../src/components/StatsPageView";
 import DailyTokenCompositionChart from "../src/components/stats/DailyTokenCompositionChart";
 import { StatsAccountLimits } from "../src/components/stats/StatsAccountLimits";
 import { StatsSummaryGrid } from "../src/components/stats/StatsSummaryCards";
@@ -210,6 +211,23 @@ describe("Slice 4 — Stats: one-click Claude account switch, email masking, Bre
     expect(view.textContent).toContain("토큰 영수증");
     expect(view.textContent).toContain("$1.25");
   });
+
+  it("renders distinct linear Y-axis ticks on MeteringChart for billion-token peaks", async () => {
+    const { MeteringChart } = await import("../src/kit/pro/metering-chart");
+    const { formatTokens } = await import("../src/components/stats/statsModel");
+    const view = await render(
+      <MeteringChart
+        title="Daily tokens"
+        days={[
+          { label: "11-23", total: 1.4e9 },
+          { label: "11-24", total: 2.7e9 },
+        ]}
+        format={formatTokens}
+      />,
+    );
+    const yLabels = Array.from(view.querySelectorAll(".aui-metering-chart-y span"), (el) => el.textContent);
+    expect(yLabels).toEqual(["3.0B", "2.0B", "1.0B", "0"]);
+  });
 });
 
 describe("Slice 4 — Routines: v3 ScheduledRuns board + one-click POST /api/routines/{id}/run-now", () => {
@@ -369,7 +387,7 @@ describe("Slice 4 — Settings: live runtime health truth, kit IntegrationSettin
     expect(view.textContent).not.toContain("아직 고르지 않았어요");
 
     const integrationGrid = view.querySelector("[data-testid='settings-integrations-grid']")!;
-    expect(integrationGrid.className).toContain("[&_.aui-integration-settings-collapse]:hidden!");
+    expect(integrationGrid.querySelector(".aui-integration-settings-collapse")).toBeNull();
     // Ready connector has no disabled reason banner
     expect(integrationGrid.querySelector(".aui-integration-settings-reason")).toBeNull();
 
@@ -385,5 +403,86 @@ describe("Slice 4 — Settings: live runtime health truth, kit IntegrationSettin
     await act(async () => typeInto(searchInput, "staleDispatchedTerminalStatuses"));
     await settle(2);
     expect(view.querySelector("[data-testid='setting-row-staleDispatchedTerminalStatuses']")).not.toBeNull();
+  });
+
+  it("defers /api/skills/* calls on StatsPageView mount and isolates skill errors from top-level stats banner", async () => {
+    let failSkillRanking = true;
+    serve({
+      "GET /api/token-analytics?period=7d": () => ({
+        body: {
+          period: "7d",
+          period_label: "최근 7일",
+          days: 7,
+          generated_at: "2026-11-26T00:00:00Z",
+          summary: {
+            total_tokens: 12000,
+            total_cost: 2.5,
+            cache_discount: 0.4,
+            total_messages: 10,
+            total_sessions: 2,
+            active_days: 3,
+            average_daily_tokens: 4000,
+            peak_day: { date: "2026-11-26", total_tokens: 6000, cost: 1.2 },
+          },
+          receipt: {
+            period_label: "최근 7일",
+            period_start: "2026-11-20",
+            period_end: "2026-11-26",
+            models: [],
+            subtotal: 2.9,
+            cache_discount: 0.4,
+            total: 2.5,
+            stats: { total_messages: 10, total_sessions: 2 },
+            providers: [],
+            agents: [{ agent: "adk-cc", tokens: 12000, cost: 2.5, percentage: 100 }],
+          },
+          daily: [
+            { date: "2026-11-26", input_tokens: 3000, output_tokens: 1000, cache_read_tokens: 7000, cache_creation_tokens: 1000, total_tokens: 12000, cost: 2.5 },
+          ],
+          heatmap: [],
+        },
+      }),
+      "GET /api/claude-accounts": () => ({ body: { accounts: [] } }),
+      "GET /api/settings/runtime-config": () => ({ body: { current: {}, defaults: {} } }),
+      "GET /api/receipt?period=month": () => ({
+        body: { period_label: "이번 달", period_start: "2026-11-01", period_end: "2026-11-26", models: [], subtotal: 0, cache_discount: 0, total: 0, stats: { total_messages: 0, total_sessions: 0 }, providers: [], agents: [] },
+      }),
+      "GET /api/skills/catalog": () => ({
+        body: { catalog: [{ name: "agent-browser", description: "Browser CLI", desc_ko: "브라우저 자동화" }] },
+      }),
+      "GET /api/skills/ranking?window=7d&limit=16": () =>
+        failSkillRanking
+          ? { status: 400, body: { error: "skill query rejected" } }
+          : { body: { window: "7d", overall: [{ skill_name: "agent-browser", skill_desc_ko: "브라우저 자동화", calls: 9, last_used_at: 0 }], byAgent: [] } },
+    });
+
+    const view = await render(
+      <MemoryRouter>
+        <StatsPageView settings={{ companyName: "ADK", ceoName: "CEO", language: "ko", theme: "dark" }} />
+      </MemoryRouter>,
+    );
+
+    // Cold start makes 0 /api/skills/* requests
+    expect(calls.some((c) => c.key.includes("/api/skills/"))).toBe(false);
+    expect(view.querySelector("[data-testid='stats-skill-load-button']")).not.toBeNull();
+
+    // Request skill usage -> first attempt fails with 500, isolated inside SkillUsageCard
+    const loadBtn = view.querySelector<HTMLButtonElement>("[data-testid='stats-skill-load-button']")!;
+    await act(async () => loadBtn.click());
+    await settle();
+
+    expect(calls.some((c) => c.key.includes("/api/skills/ranking"))).toBe(true);
+    expect(view.textContent).not.toContain("일부 통계를 불러오지 못했어요.");
+    expect(view.querySelector("[data-testid='stats-skill-error']")?.textContent).toContain("스킬 랭킹을 불러오지 못했습니다.");
+
+    // Retry succeeds and renders skill row
+    failSkillRanking = false;
+    const retryBtn = view.querySelector<HTMLButtonElement>("[data-testid='stats-skill-retry-button']")!;
+    await act(async () => retryBtn.click());
+    await settle();
+
+    expect(view.querySelector("[data-testid='stats-skill-error']")).toBeNull();
+    expect(view.textContent).toContain("agent-browser");
+    expect(view.textContent).toContain("이 기간 9회 호출");
   });
 });

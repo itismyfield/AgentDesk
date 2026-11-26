@@ -541,7 +541,7 @@ export function buildCardActivity({
       detail: { kind: "status", from: log.from_status, to: log.to_status, origin: cleanText(log.source), result },
     });
   }
-  for (const item of coalesceGitHubCommentTimeline(parseGitHubCommentTimeline(ghComments))) records.push(commentRecord(item, tr));
+  for (const item of coalesceGitHubCommentTimeline(parseGitHubCommentTimeline(ghComments, tr))) records.push(commentRecord(item, tr));
   return records
     .map((record, index) => ({ record, index }))
     .sort((a, b) => {

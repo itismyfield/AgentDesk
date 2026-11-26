@@ -75,7 +75,7 @@ export interface HomeCampaigns {
 
 export async function loadHomeCampaigns(): Promise<HomeCampaigns> {
   const [legacy, summaries] = await Promise.allSettled([
-    getCampaigns({ view: "summary" }).then((result) => result.campaigns),
+    getCampaigns({ view: "home" }).then((result) => result.campaigns),
     getServerCampaignSummaries(),
   ]);
   if (legacy.status === "rejected" && summaries.status === "rejected") throw legacy.reason;

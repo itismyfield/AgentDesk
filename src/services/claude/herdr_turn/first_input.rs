@@ -495,6 +495,22 @@ fn before_payload(
     })
 }
 
+/// Runs `publish` under the pane's source authority unless a termination chose execution `nonce`:
+/// the input it already sent stays settled, but nothing more of it is published or bound.
+fn publishes(
+    logical: &str,
+    nonce: &str,
+    publish: impl FnOnce(&crate::services::tmux_common::TmuxSourceAuthority<'_>),
+) -> bool {
+    crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        let live = !crate::services::session_host::execution_closing(nonce);
+        if live {
+            publish(authority);
+        }
+        live
+    })
+}
+
 pub(super) fn observe(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
@@ -567,7 +583,7 @@ pub(super) fn observe(
     // Resolve and verify the launch source before the first read exposes the busy turn.
     let mut bound = attached.bound;
     if !bound {
-        crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        let live = publishes(logical, &attached.nonce, |authority| {
             let published = dedupe::register_launched_tmux_runtime_binding_under_source_authority(
                 authority,
                 binding(start),
@@ -582,7 +598,7 @@ pub(super) fn observe(
                 tracing::warn!(logical, %error, "Claude launch source verification not persisted");
             }
         });
-        bound = runtime.block_on(bind_once_logged(turn, &attached.nonce));
+        bound = live && runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     let (mut terminal, mut unconfirmed) = (None, false);
     if early.is_none() {
@@ -621,8 +637,11 @@ pub(super) fn observe(
     let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
     let handoff_end = || terminal_end.unwrap_or_else(length);
     // Registered again at the handoff offset, before any terminal of this turn reaches admission.
-    dedupe::register_launched_tmux_runtime_binding(logical, binding(handoff_end()));
-    if !bound {
+    let live = publishes(logical, &attached.nonce, |authority| {
+        let handoff = binding(handoff_end());
+        dedupe::register_launched_tmux_runtime_binding_under_source_authority(authority, handoff);
+    });
+    if live && !bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     if let Some((read, token)) = terminal.take() {

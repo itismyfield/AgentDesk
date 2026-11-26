@@ -1334,27 +1334,23 @@ fn discord_relayed_user_prompt_format_is_recognized_3527() {
 }
 
 /// A running turn's input opens with `[User:` yet is never a new turn's relay echo or a machine
-/// event, whatever its body quotes; a v1 new-turn header still is a relayed prompt.
+/// event, whatever its body quotes.
 #[test]
 fn an_inject_header_is_neither_a_relayed_prompt_nor_a_machine_event() {
-    let inject = |body: &str| {
-        let frame = crate::services::tui_input::human_frame::inject;
-        frame(
-            "discord:1:2",
-            "343742347365974026",
-            "0hbujang",
-            "abcdef12",
-            body,
-        )
+    use crate::services::tui_input::human_frame::{history, plain_inject};
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
+    let transcript = tempfile::NamedTempFile::new().unwrap();
+    let inject = |nonce: &str, body: &str| {
+        let frame = plain_inject("", "343742347365974026", "0hbujang", nonce, body);
+        let who = ("claude", "inject-pane", nonce, "343742347365974026");
+        history::register(who, transcript.path(), 0, &frame).unwrap();
+        frame
     };
-    let quoting = inject("see [User: bob (ID: 5)] above");
+    let quoting = inject("abcdef12", "see [User: bob (ID: 5)] above");
     assert!(!is_discord_relayed_user_prompt(&quoting));
-    assert!(is_discord_relayed_user_prompt(
-        &quoting.replace("mode=inject", "mode=new")
-    ));
     let xml = "<subagent_notification>{\"status\":{\"completed\":\"x\"}}</subagent_notification>";
     assert!(!is_user_prefixed_subagent_notification_machine_event(
-        &inject(xml)
+        &inject("0123abcd", xml)
     ));
 }
 

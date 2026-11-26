@@ -5,16 +5,17 @@ import { act, createRef, useEffect } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { requireAuthentication, resolveAuthentication } from "../api/authState";
+import { getAuthSnapshot, requireAuthentication, resolveAuthentication } from "../api/authState";
 import { OverlayProvider } from "../components/common/overlay";
 import { Step1BotConnection } from "../components/onboarding/Step1BotConnection";
 import { KanbanProvider } from "../contexts/KanbanContext";
 import { SettingsProvider, useSettings } from "../contexts/SettingsContext";
 import { WorkspaceProvider } from "../contexts/WorkspaceContext";
+import { I18nProvider } from "../i18n";
 import { DEFAULT_SETTINGS } from "../types";
 import AppShell from "./AppShell";
 import { AppTopBar } from "./AppTopBar";
-import { DashboardAuthGate } from "./DashboardAuthGate";
+import { DashboardAuthGate, DashboardLogout } from "./DashboardAuthGate";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { findRouteByPath } from "./routes";
 import { THEME_STORAGE_KEY } from "./themePreferences";
@@ -48,6 +49,10 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "offline" }), { status: 503, headers: { "Content-Type": "application/json" } })),
+    );
     Object.defineProperty(window, "localStorage", {
       configurable: true,
       writable: true,
@@ -78,8 +83,9 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     await act(async () => root.unmount());
     container.remove();
     memoryStorage.clear();
-    resolveAuthentication(0, true, false);
+    resolveAuthentication(getAuthSnapshot().generation, true, false);
     consoleErrorSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it("catches route render errors and recovers on retry or home navigation", async () => {
@@ -204,7 +210,7 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     expect(container.querySelector(".aui-running-now-panel")?.hasAttribute("open")).toBe(false);
   });
 
-  it("renders unclipped Step1 IntegrationFlow with localized AgentDesk hub CSS variables", async () => {
+  it("renders unclipped Step1 IntegrationFlow with localized AgentDesk hub copy", async () => {
     await act(async () => {
       root.render(
         <Step1BotConnection
@@ -241,8 +247,9 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     const flowWrap = container.querySelector<HTMLElement>('[data-testid="step1-integration-flow"]')!;
     expect(flowWrap.className).not.toContain("max-h-48");
     expect(flowWrap.className).toContain("max-w-[440px]");
-    expect(flowWrap.style.getPropertyValue("--adk-hub-title")).toBe('"AgentDesk 허브"');
-    expect(flowWrap.style.getPropertyValue("--adk-hub-sub")).toBe('"Discord 실행·통신 봇 오케스트레이션"');
+    expect(flowWrap.textContent).toContain("AgentDesk 허브");
+    expect(flowWrap.textContent).toContain("Discord 실행·통신 봇 오케스트레이션");
+    expect(flowWrap.textContent).not.toContain("Data Analysis");
     expect(flowWrap.textContent).toContain("Antigravity");
   });
 
@@ -343,6 +350,39 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     expect(form.className).toContain("bg-[var(--bg-2)]");
     expect(form.className).toContain("border-[var(--line)]");
     expect(container.innerHTML).not.toMatch(/bg-gray-|text-gray-|border-gray-/);
+  });
+
+  it("localizes DashboardAuthGate and DashboardLogout in English under I18nProvider", async () => {
+    requireAuthentication();
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <DashboardAuthGate>
+            <div>authenticated</div>
+          </DashboardAuthGate>
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector("h1")?.textContent).toBe("Sign in to AgentDesk");
+    expect(container.querySelector('[role="status"]')?.textContent).toBe("Sign in with your server token.");
+    expect(container.querySelector("label")?.textContent).toBe("Server token");
+    const submitBtn = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submitBtn.textContent).toBe("Sign in");
+    expect(submitBtn.className).toContain("bg-[var(--accent)]");
+    expect(submitBtn.className).toContain("text-[var(--accent-ink)]");
+
+    resolveAuthentication(getAuthSnapshot().generation, true, true);
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <DashboardLogout />
+        </I18nProvider>,
+      );
+    });
+    const logoutBtn = container.querySelector("button")!;
+    expect(logoutBtn.textContent).toBe("Sign out");
+    expect(logoutBtn.className).toContain("max-[899px]:min-h-11");
   });
 
   it("focuses the active or first route item via [data-autofocus] instead of the close button when opening mobile More", async () => {

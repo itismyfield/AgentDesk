@@ -77,7 +77,14 @@ export default function AuditPageView({ isKo, agents, isMobileViewport }: AuditP
           {detail && tab === "prompts" ? (
             <PromptAuditDetail key={`${detail.agent.id}:${detail.provider}`} {...detail} onOpenAnchors={() => selection.selectTab("anchors")} />
           ) : null}
-          {detail && tab === "anchors" ? <AnchorAuditDetail key={`${detail.agent.id}:${detail.provider}`} {...detail} agents={agents} /> : null}
+          {detail && tab === "anchors" ? (
+            <AnchorAuditDetail
+              key={`${detail.agent.id}:${detail.provider}`}
+              {...detail}
+              agents={agents}
+              onOpenPrompts={() => selection.selectTab("prompts")}
+            />
+          ) : null}
         </AuditWorkspace>
       </section>
     </PageFrame>

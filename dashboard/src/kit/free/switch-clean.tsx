@@ -142,7 +142,7 @@ const css = /* css */ `
 
 /* Touch screens: the track, thumb, travel and label stay as on desktop (13px text next to other fields);
    only the invisible input grows into a hit area of at least 44×44px centred on the track. */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-switch-clean__input {
     inset: auto;
     top: min(-6px, calc(50% - 22px));
@@ -171,7 +171,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-switch-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-switch-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-switch-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;

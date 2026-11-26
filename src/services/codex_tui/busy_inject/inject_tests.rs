@@ -11,8 +11,8 @@ mod expanded_contract_tests;
 
 /// The model turn the captured `model_turn.jsonl` keeps open until its line 19.
 const T: &str = "01a11d88-ef31-7860-9d48-88926c4b1809";
-/// The request whose frame `busy_frame_v1.ansi`, the captured `busy_frame.ansi` with the v1 header
-/// in place of the older one, shows in the composer.
+/// The request whose frame `busy_frame_plain.ansi`, the captured `busy_frame.ansi` with the current
+/// header in place of the older one, shows in the composer.
 const SOURCE: &str = "discord";
 const AUTHOR: &str = "200";
 const NAME: &str = "fixture";
@@ -218,33 +218,45 @@ fn unreadable_tails_read_as_unknown() {
 /// the turn that record belongs to.
 #[test]
 fn the_nonce_is_confirmed_only_by_a_later_user_record() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let dir = tempfile::tempdir().unwrap();
+    let session = format!("confirm-{}", uuid::Uuid::new_v4());
+    let register = crate::services::tui_input::human_frame::history::register;
     let path = dir.path().join("rollout.jsonl");
     let before = records("model_turn.jsonl", 11);
-    fs::write(&path, records("model_turn.jsonl", 20)).unwrap();
+    let user = item(T, "UserMessage", &frame_text());
+    let rest = &records("model_turn.jsonl", 20)[before.len()..];
+    fs::write(&path, &before).unwrap();
     let offset = before.len() as u64;
-    let nonce = "845246b2";
-    assert_eq!(
-        rollout::submitted(&path, offset, nonce),
-        Some(Some(T.into()))
-    );
-    let after = records("model_turn.jsonl", 13).len() as u64;
-    assert_eq!(rollout::submitted(&path, after, nonce), None);
-    // An answer that quotes the frame is not the input.
-    let quoted = serde_json::json!({"type": "response_item", "payload": {"type": "message",
-        "role": "assistant", "content": [{"type": "output_text", "text": "[x · y · feedf00d]"}]}});
-    fs::write(
+    register(
+        ("codex", &session, NONCE, AUTHOR),
         &path,
-        format!("{quoted}\n") + &item("t2", "UserMessage", "[x · y · feedf00d]"),
+        offset,
+        &frame_text(),
     )
     .unwrap();
+    fs::write(&path, format!("{before}{user}{rest}")).unwrap();
+    assert_eq!(
+        rollout::submitted(&path, offset, NONCE),
+        Some(Some(T.into()))
+    );
+    let after = offset + user.len() as u64;
+    assert_eq!(rollout::submitted(&path, after, NONCE), None);
+    // An answer that quotes the frame is not the input.
+    let path = dir.path().join("quoted.jsonl");
+    let framed = frame(SOURCE, AUTHOR, NAME, "feedf00d", BODY);
+    fs::write(&path, "").unwrap();
+    register(("codex", &session, "feedf00d", AUTHOR), &path, 0, &framed).unwrap();
+    let quoted = serde_json::json!({"type": "response_item", "payload": {"type": "message",
+        "role": "assistant", "content": [{"type": "output_text", "text": framed}]}});
+    let unfinished = item("t2", "UserMessage", &framed);
+    fs::write(&path, unfinished.trim_end()).unwrap();
+    assert_eq!(rollout::submitted(&path, 0, "feedf00d"), None);
+    fs::write(&path, format!("{quoted}\n{unfinished}")).unwrap();
     assert_eq!(
         rollout::submitted(&path, 0, "feedf00d"),
         Some(Some("t2".into()))
     );
-    let unfinished = item("t2", "UserMessage", "[x · y · feedf00d]");
-    fs::write(&path, unfinished.trim_end()).unwrap();
-    assert_eq!(rollout::submitted(&path, 0, "feedf00d"), None);
 }
 
 fn frame_text() -> String {
@@ -263,14 +275,9 @@ fn captured_screens_read_as_shown() {
         shown.composer,
         screen::Composer::Text("person draft text".into())
     );
-    let shown = screen::read(&fixture("busy_frame_v1.ansi"));
-    assert_eq!(
-        shown.composer,
-        screen::Composer::Text(crate::services::tui_input::human_frame::inject(
-            SOURCE, AUTHOR, NAME, NONCE, BODY
-        ))
-    );
-    let legacy = crate::services::tui_input::human_frame::legacy_inject(SOURCE, NAME, NONCE, BODY);
+    let shown = screen::read(&fixture("busy_frame_plain.ansi"));
+    assert_eq!(shown.composer, screen::Composer::Text(frame_text()));
+    let legacy = format!("[📱 {SOURCE} · {NAME} · {NONCE}]\n{BODY}");
     let shown = screen::read(&fixture("busy_frame.ansi"));
     assert_eq!(shown.composer, screen::Composer::Text(legacy));
     assert!(screen::read(&fixture("busy_queued.ansi")).queued);
@@ -380,7 +387,11 @@ impl Fake {
         fs::write(dir.path().join("screen.py"), FAKE_SCREEN).unwrap();
         let fake = Self { dir, rollout };
         fake.answers("attach", &["0,,80,24"]);
-        fake.caps(&["busy_empty.ansi", "busy_empty.ansi", "busy_frame_v1.ansi"]);
+        fake.caps(&[
+            "busy_empty.ansi",
+            "busy_empty.ansi",
+            "busy_frame_plain.ansi",
+        ]);
         fake
     }
 
@@ -404,23 +415,7 @@ impl Fake {
     }
 
     fn caps(&self, names: &[&str]) {
-        let shown: Vec<String> = names
-            .iter()
-            .map(|name| {
-                let shown = fixture(name);
-                if *name == "busy_frame_v1.ansi" {
-                    let old = crate::services::tui_input::human_frame::inject(
-                        SOURCE, AUTHOR, NAME, NONCE, "",
-                    );
-                    let new = crate::services::tui_input::human_frame::plain_inject(
-                        SOURCE, AUTHOR, NAME, NONCE, "",
-                    );
-                    shown.replace(old.lines().next().unwrap(), &new)
-                } else {
-                    shown
-                }
-            })
-            .collect();
+        let shown: Vec<String> = names.iter().map(|name| fixture(name)).collect();
         let refs: Vec<&str> = shown.iter().map(String::as_str).collect();
         self.answers("cap", &refs);
     }
@@ -694,7 +689,7 @@ fn an_image_draft_is_refused_only_before_the_paste() {
     let writes = fake.calls("load-buffer") + fake.calls("paste-buffer") + fake.enters();
     assert_eq!((writes, ledger.registered.get()), (0, 0));
     let fake = Fake::new();
-    let after = with_image(&fixture("busy_frame_v1.ansi"));
+    let after = with_image(&fixture("busy_frame_plain.ansi"));
     fake.answers(
         "cap",
         &[
@@ -775,32 +770,7 @@ fn plain_receipts_do_not_use_a_late_completed_alias_for_the_second_attempt() {
     register(("codex", &session, "ca720106", "720103"), &path, 0, &framed).unwrap();
     let response = |id: &str| serde_json::json!({"type":"response_item", "payload":{"type":"message", "role":"user", "id":id, "content":[{"type":"input_text", "text":framed}], "internal_chat_message_metadata_passthrough":{"turn_id":"target"}}});
     let completed = |id: &str| serde_json::json!({"type":"event_msg", "payload":{"type":"item_completed", "turn_id":"target", "item":{"type":"UserMessage", "id":id, "content":[{"type":"text", "text":framed}]}}});
-    let legacy_frame = |nonce| {
-        crate::services::tui_input::human_frame::inject(
-            "discord",
-            "720103",
-            "ann",
-            nonce,
-            "same words",
-        )
-    };
-    let mut legacy = response("legacy-row");
-    legacy["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720106"));
-    fs::write(&path, format!("{legacy}\n")).unwrap();
-    assert_eq!(
-        rollout::submitted(&path, 0, "ca720106"),
-        None,
-        "a current plain attempt cannot be confirmed by its nonce inside an old frame"
-    );
-    let mut unregistered = legacy;
-    unregistered["payload"]["content"][0]["text"] = serde_json::json!(legacy_frame("ca720110"));
     let mut file = fs::OpenOptions::new().append(true).open(&path).unwrap();
-    writeln!(file, "{unregistered}").unwrap();
-    assert_eq!(
-        rollout::submitted(&path, 0, "ca720110"),
-        Some(Some("target".into())),
-        "an unregistered historical attempt keeps the legacy reader"
-    );
     let mut opening = response("unused-response-id");
     opening["payload"].as_object_mut().unwrap().remove("id");
     writeln!(file, "{opening}").unwrap();
