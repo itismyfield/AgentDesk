@@ -2,8 +2,9 @@
 import { act, useEffect, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Campaign } from "../src/api/campaigns";
-import { request } from "../src/api/httpClient";
+import { deleteCampaign, type Campaign } from "../src/api/campaigns";
+import { ApiRequestError, request } from "../src/api/httpClient";
+import CampaignsPanel from "../src/components/campaigns/CampaignsPanel";
 import { bulkKanbanAction } from "../src/api/kanban";
 import { getDefaultPipelineTemplate, saveServerCampaignPipeline, validateServerCampaignPipeline, type CampaignPipeline as PipelineDetail } from "../src/api/serverCampaignPipeline";
 import { serverCampaignFixtures } from "../src/api/serverCampaignsFixtures";
@@ -650,5 +651,101 @@ describe("Shared editor history & saving-leave guard (#8369 P2-a, P2-c, P2-4)", 
     });
     // Re-create root for afterEach cleanup
     root = createRoot(container);
+  });
+
+  it("wires #8340 ledger campaign deletion: disables active delete, handles 409 conflict, and removes deleted campaigns", async () => {
+    const activeLedger: Campaign = {
+      id: "active-1",
+      title: "진행 중인 원장 캠페인",
+      description: "",
+      status: "active",
+      round: 1,
+      revision: 2,
+      auto_queue: false,
+      created_at: "2026-11-20T00:00:00Z",
+      updated_at: "2026-11-26T00:00:00Z",
+      nodes: [makeCampaignNode("n1", { status: "running" })],
+    };
+    const completedLedger: Campaign = {
+      id: "done-1",
+      title: "완료된 옛 캠페인",
+      description: "",
+      status: "completed",
+      round: 1,
+      revision: 4,
+      auto_queue: false,
+      created_at: "2026-10-01T00:00:00Z",
+      updated_at: "2026-10-10T00:00:00Z",
+      nodes: [makeCampaignNode("n2", { status: "completed" })],
+    };
+
+    vi.mocked(request).mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.startsWith("/api/campaigns?limit=")) {
+        return { campaigns: [activeLedger, completedLedger], live: {}, limit: 100, offset: 0 };
+      }
+      if (url === "/api/server-campaigns?view=summary&limit=100&offset=0") {
+        return { campaigns: [], limit: 100, offset: 0 };
+      }
+      if (url === "/api/campaigns/active-1") {
+        return { campaign: activeLedger, live: {} };
+      }
+      if (url === "/api/campaigns/done-1" && (!init?.method || init.method === "GET")) {
+        return { campaign: completedLedger, live: {} };
+      }
+      return { runs: [] };
+    });
+
+    await act(async () => {
+      root.render(<CampaignsPanel language="ko" />);
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // Active campaign has disabled delete button
+    const activeDeleteBtn = container.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-trigger']")!;
+    expect(activeDeleteBtn).not.toBeNull();
+    expect(activeDeleteBtn.disabled).toBe(true);
+
+    // Switch to Done bucket and select completed campaign
+    const doneTab = [...container.querySelectorAll("button")].find((b) => b.textContent?.includes("끝남"))!;
+    await act(async () => doneTab.click());
+    const completedCard = container.querySelector<HTMLButtonElement>('[data-campaign-key="legacy:done-1"]')!;
+    await act(async () => completedCard.click());
+
+    const enabledDeleteBtn = container.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-trigger']")!;
+    expect(enabledDeleteBtn.disabled).toBe(false);
+    await act(async () => enabledDeleteBtn.click());
+
+    expect(document.querySelector("[data-testid='campaign-delete-modal']")?.textContent).toContain("완료된 옛 캠페인");
+
+    // Simulate 409 Conflict first
+    vi.mocked(request).mockImplementationOnce(async () => {
+      throw new ApiRequestError("active campaign cannot be deleted", { status: 409 });
+    });
+    const confirmBtn = document.querySelector<HTMLButtonElement>("[data-testid='campaign-delete-confirm']")!;
+    await act(async () => confirmBtn.click());
+    expect(document.querySelector("[data-testid='campaign-delete-error']")?.textContent).toContain("진행 중인 캠페인은 삭제할 수 없어요");
+
+    // Simulate 200 OK delete
+    vi.mocked(request).mockImplementationOnce(async (url, init) => {
+      expect(url).toBe("/api/campaigns/done-1");
+      expect(init?.method).toBe("DELETE");
+      return { deleted: "done-1", deleted_revisions: 4 };
+    });
+    await act(async () => confirmBtn.click());
+
+    expect(document.querySelector("[data-testid='campaign-delete-modal']")).toBeNull();
+    expect(container.querySelector('[data-campaign-key="legacy:done-1"]')).toBeNull();
+
+    // Direct API helper check
+    vi.mocked(request).mockResolvedValueOnce({ deleted: "slug/a", deleted_revisions: 1 });
+    const res = await deleteCampaign("slug/a");
+    expect(res).toEqual({ deleted: "slug/a", deleted_revisions: 1 });
+    expect(vi.mocked(request)).toHaveBeenLastCalledWith(
+      "/api/campaigns/slug%2Fa",
+      { method: "DELETE", suppressErrorToast: true },
+      expect.anything(),
+    );
   });
 });
