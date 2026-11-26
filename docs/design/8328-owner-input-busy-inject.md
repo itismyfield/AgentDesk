@@ -18,7 +18,7 @@
 
 사람 입력(Discord·iMessage·허용 봇)은 바쁜지 확인해서 보관하지 않는다. 보류 조건만 확인한 뒤 바로 넣는다.
 - Claude: 붙여넣기+Enter. TUI가 다음 도구 경계에서 입력을 진행 중 턴에 흡수하면, 그 입력의 몫은 진행 중 턴의 답에 한 번만 합쳐 게시한다. 입력 메시지에는 '진행 중 턴에 합류'(➕) 표시를 단다. 흡수되지 않고 자기 턴을 열면 자기 답을 받는다.
-- Codex: 바쁜지 읽은 값은 어떤 키를 누를지 고르는 데에만 쓴다. 바쁘면 Tab, idle이면 Enter, 불확실하면 실측 결과를 따른다(§12, 지금은 자리만 둔다).
+- Codex: 바쁜지 읽은 값은 어떤 키를 누를지 고르는 데에만 쓴다. 바쁘면 Tab, idle이면 Enter, 바쁜지만 불확실하면 Tab이다. composer 준비나 앞 입력의 수락이 불확실하면 보관한다(i8328tab1 실측, §12). 키를 누르기 전에는 붙여넣은 내용이 화면에 반영됐는지 확인하고, 다음 입력은 앞 입력이 수락된 뒤에 넣는다.
 
 답을 어느 입력에 귀속할지는 mailbox 토큰이 아니라 transcript에 남은 입력 echo의 위치로 정한다. echo가 아직 없다는 사실은 재전송 근거가 되지 못한다.
 
@@ -51,13 +51,13 @@
 | `TargetTuiDrop`·`CodexTuiDrop` | mutant RED `NoSilentLoss`·`ReplyPosted` | TUI가 입력을 버리면 깨진다(실측에서는 0건) |
 | `TargetJoinUnmarked` | mutant RED `JoinedMarked` | 합류 표시 누락 |
 | `TargetJoinDoublePost` | mutant RED `ReplyExactlyOnce` | 합류한 B 몫을 따로 한 번 더 게시하는 것(A 꼬리를 B 답으로 다시 relay) |
-| `CodexTargetBusy`·`CodexTarget8432` | GREEN | 바쁨 Tab, idle Enter, 불확실은 보류 |
-| `CodexAlwaysEnter` | mutant RED `NoSilentLoss` | 바쁨 판정을 없애고 항상 Enter를 누르면 steer로 A 작업을 잃는다(실측 3회) |
+| `CodexTargetBusy`·`CodexTarget8432` | GREEN | 채택 규칙: 바쁨 Tab, idle Enter, 불확실 Tab(`TabAtIdle=submits`, 실측 idle Tab 6/6 제출) |
+| `CodexUncertainHold` | GREEN | 대안: 불확실할 때 보류 뒤 재관측. composer·수락이 불확실할 때 쓰는 가지다 |
+| `CodexAlwaysEnter` | mutant RED `NoSilentLoss` | 바쁨 판정을 없애고 항상 Enter를 누르면 steer로 A 작업을 잃는다(0단계 3회, tab 레그 완료 전 Enter 0/4 분리·3/4 A 답 유실) |
 | `CodexUncertainEnter` | RED `NoSilentLoss` | 불확실할 때 Enter는 금지 |
-| `CodexUncertainTab` | GREEN (`TabAtIdle=submits` 가정) | 불확실할 때 Tab은 idle Tab이 제출되는 경우에만 안전하다 |
-| `CodexTabIdleStuck` | RED `ReplyPosted` (실측 대기 가설) | idle 화면의 Tab이 제출되지 않고 걸리면, 읽기와 키 사이 경합에서 B가 멈춘다 |
+| `CodexTabIdleStuck` | RED `ReplyPosted` (실측으로 기각된 가설) | idle 화면의 Tab이 걸린다면 읽기와 키 사이 경합에서 B가 멈춘다. 실측은 idle Tab 6/6 제출, 경계 Tab 8/8이라 이 가설은 현실이 아니다. 이 cfg는 그 실측이 왜 필요했는지를 보이는 대조군으로 남긴다 |
 
-정리: Current8432는 RED, 바꾼 Target은 GREEN이다. mutant 7개(토큰 귀속·echo 전 재전송·TUI drop ×2·합류 표시 누락·합류 이중 게시·항상 Enter)는 모두 RED다. Codex 두 가설 cfg(`CodexTabIdleStuck`·`CodexUncertainTab`)는 실측 레그 i8328tab1이 어느 쪽인지 정한다(§12).
+정리: Current8432는 RED, 바꾼 Target은 GREEN이다. mutant 7개(토큰 귀속·echo 전 재전송·TUI drop ×2·합류 표시 누락·합류 이중 게시·항상 Enter)는 모두 RED다. Codex 키 규칙 값은 i8328tab1 실측으로 채웠다(§12). 모델은 입력 하나만 다루므로, 여러 건을 곧바로 붙여넣고 Tab을 누르면 TUI가 두 건을 합치는 현상(실측 busy1, 0/3)은 §2.3의 키 전·후 확인 규칙과 S3 시험이 맡는다.
 
 차트(모두 `docs/statecharts/input-single-path/`):
 - `owner-input-busy-split.current-8432.chart.mmd` (exit 1)
@@ -103,7 +103,8 @@ match origin:
 | H3 | 세션 없음 | `Phase::Absent` → `Route::Cold`(target.rs:81), OI:1752 | 보류가 아니라 기존 cold launch(자기 턴 장부). 실패 시 `start_failure.rs` retry wait | 불필요 |
 | H1 | 사람 초안 | 키 시점 effect: `busy/herdr.rs:77`(PersonDraft), `effect/claude.rs` `draft_notice`, Codex `screen::delivery_veto` | 사람이 보내거나 지움 → held_watch 재관측 | **알림만**(U1). 상한이 와도 자동 제출하지 않는다. 기존 managed stash(초안을 C-s로 보관했다가 복원하는 왕복)는 사람 초안을 제출하지 않으므로 이 결정 밖이고 현행대로 둔다 |
 | H2 | 모달·승인 창 | `busy/herdr.rs:40-51`, `codex_tui/busy_inject/screen.rs` MODAL_FOOTERS, `ingress.rs` Hold::Modal/Dialog | 사람 응답 → held_watch | 불필요 |
-| Hc | composer 미준비(`/clear`·재시작 직후) | Claude: `claude_tui/input/preparation_hold.rs:112`. Codex: 세션 전환 뒤 `codex_tui/readiness.rs`의 준비 증명이 날 때까지(실측 0.3s 실패, 2s 성공) | readiness 증명 → held_watch | 불필요 |
+| Hc | composer 미준비(`/clear`·재시작 직후) | Claude: `claude_tui/input/preparation_hold.rs:112`. Codex: 세션 전환 뒤 `codex_tui/readiness.rs`의 준비 증명이 날 때까지. 실측: Enter는 0.3s에서 1/4 초안 정체, 1s부터 전수 성공. Tab은 0.3s부터 전수 성공(i8328tab1 §6, 24회) | readiness 증명 → held_watch | 불필요 |
+| Hq | (Codex) 앞 주입의 수락 미확인 | 같은 채널에서 바로 앞에 넣은 입력이 아직 TUI 대기열 항목이나 rollout 사용자 표식으로 확인되지 않음. `awaiting_echo`(§5.1)의 "수락됨" 단계로 판정 | 앞 입력 수락 확인 → held_watch | 불필요 |
 | H4 | 첨부 준비 전 | `input_payload::busy_body`(`input_payload.rs:143`), `ingress.rs` Hold::Uploads | 내려받기 완료 wake. 실패는 알림 | 불필요 |
 | H5 | 재시작 복구 중 | `ingress::ingress_hold`(`ingress.rs:192-198`) | R8 `complete_active_reconcile` wake | 불필요 |
 | H6 | 세션 전환·restart gate·effort restart | 전이 잠금(위 1), OI:190-199, V2 `v2.rs` effort_restart 차단 | `Gate::Drop`·전이 해제 wake | 불필요 |
@@ -130,10 +131,17 @@ H11은 실측에 근거해 추가했다. Claude S3D에서 Esc 0.3s 뒤 주입하
   - composer가 읽히고 작업 중 표식이 없으면 **Idle**.
   - 둘 다 아니면 **Unknown**.
   - rollout `read_turn`(`codex_tui/busy_inject.rs:288`)은 진단 보조로만 쓰고 관문으로 쓰지 않는다.
-- 규칙: Busy → **Tab**(Codex `Queued follow-up inputs`, A 뒤 자기 task), Idle → **Enter**, Unknown → **[i8328tab1 결과로 채움]**. 모델 기준 안전한 기본값은 보류(Hold, held_watch 재관측)다. Enter는 금지다(`CodexUncertainEnter` RED).
-- 키 경합: 읽기 직후 A가 끝나면 Tab이 idle 화면에 들어간다. 그때의 피해가 실측 항목 4·5다. 결과에 따라 둘 중 하나가 된다.
-  - (a) idle Tab이 제출되면 그대로 둔다(`CodexUncertainTab` GREEN).
-  - (b) 걸리면 S3에서 "Tab 직후 같은 잠금 안에서 화면을 다시 읽어, B가 composer에 남았으면 Enter 1회"를 넣는다. 이것은 같은 키 효과를 마무리하는 동작이고 재붙여넣기가 아니다. keys는 계속 1이다.
+- 규칙(i8328tab1 실측으로 확정, §12):
+  - Busy → **Tab**(Codex `Queued follow-up inputs`, A 뒤 자기 task).
+  - Idle → **Enter**.
+  - 바쁜지만 Unknown이면 → **Tab**. 조건은 composer가 준비됐고 붙여넣은 내용이 화면에 반영된 것이다. 실측에서 idle Tab은 6/6 즉시 제출됐고, task_complete 앞뒤 경계에서도 Tab은 8/8 앞 답을 보존하며 별도 턴을 열었다.
+  - composer 준비·세션 리셋·앞 입력 수락이 불확실하면 → **보류**(Hc·Hq, held_watch 재관측).
+  - Enter는 바쁜 턴이 아니라고 확인된 경우에만 누른다(완료 전 Enter는 0/4 분리, 3/4 A 답 유실. `CodexUncertainEnter`·`CodexAlwaysEnter` RED).
+- 키 전·후 확인(실측 busy1: 붙여넣은 직후 바로 Tab을 누르면 두 건이 한 대기 항목으로 합쳐지고 셋째 건이 초안에 남았다, 0/3):
+  1. 붙여넣은 뒤 같은 잠금 안에서 capture해 B의 frame이 composer에 반영됐는지 확인한 다음 키를 누른다. 반영되지 않았으면 키를 누르지 않는다. 붙여넣기 효과를 알 수 없으므로 WriteUncertain으로 끝나고, 재붙여넣기는 하지 않는다.
+  2. 키를 누른 뒤 B가 대기 항목으로 옮겨졌거나 새 턴의 사용자 입력이 됐는지(수락)를 확인한다. 확인되면 `awaiting_echo`를 "수락됨"으로 표시한다. 다음 front는 이것을 기다린다(Hq).
+  3. 간격 값(실측 paste 반환 뒤 0.12s)은 관측치일 뿐이다. 구현은 고정 sleep이 아니라 화면 반영·수락 확인으로 판정한다.
+- 키 경합: 읽기 직후 A가 끝나 Tab이 idle 화면에 들어가도 제출된다(실측 경계 Tab 4/4 완료 후 0.145-0.328s). 따라서 "Tab 뒤 Enter로 마무리" 같은 장치는 넣지 않는다. `CodexTabIdleStuck`은 기각된 가설로 대조군에만 남는다.
 - 구현 손잡이:
   - `session_host::PinnedInput`(`session_host/submit.rs:56-59`)에 `Tab`을 더한다.
   - `codex_tui::input::TuiInputAction`(`codex_tui/input.rs:467-472`)에 `Tab`을 더한다. 3128줄 giant지만 enum 변형과 match 가지만 추가한다.
@@ -189,9 +197,10 @@ V2 `SnapshotV2`(`v2_types.rs:27-65`)에 `awaiting_echo: Vec<AwaitingEcho>`를 �
 
 수명:
 1. **만듦**: 키 효과가 Submitted 또는 WriteUncertain이면 front 제거와 같은 commit에서 만든다. 키 전 NotSent에서는 만들지 않는다.
-2. **해소**: echo가 분류되면(§6) 지운다. 합류로 분류됐으면 ➕를 달고, 자기 턴이면 관찰자가 relay를 시작한다. 해소는 기존 native receipt(`tui_o/writer/input_facts/native/receipt.rs` MembershipReceipt, `history::attempt_row` `tui_input/human_frame/history.rs:838`)를 그대로 쓴다.
-3. **기한 초과**: 자동 재주입은 없다. `retained_inputs`의 Unconfirmed(V2 `retained.rs`)로 옮겨 재전송 요청 알림을 1회 보낸다(`NoDuplicate`, `ResendBeforeEcho` RED).
-4. **세션 종료**(terminate·clear·pane 교체): Cancelled/HostTerminated로 정산하고 알림을 보낸다.
+2. **수락됨**(Codex): 키 뒤 B가 TUI 대기 항목으로 옮겨졌거나 새 턴의 사용자 입력이 된 것이 화면·rollout으로 확인되면 표시한다. 같은 채널의 다음 Codex front는 이 표시를 기다린다(Hq). Claude는 이 단계를 쓰지 않는다.
+3. **해소**: echo가 분류되면(§6) 지운다. 합류로 분류됐으면 ➕를 달고, 자기 턴이면 관찰자가 relay를 시작한다. 해소는 기존 native receipt(`tui_o/writer/input_facts/native/receipt.rs` MembershipReceipt, `history::attempt_row` `tui_input/human_frame/history.rs:838`)를 그대로 쓴다.
+4. **기한 초과**: 자동 재주입은 없다. `retained_inputs`의 Unconfirmed(V2 `retained.rs`)로 옮겨 재전송 요청 알림을 1회 보낸다(`NoDuplicate`, `ResendBeforeEcho` RED).
+5. **세션 종료**(terminate·clear·pane 교체): Cancelled/HostTerminated로 정산하고 알림을 보낸다.
 
 소비자(§9의 조정 열과 1:1):
 - A3 clear: `protected` 계산(`v2/clear.rs:39-43`)에 귀속 대기 id를 더한다.
@@ -217,7 +226,7 @@ S4에 이 순서를 고정하는 시험을 둔다. 순서가 보장되지 않는
    - `user` 행(`Prompt`)이 B의 frame hash로 새 턴을 열면 → **자기 턴**. B의 관찰자가 그 offset부터 그 턴의 끝(turn_duration/stop)까지 relay해 B의 답으로 한 번 게시한다.
    - `queue-operation remove absorbed_mid_turn`(`Absorbed`)이나 사람 `queued_command` 첨부(`Human`)가 앞 턴 안에 있으면 → **합류**. B의 관찰자는 아무것도 게시하지 않는다(WF:765-766의 현행 동작: "A queued command joins the running turn, whose owner posts its answer"). 그 턴의 relay가 B의 몫을 포함한 답을 한 번 게시한다. B 메시지에는 ➕ "진행 중 턴에 합류"를 단다.
    - `Withdraw`(합류 전 Esc 등으로 회수)·`Delivered`(다른 agent로 전달)는 미전송 종료다. 재전송 요청 알림만 보낸다.
-3. **echo가 없다는 사실은 재전송 근거가 아니다.** 도구 없이 생성하는 동안 TUI 대기열에 든 입력의 echo는 앞 턴이 끝난 뒤에야 나온다(실측 S1LD). 기한이 지나도 §5.1-3대로 재전송 요청만 한다.
+3. **echo가 없다는 사실은 재전송 근거가 아니다.** 도구 없이 생성하는 동안 TUI 대기열에 든 입력의 echo는 앞 턴이 끝난 뒤에야 나온다(실측 S1LD). 기한이 지나도 §5.1-4대로 재전송 요청만 한다.
 4. **앞 턴의 relay는 자기 턴 끝에서 멈춘다.** A의 relay가 B의 자기 턴 출력까지 A 몫으로 게시하면 B가 두 번 게시된다(`JoinDoublePost`와 같은 결과). 반대로 B의 관찰자가 합류한 B 이후의 A 꼬리를 B 답으로 relay해도 이중 게시가 된다.
 5. **합류 표시는 Claude 합류에만 단다.** Codex Tab은 A 뒤 자기 task로 돈다. 별도 답이 나오므로 ➕를 달지 않는다. Codex Enter가 바쁜 턴에 들어가는 경우(steer)는 규칙상 일어나지 않는다(§2.3).
 
@@ -230,11 +239,14 @@ S4에 이 순서를 고정하는 시험을 둔다. 순서가 보장되지 않는
 
 ### 6.3 Codex
 
-- Tab으로 대기한 B는 A의 task_complete 뒤 자기 task를 연다(실측 S1T, 1회).
-- 0단계 §3-3에서 S1T의 B 답은 A의 turn bridge 범위 안에서 게시됐다. 결과는 맞았지만, 이 장부상으로는 B가 A 턴에 귀속된다(토큰 귀속).
-- 목표: Codex에도 echo 기준 관찰자를 둔다. rollout에서 B의 user marker가 연 task를 B의 답으로 relay하고, A의 bridge는 A의 task_complete에서 멈춘다.
+- Tab으로 대기한 B는 A의 task_complete 뒤 자기 task를 연다. 실측: 0단계 S1T 1회, i8328tab1에서 확인 규칙을 지킨 후속 15/15, 생성 중 4/4, Esc 직후 4/4.
+- 귀속 근거가 아직 비어 있다. i8328tab1은 답 대상 99건 중 94건에서 Discord 답 ID를 찾았고, native 턴과 Discord 본문이 모두 맞은 것은 87/99다. 그러나 그 답을 특정 bridge turn_id에 묶는 기록은 0/94였다(reply reference 비어 있음, relay_delivery 이벤트 0). 0단계 S1T에서는 B 답이 A의 turn bridge 수명 안에서 게시됐다. 지금 장부만으로는 B가 A 턴에 귀속되는지 판정할 수 없다.
+- 목표: Codex에도 echo 기준 관찰자를 둔다.
+  - rollout에서 B의 사용자 표식이 연 task(task_started → 사용자 표식 → task_complete)를 B의 답으로 relay한다.
+  - A의 bridge는 A의 task_complete(또는 turn_aborted)에서 멈춘다.
+  - 관찰자는 relay를 시작할 때 B의 message id와 task UUID를 한 줄로 남긴다. bridge 귀속 0/94의 원인인 관측 공백을 이 기록이 메운다.
 - 본체는 새 child `codex_tui/tab_followup.rs`에 둔다(`codex_tui/warm_followup.rs`는 1328줄 giant).
-- 여러 건 Tab의 순서와 귀속은 i8328tab1 실측 결과로 확정한다(§12).
+- 여러 건 Tab의 순서는 §2.3의 키 전·후 확인(반영 확인 → Tab → 수락 확인 → 다음 건)으로 지킨다. 실측에서 이 확인을 지킨 회차는 순서와 분리가 15/15였다.
 
 ## 7. 입력 출처 분류표
 
@@ -329,7 +341,7 @@ S4에 이 순서를 고정하는 시험을 둔다. 순서가 보장되지 않는
 
 순서: **S2 → S1 → S4 → S3**.
 - 손잡이(S2)를 먼저 넣는다. 그래야 S1이 동작을 바꿀 때 clear·terminate·stop이 귀속 대기 입력을 볼 수 있다.
-- S3은 i8328tab1 결과를 기다린다.
+- S3의 키 규칙 값은 i8328tab1 실측으로 채웠다(§12). 구현은 S1 뒤에 시작한다.
 
 ### S2 — 귀속 대기 손잡이 (동작 변화: 기존 hand_busy·자기 턴 주입도 등록만 한다)
 - 파일(prod 약 12개):
@@ -365,37 +377,44 @@ S4에 이 순서를 고정하는 시험을 둔다. 순서가 보장되지 않는
   2. `restore_inflight` kickoff → `complete_active_reconcile` 순서 고정(H10 ⊂ H5).
 - 검증: intake_gate 시험군, recovery_flush 시험.
 
-### S3 — Codex 키 선택 (i8328tab1 결과 반영 뒤)
+### S3 — Codex 키 선택 (i8328tab1 결과 반영)
 - 파일(prod 약 9개):
-  - 새 child: `codex_tui/tab_followup.rs`(+130), `codex_tui/busy_inject/key_choice.rs`(+60)
-  - 수정: `session_host/submit.rs`(+8)와 host 매핑 `tmux_host.rs`·`herdr_gate.rs`(+20), `codex_tui/input.rs`(enum 변형 +6), `codex_tui/busy_inject.rs`(+15/-10), `codex/herdr_turn/busy.rs`(+15/-5), OI(1714-1720 진단화 -5/+5), `codex_stop_delivery.rs`(+20)
-- 예상: prod 9파일 / 순 +280.
+  - 새 child: `codex_tui/tab_followup.rs`(+140), `codex_tui/busy_inject/key_choice.rs`(+90: 화면 판정·반영 확인·수락 확인)
+  - 수정: `session_host/submit.rs`(+8)와 host 매핑 `tmux_host.rs`·`herdr_gate.rs`(+20), `codex_tui/input.rs`(enum 변형 +6), `codex_tui/busy_inject.rs`(+20/-10), `codex/herdr_turn/busy.rs`(+25/-5: `[Paste, Enter]` 한 번에 보내던 계획을 붙여넣기 → 반영 확인 → 키로 나눔), OI(1714-1720 진단화 -5/+5), `codex_stop_delivery.rs`(+20)
+- 예상: prod 9파일 / 순 +330.
 - RED 계획:
   1. Codex(Herdr) 바쁜 화면 + 사람 입력. 현행은 `NotSent("busy_turn: transcript unavailable")`(rollout 미확정) 또는 Enter steer다. 목표는 Tab 키 1회다.
-  2. idle 화면이면 Enter.
-  3. Unknown이면 실측 규칙.
-  4. 세션 전환 직후 readiness 증명 전이면 Hc 보류.
-  5. Tab 입력 B의 답이 B의 task로 귀속되고 A bridge는 task_complete에서 멈춘다.
-  6. 키 경합(읽기 뒤 A 종료) 고정 시험. 실측이 "걸림"이면 Tab 뒤 Enter 1회 마무리를 넣는다.
-- 검증: codex busy_inject 시험군, codex_herdr_tests, effect 시험.
+  2. idle 화면이면 Enter 1회.
+  3. 바쁜지 Unknown이고 composer가 준비됐으며 반영이 확인되면 Tab. composer가 Unknown이면 보류.
+  4. 붙여넣은 내용이 화면에 반영되지 않으면 키를 누르지 않고 WriteUncertain으로 끝난다(재붙여넣기 0).
+  5. 앞 입력의 수락이 확인되지 않았으면 다음 front는 Hq 보류(busy1 합쳐짐 재현 fixture).
+  6. 세션 전환 직후 readiness 증명 전이면 Hc 보류.
+  7. Tab 입력 B의 답이 B의 task로 귀속되고, A bridge는 task_complete에서 멈춘다.
+- 검증: codex busy_inject 시험군, codex_herdr_tests, effect 시험. 화면 fixture는 i8328tab1 `logs/tab-1/` 스냅샷에서 시험 데이터로 옮긴다(비밀값 없음 확인 뒤).
 
 ### 합계
-- 추정 prod는 서로 다른 파일 약 33개(조각별 9-12개), 순 코드 약 +605(+430, -110, +5, +280)다.
+- 추정 prod는 서로 다른 파일 약 33개(조각별 9-12개), 순 코드 약 +655(+430, -110, +5, +330)다.
 - 조각별 최대치는 S2의 12파일·+430이다. 모두 PLAN_READY 선(+1200) 아래다.
 
-## 12. Codex 키 규칙 (자리 — i8328tab1 결과 대기)
+## 12. Codex 키 규칙 (i8328tab1 실측으로 채움)
 
-맥 실측 레그 i8328tab1(`/Users/itismyfield/.adk/release/lane-runs/hl-20260925/i8328/report-tab-1.md`)이 끝나면 코디가 알린다. 아래 칸을 채우고 모델 cfg `CodexTabIdleStuck`·`CodexUncertainTab` 중 어느 쪽이 현실인지 정한다. S3은 그 뒤에 시작한다.
+출처: 맥 실측 레그 i8328tab1 `report-tab-1.md`(2026-11-26 13:05-13:15 KST, 시험 셀 adk-codex-tui-2-e2e·adk-codex-tui-3-e2e, Codex CLI 0.172.0, Herdr 0.9.5). 운영 입력은 0건이다.
 
-| 칸 | 값 | 근거 |
+| 칸 | 값 | 근거(실측) |
 |---|---|---|
-| 바쁨 | Tab (잠정, 0단계 S1T 1회) | 대기 |
-| idle | Enter (0단계 S4D2·S3) | 대기 |
-| 불확실 | 대기 (모델상 안전한 기본값은 보류. Enter는 금지) | 대기 |
-| idle 화면 Tab의 피해 | 대기 (`TabAtIdle` = submits / stuck) | 대기 |
-| 바쁜 중 Tab 여러 건 순서·귀속 | 대기 | 대기 |
-| `/clear` 뒤 composer 준비 | Enter 2s 성공 / 0.3s 실패(0단계), Tab 대기 | 대기 |
-| 바쁨 판정 화면 표식 | 대기 (후보: 상태줄 `tab to queue message`, 작업 중 표시) | 대기 |
+| 바쁨 | **Tab**. 붙여넣기 반영을 확인한 뒤 누르고, 수락을 확인한 뒤 다음 건을 넣는다 | 확인 규칙을 지킨 후속 15/15 순서·분리 유지. 붙여넣은 직후 바로 Tab을 누른 회차(busy1)는 두 건이 합쳐지고 셋째 건이 초안에 남음(0/3) |
+| idle | **Enter** | 준비된 빈 composer에서 반영 뒤 Enter. 경계 완료 후 Enter 4/4 별도 턴 |
+| 바쁜지만 불확실 | **Tab** (composer 준비·반영 확인이 조건) | idle Tab 6/6 즉시 제출. 경계 Tab 8/8(완료 전 4/4 앞 답 보존, 완료 후 4/4 별도 턴) |
+| composer·리셋·앞 입력 수락이 불확실 | **보류**(Hc·Hq) | 수락 전 다음 입력을 넣으면 합쳐짐(busy1) |
+| 바쁜 턴 Enter | **금지** | 완료 전 Enter 별도 턴 0/4, 3/4 A 최종 답 유실(두 셀 재현) |
+| idle 화면 Tab의 피해 | 없음(즉시 제출). 이어서 빈 composer에서 누른 Enter·Tab은 새 턴을 열지 않음(키별 2/2) | 모델 `TabAtIdle=submits`. `CodexTabIdleStuck` 가설은 기각 |
+| 생성 중(도구 없음) Tab | SAFE 4/4 | A 1-650 두 메시지 모두 게시, A·B UUID 분리 |
+| Esc 직후 Tab | SAFE 4/4 (abort 기록 뒤 116-197ms) | abort 기록 전 구간은 미측정이라 H11(중단 정산 전 보류)을 유지한다 |
+| `/clear` 뒤 composer 준비 | Enter 1s / Tab 0.3s (관측 최단 전수 성공) | 24회. Enter 0.3s는 1/4 초안 정체 |
+| Discord 귀속 | bridge 귀속 확인 0/94(기록 없음), native 턴·본문 일치 87/99, 중복 0 | §6.3의 echo 관찰자와 귀속 기록 줄이 필요하다는 근거 |
+| 바쁨 판정 화면 표식 | S3에서 확정. 후보는 상태줄 작업 중 표시(`screen.rs:9-14`)와 대기 항목 머리(`screen.rs:22-27`). 판정 fixture는 실측 스냅샷에서 가져온다 | 이번 실측은 시험 pane 직접 키 경로라 owner 판정 코드를 거치지 않았다 |
+
+모델 반영: `CodexTargetBusy`·`CodexTarget8432`를 `UncertainKey="Tab"`, `TabAtIdle="submits"`로 두면 GREEN이다. 대안 `CodexUncertainHold`도 GREEN이다. `CodexUncertainEnter`·`CodexAlwaysEnter`는 RED, `CodexTabIdleStuck`은 기각된 가설의 대조군으로 RED다.
 
 ## 13. 남은 위험·미확인
 

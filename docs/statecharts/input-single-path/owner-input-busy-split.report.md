@@ -24,7 +24,7 @@
 | `mark` | `src/services/discord/turn_view_reconciler/injected.rs:204-231`(➕), `turn_presence/supervisor.rs:884`(✅) | 진행 중 턴에 합류 표시 |
 | `KeyCodex` Enter on Busy → `aLost` | 0단계 실측 Codex c2·c3 S1D, S5D, S1LD(steer: A 작업·답 유실) | 바쁜 턴의 Enter 금지 |
 | `KeyCodex` Tab on Busy | 0단계 실측 Codex S1T(1회), `src/services/codex_tui/busy_inject/screen.rs:22-27` QUEUE_HEADERS | A 뒤 자기 task |
-| `TabAtIdle`, `UncertainKey` | 맥 실측 레그 i8328tab1 대기 | 키 규칙 값 |
+| `TabAtIdle="submits"`, `UncertainKey="Tab"` | 맥 실측 레그 i8328tab1 `report-tab-1.md`(idle Tab 6/6 즉시 제출, 경계 Tab 8/8, 완료 전 Enter 별도 턴 0/4) | 채택 키 규칙 값 |
 | `blocker` | `queue_io/input_owner/ingress.rs:99-115,192-198`, `claude_tui/composer_lock.rs:116`, `claude_tui/busy_inject.rs:88,482`, `claude_tui/input/preparation_hold.rs:112`, `owner_input.rs:1752` | 초안·모달·세션 없음·첨부 준비 전·composer 미준비·복구 kickoff 전(H10) |
 | `CapStash` | `readiness-managed-stash.report.md`, #8430 본문 | U1이 채택하지 않은 대조군 |
 
@@ -65,26 +65,27 @@
 | `TargetTuiDrop` | mutant: TUI가 바쁜 중 받은 입력을 버림 | RED `NoSilentLoss`, `ReplyPosted` |
 | `TargetJoinUnmarked` | mutant: 합류 표시 누락 | RED `JoinedMarked` |
 | `TargetJoinDoublePost` | mutant: 합류한 B 몫을 따로 한 번 더 게시 | RED `ReplyExactlyOnce` |
-| `CodexTargetBusy` | 목표(Codex), 바쁨 Tab·idle Enter·불확실 보류, Unknown 읽기 1회 허용 | GREEN |
-| `CodexTarget8432` | 목표(Codex), #8432 조건 | GREEN |
+| `CodexTargetBusy` | 목표(Codex) 채택 규칙: 바쁨 Tab·idle Enter·불확실 Tab, Unknown 읽기 1회 허용 | GREEN |
+| `CodexTarget8432` | 목표(Codex) 채택 규칙, #8432 조건 | GREEN |
+| `CodexUncertainHold` | 대안: 불확실할 때 보류 뒤 재관측 | GREEN |
 | `CodexAlwaysEnter` | mutant: 바쁨 판정 없이 항상 Enter | RED `NoSilentLoss` |
-| `CodexTabIdleStuck` | 가설: idle 화면 Tab이 제출되지 않고 걸림 | RED `ReplyPosted` (실측 대기) |
+| `CodexTabIdleStuck` | 가설: idle 화면 Tab이 제출되지 않고 걸림(실측으로 기각) | RED `ReplyPosted` (대조군) |
 | `CodexUncertainEnter` | 불확실할 때 Enter | RED `NoSilentLoss` |
-| `CodexUncertainTab` | 불확실할 때 Tab, idle Tab은 제출된다는 가정 | GREEN |
 | `CodexTuiDrop` | mutant: Codex가 Tab 대기 입력을 버림 | RED `NoSilentLoss`, `ReplyPosted` |
 
 차트:
 - [현재 경로 #8432 반례](owner-input-busy-split.current-8432.chart.mmd): 남은 토큰 + Idle 화면에서 `hand_busy` 보류를 영원히 반복한다.
 - [목표 #8432](owner-input-busy-split.target-8432.chart.mmd): 보류 조건이 없으므로 바로 주입하고, B의 echo로 B 몫의 답을 1회 게시한다.
 - [목표 Claude 합류](owner-input-busy-split.target-busy-join.chart.mmd): 진행 중 턴에 주입된 B가 흡수되면 A 답에 합쳐 1회 게시되고 합류 표시가 붙는다. 흡수되지 않으면 A 뒤 자기 턴으로 답한다.
-- [목표 Codex](owner-input-busy-split.codex-target-busy.chart.mmd): 보류 조건 → 화면 읽기 → 바쁨 Tab, idle Enter, Unknown 보류 뒤 재관측.
+- [목표 Codex](owner-input-busy-split.codex-target-busy.chart.mmd): 보류 조건 → 화면 읽기 → 바쁨 Tab, idle Enter, Unknown Tab(읽기 뒤 A가 끝나도 idle Tab이 제출됨).
 - [Codex 항상 Enter 반례](owner-input-busy-split.codex-always-enter.chart.mmd): 바쁜 턴의 Enter가 steer로 A 작업을 잃는다.
 
 ## 읽는 법과 한계
 
 - `TokenAttribution`·`JoinDoublePost` RED는 목표가 "귀속은 echo 위치로, 합류한 몫은 진행 중 턴 답에 한 번만"을 전제로만 GREEN임을 보인다.
 - `ResendBeforeEcho` RED는 TUI 대기열에 든 입력의 echo가 A가 끝난 뒤에야 나타날 수 있으므로 "echo가 아직 없다"를 재전송 근거로 쓰면 중복이 생긴다는 뜻이다.
-- `CodexTabIdleStuck`과 `CodexUncertainTab`은 같은 규칙이 실측값(`TabAtIdle`)에 따라 갈린다는 것을 보인다. 키 규칙 칸은 맥 실측 레그 i8328tab1의 결과로 채운다. 그 전에는 불확실 → 보류가 모델상 안전한 기본값이다.
+- `CodexTabIdleStuck`과 `CodexTargetBusy`는 같은 규칙(불확실 Tab)이 실측값 `TabAtIdle`에 따라 갈린다는 것을 보인다. i8328tab1이 idle Tab 6/6 제출을 확인했으므로 채택 규칙은 GREEN 쪽이다. composer나 앞 입력 수락이 불확실할 때의 보류(`CodexUncertainHold`)도 GREEN이다.
+- 모델은 입력 하나만 다룬다. 여러 건을 곧바로 붙여넣고 Tab을 누르면 TUI가 두 건을 합치는 현상(i8328tab1 busy1)은 설계 문서 §2.3의 키 전·후 확인 규칙과 S3 시험이 맡는다.
 - 입력 하나, 앞 턴 하나다. 여러 입력의 순서, 기계 시작(START_WAITS), 스레드, 재시작·부팅, Cancel·stop은 설계 문서 §7-§9의 전수표가 다룬다. A의 남은 token을 지우는 일(#8432)은 이 모델에서 일어나지 않는다.
 
 원시 로그: `/tmp/i8328d1/`(이 레그의 `direct.out`, `out2-*` 차트 출력). 저장소에는 넣지 않았다.
