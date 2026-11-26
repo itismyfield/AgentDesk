@@ -11,10 +11,16 @@ import type { PipelineDefinition } from "../src/api/serverCampaignPipeline";
 import { AppTopBar } from "../src/app/AppTopBar";
 import { PRIMARY_ROUTES } from "../src/app/routes";
 import PipelineVisualEditor from "../src/components/agent-manager/PipelineVisualEditor";
+import PipelineVisualEditorPhaseGatePanel from "../src/components/agent-manager/PipelineVisualEditorPhaseGatePanel";
+import PipelineVisualEditorStatePanel from "../src/components/agent-manager/PipelineVisualEditorStatePanel";
+import PipelineVisualEditorToolbar from "../src/components/agent-manager/PipelineVisualEditorToolbar";
+import PipelineVisualEditorTransitionPanel from "../src/components/agent-manager/PipelineVisualEditorTransitionPanel";
 import { TaskInspector } from "../src/components/campaigns/CampaignGroupInspector";
 import PipelineStatePicker from "../src/components/campaigns/PipelineStatePicker";
 import { BottomSheet } from "../src/components/common/overlay/BottomSheet";
 import { Drawer } from "../src/components/common/overlay/Drawer";
+import { ToastProvider, useToast } from "../src/components/common/overlay/ToastProvider";
+import { OnboardingWizardLayout, ONBOARDING_WIZARD_STYLES } from "../src/components/onboarding/OnboardingWizardLayout";
 import { Step3AgentSelection } from "../src/components/onboarding/Step3AgentSelection";
 import { Step4ChannelSetup } from "../src/components/onboarding/Step4ChannelSetup";
 import { I18nProvider } from "../src/i18n";
@@ -492,5 +498,215 @@ describe("Round 2B viewport, overlay, focus & light theme regressions", () => {
     );
     expect(warnBox).toBeTruthy();
     expect(warnBox!.className).toContain("text-[var(--warn-fg)]");
+  });
+
+  it("renders valid color-mix border styles, z-[110] narrow containment, 44px dismiss target, and 4-locale i18n in ToastProvider", async () => {
+    function ToastTrigger() {
+      const { show } = useToast();
+      return (
+        <button
+          type="button"
+          data-testid="fire-toast"
+          onClick={() => show({ message: "Deployment failed", variant: "error" })}
+        >
+          Trigger toast
+        </button>
+      );
+    }
+
+    await render(
+      <I18nProvider language="ja">
+        <ToastProvider>
+          <ToastTrigger />
+        </ToastProvider>
+      </I18nProvider>,
+    );
+
+    const setPropertySpy = vi.spyOn(window.CSSStyleDeclaration.prototype, "setProperty");
+    const trigger = container.querySelector<HTMLButtonElement>('[data-testid="fire-toast"]')!;
+    await act(async () => {
+      trigger.click();
+    });
+
+    const borderColorCalls = setPropertySpy.mock.calls
+      .filter(([prop]) => prop === "border-color")
+      .map(([, val]) => String(val));
+    expect(borderColorCalls).toContain("color-mix(in oklch, var(--err) 45%, var(--line))");
+    for (const val of borderColorCalls) {
+      expect(val).not.toMatch(/\)\s*55/);
+    }
+
+    const region = document.querySelector<HTMLElement>('[role="region"][aria-label="通知"]')!;
+    expect(region).not.toBeNull();
+    expect(region.className).toContain("z-[110]");
+    expect(region.className).toContain("left-3");
+    expect(region.className).toContain("sm:left-auto");
+
+    const statusCard = region.querySelector<HTMLElement>('[role="status"]')!;
+    expect(statusCard.style.color).toBe("var(--fg)");
+    const dot = statusCard.querySelector<HTMLElement>('span[aria-hidden="true"]')!;
+    expect(dot.getAttribute("style")).toContain("var(--err)");
+
+    const dismissButton = statusCard.querySelector<HTMLButtonElement>('button[aria-label="閉じる"]')!;
+    expect(dismissButton).not.toBeNull();
+    expect(dismissButton.className).toContain("max-[899px]:h-11");
+    expect(dismissButton.className).toContain("pointer-coarse:h-11");
+  });
+
+  it("associates every <label> with its <input>/<textarea> across PipelineVisualEditorPhaseGatePanel, StatePanel, and TransitionPanel", async () => {
+    const getByLabelText = (rootEl: HTMLElement, labelText: string): HTMLElement => {
+      const label = Array.from(rootEl.querySelectorAll("label")).find(
+        (el) => el.textContent?.trim() === labelText,
+      );
+      expect(label, `Missing <label> with text "${labelText}"`).toBeTruthy();
+      const htmlFor = label!.getAttribute("htmlFor") ?? label!.getAttribute("for");
+      if (htmlFor) {
+        const control = document.getElementById(htmlFor);
+        expect(control, `Missing control with id="${htmlFor}" for "${labelText}"`).not.toBeNull();
+        return control!;
+      }
+      const nested = label!.querySelector<HTMLElement>("input, textarea, select");
+      expect(nested, `Missing nested control inside <label> "${labelText}"`).not.toBeNull();
+      return nested!;
+    };
+
+    const draft: PipelineConfigFull = {
+      name: "default",
+      version: 1,
+      states: [{ id: "review", label: "Review", terminal: false }],
+      transitions: [{ from: "review", to: "done", type: "gated", gates: ["qa_gate"] }],
+      gates: { qa_gate: { type: "builtin", check: "review_verdict_pass", description: "QA check" } },
+      hooks: { review: { on_enter: ["OnReviewEnter"], on_exit: ["OnStateExit"] } },
+      events: {},
+      clocks: { review: { set: "started_at", mode: "coalesce" } },
+      phase_gate: { dispatch_to: "self", dispatch_type: "phase-gate" },
+    };
+
+    const mockCtx: any = {
+      tr: (_ko: string, en: string) => en,
+      isFsmVariant: false,
+      pipelineDraft: draft,
+      selectedState: draft.states[0],
+      selectedTransition: draft.transitions[0],
+      selectedTransitionIndex: 0,
+      selectedTransitionGates: ["qa_gate"],
+    };
+    const mockActions: any = {
+      updatePhaseGate: vi.fn(),
+      updateState: vi.fn(),
+      updateStateHooks: vi.fn(),
+      clearStateHooks: vi.fn(),
+      clearStateClock: vi.fn(),
+      updateStateClock: vi.fn(),
+      updateTransition: vi.fn(),
+      updateTransitionGates: vi.fn(),
+      addGate: vi.fn(),
+      updateGate: vi.fn(),
+    };
+
+    await render(
+      <>
+        <div data-testid="phase-gate-panel">
+          <PipelineVisualEditorPhaseGatePanel ctx={mockCtx} actions={mockActions} />
+        </div>
+        <div data-testid="state-panel">
+          <PipelineVisualEditorStatePanel ctx={mockCtx} actions={mockActions} />
+        </div>
+        <div data-testid="transition-panel">
+          <PipelineVisualEditorTransitionPanel ctx={mockCtx} actions={mockActions} />
+        </div>
+      </>,
+    );
+
+    const phaseGateRoot = container.querySelector<HTMLElement>('[data-testid="phase-gate-panel"]')!;
+    expect((getByLabelText(phaseGateRoot, "Checked by (self = the entry's agent)") as HTMLInputElement).value).toBe("self");
+    expect((getByLabelText(phaseGateRoot, "Dispatch type") as HTMLInputElement).value).toBe("phase-gate");
+
+    const stateRoot = container.querySelector<HTMLElement>('[data-testid="state-panel"]')!;
+    expect((getByLabelText(stateRoot, "Label") as HTMLInputElement).value).toBe("Review");
+    expect((getByLabelText(stateRoot, "Terminal state") as HTMLInputElement).type).toBe("checkbox");
+    expect((getByLabelText(stateRoot, "on_enter hooks") as HTMLTextAreaElement).value).toBe("OnReviewEnter");
+    expect((getByLabelText(stateRoot, "on_exit hooks") as HTMLTextAreaElement).value).toBe("OnStateExit");
+    expect((getByLabelText(stateRoot, "Clock field") as HTMLInputElement).value).toBe("started_at");
+    expect((getByLabelText(stateRoot, "Clock mode") as HTMLInputElement).value).toBe("coalesce");
+
+    for (const clearLabel of ["Clear hooks", "Clear clock"]) {
+      const btn = Array.from(stateRoot.querySelectorAll("button")).find((b) => b.textContent?.trim() === clearLabel)!;
+      expect(btn.getAttribute("type")).toBe("button");
+      expect(btn.className).toContain("max-[899px]:min-h-11");
+      expect(btn.className).toContain("pointer-coarse:min-h-11");
+    }
+
+    const transitionRoot = container.querySelector<HTMLElement>('[data-testid="transition-panel"]')!;
+    expect((getByLabelText(transitionRoot, "Description") as HTMLInputElement).value).toBe("QA check");
+    const gateToggle = Array.from(transitionRoot.querySelectorAll("button")).find((b) => b.textContent?.trim() === "qa_gate")!;
+    expect(gateToggle.getAttribute("aria-pressed")).toBe("true");
+    const addGateBtn = Array.from(transitionRoot.querySelectorAll("button")).find((b) => b.textContent?.trim() === "+ Gate")!;
+    expect(addGateBtn.getAttribute("type")).toBe("button");
+  });
+
+  it("sets type=button and min-h-11 on SaveButton, aria-pressed on LevelSwitch, and role=alert on OnboardingWizardLayout error", async () => {
+    const toolbarCtx: any = {
+      tr: (_ko: string, en: string) => en,
+      isFsmVariant: false,
+      editorHelpText: "Help text",
+      selectedAgentDetail: null,
+      level: "repo",
+      selectedAgentId: "agent-1",
+      saving: false,
+      overrideExists: true,
+      hasVisibleChanges: true,
+    };
+    const toolbarActions: any = {
+      setLevel: vi.fn(),
+      setReloadKey: vi.fn(),
+      handleClearOverride: vi.fn(),
+      handleSave: vi.fn(),
+    };
+
+    await render(
+      <>
+        <div data-testid="toolbar-wrap">
+          <PipelineVisualEditorToolbar ctx={toolbarCtx} actions={toolbarActions} />
+        </div>
+        <OnboardingWizardLayout
+          step={0}
+          totalSteps={5}
+          isKo={false}
+          tr={(_ko: string, en: string) => en}
+          styles={ONBOARDING_WIZARD_STYLES}
+          stepStatusItems={[]}
+          setItemRef={() => () => {}}
+          draftNoticeVisible={true}
+          draftNoticeTitle="Saved draft"
+          draftNoticeDetail="Resume"
+          setDraftNoticeVisible={() => {}}
+          resetDraft={() => {}}
+          error="Token check failed"
+        />
+      </>,
+    );
+
+    const toolbarWrap = container.querySelector<HTMLElement>('[data-testid="toolbar-wrap"]')!;
+    const buttons = Array.from(toolbarWrap.querySelectorAll<HTMLButtonElement>("button"));
+    expect(buttons.length).toBeGreaterThanOrEqual(5);
+    for (const btn of buttons) {
+      expect(btn.getAttribute("type")).toBe("button");
+    }
+
+    const repoBtn = buttons.find((b) => b.textContent?.trim() === "Repository")!;
+    const agentBtn = buttons.find((b) => b.textContent?.trim() === "Agent")!;
+    expect(repoBtn.getAttribute("aria-pressed")).toBe("true");
+    expect(agentBtn.getAttribute("aria-pressed")).toBe("false");
+
+    const saveBtn = buttons.find((b) => b.textContent?.trim() === "Save changes")!;
+    expect(saveBtn.getAttribute("type")).toBe("button");
+    expect(saveBtn.className).toContain("min-h-11");
+
+    const errorAlert = container.querySelector<HTMLElement>('[role="alert"]')!;
+    expect(errorAlert).not.toBeNull();
+    expect(errorAlert.textContent).toBe("Token check failed");
+    expect(errorAlert.className).toContain("bg-[var(--err-soft)]");
+    expect(errorAlert.className).toContain("text-[var(--err-fg)]");
   });
 });
