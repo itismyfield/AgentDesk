@@ -1,5 +1,5 @@
-//! Only the greeting of an explicit restart, or a launch an effort restart owes its thread, may
-//! resume the conversation its predecessor ended.
+//! Only the greeting of an explicit restart, or a launch an effort restart or an idle end owes its
+//! thread, may resume the conversation its predecessor ended.
 use std::cell::RefCell;
 
 use super::CodexHerdrTurn;
@@ -7,6 +7,8 @@ use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState
 use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::ResumeStart;
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
+
+pub(crate) mod idle_resume;
 
 thread_local! {
     static OPERATION: RefCell<Option<String>> = const { RefCell::new(None) };
@@ -54,6 +56,21 @@ pub(super) fn resume_of(
             }
         });
     }
+    // An owner's effort intent for this execution goes first; else the thread an idle end kept.
+    let retired = match turn.row {
+        Some(HostedRecord::Known(record))
+            if record.state == HostedState::Retired && record.owner == turn.owner =>
+        {
+            Some(record.execution_nonce.as_str())
+        }
+        _ => None,
+    };
+    let effort = match effort {
+        Some(e) if e.required || retired == Some(e.retired_nonce.as_str()) => Some(e),
+        other => retired
+            .and_then(|nonce| idle_resume::kept(&turn.owner, nonce))
+            .or(other),
+    };
     let Some(effort) = effort else {
         return Ok(None);
     };

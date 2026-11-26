@@ -1488,6 +1488,8 @@ src/
 │   │   │   │   │   └── pending_lookup_tests.rs
 │   │   │   │   ├── pending_lookup_probe_tests.rs
 │   │   │   │   └── pg_tests.rs
+│   │   │   ├── restart_intent/
+│   │   │   │   └── idle_resume.rs
 │   │   │   ├── busy.rs
 │   │   │   ├── busy_tests.rs
 │   │   │   ├── composer_tests.rs

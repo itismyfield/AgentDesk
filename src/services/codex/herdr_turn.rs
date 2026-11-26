@@ -209,8 +209,8 @@ fn launch_of(
     ports: &dyn CodexHerdrPorts,
     owner_port: OwnerPort,
 ) -> Result<HerdrLaunch, String> {
-    // Only a new execution of a restart's greeting or of an effort restart resumes; a selector
-    // alone never does.
+    // Only a new execution of a restart's greeting, an effort restart or an idle end resumes; a
+    // selector alone never does.
     #[cfg(unix)]
     let resume = match provider_root {
         Some(_) => restart_intent::resume_of(turn, ports.effort_resume())?,

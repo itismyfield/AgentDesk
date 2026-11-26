@@ -6,8 +6,6 @@ mod recovery;
 mod tmux;
 mod witness;
 
-pub(in crate::services::discord) use herdr::{
-    cancel_idle_resume, herdr_resume, notice as herdr_notice, record_idle_resume,
-};
+pub(in crate::services::discord) use herdr::{herdr_resume, notice as herdr_notice};
 pub(in crate::services::discord) use recovery::{kick, resume_owed};
 pub(in crate::services::discord) use tmux::{Restart, restart};

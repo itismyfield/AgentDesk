@@ -13,8 +13,9 @@ use crate::db::dispatched_sessions::hosted_execution::http_force::{
     active_dispatch_pg, disconnect_retired_pg,
 };
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedObservation, HostedRecord, HostedState,
+    HostedExecution, HostedObservation, HostedOwner, HostedRecord, HostedState,
 };
+use crate::services::codex::herdr_turn::restart_intent::idle_resume;
 use crate::services::provider::ProviderKind;
 use crate::services::session_host::{HerdrTarget, TerminationFence};
 use crate::services::turn_orchestrator::Expected;
@@ -37,8 +38,8 @@ impl AutoEnd<'_> {
         }
     }
 
-    /// The idle end takes its row reservation and re-reads the inflight row under the transition
-    /// lock, then shuts the fence.
+    /// The idle end takes its row reservation, re-reads the inflight row and keeps a Codex thread
+    /// under the transition lock, then shuts the fence.
     pub(super) async fn fence(
         &self,
         shared: &Arc<SharedData>,
@@ -55,6 +56,7 @@ impl AutoEnd<'_> {
                 if inflight_open(provider, channel) {
                     return Err(Refused(INFLIGHT_OPEN.into()));
                 }
+                gate.keep(record)?;
                 target
                     .termination_fence()
                     .map_err(|error| Refused(format!("{error:?}")))
@@ -62,7 +64,8 @@ impl AutoEnd<'_> {
         }
     }
 
-    /// Lets a waiting dispatch write through once the pane's end was read, before the retire.
+    /// Lets a waiting dispatch write through once the pane's end was read, before the retire; the
+    /// kept thread stays.
     pub(super) async fn release(&self) {
         if let Self::Idle(gate) = self {
             gate.release().await;
@@ -77,6 +80,8 @@ pub(super) struct IdleGate {
     row_id: i64,
     minutes: i32,
     held: Mutex<Option<Transaction<'static, Postgres>>>,
+    /// The thread record this end stored, dropped unless the end reached its release.
+    kept: Mutex<Option<(HostedOwner, String)>>,
 }
 
 impl IdleGate {
@@ -104,7 +109,24 @@ impl IdleGate {
         Ok(())
     }
 
+    /// A Codex end stores the thread its owner's next launch resumes; other providers resume from
+    /// the session the row keeps.
+    fn keep(&self, record: &HostedExecution) -> Result<(), TerminationResult> {
+        if record.owner.provider != ProviderKind::Codex.as_str() {
+            return Ok(());
+        }
+        let operation = idle_resume::keep(record)
+            .map_err(|why| TerminationResult::Refused(format!("codex thread not kept: {why}")))?;
+        let kept = Some((record.owner.clone(), operation));
+        *self.kept.lock().unwrap_or_else(PoisonError::into_inner) = kept;
+        Ok(())
+    }
+
     async fn release(&self) {
+        self.kept
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
         let held = self
             .held
             .lock()
@@ -119,11 +141,16 @@ impl IdleGate {
 }
 
 impl Drop for IdleGate {
-    /// A run that stopped before its release gives the row back without leaving it locked.
+    /// A run that stopped before its release gives the row back without leaving it locked, and
+    /// drops only the thread record it stored itself.
     fn drop(&mut self) {
         let held = self.held.get_mut().unwrap_or_else(PoisonError::into_inner);
         if let Some(tx) = held.take() {
             tokio::spawn(async move { drop(tx.rollback().await) });
+        }
+        let kept = self.kept.get_mut().unwrap_or_else(PoisonError::into_inner);
+        if let Some((owner, operation)) = kept.take() {
+            idle_resume::forget(&owner, &operation);
         }
     }
 }
@@ -195,6 +222,7 @@ pub(crate) async fn expire_idle_herdr(
         row_id: row.session_id(),
         minutes: i32::try_from(minimum_idle_minutes).unwrap_or(i32::MAX),
         held: Mutex::new(None),
+        kept: Mutex::new(None),
     };
     let token = &record.owner.discord_token_hash;
     let runtimes = registry.all_shared_for_provider(&provider).await;
@@ -203,20 +231,17 @@ pub(crate) async fn expire_idle_herdr(
         .find(|shared| &shared.token_hash == token)
     else {
         let booted = chrono::Utc::now().timestamp() - registry.started_at_unix();
-        return Some(match booted >= ORPHAN_AFTER_BOOT_SECS {
-            true => end_orphan(pool, (session_key, channel), row, record, gate).await,
-            false => Err(Refused("owner runtime not registered yet".into())),
-        });
-    };
-    let resume = match provider {
-        ProviderKind::Codex => {
-            let record_resume = super::super::commands::effort_restart::record_idle_resume;
-            match record_resume(&shared, &provider, channel, &record).await {
-                Ok(operation) => Some(operation),
-                Err(why) => return Some(Err(Refused(format!("codex thread not kept: {why}")))),
-            }
+        if booted < ORPHAN_AFTER_BOOT_SECS {
+            return Some(Err(Refused("owner runtime not registered yet".into())));
         }
-        _ => None,
+        // Detached for the same reason as the owner's run below.
+        let (pool, key) = (pool.clone(), session_key.to_string());
+        let run =
+            tokio::spawn(
+                async move { end_orphan(&pool, (&key, channel), (row, record), gate).await },
+            );
+        let cancelled = TerminationResult::Indeterminate("idle end task cancelled".into());
+        return Some(run.await.unwrap_or(Err(cancelled)));
     };
     let request = OperatorTerminate {
         session_key: session_key.into(),
@@ -240,16 +265,7 @@ pub(crate) async fn expire_idle_herdr(
             false,
             auto,
         );
-        let (exclusion, wake) = match scoped.await {
-            Ok(ended) => ended,
-            Err(kept) => {
-                if let Some(operation) = resume {
-                    let cancel = super::super::commands::effort_restart::cancel_idle_resume;
-                    cancel(&shared, channel, &operation).await;
-                }
-                return Err(kept);
-            }
-        };
+        let (exclusion, wake) = scoped.await?;
         let disconnected = disconnect(&pool, &row, &record).await;
         drop(exclusion);
         wake.after_release().await;
@@ -262,39 +278,48 @@ pub(crate) async fn expire_idle_herdr(
     Some(run.await.unwrap_or(Err(cancelled)))
 }
 
-/// Ends a Claude execution whose owning bot runs no runtime: the recorded local execution is
-/// fenced, which shuts every pane write, and closed only while its row is still idle and free.
+/// Ends an execution whose owning bot runs no runtime: the recorded local execution is fenced,
+/// which shuts every pane write, and closed only while its row is still idle and free.
 async fn end_orphan(
     pool: &PgPool,
     (session_key, channel): (&str, ChannelId),
-    row: HostedObservation,
-    record: HostedExecution,
+    (row, record): (HostedObservation, HostedExecution),
     gate: IdleGate,
 ) -> Result<IdleEnd, TerminationResult> {
     use TerminationResult::Refused;
-    // A Codex thread is kept only through its owner's input path.
-    if record.owner.provider != ProviderKind::Claude.as_str() {
-        return Err(Refused("no owner runtime keeps the codex thread".into()));
-    }
     let local = crate::config::session_hosts::local_node();
     let executed_here =
         (record.location.as_ref()).is_some_and(|l| l.execution_node == record.owner.owner_node);
     if Some(record.owner.owner_node.clone()) != local || !executed_here {
         return Err(Refused("execution identity differs".into()));
     }
-    let provider = ProviderKind::Claude;
+    let provider = ProviderKind::from_str(&record.owner.provider)
+        .ok_or_else(|| Refused("unknown provider".into()))?;
     let holds = async {
         gate.reserve().await.is_ok()
             && load(pool, session_key).await.as_ref() == Ok(&row)
             && !inflight_open(&provider, channel)
+            && gate.keep(&record).is_ok()
     };
-    let closed = close_unrecorded(&record, holds).await;
-    gate.release().await;
+    // A pane an earlier end closed before its retire failed is not closed again.
+    let closed = if !already_ended(&record).await {
+        close_unrecorded(&record, holds).await
+    } else if holds.await {
+        Ok(())
+    } else {
+        Err(Refused("row changed under fence".into()))
+    };
+    if closed.is_ok() {
+        gate.release().await;
+    }
+    drop(gate);
     closed?;
     retire_confirmed(pool, &row, &record).await?;
     // The ended execution's composer hold has no turn left to release it.
     use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
-    if release_hold(&record.execution_nonce) != HoldRelease::Released {
+    if provider == ProviderKind::Claude
+        && release_hold(&record.execution_nonce) != HoldRelease::Released
+    {
         tracing::warn!(session_key, "herdr idle end: orphan hold not released");
     }
     let disconnected = disconnect(pool, &row, &record).await;
@@ -313,4 +338,14 @@ async fn disconnect(pool: &PgPool, row: &HostedObservation, record: &HostedExecu
             false
         }
     }
+}
+
+/// Whether the recorded execution's pane and provider already read as ended.
+async fn already_ended(record: &HostedExecution) -> bool {
+    let Some(view) = super::herdr_endpoints().view(record) else {
+        return false;
+    };
+    let read = record.clone();
+    let ended = tokio::task::spawn_blocking(move || view.ended(&read, &view.read_execution()));
+    ended.await.unwrap_or(false)
 }
