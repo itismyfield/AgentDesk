@@ -532,6 +532,7 @@ pub fn record_prompt_anchor(
     );
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub fn take_prompt_anchor_for_response(
     provider: &str,
     tmux_session_name: &str,

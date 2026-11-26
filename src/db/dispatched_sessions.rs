@@ -219,6 +219,7 @@ pub async fn load_live_bound_session_ids_pg(
 /// needing a distinct raw id must widen this signature. Acceptable today because
 /// the only non-Claude entry is an explicit `session_id` the caller already
 /// treats as the provider resume token.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn rebind_session_provider_pg(
     pool: &PgPool,
     session_key: &str,

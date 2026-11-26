@@ -102,7 +102,7 @@ pub struct InsertPendingPayload {
 }
 
 /// INSERT a fresh `pending` row into `intake_outbox` for the given
-/// payload. Caller computes `attempt_no` via `family_max_attempt + 1`
+/// payload. Caller computes `attempt_no` as the family maximum + 1
 /// (round-3 P0 #1) and passes `parent_outbox_id = Some(parent.id)` when
 /// retrying after a `failed_pre_accept`. For the very first attempt of
 /// a `(channel_id, user_msg_id)` family, pass `attempt_no = 1` and
@@ -209,11 +209,8 @@ pub(crate) fn classify_insert_pending_error(error: &sqlx::Error) -> Option<Intak
 }
 
 /// Compute `MAX(attempt_no)` for a `(channel_id, user_msg_id)` family,
-/// or 0 if no row exists yet. Used by retry-on-`failed_pre_accept` to
-/// allocate `attempt_no = family_max + 1` (round-4 P0 — monotonic).
-// reason: intake-outbox retry helper exercised only by the pg-integration test
-// suite; production retry path wired on select routes. See #3034.
-#[allow(dead_code)]
+/// or 0 if no row exists yet. Only the pg-integration tests call it.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn family_max_attempt(
     pool: &PgPool,
     channel_id: &str,
