@@ -122,7 +122,7 @@ pub struct TurnMark {
 /// `takeover_after` with the Legacy sends read before it, the floor a takeover judges from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LateBoundary {
-    pub(crate) baseline: u64,
+    pub baseline: u64,
     pub(crate) takeover_after: u64,
     pub(crate) sends: (u64, u64),
 }

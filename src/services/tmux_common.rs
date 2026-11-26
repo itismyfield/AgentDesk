@@ -36,7 +36,7 @@ static TMUX_SOURCE_AUTHORITY_LOCKS: LazyLock<Mutex<HashMap<String, Weak<Mutex<()
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SOURCE_AUTHORITY_CONTENTION_ARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(crate) static SOURCE_AUTHORITY_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static SOURCE_AUTHORITY_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(any(test, feature = "test-support"))]

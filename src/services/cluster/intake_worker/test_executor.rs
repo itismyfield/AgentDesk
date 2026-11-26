@@ -3,8 +3,8 @@
 use std::cell::RefCell;
 
 thread_local! {
-    pub(crate) static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
-    pub(crate) static FAIL: RefCell<bool> = const { RefCell::new(false) };
+    pub static RUNS: RefCell<Option<Vec<u64>>> = const { RefCell::new(None) };
+    pub static FAIL: RefCell<bool> = const { RefCell::new(false) };
     static CHECKPOINT: RefCell<Option<CheckpointHook>> = const { RefCell::new(None) };
 }
 

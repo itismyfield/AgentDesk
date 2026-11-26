@@ -380,10 +380,10 @@ pub mod flush_probe {
     /// One write or flush step, with the target's bytes as they stood when it ran.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct Event {
-        pub(crate) target: PathBuf,
-        pub(crate) step: Step,
+        pub target: PathBuf,
+        pub step: Step,
         pub(crate) dir: PathBuf,
-        pub(crate) ok: bool,
+        pub ok: bool,
         pub(crate) target_bytes: Option<String>,
     }
 

@@ -17,7 +17,7 @@ pub use cancel_lookup::load_cancel_turn_hosted;
 pub use cancel_lookup::load_cancel_turn_session;
 pub use trusted_target::build_trusted_target;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use trusted_target::loopback_seam;
+pub use trusted_target::loopback_seam;
 use trusted_target::{TrustedForwardTarget, TrustedTargetError};
 
 const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";

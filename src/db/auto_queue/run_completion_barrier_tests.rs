@@ -9,7 +9,7 @@ pub struct CompletionBarrier {
 }
 
 tokio::task_local! {
-    pub(crate) static COMPLETION_BARRIER: CompletionBarrier;
+    pub static COMPLETION_BARRIER: CompletionBarrier;
 }
 
 pub(super) async fn pause_completion_at(point: &str) {

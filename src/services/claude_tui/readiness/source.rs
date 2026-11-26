@@ -117,7 +117,7 @@ pub use clear::adopt as adopt_awaiting_clear;
 pub(super) use clear::note as note_clear;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
+pub use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]
 pub(crate) use clear::wakeable as clear_wakeable;

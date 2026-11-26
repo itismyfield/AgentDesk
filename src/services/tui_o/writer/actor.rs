@@ -921,7 +921,7 @@ pub(crate) use transition::scoped_tests::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition::test_hooks as transition_hooks;
+pub use transition::test_hooks as transition_hooks;
 #[cfg(any(test, feature = "test-support"))]
 pub use transition_snapshot::{execution_read, execution_sources, force_execution_for_tests};
 

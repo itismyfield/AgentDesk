@@ -240,7 +240,7 @@ pub fn resolve_codex_path() -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
+pub use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
 pub use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };

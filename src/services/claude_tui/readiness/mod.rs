@@ -807,7 +807,7 @@ fn watch(session: &str, path: Option<&Path>, draft_required: bool) {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use source::CLEAR_AFTER_PUBLICATION;
+pub use source::CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]
 pub(crate) use source::clear_wakeable;

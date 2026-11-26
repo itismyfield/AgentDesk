@@ -10,7 +10,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[cfg(any(test, feature = "test-support"))]
-thread_local! { pub(crate) static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+thread_local! { pub static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Certified {

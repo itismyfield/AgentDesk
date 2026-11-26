@@ -470,7 +470,7 @@ pub fn codex_source_mode_snapshot() -> CodexSourceMode {
     })
 }
 #[cfg(any(test, feature = "test-support"))]
-thread_local! { pub(crate) static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
+thread_local! { pub static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
 
 /// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
 pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {

@@ -946,7 +946,7 @@ pub fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::domain::atomic_write::rename_fault;
+pub use crate::domain::atomic_write::rename_fault;
 
 /// (device, inode) of a directory, so a replaced directory is told from the one it replaced.
 #[cfg(unix)]

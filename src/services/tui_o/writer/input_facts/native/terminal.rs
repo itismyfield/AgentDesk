@@ -98,7 +98,7 @@ pub(super) fn foreign_prompt(
 #[serde(deny_unknown_fields)]
 pub struct Tail {
     pub through: u64,
-    pub(crate) prefix_hash: String,
+    pub prefix_hash: String,
     pub fingerprint: Fingerprint,
     pub digest: String,
 }

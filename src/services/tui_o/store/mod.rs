@@ -37,7 +37,7 @@ use crate::services::session_host::surface_policy::InitScope;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use durable::fault;
+pub use durable::fault;
 
 pub const STORE_DIR_NAME: &str = "o_store";
 pub const ERA_FILE: &str = "o_era";

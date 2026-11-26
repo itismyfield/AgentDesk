@@ -32,7 +32,7 @@ mod restore_window_tests;
 
 /// A test-only durable store for one task, so a test never attaches the process one.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_store {
+pub mod test_store {
     use super::*;
 
     tokio::task_local! {
@@ -40,7 +40,7 @@ pub(crate) mod test_store {
     }
 
     /// Runs `future` with the recovery store on `pool` and `catalog` for this task only.
-    pub(crate) async fn with_store<F: std::future::Future>(
+    pub async fn with_store<F: std::future::Future>(
         pool: PgPool,
         catalog: RecoveryCatalog,
         future: F,

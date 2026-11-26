@@ -520,7 +520,7 @@ mod durable;
 #[cfg(any(test, feature = "test-support"))]
 pub use durable::observe_durable;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use durable::test_store;
+pub use durable::test_store;
 pub use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
