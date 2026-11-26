@@ -7,6 +7,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, Prepar
 enum Snapshot {
     Missing,
     ReplacedLegacyMissing,
+    ReplacedUserDefault,
+    WitnessChangedDuringRead,
     Unreadable,
 }
 
@@ -59,7 +61,10 @@ fn placed_recovery(snapshot: Snapshot) {
     }))
     .unwrap();
     let _hosts = crate::config::session_hosts::force_config_for_test(&cfg);
-    let endpoint = HerdrEndpoint::new(NODE, KEY, rig.socket(), SESSION).unwrap();
+    let mut endpoint = HerdrEndpoint::new(NODE, KEY, rig.socket(), SESSION).unwrap();
+    if matches!(snapshot, Snapshot::ReplacedUserDefault) {
+        endpoint = endpoint.with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+    }
     let _registry = rig.policy_registry_on_this_thread(endpoint, |mut host| {
         host.set_read_restore_for_test(|transport, _| RestoreResume::Off {
             witness: crate::services::session_host::herdr_for_test::contract::HerdrTransport::server_witness(transport).unwrap(),
@@ -87,6 +92,22 @@ fn placed_recovery(snapshot: Snapshot) {
     match snapshot {
         Snapshot::Missing => {}
         Snapshot::ReplacedLegacyMissing => rig.serve_as(&[19]),
+        Snapshot::WitnessChangedDuringRead => rig.serve_as(&[7, 19]),
+        Snapshot::ReplacedUserDefault => {
+            let host = crate::services::claude::herdr_turn::boot_launch_host().unwrap();
+            let launch = crate::services::turn_host::launch_endpoint(
+                crate::config::session_hosts::herdr_endpoint(channel).unwrap(),
+            );
+            let original = host.current_witness(&launch).unwrap();
+            let grant = crate::services::session_host::policy::permit::grant_for_test(
+                &launch,
+                &pending.execution_nonce,
+                original,
+            );
+            runtime.block_on(host.grants().save(grant.clone())).unwrap();
+            host.remember_grant(grant);
+            rig.serve_as(&[19]);
+        }
         Snapshot::Unreadable => rig.answer("session.snapshot", serde_json::json!({"type": "ok"})),
     }
     crate::services::herdr_launch::unplaced::QUIET
@@ -103,18 +124,19 @@ fn placed_recovery(snapshot: Snapshot) {
     let HostedRecord::Known(row) = HostedRecord::decode(Some(&loaded)) else {
         panic!("the placed row disappeared");
     };
-    let expected = if matches!(snapshot, Snapshot::Unreadable) {
-        HostedState::Pending
-    } else {
-        HostedState::Retired
+    let expected = match snapshot {
+        Snapshot::Missing | Snapshot::ReplacedLegacyMissing => HostedState::Retired,
+        _ => HostedState::Pending,
     };
     assert_eq!(row.state, expected, "{snapshot:?}");
     assert_eq!(row.execution_nonce, pending.execution_nonce);
     let requests = rig.requests();
-    assert!(
+    assert_eq!(
         requests
             .iter()
-            .any(|request| request["method"] == "session.snapshot")
+            .any(|request| request["method"] == "session.snapshot"),
+        !matches!(snapshot, Snapshot::ReplacedUserDefault),
+        "the grant gate precedes the snapshot",
     );
     assert!(!requests.iter().any(|request| matches!(
         request["method"].as_str(),
@@ -139,4 +161,14 @@ fn s2b1_legacy_replacement_missing_retires_the_pending_pane_pg() {
 #[test]
 fn s2b1_boot_adapter_keeps_a_pending_pane_on_an_unreadable_snapshot_pg() {
     placed_recovery(Snapshot::Unreadable);
+}
+
+#[test]
+fn s2b1_boot_adapter_holds_when_the_snapshot_answers_on_a_different_witness_pg() {
+    placed_recovery(Snapshot::WitnessChangedDuringRead);
+}
+
+#[test]
+fn s2b1_user_default_replacement_holds_the_placed_pending_pg() {
+    placed_recovery(Snapshot::ReplacedUserDefault);
 }

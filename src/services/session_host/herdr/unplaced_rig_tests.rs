@@ -72,6 +72,8 @@ struct Herdr {
     next: u32,
     lose_create_reply: bool,
     unconfirmed_command: Option<bool>,
+    unconfirmed_close: bool,
+    before_snapshot: Option<Box<dyn FnOnce() + Send>>,
     /// Labels arrive as a launch from before the marker sent them.
     bare_labels: bool,
     /// Removal requests are answered but change nothing.
@@ -189,6 +191,9 @@ impl Herdr {
         let pane = params["pane_id"].as_str().unwrap_or("").to_owned();
         match method {
             "session.snapshot" => {
+                if let Some(before_reply) = self.before_snapshot.take() {
+                    before_reply();
+                }
                 let panes: Vec<Value> = self
                     .workspaces
                     .iter()
@@ -245,7 +250,11 @@ impl Herdr {
                     self.removed.push(pane.clone());
                     self.drop_pane(&pane);
                 }
-                json!({"type": "ok"})
+                if self.unconfirmed_close {
+                    json!({"type": "unexpected"})
+                } else {
+                    json!({"type": "ok"})
+                }
             }
             _ => json!({"type": "ok"}),
         }
@@ -942,4 +951,87 @@ async fn s2b1_placed_shell_is_disposed_only_while_pristine_pg() {
         }
         rig.end().await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s2b1_restart_retires_a_placed_pane_after_an_applied_close_pg() {
+    for ack_lost in [false, true] {
+        let rig = Rig::new().await;
+        let host = rig.host();
+        rig.state().unconfirmed_command = Some(false);
+        rig.launch(&host).await.unwrap();
+        let pending = rig.record().await;
+        let pane = pending.location.as_ref().unwrap().pane_id.clone();
+        let endpoint = launch_endpoint(&rig.server);
+        let witness = host
+            .unplaced_witness(&endpoint, &pending.execution_nonce)
+            .unwrap();
+        let read = host
+            .channel_panes(&endpoint, &rig.owner.logical_key, &witness)
+            .unwrap();
+        let [read] = read.as_slice() else {
+            panic!("one shell");
+        };
+        let crate::services::session_host::PaneOccupant::LoneShell { root, .. } = &read.occupant
+        else {
+            panic!("root shell");
+        };
+        rig.state().unconfirmed_close = ack_lost;
+        host.dispose_residue(
+            &endpoint,
+            &pending.execution_nonce,
+            &Residue {
+                pane_id: pane.clone(),
+                label: read.label.clone(),
+                root: root.clone(),
+                witness,
+            },
+        )
+        .unwrap();
+        assert!(rig.state().workspaces.is_empty());
+        assert_eq!(rig.record().await, pending, "close precedes row retire");
+        assert_eq!(
+            rig.resolve(&rig.host(), &pending.execution_nonce).await,
+            Resolution::Retired
+        );
+        assert_eq!(rig.state().removed, vec![pane], "close was not re-sent");
+        rig.end().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s2b1_placed_missing_observation_cannot_retire_a_successor_pg() {
+    let rig = Rig::new().await;
+    let host = rig.host();
+    rig.launch(&host).await.unwrap();
+    let row = rig.record().await;
+    assert!(row.expected.is_some());
+    rig.state()
+        .drop_pane(&row.location.as_ref().unwrap().pane_id);
+    let mut successor = row.clone();
+    successor.execution_nonce = uuid::Uuid::new_v4().simple().to_string();
+    successor
+        .source_ref
+        .execution_nonce
+        .clone_from(&successor.execution_nonce);
+    successor.location = None;
+    successor.expected = None;
+    let replacement = serde_json::to_value(&successor).unwrap();
+    let pool = rig.pool.clone();
+    let runtime = tokio::runtime::Handle::current();
+    rig.state().before_snapshot = Some(Box::new(move || {
+        runtime.block_on(async {
+            sqlx::query("UPDATE sessions SET hosted_execution=$1 WHERE channel_id=$2")
+                .bind(replacement)
+                .bind(CHANNEL.to_string())
+                .execute(&pool)
+                .await
+                .unwrap();
+        });
+    }));
+    let resolution = rig.resolve(&host, &row.execution_nonce).await;
+    assert!(matches!(resolution, Resolution::Held(_)), "{resolution:?}");
+    assert_eq!(rig.record().await, successor, "stale snapshot ran its CAS");
+    assert!(rig.state().removed.is_empty());
+    rig.end().await;
 }
