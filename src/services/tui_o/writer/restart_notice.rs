@@ -61,7 +61,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             output_origin: None,
             notice_origin: None,
         };
-        self.send_piece(&piece, None, None, None, None).await;
+        self.send_piece(&piece, None, None, None).await;
         settled(self.store().ledger(), &key).unwrap_or(Notice::Pending)
     }
 

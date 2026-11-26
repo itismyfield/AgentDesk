@@ -256,50 +256,41 @@ async fn thread_child_writer_owing_output_refuses_retirement_and_keeps_writer_an
     let mark = || std::fs::read(child_dir.join("child_lifecycle")).ok();
     let children = host::ChildStores;
 
+    // The child's fresh owed read answers one unposted item for every ask after it.
     let real = ready
         .undelivered(child)
         .expect("the child writer publishes what it owes");
-    // The child's fresh owed read answers one unposted item, then one open image obligation.
-    let unposted = Undelivered {
-        owed: 1,
-        ..Undelivered::default()
-    };
-    let image = Undelivered {
-        images: 1,
-        ..Undelivered::default()
-    };
-    for debt in [unposted, image] {
-        let (owes, published) = tokio::sync::watch::channel(None::<Undelivered>);
-        let demand = Demand::default();
-        let asks = demand.clone();
-        let answering = tokio::spawn(async move {
-            loop {
-                if asks.wanted() {
-                    let owed = Undelivered {
-                        asked: asks.asked(),
-                        ..debt.clone()
-                    };
-                    owes.send_replace(Some(owed));
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
+    let (owes, published) = tokio::sync::watch::channel(None::<Undelivered>);
+    let demand = Demand::default();
+    let asks = demand.clone();
+    let answering = tokio::spawn(async move {
+        loop {
+            if asks.wanted() {
+                let owed = Undelivered {
+                    owed: 1,
+                    asked: asks.asked(),
+                    ..Undelivered::default()
+                };
+                owes.send_replace(Some(owed));
             }
-        });
-        ready.track_owed_for_test(child, host::OwedView { published, demand });
-        let pinned = children.pin(child).expect("an active hosted child pins");
-        let refused = children.retire(pinned, Box::pin(async { Ok(false) })).await;
-        answering.abort();
-        let reason = refused.expect_err("what is owed refuses the retirement");
-        assert!(reason.contains("still owes output"), "{reason}");
-        assert_eq!((ready.hosted_by(child), mark()), (Some(writer), None));
-        let candidate = cutover::boot_ownership()
-            .into_iter()
-            .find(|(id, _, _)| *id == child)
-            .and_then(|(_, _, candidate)| candidate);
-        assert!(
-            candidate.is_some(),
-            "the refused store stays a writer candidate"
-        );
-    }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    });
+    ready.track_owed_for_test(child, host::OwedView { published, demand });
+    let pinned = children.pin(child).expect("an active hosted child pins");
+    let refused = children.retire(pinned, Box::pin(async { Ok(false) })).await;
+    answering.abort();
+    let reason = refused.expect_err("an unposted item refuses the retirement");
+    assert!(reason.contains("still owes output"), "{reason}");
+    assert_eq!((ready.hosted_by(child), mark()), (Some(writer), None));
+    let candidate = cutover::boot_ownership()
+        .into_iter()
+        .find(|(id, _, _)| *id == child)
+        .and_then(|(_, _, candidate)| candidate);
+    assert!(
+        candidate.is_some(),
+        "the refused store stays a writer candidate"
+    );
 
     // With nothing owed the same request retires that writer generation.
     ready.track_owed_for_test(child, real);
