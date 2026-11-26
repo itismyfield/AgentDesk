@@ -426,7 +426,9 @@ pub(in crate::services::discord) async fn hand_busy(
     )
     .await?;
     let source = busy_source::live_source(provider.clone(), &host, &session, &row);
-    let live = source.as_ref().map(|(path, native)| (path.as_str(), native.as_deref()));
+    let live = source
+        .as_ref()
+        .map(|(path, native)| (path.as_str(), native.as_deref()));
     let at = (&host, session.as_str(), live);
     let kind = (provider.as_str(), origin, true);
     let owner = observed
