@@ -550,11 +550,12 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
     );
 }
 
-/// A Codex thread whose Bound pane runs on its Herdr parent's endpoint takes `/effort` there,
-/// though no boot entry names the thread: the capability and the save read one current host.
+/// A Codex thread whose Bound pane runs on its Herdr parent's endpoint cannot resume that pane
+/// after an effort restart yet: the capability, the save and the restart all refuse with the
+/// reason, and the pane stays Bound.
 #[cfg(unix)]
 #[test]
-fn a_bound_codex_thread_under_a_herdr_parent_takes_effort_pg() {
+fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {
     use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
     use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
     fixture(|_, _, _| {
@@ -606,13 +607,29 @@ fn a_bound_codex_thread_under_a_herdr_parent_takes_effort_pg() {
                 .model_overrides
                 .insert(channel, ASTRA.into());
 
+            let not_yet = "아직 /effort 변경을 적용할 수 없습니다";
             let level = validate_effort_entry(&shared, &codex, channel, "ultra").await;
-            assert_eq!(level, Ok("ultra"));
+            assert!(level.unwrap_err().contains(not_yet));
             let saved = update_channel_effort(&shared, TOKEN, channel, &codex, "ultra").await;
+            assert!(saved.unwrap_err().to_string().contains(not_yet));
+            let notice = super::super::tui_passthrough::effort_save_notice;
+            let notice = notice(&shared, TOKEN, channel, &codex, "ultra").await;
+            assert!(notice.contains(not_yet), "{notice}");
+            let state: String = sqlx::query_scalar(
+                "SELECT hosted_execution->>'state' FROM sessions WHERE channel_id = $1",
+            )
+            .bind(thread.to_string())
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(state, "bound", "the pane is kept");
+            let saved = shared.settings.read().await;
             assert!(
-                saved.unwrap(),
-                "the level is saved for the thread's Herdr pane"
+                !saved
+                    .channel_effort_levels
+                    .contains_key(&thread.to_string())
             );
+            drop(saved);
             pool.close().await;
             db.drop().await;
         })
