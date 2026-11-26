@@ -7,13 +7,13 @@ pub fn test_runtime_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-pub(crate) struct EnvRuntimeGuard {
+pub struct EnvRuntimeGuard {
     _runtime: MutexGuard<'static, ()>,
     _env: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 // Dual-lock fixtures acquire environment first and release runtime first.
-pub(crate) fn lock_env_then_runtime() -> EnvRuntimeGuard {
+pub fn lock_env_then_runtime() -> EnvRuntimeGuard {
     let env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime = test_runtime_lock();
     EnvRuntimeGuard {

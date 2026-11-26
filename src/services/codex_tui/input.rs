@@ -400,7 +400,7 @@ fn rollout_composer_ready_state() -> &'static RolloutComposerReadyState {
     })
 }
 
-pub(crate) fn record_rollout_composer_ready(session_name: &str) {
+pub fn record_rollout_composer_ready(session_name: &str) {
     if session_name.trim().is_empty() {
         return;
     }

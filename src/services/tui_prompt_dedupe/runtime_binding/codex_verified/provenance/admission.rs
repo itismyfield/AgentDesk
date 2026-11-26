@@ -38,7 +38,7 @@ thread_local! {
 }
 
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
-pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
+pub fn owed_delivery_ready(channel: u64) -> bool {
     #[cfg(test)]
     if READY.with(|ready| ready.borrow().contains(&channel)) {
         return true;

@@ -11,7 +11,7 @@ use crate::services::tui_o::store::ledger::{LedgerState, LocalRetryMark, PieceOu
 
 mod notice_selection;
 
-pub(crate) const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
+pub const LOCAL_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 pub(crate) struct Pending {
     pub root_serial: u64,
@@ -19,7 +19,7 @@ pub(crate) struct Pending {
     pub due: DateTime<Utc>,
 }
 
-pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
+pub fn pending(ledger: &LedgerState) -> Option<Pending> {
     ledger.budget_roots(0).find_map(|serial| {
         let root = ledger.piece(serial)?;
         if ledger.excluded(&root.unit_key).is_some()

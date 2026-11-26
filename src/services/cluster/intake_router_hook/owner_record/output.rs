@@ -8,7 +8,7 @@ use std::future::Future;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, sqlx::FromRow)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Origin {
+pub struct Origin {
     pub(super) delivery: i64,
     pub(super) provider: String,
     pub(super) channel: String,

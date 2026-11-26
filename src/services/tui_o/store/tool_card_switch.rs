@@ -91,7 +91,7 @@ pub fn effective(global: bool, value: &Value) -> bool {
             .is_ok_and(|v| v.as_ref().is_none_or(|v| v.enabled))
 }
 
-pub(crate) struct ToolCardSwitch;
+pub struct ToolCardSwitch;
 
 impl ToolCardSwitch {
     /// Only constructing a reader performs file I/O; each decision reads live config and watch.

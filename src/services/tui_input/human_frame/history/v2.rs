@@ -11,7 +11,7 @@ pub mod native;
 #[cfg(unix)]
 mod native_binding;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod native_support;
+pub mod native_support;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
 
@@ -968,7 +968,7 @@ mod compaction_tests;
 #[path = "v2_tests.rs"]
 mod tests;
 
-pub(crate) fn scoped_source() -> Option<Result<Source, String>> {
+pub fn scoped_source() -> Option<Result<Source, String>> {
     let c = context()?;
     Some(c.registry.source(&c.namespace, &c.key).and_then(|source| {
         source.validate(&c.key)?;

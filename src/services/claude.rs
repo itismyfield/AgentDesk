@@ -3,7 +3,7 @@ use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, Submi
 use crate::services::process::reaping::CommandReapExt;
 pub mod capability_probe;
 mod process_session_launch;
-pub(crate) use process_session_launch::execute_streaming_local_process;
+pub use process_session_launch::execute_streaming_local_process;
 
 #[cfg(unix)]
 pub mod tui_session_launch;
@@ -1862,7 +1862,7 @@ pub mod first_input;
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
+pub use fresh_lifecycle::fresh_hold_for_tests;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -2021,7 +2021,7 @@ fn handoff_claude_tui_watcher(
 
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn read_claude_tui_transcript_until_done(
+pub fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
     start_offset: u64,
     sender: Sender<StreamMessage>,

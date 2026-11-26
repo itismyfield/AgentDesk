@@ -30,7 +30,7 @@ struct Payload {
 }
 
 #[cfg(unix)]
-pub(crate) fn new_payload() -> Value {
+pub fn new_payload() -> Value {
     serde_json::json!({
         "token": Uuid::new_v4(),
         "set_at": chrono::Utc::now(),
@@ -190,7 +190,7 @@ pub async fn set_for_execution_pg(
 
 /// A launch reads once before selecting either a cached selector or the native binding journal.
 #[cfg(unix)]
-pub(crate) async fn load_for_owner_pg(
+pub async fn load_for_owner_pg(
     pool: &PgPool,
     owner: &HostedOwner,
 ) -> Result<Option<ResumeFence>, String> {
@@ -231,7 +231,7 @@ pub async fn load_by_resolved_key_pg(
 
 /// Only the fresh start that captured this token may release it; a later clear remains fenced.
 #[cfg(unix)]
-pub(crate) async fn release_pg(pool: &PgPool, captured: &ResumeFence) -> Result<bool, String> {
+pub async fn release_pg(pool: &PgPool, captured: &ResumeFence) -> Result<bool, String> {
     let updated = sqlx::query(
         "UPDATE sessions SET provider_resume_fence = NULL
          WHERE id = $1 AND provider_resume_fence->>'token' = $2",

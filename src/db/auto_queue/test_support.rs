@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-pub(crate) struct TestPostgresDb {
+pub struct TestPostgresDb {
     _lock: crate::db::postgres::PostgresTestLifecycleGuard,
     admin_url: String,
     database_name: String,

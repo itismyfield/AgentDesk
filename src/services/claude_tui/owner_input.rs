@@ -61,11 +61,11 @@ pub(crate) fn readiness_deadline() -> Option<std::time::Instant> {
     current()?.readiness_deadline
 }
 
-pub(crate) fn active() -> bool {
+pub fn active() -> bool {
     current().is_some()
 }
 /// The original queue identity stays the same across execution and attempt changes.
-pub(crate) fn original_identity() -> Option<(u64, u64)> {
+pub fn original_identity() -> Option<(u64, u64)> {
     let scope = current()?;
     let identity = &scope.target["_attempt"]["identity"];
     Some((
@@ -241,7 +241,7 @@ pub fn payload<R>(send: impl FnOnce() -> Result<R, String>) -> Result<R, String>
     send()
 }
 #[cfg(unix)]
-pub(crate) fn observe_pin(
+pub fn observe_pin(
     session: &str,
     pin: &crate::services::tui_input::submission_tmux::guarded::PaneIdentity,
 ) -> Result<(), String> {
@@ -399,13 +399,13 @@ thread_local! { static LAUNCH: RefCell<Option<LaunchHook>> = const { RefCell::ne
 /// The owner waiting for the first prompt of the execution this thread's launch creates; `None`
 /// leaves the launch's own first prompt as it is.
 #[cfg(unix)]
-pub(crate) fn launch_hook() -> Option<LaunchHook> {
+pub fn launch_hook() -> Option<LaunchHook> {
     LAUNCH.with(|hook| hook.borrow_mut().take())
 }
 
 /// Refuses a write that is not the created execution's first prompt while an owner waits for it.
 #[cfg(unix)]
-pub(crate) fn launch_refuses_live() -> Result<(), String> {
+pub fn launch_refuses_live() -> Result<(), String> {
     match LAUNCH.with(|hook| hook.borrow().is_some()) {
         true => Err("owner launch: a live session takes no first prompt".into()),
         false => Ok(()),
@@ -457,7 +457,7 @@ impl Drop for LaunchGuard {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn capture_scope<R>(
+pub fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,

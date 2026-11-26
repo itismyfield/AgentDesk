@@ -8,7 +8,7 @@ mod env_flag;
 pub use env_flag::env_flag;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn parse_env_flag_for_test(name: &str, raw: Option<&str>, default: bool) -> bool {
+pub fn parse_env_flag_for_test(name: &str, raw: Option<&str>, default: bool) -> bool {
     raw.map_or(default, |raw| env_flag::parse_value(name, raw, default))
 }
 

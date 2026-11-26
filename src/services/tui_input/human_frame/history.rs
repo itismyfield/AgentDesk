@@ -444,7 +444,7 @@ pub fn receipt(
     .flatten()
 }
 
-pub(crate) enum ObservedAttempt {
+pub enum ObservedAttempt {
     Known(String),
     Pending,
     None,
@@ -460,7 +460,7 @@ pub(crate) fn observed_attempt(
 }
 
 /// Preserves unreadable evidence as an error; `logical_session` names the recorded input owner.
-pub(crate) fn observed_attempt_checked(
+pub fn observed_attempt_checked(
     provider: &str,
     logical_session: &str,
     prompts: &[String],

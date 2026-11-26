@@ -12,7 +12,7 @@ use super::{ChannelStore, STORE_DIR_NAME, durable};
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
-pub(crate) const DIR_NAME: &str = "o_codex_ends";
+pub const DIR_NAME: &str = "o_codex_ends";
 const MAX_RECORDS: usize = 16;
 const MAX_BYTES: u64 = 16 << 10;
 const SCHEMA: u32 = 1;
@@ -20,7 +20,7 @@ static WRITE: Mutex<()> = Mutex::new(());
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum EndBasis {
+pub enum EndBasis {
     ExplicitClear,
     DirectReplacement,
 }
@@ -28,7 +28,7 @@ pub(crate) enum EndBasis {
 /// The validated immutable context values; unrelated future launch fields never enter this format.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ContextSnapshot {
+pub struct ContextSnapshot {
     pub schema: u32,
     pub provider: String,
     pub created_at: DateTime<Utc>,
@@ -93,7 +93,7 @@ pub(crate) struct SuccessorSeal {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CodexEnd {
+pub struct CodexEnd {
     pub end_id: String,
     pub channel: u64,
     pub provider: String,
@@ -120,7 +120,7 @@ struct Records {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Appended {
+pub enum Appended {
     Durable,
     PublishedUnsynced(String),
 }
@@ -213,13 +213,13 @@ fn known_fields(read: &serde_json::Value, model: &serde_json::Value) -> bool {
 }
 
 /// Missing is empty; malformed, foreign or oversized files are unavailable and remain untouched.
-pub(crate) fn read(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
+pub fn read(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
     read_records(root, channel).map(|(records, _)| records)
 }
 
 /// Returns existing records only after any sealed evidence is durably published.
 /// Every consumer retry, including restore, must cross this boundary before using a seal.
-pub(crate) fn read_durable(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
+pub fn read_durable(root: &Path, channel: u64) -> Result<Vec<CodexEnd>, String> {
     let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     let (records, bytes) = read_records(root, channel)?;
     if records.iter().any(|record| record.successor.is_some()) {
@@ -280,7 +280,7 @@ fn encode(records: &[CodexEnd]) -> Result<Vec<u8>, String> {
 }
 
 /// Appends under one read/validate/replace lock. A retry cannot replace the identity of an End.
-pub(crate) fn append(root: &Path, record: &CodexEnd) -> Result<Appended, String> {
+pub fn append(root: &Path, record: &CodexEnd) -> Result<Appended, String> {
     if !valid(record, record.channel)
         || record.successor.is_some()
         || encode(std::slice::from_ref(record))?.len() as u64 > MAX_BYTES

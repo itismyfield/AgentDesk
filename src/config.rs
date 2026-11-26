@@ -71,7 +71,7 @@ pub(crate) struct RuntimeConfigSource {
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "config/snapshot_reader_support.rs"]
-pub(crate) mod snapshot_reader_support;
+pub mod snapshot_reader_support;
 
 #[cfg(test)]
 #[path = "config/snapshot_reader_tests.rs"]
@@ -2873,14 +2873,14 @@ pub fn load_graceful() -> Config {
 /// `shared_test_env_lock().lock()` sites, which the re-entry tripwire below
 /// cannot reach.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
+pub fn shared_test_env_lock() -> &'static std::sync::Mutex<()> {
     crate::db::postgres::assert_test_lifecycle_lock_not_held_before_env_lock();
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_env_lock {
+pub mod test_env_lock {
     //! Canonical acquisition path for the shared test-environment mutex.
     //! New test sites must use `acquire_shared_test_env_lock`; directly locking
     //! `shared_test_env_lock` is forbidden.
@@ -2930,9 +2930,9 @@ pub(crate) mod test_env_lock {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_env;
+pub mod test_env;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
+pub use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for_test};
 
 /// Runtime root plus both provider homes, each pinned to a fresh empty tempdir.
 ///
@@ -2965,7 +2965,7 @@ pub(crate) struct PinnedRuntimeHost {
 /// below rather than reached through that helper.
 #[cfg(any(test, feature = "test-support"))]
 #[track_caller]
-pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
+pub fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     let env_lock = test_env_lock::acquire_shared_test_env_lock();
     let root = tempfile::tempdir().expect("tempdir");
     let claude_home = tempfile::tempdir().expect("tempdir");

@@ -29,7 +29,7 @@ mod terminal;
 #[cfg(any(test, feature = "test-support"))]
 pub use commit::commit_claim;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
+pub use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
 pub use commit::{commit_claim_published, commit_executed_resume_published};
 pub(crate) use terminal::{SettledCompanions, terminal_pending_at_seq};
 
@@ -116,7 +116,7 @@ pub fn source_ahead(
 }
 
 /// Whether the recorded source's file is still the one the hook verified.
-pub(crate) fn source_file_matches(source: &SourceId) -> bool {
+pub fn source_file_matches(source: &SourceId) -> bool {
     fs::metadata(&source.path).is_ok_and(|meta| file_identity(&meta) == (source.dev, source.ino))
 }
 

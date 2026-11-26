@@ -588,7 +588,7 @@ pub struct PhaseGateRepairOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ParsedPhaseGateContext {
+pub struct ParsedPhaseGateContext {
     pub run_id: String,
     pub phase: i64,
     pub next_phase: Option<i64>,

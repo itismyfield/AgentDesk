@@ -14,7 +14,7 @@ pub(crate) mod generation;
 pub(crate) use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Decision {
+pub enum Decision {
     Owned,
     Unowned,
     Pending(&'static str),
@@ -94,7 +94,7 @@ impl Scope {
 }
 
 #[derive(Default)]
-pub(crate) struct Batch {
+pub struct Batch {
     stamp: Option<Stamp>,
     scopes: Vec<Scope>,
     native: census::Cache,

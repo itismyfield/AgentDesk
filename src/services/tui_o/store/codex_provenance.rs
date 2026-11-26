@@ -12,7 +12,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 mod mutation;
 pub(crate) mod projection;
 pub(crate) use mutation::DurableDenyRecorded;
-pub(crate) mod submit_floor;
+pub mod submit_floor;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
 const SCHEMA: u32 = 1;
@@ -57,7 +57,7 @@ impl ValidatedCodexProvenance {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Sidecar {
+pub enum Sidecar {
     Missing,
     Present(ValidatedCodexProvenance),
     Unavailable(&'static str),

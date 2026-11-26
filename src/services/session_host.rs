@@ -5,26 +5,26 @@
 pub mod herdr {
     #[cfg(unix)]
     pub mod autostart;
-    pub(crate) mod contract;
+    pub mod contract;
     #[cfg(unix)]
-    pub(crate) mod launch_host;
+    pub mod launch_host;
     #[cfg(unix)]
     pub mod managed_config;
-    pub(crate) mod model;
-    pub(crate) mod observe;
-    pub(crate) mod pane_probe;
+    pub mod model;
+    pub mod observe;
+    pub mod pane_probe;
     pub mod policy;
-    pub(crate) mod provenance;
+    pub mod provenance;
     // Unix-socket only; no Windows transport exists.
     #[cfg(unix)]
-    pub(crate) mod transport;
-    pub(crate) mod wire;
+    pub mod transport;
+    pub mod wire;
 }
 mod consumer_guard;
 mod create;
 pub use create::HostCreate;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use create::create_in_effect;
+pub use create::create_in_effect;
 pub mod herdr_gate;
 pub mod herdr_host;
 pub mod herdr_registry;

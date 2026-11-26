@@ -220,7 +220,7 @@ mod projection {
         interrupt: Option<Vec<String>>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
-    pub(crate) struct Projection {
+    pub struct Projection {
         binding: SourceBinding,
         facts: Vec<Fact>,
         tracker: TurnTracker,

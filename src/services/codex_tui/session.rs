@@ -302,7 +302,7 @@ pub fn install_codex_tui_runtime_binding(
 /// The launch path, whose first binding of an execution takes its cause from the launch context.
 /// Returns false when a hook already moved the pane past this tail's source.
 /// A cwd discovery is only a hint; the launch's current context and pinned source authorize it.
-pub(crate) fn publish_discovered_launch(
+pub fn publish_discovered_launch(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     path: &Path,
 ) -> Result<(), String> {
@@ -357,7 +357,7 @@ pub(crate) fn publish_discovered_launch(
     })
 }
 
-pub(crate) fn install_launched_codex_tui_runtime_binding(
+pub fn install_launched_codex_tui_runtime_binding(
     tmux_session_name: &str,
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,

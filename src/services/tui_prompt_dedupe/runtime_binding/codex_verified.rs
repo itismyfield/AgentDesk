@@ -348,7 +348,7 @@ fn commit(
     )
 }
 
-pub(crate) fn proof_for_binding(
+pub fn proof_for_binding(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -373,7 +373,7 @@ pub(crate) fn proof_for_binding(
     Ok(proof)
 }
 
-pub(crate) fn publication_allowed(
+pub fn publication_allowed(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {

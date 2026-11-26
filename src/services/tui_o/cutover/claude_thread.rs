@@ -11,7 +11,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 use crate::services::tui_prompt_dedupe::binding_events::claude_fold;
 
 #[cfg(unix)]
-pub(crate) fn launch_policy(channel: u64) -> Option<String> {
+pub fn launch_policy(channel: u64) -> Option<String> {
     use crate::services::tui_o::channel_policy::Adoption;
     super::test_override::with_channels(|snapshot| {
         let child = snapshot?.child(channel)?.ok()?;
@@ -31,7 +31,7 @@ pub fn cold_resume_unverified(channel: u64, native: &str) -> bool {
 }
 
 #[cfg(unix)]
-pub(crate) fn reserve_resume(
+pub fn reserve_resume(
     channel: u64,
     session: &str,
     native: &str,

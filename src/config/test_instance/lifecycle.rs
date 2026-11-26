@@ -330,14 +330,14 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-pub(crate) fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
+pub fn nanoseconds(seconds: i64, nanos: i64) -> Option<u64> {
     u64::try_from(seconds)
         .ok()?
         .checked_mul(1_000_000_000)?
         .checked_add(u64::try_from(nanos).ok()?)
 }
 
-pub(crate) fn has_admitted_run() -> bool {
+pub fn has_admitted_run() -> bool {
     #[cfg(unix)]
     {
         RUN.lock().is_ok_and(|snapshot| snapshot.is_some())
@@ -460,7 +460,7 @@ struct ControlRequest {
 }
 
 #[cfg(unix)]
-pub(crate) fn dispatch_control(
+pub fn dispatch_control(
     peer: std::net::SocketAddr,
     body: &[u8],
 ) -> Result<serde_json::Value, String> {
@@ -481,7 +481,7 @@ pub(crate) fn dispatch_control(
 }
 
 #[cfg(unix)]
-pub(crate) fn prepare_control(
+pub fn prepare_control(
     peer: std::net::SocketAddr,
     body: &[u8],
 ) -> Result<serde_json::Value, String> {
@@ -594,7 +594,7 @@ impl RunSnapshot {
 }
 
 #[cfg(unix)]
-pub(crate) fn derive_control_key<'a>(
+pub fn derive_control_key<'a>(
     credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> [u8; 32] {
     use sha2::Digest;
@@ -610,7 +610,7 @@ pub(crate) fn derive_control_key<'a>(
 }
 
 #[cfg(unix)]
-pub(crate) fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+pub fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
     use sha2::Digest;
     let mut inner = [0x36; 64];
     let mut outer = [0x5c; 64];
@@ -629,12 +629,12 @@ pub(crate) fn control_hmac(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
 }
 
 #[cfg(unix)]
-pub(crate) fn hex_digest(digest: [u8; 32]) -> String {
+pub fn hex_digest(digest: [u8; 32]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[cfg(unix)]
-pub(crate) fn signed_control(
+pub fn signed_control(
     key: &[u8; 32],
     domain: &[u8],
     value: &serde_json::Value,

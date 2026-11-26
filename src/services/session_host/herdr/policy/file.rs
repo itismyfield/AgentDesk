@@ -128,7 +128,7 @@ impl FileToken {
     }
 }
 
-pub(crate) fn directory_identity(path: &Path) -> Result<(u64, u64), Unverified> {
+pub fn directory_identity(path: &Path) -> Result<(u64, u64), Unverified> {
     let metadata = std::fs::metadata(path).map_err(|_| Unverified::File)?;
     if !metadata.is_dir() {
         return Err(Unverified::File);

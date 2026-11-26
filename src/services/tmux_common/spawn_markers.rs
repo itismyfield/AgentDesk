@@ -42,7 +42,7 @@ pub fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
 pub const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) type GenerationStampBeforeCreateHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+pub type GenerationStampBeforeCreateHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(any(test, feature = "test-support"))]
 static GENERATION_STAMP_BEFORE_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampBeforeCreateHook>>,
@@ -64,8 +64,7 @@ fn run_generation_stamp_before_create_hook_for_tests() {
 /// — notably one that exactly equals the previous incarnation's (#5437), which an
 /// APFS/ext4 host cannot reproduce because its timestamps advance every spawn.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) type GenerationStampAfterCreateHook =
-    std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
+pub type GenerationStampAfterCreateHook = std::sync::Arc<dyn Fn(&str) + Send + Sync + 'static>;
 #[cfg(any(test, feature = "test-support"))]
 static GENERATION_STAMP_AFTER_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampAfterCreateHook>>,
@@ -271,7 +270,7 @@ fn stamp_session_generation_marker_under_source_authority(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) type SpawnMarkersAfterGenerationHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
+pub type SpawnMarkersAfterGenerationHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
 #[cfg(any(test, feature = "test-support"))]
 static SPAWN_MARKERS_AFTER_GENERATION_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<SpawnMarkersAfterGenerationHook>>,
@@ -357,28 +356,28 @@ fn write_spawn_nonce_value(
 
 /// Test seams of the spawn stamp; `None` clears one.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_generation_before_create_hook(hook: Option<GenerationStampBeforeCreateHook>) {
+pub fn set_generation_before_create_hook(hook: Option<GenerationStampBeforeCreateHook>) {
     *GENERATION_STAMP_BEFORE_CREATE_HOOK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = hook;
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_generation_after_create_hook(hook: Option<GenerationStampAfterCreateHook>) {
+pub fn set_generation_after_create_hook(hook: Option<GenerationStampAfterCreateHook>) {
     *GENERATION_STAMP_AFTER_CREATE_HOOK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = hook;
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_generation_mtime_bump_steps(steps_ns: Option<Vec<i64>>) {
+pub fn set_generation_mtime_bump_steps(steps_ns: Option<Vec<i64>>) {
     *GENERATION_MTIME_BUMP_STEPS_OVERRIDE
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = steps_ns;
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_spawn_after_generation_hook(hook: Option<SpawnMarkersAfterGenerationHook>) {
+pub fn set_spawn_after_generation_hook(hook: Option<SpawnMarkersAfterGenerationHook>) {
     *SPAWN_MARKERS_AFTER_GENERATION_HOOK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner()) = hook;

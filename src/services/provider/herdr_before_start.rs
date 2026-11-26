@@ -300,7 +300,7 @@ pub fn claude_observed_input(
 static BOUNDARY_STOPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
+pub fn stop_at_input_boundary(logical: &str, stop: bool) {
     let mut stops = BOUNDARY_STOPS.lock().unwrap();
     if stop {
         stops.insert(logical.into());

@@ -1,7 +1,7 @@
 use super::{DISCORD_MSG_LIMIT, byte_index_at_discord_message_units, discord_message_units};
 
 /// Render literal text with valid triple blocks and a bounded omission notice.
-pub(crate) fn bounded_raw_code_block_notice(header: &str, text: &str) -> String {
+pub fn bounded_raw_code_block_notice(header: &str, text: &str) -> String {
     let total_chars = text.chars().count();
     let max_suffix = format!("\n-# … (이하 {total_chars}자)");
     let header_end = byte_index_at_discord_message_units(

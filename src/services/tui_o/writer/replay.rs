@@ -56,7 +56,7 @@ pub(super) fn filter(
     summary
 }
 
-pub(in crate::services) fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
+pub fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
     if !*pending || ledger.unresolved().is_some() || ledger.violation().is_some() {
         return false;
     }
@@ -96,11 +96,11 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) fn capture() {
+pub fn capture() {
     SNAPSHOTS.with_borrow_mut(|snapshots| *snapshots = Some(Vec::new()));
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) fn snapshots() -> Vec<Snapshot> {
+pub fn snapshots() -> Vec<Snapshot> {
     SNAPSHOTS.with_borrow(|snapshots| snapshots.clone().unwrap_or_default())
 }

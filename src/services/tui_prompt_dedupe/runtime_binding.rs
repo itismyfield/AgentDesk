@@ -532,7 +532,7 @@ pub fn record_prompt_anchor(
     );
 }
 
-pub(crate) fn take_prompt_anchor_for_response(
+pub fn take_prompt_anchor_for_response(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,

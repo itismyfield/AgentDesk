@@ -10,7 +10,7 @@ mod tools;
 mod transcript;
 
 use chrono::{DateTime, Utc};
-pub(crate) use hooks::note_hook;
+pub use hooks::note_hook;
 use source::{Source, Stamp};
 use std::{
     collections::HashMap,
@@ -291,12 +291,12 @@ pub fn cached_for_channel(channel: u64) -> Option<Snapshot> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn poll_for_tests() {
+pub fn poll_for_tests() {
     poll::tick();
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn revision_for_tests(session: &str) -> Option<u64> {
+pub fn revision_for_tests(session: &str) -> Option<u64> {
     let source = Source::current(session)?;
     ledger().entries.get(&source).map(|entry| entry.revision)
 }

@@ -14,7 +14,7 @@ pub use durable_publish::{
     best_effort_publish_logged, critical_publish, fsync_parent_and_ancestors, sync_removed,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
+pub use durable_publish::{critical_atomic_write, flush_probe as durable_probe};
 
 /// Enumerate channel-named files with each store's existing channel loader.
 pub fn collect_pending_channels<T>(

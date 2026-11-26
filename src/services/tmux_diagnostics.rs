@@ -50,7 +50,7 @@ pub fn tmux_session_pane_liveness(
 /// Force (or clear, with `None`) the pane-liveness answer for one session name.
 /// Stored as an injected tmux host observation, so typed probes see it too.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_pane_liveness_override_for_tests(
+pub fn set_pane_liveness_override_for_tests(
     tmux_session_name: &str,
     liveness: Option<crate::services::platform::tmux::PaneLiveness>,
 ) {

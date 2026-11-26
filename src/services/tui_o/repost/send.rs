@@ -20,7 +20,7 @@ const REPOST_NOTE: &str = "재확인 후 추가 전달";
 
 /// The identifiers every send of one piece carries: the full marker, and a nonce derived from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RepostIds {
+pub struct RepostIds {
     nonce: String,
     marker: String,
 }
@@ -174,7 +174,7 @@ impl AttemptGuard {
 
 /// `wire == counted + throttled`, and `counted <= 1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchReport {
+pub struct DispatchReport {
     pub(crate) outcome: WireOutcome,
     pub(crate) wire: u32,
     pub(crate) counted: u32,
@@ -205,7 +205,7 @@ impl DispatchCounts {
 
 /// One dispatch's request, built with its guard inside but not yet polled, so the caller can
 /// poll it first under the gate and then own its timeout. Dropped unpolled, nothing was sent.
-pub(crate) fn hand_over(
+pub fn hand_over(
     transport: &impl BoundedTransport,
     envelope: &RepostEnvelope,
     live: Arc<dyn Fn() -> bool + Send + Sync>,
@@ -230,7 +230,7 @@ pub(crate) async fn send_bounded(
     send_within(transport, envelope, live, POST_TIMEOUT).await
 }
 
-pub(crate) async fn send_within(
+pub async fn send_within(
     transport: &impl BoundedTransport,
     envelope: &RepostEnvelope,
     live: Arc<dyn Fn() -> bool + Send + Sync>,

@@ -59,7 +59,7 @@ fn config_knows_agent(role_id: &str) -> Option<bool> {
 }
 
 /// The runtime config answers when it is loaded; the org schema answers only without one.
-pub(crate) fn is_known_agent(role_id: &str) -> bool {
+pub fn is_known_agent(role_id: &str) -> bool {
     if let Some(known) = config_knows_agent(role_id) {
         return known;
     }

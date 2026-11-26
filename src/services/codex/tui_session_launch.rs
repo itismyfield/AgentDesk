@@ -1,11 +1,11 @@
 //! Tui session launch.
 
 #[cfg(unix)]
-pub(crate) mod first_input;
-pub(crate) mod launch_policy;
+pub mod first_input;
+pub mod launch_policy;
 mod project_trust;
 #[cfg(unix)]
-pub(crate) use launch_policy::prepare_codex_herdr_launch;
+pub use launch_policy::prepare_codex_herdr_launch;
 #[cfg(unix)]
 pub(super) use launch_policy::{
     preflight_codex_tui_turn_with_policy, prepare_codex_tui_incarnation_with_policy,
@@ -196,7 +196,7 @@ thread_local! {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_codex_tui_launch_script(
+pub fn prepare_codex_tui_launch_script(
     tmux: &str,
     session_id: Option<&str>,
     prompt: &str,
@@ -245,7 +245,7 @@ pub(crate) enum CodexHerdrLaunchRefused {
 
 /// What an admitted Codex Herdr launch runs: the binary, its source mode and its hook endpoint.
 #[cfg(unix)]
-pub(crate) struct CodexHerdrLaunchable {
+pub struct CodexHerdrLaunchable {
     pub(crate) codex_bin: String,
     pub(crate) resolution: crate::services::platform::BinaryResolution,
     pub(crate) policy: &'static str,

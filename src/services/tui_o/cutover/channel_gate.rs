@@ -73,7 +73,7 @@ pub fn o_owns_tui_output_for_channel(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_owns_tui_output_for_channel_tmux(
+pub fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {

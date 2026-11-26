@@ -24,7 +24,7 @@ impl SessionKey {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TmuxBinding {
+pub enum TmuxBinding {
     Published { key: SessionKey, generation: u64 },
     NameOnly { name: String },
 }

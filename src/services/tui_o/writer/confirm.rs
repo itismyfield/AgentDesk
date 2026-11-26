@@ -14,7 +14,7 @@ pub const LAST_LOOK: Duration = Duration::from_secs(30);
 pub const HISTORY_PAGE: usize = 100;
 pub const MAX_PAGES: usize = 10;
 /// Bounds each read, rate-limit wait and body decode included.
-pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(5);
+pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Bounds a whole settlement, so it ends inside the delivery lease held over the POST.
 pub const SETTLE_DEADLINE: Duration = Duration::from_secs(110);
 /// How many of this bot's latest posts an empty history may be checked against.

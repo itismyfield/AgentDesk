@@ -19,7 +19,7 @@ use crate::services::tui_o::store::spool::{
 #[path = "transition_observe.rs"]
 pub(crate) mod observe;
 #[path = "transition_scope.rs"]
-pub(crate) mod scope;
+pub mod scope;
 use observe::{FileSeen, Observation, Present};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

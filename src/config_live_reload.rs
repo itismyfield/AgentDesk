@@ -90,7 +90,7 @@ pub(crate) fn graceful_fallback_config(path_display: &str, reason: String) -> Co
     Config::default()
 }
 
-pub(crate) fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
+pub fn subscribe() -> tokio::sync::watch::Receiver<Option<Arc<Config>>> {
     LIVE_UPDATES
         .get_or_init(|| tokio::sync::watch::channel(None).0)
         .subscribe()

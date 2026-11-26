@@ -69,13 +69,13 @@ pub fn last_posted(channel: u64) -> Option<u64> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
+pub fn note_posted_for_tests(channel: u64, msg_id: u64) {
     note_posted(channel, msg_id);
 }
 
 /// What a process restart does to the in-memory position; the guard keeps other restarts out.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
+pub fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
     static RESTARTS: Mutex<()> = Mutex::new(());
     let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
     LAST_POSTED

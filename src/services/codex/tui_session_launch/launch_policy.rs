@@ -241,7 +241,7 @@ fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), Stri
 /// The Herdr pane command of one prepared incarnation: no prompt in the argv, `--no-daemon`,
 /// hooks and an exported home, with the Herdr pane variables unset right before the exec.
 #[cfg(unix)]
-pub(crate) fn prepare_codex_herdr_launch(
+pub fn prepare_codex_herdr_launch(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,

@@ -201,7 +201,7 @@ pub(crate) enum HerdrReadFormat {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "params")]
-pub(crate) enum HerdrRequest {
+pub enum HerdrRequest {
     #[serde(rename = "ping")]
     Ping {},
     #[serde(rename = "session.snapshot")]
@@ -259,7 +259,7 @@ impl HerdrRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct HerdrCall {
+pub struct HerdrCall {
     pub id: String,
     #[serde(flatten)]
     pub request: HerdrRequest,

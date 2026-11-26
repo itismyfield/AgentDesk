@@ -29,7 +29,7 @@ pub(crate) enum Held {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Target<'a> {
+pub enum Target<'a> {
     Selected(&'a str),
     Held(Held),
 }

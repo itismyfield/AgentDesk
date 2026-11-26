@@ -24,11 +24,11 @@ use crate::services::tui_o::shadow::capture::file_identity;
 use herdr_resume::resumes_under_new_execution;
 pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
 pub const BINDING_EVENTS_DIR: &str = "binding_events";
-pub(crate) mod claude_fold;
+pub mod claude_fold;
 use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) use claude_fold::published_claude_history;
-pub(crate) use claude_fold::unverified_current_source;
+pub use claude_fold::unverified_current_source;
 pub mod codex;
 mod log_record;
 mod read_cache;
@@ -240,7 +240,7 @@ fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
+pub fn log_path(channel_id: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|dir| dir.join(format!("{channel_id}.log"))))
 }
 
@@ -392,13 +392,13 @@ pub(crate) fn admit_committed_seq<R>(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn admission_mutex_held_for_tests() -> bool {
+pub fn admission_mutex_held_for_tests() -> bool {
     matches!(LOGS.try_lock(), Err(std::sync::TryLockError::WouldBlock))
 }
 
 /// What a commit left in the log for its proposal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Committed {
+pub enum Committed {
     Appended,
     /// The log already says what the proposal says.
     Unchanged,
@@ -419,7 +419,7 @@ enum Planned {
 }
 
 /// Appends what `proposal`'s stat changes for its pane, if anything, as the pane's pin admits it.
-pub(crate) fn record_source(proposal: &Proposal) -> io::Result<Committed> {
+pub fn record_source(proposal: &Proposal) -> io::Result<Committed> {
     commit(proposal, Plan::Stat)
 }
 
@@ -433,7 +433,7 @@ pub enum PendingRecord {
 
 /// A candidate that has no verified transcript yet waits as a Pending, whether or not a file exists.
 /// Only a matching Pending stands in for the record; a current source naming the candidate does not.
-pub(crate) fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
+pub fn record_pending(proposal: &Proposal) -> io::Result<PendingRecord> {
     match commit(proposal, Plan::ForcePending)? {
         Committed::Appended => Ok(PendingRecord::Recorded),
         _ => Ok(PendingRecord::AlreadyPending),
@@ -477,7 +477,7 @@ pub(crate) fn record_rejected(proposal: &Proposal, reason: &str) -> io::Result<b
 }
 
 /// Reads the existing writer's Pending identity without loading, appending, or publishing a record.
-pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) -> Option<u64> {
+pub fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) -> Option<u64> {
     let path = log_path(channel_id).ok().flatten()?;
     let logs = lock_logs();
     let writer = logs.get(&path)?.writer.as_ref()?;
@@ -487,7 +487,7 @@ pub(crate) fn pending_seq(channel_id: u64, tmux_session: &str, session: &str) ->
 }
 
 /// The pane's current source, when a verified record pinned it.
-pub(crate) fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
+pub fn pinned_source(channel_id: u64, tmux_session: &str) -> io::Result<Option<SourceId>> {
     Ok(pinned_source_at(channel_id, tmux_session)?.map(|(pin, _)| pin))
 }
 
@@ -514,7 +514,7 @@ pub fn claude_history(
 }
 
 /// `claude_history` with the commit time of the record that pinned the pane's source.
-pub(crate) fn claude_history_at(
+pub fn claude_history_at(
     channel_id: u64,
     tmux_session: &str,
     nonce: Option<&str>,

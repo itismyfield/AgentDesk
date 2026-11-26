@@ -95,7 +95,7 @@ where
     )
 }
 
-pub(crate) fn spawn_native<P, L, A, B>(
+pub fn spawn_native<P, L, A, B>(
     config: &WriterConfig,
     readers: Option<ReaderConfig>,
     writer: ChannelWriter<P, L, A>,

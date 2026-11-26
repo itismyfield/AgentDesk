@@ -385,10 +385,7 @@ fn finish_under_authority(key: &Pane, ok: bool) {
     }
 }
 
-pub(crate) fn pane_registration_failed(
-    command: &str,
-    envelope: Option<&HookBindingEnvelope>,
-) -> bool {
+pub fn pane_registration_failed(command: &str, envelope: Option<&HookBindingEnvelope>) -> bool {
     let failed = FAILED_PANES.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(HookBindingEnvelope {
         context: CapturedContext::Captured(ctx),

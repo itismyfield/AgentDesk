@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) const ADMISSION_ENV: &str = "ADK_HERDR_ADMISSION";
+pub const ADMISSION_ENV: &str = "ADK_HERDR_ADMISSION";
 const STOP_FILE: [&str; 2] = ["herdr", "admission-off"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

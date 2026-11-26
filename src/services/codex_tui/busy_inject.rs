@@ -10,7 +10,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub(crate) use crate::services::claude_tui::busy_inject::Pane;
+pub use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
 use crate::services::claude_tui::owner_input;
 pub use rollout::{

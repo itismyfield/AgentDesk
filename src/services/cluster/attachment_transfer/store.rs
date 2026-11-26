@@ -204,7 +204,7 @@ pub async fn validate_refs(
     Ok(())
 }
 
-pub(crate) async fn cleanup(pool: &PgPool) -> Result<u64, sqlx::Error> {
+pub async fn cleanup(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtext('agentdesk.attachment-bundles.v1')::BIGINT)",

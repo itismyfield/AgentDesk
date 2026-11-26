@@ -50,7 +50,7 @@ pub struct PreparedIncarnation {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ContextPresence {
+pub enum ContextPresence {
     Present,
     Absent,
     Unknown,
@@ -91,7 +91,7 @@ pub fn context_path(provider: &str, nonce: &str) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "runtime root unavailable"))
 }
 
-pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
+pub fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
     let Ok(path) = context_path(provider, nonce) else {
         return ContextPresence::Unknown;
     };

@@ -19,7 +19,7 @@ fn owner_scope(root: &str, node: &str) -> String {
     format!("{:x}", hash.finalize())
 }
 
-pub(crate) fn runtime_identity(session: &str) -> Result<ManagedIdentity, String> {
+pub fn runtime_identity(session: &str) -> Result<ManagedIdentity, String> {
     Ok(ManagedIdentity {
         v: 1,
         owner_scope: current_owner_scope()?,

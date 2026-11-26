@@ -5,7 +5,7 @@
 #[cfg(unix)]
 mod epoch;
 mod ownership;
-pub(crate) use ownership::{
+pub use ownership::{
     ComposerOwner, composer_owner, composer_owner_in_session, draft_sighting,
     draft_sighting_in_session,
 };
@@ -413,7 +413,7 @@ impl Pane {
     }
 }
 
-pub(crate) fn modal(capture: &str) -> bool {
+pub fn modal(capture: &str) -> bool {
     screen::modal(capture)
 }
 

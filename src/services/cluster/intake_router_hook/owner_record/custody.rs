@@ -130,7 +130,7 @@ pub enum SwitchReadiness {
 }
 
 /// Readiness comes from the control plane; unavailable requires the stored deadline and old stamp.
-pub(crate) async fn promote(
+pub async fn promote(
     pool: &PgPool,
     delivery: i64,
     target: &str,
@@ -396,7 +396,7 @@ async fn retire_open_on_tx(
 }
 
 /// Refreshes only unstarted held custody. The caller commits; repeat observations never extend a deadline.
-pub(crate) async fn refresh_stage_on_tx(
+pub async fn refresh_stage_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     delivery: i64,
     target: &str,

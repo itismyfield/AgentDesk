@@ -243,7 +243,7 @@ pub fn provider_runtime_has_structured_jsonl_turn_state(
     )
 }
 
-pub(crate) fn pane_ready_fallback_allowed(
+pub fn pane_ready_fallback_allowed(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,
 ) -> bool {
@@ -352,7 +352,7 @@ pub fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
 }
 
 /// The busy writer's reading of the same transcript; see [`claude_meta::observe_running`].
-pub(crate) fn observe_claude_jsonl_running_turn_state(path: &Path) -> TuiTurnState {
+pub fn observe_claude_jsonl_running_turn_state(path: &Path) -> TuiTurnState {
     claude_meta::observe_running(path)
 }
 

@@ -187,7 +187,7 @@ pub fn execute(
     result
 }
 
-pub(crate) fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+pub fn launch_options(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     let tools = Some(turn.allowed_tools);
     let instructions = super::compose_codex_developer_instructions(turn.system_prompt, tools);
     CodexLaunchOptions::new("")
@@ -261,7 +261,7 @@ fn fresh_launch(
 
 /// The pane command of `prepared`: a resume names the exact thread its incarnation expects, a
 /// fresh launch names none. Its options are kept before the Pending row, for each later prompt.
-pub(crate) fn pane_command(
+pub fn pane_command(
     turn: &CodexHerdrTurn<'_>,
     prepared: &PreparedIncarnation,
     (launchable, overlay, home): (
@@ -432,12 +432,12 @@ fn owned_composer(
 }
 
 /// What execution `nonce` keeps of the options it was launched with.
-pub(crate) fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
+pub fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
     format!("{nonce} {}", codex_tui_launch_options_fingerprint(options))
 }
 
 /// Refuses a prompt whose launch options are not the ones execution `nonce` was launched with.
-pub(crate) fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+pub fn options_kept(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
     let logical = turn.owner.logical_key.as_str();
     let expected = kept_options(nonce, &launch_options(turn));
     match read_codex_tui_launch_options_fingerprint(logical) {
@@ -472,7 +472,7 @@ fn release_closed_hold(logical: &str, nonce: &str) {
 
 /// A test's recorded Codex execution handed to the owner hook on this thread, unobserved.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_first_prompt_for_tests(
+pub fn owned_first_prompt_for_tests(
     turn: &CodexHerdrTurn<'_>,
     record: &HostedExecution,
     lineage: crate::services::claude_tui::owner_input::Lineage,
@@ -484,7 +484,7 @@ pub(crate) fn owned_first_prompt_for_tests(
 /// A test's prepared Codex tmux argv create handed to the owner hook on this thread; it lives here
 /// because the tmux launch module is private to Codex.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn owned_spawn_for_tests(
+pub fn owned_spawn_for_tests(
     context: &crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     at: (&str, &str),
     prompt: &str,

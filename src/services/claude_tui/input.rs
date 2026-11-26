@@ -213,7 +213,7 @@ pub fn prompt_readiness_snapshot_from_capture(
     }
 }
 
-pub(crate) fn send_prompt_with_readiness(
+pub fn send_prompt_with_readiness(
     session_name: &str,
     prompt: &str,
     readiness: PromptReadinessKind,
@@ -278,10 +278,7 @@ fn run_actions(
 /// Both out-of-turn stranded-draft clearers acquire this fence before checking ownership.
 /// Callers must not hold the composer lock. In-send errors retain their uncertain payload.
 /// A pane held for draft recovery takes no cleanup key; `None` reports the skipped cleanup.
-pub(crate) fn with_composer_cleanup_lock<R>(
-    session_name: &str,
-    cleanup: impl FnOnce() -> R,
-) -> Option<R> {
+pub fn with_composer_cleanup_lock<R>(session_name: &str, cleanup: impl FnOnce() -> R) -> Option<R> {
     crate::services::claude_tui::composer_lock::with_composer_mutation_lock(session_name, || {
         let admitted = admit_automatic_write(session_name, PromptReadinessKind::Followup);
         admitted.ok().map(|()| cleanup())

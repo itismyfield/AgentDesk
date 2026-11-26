@@ -16,7 +16,7 @@ use crate::services::claude_tui::memento_feedback::{
 
 mod hook_event;
 pub use hook_event::HookEvent;
-pub(crate) use hook_event::HookFanout;
+pub use hook_event::HookFanout;
 pub mod adoption_retry;
 pub mod observation_ingress;
 pub mod relay_receipts;
@@ -114,7 +114,7 @@ impl HookEventKind {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
-pub(crate) struct HookBroadcastProbe {
+pub struct HookBroadcastProbe {
     pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
     pub(crate) primary_sent: tokio::sync::Notify,
     pub(crate) release_alias: tokio::sync::Notify,
@@ -212,7 +212,7 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
 
 /// Publishes `event` to the live hook subscribers as the receiver would.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn publish_hook_event_for_tests(event: HookEvent) {
+pub fn publish_hook_event_for_tests(event: HookEvent) {
     let _ = HOOK_SERVER_STATE.event_tx.send(event);
 }
 

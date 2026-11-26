@@ -121,7 +121,7 @@ pub mod renumber {
 
     /// Live stats of `path`'s inode report a dev XORed with `shift` until the guard drops. Keep
     /// the inode alive meanwhile, so no other test's new file reuses it.
-    pub(crate) fn shift(path: &Path, shift: u64) -> Guard {
+    pub fn shift(path: &Path, shift: u64) -> Guard {
         use std::os::unix::fs::MetadataExt;
         let meta = std::fs::metadata(path).unwrap();
         let key = (meta.dev(), meta.ino());

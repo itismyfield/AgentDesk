@@ -77,7 +77,7 @@ fn configured(channel: u64) -> bool {
 }
 
 /// Whether the channel's O writer could take a Herdr turn of `kind`'s provider now.
-pub(crate) fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
+pub fn o_writer_ready(channel: u64, kind: RuntimeHandoffKind) -> bool {
     o_ready_at(runtime_root().as_deref(), channel, kind)
 }
 
@@ -260,7 +260,7 @@ pub enum HerdrLaunchOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrLaunchError {
+pub enum HerdrLaunchError {
     /// Refused before any I/O.
     Unsupported(&'static str),
     /// The prepared cwd or command cannot run in a pane; refused before Pending.

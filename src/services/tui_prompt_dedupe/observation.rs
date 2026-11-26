@@ -204,7 +204,7 @@ pub(super) fn observe_held_prompt(
     )
 }
 
-pub(crate) fn observe_hook_prompt_by_tmux_with_prompt_id_at(
+pub fn observe_hook_prompt_by_tmux_with_prompt_id_at(
     provider: &str,
     tmux_session_name: &str,
     prompt: &str,
@@ -952,7 +952,7 @@ fn clear_ssh_direct_observation_pending_if_generation_matches(
     true
 }
 
-pub(crate) fn record_suppressed_discord_origin_prompt(
+pub fn record_suppressed_discord_origin_prompt(
     provider: &str,
     tmux_session_name: &str,
     prompt: &str,

@@ -70,7 +70,7 @@ pub enum AcquireOutcome {
 
 /// Result of `transfer_owner_in_tx` (§3.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TransferOutcome {
+pub enum TransferOutcome {
     /// CAS succeeded: `expected_owner@expected_generation` was superseded and a
     /// new `active` row was inserted for `target_owner`. Caller COMMITs.
     Transferred { new_generation: i64 },

@@ -90,7 +90,7 @@ impl TaskCompletionV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TaskCompletionV1Rejection {
+pub enum TaskCompletionV1Rejection {
     MalformedJson,
     DuplicateField,
     UnknownField,

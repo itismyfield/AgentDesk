@@ -3,7 +3,7 @@
 pub(crate) mod panic_probe;
 pub(crate) mod teardown_probe;
 
-pub(crate) struct TestEnvVarGuard {
+pub struct TestEnvVarGuard {
     _lock: Option<super::test_env_lock::SharedTestEnvLockGuard>,
     key: &'static str,
     previous: Option<std::ffi::OsString>,
@@ -75,7 +75,7 @@ impl Drop for TestEnvVarGuard {
 }
 
 #[track_caller]
-pub(crate) fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
+pub fn set_agentdesk_root_for_test(path: &std::path::Path) -> TestEnvVarGuard {
     TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", path)
 }
 
@@ -89,7 +89,7 @@ pub(crate) fn kept_test_tmpdir(label: &str) -> std::path::PathBuf {
         .keep()
 }
 
-pub(crate) struct TestRuntimeRootGuard {
+pub struct TestRuntimeRootGuard {
     _config: Option<TestEnvVarGuard>,
     _env: TestEnvVarGuard,
     _root: tempfile::TempDir,

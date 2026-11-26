@@ -72,7 +72,7 @@ pub(crate) fn report_tmux_death(
 
 /// Audit, exit reason, then kill of `tmux_name`, in that order, once admitted.
 #[cfg(unix)]
-pub(crate) fn teardown_tmux(
+pub fn teardown_tmux(
     clearance: Option<&TeardownClearance>,
     tmux_name: &str,
     component: &str,

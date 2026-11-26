@@ -17,7 +17,7 @@ use crate::services::tui_o::store::ledger::PieceRecord;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ProvenanceEntry {
+pub enum ProvenanceEntry {
     /// Re-post turned on. Serials below `frontier` were prepared before and are never re-posted.
     Activated { generation: u64, frontier: u64 },
     /// An original reached its POST under the bounded transport while re-post was on.
@@ -157,7 +157,7 @@ impl Provenance {
 
 /// The sidecar file of one channel and its replayed state.
 #[derive(Debug)]
-pub(crate) struct ProvenanceLog {
+pub struct ProvenanceLog {
     path: PathBuf,
     state: Provenance,
     /// Set when an append failed part way: its bytes may sit at the tail, so nothing more is

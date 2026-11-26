@@ -327,7 +327,7 @@ pub(in crate::services::claude_tui::readiness) fn release(
 }
 
 /// Adoption publishes only local pre-source evidence; the runtime binding and cursors stay old.
-pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
+pub fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
     tmux_common::with_tmux_source_authority(session, |authority| {
         if resolved(authority, epoch, path) {
             return true;

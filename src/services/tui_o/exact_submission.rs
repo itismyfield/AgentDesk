@@ -26,7 +26,7 @@ impl Drop for Installed {
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
+pub fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
     Installed(CURRENT.with(|current| {
         current.replace(Some(Capability {
             pool,

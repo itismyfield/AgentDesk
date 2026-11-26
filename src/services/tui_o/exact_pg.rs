@@ -29,7 +29,7 @@ impl ConsistentEpisodeSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DurableEvidenceAck {
+pub struct DurableEvidenceAck {
     pub record: Uuid,
     pub version: u32,
     pub digest: String,

@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 /// Inserts an approved event of `text` and its workflow row in `state`.
-pub(crate) async fn insert_event(
+pub async fn insert_event(
     pool: &PgPool,
     (kind, channel, actor): (EventKind, u64, u64),
     text: &str,
@@ -41,7 +41,7 @@ pub(crate) async fn insert_event(
 }
 
 /// The workflow row: state, whether normalization was used, the stored ticket, turn and detail.
-pub(crate) async fn row(
+pub async fn row(
     pool: &PgPool,
     event: Uuid,
 ) -> (String, bool, Option<String>, Option<String>, Option<String>) {

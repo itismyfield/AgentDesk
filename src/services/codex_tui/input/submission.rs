@@ -34,7 +34,7 @@ fn one_paste(plan: Vec<TuiInputAction>) -> Result<Vec<TuiInputAction>, String> {
 
 const DRAFT_NOTICE_KIND: &str = "codex.draft_preservation_unconfirmed";
 
-pub(crate) fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
+pub fn draft_notice_event(channel: u64, original: Option<(u64, u64)>) -> Option<String> {
     let (primary, generation) = original?;
     Some(format!(
         "{DRAFT_NOTICE_KIND}:{channel}:{primary}:{generation}"
@@ -62,7 +62,7 @@ pub fn notify_owned_draft(channel: u64) {
     }
 }
 
-pub(crate) async fn enqueue_draft_notice(
+pub async fn enqueue_draft_notice(
     pool: &sqlx::PgPool,
     channel: u64,
     event: &str,

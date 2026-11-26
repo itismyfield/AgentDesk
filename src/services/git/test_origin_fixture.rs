@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
+pub fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
         .args([
@@ -25,13 +25,13 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-pub(crate) fn commit(dir: &Path, message: &str) -> String {
+pub fn commit(dir: &Path, message: &str) -> String {
     git(dir, &["commit", "--allow-empty", "-m", message]);
     git(dir, &["rev-parse", "HEAD"])
 }
 
 /// `seed` pushes to `origin`; `desk` is the AgentDesk-side clone taken at `main_tip`/`default_tip`.
-pub(crate) struct OriginFixture {
+pub struct OriginFixture {
     _tmp: tempfile::TempDir,
     pub(crate) origin: PathBuf,
     pub(crate) seed: PathBuf,

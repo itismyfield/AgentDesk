@@ -3,7 +3,7 @@ mod clear;
 mod closed_turn;
 pub mod compact;
 #[cfg(unix)]
-pub(crate) use source::adopt_awaiting_clear;
+pub use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
 pub mod idle;
@@ -133,12 +133,12 @@ pub fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
 }
 /// Herdr only: current evidence, else a pane that outlived the daemon restart idling on its
 /// last hard terminal.
-pub(crate) fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, Some(ProofOrigin::RestoredHard))
         .or_else(|| observe_restored_reply(session, path))
 }
 /// Only a pinned reply of this launch; never the composer's historical hard-terminal proof.
-pub(crate) fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, Some(ProofOrigin::RestoredReply))
         .filter(|proof| proof.origin == ProofOrigin::RestoredReply)
 }
@@ -393,7 +393,7 @@ fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> 
         && clear::current(&proof.source) == Some(proof.clear.clone()))
     .then_some(proof)
 }
-pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
+pub fn reserve(proof: Proof) -> Option<Reservation> {
     let current = evidence(
         &proof.source.session,
         Some(&proof.source.path),
@@ -513,7 +513,7 @@ impl Reservation {
 pub(crate) use wait::prepare;
 
 /// Both root output blocking and feedback continuation use this same fence before replying.
-pub(crate) fn note_hook(
+pub fn note_hook(
     provider: &str,
     kind: &HookEventKind,
     routed: &str,
@@ -753,7 +753,7 @@ pub fn empty_draft(capture: &str) -> bool {
         super::busy_inject::screen::Composer::Empty
     )
 }
-pub(crate) fn watch_draft(session: &str, path: Option<&Path>) {
+pub fn watch_draft(session: &str, path: Option<&Path>) {
     watch(session, path, true);
 }
 // Current source evidence survives a UI modal; retry only after its focus is released.
@@ -777,7 +777,7 @@ pub(crate) fn watch_modal(session: &str, path: Option<&Path>) {
     #[cfg(not(unix))]
     let _ = (session, path);
 }
-pub(crate) fn watch_current(session: &str, path: Option<&Path>) {
+pub fn watch_current(session: &str, path: Option<&Path>) {
     watch(session, path, false);
 }
 fn watch(session: &str, path: Option<&Path>, draft_required: bool) {

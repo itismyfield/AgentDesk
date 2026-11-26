@@ -15,7 +15,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 use tokio::sync::{mpsc, oneshot};
 
 #[derive(Clone, Debug)]
-pub(crate) struct Port {
+pub struct Port {
     suspension: super::super::suspension::Suspension,
     generation: u64,
     run: Arc<()>,
@@ -28,7 +28,7 @@ pub(crate) struct Receiver {
     receive: mpsc::Receiver<Request>,
 }
 
-pub(crate) enum Operation {
+pub enum Operation {
     #[cfg(test)]
     Prepare(SubmitFloor),
     Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
@@ -478,7 +478,7 @@ thread_local! {
     static SPAWN: std::cell::RefCell<Option<Receiver>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
+pub fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
     struct Scope;
     impl Drop for Scope {
         fn drop(&mut self) {

@@ -316,7 +316,7 @@ static BOOT_MIGRATION: OnceLock<BootMigration> = OnceLock::new();
 static BOOT: OnceLock<BootSessionHosts> = OnceLock::new();
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install(config: &Config) -> Result<()> {
+pub fn install(config: &Config) -> Result<()> {
     let boot = BootSessionHosts::from_config(config)?;
     let _ = BOOT.set(boot);
     Ok(())
@@ -442,7 +442,7 @@ pub fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
 
 /// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
+pub fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
     let forced = force_for_test(local_node, channels);
     let boot = FORCED
         .with(|forced| forced.borrow().clone())

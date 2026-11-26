@@ -72,7 +72,7 @@ pub fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct TickReport {
+pub struct TickReport {
     /// Fresh absence evidence, one per piece, for a turn to judge.
     pub(crate) ready: Vec<NotFoundEvidence>,
     /// What recording each probed success returned, by message id.

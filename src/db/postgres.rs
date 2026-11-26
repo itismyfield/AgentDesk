@@ -1218,7 +1218,7 @@ async fn connect_test_pool_with_max_connections_and_migrate_inner(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn connect_test_pool_with_max_connections_and_migrate(
+pub async fn connect_test_pool_with_max_connections_and_migrate(
     database_url: &str,
     label: &str,
     max_connections: u32,
@@ -1374,7 +1374,7 @@ pub async fn drop_test_database(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), String> {
+pub async fn close_test_pool(pool: PgPool, label: &str) -> Result<(), String> {
     tokio::time::timeout(TEST_POSTGRES_OP_TIMEOUT, pool.close())
         .await
         .map_err(|_| {

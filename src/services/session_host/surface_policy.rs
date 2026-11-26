@@ -123,7 +123,7 @@ impl VerifiedSurface {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct InitScope {
+pub struct InitScope {
     bindings: std::collections::BTreeSet<u64>,
     kinds: std::collections::BTreeMap<u64, RuntimeHandoffKind>,
 }

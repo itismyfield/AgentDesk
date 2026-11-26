@@ -3,14 +3,14 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
-pub(crate) struct ProviderFixture {
+pub struct ProviderFixture {
     dir: tempfile::TempDir,
     pub(crate) cli: PathBuf,
     parent_group: i32,
     cleanup: mpsc::Receiver<(u32, ProcessIdentity)>,
     delay: Option<super::stream_queue::test_delay::Guard>,
 }
-pub(crate) const CASES: [&str; 6] = [
+pub const CASES: [&str; 6] = [
     "error",
     "normal",
     "continuous",

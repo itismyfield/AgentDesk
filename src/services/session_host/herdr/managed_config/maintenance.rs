@@ -162,7 +162,7 @@ pub(crate) type ObserveNotice = for<'a> fn(
 >;
 
 /// A home's confirmed cause after a pass, and the notice that cause moves.
-pub(crate) struct Fault {
+pub struct Fault {
     keys: Vec<String>,
     cause: Option<&'static str>,
     /// Every endpoint read a fresh `Off`: only then does a pass without a cause end the episode.

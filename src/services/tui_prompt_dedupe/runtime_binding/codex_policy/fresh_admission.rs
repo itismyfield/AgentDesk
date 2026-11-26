@@ -15,7 +15,7 @@ pub(crate) fn fresh_scope_ownership_calls_for_tests() -> usize {
 }
 
 #[derive(Debug)]
-pub(crate) enum FreshReason {
+pub enum FreshReason {
     ExplicitClear(Captured),
     ExactAbsence(Captured),
 }
@@ -37,7 +37,7 @@ fn input_target(channel: u64) -> Option<String> {
 }
 
 /// A cheap rejection only; full proof and identity checks stay under source authority.
-pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> bool {
+pub fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };
@@ -46,10 +46,7 @@ pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> boo
 }
 
 /// Selection restoration observes its exact marker while the existing source authority is held.
-pub(crate) fn with_current_scope_nonce<T>(
-    channel: u64,
-    inspect: impl FnOnce(Option<&str>) -> T,
-) -> T {
+pub fn with_current_scope_nonce<T>(channel: u64, inspect: impl FnOnce(Option<&str>) -> T) -> T {
     let Some(tmux) = input_target(channel) else {
         return inspect(None);
     };
@@ -125,7 +122,7 @@ pub fn successor_unproved_for_channel(channel: u64) -> bool {
     })
 }
 
-pub(crate) fn fresh_scope_eligible(channel: u64) -> bool {
+pub fn fresh_scope_eligible(channel: u64) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };
@@ -202,10 +199,10 @@ fn no_alias(denied: &[SourceId], current: &SourceId) -> bool {
     })
 }
 
-pub(crate) const FRESH_SCOPE_BUSY: &str = "source_busy";
+pub const FRESH_SCOPE_BUSY: &str = "source_busy";
 
 /// Installs only selection data under the existing authority; resume keeps its normal gates.
-pub(crate) fn with_fresh_scope(
+pub fn with_fresh_scope(
     channel: u64,
     last_nonce: Option<&str>,
     sources: &[SourceId],

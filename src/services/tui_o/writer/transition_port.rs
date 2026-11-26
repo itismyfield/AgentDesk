@@ -353,7 +353,7 @@ thread_local! {
 }
 
 /// Hands `receiver` to the actor `spawn` starts; one it did not take is dropped with the scope.
-pub(crate) fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
+pub fn spawning<T>(receiver: Receiver, spawn: impl FnOnce() -> T) -> T {
     struct Scope;
     impl Drop for Scope {
         fn drop(&mut self) {

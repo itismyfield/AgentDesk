@@ -24,7 +24,7 @@ pub mod owner_publication_fence {
     }
 
     /// Holds the fence until dropped, then restores the outer state.
-    pub(crate) struct Scope(bool);
+    pub struct Scope(bool);
 
     impl Scope {
         pub(crate) fn enter() -> Self {
@@ -38,7 +38,7 @@ pub mod owner_publication_fence {
         }
     }
 
-    pub(crate) fn held() -> bool {
+    pub fn held() -> bool {
         HELD.get()
     }
 }

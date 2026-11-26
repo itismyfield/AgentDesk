@@ -14,7 +14,7 @@ use super::model::{
 use super::provenance::ProcessStart;
 use crate::services::session_host::model::HostError;
 
-pub(crate) const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
+pub const RESTORE_RESUME_NOT_OFF: &str = "restore_resume_not_off";
 /// The only config a dedicated server may run with: any other byte, a missing file or a
 /// parse error leaves Herdr on its default, which resumes agents on restore.
 pub(crate) const CANONICAL_CONFIG: &[u8] = b"[session]\nresume_agents_on_restore = false\n";

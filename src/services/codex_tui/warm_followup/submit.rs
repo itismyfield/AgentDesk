@@ -3,7 +3,7 @@ use super::*;
 /// Settles the one submit; `None` goes on to tail the rollout. A draft that stayed
 /// in the composer is killed for a relaunch only on a confirmed tmux session.
 #[cfg(unix)]
-pub(crate) fn settle_submit(
+pub fn settle_submit(
     target: &InputTarget,
     tmux_session_name: &str,
     outcome: CodexFollowupPromptSubmitOutcome,
@@ -112,7 +112,7 @@ pub(crate) fn settle_submit(
 /// The clear end and ticket a warm follow-up test installs (KRX-TS): stored under the same pane authority the
 /// production path reads, so upper-crate tests drive the real consumer.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support {
+pub mod test_support {
     use crate::services::codex_tui::execution_end::attempt;
     use crate::services::tmux_common as tc;
     use crate::services::tui_o::store::codex_end::{self, CodexEnd, ContextSnapshot, EndBasis};

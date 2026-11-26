@@ -652,11 +652,7 @@ pub(super) fn create_empty(path: &Path) -> Result<(), StoreError> {
     Ok(fsync_parent_dir(path)?)
 }
 
-pub(crate) fn append(
-    path: &Path,
-    at: DateTime<Utc>,
-    entry: &LedgerEntry,
-) -> Result<(), StoreError> {
+pub fn append(path: &Path, at: DateTime<Utc>, entry: &LedgerEntry) -> Result<(), StoreError> {
     Ok(super::durable::append_synced(path, &line(at, entry)?)?)
 }
 
@@ -750,7 +746,7 @@ impl Unsent {
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
-pub(crate) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+pub fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 

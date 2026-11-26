@@ -425,6 +425,6 @@ fn readiness_probe(kind: &ProviderKind) -> Option<crate::services::provider::Pro
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn collect_for_login_test() -> ExecutionProbe {
+pub fn collect_for_login_test() -> ExecutionProbe {
     collect(&Config::default())
 }

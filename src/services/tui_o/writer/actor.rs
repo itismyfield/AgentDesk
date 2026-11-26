@@ -483,7 +483,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn run_channel_at<P, L, A, B>(
+pub async fn run_channel_at<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -512,7 +512,7 @@ mod fresh_resume;
 mod notice_settlement;
 pub mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
+pub use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;

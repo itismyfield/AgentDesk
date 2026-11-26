@@ -271,7 +271,7 @@ fn capture_native(
 }
 
 /// A hook's routing id can outlive a native clear; only its payload names the observed source.
-pub(crate) fn capture_hook(
+pub fn capture_hook(
     provider: &str,
     logical: &str,
     channel: u64,
@@ -341,7 +341,7 @@ pub async fn adoption_channel<S: AdoptionRuntime>(
 }
 
 // New prompt adoption needs a live execution; admitted readers keep their tail.
-pub(crate) async fn current_execution_for_adoption<S: AdoptionRuntime>(
+pub async fn current_execution_for_adoption<S: AdoptionRuntime>(
     shared: &Arc<S>,
     provider: &str,
     channel: ChannelId,

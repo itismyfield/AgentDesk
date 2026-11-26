@@ -128,7 +128,7 @@ impl EarlierExecution for LegacyTmux<'_> {
 
 /// The transcript source a resume of `session_id` continues under Claude home `home` (the
 /// daemon's when `None`); `None` only when the file is certainly absent, never for a failed read.
-pub(crate) fn transcript_file(
+pub fn transcript_file(
     working_dir: &Path,
     session_id: &str,
     home: Option<&Path>,
@@ -152,7 +152,7 @@ pub(crate) fn transcript_file(
 
 /// Whether the channel's O writer would continue a stored cursor on `source`'s file, as its own
 /// bind names it, rather than read it anew; a store that cannot be read answers nothing.
-pub(crate) fn o_reads(channel: u64, source: &SourceId) -> Result<bool, String> {
+pub fn o_reads(channel: u64, source: &SourceId) -> Result<bool, String> {
     let root = crate::config::runtime_root().ok_or("no runtime root")?;
     let Some(store) = crate::services::tui_o::store::OStore::existing(&root) else {
         return Ok(false);

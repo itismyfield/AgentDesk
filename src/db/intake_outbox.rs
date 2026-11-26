@@ -214,7 +214,7 @@ pub(crate) fn classify_insert_pending_error(error: &sqlx::Error) -> Option<Intak
 // reason: intake-outbox retry helper exercised only by the pg-integration test
 // suite; production retry path wired on select routes. See #3034.
 #[allow(dead_code)]
-pub(crate) async fn family_max_attempt(
+pub async fn family_max_attempt(
     pool: &PgPool,
     channel_id: &str,
     user_msg_id: &str,

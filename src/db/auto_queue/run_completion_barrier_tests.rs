@@ -2,7 +2,7 @@
 //! It stays beside the writer because `runs.rs` calls it under `cfg(test)`.
 
 #[derive(Clone)]
-pub(crate) struct CompletionBarrier {
+pub struct CompletionBarrier {
     pub(crate) point: &'static str,
     pub(crate) reached: std::sync::Arc<tokio::sync::Notify>,
     pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,

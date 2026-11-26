@@ -749,7 +749,7 @@ pub fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
     tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some()
 }
 
-pub(crate) fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_idle_suggestion(capture: &str) -> bool {
     let non_empty = capture
         .lines()
         .filter(|l| !l.trim().is_empty())

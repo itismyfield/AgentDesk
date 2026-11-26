@@ -386,7 +386,7 @@ pub mod test_hook {
     use std::sync::Mutex;
 
     #[derive(Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum Step {
+    pub enum Step {
         BeforeLegacyStarted,
         /// As an adoption starts pinning the sources of a channel that already holds output.
         Snapshot,
@@ -425,7 +425,7 @@ pub mod test_hook {
             .count()
     }
 
-    pub(crate) fn set(
+    pub fn set(
         channel: u64,
         step: Step,
         hook: impl FnOnce() -> Result<(), String> + Send + 'static,
@@ -433,7 +433,7 @@ pub mod test_hook {
         HOOKS.lock().unwrap().push((channel, step, Box::new(hook)));
     }
 
-    pub(crate) fn run(channel: u64, step: Step) -> Result<(), String> {
+    pub fn run(channel: u64, step: Step) -> Result<(), String> {
         let mut hooks = HOOKS.lock().unwrap();
         let Some(at) = hooks
             .iter()

@@ -139,7 +139,7 @@ pub(crate) fn ingress_counters_for_tests() -> (u64, u64) {
 }
 
 /// The one binding judgment of a hook; only `Unavailable` and `NotDurable` refuse it.
-pub(crate) fn observe_binding_hook(
+pub fn observe_binding_hook(
     provider: &str,
     event: &str,
     command_session_id: Option<&str>,

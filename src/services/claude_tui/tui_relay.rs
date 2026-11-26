@@ -80,7 +80,7 @@ fn resolve_wait_not_before(
     explicit.or_else(|| last_send_not_before(session_name))
 }
 
-pub(crate) trait SendBackend: Send + Sync {
+pub trait SendBackend: Send + Sync {
     fn has_session(&self, session_name: &str) -> bool;
     fn load_buffer(&self, buffer_name: &str, text: &str) -> Result<(), String>;
     fn paste_buffer(

@@ -243,7 +243,7 @@ fn hop<'a>(
     (old != new).then_some((old, new))
 }
 
-pub(in crate::services) fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
+pub fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
     match &event.record {
         BindingRecord::Bound {
             new: BindingTarget::Source(source),
@@ -881,7 +881,7 @@ pub mod probe {
         let reader = sources.readers.iter().find(|r| r.source == *source);
         reader.map(|r| r.rotated_at)
     }
-    pub(crate) fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
+    pub fn reading<B>(sources: &Sources<B>, source: &SourceId) -> bool {
         sources
             .readers
             .iter()
@@ -907,16 +907,16 @@ pub mod probe {
             .quiet
             .is_some()
     }
-    pub(crate) fn validating<B>(sources: &Sources<B>) -> bool {
+    pub fn validating<B>(sources: &Sources<B>) -> bool {
         sources.validation.is_some()
     }
-    pub(crate) fn jobs_started<B>(sources: &Sources<B>) -> usize {
+    pub fn jobs_started<B>(sources: &Sources<B>) -> usize {
         sources.jobs_started
     }
     pub(crate) fn hold_validation<B>(sources: &mut Sources<B>, hold: bool) {
         sources.hold_validation = hold;
     }
-    pub(crate) fn ready<B>(sources: &Sources<B>) -> bool {
+    pub fn ready<B>(sources: &Sources<B>) -> bool {
         sources
             .validation
             .as_ref()

@@ -23,7 +23,7 @@ const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
 /// with this exact constant in their tests
 /// (`turn_bridge::…::body_mutation_telemetry_tests`), so a change here fails
 /// those tests instead of silently muting a production record.
-pub(crate) const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info,adk_runtime=info";
+pub const DEFAULT_TRACING_DIRECTIVE: &str = "agentdesk=info,adk_runtime=info";
 
 pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
     let mut filter = EnvFilter::from_default_env();
@@ -710,7 +710,7 @@ mod rotation_tests {
 /// Test log capture: tracing-core's JustOne fast path caches the first hitting thread's
 /// interest, so a subscriber-less test thread can cache `never` under a live capture.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_capture {
+pub mod test_capture {
     use std::sync::OnceLock;
 
     use tracing::level_filters::LevelFilter;

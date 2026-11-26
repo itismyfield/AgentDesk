@@ -14,7 +14,7 @@ use crate::db::dispatched_sessions::HookSessionUpsert;
 
 const DISCORD_CHANNEL_KIND: &str = "discord_channel";
 const SCHEDULED_SNAPSHOT_KIND: &str = "scheduled_snapshot";
-pub(crate) const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
+pub const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionIdentityKind {
@@ -363,7 +363,7 @@ pub async fn upsert_legacy_hook_session_pg(
 /// alias, then the supplied ordinary Discord identity. All evidence must
 /// converge on one durable row; precedence never permits conflicting evidence
 /// to select a destructive target.
-pub(crate) async fn resolve_session_key_with_identity_pg(
+pub async fn resolve_session_key_with_identity_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,

@@ -21,7 +21,7 @@ struct Shared {
 }
 
 /// One proxy in front of one upstream database; dropping it stops accepting connections.
-pub(crate) struct PgWireProxy {
+pub struct PgWireProxy {
     port: u16,
     shared: Arc<Shared>,
     release: watch::Sender<u64>,

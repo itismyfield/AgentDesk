@@ -16,7 +16,7 @@ pub struct StartRequest<'a> {
     pub native_binding: &'a serde_json::Value,
 }
 
-pub(crate) struct OwnerStartPermit {
+pub struct OwnerStartPermit {
     pool: PgPool,
     delivery: i64,
     identity: OwnerIdentity,

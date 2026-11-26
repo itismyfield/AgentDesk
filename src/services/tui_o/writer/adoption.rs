@@ -835,7 +835,7 @@ impl Snapshot {
 
 /// Fails closed at once: Legacy has started but holds no cursor.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct NoLegacy;
+pub struct NoLegacy;
 
 #[cfg(any(test, feature = "test-support"))]
 impl LegacyView for NoLegacy {

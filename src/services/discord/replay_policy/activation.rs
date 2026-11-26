@@ -63,7 +63,7 @@ pub mod test_activation {
 
     pub(crate) struct Activated(String);
 
-    pub(crate) fn activate(channel: u64) -> Activated {
+    pub fn activate(channel: u64) -> Activated {
         ACTIVE.lock().unwrap().push(channel.to_string());
         Activated(channel.to_string())
     }

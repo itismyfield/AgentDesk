@@ -25,7 +25,7 @@ use super::host_draft::{
 /// Updated session resolution carried back to the orchestrator when a warm
 /// follow-up could not be delivered and the hosted session must be recreated.
 #[cfg(unix)]
-pub(crate) struct ClaudeTuiRecreateState {
+pub struct ClaudeTuiRecreateState {
     pub(crate) resolved_session_id: String,
     pub(crate) transcript_path: std::path::PathBuf,
     pub(crate) transcript_path_string: String,

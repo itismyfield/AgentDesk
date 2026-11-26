@@ -319,7 +319,7 @@ pub(crate) async fn enqueue_outbox_with_origin_on_tx(
 /// non-failed/non-cancelled row active; the no-op conflict update returns that
 /// row's id. Terminal rows no longer participate, so a genuine retry inserts a
 /// fresh id.
-pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
+pub async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_cancel(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_key: &str,
@@ -335,7 +335,7 @@ pub(crate) async fn enqueue_outbox_pg_returning_outcome_with_exact_dedupe_and_ca
     .await
 }
 
-pub(crate) async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
+pub async fn enqueue_outbox_pg_with_exact_dedupe_and_attachment(
     pool: &PgPool,
     message: OutboxMessage<'_>,
     dedupe_key: &str,

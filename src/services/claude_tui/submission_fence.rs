@@ -77,7 +77,7 @@ fn current() -> Option<Arc<dyn SubmissionFence>> {
 }
 
 /// Input calls this after its final readiness checks; an unmanaged prompt passes unchanged.
-pub(crate) fn before_first_payload() -> Result<(), String> {
+pub fn before_first_payload() -> Result<(), String> {
     match current() {
         Some(fence) => fence
             .before_first_payload()

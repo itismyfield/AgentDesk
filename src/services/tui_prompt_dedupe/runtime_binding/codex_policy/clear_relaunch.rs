@@ -12,7 +12,7 @@ mod absent_open;
 #[path = "fresh_admission.rs"]
 mod fresh_admission;
 #[path = "herdr_bootstrap.rs"]
-pub(crate) mod herdr_bootstrap;
+pub mod herdr_bootstrap;
 #[cfg(test)]
 pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
 pub use fresh_admission::{

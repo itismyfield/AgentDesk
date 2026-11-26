@@ -67,7 +67,7 @@ impl AdoptSkip {
 type Explained = (Option<(String, String)>, Option<AdoptSkip>);
 
 /// `adopt_claude_continuation_session` plus the reason when nothing was adopted or logged.
-pub(crate) fn adopt_claude_continuation_explained(
+pub fn adopt_claude_continuation_explained(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
@@ -250,7 +250,7 @@ pub fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
 
 /// Execution `nonce` left `logical` for tmux: its listing ends, so the pane's hooks and watcher
 /// read as tmux again. A newer execution listed there stays.
-pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
+pub fn release_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| {
         if executions
             .get(logical)
@@ -288,7 +288,7 @@ pub(crate) fn herdr_execution_is(logical: &str, nonce: &str) -> bool {
 
 /// The execution a launch or a reconcile last listed on `logical` as a Herdr pane. Read without
 /// the listed flag, which a test keeps per thread; the lock is a leaf.
-pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
+pub fn herdr_listed_execution(logical: &str) -> Option<String> {
     let executions = HERDR_EXECUTIONS.lock();
     let executions = executions.unwrap_or_else(|poison| poison.into_inner());
     executions.get(logical).map(|(nonce, _)| nonce.clone())

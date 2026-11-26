@@ -33,7 +33,7 @@ pub(crate) enum CleanupPhase {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HoldRecord {
+pub struct HoldRecord {
     pub(crate) schema: u8,
     pub(crate) recorded_at: String,
     pub(crate) provider: String,
@@ -80,7 +80,7 @@ pub(crate) fn screen_exact(frame: &str) -> bool {
 }
 
 /// `None` when execution `nonce` holds nothing; a v1 hold's identity is its file content.
-pub(crate) fn read(nonce: &str) -> Result<Option<Held>, String> {
+pub fn read(nonce: &str) -> Result<Option<Held>, String> {
     let text = match std::fs::read(hold_path(nonce)?) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -99,7 +99,7 @@ pub(crate) fn read(nonce: &str) -> Result<Option<Held>, String> {
 }
 
 /// Temp file, sync, rename, directory sync: a crash leaves the old or the new record whole.
-pub(crate) fn write(record: &HoldRecord) -> Result<PathBuf, String> {
+pub fn write(record: &HoldRecord) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = hold_path(&record.execution_nonce)?;
     let dir = path.parent().unwrap_or(Path::new("."));

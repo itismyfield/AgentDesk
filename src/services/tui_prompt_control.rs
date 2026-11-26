@@ -84,7 +84,7 @@ pub struct LocalOnlySlashControl {
 /// start-anchored local command representation. Unknown slash commands and
 /// `/loop` deliberately return `None`: they retain their normal external-turn
 /// lifecycle and raw/envelope dedupe behavior.
-pub(crate) fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnlySlashControl> {
+pub fn classify_local_only_slash_control(prompt: &str) -> Option<LocalOnlySlashControl> {
     let (normalized, peeled_caveat) = normalize_local_control_prompt(prompt);
     if peeled_caveat && normalized.is_empty() {
         return Some(LocalOnlySlashControl {

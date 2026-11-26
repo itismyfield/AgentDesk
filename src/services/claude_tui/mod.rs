@@ -5,7 +5,7 @@ mod busy_inject_tests;
 pub mod composer_lock;
 pub mod guarded_outcome;
 pub mod hook_bundle;
-pub(crate) mod hook_output_guard;
+pub mod hook_output_guard;
 #[cfg(test)]
 mod hook_output_guard_tests;
 #[cfg(test)]

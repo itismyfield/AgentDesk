@@ -28,7 +28,7 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
 /// Fixtures KE·ROOT tests reuse once KRX is its own crate (KRX-TS): the removed-runtime message, the hosting
 /// reset guard and the config builders. The unit tests below keep their own cases.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support {
+pub mod test_support {
     use crate::config::{AgentChannel, AgentChannelConfig, AgentDef, Config, ProviderConfig};
     use crate::services::provider_hosting;
 

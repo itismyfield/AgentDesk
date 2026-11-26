@@ -92,7 +92,7 @@ pub(crate) fn record(prompt: Option<&str>, resume: bool) {
     });
 }
 
-pub(crate) fn claude_args(args: &[String]) {
+pub fn claude_args(args: &[String]) {
     record(
         args.windows(2)
             .find(|p| p[0] == "--append-system-prompt")

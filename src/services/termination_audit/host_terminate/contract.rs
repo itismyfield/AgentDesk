@@ -7,7 +7,7 @@ use super::herdr_terminate::{HerdrTerminateResult, OperatorTerminateWarrant};
 use crate::services::session_host::{HostKind, HostRefusal, HostedRuntimeLocator};
 
 /// Operation name carried by the `Unsupported` refusal.
-pub(crate) const TERMINATE_OP: &str = "terminate";
+pub const TERMINATE_OP: &str = "terminate";
 
 /// Proof that the existing owners cleared this exact target. Not a lease or a
 /// new authority: it only carries their verdicts and is consumed by one call.

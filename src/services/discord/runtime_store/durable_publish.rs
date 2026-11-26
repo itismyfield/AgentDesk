@@ -329,7 +329,7 @@ pub fn best_effort_publish_logged(path: &Path, data: &str, context: AtomicWriteC
 
 /// The plain `atomic_write` with the recovery-critical failure log, kept for test fixtures.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn critical_atomic_write(
+pub fn critical_atomic_write(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -358,7 +358,7 @@ pub mod flush_probe {
     use super::SyncStage;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(crate) enum Step {
+    pub enum Step {
         CreateTemp,
         Write,
         FileSync,
@@ -389,7 +389,7 @@ pub mod flush_probe {
 
     /// Holds a flush until released; `entered` reports that a flush reached it.
     #[derive(Default)]
-    pub(crate) struct Gate {
+    pub struct Gate {
         state: Mutex<(bool, bool)>,
         changed: Condvar,
     }
@@ -421,7 +421,7 @@ pub mod flush_probe {
 
     /// What a watched scope does to flushes under it.
     #[derive(Clone, Default)]
-    pub(crate) struct Plan {
+    pub struct Plan {
         /// Every attempt of these steps fails with `EIO`.
         pub(crate) fail: Vec<Step>,
         /// Parent flushes wait here before running.
@@ -437,7 +437,7 @@ pub mod flush_probe {
     static WATCHED: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 
     /// Applies `plan` to every target under `scope` until dropped.
-    pub(crate) struct Watch(PathBuf);
+    pub struct Watch(PathBuf);
 
     impl Watch {
         pub(crate) fn new(scope: &Path, plan: Plan) -> Self {

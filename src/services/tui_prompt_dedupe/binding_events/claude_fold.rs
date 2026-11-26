@@ -271,7 +271,7 @@ pub(super) struct ClaudeFold {
 }
 
 /// The current execution's stat identity, only while no verified pin or other waiting session owns it.
-pub(crate) fn unverified_current_source(
+pub fn unverified_current_source(
     channel_id: u64,
     tmux_session: &str,
     nonce: &str,

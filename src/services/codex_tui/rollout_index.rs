@@ -625,7 +625,7 @@ thread_local! {
 
 /// Test seam: strict header reads of `path` still open the file, then every read fails.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn fail_header_reads_for_tests(path: Option<PathBuf>) {
+pub fn fail_header_reads_for_tests(path: Option<PathBuf>) {
     FAILING_HEADER_READ.with(|slot| *slot.borrow_mut() = path);
 }
 

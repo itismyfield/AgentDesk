@@ -112,7 +112,7 @@ impl Source {
 #[cfg(unix)]
 mod clear;
 #[cfg(unix)]
-pub(crate) use clear::adopt as adopt_awaiting_clear;
+pub use clear::adopt as adopt_awaiting_clear;
 #[cfg(unix)]
 pub(super) use clear::note as note_clear;
 

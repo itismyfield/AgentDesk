@@ -3,7 +3,7 @@ use super::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Admission {
+pub enum Admission {
     #[default]
     Reserved,
     EffectPossible,
@@ -125,7 +125,7 @@ fn current(entry: &Entry) -> bool {
     })
 }
 
-pub(crate) fn register(
+pub fn register(
     (session, id, author): (&str, &str, &str),
     transcript: &Path,
     offset: u64,
@@ -166,7 +166,7 @@ pub(crate) fn register(
     )
 }
 
-pub(crate) fn mark(id: &str, transcript: &Path, admission: Admission) -> Result<(), String> {
+pub fn mark(id: &str, transcript: &Path, admission: Admission) -> Result<(), String> {
     if super::v2::scoped() {
         return Ok(());
     }
@@ -393,7 +393,7 @@ pub(crate) fn bind_open_record(
     bind_record(&session, &transcript, start, record)
 }
 
-pub(crate) fn projection(provider: &str, session: &str, id: &str) -> Option<Projection> {
+pub fn projection(provider: &str, session: &str, id: &str) -> Option<Projection> {
     let store = super::readable_append(&path().ok()?).ok()?;
     let entry = store
         .entries

@@ -16,7 +16,7 @@ use crate::services::tui_prompt_dedupe::binding_context::context_names_execution
 pub(crate) const PROVIDER_WINDOW: Duration = Duration::from_secs(15);
 pub(crate) const PROVIDER_POLL: Duration = Duration::from_millis(200);
 /// A Linux start reads up to a second early.
-pub(crate) const START_SLACK: Duration = Duration::from_secs(1);
+pub const START_SLACK: Duration = Duration::from_secs(1);
 const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT=";
 
 /// Why a pane reading is not launch evidence; nothing is stored for any of them.

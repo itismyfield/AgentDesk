@@ -6,8 +6,7 @@ use std::pin::Pin;
 use super::{HerdrCreateOutcome, HerdrLaunchEndpoint};
 use crate::services::session_host::policy::permit::{CreatePermit, LaunchAdmissionGrant};
 
-pub(crate) type PermitFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<CreatePermit, String>> + Send + 'a>>;
+pub type PermitFuture<'a> = Pin<Box<dyn Future<Output = Result<CreatePermit, String>> + Send + 'a>>;
 
 pub struct UserDefaultCreateRequest {
     pub endpoint: HerdrLaunchEndpoint,
@@ -42,7 +41,7 @@ impl LaunchGrantStore for UnintroducedGrantStore {
         Err("launch admission grant store is not introduced".into())
     }
 }
-pub(crate) static UNINTRODUCED: UnintroducedGrantStore = UnintroducedGrantStore;
+pub static UNINTRODUCED: UnintroducedGrantStore = UnintroducedGrantStore;
 
 pub(crate) fn unsupported_create() -> HerdrCreateOutcome {
     HerdrCreateOutcome::NotSent("user-default create adapter unavailable".into())

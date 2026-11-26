@@ -192,7 +192,7 @@ impl LaunchOptionsSnapshot {
     }
 }
 
-pub(crate) fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
+pub fn codex_tui_launch_options_fingerprint(options: &CodexLaunchOptions) -> String {
     LaunchOptionsSnapshot::of(options).fingerprint
 }
 

@@ -8,7 +8,7 @@ pub(crate) struct SettledSource {
     pub binding_seq: u64,
 }
 
-pub(crate) fn read(channel: u64, pane: &str) -> io::Result<Option<SettledSource>> {
+pub fn read(channel: u64, pane: &str) -> io::Result<Option<SettledSource>> {
     let _logs = lock_logs();
     let records = ownership_records(channel)?;
     let mut checked = std::collections::HashSet::new();

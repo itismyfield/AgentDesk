@@ -286,7 +286,7 @@ struct RetryOwnerCandidate {
 }
 
 #[derive(Debug, sqlx::FromRow)]
-pub(crate) struct RetryAutoQueueOwner {
+pub struct RetryAutoQueueOwner {
     entry_id: String,
     run_id: String,
     entry_status: String,

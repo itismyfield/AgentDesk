@@ -36,7 +36,7 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
-pub(crate) mod o_input;
+pub mod o_input;
 #[cfg(test)]
 mod o_route_tests;
 pub mod owner_record;

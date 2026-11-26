@@ -13,7 +13,7 @@ pub mod maintenance;
 #[path = "managed_config/path.rs"]
 pub mod path;
 #[path = "managed_config/publication.rs"]
-pub(crate) mod publication;
+pub mod publication;
 
 pub use path::ManagedHome;
 

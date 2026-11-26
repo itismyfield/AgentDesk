@@ -37,7 +37,7 @@ fn verified(context: &BindingContext) -> bool {
 }
 
 /// Deterministic selection checks; the marker written after this can prove they passed.
-pub(crate) fn validate_selection(
+pub fn validate_selection(
     context: &BindingContext,
     selection: &CodexTuiSessionSelection,
 ) -> Result<ValidatedTail, String> {

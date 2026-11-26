@@ -260,7 +260,7 @@ thread_local! { static IN_PORT: std::cell::Cell<bool> = const { std::cell::Cell:
 
 /// Whether this thread is inside the recover port, for a fake witness to tell a bypassing caller.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn recover_in_effect() -> bool {
+pub fn recover_in_effect() -> bool {
     IN_PORT.get()
 }
 

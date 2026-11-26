@@ -2,7 +2,7 @@ use super::*;
 use crate::services::claude_tui::owner_input::OwnedLaunch;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn fresh_hold_for_tests(
+pub fn fresh_hold_for_tests(
     path: &std::path::Path,
     session: &str,
     owner: &std::path::Path,

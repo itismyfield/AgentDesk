@@ -459,7 +459,7 @@ pub mod test_override {
     use crate::services::agent_protocol::RuntimeHandoffKind;
     use std::path::Path;
 
-    pub(crate) fn assert_first_open_send(report: &str, expected_file: &Path, expected_stage: &str) {
+    pub fn assert_first_open_send(report: &str, expected_file: &Path, expected_stage: &str) {
         let (_, open) = report
             .split_once("oldest_open=seq=1,origin=")
             .expect(report);
@@ -471,17 +471,14 @@ pub mod test_override {
     }
 
     /// Keeps a tmux runtime binding registered until dropped, so a panicking test cannot leave it behind.
-    pub(crate) struct TuiSessionGuard(String);
+    pub struct TuiSessionGuard(String);
 
-    pub(crate) fn bind_claude_tui_session(
-        tmux_session: &str,
-        output_path: &str,
-    ) -> TuiSessionGuard {
+    pub fn bind_claude_tui_session(tmux_session: &str, output_path: &str) -> TuiSessionGuard {
         bind_tui_session(tmux_session, RuntimeHandoffKind::ClaudeTui, output_path)
     }
 
     /// Binds a tmux session as a Claude or Codex TUI until dropped.
-    pub(crate) fn bind_tui_session(
+    pub fn bind_tui_session(
         tmux_session: &str,
         runtime_kind: RuntimeHandoffKind,
         output_path: &str,
@@ -514,13 +511,13 @@ pub mod test_override {
         static LOOKUPS: RefCell<Option<Lookups>> = const { RefCell::new(None) };
     }
 
-    pub(crate) fn channel_lookup_providers() -> Vec<String> {
+    pub fn channel_lookup_providers() -> Vec<String> {
         with_lookups(|lookups| lookups.keys().cloned().collect())
     }
 
     pub(crate) struct LookupsGuard(Option<Lookups>);
 
-    pub(crate) fn force_channel_lookups() -> LookupsGuard {
+    pub fn force_channel_lookups() -> LookupsGuard {
         LookupsGuard(LOOKUPS.with(|cell| cell.replace(Some(Lookups::new()))))
     }
 
@@ -544,7 +541,7 @@ pub mod test_override {
         })
     }
 
-    pub(crate) const CHANNELS_ENV: &str = "ADK_TEST_O_TUI_CHANNELS";
+    pub const CHANNELS_ENV: &str = "ADK_TEST_O_TUI_CHANNELS";
     thread_local! {
         static CHANNELS: RefCell<Option<BootChannels>> = const { RefCell::new(None) };
     }
@@ -637,34 +634,31 @@ pub mod test_override {
         BootChannels::validate(&config).unwrap()
     }
 
-    pub(crate) struct ChannelsGuard {
+    pub struct ChannelsGuard {
         previous: Option<BootChannels>,
     }
 
-    pub(crate) fn force_channels(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
+    pub fn force_channels(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
         force_snapshot(snapshot(channels))
     }
 
     /// Selected channels on the home with no store yet: each adoption starts pending.
-    pub(crate) fn force_candidates(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
+    pub fn force_candidates(channels: &[(u64, RuntimeHandoffKind)]) -> ChannelsGuard {
         force_snapshot(unadopted(channels).adopted(Adoption::Pending))
     }
 
     /// Selected channels as a node other than the O home `home` sees them.
-    pub(crate) fn force_foreign(
-        channels: &[(u64, RuntimeHandoffKind)],
-        home: &str,
-    ) -> ChannelsGuard {
+    pub fn force_foreign(channels: &[(u64, RuntimeHandoffKind)], home: &str) -> ChannelsGuard {
         force_snapshot(unadopted(channels).foreign(home))
     }
 
     /// Installs a booted snapshot, as `channel_policy::install` would leave it.
-    pub(crate) fn force_boot(snapshot: BootChannels) -> ChannelsGuard {
+    pub fn force_boot(snapshot: BootChannels) -> ChannelsGuard {
         force_snapshot(snapshot)
     }
 
     /// This thread's forced channels for another thread, over the same candidate locks.
-    pub(crate) fn shared_channels() -> impl FnOnce() -> ChannelsGuard + Send + 'static {
+    pub fn shared_channels() -> impl FnOnce() -> ChannelsGuard + Send + 'static {
         let snapshot = CHANNELS.with(|cell| cell.borrow().clone());
         move || force_snapshot(snapshot.expect("channels are forced on this thread"))
     }
@@ -685,7 +679,7 @@ pub mod test_override {
         }
     }
 
-    pub(crate) fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
+    pub fn with_channels<R>(evaluate: impl FnOnce(Option<&BootChannels>) -> R) -> R {
         CHANNELS.with(|cell| {
             let value = cell.borrow();
             if let Some(snapshot) = value.as_ref() {
@@ -702,7 +696,7 @@ pub mod test_override {
 
     /// Re-runs `name` in a child whose whole process reads the empty writer list, for bodies that
     /// reach the gate from runtime worker threads; returns whether this is that child.
-    pub(crate) fn in_empty_list_process(name: &str) -> bool {
+    pub fn in_empty_list_process(name: &str) -> bool {
         if std::env::var_os(CHANNELS_ENV).is_some() {
             return true;
         }
@@ -725,7 +719,7 @@ pub mod test_override {
     }
 
     // Registry-reset tests run concurrently, so binding-dependent fixtures use their own process.
-    pub(crate) fn isolated_binding_case(name: &str) -> bool {
+    pub fn isolated_binding_case(name: &str) -> bool {
         const CHILD: &str = "ADK_TEST_O_BINDING_CASE";
         if std::env::var(CHILD).as_deref() == Ok(name) {
             return true;

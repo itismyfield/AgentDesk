@@ -40,7 +40,7 @@ pub(crate) fn build(observation: &snapshot::Shared) -> Result<Option<Plan>, sqlx
 }
 
 /// Planning is per held row; only promotion keeps the oldest-first order.
-pub(crate) async fn save_on_tx(
+pub async fn save_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
     delivery: i64,

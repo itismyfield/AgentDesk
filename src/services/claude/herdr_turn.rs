@@ -511,7 +511,7 @@ fn logged_session(target: &BindingTarget) -> Option<&str> {
 }
 
 /// Where a prompt that may sit unsubmitted in execution `nonce`'s composer is recorded.
-pub(crate) fn hold_path(nonce: &str) -> Result<PathBuf, String> {
+pub fn hold_path(nonce: &str) -> Result<PathBuf, String> {
     let plain = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     if nonce.is_empty() || !nonce.chars().all(plain) {
         return Err(format!("herdr turn: unusable execution nonce {nonce:?}"));
@@ -552,7 +552,7 @@ pub fn release_hold(nonce: &str) -> HoldRelease {
 }
 
 /// Unlinks the same validated nonce path for ordinary and durable hold release.
-pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
+pub fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
     let path = hold_path(nonce)?;
     match std::fs::remove_file(&path) {
         Ok(()) => Ok((path, true)),
@@ -822,7 +822,7 @@ impl ClaudeTurnTerminal {
 /// One Claude turn's records as the Herdr reader and bridge admission judge them alike: a
 /// turn-end record counts only after this turn's own prompt, so an earlier turn's tail ends nothing.
 #[derive(Default)]
-pub(crate) struct HerdrTurnLines {
+pub struct HerdrTurnLines {
     stream: StreamLineState,
     prompt_seen: bool,
     /// Output before the prompt or a second prompt before the terminal: another turn's records.
@@ -943,7 +943,7 @@ async fn bind_once_logged(turn: &HerdrTurn<'_>, nonce: &str) -> bool {
 mod live_reader;
 mod never_attached;
 use live_reader::read_to_provider_terminal;
-pub(crate) mod start_offset;
+pub mod start_offset;
 mod terminal_replay;
 pub use terminal_replay::{
     EndedTurn, Terminal, TurnOutput, TurnRead, closed_turn_read, ended_turn, ended_turn_read,

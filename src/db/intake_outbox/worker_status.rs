@@ -348,7 +348,7 @@ pub async fn mark_failed_pre_accept(
     .await
 }
 
-pub(crate) async fn mark_failed_post_accept(
+pub async fn mark_failed_post_accept(
     pool: &PgPool,
     id: i64,
     claim_owner: &str,
@@ -366,7 +366,7 @@ pub(crate) async fn mark_failed_post_accept(
 
 /// Existing maintenance API; no production sweep is started here. Errors may follow partial commits.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn sweep_stale_pre_accept_claims(
+pub async fn sweep_stale_pre_accept_claims(
     pool: &PgPool,
     stale_after_secs: i64,
 ) -> Result<u64, sqlx::Error> {
@@ -379,7 +379,7 @@ pub(crate) async fn sweep_stale_pre_accept_claims(
 }
 
 /// Stamped-only maintenance. Each row commits independently; an error can leave earlier rows rearmed.
-pub(crate) async fn sweep_stamped_claims(
+pub async fn sweep_stamped_claims(
     pool: &PgPool,
     stale_after_secs: i64,
 ) -> Result<u64, sqlx::Error> {

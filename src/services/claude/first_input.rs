@@ -1,13 +1,13 @@
 //! First prompt receipt and response observation have separate lifetimes.
 use super::*;
 
-pub(crate) struct Submitted {
+pub struct Submitted {
     pub(crate) start_offset: u64,
     hook_rx: tokio::sync::broadcast::Receiver<crate::services::claude_tui::hook_server::HookEvent>,
     hook_events_after: chrono::DateTime<chrono::Utc>,
 }
 
-pub(crate) fn submit(
+pub fn submit(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     cancel_token: Option<&CancelToken>,
@@ -43,7 +43,7 @@ fn stopped_before_key(cancel_token: Option<&CancelToken>) {
 /// The first prompt of an execution the caller just created, for the input owner's effect; the
 /// response stays with the provider's observer, which takes the returned ticket.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn submit_created(
+pub fn submit_created(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     tmux_session_name: &str,

@@ -24,7 +24,7 @@ pub struct ObservedMessage {
 
 /// Who else may own a message. `Unknown` is a failed lookup, never an empty index.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AttributionSnapshot {
+pub enum AttributionSnapshot {
     Known {
         /// Recorded receipts of the channel, by message id.
         receipts: BTreeMap<u64, PieceKey>,
@@ -35,7 +35,7 @@ pub(crate) enum AttributionSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RecoveryKind {
+pub enum RecoveryKind {
     /// The observed nonce came back while only the original had been sent.
     OriginalRecovered,
     /// A re-post carrying the piece's marker.
@@ -57,7 +57,7 @@ pub(crate) struct ValidatedReceipt {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Attribution {
+pub struct Attribution {
     /// New messages of this piece. Two or more distinct ids are a duplicate, not a resend reason.
     pub(crate) found: BTreeMap<u64, ValidatedReceipt>,
     /// Messages already recorded as this piece's receipts.
@@ -140,7 +140,7 @@ fn marker_claim(footer: &str, channel: u64) -> Option<bool> {
 }
 
 /// Adds what `seen` shows about the piece of `scope` to `into`; repeated ids count once.
-pub(crate) fn match_observations<'m>(
+pub fn match_observations<'m>(
     scope: &EvidenceScope,
     snapshot: &AttributionSnapshot,
     seen: impl IntoIterator<Item = &'m ObservedMessage>,

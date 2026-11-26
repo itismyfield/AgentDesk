@@ -449,10 +449,10 @@ thread_local! {
 
 /// Installs `registry` on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedRegistry(Option<&'static HerdrRegistry>);
+pub struct ForcedRegistry(Option<&'static HerdrRegistry>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_for_test(registry: HerdrRegistry) -> ForcedRegistry {
+pub fn force_for_test(registry: HerdrRegistry) -> ForcedRegistry {
     let leaked: &'static HerdrRegistry = Box::leak(Box::new(registry));
     ForcedRegistry(FORCED.with(|forced| forced.replace(Some(leaked))))
 }

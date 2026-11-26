@@ -22,7 +22,7 @@ pub mod session_source;
 pub use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod read_fault;
+pub mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
     ProviderCatalogEntry, ProviderExecutionAdapter, ProviderReadinessAdapter,
@@ -808,7 +808,7 @@ still running";
     }
 }
 
-pub(crate) fn fallback_capture_ready_for_input(
+pub fn fallback_capture_ready_for_input(
     capture: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,

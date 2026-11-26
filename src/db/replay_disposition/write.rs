@@ -98,7 +98,7 @@ pub async fn classify_normal(
 }
 
 /// The committed no-effect classification of one nonce; the permit layer turns it into a `RetryPermit`.
-pub(crate) struct NoEffectAck {
+pub struct NoEffectAck {
     receipt_id: i64,
     previous_nonce: String,
     proof: HoldProof,

@@ -389,7 +389,7 @@ fn classify_socket_failure(
 mod real_tests;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "session_inventory/test_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;
 #[cfg(test)]
 #[path = "session_inventory/unit_tests.rs"]
 pub(crate) mod tests;

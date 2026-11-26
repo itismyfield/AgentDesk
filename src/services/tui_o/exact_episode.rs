@@ -180,7 +180,7 @@ pub(crate) enum Settlement {
     Settled,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StrictResolution {
+pub struct StrictResolution {
     authority: Authority,
     settlement: Settlement,
     pub evidence_refs: Vec<Uuid>,

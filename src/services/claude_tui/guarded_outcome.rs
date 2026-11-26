@@ -56,7 +56,7 @@ pub trait Owner: Send + Sync {
 
 /// Seals the attempt's transcript window before the provider releases its turn lock.
 #[cfg(unix)]
-pub(crate) struct ReceiptEnd {
+pub struct ReceiptEnd {
     owner: Option<Arc<dyn Owner>>,
     session: String,
 }
@@ -120,7 +120,7 @@ pub fn with_owner<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> 
     scoped(owner, run).0
 }
 #[cfg(unix)]
-pub(crate) fn capture<R>(run: impl FnOnce() -> R) -> (R, Option<InputRun>) {
+pub fn capture<R>(run: impl FnOnce() -> R) -> (R, Option<InputRun>) {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     let (result, scope) = scoped(owner, run);
     (result, scope.result)

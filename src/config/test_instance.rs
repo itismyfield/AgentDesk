@@ -14,7 +14,7 @@ pub(crate) const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 
 #[derive(Debug)]
-pub(crate) struct TestInstance {
+pub struct TestInstance {
     pub(crate) root: PathBuf,
     config_path: PathBuf,
     pub(crate) instance_id: String,
@@ -562,4 +562,4 @@ pub mod login_test_support;
 /// Fixtures upper-crate tests reuse (KRX-TS); the unit tests in `tests` import them.
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/test_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;

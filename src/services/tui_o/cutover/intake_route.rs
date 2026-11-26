@@ -193,14 +193,14 @@ pub mod test_probe {
         static PROBE: RefCell<Option<Probe>> = const { RefCell::new(None) };
     }
 
-    pub(crate) struct ProbeGuard(Option<Probe>);
+    pub struct ProbeGuard(Option<Probe>);
 
-    pub(crate) fn answer_with(probe: impl FnMut(u64) -> bool + 'static) -> ProbeGuard {
+    pub fn answer_with(probe: impl FnMut(u64) -> bool + 'static) -> ProbeGuard {
         ProbeGuard(PROBE.with(|cell| cell.replace(Some(Box::new(probe)))))
     }
 
     /// Each readiness read takes the next answer; a read past the list fails the test.
-    pub(crate) fn answers(answers: &[bool]) -> ProbeGuard {
+    pub fn answers(answers: &[bool]) -> ProbeGuard {
         let mut answers = answers.to_vec().into_iter();
         answer_with(move |channel| {
             answers

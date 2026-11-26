@@ -148,7 +148,7 @@ pub(crate) fn dialog_open(pane: &str) -> bool {
 }
 
 /// The capture precedes the gated paste; it never clears a draft or confirms a dialog.
-pub(crate) fn run_ready(
+pub fn run_ready(
     session: &str,
     path: &std::path::Path,
     target: &HerdrTarget,

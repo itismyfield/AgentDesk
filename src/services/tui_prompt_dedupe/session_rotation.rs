@@ -113,7 +113,7 @@ fn lock_adopted_sessions() -> std::sync::MutexGuard<'static, HashMap<String, Tim
 /// `old_output_path`, `old_last_offset` and drain bookkeeping, because that is
 /// the transcript whose undelivered tail must still be drained. A hook that
 /// merely re-reports the rotation already recorded is a no-op.
-pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
+pub fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
     // The adopted-session authority is recorded from here too so the rotation
     // path cannot forget it, but it is stored SEPARATELY and outlives this
     // record — `clear_claude_session_rotation` must not take it down with the
@@ -185,7 +185,7 @@ pub fn pending_claude_session_rotations() -> Vec<ClaudeSessionRotation> {
 /// Called on EVERY adoption-path hook, including the "already adopted" one that
 /// records no rotation, so the authority signal is refreshed rather than written
 /// exactly once per rotation.
-pub(crate) fn record_hook_adopted_claude_session_id(tmux_session_name: &str, session_id: &str) {
+pub fn record_hook_adopted_claude_session_id(tmux_session_name: &str, session_id: &str) {
     let tmux_session_name = tmux_session_name.trim();
     let session_id = session_id.trim();
     if tmux_session_name.is_empty() || session_id.is_empty() {

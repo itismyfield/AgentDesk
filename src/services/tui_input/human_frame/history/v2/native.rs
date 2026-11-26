@@ -35,7 +35,7 @@ pub fn registrations_fingerprint(registrations: &[EvidenceRegistration]) -> Resu
 }
 
 #[cfg(unix)]
-pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
+pub fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }
 

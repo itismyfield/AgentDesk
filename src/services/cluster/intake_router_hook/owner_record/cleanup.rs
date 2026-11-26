@@ -53,7 +53,7 @@ impl Response {
 }
 
 /// The same old generation keeps its first operation, native identity and deadline.
-pub(crate) async fn request(
+pub async fn request(
     pool: &PgPool,
     id: &OwnerIdentity,
     old: (&str, i64),

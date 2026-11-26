@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed};
 use super::herdr::model::HerdrEndpoint;
-pub(crate) use super::herdr::model::{HerdrCall, HerdrRequest};
+pub use super::herdr::model::{HerdrCall, HerdrRequest};
 use super::herdr::observe::{RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::ProcessOs;
 use super::herdr::pane_probe::test_support::{FakeOs, context, env_naming};
@@ -26,14 +26,14 @@ use super::herdr::wire::{LineJsonFraming, MAX_FRAME_BYTES};
 use super::herdr_registry::{self, ForcedRegistry, HerdrRegistry};
 use crate::db::dispatched_sessions::hosted_execution::{ExpectedExecution, ProcessStamp};
 
-pub(crate) const PANE: &str = "w1-1";
-pub(crate) const NODE: &str = "mac-mini";
-pub(crate) const KEY: &str = "mini";
-pub(crate) const SESSION: &str = "agentdesk";
-pub(crate) const SHELL: u32 = 10;
-pub(crate) const PROVIDER: u32 = 20;
+pub const PANE: &str = "w1-1";
+pub const NODE: &str = "mac-mini";
+pub const KEY: &str = "mini";
+pub const SESSION: &str = "agentdesk";
+pub const SHELL: u32 = 10;
+pub const PROVIDER: u32 = 20;
 /// The root shell a restarted server gives the pane in place of the launch's.
-pub(crate) const NEW_SHELL: u32 = 11;
+pub const NEW_SHELL: u32 = 11;
 
 /// The process reads the gate sees; empty until a test names the running provider. A pid a test
 /// set answers whether it exists as set, any other as the named OS does; every such read is counted.
@@ -142,7 +142,7 @@ impl ProcessOs for Seen {
     }
 }
 
-pub(crate) struct HerdrRig {
+pub struct HerdrRig {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
     answers: Answers,
@@ -536,7 +536,7 @@ impl Drop for HerdrRig {
 }
 
 /// A separate process keeps Linux peer provenance tied to its exec-time environment.
-pub(crate) struct NativeHerdrRig {
+pub struct NativeHerdrRig {
     root: tempfile::TempDir,
     child: std::process::Child,
 }
@@ -643,13 +643,13 @@ impl Drop for NativeHerdrRig {
 }
 
 /// Installs the ordinary boot-built registry, including its production launch host.
-pub(crate) fn native_registry_on_this_thread(
+pub fn native_registry_on_this_thread(
     boot: &crate::config::session_hosts::BootSessionHosts,
 ) -> impl Drop + use<> {
     herdr_registry::force_for_test(HerdrRegistry::build(boot))
 }
 
-pub(crate) fn native_server_child() -> bool {
+pub fn native_server_child() -> bool {
     let Some(root) = std::env::var_os("ADK_TEST_NATIVE_HERDR_DIR").map(PathBuf::from) else {
         return false;
     };
@@ -791,11 +791,11 @@ impl HerdrRig {
 }
 
 #[path = "herdr_t14_client_tests.rs"]
-pub(crate) mod t14_client;
+pub mod t14_client;
 
 /// Installs on this thread the registry `boot` builds for its node, production launch host included.
 #[cfg(unix)]
-pub(crate) fn boot_registry_on_this_thread(
+pub fn boot_registry_on_this_thread(
     boot: &crate::config::session_hosts::BootSessionHosts,
 ) -> impl Drop + use<> {
     herdr_registry::force_for_test(HerdrRegistry::build(boot))

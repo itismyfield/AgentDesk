@@ -5,9 +5,7 @@ use super::*;
 mod resume_companions;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use resume_companions::{
-    after_companion_for_tests, corrupt_companion_candidate_for_tests,
-};
+pub use resume_companions::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn commit_claim(

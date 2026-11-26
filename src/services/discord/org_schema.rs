@@ -95,7 +95,7 @@ pub fn advance_auth_profile(
     ))
 }
 
-pub(crate) fn spawn_auth_overlay(
+pub fn spawn_auth_overlay(
     provider: ProviderKind,
     channel_id: Option<u64>,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {

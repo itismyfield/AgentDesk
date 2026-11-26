@@ -243,7 +243,7 @@ pub fn is_start_anchored_task_notification(prompt: &str) -> bool {
 /// Detects Codex `<subagent_notification>` envelopes as neutral machine events.
 /// This is deliberately START-ANCHORED: a human prompt that quotes the XML-ish
 /// tag mid-body remains a normal TUI-direct prompt.
-pub(in crate::services::discord) fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
+pub fn is_start_anchored_subagent_notification(prompt: &str) -> bool {
     subagent_notification_card::is_start_anchored_subagent_notification(prompt)
 }
 
