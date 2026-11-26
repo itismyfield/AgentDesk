@@ -31,7 +31,11 @@ pub(super) fn journal_bindings(
         .filter(|turn| matches!(turn.slot, AgySlot::Imessage(_)))
         .map(|turn| {
             let found = read_binding(root, destination, turn.key.id).map_err(|error| {
-                tracing::warn!(destination, %error, "[tui_o] agy delivery journal unreadable");
+                tracing::warn!(
+                    destination,
+                    ?error,
+                    "[tui_o] agy delivery journal unreadable"
+                );
             });
             (turn.slot.clone(), found)
         })
