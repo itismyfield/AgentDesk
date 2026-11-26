@@ -12,9 +12,9 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::routines::validate_routine_runtime_config;
 use sqlx::PgPool;
 
-use super::cluster::ClusterRuntime;
 use super::worker_recovery::WorkerLocalTerminalReason;
 use super::ws::{BatchBuffer, BroadcastTx};
+use crate::services::cluster::node_registry::ClusterRuntime;
 
 mod registry;
 mod status;
@@ -516,10 +516,9 @@ impl Drop for SupervisedWorkerRegistry {
 #[cfg(test)]
 mod leader_takeover_tests {
     use super::{
-        LEADER_ONLY_WORKER_ACTIVE_COUNT, LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS,
+        ClusterRuntime, LEADER_ONLY_WORKER_ACTIVE_COUNT, LEADER_ONLY_WORKER_LAST_SPAWN_UNIX_MS,
         LEADER_ONLY_WORKERS_STARTED, SupervisedWorkerRegistry, WORKER_SPECS, WorkerExecutionScope,
     };
-    use crate::server::cluster::ClusterRuntime;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;

@@ -17,6 +17,7 @@ use std::path::{Path as FsPath, PathBuf};
 
 use super::{AppState, agents_setup};
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::services::cluster::{node_registry, session_routing};
 use crate::services::git::{GitCommand, GitCommandError};
 use crate::services::observability::session_inventory::derive_visual_status;
 use crate::services::pipeline_override::{PipelineOverrideError, PipelineOverrideService};
@@ -986,18 +987,16 @@ pub(super) async fn list_sessions(
             ));
         }
     };
-    let worker_nodes = match crate::server::cluster::list_worker_nodes(
-        pool,
-        state.config.cluster.lease_ttl_secs.max(1),
-    )
-    .await
-    {
-        Ok(nodes) => nodes,
-        Err(error) => {
-            tracing::warn!("failed to list worker nodes for session owner routing: {error}");
-            Vec::new()
-        }
-    };
+    let worker_nodes =
+        match node_registry::list_worker_nodes(pool, state.config.cluster.lease_ttl_secs.max(1))
+            .await
+        {
+            Ok(nodes) => nodes,
+            Err(error) => {
+                tracing::warn!("failed to list worker nodes for session owner routing: {error}");
+                Vec::new()
+            }
+        };
     let local_instance_id = state.cluster_instance_id.as_deref();
     let mut sessions: Vec<_> = rows
         .iter()
@@ -1017,11 +1016,7 @@ pub(super) async fn list_sessions(
             })
         })
         .collect();
-    crate::server::cluster_session_routing::enrich_session_owner_routing(
-        &mut sessions,
-        local_instance_id,
-        &worker_nodes,
-    );
+    session_routing::enrich_session_owner_routing(&mut sessions, local_instance_id, &worker_nodes);
     if query.restart_gate.as_deref() == Some("1") {
         for (session, row) in sessions.iter_mut().zip(&rows) {
             let channel = row

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-pub(crate) use crate::runtime_layout::boot_id::current_boot_id_at;
+use crate::runtime_layout::boot_id::current_boot_id_at;
 
 pub(crate) const LATEST_STARTUP_DOCTOR_ENDPOINT: &str = "/api/doctor/startup/latest";
 

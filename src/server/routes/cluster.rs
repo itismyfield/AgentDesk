@@ -8,6 +8,7 @@ use serde_json::json;
 
 use super::AppState;
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::services::cluster::{capability_routing, node_registry, session_routing};
 use sqlx::PgPool;
 
 #[derive(Debug, Deserialize)]
@@ -61,7 +62,7 @@ pub async fn list_nodes(
 ) -> AppResult<(StatusCode, Json<serde_json::Value>)> {
     let pool = pg_pool(&state)?;
     let lease_ttl_secs = state.config.cluster.lease_ttl_secs.max(1);
-    match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
+    match node_registry::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(mut nodes) => {
             for node in &mut nodes {
                 crate::services::cluster::readiness::attach_diagnostics(node);
@@ -77,25 +78,22 @@ pub async fn list_nodes(
                     .await
                 {
                     Ok(mut sessions) => {
-                        crate::server::cluster_session_routing::enrich_session_owner_routing(
+                        session_routing::enrich_session_owner_routing(
                             &mut sessions,
                             state.cluster_instance_id.as_deref(),
                             &nodes,
                         );
-                        crate::server::cluster_session_routing::attach_active_session_counts_to_worker_nodes(
-                            &mut nodes,
-                            &sessions,
+                        session_routing::attach_active_session_counts_to_worker_nodes(
+                            &mut nodes, &sessions,
                         );
                         (
-                            crate::server::cluster_session_routing::summarize_session_owner_routing(
-                                &sessions,
-                            ),
+                            session_routing::summarize_session_owner_routing(&sessions),
                             None,
                         )
                     }
                     Err(error) => {
                         tracing::warn!("failed to load active session owner summary: {error}");
-                        crate::server::cluster_session_routing::attach_active_session_counts_to_worker_nodes(
+                        session_routing::attach_active_session_counts_to_worker_nodes(
                             &mut nodes,
                             &[],
                         );
@@ -204,7 +202,7 @@ pub async fn routing_diagnostics(
         _ => json!({}),
     };
     let lease_ttl_secs = state.config.cluster.lease_ttl_secs.max(1);
-    match crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await {
+    match node_registry::list_worker_nodes(pool, lease_ttl_secs).await {
         Ok(nodes) => {
             let routing_engine =
                 crate::services::dispatches::routing_constraint::RoutingEngine::from_cluster_config(
@@ -220,7 +218,7 @@ pub async fn routing_diagnostics(
             let constraint_results = routing.constraint_results_json();
             let decisions = nodes
                 .iter()
-                .map(|node| crate::server::cluster::explain_capability_match(node, &required))
+                .map(|node| capability_routing::explain_capability_match(node, &required))
                 .collect::<Vec<_>>();
             Ok((
                 StatusCode::OK,

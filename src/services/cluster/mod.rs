@@ -27,11 +27,7 @@ pub(crate) mod intake_turn;
 pub(crate) mod intake_worker;
 pub(crate) mod intake_worker_capabilities;
 pub(crate) mod machine_resources;
-/// Runner-node registry + capability routing infrastructure. Relocated from
-/// `server::cluster` (#3037 bucket 3): it is pure cluster coordination
-/// (config + db + serde) with no route/axum dependency, so it belongs beside
-/// the rest of the cluster services. `server::cluster` re-exports it for the
-/// route layer.
+/// Runner-node registry and leader coordination.
 pub(crate) mod node_registry;
 pub(crate) mod pre_accept_sweep;
 pub(crate) mod readiness;
@@ -40,9 +36,7 @@ pub mod relay_producer_registry;
 pub mod session_discovery;
 pub mod session_matcher;
 pub mod session_registry;
-/// Session owner routing helpers. Relocated from
-/// `server::cluster_session_routing` (#3037 bucket 3); `server::cluster_session_routing`
-/// re-exports it for the route layer.
+/// Session owner routing helpers.
 pub(crate) mod session_routing;
 pub mod stream_relay;
 pub mod watcher_supervisor;

@@ -646,8 +646,7 @@ src/
 │   │   ├── analytics.rs
 │   │   ├── dispatches.rs
 │   │   ├── kanban.rs
-│   │   ├── mod.rs
-│   │   └── settings.rs
+│   │   └── mod.rs
 │   ├── maintenance/
 │   │   ├── mod.rs
 │   │   └── storage_jobs.rs
@@ -903,8 +902,6 @@ src/
 │   │   ├── registry.rs
 │   │   └── status.rs
 │   ├── bind_security_diagnostics.rs
-│   ├── cluster.rs
-│   ├── cluster_session_routing.rs
 │   ├── cron_catalog.rs
 │   ├── dashboard_auth.rs
 │   ├── dashboard_provision.rs

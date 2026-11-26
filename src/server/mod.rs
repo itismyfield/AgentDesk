@@ -1,6 +1,4 @@
 mod bind_security_diagnostics;
-pub(crate) mod cluster;
-pub(crate) mod cluster_session_routing;
 pub(crate) mod cron_catalog;
 mod dashboard_auth;
 mod dashboard_provision;
@@ -41,6 +39,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::engine::PolicyEngine;
+use crate::services::cluster::node_registry;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::engine_runtime::health_port::stale_sweep_port;
 
@@ -315,7 +314,7 @@ pub(crate) async fn run(
         };
 
     startup_preflight::run();
-    let cluster_runtime = cluster::bootstrap(
+    let cluster_runtime = node_registry::bootstrap(
         &config,
         pg_pool.clone(),
         crate::services::dispatches::cluster_hooks::HOOKS,
@@ -405,7 +404,7 @@ pub(crate) async fn run(
 async fn policy_tick_loop(
     engine: PolicyEngine,
     pg_pool: Option<Arc<PgPool>>,
-    cluster_runtime: Option<cluster::ClusterRuntime>,
+    cluster_runtime: Option<node_registry::ClusterRuntime>,
     shutdown: Option<Arc<AtomicBool>>,
     // `None` only without Discord providers; the cleanup replay then converges its
     // PostgreSQL side and skips the in-memory teardown, as there is no runtime to tear down.

@@ -2025,7 +2025,7 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
   queue-review reconciliation), `src/high_risk_recovery.rs` (PG recovery
   harness for delivery
   outbox/notify), `src/server/task_dispatch_claims.rs` (cluster-aware
-  task-dispatch claim coordination), `src/server/cluster.rs`
+  task-dispatch claim coordination), `src/services/cluster/node_registry.rs`
   (cluster role/leader-failover coordination), `src/server/worker_registry.rs`
   (supervised-worker registry / leader-only lifecycle), and
   `src/server/worker_recovery.rs` (worker-local restart budget/backoff execution).

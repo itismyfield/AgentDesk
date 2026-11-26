@@ -507,7 +507,7 @@ async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
         std::process::id().to_string(),
     )
     .unwrap();
-    let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
+    let doctor = crate::runtime_layout::boot_id::current_boot_id_at(root.path()).unwrap();
     let boot = boot();
     let journal = Journal::open(
         root.path(),

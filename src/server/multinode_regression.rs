@@ -12,11 +12,11 @@
 /// Postgres server that the lane did not hand them.
 mod multinode_regression_pg_tests {
     use crate::db::postgres::AdvisoryLockLease;
-    use crate::server::cluster::CLUSTER_LEADER_ADVISORY_LOCK_ID;
     use crate::server::resource_locks::{
         ResourceLockRequest, acquire_resource_lock, release_resource_lock, unreal_project_lock_key,
     };
     use crate::server::task_dispatch_claims::{TaskDispatchClaimRequest, claim_task_dispatches};
+    use crate::services::cluster::node_registry::CLUSTER_LEADER_ADVISORY_LOCK_ID;
     use serde_json::Value;
     use uuid::Uuid;
 

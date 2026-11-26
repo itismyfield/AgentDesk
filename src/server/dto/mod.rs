@@ -4,4 +4,3 @@ pub mod agents;
 pub mod analytics;
 pub mod dispatches;
 pub mod kanban;
-pub mod settings;

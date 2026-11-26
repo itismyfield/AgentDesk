@@ -3,8 +3,9 @@ pub(crate) use measurement::degraded_reasons;
 
 use serde_json::{Value, json};
 
-use super::contract::{FixSafety, SecurityExposure, Severity};
+use super::contract::{SecurityExposure, Severity};
 use super::startup::LATEST_STARTUP_DOCTOR_ENDPOINT;
+use crate::domain::fix_safety::FixSafety;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ClassifiedReason {
@@ -315,8 +316,9 @@ pub(crate) fn is_loopback_base_url(base: &str) -> bool {
 mod health_classification_tests {
     use serde_json::json;
 
-    use super::super::contract::{FixSafety, Severity};
+    use super::super::contract::Severity;
     use super::{LATEST_STARTUP_DOCTOR_ENDPOINT, classify_degraded_reason, reasons_evidence};
+    use crate::domain::fix_safety::FixSafety;
 
     #[test]
     fn startup_doctor_reasons_point_to_latest_report_endpoint() {

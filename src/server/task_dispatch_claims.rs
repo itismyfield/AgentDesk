@@ -5,6 +5,7 @@ use sqlx::{PgPool, Row};
 use std::collections::BTreeMap;
 
 use crate::config::{ClusterConfig, ClusterSemaphoreConfig};
+use crate::services::cluster::{capability_routing, node_registry};
 
 const DEFAULT_TASK_DISPATCH_CLAIM_TTL_SECS: i64 = 10 * 60;
 const DEFAULT_TASK_DISPATCH_CLAIM_LIMIT: i64 = 10;
@@ -73,7 +74,7 @@ async fn claim_task_dispatches_with_cluster_config(
     let to_agent_id = clean_optional(request.to_agent_id.as_deref());
     let dispatch_type = clean_optional(request.dispatch_type.as_deref());
     let lease_ttl_secs = request.lease_ttl_secs.unwrap_or(60);
-    let worker_nodes = crate::server::cluster::list_worker_nodes(pool, lease_ttl_secs).await?;
+    let worker_nodes = node_registry::list_worker_nodes(pool, lease_ttl_secs).await?;
     let semaphore_configs = &cluster_config.semaphores;
 
     let mut tx = pool
@@ -152,11 +153,10 @@ async fn claim_task_dispatches_with_cluster_config(
                 .find(|candidate| candidate.decision.instance_id.as_deref() == Some(&claim_owner))
                 .map(|candidate| candidate.decision.clone())
                 .or_else(|| {
-                    owner_node.map(|node| {
-                        crate::server::cluster::explain_capability_match(node, required)
-                    })
+                    owner_node
+                        .map(|node| capability_routing::explain_capability_match(node, required))
                 })
-                .unwrap_or_else(|| crate::server::cluster::CapabilityRouteDecision {
+                .unwrap_or_else(|| capability_routing::CapabilityRouteDecision {
                     instance_id: Some(claim_owner.clone()),
                     eligible: false,
                     reasons: Vec::new(),
@@ -267,9 +267,9 @@ async fn semaphore_aware_route_candidates_on_pg_tx(
     worker_nodes: &[Value],
     required_capabilities: &Value,
     semaphore_configs: &BTreeMap<String, ClusterSemaphoreConfig>,
-) -> Result<Vec<crate::server::cluster::CapabilityRouteCandidate>, String> {
+) -> Result<Vec<capability_routing::CapabilityRouteCandidate>, String> {
     let mut candidates =
-        crate::server::cluster::select_capability_route(worker_nodes, required_capabilities);
+        capability_routing::select_capability_route(worker_nodes, required_capabilities);
     if crate::db::dispatch_semaphores::required_semaphore_names(Some(required_capabilities))
         .is_empty()
     {
@@ -319,7 +319,7 @@ async fn semaphore_aware_route_candidates_on_pg_tx(
 /// `selected`, because `select_capability_route` keeps `status = 'online'`
 /// nodes only — so nothing here can flip a claim into or out of existence.
 fn merge_worker_registry_reasons(
-    decision: &mut crate::server::cluster::CapabilityRouteDecision,
+    decision: &mut capability_routing::CapabilityRouteDecision,
     owner_node: Option<&Value>,
     lease_ttl_secs: u64,
 ) {
@@ -352,7 +352,7 @@ fn merge_worker_registry_reasons(
 /// its own reasons: "you are offline" and "so is everyone else" are different
 /// facts and the operator needs both.
 fn merge_route_selection_reason(
-    decision: &mut crate::server::cluster::CapabilityRouteDecision,
+    decision: &mut capability_routing::CapabilityRouteDecision,
     selected: Option<&str>,
 ) {
     match selected {

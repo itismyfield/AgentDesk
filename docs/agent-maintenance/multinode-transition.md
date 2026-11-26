@@ -274,7 +274,7 @@
   together; do not make the loop worker-local without a replacement ownership
   and Discord side-effect plan.
 - active_callsite_coverage: partial. Cluster identity and heartbeat are persisted
-  through `src/server/cluster.rs`; `src/server/worker_registry.rs` classifies
+  through `src/services/cluster/node_registry.rs`; `src/server/worker_registry.rs` classifies
   supervised workers as `leader_only` or `worker_local`, and
   `src/server/worker_registry/registry.rs` applies that scope before startup.
   `policy_tick_loop` already uses a PG advisory lock in
@@ -534,7 +534,7 @@
   `src/services/discord/runtime_bootstrap/gateway_lease.rs`, policy tick advisory lock in
   `src/server/mod.rs` (`policy_tick_loop`), GitHub sync advisory lock in
   `src/server/mod.rs` (`github_sync_loop`), server cluster leader lease bootstrap at
-  `src/server/cluster.rs`, and leader-only worker self-fence in
+  `src/services/cluster/node_registry.rs`, and leader-only worker self-fence in
   `src/server/worker_registry/registry.rs` (`supervise_leader_tokio_worker`).
 - Enablement condition: every supervised worker in
   `src/server/worker_registry.rs` (`WORKER_SPECS`) is classified (`WorkerExecutionScope`) as leader-only,
@@ -575,7 +575,7 @@
   that advertised the required capability. Expired heartbeats must remove the
   worker from routing before new work is assigned.
 - Current anchors: `worker_nodes` stores `labels` and `capabilities` through
-  `src/server/cluster.rs`; provider execution context carries node-local details in
+  `src/services/cluster/node_registry.rs`; provider execution context carries node-local details in
   `src/services/discord/router/message_handler/intake_turn.rs`
   (`handle_text_message`); MCP capability checks are local in
   `src/services/mcp_config.rs` (`provider_has_mcp_server`); tmux watcher state

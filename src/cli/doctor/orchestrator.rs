@@ -14,8 +14,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use super::contract::{DoctorProfile, FixSafety, RunContext, SecurityExposure, Severity};
+use super::contract::{DoctorProfile, RunContext, SecurityExposure, Severity};
 use super::{health, mailbox};
+use crate::domain::fix_safety::FixSafety;
 
 mod api_exposure;
 mod config_dir_checks;

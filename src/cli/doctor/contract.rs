@@ -1,7 +1,5 @@
 use serde::Serialize;
 
-pub(crate) use crate::domain::fix_safety::FixSafety;
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum Severity {

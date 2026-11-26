@@ -326,7 +326,7 @@ async fn production_entry_writes_header_and_boot_ready() {
     assert_eq!(health["boot_id"], id.id);
     assert_eq!(
         header(&root, id)["doctor_boot_id"],
-        crate::cli::doctor::startup::current_boot_id_at(&root).unwrap()
+        crate::runtime_layout::boot_id::current_boot_id_at(&root).unwrap()
     );
     assert_eq!(
         records(&root, id)
