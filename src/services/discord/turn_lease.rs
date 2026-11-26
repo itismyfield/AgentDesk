@@ -207,11 +207,15 @@ async fn release_on(
     if request.expected.runtime != shared.token_hash {
         return Err("runtime identity changed; inspect again".into());
     }
+    let observed = match active_lease(shared, provider, channel).await {
+        Err(LeaseError::Unobservable(_)) => None,
+        result => result?,
+    };
     let Some(ActiveLease {
         identity: current,
         token,
         ..
-    }) = active_lease(shared, provider, channel).await?
+    }) = observed
     else {
         return Ok(serde_json::json!({"released": false, "status": "already_released"}));
     };
@@ -291,10 +295,13 @@ async fn release_on(
                 ),
             }))
         }
-        _ if identity(shared, provider, channel).await?.is_none() => {
-            Ok(serde_json::json!({"released": false, "status": "already_released"}))
-        }
-        _ => Err("lease changed before release committed; inspect again".into()),
+        _ => match identity(shared, provider, channel).await {
+            Ok(None) | Err(LeaseError::Unobservable(_)) => {
+                Ok(serde_json::json!({"released": false, "status": "already_released"}))
+            }
+            Ok(Some(_)) => Err("lease changed before release committed; inspect again".into()),
+            Err(error) => Err(error),
+        },
     }
 }
 
