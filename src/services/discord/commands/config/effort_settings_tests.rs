@@ -550,9 +550,8 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
     );
 }
 
-/// A Codex thread whose Bound pane runs on its Herdr parent's endpoint cannot resume that pane
-/// after an effort restart yet: the capability, the save and the restart all refuse with the
-/// reason, and the pane stays Bound.
+/// A Codex thread's Bound pane on its Herdr parent's endpoint is not restarted for effort yet: the
+/// capability, the save and the restart refuse with the reason, and the pane stays Bound.
 #[cfg(unix)]
 #[test]
 fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {

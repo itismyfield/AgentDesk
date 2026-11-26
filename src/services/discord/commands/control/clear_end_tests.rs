@@ -506,9 +506,8 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
     });
 }
 
-// A thread under a Herdr parent whose host is held ends the Herdr row it stores, never a guessed
-// tmux: a Pending row goes to the terminate service, an unreadable row warns, a legacy row whose
-// tmux probe failed confirms no host, and every one is fenced with its process and tmux untouched.
+// A held thread under a Herdr parent ends only its stored Herdr row (Pending to terminate; an
+// unreadable or legacy row with a failed probe just warns): fenced, its process and tmux untouched.
 #[tokio::test]
 async fn a_held_herdr_threads_clear_ends_its_stored_row_not_a_guessed_tmux_pg() {
     use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
