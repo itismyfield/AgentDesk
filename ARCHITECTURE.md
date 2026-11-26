@@ -2633,6 +2633,8 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── owned_busy/
+│   │   │   │   │   │   ├── dead_bound.rs
+│   │   │   │   │   │   ├── dead_bound_tests.rs
 │   │   │   │   │   │   └── missing_watch.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
@@ -2720,6 +2722,7 @@ src/
 │   │   │   │   │   ├── owner_input_settled_front_tests.rs
 │   │   │   │   │   ├── owner_input_single_marker_tests.rs
 │   │   │   │   │   ├── owner_input_start_wait.rs
+│   │   │   │   │   ├── owner_input_start_wait_tests.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_input_turn_mode_tests.rs
@@ -2783,6 +2786,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_clear_fence_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_dead_bound_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
