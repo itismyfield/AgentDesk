@@ -448,6 +448,7 @@ def run_check(cargo, cwd, args, target_dir, own_root, manifest=None):
             continue
         diag = msg["message"]
         diag["_test"] = bool(msg.get("target", {}).get("test")) or msg.get("profile", {}).get("test", False)
+        diag["_src"] = msg.get("target", {}).get("src_path")  # the reporting target, for reading type paths
         primary = next((s for s in diag.get("spans", []) if s.get("is_primary")), None)
         key = (diag.get("level"), (diag.get("code") or {}).get("code"), diag.get("message"),
                primary and (primary["file_name"], primary["line_start"], primary["column_start"]))
@@ -710,6 +711,7 @@ class Widener:
         self.text = {}
         self.original = {}
         self._level_cache = {}
+        self.owner = None  # vistool_paths.Owner: reads E0616 type paths across crates
 
     def lines(self, rel):
         if rel not in self.text:
@@ -726,19 +728,6 @@ class Widener:
                     hits.append((rel, i))
         return hits
 
-    def _struct_at_path(self, diag, hits, side, lib):
-        """Same-named structs narrowed to the module of the message's type path. Lower reports its own
-        types as `a::b::Name`; upper names a lower type `<lib>::a::b::Name`, and any other path is not ours."""
-        names = NAME_IN_MSG.findall(diag.get("message", ""))
-        segs = re.sub(r"<.*", "", names[1] if len(names) > 1 else "").split("::")[:-1]
-        if side == "lower" and segs:
-            module = segs[1:] if segs[0] == "crate" else segs
-        elif side == "upper" and lib and segs[:1] == [lib]:
-            module = segs[1:]
-        else:
-            return []
-        return [(rel, i) for rel, i in hits if self.layout.module_at(rel, i + 1) == tuple(module)]
-
     def _edit(self, rel, index, op, what):
         if apply_op(self.lines(rel)[index], op) == self.lines(rel)[index]:
             return {}, ("unresolved", f"{what} already pub: {rel}:{index + 1}")
@@ -752,9 +741,8 @@ class Widener:
             return ("outside_crate", f"{rel} ({where or 'not in partition'})")
         return None
 
-    def resolve(self, diag, resolver, run_root, side=None, lib=None):
-        """(edits {(rel, idx): op}, outcome) for one visibility diagnostic reported by `side` ('lower' |
-        'upper'); `lib` is lower's crate name as upper's messages spell it.
+    def resolve(self, diag, resolver, run_root, reporter=None):
+        """(edits {(rel, idx): op}, outcome) for one visibility diagnostic `reporter` ('lower' | 'upper') gave.
 
         outcome: 'edit' | (residue class | 'outside_crate' | 'unresolved', why)."""
         kind, name, owner = message_target(diag)
@@ -763,8 +751,10 @@ class Widener:
         span = definition_span(diag)
         if span is None and kind == "field":
             hits = self.unique_struct(owner)
-            if len(hits) > 1:
-                hits = self._struct_at_path(diag, hits, side, lib) or hits
+            names = NAME_IN_MSG.findall(diag.get("message", ""))
+            if len(hits) > 1 and self.owner and len(names) > 1:
+                # Same-named structs: the type path picks one only when its owner is certain.
+                hits = self.owner.owned(names[1], owner, reporter, diag.get("_src"), hits) or hits
             if len(hits) != 1:
                 return {}, ("unresolved", f"struct `{owner}` defined {len(hits)} times in {self.layout.crate}")
             return self._field(*hits[0], name, owner)
@@ -1299,6 +1289,15 @@ class ShadowProbe:
     def check_upper(self, cargo):
         return run_check(cargo, self.upper, ["--lib", "--tests"], self.target_dir, self.upper)
 
+    def path_owner(self, layout, read):
+        """Type paths read against probe_lower and the upper copy (named as the repo package)."""
+        import tomllib
+        import vistool_paths
+        cargo = tomllib.loads((self.repo / "Cargo.toml").read_text("utf-8"))
+        name = cargo.get("lib", {}).get("name") or cargo["package"]["name"].replace("-", "_")
+        root = self.upper / layout.root_file
+        return vistool_paths.Owner(layout, read, self.lib_name, {name: root}, root, self.upper)
+
     def accept(self, manifest):
         """Last word on a converged run; shadow leaves residue to the slices that own it."""
 
@@ -1334,6 +1333,7 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
     try:
         layout, resolver = probe.prepare(manifest)
         widener = Widener(layout, probe.lower, probe.upper)
+        widener.owner = probe.path_owner(layout, widener.lines)
         restricted = restricted_defs(layout, widener.lines)
         while True:
             iters += 1
@@ -1365,8 +1365,7 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
                     residue[classify_residue(d, restricted)].append(d)
             edits, unresolved, outside = {}, [], []
             for d, run_root, from_lower in vis:
-                new, outcome = widener.resolve(d, resolver, run_root, "lower" if from_lower else "upper",
-                                               probe.lib_name)
+                new, outcome = widener.resolve(d, resolver, run_root, "lower" if from_lower else "upper")
                 if outcome == "edit":
                     for key, op in new.items():
                         entry = edits.setdefault(key, [set(), set(), set()])

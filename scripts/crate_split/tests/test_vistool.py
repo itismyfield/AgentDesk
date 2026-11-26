@@ -1006,6 +1006,35 @@ class EndToEnd(unittest.TestCase):
             self.assertTrue(ok, line)
             self.assertIn(" iters=1 files=0 edits=0 residue=0 ", line)
 
+    def test_same_named_struct_owner_through_reexports_and_local_modules(self):
+        point = "pub struct {} {{\n    pub(crate) {}: u32,\n}}\n"
+        lower = {"lower/src/lib.rs": "pub mod b;\npub mod c;\npub mod lower;\n",
+                 "lower/src/b.rs": point.format("Point", "x") + point.format("Context", "id")
+                 + "pub fn build() -> Point {\n    Point { x: 1 }\n}\npub fn ctx() -> Context {\n    Context { id: 1 }\n}\n",
+                 "lower/src/c.rs": point.format("Point", "x"),
+                 "lower/src/lower.rs": "pub mod b {\n    pub struct Context {\n        pub id: u32,\n    }\n}\n"}
+        local = "pub mod lower {\n    pub mod b {\n        pub struct Context {\n            id: u32,\n        }\n" \
+                "        pub fn ctx() -> Context {\n            Context { id: 1 }\n        }\n    }\n}\n"
+        b = "lower/src/b.rs"
+        cases = [
+            # An upper integration test names it `upper::b::Point` through `pub use lower::{b, c};`.
+            ({"upper/src/lib.rs": "pub use lower::{b, c};\n",
+              "upper/tests/reads.rs": "#[test]\nfn reads() {\n    assert_eq!(upper::b::build().x, 1);\n}\n"},
+             "VISTOOL_OK", [(b, "    pub x: u32,")]),
+            ({"upper/src/lib.rs": "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\n"}, "VISTOOL_OK", [(b, "    pub id: u32,")]),
+            # An upper-local `pub mod lower` prints the same `lower::b::Context` once upper also names the lower
+            # crate: the owner is not certain, so no edit.
+            ({"upper/src/lib.rs": local + "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\n"
+              "pub fn other() -> ::lower::b::Point {\n    ::lower::b::build()\n}\n"}, "VISTOOL_FAIL no_progress", []),
+        ]
+        for upper, want_line, want_edits in cases:
+            with self.subTest(upper["upper/src/lib.rs"][-40:]), tempfile.TemporaryDirectory() as tmp:
+                repo, _ = real_repo(Path(tmp), {**lower, **upper})
+                ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
+                                                       log=lambda *a, **k: None)
+                self.assertTrue(line.startswith(want_line + " "), (line, manifest.get("fail")))
+                self.assertEqual([(e["file"], e["after"]) for e in manifest["final_edits"]], want_edits)
+
     def test_real_test_cfg_residue_fails_with_the_list(self):
         upper = (FX / "realws/upper/src/lib.rs").read_text().replace(
             "assert_eq!(super::total(), 5);", "assert_eq!(super::total() + lower::core::fixture_value(), 12);")

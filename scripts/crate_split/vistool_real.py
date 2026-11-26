@@ -48,6 +48,11 @@ def member_of(rel, members):
     return max(hits, key=len) if hits else ("." if "." in members else None)
 
 
+def lib_name(cargo):
+    """The crate name other crates use: `[lib] name`, else the package name with `-` as `_`."""
+    return cargo.get("lib", {}).get("name") or cargo["package"]["name"].replace("-", "_")
+
+
 class RealLayout(vt.Layout):
     """Module map of the lower member only; `side_of` answers by member instead of by partition group."""
 
@@ -132,8 +137,7 @@ class RealProbe:
         name = lambda rel: members[rel][1]["package"]["name"]
         self.lower_pkg, self.upper_pkg = name(self.lower_dir), name(self.upper_dir)
         self.crate = self.lower_pkg
-        lower_cargo = members[self.lower_dir][1]
-        self.lib_name = lower_cargo.get("lib", {}).get("name") or self.lower_pkg.replace("-", "_")
+        self.lib_name = lib_name(members[self.lower_dir][1])
         manifest.update(crate=self.lower_pkg, upper=self.upper_pkg, lower_dir=self.lower_dir,
                         upper_dir=self.upper_dir)
         layout = RealLayout(self.repo, members, self.lower_dir, self.upper_dir, self.lower_pkg)
@@ -142,6 +146,14 @@ class RealProbe:
             shutil.rmtree(self.probe)
         vt.extract_head(self.repo, self.lower)
         return layout, RealResolver(self.lower, members, self.lower_dir, self.upper_dir, layout.x_files)
+
+    def path_owner(self, layout, read):
+        """Type paths read against every member's lib in the probe copy."""
+        import vistool_paths
+        roots = {rel: self.lower / rel / cargo.get("lib", {}).get("path", "src/lib.rs")
+                 for rel, (_, cargo) in self.members.items() if rel != self.lower_dir}
+        crates = {lib_name(self.members[rel][1]): root for rel, root in roots.items() if root.is_file()}
+        return vistool_paths.Owner(layout, read, self.lib_name, crates, roots[self.upper_dir], self.lower)
 
     def _check(self, cargo, pkg, rel, args):
         own = self.lower / rel
