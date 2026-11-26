@@ -19,7 +19,11 @@ use std::time::{Instant, SystemTime};
 /// Answer of an arm the V2 owner does not serve: nothing was absorbed or moved.
 const HELD: &str = "the V2 owner holds this queue; the legacy queue path is refused";
 
-pub(crate) fn route(state: &mut ChannelMailboxState, channel_id: ChannelId, msg: M) -> Option<M> {
+pub(in crate::services::turn_orchestrator) fn route(
+    state: &mut ChannelMailboxState,
+    channel_id: ChannelId,
+    msg: M,
+) -> Option<M> {
     let Some(owner) = state.queued_head.v2.as_mut() else {
         return Some(msg);
     };
