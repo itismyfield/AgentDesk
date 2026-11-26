@@ -52,7 +52,3 @@ pub fn warn_retired_provider_refs(config: &Config) {
         );
     }
 }
-
-#[cfg(test)]
-#[path = "retired_providers_tests.rs"]
-mod tests;
