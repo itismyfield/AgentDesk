@@ -20,6 +20,8 @@ vi.mock("emoji-picker-react", () => ({
   Theme: { DARK: "dark" },
 }));
 
+vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
 describe("EmojiPickerLibraryPanel accessibility", () => {
   let container: HTMLDivElement | null = null;
   let root: Root | null = null;

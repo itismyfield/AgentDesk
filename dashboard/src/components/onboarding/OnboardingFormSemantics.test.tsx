@@ -73,6 +73,7 @@ describe("onboarding form semantics", () => {
     expect(banner?.querySelector('.aui-integration-flow[role="img"]')).not.toBeNull();
     expect(banner?.textContent).toContain("Discord");
     expect(banner?.textContent).toContain("AgentDesk");
+    expect(banner?.textContent).not.toContain("Data Analysis");
     const html = koStep.innerHTML;
     expect(html.indexOf('data-testid="step1-integration-flow"')).toBeLessThan(html.indexOf("봇 토큰을 얻는 방법"));
   });

@@ -48,6 +48,10 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(JSON.stringify({ error: "offline" }), { status: 503, headers: { "Content-Type": "application/json" } })),
+    );
     Object.defineProperty(window, "localStorage", {
       configurable: true,
       writable: true,
@@ -80,6 +84,7 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     memoryStorage.clear();
     resolveAuthentication(0, true, false);
     consoleErrorSpy.mockRestore();
+    vi.unstubAllGlobals();
   });
 
   it("catches route render errors and recovers on retry or home navigation", async () => {
@@ -204,7 +209,7 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     expect(container.querySelector(".aui-running-now-panel")?.hasAttribute("open")).toBe(false);
   });
 
-  it("renders unclipped Step1 IntegrationFlow with localized AgentDesk hub CSS variables", async () => {
+  it("renders unclipped Step1 IntegrationFlow with localized AgentDesk hub copy", async () => {
     await act(async () => {
       root.render(
         <Step1BotConnection
@@ -241,8 +246,9 @@ describe("RouteErrorBoundary & shell audit fixes", () => {
     const flowWrap = container.querySelector<HTMLElement>('[data-testid="step1-integration-flow"]')!;
     expect(flowWrap.className).not.toContain("max-h-48");
     expect(flowWrap.className).toContain("max-w-[440px]");
-    expect(flowWrap.style.getPropertyValue("--adk-hub-title")).toBe('"AgentDesk 허브"');
-    expect(flowWrap.style.getPropertyValue("--adk-hub-sub")).toBe('"Discord 실행·통신 봇 오케스트레이션"');
+    expect(flowWrap.textContent).toContain("AgentDesk 허브");
+    expect(flowWrap.textContent).toContain("Discord 실행·통신 봇 오케스트레이션");
+    expect(flowWrap.textContent).not.toContain("Data Analysis");
     expect(flowWrap.textContent).toContain("Antigravity");
   });
 

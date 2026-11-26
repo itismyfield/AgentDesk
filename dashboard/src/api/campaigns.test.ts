@@ -94,6 +94,61 @@ it("includes older campaigns beyond the first page with validated pagination met
   expect(fetchMock.mock.calls[1][0]).toBe("/api/campaigns?limit=100&offset=100&view=summary");
 });
 
+it("preserves stage, next_action, blocker, and issue_url on home campaign node summaries", async () => {
+  fetchMock.mockResolvedValueOnce(
+    response({
+      campaigns: [
+        {
+          ...campaignPayload,
+          id: "home-ledger",
+          auto_queue: true,
+          nodes: [
+            {
+              ...campaignPayload.nodes[0],
+              stage: "LAND_READY",
+              next_action: "착지 승인 대기",
+              blocker: "결정 포럼 승인 필요",
+              assignee: "ada",
+              issue_url: "https://github.com/itismyfield/AgentDesk/issues/8423",
+            },
+            {
+              ...campaignPayload.nodes[1],
+              stage: null,
+            },
+          ],
+        },
+      ],
+      live: {
+        "home-ledger": {
+          review: {
+            card_id: "card-7",
+            card_status: "in_progress",
+            running: true,
+          },
+        },
+      },
+      limit: 100,
+      offset: 0,
+    }),
+  );
+
+  const result = await getCampaigns({ view: "home" });
+  expect(result.live).toEqual({});
+  expect(result.campaigns).toHaveLength(1);
+  expect(result.campaigns[0]?.nodes[0]).toMatchObject({
+    id: "review",
+    title: "Review",
+    status: "running",
+    stage: "LAND_READY",
+    next_action: "착지 승인 대기",
+    blocker: "결정 포럼 승인 필요",
+    assignee: "ada",
+    issue_url: "https://github.com/itismyfield/AgentDesk/issues/8423",
+    updated_at: timestamp,
+  });
+  expect(result.campaigns[0]?.nodes[1]?.stage).toBe("");
+});
+
 it("restores the fields a summary copy left out before any save, so the ledger keeps its evidence", async () => {
   const summary = campaignSchema.parse({
     ...campaignPayload,

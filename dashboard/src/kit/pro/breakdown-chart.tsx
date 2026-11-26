@@ -396,7 +396,7 @@ const styles = `
  .aui-breakdown-chart-footer { flex-wrap:wrap; }
 }
 @media (pointer:coarse) and (min-width:900px) { .aui-breakdown-chart-picker-button { position:relative; z-index:2; min-width:44px; } .aui-breakdown-chart-picker-button::before { content:''; position:absolute; inset:-7px 0; } .aui-breakdown-chart-option { min-width:44px; min-height:44px; } .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; margin-block:-8px; } }
-@media (pointer:coarse) and (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
+@media (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }
 .aui-breakdown-chart-overlay-mobile { pointer-events:auto; }
 .aui-breakdown-chart-backdrop { position:absolute; inset:0; background:var(--aui-breakdown-chart-backdrop,#0006); }
 .aui-breakdown-chart-overlay-mobile .aui-breakdown-chart-menu { top:auto; left:max(8px,env(safe-area-inset-left)); right:max(8px,env(safe-area-inset-right)); bottom:0; max-height:calc(100dvh - env(safe-area-inset-top) - 24px); padding:8px 8px max(12px,env(safe-area-inset-bottom)); border-radius:18px 18px 0 0; }

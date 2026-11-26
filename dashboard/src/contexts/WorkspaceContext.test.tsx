@@ -10,6 +10,8 @@ vi.mock("../api/client", () => ({ getDispatchedSessions: vi.fn() }));
 
 import { getDispatchedSessions } from "../api/client";
 
+vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+
 const session = {
   id: "s1",
   session_key: "mac:session",
