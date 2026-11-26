@@ -438,6 +438,8 @@ async fn a_start_before_the_retry_keeps_its_hourglass() {
         .settle_accept_pending(&shared, target, std::future::ready(false), "settle")
         .await;
     assert_eq!(kept, AcceptSettle::Kept);
+    // Every clear failed, so the ⏳ is still on; the op log alone would read it as removed.
+    let after_kept = reconciler.ops().len();
 
     let owner = TurnViewOwner::for_message(target.channel_id, target.message_id, 75);
     reconciler
@@ -455,8 +457,9 @@ async fn a_start_before_the_retry_keeps_its_hourglass() {
 
     assert_eq!(settled, AcceptSettle::Nothing);
     assert_eq!(
-        snapshot_reactions(&reconciler, target),
-        vec![expected('⏳', "intake-a")]
+        reconciler.ops().len(),
+        after_kept,
+        "no op touched the started ⏳"
     );
 }
 

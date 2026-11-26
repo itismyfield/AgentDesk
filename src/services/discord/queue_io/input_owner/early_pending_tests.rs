@@ -53,14 +53,18 @@ async fn ready_owner(channel: u64) -> Arc<SharedData> {
     seed_generation();
     let shared = make_shared_data_for_tests();
     shared.restart.reconcile_done.store(true, Ordering::SeqCst);
-    let path = crate::services::discord::runtime_store::discord_pending_queue_root()
-        .unwrap()
-        .join("claude")
-        .join(&shared.token_hash)
-        .join(format!("{channel}.json"));
+    // The production path and namespace, so a restarted runtime's owner recovery adopts it.
+    let persistence = crate::services::turn_orchestrator::QueuePersistenceContext::new(
+        &ProviderKind::Claude,
+        &shared.token_hash,
+        None,
+    );
+    let channel = ChannelId::new(channel);
+    let (path, namespace) =
+        crate::services::turn_orchestrator::v2_queue(&persistence, channel).unwrap();
     shared
-        .mailbox(ChannelId::new(channel))
-        .v2_adopt(path, shared.token_hash.clone())
+        .mailbox(channel)
+        .v2_adopt(path, namespace)
         .await
         .unwrap();
     shared
