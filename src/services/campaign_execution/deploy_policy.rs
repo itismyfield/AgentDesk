@@ -7,12 +7,12 @@ use crate::domain::campaign::deployment::DeployWitness;
 use crate::domain::campaign::deployment::{
     DeployFact, DeployHost, DeployIntent, DeployJob, DeployStatus,
 };
+use crate::domain::campaign::landing::{Landing, LandingStatus, MergeStatus, OpenedPr};
 use crate::domain::campaign::profile::MainIntegrationEvidence;
 
-use super::landing_effects::{Landing, LandingStatus, MergeStatus, OpenedPr};
 use super::lifecycle;
-use super::model::*;
 use super::stage_fsm::Transition;
+use crate::domain::campaign::model::*;
 
 // The confirmation limit of the profile. It starts at the first request and covers the approval
 // wait, the executor's own window and the witness; a moved head never extends it.

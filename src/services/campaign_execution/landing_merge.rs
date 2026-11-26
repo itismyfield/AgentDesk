@@ -6,8 +6,10 @@ use sqlx::PgPool;
 
 use crate::db::server_campaigns::StoreError;
 use crate::domain::campaign::decision_item::ApprovalBinding;
-pub use crate::domain::campaign::landing::{
-    MergeFact, MergeJob, MergeReceipt, MergeStatus, OpenedPr, TlcEvidence, TlcOutcome,
+#[cfg(test)]
+use crate::domain::campaign::landing::TlcOutcome;
+use crate::domain::campaign::landing::{
+    MergeFact, MergeJob, MergeReceipt, MergeStatus, OpenedPr, TlcEvidence,
 };
 
 use super::adk_observe::ci::{CiObservation, CiVerdict};
@@ -18,10 +20,10 @@ use super::host_gate::{EffectAuthority, EffectEnvelope, Initiated, Initiation, J
 use super::host_worker::{HostWorker, WorkerError};
 use super::lifecycle;
 use super::main_integration::judge_single_landing;
-use super::model::*;
 use super::profile::{IntegrationMethod, NodeArtifact, Observation};
 use super::stage_fsm::Transition;
 use super::verification_run::digest_of;
+use crate::domain::campaign::model::*;
 
 const WAIT_LIMIT: TimeDelta = TimeDelta::minutes(240);
 
@@ -68,7 +70,7 @@ fn opening<'a>(
 ) -> Result<
     (
         &'a Run,
-        &'a super::landing_effects::Landing,
+        &'a crate::domain::campaign::landing::Landing,
         &'a OpenedPr,
         &'a Action,
     ),
@@ -82,7 +84,7 @@ fn opening<'a>(
         .landings
         .get(node)
         .ok_or_else(|| rejected(RejectionCode::StaleBinding))?;
-    let super::landing_effects::LandingStatus::CiHold { pr } = &landing.status else {
+    let crate::domain::campaign::landing::LandingStatus::CiHold { pr } = &landing.status else {
         return Err(rejected(RejectionCode::InvalidState));
     };
     let opened = run
@@ -256,7 +258,7 @@ pub(super) fn decide(
 
 fn envelope(
     run: &Run,
-    landing: &super::landing_effects::Landing,
+    landing: &crate::domain::campaign::landing::Landing,
     pr: &OpenedPr,
     opened: &Action,
 ) -> Result<EffectEnvelope, WorkerError> {

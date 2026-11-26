@@ -13,12 +13,9 @@ use serde_json::{Value, json};
 use super::AppState;
 use crate::{
     db::server_campaigns as store,
+    domain::campaign::model::{CampaignState, Command, CommandEnvelope},
     error::{AppError, AppResult, ErrorCode},
-    services::campaign_execution::{
-        commands,
-        model::{CampaignState, Command, CommandEnvelope},
-        view,
-    },
+    services::campaign_execution::{commands, view},
 };
 
 mod dto;

@@ -1,10 +1,10 @@
 use std::collections::BTreeSet;
 
-pub use crate::domain::campaign::pipeline_rules::*;
+use crate::domain::campaign::pipeline_rules::*;
 
 use super::adk_profile::{AdkSettingsObservation, ProfileResolution, resolve_adk_profile};
-use super::model::Role;
 use super::verification_run::VerificationSpec;
+use crate::domain::campaign::model::Role;
 
 pub const REQUIRED_RULE_SOURCES: [&str; 8] = [
     "SKILL.md",

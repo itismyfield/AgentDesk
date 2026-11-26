@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::adk_workspace::repository_identity;
-use super::execution_pin::IssueObservation;
-use super::model::Repository;
 use super::profile::Observation;
+use crate::domain::campaign::execution_pin::IssueObservation;
+use crate::domain::campaign::model::Repository;
 use crate::services::git::GitCommand;
 
 pub mod ci;

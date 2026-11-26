@@ -1,8 +1,8 @@
 use super::*;
+use crate::domain::campaign::execution_pin::ExecutionPin;
 use crate::services::campaign_execution::{
     control::{decide, tests as domain},
     evidence_gate::tests::{REPO, a1_finish, claim, workspace},
-    execution_pin::ExecutionPin,
     profile::TestOutcome,
     verification_run::{ProcessIdentity, VerificationSpec, tests as a1},
 };

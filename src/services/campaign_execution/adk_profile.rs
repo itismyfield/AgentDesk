@@ -2,9 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::campaign::definition::PROFILE_VERSION;
 
-use super::model::{Repository, Role};
 use super::profile::{EnvironmentComponent, ProfileLimits, RepositoryProfile};
 use super::verification_run::{Digest, VerificationSpec, digest_of};
+use crate::domain::campaign::model::{Repository, Role};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case")]

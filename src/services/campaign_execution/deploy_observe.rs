@@ -15,8 +15,8 @@ pub use super::adk_observe::{DeploymentExpectation, DeploymentObservation};
 use super::adk_observe::{is_sha, observe_deployment};
 use super::host_gate::{JournalEntry, JournalState};
 use super::host_worker::{HostWorker, WorkerError};
-use super::model::CampaignState;
 use super::verification_run::{Digest, digest_of};
+use crate::domain::campaign::model::CampaignState;
 
 /// The deploy initiator binds this watch in its effect payload under the final fence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

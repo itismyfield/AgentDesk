@@ -3,7 +3,7 @@ use serde_json::json;
 use super::super::tests::{FakeGh, SLUG, at, pr_json, sha};
 use super::super::{PrObservation, parse_pr};
 use super::*;
-use crate::services::campaign_execution::model::Repository;
+use crate::domain::campaign::model::Repository;
 
 const RUN: u64 = 900;
 const RULES: &str = "repos/itismyfield/AgentDesk/rules/branches/main?per_page=100";

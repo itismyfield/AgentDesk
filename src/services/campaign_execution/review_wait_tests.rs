@@ -276,11 +276,11 @@ async fn m5_webgpt_pro_reuses_its_receipt_and_stores_scope_evidence_pg() {
 
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::db::server_campaigns::command_transaction::{self, Preparation};
+    use crate::domain::campaign::pipeline_rules::MinimalPipelineScope;
     use crate::services::campaign_execution::{
         adk_resources::AdkResources,
         host_identity,
         host_worker::HostWorker,
-        pipeline_rules::MinimalPipelineScope,
         profile::Observation,
         review_dispatch::{ReviewDispatcher, ReviewProgress, WebGptAdmission, WebGptPro},
         runtime_profile::{

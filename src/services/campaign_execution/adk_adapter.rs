@@ -8,7 +8,6 @@ use crate::domain::campaign::workspace::WorkspaceObservation;
 
 use super::adk_resources::AdkResources;
 use super::adk_workspace::{self, AdkWorkspaceKey, WorkspaceError};
-use super::model::HostGate;
 use super::profile::{
     Checkout, ComponentObservation, EnvironmentComponent, EnvironmentFact, ExecutionEnvironment,
     Observation,
@@ -20,6 +19,7 @@ use super::verification_run::{
 use super::verification_runner::{
     AdkBuildIdentity, AdkPhasePaths, TestHandoff, adk_phase_command, adk_test_handoff,
 };
+use crate::domain::campaign::model::HostGate;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {

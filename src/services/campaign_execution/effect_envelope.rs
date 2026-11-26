@@ -2,11 +2,11 @@ use super::control::validate_new_start;
 use super::host_gate::{
     EffectAuthority, EffectEnvelope, HostNodeFence, HostStop, PhaseBinding, RunFence,
 };
-use super::model::{
-    ActionKind, ActionState, AttemptBinding, CampaignState, Rejection, RejectionCode, Run, StopMode,
-};
 use super::stage_fsm::{provisional_finish_actions, validate_verification_start};
 use super::verification_run::{BoundInput, CurrentFence, Digest, PhaseAdmission, digest_of};
+use crate::domain::campaign::model::{
+    ActionKind, ActionState, AttemptBinding, CampaignState, Rejection, RejectionCode, Run, StopMode,
+};
 
 fn reject<T>(code: RejectionCode) -> Result<T, Rejection> {
     Err(Rejection::new(code))

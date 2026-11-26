@@ -5,12 +5,11 @@ use crate::domain::campaign::{
     decision_item::{ApprovalBinding, ApprovalTarget},
     definition::valid_id,
     deployment::DeployJob,
-    model::ReviewedCandidate,
+    model::*,
     workflow_options::ApprovalGate,
 };
 
 use super::control;
-use super::model::*;
 use super::stage_fsm::Transition;
 
 fn reject<T>(code: RejectionCode) -> Result<T, Rejection> {
@@ -412,7 +411,7 @@ pub(super) fn merge_position(
     state: &CampaignState,
     run: &Run,
     node_id: &str,
-    landing: &super::landing_effects::Landing,
+    landing: &crate::domain::campaign::landing::Landing,
 ) -> bool {
     state.control == CampaignControl::Running
         && run.stop.is_none()
@@ -444,8 +443,8 @@ pub(super) fn merge_approval(
     state: &CampaignState,
     run: &Run,
     node_id: &str,
-    landing: &super::landing_effects::Landing,
-    pr: &super::landing_effects::OpenedPr,
+    landing: &crate::domain::campaign::landing::Landing,
+    pr: &crate::domain::campaign::landing::OpenedPr,
 ) -> Option<(ApprovalBinding, bool)> {
     let target = ApprovalTarget::PullRequest {
         number: pr.number,

@@ -141,6 +141,7 @@ async fn m9_the_worker_reobserves_every_host_after_an_indeterminate_restart_pg()
         CommandOutcome, ReceiptResponse,
         command_transaction::{self, Preparation, StoreRequest},
     };
+    use crate::domain::campaign::model::*;
     use crate::services::campaign_execution::{
         adk_resources::AdkResources,
         commands,
@@ -149,7 +150,6 @@ async fn m9_the_worker_reobserves_every_host_after_an_indeterminate_restart_pg()
         host_gate::{
             EffectAuthority, EffectEnvelope, EffectGate, HostNodeFence, Initiation, RunFence,
         },
-        model::*,
     };
 
     struct Probe {

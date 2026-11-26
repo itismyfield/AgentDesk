@@ -3,16 +3,16 @@ use std::path::Path;
 
 use chrono::Utc;
 
+use crate::domain::campaign::pipeline_rules::MinimalPipelineScope;
+
 use super::adk_profile::{
     AdkSettingsObservation, ObservedModel, ProfileResolution, ProviderCapability,
     ResolvedAdkProfile, RoleSettingObservation,
 };
-use super::model::{HostGate, Role, SessionIdentity};
-use super::pipeline_rules::{
-    MinimalPipelineScope, PipelineSource, REQUIRED_RULE_SOURCES, resolve_minimal_adk_profile,
-};
+use super::pipeline_rules::{PipelineSource, REQUIRED_RULE_SOURCES, resolve_minimal_adk_profile};
 use super::profile::Observation;
 use super::verification_run::VerificationSpec;
+use crate::domain::campaign::model::{HostGate, Role, SessionIdentity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeMarker {

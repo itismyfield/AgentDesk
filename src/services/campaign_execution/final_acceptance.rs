@@ -2,15 +2,14 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::domain::campaign::definition::VerificationKind;
-pub use crate::domain::campaign::deployment::AcceptanceFact;
-use crate::domain::campaign::deployment::DeployStatus;
+use crate::domain::campaign::deployment::{AcceptanceFact, DeployStatus};
 use crate::domain::campaign::landing::MergeReceipt;
 
 use super::deploy_policy::{self, Landed};
 use super::host_worker::{HostWorker, WorkerError};
 use super::lifecycle;
-use super::model::*;
 use super::stage_fsm::Transition;
+use crate::domain::campaign::model::*;
 
 fn rejected(code: RejectionCode) -> Rejection {
     Rejection::new(code)

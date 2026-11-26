@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
 use crate::db::server_campaigns::StoreError;
-pub use crate::domain::campaign::landing::*;
+use crate::domain::campaign::landing::*;
 use crate::domain::campaign::workflow_options::ApprovalGate;
 
 use super::adk_observe::{is_sha, valid_slug};
@@ -15,9 +15,9 @@ use super::host_gate::{EffectAuthority, EffectEnvelope, Initiated, Initiation, J
 use super::host_worker::{HostWorker, WorkerError};
 use super::landing_prepare::{LandingChecks, require_checkout};
 use super::lifecycle::{GateTarget, landing_candidate, require_gate};
-use super::model::*;
 use super::stage_fsm::Transition;
 use super::verification_run::digest_of;
+use crate::domain::campaign::model::*;
 
 const CI_WAIT: &str = "landing waits for idle CI";
 

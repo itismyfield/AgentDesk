@@ -5,7 +5,7 @@ use crate::domain::campaign::{
 };
 use serde::Deserialize;
 
-use crate::services::campaign_execution::model::{ChangeReason, Command, StopMode};
+use crate::domain::campaign::model::{ChangeReason, Command, StopMode};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]

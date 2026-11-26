@@ -9,9 +9,7 @@ use crate::db::server_campaigns::{
     self as store, CommandOutcome, ReceiptResponse, StoreError, StoreResult,
     command_transaction::StoreRequest,
 };
-use crate::domain::campaign::{
-    definition::valid_id, lifecycle::NextAction, model::command_fingerprint,
-};
+use crate::domain::campaign::{definition::valid_id, lifecycle::NextAction, model::*};
 
 use super::adk_resources::{AdkResources, ResourceObservation};
 use super::commands;
@@ -22,7 +20,6 @@ use super::host_gate::{
 };
 use super::host_identity;
 use super::host_journal::{JournalDir, OpenError};
-use super::model::*;
 use super::resource_admission::ResourceAdmission;
 use super::scheduler::next_action;
 use super::verification_run::{Digest, PhaseKind, PhaseResult, TreeState, digest_of};
@@ -422,7 +419,7 @@ impl HostWorker {
         &self,
         tx: Transaction<'_, Postgres>,
         state: &CampaignState,
-        fact: super::landing_effects::LandingFact,
+        fact: crate::domain::campaign::landing::LandingFact,
     ) -> Result<(), WorkerError> {
         self.commit(
             tx,
@@ -442,7 +439,7 @@ impl HostWorker {
         pool: &PgPool,
         expected_action: &str,
         initiate: impl FnOnce(
-            &super::landing_effects::Landing,
+            &crate::domain::campaign::landing::Landing,
             &Path,
             &str,
         ) -> io::Result<Initiated<()>>,
