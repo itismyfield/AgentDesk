@@ -14,7 +14,8 @@ pub(crate) enum Fault {
 }
 
 impl Owner {
-    pub(super) fn commit(&mut self, next: SnapshotV2) -> Result<(), String> {
+    pub(super) fn commit(&mut self, mut next: SnapshotV2) -> Result<(), String> {
+        next.prune_retry_wait();
         if self.pending.is_some() {
             return Err("commit unknown: recovery required".into());
         }

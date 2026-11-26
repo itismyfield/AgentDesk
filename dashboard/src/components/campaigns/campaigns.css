@@ -54,13 +54,19 @@
 .campaign-server-latest dt { color: var(--th-text-muted); overflow-wrap: anywhere; }
 .campaign-server-latest dd { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 @media (prefers-reduced-motion: reduce) { .campaign-graph :is(.react-flow__edge-path, .react-flow__node) { transition: none; animation: none; } }
-@media (max-width: 900px) { .campaigns-panel .campaign-check { min-height: 44px; } .campaigns-panel button { min-height: 36px; } .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; } .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; } .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); } }
-@media (max-width: 600px) {
-  .campaigns-panel { gap: 10px; }
-  .campaigns-panel .campaign-inspector-header button { min-height: 44px; }
+@media (max-width: 899px) {
+  .campaigns-panel .campaign-check { min-height: 44px; }
+  .campaigns-panel button { min-height: 44px; }
+  .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; }
+  .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; }
+  .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); }
   .campaign-server-ac { grid-template-columns: minmax(0, 1fr); }
   .campaigns-panel :is(.campaign-server-detail, .campaign-server-form) button { min-height: 44px; }
   .campaigns-panel :is(.campaign-server-form, .campaign-server-feedback) :is(input, select, textarea) { font-size: 16px; min-height: 44px; }
+}
+@media (max-width: 600px) {
+  .campaigns-panel { gap: 10px; }
+  .campaigns-panel .campaign-inspector-header button { min-height: 44px; }
 }
 }
 /* A relations card the keyboard reached: React Flow clears its node's outline, so the card draws one, 2px on screen at any zoom. */

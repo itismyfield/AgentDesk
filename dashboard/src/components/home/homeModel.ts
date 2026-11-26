@@ -1,4 +1,4 @@
-import type { Campaign, HomeLegacyCampaignSummary } from "../../api/campaigns";
+import type { Campaign, HomeCampaignNodeSummary, HomeLegacyCampaignSummary } from "../../api/campaigns";
 import type { RoutineRecord } from "../../api/routines";
 import type { ServerCampaignDocument, ServerCampaignSummary, ServerCampaignView } from "../../api/serverCampaigns";
 import type { HealthResponse, RuntimeConfigResponse } from "../../api/settingsRuntime";
@@ -6,10 +6,12 @@ import { formatRelativeTime } from "../../app/shellFormatting";
 import type { AgentMonitorStep, AgentMonitorStepKind, AgentMonitorStepStatus } from "../../kit/pro/agent-monitor";
 import type { RunningNowTask } from "../../kit/pro/running-now";
 import { isTestAgent } from "../../lib/agentHelpers";
+import { aggregateDegradedReasons } from "../../lib/healthReasons";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
 import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
 import { campaignProgress } from "../campaigns/campaignModel";
+import { isLedgerHumanApprovalPending } from "../campaigns/campaignOverviewModel";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
 import { DISPLAY_LABELS, REASON_LABELS, STAGE_LABELS, campaignLocationQuery, displayText } from "../campaigns/serverCampaignModel";
 import { formatRateLimitWindowLabel, transformRLProviders, type RawRLProvider } from "../dashboard/MiniRateLimitBarModel";
@@ -18,7 +20,14 @@ import { formatClock, parseTime } from "../dashboard/routineModel";
 export type Tr = (ko: string, en: string) => string;
 export type HomeTone = "ok" | "info" | "warn" | "err" | "neutral";
 
+export type HomeLegacyNode = Pick<HomeCampaignNodeSummary, "status"> & Partial<Omit<HomeCampaignNodeSummary, "status">>;
+
+export type HomeLegacySummary = Omit<HomeLegacyCampaignSummary, "nodes"> & {
+  nodes: ReadonlyArray<HomeLegacyNode>;
+};
+
 export const QUEUE_PATH = `/campaigns${queueLocationQuery(null)}`;
+export const CAMPAIGNS_PATH = "/campaigns";
 
 const join = (...parts: Array<string | null | undefined | false>) => parts.filter(Boolean).join(" · ");
 
@@ -148,6 +157,9 @@ export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], s
       }
       const own = byAgent.get(agent.id) ?? [];
       const live = own.filter((session) => LIVE_STATUSES.has(session.status));
+      const snapshot = (agent as Agent & { visual_status_code?: string }).visual_status_code;
+      const stuck = snapshot === "stuck-suspect";
+      const stalledProp = stuck ? { stalled: true } : {};
       const lead = newestSession(live.filter((session) => TURN_STATUSES.has(session.status)))
         ?? newestSession(live.filter((session) => session.status === "awaiting_bg"));
       if (lead) {
@@ -156,22 +168,22 @@ export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], s
           state: TURN_STATUSES.has(lead.status) ? "working" : "background",
           info: firstLine(lead.session_info),
           seenAt: null,
+          ...stalledProp,
           activityAt: sessionLastSeenMs(lead),
         };
       }
-      const snapshot = (agent as Agent & { visual_status_code?: string }).visual_status_code;
       if (snapshot === "idle-bg-wait") {
         return { agent, state: "background", info: firstLine(agent.session_info), seenAt: null, activityAt: newestActivity(own) };
       }
       if (live.length) {
         const seenAt = newestSeen(live);
-        return { agent, state: "resting", info: null, seenAt, activityAt: seenAt ?? newestActivity(live) };
+        return { agent, state: "resting", info: null, seenAt, ...stalledProp, activityAt: seenAt ?? newestActivity(live) };
       }
       if (agent.status === "working" || (sessionsFailed && (snapshot === "active" || snapshot === "stuck-suspect"))) {
-        return { agent, state: "working", info: firstLine(agent.session_info), seenAt: null, activityAt: newestActivity(own) };
+        return { agent, state: "working", info: firstLine(agent.session_info), seenAt: null, ...stalledProp, activityAt: newestActivity(own) };
       }
       const seenAt = newestSeen(own);
-      return { agent, state: own.length || !sessionsFailed ? "noSession" : "unknown", info: null, seenAt, activityAt: seenAt };
+      return { agent, state: own.length || !sessionsFailed ? "noSession" : "unknown", info: null, seenAt, ...stalledProp, activityAt: seenAt };
     })
     .sort(compareHomeAgents);
 }
@@ -309,9 +321,26 @@ function mapTurnSteps(turn: HomeTurn): AgentMonitorStep[] {
 const CLOCK_AHEAD_MS = 60_000;
 const CLOCK_MAX_MS = 12 * 3_600_000;
 
-/** A working agent's live turn for the kit monitor, including tool_events steps when present. */
+function resolveMonitorRole(entry: HomeAgent, turn?: HomeTurn): string | null {
+  const agentProvider = !entry.unlinkedSession && !entry.agent.id.startsWith("dispatched:")
+    ? entry.agent.cli_provider?.trim() || null
+    : null;
+  return agentProvider ?? turn?.provider ?? entry.unlinkedSession?.provider ?? entry.agent.cli_provider ?? null;
+}
+
+/** A working agent's live turn for the kit monitor, with a compact fallback when turn details have not arrived. */
 export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr, now = Date.now()): MonitorView | null {
-  if (!turn || entry.state !== "working" || turn.status === "idle") return null;
+  if (entry.state !== "working") return null;
+  const role = resolveMonitorRole(entry, turn);
+  if (!turn || (!turn.status && !turn.current_tool_line && !(turn.tool_events?.length))) {
+    return {
+      started: null,
+      label: entry.info ?? tr("작업 중", "Working"),
+      kind: "think",
+      role,
+    };
+  }
+  if (turn.status === "idle") return null;
   const tool = turn.current_tool_line ? turn.tool_events?.filter((event) => event.kind === "tool").at(-1)?.tool_name ?? "" : "";
   const updated = coerceTimestampMs(turn.updated_at);
   const started = updated === null ? null : coerceTimestampMs(turn.started_at);
@@ -321,7 +350,7 @@ export function monitorView(turn: HomeTurn | undefined, entry: HomeAgent, tr: Tr
     started: plausible ? started : null,
     label: turn.current_tool_line ?? entry.info ?? tr("작업 중", "Working"),
     kind: TOOL_KINDS.find(([pattern]) => pattern.test(tool))?.[1] ?? "think",
-    role: turn.provider,
+    role,
     ...(steps.length > 0 ? { steps } : {}),
   };
 }
@@ -409,7 +438,7 @@ export interface TodoItem {
   agentId: string | null;
 }
 
-export type TriageAlertKind = "quota" | "stale-session" | "health";
+export type TriageAlertKind = "quota" | "stale-session" | "stalled-agent" | "health";
 
 export interface TriageAlert {
   key: string;
@@ -442,10 +471,24 @@ const HUMAN_TODO = new Map<string, Pick<TodoItem, "kind" | "tone"> & { chip: [st
 ]);
 const KIND_ORDER: TodoKind[] = ["approve", "decide", "deploy", "other"];
 
-export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
+function formatTodoIssueTitle(rawTitle: string, issueNumber?: string | number | null): string {
+  const trimmed = rawTitle.trim();
+  const leading = trimmed.match(/^#(\d+)\b[\s:·-]*/);
+  const issue = issueNumber != null && String(issueNumber) !== "" ? String(issueNumber) : leading?.[1] ?? null;
+  if (!issue) return trimmed;
+  let clean = trimmed;
+  const prefixRe = new RegExp(`^#${issue}\\b[\\s:·-]*`);
+  while (prefixRe.test(clean)) {
+    clean = clean.replace(prefixRe, "");
+  }
+  return clean ? `#${issue} ${clean}` : `#${issue}`;
+}
+
+export function buildTodoItems({ cards, campaigns, documents = [], legacy, tr, isKo }: {
   cards: KanbanCard[];
   campaigns: ServerCampaignSummary[] | null;
   documents?: ServerCampaignDocument[];
+  legacy?: ReadonlyArray<HomeLegacySummary> | null;
   tr: Tr;
   isKo: boolean;
 }): TodoItem[] {
@@ -455,9 +498,10 @@ export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
     return time === null ? null : formatRelativeTime(time, isKo);
   };
   for (const card of cards.filter(isOpenKanbanCard)) {
+    const cleanCardTitle = cardTitle(card.title);
     const base = {
       key: `card:${card.id}`,
-      title: `${card.github_issue_number ? `#${card.github_issue_number} ` : ""}${cardTitle(card.title)}`,
+      title: card.github_issue_number ? formatTodoIssueTitle(cleanCardTitle, card.github_issue_number) : cleanCardTitle,
       to: `/campaigns${queueLocationQuery(card.id)}`,
       agentId: card.assignee_agent_id ?? card.owner_agent_id ?? null,
     };
@@ -480,10 +524,28 @@ export function buildTodoItems({ cards, campaigns, documents = [], tr, isKo }: {
         kind: human.kind,
         tone: human.tone,
         chip: tr(...human.chip),
-        title: `${issue ? `#${issue} ` : ""}${spec?.title ?? node.id}`,
+        title: formatTodoIssueTitle(cardTitle(spec?.title ?? node.id), issue),
         detail: join(definition.title, typeof waitedAt === "string" && ago(waitedAt)),
         to: `/campaigns${campaignLocationQuery({ mode: "server", campaign: view.campaign_id, node: node.id })}`,
         agentId: null,
+      });
+    }
+  }
+  for (const campaign of legacy ?? []) {
+    if (campaign.status === "completed" || campaign.status === "cancelled") continue;
+    for (const node of campaign.nodes) {
+      if (!node.id || node.status === "completed" || node.status === "skipped") continue;
+      if (!isLedgerHumanApprovalPending(node.stage, node.next_action, node.blocker)) continue;
+      const issue = node.issue_url?.match(/\/issues\/(\d+)/)?.[1];
+      items.push({
+        key: `legacy:${campaign.id}:${node.id}`,
+        kind: "approve",
+        tone: "warn",
+        chip: tr("승인 대기", "Approval"),
+        title: formatTodoIssueTitle(cardTitle(node.title ?? node.id), issue),
+        detail: join(campaign.title, ago(node.updated_at)),
+        to: `/campaigns${campaignLocationQuery({ mode: "legacy", campaign: campaign.id, node: node.id })}`,
+        agentId: node.assignee ?? null,
       });
     }
   }
@@ -520,24 +582,17 @@ export function formatKstReset(resetAtMs: number | null | undefined, tr: Tr): st
   return tr(`${text} 초기화`, `Resets ${text}`);
 }
 
-/** Human-readable explanation of why `/api/health/detail` reports degraded or unhealthy. */
+/** Human-readable, aggregated explanation of why `/api/health/detail` reports degraded or unhealthy. */
 export function describeHealthReasons(health: HomeHealth | null | undefined, tr: Tr): string[] {
   if (!health) return [];
+  const isKo = tr("ko", "en") === "ko";
   const reasons: string[] = [];
   if (health.db === false) {
     reasons.push(tr("PostgreSQL 데이터베이스 연결 실패", "PostgreSQL database disconnected"));
   }
-  for (const raw of [...(health.degraded_reasons ?? []), ...(health.startup_degraded_reasons ?? [])]) {
-    if (raw === "db_slow") reasons.push(tr("데이터베이스 응답 지연 (db_slow)", "Database response slow (db_slow)"));
-    else if (raw.startsWith("provider:")) {
-      const rest = raw.slice("provider:".length);
-      reasons.push(tr(`프로바이더 이상: ${rest}`, `Provider issue: ${rest}`));
-    } else if (raw.startsWith("relay_verdict_unknown_")) {
-      const rest = raw.slice("relay_verdict_unknown_".length);
-      reasons.push(tr(`릴레이 전달 판정 미확인 (${rest})`, `Unverified relay verdict (${rest})`));
-    } else if (raw) {
-      reasons.push(raw);
-    }
+  const rawDegraded = [...(health.degraded_reasons ?? []), ...(health.startup_degraded_reasons ?? [])];
+  for (const group of aggregateDegradedReasons(rawDegraded, isKo)) {
+    reasons.push(group.summary);
   }
   for (const provider of health.providers ?? []) {
     if (!provider.connected) {
@@ -566,11 +621,32 @@ export function describeHealthReasons(health: HomeHealth | null | undefined, tr:
   return [...new Set(reasons)];
 }
 
-/** Promoted 3-second triage alerts: quota danger/warning, degraded server, and stalled unlinked sessions. */
+/** Dynamic header link for `HomeTodoCard` based on campaign/queue to-dos and triage alerts. */
+export function todoHeaderLink(
+  items: ReadonlyArray<TodoItem>,
+  alerts: ReadonlyArray<TriageAlert>,
+  tr: Tr,
+): { to: string; label: string } {
+  if (items.length > 0 && items.every((item) => item.to.startsWith("/campaigns?mode=") && !item.key.startsWith("card:"))) {
+    return { to: CAMPAIGNS_PATH, label: tr("캠페인에서 보기", "Open campaigns") };
+  }
+  if (items.length === 0 && alerts.length > 0) {
+    const first = alerts[0].kind;
+    if (first === "quota") return { to: "/stats", label: tr("통계에서 보기", "Open stats") };
+    if (first === "health") return { to: "/settings?category=connections", label: tr("연결 상태 보기", "View connections") };
+    if (first === "stale-session" || first === "stalled-agent") {
+      return { to: "/agents", label: tr("에이전트에서 보기", "Open agents") };
+    }
+  }
+  return { to: QUEUE_PATH, label: tr("대기열에서 보기", "Open queue") };
+}
+
+/** Promoted 3-second triage alerts: quota danger/warning, degraded server, stalled linked agents, and stalled unlinked sessions. */
 export function buildTriageAlerts({
   usageRows,
   rule,
   sessions,
+  agentEntries,
   reconciledKeys,
   health,
   tr,
@@ -580,6 +656,7 @@ export function buildTriageAlerts({
   usageRows: UsageRow[];
   rule: ReturnType<typeof autoPauseRule>;
   sessions: DispatchedSession[];
+  agentEntries?: ReadonlyArray<HomeAgent>;
   reconciledKeys?: ReadonlySet<string>;
   health: HomeHealth | null;
   tr: Tr;
@@ -618,8 +695,24 @@ export function buildTriageAlerts({
       chip: isErr ? tr("서버 장애", "Server down") : tr("서버 주의", "Server degraded"),
       title: isErr ? tr("서버가 장애 상태예요", "Server is unhealthy") : tr("서버가 주의 상태예요", "Server is degraded"),
       detail: reasons[0] ?? tr("원인 보기에서 상세 상태를 확인해요", "Inspect detailed health reasons"),
-      to: "/settings?category=system",
+      to: "/settings?category=connections",
       reasons,
+    });
+  }
+
+  for (const entry of agentEntries ?? []) {
+    if (!entry.stalled || entry.unlinkedSession) continue;
+    alerts.push({
+      key: `stuck:${entry.agent.id}`,
+      kind: "stalled-agent",
+      tone: "warn",
+      chip: tr("막힘 의심", "Likely stuck"),
+      title: agentName(entry.agent, isKo),
+      detail: join(
+        entry.info,
+        tr("도구를 실행한 뒤 응답이 오래 없어요", "No response for an extended period after tool run"),
+      ),
+      to: `/agents?agent=${encodeURIComponent(entry.agent.id)}`,
     });
   }
 
@@ -665,6 +758,11 @@ export type HomeHealth = HealthResponse & {
   startup_degraded_reasons?: string[];
 };
 
+export interface HomeMementoStatus {
+  connected: boolean;
+  status?: "connected" | "disconnected" | "unknown" | "unconfigured";
+}
+
 export interface SystemRow {
   key: "server" | "discord" | "memento" | "campaign" | "queue";
   label: string;
@@ -681,11 +779,12 @@ function uptimeText(seconds: number, tr: Tr): string {
   return tr(`${minutes}분째`, `up ${minutes}m`);
 }
 
-export function buildSystemRows({ health, healthFailed, legacy, documents, tr }: {
+export function buildSystemRows({ health, healthFailed, legacy, documents, memento, tr }: {
   health: HomeHealth | null;
   healthFailed: boolean;
-  legacy: ReadonlyArray<HomeLegacyCampaignSummary> | null;
+  legacy: ReadonlyArray<HomeLegacySummary> | null;
   documents: ServerCampaignDocument[];
+  memento?: HomeMementoStatus | null;
   tr: Tr;
 }): SystemRow[] {
   const unknown = tr("확인 불가", "Unknown");
@@ -707,6 +806,14 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
         ? { value: tr(`${connected}개 연결`, `${connected} connected`), tone: "ok" }
         : { value: tr(`${connected}/${providers.length}개 연결`, `${connected}/${providers.length} connected`), tone: connected === 0 ? "err" : "warn" };
 
+  const mementoRow: Pick<SystemRow, "value" | "tone"> = !memento || memento.status === "unknown"
+    ? { value: unknown, tone: "neutral" }
+    : memento.connected
+      ? { value: tr("연결됨", "Connected"), tone: "ok" }
+      : memento.status === "unconfigured"
+        ? { value: tr("미설정", "Not configured"), tone: "neutral" }
+        : { value: tr("연결 끊김", "Disconnected"), tone: "warn" };
+
   const campaignParts: string[] = [];
   let campaignTone: HomeTone = "neutral";
   if (documents.some(({ view }) => view.execution_readiness === "unavailable")) {
@@ -723,7 +830,7 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
   return [
     { key: "server", label: tr("서버", "Server"), value: server, tone: serverTone },
     { key: "discord", label: tr("Discord 봇", "Discord bots"), ...discord },
-    { key: "memento", label: "Memento", value: unknown, tone: "neutral" },
+    { key: "memento", label: "Memento", ...mementoRow },
     { key: "campaign", label: tr("캠페인 실행", "Campaign runs"), value: campaignParts.join(" · ") || unknown, tone: campaignTone },
     {
       key: "queue",
@@ -736,7 +843,7 @@ export function buildSystemRows({ health, healthFailed, legacy, documents, tr }:
 
 export function systemNeedsAttention(rows: SystemRow[], tr: Tr): boolean {
   const unknown = tr("확인 불가", "Unknown");
-  return rows.some((row) => row.key !== "memento" && (row.tone === "warn" || row.tone === "err" || row.value === unknown));
+  return rows.some((row) => row.tone === "warn" || row.tone === "err" || (row.key !== "memento" && row.value === unknown));
 }
 
 // ── Campaigns ──
@@ -785,7 +892,7 @@ function serverCampaignRow(summary: ServerCampaignSummary, document: ServerCampa
   };
 }
 
-function legacyCampaignRow(campaign: HomeLegacyCampaignSummary, tr: Tr): CampaignRow {
+function legacyCampaignRow(campaign: HomeLegacySummary, tr: Tr): CampaignRow {
   const { counts, total } = campaignProgress(campaign.nodes);
   const [label, tone]: [string, HomeTone] = campaign.status === "active"
     ? [tr("진행 중", "Active"), "info"]
@@ -808,7 +915,7 @@ function legacyCampaignRow(campaign: HomeLegacyCampaignSummary, tr: Tr): Campaig
 }
 
 export function buildCampaignRows({ legacy, summaries, documents, tr, limit }: {
-  legacy: ReadonlyArray<HomeLegacyCampaignSummary> | null;
+  legacy: ReadonlyArray<HomeLegacySummary> | null;
   summaries: ServerCampaignSummary[] | null;
   documents: ServerCampaignDocument[];
   tr: Tr;
@@ -915,9 +1022,9 @@ export function autoPauseRule(config: RuntimeConfigResponse | null): { enabled: 
   return { enabled, pct: typeof pct === "number" ? pct : null };
 }
 
-export function pauseMeterScale(rule: ReturnType<typeof autoPauseRule>): { warnAt?: number; dangerAt?: number } {
-  if (!rule?.enabled || rule.pct === null || rule.pct >= 100) return {};
-  const dangerAt = Math.max(0, rule.pct) / 100;
+export function pauseMeterScale(rule: ReturnType<typeof autoPauseRule>): { warnAt: number; dangerAt: number } {
+  if (!rule?.enabled || rule.pct === null || rule.pct >= 100) return { warnAt: 0.8, dangerAt: 0.99 };
+  const dangerAt = Math.min(0.99, Math.max(0, rule.pct) / 100);
   return { warnAt: Math.min(0.8, dangerAt), dangerAt };
 }
 
@@ -925,7 +1032,7 @@ export function usageDetail(row: UsageRow, rule: ReturnType<typeof autoPauseRule
   if (row.unmeasured) return tr("측정 안 됨", "Not measured");
   if (row.pct === null) return row.note ?? tr("확인 불가", "Unknown");
   const old = row.stale && row.measuredAt !== null ? tr(`${formatClock(row.measuredAt)} 값`, `as of ${formatClock(row.measuredAt)}`) : null;
-  const shown = pauseMeterScale(rule).dangerAt !== undefined;
+  const shown = Boolean(rule?.enabled && rule.pct !== null && rule.pct < 100);
   const paused = !shown && rule?.enabled && rule.pct !== null && row.pct >= rule.pct ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : null;
   const kstReset = row.pct >= 80 ? formatKstReset(row.resetAtMs, tr) : null;
   return join(old, paused, kstReset) || undefined;

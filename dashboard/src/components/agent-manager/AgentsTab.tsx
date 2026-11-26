@@ -16,13 +16,12 @@ import { ActionMenu } from "../common/ActionMenu";
 import { Cap, KitCard, SectionCard, StatusDot, type DotTone } from "../common/KitPrimitives";
 import { AGENT_STATES, agentLine, agentStateLabel, monitorView, type HomeAgent, type HomeAgentState } from "../home/homeModel";
 import { useAgentTurns } from "../home/useHomeData";
-import { UnlinkedSessions } from "../session-panel/SessionPanel";
 import AgentInfoCard from "./AgentInfoCard";
 import { AgentInfoCardContent } from "./AgentInfoCardContent";
 import AgentRow from "./AgentRow";
 import { AgentsAttentionCard, useAgentsAttention } from "./AgentsAttentionCard";
-import { AgentsSummaryPane } from "./AgentsSummaryPane";
-import { NO_DEPARTMENT, departmentLabels, filterAgents, hasDepartment, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
+import { AgentsSummaryPane, AgentsUnlinkedSessions } from "./AgentsSummaryPane";
+import { filterAgents, isListedAgent, isStandIn, type AgentStatusFilter } from "./agent-list-controls";
 import type { Translator } from "./types";
 import type { AgentSortMode } from "./useAgentManagerController";
 import { useAgentDetailShared } from "./useAgentDetailData";
@@ -87,7 +86,6 @@ export default function AgentsTab({
   onCreateAgent,
   onEditAgent,
   onDuplicateAgent,
-  onEditDepartment,
   onDeleteAgent,
   onAgentUpdated,
   saving,
@@ -111,7 +109,6 @@ export default function AgentsTab({
   // Phones show no tool line, so they read no turns either (as home).
   const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
   const departmentById = useMemo(() => new Map(departments.map((department) => [department.id, department])), [departments]);
-  const deptLabelById = useMemo(() => departmentLabels(departments, locale), [departments, locale]);
   const known = useMemo(() => new Set(departmentById.keys()), [departmentById]);
 
   // Tab counts follow the other filters, so each number is what that tab would show.
@@ -128,9 +125,7 @@ export default function AgentsTab({
   const selectedEntry = entries.find((entry) => entry.agent.id === selectedAgentId);
   const selected = selectedEntry?.agent ?? null;
   const reasons = attention.entries.find((entry) => entry.agent.id === selectedAgentId)?.reasons ?? [];
-  const selectedDept = deptTab !== "all" ? departmentById.get(deptTab) : undefined;
   const filtersActive = search.trim() !== "" || statusFilter !== "all" || deptTab !== "all";
-  const unassigned = listed.filter((entry) => !hasDepartment(entry.agent, known)).length;
 
   const lineOf = (entry: HomeAgent) => {
     const view = monitorView(turns.get(entry.agent.id), entry, tr);
@@ -139,7 +134,7 @@ export default function AgentsTab({
     const elapsed = view.started === null ? "" : ` ${formatElapsedCompact(Date.now() - view.started, isKo)}`;
     return `${agentStateLabel(entry.state, tr)}${elapsed} · ${view.label}`;
   };
-  const needsCheck = (agent: Agent) => !hasDepartment(agent, known) || (bound !== null && !bound.has(agent.id));
+  const needsCheck = (agent: Agent) => bound !== null && !bound.has(agent.id);
   const anyCheck = sortedEntries.some((entry) => needsCheck(entry.agent));
 
   const onRowKey = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -201,7 +196,7 @@ export default function AgentsTab({
       <EmptyState
         icon={<Search size={18} />}
         title={tr("검색 결과 없음", "No agents found")}
-        text={tr("검색어나 상태·부서 조건을 바꿔 보세요.", "Try another search, status or department.")}
+        text={tr("검색어나 상태 조건을 바꿔 보세요.", "Try another search or status.")}
         action={
           filtersActive ? (
             <Button
@@ -244,6 +239,11 @@ export default function AgentsTab({
       <div className="grid min-w-0 items-start gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(18rem,38%)] xl:gap-5">
         <div className="flex min-w-0 flex-col gap-3 sm:gap-4">
           <AgentsAttentionCard attention={attention} locale={locale} isMobile={isMobile} tr={tr} onOpenAgent={onSelectAgent} />
+          {isMobile && unlinkedSessions.length > 0 ? (
+            <KitCard pad="sm">
+              <AgentsUnlinkedSessions sessions={unlinkedSessions} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onAgentUpdated} />
+            </KitCard>
+          ) : null}
           <SectionCard
             title={tr("모든 에이전트", "All agents")}
             count={sortedEntries.length}
@@ -262,13 +262,13 @@ export default function AgentsTab({
             <div className="@container flex min-w-0 flex-col gap-2 border-t border-(--line-soft) px-3 py-3 sm:px-4">
               {standIns > 0 ? (
                 <Cap data-testid="agents-stand-ins">
-                  {tr(`수에는 에이전트 없이 부서에만 붙은 세션 ${standIns}개도 들어 있어요(홈과 같은 기준).`, `Counts include ${standIns} sessions attached to a department only, as on home.`)}
+                  {tr(`수에는 에이전트에 연결되지 않은 세션 ${standIns}개도 들어 있어요(홈과 같은 기준).`, `Counts include ${standIns} sessions without a linked agent, as on home.`)}
                 </Cap>
               ) : null}
               {attention.status === "empty" ? (
                 <Cap data-testid="agents-attention-empty">{tr("막히거나 실패한 에이전트가 없어요.", "No agent is stuck or failing.")}</Cap>
               ) : null}
-              <div className="grid min-w-0 grid-cols-1 items-center gap-2 @xl:grid-cols-[minmax(0,1fr)_10rem_8rem_auto]">
+              <div className="grid min-w-0 grid-cols-1 items-center gap-2 @xl:grid-cols-[minmax(0,1fr)_8rem_auto]">
                 <TextField
                   type="search"
                   aria-label={tr("에이전트 검색", "Search agents")}
@@ -280,29 +280,14 @@ export default function AgentsTab({
                   onClear={() => setSearch("")}
                   className="min-w-0"
                 />
-                <Select
-                  aria-label={tr("소속 부서", "Department")}
-                  value={deptTab}
-                  onChange={setDeptTab}
-                  className="order-last min-w-0 @xl:order-none"
-                  options={[
-                    { value: "all", label: tr(`전체 부서 · ${listed.length}명`, `All departments · ${listed.length}`) },
-                    ...departments.map((department) => ({
-                      value: department.id,
-                      label: `${deptLabelById.get(department.id) ?? localeName(locale, department)} · ${listed.filter((entry) => entry.agent.department_id === department.id).length}`,
-                    })),
-                    ...(unassigned ? [{ value: NO_DEPARTMENT, label: tr(`미배정 · ${unassigned}`, `Unassigned · ${unassigned}`) }] : []),
-                  ]}
-                />
                 {isMobile ? null : (
                   <Select
                     aria-label={tr("에이전트 정렬", "Sort agents")}
-                    value={sortMode}
+                    value={sortMode === "department" ? "status" : sortMode}
                     onChange={(value) => setSortMode(value as AgentSortMode)}
                     className="min-w-0"
                     options={[
                       { value: "status", label: tr("상태순", "By status") },
-                      { value: "department", label: tr("부서순", "By department") },
                       { value: "name", label: tr("이름순", "By name") },
                       { value: "activity", label: tr("활동량순", "By activity") },
                       { value: "created", label: tr("생성일순", "By created date") },
@@ -319,42 +304,34 @@ export default function AgentsTab({
                   />
                 ) : null}
                 {/* The kit control is an inline-size container, so its grid slot carries the placement. */}
-                <div className="min-w-0 @xl:order-last @xl:col-span-4">
+                <div className="min-w-0 @xl:order-last @xl:col-span-3">
                   <SegmentedControl
                     kind="tabs"
                     variant="tray"
+                    size={isMobile ? "sm" : "md"}
+                    className="max-sm:[--aui-segmented-control-clean-px:6px]! max-sm:[--aui-segmented-control-clean-fs:12px]!"
                     aria-label={tr("에이전트 상태", "Agent status")}
                     value={statusFilter}
                     onChange={(value) => setStatusFilter(value as AgentStatusFilter)}
                     options={statusKeys.map((key) => ({
                       value: key,
-                      label: key === "all" ? tr("전체", "All") : agentStateLabel(key, tr),
+                      label: key === "all" ? tr("전체", "All") : isMobile && isKo && key === "background" ? "대기" : agentStateLabel(key, tr),
                       count: statusCounts[key] ?? 0,
                       controls: panelId,
                     }))}
                   />
                 </div>
               </div>
-              {selectedDept ? (
-                <Button variant="ghost" size="sm" className="self-start" onClick={() => onEditDepartment(selectedDept)}>
-                  {tr("부서 편집", "Edit department")}
-                </Button>
-              ) : null}
             </div>
             <div id={panelId} role="tabpanel" aria-label={statusFilter === "all" ? tr("전체", "All") : agentStateLabel(statusFilter, tr)} className="min-w-0 border-t border-(--line-soft)">
               {list}
             </div>
             {anyCheck && !isMobile ? (
               <Cap className="block border-t border-(--line-soft) px-4 py-2.5 text-right">
-                {tr("주황 점은 설정 확인이 필요하다는 뜻이에요(부서나 Discord 경로 없음).", "An orange dot marks settings to check (no department or Discord route).")}
+                {tr("주황 점은 설정 확인이 필요하다는 뜻이에요(Discord 경로 없음).", "An orange dot marks settings to check (no Discord route).")}
               </Cap>
             ) : null}
           </SectionCard>
-          {isMobile && unlinkedSessions.length > 0 ? (
-            <KitCard pad="sm">
-              <UnlinkedSessions sessions={unlinkedSessions} departments={departments} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onAgentUpdated} />
-            </KitCard>
-          ) : null}
         </div>
 
         {!isMobile ? (
@@ -390,8 +367,6 @@ export default function AgentsTab({
                 locale={locale}
                 tr={tr}
                 isKo={isKo}
-                deptTab={deptTab}
-                onSelectDept={setDeptTab}
                 unlinkedSessions={unlinkedSessions}
                 onSessionsChange={onAgentUpdated}
               />

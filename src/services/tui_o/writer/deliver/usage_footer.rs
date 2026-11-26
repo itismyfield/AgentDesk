@@ -27,6 +27,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         piece: &PieceWork,
         admission: Option<Admission<'_>>,
     ) -> Step {
+        // An image marker settles through the image selector, never the ordinary disposition.
+        if piece.unit_key.kind == UnitKind::ToolImage {
+            return self.deliver_image(piece, admission).await;
+        }
         let ledger = self.store.ledger();
         if ledger.excluded(&piece.unit_key).is_some() {
             return Step::Done;
@@ -103,7 +107,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         let local_retry =
             (approved.is_none() && admission.is_none() && retry_owner == OriginalGate::SendLocal)
                 .then_some(LocalRetryMark::Budget);
-        self.send_piece(&piece, admission, local_retry, approved)
+        self.send_piece(&piece, admission, local_retry, approved, None)
             .await
     }
 }

@@ -1,5 +1,6 @@
 //! An HTTP force cancel's way into the P11 terminate service: the scoped run and its postlude
-//! share one detached task, and the postlude runs only while the [`RetiredExclusion`] is held.
+//! share one detached task, and the postlude runs only while the [`RetiredExclusion`] is held;
+//! the owner is woken after its released step.
 
 use futures::FutureExt;
 use futures::future::BoxFuture;
@@ -44,13 +45,16 @@ where
     };
     let run = tokio::spawn(async move {
         let service = async {
-            match terminate_scoped(request, shared, &pool, Some(expected), false, false).await {
-                Ok(exclusion) => {
+            let scoped =
+                terminate_scoped(request, shared, &pool, Some(expected), false, false, None);
+            match scoped.await {
+                Ok((exclusion, wake)) => {
                     #[cfg(test)]
                     super::run_probe(&super::BEFORE_POSTLUDE).await;
                     let applied = postlude(&exclusion).await;
                     drop(exclusion);
                     let applied = applied.released().await;
+                    wake.after_release().await;
                     (TerminationResult::Retired, Some(applied))
                 }
                 Err(result) => (result, None),

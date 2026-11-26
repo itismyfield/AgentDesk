@@ -23,6 +23,7 @@ export default function PipelineVisualEditorView({ ctx, actions }: Props) {
     >
       <button
         type="button"
+        aria-expanded={!ctx.collapsed}
         onClick={() => actions.setCollapsed((value: boolean) => !value)}
         className="flex min-h-11 w-full items-center justify-between gap-3 text-left"
       >

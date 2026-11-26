@@ -1058,3 +1058,6 @@ fn u_thread_scope_ends_at_the_binding_gate() {
     );
     assert_eq!(first, Scope::HerdrFirstCreate);
 }
+
+#[path = "retired_unplaced_tests.rs"]
+mod retired_unplaced;

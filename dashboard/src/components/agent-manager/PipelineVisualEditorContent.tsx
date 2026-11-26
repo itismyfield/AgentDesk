@@ -1,4 +1,5 @@
 import PipelineFlowCanvas from "./PipelineFlowCanvas";
+import type { PipelineEditorActions, PipelineEditorCtx } from "./PipelineVisualEditor";
 import PipelineVisualEditorInspector from "./PipelineVisualEditorInspector";
 import PipelineVisualEditorStagePanel from "./PipelineVisualEditorStagePanel";
 import {
@@ -11,12 +12,13 @@ import {
 } from "./pipeline-visual-editor-ui";
 
 interface Props {
-  ctx: any;
-  actions: any;
+  ctx: PipelineEditorCtx;
+  actions: PipelineEditorActions;
 }
 
 export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
-  const tr = ctx.tr;
+  const { graph, pipelineDraft, tr } = ctx;
+  if (!graph || !pipelineDraft) return null;
 
   return (
     <>
@@ -46,7 +48,7 @@ export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
           <PipelineFlowCanvas
             compactGraph={ctx.compactGraph}
             fsmEdgeBindings={ctx.fsmEdgeBindings}
-            graph={ctx.graph}
+            graph={graph}
             graphPanelNote={ctx.graphPanelNote}
             isFsmVariant={ctx.isFsmVariant}
             onConnectTransition={actions.addTransitionBetween}

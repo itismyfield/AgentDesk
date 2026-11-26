@@ -295,7 +295,7 @@ const css = /* css */ `
   -webkit-font-smoothing: antialiased;
 }
 /* Touch screens: 16px text, so iOS doesn't zoom in on focus */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-area-clean { --fs: 16px; --lh: 24px; }
 }
 
@@ -374,7 +374,7 @@ const css = /* css */ `
 .aui-text-area-clean__expand:focus-visible { outline: 2px solid var(--ui-tac-focus); outline-offset: -2px; }
 .aui-text-area-clean__expand svg { display: block; }
 .aui-text-area-clean__swap { display: grid; animation: aui-text-area-clean-swap 280ms var(--ui-tac-ease); }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-area-clean__expand { width: 32px; height: 32px; }
   .aui-text-area-clean__expand::before { content: ""; position: absolute; inset: -4px; }
   .aui-text-area-clean[data-expandable] .aui-text-area-clean__input { padding-inline-end: 42px; }
@@ -437,7 +437,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-text-area-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-area-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-text-area-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;

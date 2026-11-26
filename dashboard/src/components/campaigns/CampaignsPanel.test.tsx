@@ -625,3 +625,84 @@ it("defaults large campaign swimlanes (>24 tasks) to active-only, hides finished
   expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')).toBeNull();
   expect(container.querySelector(".aui-handoff-swimlanes")?.textContent).toContain("FinishedGroup");
 });
+
+it("falls back to a right-side slide-over Drawer when docking would leave < 520px main width and docks inline when wide", async () => {
+  const originalInnerWidth = window.innerWidth;
+  let detailRect: DOMRect = {
+    x: 560,
+    y: 80,
+    top: 80,
+    left: 560,
+    right: 1248,
+    bottom: 900,
+    width: 688,
+    height: 820,
+    toJSON: () => ({}),
+  };
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
+  const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.classList?.contains("campaign-detail")) return detailRect;
+    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) } as DOMRect;
+  });
+
+  try {
+    const withDone = {
+      ...campaign,
+      nodes: [
+        campaign.nodes[0],
+        makeCampaignNode("done-1", { title: "Completed item", status: "completed", stage: "done" }),
+      ],
+    };
+    vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [withDone], live: {}, read: 1 });
+    await render();
+    await selectTask("review");
+
+    // At 1280px with left=560: dock width=384, remaining main width = (1280 - 384 - 16) - 560 = 320 < 520 -> slide-over Drawer
+    expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).toBe("");
+    const slideOver = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Selected task"]');
+    expect(slideOver).not.toBeNull();
+    expect(slideOver?.hasAttribute("data-docked")).toBe(false);
+    expect(slideOver?.className).toContain("fixed");
+    expect(slideOver?.className).toContain("right-0");
+    expect(slideOver?.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
+
+    // Widen to 1728px with left=560: dock width=480, remaining main width = (1728 - 480 - 16) - 560 = 672 >= 520 -> docked <aside>
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1728 });
+    detailRect = {
+      x: 560,
+      y: 80,
+      top: 80,
+      left: 560,
+      right: 1696,
+      bottom: 900,
+      width: 1136,
+      height: 820,
+      toJSON: () => ({}),
+    };
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    });
+
+    const dockedAside = document.querySelector<HTMLElement>('aside[aria-label="Selected task"]');
+    expect(dockedAside).not.toBeNull();
+    expect(dockedAside?.style.width).toBe("480px");
+    expect(dockedAside?.querySelector("[data-docked] .campaign-node-detail h3")?.textContent).toBe("Review current head");
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).not.toBe("");
+
+    // Also verify toolbar size="sm" alignment in Connections and folded done column polish in Stage board
+    await act(async () => button("Connections").click());
+    expect(container.querySelector('.campaign-node-picker [data-size="sm"]')).not.toBeNull();
+    expect(container.querySelector('.campaign-relations header button[data-size="sm"][data-variant="secondary"]')).not.toBeNull();
+
+    await act(async () => button("Stage board").click());
+    const foldedCol = container.querySelector<HTMLElement>("[data-folded-column]");
+    expect(foldedCol?.className).toContain("max-w-[10.5rem]");
+    const showLatestBtn = foldedCol?.querySelector<HTMLButtonElement>("button");
+    expect(showLatestBtn?.className).toContain("whitespace-nowrap");
+  } finally {
+    rectSpy.mockRestore();
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: originalInnerWidth });
+  }
+});

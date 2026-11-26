@@ -201,3 +201,16 @@ it("falls back to static stills and skips hover upgrades when prefers-reduced-mo
   });
   expect(personas()[0].getAttribute("data-persona-motion")).toBe("still");
 });
+
+it("localizes displayName and state labels when wrapped in I18nProvider language='en'", async () => {
+  const { I18nProvider } = await import("../i18n");
+  const target = await render(
+    <I18nProvider language="en">
+      <AgentPersona agent={idleAgent} size={32} animated={false} />
+      <AgentPersona agent={workingAgent} size={32} animated={false} />
+      <AgentPersona agent={idleAgent} state="waiting" size={32} animated={false} />
+    </I18nProvider>,
+  );
+  const labels = [...target.querySelectorAll('[role="img"]')].map((el) => el.getAttribute("aria-label"));
+  expect(labels).toEqual(["Chef · Idle", "Chef · Working", "Chef · Needs attention"]);
+});

@@ -23,6 +23,9 @@ pub mod input_notices;
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) use test_access::{append_for_test, recover_for_test};
+pub mod tool_images;
+#[cfg(test)]
+mod tool_images_tests;
 
 /// Discord ids minted on different API nodes can trail creation order by about a second.
 const POST_ORDER_SKEW_MS: u64 = 30_000;
@@ -39,6 +42,10 @@ pub enum LocalRetryMark {
 pub enum LedgerEntry {
     InputNotice {
         entry: Box<input_notices::NoticeEntry>,
+    },
+    /// Tool-image turn spans and obligations; see `tool_images`.
+    ToolImage {
+        entry: Box<tool_images::ImageEntry>,
     },
     ExactEvidence {
         metadata: Box<crate::services::tui_o::exact_episode::EpisodeMetadata>,
@@ -234,6 +241,7 @@ pub struct LedgerState {
     exact_evidence: Vec<crate::services::tui_o::exact_episode::EpisodeMetadata>,
     approvals: BTreeMap<u64, ResumeApproval>,
     input_notices: input_notices::NoticeState,
+    tool_images: tool_images::ImageState,
 }
 
 impl LedgerState {
@@ -262,6 +270,10 @@ impl LedgerState {
 
     pub fn input_notices(&self) -> &input_notices::NoticeState {
         &self.input_notices
+    }
+
+    pub(crate) fn tool_images(&self) -> &tool_images::ImageState {
+        &self.tool_images
     }
 
     /// The piece prepared without a recorded result; at most one exists while the invariant holds.
@@ -454,6 +466,7 @@ impl LedgerState {
             LedgerEntry::InputNotice { entry } => {
                 input_notices::settlement::apply(self, at, *entry);
             }
+            LedgerEntry::ToolImage { entry } => tool_images::apply(self, *entry),
             LedgerEntry::OperatorResume {
                 rejected_serial,
                 approval_id,
@@ -561,6 +574,7 @@ impl LedgerState {
                     }
                 }
                 self.latest.insert((unit_key.clone(), piece_index), serial);
+                self.tool_images.note_attempt(&unit_key, serial);
                 let piece = PieceRecord {
                     unit_key,
                     piece_index,
@@ -581,10 +595,14 @@ impl LedgerState {
                 self.pieces.insert(serial, piece);
             }
             LedgerEntry::Posted { serial, msg_id, .. } => {
-                if msg_id > self.anchor {
-                    self.anchor = msg_id;
-                } else if !self.reordered_post(msg_id) {
-                    self.violate(format!("serial {serial} posted {msg_id} behind the anchor"));
+                match tool_images::late_confirm(self, serial, msg_id) {
+                    tool_images::LateConfirm::Accept { anchor } => self.anchor = anchor,
+                    tool_images::LateConfirm::Reject(detail) => self.violate(detail),
+                    _ if msg_id > self.anchor => self.anchor = msg_id,
+                    _ if !self.reordered_post(msg_id) => {
+                        self.violate(format!("serial {serial} posted {msg_id} behind the anchor"))
+                    }
+                    tool_images::LateConfirm::Ordinary => {}
                 }
                 self.posted.insert(msg_id);
                 self.resolve(serial, PieceOutcome::Posted(msg_id), at);

@@ -23,6 +23,17 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) own_start: Mutex<OwnStart>,
     /// The backstop's read of this turn from its own start, resumed poll to poll.
     pub(crate) own_turn: Mutex<OwnTurnCursor>,
+    /// The token's turn; a saved start names it so a successor turn never reuses it.
+    pub(crate) turn_nonce: Option<String>,
+}
+
+/// Writes a recorded turn start to that turn's durable row; the Discord layer installs it.
+pub(crate) type TurnStartSink =
+    fn(&crate::db::dispatched_sessions::hosted_execution::HostedOwner, &str, &HerdrTurnStart);
+static TURN_START_SINK: std::sync::OnceLock<TurnStartSink> = std::sync::OnceLock::new();
+
+pub(crate) fn install_turn_start_sink(sink: TurnStartSink) {
+    let _ = TURN_START_SINK.set(sink);
 }
 
 /// A stop's one late delivery attempt; it holds the token only weakly.
@@ -40,7 +51,7 @@ pub(crate) enum OwnStart {
 }
 
 /// The source and offset an executor observed at this token's input, never taken from a frame.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct HerdrTurnStart {
     pub(crate) execution_nonce: String,
     pub(crate) source: std::path::PathBuf,
@@ -55,8 +66,32 @@ impl HerdrInterruptState {
     /// Records the turn start once; a different second start is refused, never overwritten.
     pub(crate) fn record_turn_start(&self, start: HerdrTurnStart) -> bool {
         match self.turn_start.set(start) {
-            Ok(()) => true,
+            Ok(()) => {
+                // Saved before the first key; a failed save holds the row, never the input.
+                let sink = TURN_START_SINK.get();
+                if let (Some(sink), Some(nonce), Some(start)) =
+                    (sink, self.turn_nonce.as_deref(), self.turn_start.get())
+                {
+                    sink(&self.owner, nonce, start);
+                }
+                true
+            }
             Err(start) => self.turn_start.get() == Some(&start),
+        }
+    }
+
+    /// The reader opened this turn's source at its first own record; a cold start's file is
+    /// pinned to it once, so a later file at the same path is never this turn's.
+    pub(crate) fn source_observed(&self, file: (u64, u64)) {
+        let (Some(start), Some(nonce)) = (self.turn_start.get(), self.turn_nonce.as_deref()) else {
+            return;
+        };
+        if let (None, Some(sink)) = (start.file, TURN_START_SINK.get()) {
+            let pinned = HerdrTurnStart {
+                file: Some(file),
+                ..start.clone()
+            };
+            sink(&self.owner, nonce, &pinned);
         }
     }
 
@@ -437,6 +472,7 @@ impl CancelToken {
             turn_start: std::sync::OnceLock::new(),
             own_start: Mutex::new(OwnStart::Unseen(None)),
             own_turn: Mutex::new(OwnTurnCursor::default()),
+            turn_nonce: self.turn_nonce().map(str::to_owned),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         if let Some(nonce) = self.turn_nonce() {

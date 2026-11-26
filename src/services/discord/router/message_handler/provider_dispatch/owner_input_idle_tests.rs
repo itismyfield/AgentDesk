@@ -3022,7 +3022,7 @@ pub(crate) fn claimed_root_recovery_launch(
     created(
         registration,
         text.into(),
-        scope::Lineage::Created,
+        (scope::Lineage::Created, None),
         (Some(claim), reply_once(Some(settled))),
     )
 }

@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 #[cfg(unix)]
 pub(crate) mod carried;
 mod collision;
+pub(super) mod keyless;
 mod migration;
 pub(crate) mod native;
 #[cfg(unix)]
@@ -227,6 +228,13 @@ impl Snapshot {
     }
 }
 
+/// What a transaction found under the ledger lock.
+enum Ledger<'a> {
+    /// A V1 store, which the V1 writer still changes in place.
+    V1,
+    V2(&'a mut Snapshot),
+}
+
 #[derive(Clone)]
 pub(crate) struct Registry {
     path: PathBuf,
@@ -262,6 +270,18 @@ impl Registry {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.locked(false, |ledger| match ledger {
+            Ledger::V2(state) => apply(state),
+            Ledger::V1 => Err("a migrating transaction found a V1 store".into()),
+        })
+    }
+    /// One transaction under the `cached` mutex and the `.lock` flock. A `keyless` writer gets a V1
+    /// file as [`Ledger::V1`] instead of migrating, and V1's success without a directory fsync.
+    fn locked<T>(
+        &self,
+        keyless: bool,
+        apply: impl FnOnce(Ledger<'_>) -> Result<T, String>,
+    ) -> Result<T, String> {
         use crate::services::discord::runtime_store::{
             AtomicWriteContext, durable_publish::FlushStatus, durable_publish::*,
         };
@@ -276,9 +296,11 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
-        let raw = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => migration::MISSING.into(),
+        let (raw, present) = match std::fs::read_to_string(&self.path) {
+            Ok(raw) => (raw, true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                (migration::MISSING.into(), false)
+            }
             Err(e) => return Err(e.to_string()),
         };
         let context = || AtomicWriteContext::new("injected_frames_v2");
@@ -296,11 +318,19 @@ impl Registry {
             }
             *pending = None;
         }
+        if keyless
+            && present
+            && !compat::v2_head(raw.as_bytes())
+            && matches!(migration::decode(&raw)?, migration::Decoded::Legacy(_))
+        {
+            cached.clear();
+            return apply(Ledger::V1);
+        }
         if cached.raw() != Some(raw.as_str()) {
             cached.replace(raw.clone(), migration::restore(&raw)?);
         }
         let state = cached.state_mut().ok_or("history cache unavailable")?;
-        let encoded = apply(state).and_then(|result| {
+        let encoded = apply(Ledger::V2(state)).and_then(|result| {
             if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err("history encoding failed".to_string());
             }
@@ -320,6 +350,11 @@ impl Registry {
         super::stamped::published();
         match published {
             Ok(FlushStatus::Flushed) => {
+                cached.published(candidate)?;
+                Ok(result)
+            }
+            // The V1 writer it replaces confirms a rename alone on Windows (no directory fsync).
+            Ok(FlushStatus::UnflushedPlatform) if keyless => {
                 cached.published(candidate)?;
                 Ok(result)
             }
@@ -841,7 +876,7 @@ pub(super) fn is_v2(path: &Path) -> Result<bool, String> {
 }
 
 /// Live, unabandoned passive and stand-in unbound entries as one V1 list, each beside the passive
-/// slot of a migrated V1 append entry, the only kind a non-scoped writer may change.
+/// slot of a keyless entry (no registration), the only kind a non-scoped writer may change.
 fn owned(state: &Snapshot) -> Vec<(Entry, Option<usize>)> {
     let unbound = |r: &Registration| Entry {
         id: r.key["attempt"]["nonce"]
@@ -874,7 +909,7 @@ fn owned(state: &Snapshot) -> Vec<(Entry, Option<usize>)> {
             return None;
         }
         match (&p.entry, &p.registration) {
-            (Some(entry), None) if entry.append.is_some() => Some((entry.clone(), Some(at))),
+            (Some(entry), None) => Some((entry.clone(), Some(at))),
             (Some(entry), _) => Some((entry.clone(), None)),
             (None, Some(r)) => Some((unbound(r), None)),
             (None, None) => None,
@@ -917,49 +952,6 @@ fn owned_entries(raw: &[u8]) -> Result<Store, String> {
     })
 }
 
-/// A V1 append mutation under the V2 lock: only migrated append entries change; any other change,
-/// or a first native event a same-frame V2 registration could own, refuses the transaction.
-pub(super) fn update_migrated<T>(
-    path: &Path,
-    apply: impl FnOnce(&mut Store) -> Result<T, String>,
-) -> Result<T, String> {
-    Registry::shared(path.to_path_buf()).transaction(|state| {
-        let owned = owned(state);
-        let before: Vec<String> = owned
-            .iter()
-            .map(|(entry, _)| serde_json::to_string(entry).map_err(|e| e.to_string()))
-            .collect::<Result<_, _>>()?;
-        let slots: Vec<_> = owned
-            .iter()
-            .map(|(entry, slot)| (*slot, entry.events.len()))
-            .collect();
-        let mut store = Store {
-            entries: owned.into_iter().map(|(entry, _)| entry).collect(),
-        };
-        let result = apply(&mut store)?;
-        if store.entries.len() != slots.len() {
-            return Err("a V2 history adds and removes no entry for a V1 append".into());
-        }
-        for ((entry, (slot, events)), before) in store.entries.into_iter().zip(slots).zip(before) {
-            if serde_json::to_string(&entry).map_err(|e| e.to_string())? == before {
-                continue;
-            }
-            let at = slot.ok_or("only a migrated V1 append entry changes in a V2 history")?;
-            let start = (entry.append.as_ref())
-                .and_then(append::State::receipt_start)
-                .unwrap_or(u64::MAX);
-            if (entry.events.iter().skip(events))
-                .any(|event| collision::contests_migrated(state, &entry, &event.kind, start))
-            {
-                return Err("a same-frame V2 registration may own this native row".into());
-            }
-            let passive = &mut state.passive[at];
-            passive.entry = Some(entry);
-            passive.encoded = None;
-        }
-        Ok(result)
-    })
-}
 // Writer fixtures require Unix file identity and confirmed parent directory fsync.
 #[cfg(all(test, unix))]
 #[path = "v2_compaction_tests.rs"]

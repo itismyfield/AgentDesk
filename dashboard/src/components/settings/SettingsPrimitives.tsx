@@ -76,8 +76,8 @@ const TEXT_FIELD_TOKEN_CLASS = [
 export function SettingsButton({ size = "md", className, style, ...props }: ButtonProps) {
   const sizeClass =
     size === "sm"
-      ? "[--aui-button-clean-h:30px]! [--aui-button-clean-px:10px]! [--aui-button-clean-radius:8px]! pointer-coarse:[--aui-button-clean-h:44px]!"
-      : "[--aui-button-clean-h:36px]! [--aui-button-clean-px:14px]! [--aui-button-clean-radius:var(--r-sm)]! pointer-coarse:[--aui-button-clean-h:44px]!";
+      ? "[--aui-button-clean-h:30px]! [--aui-button-clean-px:10px]! [--aui-button-clean-radius:8px]! max-[899px]:[--aui-button-clean-h:44px]! pointer-coarse:[--aui-button-clean-h:44px]!"
+      : "[--aui-button-clean-h:36px]! [--aui-button-clean-px:14px]! [--aui-button-clean-radius:var(--r-sm)]! max-[899px]:[--aui-button-clean-h:44px]! pointer-coarse:[--aui-button-clean-h:44px]!";
   return (
     <Button
       size={size}
@@ -124,7 +124,7 @@ export function SettingsTextField({ className, inputClassName, ...props }: TextF
   return (
     <TextField
       {...props}
-      className={join(FIELD_FOCUS_CLASS, TEXT_FIELD_TOKEN_CLASS, "pointer-coarse:[--h:44px]!", className)}
+      className={join(FIELD_FOCUS_CLASS, TEXT_FIELD_TOKEN_CLASS, "max-[899px]:[--h:44px]! pointer-coarse:[--h:44px]!", className)}
       inputClassName={join("focus-visible:outline-none!", inputClassName)}
     />
   );

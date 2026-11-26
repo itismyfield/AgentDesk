@@ -355,10 +355,15 @@ pub(crate) type CreatedSubmit =
 /// What the driver observed of the execution it hands over: created now, pending from an earlier
 /// launch, or already bound.
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Lineage {
     Created,
     Pending,
+    /// A Claude Pending execution its driver attached after its launch's own logged start, named
+    /// by the nonce of the source that attach returned.
+    PendingAttached {
+        nonce: String,
+    },
     Existing,
 }
 /// The first prompt of an execution this thread's driver observed: its lineage, its own target

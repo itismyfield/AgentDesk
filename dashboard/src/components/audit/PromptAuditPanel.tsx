@@ -7,7 +7,7 @@ import { CodeBlock } from "../../kit/free/code-block-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { TreeView, type TreeNode } from "../../kit/free/tree-view-clean";
 import type { Agent } from "../../types";
-import { Cap, Chip, Desc, Eyebrow, InspSection, KeyValue, KitCard, Row, RowButton, RuleItem } from "../common/KitPrimitives";
+import { Cap, Chip, Desc, Eyebrow, InspSection, KitCard, Row, RowButton, RuleItem } from "../common/KitPrimitives";
 import { auditState, fullPromptText, sectionLabels, sourceLabel, sourceShares } from "./auditModel";
 import { AuditSummaryCard, counter, FULL_TOUCH_BUTTON_STYLE, sessionMeta, ShareBar, useCachedCaptions, useCopyFeedback, type AuditDetailProps } from "./AuditDetailFrame";
 import { AuditRequestState } from "./AuditWorkspace";
@@ -59,15 +59,13 @@ function buildSectionTree(sections: PromptSection[], labels: string[], charsFmt:
   });
 }
 
-/** Right-hand desktop inspector summarizing section TOC (`TreeView`), source shares, canon logical paths and origin semantics. */
+/** Right-hand desktop inspector summarizing section TOC (`TreeView`), canon logical paths and origin semantics. */
 function PromptSourceInspector({ sections, labels, treeItems, selectedNode, onSelectNode, origin, maskedCount, isKo, tr }: {
   sections: PromptSection[]; labels: string[]; treeItems: TreeNode[];
   selectedNode: string | null; onSelectNode: (id: string) => void;
   origin: AuditOrigin; maskedCount: number; isKo: boolean; tr: Tr;
 }) {
   const count = counter(isKo);
-  const chars = (value: number) => tr(`${count(value)}자`, `${count(value)} chars`);
-  const shares = sourceShares(sections);
   const canonRows = sections.map((section, index) => ({ section, label: labels[index] })).filter(({ section }) => section.source === "canon_file");
 
   return (
@@ -80,13 +78,6 @@ function PromptSourceInspector({ sections, labels, treeItems, selectedNode, onSe
             <TreeView aria-label={tr("프롬프트 섹션 목차", "Prompt section outline")} items={treeItems} selected={selectedNode} onSelect={onSelectNode} />
           </InspSection>
         ) : null}
-        <InspSection>
-          {shares.map((share) => (
-            <KeyValue key={share.source} leading={<i aria-hidden className="block size-2 shrink-0 rounded-[2px]" style={{ background: SOURCE_CSS_COLOR[share.source] }} />} label={sourceLabel(share.source, tr)} num>
-              {chars(share.chars)} · {share.percent}%
-            </KeyValue>
-          ))}
-        </InspSection>
         {canonRows.length > 0 ? (
           <InspSection>
             <Eyebrow>{tr("정본 파일", "Canon files")}</Eyebrow>
@@ -183,7 +174,7 @@ export function PromptAuditDetail({ onOpenAnchors, ...detail }: AuditDetailProps
             compact={phone}
             testId="audit-share-bar"
             ariaLabel={`${tr("출처별 비율", "Share by source")}: ${shares.map((s) => `${sourceLabel(s.source, tr)} ${s.percent}%`).join(", ")}`}
-            segments={shares.map((s) => ({ key: s.source, value: s.chars, color: SOURCE_CSS_COLOR[s.source], label: `${sourceLabel(s.source, tr)} ${chars(s.chars)}` }))}
+            segments={shares.map((s) => ({ key: s.source, value: s.chars, color: SOURCE_CSS_COLOR[s.source], label: `${sourceLabel(s.source, tr)} ${chars(s.chars)} (${s.percent}%)` }))}
           />
         ) : null}
       </AuditSummaryCard>

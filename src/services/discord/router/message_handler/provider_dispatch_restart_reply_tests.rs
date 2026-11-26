@@ -2,10 +2,61 @@ use super::*;
 use crate::services::claude_tui::readiness;
 use crate::services::discord::queue_io::input_owner::held_watch::{self, Verdict};
 use crate::services::discord::router::message_handler::provider_dispatch as dispatch;
-use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+use crate::services::tui_turn_state::idle_compaction_tests::{
+    end_turn, measured_compaction_tail, tail,
+};
 
 #[test]
 fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
+    delivers_once_after_restart(|session| {
+        let mut end = end_turn();
+        end["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
+        let records = std::iter::once(end).chain(tail());
+        let own = |mut record: serde_json::Value| {
+            record["sessionId"] = json!(session);
+            record
+        };
+        records.map(own).collect()
+    });
+}
+
+#[test]
+fn a_restored_reply_after_a_measured_idle_compaction_delivers_once_pg() {
+    delivers_once_after_restart(measured_compaction_tail);
+}
+
+/// Without its notice, or with work inside it, the compaction keeps the restored reply unproven.
+#[test]
+fn a_restored_reply_stays_unproven_behind_an_unclosed_or_working_compaction_pg() {
+    let work = json!({"type":"assistant","message":{"stop_reason":null,"content":[]}});
+    for (change, restored) in [(None, true), (Some(None), false), (Some(Some(work)), false)] {
+        let fx = Fixture::with_root(
+            "restart-reply-compaction",
+            None,
+            crate::config::TestRuntimeRootGuard::new(),
+        );
+        let (_, started) = reconnect::launch(&fx, &Arc::new(Launcher::default()));
+        let mut records = measured_compaction_tail(&started.session);
+        let notice = records.iter().position(|r| r["subtype"] == "informational");
+        match change.clone() {
+            Some(Some(mut work)) => {
+                work["sessionId"] = json!(started.session);
+                records.insert(notice.unwrap(), work);
+            }
+            Some(None) => {
+                records.remove(notice.unwrap());
+            }
+            None => {}
+        }
+        append(&started.path, &records);
+        readiness::test_support::forget_session(fx.logical());
+        let proof = readiness::observe_restored_reply(fx.logical(), Some(&started.path));
+        assert_eq!(proof.is_some(), restored, "{change:?}");
+    }
+}
+
+/// After a restart forgot the proof, `records` of the launched session restore the held input.
+fn delivers_once_after_restart(records: fn(&str) -> Vec<serde_json::Value>) {
     let fx = Fixture::with_root(
         "restart-reply-held-front",
         None,
@@ -21,18 +72,7 @@ fn a_restored_reply_wakes_the_same_busy_hold_and_delivers_once_pg() {
         CHANNEL,
     );
     let intake = Intake::new(&fx, &started);
-    let mut end = end_turn();
-    end["sessionId"] = json!(started.session);
-    end["timestamp"] = json!(chrono::Utc::now().to_rfc3339());
-    append(&started.path, &[end]);
-    let records: Vec<_> = tail()
-        .into_iter()
-        .map(|mut record| {
-            record["sessionId"] = json!(started.session);
-            record
-        })
-        .collect();
-    append(&started.path, &records);
+    append(&started.path, &records(&started.session));
     readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let idle = include_str!(concat!(

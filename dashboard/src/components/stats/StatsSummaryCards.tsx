@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { KpiChart, type KpiChartText } from "../../kit/pro/kpi-chart";
-import { StatCard } from "../../kit/pro/stat-card";
+import { StatCard, type StatCardLabels } from "../../kit/pro/stat-card";
 import { TrendChart } from "../../kit/pro/trend-chart";
 import { SectionCard } from "../common/KitPrimitives";
 import {
@@ -22,12 +22,14 @@ function SummaryFact({
   value,
   note,
   chart,
+  labels,
 }: {
   testId: string;
   label: string;
   value: string;
   note: string;
   chart?: ReactNode;
+  labels?: Partial<StatCardLabels>;
 }) {
   return (
     <div data-testid={testId} className="min-w-0">
@@ -37,6 +39,7 @@ function SummaryFact({
         footer={note}
         chart={chart}
         layout={chart ? "beside" : "stack"}
+        labels={labels}
       />
     </div>
   );
@@ -99,6 +102,12 @@ export function StatsSummaryGrid({
     : "";
   const savingsRate = cacheSavingsDelta ? `(${cacheSavingsDelta.value.replace("-", "")})` : "";
   const text = kpiText(t);
+  const statLabels: Partial<StatCardLabels> = {
+    loading: t(msg("불러오는 중", "Loading", "読み込み中", "加载中")),
+    up: t(msg("증가", "up", "増加", "上升")),
+    down: t(msg("감소", "down", "減少", "下降")),
+    flat: t(msg("변화 없음", "no change", "変化なし", "无变化")),
+  };
   const hasSparkline = daily.length > 1;
   const dailyTokens = daily.map((day) => day.total_tokens);
   const peakIndex = peakDay ? daily.findIndex((day) => day.date === peakDay.date) : -1;
@@ -106,17 +115,20 @@ export function StatsSummaryGrid({
   return (
     <SectionCard title={t(msg(`사용량 · 최근 ${rangeDays}일`, `Usage · last ${rangeDays} days`, `使用量 · 直近${rangeDays}日`, `用量 · 最近 ${rangeDays} 天`))} testId="stats-usage">
       {/* The kit caps its card at 460px; here each chart fills its column, two columns once both fit their tooltip. */}
-      <div className="@container flex flex-col gap-3 px-3 pb-3 sm:px-4 sm:pb-4">
-        <div data-testid="stats-summary-grid" className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none!">
+      <div className="@container flex flex-col gap-2.5 px-3 pb-3 sm:px-4 sm:pb-3.5">
+        <div
+          data-testid="stats-summary-grid"
+          className="grid grid-cols-1 gap-3 @min-[880px]:grid-cols-2 [&_.aui-kpi-chart]:max-w-none! [&_.aui-kpi-chart-card]:px-4! [&_.aui-kpi-chart-card]:py-3.5! [&_.aui-kpi-chart-footer]:mt-2.5! [&_.aui-kpi-chart-graph]:mt-3.5! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-guide]:opacity-0! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-point]:opacity-0! [&_.aui-kpi-chart-plot-wrap:not(:hover):not(:focus-within)_.aui-kpi-chart-tooltip]:opacity-0!"
+        >
           <div data-testid="stats-summary-total-tokens" className="min-w-0">
             <KpiChart
               title={t(msg("총 토큰", "Total Tokens", "総トークン", "总代币"))}
               value={summary ? formatTokens(summary.total_tokens) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
-              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "tokens", label: t(msg("토큰", "Tokens", "トークン", "Token")), values: dailyTokens, color: "var(--aui-accent)" }]}
               format={formatTokens}
+              defaultIndex={Math.max(0, daily.length - 1)}
               emptyLabel={notice}
               text={text}
               footer={t(msg(
@@ -133,9 +145,9 @@ export function StatsSummaryGrid({
               value={summary ? formatCurrency(summary.total_cost) : missing}
               labels={labels}
               tooltipLabels={tooltipLabels}
-              defaultIndex={Math.max(0, daily.length - 1)}
               series={[{ id: "cost", label: t(msg("비용", "Cost", "コスト", "成本")), values: daily.map((day) => day.cost), color: "var(--aui-info)" }]}
               format={formatAxisCurrency}
+              defaultIndex={Math.max(0, daily.length - 1)}
               emptyLabel={notice}
               text={text}
               footer={summary
@@ -157,6 +169,7 @@ export function StatsSummaryGrid({
             note={summary
               ? t(msg(`일 평균 ${formatTokens(Math.round(average))}`, `Avg ${formatTokens(Math.round(average))} per day`, `平均 ${formatTokens(Math.round(average))} / 日`, `日均 ${formatTokens(Math.round(average))}`))
               : notice}
+            labels={statLabels}
             chart={hasSparkline ? (
               <TrendChart
                 labels={labels}
@@ -177,6 +190,7 @@ export function StatsSummaryGrid({
             note={peakDay
               ? `${formatTokens(peakDay.total_tokens)}${peakRatio ? t(msg(` · 평균의 ${peakRatio.toFixed(1)}배`, ` · ${peakRatio.toFixed(1)}x avg`, ` · 平均の ${peakRatio.toFixed(1)}x`, ` · ${peakRatio.toFixed(1)}x 平均`)) : ""}`
               : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : notice}
+            labels={statLabels}
             chart={hasSparkline ? (
               <TrendChart
                 labels={labels}

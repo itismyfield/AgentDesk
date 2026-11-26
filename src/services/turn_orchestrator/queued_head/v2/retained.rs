@@ -41,9 +41,10 @@ impl Owner {
         Ok(successor)
     }
 
-    /// When `tick` next settles: the head's retention or the front's readiness deadline.
+    /// When `tick` next settles: the head's retention, or the front's readiness or retry due.
     pub(crate) fn settle_due(&self) -> Option<u64> {
         let front = self.front_hold().map(|hold| hold.due_at_ms);
+        let front = [front, self.retry_due()].into_iter().flatten().min();
         self.head_due().or(front)
     }
 
@@ -64,6 +65,7 @@ impl Owner {
     pub(crate) fn tick(&mut self, now: u64) -> Result<(), String> {
         self.refuse_expired_front(now)?;
         let mut next = self.snapshot.clone();
+        next.consume_retry_due(now);
         if self.head_due().is_some_and(|due| now >= due) {
             let input = next
                 .head_injection

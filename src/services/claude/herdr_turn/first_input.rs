@@ -66,6 +66,43 @@ pub(super) fn submit(
         .map_err(SubmissionError::into_legacy)
 }
 
+/// What a Pending row's turn hands the owner: the source its attach returned, and the lineage
+/// read from that source, which may name a fresh launch after an unplaced Pending was retired.
+pub(super) fn pending_handover(
+    record: &HostedExecution,
+    source: impl FnOnce(&HostedExecution) -> Result<Attached, String>,
+) -> Result<(Attached, crate::services::claude_tui::owner_input::Lineage), String> {
+    let attached = source(record)?;
+    let nonce = attached.nonce.clone();
+    let lineage = crate::services::claude_tui::owner_input::Lineage::PendingAttached { nonce };
+    Ok((attached, lineage))
+}
+
+/// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
+/// read, the execution `attached` its attach returned, and the execution `target` the hook names.
+#[cfg(all(test, unix))]
+pub(crate) fn owned_pending_prompt_for_tests(
+    turn: &HerdrTurn<'_>,
+    (record, attached, target): (&HostedExecution, &HostedExecution, &HostedExecution),
+    (session_id, transcript): (&str, PathBuf),
+) -> Result<(), String> {
+    let hook = crate::services::claude_tui::owner_input::launch_hook().ok_or("no owner hook")?;
+    let source = |record: &HostedExecution| -> Result<Attached, String> {
+        Ok(Attached {
+            nonce: record.execution_nonce.clone(),
+            session_id: session_id.into(),
+            transcript: transcript.clone(),
+            target: gate(record)?,
+            bound: true,
+            awaiting_clear: false,
+            physical: physical(record),
+        })
+    };
+    let (_, lineage) = pending_handover(record, |_| source(attached))?;
+    let (sender, _receiver) = std::sync::mpsc::channel();
+    submit_owned(turn, hook, (lineage, None), source(target)?, &sender).map(drop)
+}
+
 /// The prompt through the owner waiting on this thread: it reserves the frame on the execution
 /// the driver observed, binds its pane, and runs this write as its effect; its settlement is final.
 pub(super) fn submit_owned(
@@ -458,6 +495,22 @@ fn before_payload(
     })
 }
 
+/// Runs `publish` under the pane's source authority unless a termination chose execution `nonce`:
+/// the input it already sent stays settled, but nothing more of it is published or bound.
+fn publishes(
+    logical: &str,
+    nonce: &str,
+    publish: impl FnOnce(&crate::services::tmux_common::TmuxSourceAuthority<'_>),
+) -> bool {
+    crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        let live = !crate::services::session_host::execution_closing(nonce);
+        if live {
+            publish(authority);
+        }
+        live
+    })
+}
+
 pub(super) fn observe(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
@@ -530,7 +583,7 @@ pub(super) fn observe(
     // Resolve and verify the launch source before the first read exposes the busy turn.
     let mut bound = attached.bound;
     if !bound {
-        crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
+        let live = publishes(logical, &attached.nonce, |authority| {
             let published = dedupe::register_launched_tmux_runtime_binding_under_source_authority(
                 authority,
                 binding(start),
@@ -545,7 +598,7 @@ pub(super) fn observe(
                 tracing::warn!(logical, %error, "Claude launch source verification not persisted");
             }
         });
-        bound = runtime.block_on(bind_once_logged(turn, &attached.nonce));
+        bound = live && runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     let (mut terminal, mut unconfirmed) = (None, false);
     if early.is_none() {
@@ -584,8 +637,11 @@ pub(super) fn observe(
     let terminal_end = terminal.as_ref().map(|(read, ..)| read.end);
     let handoff_end = || terminal_end.unwrap_or_else(length);
     // Registered again at the handoff offset, before any terminal of this turn reaches admission.
-    dedupe::register_launched_tmux_runtime_binding(logical, binding(handoff_end()));
-    if !bound {
+    let live = publishes(logical, &attached.nonce, |authority| {
+        let handoff = binding(handoff_end());
+        dedupe::register_launched_tmux_runtime_binding_under_source_authority(authority, handoff);
+    });
+    if live && !bound {
         runtime.block_on(bind_once_logged(turn, &attached.nonce));
     }
     if let Some((read, token)) = terminal.take() {

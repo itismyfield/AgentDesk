@@ -17,25 +17,29 @@ pub(super) fn clear_fresh(
         return Ok(());
     }
     tc::with_tmux_source_authority(&owner.logical_key, |_| {
-        clear_owned(&owner.logical_key, nonce, fence)
+        clear_owned(&owner.logical_key, nonce, fence, "codex_tui").map(|_| ())
     })
 }
 
-pub(crate) async fn clear_retired(record: &HostedExecution) -> Result<(), String> {
+/// `Ok(true)` when the retired execution's runtime hint was removed.
+pub(crate) async fn clear_retired(record: &HostedExecution) -> Result<bool, String> {
     if record.state != HostedState::Retired {
         return Err("runtime marker cleanup requires a retired execution".into());
     }
     clear(&record.owner, &record.execution_nonce).await
 }
 
-async fn clear(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
-    if owner.provider != "codex" {
-        return Ok(());
-    }
+/// Clears the hint retired execution `nonce` left, Codex's or Claude's; any other is kept.
+pub(super) async fn clear(owner: &HostedOwner, nonce: &str) -> Result<bool, String> {
+    let runtime = match owner.provider.as_str() {
+        "codex" => "codex_tui",
+        "claude" => "claude_tui",
+        _ => return Ok(false),
+    };
     let (logical, nonce) = (owner.logical_key.clone(), nonce.to_owned());
     tokio::task::spawn_blocking(move || {
         let fence = RuntimeHintFence::acquire(&logical)?;
-        tc::with_tmux_source_authority(&logical, |_| clear_owned(&logical, &nonce, &fence))
+        tc::with_tmux_source_authority(&logical, |_| clear_owned(&logical, &nonce, &fence, runtime))
     })
     .await
     .map_err(|error| format!("runtime marker cleanup task: {error}"))?
@@ -63,19 +67,25 @@ fn read_runtime(path: &Path) -> Result<Option<Vec<u8>>, String> {
     }
 }
 
-fn clear_owned(logical: &str, nonce: &str, fence: &RuntimeHintFence) -> Result<(), String> {
+/// `runtime` is the hint the execution's provider writes; `Ok(true)` when one was removed.
+fn clear_owned(
+    logical: &str,
+    nonce: &str,
+    fence: &RuntimeHintFence,
+    runtime: &str,
+) -> Result<bool, String> {
     fence.validate(logical)?;
     let mut markers = Vec::new();
     for path in runtime_paths(logical) {
         if let Some(bytes) = read_runtime(&path)? {
-            if std::str::from_utf8(&bytes).map(str::trim) != Ok("codex_tui") {
+            if std::str::from_utf8(&bytes).map(str::trim) != Ok(runtime) {
                 return Err("runtime marker belongs to another runtime".into());
             }
             markers.push((path, bytes));
         }
     }
     if markers.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
     let owned = || {
         !nonce.is_empty()
@@ -104,7 +114,7 @@ fn clear_owned(logical: &str, nonce: &str, fence: &RuntimeHintFence) -> Result<(
     for (path, _) in markers {
         std::fs::remove_file(path).map_err(|error| format!("remove runtime marker: {error}"))?;
     }
-    Ok(())
+    Ok(true)
 }
 
 #[cfg(all(test, unix))]

@@ -14,6 +14,8 @@ use tower::ServiceExt;
 use tracing_subscriber::layer::SubscriberExt;
 
 use super::{probe_after_capture, probe_after_close, probe_after_fence};
+#[path = "herdr_terminate/never_started_tests.rs"]
+mod never_started_tests;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::krx_session_host_test_host::herdr_termination_rig as herdr;

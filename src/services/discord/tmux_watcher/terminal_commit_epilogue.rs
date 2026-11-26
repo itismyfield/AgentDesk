@@ -259,7 +259,21 @@ pub(super) async fn run_terminal_commit_epilogue(
         // matching identity permits an atomic clear, but does not make this
         // older terminal its owner. Keep the same id-0-inclusive stale veto
         // already used for this row's history, anchor and FINISHED marker.
+        // A Herdr row's clear, mailbox release and FINISHED mark wait for its own proven end; both
+        // rows this pass may clear or finalize are judged.
+        use crate::services::discord::inflight::herdr_turn_held;
+        let (session, logical): (&SharedData, &str) = (shared, tmux_session_name);
+        let herdr_held = herdr_turn_held(session, provider_kind, inflight_state.as_ref(), logical)
+            .await
+            || herdr_turn_held(
+                session,
+                provider_kind,
+                inflight_before_relay.as_ref(),
+                logical,
+            )
+            .await;
         let committed_row_cleanup_allowed = !late_held
+            && !herdr_held
             && !completion_is_stale_for_newer_turn
             && !anchor_cleanup_is_stale_for_newer_turn;
         let pinned_committed_clear_identity = if committed_row_cleanup_allowed {
@@ -407,6 +421,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         // FINISHED stamp is the same kind of committed-output branch, so it takes
         // the same guard.
         if !late_held
+            && !herdr_held
             && readopted_finish_mark_allowed(
                 completion_is_stale_for_newer_turn,
                 anchor_cleanup_is_stale_for_newer_turn,
@@ -435,7 +450,9 @@ pub(super) async fn run_terminal_commit_epilogue(
         // wait, after the pre-relay snapshot was taken. This pass then clears that
         // row, so it must also finish that row's exact mailbox episode.
         let (restored_finalizer_turn_id, finalizer_claim_row) = committed_finalize_target(
-            inflight_before_relay.as_ref().filter(|_| !pin_held),
+            inflight_before_relay
+                .as_ref()
+                .filter(|_| !pin_held && !herdr_held),
             committed_cleared_row,
             &tmux_session_name,
             current_offset,
@@ -526,7 +543,8 @@ pub(super) async fn run_terminal_commit_epilogue(
         // The legacy `mailbox_finalize_owed`-derived `delegated_finalize_owed`
         // term is dropped: the only false path (stale-newer-turn skip) has a newer
         // live turn, so `has_active_turn` already suppresses kickoff — identical.
-        let watcher_handled_mailbox_finish = watcher_drove_finalize || finish_mailbox_on_completion;
+        let watcher_handled_mailbox_finish =
+            watcher_drove_finalize || (finish_mailbox_on_completion && !herdr_held);
         let should_kickoff_queue =
             if watcher_handled_mailbox_finish || *monitor_auto_turn_finished || has_active_turn {
                 false

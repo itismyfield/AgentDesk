@@ -113,7 +113,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     self.deriver = configured_deriver(
                         channel,
                         crate::services::tui_o::shadow::ShadowProvider::Codex,
-                        self.writer.store().ledger(),
+                        self.writer.store(),
                     );
                 }
                 if changed {
@@ -156,8 +156,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 pub(super) fn configured_deriver(
     channel: u64,
     provider: ShadowProvider,
-    ledger: &crate::services::tui_o::store::ledger::LedgerState,
+    store: &crate::services::tui_o::store::ChannelStore,
 ) -> UnitDeriver {
+    let ledger = store.ledger();
+    let images = super::super::tool_images::derive::ImageRun::new(
+        channel,
+        provider,
+        ledger,
+        &store.init().sources,
+    );
     let inputs = super::super::pieces::ToolCardInputs {
         known: ledger.non_card_tool_keys(),
         recorded_cards: ledger.card_tool_keys(),
@@ -177,4 +184,5 @@ pub(super) fn configured_deriver(
         ))
         .with_tool_cards(inputs)
         .with_turn_summary(summary)
+        .with_tool_images(images)
 }

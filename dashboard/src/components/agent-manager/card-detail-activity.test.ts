@@ -206,7 +206,7 @@ describe("unified card activity", () => {
     expect(blocked).toMatchObject({ text: "In Progress → Blocked", actor: "pipeline", sub: "Blocked: tmux 없음", badge: { tone: "danger" } });
     const review = records.find((record) => record.source === "review")!;
     expect(review).toMatchObject({ actor: "luna", badge: { label: "Changes requested", tone: "warning" } });
-    expect(review.text).toMatch(/^리뷰 피드백: /);
+    expect(review.text).toMatch(/^Review feedback: /);
     const coalesced = records.find((record) => record.source === "general")!;
     expect(coalesced.text).toMatch(/^2 changes · /);
     expect(coalesced.badge).toMatchObject({ label: "Coalesced" });

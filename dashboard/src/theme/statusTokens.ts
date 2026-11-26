@@ -148,8 +148,8 @@ export const QUEUE_ENTRY_STATUS_TONES = {
     labelEn: "Review",
   },
   rework: {
-    bg: "rgba(236,72,153,0.22)",
-    text: "#f472b6",
+    bg: "color-mix(in oklch, #ec4899 15%, var(--th-bg-surface) 85%)",
+    text: "color-mix(in oklch, #ec4899 72%, var(--th-text-primary) 28%)",
     label: "리뷰 반영",
     labelEn: "Rework",
   },
@@ -170,7 +170,7 @@ export const QUEUE_ENTRY_STATUS_TONES = {
 export const AUTOQUEUE_RUN_STATUS_TONES = {
   generated: {
     bg: KANBAN_STATUS_TONES.qa_in_progress.bg,
-    text: "#60a5fa",
+    text: KANBAN_STATUS_TONES.qa_in_progress.text,
     label: "생성됨",
     labelEn: "Generated",
   },
@@ -221,11 +221,11 @@ export const QUEUE_GROUP_COLORS = [
 
 export const DELIVERY_EVENT_STATUS_TONES = {
   reserved: { bg: "rgba(156,163,175,0.12)", text: KANBAN_STATUS_TONES.cancelled.text },
-  sent: { bg: "rgba(34,197,94,0.16)", text: "#86efac" },
+  sent: { bg: KANBAN_STATUS_TONES.done.bg, text: KANBAN_STATUS_TONES.done.text },
   fallback: TIMELINE_KIND_TONES.pm,
   duplicate: KANBAN_STATUS_TONES.qa_in_progress,
   skipped: { bg: "rgba(156,163,175,0.12)", text: KANBAN_STATUS_TONES.cancelled.text },
-  failed: { bg: "rgba(248,113,113,0.16)", text: "#fca5a5" },
+  failed: { bg: KANBAN_STATUS_TONES.blocked.bg, text: KANBAN_STATUS_TONES.blocked.text },
 } satisfies Record<string, Pick<StatusTone, "bg" | "text">>;
 
 export function getKanbanStatusTone(status: string): StatusTone {

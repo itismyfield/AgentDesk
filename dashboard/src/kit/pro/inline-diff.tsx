@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@3024685b30
 import { forwardRef, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, ChevronLeft, ChevronRight, Columns2, RotateCcw, Sparkles, Undo2, X } from 'lucide-react';
@@ -17,6 +17,88 @@ export interface InlineDiffHandle {
   undo: () => void;
   reset: () => void;
 }
+export interface InlineDiffLabels {
+  regionLabel: string;
+  proposalUnit: string;
+  prevProposal: string;
+  nextProposal: string;
+  rejectAll: string;
+  acceptAll: string;
+  reviewDone: string;
+  undo: string;
+  originalColumn: string;
+  suggestedColumn: string;
+  emptyBody: string;
+  decideGroup: string;
+  decideProposalGroup: (index: string) => string;
+  acceptCurrent: string;
+  rejectCurrent: string;
+  accept: string;
+  reject: string;
+  toolsSummary: string;
+  unifiedView: string;
+  splitView: string;
+  undoLast: string;
+  restartReview: string;
+  sheetAria: (index: string) => string;
+  sheetTitle: (index: string, total: string) => string;
+  closeSheet: string;
+  beforeHeading: string;
+  beforeEmpty: string;
+  afterHeading: string;
+  afterEmpty: string;
+  whitespaceChange: string;
+  replaceChange: (before: string, after: string) => string;
+  insertChange: (after: string) => string;
+  removeChange: (before: string) => string;
+  proposalAria: (index: string, total: string, detail: string) => string;
+  remainingNotice: (remaining: string) => string;
+  allDoneNotice: string;
+  singleDecidedNotice: (detail: string, accepted: boolean, ending: string) => string;
+  multiDecidedNotice: (decided: string, accepted: boolean, ending: string) => string;
+  undoneNotice: (undone: string, remaining: string) => string;
+}
+export const inlineDiffDefaultLabels: InlineDiffLabels = {
+  regionLabel: '문장 제안 검토',
+  proposalUnit: '개 제안',
+  prevProposal: '이전 제안',
+  nextProposal: '다음 제안',
+  rejectAll: '모두 거절',
+  acceptAll: '모두 수락',
+  reviewDone: '검토 완료',
+  undo: '실행 취소',
+  originalColumn: '원문 · 검토 결과',
+  suggestedColumn: '제안 · 검토 결과',
+  emptyBody: '비교할 문장이 없습니다. 원문과 수정 제안을 연결해 주세요.',
+  decideGroup: '제안 결정',
+  decideProposalGroup: (index) => `제안 ${index} 결정`,
+  acceptCurrent: '현재 제안 수락',
+  rejectCurrent: '현재 제안 거절',
+  accept: '수락',
+  reject: '거절',
+  toolsSummary: '검토 보조 도구',
+  unifiedView: '통합 보기',
+  splitView: '좌우 비교',
+  undoLast: '마지막 결정 취소',
+  restartReview: '처음부터 검토',
+  sheetAria: (index) => `제안 ${index} 검토`,
+  sheetTitle: (index, total) => `제안 ${index} / ${total}`,
+  closeSheet: '제안 검토 닫기',
+  beforeHeading: '이전 내용',
+  beforeEmpty: '추가 제안 · 이전 내용 없음',
+  afterHeading: '제안 내용',
+  afterEmpty: '삭제 제안 · 새 내용 없음',
+  whitespaceChange: '공백 변경',
+  replaceChange: (before, after) => `“${before}”을 “${after}”으로 바꾸기`,
+  insertChange: (after) => `“${after}” 추가`,
+  removeChange: (before) => `“${before}” 삭제`,
+  proposalAria: (index, total, detail) => `전체 ${total}개 중 제안 ${index}. ${detail}. Y 또는 Enter 수락, N·Backspace·Delete 거절.`,
+  remainingNotice: (remaining) => `${remaining}개 제안이 남았습니다.`,
+  allDoneNotice: '모든 제안 검토를 마쳤습니다.',
+  singleDecidedNotice: (detail, accepted, ending) => `${detail} 제안을 ${accepted ? '수락' : '거절'}했습니다. ${ending}`,
+  multiDecidedNotice: (decided, accepted, ending) => `${decided}개 제안을 모두 ${accepted ? '수락' : '거절'}했습니다. ${ending}`,
+  undoneNotice: (undone, remaining) => `마지막 결정 ${undone}개를 되돌렸습니다. ${remaining}개 제안이 남았습니다.`,
+};
 export interface InlineDiffProps {
   original?: string;
   suggested?: string;
@@ -25,6 +107,7 @@ export interface InlineDiffProps {
   onChange?: (text: string) => void;
   onDone?: (text: string) => void;
   label?: string;
+  labels?: Partial<InlineDiffLabels>;
   defaultView?: 'unified' | 'split';
   /** Explicit log view; ordinary prose always wraps. */
   preserveLines?: boolean;
@@ -175,9 +258,9 @@ export function diffWords(originalInput: unknown, suggestedInput: unknown): Diff
   return normalized;
 }
 
-function description(change: Change) {
+function description(change: Change, words: InlineDiffLabels) {
   const before = change.remove.trim(), after = change.insert.trim();
-  return !before && !after ? '공백 변경' : before && after ? `“${before}”을 “${after}”으로 바꾸기` : after ? `“${after}” 추가` : `“${before}” 삭제`;
+  return !before && !after ? words.whitespaceChange : before && after ? words.replaceChange(before, after) : after ? words.insertChange(after) : words.removeChange(before);
 }
 
 const styles = `
@@ -218,15 +301,16 @@ const styles = `
 @container(max-width:600px){.aui-inline-diff[data-view="split"] .aui-inline-diff-unified{display:block}.aui-inline-diff[data-view="split"] .aui-inline-diff-split{display:none}}
 @container aui-inline-diff-card (max-width:400px){.aui-inline-diff-count-unit{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.aui-inline-diff-toolbar{column-gap:5px}}
 @media(max-width:400px){.aui-inline-diff-toolbar{padding-left:14px}.aui-inline-diff-label{padding-left:6px}.aui-inline-diff-body{padding:14px 14px 16px}.aui-inline-diff-toolbar .aui-inline-diff-nav{display:none}}
-@media(pointer:coarse){.aui-inline-diff button{min-width:44px;min-height:44px;height:44px}.aui-inline-diff .aui-inline-diff-arrow{width:44px}.aui-inline-diff-proposal:not([data-decision]){display:inline-block;min-width:44px;min-height:44px;padding:9px 3px;vertical-align:baseline;max-width:100%}.aui-inline-diff kbd{display:none}.aui-inline-diff-tools summary{min-height:44px;display:flex;align-items:center}.aui-inline-diff .aui-inline-diff-decision{min-height:44px}}
+@media(pointer:coarse),(max-width:899px){.aui-inline-diff button{min-width:44px;min-height:44px;height:44px}.aui-inline-diff .aui-inline-diff-arrow{width:44px}.aui-inline-diff-proposal:not([data-decision]){display:inline-block;min-width:44px;min-height:44px;padding:9px 3px;vertical-align:baseline;max-width:100%}.aui-inline-diff kbd{display:none}.aui-inline-diff-tools summary{min-height:44px;display:flex;align-items:center}.aui-inline-diff .aui-inline-diff-decision{min-height:44px}}
 @media(max-width:899px){.aui-inline-diff-popover{display:none}}
 @keyframes aui-inline-diff-check{to{stroke-dashoffset:0}}
 @media(prefers-reduced-motion:reduce){.aui-inline-diff *,.aui-inline-diff *::before,.aui-inline-diff *::after{animation-duration:1ms!important;animation-delay:0ms!important;transition:none!important;scroll-behavior:auto!important}.aui-inline-diff-toolbar-layer[data-hidden="true"]{transform:none;filter:none}.aui-inline-diff-check{stroke-dashoffset:0}}
 }
 `;
 
-export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function InlineDiff({ original = '', suggested = '', changes, onChange, onDone, label, defaultView = 'unified', preserveLines = false, showTools = false, appearance, className = '' }, ref) {
+export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function InlineDiff({ original = '', suggested = '', changes, onChange, onDone, label, labels, defaultView = 'unified', preserveLines = false, showTools = false, appearance, className = '' }, ref) {
   const id = useId();
+  const words: InlineDiffLabels = { ...inlineDiffDefaultLabels, ...labels };
   // Falsy supplied changes fall back to comparison; any other value is cleaned with its boundaries kept.
   const segments = useMemo(() => changes ? normalizeSegments(changes) : diffWords(original, suggested), [changes, original, suggested]);
   const sourceKey = JSON.stringify(segments);
@@ -300,8 +384,8 @@ export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function
     last.current = Math.max(...accepted); setExternal(null); setHover(null); setKeyboard(null); cancelLeave();
     const nextPending = changeSegments.map((_, index) => index).filter((index) => !next[index]);
     const text = textFor(next); onChange?.(text);
-    const ending = nextPending.length ? `${count(nextPending.length)}개 제안이 남았습니다.` : '모든 제안 검토를 마쳤습니다.';
-    setAnnouncement(accepted.length === 1 ? `${description(changeSegments[accepted[0]])} 제안을 ${decision === 'accepted' ? '수락' : '거절'}했습니다. ${ending}` : `${count(accepted.length)}개 제안을 모두 ${decision === 'accepted' ? '수락' : '거절'}했습니다. ${ending}`);
+    const ending = nextPending.length ? words.remainingNotice(count(nextPending.length)) : words.allDoneNotice;
+    setAnnouncement(accepted.length === 1 ? words.singleDecidedNotice(description(changeSegments[accepted[0]], words), decision === 'accepted', ending) : words.multiDecidedNotice(count(accepted.length), decision === 'accepted', ending));
     const nextIndex = nextPending.find((index) => index > last.current!) ?? nextPending[0] ?? null;
     if (!nextPending.length) { setSheetOpen(false); onDone?.(text); }
     else if (mobile && sheetOpen) { setExternal(nextIndex); scrollToChange(nextIndex!); }
@@ -310,7 +394,7 @@ export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function
   function undo(moveFocus = false) {
     const entry = history.current.pop(); if (!entry) return;
     decisions.current = entry.previous; setReview(entry.previous); setHistoryCount(history.current.length);
-    const remaining = changeSegments.length - Object.keys(entry.previous).length; onChange?.(textFor(entry.previous)); setAnnouncement(`마지막 결정 ${count(entry.indices.length)}개를 되돌렸습니다. ${count(remaining)}개 제안이 남았습니다.`);
+    const remaining = changeSegments.length - Object.keys(entry.previous).length; onChange?.(textFor(entry.previous)); setAnnouncement(words.undoneNotice(count(entry.indices.length), count(remaining)));
     if (moveFocus) focusChange(Math.min(...entry.indices));
   }
   function highlight(index: number | null) { cancelLeave(); setExternal(valid(index) ? index : null); if (mobile) setSheetOpen(valid(index)); }
@@ -340,10 +424,10 @@ export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function
       if (item.type === 'equal') return <span key={segmentIndex}>{item.text}</span>;
       const index = at++, decision = review[index], accessible = !decision;
       const before = side !== 'suggested' ? item.remove : '', after = side !== 'original' ? item.insert : '';
-      return <span key={segmentIndex} className="aui-inline-diff-proposal" data-change-index={index} data-decision={decision} data-active={active === index} role={accessible ? 'button' : undefined} tabIndex={accessible ? 0 : undefined} aria-label={accessible ? `전체 ${count(changeSegments.length)}개 중 제안 ${count(index + 1)}. ${description(item)}. Y 또는 Enter 수락, N·Backspace·Delete 거절.` : undefined} aria-pressed={accessible ? active === index : undefined}
+      return <span key={segmentIndex} className="aui-inline-diff-proposal" data-change-index={index} data-decision={decision} data-active={active === index} role={accessible ? 'button' : undefined} tabIndex={accessible ? 0 : undefined} aria-label={accessible ? words.proposalAria(count(index + 1), count(changeSegments.length), description(item, words)) : undefined} aria-pressed={accessible ? active === index : undefined}
         onPointerEnter={(event) => { if (!decision && event.pointerType === 'mouse') { cancelLeave(); setHover(index); } }} onPointerLeave={(event) => { if (event.pointerType === 'mouse') leave(); }}
         onPointerDown={() => { touchPress.current = true; }} onPointerCancel={() => { touchPress.current = false; }}
-        onClick={(event) => { if (decision) return; if (mobile || event.detail === 0 && window.matchMedia('(pointer:coarse)').matches) { const close = sheetOpen && active === index; setHover(null); setKeyboard(null); setExternal(close ? null : index); focusSheet.current = !close; setSheetOpen(!close); } else setExternal(index); touchPress.current = false; }}
+        onClick={(event) => { if (decision) return; if (mobile || event.detail === 0 && window.matchMedia('(pointer:coarse),(max-width:899px)').matches) { const close = sheetOpen && active === index; setHover(null); setKeyboard(null); setExternal(close ? null : index); focusSheet.current = !close; setSheetOpen(!close); } else setExternal(index); touchPress.current = false; }}
         onFocus={() => { if (!decision) { setKeyboard(index); if (mobile && !restoreFocus.current && !touchPress.current) setSheetOpen(true); } }} onBlur={() => setKeyboard((current) => current === index ? null : current)} onKeyDown={(event) => proposalKey(event, index)}>
         {before && <del aria-hidden={decision === 'accepted' || undefined}>{before}</del>}{after && <ins aria-hidden={decision === 'rejected' || undefined}>{after}</ins>}
         {decision && side === 'suggested' && decision === 'rejected' ? <span>{item.remove}</span> : null}{decision && side === 'original' && decision === 'accepted' ? <span>{item.insert}</span> : null}
@@ -354,24 +438,24 @@ export const InlineDiff = forwardRef<InlineDiffHandle, InlineDiffProps>(function
   const popupDecision = (decision: Decision) => { if (active !== null) decide([active], decision, mobile || keyboard === active); };
   const content = popIndex === null ? null : changeSegments[popIndex];
   const rootStyle = appearance ? Object.fromEntries(Object.entries(appearance).filter(([, value]) => value).map(([key, value]) => [`--aui-inline-diff-${appearanceVars[key as keyof InlineDiffAppearance]}`, value])) as CSSProperties : undefined;
-  return <section ref={root} className={`aui-inline-diff ${className}`} style={rootStyle} data-view={view} aria-label={label || '문장 제안 검토'} onKeyDown={(event) => { if (event.key === 'Escape') { setExternal(null); if (mobile && sheetOpen) closeSheet(); } }}>
+  return <section ref={root} className={`aui-inline-diff ${className}`} style={rootStyle} data-view={view} aria-label={label || words.regionLabel} onKeyDown={(event) => { if (event.key === 'Escape') { setExternal(null); if (mobile && sheetOpen) closeSheet(); } }}>
     <style>{styles}</style>
     <div className="aui-inline-diff-shell">
       {label && <p className="aui-inline-diff-label" title={label}><Sparkles size={13} aria-hidden="true" /><span dir="auto">{label}</span></p>}
       <div ref={card} className="aui-inline-diff-card">
         <div className="aui-inline-diff-toolbar">
           <div className="aui-inline-diff-toolbar-layer" data-hidden={complete} aria-hidden={complete} inert={complete}>
-            <span className="aui-inline-diff-count"><span className="aui-inline-diff-count-number">{count(pending.length)}</span><span className="aui-inline-diff-count-unit">개 제안</span></span>
-            <div className="aui-inline-diff-actions"><div className="aui-inline-diff-nav"><button className="aui-inline-diff-arrow" type="button" aria-label="이전 제안" disabled={!pending.length} onPointerDown={stopMouseFocus} onClick={() => navigate(-1)}><ChevronLeft size={14} strokeWidth={1.6} aria-hidden="true" /></button><button className="aui-inline-diff-arrow" type="button" aria-label="다음 제안" disabled={!pending.length} onPointerDown={stopMouseFocus} onClick={() => navigate(1)}><ChevronRight size={14} strokeWidth={1.6} aria-hidden="true" /></button></div><button type="button" disabled={!pending.length} onClick={() => decide(pending, 'rejected', true)}>모두 거절</button><button className="aui-inline-diff-primary" type="button" disabled={!pending.length} onClick={() => decide(pending, 'accepted', true)}>모두 수락</button></div>
+            <span className="aui-inline-diff-count"><span className="aui-inline-diff-count-number">{count(pending.length)}</span><span className="aui-inline-diff-count-unit">{words.proposalUnit}</span></span>
+            <div className="aui-inline-diff-actions"><div className="aui-inline-diff-nav"><button className="aui-inline-diff-arrow" type="button" aria-label={words.prevProposal} disabled={!pending.length} onPointerDown={stopMouseFocus} onClick={() => navigate(-1)}><ChevronLeft size={14} strokeWidth={1.6} aria-hidden="true" /></button><button className="aui-inline-diff-arrow" type="button" aria-label={words.nextProposal} disabled={!pending.length} onPointerDown={stopMouseFocus} onClick={() => navigate(1)}><ChevronRight size={14} strokeWidth={1.6} aria-hidden="true" /></button></div><button type="button" disabled={!pending.length} onClick={() => decide(pending, 'rejected', true)}>{words.rejectAll}</button><button className="aui-inline-diff-primary" type="button" disabled={!pending.length} onClick={() => decide(pending, 'accepted', true)}>{words.acceptAll}</button></div>
           </div>
-          <div className="aui-inline-diff-toolbar-layer" data-hidden={!complete} aria-hidden={!complete} inert={!complete}><span className="aui-inline-diff-complete"><Check className="aui-inline-diff-check" size={16} aria-hidden="true" />검토 완료</span><button ref={undoButton} type="button" disabled={!historyCount} onClick={() => undo(true)}><Undo2 size={14} strokeWidth={1.6} aria-hidden="true" />실행 취소</button></div>
+          <div className="aui-inline-diff-toolbar-layer" data-hidden={!complete} aria-hidden={!complete} inert={!complete}><span className="aui-inline-diff-complete"><Check className="aui-inline-diff-check" size={16} aria-hidden="true" />{words.reviewDone}</span><button ref={undoButton} type="button" disabled={!historyCount} onClick={() => undo(true)}><Undo2 size={14} strokeWidth={1.6} aria-hidden="true" />{words.undo}</button></div>
         </div>
-        <div className="aui-inline-diff-body"><div className="aui-inline-diff-unified"><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('unified')}</div></div><div className="aui-inline-diff-split"><div className="aui-inline-diff-column"><h3>원문 · 검토 결과</h3><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('original')}</div></div><div className="aui-inline-diff-column"><h3>제안 · 검토 결과</h3><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('suggested')}</div></div></div>{!segments.length && <p className="aui-inline-diff-prose">비교할 문장이 없습니다. 원문과 수정 제안을 연결해 주세요.</p>}</div>
-        <div ref={popover} className="aui-inline-diff-popover" role="group" aria-label={active === null ? '제안 결정' : `제안 ${count(active + 1)} 결정`} aria-hidden={active === null || mobile} inert={active === null || mobile} data-open={active !== null} data-placement={placement} data-first={!wasOpen.current} style={position} onPointerEnter={() => { cancelLeave(); if (popIndex !== null) setHover(popIndex); }} onPointerLeave={leave} onTransitionEnd={() => { if (active !== null) wasOpen.current = true; }}><button className="aui-inline-diff-decision" type="button" tabIndex={-1} aria-label="현재 제안 수락" onPointerDown={stopMouseFocus} onClick={() => popupDecision('accepted')}><Check size={14} strokeWidth={1.8} aria-hidden="true" />수락<kbd aria-hidden="true">Y</kbd></button><span className="aui-inline-diff-divider" aria-hidden="true" /><button className="aui-inline-diff-decision" type="button" tabIndex={-1} aria-label="현재 제안 거절" onPointerDown={stopMouseFocus} onClick={() => popupDecision('rejected')}><X size={14} strokeWidth={1.8} aria-hidden="true" />거절<kbd aria-hidden="true">N</kbd></button></div>
+        <div className="aui-inline-diff-body"><div className="aui-inline-diff-unified"><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('unified')}</div></div><div className="aui-inline-diff-split"><div className="aui-inline-diff-column"><h3>{words.originalColumn}</h3><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('original')}</div></div><div className="aui-inline-diff-column"><h3>{words.suggestedColumn}</h3><div className="aui-inline-diff-text-scroll" data-preserve={preserveLines}>{prose('suggested')}</div></div></div>{!segments.length && <p className="aui-inline-diff-prose">{words.emptyBody}</p>}</div>
+        <div ref={popover} className="aui-inline-diff-popover" role="group" aria-label={active === null ? words.decideGroup : words.decideProposalGroup(count(active + 1))} aria-hidden={active === null || mobile} inert={active === null || mobile} data-open={active !== null} data-placement={placement} data-first={!wasOpen.current} style={position} onPointerEnter={() => { cancelLeave(); if (popIndex !== null) setHover(popIndex); }} onPointerLeave={leave} onTransitionEnd={() => { if (active !== null) wasOpen.current = true; }}><button className="aui-inline-diff-decision" type="button" tabIndex={-1} aria-label={words.acceptCurrent} onPointerDown={stopMouseFocus} onClick={() => popupDecision('accepted')}><Check size={14} strokeWidth={1.8} aria-hidden="true" />{words.accept}<kbd aria-hidden="true">Y</kbd></button><span className="aui-inline-diff-divider" aria-hidden="true" /><button className="aui-inline-diff-decision" type="button" tabIndex={-1} aria-label={words.rejectCurrent} onPointerDown={stopMouseFocus} onClick={() => popupDecision('rejected')}><X size={14} strokeWidth={1.8} aria-hidden="true" />{words.reject}<kbd aria-hidden="true">N</kbd></button></div>
       </div>
     </div>
     <span className="aui-inline-diff-sr" role="status" aria-live="polite" aria-atomic="true">{announcement}</span>
-    {showTools && <details className="aui-inline-diff-tools"><summary>검토 보조 도구</summary><div className="aui-inline-diff-tools-actions"><button type="button" aria-pressed={view === 'split'} onClick={() => setView(view === 'split' ? 'unified' : 'split')}><Columns2 size={14} aria-hidden="true" />{view === 'split' ? '통합 보기' : '좌우 비교'}</button><button type="button" disabled={!historyCount} onClick={() => undo()}><Undo2 size={14} aria-hidden="true" />마지막 결정 취소</button><button type="button" onClick={clearState}><RotateCcw size={14} aria-hidden="true" />처음부터 검토</button></div></details>}
-    {mobile && sheetOpen && active !== null && content && createPortal(<div className="aui-inline-diff aui-inline-diff-overlay"><div ref={sheet} className="aui-inline-diff-sheet" role="dialog" aria-label={`제안 ${count(active + 1)} 검토`} aria-describedby={`${id}-sheet-description`} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); closeSheet(); } }}><div className="aui-inline-diff-sheet-header"><h2>제안 {count(active + 1)} / {count(changeSegments.length)}</h2><button type="button" aria-label="이전 제안" onClick={() => navigate(-1)}><ChevronLeft size={18} aria-hidden="true" /></button><button type="button" aria-label="다음 제안" onClick={() => navigate(1)}><ChevronRight size={18} aria-hidden="true" /></button><button ref={closeButton} type="button" aria-label="제안 검토 닫기" onClick={closeSheet}><X size={18} aria-hidden="true" /></button></div><div className="aui-inline-diff-sheet-content" id={`${id}-sheet-description`}><h3>이전 내용</h3><p dir="auto">{content.remove || '추가 제안 · 이전 내용 없음'}</p><h3>제안 내용</h3><p dir="auto">{content.insert || '삭제 제안 · 새 내용 없음'}</p></div><div className="aui-inline-diff-sheet-actions"><button type="button" onClick={() => popupDecision('rejected')}><X size={16} aria-hidden="true" />거절</button><button className="aui-inline-diff-primary" type="button" onClick={() => decide([active], 'accepted', true)}><Check size={16} aria-hidden="true" />수락</button></div></div></div>, document.body)}
+    {showTools && <details className="aui-inline-diff-tools"><summary>{words.toolsSummary}</summary><div className="aui-inline-diff-tools-actions"><button type="button" aria-pressed={view === 'split'} onClick={() => setView(view === 'split' ? 'unified' : 'split')}><Columns2 size={14} aria-hidden="true" />{view === 'split' ? words.unifiedView : words.splitView}</button><button type="button" disabled={!historyCount} onClick={() => undo()}><Undo2 size={14} aria-hidden="true" />{words.undoLast}</button><button type="button" onClick={clearState}><RotateCcw size={14} aria-hidden="true" />{words.restartReview}</button></div></details>}
+    {mobile && sheetOpen && active !== null && content && createPortal(<div className="aui-inline-diff aui-inline-diff-overlay"><div ref={sheet} className="aui-inline-diff-sheet" role="dialog" aria-label={words.sheetAria(count(active + 1))} aria-describedby={`${id}-sheet-description`} onKeyDown={(event) => { if (event.key === 'Escape') { event.preventDefault(); closeSheet(); } }}><div className="aui-inline-diff-sheet-header"><h2>{words.sheetTitle(count(active + 1), count(changeSegments.length))}</h2><button type="button" aria-label={words.prevProposal} onClick={() => navigate(-1)}><ChevronLeft size={18} aria-hidden="true" /></button><button type="button" aria-label={words.nextProposal} onClick={() => navigate(1)}><ChevronRight size={18} aria-hidden="true" /></button><button ref={closeButton} type="button" aria-label={words.closeSheet} onClick={closeSheet}><X size={18} aria-hidden="true" /></button></div><div className="aui-inline-diff-sheet-content" id={`${id}-sheet-description`}><h3>{words.beforeHeading}</h3><p dir="auto">{content.remove || words.beforeEmpty}</p><h3>{words.afterHeading}</h3><p dir="auto">{content.insert || words.afterEmpty}</p></div><div className="aui-inline-diff-sheet-actions"><button type="button" onClick={() => popupDecision('rejected')}><X size={16} aria-hidden="true" />{words.reject}</button><button className="aui-inline-diff-primary" type="button" onClick={() => decide([active], 'accepted', true)}><Check size={16} aria-hidden="true" />{words.accept}</button></div></div></div>, document.body)}
   </section>;
 });

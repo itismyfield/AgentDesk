@@ -13,6 +13,10 @@ use sqlx::PgPool;
 use super::herdr::BootPorts;
 #[path = "provider_dispatch_herdr_tests/clear_execute_tests.rs"]
 mod clear_execute_tests;
+#[path = "provider_dispatch_herdr_tests/closing_tests.rs"]
+mod closing_tests;
+#[path = "provider_dispatch_herdr_tests/retry_wait_tests.rs"]
+mod retry_wait_tests;
 
 use super::*;
 use crate::config::{TestEnvVarGuard as Guard, TestRuntimeRootGuard};

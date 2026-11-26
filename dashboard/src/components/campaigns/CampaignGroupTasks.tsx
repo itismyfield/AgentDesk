@@ -58,10 +58,10 @@ export function buildGroupTasks(nodes: CampaignNode[], key: string, settings: Gr
 
 /** The opened group's task graph, read only: task cards, faint tails that open their own group with that task chosen,
  * and the chosen task's summary (or the group's) beside it. */
-export default function CampaignGroupTasks({ campaign, live, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, tr }: {
+export default function CampaignGroupTasks({ campaign, live, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, canvasHeight, tr }: {
   campaign: Campaign; live?: Record<string, CampaignNodeLive>; group: string; chosen: string | null; onChoose: (id: string | null) => void;
   /** Goes to a task's group with that task chosen. */
-  onGoto: (id: string) => void; onGotoGroup: (group: string) => void; onOpenTask: (id: string) => void; tr: Tr;
+  onGoto: (id: string) => void; onGotoGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; tr: Tr;
 }) {
   const scope = useMemo(() => editorViewScope(campaign.id, scopeKey({ kind: "group", key: group })), [campaign.id, group]);
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
@@ -122,7 +122,7 @@ export default function CampaignGroupTasks({ campaign, live, group, chosen, onCh
   const pick = (id: string | null) => id?.startsWith("tail:") ? onGoto(id.slice(5)) : onChoose(id);
   const task = chosen === null ? undefined : graph.members.find((node) => node.id === chosen);
   return <RelationsViewCanvas key={group} label={tr(`그룹 ${label(group)}의 작업 관계`, `Task relations in ${label(group)}`)} nodes={graphNodes} lines={graph.connections} ties={graph.ties}
-    cycles={graph.cycles} components={graph.components} cycleText={cycleText} lineLabel={lineLabel}
+    cycles={graph.cycles} components={graph.components} cycleText={cycleText} lineLabel={lineLabel} height={canvasHeight}
     onSelect={pick} onOpen={(id) => id.startsWith("tail:") ? pick(id) : onOpenTask(id)} tr={tr}
     inspector={task ? <TaskInspector node={task} nodes={campaign.nodes} live={live?.[task.id]} cycles={graph.cycles.filter((_, index) => graph.components[index].has(task.id)).map(cycleText)}
       onChoose={(id) => byId.get(id) && campaignGroup(byId.get(id)!) === group ? onChoose(id) : onGoto(id)} onOpenTask={openDetail} tr={tr} />

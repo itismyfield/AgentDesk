@@ -219,3 +219,6 @@ async fn restarted_herdr_channel_drains_only_an_admitted_bound_run_without_a_wat
 
 #[path = "herdr_chain_tests.rs"]
 mod chain;
+
+#[path = "herdr_unsent_retire_tests.rs"]
+mod unsent_retire;

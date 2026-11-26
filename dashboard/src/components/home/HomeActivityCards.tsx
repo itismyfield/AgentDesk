@@ -126,18 +126,21 @@ export function HomeRoutinesCard({ tr, isKo, className }: { tr: Tr; isKo: boolea
 const AUTO_PAUSE_SETTINGS = "/settings?category=usage";
 const USAGE_METER_STYLE = { "--aui-usage-meter-meter-fill": "var(--accent)" } as CSSProperties;
 
-function usageLabels(tr: Tr): Partial<UsageMeterLabels> {
+function usageLabels(tr: Tr, rule: ReturnType<typeof autoPauseRule>): Partial<UsageMeterLabels> {
+  const hasPauseBelowLimit = Boolean(rule?.enabled && rule.pct !== null && rule.pct < 100);
   return {
     limits: tr("공급자별 한도", "Limits by provider"),
     limitReached: tr("한도 도달", "Limit reached"),
     nearLimit: tr("한도에 가까움", "Close to the limit"),
-    danger: tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause"),
+    danger: hasPauseBelowLimit ? tr("자동 진행 멈춤 기준 이상", "At or past the auto-run pause") : tr("한도 소진 임박", "Critical limit"),
     notMeasured: tr("측정 안 됨", "Not measured"),
     unlimited: tr("무제한", "Unlimited"),
     announce: (state, title, actual, percent) => state === "limit"
       ? tr(`${title}, 한도 도달. ${actual}.`, `${title}, limit reached. ${actual}.`)
       : state === "warn" ? tr(`${title}, ${percent}% 썼어요.`, `${title}, ${percent}% used.`) : tr(`${title}, ${actual} 썼어요.`, `${title}, ${actual} used.`),
-    announceDanger: (title, _actual, percent) => tr(`${title}, 자동 진행 멈춤 기준 이상이에요. ${percent}%.`, `${title}, at or past the auto-run pause. ${percent}%.`),
+    announceDanger: (title, _actual, percent) => hasPauseBelowLimit
+      ? tr(`${title}, 자동 진행 멈춤 기준 이상이에요. ${percent}%.`, `${title}, at or past the auto-run pause. ${percent}%.`)
+      : tr(`${title}, 한도 소진이 임박했어요. ${percent}%.`, `${title}, approaching the limit. ${percent}%.`),
   };
 }
 
@@ -161,6 +164,15 @@ export function HomeUsageCard({
   const rows = buildUsageRows(usage.data ?? [], isKo);
   const measured = rows.map((row) => row.measuredAt).filter((time): time is number => time !== null);
   const unknown = tr("확인 불가", "Unknown");
+  const measuredLabel = (() => {
+    if (measured.length === 0) return unknown;
+    const latestClock = formatClock(Math.max(...measured));
+    const oldestClock = formatClock(Math.min(...measured));
+    if (rows.some((row) => row.stale && row.measuredAt !== null) && oldestClock !== latestClock) {
+      return tr(`${oldestClock}–${latestClock} 측정`, `measured ${oldestClock}–${latestClock}`);
+    }
+    return tr(`${latestClock} 측정`, `measured ${latestClock}`);
+  })();
   const rule = autoPauseRule(runtime.data);
   const hasRows = Boolean(usage.data && rows.length > 0);
   const ruleText = rule
@@ -186,7 +198,7 @@ export function HomeUsageCard({
       title={tr("사용량", "Usage")}
       aside={usage.data || usage.failed ? (
         <Cap className="font-display tabular-nums">
-          {tr("한도 추적기", "Limit tracker")} · {measured.length ? formatClock(Math.max(...measured)) : unknown}
+          {tr("한도 추적기", "Limit tracker")} · {measuredLabel}
         </Cap>
       ) : null}
       testId="home-usage"
@@ -210,7 +222,7 @@ export function HomeUsageCard({
             locale={isKo ? "ko-KR" : "en-US"}
             limits={rows.map((row) => ({ group: row.group ?? undefined, label: row.label, used: row.pct, total: 100, unit: "%", detail: usageDetail(row, rule, tr) }))}
             {...pauseMeterScale(rule)}
-            labels={usageLabels(tr)}
+            labels={usageLabels(tr, rule)}
           />
           {pauseFooter}
         </InspSection>

@@ -44,9 +44,13 @@ pub(super) fn record(
         hook: Some(hook),
     };
     let nonce = context.execution_nonce.as_str();
+    // A start logged once a termination chose this execution would name a pane about to close.
     let committed = crate::services::tmux_common::with_tmux_source_authority(tmux, |_| {
-        record_source(&proposal)
+        (!crate::services::session_host::execution_closing(nonce)).then(|| record_source(&proposal))
     });
+    let Some(committed) = committed else {
+        return Err(NotDurableReason::ExecutionChanged);
+    };
     // Only a record of this execution's start answers the hook; anything else is retried.
     let logged = match committed {
         Ok(Committed::Appended) => Ok(()),

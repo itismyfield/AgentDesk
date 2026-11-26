@@ -70,9 +70,11 @@ function GroupList({ campaign, live, onOpen, tr, children }: {
     </Well>)}
     <ul aria-label={tr("그룹 목록", "Groups")} className="m-0 grid list-none gap-0.5 p-0">{overview.groups.map((group) => {
       const { counts, percent, total } = group.progress;
+      const upstream = overview.connections.filter((line) => line.target === group.id).length;
+      const downstream = overview.connections.filter((line) => line.source === group.id).length;
       return <li key={group.id}><RowButton data-group={group.key} onClick={() => onOpen(group.key)} className="gap-3 rounded-[var(--r-sm)] px-3 py-2 sm:px-3">
         <span className="grid min-w-0 flex-1 gap-1.5">
-          <span className="flex min-w-0 items-baseline gap-2"><strong className="min-w-0 truncate text-sm font-medium text-[var(--fg)]">{group.key || tr("미분류", "Ungrouped")}</strong><Cap className="shrink-0"><Num>{tr(`작업 ${total}개`, `${total} tasks`)}</Num></Cap></span>
+          <span className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-0.5"><strong className="min-w-0 truncate text-sm font-medium text-[var(--fg)]">{group.key || tr("미분류", "Ungrouped")}</strong><Cap className="shrink-0"><Num>{tr(`작업 ${total}개`, `${total} tasks`)}</Num></Cap><Cap className="shrink-0"><Num>{tr(`선행 그룹 ${upstream} · 다음 그룹 ${downstream}`, `${upstream} upstream · ${downstream} downstream`)}</Num></Cap></span>
           <MeterBar ratio={percent / 100} tone="ok" />
         </span>
         <span className="grid min-w-10 shrink-0 justify-items-end gap-0.5 text-xs"><Num className="text-[var(--fg)]">{percent}%</Num>{counts.blocked > 0 && <span className="text-[var(--err)]">{tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`)}</span>}</span>
@@ -91,6 +93,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
   const [group, setGroup] = useState<string | null>(null);
   const [task, setTask] = useState<string | null>(null);
   const [swimlaneChoice, setSwimlaneChoice] = useState<{ campaignId: string; scope: SwimlaneScope } | null>(null);
+  const [phoneGraphLayout, setPhoneGraphLayout] = useState<"canvas" | "list">("canvas");
   const listId = useId();
   const root = useRef<HTMLDivElement>(null);
   const selected = campaign.nodes.find((node) => node.id === selectedId);
@@ -101,6 +104,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
   const groups = grouped.length;
   const kept = keptDraft(campaign.id) !== null;
   const phone = useIsMobile();
+  const phoneListMode = phone && phoneGraphLayout === "list";
   const activeCount = useMemo(() => campaign.nodes.filter(isActiveNode).length, [campaign.nodes]);
   const defaultSwimlaneScope: SwimlaneScope =
     campaign.nodes.length > 24 && activeCount > 0 && activeCount < campaign.nodes.length ? "active" : "all";
@@ -113,7 +117,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
   const activeOnly = swimlaneScope === "active";
 
   // Keep group spatial context when inside a group instead of replacing the entire canvas on task selection.
-  const inGroup = viewMode === "graph" && !phone && group !== null;
+  const inGroup = viewMode === "graph" && !phoneListMode && group !== null;
   const activeTaskInGroup = inGroup
     ? (selected && campaignGroup(selected) === group ? selected.id : task)
     : null;
@@ -123,7 +127,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
   const focus = (selector: string) => requestAnimationFrame(() => requestAnimationFrame(() => root.current?.querySelector<HTMLElement>(selector)?.focus()));
   const openGroup = (key: string, id: string | null = null) => {
     setGroup(key); setChosen(key); setTask(id);
-    if (!id) focus(phone ? "[data-relations-list] [aria-expanded]" : "[data-relations-back]");
+    if (!id) focus(phoneListMode ? "[data-relations-list] [aria-expanded]" : "[data-relations-back]");
   };
   const goto = (id: string) => { const node = byId.get(id); if (node) openGroup(campaignGroup(node), id); };
   const back = () => { const left = group; setGroup(null); setTask(null); if (left !== null) focus(`.react-flow__node[data-id="campaign-group:${CSS.escape(encodeURIComponent(left))}"]`); };
@@ -204,7 +208,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
 
   return <div ref={root} className="campaign-relations grid min-w-0 gap-3">
     <div className="min-w-0 overflow-hidden rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-1)]">
-      <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-[var(--line-soft)] px-4 py-2">
+      <header className="flex min-h-14 min-w-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-[var(--line-soft)] px-4 py-3">
         {inGroup ? <div className="flex min-w-0 items-center gap-1">
           <IconButton data-relations-back icon={<ArrowLeft aria-hidden />} label={tr("전체 그룹으로 돌아가기", "Back to all groups")} onClick={back} />
           <nav aria-label={tr("이동 줄", "Breadcrumb")} className="min-w-0"><ol className="m-0 flex min-w-0 list-none items-center gap-1 p-0 text-[15px]">
@@ -215,7 +219,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
           <Cap className="shrink-0 pl-2"><Num>{tr(`작업 ${members.length}개`, `${members.length} tasks`)}</Num></Cap>
         </div> : viewMode === "graph" && selected ? <div className="flex flex-wrap items-center gap-1.5">
           <Button variant="ghost" icon={<ArrowLeft aria-hidden className="size-4" />} onClick={() => onOpen(null)}>{tr("전체 그룹 관계", "All group connections")}</Button>
-          {!phone && <Button variant="secondary" size="sm" onClick={() => openGroup(campaignGroup(selected), selected.id)}>{tr("그룹 안에서 보기 →", "Open in group →")}</Button>}
+          <Button variant="secondary" size="sm" onClick={() => { setPhoneGraphLayout("canvas"); openGroup(campaignGroup(selected), selected.id); }}>{tr("그룹 안에서 보기 →", "Open in group →")}</Button>
         </div> : <div className="grid min-w-0 gap-0.5">
           <strong className="truncate text-[15px] text-[var(--fg)]">{viewMode === "swimlanes" ? tr("그룹 스윔레인", "Group swimlanes") : tr("그룹 관계", "Group connections")}</strong>
           <Cap><Num>{tr(`그룹 ${groups}개 · 작업 ${campaign.nodes.length}개`, `${groups} groups · ${campaign.nodes.length} tasks`)}</Num></Cap>
@@ -223,7 +227,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2 max-sm:w-full">
           {onEdit && kept && <KitBadge size="md" tone="warning">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</KitBadge>}
           {viewMode === "swimlanes" && (
-            <div className="w-60 shrink-0">
+            <div className="min-w-0 max-w-full flex-1 sm:w-60 sm:flex-none">
               <SegmentedControl<SwimlaneScope>
                 variant="tray"
                 fullWidth
@@ -252,11 +256,27 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
               ]}
             />
           </div>
+          {phone && viewMode === "graph" && !selected && !inGroup && (
+            <div className="w-36 shrink-0">
+              <SegmentedControl<"canvas" | "list">
+                variant="tray"
+                fullWidth
+                size="sm"
+                aria-label={tr("모바일 그래프 표시", "Mobile graph layout")}
+                value={phoneGraphLayout}
+                onChange={setPhoneGraphLayout}
+                options={[
+                  { value: "canvas", label: tr("캔버스", "Canvas") },
+                  { value: "list", label: tr("목록", "List") },
+                ]}
+              />
+            </div>
+          )}
           <div className="campaign-node-picker min-w-0 flex-1 sm:w-64 sm:flex-none">
-            <Select aria-label={tr("연결을 볼 작업", "Task to inspect")} size="lg" placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
+            <Select aria-label={tr("연결을 볼 작업", "Task to inspect")} size="sm" placeholder={tr("작업을 선택하세요", "Select a task")} value={selectedId}
               options={campaign.nodes.map((node) => ({ value: node.id, label: node.title }))} onChange={pick} />
           </div>
-          {onEdit && <Button variant="secondary" size="lg" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>}
+          {onEdit && <Button variant="secondary" size="sm" onClick={() => onEdit(editScope())}>{kept ? tr("이어서 편집", "Continue editing") : tr("편집", "Edit")}</Button>}
         </div>
       </header>
       {viewMode === "swimlanes" ? (
@@ -288,16 +308,16 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
         </div>
       ) : selected && !inGroup ? (
         <div className="p-4"><CampaignNeighborhood nodes={campaign.nodes} selectedId={selected.id} visibleIds={all} onSelect={onOpen} tr={tr} /></div>
-      ) : phone ? (
+      ) : phoneListMode ? (
         <GroupList campaign={campaign} live={live} onOpen={openGroup} tr={tr}><TieLines campaign={campaign} tr={tr} /></GroupList>
       ) : inGroup ? (
         <CampaignGroupTasks key={group} campaign={campaign} live={live} group={group} chosen={activeTaskInGroup} onChoose={setTask} onGoto={goto} onGotoGroup={(key) => openGroup(key)}
-          onOpenTask={(id) => { setTask(id); onOpen(id); }} tr={tr} />
+          onOpenTask={(id) => { setTask(id); onOpen(id); }} canvasHeight={phone ? "360px" : undefined} tr={tr} />
       ) : (
-        <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} live={live} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={goto} tr={tr} />
+        <CampaignGroupOverview campaignId={campaign.id} nodes={campaign.nodes} live={live} chosen={chosen} onChoose={setChosen} onOpenGroup={openGroup} onOpenTask={goto} canvasHeight={phone ? "360px" : undefined} tr={tr} />
       )}
     </div>
-    {phone && viewMode === "graph" && group !== null && <div data-relations-list><KitCard pad="none">
+    {phoneListMode && viewMode === "graph" && group !== null && <div data-relations-list><KitCard pad="none">
       <div className="grid min-w-0 gap-0.5 p-1.5">
         <TaskGroupHeading open controls={listId} label={name(group)} count={members.length} onToggle={() => setGroup(null)} />
         <div id={listId} className="grid min-w-0 gap-0.5">{members.map((node) => {

@@ -89,7 +89,9 @@ pub(crate) use herdr::managed_config;
 pub(crate) use herdr::model::HerdrEndpoint;
 pub(crate) use herdr::policy;
 pub(crate) use herdr_gate::legacy_return;
-pub(crate) use herdr_gate::{restore_execution_fence, try_notice_fence};
+#[cfg(test)]
+pub(crate) use herdr_gate::shut_execution_for_test;
+pub(crate) use herdr_gate::{execution_closing, restore_execution_fence, try_notice_fence};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]
 pub(crate) use herdr_gate::{

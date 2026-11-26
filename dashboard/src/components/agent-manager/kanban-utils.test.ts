@@ -142,6 +142,22 @@ describe("parseGitHubCommentTimeline", () => {
     });
   });
 
+  it("localizes fallback titles when tr is provided while keeping Korean defaults for 1-arg calls", () => {
+    const comments = [
+      makeComment("추가 blocking finding은 없습니다. 현재 diff 기준으로 머지를 막을 추가 결함은 확인하지 못했습니다."),
+      makeComment("구현 완료: 타임라인 다국어 처리"),
+    ];
+
+    expect(parseGitHubCommentTimeline(comments, (_ko, en) => en).map((entry) => entry.title)).toEqual([
+      "Review passed",
+      "Work completed",
+    ]);
+    expect(parseGitHubCommentTimeline(comments).map((entry) => entry.title)).toEqual([
+      "리뷰 통과",
+      "작업 완료",
+    ]);
+  });
+
   it("완료 보고 코멘트를 작업 이력 이벤트로 파싱한다", () => {
     const [entry] = parseGitHubCommentTimeline([
       makeComment(`## #68 완료 보고
