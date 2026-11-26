@@ -7,6 +7,8 @@ const NAMESPACE: &str = "notice-owner-tests";
 
 #[path = "notice_cache_tests.rs"]
 mod cache_tests;
+#[path = "notice_owner_command_tests.rs"]
+mod command_tests;
 #[path = "notice_resume_tests.rs"]
 mod resume_tests;
 
@@ -607,39 +609,6 @@ async fn notice_owner_v2_exact_receipt_settles_without_current_native_file() {
     std::fs::rename(&c.path, parked).unwrap();
     actor.prepare_notices_for_test(&[]).await;
     c.excluded(&mut actor, "historical-v2");
-}
-
-#[tokio::test(start_paused = true)]
-async fn queued_command_receipt_excludes_the_notice_by_original_input_id() {
-    let c = Case::new("queued-command-receipt");
-    let frame = c.frame();
-    let (registry, key) = c.v2(&frame, 8820, false);
-    let mut actor = c.open();
-    let command = json!({
-        "type": "attachment",
-        "uuid": "physical-command",
-        "sessionId": "native",
-        "attachment": {
-            "type": "queued_command",
-            "commandMode": "prompt",
-            "origin": {"kind": "human"},
-            "source_uuid": "original-input",
-            "prompt": frame
-        }
-    });
-    append(&c.path, format!("{command}\n").as_bytes());
-    let fresh = actor.read_sources_for_test();
-    assert_eq!(notice_evidence(&mut actor, &input_key("original-input")), 1);
-    assert_eq!(
-        registry.receipt(
-            NAMESPACE,
-            &key,
-            (&c.path, 0, "command", Some("physical-command"), &frame)
-        ),
-        Some(true)
-    );
-    actor.prepare_notices_for_test(&fresh).await;
-    c.excluded(&mut actor, "original-input");
 }
 
 #[tokio::test(start_paused = true)]

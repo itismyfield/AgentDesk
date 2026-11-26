@@ -106,6 +106,25 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
             .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
 }
 
+fn observed_notice_attempt(
+    session: &str,
+    prompts: &[String],
+    input_uuid: &str,
+    command_row_uuid: Option<&str>,
+) -> Result<ObservedAttempt, String> {
+    let row = command_row_uuid.unwrap_or(input_uuid);
+    let observed = |uuid| history::observed_attempt_checked("claude", session, prompts, Some(uuid));
+    let attempt = observed(row)?;
+    // A receipt for the original user row also owns its queued command.
+    if row != input_uuid
+        && matches!(attempt, ObservedAttempt::Pending)
+        && let known @ ObservedAttempt::Known(_) = observed(input_uuid)?
+    {
+        return Ok(known);
+    }
+    Ok(attempt)
+}
+
 #[derive(Default)]
 pub(crate) struct Projection {
     enabled: bool,
@@ -170,11 +189,11 @@ impl Projection {
         {
             return Err("input notice has incomplete original provenance".into());
         }
-        match history::observed_attempt_checked(
-            "claude",
+        match observed_notice_attempt(
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(command_row_uuid.as_deref().unwrap_or(&native_key)),
+            &native_key,
+            command_row_uuid.as_deref(),
         )? {
             ObservedAttempt::Known(_) => return Ok(None),
             // Unconfirmed ownership is kept as evidence and debt until a receipt decides it.

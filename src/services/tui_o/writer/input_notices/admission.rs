@@ -1,7 +1,7 @@
 //! Final notice admission stays synchronous through prepare and the first POST poll.
 
 use super::super::pieces::PieceWork;
-use super::NoticeOrigin;
+use super::{NoticeOrigin, observed_notice_attempt};
 use crate::services::discord::session_notice::input_notice;
 use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
 use crate::services::tui_o::shadow::{SourceId, UnitKind};
@@ -110,11 +110,11 @@ pub(crate) fn admit_notice<R>(
         if input_notice::input_notice_content(&prompt).is_none() {
             return exclude(piece, store, "input_notice_source");
         }
-        match history::observed_attempt_checked(
-            "claude",
+        match observed_notice_attempt(
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(receipt_uuid),
+            &piece.unit_key.native_key,
+            command_row_uuid.as_deref(),
         )
         .map_err(withheld)?
         {
