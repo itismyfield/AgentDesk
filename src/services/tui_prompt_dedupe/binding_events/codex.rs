@@ -7,7 +7,7 @@ use crate::services::codex_tui::session::source_observation::VerifiedCodexHookSo
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
 // Provider workers inherit only a fixture's explicit test root, never the live runtime root.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     Ok(super::events_dir()?.or_else(|| {
         std::env::var_os("AGENTDESK_TEST_CODEX_BINDING_ROOT")
@@ -15,7 +15,7 @@ fn events_dir() -> io::Result<Option<PathBuf>> {
     }))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|root| root.join(format!("{channel}.log"))))
 }

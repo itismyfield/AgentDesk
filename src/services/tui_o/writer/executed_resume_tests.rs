@@ -13,7 +13,7 @@ use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig
 use crate::services::tui_o::writer::actor;
 use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::owed::test_support::owed_writer;
-use crate::services::tui_o::writer::source_read_tests::*;
+use crate::services::tui_o::writer::source_read_support::*;
 use crate::services::tui_o::writer::*;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
