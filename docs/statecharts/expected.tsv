@@ -1971,6 +1971,10 @@ thread-host/ThreadHostS1bMutW1BootGateBlocks.cfg	ThreadHostS1b	-	BootServesOther
 thread-host/ThreadHostS1bMutW1ResetRefuses.cfg	ThreadHostS1b	NoInputRefused	FirstInputResolves
 thread-host/ThreadHostS1bMutW1RestartNoSeed.cfg	ThreadHostS1b	-	FirstInputResolves
 thread-host/ThreadHostS1bMutW1RetrySkipsReserve.cfg	ThreadHostS1b	KeyAfterReservation	-
+thread-host/ThreadHostS1bMutW3ArchiveAfterRelease.cfg	ThreadHostS1b	ArchiveSparesLive	-
+thread-host/ThreadHostS1bMutW3NoPlacedResidue.cfg	ThreadHostS1b	-	FirstInputResolves
+thread-host/ThreadHostS1bMutW3NoPristine.cfg	ThreadHostS1b	TouchedResidueHeld	-
+thread-host/ThreadHostS1bMutW3ResidueByAbsence.cfg	ThreadHostS1b	ResidueNeverRan	-
 thread-host/ThreadHostS1bRev4All.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,RestoredBeforeRead,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bRev4S1b.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bS1bFirstAll.cfg	ThreadHostS1b	RestoredBeforeRead,SlotRotationProceeds	-
@@ -1987,6 +1991,10 @@ thread-host/ThreadHostS1bS2W2All.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2W2Boot.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2W2BootMain.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2W2Main.cfg	ThreadHostS1b	NewThreadFollowsParent	-
+thread-host/ThreadHostS1bS2W3All.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W3Held.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W3Lost.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W3Slot.cfg	ThreadHostS1b	-	-
 tui-o-turn-mode/CodexTakeoverAfter.cfg	CodexTakeover	-	-
 tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverNoArchive.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
