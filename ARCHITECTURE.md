@@ -1771,6 +1771,7 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   ├── herdr.rs
 │   │   │   │   ├── host_hold_tests.rs
+│   │   │   │   ├── seed_successor_tests.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -2744,6 +2745,7 @@ src/
 │   │   │   │   │   ├── owner_input_herdr_attached_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_seed_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_local_control_tests.rs
@@ -2767,6 +2769,7 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   ├── start_failure_missing_tests.rs
+│   │   │   │   │   ├── start_failure_seed_tests.rs
 │   │   │   │   │   ├── start_failure_state_tests.rs
 │   │   │   │   │   └── stream_json_turn.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
@@ -2778,7 +2781,8 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   ├── clear_execute_tests.rs
 │   │   │   │   │   ├── closing_tests.rs
-│   │   │   │   │   └── retry_wait_tests.rs
+│   │   │   │   │   ├── retry_wait_tests.rs
+│   │   │   │   │   └── seed_successor_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -3662,6 +3666,7 @@ src/
 │   │   │   │   ├── already_finalized.rs
 │   │   │   │   └── terminal_release.rs
 │   │   │   ├── episode/
+│   │   │   │   ├── claim_rejection.rs
 │   │   │   │   ├── row_retirement.rs
 │   │   │   │   └── row_retirement_tests.rs
 │   │   │   ├── finalize/

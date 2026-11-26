@@ -267,6 +267,8 @@ pub(crate) fn claude_observed_input(
     let run = if let Some(state) = state {
         let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
         if !state.prepare_input(&mut input) {
+            // Only a Herdr user stop closes input before it begins.
+            crate::services::claude_tui::owner_input::herdr_input_closed();
             return Ok(HerdrInputRun::Closed);
         }
         crate::services::tui_o::exact_submission::begin_input()?;

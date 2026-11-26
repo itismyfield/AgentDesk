@@ -134,8 +134,8 @@ pub(crate) use queued_head::effort_intent;
 #[cfg(unix)]
 pub(crate) use queued_head::proves_not_sent;
 pub(crate) use queued_head::{
-    DecisionHeld, OwedDrop, RESTART_SEED_SOURCE, RoutineInputSettlement, SeedStatus, TurnBind,
-    Waiting, v2_queue, waiting_origin,
+    DecisionHeld, OwedDrop, RESTART_SEED_SOURCE, RoutineInputSettlement, SeedStatus,
+    SeedStopAuthority, TurnBind, Waiting, v2_queue, waiting_origin,
 };
 pub(crate) use queued_head::{HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim, prefix};
 #[cfg(unix)]

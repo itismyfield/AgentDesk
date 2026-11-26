@@ -1851,6 +1851,9 @@ session-lifecycle/HerdrRetiredRowNewTurnBefore.cfg	HerdrRetiredRow	LostReaderNev
 session-lifecycle/HerdrRetiredRowNewTurnFlushBefore.cfg	HerdrRetiredRow	LostReaderNeverWrites,NoRevival,EndedTurnNotSelectable,NewTurnRowNotOverwritten	-
 session-lifecycle/HerdrRetiredRowNewTurnToolBefore.cfg	HerdrRetiredRow	LostReaderNeverWrites,NewTurnRowNotOverwritten	RowSettles
 session-lifecycle/HerdrRetiredRowNoNonce.cfg	HerdrRetiredRow	LostReaderNeverWrites,NewTurnNotRefused,NoRevival,EndedTurnNotSelectable,NewTurnRowNotOverwritten	RowSettles
+session-lifecycle/HerdrRetiredRowNoticeCurrent.cfg	HerdrRetiredRowNotice	NoticeExactlyOnce	-
+session-lifecycle/HerdrRetiredRowNoticeNoRecord.cfg	HerdrRetiredRowNotice	NoticeExactlyOnce	-
+session-lifecycle/HerdrRetiredRowNoticeTarget.cfg	HerdrRetiredRowNotice	-	-
 session-lifecycle/HerdrRetiredRowRestart.cfg	HerdrRetiredRow	LostReaderNeverWrites,NoRevival,EndedTurnNotSelectable	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-
