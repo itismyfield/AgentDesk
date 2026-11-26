@@ -11,7 +11,8 @@ pub(crate) async fn archive_duplicate_slot_threads(
     keep_thread_id: &str,
     candidate_thread_ids: &[String],
 ) {
-    if !crate::config::session_hosts::with_boot(|boot| boot.is_some())
+    if expected_parent == 0
+        || !crate::config::session_hosts::with_boot(|boot| boot.is_some())
         || !matches!(parent_policy(expected_parent), PolicyHost::Tmux)
     {
         return;
@@ -57,9 +58,8 @@ pub(crate) async fn archive_duplicate_slot_threads(
         let parent_id = thread_info
             .get("parent_id")
             .and_then(|value| value.as_str())
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or_default();
-        if parent_id != expected_parent {
+            .and_then(|value| value.parse::<u64>().ok());
+        if parent_id != Some(expected_parent) {
             continue;
         }
 
