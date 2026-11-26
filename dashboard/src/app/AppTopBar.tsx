@@ -1,5 +1,5 @@
 import { Bell, Moon, Palette, Search, Sun, WifiOff, X } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { Cap, CardNote, CountBadge, Row, StatusDot } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 import { IconButton } from "../kit/free/icon-button-clean";
@@ -115,10 +115,33 @@ export function AppTopBar({
   const routeLabel = currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : tr("홈", "Home");
   const routeDescription = currentRoute ? (isKo ? currentRoute.descriptionKo : currentRoute.descriptionEn) : "";
   const [runningOpen, setRunningOpen] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setRunningOpen(false);
   }, [currentRoute?.path]);
+
+  useEffect(() => {
+    if (!showNotificationPanel) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!notificationRef.current?.contains(event.target as Node)) {
+        setShowNotificationPanel(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setShowNotificationPanel(false);
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [setShowNotificationPanel, showNotificationPanel]);
 
   const themeLabel = tr(
     resolvedTheme === "dark" ? "밝은 화면으로 전환" : "어두운 화면으로 전환",
@@ -263,7 +286,7 @@ export function AppTopBar({
           />
         ) : null}
 
-        <div className="relative flex shrink-0">
+        <div ref={notificationRef} className="relative flex shrink-0">
           <IconButton
             variant={iconButtonVariant}
             label={notificationLabel}

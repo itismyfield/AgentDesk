@@ -52,6 +52,7 @@
   --accent-cyan: oklch(0.77 0.13 220);
   --accent-lime: oklch(0.83 0.19 131);
   --accent: var(--accent-indigo);
+  --accent-ink: #ffffff;
   --color-primary: var(--accent);
 }
 
@@ -224,26 +225,32 @@
 
 [data-accent="indigo"] {
   --accent: var(--accent-indigo);
+  --accent-ink: #ffffff;
 }
 
 [data-accent="violet"] {
   --accent: var(--accent-violet);
+  --accent-ink: #ffffff;
 }
 
 [data-accent="amber"] {
   --accent: var(--accent-amber);
+  --accent-ink: #171717;
 }
 
 [data-accent="rose"] {
   --accent: var(--accent-rose);
+  --accent-ink: #ffffff;
 }
 
 [data-accent="cyan"] {
   --accent: var(--accent-cyan);
+  --accent-ink: #171717;
 }
 
 [data-accent="lime"] {
   --accent: var(--accent-lime);
+  --accent-ink: #171717;
 }
 
 *,

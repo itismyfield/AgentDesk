@@ -227,7 +227,7 @@ export default function CampaignRelations({ campaign, live, selectedId, onOpen, 
         <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2 max-sm:w-full">
           {onEdit && kept && <KitBadge size="md" tone="warning">{tr("저장하지 않은 편집이 있어요", "Unsaved edits are waiting")}</KitBadge>}
           {viewMode === "swimlanes" && (
-            <div className="w-60 shrink-0">
+            <div className="min-w-0 max-w-full flex-1 sm:w-60 sm:flex-none">
               <SegmentedControl<SwimlaneScope>
                 variant="tray"
                 fullWidth
