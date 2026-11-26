@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 fn headers(token: &'static str, channel: &'static str) -> HeaderMap {
     let mut headers = HeaderMap::new();

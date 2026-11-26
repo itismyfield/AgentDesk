@@ -2,7 +2,7 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
-use crate::services::platform::tmux::session_inventory::tests::ChannelProbeTrace;
+use crate::services::platform::tmux::session_inventory::test_support::ChannelProbeTrace;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -38,7 +38,9 @@ impl Rig {
         })
     }
     async fn seed_retired(&self) {
-        use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, tests::record};
+        use crate::db::dispatched_sessions::hosted_execution::{
+            HostedLocation, test_support::record,
+        };
         let owner = HostedOwner {
             provider: "claude".into(),
             discord_token_hash: self.shared.token_hash.clone(),
@@ -895,7 +897,7 @@ impl Drop for InventoryPause {
 }
 
 async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
-    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::record;
     use crate::services::discord::{mailbox_snapshot, mailbox_take_next_automatic_intervention};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
     use poise::serenity_prelude::{MessageId, UserId};
@@ -1105,7 +1107,7 @@ async fn s1f_publication_canonical_change_during_inventory_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn unbound_notice_keeps_the_canonical_nonce_and_hold_leaf_in_its_publication_pg() {
     use crate::db::dispatched_sessions::hosted_execution::{
-        HostedOwner, HostedState, tests::record,
+        HostedOwner, HostedState, test_support::record,
     };
     use crate::services::discord::turn_presence::activity::notice_identity::ExecutionIdentity;
     let id = 69_182_119;

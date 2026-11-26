@@ -446,7 +446,7 @@ where
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -524,7 +524,7 @@ mod notice_settlement;
 mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) mod notice_work;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
@@ -934,8 +934,8 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
-#[cfg(all(test, unix))]
-pub(crate) use transition::scoped_tests::{
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]

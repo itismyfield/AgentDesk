@@ -7,7 +7,7 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, pending, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, pending, wire};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::test_support::{
     Stored, channel_key, seed, shared_on,
@@ -193,7 +193,7 @@ async fn the_promote_gate_holds_only_what_the_host_guard_keeps_pg() {
 #[tokio::test]
 async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{future_schema, record};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
@@ -235,7 +235,7 @@ async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
 #[tokio::test]
 async fn the_promote_gate_leaves_a_herdr_channel_to_its_turn_host_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::record;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
@@ -335,7 +335,9 @@ impl Nameless {
         tmux_name: &str,
     ) {
         use crate::db::dispatched_sessions::hosted_execution::HostedState;
-        use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+        use crate::db::dispatched_sessions::hosted_execution::test_support::{
+            future_schema, record,
+        };
         let seed_row = crate::services::discord::host_key_derivation::tests::seed_row;
         let build = crate::services::discord::adk_session::build_namespaced_session_key;
         let mut row_owner = owner(&channel.to_string());
@@ -427,7 +429,7 @@ async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
 #[tokio::test]
 async fn the_promote_gate_starts_only_the_turn_that_moves_this_node_s_claude_back_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{future_schema, record};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{future_schema, record};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
     let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);

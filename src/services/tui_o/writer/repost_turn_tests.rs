@@ -13,8 +13,8 @@ use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::InitSource;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
-use crate::services::tui_o::writer::tests::actor::*;
-use crate::services::tui_o::writer::tests::{
+use crate::services::tui_o::writer::test_support::*;
+use crate::services::tui_o::writer::test_support::{
     BOT, CHANNEL, FakePort, Harness, Reply, Writer, ledger_path, outcome, piece, unit,
 };
 use crate::services::tui_o::writer::{

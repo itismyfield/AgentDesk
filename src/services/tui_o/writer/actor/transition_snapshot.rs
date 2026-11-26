@@ -168,7 +168,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         #[cfg(test)]
         let _authority_scope =
             super::transition::test_hooks::snapshot_authority_scope(authority.is_some());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::transition::test_hooks::snapshot_built();
         let channel = self.writer.channel();
         let (rotation, checkpoint) = self.sources.transition_rotation();

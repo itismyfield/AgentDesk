@@ -11,6 +11,8 @@ mod migration;
 pub(crate) mod native;
 #[cfg(unix)]
 mod native_binding;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) mod native_support;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
 mod read_stamp;

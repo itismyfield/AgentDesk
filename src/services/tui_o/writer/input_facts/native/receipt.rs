@@ -169,7 +169,7 @@ pub(super) fn candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::tui_input::human_frame::history::v2::{Registry, native_tests::Fixture};
+    use crate::services::tui_input::human_frame::history::v2::{Registry, native_support::Fixture};
     use serde_json::json;
     fn fixture() -> (crate::config::TestRuntimeRootGuard, Fixture, SourceBinding) {
         let guard = crate::config::TestRuntimeRootGuard::new();

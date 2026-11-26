@@ -194,6 +194,7 @@ src/
 │   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
+│   ├── snapshot_reader_support.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
 │   ├── test_instance.rs
@@ -256,6 +257,7 @@ src/
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
+│   │   ├── hosted_execution_support.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── key_promotion.rs
 │   │   ├── key_promotion_pg_tests.rs
@@ -4294,6 +4296,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
 │   │   │   │   ├── real_tests.rs
+│   │   │   │   ├── test_support.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
@@ -4720,6 +4723,7 @@ src/
 │   │   │   │   │   ├── native_binding.rs
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_receipt.rs
+│   │   │   │   │   ├── native_support.rs
 │   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   ├── read_stamp.rs
 │   │   │   │   │   ├── read_stamp_tests.rs
@@ -4918,6 +4922,7 @@ src/
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
+│   │   │   │   ├── scoped_transition_support.rs
 │   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── test_access.rs
 │   │   │   │   ├── transition.rs
@@ -5018,6 +5023,9 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── test_support/
+│   │   │   │   ├── codex_ready.rs
+│   │   │   │   └── transition.rs
 │   │   │   ├── tool_images/
 │   │   │   │   ├── kind_tests.rs
 │   │   │   │   ├── turns.rs
@@ -5048,7 +5056,6 @@ src/
 │   │   │   ├── codex_adoption.rs
 │   │   │   ├── codex_end_proof_tests.rs
 │   │   │   ├── codex_fresh_boundary_tests.rs
-│   │   │   ├── codex_herdr_drive_tests.rs
 │   │   │   ├── codex_launch_cause_tests.rs
 │   │   │   ├── codex_snapshot.rs
 │   │   │   ├── confirm.rs
@@ -5152,6 +5159,7 @@ src/
 │   │   │   ├── suspension.rs
 │   │   │   ├── switch.rs
 │   │   │   ├── switch_tests.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── thread_child_dormant_tests.rs
 │   │   │   ├── thread_child_host_tests.rs
 │   │   │   ├── tool_card_accuracy_tests.rs

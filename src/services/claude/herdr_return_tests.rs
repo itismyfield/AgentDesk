@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use super::*;
 use crate::config::{TestEnvVarGuard, TestRuntimeRootGuard};
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, HostedRecord, load_hosted_execution_pg,
 };

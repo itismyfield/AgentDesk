@@ -44,6 +44,7 @@ from generate_inventory_docs import (  # noqa: E402
     cfg_requires_test,
     is_test_file,
     scan_balanced,
+    test_only_module_files,
 )
 from rust_lex import COMMENT, StripState, blank_segments, cfg_item_end, strip_line  # noqa: E402
 
@@ -150,7 +151,9 @@ def production_rust_files() -> list[Path]:
         if is_test_file(path):
             continue
         files.append(path)
-    return files
+    # A file reached only through a test-gated parent `mod` never builds in production.
+    test_only = test_only_module_files(files, all_files=sorted(SRC_ROOT.rglob("*.rs")))
+    return [path for path in files if path not in test_only]
 
 
 def blank_test_modules(text: str) -> str:

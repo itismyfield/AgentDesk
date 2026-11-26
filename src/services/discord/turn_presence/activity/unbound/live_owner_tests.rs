@@ -20,12 +20,12 @@ const THREAD: u64 = 69_183_950;
 /// Real tmux sessions on the rig's private socket, which is never the host's own server.
 struct HostSessions {
     socket: PathBuf,
-    _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
+    _namespace: crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace,
 }
 impl HostSessions {
     async fn new(rig: &Rig) -> Self {
         let namespace =
-            crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+            crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
                 rig.channel.get(),
                 rig.root.path().join("host.sock"),
             );
@@ -420,7 +420,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
         .unwrap();
     {
         let _failed =
-            crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
+            crate::services::platform::tmux::session_inventory::test_support::ChannelCommand::new(
                 rig.channel.get(),
                 "/usr/bin/false".into(),
             );
@@ -574,7 +574,7 @@ async fn completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_
     let host = HostSessions::new(&rig).await;
     host.start(MANUAL);
     let _namespace =
-        crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+        crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
             other.get(),
             host.socket.clone(),
         );

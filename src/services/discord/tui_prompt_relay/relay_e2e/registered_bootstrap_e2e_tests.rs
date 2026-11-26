@@ -159,7 +159,9 @@ async fn seed(trace: Trace, pool: &sqlx::PgPool, own: &str) {
         }
         Trace::ReturningIdOnly | Trace::RetiredIdOnly => {
             use crate::db::dispatched_sessions::hosted_execution::HostedState;
-            use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+            use crate::db::dispatched_sessions::hosted_execution::test_support::{
+                owner, record, wire,
+            };
             let mut row_owner = owner(&CHANNEL_ID.to_string());
             row_owner.discord_token_hash = own.to_string();
             row_owner.logical_key = tmux_name.clone();

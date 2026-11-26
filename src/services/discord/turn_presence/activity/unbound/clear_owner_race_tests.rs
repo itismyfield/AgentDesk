@@ -680,7 +680,7 @@ async fn canary_conflict_holds(local_conflict: bool, foreign_self: bool, failed_
         )
     });
     let _probe = failed_herdr.then(|| {
-        crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
+        crate::services::platform::tmux::session_inventory::test_support::ChannelCommand::new(
             CANARY_CHANNEL,
             "/usr/bin/false".into(),
         )

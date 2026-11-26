@@ -122,7 +122,7 @@ impl Readiness {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support {
     use super::*;
 

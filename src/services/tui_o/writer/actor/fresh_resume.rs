@@ -11,25 +11,25 @@ pub(super) enum Rescope {
     Busy,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (
     AtomicUsize::new(0),
     std::sync::atomic::AtomicBool::new(false),
 );
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(crate) static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn note_work(owed: usize, unsealed: bool) {
     WORK.0.store(owed, Ordering::SeqCst);
     WORK.1.store(unsealed, Ordering::SeqCst);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn work_for_tests() -> (usize, bool) {
     (WORK.0.load(Ordering::SeqCst), WORK.1.load(Ordering::SeqCst))
 }
@@ -62,7 +62,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .map(|cursor| cursor.source.clone())
             .collect();
         let mut persisted = Ok(());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(enter) = BEFORE_SCOPE_ATTEMPT.with_borrow_mut(Option::take) {
             enter();
         }

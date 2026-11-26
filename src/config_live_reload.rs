@@ -312,7 +312,7 @@ pub(crate) struct TestLiveGuard {
     before_restore: Option<Box<dyn FnOnce() + Send + Sync>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestLiveGuard {
     pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
         assert!(self.before_restore.is_none());
@@ -320,7 +320,7 @@ impl TestLiveGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
         crate::config::test_env_lock::assert_shared_test_env_lock_held();

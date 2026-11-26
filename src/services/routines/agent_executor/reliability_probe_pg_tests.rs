@@ -32,7 +32,9 @@ fn probe_session(provider: &str, name: &str) -> String {
 #[cfg(unix)]
 #[tokio::test]
 async fn fresh_probe_failure_stands_only_for_a_found_legacy_row_pg() {
-    use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, owner, pending, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
+        TOKEN, owner, pending, wire,
+    };
     use crate::services::discord::health::HealthRegistry;
     use crate::services::discord::host_key_derivation::tests::seed_row;
     use crate::services::platform::tmux::PaneLiveness;

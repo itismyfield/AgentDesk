@@ -4,7 +4,7 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Front};
 use crate::services::provider::CancelToken;
 use crate::services::tui_input::human_frame::history::v2::{
-    Registry, native, native_tests::Fixture,
+    Registry, native, native_support::Fixture,
 };
 use crate::services::turn_orchestrator::{PendingQueueItem, QueuePersistenceContext};
 use crate::test_support::wait::{WAIT_CAP, await_within};

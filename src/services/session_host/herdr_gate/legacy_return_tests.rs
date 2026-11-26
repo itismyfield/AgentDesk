@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::services::session_host::herdr::contract::{HerdrOutcome, Witnessed};
 use crate::services::session_host::herdr::model::{HerdrReply, HerdrResult, HerdrSnapshot};
 use crate::services::session_host::herdr::provenance::{ProcessStart, StartIdentity};

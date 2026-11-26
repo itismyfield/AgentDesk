@@ -898,12 +898,12 @@ pub(crate) mod tests {
         let channel = Channel::new(8077002);
         let logical = "i8077-boot-test";
         let key = format!("claude/{}/test-node:{logical}", shared.token_hash);
-        let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner(
+        let mut owner = crate::db::dispatched_sessions::hosted_execution::test_support::owner(
             &channel.get().to_string(),
         );
         owner.discord_token_hash = shared.token_hash.clone();
         owner.logical_key = logical.into();
-        let record = crate::db::dispatched_sessions::hosted_execution::tests::record(
+        let record = crate::db::dispatched_sessions::hosted_execution::test_support::record(
             &owner,
             "boot-nonce",
             HostedState::Bound,

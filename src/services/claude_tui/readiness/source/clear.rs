@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { pub(crate) static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -344,7 +344,7 @@ pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
         {
             return false;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = AFTER_PUBLICATION.with_borrow_mut(Option::take) {
             hook();
         }

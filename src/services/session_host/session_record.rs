@@ -39,7 +39,7 @@ mod tests {
         CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
     };
     use crate::db::dispatched_sessions::HookSessionUpsert;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
         TOKEN, future_schema, owner, pending, record, wire,
     };
     use crate::db::dispatched_sessions::hosted_execution::{

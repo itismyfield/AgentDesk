@@ -90,14 +90,14 @@ impl PaneLivenessOverrideGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for PaneLivenessOverrideGuard {
     fn drop(&mut self) {
         set_pane_liveness_override_for_tests(&self.tmux_session_name, None);
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn pane_liveness_override_for_tests(
     tmux_session_name: &str,
 ) -> Option<crate::services::platform::tmux::PaneLiveness> {
@@ -117,7 +117,7 @@ fn pane_liveness_override_for_tests(
 pub async fn probe_tmux_session_pane_liveness(
     tmux_session_name: &str,
 ) -> crate::services::platform::tmux::PaneLiveness {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = pane_liveness_override_for_tests(tmux_session_name) {
         return forced;
     }

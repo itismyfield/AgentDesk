@@ -66,8 +66,9 @@ async fn m1_retire_cas_failure_preserves_successor_pg() {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let channel = "5340115";
-    let owner = hosted_execution::tests::owner(channel);
-    let record = hosted_execution::tests::record(&owner, "execution-cas", HostedState::Bound);
+    let owner = hosted_execution::test_support::owner(channel);
+    let record =
+        hosted_execution::test_support::record(&owner, "execution-cas", HostedState::Bound);
     let key = "claude/discord_0123456789abcdef/test-node:AgentDesk-claude-m1cas";
     sqlx::query("INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash, channel_id, hosted_execution) VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4)")
         .bind(key).bind(&owner.discord_token_hash).bind(channel)
@@ -76,7 +77,7 @@ async fn m1_retire_cas_failure_preserves_successor_pg() {
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
         .bind(key)
         .bind(
-            serde_json::to_value(hosted_execution::tests::record(
+            serde_json::to_value(hosted_execution::test_support::record(
                 &owner,
                 "successor-cas",
                 HostedState::Bound,
