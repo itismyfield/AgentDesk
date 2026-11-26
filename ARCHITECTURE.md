@@ -4990,14 +4990,9 @@ src/
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── tool_images/
-│   │   │   │   ├── derive.rs
 │   │   │   │   ├── kind_tests.rs
-│   │   │   │   ├── notice.rs
-│   │   │   │   ├── reconfirm.rs
-│   │   │   │   ├── select.rs
 │   │   │   │   ├── turns.rs
-│   │   │   │   ├── turns_tests.rs
-│   │   │   │   └── wiring_tests.rs
+│   │   │   │   └── turns_tests.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs

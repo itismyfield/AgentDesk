@@ -122,7 +122,6 @@ async fn retire_child(
         owed.binding_pending,
         owed.verified_work,
         owed.posting,
-        owed.images,
     ];
     if debt.iter().any(|count| *count != 0) {
         return Err(format!("the child writer still owes output: {debt:?}"));
