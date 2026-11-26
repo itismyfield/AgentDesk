@@ -12,11 +12,12 @@ use crate::services::discord::herdr_terminate::{IdleEnd, expire_idle_herdr};
 pub(super) async fn herdr_idle_kill(
     state: &AppState,
     pool: &sqlx::PgPool,
-    session_key: &str,
-    tmux_name: &str,
+    (session_key, tmux_name): (&str, &str),
+    minimum_idle_minutes: u64,
 ) -> Option<(StatusCode, Json<Value>)> {
     let registry = state.health_registry.as_deref();
-    let reply = match expire_idle_herdr(registry, pool, session_key).await? {
+    let expired = expire_idle_herdr(registry, pool, session_key, minimum_idle_minutes);
+    let reply = match expired.await? {
         Ok(IdleEnd {
             closed,
             disconnected,

@@ -625,6 +625,9 @@ async fn terminate_scoped(
         #[cfg(test)]
         run_probe(&AFTER_CLOSE).await;
         read_end(target, record.clone()).await?;
+        if let Some(auto) = &auto {
+            auto.release().await;
+        }
         if record.state != HostedState::Retired {
             retire_confirmed(pool, &row, record).await?;
         }

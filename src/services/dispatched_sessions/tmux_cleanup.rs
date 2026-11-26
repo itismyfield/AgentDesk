@@ -115,12 +115,11 @@ pub(super) async fn kill_tmux_session_impl(
     if let Err(refusal) = host {
         // The idle policy's Herdr row gets the idle end instead of a preserve alarm.
         #[cfg(unix)]
-        if reason_is_idle_cleanup
-            && minimum_idle_minutes.is_some()
+        if let Some(minutes) = minimum_idle_minutes.filter(|_| reason_is_idle_cleanup)
             && refusal == crate::services::tmux_turn_liveness::cleanup_host::CleanupHostRefusal::NotLegacyTmux
         {
-            let herdr = super::herdr_idle::herdr_idle_kill(state, pool, session_key, &tmux_name);
-            if let Some(reply) = herdr.await {
+            let herdr = super::herdr_idle::herdr_idle_kill;
+            if let Some(reply) = herdr(state, pool, (session_key, &tmux_name), minutes).await {
                 return reply;
             }
         }
