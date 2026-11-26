@@ -5,8 +5,7 @@ const STALE_LINKED_SESSION_MS = 10 * 60_000;
 export type AgentWarningCode =
   | "missing_work_detail"
   | "no_discord_route"
-  | "stale_linked_session"
-  | "unassigned";
+  | "stale_linked_session";
 
 export interface AgentWarning {
   code: AgentWarningCode;
@@ -81,15 +80,6 @@ export function getAgentWarnings(
       .map((session) => cleanText(session.session_info) ?? cleanText(session.name))
       .find((value): value is string => Boolean(value))
     ?? null;
-
-  if (!agent.department_id) {
-    warnings.push({
-      code: "unassigned",
-      severity: "info",
-      ko: "부서 미배정",
-      en: "Department unassigned",
-    });
-  }
 
   if (agent.status === "working" && !specificWorkSummary) {
     warnings.push({

@@ -3,7 +3,6 @@ import type {
   Agent,
   CompanySettings,
   DashboardStats,
-  Department,
   DispatchedSession,
 } from "../types";
 import { DEFAULT_SETTINGS } from "../types";
@@ -11,7 +10,6 @@ import { DEFAULT_SETTINGS } from "../types";
 // Shell essentials that gate the first frame; heavy session/stats payloads stream in parallel without blocking AppShell.
 export interface BootstrapData {
   agents: Agent[];
-  departments: Department[];
   /** Present when supplied by a caller/mock; otherwise loaded in parallel via fetchBootstrapSessions. */
   sessions?: DispatchedSession[] | null;
   /** Present when supplied by a caller/mock; otherwise loaded in parallel via fetchBootstrapStats. */
@@ -31,14 +29,12 @@ function safe<T>(promise: Promise<T>, fallback: T): Promise<T> {
 }
 
 export async function fetchDashboardBootstrap(): Promise<BootstrapData> {
-  const [agents, departments, settings] = await Promise.all([
+  const [agents, settings] = await Promise.all([
     safe(api.getAgents(), [] as Agent[]),
-    safe(api.getDepartments(), [] as Department[]),
     safe(api.getSettings(), DEFAULT_SETTINGS as Partial<CompanySettings>),
   ]);
   return {
     agents,
-    departments,
     settings: { ...DEFAULT_SETTINGS, ...settings } as CompanySettings,
   };
 }
