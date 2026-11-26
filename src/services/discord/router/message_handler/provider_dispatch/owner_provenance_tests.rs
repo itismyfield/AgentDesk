@@ -255,7 +255,7 @@ async fn owned(shared: &Arc<SharedData>, context: Value) -> (String, Result<(), 
     let granted = mailbox.v2_request(|slot| {
         let owner = slot.as_mut().ok_or("no owner")?;
         let front = owner.front().ok_or("no front")?;
-        owner.grant_front(&front).map(|()| front)
+        owner.grant_front(&front).map(|_| front)
     });
     let granted = granted.await.unwrap();
     let started = start_idle(Arc::clone(shared), OWNED, granted).await;

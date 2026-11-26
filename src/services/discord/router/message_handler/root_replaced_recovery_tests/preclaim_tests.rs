@@ -14,6 +14,8 @@ use tower::ServiceExt;
 
 #[path = "handoff_launch_tests.rs"]
 mod handoff_launch;
+#[path = "preclaim_retry_wait_tests.rs"]
+mod retry_wait_tests;
 
 struct PolicyLauncher {
     io: Arc<Launcher>,

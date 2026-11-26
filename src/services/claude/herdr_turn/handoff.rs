@@ -155,10 +155,15 @@ pub(super) fn launched_source(
     launch.provider_root = home.map(|home| home.join("projects"));
     let outcome = runtime.block_on(launch_herdr_session(turn.pool, launch, prepare, host));
     let nonce = launched(outcome).map_err(|e| launch_error("admit_create_evidence", e))?;
-    let resume = resumed.is_some().then_some(nonce.as_str());
     let cancel = turn.cancel.as_deref();
-    session_started(runtime, &mut hooks, (&session_id, resume), cancel)
-        .map_err(|e| launch_error("session_start", e))?;
+    session_started(
+        runtime,
+        &mut hooks,
+        (&session_id, &nonce, resumed.is_some()),
+        cancel,
+    )
+    .map_err(|e| super::retry_probe::armed(turn, &session_id, e))
+    .map_err(|e| launch_error("session_start", e))?;
     if let Some(captured) = fence {
         runtime
             .block_on(provider_resume_fence::release_pg(turn.pool, &captured))
@@ -1105,5 +1110,20 @@ mod tests {
             vary(&mut other);
             assert_eq!(other.judged((0, 0), Some(&retired)), refused);
         }
+    }
+
+    #[test]
+    fn resume_start_only_then_explicit_terminate_resumes_with_closing_tombstone() {
+        let _root_guard = crate::config::TestRuntimeRootGuard::new();
+        let session = uuid::Uuid::new_v4().to_string();
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let mut start = ResumeStart::new(&session);
+        start.nonce.clone_from(&nonce);
+        start.marker.clone_from(&nonce);
+        start.logged_nonce = Some(nonce.clone());
+        crate::services::session_host::shut_execution_for_test(&nonce);
+        let retired = hosted_row(owner(), &nonce, HostedState::Retired);
+        assert_eq!(start.judged((0, 0), Some(&retired)), Ok(Some(session)));
+        assert!(crate::services::session_host::execution_closing(&nonce));
     }
 }

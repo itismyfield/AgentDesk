@@ -1,12 +1,16 @@
 //! Explicit termination of one Herdr execution, by the operator route, a user clear or an HTTP
 //! force cancel, and the close of an execution no row records.
 pub(crate) mod http_force;
+mod never_started;
 pub(crate) mod restart_recovery;
 mod retired_wake;
 pub(crate) mod root_replaced;
 
 pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
 pub(crate) use crate::services::turn_orchestrator::RetiredExclusion;
+pub(in crate::services::discord) use never_started::{
+    NeverStartedTerminate, terminate_never_started,
+};
 
 use super::health::HealthRegistry;
 use super::turn_finalizer::cleanup::SyntheticClaimSnapshot;
@@ -418,7 +422,7 @@ pub(in crate::services::discord) async fn terminate_explicit_herdr(
         by_pane,
     } = request.into();
     let resume_retired = after.is_some();
-    match terminate_scoped(request, shared, pool, None, resume_retired, by_pane).await {
+    match terminate_scoped(request, shared, pool, None, resume_retired, by_pane, None).await {
         Ok((exclusion, wake)) => {
             let result = match after {
                 Some(after) => after(exclusion).await,
@@ -454,6 +458,7 @@ async fn terminate_scoped(
     expected: Option<http_force::Expected>,
     resume_retired: bool,
     by_pane: bool,
+    never_started: Option<&NeverStartedTerminate>,
 ) -> Result<(RetiredExclusion, retired_wake::RetiredWake), TerminationResult> {
     use TerminationResult::{Indeterminate, Refused};
     if !terminate_enabled() {
@@ -475,6 +480,9 @@ async fn terminate_scoped(
     {
         return Err(Refused("execution identity differs".into()));
     }
+    if never_started.is_some_and(|asked| !asked.admits(record)) {
+        return Err(Refused("execution is not a never-started pending".into()));
+    }
     let Some(provider) = ProviderKind::from_str(&record.owner.provider) else {
         return Err(Refused("unknown provider".into()));
     };
@@ -490,6 +498,10 @@ async fn terminate_scoped(
     let turn = capture_turn(&shared, &provider, channel)
         .await
         .map_err(Refused)?;
+    // An automatic end settles no turn: any turn holding the channel refuses it before a fence.
+    if never_started.is_some() && turn.is_some() {
+        return Err(Refused("turn active".into()));
+    }
     #[cfg(test)]
     run_probe(&AFTER_CAPTURE).await;
     let Ok(transition) = shared.session_transition_locks.acquire(channel).await else {
@@ -530,11 +542,13 @@ async fn terminate_scoped(
         })
     };
     let fence = if let Some(target) = &target {
-        Arc::new(
-            target
+        let shut = match never_started {
+            Some(asked) => asked.fence(&shared, channel, record, target).await,
+            None => target
                 .termination_fence()
-                .map_err(|error| Refused(format!("{error:?}")))?,
-        )
+                .map_err(|error| Refused(format!("{error:?}"))),
+        };
+        Arc::new(shut?)
     } else {
         let probe = herdr_endpoints()
             .retired_probe(record)

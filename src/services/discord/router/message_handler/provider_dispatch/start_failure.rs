@@ -1,8 +1,11 @@
 use super::owner_input::OwnerTurn;
 use super::*;
+use crate::services::claude::herdr_turn::retry_probe::CauseRead;
+use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::discord::inflight::row_removed;
 use crate::services::discord::queue_io::input_owner::drive::{Front, FrontClaim};
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
+use crate::services::discord::queue_io::input_owner::held_watch;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem, RetryWaitCause};
 
 #[derive(Clone, Copy, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -371,15 +374,23 @@ impl Failure {
         watch: Result<Option<row_removed::Watch>, String>,
         result: Result<(), String>,
     ) -> Result<(), String> {
+        let read = crate::services::claude::herdr_turn::take_retry_probe();
         let Err(error) = result else { return Ok(()) };
         let bound = crate::services::claude::herdr_turn::take_owner_bound_failure();
-        if turn
+        let stopped = turn
             .cancel
             .cancelled
             .load(std::sync::atomic::Ordering::Acquire)
-            || turn.cancel.native_stop.receipt_sink().stopped_before_key()
-            || (!self.recovery.repaired() && !bound && error.starts_with("NotSent("))
+            || turn.cancel.native_stop.receipt_sink().stopped_before_key();
+        let unsent = !self.recovery.repaired() && !bound && error.starts_with("NotSent(");
+        // A refusal typed by a cause a later look may clear waits; it counts no failed start.
+        if unsent
+            && !stopped
+            && let Some(cause) = RetryWaitCause::from_refusal(&error)
         {
+            self.wait_for_retry(turn.channel_id, cause, read);
+        }
+        if stopped || unsent {
             return Err(error);
         }
         let kind = match turn.host {
@@ -404,6 +415,52 @@ impl Failure {
         }
     }
 }
+impl Failure {
+    /// The exact claim waits as `cause`; `read` then watches that cause for the drive.
+    fn wait_for_retry(&self, channel: u64, cause: RetryWaitCause, read: Option<CauseRead>) {
+        let (front, number) = (self.front.clone(), self.number);
+        let now = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let entered = self.mailbox.v2_request(move |slot| {
+            let owner = slot.as_mut().ok_or("V2 not adopted")?;
+            owner.enter_retry_wait_claimed((&front, number), cause, now)
+        });
+        match tokio::runtime::Handle::current().block_on(entered) {
+            Ok(Some(wait_seq)) => {
+                if let Some(read) = read {
+                    let (mailbox, message) = (self.mailbox.clone(), self.front.1.message_id);
+                    held_watch::arm(channel, released(mailbox, message, wait_seq, read));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(channel_id = channel, %error, "retry wait not recorded"),
+        }
+    }
+}
+
+/// Ends wait `wait_seq` of front `message` once `read` sees its cause cleared; a wait that moved
+/// on since ends the watch instead.
+fn released(
+    mailbox: ChannelMailboxHandle,
+    message: u64,
+    wait_seq: u64,
+    mut read: CauseRead,
+) -> held_watch::ScreenProbe {
+    Box::new(move || match read() {
+        Screen::Ready => {
+            let release = mailbox.v2_request(move |slot| {
+                let owner = slot.as_mut().ok_or("V2 not adopted")?;
+                owner.release_retry_wait(message, wait_seq)
+            });
+            match tokio::runtime::Handle::current().block_on(release) {
+                Ok(true) => Screen::Ready,
+                Ok(false) => Screen::Gone,
+                Err(_) => Screen::Unknown,
+            }
+        }
+        other => other,
+    })
+}
+
 pub(super) fn run(
     turn: StreamingTurn<'_>,
     start: ReplayStart,

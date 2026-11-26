@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod cold_source;
 pub(crate) mod effort_restart;
+pub(crate) mod retry_wait;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SnapshotV2 {
@@ -58,6 +59,9 @@ pub(crate) struct SnapshotV2 {
     pub(crate) unfinished_handoff: Option<ClaudeHandoffJournal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) effort_restart: Option<effort_restart::EffortRestart<PendingQueueItem>>,
+    /// The front's retry wait and the last wait number issued.
+    #[serde(default, skip_serializing_if = "retry_wait::Waits::is_unused")]
+    pub(crate) retry: retry_wait::Waits,
 }
 
 pub(crate) const ROUTINE_DELIVERY_DEADLINE_FIELD: &str = "routine_delivery_deadline_ms";

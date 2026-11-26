@@ -192,7 +192,7 @@ async fn reserve(rig: &Rig, logical: &str) -> Result<(), String> {
     let granted = rig.mailbox.v2_request(|slot| {
         let owner = slot.as_mut().unwrap();
         let front = owner.front().ok_or("no front")?;
-        owner.grant_front(&front).map(|()| front)
+        owner.grant_front(&front).map(|_| front)
     });
     let front = granted.await?;
     let claim = drive::claim_turn(&rig.mailbox, front.1.message_id, &front).await?;

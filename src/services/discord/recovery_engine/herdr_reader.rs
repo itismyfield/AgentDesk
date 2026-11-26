@@ -312,6 +312,17 @@ fn reconnect_pass(
         pass.results.extend(after);
     });
     for (channel, provider) in completed {
+        // The retired recovery ends a front's wait held on it, so the kickoff starts that front.
+        if provider == shared.provider {
+            let mailbox = shared.mailbox(crate::services::discord::ChannelId::new(channel));
+            let released = mailbox.v2_request(|slot| match slot.as_mut() {
+                Some(owner) => owner.release_root_recovery_wait(),
+                None => Ok(false),
+            });
+            if let Err(error) = runtime.block_on(released) {
+                tracing::warn!(channel, %error, "root recovery wait not released");
+            }
+        }
         crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
             shared.clone(),
             provider,

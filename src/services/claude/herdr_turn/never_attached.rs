@@ -26,21 +26,16 @@ pub(super) fn probe_again(
     )))
 }
 
-/// Why the turn of execution `record`, whose session `session_id` logged no start, is refused.
+/// Why the turn of execution `record`, whose session `session_id` logged no start or whose pane
+/// is not `proven` its provider's, is refused.
 pub(super) fn refusal(
     turn: &HerdrTurn<'_>,
-    runtime: &Handle,
-    ports: &dyn HerdrTurnPorts,
     record: &HostedExecution,
     session_id: &str,
+    proven: Result<(), String>,
 ) -> String {
     let nonce = &record.execution_nonce;
     let pane = record.location.as_ref().map(|location| &location.pane_id);
-    let proven = match (&record.expected, pane) {
-        (Some(_), _) => Ok(()),
-        (None, Some(_)) => probe_again(turn, runtime, ports).map(drop),
-        (None, None) => Err("no pane recorded".to_string()),
-    };
     let terminate = crate::services::session_host::operation_policy::terminate_enabled();
     let context = crate::services::platform::active_provider_context("claude");
     let session_key = context.and_then(|context| context.session_key);
