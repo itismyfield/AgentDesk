@@ -63,6 +63,43 @@ Counterexamples checked against the w2 code:
 - Foreign idle: `observe` mapped every `Idle(_)` to `end`, closing the parent on a child's
   `turn_aborted`.
 
+## S2b wiring: GC of openers and calls
+
+S2b adds `GcRule = "persist"` and `MissedEndCloses`. GC keeps no turn opener; before it
+collects an open turn's opener or a pending call, the writer records that turn's span or the
+call's turn (`ImageTurnOpened`, `ImageCall`). A verified end that the restart projection
+cannot apply for lack of its opener still closes the image turn, after row preparation.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bPersistA/B/C/E/EFail/F, MidPrompt, LateCall, ForeignIdle, Unresolved | persist + cut | - | the wired rule |
+| ToolImageS2bPersistLateSameHash | o1 c i o2 h1 s: the call's image-less turn ends, the next turn posts h1, then the late result carries h1 | - | the late result keeps its own turn and upload |
+| ToolImageS2bPersistMutNoCut | persist, no cut | NoSilentLoss | the cut is required once openers are collected |
+| ToolImageS2bSpanE / S2bSpanMidPrompt / S2bSpanLateSameHash | S2b w1 rule: only a turn with an image span keeps its opener | AttributionTrue (+AtMostOnce or NoSilentLoss) | opener or call collected before restart: the image falls to the edge or the next turn |
+
+## S2b re-settlement past a later body
+
+`BodyRule` lets another serial's body post past an Unresolved attempt's anchor, as the body
+FIFO goes on after that result. Under `"w4"` re-settlement with no exact match reads that
+body as an altered post and keeps the attempt Unresolved; `"owned"` skips posts the ledger
+gave other serials, so a missing image ends in its retry and omission notice.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bReconfirmBehind | RecD, persist, `"owned"`, two failures | - | the fixed rule |
+| ToolImageS2bReconfirmBehindW4 | same, `"w4"` | EventuallyAccounted | the image stays Unresolved for good |
+
+## S2b image poll and a restored body Prepared
+
+`SelectSettle` starts with a body's Prepared left open by a crash. The image poll settles it
+under `"always"` (w5: every poll) or only when an image step is due under `"due"`; image and
+notice attempts wait for it either way.
+
+| cfg | Setting | Broken rules | Note |
+|---|---|---|---|
+| ToolImageS2bSelectSettleDue | RecF, persist, `"due"` | - | the body's Prepared waits for its delivery or a due image step |
+| ToolImageS2bSelectSettleAlways | same, `"always"` | NoImagelessSettle | the first poll settles it before any image step |
+
 ## Limits
 
 Spool segments are one record each. History is truthful unless `Lag` hides one arrived post
