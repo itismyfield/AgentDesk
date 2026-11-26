@@ -135,7 +135,10 @@ pub(in crate::services::discord) struct ReadRefusal {
 }
 
 impl ReadRefusal {
-    fn new(reason: UnavailableReason, detail: impl ToString) -> Self {
+    pub(in crate::services::discord) fn new(
+        reason: UnavailableReason,
+        detail: impl ToString,
+    ) -> Self {
         Self {
             reason,
             detail: detail.to_string(),
@@ -207,7 +210,7 @@ pub(crate) enum RetryClass {
 
 /// Unavailable over Parked over Ready, decided only after every read; the first refusal names
 /// the reason.
-fn classify_reads<'a>(
+pub(in crate::services::discord) fn classify_reads<'a>(
     reads: impl IntoIterator<Item = &'a SourceRead>,
     hold_preparation: bool,
 ) -> RetryClass {
@@ -420,7 +423,3 @@ impl BacklogLayers<'_> {
         )
     }
 }
-
-#[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;

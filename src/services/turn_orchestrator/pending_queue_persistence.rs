@@ -92,7 +92,7 @@ fn pending_queue_root() -> Option<PathBuf> {
     crate::services::discord::runtime_store::discord_pending_queue_root()
 }
 
-pub(super) fn pending_queue_file_path(
+pub(crate) fn pending_queue_file_path(
     provider: &ProviderKind,
     token_hash: &str,
     channel_id: ChannelId,

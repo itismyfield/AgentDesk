@@ -88,7 +88,7 @@ impl SnapshotMeta {
 
 pub(super) mod compat;
 mod snapshot;
-mod v2;
+pub(crate) mod v2;
 #[cfg(unix)]
 pub(crate) use v2::actor::proves_not_sent;
 pub(crate) use v2::actor::v2_queue;
@@ -105,7 +105,7 @@ pub(crate) use v2_types::OwedDrop;
 pub(crate) use v2_types::cold_source::BindingIntent;
 #[cfg(unix)]
 pub(crate) use v2_types::cold_source::PreKeyPin;
-mod v2_types;
+pub(crate) mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 pub(crate) use v2_types::effort_restart as effort_intent;
 
