@@ -182,18 +182,24 @@ impl Failure {
     ) -> super::owner_input::Reply {
         let (mailbox, front, number) = (self.mailbox.clone(), self.front.clone(), self.number);
         Arc::new(move |result| {
-            tracing::trace!(turn_nonce = token.turn_nonce(), "owner reply");
             let front = front.clone();
-            // Only an unreserved exact claim waits for the failure commit; EffectOwned settles now.
+            // An unreserved exact claim waits for the failure commit, and a refusal no key followed
+            // for its row's rewind even after a reserve spent the claim; EffectOwned settles now.
+            let unsent = result
+                .as_ref()
+                .is_err_and(|error| error.starts_with("NotSent("));
+            let untouched =
+                unsent && crate::services::provider::herdr_before_start::ended_untouched(&token);
             let before_input = result.is_err()
-                && tokio::runtime::Handle::current()
-                    .block_on(mailbox.v2_request(move |slot| {
-                        Ok(slot.as_ref().is_some_and(|owner| {
-                            owner.claim_number() == number
-                                && owner.claimed(front.1.message_id, &front)
+                && (untouched
+                    || tokio::runtime::Handle::current()
+                        .block_on(mailbox.v2_request(move |slot| {
+                            Ok(slot.as_ref().is_some_and(|owner| {
+                                owner.claim_number() == number
+                                    && owner.claimed(front.1.message_id, &front)
+                            }))
                         }))
-                    }))
-                    .unwrap_or(true);
+                        .unwrap_or(true));
             if !before_input {
                 reply(result);
             }
@@ -379,11 +385,12 @@ impl Failure {
         let read = crate::services::claude::herdr_turn::take_retry_probe();
         let Err(error) = result else { return Ok(()) };
         let bound = crate::services::claude::herdr_turn::take_owner_bound_failure();
-        let stopped = turn
+        let cancelled = turn
             .cancel
             .cancelled
-            .load(std::sync::atomic::Ordering::Acquire)
-            || turn.cancel.native_stop.receipt_sink().stopped_before_key();
+            .load(std::sync::atomic::Ordering::Acquire);
+        let before_key = turn.cancel.native_stop.receipt_sink().stopped_before_key();
+        let stopped = cancelled || before_key;
         let unsent = !self.recovery.repaired() && !bound && error.starts_with("NotSent(");
         // A refusal typed by a cause a later look may clear waits; it counts no failed start.
         if unsent
@@ -393,8 +400,11 @@ impl Failure {
             self.wait_for_retry(turn.channel_id, cause, read);
         }
         if stopped || unsent {
-            // No stop took the attempt: a row no key followed leaves before the front may retry.
-            if !stopped {
+            // A cleanup cancel (the producer's own pre-key unwind) publishes no cause; a stop does,
+            // and keeps the row for its own settlement.
+            let cleanup =
+                turn.cancel.is_completion_cleanup() && turn.cancel.cancel_source_kind().is_none();
+            if unsent && !before_key && (!cancelled || cleanup) {
                 herdr_unsent_unwind::unwind(turn, self.front.1.message_id);
             }
             return Err(error);

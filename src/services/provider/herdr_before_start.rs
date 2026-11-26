@@ -245,6 +245,20 @@ pub(crate) fn seal_exit(
     decision
 }
 
+/// Whether this token's input ended before its first key reached the pane.
+#[cfg(unix)]
+fn ended_untouched_locked(input: &HerdrInputState) -> bool {
+    input.submission == HerdrSubmission::Unsubmitted && input.phase == InputPhase::FinishedUntouched
+}
+
+/// Whether this token's Herdr input ended Unsubmitted and FinishedUntouched.
+#[cfg(unix)]
+pub(crate) fn ended_untouched(token: &CancelToken) -> bool {
+    token.herdr_interrupt_state().is_some_and(|state| {
+        ended_untouched_locked(&state.submission.lock().unwrap_or_else(|e| e.into_inner()))
+    })
+}
+
 /// Seals a normal exit for an attempt that ended before its first key with no stop taken, so its
 /// row can be rewound: a stop taken after this is late. False changes nothing.
 #[cfg(unix)]
@@ -253,8 +267,7 @@ pub(crate) fn seal_untouched_exit(token: &CancelToken) -> bool {
         return false;
     };
     let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
-    let untouched = input.submission == HerdrSubmission::Unsubmitted
-        && input.phase == InputPhase::FinishedUntouched
+    let untouched = ended_untouched_locked(&input)
         && !state.user_stop.load(Ordering::Acquire)
         && matches!(input.exit, None | Some(ExitDecision::Normal));
     if untouched {
