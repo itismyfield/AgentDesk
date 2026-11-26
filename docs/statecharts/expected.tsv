@@ -1929,6 +1929,10 @@ session-lifecycle/TmuxSessionRawAliasProviderDefault.cfg	TmuxSession	RawProvider
 session-lifecycle/TmuxSessionRawAliasUnnormalized.cfg	TmuxSession	RawAliasReachesRow,NoDeadlock	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
 session-relay/HeadlessIdleReplayCurrent.cfg	HeadlessIdleReplay	NoDuplicate	-
+session-relay/HeadlessIdleReplayCursorCurrent.cfg	HeadlessIdleReplay	-	ReadStartAdvances,LaterAnswerPosts
+session-relay/HeadlessIdleReplayCursorNoAdvance.cfg	HeadlessIdleReplay	-	ReadStartAdvances,LaterAnswerPosts
+session-relay/HeadlessIdleReplayCursorTarget.cfg	HeadlessIdleReplay	-	-
+session-relay/HeadlessIdleReplayCursorUnsafePrefix.cfg	HeadlessIdleReplay	NoUnpostedPrefixSkipped	-
 session-relay/HeadlessIdleReplayEofRange.cfg	HeadlessIdleReplay	NoQuietLoss	EveryAnswerPosts
 session-relay/HeadlessIdleReplayNoLink.cfg	HeadlessIdleReplay	NoDuplicate	-
 session-relay/HeadlessIdleReplayTarget.cfg	HeadlessIdleReplay	-	-

@@ -2,7 +2,8 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANT Mode
-ASSUME Mode \in {"Current", "Target", "NoLink", "EofRange"}
+ASSUME Mode \in {"Current", "Target", "NoLink", "EofRange",
+                 "CursorCurrent", "CursorTarget", "CursorNoAdvance", "CursorUnsafePrefix"}
 
 VARIABLE s
 vars == <<s>>
@@ -98,4 +99,106 @@ Spec == Init /\ [][Next]_vars
 NoDuplicate == \A t \in Turns: s.posts[t] <= 1
 NoQuietLoss == \A t \in s.retired: s.posts[t] >= 1
 EveryAnswerPosts == \A t \in Turns: <> (t \in s.available /\ s.posts[t] >= 1)
+
+\* Refine the already-Sent, post-grace AppendedTail path with the actual
+\* scanner cursor and the ordered sink's independently parsed read window.
+WindowBytes == 1048576
+PrefixEnd == 75
+SentAnswerEnd == 706908
+LaterAnswerEnd == 1312781
+FirstFrameEnd == 1040066
+PrefixKinds == {"Sentinel", "Visible", "Failed", "Pending"}
+
+CursorInit == \E kind \in PrefixKinds:
+    s = [prefix |-> kind, cursor |-> 0, committed |-> 0, phase |-> "Scan",
+         frameStart |-> 0, frameEnd |-> 0, laterAvailable |-> FALSE,
+         prefixChecked |-> FALSE, outboxPosts |-> 1, idlePostsA |-> 0,
+         visiblePrefixPosts |-> 0, idlePostsB |-> 0, skippedA |-> FALSE]
+
+CursorAppend == /\ ~s.laterAvailable
+                /\ s' = [s EXCEPT !.laterAvailable = TRUE]
+
+\* An earlier owned prefix is first Pending, then Sent and actually visible.
+\* A failed headless row is no longer an owner; its terminal needs idle delivery.
+CursorConfirmPrefix == /\ s.prefix = "Pending"
+                       /\ s' = [s EXCEPT !.prefix = "Sent", !.visiblePrefixPosts = 1]
+
+CursorHasPrefixProof == s.cursor = 0 /\ s.prefix = "Sent"
+CursorInSentAnswer == PrefixEnd <= s.cursor /\ s.cursor < SentAnswerEnd
+CursorCanSkipGap == /\ s.cursor = 0 /\ s.prefix \notin {"Pending", "Sent"}
+                    /\ s.prefix = "Sentinel" \/ s.committed >= PrefixEnd
+                         \/ Mode = "CursorUnsafePrefix"
+
+CursorPrefixProof == /\ s.phase = "Scan" /\ CursorHasPrefixProof
+                     /\ s' = [s EXCEPT !.cursor = PrefixEnd]
+
+CursorGapAdvance == /\ s.phase = "Scan" /\ CursorCanSkipGap
+                    /\ Mode \in {"CursorTarget", "CursorUnsafePrefix"}
+                    /\ s' = [s EXCEPT !.cursor = PrefixEnd]
+
+\* The mutation recognizes the prefix but drops the local cursor write.
+CursorObserveWithoutAdvance == /\ s.phase = "Scan" /\ CursorCanSkipGap
+                               /\ Mode = "CursorNoAdvance" /\ ~s.prefixChecked
+                               /\ s' = [s EXCEPT !.prefixChecked = TRUE]
+
+CursorConsumeSent == /\ s.phase = "Scan" /\ CursorInSentAnswer
+                     /\ s' = [s EXCEPT !.cursor = SentAnswerEnd, !.skippedA = TRUE]
+
+CursorWidth == s.cursor + WindowBytes
+CursorLength == IF s.laterAvailable THEN LaterAnswerEnd ELSE SentAnswerEnd
+CursorWindowEnd ==
+    LET newlines == {0, PrefixEnd, SentAnswerEnd, FirstFrameEnd, LaterAnswerEnd}
+        complete == {end \in newlines: end <= CursorWidth /\ end <= CursorLength}
+    IN CHOOSE end \in complete: \A other \in complete: other <= end
+
+CursorOpenWindow ==
+    /\ s.phase = "Scan" /\ s.cursor < CursorLength
+    /\ ~CursorInSentAnswer /\ ~CursorHasPrefixProof /\ s.prefix # "Pending"
+    /\ ~(CursorCanSkipGap /\ Mode \in {"CursorTarget", "CursorUnsafePrefix"})
+    /\ s' = [s EXCEPT !.phase = "Frame", !.frameEnd = CursorWindowEnd,
+                      !.frameStart = IF s.committed > s.cursor THEN s.committed ELSE s.cursor]
+
+CursorPostVisiblePrefix ==
+    /\ s.phase = "Frame" /\ s.frameStart < PrefixEnd /\ PrefixEnd <= s.frameEnd
+    /\ s.prefix \in {"Visible", "Failed"} /\ s.visiblePrefixPosts = 0
+    /\ s' = [s EXCEPT !.visiblePrefixPosts = 1, !.committed = PrefixEnd]
+
+CursorOwesVisiblePrefix == /\ s.prefix \in {"Visible", "Failed"}
+                           /\ s.frameStart < PrefixEnd /\ s.visiblePrefixPosts = 0
+
+CursorSinkSkip == /\ s.phase = "Frame" /\ ~CursorOwesVisiblePrefix
+                  /\ s.frameStart < SentAnswerEnd /\ SentAnswerEnd <= s.frameEnd
+                  /\ s.frameEnd < LaterAnswerEnd
+                  /\ s' = [s EXCEPT !.phase = "Scan", !.skippedA = TRUE]
+
+CursorPostB == /\ s.phase = "Frame" /\ s.frameEnd = LaterAnswerEnd
+               /\ SentAnswerEnd <= s.frameStart /\ s.frameStart < LaterAnswerEnd
+               /\ s' = [s EXCEPT !.phase = "Scan", !.idlePostsB = @ + 1,
+                                 !.committed = LaterAnswerEnd]
+
+CursorRetireCommitted ==
+    /\ s.phase = "Frame" /\ s.frameEnd <= s.frameStart
+    /\ s' = [s EXCEPT !.phase = "Scan", !.cursor = s.frameEnd]
+
+CursorDone == s.cursor = LaterAnswerEnd /\ UNCHANGED vars
+
+CursorNext == CursorAppend \/ CursorConfirmPrefix \/ CursorPrefixProof \/ CursorGapAdvance
+              \/ CursorObserveWithoutAdvance \/ CursorConsumeSent \/ CursorOpenWindow
+              \/ CursorPostVisiblePrefix \/ CursorSinkSkip \/ CursorPostB
+              \/ CursorRetireCommitted \/ CursorDone
+
+CursorSpec == CursorInit /\ [][CursorNext]_vars
+              /\ WF_vars(CursorAppend) /\ WF_vars(CursorConfirmPrefix)
+              /\ WF_vars(CursorPrefixProof) /\ WF_vars(CursorGapAdvance)
+              /\ WF_vars(CursorObserveWithoutAdvance) /\ WF_vars(CursorConsumeSent)
+              /\ WF_vars(CursorOpenWindow) /\ WF_vars(CursorPostVisiblePrefix)
+              /\ WF_vars(CursorSinkSkip) /\ WF_vars(CursorPostB)
+              /\ WF_vars(CursorRetireCommitted)
+
+ASkippedBExactlyOnce == /\ s.outboxPosts = 1 /\ s.idlePostsA = 0 /\ s.idlePostsB <= 1
+                        /\ (s.cursor = LaterAnswerEnd => s.skippedA /\ s.idlePostsB = 1)
+NoUnpostedPrefixSkipped == s.cursor >= PrefixEnd /\ s.prefix # "Sentinel" => s.visiblePrefixPosts = 1
+ReadStartAdvances == s.laterAvailable ~> (s.cursor >= SentAnswerEnd)
+LaterAnswerPosts == s.laterAvailable ~> (s.idlePostsB = 1)
+
 =============================================================================

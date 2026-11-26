@@ -403,6 +403,28 @@ pub(super) struct OpenedJsonlRange {
 }
 
 impl OpenedJsonlRange {
+    pub(super) fn contains_only_wrapper_ready_records(&self, from: u64, through: u64) -> bool {
+        use crate::services::tmux_common::WRAPPER_READY_FOR_INPUT_EVENT;
+
+        if from < self.start || through > self.end || from > through {
+            return false;
+        }
+        let from = (from - self.start) as usize;
+        let through = (through - self.start) as usize;
+        if from > 0 && self.payload[from - 1] != b'\n' {
+            return false;
+        }
+        self.payload[from..through]
+            .split_inclusive(|byte| *byte == b'\n')
+            .all(|line| {
+                line.ends_with(b"\n")
+                    && serde_json::from_slice::<serde_json::Value>(line).is_ok_and(|event| {
+                        event["type"] == WRAPPER_READY_FOR_INPUT_EVENT
+                            && event["provider"] == "claude"
+                    })
+            })
+    }
+
     pub(super) fn suffix(&self, path: &str, from: u64) -> std::io::Result<Self> {
         if from != self.start {
             return read_jsonl_range(path, from, self.end);

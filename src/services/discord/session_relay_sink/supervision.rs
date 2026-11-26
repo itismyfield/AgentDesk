@@ -285,6 +285,18 @@ pub(super) async fn run_idle_jsonl_relay_loop(
             if opened_range.file_identity != expected_file {
                 continue;
             }
+            // Rebase the next read window at the proof only after the complete prefix is safe.
+            if let Some(proof_start) = proofs.next_sent_start(start)
+                && opened_range.contains_only_wrapper_ready_records(
+                    committed.clamp(start, proof_start),
+                    proof_start,
+                )
+                && source.current_through(proof_start)
+            {
+                *offset = proof_start;
+                pending_ends.insert(session_name.clone(), Deferred);
+                continue;
+            }
             if proofs.recorded_source()
                 && let Some(last_newline) =
                     opened_range.payload.iter().rposition(|byte| *byte == b'\n')

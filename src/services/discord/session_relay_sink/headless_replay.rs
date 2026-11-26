@@ -51,6 +51,15 @@ impl HeadlessReads {
         self.ownership(|read| read.start <= cursor && cursor < read.end)
     }
 
+    pub(super) fn next_sent_start(&self, cursor: u64) -> Option<u64> {
+        let (read, sent) = self
+            .ranges
+            .iter()
+            .filter(|(read, _)| read.start > cursor)
+            .min_by_key(|(read, sent)| (read.start, *sent))?;
+        sent.then_some(read.start)
+    }
+
     pub(super) fn at_terminal_end(&self, end: u64) -> Ownership {
         self.ownership(|read| read.end == end)
     }

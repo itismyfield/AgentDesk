@@ -1,0 +1,35 @@
+---
+title: "Headless idle replay crosses the published answer"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoUnpostedPrefixSkipped
+    lg1: Path to the NoUnpostedPrefixSkipped bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Earlier visible answer waiting
+  s1: Earlier outbox delivery pending
+  s2: Cursor before the ready-for-input marker
+  s3: Earlier answer lost without a post
+  s4: Earlier outbox confirms its post
+  s5: Cursor at the start of the published answer
+  s6: Cursor at the end of the published answer
+  s7: Later terminal fits in the new window
+  s8: Later answer posted once
+  s9: Read cursor passed the later answer
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  s0 --> s3: move past the accounted prefix
+  s1 --> s4: earlier outbox confirms its post
+  s2 --> s5: move past the accounted prefix
+  s4 --> s5: consume earlier published range
+  s5 --> s6: consume the confirmed answer range
+  s6 --> s7: read complete records within one MiB
+  s7 --> s8: post the later answer
+  s8 --> s9: consume the posted range
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s3 breaks
+  class s3 bugPath

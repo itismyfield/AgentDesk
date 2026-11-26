@@ -1,0 +1,35 @@
+---
+title: "Headless idle replay crosses the published answer"
+---
+stateDiagram-v2
+  s0: Earlier visible answer waiting
+  s1: Earlier outbox delivery pending
+  s2: Cursor before the ready-for-input marker
+  s3: Window reaches only the first answer
+  s4: Earlier outbox confirms its post
+  s5: Cursor at the start of the published answer
+  s6: Window ends before the later terminal
+  s7: Cursor at the end of the published answer
+  s8: Earlier visible answer delivered
+  s9: First answer skipped and read start unchanged
+  s10: Later terminal fits in the new window
+  s11: Later answer posted once
+  s12: Read cursor passed the later answer
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  s0 --> s3: read complete records within one MiB
+  s1 --> s4: earlier outbox confirms its post
+  s2 --> s5: move past the accounted prefix
+  s3 --> s6: later terminal appears
+  s0 --> s6: read complete records within one MiB
+  s4 --> s5: consume earlier published range
+  s5 --> s7: consume the confirmed answer range
+  s3 --> s8: skip the already posted answer
+  s6 --> s9: skip the already posted answer
+  s8 --> s9: later terminal appears
+  s8 --> s5: move past the accounted prefix
+  s7 --> s10: read complete records within one MiB
+  s9 --> s5: move past the accounted prefix
+  s10 --> s11: post the later answer
+  s11 --> s12: consume the posted range

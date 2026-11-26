@@ -1,0 +1,49 @@
+---
+title: "Headless idle replay crosses the published answer"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the LaterAnswerPosts or ReadStartAdvances bug
+    lg1: Repeats forever, so LaterAnswerPosts or ReadStartAdvances breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: Earlier visible answer waiting
+  s1: Earlier outbox delivery pending
+  s2: Cursor before the ready-for-input marker
+  s3: Window reaches only the first answer
+  s4: Earlier outbox confirms its post
+  s5: Window ends before the later terminal
+  s6: Cursor at the start of the published answer
+  s7: Earlier visible answer delivered
+  s8: Cursor at the end of the published answer
+  s9: First answer skipped and read start unchanged
+  s10: Later terminal fits in the new window
+  s11: Later answer posted once
+  s12: Read cursor passed the later answer
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  s0 --> s3: read complete records within one MiB
+  s1 --> s4: earlier outbox confirms its post
+  s2 --> s3: read complete records within one MiB
+  s2 --> s2: later terminal appears
+  s3 --> s5: later terminal appears
+  s0 --> s5: read complete records within one MiB
+  s4 --> s6: consume earlier published range
+  s3 --> s2: skip the already posted answer
+  s2 --> s5: read complete records within one MiB
+  s3 --> s7: skip the already posted answer
+  s6 --> s8: consume the confirmed answer range
+  s5 --> s9: skip the already posted answer
+  s2 --> s9: later terminal appears
+  s7 --> s3: read complete records within one MiB
+  s7 --> s9: later terminal appears
+  s9 --> s5: read complete records within one MiB
+  s8 --> s10: read complete records within one MiB
+  s10 --> s11: post the later answer
+  s11 --> s12: consume the posted range
+  class s2 bugPath
+  class s5 bugPath
+  class s5 repeats
+  class s9 repeats
