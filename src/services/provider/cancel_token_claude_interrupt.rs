@@ -25,6 +25,9 @@ pub(crate) struct HerdrInterruptState {
     pub(crate) own_turn: Mutex<OwnTurnCursor>,
     /// The token's turn; a saved start names it so a successor turn never reuses it.
     pub(crate) turn_nonce: Option<String>,
+    /// Delivered live row-end notices keyed by execution nonce and row save generation.
+    #[cfg(unix)]
+    pub(crate) recovery_notices: Mutex<std::collections::HashSet<(String, u64)>>,
 }
 
 /// Writes a recorded turn start to that turn's durable row; the Discord layer installs it.
@@ -473,6 +476,8 @@ impl CancelToken {
             own_start: Mutex::new(OwnStart::Unseen(None)),
             own_turn: Mutex::new(OwnTurnCursor::default()),
             turn_nonce: self.turn_nonce().map(str::to_owned),
+            #[cfg(unix)]
+            recovery_notices: Mutex::default(),
         });
         self.bind_interrupt_session(provider, &owner.logical_key);
         if let Some(nonce) = self.turn_nonce() {
