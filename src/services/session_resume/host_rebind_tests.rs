@@ -3,7 +3,9 @@ use std::sync::Arc;
 
 use crate::db::dispatched_sessions::load_session_rebind_context_pg;
 use crate::services::discord::health::{HealthRegistry, rebind_channel_provider_session};
-use crate::services::discord::host_teardown_gate::test_support::{channel_key, shared_on};
+use crate::services::discord::host_teardown_gate::test_support::{
+    channel_key, session_transition_lock, shared_on,
+};
 use crate::services::provider::ProviderKind;
 use crate::services::session_resume::*;
 use filetime::{FileTime, set_file_mtime};
@@ -354,9 +356,7 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
     )
     .await;
 
-    let held = shared
-        .session_transition_locks
-        .lock(channel_id)
+    let held = session_transition_lock(&shared, channel_id)
         .lock_owned()
         .await;
     let resume_pool = pool.clone();
@@ -385,7 +385,7 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
     );
     drop(held);
 
-    let resume_lock = shared.session_transition_locks.lock(channel_id);
+    let resume_lock = session_transition_lock(&shared, channel_id);
     let resume_guard = resume_lock.lock().await;
     let busy_transition = crate::services::discord::try_intake_runtime_transition_after_redirect(
         &shared,

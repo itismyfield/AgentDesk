@@ -54,6 +54,17 @@ fn input_file_path_in_root(
         .join(format!("{user_msg_id}.json"))
 }
 
+/// `input_file_path_in_root` for retry-store tests declared outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn input_file_path_in_root_for_tests(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+) -> PathBuf {
+    input_file_path_in_root(root, provider, channel_id, user_msg_id)
+}
+
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_CLOCK_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };

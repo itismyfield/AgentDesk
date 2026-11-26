@@ -262,6 +262,18 @@ impl CheckedInputView {
         Self::read_in(root.as_deref(), provider, channel_id, primary, sources)
     }
 
+    /// `read_in` for policy tests declared outside this module.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::services::discord) fn read_in_for_tests(
+        root: Option<&Path>,
+        provider: &ProviderKind,
+        channel_id: u64,
+        primary: u64,
+        sources: &[MessageId],
+    ) -> Self {
+        Self::read_in(root, provider, channel_id, primary, sources)
+    }
+
     fn read_in(
         root: Option<&Path>,
         provider: &ProviderKind,
