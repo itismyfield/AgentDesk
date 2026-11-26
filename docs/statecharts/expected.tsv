@@ -1682,6 +1682,7 @@ session-lifecycle/HerdrIdleExpireMutNewThread.cfg	HerdrIdleExpire	NextMessageRes
 session-lifecycle/HerdrIdleExpireMutOrphanCodex.cfg	HerdrIdleExpire	-	IdleEventuallyCloses
 session-lifecycle/HerdrIdleExpireMutTurn.cfg	HerdrIdleExpire	NeverClosesBusy	-
 session-lifecycle/HerdrIdleExpirePrev.cfg	HerdrIdleExpire	NextMessageResumes	IdleEventuallyCloses
+session-lifecycle/HerdrIdleExpirePrevClear.cfg	HerdrIdleExpire	ClearNeverResumes	-
 session-lifecycle/HerdrMissingBoundAttachAfter.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundAttachAfterStale.cfg	HerdrMissingBound	-	-
 session-lifecycle/HerdrMissingBoundAttachBefore.cfg	HerdrMissingBound	NoLiveRestore	-

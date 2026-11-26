@@ -12,30 +12,21 @@ stateDiagram-v2
   class lg2 repeats
   s0: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중
   s1: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중 #183; 6시간 유휴
-  s2: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음
-  s3: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중 #183; 6시간 유휴 #183; 보류 경보 1회
-  s4: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; owner 슬롯 /effort 의도 #183; /effort 종료 대기
-  s5: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중 #183; 6시간 유휴 #183; 보류 경보 2회
-  s6: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; owner 슬롯 /effort 의도 #183; /effort 종료 대기 #183; 6시간 유휴
-  s7: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; owner 슬롯 /effort 의도 #183; /effort 종료 대기 #183; 6시간 유휴 #183; 보류 경보 1회
-  s8: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; owner 슬롯 /effort 의도 #183; /effort 종료 대기 #183; 6시간 유휴 #183; 보류 경보 2회
+  s2: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중 #183; 6시간 유휴 #183; 보류 경보 1회
+  s3: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 부팅 유예 중 #183; 6시간 유휴 #183; 보류 경보 2회
+  s4: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; 6시간 유휴 #183; 보류 경보 2회
+  s5: Claude 실행 Bound#183;pane 살아 있음 #183; 작업 없음 #183; owner 슬롯 /effort 의도 #183; /effort 종료 대기 #183; 6시간 유휴 #183; 보류 경보 2회
   [*] --> s0
   s0 --> s1: 6시간 경과
-  s0 --> s2: 부팅 유예 지남
-  s1 --> s3: idle-kill 틱
-  s2 --> s4: /effort 의도 저장
-  s3 --> s5: idle-kill 틱
-  s4 --> s6: 6시간 경과
-  s6 --> s7: idle-kill 틱
-  s7 --> s8: idle-kill 틱
+  s1 --> s2: idle-kill 틱
+  s2 --> s3: idle-kill 틱
+  s3 --> s4: 부팅 유예 지남
+  s4 --> s5: /effort 의도 저장
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
   class s1 bugPath
   class s2 bugPath
+  class s3 breaks
   class s3 bugPath
   class s4 bugPath
-  class s5 breaks
-  class s5 bugPath
-  class s6 bugPath
-  class s7 bugPath
-  class s8 repeats
+  class s5 repeats
