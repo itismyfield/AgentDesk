@@ -532,10 +532,11 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
             "{n}: {body}"
         );
         assert_eq!(body["skipped_provider_activity_guard"], true, "{n}: {body}");
-        let expected = if n == "probefail" {
-            "tmux_probe_failed"
-        } else {
-            "host_not_legacy_tmux"
+        // A recorded Herdr execution meets the idle end, whose switch is off here.
+        let expected = match n {
+            "probefail" => "tmux_probe_failed",
+            "pending" | "bound" | "retired" => "herdr_disabled",
+            _ => "host_not_legacy_tmux",
         };
         assert_eq!(body["preserved_reason"], expected, "{n}: {body}");
         assert_eq!(row(n).await, before, "{n}: no column may change");

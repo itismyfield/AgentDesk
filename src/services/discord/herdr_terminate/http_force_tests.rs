@@ -7,6 +7,9 @@ mod restart_channel_tests;
 #[path = "http_force_tests/restart_refusal_tests.rs"]
 mod restart_refusal_tests;
 
+#[path = "http_force_tests/idle_expire_tests.rs"]
+mod idle_expire_tests;
+
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
