@@ -122,7 +122,7 @@ async fn fresh_proof_preserves_tool_cards_and_turn_summary_after_deriver_reset()
     let (_, n2) = proven(root.path());
     let harness = initial(&n2);
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(
@@ -230,7 +230,7 @@ async fn pending_deriver_holds(case: Pending) {
     let (n3_context, n3) = proven(root.path());
     let harness = initial(&n3);
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test();
     let (stop, stopped) = watch::channel(false);
     let (resumed, ready) = watch::channel(false);
     let actor = tokio::spawn(run_channel(

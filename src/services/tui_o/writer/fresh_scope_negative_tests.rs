@@ -223,7 +223,7 @@ async fn exercise(case: Case) {
             let io =
                 crate::services::codex::actual_submit_tests::source_io::Watch::start(&old.path);
             let writer = harness.writer();
-            let selection = writer.suspension.clone();
+            let selection = writer.suspension_for_test();
             let (stop, stopped) = watch::channel(false);
             let (resumed, ready) = watch::channel(false);
             let actor = tokio::spawn(run_channel(
@@ -374,7 +374,7 @@ async fn restart_after_warm(harness: &Harness, context: &BindingContext, root_se
         .unwrap();
     assert!(warm.seq > root_seq);
     let writer = harness.writer();
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test();
     assert!(
         selection.is_empty(),
         "a restarted actor must rebuild its own selection"

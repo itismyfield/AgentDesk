@@ -90,7 +90,7 @@ async fn scenario(case: Case) {
         harness.lease.clone(),
         harness.alarms.clone(),
     );
-    let selection = writer.suspension.clone();
+    let selection = writer.suspension_for_test();
     if case != Case::CurrentWaiting {
         harness.gate.acquired();
     }

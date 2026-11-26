@@ -34,6 +34,8 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 mod notice_migration;
 #[path = "input_notices/retry.rs"]
 mod notice_retry;
+#[cfg(any(test, feature = "test-support"))]
+mod test_access;
 mod usage_footer;
 
 /// A POST still unanswered by then is treated as uncertain and settled from history.
@@ -210,7 +212,7 @@ pub struct ChannelWriter<P, L, A> {
     pub(crate) notice_pending: HashMap<(SourceId, u64, u64), String>,
     pub(super) notice_missing: std::collections::HashSet<UnitKey>,
     pub(crate) boot: super::boot::Trace,
-    pub suspension: super::suspension::Suspension,
+    pub(crate) suspension: super::suspension::Suspension,
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
@@ -361,7 +363,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
-    pub async fn repost_turn(&mut self) {
+    pub(crate) async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();
         if !allowed {
             return;

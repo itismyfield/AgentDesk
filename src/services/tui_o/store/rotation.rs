@@ -31,15 +31,21 @@ pub struct TakeoverEnd {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FreshSelection {
+pub(crate) struct FreshSelection {
     schema: u32,
     channel: u64,
-    pub nonce: String,
+    pub(crate) nonce: String,
     pub(crate) keys: Vec<String>,
 }
 
 impl ChannelStore {
-    pub fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
+    /// The stored fresh selection's nonce, for upper-crate tests.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fresh_selection_nonce_for_test(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.fresh_selection()?.map(|selection| selection.nonce))
+    }
+
+    pub(crate) fn fresh_selection(&self) -> Result<Option<FreshSelection>, StoreError> {
         let read: Option<FreshSelection> =
             durable::read_json(&self.dir.join(FRESH_SELECTION_FILE))?;
         if let Some(record) = &read {
