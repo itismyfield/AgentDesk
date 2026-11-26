@@ -25,8 +25,6 @@ pub(crate) mod hosted_cleanup;
 mod listing;
 pub use listing::list_dispatched_sessions;
 pub(crate) use listing::list_dispatched_sessions_pg;
-#[cfg(test)]
-mod listing_tests;
 mod output;
 #[cfg(all(test, unix))]
 mod resume_fence_api_tests;
@@ -34,11 +32,9 @@ pub use output::tmux_output;
 
 #[path = "dispatched_sessions/tmux_cleanup.rs"]
 mod tmux_cleanup;
-use tmux_cleanup::kill_tmux_session_impl;
+pub(crate) use tmux_cleanup::kill_tmux_session_impl;
 mod current_key;
 pub(crate) use current_key::current_session_key_pg;
-#[cfg(all(test, unix))]
-mod raw_alias_pg_tests;
 
 mod force_kill;
 #[cfg(unix)]

@@ -2016,6 +2016,8 @@ src/
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
 │   │   │   └── root_replaced.rs
+│   │   ├── host_key_derivation/
+│   │   │   └── ke_session_tests.rs
 │   │   ├── host_liveness/
 │   │   │   ├── krx_discord_dl_tests.rs
 │   │   │   └── krx_discord_dl_unix_tests.rs
@@ -3009,6 +3011,9 @@ src/
 │   │   ├── shared_state/
 │   │   │   ├── g7_host.rs
 │   │   │   └── g7_host_tests.rs
+│   │   ├── stall_recovery/
+│   │   │   ├── ke_queue_tests.rs
+│   │   │   └── ke_queue_unix_tests.rs
 │   │   ├── standby_relay/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
@@ -4150,7 +4155,8 @@ src/
 │   │   │   ├── db_retention/
 │   │   │   │   ├── image_retention.rs
 │   │   │   │   ├── queue_and_dispatch.rs
-│   │   │   │   └── record_caps.rs
+│   │   │   │   ├── record_caps.rs
+│   │   │   │   └── record_caps_reader_pg_tests.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -4334,6 +4340,7 @@ src/
 │   ├── queue/
 │   │   ├── cancel_effects.rs
 │   │   ├── cancel_effects_v2_tests.rs
+│   │   ├── force_purge_tests.rs
 │   │   ├── herdr_stop.rs
 │   │   └── http_force.rs
 │   ├── qwen/
@@ -5409,6 +5416,7 @@ src/
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
 │   ├── agent_channels.rs
+│   ├── agent_channels_reload_pg_tests.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -5500,6 +5508,7 @@ src/
 │   ├── scheduling.rs
 │   ├── service_error.rs
 │   ├── session_activity.rs
+│   ├── session_activity_heartbeat_tests.rs
 │   ├── session_backend.rs
 │   ├── session_evidence.rs
 │   ├── session_forwarding.rs

@@ -226,14 +226,10 @@ async fn purge_on<R: QueueCancelPort>(
     Some((purge, None))
 }
 
-#[cfg(all(test, unix))]
-#[path = "cancel_effects_v2_tests.rs"]
-mod v2_tests;
-
 /// `None` without a V2 owner; a kept queue answers the owner's depth and reason, nothing drained,
 /// an unanswered, unknown or unmeasured one no purge. `captured` runs between capture and purge.
 #[cfg(unix)]
-async fn purge_v2<F: std::future::Future<Output = ()>>(
+pub(crate) async fn purge_v2<F: std::future::Future<Output = ()>>(
     handle: &ChannelMailboxHandle,
     persistence: QueuePersistenceContext,
     captured: impl FnOnce() -> F,
