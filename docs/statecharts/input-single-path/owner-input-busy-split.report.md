@@ -1,6 +1,7 @@
 # owner 입력 busy 분기: 현재 경로 대 바로 주입·합류·채널 lease·Codex 항상 Tab·답 anchor 귀속 (#8328 1단계 설계 w3)
 
 - 기준 코드는 `82702fe252`다.
+- **설계 w4부터 이 모델은 S2(Codex 항상 Tab + 채널 lease 공유) 모델이다.** cfg와 결과는 w3 그대로 둔다. S1(Claude 바로 합류 + 답 귀속 + transcript 없는 키)은 [`owner-input-busy-s1.report.md`](owner-input-busy-s1.report.md)의 `OwnerInputBusyS1.tla`가 맡는다. 리뷰 i8328-design-3이 짚은 S2 모델 가드 보강은 설계 문서 §13.5에 남겼다.
 - 다루는 범위: 사람 입력 B 하나와 앞 턴 A 하나.
 - 상수 구분
   - `Policy`: 현재 경로(`Current`)와 목표 경로(`Target`)
