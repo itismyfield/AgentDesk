@@ -2715,6 +2715,8 @@ src/
 │   │   │   │   │   │   │   └── review_tests.rs
 │   │   │   │   │   │   ├── metadata_hold.rs
 │   │   │   │   │   │   └── restart_gate_tests.rs
+│   │   │   │   │   ├── start_failure/
+│   │   │   │   │   │   └── herdr_unsent_unwind.rs
 │   │   │   │   │   ├── stream_json_turn/
 │   │   │   │   │   │   └── admission_tests.rs
 │   │   │   │   │   ├── handoff_retry_tests.rs
@@ -2754,6 +2756,7 @@ src/
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   ├── start_failure_missing_tests.rs
 │   │   │   │   │   ├── start_failure_state_tests.rs
+│   │   │   │   │   ├── start_failure_unwind_tests.rs
 │   │   │   │   │   └── stream_json_turn.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
 │   │   │   │   │   └── clear_execute_tests.rs

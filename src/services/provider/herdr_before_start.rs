@@ -245,6 +245,24 @@ pub(crate) fn seal_exit(
     decision
 }
 
+/// Seals a normal exit for an attempt that ended before its first key with no stop taken, so its
+/// row can be rewound: a stop taken after this is late. False changes nothing.
+#[cfg(unix)]
+pub(crate) fn seal_untouched_exit(token: &CancelToken) -> bool {
+    let Some(state) = token.herdr_interrupt_state() else {
+        return false;
+    };
+    let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
+    let untouched = input.submission == HerdrSubmission::Unsubmitted
+        && input.phase == InputPhase::FinishedUntouched
+        && !state.user_stop.load(Ordering::Acquire)
+        && matches!(input.exit, None | Some(ExitDecision::Normal));
+    if untouched {
+        input.exit = Some(ExitDecision::Normal);
+    }
+    untouched
+}
+
 pub(crate) fn claude_observed_input(
     cancel: Option<&super::CancelToken>,
     start: impl FnOnce() -> crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart,

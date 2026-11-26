@@ -391,6 +391,10 @@ impl Failure {
             self.wait_for_retry(turn.channel_id, cause, read);
         }
         if stopped || unsent {
+            // No stop took the attempt: a row no key followed leaves before the front may retry.
+            if !stopped {
+                herdr_unsent_unwind::unwind(turn, self.front.1.message_id);
+            }
             return Err(error);
         }
         let kind = match turn.host {
@@ -551,6 +555,8 @@ async fn token_released(
     }
     Ok(())
 }
+mod herdr_unsent_unwind;
+
 #[cfg(test)]
 type FactSender = (
     u64,
