@@ -22,6 +22,11 @@ impl Projection {
             .filter_map(|f| f.receipt.as_ref())
             .collect();
         let mut members: Vec<(String, Ticket, Option<u64>)> = Vec::new();
+        // A membership without a row id is evidence only when its record is the absorption.
+        let absorbed = |range: (u64, u64)| {
+            let absorption = |f: &Fact| matches!(f.event, Some(Event::Absorbed(_)));
+            self.facts.iter().any(|f| f.range == range && absorption(f))
+        };
         reduce(
             &self.binding,
             (&self.facts, None),
@@ -32,7 +37,9 @@ impl Projection {
                     *namespace == registration.namespace && *ticket == registration.ticket
                 });
                 // Only exact evidence names an anchor; a trimmed class-hash match is a guess.
-                if !known && super::super::receipt::exact(&receipts, registration, row) {
+                let evidence = row.is_some() || absorbed(range);
+                if !known && evidence && super::super::receipt::exact(&receipts, registration, row)
+                {
                     // The same exact body twice after the offset is no single row.
                     let at = (!super::super::receipt::repeated(&receipts, registration))
                         .then_some(range.0);

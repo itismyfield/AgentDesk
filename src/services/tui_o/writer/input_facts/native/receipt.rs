@@ -79,7 +79,7 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
         digest: format!("{:x}", digest.finalize()),
     })
 }
-/// A row with an id needs its recorded receipt; a queue record without one needs the ticket's
+/// A row with an id needs its recorded receipt; an absorption without one needs the ticket's
 /// single exact enqueue after its offset.
 pub(super) fn exact(facts: &[&Fact], registration: &Registration, row: Option<&str>) -> bool {
     if let Some(row) = row {
