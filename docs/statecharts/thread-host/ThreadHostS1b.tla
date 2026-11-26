@@ -349,8 +349,9 @@ Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in
                        /\ judged' = IF Mode = "MutS2PlanSeeds" THEN "Herdr" ELSE judged
                        /\ UNCHANGED <<tmuxs, inq, submits, receipt>>
           /\ UNCHANGED <<tabs, oready, late, restarts2, idle, slot, unsent>>
-          \* w4: each Herdr Pending is a new execution nonce (herdr_launch.rs:550).
-          /\ gen' = IF exec' = "Pending" THEN gen + 1 ELSE gen
+          \* w4: each Herdr Pending is a new execution nonce (herdr_launch.rs:550). Generations
+          \* saturate at 3 to keep relaunch loops finite; contract paths use at most 2.
+          /\ gen' = IF exec' = "Pending" /\ gen < 3 THEN gen + 1 ELSE gen
           /\ gone' = FALSE /\ UNCHANGED <<goneGen, lostSucc>>
 \* writer/host/first_init.rs:282 activate_owner: an ordinary adoption's writer becomes ready.
 OrdinaryReady == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHANGED w2vars /\ entry \in HerdrParentS2 /\ ~late /\ ~oready
