@@ -10,21 +10,36 @@ import type { CampaignNode } from "../src/api/campaigns";
 import type { PipelineDefinition } from "../src/api/serverCampaignPipeline";
 import { AppTopBar } from "../src/app/AppTopBar";
 import { PRIMARY_ROUTES } from "../src/app/routes";
+import EmojiPicker from "../src/components/agent-manager/EmojiPicker";
+import EmojiPickerLibraryPanel from "../src/components/agent-manager/EmojiPickerLibraryPanel";
 import PipelineVisualEditor from "../src/components/agent-manager/PipelineVisualEditor";
 import PipelineVisualEditorPhaseGatePanel from "../src/components/agent-manager/PipelineVisualEditorPhaseGatePanel";
 import PipelineVisualEditorStatePanel from "../src/components/agent-manager/PipelineVisualEditorStatePanel";
 import PipelineVisualEditorToolbar from "../src/components/agent-manager/PipelineVisualEditorToolbar";
 import PipelineVisualEditorTransitionPanel from "../src/components/agent-manager/PipelineVisualEditorTransitionPanel";
+import { FilterChipGroup } from "../src/components/audit/AuditDetailFrame";
 import { TaskInspector } from "../src/components/campaigns/CampaignGroupInspector";
 import PipelineStatePicker from "../src/components/campaigns/PipelineStatePicker";
+import { ActionMenu } from "../src/components/common/ActionMenu";
 import { BottomSheet } from "../src/components/common/overlay/BottomSheet";
 import { Drawer } from "../src/components/common/overlay/Drawer";
 import { ToastProvider, useToast } from "../src/components/common/overlay/ToastProvider";
+import { RoutineDetailBody } from "../src/components/dashboard/RoutineDetail";
 import { OnboardingWizardLayout, ONBOARDING_WIZARD_STYLES } from "../src/components/onboarding/OnboardingWizardLayout";
 import { Step3AgentSelection } from "../src/components/onboarding/Step3AgentSelection";
 import { Step4ChannelSetup } from "../src/components/onboarding/Step4ChannelSetup";
 import { I18nProvider } from "../src/i18n";
 import type { PipelineConfigFull } from "../src/types";
+
+vi.mock("emoji-picker-react", () => ({
+  default: ({ searchPlaceholder, searchClearButtonLabel }: { searchPlaceholder?: string; searchClearButtonLabel?: string }) => (
+    <div data-testid="mock-epr" data-placeholder={searchPlaceholder} data-clear-label={searchClearButtonLabel}>
+      <input className="epr-search" aria-label={searchPlaceholder} />
+    </div>
+  ),
+  EmojiStyle: { NATIVE: "native" },
+  Theme: { DARK: "dark", LIGHT: "light" },
+}));
 
 vi.mock("../src/components/agent-manager/PipelineFlowCanvas", () => ({
   default: () => <div data-testid="mock-flow-canvas" />,
@@ -708,5 +723,171 @@ describe("Round 2B viewport, overlay, focus & light theme regressions", () => {
     expect(errorAlert.textContent).toBe("Token check failed");
     expect(errorAlert.className).toContain("bg-[var(--err-soft)]");
     expect(errorAlert.className).toContain("text-[var(--err-fg)]");
+  });
+
+  it("syncs document.documentElement.lang across ko, en, ja, and zh in I18nProvider", async () => {
+    for (const lang of ["ko", "en", "ja", "zh"] as const) {
+      await render(
+        <I18nProvider language={lang}>
+          <div>{lang}</div>
+        </I18nProvider>,
+      );
+      expect(document.documentElement.lang).toBe(lang);
+    }
+  });
+
+  it("renders EmojiPicker dialog at z-[110] with localized labels and 16px search input classes", async () => {
+    await render(
+      <I18nProvider language="ja">
+        <EmojiPicker value="🤖" onChange={() => {}} />
+        <EmojiPickerLibraryPanel height={360} width={300} value="🤖" onSelect={() => {}} />
+      </I18nProvider>,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>("button")!;
+    expect(trigger.getAttribute("aria-label")).toBe("選択中のアイコン: 🤖、アイコンを変更");
+
+    await act(async () => {
+      trigger.click();
+    });
+
+    const dialog = container.querySelector<HTMLElement>('div[role="dialog"]')!;
+    expect(dialog).not.toBeNull();
+    expect(dialog.getAttribute("aria-label")).toBe("アイコンを選択");
+    expect(dialog.className).toContain("z-[110]");
+    expect(dialog.className).toContain("max-w-[calc(100vw-1.5rem)]");
+
+    const mockEpr = container.querySelector<HTMLElement>('[data-testid="mock-epr"]')!;
+    expect(mockEpr.getAttribute("data-placeholder")).toBe("絵文字を検索");
+    expect(mockEpr.getAttribute("data-clear-label")).toBe("絵文字検索をクリア");
+    expect(mockEpr.parentElement?.className).toContain("max-[899px]:[&_input.epr-search]:text-base");
+    expect(mockEpr.parentElement?.className).toContain("pointer-coarse:[&_input.epr-search]:text-base");
+
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    await act(async () => {
+      outside.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(container.querySelector('div[role="dialog"]')).toBeNull();
+    outside.remove();
+
+    await render(
+      <I18nProvider language="en">
+        <EmojiPicker value="" onChange={() => {}} />
+      </I18nProvider>,
+    );
+    expect(container.querySelector("button")?.getAttribute("aria-label")).toBe("Open icon picker");
+  });
+
+  it("moves focus into ActionMenu on open, roves enabled menuitems via ArrowDown/ArrowUp/Home/End, and closes on outside pointerdown", async () => {
+    await render(
+      <ActionMenu
+        label="Row actions"
+        items={[
+          { key: "disabled-first", label: "Disabled", disabled: true, onSelect: () => {} },
+          { key: "edit", label: "Edit", onSelect: () => {} },
+          { key: "duplicate", label: "Duplicate", onSelect: () => {} },
+          { key: "delete", label: "Delete", danger: true, onSelect: () => {} },
+        ]}
+      />,
+    );
+
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="Row actions"]')!;
+    await act(async () => {
+      trigger.click();
+    });
+
+    const menu = container.querySelector<HTMLElement>('[role="menu"]')!;
+    expect(menu).not.toBeNull();
+    expect(menu.className).toContain("max-w-[calc(100vw-1.5rem)]");
+
+    const items = Array.from(menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'));
+    expect(document.activeElement).toBe(items[1]); // First enabled ("Edit")
+
+    await act(async () => {
+      items[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(items[2]); // "Duplicate"
+
+    await act(async () => {
+      items[2].dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(items[3]); // "Delete"
+
+    await act(async () => {
+      items[3].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(items[1]); // Wraps to "Edit"
+
+    await act(async () => {
+      items[1].dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(items[3]); // Wraps back to "Delete"
+
+    await act(async () => {
+      items[3].dispatchEvent(new KeyboardEvent("keydown", { key: "Home", bubbles: true, cancelable: true }));
+    });
+    expect(document.activeElement).toBe(items[1]); // "Edit"
+
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    await act(async () => {
+      outside.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    });
+    expect(container.querySelector('[role="menu"]')).toBeNull();
+    outside.remove();
+  });
+
+  it("stacks RoutineDetailBody settings <dl> below 360px and scopes FilterChipGroup 30px height to fine pointers", async () => {
+    await render(
+      <>
+        <RoutineDetailBody
+          routine={{
+            id: "r-1",
+            agent_id: "ada",
+            script_ref: "daily.sh",
+            name: "daily-sync",
+            status: "enabled",
+            execution_strategy: "fresh",
+            schedule: "0 9 * * *",
+            next_due_at: null,
+            last_run_at: null,
+            last_result: null,
+            checkpoint: null,
+            discord_thread_id: null,
+            timeout_secs: 300,
+            in_flight_run_id: null,
+            created_at: "2026-11-26T00:00:00Z",
+            updated_at: "2026-11-26T00:00:00Z",
+          }}
+          threadUrl={null}
+          runs={[]}
+          runsLoading={false}
+          runsError={false}
+          t={(input) => (typeof input === "string" ? input : input.en)}
+          localeTag="en-US"
+          language="en"
+          now={Date.now()}
+        />
+        <FilterChipGroup
+          value="all"
+          onChange={() => {}}
+          ariaLabel="Audit filter"
+          options={[
+            { value: "all", label: "All", count: 3 },
+            { value: "warn", label: "Warnings", count: 1 },
+          ]}
+        />
+      </>,
+    );
+
+    const settingsDl = container.querySelector<HTMLElement>('[data-testid="routine-detail"] dl')!;
+    expect(settingsDl.className).toContain("grid-cols-1");
+    expect(settingsDl.className).toContain("min-[360px]:grid-cols-2");
+
+    const chipButton = container.querySelector<HTMLButtonElement>('[role="radiogroup"] [role="radio"]')!;
+    expect(chipButton.className).toContain("min-[900px]:pointer-fine:min-h-[30px]");
+    expect(chipButton.className).toContain("pointer-coarse:min-h-11");
+    expect(chipButton.className).not.toContain("sm:min-h-[30px]");
   });
 });

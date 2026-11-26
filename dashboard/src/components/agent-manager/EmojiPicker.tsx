@@ -25,7 +25,7 @@ export default function EmojiPicker({
 
   useEffect(() => {
     if (!open) return;
-    const handler = (e: MouseEvent) => {
+    const handler = (e: PointerEvent | MouseEvent) => {
       if (ref.current && !ref.current.contains(e.target as Node)) {
         setOpen(false);
         buttonRef.current?.focus();
@@ -39,9 +39,11 @@ export default function EmojiPicker({
         buttonRef.current?.focus();
       }
     };
+    document.addEventListener("pointerdown", handler);
     document.addEventListener("mousedown", handler);
     document.addEventListener("keydown", keyHandler, true);
     return () => {
+      document.removeEventListener("pointerdown", handler);
       document.removeEventListener("mousedown", handler);
       document.removeEventListener("keydown", keyHandler, true);
     };
@@ -70,8 +72,18 @@ export default function EmojiPicker({
         aria-label={
           ariaLabel ||
           (value
-            ? tr({ ko: `선택된 아이콘: ${value}, 아이콘 변경`, en: `Selected icon: ${value}, change icon` })
-            : tr({ ko: "아이콘 선택기 열기", en: "Open icon picker" }))
+            ? tr({
+                ko: `선택된 아이콘: ${value}, 아이콘 변경`,
+                en: `Selected icon: ${value}, change icon`,
+                ja: `選択中のアイコン: ${value}、アイコンを変更`,
+                zh: `已选图标: ${value}，更改图标`,
+              })
+            : tr({
+                ko: "아이콘 선택기 열기",
+                en: "Open icon picker",
+                ja: "アイコン選択を開く",
+                zh: "打开图标选择器",
+              }))
         }
       >
         {value || "❓"}
@@ -79,8 +91,11 @@ export default function EmojiPicker({
       {open && (
         <div
           role="dialog"
-          aria-label={dialogLabel || tr({ ko: "아이콘 선택", en: "Choose an icon" })}
-          className="fixed left-1/2 top-1/2 z-[60] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface shadow-xl"
+          aria-label={
+            dialogLabel ||
+            tr({ ko: "아이콘 선택", en: "Choose an icon", ja: "アイコンを選択", zh: "选择图标" })
+          }
+          className="fixed left-1/2 top-1/2 z-[110] max-h-[calc(100dvh-2rem)] max-w-[calc(100vw-1.5rem)] -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-lg border border-th-border-subtle bg-th-bg-surface shadow-xl"
         >
           <Suspense
             fallback={(
@@ -90,9 +105,16 @@ export default function EmojiPicker({
                   color: "var(--th-text-muted)",
                   height: pickerHeight,
                   width: pickerWidth,
+                  maxWidth: "calc(100vw - 2rem)",
+                  maxHeight: "calc(100dvh - 4rem)",
                 }}
               >
-                Loading emoji...
+                {tr({
+                  ko: "이모지 불러오는 중…",
+                  en: "Loading emoji…",
+                  ja: "絵文字を読み込み中…",
+                  zh: "正在加载表情…",
+                })}
               </div>
             )}
           >
