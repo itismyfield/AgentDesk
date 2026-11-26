@@ -119,6 +119,11 @@ pub(in crate::services::discord) async fn try_busy(
         return false;
     };
     let head = &snapshot.intervention_queue[at];
+    // A Decision original never joins a running turn: it waits for the idle start, whose
+    // admission checks its event.
+    if super::decision_drain::queued::origin(head).is_some() {
+        return false;
+    }
     let request = health::HumanInputRequest {
         channel_id: channel,
         provider: provider.clone(),
