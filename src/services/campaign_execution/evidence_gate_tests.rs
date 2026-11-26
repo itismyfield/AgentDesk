@@ -4,11 +4,11 @@ use crate::domain::campaign::{
     definition::{AcceptanceCondition, VerificationKind},
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
     model::*,
+    profile::*,
+    verification_run::*,
     workspace::WorkspaceObservation,
 };
-use crate::services::campaign_execution::{
-    control::tests as domain, profile::*, verification_run::*,
-};
+use crate::services::campaign_execution::control::tests as domain;
 
 pub(crate) const OUTPUT: &str = "output-h1";
 pub(crate) const REPO: &str = "github.com/itismyfield/AgentDesk";

@@ -11,7 +11,7 @@ use crate::domain::campaign::model::{
     ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
     RejectionCode,
 };
-use crate::domain::campaign::verification_run::{AuthoritySource, PhaseInput, tests as a1};
+use crate::domain::campaign::verification_run::{AuthoritySource, PhaseInput};
 use crate::services::campaign_execution::control::{decide, tests as domain};
 use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,
@@ -19,6 +19,7 @@ use crate::services::campaign_execution::effect_envelope::{
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,
 };
+use crate::services::campaign_execution::verification_run::tests as a1;
 
 const PHASE: &str = "archive";
 
