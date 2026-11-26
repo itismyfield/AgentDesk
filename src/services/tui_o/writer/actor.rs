@@ -916,8 +916,8 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
-#[cfg(all(test, unix))]
-pub(crate) use transition::scoped_tests::{
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]

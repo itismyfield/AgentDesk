@@ -676,6 +676,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "scoped_transition_support.rs"]
+pub(super) mod scoped_support;
 #[cfg(all(test, unix))]
 #[path = "scoped_transition_tests.rs"]
 pub(super) mod scoped_tests;

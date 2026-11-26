@@ -4839,6 +4839,7 @@ src/
 │   │   │   │   ├── notice_work.rs
 │   │   │   │   ├── notice_work_tests.rs
 │   │   │   │   ├── scoped_submission_tests.rs
+│   │   │   │   ├── scoped_transition_support.rs
 │   │   │   │   ├── scoped_transition_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_snapshot.rs
@@ -4934,6 +4935,8 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── test_support/
+│   │   │   │   └── transition.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
