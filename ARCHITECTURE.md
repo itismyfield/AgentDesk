@@ -4801,6 +4801,7 @@ src/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── input_notices.rs
+│   │   │   │   ├── reply_to.rs
 │   │   │   │   ├── test_access.rs
 │   │   │   │   ├── tool_images.rs
 │   │   │   │   └── tool_images_tests.rs
@@ -4813,6 +4814,7 @@ src/
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── agy_delivery.rs
 │   │   │   ├── agy_spool.rs
+│   │   │   ├── anchor_bindings.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4889,6 +4891,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
+│   │   │   │   ├── prepared.rs
 │   │   │   │   ├── test_access.rs
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
@@ -4908,6 +4911,8 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
+│   │   │   │   │   ├── projection/
+│   │   │   │   │   │   └── membership.rs
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
@@ -5073,6 +5078,8 @@ src/
 │   │   │   ├── repair_io_tests.rs
 │   │   │   ├── replay.rs
 │   │   │   ├── replay_metadata_tests.rs
+│   │   │   ├── reply_anchor.rs
+│   │   │   ├── reply_anchor_tests.rs
 │   │   │   ├── repost_turn_tests.rs
 │   │   │   ├── restart_end.rs
 │   │   │   ├── restart_end_repair_tests.rs
