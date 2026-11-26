@@ -275,6 +275,7 @@ jobs:
               - 'src/github/**'
               - 'src/kanban/**'
               - 'src/krx_config_tests/**'
+              - 'src/launch/**'
               - 'src/runtime_layout/**'
               - 'src/server/**'
               - 'src/supervisor/**'
@@ -311,6 +312,8 @@ jobs:
               - 'src/services/replay_evidence/root_issuer.rs'
               - 'src/services/session_host/**'
               - 'src/services/session_resume/background.rs'
+              - 'src/services/session_resume/host_rebind_tests.rs'
+              - 'src/services/stale_turn_reconciler/root_lookup_tests.rs'
               # The Herdr close owner is unix-gated production code.
               - 'src/services/termination_audit/**'
               - 'src/services/tmux_common/runtime_hint_fence.rs'
