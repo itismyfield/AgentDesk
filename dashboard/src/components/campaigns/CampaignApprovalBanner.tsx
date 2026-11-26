@@ -3,7 +3,7 @@ import { useMemo, useRef, useState } from "react";
 import type { Campaign } from "../../api/campaigns";
 import { request } from "../../api/httpClient";
 import { serverCampaignRejection } from "../../api/serverCampaigns";
-import { ApprovalCard, type ApprovalDetail } from "../../kit/pro/approval-card";
+import { ApprovalCard, type ApprovalCardLabels, type ApprovalDetail } from "../../kit/pro/approval-card";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import { Cap, Chip, Num, StageTrack, Well, type TrackSegment } from "../common/KitPrimitives";
@@ -102,6 +102,50 @@ export function CampaignGateApprovalCard({
     </div>}
   </div> : undefined;
 
+  const approvalLabels: Partial<ApprovalCardLabels> = {
+    approve: tr("승인", "Approve"),
+    deny: tr("거절", "Deny"),
+    edit: tr("수정", "Edit"),
+    always: tr("이 작업은 다음에도 허용", "Always allow this action"),
+    busy: tr("처리 중", "Processing"),
+    riskLow: tr("낮음", "Low"),
+    riskMedium: tr("중간", "Medium"),
+    riskHigh: tr("높음", "High"),
+    riskSuffix: tr("위험", "risk"),
+    expand: tr("잘린 내용 모두 보기", "Show full text"),
+    collapse: tr("한 줄로 보기", "Collapse text"),
+    timer: (clock) => tr(`${clock} 뒤 자동 거절`, `Auto-deny in ${clock}`),
+    timerHint: (rem) =>
+      tr(
+        `남은 시간 ${rem}. 그 안에 결정하지 않으면 자동으로 거절됩니다. 카드 위에 포인터가 있거나 카드 안에 초점이 있거나 승인을 처리하는 동안에는 시간이 멈춥니다.`,
+        `${rem} remaining before automatic denial. Timer pauses on hover, focus, or while processing.`,
+      ),
+    remaining: (s) =>
+      s < 120
+        ? tr(`${s}초`, `${s}s`)
+        : s < 7200
+          ? tr(`약 ${Math.round(s / 60)}분`, `~${Math.round(s / 60)}m`)
+          : tr(`약 ${Math.round(s / 3600)}시간`, `~${Math.round(s / 3600)}h`),
+    elapsed: (s) =>
+      s < 60
+        ? tr("방금", "Just now")
+        : s < 3600
+          ? tr(`${Math.floor(s / 60)}분 전`, `${Math.floor(s / 60)}m ago`)
+          : s < 86400
+            ? tr(`${Math.floor(s / 3600)}시간 전`, `${Math.floor(s / 3600)}h ago`)
+            : tr(`${Math.floor(s / 86400)}일 전`, `${Math.floor(s / 86400)}d ago`),
+    resultApproved: tr("승인됨", "Approved"),
+    resultDenied: tr("거절됨", "Denied"),
+    resultExpired: tr("시간 만료", "Expired"),
+    alwaysResult: tr("계속 허용", "Always allowed"),
+    announce: (res, alw, ttl) =>
+      res === "approved"
+        ? tr(`승인됨${alw ? " · 계속 허용" : ""}: ${ttl}`, `Approved${alw ? " · Always allowed" : ""}: ${ttl}`)
+        : res === "expired"
+          ? tr(`시간 만료로 자동 거절됨: ${ttl}`, `Auto-denied after timeout: ${ttl}`)
+          : tr(`거절됨: ${ttl}`, `Denied: ${ttl}`),
+  };
+
   return <div className="campaign-gate min-w-0 [&_.aui-approval-card-button]:max-[899px]:!min-h-11">
     <ApprovalCard
       title={`${tr(`${gateWord} 승인 대기`, `Waiting for ${GATE_LABELS[gate.gate][1].toLowerCase()} approval`)} · ${taskTitle}`}
@@ -111,6 +155,7 @@ export function CampaignGateApprovalCard({
       icon={gate.gate === "landing" ? <ShieldCheck /> : <LockKeyhole />}
       details={details} preview={preview} allowAlways={false} shortcuts={false}
       approveLabel={tr("승인", "Approve")} approveDisabledReason={disabledReason}
+      labels={approvalLabels}
       onApprove={canSubmitForum ? () => submitApproval() : undefined}
     />
   </div>;

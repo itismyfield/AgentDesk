@@ -411,7 +411,7 @@ export default function PipelineVisualEditor({
     [overrideExtras, savedOverrideExtras],
   );
   const visibleStagesChanged = !isFsmVariant && stagesChanged;
-  const hasVisibleChanges = pipelineChanged || visibleStagesChanged;
+  const hasVisibleChanges = pipelineChanged || overrideExtrasChanged || visibleStagesChanged;
   const activeLayers = [
     layers.default ? "default" : null,
     layers.repo ? "repo" : null,
@@ -585,6 +585,7 @@ export default function PipelineVisualEditor({
     stageDrafts,
     allRepoStages,
     overrideExtras,
+    overrideExtrasChanged,
     pipelineChanged,
     stagesChanged,
     saving,

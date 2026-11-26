@@ -115,4 +115,28 @@ describe("ReceiptWidget slow aggregation", () => {
       "/api/receipt?period=month", "/api/receipt?period=week", "/api/receipt?period=all",
     ]);
   });
+
+  it("triggers an immediate /api/receipt fetch when clicking Retry after a failed load", async () => {
+    let attempts = 0;
+    const fetchMock = receiptServer(() => {
+      attempts += 1;
+      return attempts === 1
+        ? new Response(JSON.stringify({ error: "gateway timeout" }), { status: 504 })
+        : new Response(JSON.stringify(receipt));
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const view = await mount();
+
+    await advance(5_000);
+    expect(receiptCalls(fetchMock)).toHaveLength(1);
+    expect(view.textContent).toContain("Could not load receipt data.");
+
+    const retryBtn = [...view.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+    expect(retryBtn).toBeDefined();
+    await act(async () => retryBtn.click());
+    await advance(100);
+    expect(receiptCalls(fetchMock)).toHaveLength(2);
+    expect(view.textContent).toContain("1 models");
+    expect(view.textContent).toContain("1 msgs · 1 sessions");
+  });
 });
