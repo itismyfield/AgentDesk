@@ -1,9 +1,11 @@
 use super::*;
+use crate::domain::campaign::{
+    profile::TestOutcome,
+    verification_run::{Cancellation, NotSentReason, PhaseInitiation, VerificationCollection},
+};
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{OUTPUT, actions, assess, collected, registered, seal},
-    profile::TestOutcome,
-    verification_run::{Cancellation, NotSentReason, PhaseInitiation, VerificationCollection},
 };
 
 fn actor(attempt: &str, session: &str, native: &str) -> ActorIdentity {
@@ -172,7 +174,7 @@ fn review_outcome_waits_for_its_exact_prerequisite_and_takes_late_pass_or_fail()
     let mut pending = registered(&work, 0);
     pending.subject.bind(sealed.bound_subject()).unwrap();
     let resource = crate::services::campaign_execution::adk_resources::resource(
-        crate::services::campaign_execution::profile::ResourceKind::Build,
+        crate::domain::campaign::profile::ResourceKind::Build,
         "mac",
         "token",
     );
@@ -423,7 +425,7 @@ fn resume_replaces_collected_interruptions_and_unclassified_preparation_failures
         record: crate::services::campaign_execution::verification_run::tests::result(
             "plan",
             1,
-            crate::services::campaign_execution::verification_run::PhaseOutput::None,
+            crate::domain::campaign::verification_run::PhaseOutput::None,
         )
         .record,
     });

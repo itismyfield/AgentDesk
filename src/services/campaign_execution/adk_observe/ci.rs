@@ -9,7 +9,7 @@ use super::{
     GhExec, PrObservation, gh_api, is_sha, sha_at, str_at, time_at, unknown, valid_branch,
     valid_slug,
 };
-use crate::services::campaign_execution::profile::Observation;
+use crate::domain::campaign::profile::Observation;
 
 const PLAN_ARTIFACT: &str = "nextest-plan";
 const PAGE: usize = 100;

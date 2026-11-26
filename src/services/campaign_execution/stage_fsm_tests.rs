@@ -1,10 +1,13 @@
 use super::*;
 use crate::domain::campaign::execution_pin::ExecutionPin;
+use crate::domain::campaign::{
+    profile::TestOutcome,
+    verification_run::{ProcessIdentity, VerificationSpec},
+};
 use crate::services::campaign_execution::{
     control::{decide, tests as domain},
     evidence_gate::tests::{REPO, a1_finish, claim, workspace},
-    profile::TestOutcome,
-    verification_run::{ProcessIdentity, VerificationSpec, tests as a1},
+    verification_run::tests as a1,
 };
 
 const START: &str = "lib-tests";

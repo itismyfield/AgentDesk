@@ -1,10 +1,9 @@
 use super::*;
 use crate::domain::campaign::model::{AttemptOutcome, NodeRuntime, Stage};
+use crate::domain::campaign::{profile::TestOutcome, review_gate::StagePrerequisite};
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{OUTPUT, collected, seal},
-    profile::TestOutcome,
-    review_gate::StagePrerequisite,
 };
 use serde_json::json;
 

@@ -10,14 +10,14 @@ use crate::domain::campaign::evidence_gate::{
 
 use super::failure_budget::{FailureDisposition, record_quality_failure};
 use super::lifecycle::{self, GateTarget};
-use super::profile::{Candidate, ProfileLimits, RepositoryProfile};
-use super::review_gate::{StagePrerequisite, evaluate_review_stage};
-use super::verification_run::{
+use crate::domain::campaign::model::*;
+use crate::domain::campaign::profile::{Candidate, ProfileLimits, RepositoryProfile};
+use crate::domain::campaign::review_gate::{StagePrerequisite, evaluate_review_stage};
+use crate::domain::campaign::verification_run::{
     AuthoritySource, BoundSubject, CurrentFence, PhaseAdmission, RegistrationInput,
     VerificationCollection, VerificationError, VerificationRun, VerificationStartAuthority,
     digest_of,
 };
-use crate::domain::campaign::model::*;
 
 // None leaves the state unchanged: a retransmitted command adds no V, epoch, count or action.
 pub(super) type Transition = Result<Option<EventKind>, Rejection>;

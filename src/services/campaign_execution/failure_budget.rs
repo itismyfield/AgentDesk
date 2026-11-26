@@ -1,5 +1,5 @@
-use super::profile::ProfileLimits;
 use crate::domain::campaign::model::{NodeDisposition, NodeRuntime};
+use crate::domain::campaign::profile::ProfileLimits;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureDisposition {

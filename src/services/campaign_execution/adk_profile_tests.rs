@@ -1,6 +1,6 @@
 use super::*;
-use crate::services::campaign_execution::profile::CheckKind;
-use crate::services::campaign_execution::verification_run::{
+use crate::domain::campaign::profile::CheckKind;
+use crate::domain::campaign::verification_run::{
     CommandPolicy, PhaseKind, PhaseTemplate, SelectionRule, SpecCheck,
 };
 

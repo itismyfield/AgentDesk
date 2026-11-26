@@ -8,18 +8,18 @@ use crate::domain::campaign::workspace::WorkspaceObservation;
 
 use super::adk_resources::AdkResources;
 use super::adk_workspace::{self, AdkWorkspaceKey, WorkspaceError};
-use super::profile::{
-    Checkout, ComponentObservation, EnvironmentComponent, EnvironmentFact, ExecutionEnvironment,
-    Observation,
-};
-use super::verification_run::{
-    ArtifactRef, ExpectedArtifact, PhaseInput, PhaseKind, Termination, VerificationError,
-    VerificationPhase, VerificationRun, VerificationSpec, digest_of, execution_id,
-};
 use super::verification_runner::{
     AdkBuildIdentity, AdkPhasePaths, TestHandoff, adk_phase_command, adk_test_handoff,
 };
 use crate::domain::campaign::model::HostGate;
+use crate::domain::campaign::profile::{
+    Checkout, ComponentObservation, EnvironmentComponent, EnvironmentFact, ExecutionEnvironment,
+    Observation,
+};
+use crate::domain::campaign::verification_run::{
+    ArtifactRef, ExpectedArtifact, PhaseInput, PhaseKind, Termination, VerificationError,
+    VerificationPhase, VerificationRun, VerificationSpec, digest_of, execution_id,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {

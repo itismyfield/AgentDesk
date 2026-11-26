@@ -3,10 +3,12 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::profile::{Candidate, ContractError, VerificationCheckoutKind, Workspace};
-use super::verification_run::BoundSubject;
 use crate::domain::campaign::definition::valid_id;
 use crate::domain::campaign::model::Repository;
+use crate::domain::campaign::profile::{
+    Candidate, ContractError, VerificationCheckoutKind, Workspace,
+};
+use crate::domain::campaign::verification_run::BoundSubject;
 use crate::domain::campaign::workspace::WorkspaceObservation;
 use crate::services::git::GitCommand;
 

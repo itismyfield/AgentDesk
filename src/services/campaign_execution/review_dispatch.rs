@@ -8,14 +8,16 @@ use crate::db::server_campaigns::{self as store, StoreError};
 
 use super::host_gate::{GateRefusal, Initiated, Initiation, JournalState};
 use super::host_worker::{HostWorker, WorkerError};
-use super::profile::Observation;
-use super::review_gate::{ActorIdentity, ReviewFact, ReviewRequest, ReviewStatus, ScopeTest};
 use super::review_wait::{self, send};
 use super::runtime_profile::RuntimeProfile;
-use super::verification_run::digest_of;
 use super::verification_spec::adk_verification_spec;
 use crate::domain::campaign::execution_pin::{ExecutionPin, PinError, RequirementsSnapshot};
 use crate::domain::campaign::model::{ActionState, Command, Role};
+use crate::domain::campaign::profile::Observation;
+use crate::domain::campaign::review_gate::{
+    ActorIdentity, ReviewFact, ReviewRequest, ReviewStatus, ScopeTest,
+};
+use crate::domain::campaign::verification_run::digest_of;
 
 pub enum WebGptAdmission<S> {
     Ready(S),

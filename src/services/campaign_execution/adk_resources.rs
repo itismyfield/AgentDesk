@@ -5,10 +5,10 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::profile::{Observation, ResourceIdentity, ResourceKind};
+use crate::domain::campaign::profile::{Observation, ResourceIdentity, ResourceKind};
 
 use super::resource_admission::{ResourceAdmission, wait_for_headroom};
-use super::verification_run::CommandSpec;
+use crate::domain::campaign::verification_run::CommandSpec;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceFact {

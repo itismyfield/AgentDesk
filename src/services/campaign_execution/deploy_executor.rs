@@ -20,8 +20,8 @@ use super::deploy_policy::{self, Permit};
 use super::effect_envelope::execution_nonce;
 use super::host_gate::{EffectAuthority, EffectEnvelope, Initiated, Initiation, JournalState};
 use super::host_worker::{HostWorker, WorkerError};
-use super::verification_run::digest_of;
 use crate::domain::campaign::model::*;
+use crate::domain::campaign::verification_run::digest_of;
 
 /// What the existing deployment path would release now.
 #[derive(Clone, Debug, PartialEq, Eq)]

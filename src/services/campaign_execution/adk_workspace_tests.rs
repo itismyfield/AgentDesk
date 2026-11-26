@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::*;
-use crate::services::campaign_execution::verification_run::VerificationSubjectRef;
+use crate::domain::campaign::verification_run::VerificationSubjectRef;
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-29T08:00:00Z")

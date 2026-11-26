@@ -10,10 +10,10 @@ use crate::domain::campaign::model::*;
 
 use super::commands;
 use super::control::{observe_action, validate_new_start};
-use super::profile::{ReviewExtent, ReviewRange};
 use super::review_dispatch::{ReviewError, WebGptReply};
-use super::review_gate::*;
 use super::stage_fsm::{Transition, accept_stage_result};
+use crate::domain::campaign::profile::{ReviewExtent, ReviewRange};
+use crate::domain::campaign::review_gate::*;
 
 pub(super) async fn record(
     pool: &PgPool,
