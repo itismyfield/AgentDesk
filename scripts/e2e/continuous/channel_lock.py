@@ -112,7 +112,7 @@ def is_held(state_dir, resource):
     try:
         _check_private_dir(root)
         _check_private_dir(path.parent)
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
         return False
     try:

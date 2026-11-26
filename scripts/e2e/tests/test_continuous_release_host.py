@@ -904,7 +904,7 @@ from scripts.e2e.continuous import channel_lock
 held = channel_lock.acquire(sys.argv[1], json.loads(sys.argv[2]))
 held.publish_owner({'pid': os.getpid(), 'kind': 'fixture'})
 os._exit(0)
-""", str(self.state), json.dumps(RESOURCE)], check=True, timeout=10)
+""", str(self.state), json.dumps(RESOURCE)], cwd=REPO, check=True, timeout=10)
         raw, inode = self.path.read_bytes(), self.path.stat().st_ino
         self.assertGreater(json.loads(raw)["pid"], 0)
         self.inspect("FREE")
@@ -934,6 +934,11 @@ os._exit(0)
             with self.assertRaises(PermissionError):
                 channel_lock.acquire(self.state, RESOURCE)
         self.assertEqual(self.path.read_bytes(), raw)
+        self.path.unlink()
+        os.mkfifo(self.path, 0o600)
+        result = subprocess.run([sys.executable, "-m", "scripts.e2e.continuous", "--config", str(self.config), "lease-status"],
+                                cwd=REPO, capture_output=True, text=True, timeout=10)
+        self.assertEqual((result.returncode, json.loads(result.stdout)["status"]), (2, "REJECTED"))
 
 
 if __name__ == "__main__":
