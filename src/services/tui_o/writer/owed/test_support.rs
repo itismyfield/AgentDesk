@@ -32,9 +32,9 @@ pub(super) const CHANNEL: u64 = 584_521;
 
 #[derive(Default)]
 pub(crate) struct Port {
-    history_override: Mutex<Option<Vec<SeenMessage>>>,
-    history_reads: std::sync::atomic::AtomicUsize,
-    posts: Mutex<Vec<String>>,
+    pub(super) history_override: Mutex<Option<Vec<SeenMessage>>>,
+    pub(super) history_reads: std::sync::atomic::AtomicUsize,
+    pub(super) posts: Mutex<Vec<String>>,
     /// Runs inside each POST's first poll, under the gate and any record lock.
     pub(super) on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
