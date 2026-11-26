@@ -80,7 +80,7 @@ pub(super) fn pending_handover(
 
 /// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
 /// read, the execution `attached` its attach returned, and the execution `target` the hook names.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn owned_pending_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     (record, attached, target): (&HostedExecution, &HostedExecution, &HostedExecution),

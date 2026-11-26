@@ -11,7 +11,7 @@ pub(crate) mod legacy_return;
 #[path = "herdr_gate/closing.rs"]
 mod closing;
 pub(crate) use closing::execution_closing;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use closing::shut_execution_for_test;
 
 use std::collections::HashMap;
