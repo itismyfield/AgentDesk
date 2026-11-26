@@ -213,7 +213,7 @@ pub(crate) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
     merged.into_values().collect()
 }
 
-pub(crate) use crate::services::channel_roles::resolve_workspace;
+use crate::services::channel_roles::resolve_workspace;
 
 pub(crate) fn has_configured_channel_binding(
     channel_id: ChannelId,

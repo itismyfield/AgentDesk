@@ -44,8 +44,8 @@ pub(crate) use validation::list_registered_channel_bindings;
 // routes layer (`src/server/routes/discord.rs`) can deny `/api/discord/channels/*`
 // proxy lookups for channels that are not registered with this AgentDesk
 // instance. All other validation helpers remain super-scoped.
+pub(crate) use crate::services::channel_roles::resolve_workspace;
 pub(crate) use validation::resolve_role_binding;
-pub(crate) use validation::resolve_workspace;
 pub(super) use validation::{
     BotChannelRoutingGuardFailure, bot_settings_allow_channel, channel_supports_provider,
     has_configured_channel_binding, resolve_cache_ttl_minutes, resolve_dispatch_profile,
