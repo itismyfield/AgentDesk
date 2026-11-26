@@ -3964,6 +3964,7 @@ pub(super) fn dc1_observe_tick(
     cursors: &HashMap<String, IdleCursor>,
     pending: &HashMap<String, IdlePending>,
 ) {
+    idle_relay_harness::observe_cursor(cursors);
     if let Some(ticks) = DC1_TICKS.get() {
         ticks.lock().unwrap().push(
             cursors
@@ -4548,13 +4549,108 @@ impl SessionBoundDiscordRelaySink {
 /// #6210: the real idle JSONL relay loop over one captured supervisor StreamRelay, whose
 /// sink commits each frame the way the Discord sink does, so sends are counted exactly.
 pub(in crate::services::discord) mod idle_relay_harness {
+    use crate::services::cluster::relay_producer_registry::global_relay_producer_registry;
+    use crate::services::cluster::session_matcher::MatchedChannel;
+    use crate::services::cluster::session_registry::global_session_registry;
     use crate::services::cluster::stream_relay::{
         RelaySink, RelaySinkError, RelaySinkOutcome, StreamFrame, StreamRelayHandle,
     };
     use crate::services::discord::SharedData;
+    use crate::services::discord::session_relay_sink::SessionBoundDiscordRelaySink;
     use serenity::model::id::ChannelId;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+    use tokio::sync::{mpsc, watch};
+
+    static SCANNER_CURSOR: Mutex<Option<(String, watch::Sender<Option<u64>>)>> = Mutex::new(None);
+
+    pub(super) fn observe_cursor(cursors: &std::collections::HashMap<String, super::IdleCursor>) {
+        if let Some((name, tx)) = SCANNER_CURSOR.lock().unwrap().as_ref()
+            && let Some(cursor) = cursors.get(name)
+        {
+            tx.send_replace(Some(cursor.offset));
+        }
+    }
+
+    struct Capture(mpsc::UnboundedSender<StreamFrame>);
+
+    #[async_trait::async_trait]
+    impl RelaySink for Capture {
+        async fn deliver(&self, frame: &StreamFrame) -> Result<RelaySinkOutcome, RelaySinkError> {
+            let _ = self.0.send(frame.clone());
+            Ok(RelaySinkOutcome::FrameAccepted)
+        }
+    }
+
+    pub(in crate::services::discord) struct ObservedScanner {
+        session: String,
+        frames: mpsc::UnboundedReceiver<StreamFrame>,
+        cursor: watch::Receiver<Option<u64>>,
+        task: tokio::task::JoinHandle<()>,
+        _relay: StreamRelayHandle,
+    }
+
+    impl ObservedScanner {
+        pub(in crate::services::discord) fn start(
+            binding: MatchedChannel,
+            sink: Arc<SessionBoundDiscordRelaySink>,
+        ) -> Self {
+            let session = binding.expected_session_name.clone();
+            let (tx, frames) = mpsc::unbounded_channel();
+            let relay = crate::services::cluster::stream_relay::spawn_stream_relay(
+                binding.clone(),
+                Arc::new(Capture(tx)),
+            );
+            let (cursor_tx, cursor) = watch::channel(None);
+            assert!(
+                SCANNER_CURSOR
+                    .lock()
+                    .unwrap()
+                    .replace((session.clone(), cursor_tx))
+                    .is_none()
+            );
+            global_relay_producer_registry().register(session.clone(), relay.producer());
+            global_session_registry().upsert(binding, None);
+            let task = tokio::spawn(super::super::run_idle_jsonl_relay_loop(
+                Arc::default(),
+                sink,
+            ));
+            Self {
+                session,
+                frames,
+                cursor,
+                task,
+                _relay: relay,
+            }
+        }
+
+        pub(in crate::services::discord) async fn at_cursor(&mut self, expected: u64) {
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                self.cursor.wait_for(|offset| *offset == Some(expected)),
+            )
+            .await
+            .expect("scanner cursor timeout")
+            .expect("scanner stopped");
+        }
+
+        pub(in crate::services::discord) async fn frame(&mut self) -> StreamFrame {
+            tokio::time::timeout(Duration::from_secs(18), self.frames.recv())
+                .await
+                .expect("scanner frame timeout including initial grace")
+                .expect("relay closed")
+        }
+    }
+
+    impl Drop for ObservedScanner {
+        fn drop(&mut self) {
+            self.task.abort();
+            global_session_registry().remove(&self.session);
+            global_relay_producer_registry().deregister(&self.session);
+            *SCANNER_CURSOR.lock().unwrap() = None;
+        }
+    }
 
     struct CommittingCapture {
         frames: tokio::sync::mpsc::UnboundedSender<StreamFrame>,

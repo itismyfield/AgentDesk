@@ -6,6 +6,7 @@ use crate::services::cluster::stream_relay::{
     GenerationSourceIdentity, RelaySink, RelaySinkOutcome, SourceEpoch, SourceFileIdentity,
     SourceStamp, SourceWitness, StreamFrame,
 };
+use crate::services::discord::session_relay_sink::tests::idle_relay_harness::ObservedScanner;
 use crate::services::discord::{
     bot_role::UtilityBotRole, inflight, outbound::delivery_record, session_relay_sink,
     shared_state::test_rest,
@@ -24,7 +25,7 @@ const NEXT_ANSWER: &str = "later autonomous answer";
 
 struct Fixture {
     mock: Discord,
-    sink: session_relay_sink::SessionBoundDiscordRelaySink,
+    sink: Arc<session_relay_sink::SessionBoundDiscordRelaySink>,
     binding: MatchedChannel,
     source: SourceStamp,
     first: String,
@@ -37,6 +38,16 @@ struct Fixture {
 
 impl Fixture {
     async fn new(label: &str, next_answer: &str) -> Self {
+        Self::with_output(
+            label,
+            &terminal_jsonl(""),
+            &terminal_jsonl(FIRST_ANSWER),
+            &terminal_jsonl(next_answer),
+        )
+        .await
+    }
+
+    async fn with_output(label: &str, prelude: &str, first_records: &str, next: &str) -> Self {
         let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
         let db = DispatchPostgresTestDb::create("adk_wrapper_idle", label).await;
         let pool = Arc::new(db.connect_and_migrate().await);
@@ -55,14 +66,14 @@ impl Fixture {
         registry
             .register(provider.as_str().into(), shared.clone())
             .await;
-        let sink = session_relay_sink::SessionBoundDiscordRelaySink::new(registry.clone());
+        let sink = Arc::new(session_relay_sink::SessionBoundDiscordRelaySink::new(
+            registry.clone(),
+        ));
         let session = provider.build_tmux_session_name(&CHANNEL.to_string());
         let output = expected_rollout_path_for(&session);
         let generation_marker = session_temp_path(&session, "generation");
         fs::create_dir_all(Path::new(&output).parent().unwrap()).unwrap();
-        let prelude = terminal_jsonl("");
-        let first = format!("{prelude}{}", terminal_jsonl(FIRST_ANSWER));
-        let next = terminal_jsonl(next_answer);
+        let first = format!("{prelude}{first_records}");
         fs::write(&output, format!("{first}{next}")).unwrap();
         fs::write(&generation_marker, b"wrapper fixture generation").unwrap();
         let generation = delivery_record::current_generation_mtime_ns(&session);
@@ -144,7 +155,7 @@ impl Fixture {
             binding,
             source,
             first,
-            next,
+            next: next.to_owned(),
             pool,
             db,
             _rest: rest,
@@ -186,6 +197,16 @@ impl Fixture {
     async fn close(self) {
         self.pool.close().await;
         self.db.drop().await;
+    }
+
+    async fn scanner(&self) -> ObservedScanner {
+        let path = &self.binding.expected_rollout_path;
+        fs::write(path, b"").unwrap();
+        let mut scanner = ObservedScanner::start(self.binding.clone(), self.sink.clone());
+        // Coordinate zero is the previous terminal end. Keep the inode from the sent proof.
+        scanner.at_cursor(0).await;
+        fs::write(path, format!("{}{}", self.first, self.next)).unwrap();
+        scanner
     }
 }
 
@@ -273,5 +294,147 @@ async fn sent_wrapper_proof_cannot_consume_replaced_source_with_same_generation_
     fixture.source.file = replacement_file;
     fixture.relay(0, fixture.first.clone(), 2).await;
     assert_eq!(fixture.mock.posts().len(), 2);
+    fixture.close().await;
+}
+
+const SENTINEL: &str =
+    "{\"type\":\"ready_for_input\",\"provider\":\"claude\",\"ts\":\"2026-11-26T11:23:59Z\"}\n";
+const A_END: u64 = 706_908;
+const B_END: u64 = 1_312_781;
+
+fn sized_turn(output_size: usize, tool_sizes: &[usize], answer: &str) -> String {
+    let terminal = terminal_jsonl(answer);
+    let rest = output_size - tool_sizes.iter().sum::<usize>() - terminal.len();
+    let mut output = String::with_capacity(output_size);
+    for size in tool_sizes.iter().copied().chain([rest]) {
+        let start = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_fixture\",\"content\":\"";
+        let end = "\"}]}}\n";
+        output.push_str(start);
+        output.push_str(&"x".repeat(size - start.len() - end.len()));
+        output.push_str(end);
+    }
+    output.push_str(&terminal);
+    assert_eq!(output.len(), output_size);
+    output
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sent_wrapper_past_sentinel_moves_the_idle_window_to_the_equal_later_answer_pg() {
+    let _policy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let first = sized_turn(706_833, &[176_000, 176_000, 176_000], FIRST_ANSWER);
+    let next = sized_turn(605_873, &[166_579, 166_579], FIRST_ANSWER);
+    let fixture =
+        Fixture::with_output("cursor through sent wrapper proof", SENTINEL, &first, &next).await;
+    assert_eq!(SENTINEL.len(), 75);
+    assert_eq!(fixture.first.len() as u64, A_END);
+    let all = format!("{}{}", fixture.first, fixture.next);
+    assert_eq!(all.len() as u64, B_END);
+    assert_eq!(all[..1_048_576].rfind('\n').unwrap() + 1, 1_040_066);
+    let mut scanner = fixture.scanner().await;
+    let mut ranges = Vec::new();
+    for _ in 0..4 {
+        let frame = scanner.frame().await;
+        let delivers_later_answer = frame.relay_range == Some((A_END, B_END));
+        assert_eq!(
+            fixture.sink.deliver(&frame).await.unwrap(),
+            RelaySinkOutcome::TerminalDelivered
+        );
+        ranges.push(frame.relay_range);
+        assert_eq!(
+            fixture.mock.posts().len(),
+            if delivers_later_answer { 2 } else { 1 },
+            "only the window over the later occurrence may add a POST"
+        );
+        if delivers_later_answer {
+            break;
+        }
+    }
+    assert!(
+        ranges.contains(&Some((A_END, B_END))),
+        "the idle read window stalled: {ranges:?}"
+    );
+    scanner.at_cursor(B_END).await;
+    let posts = fixture.mock.posts();
+    assert_eq!(
+        posts.len(),
+        2,
+        "the worker's first answer and the separate idle answer post once each"
+    );
+    assert!(
+        posts
+            .iter()
+            .all(|(_, body)| body["content"].as_str().unwrap().contains(FIRST_ANSWER))
+    );
+    drop(scanner);
+    fixture.close().await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn idle_scanner_keeps_an_unposted_visible_prefix_before_the_sent_wrapper_proof_pg() {
+    let _policy = crate::services::tui_o::cutover::test_override::force_channels(&[]);
+    let prefix_answer = "earlier visible response";
+    let prefix = terminal_jsonl(prefix_answer);
+    let first = sized_turn(706_833, &[176_000, 176_000, 176_000], FIRST_ANSWER);
+    let next = sized_turn(605_873, &[166_579, 166_579], NEXT_ANSWER);
+    let fixture = Fixture::with_output(
+        "unposted visible prefix before sent proof",
+        &prefix,
+        &first,
+        &next,
+    )
+    .await;
+    let mut scanner = fixture.scanner().await;
+    let initial = scanner.frame().await;
+    let retry = scanner.frame().await;
+    for frame in [&initial, &retry] {
+        assert_eq!(frame.relay_range.map(|(start, _)| start), Some(0));
+        assert!(frame.payload.starts_with(&prefix));
+    }
+    assert_eq!(
+        fixture.mock.posts().len(),
+        1,
+        "only the worker's sent answer is visible so far"
+    );
+    assert_eq!(
+        fixture.sink.deliver(&initial).await.unwrap(),
+        RelaySinkOutcome::TerminalDelivered
+    );
+    let posts = fixture.mock.posts();
+    assert_eq!(posts.len(), 2);
+    assert!(
+        posts[1].1["content"]
+            .as_str()
+            .unwrap()
+            .contains(prefix_answer)
+    );
+    let a_end = fixture.first.len() as u64;
+    let b_end = a_end + fixture.next.len() as u64;
+    scanner.at_cursor(a_end).await;
+    let mut delivered_tail = false;
+    for _ in 0..4 {
+        let frame = scanner.frame().await;
+        if frame.relay_range == Some((a_end, b_end)) {
+            assert_eq!(
+                fixture.sink.deliver(&frame).await.unwrap(),
+                RelaySinkOutcome::TerminalDelivered
+            );
+            delivered_tail = true;
+            break;
+        }
+    }
+    assert!(
+        delivered_tail,
+        "the committed visible prefix must release the later window"
+    );
+    scanner.at_cursor(b_end).await;
+    let posts = fixture.mock.posts();
+    assert_eq!(posts.len(), 3);
+    assert!(
+        posts[2].1["content"]
+            .as_str()
+            .unwrap()
+            .contains(NEXT_ANSWER)
+    );
+    drop(scanner);
     fixture.close().await;
 }
