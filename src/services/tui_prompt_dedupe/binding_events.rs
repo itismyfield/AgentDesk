@@ -235,7 +235,7 @@ fn events_dir() -> io::Result<Option<PathBuf>> {
     Ok(Some(root.join(BINDING_EVENTS_DIR)))
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn fault(_step: &str) -> io::Result<()> {
     Ok(())
 }
@@ -1025,7 +1025,7 @@ fn events_dir() -> io::Result<Option<PathBuf>> {
     Ok(root.map(|root| root.join(BINDING_EVENTS_DIR)))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn fault(step: &str) -> io::Result<()> {
     match APPEND_FAULT.with(|fault| fault.get()) {
         Some(armed) if armed == step => Err(io::Error::other(format!("injected {step}"))),
