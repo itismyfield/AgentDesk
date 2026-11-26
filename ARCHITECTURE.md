@@ -544,13 +544,15 @@ src/
 │   │   ├── exec_ops/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
+│   │   │   ├── inflight_remove_tests.rs
 │   │   │   └── session_liveness_tests.rs
 │   │   ├── read_bridge/
 │   │   │   ├── contract_tests.rs
 │   │   │   └── epoch_tests.rs
 │   │   ├── timeouts_ops/
 │   │   │   ├── host_repair.rs
-│   │   │   └── host_repair_tests.rs
+│   │   │   ├── host_repair_tests.rs
+│   │   │   └── key_promotion_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -623,6 +625,7 @@ src/
 │   ├── settings_cli_tests.rs
 │   └── skill_sync_shipped_tree_tests.rs
 ├── launch/
+│   ├── ke_engine_tests.rs
 │   ├── ke_turn_tests.rs
 │   └── ke_turn_unix_tests.rs
 ├── logging/
@@ -631,6 +634,8 @@ src/
 │   ├── intake_stage.rs
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
+├── reconcile/
+│   └── boot_lease_tests.rs
 ├── runtime_layout/
 │   ├── boot_id.rs
 │   ├── config_merge.rs
@@ -5641,8 +5646,9 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
-| `src/launch/` | Test-only hosts that declare KE turn tests calling root-crate items, so they leave the KE crate. |
+| `src/launch/` | Test-only hosts that declare KE tests calling root-crate items, so they leave the KE crate. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
+| `src/reconcile/` | Reconcile tests moved out of the inline module because they call root-crate items. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |
