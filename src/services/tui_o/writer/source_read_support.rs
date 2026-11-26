@@ -25,7 +25,6 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 pub(super) const A: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
