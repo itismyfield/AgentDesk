@@ -75,5 +75,17 @@ export function useLegacyCampaigns() {
     setCampaigns((current) => current.map((value) => value.id === updated.id && updated.revision >= value.revision ? updated : value));
   }, []);
 
-  return { campaigns, live, loading, error, refreshedAt, checkedRead, refresh, refreshCampaign, onSaved };
+  const onDeleted = useCallback((campaignId: string) => {
+    listRequest.current++; detailRequest.current++;
+    setLoading(false); setError(null); setRefreshedAt(Date.now());
+    setLive((current) => {
+      if (!(campaignId in current)) return current;
+      const rest = { ...current };
+      delete rest[campaignId];
+      return rest;
+    });
+    setCampaigns((current) => current.filter((value) => value.id !== campaignId));
+  }, []);
+
+  return { campaigns, live, loading, error, refreshedAt, checkedRead, refresh, refreshCampaign, onSaved, onDeleted };
 }
