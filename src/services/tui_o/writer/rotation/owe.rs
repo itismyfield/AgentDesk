@@ -387,11 +387,8 @@ impl NativeSources {
 }
 
 #[cfg(unix)]
-impl<B: BindingEvents>
-    crate::services::tui_input::human_frame::history::notice_owner::NativeNoticeSource
-    for Sources<B>
-{
-    fn notice_projection(
+impl<B: BindingEvents> Sources<B> {
+    pub(in crate::services::tui_o::writer) fn notice_projection(
         &self,
         cursor: &crate::services::tui_o::store::spool::Cursor,
         stamp: &crate::services::tui_o::shadow::capture::Fingerprint,

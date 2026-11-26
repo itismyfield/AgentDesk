@@ -346,11 +346,20 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         }
         let mut owners = std::mem::take(&mut self.writer.notice_owners);
-        owners.refresh(
-            self.writer.store(),
-            #[cfg(unix)]
-            Some(&self.sources),
-        );
+        let store = self.writer.store();
+        #[cfg(unix)]
+        let lookup = |origin: &_, stamp: &_| {
+            super::super::input_notices::absorption::authenticated_proofs(
+                store,
+                &self.sources,
+                origin,
+                stamp,
+            )
+        };
+        #[cfg(unix)]
+        owners.refresh(store, Some(&lookup));
+        #[cfg(not(unix))]
+        owners.refresh(store, None);
         let mut cache = std::mem::take(&mut self.writer.notice_cache);
         cache.track_contexts(
             &owners,

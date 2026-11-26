@@ -5,17 +5,9 @@ use crate::services::tui_o::store::ledger::input_notices::Settled;
 pub(super) type Proven = HashMap<(u64, u64), String>;
 type Reserved = HashMap<String, u64>;
 
-#[cfg(unix)]
-use crate::services::tui_o::writer::input_facts::native::{Projection, Registration};
-
-#[cfg(unix)]
-pub(crate) trait NativeNoticeSource {
-    fn notice_projection(
-        &self,
-        cursor: &crate::services::tui_o::store::spool::Cursor,
-        stamp: &Fingerprint,
-    ) -> Option<&Projection>;
-}
+pub(crate) type AbsorptionProofs = HashMap<(u64, u64), ([u8; 32], String)>;
+pub(crate) type AbsorptionLookup<'a> =
+    dyn Fn(&NoticeOrigin, &Fingerprint) -> Option<AbsorptionProofs> + 'a;
 
 pub(super) fn collect(
     store: &ChannelStore,
@@ -23,7 +15,7 @@ pub(super) fn collect(
     entries: &[Entry],
     blocked: &Blocked,
     source_stamp: Option<&Fingerprint>,
-    #[cfg(unix)] live: Option<&dyn NativeNoticeSource>,
+    lookup: Option<&AbsorptionLookup<'_>>,
 ) -> (Proven, Reserved) {
     let state = store.ledger().input_notices();
     let mut reserved = Reserved::new();
@@ -56,13 +48,7 @@ pub(super) fn collect(
     let mut proven = Proven::new();
     if let Some(source_stamp) = source_stamp
         && !pending.is_empty()
-        && let Some(by_range) = authenticated_proofs(
-            store,
-            origin,
-            source_stamp,
-            #[cfg(unix)]
-            live,
-        )
+        && let Some(by_range) = lookup.and_then(|lookup| lookup(origin, source_stamp))
     {
         for evidence in pending {
             let range = (evidence.record.start, evidence.record.end);
@@ -102,108 +88,4 @@ fn reserve(reserved: &mut Reserved, owner: &str, offset: u64) {
         .entry(owner.into())
         .and_modify(|before| *before = (*before).min(offset))
         .or_insert(offset);
-}
-
-type SourceProofs = HashMap<(u64, u64), ([u8; 32], String)>;
-
-#[cfg(unix)]
-fn authenticated_proofs(
-    store: &ChannelStore,
-    origin: &NoticeOrigin,
-    source_stamp: &Fingerprint,
-    live: Option<&dyn NativeNoticeSource>,
-) -> Option<SourceProofs> {
-    use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
-
-    let source = &origin.record.source;
-    let cursor = store.cursor(source)?;
-    let binding = SourceBinding {
-        channel_id: store.init().channel,
-        provider: ShadowProvider::Claude,
-        source: source.clone(),
-    };
-    let registry = v2::Registry::runtime().ok()?;
-    let mut registrations: Vec<_> = registry
-        .native_classification_registrations()
-        .ok()?
-        .into_iter()
-        .filter(|r| {
-            r.ticket.channel_id == binding.channel_id
-                && (r.matches(&binding) || r.ticket.source.is_none())
-        })
-        .collect();
-    let allowed = verified_attempts(&registry, &mut registrations);
-    if allowed.is_empty() {
-        return None;
-    }
-    let mut proofs =
-        if let Some(seed) = live.and_then(|live| live.notice_projection(cursor, source_stamp)) {
-            seed.notice_absorptions(&registrations).ok()?
-        } else {
-            let (capture, projection) =
-                Projection::reopen(binding, cursor.captured_through, &cursor.prefix_hash).ok()?;
-            let proofs = projection.ok()?.notice_absorptions(&registrations).ok()?;
-            if capture.fingerprint().ok().as_ref() != Some(source_stamp) {
-                return None;
-            }
-            proofs
-        };
-    proofs.retain(|range, (_, owner)| {
-        allowed
-            .get(owner)
-            .is_some_and(|expected| expected.is_none_or(|r| r == *range))
-    });
-    (census::fingerprint(source).as_ref() == Some(source_stamp)).then_some(proofs)
-}
-
-#[cfg(unix)]
-fn verified_attempts(
-    registry: &v2::Registry,
-    registrations: &mut [Registration],
-) -> HashMap<String, Option<(u64, u64)>> {
-    use v2::native::Disposition;
-    let mut allowed = HashMap::new();
-    for reg in registrations {
-        if reg.ticket.source.is_none() || !reg.receipts.is_empty() {
-            continue;
-        }
-        let Ok(settlement) = registry.native_settlement(&reg.namespace, &reg.ticket) else {
-            continue;
-        };
-        if settlement.extra.get("any_key") != Some(&serde_json::Value::Bool(true))
-            || settlement.extra.get("not_sent") == Some(&serde_json::Value::Bool(true))
-        {
-            continue;
-        }
-        let owner = serde_json::json!([reg.namespace, reg.ticket.key]).to_string();
-        if let Some(outcome) = settlement.outcome {
-            // A recorded terminal result can only attest to its own membership range.
-            let Some(proof) = outcome.extra.get("native_proof") else {
-                continue;
-            };
-            if matches!(
-                outcome.disposition,
-                Disposition::Executed | Disposition::Cancelled
-            ) && proof.get("membership_row") == Some(&serde_json::Value::Null)
-                && let Ok(range) =
-                    serde_json::from_value::<(u64, u64)>(proof["membership_range"].clone())
-                && range.0 < range.1
-            {
-                reg.candidate = true;
-                allowed.insert(owner, Some(range));
-            }
-        } else if reg.candidate {
-            allowed.insert(owner, None);
-        }
-    }
-    allowed
-}
-
-#[cfg(not(unix))]
-fn authenticated_proofs(
-    _: &ChannelStore,
-    _: &NoticeOrigin,
-    _: &Fingerprint,
-) -> Option<SourceProofs> {
-    None
 }

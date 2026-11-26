@@ -1,6 +1,8 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
 // Test builds open it to the admission tests mounted in the discord-layer test host.
+#[cfg(unix)]
+pub(super) mod absorption;
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) mod admission;
 #[cfg(any(test, feature = "test-support"))]
@@ -106,12 +108,6 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
             .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
 }
 
-pub(crate) fn is_absorbed_remove(row: &serde_json::Value) -> bool {
-    row["type"] == "queue-operation"
-        && row["operation"] == "remove"
-        && row["reason"] == "absorbed_mid_turn"
-}
-
 enum NoticeOwnership {
     Known,
     KnownCommand,
@@ -215,7 +211,7 @@ impl Projection {
             std::slice::from_ref(&prompt),
             &native_key,
             command_row_uuid.as_deref(),
-            is_absorbed_remove(&value),
+            tui_prompt_dedupe::is_claude_absorbed_remove(&value),
         )? {
             NoticeOwnership::Known => return Ok(None),
             // Keep the physical receipt row until ownership settles the original input key.

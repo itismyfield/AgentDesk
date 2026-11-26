@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use crate::services::tui_prompt_dedupe::{
-    extract_claude_writer_input_with_entry_id, may_be_claude_queued_command,
+    extract_claude_writer_input_with_entry_id, is_claude_absorbed_remove,
+    may_be_claude_queued_command,
 };
 pub(super) mod settlement;
 pub(crate) use settlement::policy_proven;
@@ -134,9 +135,8 @@ impl NoticeEvidence {
         self.raw_record
             .windows(token.len())
             .any(|window| window == token)
-            && serde_json::from_slice(&self.raw_record).is_ok_and(|raw: serde_json::Value| {
-                crate::services::tui_o::writer::input_notices::is_absorbed_remove(&raw)
-            })
+            && serde_json::from_slice(&self.raw_record)
+                .is_ok_and(|raw: serde_json::Value| is_claude_absorbed_remove(&raw))
     }
 
     /// Receipts address the attachment row even when the notice uses the original input UUID.

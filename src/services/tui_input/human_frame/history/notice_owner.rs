@@ -6,8 +6,9 @@ use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
 
 mod absorption;
+use absorption::AbsorptionLookup;
 #[cfg(unix)]
-pub(crate) use absorption::NativeNoticeSource;
+pub(crate) use absorption::AbsorptionProofs;
 mod census;
 mod context_observation;
 #[cfg(test)]
@@ -155,19 +156,11 @@ impl Batch {
     #[cfg(test)]
     pub(crate) fn prepare(store: &ChannelStore) -> Self {
         let mut batch = Self::default();
-        batch.refresh(
-            store,
-            #[cfg(unix)]
-            None,
-        );
+        batch.refresh(store, None);
         batch
     }
 
-    pub(crate) fn refresh(
-        &mut self,
-        store: &ChannelStore,
-        #[cfg(unix)] live: Option<&dyn NativeNoticeSource>,
-    ) {
+    pub(crate) fn refresh(&mut self, store: &ChannelStore, lookup: Option<&AbsorptionLookup<'_>>) {
         let before = stamp();
         self.stamp = before.clone();
         let mut previous = std::mem::take(&mut self.scopes);
@@ -248,8 +241,7 @@ impl Batch {
                         &entries,
                         &blocked,
                         native_stamp.as_ref(),
-                        #[cfg(unix)]
-                        live,
+                        lookup,
                     );
                     let (exact, census, owners) = attribute(
                         &entries,

@@ -241,11 +241,14 @@ fn claude_notice_row(json: &Value) -> bool {
         && !crate::services::tui_o::shadow::identity::record_is_compact_summary(json)
 }
 
+pub(crate) fn is_claude_absorbed_remove(json: &Value) -> bool {
+    json["type"] == "queue-operation"
+        && json["operation"] == "remove"
+        && json["reason"] == "absorbed_mid_turn"
+}
+
 fn claude_absorbed_input(json: &Value) -> Option<ClaudeWriterInput> {
-    if json["operation"] != "remove"
-        || json["reason"] != "absorbed_mid_turn"
-        || !claude_notice_row(json)
-    {
+    if !is_claude_absorbed_remove(json) || !claude_notice_row(json) {
         return None;
     }
     let uuid = json["commandUuid"]
