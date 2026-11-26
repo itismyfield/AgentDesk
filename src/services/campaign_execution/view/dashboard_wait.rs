@@ -2,10 +2,10 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::domain::campaign::{
-    decision_item::ApprovalBinding, lifecycle::NextAction, workflow_options::ApprovalGate,
+    decision_item::ApprovalBinding, lifecycle::NextAction, model::*, workflow_options::ApprovalGate,
 };
 
-use super::super::{control, model::*, scheduler};
+use super::super::{control, scheduler};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]

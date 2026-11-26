@@ -3,11 +3,10 @@ use std::collections::BTreeMap;
 use chrono::{DateTime, Utc};
 
 use crate::domain::campaign::definition::{self, DefinitionInput, WORKFLOW_VERSION};
-use crate::domain::campaign::model::command_fingerprint;
+use crate::domain::campaign::model::*;
 
 use super::{
-    decision_commands, lifecycle, model::*, pipeline_editor, review_wait, stage_fsm,
-    verification_commands,
+    decision_commands, lifecycle, pipeline_editor, review_wait, stage_fsm, verification_commands,
 };
 
 type DecisionResult<T> = Result<T, Rejection>;

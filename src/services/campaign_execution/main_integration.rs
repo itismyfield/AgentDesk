@@ -5,11 +5,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::adk_observe::{MainObservation, PrObservation, is_sha};
-use super::model::Repository;
 use super::profile::{
     IntegrationCheck, IntegrationMethod, MainIntegrationEvidence, NodeArtifact, NodeMainMapping,
     Observation, ReviewRange,
 };
+use crate::domain::campaign::model::Repository;
 use crate::services::git::GitCommand;
 
 // The landing candidate a PR carried: one member for a single-node PR, several for a bundle.

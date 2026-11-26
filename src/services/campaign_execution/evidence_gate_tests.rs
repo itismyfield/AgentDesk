@@ -3,10 +3,11 @@ use crate::domain::campaign::{
     candidate_seal::CandidateSeal,
     definition::{AcceptanceCondition, VerificationKind},
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
+    model::*,
     workspace::WorkspaceObservation,
 };
 use crate::services::campaign_execution::{
-    control::tests as domain, model::*, profile::*, verification_run::*,
+    control::tests as domain, profile::*, verification_run::*,
 };
 
 pub(crate) const OUTPUT: &str = "output-h1";

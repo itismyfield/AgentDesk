@@ -7,13 +7,13 @@ use tempfile::{TempDir, tempdir};
 
 use super::*;
 use crate::domain::campaign::candidate_seal::CandidateSeal;
+use crate::domain::campaign::model::{
+    ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
+    RejectionCode,
+};
 use crate::services::campaign_execution::control::{decide, tests as domain};
 use crate::services::campaign_execution::effect_envelope::{
     action_envelope, host_fences, phase_envelope, phase_launch,
-};
-use crate::services::campaign_execution::model::{
-    ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
-    RejectionCode,
 };
 use crate::services::campaign_execution::stage_fsm::tests::{
     assigned, begin, execution, review_of, run_v, seal_of,

@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::*;
+use crate::domain::campaign::model::{Action, ActionState};
 use crate::services::campaign_execution::adk_resources::{ResourceFact, resource};
-use crate::services::campaign_execution::model::{Action, ActionState};
 use crate::services::campaign_execution::profile::{
     Observation, PlannedTest, ResourceKind, TestOutcome,
 };

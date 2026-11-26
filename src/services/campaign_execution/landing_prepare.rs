@@ -7,10 +7,10 @@ use chrono::{DateTime, Utc};
 use crate::services::process::{configure_child_process_group, wait_with_output_timeout};
 
 use super::adk_workspace::{self, WorkspaceError};
-use super::model::Repository;
 use super::verification_run::digest_of;
 use super::verification_spec::landing_prepush_mode;
 use crate::domain::campaign::landing::{LandingPreflight, LandingTarget, PreflightMode};
+use crate::domain::campaign::model::Repository;
 
 #[derive(Debug, thiserror::Error)]
 pub enum PreflightError {

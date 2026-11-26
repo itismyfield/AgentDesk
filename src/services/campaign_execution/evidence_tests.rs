@@ -1,8 +1,8 @@
 use super::*;
+use crate::domain::campaign::model::{AttemptOutcome, NodeRuntime, Stage};
 use crate::services::campaign_execution::{
     control::tests as domain,
     evidence_gate::tests::{OUTPUT, collected, seal},
-    model::{AttemptOutcome, NodeRuntime, Stage},
     profile::TestOutcome,
     review_gate::StagePrerequisite,
 };

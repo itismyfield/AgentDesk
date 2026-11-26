@@ -6,11 +6,10 @@ use crate::db::server_campaigns::{
 };
 use crate::domain::campaign::evidence::{EvidenceEnvelope, EvidencePayload, EvidenceStatus, admit};
 use crate::domain::campaign::evidence_gate::{GateReason, StageAssessment, Verdict};
-use crate::domain::campaign::model::{ReviewedCandidate, command_fingerprint};
+use crate::domain::campaign::model::*;
 
 use super::commands;
 use super::control::{observe_action, validate_new_start};
-use super::model::*;
 use super::profile::{ReviewExtent, ReviewRange};
 use super::review_dispatch::{ReviewError, WebGptReply};
 use super::review_gate::*;

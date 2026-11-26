@@ -2,7 +2,7 @@ use super::*;
 use crate::domain::campaign::definition::{
     DefinitionInput, NodeDefinition, VerificationKind, WORKFLOW_VERSION, validate_definition,
 };
-use crate::services::campaign_execution::model::{HostGate, SessionIdentity};
+use crate::domain::campaign::model::{HostGate, SessionIdentity};
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-28T04:00:00Z")

@@ -1,7 +1,8 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::{control, model::*};
+use super::control;
+use crate::domain::campaign::model::*;
 
 mod dashboard_wait;
 use dashboard_wait::NodeRuntimeView;

@@ -4,12 +4,12 @@ use crate::domain::campaign::candidate_seal::CandidateSeal;
 use crate::domain::campaign::evidence::{self, EvidenceEnvelope, EvidenceStatus};
 use crate::domain::campaign::workspace::WorkspaceObservation;
 
-use super::model::*;
 use super::profile::ExecutionEnvironment;
 use super::stage_fsm::{self, Transition};
 use super::verification_run::{
     NotSentReason, PhaseInitiation, ReconciledInitiation, VerificationError, VerificationRun,
 };
+use crate::domain::campaign::model::*;
 
 fn reject<T>(code: RejectionCode) -> Result<T, Rejection> {
     Err(Rejection::new(code))

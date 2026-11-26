@@ -4,7 +4,7 @@ use crate::domain::campaign::{
 };
 
 use super::lifecycle::{self, GateStatus, GateTarget};
-use super::model::*;
+use crate::domain::campaign::model::*;
 
 fn hold(reason: HoldReason) -> NextAction {
     NextAction::Hold { reason }

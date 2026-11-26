@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::campaign::definition;
 use crate::domain::campaign::definition::{PROFILE_VERSION, WORKFLOW_VERSION};
-use crate::services::campaign_execution::model::{Role, SessionIdentity};
+use crate::domain::campaign::model::{Role, SessionIdentity};
 use crate::services::campaign_execution::profile::{Checkout, ResourceKind};
 
 pub(crate) fn at() -> DateTime<Utc> {

@@ -3,7 +3,7 @@ use std::process::{Command, Stdio};
 
 use uuid::Uuid;
 
-use super::model::HostGate;
+use crate::domain::campaign::model::HostGate;
 
 const BOOT_PREFIX: &str = "boot:";
 
