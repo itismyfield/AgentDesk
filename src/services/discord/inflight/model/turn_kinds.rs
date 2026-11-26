@@ -71,6 +71,20 @@ impl RelayOwnerKind {
     }
 }
 
+impl InflightTurnState {
+    pub(in crate::services::discord) fn effective_relay_owner_kind(&self) -> RelayOwnerKind {
+        match self.relay_owner_kind {
+            RelayOwnerKind::None if self.watcher_owns_live_relay => RelayOwnerKind::Watcher,
+            kind => kind,
+        }
+    }
+
+    pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
+        self.relay_owner_kind = kind;
+        self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);
+    }
+}
+
 impl TurnSource {
     /// Stable wire representation for completion audit logs and metrics labels.
     pub(in crate::services::discord) fn as_str(self) -> &'static str {

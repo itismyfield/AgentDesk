@@ -1291,13 +1291,6 @@ impl InflightTurnState {
             && (self.user_msg_id == expected || self.effective_finalizer_turn_id() == expected)
     }
 
-    pub(in crate::services::discord) fn effective_relay_owner_kind(&self) -> RelayOwnerKind {
-        match self.relay_owner_kind {
-            RelayOwnerKind::None if self.watcher_owns_live_relay => RelayOwnerKind::Watcher,
-            kind => kind,
-        }
-    }
-
     /// #4400 (b): is this row the orphaned headless synthetic shape that the
     /// #3107 watcher self-heal (`reacquire_watcher_inflight_for_active_stream`)
     /// re-mints after a stall-watchdog force-clean deleted the real row?
@@ -1332,11 +1325,6 @@ impl InflightTurnState {
                 .output_path
                 .as_deref()
                 .is_some_and(|path| !path.trim().is_empty())
-    }
-
-    pub(in crate::services::discord) fn set_relay_owner_kind(&mut self, kind: RelayOwnerKind) {
-        self.relay_owner_kind = kind;
-        self.watcher_owns_live_relay = matches!(kind, RelayOwnerKind::Watcher);
     }
 
     pub(in crate::services::discord) fn set_watcher_owner_channel_id(
