@@ -29,6 +29,7 @@ use serde_json::{Value, json};
 mod native_input;
 use native_input::submit;
 
+mod busy_source;
 mod busy_turn;
 #[path = "../intake_turn/owned_busy.rs"]
 pub(in crate::services::discord) mod owned_busy;
@@ -424,25 +425,8 @@ pub(in crate::services::discord) async fn hand_busy(
         &front,
     )
     .await?;
-    // Claude's prelaunch row has no transcript until its observer hands it back. Its live pane
-    // already has the binding that the idle observer used before submitting the first input.
-    let binding = (provider == ProviderKind::Claude
-        && matches!(&host, TurnHost::Tmux)
-        && row.output_path.is_none())
-    .then(|| crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(&session))
-    .flatten()
-    .filter(|binding| {
-        binding.runtime_kind == crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui
-    });
-    let output = row
-        .output_path
-        .as_deref()
-        .or_else(|| binding.as_ref().map(|binding| binding.output_path.as_str()));
-    let native = binding
-        .as_ref()
-        .and_then(|binding| binding.session_id.as_deref())
-        .or(row.session_id.as_deref());
-    let live = output.map(|path| (path, native));
+    let source = busy_source::live_source(provider.clone(), &host, &session, &row);
+    let live = source.as_ref().map(|(path, native)| (path.as_str(), native.as_deref()));
     let at = (&host, session.as_str(), live);
     let kind = (provider.as_str(), origin, true);
     let owner = observed

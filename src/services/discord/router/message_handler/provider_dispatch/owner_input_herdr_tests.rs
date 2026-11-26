@@ -19,6 +19,8 @@ use std::sync::{Arc, Mutex};
 mod attached;
 #[path = "owner_input_herdr_busy_operation_tests.rs"]
 mod busy_operation;
+#[path = "owner_input_herdr_busy_source_tests.rs"]
+mod busy_source_choice;
 #[path = "owner_input_herdr_pending_tests.rs"]
 mod pending;
 
