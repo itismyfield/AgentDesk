@@ -4,9 +4,8 @@ use crate::services::tui_o::writer::reply_anchor::ReplyRef;
 
 const ANCHOR: u64 = 4242;
 
-/// A re-post keeps its original's reply: the new serial records the same `ReplyTo` before its
-/// `Prepared`, the one request carries it as the message reference beside the payload, nonce and
-/// marker, and a restart settling the same piece posts nothing more.
+/// A re-post keeps its original's reply in the new serial's `ReplyTo` and its one request's
+/// reference, with payload, nonce and marker, and a restart posts nothing more.
 #[tokio::test]
 async fn repost_replies_to_the_original_anchor_pg() {
     let db = TestPostgresDb::create().await;

@@ -5,9 +5,8 @@ use super::*;
 use crate::services::tui_o::writer::reply_anchor::{RunAnchor, anchor_of};
 
 impl Projection {
-    /// Every run opened so far with its opener and joined anchors. Each registration is offered
-    /// to the reduction, whose uniqueness rules decide membership; a member needs exact evidence,
-    /// and a repeated body binds nothing.
+    /// Every run so far with its opener and joined anchors, as the reduction's uniqueness rules
+    /// place them; a member needs exact evidence, and a repeated body binds nothing.
     pub(crate) fn memberships(
         &self,
         registrations: &[Registration],
