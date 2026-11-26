@@ -48,39 +48,56 @@ fn assert_retirement_notice_clear(c: &Case, actor: &mut Host) {
     );
 }
 
-#[tokio::test(start_paused = true)]
-async fn owned_absorbed_remove_settles_without_physical_receipt_across_restart() {
-    let c = Case::new("owned-remove-only");
-    let frame = c.frame();
-    let parent = "[User: parent (ID: 42)]\nIndependent parent turn";
-    assert!(crate::services::tui_o::writer::input_notices::discord_input(parent));
-    append(&c.path, &row("parent-turn", parent));
-
-    let registry = history::v2::Registry::runtime().unwrap();
-    let mut key = registration(&c.path, &c.logical, OWNER_NONCE, 8825, false);
+fn arm_absorption(c: &Case, registry: &history::v2::Registry, id: u64, frame: &str) -> Ticket {
+    let mut key = registration(&c.path, &c.logical, OWNER_NONCE, id, false);
     key["attempt"]["source"]["offset"] = json!(std::fs::metadata(&c.path).unwrap().len());
     registry
-        .prepare(NAMESPACE, &registered_input(&key, &frame))
+        .prepare(NAMESPACE, &registered_input(&key, frame))
         .unwrap();
     registry
         .prepare_native_intent(NAMESPACE, &key, CHANNEL, &Intent::Follower)
         .unwrap();
     let ticket = registry.native_ticket(NAMESPACE, &key).unwrap();
     registry.note_native_any_key(NAMESPACE, &ticket).unwrap();
+    ticket
+}
 
+fn append_parent_turn(c: &Case, id: &str) {
+    let parent = "[User: parent (ID: 42)]\nIndependent parent turn";
+    assert!(crate::services::tui_o::writer::input_notices::discord_input(parent));
+    append(&c.path, &row(id, parent));
+}
+
+fn append_remove_only(c: &Case, id: &str, frame: &str) {
     for value in [
         json!({"type":"queue-operation", "operation":"enqueue", "content":frame}),
         json!({"type":"queue-operation", "operation":"remove", "reason":"absorbed_mid_turn",
-            "content":frame, "commandUuid":OWNED_ID, "deliveryId":"owned-delivery"}),
+            "content":frame, "commandUuid":id, "deliveryId":format!("delivery-{id}")}),
         json!({"type":"system", "subtype":"turn_duration"}),
     ] {
         append(&c.path, format!("{value}\n").as_bytes());
     }
-    assert_native_absorption(&c, &registry, &ticket);
+}
 
+async fn capture_settled_absorption(label: &str) -> (Case, Host, history::v2::Registry, Ticket) {
+    let c = Case::new(label);
+    let frame = c.frame();
+    append_parent_turn(&c, "parent-turn");
+    let registry = history::v2::Registry::runtime().unwrap();
+    let ticket = arm_absorption(&c, &registry, 8825, &frame);
+    append_remove_only(&c, OWNED_ID, &frame);
+    assert_native_absorption(&c, &registry, &ticket);
     let mut actor = c.open();
     c.run(&mut actor).await;
     assert_retirement_notice_clear(&c, &mut actor);
+    (c, actor, registry, ticket)
+}
+
+#[tokio::test(start_paused = true)]
+async fn owned_absorbed_remove_settles_without_physical_receipt_across_restart() {
+    let (c, actor, registry, ticket) = capture_settled_absorption("owned-remove-only").await;
+    let frame = c.frame();
+    let key = ticket.key;
     drop(actor);
 
     registry
@@ -104,6 +121,87 @@ async fn owned_absorbed_remove_settles_without_physical_receipt_across_restart()
     let (_, independent) = ledger
         .latest_piece(&input_key("separate-input"), 0)
         .expect("a distinct UUID with the same content is still unowned");
+    assert!(matches!(
+        independent.outcome,
+        Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+            _
+        ))
+    ));
+    assert_eq!(c.notices(), 1);
+}
+
+fn assert_registration_still_open(registry: &history::v2::Registry, ticket: &Ticket) {
+    let settlement = registry.native_settlement(NAMESPACE, ticket).unwrap();
+    assert!(settlement.outcome.is_none());
+    assert!(!settlement.cleanup_complete);
+    let registrations = registry.native_evidence_registrations().unwrap();
+    let seen = registrations.iter().find(|r| r.ticket == *ticket).unwrap();
+    assert!(seen.candidate);
+    assert!(seen.receipts.is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn consumed_absorption_does_not_contest_the_next_registered_remove() {
+    const NEXT: &str = "absorbed-next-owned";
+    let (c, mut actor, registry, first) = capture_settled_absorption("owned-remove-repeat").await;
+    assert_registration_still_open(&registry, &first);
+
+    let frame = c.frame();
+    append_parent_turn(&c, "second-parent-turn");
+    let second = arm_absorption(&c, &registry, 8826, &frame);
+    assert_registration_still_open(&registry, &second);
+    append_remove_only(&c, NEXT, &frame);
+    c.run(&mut actor).await;
+    assert_registration_still_open(&registry, &first);
+    c.excluded(&mut actor, NEXT);
+    assert_retirement_notice_clear(&c, &mut actor);
+    drop(actor);
+
+    let mut restarted = c.open();
+    c.run(&mut restarted).await;
+    c.excluded(&mut restarted, NEXT);
+    assert_retirement_notice_clear(&c, &mut restarted);
+
+    append_parent_turn(&c, "contested-parent-turn");
+    arm_absorption(&c, &registry, 8827, &frame);
+    arm_absorption(&c, &registry, 8828, &frame);
+    append_remove_only(&c, "contested-remove", &frame);
+    c.run(&mut restarted).await;
+    let debt = restarted.undelivered_for_test(2).unwrap();
+    let ledger = restarted.writer_mut_for_test().store().ledger();
+    let key = input_key("contested-remove");
+    assert_eq!(debt.notice_owed, 1);
+    assert_eq!(ledger.excluded(&key), None);
+    assert!(ledger.latest_piece(&key, 0).is_none());
+    assert_eq!(c.notices(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn consumed_absorption_does_not_block_a_separate_unowned_remove() {
+    const NEXT: &str = "absorbed-next-unowned";
+    let (c, mut actor, registry, first) = capture_settled_absorption("unowned-remove-repeat").await;
+    assert_registration_still_open(&registry, &first);
+
+    let frame = c.frame();
+    append_parent_turn(&c, "second-parent-turn");
+    append_remove_only(&c, NEXT, &frame);
+    c.run(&mut actor).await;
+    assert_registration_still_open(&registry, &first);
+    assert_eq!(c.notices(), 1);
+    assert_eq!(actor.undelivered_for_test(2).unwrap().notice_owed, 0);
+    drop(actor);
+
+    let mut restarted = c.open();
+    c.run(&mut restarted).await;
+    assert_eq!(restarted.undelivered_for_test(3).unwrap().notice_owed, 0);
+    let ledger = restarted.writer_mut_for_test().store().ledger();
+    assert_eq!(
+        ledger.excluded(&input_key(OWNED_ID)),
+        Some("input_notice_source")
+    );
+    let (_, independent) = ledger
+        .latest_piece(&input_key(NEXT), 0)
+        .expect("an unowned remove in the next turn owes its own notice");
     assert!(matches!(
         independent.outcome,
         Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
