@@ -280,9 +280,9 @@ impl migration::RowSource for Rows {
         &self,
         _: &std::collections::BTreeSet<u64>,
     ) -> Result<Vec<migration::MigrationRow>, String> {
-        use crate::db::dispatched_sessions::hosted_execution::{self as hosted, tests};
-        let mut bound = tests::record(
-            &tests::owner(&CHANNEL.to_string()),
+        use crate::db::dispatched_sessions::hosted_execution::{self as hosted, test_support};
+        let mut bound = test_support::record(
+            &test_support::owner(&CHANNEL.to_string()),
             "e",
             hosted::HostedState::Bound,
         );

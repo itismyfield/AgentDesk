@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 #[test]
 fn stable_host_identity_prefers_snapshot_before_environment() {

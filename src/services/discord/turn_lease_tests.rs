@@ -1115,7 +1115,7 @@ async fn operator_release_settles_after_caller_abort_without_home_fence() {
 async fn native_8148_control_operator_release_uses_exact_native_custody() {
     use crate::services::discord::turn_finalizer::native_prepare::Handle;
     use crate::services::tui_input::human_frame::history::v2::{
-        native::Disposition, native_tests::Fixture,
+        native::Disposition, native_support::Fixture,
     };
     use crate::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();

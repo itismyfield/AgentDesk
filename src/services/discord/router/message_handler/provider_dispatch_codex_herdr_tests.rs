@@ -1575,7 +1575,7 @@ fn bootstrap_launch_refuses_before_pending_when_its_target_reappears_pg() {
     const RETIRED: &str = "0123456789abcdef0123456789abcdef";
     let fx = Fixture::admitted("bootstrap-recheck");
     fx.bootstrap.store(true, Ordering::SeqCst);
-    let mut retired = crate::db::dispatched_sessions::hosted_execution::tests::record(
+    let mut retired = crate::db::dispatched_sessions::hosted_execution::test_support::record(
         &fx.owner,
         RETIRED,
         HostedState::Retired,

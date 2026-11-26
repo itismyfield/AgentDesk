@@ -2,7 +2,7 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
 };
-use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{TOKEN, owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookupKey, load_hosted_execution_pg};
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
 use crate::services::discord::{inflight, make_shared_data_for_tests};

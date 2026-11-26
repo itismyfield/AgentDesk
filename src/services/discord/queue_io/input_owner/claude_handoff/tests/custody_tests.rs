@@ -302,8 +302,8 @@ async fn every_refusal_an_unended_journal_cannot_pass_spends_one_budget() {
     let unread = herdr_host(8_146_116, KEY, false);
     refusal_spends_one_budget(8_146_116, unread, json!({"pane":"%0"})).await;
     // A Bound row stands while the old pane is not known ended.
-    let owner = hosted::tests::owner("8146117");
-    let record = hosted::tests::record(&owner, "bound-nonce", HostedState::Bound);
+    let owner = hosted::test_support::owner("8146117");
+    let record = hosted::test_support::record(&owner, "bound-nonce", HostedState::Bound);
     let bound = force_host(
         8_146_117,
         KEY.into(),

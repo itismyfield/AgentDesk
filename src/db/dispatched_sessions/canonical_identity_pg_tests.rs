@@ -3,7 +3,7 @@ use crate::db::dispatched_session_canonical_identity::{
     SessionIdentityKind, capture_hook_session_actor_pin_pg, upsert_hook_session_with_actor_pin_pg,
     upsert_hook_session_with_identity_pg,
 };
-use crate::db::dispatched_sessions::hosted_execution::tests::{
+use crate::db::dispatched_sessions::hosted_execution::test_support::{
     TOKEN, expected, future_schema, location, owner, pending, record, wire,
 };
 use crate::db::dispatched_sessions::hosted_execution::*;

@@ -19,7 +19,7 @@ struct ForeignWatcher {
     cancel: Arc<std::sync::atomic::AtomicBool>,
     observation: inflight::o_seed_observation::Guard,
     _confirmation: TestConfirmation,
-    _namespace: crate::services::platform::tmux::session_inventory::tests::ChannelNamespace,
+    _namespace: crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace,
 }
 
 impl ForeignWatcher {
@@ -29,7 +29,7 @@ impl ForeignWatcher {
         let name = &fixture.foreign_name;
         let confirmation = TestConfirmation::new(channel.get());
         let namespace =
-            crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+            crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
                 channel.get(),
                 fixture.host.socket.clone(),
             );

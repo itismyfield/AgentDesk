@@ -190,6 +190,7 @@ src/
 │   ├── server_surface.rs
 │   ├── session_hosts.rs
 │   ├── session_hosts_tests.rs
+│   ├── snapshot_reader_support.rs
 │   ├── snapshot_reader_tests.rs
 │   ├── test_env.rs
 │   ├── test_instance.rs
@@ -250,6 +251,7 @@ src/
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
+│   │   ├── hosted_execution_support.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── key_promotion.rs
 │   │   ├── key_promotion_pg_tests.rs
@@ -4224,6 +4226,7 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── session_inventory/
 │   │   │   │   ├── real_tests.rs
+│   │   │   │   ├── test_support.rs
 │   │   │   │   └── unit_tests.rs
 │   │   │   ├── availability.rs
 │   │   │   ├── health_probe.rs
@@ -4642,6 +4645,7 @@ src/
 │   │   │   │   │   ├── native_binding.rs
 │   │   │   │   │   ├── native_control.rs
 │   │   │   │   │   ├── native_receipt.rs
+│   │   │   │   │   ├── native_support.rs
 │   │   │   │   │   ├── native_tests.rs
 │   │   │   │   │   └── s4_tests.rs
 │   │   │   │   ├── append.rs

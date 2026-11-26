@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{expected, owner};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedLocation, HostedState,
 };

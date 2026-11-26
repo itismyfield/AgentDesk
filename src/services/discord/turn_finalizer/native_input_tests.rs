@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::tui_input::human_frame::history::v2::{
-    native::Disposition, native_tests::Fixture,
+    native::Disposition, native_support::Fixture,
 };
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
 use crate::services::tui_o::writer::input_facts::native::Observation;

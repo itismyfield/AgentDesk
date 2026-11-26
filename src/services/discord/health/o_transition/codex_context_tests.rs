@@ -607,10 +607,10 @@ fn pg_configured_herdr_production_prepare_is_complete_and_extra_pane_is_unknown(
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let shared = fixture.shared(Some(pool.clone()));
-        let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner(&CHANNEL.to_string());
+        let mut owner = crate::db::dispatched_sessions::hosted_execution::test_support::owner(&CHANNEL.to_string());
         owner.provider = "codex".into(); owner.discord_token_hash = shared.token_hash.clone();
         owner.logical_key = fixture.context.tmux_session.clone(); owner.runtime_root = fixture.context.owner_runtime_root.clone();
-        let mut row = crate::db::dispatched_sessions::hosted_execution::tests::record(&owner, &fixture.context.execution_nonce, crate::db::dispatched_sessions::hosted_execution::HostedState::Bound);
+        let mut row = crate::db::dispatched_sessions::hosted_execution::test_support::record(&owner, &fixture.context.execution_nonce, crate::db::dispatched_sessions::hosted_execution::HostedState::Bound);
         let location = row.location.as_mut().unwrap();
         location.pane_id = "w1-1".into(); location.endpoint_config_key = "test-node-endpoint".into(); location.socket_addr = rig.socket().display().to_string();
         row.expected.as_mut().unwrap().binding_provider = "codex".into();
