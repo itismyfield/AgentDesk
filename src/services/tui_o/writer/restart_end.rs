@@ -357,13 +357,6 @@ impl Projection {
         ended
     }
 
-    /// The native turn of a verified end cut exactly at `at`, applied or not.
-    pub(super) fn cutoff_turn(&self, source: &SourceId, at: u64) -> Option<Option<&str>> {
-        let end =
-            (self.ends.iter()).find(|end| same_source(&end.source, source) && end.cutoff == at);
-        end.map(|end| end.native_turn_id.as_deref())
-    }
-
     pub(super) fn through(&mut self, source: &SourceId, through: u64) -> Option<Ended> {
         self.take(source, through)
     }

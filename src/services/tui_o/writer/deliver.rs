@@ -14,7 +14,6 @@ use tokio::sync::{oneshot, watch};
 
 use super::confirm::{self, Verdict};
 use super::pieces::{Derived, PieceWork};
-use super::tool_images::select;
 use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
@@ -218,7 +217,7 @@ pub struct ChannelWriter<P, L, A> {
     channel: u64,
     store: ChannelStore,
     gate: Arc<OwnershipGate>,
-    pub(super) port: Arc<P>,
+    port: Arc<P>,
     lease: L,
     alarms: A,
     stopped: Option<StopCause>,
@@ -293,7 +292,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             receipts,
         };
         writer.exclude_stored_tool_results();
-        writer.finish_image_refusals();
         let ledger = writer.store.ledger();
         seed_last_posted(channel, ledger);
         let refused = writer.receipts.blocked(ledger);
@@ -527,7 +525,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         admission: Option<Admission<'_>>,
         local_retry: Option<LocalRetryMark>,
         approved: Option<u64>,
-        mut attachment: Option<(Vec<u8>, String)>,
     ) -> Step {
         if let Some(step) = self.exclude_tool_result(&piece.unit_key) {
             return step;
@@ -590,14 +587,19 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        let post = select::unit_post(&*port, channel, piece, attachment.take());
+                        let post = port.post_unit(
+                            channel,
+                            piece.payload.clone(),
+                            piece.output_origin.clone(),
+                            piece.unit_key.kind,
+                        );
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
                             Some(running) => Box::pin(post.map(move |outcome| {
                                 drop(running);
                                 outcome
                             })),
-                            None => post,
+                            None => Box::pin(post),
                         };
                         boot.first_post(serial, epoch);
                         Ok(match request.as_mut().poll(cx) {
@@ -725,9 +727,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 return self.stop(WriterAlarm::Unresolved { serial, reason });
             }
             PostOutcome::Refused(status) => {
-                if let Some(step) = self.image_refused(serial, status) {
-                    return step;
-                }
                 let reason = if self.store.ledger().piece(serial).is_some_and(|piece| {
                     matches!(piece.local_retry, Some(LocalRetryMark::Attempt { .. }))
                 }) {
