@@ -169,7 +169,7 @@ async fn disconnect(pool: &PgPool, row: &HostedObservation, record: &HostedExecu
         Ok(disconnected) => disconnected,
         Err(error) => {
             tracing::warn!(
-                session_id = row.session_id(),
+                row_id = row.session_id(),
                 error,
                 "herdr idle end: row kept"
             );
