@@ -33,6 +33,7 @@ interface Params {
   stageDrafts: StageDraft[];
   allRepoStages: PipelineStage[];
   overrideExtras: Record<string, unknown>;
+  overrideExtrasChanged?: boolean;
   pipelineChanged: boolean;
   stagesChanged: boolean;
   saving: boolean;
@@ -62,6 +63,7 @@ export function usePipelineVisualEditorActions(params: Params) {
     stageDrafts,
     allRepoStages,
     overrideExtras,
+    overrideExtrasChanged,
     pipelineChanged,
     stagesChanged,
     setLevel,
@@ -413,7 +415,7 @@ export function usePipelineVisualEditorActions(params: Params) {
     setSaving(true);
     setError(null);
     try {
-      if (pipelineChanged) {
+      if (pipelineChanged || overrideExtrasChanged) {
         const payload = buildOverridePayload(pipelineDraft, overrideExtras);
         if (level === "agent" && selectedAgentId) {
           await api.setAgentPipeline(selectedAgentId, payload);

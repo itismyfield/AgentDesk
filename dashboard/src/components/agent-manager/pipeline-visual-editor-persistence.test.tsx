@@ -573,8 +573,8 @@ describe("override-only FSM edge edits", () => {
     expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
 
     await rebind("on_error");
-    // The edit is override-only: no pipeline or stage signature moved.
-    expect(view.current?.ctx.hasVisibleChanges).toBe(false);
+    // Override-only edit enables save even when pipeline/stage signatures are unchanged.
+    expect(view.current?.ctx.hasVisibleChanges).toBe(true);
     expect(view.current?.ctx.pipelineDraft?.events).toEqual({ on_dispatch: [], on_error: [] });
     expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
 
@@ -582,10 +582,12 @@ describe("override-only FSM edge edits", () => {
     await mountEditor();
     expect(view.current?.ctx.fsmEdgeBindings).toEqual({ "ready->done": { event: "on_error" } });
     expect(persistedDraftExtras().fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
+
+    const payload = await saveAndReadPayload();
+    expect(payload.fsm_edge_bindings).toEqual({ "ready->done": { event: "on_error" } });
   });
 
-  // Out of scope here: `handleSave` still PUTs only when `pipelineChanged`, so an
-  // override-only edit survives a remount but has no way to reach the server yet.
+  // Returning extras to the server snapshot clears change state and retires the draft scope.
   it("retires the draft scope once the extras match the server snapshot again", async () => {
     mockBoundApi();
     await mountEditor();
@@ -596,6 +598,7 @@ describe("override-only FSM edge edits", () => {
 
     await rebind("on_dispatch");
     expect(view.current?.ctx.fsmEdgeBindings).toEqual(SERVER_BINDINGS);
+    expect(view.current?.ctx.hasVisibleChanges).toBe(false);
     expect(persistedDraftEntry()).toBeNull();
   });
 

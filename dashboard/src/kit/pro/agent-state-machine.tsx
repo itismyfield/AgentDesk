@@ -218,7 +218,7 @@ const styles = `
   .aui-agent-state-machine-chip-desktop { display: none; }
   .aui-agent-state-machine-chip-mobile { display: inline-flex; align-items: center; gap: 4px; }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-agent-state-machine-node,
   .aui-agent-state-machine-chip {
     min-width: 44px;

@@ -149,18 +149,26 @@ describe("statsModel", () => {
     expect(buildModelItems(null)).toEqual([]);
   });
 
-  it("matches agent skill pairs by role id or name", () => {
+  it("matches agent skill pairs by role id or name and preserves entries past index 8", () => {
     const ranking: SkillRankingResponse = {
       window: "7d",
       overall: [],
       byAgent: [
-        { agent_role_id: "pm", agent_name: "PM Bot", skill_name: "plan", skill_desc_ko: "계획", calls: 4, last_used_at: 0 },
-        { agent_role_id: "qa", agent_name: "QA", skill_name: "test", skill_desc_ko: "테스트", calls: 2, last_used_at: 0 },
+        ...Array.from({ length: 9 }, (_, i) => ({
+          agent_role_id: `pm-${i + 1}`,
+          agent_name: `PM ${i + 1}`,
+          skill_name: `skill-${i + 1}`,
+          skill_desc_ko: "기타",
+          calls: 20 - i,
+          last_used_at: 0,
+        })),
+        { agent_role_id: "qa", agent_name: "QA", skill_name: "tenth-skill", skill_desc_ko: "테스트", calls: 2, last_used_at: 0 },
       ],
     };
     const rows = buildAgentSkillRows(ranking, [], "ko");
-    expect(skillsForAgent(rows, "pm").map((row) => row.skillName)).toEqual(["plan"]);
-    expect(skillsForAgent(rows, "QA").map((row) => row.skillName)).toEqual(["test"]);
+    expect(rows).toHaveLength(10);
+    expect(skillsForAgent(rows, "pm-1").map((row) => row.skillName)).toEqual(["skill-1"]);
+    expect(skillsForAgent(rows, "QA").map((row) => row.skillName)).toEqual(["tenth-skill"]);
     expect(skillsForAgent(rows, "nobody")).toEqual([]);
   });
 

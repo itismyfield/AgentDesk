@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@3024685b30
 import { isValidElement, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { Clock, ShieldCheck } from 'lucide-react';
 
@@ -305,7 +305,7 @@ const approvalCardStyles = `
   .aui-approval-card-details { column-gap: 12px; }
   .aui-approval-card-risk-word { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-approval-card .aui-approval-card-button { min-height: 44px; }
   .aui-approval-card .aui-approval-card-always { min-height: 44px; }
   .aui-approval-card-more { min-height: 44px; }
