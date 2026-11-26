@@ -31,7 +31,7 @@ pub struct TakeoverEnd {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct FreshSelection {
+pub struct FreshSelection {
     schema: u32,
     channel: u64,
     pub(crate) nonce: String,
