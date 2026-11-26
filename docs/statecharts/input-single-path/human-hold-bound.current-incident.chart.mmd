@@ -1,0 +1,27 @@
+---
+title: "Issue 8430: held human input is delivered once the session is Idle"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the IdleEventuallyDelivered bug
+    lg1: Repeats forever, so IdleEventuallyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 사람 입력 front 대기
+  s1: 보류(시계 진행)
+  s2: 보류 뒤 재구동
+  s3: 상한 시각 뒤 재구동
+  s4: 보류(Idle 연속 관측됨)
+  [*] --> s0
+  s0 --> s1: owner drive
+  s1 --> s2: held_watch 2초 깨움
+  s2 --> s1: owner drive
+  s1 --> s3: held_watch 2초 깨움
+  s3 --> s4: owner drive
+  s4 --> s3: 같은 보류 반복
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 repeats
+  class s4 repeats

@@ -1,0 +1,2 @@
+key: 695-input-single-path-human-hold-bound
+| `input-single-path` human hold bound (#8430, +#8343/#8372 scenarios) | `a53f299560` | Current: Idle session with leftover lease holds the human front forever; `!clear` busy-path readiness due drops it with an unidentified notice; a headless row stalls the reply | Target: 3-minute bound with two-evidence Idle streak releases through the existing OperatorRelease CAS and delivers once; 3 Current RED, 9 Target GREEN, 7 mutant RED; see [report](input-single-path/human-hold-bound.report.md). |

@@ -120,7 +120,7 @@ TurnEndWake == /\ s.up /\ s.front = "held" /\ s.token = "none" /\ s.row = "none"
 DueExpire == /\ s.due = "armed" /\ s.front \in {"queued", "held"}
              /\ s' = [s EXCEPT !.due = "expired"]
 \* refuse_readiness_front (readiness_hold.rs:111-149) via settle_at_deadline (drive.rs:139).
-\* Target: a busy-path due never drops while another turn holds the lease.
+\* Target R1: a due taken while another turn holds the lease never drops the front.
 DueDrop == /\ s.up /\ s.due = "expired" /\ s.front = "held"
            /\ (Policy = "current" \/ s.token = "none")
            /\ s' = [s EXCEPT !.front = "dropped",
@@ -160,7 +160,8 @@ OldTerminal == /\ s.terminal = "submitted"
                   ELSE s' = [s EXCEPT !.terminal = "done", !.ledger = "finalized",
                                       !.token = IF s.token = "old" THEN "none" ELSE @,
                                       !.row = IF s.row = "old" THEN "none" ELSE @,
-                                      \* target: the turn boundary re-bases a busy-path due
+                                      \* target R1: a due armed while the lease was held does not
+                                      \* outlive it (code: source_hold never arms one then)
                                       !.due = IF Policy = "target" /\ Mutant # "NoRebase"
                                               THEN "none" ELSE @]
 \* "late": the lost terminal of the old turn finally arrives after the bound.

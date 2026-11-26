@@ -1,0 +1,32 @@
+---
+title: "Issue 8430: held human input is delivered once the session is Idle"
+---
+stateDiagram-v2
+  s0: 사람 입력 front 대기
+  s1: 보류(시계 진행)
+  s2: 보류 뒤 재구동
+  s3: 1회 전달
+  s4: 새 턴 완료
+  s5: 상한 시각 뒤 재구동
+  s6: 보류(상한 시각 경과, Idle 확인 중)
+  s7: 보류(Idle 연속 관측됨)
+  s8: 옛 턴 정리됨, 전달 대기
+  s9: 상한 정리 뒤 1회 전달
+  [*] --> s0
+  s0 --> s1: owner drive
+  s1 --> s2: held_watch 2초 깨움 or 턴 끝 drain 깨움
+  s0 --> s3: owner drive
+  s2 --> s1: owner drive
+  s1 --> s0: 턴 끝 drain 깨움
+  s1 --> s5: held_watch 2초 깨움
+  s3 --> s4: 새 턴 종료
+  s2 --> s3: owner drive
+  s5 --> s6: owner drive
+  s5 --> s7: owner drive
+  s6 --> s7: 화면#183;transcript 관측
+  s7 --> s8: 상한: 옛 episode CAS 정리
+  s5 --> s3: owner drive
+  s6 --> s5: 턴 끝 drain 깨움
+  s7 --> s5: 턴 끝 drain 깨움
+  s8 --> s9: owner drive
+  s9 --> s4: 새 턴 종료

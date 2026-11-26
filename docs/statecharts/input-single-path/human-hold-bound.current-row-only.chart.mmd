@@ -1,0 +1,16 @@
+---
+title: "Issue 8430: held human input is delivered once the session is Idle"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the OrphanEventuallyDelivered bug
+    lg1: Repeats forever, so OrphanEventuallyDelivered breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: 사람 입력 front 대기
+  s1: 남은 행에 막혀 깨움 없이 멈춤
+  [*] --> s0
+  s0 --> s1: owner drive
+  class s0 bugPath
+  class s1 repeats
