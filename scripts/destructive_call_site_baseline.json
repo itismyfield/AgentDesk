@@ -103,7 +103,7 @@
         "src/services/discord/relay_recovery/tests/circuit_breaker_apply.rs": 2,
         "src/services/discord/relay_recovery/tests/unread_tail_seed.rs": 2,
         "src/services/discord/tmux_watcher/placeholder_reclaim.rs": 1,
-        "src/services/session_resume.rs": 1
+        "src/services/session_resume/host_rebind_tests.rs": 1
       }
     },
     "watcher_cancel": {
