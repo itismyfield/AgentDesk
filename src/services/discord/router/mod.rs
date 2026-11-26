@@ -18,6 +18,8 @@ pub(crate) use authorization::TurnKind;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
 pub(crate) use intake_dispatch::replay_admission::IntakeExecution;
+#[cfg(unix)]
+pub(in crate::services::discord) use intake_dispatch::writer_boot_held;
 pub(in crate::services::discord) use ports::ROUTER_PORTS;
 pub(in crate::services::discord) use transition_wake::SessionTransitionCompletion;
 #[cfg(unix)]

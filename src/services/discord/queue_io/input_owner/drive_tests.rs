@@ -863,16 +863,16 @@ async fn an_earlier_readiness_due_rearms_past_a_later_awaited_deadline() {
         settled: None,
     });
     arm_deadline(drive.clone());
-    let awaited = || *lane(channel).armed.lock().unwrap();
+    let lane = lane(&drive);
+    let awaited = || *lane.armed.lock().unwrap();
     for _ in 0..500 {
         if awaited().is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(
-        awaited(),
-        Some(now + 30_000),
+    assert!(
+        matches!(awaited(), Some(Deadline::Owner(at)) if at == now + 30_000),
         "the head's window is awaited"
     );
     let held = mailbox.v2_request(move |slot| {

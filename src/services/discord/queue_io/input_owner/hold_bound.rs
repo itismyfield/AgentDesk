@@ -392,11 +392,7 @@ async fn gate(shared: &SharedData, channel: u64, hold: &Arc<Hold>) -> Result<Opt
     // Echo custody joins the exclusions here when pending echoes gain their own deadline.
     if super::restart_gate::inflight(hold.provider.as_str(), &shared.token_hash, channel)
         || super::ingress::ingress_hold(shared, false).is_some()
-        || crate::services::discord::router::intake_dispatch::writer_boot_held(
-            &hold.provider,
-            channel,
-        )
-        .await
+        || crate::services::discord::router::writer_boot_held(&hold.provider, channel).await
     {
         return Err(Retry("gate", None));
     }
