@@ -589,7 +589,7 @@ mod claim {
                     Some((channel, parent, gate, check)) => {
                         channel == channel_id && check(&persistence.provider, channel, parent, gate)
                     }
-                    None => cfg!(test),
+                    None => cfg!(any(test, feature = "test-support")),
                 };
                 if !enabled {
                     let _ = reply.send(QueuedHeadClaim::NotEligible);
