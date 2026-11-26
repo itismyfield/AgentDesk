@@ -1,0 +1,2 @@
+key: 750-input-single-path-owner-input-busy-split
+| `input-single-path` owner 입력 busy 분기 제거 설계 준비 (#8328 1단계) | `82702fe252` | Current8432: 앞 턴 terminal 미제출로 mailbox 토큰이 남고 화면이 Idle이면 hand_busy가 NotSent로 보류를 되풀이해 IdleDelivers·ReplyPosted RED | Target: 보류 조건(초안·모달·세션 없음·첨부 준비 전)만 보고 바로 주입, 답은 transcript echo로 귀속. 10 cfg GREEN6 / expected RED4(Current8432, 초안 영구·상한 없음, 토큰 귀속·echo 전 재전송·TUI 대기열 유실 mutant). [보고서](input-single-path/owner-input-busy-split.report.md) |
