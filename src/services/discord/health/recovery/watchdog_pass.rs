@@ -310,7 +310,7 @@ pub(crate) async fn run_stall_watchdog_pass(
             // clean below — a freshly-written jsonl means this idle-foreground
             // anchor is a live loop turn, not a stranded one, so do not clear it.
             && !stall_liveness::stall_watchdog_jsonl_liveness_defers_force_clean(
-                crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(
+                crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
                     &tmux_session,
                 ),
                 now_unix_secs,

@@ -77,7 +77,9 @@ fn runtime_activity_evidence_from(latest_nanos: i64, now_secs: i64) -> RuntimeAc
 
 fn runtime_activity_evidence(session_name: &str) -> RuntimeActivityEvidence {
     let latest_nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session_name);
+        crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
+            session_name,
+        );
     runtime_activity_evidence_from(latest_nanos, chrono::Utc::now().timestamp())
 }
 

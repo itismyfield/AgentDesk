@@ -511,8 +511,6 @@ pub async fn kill_tmux_session(
     .await
 }
 
-pub(crate) use crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos;
-
 /// Provider-output clock for the idle-kill guard: newest conversation record time plus an open-turn
 /// flag. Spawn markers and touched mtimes (Claude rewrites idle transcripts hourly) do not count.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -870,11 +868,11 @@ mod kill_tmux_resume_tests {
         should_skip_idle_kill_for_live_runtime_activity,
     };
     use super::{
-        latest_runtime_activity_unix_nanos, provider_output_evidence,
-        provider_resume_selector_is_effective_with_claude_home,
+        provider_output_evidence, provider_resume_selector_is_effective_with_claude_home,
         selected_provider_resume_selector_with_claude_home,
     };
     use crate::db::dispatched_sessions::ProviderSessionIds;
+    use crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos;
 
     fn ids(
         claude_session_id: Option<&str>,

@@ -20,9 +20,8 @@ use crate::api_caller_observability::{
     IdentityConsumptionFields, RequestPrincipal, emit_identity_consumption,
     identity_consumption_fields,
 };
-use crate::services::automation_candidate_contract::{
-    PIPELINE_STAGE_ID, has_complete_loop_contract,
-};
+use crate::domain::automation_contract::PIPELINE_STAGE_ID;
+use crate::services::automation_candidate_contract::has_complete_loop_contract;
 use crate::services::scheduling::{next_due_after, next_due_after_anchor, validate_schedule};
 use crate::utils::api::clamp_api_limit;
 

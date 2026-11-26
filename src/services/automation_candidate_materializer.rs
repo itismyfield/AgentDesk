@@ -9,12 +9,12 @@ use crate::db::automation_candidates::{
     load_card_program_for_update_in_tx, load_card_program_pg, materialize_candidate_card_pg,
     persist_iteration_outcome_pg,
 };
+use crate::domain::automation_contract::PIPELINE_STAGE_ID;
 use crate::services::automation_candidate_contract::{
-    AutomationCandidateDiscriminator, MARKER_METADATA_KEY, PIPELINE_STAGE_ID,
-    PROGRAM_ALLOWED_WRITE_PATHS_KEY, PROGRAM_CURRENT_ITERATION_KEY, PROGRAM_DESCRIPTION_KEY,
-    PROGRAM_FINAL_GATE_KEY, PROGRAM_ITERATION_BUDGET_KEY, PROGRAM_METADATA_KEY,
-    PROGRAM_METRIC_DIRECTION_KEY, PROGRAM_METRIC_NAME_KEY, PROGRAM_METRIC_TARGET_KEY,
-    PROGRAM_REPO_DIR_KEY, discriminator,
+    AutomationCandidateDiscriminator, MARKER_METADATA_KEY, PROGRAM_ALLOWED_WRITE_PATHS_KEY,
+    PROGRAM_CURRENT_ITERATION_KEY, PROGRAM_DESCRIPTION_KEY, PROGRAM_FINAL_GATE_KEY,
+    PROGRAM_ITERATION_BUDGET_KEY, PROGRAM_METADATA_KEY, PROGRAM_METRIC_DIRECTION_KEY,
+    PROGRAM_METRIC_NAME_KEY, PROGRAM_METRIC_TARGET_KEY, PROGRAM_REPO_DIR_KEY, discriminator,
 };
 use crate::services::git::{
     automation_branch_name, ensure_automation_worktree, find_automation_worktree,

@@ -774,8 +774,9 @@ pub(in crate::services::discord) fn transcript_mtime_age_secs(
 
 fn runtime_activity_age_secs(snapshot: &WatcherStateSnapshot, now_unix_secs: i64) -> Option<u64> {
     let tmux_session = snapshot.tmux_session.as_deref()?;
-    let nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session);
+    let nanos = crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
+        tmux_session,
+    );
     unix_nanos_age_secs(nanos, now_unix_secs)
 }
 

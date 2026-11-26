@@ -127,7 +127,7 @@ pub(super) async fn try_apply(
     let Some(latest_activity_unix_nanos) = snapshot
         .tmux_session
         .as_deref()
-        .map(crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos)
+        .map(crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos)
     else {
         return ReattachLaneOutcome::Untouched;
     };

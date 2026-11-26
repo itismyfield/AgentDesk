@@ -2,10 +2,9 @@
 
 use super::thread_child_tests::{booted, install, stored};
 use super::*;
-use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::{
-    ChildStore, gc_stale_thread_sessions_retiring_pg,
-};
+use crate::services::dispatched_sessions::hosted_cleanup::thread_gc::gc_stale_thread_sessions_retiring_pg;
 use crate::services::platform::tmux::SessionPresence;
+use crate::services::tui_o::store::thread_children::ChildStore;
 
 async fn stale_thread_row(pool: &sqlx::PgPool, key: &str, child: u64) {
     sqlx::query(

@@ -65,7 +65,7 @@ pub(super) fn proven_dead_from_signals(pane: PaneLiveness, activity_recent: bool
 /// the sidecar lock; 0 (no resolvable file) counts as no recent activity.
 pub(super) fn watcher_runtime_activity_recent(session: &str) -> bool {
     let latest_nanos =
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(session);
+        crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(session);
     latest_nanos > 0 && {
         let age_secs = now_unix()
             .saturating_sub(latest_nanos / 1_000_000_000)

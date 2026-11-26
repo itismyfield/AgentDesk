@@ -207,7 +207,9 @@ pub(in crate::services::discord) fn runtime_activity_heartbeat_at(
     fallback_now: chrono::DateTime<chrono::Utc>,
 ) -> chrono::DateTime<chrono::Utc> {
     datetime_from_unix_nanos(
-        crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name),
+        crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
+            tmux_session_name,
+        ),
     )
     .unwrap_or(fallback_now)
 }

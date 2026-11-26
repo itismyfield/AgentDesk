@@ -9,11 +9,12 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions as dispatched_sessions_db;
 use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos;
 
 use super::{
     ProviderOutputEvidence, RawProviderTranscriptObservationMode,
-    classify_session_termination_reason, latest_runtime_activity_unix_nanos, now_unix_nanos,
-    provider_output_evidence, provider_resume_selector_is_effective,
+    classify_session_termination_reason, now_unix_nanos, provider_output_evidence,
+    provider_resume_selector_is_effective,
     record_raw_provider_transcript_len_watermark_if_observed,
 };
 

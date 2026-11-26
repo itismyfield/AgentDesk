@@ -187,13 +187,14 @@ fn latest_runtime_activity_unix_nanos_for_manual_rebind(
     session_cache_selector_state: Option<&SessionCacheSelectorState>,
     claude_home: Option<&std::path::Path>,
 ) -> i64 {
-    crate::services::dispatched_sessions::latest_runtime_activity_unix_nanos(tmux_session_name).max(
-        claude_tui_selector_transcript_activity_unix_nanos(
-            provider,
-            session_cache_selector_state,
-            claude_home,
-        ),
+    crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
+        tmux_session_name,
     )
+    .max(claude_tui_selector_transcript_activity_unix_nanos(
+        provider,
+        session_cache_selector_state,
+        claude_home,
+    ))
 }
 
 fn claude_tui_selector_transcript_activity_unix_nanos(
