@@ -168,11 +168,7 @@ async fn disconnect(pool: &PgPool, row: &HostedObservation, record: &HostedExecu
     match disconnect_retired_pg(pool, row.session_id(), record, None, true).await {
         Ok(disconnected) => disconnected,
         Err(error) => {
-            tracing::warn!(
-                row_id = row.session_id(),
-                error,
-                "herdr idle end: row kept"
-            );
+            tracing::warn!(row_id = row.session_id(), error, "herdr idle end: row kept");
             false
         }
     }
