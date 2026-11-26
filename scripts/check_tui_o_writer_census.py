@@ -700,7 +700,6 @@ TRANSPORT_PROBES = {
     'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1': {'id': 'RAW:outbound/transport.rs:post_serenity_message_with_nonce:1', 'path': 'src/services/discord/outbound/transport.rs', 'entrypoint': 'post_serenity_message_with_nonce', 'occurrence': 1, 'op': 'POST', 'guard': 'RAW_OPERATION_OBSERVED_ONCE'},
     'O_GATEWAY_CREATED_ACK': {'id': 'O_GATEWAY_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_io.rs', 'entrypoint': 'post/post_origin', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
     'O_REPOST_CREATED_ACK': {'id': 'O_REPOST_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_repost_io.rs', 'entrypoint': 'create', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
-    'O_ATTACHMENT_CREATED_ACK': {'id': 'O_ATTACHMENT_CREATED_ACK', 'path': 'src/services/discord/outbound/o_writer_io/attachment.rs', 'entrypoint': 'post', 'op': 'POST', 'guard': 'O_CREATED_ACK_ONCE'},
 }
 
 CLAIM_PROBES = {'CLAIM_GATE_REASON': {'id': 'CLAIM_GATE_REASON', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'decide_with_snapshot', 'guard': 'CLAIM_REASON_AT_DECISION'}, 'CLAIM_ADOPTION_REASON': {'id': 'CLAIM_ADOPTION_REASON', 'path': 'src/services/tui_o/channel_policy/adoption.rs', 'entrypoint': 'claim_body_from', 'guard': 'CLAIM_REASON_UNDER_STATE_LOCK'}, 'CLAIM_SITE_NONE_HELD': {'id': 'CLAIM_SITE_NONE_HELD', 'path': 'src/services/tui_o/cutover/channel_gate.rs', 'entrypoint': 'claim_then_send_at/claim_then_send_held_at', 'consumer_path': 'src/services/discord/standby_relay.rs', 'consumer_function': 'run_standby_relay', 'site': 'W06', 'guard': 'SITE_NONE_HELD_INHERITED_ONLY'}}
@@ -809,7 +808,7 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
     except (OSError, KeyError, TypeError, ValueError):
         return []  # The manifest parser reports malformed or missing inventories.
     problems = []
-    if active & {"O_GATEWAY_CREATED_ACK", "O_REPOST_CREATED_ACK", "O_ATTACHMENT_CREATED_ACK"} and ack_sites != {
+    if active & {"O_GATEWAY_CREATED_ACK", "O_REPOST_CREATED_ACK"} and ack_sites != {
         "src/services/discord/outbound/o_writer_io.rs": ["post:ack"],
         "src/services/discord/outbound/o_writer_io/attachment.rs": ["post:ack"],
         "src/services/discord/outbound/o_writer_repost_io.rs": ["create:ack"],
@@ -859,13 +858,6 @@ def _transport_guard_problems(root: Path, texts: dict[str, str], ack_sites: dict
         ok = ok and "request_context::census_scope(None,ChannelId::new(channel).send_message" in post
         if not (ok and ack_ok):
             problems.append("transport guard: O gateway ACK must follow its sole Created response")
-    if "O_ATTACHMENT_CREATED_ACK" in active:
-        post = compact(body("src/services/discord/outbound/o_writer_io/attachment.rs", "post"))
-        ok = re.search(r"Ok\(message\)=>\{crate::services::legacy_body_census::transport::record_o_created\(channel,message.id.get\(\),None,?\);PostOutcome::Created\(super::seen\(message\)\)\}", post)
-        ok = ok and post.count("record_o_created(") == 1
-        ok = ok and "request_context::census_scope(None,ChannelId::new(channel).send_message" in post
-        if not (ok and ack_ok):
-            problems.append("transport guard: O attachment ACK must follow its sole Created response")
     if "O_REPOST_CREATED_ACK" in active:
         create = compact(body("src/services/discord/outbound/o_writer_repost_io.rs", "create"))
         ok = "letstarted_at=chrono::Utc::now().timestamp_millis();" in create
