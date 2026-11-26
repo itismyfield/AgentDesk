@@ -1,7 +1,6 @@
 //! Cancel queue-truth tests that read the pending queue through ROOT health and DL shared data.
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::provider::ProviderKind;
-use crate::services::turn_lifecycle::*;
 use poise::serenity_prelude::ChannelId;
 
 #[tokio::test]

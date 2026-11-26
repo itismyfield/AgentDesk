@@ -1,7 +1,6 @@
 //! Resume rebind tests that drive ROOT health and DL shared data through the KE resume path.
 use std::sync::Arc;
 
-use crate::db::dispatched_sessions::load_session_rebind_context_pg;
 use crate::services::discord::health::{HealthRegistry, rebind_channel_provider_session};
 use crate::services::discord::host_teardown_gate::test_support::{
     channel_key, session_transition_lock, shared_on,

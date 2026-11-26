@@ -104,7 +104,6 @@ pub(crate) async fn resolve_review_followup_channel_pg(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::db::agents::AgentChannelBindings;
     use crate::domain::provider::ProviderKind;
     use std::cell::RefCell;
