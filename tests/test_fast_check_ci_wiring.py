@@ -905,10 +905,13 @@ class FastCheckCiWiringTests(unittest.TestCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import rust_test_sources
         ids = (REPO_ROOT / "scripts/ci/herdr_loaded_image_macos_ids.txt").read_text(encoding="utf-8").split()
-        macos, linux = set(), set()
-        for package in rust_test_sources.workspace_lib_roots(REPO_ROOT):
-            macos |= rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos", package)
-            linux |= rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux", package)
+        # The documented Mac command runs one package; the list must match that package's inventory.
+        docs = (REPO_ROOT / "docs/ci/rust-quality-gates.md").read_text(encoding="utf-8")
+        package = re.search(r"--expected-ids scripts/ci/herdr_loaded_image_macos_ids\.txt -- .*?cargo test -p (\S+) --lib",
+                            docs)[1]
+        macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos", package)
+        linux = set().union(*(rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux", name)
+                              for name in rust_test_sources.workspace_lib_roots(REPO_ROOT)))
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(set(ids), {t for t in macos if "herdr_loaded_image_macos_" in t})
         self.assertFalse(set(ids) & linux)
