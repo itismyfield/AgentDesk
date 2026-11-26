@@ -12,6 +12,7 @@ import { Drawer } from "../src/components/common/overlay/Drawer";
 import { Modal } from "../src/components/common/overlay/Modal";
 import { SettingsOnboardingOverlay } from "../src/components/settings/SettingsOnboardingOverlay";
 import { SkillUsageCard } from "../src/components/stats/StatsAgentCards";
+import { I18nProvider } from "../src/i18n";
 
 vi.mock("../src/components/OnboardingWizard", () => ({
   default: () => (
@@ -60,15 +61,17 @@ describe("Dashboard Round 1 — Multi-Viewport & Overlay Regressions", () => {
     document.body.style.overflow = "";
   });
 
-  it("renders Modal overlay at z-[90] and content at z-[100] above Drawer (z-[80])", async () => {
+  it("renders Modal overlay at z-[90] and content at z-[100] above Drawer (z-[80]) with localized closeLabel and theme-aware hover", async () => {
     await act(async () => {
       root.render(
-        <Drawer open onClose={() => {}} title="작업 드로어">
-          <button type="button">드로어 액션</button>
-          <Modal open onClose={() => {}} title="삭제 확인">
-            <p>정말 삭제할까요?</p>
-          </Modal>
-        </Drawer>,
+        <I18nProvider language="ko">
+          <Drawer open onClose={() => {}} title="작업 드로어">
+            <button type="button">드로어 액션</button>
+            <Modal open onClose={() => {}} title="삭제 확인">
+              <p>정말 삭제할까요?</p>
+            </Modal>
+          </Drawer>
+        </I18nProvider>,
       );
     });
 
@@ -78,10 +81,29 @@ describe("Dashboard Round 1 — Multi-Viewport & Overlay Regressions", () => {
     expect(modalContent).not.toBeNull();
     expect(drawerContent.className).toContain("z-[80]");
     expect(modalContent.className).toContain("z-[100]");
+    expect(modalContent.className).toContain("bg-[var(--th-card-bg,_var(--bg-2))]");
+    expect(modalContent.className).toContain("text-[var(--th-text,_var(--fg))]");
+
+    const modalCloseButton = modalContent.querySelector<HTMLButtonElement>('button[aria-label="닫기"]')!;
+    expect(modalCloseButton).not.toBeNull();
+    expect(modalCloseButton.className).toContain("hover:bg-[var(--th-overlay-light)]");
 
     const overlays = Array.from(document.body.querySelectorAll<HTMLElement>("div.fixed.inset-0"));
     expect(overlays.some((el) => el.className.includes("z-[70]"))).toBe(true);
     expect(overlays.some((el) => el.className.includes("z-[90]"))).toBe(true);
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="ko">
+          <Modal open onClose={() => {}} title="커스텀 닫기" closeLabel="모달 닫기">
+            <p>본문</p>
+          </Modal>
+        </I18nProvider>,
+      );
+    });
+    expect(
+      document.body.querySelector('[aria-label="커스텀 닫기"] button[aria-label="모달 닫기"]'),
+    ).not.toBeNull();
   });
 
   it("portals SettingsOnboardingOverlay into document.body at z-[90], marks sibling body children inert, and blocks / keydown", async () => {

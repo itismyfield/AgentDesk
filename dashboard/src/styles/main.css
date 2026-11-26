@@ -300,9 +300,9 @@ body {
   textarea { font-size: 16px; }
   .aui-button-clean[data-size] { min-width: 44px; min-height: 44px; --aui-button-clean-h: 44px; }
   .aui-button-clean[data-icon-only] { width: 44px; height: 44px; }
-  .aui-icon-button-clean { min-width: 44px; min-height: 44px; --size: 44px; }
+  .aui-icon-button-clean { width: 44px; height: 44px; min-width: 44px; min-height: 44px; --size: 44px; }
   .aui-segmented-control-clean[data-size] { --aui-segmented-control-clean-h: 44px; }
-  .aui-segmented-control-clean .aui-segmented-control-clean__opt { min-height: 44px; }
+  .aui-segmented-control-clean .aui-segmented-control-clean__opt { min-width: 44px; min-height: 44px; }
   .aui-segmented-control-clean[data-variant="underline"] .aui-segmented-control-clean__opt { height: 44px; }
   .aui-select-clean.aui-select-clean[data-size],
   .aui-text-field-clean.aui-text-field-clean[data-size] { --h: 44px; --fs: 16px; min-height: 44px; }
@@ -315,9 +315,9 @@ body {
   textarea { font-size: 16px; }
   .aui-button-clean[data-size] { min-width: 44px; min-height: 44px; --aui-button-clean-h: 44px; }
   .aui-button-clean[data-icon-only] { width: 44px; height: 44px; }
-  .aui-icon-button-clean { min-width: 44px; min-height: 44px; --size: 44px; }
+  .aui-icon-button-clean { width: 44px; height: 44px; min-width: 44px; min-height: 44px; --size: 44px; }
   .aui-segmented-control-clean[data-size] { --aui-segmented-control-clean-h: 44px; }
-  .aui-segmented-control-clean .aui-segmented-control-clean__opt { min-height: 44px; }
+  .aui-segmented-control-clean .aui-segmented-control-clean__opt { min-width: 44px; min-height: 44px; }
   .aui-segmented-control-clean[data-variant="underline"] .aui-segmented-control-clean__opt { height: 44px; }
   .aui-select-clean.aui-select-clean[data-size],
   .aui-text-field-clean.aui-text-field-clean[data-size] { --h: 44px; --fs: 16px; min-height: 44px; }
