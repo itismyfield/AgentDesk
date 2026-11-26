@@ -1,5 +1,6 @@
 //! Policy pinned at a routine start: the wire-only presentation, whose terminal evidence never
 //! replaces the raw body, and whether the run is isolated from its channel's shared session.
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 
@@ -10,6 +11,24 @@ pub(super) struct RoutinePresentation {
     terminal: TerminalEvidence,
     #[serde(skip_serializing_if = "Isolation::is_shared")]
     isolation: Isolation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) process_thread: Option<ProcessThread>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct ProcessThread {
+    pub(super) parent_channel_id: u64,
+    pub(super) channel_id: u64,
+    pub(super) provider: String,
+    pub(super) turn_nonce: String,
+}
+
+pub(super) fn process_thread_policy_kind(provider: &str) -> Option<RuntimeHandoffKind> {
+    match provider {
+        "claude" => Some(RuntimeHandoffKind::ClaudeTui),
+        "codex" => Some(RuntimeHandoffKind::CodexTui),
+        _ => None,
+    }
 }
 
 /// A per-run turn owns no channel state: every completer and recovery reads this pin. `Shared`
@@ -57,6 +76,7 @@ impl RoutinePresentation {
         self.policy == Policy::Legacy
             && self.terminal == TerminalEvidence::Missing
             && self.isolation == Isolation::Shared
+            && self.process_thread.is_none()
     }
 
     /// Pins a headless routine run to its own per-run session.
@@ -83,8 +103,7 @@ impl RoutinePresentation {
             } else {
                 Policy::Legacy
             },
-            terminal: TerminalEvidence::Missing,
-            isolation: Isolation::Shared,
+            ..Self::default()
         }
     }
 

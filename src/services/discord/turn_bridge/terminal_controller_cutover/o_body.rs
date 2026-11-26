@@ -126,3 +126,7 @@ mod first_admission_tests {
         drop(boot_guard);
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "o_body/routine_process_tests.rs"]
+mod routine_process_tests;

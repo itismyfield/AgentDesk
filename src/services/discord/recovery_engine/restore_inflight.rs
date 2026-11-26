@@ -28,16 +28,9 @@ fn build_tmux_death_diagnostic(_name: &str, _output_path: Option<&str>) -> Optio
     None
 }
 
-fn recovery_output_path_with_tmux_fallback(
-    state: &inflight::InflightTurnState,
-    fallback_output: String,
-) -> Option<String> {
-    state
-        .output_path
-        .clone()
-        .filter(|path| !path.is_empty())
-        .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
-}
+use super::state_extractors::{
+    recovery_output_path_with_tmux_fallback, restart_report_output_path, restore_tmux_session_name,
+};
 
 #[cfg(unix)]
 use super::herdr_row_end::held_at_restore;
@@ -306,16 +299,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         // both the inflight state and the restart report, so the flush loop won't
         // overwrite the message with a generic follow-up.
         if restart_report_exists {
-            let output_path_for_check: Option<String> = state
-                .output_path
-                .clone()
-                .filter(|s| !s.is_empty())
-                .or_else(|| {
-                    state
-                        .channel_name
-                        .as_ref()
-                        .map(|name| tmux_runtime_paths(&provider.build_tmux_session_name(name)).0)
-                });
+            let output_path_for_check = restart_report_output_path(provider, &state);
             let restart_tmux_name = recovery_tmux_session_name(provider, &state);
             let completed_during_downtime_end = output_path_for_check
                 .as_deref()
@@ -942,11 +926,7 @@ pub(in crate::services::discord) async fn restore_inflight_states(
         let current_msg_id = optional_message_id(state.current_msg_id);
         let user_msg_id = optional_message_id(state.user_msg_id);
         let channel_name = state.channel_name.clone();
-        let tmux_session_name = state.tmux_session_name.clone().or_else(|| {
-            channel_name
-                .as_ref()
-                .map(|name| provider.build_tmux_session_name(name))
-        });
+        let tmux_session_name = restore_tmux_session_name(provider, &state);
         let channel_name = channel_name.or_else(|| {
             tmux_session_name.as_deref().and_then(|name| {
                 crate::services::provider::parse_provider_and_channel_from_tmux_name(name)

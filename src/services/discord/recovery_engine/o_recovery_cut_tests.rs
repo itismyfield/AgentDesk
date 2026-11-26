@@ -43,6 +43,172 @@ fn no_delivery_record(channel: u64) -> bool {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn i8372_process_restart_rechecks_thread_before_relay_pg() {
+    use crate::services::tui_o::cutover::{
+        boot_snapshot, install_channel_lookup, record_thread_child,
+        test_override::force_channel_lookups,
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    with_isolated_runtime_root(|| async move {
+        const PARENT: u64 = 8_372_601;
+        const CHILD: u64 = 8_372_602;
+        const NONCE: &str = "routine-process-recovery";
+        let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+            "i8372_restart",
+            "routine process recovery delivery",
+        )
+        .await;
+        let pool = db.connect_and_migrate().await;
+        let shared =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        let recorder = start(CHILD).await;
+        let mut state = recovery_state(CHILD, 0, RuntimeHandoffKind::ProcessBackend);
+        state.tmux_session_name = None;
+        state.channel_name = Some("parent-display-name".to_owned());
+        state.turn_nonce = Some(NONCE.into());
+        state.born_generation = 41;
+        inflight::save_inflight_state(&state).unwrap();
+        let path = inflight::inflight_state_path(
+            &inflight::inflight_runtime_root().unwrap(),
+            &ProviderKind::Claude,
+            CHILD,
+        );
+        let mut wire = serde_json::to_value(&state).unwrap();
+        wire["routine_presentation"] = serde_json::json!({"process_thread": {
+            "parent_channel_id": PARENT, "channel_id": CHILD, "provider": "claude",
+            "turn_nonce": NONCE,
+        }});
+
+        let dedupe_key = format!(
+            "headless_delivery:v2|p=6:claude|c={CHILD}|u={}|g={}",
+            state.user_msg_id, state.born_generation,
+        );
+        let sent_id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO message_outbox
+             (target, content, bot, source, status, sent_at, dedupe_key, producer_turn_nonce)
+             VALUES ($1, $2, 'claude', 'headless_turn', 'sent', NOW(), $3, $4)
+             RETURNING id",
+        )
+        .bind(format!("channel:{CHILD}"))
+        .bind(BODY)
+        .bind(&dedupe_key)
+        .bind(NONCE)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let thread: serenity::GuildChannel = serde_json::from_value(serde_json::json!({
+            "id": CHILD.to_string(), "parent_id": PARENT.to_string(),
+            "type": 11, "name": "routine results",
+        }))
+        .unwrap();
+        let _lookups = force_channel_lookups();
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (checked_thread, count) = (thread.clone(), reads.clone());
+        install_channel_lookup(
+            "claude",
+            Arc::new(move |channel| {
+                assert_eq!(channel, CHILD);
+                count.fetch_add(1, Ordering::SeqCst);
+                let found = checked_thread.clone();
+                Box::pin(async move { Ok(Some(found)) })
+            }),
+        );
+
+        let load = |wire: &serde_json::Value| {
+            std::fs::write(&path, serde_json::to_vec(wire).unwrap()).unwrap();
+            inflight::load_inflight_state_read_only(&ProviderKind::Claude, CHILD).unwrap()
+        };
+        {
+            let _boot = force_channels(&[(PARENT, RuntimeHandoffKind::ClaudeTui)]);
+            assert!(boot_snapshot().unwrap().child(CHILD).is_none());
+            let restored = load(&wire);
+            assert_eq!(
+                relay_recovery_body_notice(
+                    &recorder.http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    &restored,
+                    BODY,
+                )
+                .await,
+                RecoveryRelayOutcome::Delivered,
+            );
+            assert!(
+                recorder.calls().is_empty(),
+                "sent outbox ACK must prevent a direct repost"
+            );
+            assert_eq!(
+                reads.load(Ordering::SeqCst),
+                1,
+                "fresh boot must recheck the child"
+            );
+            assert!(
+                recovery_tmux_session_name(&ProviderKind::Claude, &restored).is_none(),
+                "a routine thread must not recover the parent display name as a pane"
+            );
+        }
+        {
+            let _boot = force_channels(&[(PARENT, RuntimeHandoffKind::ClaudeTui)]);
+            let mut foreign = wire.clone();
+            foreign["routine_presentation"]["process_thread"]["turn_nonce"] =
+                serde_json::json!("another episode");
+            let restored = load(&foreign);
+            assert_eq!(
+                relay_recovery_body_notice(
+                    &recorder.http,
+                    &shared,
+                    &ProviderKind::Claude,
+                    &restored,
+                    BODY,
+                )
+                .await,
+                RecoveryRelayOutcome::TransientFailure,
+                "an invalid pin cannot fall through to an unlisted channel on fresh boot",
+            );
+        }
+        {
+            let _boot = force_channels(&[(PARENT, RuntimeHandoffKind::ClaudeTui)]);
+            assert!(record_thread_child(&thread, false));
+            for kind in [
+                serde_json::Value::Null,
+                serde_json::json!("future_provider_runtime"),
+            ] {
+                let mut older = wire.clone();
+                older
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("routine_presentation");
+                older["runtime_kind"] = kind;
+                let restored = load(&older);
+                assert_eq!(
+                    relay_recovery_body_notice(
+                        &recorder.http,
+                        &shared,
+                        &ProviderKind::Claude,
+                        &restored,
+                        BODY,
+                    )
+                    .await,
+                    RecoveryRelayOutcome::TransientFailure,
+                );
+            }
+        }
+        assert!(recorder.calls().is_empty());
+        let surviving = sqlx::query_as::<_, (i64, String)>(
+            "SELECT id, status FROM message_outbox WHERE source = 'headless_turn' ORDER BY id",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(surviving, vec![(sent_id, "sent".to_string())]);
+        db.drop().await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn o_delegated_recovery_body_posts_only_the_marker_without_evidence() {
     with_isolated_runtime_root(|| async move {
         let shared = crate::services::discord::make_shared_data_for_tests();

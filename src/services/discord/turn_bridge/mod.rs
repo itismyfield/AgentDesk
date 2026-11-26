@@ -174,6 +174,7 @@ use current_message_anchor::{
 use guards::{make_bridge_guards, resolve_guard_owner_channel};
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use headless_delivery::enqueue_headless_turn_row_for_test;
+pub(in crate::services::discord) use headless_delivery::recover_routine_process_body;
 use headless_delivery::{
     cleanup_headless_streaming_placeholder_after_delivery, enqueue_claimed_headless_delivery,
     is_synthetic_headless_message_id,

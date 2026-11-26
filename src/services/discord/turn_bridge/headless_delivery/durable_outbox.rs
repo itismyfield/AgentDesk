@@ -132,9 +132,10 @@ pub(super) async fn enqueue_headless_outbox(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
-    (origin, producer_turn_nonce): (
+    (origin, producer_turn_nonce, require_exact): (
         Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
         Option<&str>,
+        bool,
     ),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
@@ -151,6 +152,7 @@ pub(super) async fn enqueue_headless_outbox(
             durable_headless_outbox_enabled(),
             origin,
             producer_turn_nonce,
+            require_exact,
         ),
     )
     .await
@@ -176,7 +178,7 @@ pub(super) async fn enqueue_headless_outbox_with_rollout(
         provider,
         born_generation,
         cancel_token,
-        (durable_enabled, None, producer_turn_nonce),
+        (durable_enabled, None, producer_turn_nonce, false),
     )
     .await
 }
@@ -188,10 +190,11 @@ async fn enqueue_headless_outbox_with_origin(
     provider: &ProviderKind,
     born_generation: u64,
     cancel_token: Option<&CancelToken>,
-    (durable_enabled, origin, producer_turn_nonce): (
+    (durable_enabled, origin, producer_turn_nonce, require_exact): (
         bool,
         Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
         Option<&str>,
+        bool,
     ),
 ) -> Result<
     crate::services::message_outbox::OutboxEnqueueOutcome,
@@ -204,7 +207,7 @@ async fn enqueue_headless_outbox_with_origin(
     let bounded_session_key = message
         .session_key
         .and_then(HeadlessSessionRoutingKey::<MAX_HEADLESS_SESSION_ROUTING_KEY_BYTES>::new);
-    let identity = durable_enabled
+    let identity = (durable_enabled || require_exact)
         .then(|| {
             channel_id.and_then(|channel_id| {
                 DurableHeadlessOutboxIdentity::new(
@@ -219,6 +222,9 @@ async fn enqueue_headless_outbox_with_origin(
     let identity =
         identity.filter(|_| message.session_key.is_none() || bounded_session_key.is_some());
     let Some(identity) = identity else {
+        if require_exact {
+            return Ok(crate::services::message_outbox::OutboxEnqueueOutcome::NoRow);
+        }
         return crate::services::message_outbox::enqueue_outbox_pg_with_ttl_origin(
             pool,
             message,
@@ -275,7 +281,7 @@ mod tests {
             &ProviderKind::Claude,
             1,
             None,
-            (Some(&artifact), None),
+            (Some(&artifact), None, false),
         )
         .await
         .unwrap()

@@ -2143,6 +2143,14 @@ tui-o-writer/WriterThreadActivePending.cfg	WriterThreadActive	NoLegacyBody	Child
 tui-o-writer/WriterThreadActiveReadyEarly.cfg	WriterThreadActive	ExactlyOnce,LateTurnLegacyOnce,ReadyNeedsInit	-
 tui-o-writer/WriterThreadActiveReregister.cfg	WriterThreadActive	ExactlyOnce,NoLegacyBody	-
 tui-o-writer/WriterThreadActiveReverse.cfg	WriterThreadActive	FloorBeforeInit,OldReaderBoots	-
+tui-o-writer/WriterThreadActiveRoutineCurrent.cfg	WriterThreadActive	-	RoutineEventuallyPosted
+tui-o-writer/WriterThreadActiveRoutineFalseAck.cfg	WriterThreadActive	RoutineExactlyOnce	-
+tui-o-writer/WriterThreadActiveRoutineNoFence.cfg	WriterThreadActive	RoutineClaimFenced	-
+tui-o-writer/WriterThreadActiveRoutineNoProof.cfg	WriterThreadActive	RoutineClaimFenced,RoutineOtherKindsUnchanged	-
+tui-o-writer/WriterThreadActiveRoutineNoRecheck.cfg	WriterThreadActive	RoutineClaimFenced	-
+tui-o-writer/WriterThreadActiveRoutineNoRoute.cfg	WriterThreadActive	-	RoutineEventuallyPosted
+tui-o-writer/WriterThreadActiveRoutineRepost.cfg	WriterThreadActive	RoutineExactlyOnce	-
+tui-o-writer/WriterThreadActiveRoutineTarget.cfg	WriterThreadActive	-	-
 tui-o-writer/WriterThreadChildHeldBeforeBody.cfg	WriterThreadChildHeld	-	CurrentRunAnswered
 tui-o-writer/WriterThreadChildHeldBeforeBoot.cfg	WriterThreadChildHeld	NoBootChurn	-
 tui-o-writer/WriterThreadChildHeldDebtAfter.cfg	WriterThreadChildHeld	-	-

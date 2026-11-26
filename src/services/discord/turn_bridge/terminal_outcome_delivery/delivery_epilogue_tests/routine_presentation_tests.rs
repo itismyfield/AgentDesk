@@ -10,6 +10,119 @@ fn pin(row: &mut InflightTurnState, terminal: &str) {
     crate::services::discord::inflight::save_inflight_state(row).unwrap();
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn i8372_process_ack_failure_keeps_response_and_no_reply_stays_quiet_pg() {
+    use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
+    use crate::services::discord::gateway::HeadlessGateway;
+    use crate::services::tui_o::cutover::{record_thread_child, test_override::force_channels};
+
+    const PARENT: u64 = 8_372_701;
+    const NONCE: &str = "routine-process-ack-failure";
+    let _boot = force_channels(&[(PARENT, ClaudeTui)]);
+    let thread: poise::serenity_prelude::GuildChannel = serde_json::from_value(json!({
+        "id": DRIVER_CHANNEL_ID.to_string(), "parent_id": PARENT.to_string(),
+        "type": 11, "name": "routine results",
+    }))
+    .unwrap();
+    assert!(record_thread_child(&thread, false));
+
+    let mut driver = TerminalDeliveryDriver::new(ReplaceBehaviour::Edited, 0);
+    let db = crate::dispatch::test_support::DispatchPostgresTestDb::create(
+        "i8372_ack",
+        "routine process visible acknowledgement",
+    )
+    .await;
+    let pool = db.connect_and_migrate().await;
+    sqlx::raw_sql(
+        "CREATE FUNCTION fail_routine_ack() RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             NEW.status := 'failed';
+             NEW.error := 'Discord did not acknowledge the result';
+             RETURN NEW;
+         END; $$;
+         CREATE TRIGGER fail_routine_ack BEFORE INSERT ON message_outbox FOR EACH ROW
+         WHEN (NEW.source = 'headless_turn') EXECUTE FUNCTION fail_routine_ack();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    driver.inflight.born_generation = 41;
+    driver.shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    driver.gateway = Arc::new(HeadlessGateway);
+
+    for (terminal, body, expected_ack) in [
+        ("no_reply", "NO_REPLY", true),
+        ("full", "routine result with a failed visible ACK", false),
+    ] {
+        driver.body = body.into();
+        driver.inflight.full_response = body.into();
+        driver.inflight.turn_nonce = Some(NONCE.into());
+        pin(&mut driver.inflight, terminal);
+        let mut wire = serde_json::to_value(&driver.inflight).unwrap();
+        wire["routine_presentation"]["process_thread"] = json!({
+            "parent_channel_id": PARENT, "channel_id": DRIVER_CHANNEL_ID,
+            "provider": "claude", "turn_nonce": NONCE,
+        });
+        driver.inflight = serde_json::from_value(wire).unwrap();
+        crate::services::discord::inflight::save_inflight_state(&driver.inflight).unwrap();
+
+        let (ctx, state) = driver.parts();
+        let output = crate::test_support::wait::await_within(
+            run_terminal_outcome_delivery(ctx, state),
+            crate::test_support::wait::WAIT_CAP,
+        )
+        .await;
+        assert_eq!(output.terminal_delivery_committed, expected_ack);
+        assert_eq!(output.preserve_inflight_for_cleanup_retry, !expected_ack);
+        let outbox = sqlx::query_as::<_, (String, String, Option<String>)>(
+            "SELECT status, content, error FROM message_outbox WHERE source = 'headless_turn'",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        if expected_ack {
+            assert!(outbox.is_empty(), "exact NO_REPLY stays quiet");
+        } else {
+            assert_eq!(
+                outbox.len(),
+                1,
+                "the attempt must reach Discord's visible-ACK path before retaining its row",
+            );
+            let (status, content, error) = &outbox[0];
+            assert_eq!(status, "failed");
+            assert!(content.contains(body));
+            assert_eq!(
+                error.as_deref(),
+                Some("Discord did not acknowledge the result")
+            );
+            assert_eq!(output.full_response, body);
+            assert_eq!(output.response_sent_offset, 0);
+            use crate::services::discord::turn_bridge::{
+                context::BridgeCompletionSignal, guards::CompletionGuard,
+            };
+            let mut completion = CompletionGuard::for_completion_test(
+                driver.shared.clone(),
+                ChannelId::new(DRIVER_CHANNEL_ID),
+                DRIVER_USER_MSG_ID,
+            );
+            output.handoff_completion_authority(&mut completion);
+            assert_eq!(
+                completion.completion_signal(),
+                BridgeCompletionSignal::Unresolved
+            );
+            let persisted = crate::services::discord::inflight::load_inflight_state_read_only(
+                &ProviderKind::Claude,
+                DRIVER_CHANNEL_ID,
+            )
+            .unwrap();
+            assert_eq!(persisted.full_response, body);
+            assert!(!persisted.terminal_delivery_completed());
+        }
+    }
+    db.drop().await;
+}
+
 #[tokio::test]
 async fn i8117_no_reply_settles_without_body_banner_or_retry() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);

@@ -5,8 +5,11 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::InflightTurnState;
+use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::session_host::{HostKind, HostedRuntimeLocator};
-use crate::services::tui_o::cutover::{BodyClaim, claude_thread};
+use crate::services::tui_o::cutover::{self, BodyClaim, IdentityError, claude_thread};
+
+use super::super::routine_presentation::{ProcessThread, process_thread_policy_kind};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(in crate::services::discord) enum PersistedHostLocator {
@@ -85,11 +88,69 @@ impl<'de> Deserialize<'de> for PersistedHostLocator {
 }
 
 impl InflightTurnState {
+    pub(in crate::services::discord) fn pin_process_thread(
+        &mut self,
+        parent: u64,
+    ) -> Result<(), IdentityError> {
+        let turn_nonce = self
+            .turn_nonce
+            .clone()
+            .ok_or(IdentityError::ChildDeliveryHeld)?;
+        self.runtime_kind = Some(RuntimeHandoffKind::ProcessBackend);
+        self.routine_presentation.process_thread = Some(ProcessThread {
+            parent_channel_id: parent,
+            channel_id: self.channel_id,
+            provider: self.provider.clone(),
+            turn_nonce,
+        });
+        Ok(())
+    }
+
+    fn process_thread_scope(
+        &self,
+        destination: u64,
+    ) -> Option<Result<(u64, RuntimeHandoffKind), IdentityError>> {
+        let thread = self.routine_presentation.process_thread.as_ref()?;
+        let scope = process_thread_policy_kind(&thread.provider).filter(|_| {
+            !self.runtime_kind_unknown_on_disk
+                && self.runtime_kind == Some(RuntimeHandoffKind::ProcessBackend)
+                && self.channel_id == destination
+                && thread.channel_id == destination
+                && thread.provider == self.provider
+                && !thread.turn_nonce.is_empty()
+                && self.turn_nonce.as_deref() == Some(thread.turn_nonce.as_str())
+                && !self.silent_turn
+                && self.host_locator.is_none()
+                && self.tmux_session_name.is_none()
+                && self.input_fifo_path.is_none()
+                && self.output_path.is_none()
+        });
+        Some(
+            scope
+                .map(|kind| (thread.parent_channel_id, kind))
+                .ok_or(IdentityError::ChildDeliveryHeld),
+        )
+    }
+
+    pub(in crate::services::discord) async fn restore_process_thread_scope(
+        &self,
+        destination: u64,
+    ) -> Result<(), IdentityError> {
+        if let Some(scope) = self.process_thread_scope(destination) {
+            let (parent, kind) = scope?;
+            cutover::resolve_process_thread(destination, parent, kind).await?;
+        }
+        Ok(())
+    }
+
     #[track_caller]
     pub(in crate::services::discord) fn tui_body_claim(
         &self,
         destination: u64,
     ) -> BodyClaim<'static> {
+        if let Some(scope) = self.process_thread_scope(destination) {
+            return BodyClaim::process_thread(destination, scope);
+        }
         if self.channel_id != destination {
             return BodyClaim::new(destination, None);
         }

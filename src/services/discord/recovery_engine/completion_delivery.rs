@@ -131,6 +131,9 @@ pub(super) async fn relay_captured_recovery_terminal_notice_with_gateway(
     text: &str,
     gateway: &dyn super::super::gateway::TurnGateway,
 ) -> CapturedRecoveryDelivery {
+    if let Some(outcome) = relay_process_thread_body(shared, state, state.channel_id, text).await {
+        return outcome.into();
+    }
     // O posts this channel's TUI body: consume the captured range without sending or recording it.
     match o_owns_recovery_body(state, state.channel_id) {
         Ok(false) => {}
@@ -296,6 +299,34 @@ fn o_recovery_marker(
         .then(|| interrupted_recovery_message(state, "")))
 }
 
+async fn relay_process_thread_body(
+    shared: &Arc<SharedData>,
+    state: &super::inflight::InflightTurnState,
+    channel: u64,
+    text: &str,
+) -> Option<RecoveryRelayOutcome> {
+    state.routine_presentation.process_thread.as_ref()?;
+    if !carries_body(state, text) {
+        return state
+            .restore_process_thread_scope(channel)
+            .await
+            .err()
+            .map(|_| RecoveryRelayOutcome::TransientFailure);
+    }
+    let delivered = match super::inflight::opt_channel_id(channel) {
+        Some(channel) => {
+            super::super::turn_bridge::recover_routine_process_body(shared, state, channel, text)
+                .await
+        }
+        None => false,
+    };
+    Some(if delivered {
+        RecoveryRelayOutcome::Delivered
+    } else {
+        RecoveryRelayOutcome::TransientFailure
+    })
+}
+
 /// Recovered-body relay: unchanged for Legacy; on an O-owned channel only the marker, and
 /// without a recovery context so no delivery evidence is recorded for O's body.
 pub(super) async fn relay_recovery_body_to_placeholder(
@@ -307,6 +338,9 @@ pub(super) async fn relay_recovery_body_to_placeholder(
     text: &str,
     recovery_context: Option<&RecoveryDeliveryContext>,
 ) -> RecoveryRelayOutcome {
+    if let Some(outcome) = relay_process_thread_body(shared, state, channel_id.get(), text).await {
+        return outcome;
+    }
     let Ok(marker) = o_recovery_marker(state, channel_id) else {
         return RecoveryRelayOutcome::TransientFailure;
     };
@@ -358,6 +392,9 @@ pub(super) async fn relay_recovery_body_notice(
     state: &super::inflight::InflightTurnState,
     text: &str,
 ) -> RecoveryRelayOutcome {
+    if let Some(outcome) = relay_process_thread_body(shared, state, state.channel_id, text).await {
+        return outcome;
+    }
     let channel_id = super::inflight::opt_channel_id(state.channel_id);
     let owned = channel_id.map_or(Ok(false), |channel_id| {
         o_owns_recovery_body(state, channel_id.get())

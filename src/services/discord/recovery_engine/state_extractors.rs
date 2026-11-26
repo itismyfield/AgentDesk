@@ -125,10 +125,63 @@ fn recovery_dispatch_id(state: &inflight::InflightTurnState) -> Option<&str> {
         .filter(|dispatch_id| !dispatch_id.is_empty())
 }
 
+pub(super) fn recovery_output_path_with_tmux_fallback(
+    state: &inflight::InflightTurnState,
+    fallback_output: String,
+) -> Option<String> {
+    if state.routine_presentation.process_thread.is_some() {
+        return None;
+    }
+    state
+        .output_path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .or_else(|| (!fallback_output.is_empty()).then_some(fallback_output))
+}
+
+pub(super) fn restore_tmux_session_name(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Option<String> {
+    if state.routine_presentation.process_thread.is_some() {
+        return None;
+    }
+    state.tmux_session_name.clone().or_else(|| {
+        state
+            .channel_name
+            .as_ref()
+            .map(|name| provider.build_tmux_session_name(name))
+    })
+}
+
+pub(super) fn restart_report_output_path(
+    provider: &ProviderKind,
+    state: &inflight::InflightTurnState,
+) -> Option<String> {
+    if state.routine_presentation.process_thread.is_some() {
+        return None;
+    }
+    state
+        .output_path
+        .clone()
+        .filter(|path| !path.is_empty())
+        .or_else(|| {
+            state.channel_name.as_ref().map(|name| {
+                crate::services::discord::turn_bridge::tmux_runtime_paths(
+                    &provider.build_tmux_session_name(name),
+                )
+                .0
+            })
+        })
+}
+
 pub(super) fn recovery_tmux_session_name(
     provider: &ProviderKind,
     state: &inflight::InflightTurnState,
 ) -> Option<String> {
+    if state.routine_presentation.process_thread.is_some() {
+        return None;
+    }
     state
         .tmux_session_name
         .as_deref()

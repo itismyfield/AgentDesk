@@ -14,6 +14,7 @@ use replay_start::take_session_retry_context;
 mod isolated_context;
 mod process_mailbox;
 mod routine_metadata;
+mod routine_result_process;
 use routine_metadata::{
     fresh_routine_turn, headless_session_basis, routine_metadata_agent_id,
     routine_metadata_role_binding, routine_tmux_session_name, scheduled_snapshot_session_label,
@@ -165,6 +166,11 @@ async fn start_reserved_headless_turn_admitted(
         }
         return Err(HeadlessTurnStartError::InvalidTarget(refusal.to_string()));
     }
+    let result_thread = routine_result_process::authorize(
+        &replay_request,
+        early_thread_parent.as_ref().map(|(parent, _)| parent.get()),
+    )
+    .await?;
     let is_dm = is_dm_hint.unwrap_or(false);
     shared.record_channel_speaker(channel_id, request_owner, request_owner_name, is_dm);
     let live_events = &shared.ui.placeholder_live_events;
@@ -997,6 +1003,14 @@ async fn start_reserved_headless_turn_admitted(
         adk_session_key.as_deref(),
     )
     .await;
+    routine_result_process::pin(
+        &replay_request,
+        result_thread,
+        (&turn_host, tmux_session_name.as_deref()),
+        &mut inflight_state,
+        &cancel_token,
+    )
+    .await?;
     let replay_gateway = replay_request.gateway(
         &mut inflight_state,
         &pending_uploads,
