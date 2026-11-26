@@ -1,5 +1,7 @@
 # #8118 S2a 착수 1 — 설계 ↔ 코드 대조, 겹침, 구현 계획
 
+<!-- doc-path-refs: proposed src/services/session_host/thread_launch.rs -->
+
 - 입력은 WebGPT pro 설계 `design-s2-1.out.md`(VERDICT: DESIGN_READY)다. 이 설계의 입력은 준비 묶음 `refs/review/i8118-s2-prep-1`(`b52e052e24`)이었다. 설계 원문은 lane-runs에 있고 저장소에는 없다.
 - 대조 기준:
   - 코드는 `b52e052e24e13781569050ec940eb35b9496ed54`(prod는 base `b04ea56650`과 같다).
@@ -106,7 +108,7 @@
 | 〃 | `session_host/thread_host.rs` (+9/−9) | 가시성만 | S2a-2: `next_host*`·`next_is_herdr` 시그니처 |
 | 〃 | `session_host/host_decision.rs` (+9/−9) | 가시성만 | S2a-2: `decide`·`observe_thread`·`input_runs_herdr` |
 | 〃 | `session_host.rs` (+56/−58) | 가시성 + `use` 목록 재배치(2줄) | S2a-2: `mod thread_launch;` 한 줄 |
-| 〃 | `src/db/dispatched_sessions/hosted_execution.rs` (+44/−49) | 가시성, rustfmt 재배치(`load_hosted_execution_pg` 시그니처 한 줄화 등), 시험 지원 `#[path = "hosted_execution_support.rs"]` 분리 | S2a-2: `HostedObservation` 필드, `load_hosted_execution_pg` SELECT |
+| 〃 | `src/db/dispatched_sessions/hosted_execution.rs` (+44/−49) | 가시성, rustfmt 재배치(`load_hosted_execution_pg` 시그니처 한 줄화 등), 시험 지원 코드를 `#[path]` 별도 파일로 분리 | S2a-2: `HostedObservation` 필드, `load_hosted_execution_pg` SELECT |
 | 〃 | `tui_o/cutover.rs` (+38/−56) | 가시성, 함수 시그니처 한 줄화(rustfmt), `#[cfg(test)]` → `#[cfg(any(test, feature = "test-support"))]` | S2a-2: `record_thread_child_by_id`, `record_in`, `relation`, `policy_channel` |
 | 〃 | `tui_o/channel_policy.rs` (+21/−21) | 가시성만 | S2a-2: 관계 accessor·kind 출처 |
 | 〃 | `tui_o/channel_policy/children.rs` (+11/−11) | 가시성만 | S2a-2: `ChildEntry::read`, `policy_channel` |
