@@ -749,7 +749,7 @@ fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreig
         let output = crate::config::test_instance::test_support::command(&root)
             .args(["--exact", concat!(module_path!(),
                 "::test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts")
-                .strip_prefix("agentdesk::").unwrap(), "--nocapture"])
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::")).unwrap(), "--nocapture"])
             .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
             .env("AGENTDESK_ROOT_DIR", &root)
             .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))

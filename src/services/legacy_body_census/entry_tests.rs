@@ -558,7 +558,8 @@ fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                concat!(module_path!(), "::unsampled_boot_child").trim_start_matches("agentdesk::"),
+                concat!(module_path!(), "::unsampled_boot_child")
+                    .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
                 "--nocapture",
             ])
             .env("ADK_I7651_CHILD_ROOT", root.path())

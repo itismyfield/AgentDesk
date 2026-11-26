@@ -41,7 +41,7 @@ async fn retired_provider_config_boots_with_one_warning_and_no_retired_bot() {
             module_path!(),
             "::retired_provider_config_boots_with_one_warning_and_no_retired_bot"
         )
-        .trim_start_matches("agentdesk::");
+        .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::"));
         for provider in ["gemini", "claude"] {
             let root = tempfile::tempdir().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())

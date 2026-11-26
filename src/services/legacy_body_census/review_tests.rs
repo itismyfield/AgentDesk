@@ -297,7 +297,7 @@ async fn production_entry_writes_header_and_boot_ready() {
                 module_path!(),
                 "::production_entry_writes_header_and_boot_ready"
             )
-            .trim_start_matches("agentdesk::"),
+            .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
         );
         return;
     }
@@ -344,7 +344,7 @@ async fn production_selection_records_both_installation_outcomes() {
                     module_path!(),
                     "::production_selection_records_both_installation_outcomes"
                 )
-                .trim_start_matches("agentdesk::"),
+                .trim_start_matches(concat!(env!("CARGO_CRATE_NAME"), "::")),
             );
         }
         return;
