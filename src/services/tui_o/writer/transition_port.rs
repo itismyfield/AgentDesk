@@ -30,7 +30,7 @@ pub(crate) enum Operation {
     Inspect(Request),
     /// Retires each source the judgment passes, one per actor poll, while the scope is still the
     /// one whose digest the Inspect gave.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Apply(Request, ScopeDigest),
     /// The periodic retention policy applies an inspected scope, with a fresh idle check.
     AutomaticApply(Request, ScopeDigest, Idle),
@@ -329,7 +329,7 @@ impl Operation {
     pub(super) fn request_ref(&self) -> &Request {
         match self {
             Self::Inspect(request) | Self::AutomaticApply(request, _, _) => request,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::Apply(request, _) => request,
         }
     }

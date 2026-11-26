@@ -44,7 +44,7 @@ pub(crate) struct Transitions {
 }
 
 impl Transitions {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(super) fn has_job(&self) -> bool {
         self.job.is_some()
     }
@@ -156,7 +156,7 @@ fn conflicts<'a>(mut cursors: impl Iterator<Item = &'a Cursor>, request: &Reques
 /// The actor's clock; a test may move it on just as a worker's probes are taken.
 fn now() -> Instant {
     let now = Instant::now();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let now = now + test_hooks::skew();
     now
 }
@@ -231,7 +231,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         } = envelope;
         let (apply, request, expected, automatic) = match operation {
             Operation::Inspect(request) => (false, request, None, None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Operation::Apply(request, digest) => (true, request, Some(digest), None),
             Operation::AutomaticApply(request, digest, idle) => {
                 (true, request, Some(digest), Some(idle))
@@ -401,7 +401,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return true;
         }
         if let Some(worker) = &job.worker {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_hooks::receiving();
             let seen = match worker.try_recv() {
                 Ok(seen) => seen,
@@ -478,7 +478,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
             _ => None,
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let done = test_hooks::worker_started();
         tokio::task::spawn_blocking(move || {
             let seen = batch.into_iter().map(|(key, cursor)| {
@@ -490,7 +490,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 (key, observe(&cursor, wall()), age)
             });
             let _ = send.send(seen.collect());
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             done.store(true, std::sync::atomic::Ordering::Release);
         });
         job.worker = Some(worker);
@@ -593,7 +593,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         if *self.transitions.stop.borrow() || *job.stopping.borrow() {
             return Outcome::Held(Hold::Stopping);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         test_hooks::at_retire();
         unsettled.send_replace(None);
         match self
