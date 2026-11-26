@@ -991,6 +991,7 @@ src/
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   ├── verified_clear_probe_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── transactions/
 │   │   │   ├── completion.rs
@@ -4017,6 +4018,7 @@ src/
 │   │   ├── current_key.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
+│   │   ├── herdr_probe_tests.rs
 │   │   ├── hook.rs
 │   │   ├── hosted_cleanup.rs
 │   │   ├── listing.rs
