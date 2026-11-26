@@ -570,7 +570,7 @@ const runningNowStyles = `
 @media (hover: none) and (pointer: coarse) {
   .aui-running-now { --aui-running-now-row-h: 56px; }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-running-now-trigger { height: 44px; padding: 0 12px 0 14px; }
   .aui-running-now-icon-button { width: 44px; height: 44px; }
   .aui-running-now-open { height: 44px; padding: 0 14px; }

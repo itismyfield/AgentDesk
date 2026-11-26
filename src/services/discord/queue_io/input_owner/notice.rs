@@ -11,9 +11,10 @@ pub(crate) async fn drain(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
-    // A failed Decision original leaves here, before its record could owe a resend notice.
-    crate::services::discord::decision_drain::settle_channel(pool, handle, channel).await;
-    let (namespace, owed) = owed(handle).await?;
+    // A closed Decision original leaves here, before its record could owe a resend notice; one
+    // whose removal failed keeps its notice back until the next drain.
+    let held = crate::services::discord::decision_drain::settle_channel(pool, handle, channel);
+    let (namespace, owed) = owed(handle, held.await).await?;
     if owed.iter().any(|entry| {
         entry["input"]["attempt"].is_null()
             && entry["reason"]["reason"]
@@ -34,17 +35,28 @@ pub(crate) async fn drain(
     finish(pool, handle, provider, channel, &namespace, &owed).await
 }
 
-/// The namespace and every retained or refused entry whose notice is still owed.
-async fn owed(handle: &ChannelMailboxHandle) -> Result<(String, Vec<Value>), String> {
+/// The namespace and every retained or refused entry whose notice is still owed, except those
+/// of the originals `held` names.
+async fn owed(
+    handle: &ChannelMailboxHandle,
+    held: Vec<u64>,
+) -> Result<(String, Vec<Value>), String> {
+    let withheld = move |entry: &Value| {
+        let members = entry["members"].as_array().into_iter().flatten();
+        std::iter::once(&entry["input"]["original"]["message_id"])
+            .chain(members.map(|member| &member["identity"]["primary"]))
+            .filter_map(Value::as_u64)
+            .any(|id| held.contains(&id))
+    };
     handle
-        .v2_request(|slot| {
+        .v2_request(move |slot| {
             let state = slot.as_ref().ok_or("no input owner")?.json()?;
             let namespace = state["namespace"].as_str().ok_or("missing namespace")?;
             let entries = ["retained_inputs", "refused_inputs", "refused_fronts"]
                 .into_iter()
                 .flat_map(|kept| state[kept].as_array().into_iter().flatten());
             let owed = entries
-                .filter(|entry| entry["notice"]["enqueued"] != true)
+                .filter(|entry| entry["notice"]["enqueued"] != true && !withheld(entry))
                 .cloned()
                 .collect();
             Ok((namespace.to_string(), owed))
@@ -113,7 +125,7 @@ pub(crate) async fn drain_synchronously_for_tests(
     provider: &str,
     channel: u64,
 ) -> Result<usize, String> {
-    crate::services::discord::decision_drain::settle_channel(pool, handle, channel).await;
-    let (namespace, owed) = owed(handle).await?;
+    let held = crate::services::discord::decision_drain::settle_channel(pool, handle, channel);
+    let (namespace, owed) = owed(handle, held.await).await?;
     finish(pool, handle, provider, channel, &namespace, &owed).await
 }

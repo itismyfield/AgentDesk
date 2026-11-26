@@ -453,20 +453,34 @@ fn cleared_source(
 
 /// Whether the pane's latest logged record is execution `nonce`'s start of `session_id`.
 pub(crate) fn start_logged(channel: u64, logical: &str, nonce: &str, session_id: &str) -> bool {
-    latest_logged(channel, logical).is_some_and(|event| {
+    start_log_read(channel, logical, nonce, session_id).unwrap_or(false)
+}
+
+/// As `start_logged`, but a log that cannot be read is an error rather than a missing start.
+pub(crate) fn start_log_read(
+    channel: u64,
+    logical: &str,
+    nonce: &str,
+    session_id: &str,
+) -> std::io::Result<bool> {
+    Ok(latest_logged_read(channel, logical)?.is_some_and(|event| {
         event.execution_nonce.as_deref() == Some(nonce)
             && logged_session(&event.new) == Some(session_id)
-    })
+    }))
 }
 
 /// The pane's latest logged record that moved it; refusal audits do not.
 fn latest_logged(channel: u64, logical: &str) -> Option<BindingEvent> {
-    let events = binding_events_since(channel, 0).ok()?;
-    events
+    latest_logged_read(channel, logical).ok().flatten()
+}
+
+fn latest_logged_read(channel: u64, logical: &str) -> std::io::Result<Option<BindingEvent>> {
+    let events = binding_events_since(channel, 0)?;
+    Ok(events
         .into_iter()
         .rev()
         .filter(|event| event.tmux_session == logical)
-        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. }))
+        .find(|event| !matches!(event.new, BindingTarget::Rejected { .. })))
 }
 
 fn logged_session(target: &BindingTarget) -> Option<&str> {

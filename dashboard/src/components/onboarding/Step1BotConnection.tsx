@@ -1,5 +1,6 @@
 import type { Dispatch, RefObject, SetStateAction } from "react";
 
+import { IntegrationFlow, type IntegrationFlowItem } from "../../kit/illustrations/integration-flow";
 import type { BotInfo, CommandBotEntry } from "../onboardingDraft";
 import {
   COMMAND_PROVIDERS,
@@ -82,6 +83,15 @@ export function Step1BotConnection({
   validateStep1,
   goToStep,
 }: Step1BotConnectionProps) {
+  const hubTitle = tr("AgentDesk 허브", "AgentDesk Hub");
+  const hubSub = tr("Discord 실행·통신 봇 오케스트레이션", "Discord Command & Comms Orchestration");
+  const integrationItems: IntegrationFlowItem[] = [
+    { name: "Discord", title: tr("봇·채널 허브", "Bots & Channels") },
+    { name: "Claude", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Codex", title: tr("실행 프로바이더", "Command Provider") },
+    { name: "Antigravity", title: tr("클라우드 에이전트", "Cloud Agent") },
+  ];
+
   return (
     <div className={stepBox} style={{ borderColor: borderLight }}>
       <div>
@@ -94,6 +104,21 @@ export function Step1BotConnection({
             "AgentDesk runs AI agents through Discord bots. You need at least 2 bots (Command + Communication).",
           )}
         </p>
+      </div>
+
+      <div
+        data-testid="step1-integration-flow"
+        className="mx-auto w-full max-w-[440px] overflow-hidden rounded-xl border border-[var(--th-border-subtle)] bg-[var(--th-overlay-subtle)]"
+      >
+        <IntegrationFlow
+          label={tr(
+            "Discord 봇과 AgentDesk, AI 프로바이더 연동 흐름",
+            "Discord bots, AgentDesk, and AI provider integration flow",
+          )}
+          hubTitle={hubTitle}
+          hubSubtitle={hubSub}
+          items={integrationItems}
+        />
       </div>
 
       <div

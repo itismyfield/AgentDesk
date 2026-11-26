@@ -1,11 +1,108 @@
 use super::*;
 use crate::services::cluster::intake_router_hook::owner_record::output;
+use crate::services::discord::SharedData;
+use crate::services::discord::formatting::rollback_transport_test_hook;
 use crate::services::discord::gateway::DiscordGateway;
 use crate::services::provider::ProviderKind;
+use crate::test_support::wait::{WAIT_CAP, join_within};
+use std::future::{Future, poll_fn};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
+    mpsc::{self, RecvTimeoutError},
 };
+use tokio::time::{Duration, Instant};
+
+#[derive(Default)]
+struct PacedRequests {
+    io_complete: Option<mpsc::Sender<()>>,
+    deadlines: Vec<Instant>,
+}
+
+impl PacedRequests {
+    fn keep_clock_still_during_io(&mut self) {
+        if self.io_complete.is_none() {
+            // A pending blocking task inhibits Tokio's automatic clock advancement.
+            let (complete, wait) = mpsc::channel();
+            drop(tokio::task::spawn_blocking(move || {
+                let _ = wait.recv_timeout(WAIT_CAP * 2);
+            }));
+            self.io_complete = Some(complete);
+        }
+    }
+}
+
+async fn drive_paced_delivery<F: Future>(
+    delivery: F,
+    shared: &Arc<SharedData>,
+    channel: ChannelId,
+    chunks: usize,
+) -> F::Output {
+    let (cancel_wall_limit, wait) = mpsc::channel::<()>();
+    let (wall_result, mut wall_limit) = tokio::sync::oneshot::channel();
+    let watchdog = std::thread::spawn(move || {
+        let _ = wall_result.send(wait.recv_timeout(WAIT_CAP));
+    });
+    let requests = Arc::new(Mutex::new(PacedRequests::default()));
+    requests.lock().unwrap().keep_clock_still_during_io();
+    let observed = requests.clone();
+    let pacing = shared.clone();
+    // The fixture holds the shared test-env lock. Observe before PG or HTTP can yield.
+    let _hook = rollback_transport_test_hook::install(
+        Box::new(move |seen_channel, _, _, _, _| {
+            if seen_channel == channel {
+                let deadline = *pacing
+                    .api_timestamps
+                    .get(&channel)
+                    .expect("each chunk needs a pacing deadline");
+                assert!(Instant::now() >= deadline, "POST began before its deadline");
+                let mut observed = observed.lock().unwrap();
+                observed.deadlines.push(deadline);
+                observed.keep_clock_still_during_io();
+            }
+            None
+        }),
+        Box::new(|_, _| None),
+    );
+    let initial_target = shared.api_timestamps.get(&channel).map(|entry| *entry);
+    tokio::time::pause();
+    let mut delivery = std::pin::pin!(delivery);
+    let paced_delivery = poll_fn(|cx| {
+        let outcome = delivery.as_mut().poll(cx);
+        if outcome.is_pending()
+            && let Some(target) = shared.api_timestamps.get(&channel).map(|entry| *entry)
+        {
+            let mut requests = requests.lock().unwrap();
+            let entered = requests.deadlines.last().copied().or(initial_target);
+            if entered != Some(target) {
+                // Let Tokio wake the actual pacing timer. The POST hook freezes I/O again.
+                drop(requests.io_complete.take());
+            }
+        }
+        outcome
+    });
+    let result = tokio::select! {
+        result = paced_delivery => result,
+        _ = &mut wall_limit => panic!("paced delivery exceeded the real-time test limit"),
+    };
+    tokio::time::resume();
+    drop(cancel_wall_limit);
+    assert_eq!(
+        wall_limit.await.unwrap(),
+        Err(RecvTimeoutError::Disconnected)
+    );
+    join_within(watchdog, WAIT_CAP);
+    let requests = requests.lock().unwrap();
+    assert_eq!(requests.deadlines.len(), chunks);
+    assert!(
+        requests
+            .deadlines
+            .windows(2)
+            .all(|pair| pair[1].duration_since(pair[0]) >= Duration::from_secs(1)),
+        "each chunk needs a full second of pacing"
+    );
+    result
+}
 
 #[tokio::test]
 async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
@@ -65,7 +162,8 @@ async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
     ));
     let bridge =
         crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway(
-            http, shared,
+            http,
+            shared.clone(),
         );
     let channel = ChannelId::new(7336950);
     for (kind, gateway) in [("discord", gateway), ("bridge", bridge)] {
@@ -88,7 +186,7 @@ async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
             };
             let started = tokio::time::Instant::now();
             let turn = TurnKey::new(channel, 90001, chunks as u64);
-            let outcome = deliver_turn_output(
+            let delivery = deliver_turn_output(
                 gateway.as_ref(),
                 TurnOutputCtx {
                     turn,
@@ -112,8 +210,12 @@ async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
                     heartbeat: None,
                     body_claim: None,
                 },
-            )
-            .await;
+            );
+            let outcome = if chunks == 70 {
+                drive_paced_delivery(delivery, &shared, channel, chunks).await
+            } else {
+                delivery.await
+            };
             eprintln!(
                 "paced case {kind} chunks={chunks} posts={} elapsed={:?} delivered={}",
                 posts.load(Ordering::SeqCst),
@@ -131,7 +233,7 @@ async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
             );
             if chunks == 70 {
                 assert!(
-                    started.elapsed() >= std::time::Duration::from_secs(69),
+                    started.elapsed() >= Duration::from_secs(69),
                     "production pacing must run"
                 );
             }

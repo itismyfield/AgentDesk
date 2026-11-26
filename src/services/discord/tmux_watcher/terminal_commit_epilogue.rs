@@ -259,8 +259,8 @@ pub(super) async fn run_terminal_commit_epilogue(
         // matching identity permits an atomic clear, but does not make this
         // older terminal its owner. Keep the same id-0-inclusive stale veto
         // already used for this row's history, anchor and FINISHED marker.
-        // A Herdr row's clear and mailbox release wait for its own proven end; both rows this pass
-        // may clear or finalize are judged.
+        // A Herdr row's clear, mailbox release and FINISHED mark wait for its own proven end; both
+        // rows this pass may clear or finalize are judged.
         use crate::services::discord::inflight::herdr_turn_held;
         let (session, logical): (&SharedData, &str) = (shared, tmux_session_name);
         let herdr_held = herdr_turn_held(session, provider_kind, inflight_state.as_ref(), logical)
@@ -421,6 +421,7 @@ pub(super) async fn run_terminal_commit_epilogue(
         // FINISHED stamp is the same kind of committed-output branch, so it takes
         // the same guard.
         if !late_held
+            && !herdr_held
             && readopted_finish_mark_allowed(
                 completion_is_stale_for_newer_turn,
                 anchor_cleanup_is_stale_for_newer_turn,

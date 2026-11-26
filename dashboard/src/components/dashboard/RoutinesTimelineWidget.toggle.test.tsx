@@ -156,4 +156,25 @@ describe("RoutinesTimelineWidget pause and resume", () => {
     expect(container.textContent).toContain("fresh");
     vi.useRealTimers();
   });
+
+  it("renders English ScheduledRuns labels without Korean leaks when language='en'", async () => {
+    const enT: TFunction = (translations) => translations.en;
+    api.getRoutines.mockResolvedValue([{ ...routine("rt-en", "enabled"), agent_id: "personal-obiseo" }]);
+    await act(async () => {
+      root.render(
+        <ToastProvider>
+          <RoutinesTimelineWidget t={enT} localeTag="en-US" language="en" />
+        </ToastProvider>,
+      );
+    });
+    await flush();
+
+    const board = container.querySelector<HTMLElement>("[data-testid='routines-scheduled-runs']")!;
+    expect(board.textContent).toContain("7-day routine board");
+    expect(board.textContent).toContain("Unscheduled");
+    expect(board.textContent).toContain("1 routines");
+    expect(board.querySelector("[role='grid']")?.getAttribute("aria-label")).toBe("Sessions by day");
+    expect(board.querySelector(".aui-scheduled-runs-agents")?.getAttribute("aria-label")).toBe("Highlight agent");
+    expect(board.textContent).not.toMatch(/[가-힣]/);
+  });
 });

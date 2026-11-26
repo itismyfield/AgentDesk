@@ -1,5 +1,6 @@
 import { BookOpen, ChevronRight, Search } from "lucide-react";
 import { useEffect, useId, useMemo, useState } from "react";
+import type { SkillTrendPoint } from "../api/analytics";
 import { getSkillCatalog, getSkillRanking, getSkillTrend } from "../api/client";
 import { localeName } from "../i18n";
 import { Button } from "../kit/free/button-clean";
@@ -17,8 +18,6 @@ import {
   SKILL_CATEGORIES,
   categorizeSkill,
   compareSkills,
-  fillSkillTrend,
-  formatDateShort,
   normalizeSkillText,
   plainSkillText,
   skillUsers,
@@ -28,11 +27,38 @@ import {
 } from "./SkillCatalogModel";
 
 const TREND_DAYS = 30;
+const DAY_MS = 86_400_000;
+const KST_OFFSET_MS = 9 * 3_600_000;
 const quiet = { suppressErrorToast: true };
 const readCatalog = () => getSkillCatalog();
 // The catalog holds a few dozen skills, so 50 rows cover every skill called in the window.
 const readRanking = () => getSkillRanking("30d", 50);
 const readTrend = () => getSkillTrend(TREND_DAYS, quiet);
+
+const toKstDateKey = (ms: number) => new Date(ms + KST_OFFSET_MS).toISOString().slice(0, 10);
+
+function fillSkillTrendKst(points: SkillTrendPoint[], days: number, now = Date.now()): SkillTrendPoint[] {
+  const counts = new Map<string, number>();
+  for (const point of points) {
+    const key = point.day.includes("T") ? toKstDateKey(Date.parse(point.day)) : point.day.slice(0, 10);
+    counts.set(key, (counts.get(key) ?? 0) + point.count);
+  }
+  return Array.from({ length: days }, (_, index) => {
+    const day = toKstDateKey(now - (days - 1 - index) * DAY_MS);
+    return { day, count: counts.get(day) ?? 0 };
+  });
+}
+
+function formatDateShortKst(ts: number | null, isKo: boolean, now = Date.now()): string {
+  if (!ts) return isKo ? "기록 없음" : "No record";
+  const hours = Math.floor((now - ts) / 3_600_000);
+  const days = Math.floor(hours / 24);
+  if (hours < 1) return isKo ? "방금" : "Just now";
+  if (hours < 24) return isKo ? `${hours}시간 전` : `${hours}h ago`;
+  if (days === 1) return isKo ? "어제" : "Yesterday";
+  if (days < 7) return isKo ? `${days}일 전` : `${days}d ago`;
+  return new Date(ts).toLocaleDateString(isKo ? "ko-KR" : "en-US", { month: "short", day: "numeric", timeZone: "Asia/Seoul" });
+}
 
 type Load<T> = { status: "loading" } | { status: "error" } | { status: "ready"; data: T };
 
@@ -81,7 +107,7 @@ export default function SkillCatalogView({ tr, locale, roster, onOpenAgent }: {
   const [picked, setPicked] = useState<string | null>(null);
   const label = (id: SkillCategoryId) => tr(SKILL_CATEGORIES[id].ko, SKILL_CATEGORIES[id].en);
 
-  const trend = useMemo(() => (trendLoad.status === "ready" ? fillSkillTrend(trendLoad.data, TREND_DAYS) : []), [trendLoad]);
+  const trend = useMemo(() => (trendLoad.status === "ready" ? fillSkillTrendKst(trendLoad.data, TREND_DAYS) : []), [trendLoad]);
   const trendTotal = trend.reduce((sum, point) => sum + point.count, 0);
   const ranking = rankingLoad.status === "ready" ? rankingLoad.data : null;
   const top = useMemo(() => topSkillItems(ranking?.overall ?? []), [ranking]);
@@ -157,7 +183,7 @@ export default function SkillCatalogView({ tr, locale, roster, onOpenAgent }: {
               <span className="font-display text-xs leading-4 text-(--fg) tabular-nums">
                 {skill.total_calls > 0 ? tr(`누적 ${skill.total_calls.toLocaleString()}회`, `${skill.total_calls.toLocaleString()} calls`) : tr("쓴 기록 없음", "Never used")}
               </span>
-              <Cap>{[label(kind), skill.total_calls > 0 ? formatDateShort(skill.last_used_at, isKo) : null].filter(Boolean).join(" · ")}</Cap>
+              <Cap>{[label(kind), skill.total_calls > 0 ? formatDateShortKst(skill.last_used_at, isKo) : null].filter(Boolean).join(" · ")}</Cap>
             </span>
           </li>
         );
@@ -166,7 +192,12 @@ export default function SkillCatalogView({ tr, locale, roster, onOpenAgent }: {
   );
 
   return (
-    <SectionCard title={tr("스킬", "Skills")} count={catalogLoad.status === "ready" ? catalog.length : null} testId="skills-catalog">
+    <SectionCard
+      title={tr("스킬", "Skills")}
+      count={catalogLoad.status === "ready" ? catalog.length : null}
+      aside={catalogLoad.status === "loading" ? <Cap>—</Cap> : undefined}
+      testId="skills-catalog"
+    >
       <div className="@container border-t border-(--line-soft) px-3 py-3 sm:px-4">
         <div className="grid min-w-0 grid-cols-1 gap-4 @min-[720px]:grid-cols-2 [&_.aui-compact-breakdown]:max-w-none! [&_.aui-kpi-chart]:max-w-none!">
           <div data-testid="skills-trend" className="min-w-0">
@@ -182,22 +213,22 @@ export default function SkillCatalogView({ tr, locale, roster, onOpenAgent }: {
                   ? tr("호출 기록을 불러오지 못했어요", "Could not load the calls")
                   : tr("이 기간에 호출이 없어요", "No calls in this range")}
               text={chartText(tr)}
-              footer={tr("날짜는 UTC 기준이에요. 턴 기록에서 찾은 호출도 세요.", "UTC dates. Calls found in turn records count too.")}
+              footer={tr("날짜는 KST 기준이에요. 턴 기록에서 찾은 호출도 세요.", "Dates in KST (UTC+9). Calls found in turn records count too.")}
             />
           </div>
           <div data-testid="skills-top" className="flex min-w-0 flex-col gap-2">
             <CompactBreakdown
               items={top.items}
               title={tr(`많이 쓴 스킬 · ${TREND_DAYS}일`, `Most used · ${TREND_DAYS} days`)}
-              totalLabel={tr(`상위 ${top.items.length}개`, `Top ${top.items.length}`)}
-              format={(value) => value.toLocaleString()}
+              totalLabel={rankingLoad.status === "ready" ? tr(`상위 ${top.items.length}개`, `Top ${top.items.length}`) : "—"}
+              format={(value) => (rankingLoad.status === "ready" ? value.toLocaleString() : "—")}
               onSelect={(id) => setPicked((current) => (current === id ? null : id))}
               selectedId={picked}
               hideFooter
               labels={{
                 list: tr("스킬별 호출과 비중", "Calls and share by skill"),
                 row: (name, value, share) => tr(`${name}, ${value}회, 상위 스킬 호출의 ${share}`, `${name}, ${value} calls, ${share} of the top skills`),
-                summary: (total, amount) => `${total}: ${amount}`,
+                summary: (total, amount) => (rankingLoad.status === "ready" ? `${total}: ${amount}` : "—"),
                 empty: rankingLoad.status === "loading"
                   ? tr("순위를 불러오는 중이에요.", "Loading the ranking.")
                   : rankingLoad.status === "error"
@@ -239,7 +270,12 @@ export default function SkillCatalogView({ tr, locale, roster, onOpenAgent }: {
               aria-label={tr("스킬 분류", "Skill categories")}
               value={category}
               onChange={setCategory}
-              options={categoryKeys.map((id) => ({ value: id, label: label(id), count: counts[id] ?? 0, controls: panelId }))}
+              options={categoryKeys.map((id) => ({
+                value: id,
+                label: label(id),
+                count: catalogLoad.status === "ready" ? (counts[id] ?? 0) : "—",
+                controls: panelId,
+              }))}
             />
           </div>
         </div>

@@ -45,25 +45,19 @@ fn persist(owner: &HostedOwner, turn_nonce: &str, start: &HerdrTurnStart) {
     let Some(mut row) = load_inflight_state_unlocked(&path) else {
         return;
     };
-    let pins_cold_file = |saved: &PersistedHerdrTurnStart| {
-        let unpinned = HerdrTurnStart {
-            file: None,
-            ..start.clone()
-        };
-        saved.turn_nonce == turn_nonce && start.file.is_some() && saved.start == unpinned
+    let recorded = PersistedHerdrTurnStart {
+        turn_nonce: turn_nonce.to_owned(),
+        start: start.clone(),
     };
     if row.turn_nonce.as_deref() != Some(turn_nonce)
         || row
             .herdr_turn_start
             .as_ref()
-            .is_some_and(|saved| !pins_cold_file(saved))
+            .is_some_and(|saved| !pins_cold_file(saved, &recorded))
     {
         return;
     }
-    row.herdr_turn_start = Some(PersistedHerdrTurnStart {
-        turn_nonce: turn_nonce.to_owned(),
-        start: start.clone(),
-    });
+    row.herdr_turn_start = Some(recorded);
     if !matches!(
         store::persist_under_lock_with_snapshot(&root, &path, &row, "herdr_turn_start"),
         Ok(Some(_))
@@ -75,7 +69,19 @@ fn persist(owner: &HostedOwner, turn_nonce: &str, start: &HerdrTurnStart) {
     }
 }
 
-/// A stale snapshot of the same turn keeps the saved start; a successor turn never inherits it.
+/// Whether `recorded` only pins `saved`, the same turn's unpinned start, to the file its reader opened.
+fn pins_cold_file(saved: &PersistedHerdrTurnStart, recorded: &PersistedHerdrTurnStart) -> bool {
+    let unpinned = HerdrTurnStart {
+        file: None,
+        ..recorded.start.clone()
+    };
+    saved.turn_nonce == recorded.turn_nonce
+        && recorded.start.file.is_some()
+        && saved.start == unpinned
+}
+
+/// A save of the same turn keeps the saved start and may only pin its file; a successor turn never
+/// inherits it.
 pub(super) fn carry_forward(
     existing: Option<&InflightTurnState>,
     outgoing: &mut InflightTurnState,
@@ -88,7 +94,10 @@ pub(super) fn carry_forward(
         .take()
         .filter(|s| own(outgoing, s));
     let carried = existing.and_then(|row| row.herdr_turn_start.clone().filter(|s| own(row, s)));
-    outgoing.herdr_turn_start = kept.or(carried.filter(|s| own(outgoing, s)));
+    outgoing.herdr_turn_start = match (kept, carried.filter(|s| own(outgoing, s))) {
+        (Some(kept), Some(saved)) if !pins_cold_file(&saved, &kept) => Some(saved),
+        (kept, carried) => kept.or(carried),
+    };
 }
 
 /// The fresh-idle signal for `row`: a Herdr turn ends on its own terminal only and is held otherwise.

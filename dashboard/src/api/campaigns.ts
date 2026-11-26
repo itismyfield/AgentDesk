@@ -33,9 +33,11 @@ export const campaignNodeSchema = z.looseObject({
   status: campaignNodeStatusSchema,
   stage: z
     .string()
-    .min(1)
     .max(128)
-    .refine((value) => value.trim().length > 0),
+    .refine((value) => value === "" || value.trim().length > 0)
+    .nullable()
+    .default("")
+    .transform((value) => value ?? ""),
   group: nullableText,
   round: roundSchema,
   assignee: nullableText,
@@ -115,6 +117,10 @@ const campaignSaveResponseSchema = z.looseObject({
   handoff: campaignHandoffSchema.optional(),
   handoff_error: z.string().optional(),
 });
+const campaignDeleteResponseSchema = z.looseObject({
+  deleted: z.string(),
+  deleted_revisions: z.number().int().nonnegative(),
+});
 
 export type CampaignStatus = z.infer<typeof campaignStatusSchema>;
 export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
@@ -123,7 +129,15 @@ export type Campaign = z.infer<typeof campaignSchema>;
 export type CampaignNodeLive = z.infer<typeof campaignNodeLiveSchema>;
 
 export interface HomeCampaignNodeSummary {
+  id: string;
+  title: string;
   status: CampaignNodeStatus;
+  stage: string;
+  next_action: string | null;
+  blocker: string | null;
+  assignee: string | null;
+  issue_url: string | null;
+  updated_at: string;
 }
 
 export interface HomeLegacyCampaignSummary {
@@ -135,18 +149,38 @@ export interface HomeLegacyCampaignSummary {
   updated_at: string;
 }
 
-const homeCampaignSummarySchema = z.object({
+const homeCampaignNodeSummarySchema = z.looseObject({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  status: campaignNodeStatusSchema,
+  stage: z.string().nullable().default("").transform((v) => v ?? ""),
+  next_action: nullableText,
+  blocker: nullableText,
+  assignee: nullableText,
+  issue_url: nullableText,
+  updated_at: z.string(),
+});
+
+const homeCampaignSummarySchema = z.looseObject({
   id: z.string().min(1),
   title: z.string().min(1),
   status: campaignStatusSchema,
   auto_queue: z.boolean().default(false),
-  nodes: z.array(z.object({ status: campaignNodeStatusSchema })).default([]),
+  nodes: z.array(homeCampaignNodeSummarySchema).default([]),
   updated_at: z.string(),
 });
 
-const homeCampaignListResponseSchema = z.object({
+const homeCampaignListResponseSchema = z.looseObject({
   campaigns: z.array(homeCampaignSummarySchema),
 });
+const parsedListPages = new WeakSet<object>();
+const campaignListParser = {
+  parse(value: unknown) {
+    const parsed = campaignListResponseSchema.parse(value);
+    parsedListPages.add(parsed);
+    return parsed;
+  },
+};
 export type CampaignHandoff = z.infer<typeof campaignHandoffSchema>;
 /** Campaign id, then node id. */
 export type CampaignLive = Record<string, Record<string, CampaignNodeLive>>;
@@ -191,7 +225,9 @@ export async function getCampaigns(options?: { view?: "summary" | "home" }): Pro
   const live: CampaignLive = {};
   const limit = 100;
   for (let offset = 0; ; offset += limit) {
-    const result = await request(`/api/campaigns?limit=${limit}&offset=${offset}&view=summary`, { suppressErrorToast: true, shareInflight: false }, campaignListResponseSchema);
+    const raw = await request(`/api/campaigns?limit=${limit}&offset=${offset}&view=summary`, { suppressErrorToast: true, shareInflight: false }, campaignListParser);
+    // Re-parse when a 304 ETag hit returned a payload cached by the lightweight home parser.
+    const result = parsedListPages.has(raw) ? raw : campaignListParser.parse(raw);
     for (const campaign of result.campaigns) campaigns.set(campaign.id, campaign);
     Object.assign(live, result.live);
     if (result.campaigns.length < limit) return { campaigns: Array.from(campaigns.values()), live, read };
@@ -277,4 +313,13 @@ export async function addCampaignNode(campaign: Campaign, added: CampaignNode): 
 export async function setCampaignAutoQueue(campaign: Campaign, enabled: boolean) {
   const result = await saveCampaign(campaign, { auto_queue: enabled }, 60_000);
   return { campaign: result.campaign, handoff: result.handoff ?? null, handoffError: result.handoff_error ?? null };
+}
+
+/** Deletes a non-active ledger campaign (`active` returns 409; linked Kanban cards stay untouched). */
+export async function deleteCampaign(id: string): Promise<{ deleted: string; deleted_revisions: number }> {
+  return request(
+    `/api/campaigns/${encodeURIComponent(id)}`,
+    { method: "DELETE", suppressErrorToast: true },
+    campaignDeleteResponseSchema,
+  );
 }

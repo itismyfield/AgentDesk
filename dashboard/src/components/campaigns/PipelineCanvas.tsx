@@ -1,8 +1,9 @@
 import { Bot, Box, CircleX, Flag, Hand, Hourglass, Lock, Maximize, MessageCircleQuestion, MousePointer2, Play, RotateCw, ShieldCheck, SquarePlus, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
-import { Background, BaseEdge, EdgeLabelRenderer, Handle, MiniMap, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type OnConnectEnd, type ReactFlowInstance } from "@xyflow/react";
+import { Background, BaseEdge, EdgeLabelRenderer, Handle, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type OnConnectEnd, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { IconButton } from "../../kit/free/icon-button-clean";
+import { GraphMiniMap } from "../common/graph/GraphChrome";
 import type { Tr } from "./campaignPresentation";
 import { NEW_PIN } from "./pipelineEdit";
 import { PIPE_WIDTH, cardHeight, type Line, type Pin, type PipelineGraph } from "./pipelineModel";
@@ -100,16 +101,20 @@ const swatch = (color: string, dashed = false) => <i aria-hidden className={`w-5
 
 /** The pipeline canvas: cards in tab order along the drawn flow, coloured lines, the key, zoom tools and a minimap. While
  * editing it fills the window over the checks, and a pin dragged to a state points there, or let go elsewhere asks where. */
-export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, reveal = null, edit, checks, inspector, children, tr }: {
+export default function PipelineCanvas({ label, graph, nodeData, eventData, chosen, onChoose, reveal = null, height, defaultMinimapOpen = true, edit, checks, inspector, children, tr }: {
   label: string; graph: PipelineGraph; nodeData: Map<string, StateNodeData & { aria: string }>; eventData: Map<string, { title: string; target: string }>;
   chosen: string | null; onChoose: (id: string | null) => void; inspector: ReactNode; children: ReactNode; tr: Tr;
   /** A state to bring into view (a check pointed at it). */
   reveal?: { id: string; n: number } | null;
+  height?: string;
+  defaultMinimapOpen?: boolean;
   /** `busy` (a save is out) holds the pins and the tools that change the draft. */
   edit?: { busy: boolean; onLink: (from: string, pin: string, to: string) => void; onDrop: (from: string, pin: string, at: PinDrop) => void; onAdd: (button: HTMLElement) => void };
   checks?: ReactNode;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
+  const [minimapOpen, setMinimapOpen] = useState(defaultMinimapOpen);
+  const [flowReady, setFlowReady] = useState(false);
   // While editing, select connects pins and picks cards; move only pans, cards included.
   const [tool, setTool] = useState<"select" | "move">("select");
   useEffect(() => { if (reveal) void flow.current?.fitView({ nodes: [{ id: reveal.id }], minZoom: 0.8, maxZoom: 1, duration: 200 }); }, [reveal]);
@@ -157,13 +162,13 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
     prevView.current = { full, shapeKey };
     if (flow.current && (fullChanged || (!full && shapeChanged))) open(flow.current);
   }, [full, shapeKey]); // eslint-disable-line react-hooks/exhaustive-deps
-  return <section aria-label={label} style={{ "--pipeline-height": CANVAS_HEIGHT } as CSSProperties}
+  return <section aria-label={label} style={{ "--pipeline-height": height ?? CANVAS_HEIGHT } as CSSProperties}
     className={full ? "grid min-h-0 flex-1 grid-cols-[minmax(0,1fr)_18rem] grid-rows-[minmax(0,1fr)] min-[1280px]:grid-cols-[minmax(0,1fr)_21rem]"
       : "grid min-w-0 min-[1280px]:h-[var(--pipeline-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]"}>
     <div className="flex min-h-0 min-w-0 flex-col">
       <div ref={canvas} data-pipeline-canvas data-full={full || undefined} className="relative h-[var(--pipeline-height)] min-w-0 bg-[var(--bg)] data-full:h-auto data-full:min-h-0 data-full:flex-1 [&_.react-flow\_\_node:focus-visible>div]:outline-2 [&_.react-flow\_\_node:focus-visible>div]:outline-offset-2 [&_.react-flow\_\_node:focus-visible>div]:outline-[var(--accent)]">
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
-          onInit={(instance) => { flow.current = instance; open(instance); }}
+          onInit={(instance) => { flow.current = instance; setFlowReady(true); open(instance); }}
           minZoom={0.1} maxZoom={1.5} nodesDraggable={false} edgesFocusable={false} panOnScroll zoomOnScroll={false} zoomOnDoubleClick={false}
           nodesConnectable={full && !moving && !edit.busy} elementsSelectable={!moving} connectOnClick={false} onConnectEnd={dropped} connectionLineStyle={{ stroke: "var(--accent)", strokeWidth: 2, strokeDasharray: "6 5" }}
           deleteKeyCode={null} selectionKeyCode={null} multiSelectionKeyCode={null}
@@ -176,17 +181,18 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
           }}
           onPaneClick={() => Date.now() - ended.current > 300 && onChoose(null)}>
           <Background gap={20} size={1.6} color="var(--line)" />
-          <MiniMap pannable zoomable ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")} bgColor="var(--th-card-bg)" maskColor="color-mix(in srgb, var(--bg) 55%, transparent)"
-            nodeColor={(node) => node.id === chosen ? "var(--accent)" : "var(--fg-faint)"} nodeBorderRadius={6} style={{ marginBottom: 76, width: 168, height: 104, border: "1px solid var(--line-soft)", borderRadius: 12 }} />
+          <GraphMiniMap open={minimapOpen} ready={flowReady} ariaLabel={tr("파이프라인 미니맵", "Pipeline minimap")} chosenId={chosen}
+            nodeColor={(node) => node.id === chosen ? "var(--accent)" : "var(--fg-faint)"} />
         </ReactFlow>
-        <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)]`}>
+        <div className={`${FLOAT} bottom-4 left-4 flex max-w-[calc(100%-12rem)] flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] max-sm:top-3 max-sm:bottom-auto max-sm:left-3 max-sm:max-w-[calc(100%-1.5rem)] max-sm:px-2.5 max-sm:py-1.5`}>
           <span className="flex items-center gap-1.5">{swatch("var(--ok)")}{tr("통과", "Pass")}</span>
           <span className="flex items-center gap-1.5">{swatch("var(--err)")}{tr("실패", "Fail")}</span>
           <span className="flex items-center gap-1.5"><RotateCw aria-hidden className="size-3 text-[var(--warn)]" />{tr("재시도", "Retry")}</span>
           <span className="flex items-center gap-1.5"><Lock aria-hidden className="size-3 text-[var(--warn)]" />{tr("승인", "Approval")}</span>
           {graph.events.length > 0 && <span className="flex items-center gap-1.5">{swatch("var(--warn)", true)}{tr("이벤트", "Event")}</span>}
         </div>
-        <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")} tr={tr} />
+        <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")}
+          className="max-sm:right-3 max-sm:bottom-3" minimap={{ open: minimapOpen, onToggle: () => setMinimapOpen((v) => !v) }} tr={tr} />
         {edit && <div role="toolbar" aria-orientation="vertical" aria-label={tr("캔버스 도구", "Canvas tools")} className={`${FLOAT} top-1/2 left-4 flex -translate-y-1/2 flex-col gap-0.5 p-1`}>
           <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택 · 핀을 끌어 이어요", "Select · drag a pin to connect")} pressed={tool === "select"} onClick={() => setTool("select")} />
           <IconButton icon={<Hand aria-hidden />} className={TOOL} label={tr("이동", "Move")} pressed={tool === "move"} onClick={() => setTool("move")} />

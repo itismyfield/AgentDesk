@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 
 use super::{AppError, StatusCode, app_error};
+use crate::services::discord::outbound::image_format;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,44 +71,23 @@ pub(super) fn decode(
         ));
     }
     let content_type = upload.content_type.to_ascii_lowercase();
-    let extension = upload
-        .filename
-        .rsplit_once('.')
-        .filter(|(stem, _)| !stem.is_empty())
-        .map(|(_, extension)| extension)
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if !matches!(
-        (extension.as_str(), content_type.as_str()),
-        ("png", "image/png")
-            | ("jpg" | "jpeg", "image/jpeg")
-            | ("gif", "image/gif")
-            | ("webp", "image/webp")
-    ) {
+    if !image_format::extension_matches(upload.filename, &content_type) {
         return Err(invalid(
             "imageAttachment filename extension and MIME must match PNG, JPEG, GIF or WebP",
         ));
     }
-    let max = crate::db::scheduled_messages::MAX_IMAGE_BYTES;
-    if upload.data_base64.len() > max.div_ceil(3) * 4 {
+    if !image_format::encoded_fits(upload.data_base64.len()) {
         return Err(invalid("imageAttachment exceeds 8 MiB"));
     }
     let data = STANDARD
         .decode(upload.data_base64)
         .map_err(|_| invalid("imageAttachment.dataBase64 must be canonical standard base64"))?;
-    if !(1..=max).contains(&data.len()) {
-        return Err(invalid("imageAttachment must contain 1 byte to 8 MiB"));
-    }
-    let matches_magic = match content_type.as_str() {
-        "image/png" => data.starts_with(b"\x89PNG\r\n\x1a\n"),
-        "image/jpeg" => data.starts_with(&[0xff, 0xd8, 0xff]),
-        "image/gif" => data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"),
-        "image/webp" => data.starts_with(b"RIFF") && data.get(8..12) == Some(&b"WEBP"[..]),
-        _ => false,
-    };
-    if !matches_magic {
-        return Err(invalid("imageAttachment magic must match MIME"));
-    }
+    image_format::check_bytes(&content_type, &data).map_err(|rejected| {
+        invalid(match rejected {
+            image_format::Rejected::Size => "imageAttachment must contain 1 byte to 8 MiB",
+            image_format::Rejected::Magic => "imageAttachment magic must match MIME",
+        })
+    })?;
     Ok(Some(
         crate::db::scheduled_messages::ScheduledMessageImageAttachment {
             filename: upload.filename.to_owned(),

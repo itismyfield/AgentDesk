@@ -4,7 +4,6 @@ import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { getAgentAnchors, type AgentAnchor, type AgentAnchors, type AuditProvider } from "../../api/promptAudit";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
-import { CodeBlock } from "../../kit/free/code-block-clean";
 import type { Agent } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { formatTranscriptTimestamp } from "../agent-manager/turn-transcript-utils";
@@ -24,6 +23,9 @@ import {
 import { AuditRequestState } from "./AuditWorkspace";
 
 type Tr = (ko: string, en: string) => string;
+
+const formatAnchorScope = (scope: string | null | undefined, tr: Tr) =>
+  scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : scope;
 
 const PHONE_ANCHOR_LIMIT = 5;
 const AVATAR_STACK_LIMIT = 7;
@@ -124,6 +126,8 @@ function AnchorDetailSections({
   const marks = anchorFlags(anchor, tr);
   const reader = (id: string) => agents.find((item) => item.id === id) ?? { id, name: id };
   const extraReaders = Math.max(0, anchor.receiving_agents.length - AVATAR_STACK_LIMIT);
+  const trimmedText = anchor.text.trim();
+  const heading = anchorTitle(anchor.text);
 
   return (
     <>
@@ -131,18 +135,19 @@ function AnchorDetailSections({
         {(anchor.type || anchor.scope || marks.length > 0) ? (
           <div className="flex flex-wrap gap-1.5">
             {anchor.type ? <Chip tone="neutral">{anchor.type}</Chip> : null}
-            {anchor.scope ? <Chip tone="accent">{anchor.scope}</Chip> : null}
+            {anchor.scope ? <Chip tone="accent">{formatAnchorScope(anchor.scope, tr)}</Chip> : null}
             {!phone ? marks : null}
           </div>
         ) : null}
-        {!phone ? <h3 className="m-0 text-base leading-6 font-semibold text-[var(--fg)]">{anchorTitle(anchor.text)}</h3> : null}
-        <CodeBlock
-          code={anchor.text}
-          filename={anchor.scope || anchor.type || tr(`앵커 ${index + 1}`, `Anchor ${index + 1}`)}
-          showLineNumbers
-          wrap
-          maxHeight={280}
-        />
+        {!phone && trimmedText !== heading ? (
+          <h3 className="m-0 text-base leading-6 font-semibold text-[var(--fg)]">{heading}</h3>
+        ) : null}
+        <Well
+          data-testid="audit-anchor-text"
+          className="max-h-80 overflow-y-auto px-3.5 py-3 pr-4 text-[13px] leading-relaxed whitespace-pre-wrap text-[var(--fg)] [overflow-wrap:anywhere]"
+        >
+          {trimmedText}
+        </Well>
         <div className="flex items-center gap-2">
           {anchor.limit != null ? (
             <MeterBar
@@ -208,7 +213,7 @@ function AnchorDetailSections({
       </InspSection>
 
       <InspSection>
-        <KeyValue label={tr("범위", "Scope")}>{anchor.scope ?? tr("범위 없음", "No scope")}</KeyValue>
+        <KeyValue label={tr("범위", "Scope")}>{formatAnchorScope(anchor.scope, tr) ?? tr("범위 없음", "No scope")}</KeyValue>
         {anchor.id ? <KeyValue label="ID" valueClassName="font-mono">{anchor.id}</KeyValue> : null}
         {startedAt ? <KeyValue label={tr("세션 시작", "Session start")}>{formatTranscriptTimestamp(startedAt, isKo)}</KeyValue> : null}
         <div className="mt-1 flex flex-wrap gap-2">
@@ -227,7 +232,7 @@ function AnchorDetailSections({
 }
 
 /** One agent's Memento anchors: `Well` summary strip, filter chips, grouped `KitCard` rows and selected anchor inspector. */
-export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { agents: Agent[] }) {
+export function AnchorAuditDetail({ agents, onOpenPrompts, ...detail }: AuditDetailProps & { agents: Agent[]; onOpenPrompts?: () => void }) {
   const { agent, provider, phone, isKo, tr } = detail;
   const query = useQuery(anchorsQuery(agent.id, provider));
   const state = auditState(query.error, query.data?.source);
@@ -296,6 +301,11 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
         )}
         fetching={query.isFetching}
         onRefresh={retry}
+        actions={phone && onOpenPrompts ? (
+          <Button variant="secondary" size="sm" onClick={onOpenPrompts} data-testid="audit-open-prompts">
+            {tr("프롬프트 감사", "System prompts")}
+          </Button>
+        ) : undefined}
         stats={phone && state === "ready" ? [
           { value: anchors.length, label: tr("앵커", "anchors") },
           { value: totalChars, label: tr("자", "chars") },
@@ -346,10 +356,11 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
               <KitCard>
                 {anchorGroups(visible).map((group) => {
                   const isGlobalScope = group.scope === "모든 에이전트";
+                  const scopeLabel = formatAnchorScope(group.scope, tr);
                   return (
                     <section
                       key={group.scope ?? ""}
-                      aria-label={group.scope ?? tr("앵커", "Anchors")}
+                      aria-label={scopeLabel ?? tr("앵커", "Anchors")}
                       className="border-t border-[var(--line-soft)] first:border-t-0"
                       data-testid="audit-anchor-group"
                     >
@@ -360,7 +371,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
                               ? <Globe size={15} aria-hidden className="shrink-0 text-[var(--accent-fg)]" />
                               : <Folder size={15} aria-hidden className="shrink-0 text-[var(--accent-fg)]" />
                           ) : null}
-                          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{group.scope ?? tr("범위 없음", "No scope")}</span>
+                          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">{scopeLabel ?? tr("범위 없음", "No scope")}</span>
                           <Cap className="font-display tabular-nums font-normal">{group.rows.length}</Cap>
                         </h3>
                       ) : null}
@@ -396,7 +407,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
                                   {marks.length > 0 ? (
                                     <span className="mt-1 flex flex-wrap gap-1">{marks}</span>
                                   ) : !grouped && anchor.scope ? (
-                                    <Cap className="mt-0.5 block truncate">{anchor.scope}</Cap>
+                                    <Cap className="mt-0.5 block truncate">{formatAnchorScope(anchor.scope, tr)}</Cap>
                                   ) : null}
                                 </span>
                               ) : (

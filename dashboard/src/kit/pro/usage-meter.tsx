@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react';
 import { ArrowLeft, ArrowRight, CalendarDays } from 'lucide-react';
 
@@ -777,7 +777,7 @@ const usageMeterStyles = `
     .aui-usage-meter-selected-line { display: flex; }
   }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-usage-meter-period { min-width: 44px; height: 44px; }
   .aui-usage-meter-category { min-height: 44px; height: 44px; }
   .aui-usage-meter-bar-area { display: flex; align-items: center; min-height: 44px; margin-top: 4px; padding: 10px 0; }

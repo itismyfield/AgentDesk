@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { request } from "../../api/httpClient";
 import { getServerCampaignSummaries } from "../../api/serverCampaigns";
 import { todoStatus, type HomeTurn } from "./homeModel";
-import { AgentTurnsProvider, campaignTodoSource, cleanupStaleIdleSession, loadHomeCampaigns, useAgentTurns, usePolled, type Loaded } from "./useHomeData";
+import { AgentTurnsProvider, campaignTodoSource, cleanupStaleIdleSession, loadHomeCampaigns, loadHomeMemento, useAgentTurns, usePolled, type Loaded } from "./useHomeData";
 
 vi.mock("../../api/httpClient", () => ({ ApiRequestError: class extends Error {}, request: vi.fn(async () => ({ status: "working" })) }));
 vi.mock("../../api/campaigns", () => ({ getCampaigns: vi.fn(async () => ({ campaigns: [] })) }));
@@ -139,5 +139,15 @@ describe("home data", () => {
     vi.mocked(request).mockClear();
     vi.mocked(request).mockResolvedValueOnce({ ok: true, tmux_killed: false, session_row_disconnected: false, preserved_reason: "host_not_legacy_tmux" });
     expect(await cleanupStaleIdleSession(key)).toEqual({ disconnected: false, reason: "host_not_legacy_tmux" });
+  });
+
+  it("probes live Memento connection status from the first bound non-test agent's anchors endpoint", async () => {
+    vi.mocked(request).mockClear().mockResolvedValueOnce({ memento: { status: "connected" } });
+    const status = await loadHomeMemento([
+      { id: "relay-e2e", discord_channel_cc: "9" } as never,
+      { id: "adk-dashboard", discord_channel_cc: "1" } as never,
+    ]);
+    expect(status).toEqual({ connected: true, status: "connected" });
+    expect(vi.mocked(request).mock.calls[0][0]).toBe("/api/agents/adk-dashboard/anchors?provider=claude");
   });
 });

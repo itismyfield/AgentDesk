@@ -18,6 +18,13 @@ vi.mock("../../api/serverCampaigns", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../api/serverCampaigns")>()),
   getServerCampaignSummaries: vi.fn().mockResolvedValue([]),
 }));
+vi.mock("../../api/serverCampaignPipeline", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../api/serverCampaignPipeline")>()),
+  getDefaultPipelineTemplate: vi.fn().mockResolvedValue({
+    template: { id: "campaign-development-9", version: 1 },
+    pipeline: { start: "plan", states: [{ id: "plan", kind: "agent_task", title: "Plan" }], transitions: [], events: [] },
+  }),
+}));
 vi.mock("@xyflow/react", () => ({
   ReactFlow: ({ nodes, onNodesChange }: { nodes: Array<{ id: string; domAttributes?: object }>; onNodesChange?: (changes: unknown[]) => void }) => (
     <div data-graph-nodes={nodes.length}>
@@ -544,4 +551,199 @@ it("opens a task in a pane docked beside the overview and gives focus back to it
   expect(pane()).toBeNull();
   expect(opener.getAttribute("aria-current")).toBeNull();
   expect(document.activeElement).toBe(opener);
+});
+
+it("filters campaigns by title or ID from the list search box", async () => {
+  const alpha = { ...campaign, id: "alpha-dag", title: "Alpha release" };
+  const beta = { ...campaign, id: "beta-ops", title: "Beta rollout" };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [alpha, beta], live: {}, read: 1 });
+  await render();
+  const search = container.querySelector<HTMLInputElement>('input[aria-label="Search campaigns"]')!;
+  await typeValue(search, "beta-ops");
+  expect([...container.querySelectorAll("[data-campaign-key]")].map((el) => el.getAttribute("data-campaign-key"))).toEqual(["legacy:beta-ops"]);
+  await typeValue(search, "nonexistent");
+  expect(page()).toContain("No matching campaigns.");
+});
+
+it("syncs the active campaign detail sub-tab with view= in the URL while omitting the default overview tab", async () => {
+  window.history.replaceState(null, "", "/campaigns?mode=legacy&campaign=ongoing&view=relations");
+  await render();
+  expect(container.querySelector(".campaign-relations")).not.toBeNull();
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing&view=relations");
+
+  await act(async () => button("Stage board").click());
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing&view=board");
+
+  await act(async () => button("Overview").click());
+  expect(window.location.search).toBe("?mode=legacy&campaign=ongoing");
+});
+
+it("switches Connections to HandoffSwimlanes and opens a selected task from a lane", async () => {
+  const multi = {
+    ...campaign,
+    nodes: [
+      makeCampaignNode("g1", { title: "Gateway spec", group: "Gateway", status: "completed" }),
+      makeCampaignNode("r1", { title: "Relay handoff", group: "Relay", status: "blocked", dependencies: ["g1"], blocker: "Waiting on schema" }),
+    ],
+  };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [multi], live: {}, read: 1 });
+  await render();
+  await act(async () => button("Connections").click());
+  await act(async () => button("Swimlanes").click());
+  const swimlanes = container.querySelector(".aui-handoff-swimlanes");
+  expect(swimlanes).not.toBeNull();
+  expect(swimlanes?.textContent).toContain("Gateway");
+  expect(swimlanes?.textContent).toContain("Relay handoff");
+  await act(async () => swimlanes!.querySelector<HTMLButtonElement>('[data-item="r1"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay handoff");
+});
+
+it("renders AgentStateMachine and AgentMetroMap for ledger campaigns with running tasks in the Pipeline tab", async () => {
+  await render();
+  expect(container.querySelector('[aria-label="Summary"]')?.textContent).toContain("Running with PR");
+  expect(container.querySelector('[aria-label="Summary"]')?.textContent).not.toContain("Done");
+  await act(async () => button("Pipeline").click());
+  expect(container.querySelector(".aui-agent-state-machine")).not.toBeNull();
+  expect(container.querySelector(".aui-agent-metro-map")).not.toBeNull();
+  expect(page()).toContain("Preview built-in 9-stage template");
+});
+
+it("defaults large campaign swimlanes (>24 tasks) to active-only, hides finished lanes, and toggles to all tasks", async () => {
+  const nodes = [
+    ...Array.from({ length: 24 }, (_, i) => makeCampaignNode(`done-${i}`, { title: `Done ${i}`, group: "FinishedGroup", status: "completed" })),
+    makeCampaignNode("run-1", { title: "Active relay", group: "ActiveGroup", status: "running", dependencies: ["done-0"] }),
+  ];
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [{ ...campaign, nodes }], live: {}, read: 1 });
+  await render();
+  await act(async () => button("Connections").click());
+  await act(async () => button("Swimlanes").click());
+  expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')?.textContent).toContain("Hiding 1 completed/skipped groups and 24 tasks.");
+  const swimlanes = container.querySelector(".aui-handoff-swimlanes")!;
+  expect(swimlanes.textContent).toContain("ActiveGroup");
+  expect(swimlanes.textContent).not.toContain("FinishedGroup");
+  await act(async () => button("All (25)").click());
+  expect(container.querySelector('[data-testid="swimlanes-filter-caption"]')).toBeNull();
+  expect(container.querySelector(".aui-handoff-swimlanes")?.textContent).toContain("FinishedGroup");
+});
+
+it("falls back to a right-side slide-over Drawer when docking would leave < 520px main width and docks inline when wide", async () => {
+  const originalInnerWidth = window.innerWidth;
+  let detailRect: DOMRect = {
+    x: 560,
+    y: 80,
+    top: 80,
+    left: 560,
+    right: 1248,
+    bottom: 900,
+    width: 688,
+    height: 820,
+    toJSON: () => ({}),
+  };
+  Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1280 });
+  const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    if (this.classList?.contains("campaign-detail")) return detailRect;
+    return { x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) } as DOMRect;
+  });
+
+  try {
+    const withDone = {
+      ...campaign,
+      nodes: [
+        campaign.nodes[0],
+        makeCampaignNode("done-1", { title: "Completed item", status: "completed", stage: "done" }),
+      ],
+    };
+    vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [withDone], live: {}, read: 1 });
+    await render();
+    await selectTask("review");
+
+    // At 1280px with left=560: dock width=384, remaining main width = (1280 - 384 - 16) - 560 = 320 < 520 -> slide-over Drawer
+    expect(document.querySelector('aside[aria-label="Selected task"]')).toBeNull();
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).toBe("");
+    const slideOver = document.querySelector<HTMLElement>('[role="dialog"][aria-label="Selected task"]');
+    expect(slideOver).not.toBeNull();
+    expect(slideOver?.hasAttribute("data-docked")).toBe(false);
+    expect(slideOver?.className).toContain("fixed");
+    expect(slideOver?.className).toContain("right-0");
+    expect(slideOver?.querySelector(".campaign-node-detail h3")?.textContent).toBe("Review current head");
+
+    // Widen to 1728px with left=560: dock width=480, remaining main width = (1728 - 480 - 16) - 560 = 672 >= 520 -> docked <aside>
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: 1728 });
+    detailRect = {
+      x: 560,
+      y: 80,
+      top: 80,
+      left: 560,
+      right: 1696,
+      bottom: 900,
+      width: 1136,
+      height: 820,
+      toJSON: () => ({}),
+    };
+    await act(async () => {
+      window.dispatchEvent(new Event("resize"));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(undefined)));
+    });
+
+    const dockedAside = document.querySelector<HTMLElement>('aside[aria-label="Selected task"]');
+    expect(dockedAside).not.toBeNull();
+    expect(dockedAside?.style.width).toBe("480px");
+    expect(dockedAside?.querySelector("[data-docked] .campaign-node-detail h3")?.textContent).toBe("Review current head");
+    expect(container.querySelector<HTMLElement>(".campaign-detail")?.style.paddingRight).not.toBe("");
+
+    // Also verify toolbar size="sm" alignment in Connections and folded done column polish in Stage board
+    await act(async () => button("Connections").click());
+    expect(container.querySelector('.campaign-node-picker [data-size="sm"]')).not.toBeNull();
+    expect(container.querySelector('.campaign-relations header button[data-size="sm"][data-variant="secondary"]')).not.toBeNull();
+
+    await act(async () => button("Stage board").click());
+    const foldedCol = container.querySelector<HTMLElement>("[data-folded-column]");
+    expect(foldedCol?.className).toContain("max-w-[10.5rem]");
+    const showLatestBtn = foldedCol?.querySelector<HTMLButtonElement>("button");
+    expect(showLatestBtn?.className).toContain("whitespace-nowrap");
+  } finally {
+    rectSpy.mockRestore();
+    Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: originalInnerWidth });
+  }
+});
+
+it("filters tasks by group from the Overview progress track and opens Wave GanttTimeline in Connections", async () => {
+  const multi = {
+    ...campaign,
+    nodes: [
+      makeCampaignNode("g1", { title: "Gateway schema", group: "Gateway", status: "completed" }),
+      makeCampaignNode("r1", { title: "Relay worker", group: "Relay", status: "running", dependencies: ["g1"] }),
+      makeCampaignNode("r2", { title: "Relay rollout", group: "Relay", status: "pending", dependencies: ["r1"] }),
+    ],
+  };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [multi], live: {}, read: 1 });
+  await render();
+
+  // Overview renders ProjectProgressCard with group radio cards
+  const progressRegion = container.querySelector('[aria-label="Overall and group progress"]');
+  expect(progressRegion).not.toBeNull();
+  expect(progressRegion?.textContent).toContain("33%");
+
+  const relayCard = container.querySelector<HTMLButtonElement>('[data-group-card="Relay"]')!;
+  expect(relayCard).not.toBeNull();
+  await act(async () => relayCard.click());
+  expect(container.querySelector('[role="list"][aria-label="Relay tasks"]')).not.toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[role="list"][aria-label="Relay tasks"] [data-task-id="r2"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay rollout");
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+
+  // Switch Connections to Wave GanttTimeline
+  await act(async () => button("Connections").click());
+  await act(async () => button("Timeline").click());
+  const gantt = container.querySelector(".aui-gantt-timeline-root");
+  expect(gantt).not.toBeNull();
+  expect(gantt?.getAttribute("data-embedded")).toBe("true");
+  expect(gantt?.getAttribute("data-axis")).toBe("wave");
+  expect(gantt?.textContent).toContain("Wave 1");
+  expect(gantt?.textContent).toContain("Wave 3");
+
+  // Completed-only Gateway group starts folded with 100% summary bar; clicking Relay worker bar opens details
+  expect(gantt?.querySelector('.aui-gantt-timeline-lane-summary.is-folded[aria-label="Gateway, 100%"]')).not.toBeNull();
+  await act(async () => gantt!.querySelector<HTMLButtonElement>('button.aui-gantt-timeline-bar[data-task-id="r1"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay worker");
 });

@@ -58,10 +58,15 @@ const text = () => document.body.textContent ?? "";
 const named = (name: string) => [...document.querySelectorAll<HTMLElement>("button, select, input")].find((element) => element.getAttribute("aria-label") === name || element.textContent?.trim() === name)!;
 const click = (element: HTMLElement) => act(async () => element.click());
 const pick = (id: string) => click(container.querySelector<HTMLElement>(`[data-node="${id}"]`)!);
-const choose = (name: string, value: string) => act(async () => {
-  const select = named(name) as HTMLSelectElement;
-  select.value = value; select.dispatchEvent(new Event("change", { bubbles: true }));
-});
+const choose = async (name: string, value: string) => {
+  await click(named(name));
+  const option = [...document.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')]
+    .find((element) => {
+      const label = element.textContent?.trim() ?? "";
+      return label === value || label.startsWith(`${value} `);
+    })!;
+  await click(option);
+};
 const saveButton = () => [...container.querySelectorAll("button")].find((element) => element.textContent === "Save")!;
 const asks = () => { const event = new Event("beforeunload", { cancelable: true }); window.dispatchEvent(event); return event.defaultPrevented; };
 const typeTitle = (value: string) => act(async () => { const input = container.querySelector<HTMLInputElement>("aside input")!;
@@ -376,4 +381,55 @@ it("draws at most 120 tasks of a scope and says how many were left out", async (
   await render({ ...base, nodes: Array.from({ length: 125 }, (_, index) => node(`n${index}`, { group: "big" })) }, { kind: "group", key: "big" });
   expect(flow.props!.nodes).toHaveLength(120);
   expect(text()).toContain("Drawing 120 of 125 tasks.");
+});
+
+it("adds directional arrowheads to dependency edges, dims unrelated branches to 0.24 on selection, and toggles the minimap", async () => {
+  const branched: Campaign = {
+    ...base,
+    nodes: [...base.nodes, node("X", { group: "G" }), node("Y", { group: "G", dependencies: ["X"] })],
+  };
+  await render(branched);
+  expect(flow.props!.edges.every((line) => typeof line.markerEnd === "object" && line.markerEnd?.type === "arrowclosed")).toBe(true);
+  await pick("C");
+  // Connected chain for C is A -> B -> C; sibling D and unrelated branch X -> Y dim to 0.24.
+  const nodeOpacity = (id: string) => flow.props!.nodes.find((value) => value.id === id)?.style?.opacity ?? 1;
+  expect(["A", "B", "C"].map(nodeOpacity)).toEqual([1, 1, 1]);
+  expect(["D", "X", "Y"].map(nodeOpacity)).toEqual([0.24, 0.24, 0.24]);
+  expect([edge("A->B").style?.opacity ?? 1, edge("B->C").style?.opacity ?? 1, edge("B->D").style?.opacity, edge("X->Y").style?.opacity]).toEqual([1, 1, 0.24, 0.24]);
+
+  const minimapButton = named("Minimap");
+  expect(minimapButton.getAttribute("aria-pressed")).toBe("false");
+  await click(minimapButton);
+  expect(named("Minimap").getAttribute("aria-pressed")).toBe("true");
+  await click(named("Minimap"));
+  expect(named("Minimap").getAttribute("aria-pressed")).toBe("false");
+});
+
+it("exits fullscreen mode on Escape when clean, prompts via leave guard when dirty, and ignores Escape inside inputs", async () => {
+  const mq = vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+    matches: query === "(min-width: 1280px)",
+    media: query,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+  }) as unknown as MediaQueryList);
+  try {
+    await render();
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).toHaveBeenCalledOnce();
+
+    onExit.mockClear();
+    await pick("C");
+    const input = container.querySelector<HTMLInputElement>("aside input")!;
+    await act(async () => { input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).not.toHaveBeenCalled();
+
+    await typeTitle("Edited C");
+    await act(async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); });
+    expect(onExit).not.toHaveBeenCalled();
+    expect(text()).toContain("1 unsaved changes");
+    await click(named("Discard and leave"));
+    expect(onExit).toHaveBeenCalledOnce();
+  } finally {
+    mq.mockRestore();
+  }
 });

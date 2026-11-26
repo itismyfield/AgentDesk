@@ -23,8 +23,8 @@ pub(super) fn contested(
     )
 }
 
-/// Whether a V2 registration could still own the row a migrated V1 append `entry` binds; other
-/// V1 entries are left to the V1 rules.
+/// Whether a V2 registration could still own the row a keyless `entry` binds; other keyless
+/// entries are left to the V1 rules.
 pub(super) fn contests_migrated(state: &Snapshot, entry: &Entry, kind: &str, offset: u64) -> bool {
     rival(
         state,

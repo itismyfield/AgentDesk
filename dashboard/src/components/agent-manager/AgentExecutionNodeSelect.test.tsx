@@ -32,15 +32,20 @@ afterEach(async () => {
 });
 const render = () => act(async () => root.render(<AgentExecutionNodeSelect agentId="codex" provider="codex" tr={tr} />));
 const button = (name: string) => [...container.querySelectorAll("button")].find((entry) => entry.textContent === name)!;
-const select = async (value: string) => act(async () => {
-  const element = container.querySelector("select")!;
-  element.value = value;
-  element.dispatchEvent(new Event("change", { bubbles: true }));
-});
+const combobox = () => container.querySelector<HTMLButtonElement>('[role="combobox"]')!;
+const selectedValue = () => container.querySelector<HTMLInputElement>('input[name="execution_node"]')!.value;
+const select = async (value: string) => {
+  await act(async () => combobox().click());
+  const labelPrefix = value === "" ? "Use default policy" : value === "windows-worker-1" ? "Windows PC" : "Mac mini";
+  const option = [...container.querySelectorAll<HTMLElement>('[role="option"]')].find((entry) => entry.textContent?.startsWith(labelPrefix))!;
+  await act(async () => option.click());
+};
 
 it("saves only the selected agent default after an explicit save", async () => {
   vi.mocked(setAgentExecutionNode).mockResolvedValue({ default_node_id: "windows-worker-1" });
   await render();
+  expect(container.querySelector("label")).toBeNull();
+  expect(combobox().getAttribute("aria-label")).toBe("Preferred execution device");
   await select("windows-worker-1");
   expect(setAgentExecutionNode).not.toHaveBeenCalled();
   await act(async () => button("Save").click());
@@ -53,7 +58,7 @@ it("preserves a missing saved node and allows an explicit reset", async () => {
   vi.mocked(getAgentExecutionNode).mockResolvedValue({ default_node_id: "removed-worker", routing_enforced: true });
   vi.mocked(setAgentExecutionNode).mockResolvedValue({ default_node_id: null });
   await render();
-  expect(container.querySelector("select")!.value).toBe("removed-worker");
+  expect(selectedValue()).toBe("removed-worker");
   expect(container.textContent).toContain("Not registered");
   expect(container.textContent).toContain("not ready");
   await select("");
@@ -64,7 +69,7 @@ it("preserves a missing saved node and allows an explicit reset", async () => {
 it("does not permit a save after policy loading failed", async () => {
   vi.mocked(getAgentExecutionNode).mockRejectedValue(new Error("Policy unavailable"));
   await render();
-  expect(container.querySelector("select")!.disabled).toBe(true);
+  expect(combobox().disabled).toBe(true);
   expect(button("Save").disabled).toBe(true);
   expect(container.textContent).toContain("Policy unavailable");
   expect(setAgentExecutionNode).not.toHaveBeenCalled();
@@ -88,9 +93,9 @@ it("ignores a save response after switching to another agent", async () => {
   await act(async () => button("Save").click());
   vi.mocked(getAgentExecutionNode).mockResolvedValue({ default_node_id: "single-node", routing_enforced: true });
   await act(async () => root.render(<AgentExecutionNodeSelect agentId="another-agent" provider="codex" tr={tr} />));
-  expect(container.querySelector("select")!.value).toBe("single-node");
+  expect(selectedValue()).toBe("single-node");
   await act(async () => finish({ default_node_id: "windows-worker-1" }));
-  expect(container.querySelector("select")!.value).toBe("single-node");
+  expect(selectedValue()).toBe("single-node");
   expect(container.textContent).not.toContain("Applies to new sessions");
   expect(button("Save").disabled).toBe(true);
 });

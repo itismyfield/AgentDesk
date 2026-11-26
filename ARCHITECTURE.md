@@ -30,6 +30,8 @@ src/
 │   ├── dcserver/
 │   │   ├── startup.rs
 │   │   └── startup_audit_tests.rs
+│   ├── decision/
+│   │   └── owner_cache.rs
 │   ├── dev_instance/
 │   │   └── tests.rs
 │   ├── direct/
@@ -96,6 +98,8 @@ src/
 │   ├── dcserver_pg_bootstrap.rs
 │   ├── dcserver_restart_marker.rs
 │   ├── dcserver_restart_wait.rs
+│   ├── decision.rs
+│   ├── decision_tests.rs
 │   ├── dev_instance.rs
 │   ├── direct.rs
 │   ├── discord.rs
@@ -238,6 +242,8 @@ src/
 │   │   └── tests.rs
 │   ├── channel_home_preferences/
 │   │   └── pg_tests.rs
+│   ├── decisions/
+│   │   └── requests.rs
 │   ├── dispatched_sessions/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
@@ -691,6 +697,7 @@ src/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints/
 │   │   │   │       ├── cluster_execution.rs
+│   │   │   │       ├── decisions.rs
 │   │   │   │       ├── kakao_calendar.rs
 │   │   │   │       ├── mod.rs
 │   │   │   │       ├── part_01.rs
@@ -830,6 +837,8 @@ src/
 │   │   ├── claude_accounts_api.rs
 │   │   ├── cluster.rs
 │   │   ├── cron_api.rs
+│   │   ├── decisions.rs
+│   │   ├── decisions_tests.rs
 │   │   ├── departments.rs
 │   │   ├── discord.rs
 │   │   ├── dispatched_sessions.rs
@@ -1796,6 +1805,12 @@ src/
 │   │   │   ├── tool_call_tests.rs
 │   │   │   ├── tui_passthrough.rs
 │   │   │   └── usage_footer.rs
+│   │   ├── decisions/
+│   │   │   ├── ask_tests.rs
+│   │   │   ├── ingress.rs
+│   │   │   ├── ingress_tests.rs
+│   │   │   ├── mod.rs
+│   │   │   └── requester.rs
 │   │   ├── delivery_lease_cell/
 │   │   │   ├── exact_lease/
 │   │   │   │   └── tests.rs
@@ -2196,7 +2211,8 @@ src/
 │   │   │   │   ├── resolved.rs
 │   │   │   │   └── routine_incident_nonce.rs
 │   │   │   ├── o_writer_io/
-│   │   │   │   └── agy.rs
+│   │   │   │   ├── agy.rs
+│   │   │   │   └── attachment.rs
 │   │   │   ├── o_writer_legacy/
 │   │   │   │   └── child_debt_tests.rs
 │   │   │   ├── o_writer_repost_io_tests/
@@ -2215,6 +2231,8 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── image_format.rs
+│   │   │   ├── image_format_tests.rs
 │   │   │   ├── local_retry_io_tests.rs
 │   │   │   ├── manual_delivery.rs
 │   │   │   ├── message.rs
@@ -2313,6 +2331,9 @@ src/
 │   │   │   ├── input_effect_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
+│   │   │   ├── decision_drain/
+│   │   │   │   ├── queued.rs
+│   │   │   │   └── queued_tests.rs
 │   │   │   ├── input_owner/
 │   │   │   │   ├── claude_handoff/
 │   │   │   │   │   └── tests/
@@ -2320,7 +2341,8 @@ src/
 │   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
 │   │   │   │   ├── drive_tests/
-│   │   │   │   │   └── claimed_followers_tests.rs
+│   │   │   │   │   ├── claimed_followers_tests.rs
+│   │   │   │   │   └── retry_wait_tests.rs
 │   │   │   │   ├── effect/
 │   │   │   │   │   ├── claude.rs
 │   │   │   │   │   ├── codex.rs
@@ -2562,6 +2584,7 @@ src/
 │   │   │   │   │   ├── transition_busy_tests/
 │   │   │   │   │   │   └── retry_tests.rs
 │   │   │   │   │   ├── clear_discard_tests.rs
+│   │   │   │   │   ├── decision_tests.rs
 │   │   │   │   │   ├── race_loss.rs
 │   │   │   │   │   └── transition_busy_tests.rs
 │   │   │   │   ├── tests/
@@ -2594,6 +2617,7 @@ src/
 │   │   │   │   ├── busy_inject_test_support.rs
 │   │   │   │   ├── busy_queue.rs
 │   │   │   │   ├── component_events.rs
+│   │   │   │   ├── decision_guard_tests.rs
 │   │   │   │   ├── gate.rs
 │   │   │   │   ├── live_entry_tests.rs
 │   │   │   │   ├── queue_effects.rs
@@ -2752,6 +2776,7 @@ src/
 │   │   │   │   │   ├── handoff_launch_tests.rs
 │   │   │   │   │   ├── legacy_clear_tests.rs
 │   │   │   │   │   ├── policy_tests.rs
+│   │   │   │   │   ├── preclaim_retry_wait_tests.rs
 │   │   │   │   │   ├── preclaim_tests.rs
 │   │   │   │   │   ├── recheck_tests.rs
 │   │   │   │   │   └── wake_tests.rs
@@ -4658,6 +4683,9 @@ src/
 │   │   │   │   │   ├── carried.rs
 │   │   │   │   │   ├── carried_tests.rs
 │   │   │   │   │   ├── collision.rs
+│   │   │   │   │   ├── keyless.rs
+│   │   │   │   │   ├── keyless_platform_tests.rs
+│   │   │   │   │   ├── keyless_tests.rs
 │   │   │   │   │   ├── migration.rs
 │   │   │   │   │   ├── native.rs
 │   │   │   │   │   ├── native_barrier.rs
@@ -4797,7 +4825,9 @@ src/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── input_notices.rs
-│   │   │   │   └── test_access.rs
+│   │   │   │   ├── test_access.rs
+│   │   │   │   ├── tool_images.rs
+│   │   │   │   └── tool_images_tests.rs
 │   │   │   ├── spool/
 │   │   │   │   ├── retention.rs
 │   │   │   │   └── transition.rs
@@ -4959,6 +4989,15 @@ src/
 │   │   │   │   ├── scoped_tests.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
+│   │   │   ├── tool_images/
+│   │   │   │   ├── derive.rs
+│   │   │   │   ├── kind_tests.rs
+│   │   │   │   ├── notice.rs
+│   │   │   │   ├── reconfirm.rs
+│   │   │   │   ├── select.rs
+│   │   │   │   ├── turns.rs
+│   │   │   │   ├── turns_tests.rs
+│   │   │   │   └── wiring_tests.rs
 │   │   │   ├── transition_scope/
 │   │   │   │   └── codex.rs
 │   │   │   ├── activation.rs
@@ -5102,6 +5141,8 @@ src/
 │   │   │   ├── tool_card_replay_tests.rs
 │   │   │   ├── tool_card_tests.rs
 │   │   │   ├── tool_cards.rs
+│   │   │   ├── tool_images.rs
+│   │   │   ├── tool_images_tests.rs
 │   │   │   ├── tool_result_repost_tests.rs
 │   │   │   ├── tool_result_tests.rs
 │   │   │   ├── tool_results.rs

@@ -186,7 +186,7 @@ const css = /* css */ `
 .aui-checkbox-clean[data-variant="card"] .aui-checkbox-clean__error { margin-left: 2px; }
 
 /* Touch screens: 16px text and a bigger box */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-checkbox-clean { font-size: 15px; line-height: 22px; }
   .aui-checkbox-clean__control { width: 20px; height: 22px; }
   .aui-checkbox-clean__box { width: 20px; height: 20px; border-radius: 5.5px; }
@@ -220,7 +220,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-checkbox-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-checkbox-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-checkbox-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;
