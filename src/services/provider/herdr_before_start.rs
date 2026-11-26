@@ -194,11 +194,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-pub fn seal_exit(
-    token: &CancelToken,
-    cancelled: bool,
-    terminal_admitted: bool,
-) -> ExitDecision {
+pub fn seal_exit(token: &CancelToken, cancelled: bool, terminal_admitted: bool) -> ExitDecision {
     use super::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let exception = !herdr_stop_settlement_available() || cancelled || terminal_admitted;
     if exception {

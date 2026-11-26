@@ -41,10 +41,7 @@ pub async fn dispatch_notify_delivery_suppressed_pg(
     })
 }
 
-pub async fn mark_dispatch_dispatched_pg(
-    pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<(), String> {
+pub async fn mark_dispatch_dispatched_pg(pool: &PgPool, dispatch_id: &str) -> Result<(), String> {
     let current = sqlx::query(
         "SELECT status, kanban_card_id, dispatch_type
            FROM task_dispatches

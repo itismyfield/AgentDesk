@@ -619,10 +619,7 @@ pub fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
     fold_records(context, &ownership_records(channel)?)
 }
 
-pub fn proof_at_seq(
-    context: &BindingContext,
-    seq: u64,
-) -> io::Result<Option<VerifiedProof>> {
+pub fn proof_at_seq(context: &BindingContext, seq: u64) -> io::Result<Option<VerifiedProof>> {
     let channel = ownership_context(context)?;
     let _logs = lock_logs();
     Ok(ownership_records(channel)?.into_iter().find_map(|logged| {

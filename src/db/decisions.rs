@@ -209,11 +209,7 @@ pub async fn begin_write(pool: &PgPool, event_id: Uuid) -> Result<bool, sqlx::Er
 
 /// The closing fence: an event that journaled no write stops being runnable, with its reason.
 /// The removal of its original follows, and survives a crash between the two.
-pub async fn close(
-    pool: &PgPool,
-    event_id: Uuid,
-    reason: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn close(pool: &PgPool, event_id: Uuid, reason: &str) -> Result<bool, sqlx::Error> {
     let moved = sqlx::query(
         "UPDATE decision_delivery_attempts SET state = 'closing', detail = $2, updated_at = NOW()
          WHERE event_id = $1
@@ -226,10 +222,7 @@ pub async fn close(
     Ok(moved.rows_affected() == 1)
 }
 
-pub async fn state_of(
-    pool: &PgPool,
-    event_id: Uuid,
-) -> Result<Option<AttemptState>, sqlx::Error> {
+pub async fn state_of(pool: &PgPool, event_id: Uuid) -> Result<Option<AttemptState>, sqlx::Error> {
     let state: Option<String> =
         sqlx::query_scalar("SELECT state FROM decision_delivery_attempts WHERE event_id = $1")
             .bind(event_id)

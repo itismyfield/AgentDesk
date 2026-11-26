@@ -144,13 +144,7 @@ pub fn preserved_decision_body(
 
 /// The idle frame tagged with the attempt's nonce, so two attempts of one text differ; a nonce
 /// not shaped like `fresh_nonce`'s adds no tag.
-pub fn plain_inject(
-    _source: &str,
-    author: &str,
-    name: &str,
-    nonce: &str,
-    body: &str,
-) -> String {
+pub fn plain_inject(_source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
     let tag = if is_nonce(nonce) {
         format!(" · {nonce}")
     } else {

@@ -2,9 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use super::model::DispatchOutboxClaimCandidate;
 
-pub fn wait_reason_from_routing_diagnostics(
-    diagnostics: &serde_json::Value,
-) -> Option<String> {
+pub fn wait_reason_from_routing_diagnostics(diagnostics: &serde_json::Value) -> Option<String> {
     if !diagnostics
         .get("selected")
         .map(serde_json::Value::is_null)

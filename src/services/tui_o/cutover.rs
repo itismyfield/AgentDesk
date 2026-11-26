@@ -163,19 +163,13 @@ async fn resolve_reserved_with(channel: u64, lookup: Option<ChannelLookup>) -> R
 
 /// Records a thread Discord returned under an O parent; `fresh` only for a thread this process
 /// just created, where no Legacy turn has run. Returns whether O now hosts it.
-pub fn record_thread_child(
-    channel: &poise::serenity_prelude::GuildChannel,
-    fresh: bool,
-) -> bool {
+pub fn record_thread_child(channel: &poise::serenity_prelude::GuildChannel, fresh: bool) -> bool {
     test_override::with_channels(|snapshot| snapshot.is_some_and(|s| record_in(s, channel, fresh)))
 }
 
 /// As `record_thread_child` for a channel known by id, read through the checked lookup; only
 /// when `hinted_parent`, which is no evidence, names a channel O selects.
-pub async fn record_thread_child_by_id(
-    channel: u64,
-    hinted_parent: u64,
-) -> Result<bool, String> {
+pub async fn record_thread_child_by_id(channel: u64, hinted_parent: u64) -> Result<bool, String> {
     let provider = test_override::with_channels(|snapshot| {
         let snapshot = snapshot?;
         if snapshot.agy_selected(hinted_parent) {
@@ -253,9 +247,7 @@ fn held_children() -> Vec<u64> {
 }
 
 /// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
-pub fn codex_turn_awaited(
-    channel: u64,
-) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
+pub fn codex_turn_awaited(channel: u64) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
     if owned_kind(channel) != Some(RuntimeHandoffKind::CodexTui)
         || super::turn_mode::transcript_turns(channel)
     {
@@ -381,11 +373,7 @@ pub fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
     })
 }
 
-pub fn invalidate_codex_first(
-    channel: Option<u64>,
-    nonce: Option<&str>,
-    tmux: Option<&str>,
-) {
+pub fn invalidate_codex_first(channel: Option<u64>, nonce: Option<&str>, tmux: Option<&str>) {
     test_override::with_channels(|boot| {
         if let Some(boot) = boot {
             for id in boot.channels() {

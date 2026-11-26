@@ -147,9 +147,7 @@ pub fn register_provider_session(
     }
 }
 
-pub fn runtime_binding_for_tmux_session(
-    tmux_session_name: &str,
-) -> Option<TuiRuntimeBinding> {
+pub fn runtime_binding_for_tmux_session(tmux_session_name: &str) -> Option<TuiRuntimeBinding> {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
         return None;

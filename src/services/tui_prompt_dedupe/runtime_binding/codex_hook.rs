@@ -7,10 +7,7 @@ use super::*;
 mod herdr_resume_tests;
 
 /// Launch paths let the execution's context name the cause of a new source.
-pub fn register_launched_tmux_runtime_binding(
-    tmux_session_name: &str,
-    binding: TuiRuntimeBinding,
-) {
+pub fn register_launched_tmux_runtime_binding(tmux_session_name: &str, binding: TuiRuntimeBinding) {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         register_launched_tmux_runtime_binding_under_source_authority(authority, binding)
     });
@@ -59,10 +56,7 @@ pub fn register_codex_herdr_placeholder(logical: &str, channel_id: u64) {
 }
 
 /// Child rollouts cannot supply the output source of a Codex TUI pane.
-pub fn codex_tui_binding_is_subagent(
-    tmux_session_name: &str,
-    binding: &TuiRuntimeBinding,
-) -> bool {
+pub fn codex_tui_binding_is_subagent(tmux_session_name: &str, binding: &TuiRuntimeBinding) -> bool {
     let child = binding.runtime_kind == RuntimeHandoffKind::CodexTui
         && crate::services::codex_tui::rollout_index::rollout_is_subagent(std::path::Path::new(
             &binding.output_path,

@@ -437,10 +437,7 @@ pub(in crate::services::discord) fn extract_loop_body(prompt: &str) -> Option<St
 
 /// A local command's output as written, under a `-# ⚙️ /<command>` header. `None` for a name
 /// that is not a plain slash token or an empty output; the caller keeps the kind-only note.
-pub fn format_slash_command_output_notice(
-    command: &str,
-    raw_prompt: &str,
-) -> Option<String> {
+pub fn format_slash_command_output_notice(command: &str, raw_prompt: &str) -> Option<String> {
     let name = command.strip_prefix('/')?;
     let plain = !name.is_empty()
         && name.len() <= 64
@@ -478,10 +475,7 @@ fn extract_local_command_stdout_body(prompt: &str) -> Option<String> {
     (!body.is_empty()).then_some(body)
 }
 
-pub fn format_system_continuation_note(
-    tmux_session_name: &str,
-    _prompt: &str,
-) -> String {
+pub fn format_system_continuation_note(tmux_session_name: &str, _prompt: &str) -> String {
     super::super::session_notice::subtext(
         "🧩",
         &format!("Session continued (compact/resume) · tmux: {tmux_session_name}"),

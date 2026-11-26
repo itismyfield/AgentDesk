@@ -66,10 +66,7 @@ pub struct RelayDeadLetterRecord {
 /// INSERT one dead-letter row, returning its id. Prefer [`record_detached`] on
 /// the hot path; this variant surfaces the error for tests and callers that
 /// want the id.
-pub async fn insert(
-    pool: &PgPool,
-    record: &RelayDeadLetterRecord,
-) -> Result<i64, sqlx::Error> {
+pub async fn insert(pool: &PgPool, record: &RelayDeadLetterRecord) -> Result<i64, sqlx::Error> {
     insert_with_outcome(pool, record).await.map(|(id, _)| id)
 }
 

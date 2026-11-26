@@ -5,10 +5,7 @@ use serde_json::json;
 // Keep operator history responses bounded even after repeated event revisions.
 const MAX_OPERATION_HISTORY: i64 = 200;
 
-pub async fn event_accounts(
-    pool: &PgPool,
-    event: Uuid,
-) -> Result<Vec<String>, CalendarDbError> {
+pub async fn event_accounts(pool: &PgPool, event: Uuid) -> Result<Vec<String>, CalendarDbError> {
     Ok(sqlx::query_scalar("SELECT b.account_id FROM kakao_calendar_targets t JOIN kakao_calendar_bindings b USING(binding_id) WHERE t.event_id=$1 ORDER BY b.account_id")
         .bind(event).fetch_all(pool).await?)
 }

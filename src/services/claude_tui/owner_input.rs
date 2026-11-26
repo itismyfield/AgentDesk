@@ -415,10 +415,7 @@ pub(crate) fn launch_refuses_live() -> Result<(), String> {
 /// The created tmux execution's target, read from its spawn marker and binding context as the
 /// owner's live epoch reads them.
 #[cfg(unix)]
-pub fn created_tmux_target(
-    provider: &str,
-    session: &str,
-) -> Result<serde_json::Value, String> {
+pub fn created_tmux_target(provider: &str, session: &str) -> Result<serde_json::Value, String> {
     use crate::services::tui_prompt_dedupe::binding_context::{self, SpawnNonceMarker};
     let SpawnNonceMarker::Known(nonce) = binding_context::observe_spawn_nonce_marker(session)
     else {

@@ -6,17 +6,11 @@ use super::{
     sanitize_oneline, status_icon,
 };
 
-pub fn format_task_notification_card(
-    note: &TaskNotification,
-    update_count: u64,
-) -> String {
+pub fn format_task_notification_card(note: &TaskNotification, update_count: u64) -> String {
     render(note, update_count, has_completion_body(note))
 }
 
-pub fn format_legacy(
-    note: &TaskNotification,
-    update_count: u64,
-) -> String {
+pub fn format_legacy(note: &TaskNotification, update_count: u64) -> String {
     render(note, update_count, false)
 }
 

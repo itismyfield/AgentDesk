@@ -659,10 +659,7 @@ pub fn tmux_followup_fallback_after_read_error(
     })
 }
 
-pub fn tmux_capture_indicates_ready_for_input(
-    capture: &str,
-    provider: &ProviderKind,
-) -> bool {
+pub fn tmux_capture_indicates_ready_for_input(capture: &str, provider: &ProviderKind) -> bool {
     if let ProviderKind::Unsupported(_) = provider {
         return crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
             || tmux_capture_contains_wrapper_ready_marker(capture, provider);

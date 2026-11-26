@@ -29,10 +29,7 @@ pub struct Claim {
     pub attempts: i32,
 }
 
-pub async fn claim(
-    pool: &PgPool,
-    accounts: &[String],
-) -> Result<Option<Claim>, sqlx::Error> {
+pub async fn claim(pool: &PgPool, accounts: &[String]) -> Result<Option<Claim>, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query("UPDATE kakao_calendar_operations SET status='needs_reconcile',error_code='dispatch_interrupted',updated_at=NOW()
         WHERE status='dispatching' AND lease_expires_at <= NOW()") .execute(&mut *tx).await?;

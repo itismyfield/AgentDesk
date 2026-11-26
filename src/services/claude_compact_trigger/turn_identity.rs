@@ -1,9 +1,7 @@
 //! The live turn a compact request is bound to, as the trigger reads it.
 
 /// A captured compact-eligible turn; its owner rechecks it against the live turn before a send.
-pub trait CompactTurnIdentity:
-    Send + Sync + 'static
-{
+pub trait CompactTurnIdentity: Send + Sync + 'static {
     fn channel_id(&self) -> u64;
     fn tmux_session_name(&self) -> &str;
     /// A captured eligible turn can finish before compact; a successor or failed read cannot

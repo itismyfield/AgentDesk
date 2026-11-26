@@ -120,10 +120,7 @@ impl EffectiveIntakeRoutingConfig {
         !matches!(self.mode, IntakeRoutingMode::Disabled)
     }
 
-    pub fn owner_authority_channel_opt_in(
-        &self,
-        channel_id: &str,
-    ) -> OwnerAuthorityChannelOptIn {
+    pub fn owner_authority_channel_opt_in(&self, channel_id: &str) -> OwnerAuthorityChannelOptIn {
         if !self.owner_authority_config_known {
             return OwnerAuthorityChannelOptIn::Unknown;
         }

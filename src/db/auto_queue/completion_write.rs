@@ -43,9 +43,7 @@ impl<'borrow, 'conn> PreparedCompletion<'borrow, 'conn> {
         self.has_entries
     }
 
-    pub async fn notice_facts(
-        &mut self,
-    ) -> Result<Option<RunCompletionNoticeFacts>, String> {
+    pub async fn notice_facts(&mut self) -> Result<Option<RunCompletionNoticeFacts>, String> {
         load_run_completion_notice_facts_on_pg_tx(self.tx, &self.run_id).await
     }
 

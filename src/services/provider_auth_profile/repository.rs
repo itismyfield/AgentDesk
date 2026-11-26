@@ -76,10 +76,7 @@ pub(crate) fn append_provider_auth_profile_at(
     persist_org_document(org_path, &document)
 }
 
-pub fn set_agent_auth_profile(
-    role_id: &str,
-    auth_profile: Option<&str>,
-) -> Result<(), String> {
+pub fn set_agent_auth_profile(role_id: &str, auth_profile: Option<&str>) -> Result<(), String> {
     set_agent_auth_profile_at(&org_yaml_path()?, role_id, auth_profile)
 }
 

@@ -79,9 +79,7 @@ pub mod herdr_terminate {
     }
 
     /// Consumes the operator proof; no locator or cancel verdict can replace it.
-    pub fn terminate_herdr_once(
-        warrant: OperatorTerminateWarrant<'_>,
-    ) -> HerdrTerminateResult {
+    pub fn terminate_herdr_once(warrant: OperatorTerminateWarrant<'_>) -> HerdrTerminateResult {
         use super::{HostTerminateEffect, HostTerminateWarrant, terminate_hosted_session};
         use crate::services::session_host::{HostKind, host_for};
 

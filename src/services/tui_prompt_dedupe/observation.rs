@@ -910,10 +910,7 @@ pub(super) fn clear_ssh_direct_observation_pending(provider: &str, tmux_session_
 
 /// Whether the hook relay announced this scanner row's prompt after the row was published. When
 /// it did, only the lease and marker this row's own observation recorded are released.
-pub fn withdraw_row_announced_by_its_hook(
-    prompt: &ObservedTuiPrompt,
-    channel_id: u64,
-) -> bool {
+pub fn withdraw_row_announced_by_its_hook(prompt: &ObservedTuiPrompt, channel_id: u64) -> bool {
     let Some(prompt_id) = prompt.row_prompt_id.as_deref() else {
         return false;
     };

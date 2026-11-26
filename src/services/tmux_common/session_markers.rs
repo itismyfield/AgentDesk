@@ -6,10 +6,7 @@ use super::*;
 /// profile.  A legacy wrapper without a marker is safe to reuse only for the
 /// implicit default profile; named profiles must start a fresh provider
 /// session rather than silently continue under another account.
-pub fn tmux_session_auth_profile_matches(
-    session_name: &str,
-    requested_profile_id: &str,
-) -> bool {
+pub fn tmux_session_auth_profile_matches(session_name: &str, requested_profile_id: &str) -> bool {
     let marker = resolve_session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT)
         .and_then(|path| std::fs::read_to_string(path).ok())
         .map(|value| value.trim().to_string());
@@ -21,10 +18,7 @@ pub fn tmux_session_auth_profile_matches(
 
 /// Persist the selected profile beside a newly-created provider wrapper so warm
 /// follow-ups are never routed across account boundaries.
-pub fn write_tmux_session_auth_profile(
-    session_name: &str,
-    profile_id: &str,
-) -> Result<(), String> {
+pub fn write_tmux_session_auth_profile(session_name: &str, profile_id: &str) -> Result<(), String> {
     std::fs::write(
         session_temp_path(session_name, TMUX_AUTH_PROFILE_TEMP_EXT),
         profile_id.trim(),
@@ -96,11 +90,7 @@ pub fn claude_session_auth_matches(
 
 /// Carries the account recorded for `from` over to `to` once the same execution verifiably moved on
 /// from `from` to `to`; a record of any other session stays as it is and vouches for neither.
-pub fn advance_claude_session_auth(
-    session_name: &str,
-    from: &str,
-    to: &str,
-) -> Result<(), String> {
+pub fn advance_claude_session_auth(session_name: &str, from: &str, to: &str) -> Result<(), String> {
     match claude_session_auth(session_name, from)? {
         Some(profile) => write_claude_session_auth(session_name, to, &profile),
         None => Ok(()),
@@ -109,10 +99,7 @@ pub fn advance_claude_session_auth(
 
 /// The account `session_id` ran under, recorded by its launch or by the session it moved on from;
 /// `None` when the record names another session or none exists.
-pub fn claude_session_auth(
-    session_name: &str,
-    session_id: &str,
-) -> Result<Option<String>, String> {
+pub fn claude_session_auth(session_name: &str, session_id: &str) -> Result<Option<String>, String> {
     let Some(path) = resolve_session_temp_path(session_name, CLAUDE_SESSION_AUTH_TEMP_EXT) else {
         return Ok(None);
     };

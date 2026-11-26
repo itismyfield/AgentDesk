@@ -61,10 +61,7 @@ pub async fn blocked_receipt_for_sources(
 }
 
 /// Whether the dispatch's projected disposition forbids an automatic rerun.
-pub async fn dispatch_blocked(
-    pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn dispatch_blocked(pool: &PgPool, dispatch_id: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT replay_dispatch_blocked($1)")
         .bind(dispatch_id)
         .fetch_one(pool)

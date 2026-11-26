@@ -27,10 +27,7 @@ enum TransitionHold<'a> {
 }
 
 impl<'a, S: SessionTransitionHost> SessionTransitionLease<'a, S> {
-    pub fn try_acquire(
-        shared: &'a S,
-        channel: ChannelId,
-    ) -> Result<Self, SessionTransitionBusy> {
+    pub fn try_acquire(shared: &'a S, channel: ChannelId) -> Result<Self, SessionTransitionBusy> {
         let guard = shared
             .transition_locks()
             .lock(channel)

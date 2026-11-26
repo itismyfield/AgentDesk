@@ -73,11 +73,7 @@ pub async fn get(pool: &sqlx::PgPool, agent: &str) -> Result<Option<Value>, sqlx
         .await
 }
 
-pub async fn set(
-    pool: &sqlx::PgPool,
-    agent: &str,
-    value: &Value,
-) -> Result<bool, sqlx::Error> {
+pub async fn set(pool: &sqlx::PgPool, agent: &str, value: &Value) -> Result<bool, sqlx::Error> {
     Ok(
         sqlx::query("UPDATE agents SET execution_requirements=$2, updated_at=NOW() WHERE id=$1")
             .bind(agent)

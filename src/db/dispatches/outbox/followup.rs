@@ -57,10 +57,7 @@ pub async fn load_completed_dispatch_info_pg(
     .transpose()
 }
 
-pub async fn load_card_status_pg(
-    pool: &PgPool,
-    card_id: &str,
-) -> Result<Option<String>, String> {
+pub async fn load_card_status_pg(pool: &PgPool, card_id: &str) -> Result<Option<String>, String> {
     let row = sqlx::query("SELECT status FROM kanban_cards WHERE id = $1")
         .bind(card_id)
         .fetch_optional(pool)
@@ -73,10 +70,7 @@ pub async fn load_card_status_pg(
     .transpose()
 }
 
-pub async fn clear_all_dispatch_threads_pg(
-    pool: &PgPool,
-    card_id: &str,
-) -> Result<(), String> {
+pub async fn clear_all_dispatch_threads_pg(pool: &PgPool, card_id: &str) -> Result<(), String> {
     sqlx::query(
         "UPDATE kanban_cards
          SET channel_thread_map = NULL,

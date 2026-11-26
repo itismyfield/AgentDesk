@@ -4,10 +4,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 /// Returns `Ok(true)` when an outbox row ends up in a fresh `pending` state,
 /// `Ok(false)` when the dispatch is already terminal or no row exists to
 /// rearm.
-pub async fn requeue_dispatch_notify_pg(
-    pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<bool, String> {
+pub async fn requeue_dispatch_notify_pg(pool: &PgPool, dispatch_id: &str) -> Result<bool, String> {
     let dispatch = sqlx::query(
         "SELECT status, to_agent_id, kanban_card_id, title
            FROM task_dispatches

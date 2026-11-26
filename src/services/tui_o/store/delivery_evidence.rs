@@ -27,12 +27,7 @@ pub fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
         .flatten()
 }
 
-pub fn source(
-    root: &Path,
-    channel: u64,
-    path: &Path,
-    file: (u64, u64),
-) -> Option<spool::Cursor> {
+pub fn source(root: &Path, channel: u64, path: &Path, file: (u64, u64)) -> Option<spool::Cursor> {
     let store = OStore::existing(root)?;
     let init = store.read_init(channel).ok()??;
     let dir = store.channel_dir(channel);
@@ -94,11 +89,7 @@ impl LocalEvidence {
         }
     }
 
-    pub fn latest_piece(
-        &self,
-        key: &UnitKey,
-        index: u32,
-    ) -> Option<(u64, &ledger::PieceRecord)> {
+    pub fn latest_piece(&self, key: &UnitKey, index: u32) -> Option<(u64, &ledger::PieceRecord)> {
         self.pieces
             .get(&(key.clone(), index))
             .map(|(serial, record)| (*serial, record))

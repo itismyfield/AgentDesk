@@ -19,9 +19,7 @@ pub use memento::{
     MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_snapshot,
     resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
-pub use memento_throttle::{
-    memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
-};
+pub use memento_throttle::{memento_call_metrics_snapshot, note_memento_tool_feedback_trigger};
 pub use runtime_state::{
     ExternalMemoryBackendState, backend_is_active, backend_state, refresh_backend_health,
 };

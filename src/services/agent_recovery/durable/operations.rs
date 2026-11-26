@@ -7,9 +7,7 @@ pub struct ExecutionGuard {
 }
 
 /// Distinct from admission's lock so a reconciler can reserve the new mailbox.
-pub async fn try_execution(
-    channel: &str,
-) -> Result<Option<ExecutionGuard>, RecoveryStoreError> {
+pub async fn try_execution(channel: &str) -> Result<Option<ExecutionGuard>, RecoveryStoreError> {
     let mut tx = coordinator().pool()?.begin().await?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(1893, hashtext($1))")
         .bind(channel)
@@ -27,9 +25,7 @@ pub struct PendingOperation {
     pub fallback_provider: ProviderKind,
     pub plan: OperationPlan,
 }
-pub async fn recovery_state(
-    channel: &str,
-) -> Result<Option<ChannelState>, RecoveryStoreError> {
+pub async fn recovery_state(channel: &str) -> Result<Option<ChannelState>, RecoveryStoreError> {
     coordinator().refresh(channel).await?;
     Ok(lock(&coordinator().runtime).states.get(channel).cloned())
 }
@@ -100,9 +96,7 @@ pub async fn pending_operation(
         plan,
     }))
 }
-pub async fn acknowledge_start_durable(
-    lease: &RecoveryLease,
-) -> Result<(), RecoveryStoreError> {
+pub async fn acknowledge_start_durable(lease: &RecoveryLease) -> Result<(), RecoveryStoreError> {
     coordinator()
         .transition(&lease.channel_id, |runtime| {
             runtime.acknowledge_start(lease)

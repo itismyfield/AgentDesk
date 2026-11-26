@@ -3,10 +3,7 @@ use sqlx::PgPool;
 
 pub use crate::domain::cluster_policy::AgentExecutionNode;
 
-pub async fn get(
-    pool: &PgPool,
-    agent: &str,
-) -> Result<Option<AgentExecutionNode>, sqlx::Error> {
+pub async fn get(pool: &PgPool, agent: &str) -> Result<Option<AgentExecutionNode>, sqlx::Error> {
     let node: Option<Option<String>> =
         sqlx::query_scalar("SELECT default_execution_node_id FROM agents WHERE id=$1")
             .bind(agent)
@@ -38,10 +35,7 @@ pub async fn set(
     )
 }
 
-pub async fn for_channel(
-    pool: &PgPool,
-    channel: &str,
-) -> Result<Option<String>, sqlx::Error> {
+pub async fn for_channel(pool: &PgPool, channel: &str) -> Result<Option<String>, sqlx::Error> {
     let value: Option<Option<String>> = sqlx::query_scalar(
         "SELECT default_execution_node_id FROM agents WHERE discord_channel_id=$1
          OR discord_channel_alt=$1 OR discord_channel_cc=$1 OR discord_channel_cdx=$1 LIMIT 1",

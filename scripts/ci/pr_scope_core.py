@@ -128,8 +128,8 @@ def select_core_ids(repo: Path, universe: set[tuple[str, str]]) -> set[tuple[str
     """Keep all matches as binary-qualified IDs. A missing contract cannot pass."""
     targeted, owner_contracts = _load_core(repo)
     selected, missing = _match(universe, *targeted)
-    # Owner proofs and census evidence are defined against the root lib binary.
-    owner_ids = {test_id for test_id in universe if test_id[0] == "agentdesk"}
+    # Owner proofs and census evidence are defined against the root and runtime lib binaries.
+    owner_ids = {test_id for test_id in universe if test_id[0] in ("agentdesk", "adk-runtime")}
     owners, owner_missing = _match(owner_ids, *owner_contracts)
     missing.extend(owner_missing)
     if missing:

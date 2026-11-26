@@ -11,11 +11,7 @@ pub struct PooledAdvisoryLock {
 }
 
 impl PooledAdvisoryLock {
-    pub async fn acquire(
-        pool: &PgPool,
-        namespace: &str,
-        key: &str,
-    ) -> Result<Self, sqlx::Error> {
+    pub async fn acquire(pool: &PgPool, namespace: &str, key: &str) -> Result<Self, sqlx::Error> {
         let mut guard = Self {
             conn: Some(pool.acquire().await?),
             namespace: namespace.to_owned(),

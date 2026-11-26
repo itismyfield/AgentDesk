@@ -2,9 +2,7 @@
 use crate::services::agent_protocol::SubagentSummary;
 use serde_json::Value;
 
-pub fn summary_from_tool_use_result(
-    value: &Value,
-) -> Option<(SubagentSummary, Option<String>)> {
+pub fn summary_from_tool_use_result(value: &Value) -> Option<(SubagentSummary, Option<String>)> {
     let result = value.get("toolUseResult")?;
     // `toolUseResult` may be a string (non-subagent tools) — only objects carry
     // the subagent accounting.

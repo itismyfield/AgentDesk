@@ -7,10 +7,7 @@ pub use crate::domain::replay_evidence::{SnapshotIdentity, recovery::LocalSnapsh
 pub(crate) mod issuer_key;
 
 impl LocalSnapshot {
-    pub fn load<S: ReplayRow>(
-        root: Option<&OwnedRuntimeRoot>,
-        state: &S,
-    ) -> Option<Self> {
+    pub fn load<S: ReplayRow>(root: Option<&OwnedRuntimeRoot>, state: &S) -> Option<Self> {
         let root = root?;
         if !root.covers(&runtime_store::agentdesk_root()?) {
             return None;

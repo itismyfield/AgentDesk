@@ -178,10 +178,7 @@ impl AgentChannelBindings {
     }
 
     /// Explicit provider columns win over the legacy primary channel.
-    pub fn provider_for_channel(
-        &self,
-        matches: impl Fn(&str) -> bool,
-    ) -> Option<ProviderKind> {
+    pub fn provider_for_channel(&self, matches: impl Fn(&str) -> bool) -> Option<ProviderKind> {
         let claude = self
             .discord_channel_cc
             .as_deref()

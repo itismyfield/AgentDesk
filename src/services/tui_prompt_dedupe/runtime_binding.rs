@@ -903,10 +903,7 @@ fn adopt_continuation(
     Some((tmux_session_name, new_output_path))
 }
 
-pub fn refresh_tmux_runtime_binding_activity(
-    tmux_session_name: &str,
-    output_path: &str,
-) -> bool {
+pub fn refresh_tmux_runtime_binding_activity(tmux_session_name: &str, output_path: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     let output_path = output_path.trim();
     if tmux_session_name.is_empty() || output_path.is_empty() {

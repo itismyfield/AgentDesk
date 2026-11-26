@@ -24,9 +24,7 @@ impl RelayObservedPromptInjectionDecision {
     }
 }
 
-pub fn observed_prompt_starts_external_turn_lifecycle(
-    prompt: &str,
-) -> bool {
+pub fn observed_prompt_starts_external_turn_lifecycle(prompt: &str) -> bool {
     relay_observed_prompt_injected_prompt_decision(prompt).starts_external_turn_lifecycle()
 }
 

@@ -28,9 +28,7 @@ pub struct EvidenceRegistration {
 }
 
 #[cfg(unix)]
-pub fn registrations_fingerprint(
-    registrations: &[EvidenceRegistration],
-) -> Result<String, String> {
+pub fn registrations_fingerprint(registrations: &[EvidenceRegistration]) -> Result<String, String> {
     serde_json::to_vec(registrations)
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
         .map_err(|e| e.to_string())
@@ -523,9 +521,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub fn native_classification_registrations(
-        &self,
-    ) -> Result<Vec<EvidenceRegistration>, String> {
+    pub fn native_classification_registrations(&self) -> Result<Vec<EvidenceRegistration>, String> {
         self.inspect(|s| evidence_registrations(s, true))
     }
 

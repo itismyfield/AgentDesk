@@ -291,10 +291,7 @@ fn parse_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
 
 /// Records of `channel_id` with `seq > after_seq`, in log order. Read-only; a corrupt line fails
 /// the read, since skipping it would hide a binding from the reader.
-pub fn binding_events_since(
-    channel_id: u64,
-    after_seq: u64,
-) -> io::Result<Vec<BindingEvent>> {
+pub fn binding_events_since(channel_id: u64, after_seq: u64) -> io::Result<Vec<BindingEvent>> {
     let events = binding_events_judged_since(channel_id, after_seq)?;
     Ok(events.into_iter().map(|(event, _)| event).collect())
 }

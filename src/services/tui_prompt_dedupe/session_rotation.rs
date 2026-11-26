@@ -149,10 +149,7 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
 }
 
 /// Notes that the channel's stored selector moved to `new_session_id`; a later hop clears it.
-pub fn mark_claude_rotation_selector_followed(
-    tmux_session_name: &str,
-    new_session_id: &str,
-) {
+pub fn mark_claude_rotation_selector_followed(tmux_session_name: &str, new_session_id: &str) {
     if let Some(entry) = lock_rotations().get_mut(tmux_session_name.trim())
         && entry.rotation.new_session_id == new_session_id
     {
@@ -169,9 +166,7 @@ pub(crate) fn claude_rotation_blocks_adoption(tmux_session_name: &str) -> bool {
 }
 
 /// The unsettled rotation for `tmux_session_name`, if any.
-pub fn claude_session_rotation_for_tmux(
-    tmux_session_name: &str,
-) -> Option<ClaudeSessionRotation> {
+pub fn claude_session_rotation_for_tmux(tmux_session_name: &str) -> Option<ClaudeSessionRotation> {
     lock_rotations()
         .get(tmux_session_name.trim())
         .map(|entry| entry.rotation.clone())

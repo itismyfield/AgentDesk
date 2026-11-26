@@ -287,11 +287,7 @@ impl TransitionPort {
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
     /// runs to its end, and only the reply is lost.
-    pub async fn request(
-        &self,
-        operation: Operation,
-        context: Context,
-    ) -> Result<Reply, String> {
+    pub async fn request(&self, operation: Operation, context: Context) -> Result<Reply, String> {
         self.request_as(self, operation, context).await
     }
 

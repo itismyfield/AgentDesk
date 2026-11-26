@@ -318,9 +318,7 @@ pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
 /// work. Its 10-second acquire deadline tolerates slow TCP/TLS/auth handshakes;
 /// the separate long-lived runtime pool is built only after initialization and
 /// retains the normal 10-second acquire timeout.
-pub async fn connect_for_bootstrap(
-    config: &Config,
-) -> Result<Option<PgPool>, PgConnectFailure> {
+pub async fn connect_for_bootstrap(config: &Config) -> Result<Option<PgPool>, PgConnectFailure> {
     connect_with_settings_typed(
         config,
         bootstrap_pool_settings(config),

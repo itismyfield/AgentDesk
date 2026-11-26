@@ -213,6 +213,8 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+pub(crate) use adk_runtime::services::discord::replay_policy;
+use adk_runtime::services::discord::tui_task_card;
 #[cfg(test)]
 pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
 #[cfg(test)]
@@ -224,8 +226,6 @@ pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) use adk_runtime::services::discord::replay_policy;
-use adk_runtime::services::discord::tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;

@@ -47,10 +47,7 @@ pub fn resolve_role_binding(
     None
 }
 
-pub fn resolve_workspace(
-    channel_id: ChannelId,
-    channel_name: Option<&str>,
-) -> Option<String> {
+pub fn resolve_workspace(channel_id: ChannelId, channel_name: Option<&str>) -> Option<String> {
     if let Some(workspace) = config_projection::config_workspace(channel_id, channel_name) {
         return Some(workspace);
     }

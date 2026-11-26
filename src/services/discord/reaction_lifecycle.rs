@@ -333,9 +333,15 @@ impl crate::services::tui_o::writer::input_facts::reactions::ReactionPort for Ht
         } else {
             ReactionAction::Remove
         };
-        try_reaction_raw_on_channel_detailed(self.0, ChannelId::new(channel), message, emoji, action)
-            .await
-            .map_err(|error| error.to_string())
+        try_reaction_raw_on_channel_detailed(
+            self.0,
+            ChannelId::new(channel),
+            message,
+            emoji,
+            action,
+        )
+        .await
+        .map_err(|error| error.to_string())
     }
 }
 

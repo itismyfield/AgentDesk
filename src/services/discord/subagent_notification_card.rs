@@ -46,9 +46,7 @@ pub struct SubagentNotificationSemantic {
     pub(in crate::services::discord) payload_fingerprint: String,
 }
 
-pub fn semantic_event(
-    prompt: &str,
-) -> Option<SubagentNotificationSemantic> {
+pub fn semantic_event(prompt: &str) -> Option<SubagentNotificationSemantic> {
     let payload = extract_payload(prompt).ok()?;
     let envelope: Envelope = serde_json::from_str(&payload).ok()?;
     let status = envelope.status?;
@@ -106,10 +104,7 @@ pub(in crate::services::discord) fn is_start_anchored_subagent_notification(prom
     starts_with_xmlish_tag(&normalized, "subagent_notification")
 }
 
-pub fn format_subagent_notification_card(
-    tmux_session_name: Option<&str>,
-    prompt: &str,
-) -> String {
+pub fn format_subagent_notification_card(tmux_session_name: Option<&str>, prompt: &str) -> String {
     match parse(prompt) {
         Ok(Render::Completed(report)) => {
             format_report(tmux_session_name, "✅", "completed", &report)
@@ -144,10 +139,7 @@ pub(in crate::services::discord) fn status_summary(input: &str) -> Option<String
     })
 }
 
-pub fn status_summary_from(
-    current_tool_line: Option<&str>,
-    full_response: &str,
-) -> Option<String> {
+pub fn status_summary_from(current_tool_line: Option<&str>, full_response: &str) -> Option<String> {
     current_tool_line
         .and_then(status_summary)
         .or_else(|| status_summary(full_response))

@@ -99,10 +99,7 @@ pub async fn release(
 }
 
 /// Rearms the exact pre-effects row once; its marker survives later claims without a TTL reset.
-pub async fn return_before_record(
-    pool: &PgPool,
-    proof: BeforeEffects,
-) -> Result<bool, String> {
+pub async fn return_before_record(pool: &PgPool, proof: BeforeEffects) -> Result<bool, String> {
     let expected = proof.row();
     if expected.status != super::IntakeOutboxStatus::Spawned || expected.claim_owner.is_none() {
         return Err("consent rollback requires this worker's before-effects spawned row".into());

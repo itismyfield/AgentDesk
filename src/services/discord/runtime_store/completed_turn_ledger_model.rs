@@ -98,10 +98,7 @@ fn ledger_root() -> Option<PathBuf> {
 }
 
 /// `<runtime_root>/discord_completed_turn_ledger/<provider>/<channel_id>.json`.
-pub fn ledger_path(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> Option<PathBuf> {
+pub fn ledger_path(provider: &ProviderKind, channel_id: u64) -> Option<PathBuf> {
     ledger_root().map(|root| {
         root.join(provider.as_str())
             .join(format!("{channel_id}.json"))
@@ -117,10 +114,7 @@ pub fn read_ledger_at(path: &Path) -> Option<CompletedTurnLedger> {
 
 /// Read the durable ledger for `(provider, channel_id)`. `None` when the runtime
 /// root is unavailable, the file is missing, or the content is malformed.
-pub fn read_ledger(
-    provider: &ProviderKind,
-    channel_id: u64,
-) -> Option<CompletedTurnLedger> {
+pub fn read_ledger(provider: &ProviderKind, channel_id: u64) -> Option<CompletedTurnLedger> {
     read_ledger_at(&ledger_path(provider, channel_id)?)
 }
 

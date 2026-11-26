@@ -234,10 +234,7 @@ pub enum HostedLookup {
 }
 
 /// Resolve exactly one sessions row by full key or exact canonical tuple, then read its record.
-pub async fn load_hosted_execution_pg(
-    pool: &PgPool,
-    key: HostedLookupKey<'_>,
-) -> HostedLookup {
+pub async fn load_hosted_execution_pg(pool: &PgPool, key: HostedLookupKey<'_>) -> HostedLookup {
     let resolved = match key {
         HostedLookupKey::SessionKey(session_key) if filled(&[session_key]) => {
             resolve_session_row_pg(pool, Some(session_key), None, None).await
@@ -674,9 +671,7 @@ impl CleanupRow {
 }
 
 /// Candidate snapshots in the same order used by bulk cleanup.
-pub async fn load_disconnected_cleanup_rows_pg(
-    pool: &PgPool,
-) -> Result<Vec<CleanupRow>, String> {
+pub async fn load_disconnected_cleanup_rows_pg(pool: &PgPool) -> Result<Vec<CleanupRow>, String> {
     let rows = sqlx::query(
         "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
                 s.channel_id, s.hosted_execution,

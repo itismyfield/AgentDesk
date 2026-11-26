@@ -222,11 +222,7 @@ impl DispatchTerminalEntryRow {
         self.entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE
     }
 
-    pub fn update_trigger_source<'a>(
-        &self,
-        new_status: &str,
-        trigger_source: &'a str,
-    ) -> &'a str {
+    pub fn update_trigger_source<'a>(&self, new_status: &str, trigger_source: &'a str) -> &'a str {
         if self.reconciles_failed_to_done(new_status) {
             "dispatch_terminal_reconcile"
         } else {

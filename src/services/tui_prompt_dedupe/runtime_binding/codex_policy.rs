@@ -149,11 +149,7 @@ pub fn codex_verified_source_allowed_under_source_authority(
     codex_verified::consumer_allowed(authority, &binding)
 }
 
-pub fn codex_verified_source_allowed(
-    tmux: &str,
-    path: &str,
-    session_id: Option<&str>,
-) -> bool {
+pub fn codex_verified_source_allowed(tmux: &str, path: &str, session_id: Option<&str>) -> bool {
     tc::with_tmux_source_authority(tmux, |a| {
         codex_verified_source_allowed_under_source_authority(a, path, session_id)
     })
@@ -316,10 +312,7 @@ mod provenance_tests;
 #[path = "codex_policy/observation_tests.rs"]
 mod observation_tests;
 
-pub fn codex_verified_o_source_allowed(
-    channel: u64,
-    source: &binding_events::SourceId,
-) -> bool {
+pub fn codex_verified_o_source_allowed(channel: u64, source: &binding_events::SourceId) -> bool {
     #[cfg(all(test, unix))]
     crate::services::tui_o::writer::tests::restart_policy_call(channel);
     // O's cursor keeps the dev it first stored; the proof reads the file's dev now.

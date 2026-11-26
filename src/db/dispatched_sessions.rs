@@ -1505,10 +1505,7 @@ pub async fn load_session_update_payload_pg(
 /// Sibling of `mark_session_disconnected_for_idle_cleanup` in the discord
 /// module (in-memory expiry path); both preserve selectors but guard differently.
 /// Returns true if a row transitioned.
-pub async fn reconcile_orphaned_tmuxless_session_pg(
-    pool: &PgPool,
-    session_key: &str,
-) -> bool {
+pub async fn reconcile_orphaned_tmuxless_session_pg(pool: &PgPool, session_key: &str) -> bool {
     let resolved_session_key =
         match resolve_session_locator_pg(pool, session_key, "orphan reconcile").await {
             Ok(Some(resolved_session_key)) => resolved_session_key,
@@ -1549,10 +1546,7 @@ pub async fn reconcile_orphaned_tmuxless_session_pg(
 /// Used by the kill-time live-activity guard (#3053) to compare against runtime
 /// file mtimes (relay output / generation marker / provider transcript).
 /// `None` when the row is absent or the timestamp cannot be decoded.
-pub async fn session_last_seen_unix_nanos_pg(
-    pool: &PgPool,
-    session_key: &str,
-) -> Option<i64> {
+pub async fn session_last_seen_unix_nanos_pg(pool: &PgPool, session_key: &str) -> Option<i64> {
     let resolved_session_key = resolve_session_locator_pg(pool, session_key, "last-seen session")
         .await
         .ok()
@@ -1684,10 +1678,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
     }
 }
 
-pub async fn disconnect_stale_fixed_session_by_key_pg(
-    pool: &PgPool,
-    session_key: &str,
-) -> usize {
+pub async fn disconnect_stale_fixed_session_by_key_pg(pool: &PgPool, session_key: &str) -> usize {
     let resolved_session_key =
         match resolve_session_locator_pg(pool, session_key, "stale session").await {
             Ok(Some(resolved_session_key)) => resolved_session_key,
@@ -2054,10 +2045,7 @@ pub async fn mark_raw_provider_transcript_growth_if_observed_pg(
 
 /// Clears a stale selector from Legacy rows only; a hosted row or a Herdr-configured
 /// channel's row keeps its selectors and transcript watermark.
-pub async fn clear_stale_session_id_pg(
-    pool: &PgPool,
-    session_id: &str,
-) -> Result<u64, String> {
+pub async fn clear_stale_session_id_pg(pool: &PgPool, session_id: &str) -> Result<u64, String> {
     sqlx::query(
         "UPDATE sessions
          SET claude_session_id = NULL,
@@ -2079,10 +2067,7 @@ pub async fn clear_stale_session_id_pg(
     .map_err(|error| format!("{error}"))
 }
 
-pub async fn clear_session_id_by_key_pg(
-    pool: &PgPool,
-    session_key: &str,
-) -> Result<u64, String> {
+pub async fn clear_session_id_by_key_pg(pool: &PgPool, session_key: &str) -> Result<u64, String> {
     let mut tx = pool
         .begin()
         .await

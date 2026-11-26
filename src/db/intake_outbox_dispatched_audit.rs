@@ -34,9 +34,7 @@ pub struct DispatchedAuditRow {
 /// row lock, or advisory lock. Each SELECT runs in an implicit transaction and
 /// takes an ACCESS SHARE relation lock; it is compatible with DML but can delay
 /// ACCESS EXCLUSIVE DDL for the duration of the query.
-pub async fn list_dispatched_audit(
-    pool: &PgPool,
-) -> Result<Vec<DispatchedAuditRow>, sqlx::Error> {
+pub async fn list_dispatched_audit(pool: &PgPool) -> Result<Vec<DispatchedAuditRow>, sqlx::Error> {
     let rows: Vec<DispatchedAuditProjection> = sqlx::query_as(
         "SELECT id, channel_id, user_msg_id, attempt_no, parent_outbox_id,
                 dispatched_at, claim_owner, provider

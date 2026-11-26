@@ -129,11 +129,7 @@ pub(crate) fn register_claude_pane_with(
 }
 
 /// `register_judged_claude_pane` of the pane's own binding, given up if a hook moved it since.
-pub fn register_unmoved_claude_pane(
-    tmux: &str,
-    channel: u64,
-    binding: TuiRuntimeBinding,
-) -> bool {
+pub fn register_unmoved_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) -> bool {
     let judged = binding.clone();
     register_judged_claude_pane(tmux, channel, binding, None, Some(&judged))
 }

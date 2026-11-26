@@ -148,10 +148,7 @@ impl TuiTurnStateProbe for JsonlTurnStateProbe<'_> {
     }
 }
 
-pub fn observe_provider_jsonl_turn_state(
-    provider: &ProviderKind,
-    path: &Path,
-) -> TuiTurnState {
+pub fn observe_provider_jsonl_turn_state(provider: &ProviderKind, path: &Path) -> TuiTurnState {
     match provider {
         ProviderKind::Claude => observe_claude_jsonl_turn_state(path),
         ProviderKind::Codex => observe_codex_jsonl_turn_state(path),
@@ -161,10 +158,7 @@ pub fn observe_provider_jsonl_turn_state(
 
 /// Unix nanos of the newest stamped provider conversation record in `path`'s tail window.
 /// `None` is "no measurable output": unstamped records and the file mtime never stand in.
-pub fn latest_provider_record_unix_nanos(
-    provider: &ProviderKind,
-    path: &Path,
-) -> Option<i64> {
+pub fn latest_provider_record_unix_nanos(provider: &ProviderKind, path: &Path) -> Option<i64> {
     let window = read_recent_jsonl_window(path, TURN_STATE_TAIL_BYTES).ok()?;
     latest_record_in(provider, &window.lines)
 }

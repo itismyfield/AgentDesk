@@ -273,9 +273,7 @@ pub fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
 }
 
 mod decision;
-pub use decision::{
-    error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume,
-};
+pub use decision::{error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume};
 
 /// Non-executable custody follows a refusal even after the start right moved to a gateway.
 #[derive(Clone)]

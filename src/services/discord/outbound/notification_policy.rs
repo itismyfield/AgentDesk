@@ -104,9 +104,7 @@ pub fn scoped<F: std::future::Future>(
     SCOPE.scope(class, send)
 }
 
-pub fn progress<F: std::future::Future>(
-    send: F,
-) -> impl std::future::Future<Output = F::Output> {
+pub fn progress<F: std::future::Future>(send: F) -> impl std::future::Future<Output = F::Output> {
     scoped(NoticeClass::Progress, send)
 }
 

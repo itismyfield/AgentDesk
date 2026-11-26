@@ -38,11 +38,7 @@ pub async fn begin_posting(pool: &PgPool, lease: Lease<'_>) -> Result<bool, sqlx
 
 /// Records the Discord message id on the same row and lease; a slow post the sweep already closed
 /// as `unknown` may still be confirmed by the worker that holds its lease.
-pub async fn ack(
-    pool: &PgPool,
-    lease: Lease<'_>,
-    message_id: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn ack(pool: &PgPool, lease: Lease<'_>, message_id: &str) -> Result<bool, sqlx::Error> {
     let changed = sqlx::query(
         "UPDATE message_outbox
             SET status = 'sent', sent_at = NOW(), transport_state = 'acked',

@@ -110,9 +110,7 @@ pub async fn record_channel_clear_boundary(
 /// The transaction's `NOW()` — the value that becomes `cleared_at` — is already
 /// frozen here, which is why it can be earlier than a transcript this clear
 /// ends up covering.
-pub async fn begin_channel_clear_boundary_tx(
-    pool: &PgPool,
-) -> Result<Transaction<'_, Postgres>> {
+pub async fn begin_channel_clear_boundary_tx(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
     pool.begin()
         .await
         .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))

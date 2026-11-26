@@ -106,12 +106,7 @@ pub trait Ledger {
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
-pub fn inject(
-    pane: &Pane,
-    request: &Request<'_>,
-    ledger: &dyn Ledger,
-    timing: &Timing,
-) -> Outcome {
+pub fn inject(pane: &Pane, request: &Request<'_>, ledger: &dyn Ledger, timing: &Timing) -> Outcome {
     let text = frame(
         request.source,
         request.author,

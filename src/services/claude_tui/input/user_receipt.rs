@@ -536,9 +536,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// Re-adopt only the stored row on the same live pane, never search for another input.
-pub fn revalidate_native_pin(
-    pin: &crate::services::provider::native_stop::NativeUserPin,
-) -> bool {
+pub fn revalidate_native_pin(pin: &crate::services::provider::native_stop::NativeUserPin) -> bool {
     #[cfg(not(unix))]
     {
         let _ = pin;

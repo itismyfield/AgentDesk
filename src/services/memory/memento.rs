@@ -300,10 +300,7 @@ impl MementoBackend {
         self.initialize_session(config).await
     }
 
-    pub async fn remember(
-        &self,
-        request: MementoRememberRequest,
-    ) -> Result<TokenUsage, String> {
+    pub async fn remember(&self, request: MementoRememberRequest) -> Result<TokenUsage, String> {
         if request.content.trim().is_empty() {
             return Err("memento remember requires non-empty content".to_string());
         }

@@ -18,10 +18,7 @@ pub fn herdr_execution(
 }
 
 /// The row's active dispatch; a missing row is an error, never an idle one.
-pub async fn active_dispatch_pg(
-    pool: &PgPool,
-    session_id: i64,
-) -> Result<Option<String>, String> {
+pub async fn active_dispatch_pg(pool: &PgPool, session_id: i64) -> Result<Option<String>, String> {
     sqlx::query_scalar("SELECT active_dispatch_id FROM sessions WHERE id = $1")
         .bind(session_id)
         .fetch_one(pool)

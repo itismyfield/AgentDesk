@@ -98,9 +98,7 @@ pub use model::{
     HostLiveness, HostMutation, HostPresence, HostRefusal, HostSessionRef, HostedRuntimeLocator,
 };
 pub(crate) use process_host::ProcessHost;
-pub use resolve::{
-    HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind,
-};
+pub use resolve::{HostEvidence, HostWitness, SessionTargetEvidence, host_for, resolve_host_kind};
 pub use submit::{
     AuthorizedHostTarget, InputSource, KeyOutcome, PinnedInput, SubmitOutcome, SubmitPayload,
 };

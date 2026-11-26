@@ -86,6 +86,7 @@ def cfg_requires_test(predicate: str) -> bool:
 
 TOP_LEVEL_MODULE_PURPOSES = {
     "adk_base_lib.rs": "Library root of the `adk-base` workspace crate; builds the seed `domain` value contracts and `utils` pure helpers in place, which the parent re-exports under their old paths.",
+    "adk_runtime_lib.rs": "Library root of the `adk-runtime` workspace crate; builds the runtime modules (config, db, logging, the provider/TUI/session services) in place, which the parent re-exports under their old paths.",
     "adk_test_support_lib.rs": "Library root of the `adk-test-support` workspace crate; builds the `test_support` capped waits, serialized runtimes, lock holder records and source lexer in place for dev-dependencies only, which the parent re-exports under `#[cfg(test)]`.",
     "api_caller_observability.rs": "Request-principal classification and uniform log-only API caller attribution records for identity-consuming mutation paths.",
     "bootstrap.rs": "Builds config, database, policy engine, and shared app state before launch.",

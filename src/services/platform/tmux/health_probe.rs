@@ -65,10 +65,7 @@ pub(crate) fn health_tmux_command_using(
 }
 
 /// Only a completed command reaches here; a missing session needs tmux's own missing answer.
-pub fn classify_health_tmux_output(
-    query: HealthTmuxQuery,
-    output: &Output,
-) -> HealthTmuxAnswer {
+pub fn classify_health_tmux_output(query: HealthTmuxQuery, output: &Output) -> HealthTmuxAnswer {
     match query {
         HealthTmuxQuery::HasSession => match classify_has_session_output(output) {
             SessionPresence::Present => HealthTmuxAnswer::Present,

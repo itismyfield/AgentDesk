@@ -363,10 +363,7 @@ pub enum PromptObservation {
     Ignored,
 }
 
-pub fn resolve_tmux_session_name(
-    provider: &str,
-    provider_session_id: &str,
-) -> Option<String> {
+pub fn resolve_tmux_session_name(provider: &str, provider_session_id: &str) -> Option<String> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state

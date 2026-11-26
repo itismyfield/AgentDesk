@@ -168,10 +168,7 @@ pub fn capture_scanned(
     Some(pin)
 }
 
-pub fn claude_record_created_at(
-    path: &Path,
-    start: u64,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+pub fn claude_record_created_at(path: &Path, start: u64) -> Option<chrono::DateTime<chrono::Utc>> {
     use std::io::{BufRead, Seek, SeekFrom};
     let mut file = std::io::BufReader::new(std::fs::File::open(path).ok()?);
     file.seek(SeekFrom::Start(start)).ok()?;

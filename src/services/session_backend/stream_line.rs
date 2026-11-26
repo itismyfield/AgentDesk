@@ -274,10 +274,7 @@ fn process_stream_line_with_body_policy(
     true
 }
 
-pub fn emit_status_events_from_stream_json(
-    json: &Value,
-    sender: &Sender<StreamMessage>,
-) -> bool {
+pub fn emit_status_events_from_stream_json(json: &Value, sender: &Sender<StreamMessage>) -> bool {
     let events = status_events_from_workflow_json(json);
     if events.is_empty() {
         return true;

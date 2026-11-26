@@ -39,5 +39,5 @@ readonly runtime_store="src/services/discord/runtime_store.rs"
   || exit
 # Keep the Windows-only transcript refusal executable in the required PR job.
 # The CLI parse test pins the Windows 1 MiB default main-thread stack contract on Windows debug.
-exec cargo nextest run --lib --profile ci --no-tests fail \
+exec cargo nextest run --workspace --lib --profile ci --no-tests fail \
   -E 'test(=services::discord::health::turn_deliver::inject::queued_reconcile::mismatched_file_identity_refuses_transcript_proof) | test(=cli::args::tests::cli_parse_fits_in_the_windows_default_main_thread_stack) | test(=services::tui_input::human_frame::history::notice_owner::census::tests::native_census_without_unix_change_witness_scans_each_time) | test(=runtime_layout::skill_sync::provider_sync_tests::retired_gemini_removes_deleted_directory_symlinks_windows) | test(=runtime_layout::skill_sync::provider_sync_tests::windows_link_removal_preserves_live_targets_and_removes_dangling_links) | test(=runtime_layout::skill_sync::provider_sync_tests::retired_gemini_removes_dangling_links_alone_or_with_skill_links)'

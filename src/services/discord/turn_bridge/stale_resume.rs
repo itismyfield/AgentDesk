@@ -64,9 +64,7 @@ pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
     STALE_PHRASES.iter().any(|p| lower.contains(p))
 }
 
-pub fn result_event_has_stale_resume_error(
-    value: &serde_json::Value,
-) -> bool {
+pub fn result_event_has_stale_resume_error(value: &serde_json::Value) -> bool {
     if value.get("type").and_then(|v| v.as_str()) != Some("result") {
         return false;
     }
@@ -129,10 +127,7 @@ pub fn output_file_has_stale_resume_error_after_offset(
         })
 }
 
-pub fn stream_error_has_stale_resume_error(
-    message: &str,
-    stderr: &str,
-) -> bool {
+pub fn stream_error_has_stale_resume_error(message: &str, stderr: &str) -> bool {
     contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
 }
 
