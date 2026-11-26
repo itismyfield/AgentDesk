@@ -1,6 +1,6 @@
 # #8328 1단계 설계 (w5): owner 입력 바쁜 중 주입 — S1(Claude 바로 합류 + 답 anchor 귀속) 먼저, S2(Codex 항상 Tab + 채널 lease)는 뒤로
 
-<!-- doc-path-refs: proposed src/services/claude_tui/hosting/deferred_source.rs src/services/cluster/execution_capacity/channel_lease.rs src/services/tui_input/human_frame/history/v2/key_admit.rs src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/tui_o/store/anchor_bindings.rs src/services/tui_o/writer/deliver/prepared.rs src/services/tui_o/writer/reply_anchor.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
+<!-- doc-path-refs: proposed src/services/claude_tui/hosting/deferred_source.rs src/services/cluster/execution_capacity/channel_lease.rs src/services/tui_input/human_frame/history/v2/key_admit.rs src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
 
 - 기준 코드: `origin/main` = `82702fe252`. 브랜치는 `wt/i8328-design`이다(w1 `cafed27b40`, w2 `1113953fa4`, w3 `9b934cfcb8`, w4 `c603bfb08c` 위에 이어서).
 - 결정 출처:
