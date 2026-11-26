@@ -164,7 +164,7 @@
 | `POST` | `/api/kanban-cards/assign-issue` | `kanban::assign_issue` | `src/server/routes/kanban.rs:984` | `src/server/routes/domains/kanban.rs:20` |
 | `POST` | `/api/kanban-cards/batch-rereview` | `kanban::batch_rereview` | `src/server/routes/kanban.rs:1795` | `src/server/routes/domains/kanban.rs:29` |
 | `GET` | `/api/kanban-cards/stalled` | `kanban::stalled_cards` | `src/server/routes/kanban.rs:955` | `src/server/routes/domains/kanban.rs:19` |
-| `DELETE` | `/api/kanban-cards/{id}` | `kanban::delete_card` | `src/server/routes/kanban/card_delete.rs:4` | `src/server/routes/domains/kanban.rs:21` |
+| `DELETE` | `/api/kanban-cards/{id}` | `kanban::delete_card` | `src/server/routes/kanban/card_delete.rs:5` | `src/server/routes/domains/kanban.rs:21` |
 | `GET` | `/api/kanban-cards/{id}` | `kanban::get_card` | `src/server/routes/kanban.rs:375` | `src/server/routes/domains/kanban.rs:21` |
 | `PATCH` | `/api/kanban-cards/{id}` | `kanban::update_card` | `src/server/routes/kanban.rs:434` | `src/server/routes/domains/kanban.rs:21` |
 | `POST` | `/api/kanban-cards/{id}/assign` | `kanban::assign_card` | `src/server/routes/kanban.rs:547` | `src/server/routes/domains/kanban.rs:27` |
