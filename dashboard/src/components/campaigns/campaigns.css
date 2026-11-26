@@ -56,7 +56,7 @@
 @media (prefers-reduced-motion: reduce) { .campaign-graph :is(.react-flow__edge-path, .react-flow__node) { transition: none; animation: none; } }
 @media (max-width: 899px) {
   .campaigns-panel .campaign-check { min-height: 44px; }
-  .campaigns-panel button { min-height: 44px; }
+  .campaigns-panel button:not(:where([class^="aui-"], [class*=" aui-"], [class^="aui-"] *, [class*=" aui-"] *)) { min-height: 44px; }
   .campaigns-panel :is(.campaign-tie-toolbar, .campaign-tie-list) button, .campaigns-panel .campaign-tie-list .campaign-check { min-height: 44px; }
   .campaigns-panel .campaign-tie-list .campaign-check input { width: 20px; height: 20px; }
   .campaign-tie-panel { padding-bottom: env(safe-area-inset-bottom, 0px); }

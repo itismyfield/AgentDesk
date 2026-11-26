@@ -1,18 +1,19 @@
 import { ChevronRight, Search, TriangleAlert } from "lucide-react";
-import { useId, useState, type CSSProperties, type ReactNode } from "react";
+import { useId, useMemo, useState, type CSSProperties, type ReactNode } from "react";
 import type { CampaignNodeLive, CampaignNodeStatus } from "../../api/campaigns";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { useWorkspaceAgents } from "../../contexts/WorkspaceContext";
 import { localeName } from "../../i18n";
 import { Button } from "../../kit/free/button-clean";
 import { TextField } from "../../kit/free/text-field-clean";
+import { ProjectProgressCard } from "../../kit/pro/project-progress-card";
 import AgentPersona from "../AgentPersona";
 import {
   Cap, CardNote, Chip, Desc, KitCard, Num, ROW_HOVER_CLASS, Row, StatusDot, Well, cn, type DotTone,
 } from "../common/KitPrimitives";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
 import { CampaignGateApprovalCard } from "./CampaignApprovalBanner";
-import { findAgent, findTasks, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
+import { findAgent, findTasks, groupOverviewProgress, taskCounts, type OverviewTask, type RecentEntry } from "./campaignOverviewModel";
 import { LABELS, LiveChip, liveSession, type Tr } from "./campaignPresentation";
 import type { Connection } from "./serverCampaignModel";
 import { StatusMarker, nodeMarker } from "./StatusMarker";
@@ -58,6 +59,43 @@ export default function CampaignOverview({ tasks, limit, showPr, hasTracker = fa
   const [query, setQuery] = useState("");
   const [finding, setFinding] = useState(false);
   const [foundAll, setFoundAll] = useState(false);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const [groupListAll, setGroupListAll] = useState(false);
+  const ungroupedLabel = tr("미분류", "Ungrouped");
+  const groupSummaries = useMemo(() => groupOverviewProgress(tasks, ungroupedLabel), [tasks, ungroupedLabel]);
+  const activeGroup = groupSummaries.find((g) => g.id === selectedGroupId) ?? null;
+  const activeGroupTasks = useMemo(
+    () => (activeGroup ? tasks.filter((t) => (t.group?.trim() ?? "") === activeGroup.key) : []),
+    [activeGroup, tasks],
+  );
+  const settledCount = counts.done + counts.skipped;
+  const openCount = Math.max(0, tasks.length - settledCount);
+  const totalAttention = counts.approvals + counts.blocked + counts.failed;
+  const attentionBreakdown = [
+    counts.approvals > 0 && tr(`승인 대기 ${counts.approvals}`, `${counts.approvals} awaiting approval`),
+    counts.blocked > 0 && tr(`막힘 ${counts.blocked}`, `${counts.blocked} blocked`),
+    counts.failed > 0 && tr(`실패 ${counts.failed}`, `${counts.failed} failed`),
+  ].filter(Boolean).join(" · ");
+  const progressLabels = useMemo(() => ({
+    regionAria: tr("전체 및 그룹별 진행 현황", "Overall and group progress"),
+    complete: tr("전체 진행률", "Progress"),
+    openTasks: tr("남은 작업", "Remaining"),
+    attention: tr("주의 필요", "Needs attention"),
+    groupsStat: tr("완료 그룹", "Tracks settled"),
+    groupsHeading: tr("그룹별 진행 현황", "Progress by group"),
+    groupsAria: tr("그룹별 진행률 선택", "Filter by group"),
+    groupsSummary: (done: number, total: number) => tr(`${done}/${total} 완료`, `${done} of ${total} settled`),
+    clearGroup: tr("그룹 선택 해제", "Clear group"),
+    showAllGroups: (total: number) => tr(`그룹 ${total}개 모두 보기`, `Show all ${total} groups`),
+    showFewerGroups: tr("그룹 접기", "Fewer groups"),
+    groupDone: tr("완료", "Settled"),
+    groupTasks: (done: number, total: number) => `${done}/${total}`,
+    groupRunning: (n: number) => tr(`진행 ${n}`, `${n} active`),
+    groupAttention: (n: number) => tr(`주의 ${n}`, `${n} flagged`),
+    noAttention: tr("이상 없음", "All clear"),
+    singleTrack: tr("단일 트랙", "Single track"),
+    activeGroupsSub: (n: number) => (n > 0 ? tr(`진행 그룹 ${n}개`, `${n} active tracks`) : tr("대기 중", "Idle")),
+  }), [tr]);
   const found = findTasks(tasks, query);
   const listId = useId();
   const findId = useId();
@@ -109,6 +147,49 @@ export default function CampaignOverview({ tasks, limit, showPr, hasTracker = fa
       {!hasTracker && stat(tr("완료", "Done"), `${counts.done} / ${tasks.length}`)}
       {summaryExtra && <div className="flex min-w-0 flex-wrap items-center gap-3 @[36rem]/overview:border-l @[36rem]/overview:border-[var(--line-soft)] @[36rem]/overview:pl-6">{summaryExtra}</div>}
     </Well>
+
+    {tasks.length > 0 && (
+      <ProjectProgressCard
+        totalCount={tasks.length}
+        doneCount={settledCount}
+        doneSub={counts.skipped > 0
+          ? tr(`완료 ${counts.done} · 건너뜀 ${counts.skipped}`, `${counts.done} completed · ${counts.skipped} skipped`)
+          : tr(`${counts.done} / ${tasks.length}`, `${counts.done} of ${tasks.length}`)}
+        openCount={openCount}
+        runningCount={counts.running}
+        openSub={limit ? tr(`${counts.running} / ${limit} 진행 중`, `${counts.running} / ${limit} active`) : tr(`${counts.running}개 진행 중`, `${counts.running} active`)}
+        attentionCount={totalAttention}
+        attentionSub={attentionBreakdown || undefined}
+        groups={groupSummaries}
+        selectedGroupId={activeGroup?.id ?? null}
+        onSelectGroup={(id) => { setGroupListAll(false); setSelectedGroupId(id); }}
+        maxPreviewGroups={phone ? 6 : 8}
+        labels={progressLabels}
+      >
+        {activeGroup && (
+          <div className="grid min-w-0 gap-1 border-t border-[var(--line-soft)] pt-2.5" onKeyDown={moveListFocus}>
+            <div className="flex items-baseline justify-between gap-2 px-1">
+              <strong className="truncate text-xs font-semibold text-[var(--fg)]">{activeGroup.name}</strong>
+              <Cap><Num>{tr(`작업 ${activeGroupTasks.length}개`, `${activeGroupTasks.length} tasks`)}</Num></Cap>
+            </div>
+            <div role="list" aria-label={tr(`${activeGroup.name} 작업`, `${activeGroup.name} tasks`)} className="grid min-w-0 gap-0.5">
+              {(groupListAll ? activeGroupTasks : activeGroupTasks.slice(0, LIST_PREVIEW)).map((task) => (
+                <div key={task.id} role="listitem" className="min-w-0">{row(task, reason(task))}</div>
+              ))}
+            </div>
+            {activeGroupTasks.length > LIST_PREVIEW && (
+              <div className="px-1">
+                <Button variant="ghost" size="sm" aria-expanded={groupListAll} onClick={() => setGroupListAll((v) => !v)}>
+                  {groupListAll
+                    ? tr("처음 몇 개만 보기", "Show fewer")
+                    : tr(`그룹 내 ${activeGroupTasks.length - LIST_PREVIEW}개 더 보기`, `Show ${activeGroupTasks.length - LIST_PREVIEW} more in group`)}
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </ProjectProgressCard>
+    )}
 
     {(otherGates.length > 0 || stuck.length > 0) && <section aria-label={tr("주의", "Needs attention")} className="campaign-attention grid min-w-0 gap-2">
       {otherGates.map(renderApproval)}

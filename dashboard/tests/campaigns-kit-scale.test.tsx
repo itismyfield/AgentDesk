@@ -539,10 +539,14 @@ describe("Batch landing header tracker & 486+ scale UX", () => {
       expect(container.querySelector('[data-testid="mock-reactflow"]')).toBeNull();
       expect(container.textContent).toContain("요구사항");
 
-      // (b) CampaignRelations on phone: interactive CampaignGroupOverview by default -> drill into CampaignGroupTasks -> switch to 목록 GroupList
+      // (b) CampaignRelations on phone: Wave GanttTimeline by default -> switch to 그래프 -> interactive CampaignGroupOverview -> drill into CampaignGroupTasks -> switch to 목록 GroupList
       await act(async () => {
         root.render(<CampaignRelations campaign={mobileCampaign} selectedId={null} onOpen={vi.fn()} tr={koTr} />);
       });
+      expect(container.querySelector('.aui-gantt-timeline-root[data-axis="wave"]')).not.toBeNull();
+
+      const graphModeBtn = [...container.querySelectorAll('[aria-label="관계도 보기 방식"] button')].find((b) => b.textContent?.trim() === "그래프")!;
+      await act(async () => (graphModeBtn as HTMLButtonElement).click());
       expect(container.querySelector('[data-testid="mock-reactflow"]')?.getAttribute("data-node-count")).toBe("2");
       expect(container.querySelector('[aria-label="그룹 목록"]')).toBeNull();
 
