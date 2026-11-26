@@ -179,7 +179,7 @@ mod tests {
     }
 
     fn schema(file: &str) -> Value {
-        let path = format!("{}/tests/fixtures/herdr/{file}", env!("CARGO_MANIFEST_DIR"));
+        let path = format!("{}/tests/fixtures/herdr/{file}", env!("ADK_REPO_ROOT"));
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
