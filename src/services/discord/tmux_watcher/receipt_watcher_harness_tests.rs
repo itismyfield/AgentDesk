@@ -10,13 +10,7 @@ const ORIGIN: &str = "G-watcher-origin";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg() {
-    use crate::services::agent_protocol::RuntimeHandoffKind;
-    use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, mark_herdr};
-    use crate::services::discord::inflight::{
-        GuardedSaveOutcome, InflightTurnIdentity, RelayOwnerKind,
-        stamp_runtime_handoff_if_matches_identity,
-    };
-    use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
+    use crate::services::discord::inflight::herdr_turn_evidence_tests::HELD;
 
     let test = "i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg";
     if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
@@ -24,16 +18,39 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
+    run_herdr_soft_terminal_case(&pool, test, 432, HELD[4], true).await;
+    run_herdr_soft_terminal_case(&pool, test, 433, HELD[1], false).await;
+    run_herdr_soft_terminal_case(&pool, test, 434, HELD[2], false).await;
+    pool.close().await;
+    db.drop().await;
+}
+
+async fn run_herdr_soft_terminal_case(
+    pool: &sqlx::PgPool,
+    test: &'static str,
+    case: u64,
+    hosted: crate::services::discord::inflight::herdr_turn_evidence_tests::HerdrCase,
+    authorized: bool,
+) {
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::inflight::herdr_turn_evidence_tests::mark_herdr;
+    use crate::services::discord::inflight::{
+        GuardedSaveOutcome, InflightTurnIdentity, RelayOwnerKind,
+        stamp_runtime_handoff_if_matches_identity,
+    };
+    use crate::services::discord::turn_finalizer::{CompletionAdmissionPlan, TurnKey};
+
     let prefix = format!("{}{}{}", user("earlier question"), said(T0), stop());
     let start = prefix.len() as u64;
-    let mut h = Harness::on(432, &prefix, Some(pool.clone())).await;
+    let origin = format!("i8432-origin-{case}");
+    let mut h = Harness::on(case, &prefix, Some(pool.clone())).await;
     h.commit(0, start);
     let mut prelaunch = InflightTurnState::new(
         CLAUDE,
         h.channel.get(),
         None,
         7,
-        8_432_000_001,
+        8_432_000_000 + case,
         0,
         "question".to_string(),
         None,
@@ -44,14 +61,14 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
     );
     prelaunch.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
     prelaunch.turn_source = TurnSource::Managed;
-    prelaunch.turn_nonce = Some("i8432-turn".to_string());
-    prelaunch.input_origin_ids = vec!["i8432-origin".to_string()];
+    prelaunch.turn_nonce = Some(format!("i8432-turn-{case}"));
+    prelaunch.input_origin_ids = vec![origin.clone()];
     mark_herdr(
-        &pool,
+        pool,
         &h.shared.token_hash,
         &mut prelaunch,
         std::path::Path::new(&h.path),
-        HELD[4],
+        hosted,
     )
     .await;
     std::fs::write(&h.path, prefix).unwrap();
@@ -115,13 +132,21 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
             field(line, "terminal_kind").as_deref() == Some("soft_stop_hook_summary")
         })
     );
-    assert!(
-        h.frames()
-            .iter()
-            .any(|(from, _, route)| { *from == start && route == "watcher_direct" }),
-        "expected direct authority for the suffix, got {:?}",
-        h.frames()
-    );
+    let frames = h.frames();
+    let route = if authorized {
+        "watcher_direct"
+    } else {
+        "soft_terminal_no_authority:turn_start_outside_frame"
+    };
+    assert_eq!(frames[0].0, start, "{hosted:?}: {frames:?}");
+    assert_eq!(frames[0].2, route, "{hosted:?}: {frames:?}");
+    if !authorized {
+        h.cancel();
+        h.exited("watcher exit after authority denial").await;
+        assert!(!h.showing(body));
+        assert_eq!(receipt(pool, restored.user_msg_id, h.channel).await, None);
+        return;
+    }
     h.drained("terminal frame").await;
     h.until("reply and terminal retirement", |h| {
         h.showing(body) && h.row().is_none()
@@ -143,13 +168,11 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
             .await
     );
     assert_eq!(
-        receipt(&pool, restored.user_msg_id, h.channel).await,
-        Some((vec!["i8432-origin".to_string()], "completed".to_string()))
+        receipt(pool, restored.user_msg_id, h.channel).await,
+        Some((vec![origin], "completed".to_string()))
     );
     h.cancel();
     h.exited("watcher exit").await;
-    pool.close().await;
-    db.drop().await;
 }
 
 async fn receipt(
