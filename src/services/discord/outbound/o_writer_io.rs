@@ -24,11 +24,14 @@ const _: () = assert!(
 );
 
 /// Uses the gateway's cached client, so O shares Legacy's rate limiter and route buckets.
+#[derive(Clone)]
 pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
     agy_correlation: Option<agy::Correlation>,
+    /// The message a POST replies to; set only on a per-unit copy of the port.
+    reply_to: Option<u64>,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -40,6 +43,7 @@ impl GatewayPort {
             bot_id,
             owner: None,
             agy_correlation: None,
+            reply_to: None,
             #[cfg(test)]
             repost_base: None,
         }
@@ -125,21 +129,28 @@ fn owner_guarded(
     }
 }
 
-impl GatewayPort {
-    /// A POST, replying to `reply_to` when set; a deleted anchor still posts, unreferenced.
-    fn send(
+impl DiscordPort for GatewayPort {
+    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
+        self.owner.as_ref().map(|scope| &scope.pool)
+    }
+
+    fn bot_id(&self) -> u64 {
+        self.bot_id
+    }
+
+    fn post(
         &self,
         channel: u64,
         content: String,
-        reply_to: Option<u64>,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let http = Arc::clone(&self.http);
         let agy = self.agy_correlation.clone();
-        let bot_id = self.bot_id;
+        let (bot_id, reply_to) = (self.bot_id, self.reply_to);
         async move {
             let message = super::notification_policy::scoped_message(channel)
                 .content(content)
                 .allowed_mentions(super::super::http::relay_allowed_mentions());
+            // A deleted anchor still posts, without the reference.
             let message = match reply_to {
                 Some(id) => message.reference_message(
                     serenity::MessageReference::from((ChannelId::new(channel), MessageId::new(id)))
@@ -181,24 +192,6 @@ impl GatewayPort {
             }
         }
     }
-}
-
-impl DiscordPort for GatewayPort {
-    fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
-        self.owner.as_ref().map(|scope| &scope.pool)
-    }
-
-    fn bot_id(&self) -> u64 {
-        self.bot_id
-    }
-
-    fn post(
-        &self,
-        channel: u64,
-        content: String,
-    ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        self.send(channel, content, None)
-    }
 
     fn post_origin(
         &self,
@@ -221,7 +214,11 @@ impl DiscordPort for GatewayPort {
         >,
         kind: crate::services::tui_o::shadow::UnitKind,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        self.post_unit_reply(channel, content, origin, kind, None)
+        use super::notification_policy as policy;
+        policy::scoped(
+            policy::unit_class(kind),
+            self.post_origin(channel, content, origin),
+        )
     }
 
     fn post_unit_reply(
@@ -234,21 +231,22 @@ impl DiscordPort for GatewayPort {
         kind: crate::services::tui_o::shadow::UnitKind,
         reply_to: Option<u64>,
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
-        use super::notification_policy as policy;
-        let request = self.send(channel, content.clone(), reply_to);
-        let guarded = owner_guarded(self.owner.clone(), channel, content, origin, request);
-        policy::scoped(policy::unit_class(kind), guarded)
+        // A copy carries the reply, so `post` stays the sole request and Created response.
+        let port = Self {
+            reply_to,
+            ..self.clone()
+        };
+        port.post_unit(channel, content, origin, kind)
     }
 
     fn mark_joined(&self, channel: u64, message: u64) -> impl Future<Output = ()> + Send + 'static {
         let http = Arc::clone(&self.http);
         async move {
-            let reaction = serenity::ReactionType::Unicode('➕'.to_string());
-            let channel_id = ChannelId::new(channel);
-            if let Err(error) = channel_id
-                .create_reaction(&*http, MessageId::new(message), reaction)
-                .await
-            {
+            let (channel_id, message_id) = (ChannelId::new(channel), MessageId::new(message));
+            let added = super::super::reaction_lifecycle::try_add_reaction_raw_detailed(
+                &http, channel_id, message_id, '➕',
+            );
+            if let Err(error) = added.await {
                 tracing::warn!(channel, message, %error, "[tui_o] joined mark not added");
             }
         }
