@@ -44,6 +44,9 @@ fn no_delivery_record(channel: u64) -> bool {
 
 #[tokio::test(flavor = "current_thread")]
 async fn i8372_process_restart_rechecks_thread_before_relay_pg() {
+    use crate::services::message_outbox::{
+        OutboxEnqueueOutcome, OutboxMessage, enqueue_outbox_pg_with_exact_origin,
+    };
     use crate::services::tui_o::cutover::{
         boot_snapshot, install_channel_lookup, record_thread_child,
         test_override::force_channel_lookups,
@@ -84,19 +87,35 @@ async fn i8372_process_restart_rechecks_thread_before_relay_pg() {
             "headless_delivery:v2|p=6:claude|c={CHILD}|u={}|g={}",
             state.user_msg_id, state.born_generation,
         );
-        let sent_id = sqlx::query_scalar::<_, i64>(
-            "INSERT INTO message_outbox
-             (target, content, bot, source, status, sent_at, dedupe_key, producer_turn_nonce)
-             VALUES ($1, $2, 'claude', 'headless_turn', 'sent', NOW(), $3, $4)
-             RETURNING id",
+        let target = format!("channel:{CHILD}");
+        let seeded = enqueue_outbox_pg_with_exact_origin(
+            &pool,
+            OutboxMessage {
+                target: &target,
+                content: BODY,
+                bot: "claude",
+                source: "headless_turn",
+                reason_code: Some("headless.delivery"),
+                session_key: None,
+            },
+            &dedupe_key,
+            None,
+            None,
+            None,
+            Some(NONCE),
         )
-        .bind(format!("channel:{CHILD}"))
-        .bind(BODY)
-        .bind(&dedupe_key)
-        .bind(NONCE)
-        .fetch_one(&pool)
         .await
         .unwrap();
+        let OutboxEnqueueOutcome::Enqueued { id: sent_id } = seeded else {
+            panic!("expected one seeded recovery delivery, got {seeded:?}");
+        };
+        let updated =
+            sqlx::query("UPDATE message_outbox SET status='sent', sent_at=NOW() WHERE id=$1")
+                .bind(sent_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        assert_eq!(updated.rows_affected(), 1);
 
         let thread: serenity::GuildChannel = serde_json::from_value(serde_json::json!({
             "id": CHILD.to_string(), "parent_id": PARENT.to_string(),
