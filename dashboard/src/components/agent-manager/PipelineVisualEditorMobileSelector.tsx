@@ -63,7 +63,7 @@ export default function PipelineVisualEditorMobileSelector({ ctx, actions }: Pro
                   isSelected
                     ? {
                         borderColor: "color-mix(in srgb, var(--th-accent-primary) 50%, var(--th-border) 50%)",
-                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 84%, #11141b 16%)",
+                        background: "color-mix(in srgb, var(--th-accent-primary-soft) 84%, var(--th-card-bg) 16%)",
                         color: "var(--th-text-primary)",
                       }
                     : {

@@ -118,4 +118,34 @@ describe("AuditPageView", () => {
 
     await act(async () => root.unmount());
   });
+
+  it("lets mobile users switch from anchors detail back to system prompts via audit-open-prompts", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={["/audit?tab=anchors&agent=adk-main"]}>
+            <AuditPageView isKo={false} agents={AGENTS} isMobileViewport={true} />
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    });
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+
+    expect(container.querySelector('[data-testid="audit-anchor-detail"]')).toBeTruthy();
+    const openPromptsBtn = container.querySelector<HTMLButtonElement>('[data-testid="audit-open-prompts"]');
+    expect(openPromptsBtn?.textContent).toBe("System prompts");
+
+    await act(async () => { openPromptsBtn!.click(); });
+    await act(async () => { await new Promise((r) => setTimeout(r, 10)); });
+
+    expect(container.querySelector('[data-testid="audit-prompt-detail"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="audit-anchor-detail"]')).toBeNull();
+
+    await act(async () => root.unmount());
+  });
 });
