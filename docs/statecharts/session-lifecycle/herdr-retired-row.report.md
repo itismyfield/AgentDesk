@@ -49,3 +49,53 @@ Presence is computed from the transcript, not the row, and leaves busy in every 
 The eight earlier cfgs set `FlushObserves` and `ToolGuard` TRUE so they keep checking what they
 checked before; the two new Before cfgs each drop one of them. The P2 that post-loop removal is not
 caught by these cfgs is not addressed here.
+
+## Restart owner (#8435 S3)
+
+Code SHA: `b04ea56650e5397989d33f1be199be21a83c8d0e`. `Owner # "off"` adds the turn's inflight row
+after an HTTP terminate (`Path = "terminate"`), a dcserver restart, and who ends that row. Existing
+cfgs set `Owner = "off"`, so the ownership variables stay at their initial values and every
+existing rule result is unchanged. Before and NewTurnToolBefore draw a different shortest
+counterexample with the same broken rules, so their chart and report were regenerated. Design and
+entrypoints: [herdr-restart-row-owner.design.md](herdr-restart-row-owner.design.md).
+
+| Action | Code |
+|---|---|
+| TermSettle | `herdr_terminate.rs:327-391` `settle_and_release` → `settle_captured`: HostTerminated clears the row, or the actor CAS refuses and the row stays (#8435 (b), refusal cause out of range) |
+| Restart (Owner on) | `born_generation` is stamped once (`inflight/model.rs:1068`), so a kept row turns prior-generation (`reconcile_gate.rs:29-34`); the mailbox actor dies with the process |
+| BootRestore | `restore_inflight.rs:120-229` one pass: pathless skips (`:215`); kind (`:224`) and receipt (`:143,:209`) run their settle once and may keep the row "for the next boot" (`herdr_admitted_restart.rs:193`, `herdr_before_start_restart.rs:114`); an `output_path` row takes the wrapper restore, whose reader can leave it (`carried_turn_close.rs:197-201`) |
+| EndPass | `herdr_row_end.rs:112-181` after `reconcile_done`; on a Retired execution `observe` keeps retire None (`:413`), `commit` releases the hold (`:505-517`), notice, clear. Unclear gates retry every 5 s; the model takes the passing run |
+| StaleDrop | design alternative only: `inflight/removal.rs:417-509` without the Herdr preservation |
+
+Shapes (`Shapes`, chosen at init): `pathless` = `target()` holds (`herdr_row_end.rs:53-72`);
+`path` = `output_path` set and no kind/receipt/hand-off/rebind/replay (`dedicated_cleanup_owner`
+false, `owner.rs:127-141`); `kind` = `tui_terminal_kind`; `receipt` = before-start stop or receipt.
+Held = prior-generation row of any shape (`owner.rs:110-123`). Current picks only `pathless`;
+Target picks every held shape and runs that shape's settle again.
+
+Rules: `ExeclessRowResolves` (PROPERTY) — a row whose execution is Retired is eventually gone or no
+longer held. `RowGoneWithTerminal` — a row leaves only after its terminal notice was shown.
+`NoticeOnce` — that notice shows once.
+
+| cfg | Breaks | Holds |
+|---|---|---|
+| OwnerCurrent | ExeclessRowResolves (path, kind, receipt) | RowGoneWithTerminal, NoticeOnce |
+| OwnerTarget | — | all |
+| OwnerMutantSplit (Target, `target()` kept as the pass filter) | ExeclessRowResolves | RowGoneWithTerminal, NoticeOnce |
+| OwnerRedeliver (Target re-run ignores the committed ack) | NoticeOnce | RowGoneWithTerminal, ExeclessRowResolves |
+| OwnerStaleDrop (Target + stale-age drops Herdr rows) | RowGoneWithTerminal | NoticeOnce, ExeclessRowResolves |
+
+Scratch runs with one shape each (not committed): Current and MutantSplit break only for `path`,
+`kind` and `receipt`; `pathless` holds; Target holds for all four.
+
+The OwnerCurrent counterexample, replayed against the code: retire (`herdr_terminate.rs:623`); the
+settle is refused and the row stays (`:395-411` "captured turn still active"); restart makes it
+prior-generation; boot restore leaves an `output_path` row (`target()` false at `:63`,
+`admitted()` needs a kind); from then on `restarted_owner` holds inputs, `row_end_pass` skips it
+(`:122`), `request_row_end` returns without a log (`:161`), and stale-age keeps it
+(`removal.rs:417-421`). The kind/receipt variant keeps the row at boot, then the same three
+consumers apply with `dedicated_cleanup_owner` true. The case log's 14:48:35 "dedicated owner" line
+with no row end diagnostics matches that variant; which X field the row carried is not confirmed.
+
+Out of range: the CAS refusal cause (#8435 (b)), the live row end notice repeat (#8435 (c)),
+HotSwap/rebind/replay rows, and current-generation rows before a restart.

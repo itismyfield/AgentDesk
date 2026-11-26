@@ -1,0 +1,454 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks RowGoneWithTerminal
+    lg1: Path to the RowGoneWithTerminal bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight terminal kind 행(현 세대)
+  s1: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s2: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 경로 없는 행(현 세대)
+  s3: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight before-start receipt 행(현 세대)
+  s4: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 나이로 삭제
+  s5: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight terminal kind 행(현 세대)
+  s6: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s7: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 경로 없는 행(현 세대)
+  s8: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight before-start receipt 행(현 세대)
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight terminal kind 행(현 세대)
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 경로 없는 행(현 세대)
+  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight before-start receipt 행(현 세대)
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 정리됨 #183; 공지 1회
+  s14: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 나이로 삭제
+  s15: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight terminal kind 행(현 세대)
+  s16: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight output_path 행(현 세대)
+  s17: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight 경로 없는 행(현 세대)
+  s18: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight before-start receipt 행(현 세대)
+  s19: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight 나이로 삭제
+  s20: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s21: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight terminal kind 행(현 세대)
+  s22: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight output_path 행(현 세대)
+  s23: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight 경로 없는 행(현 세대)
+  s24: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight before-start receipt 행(현 세대)
+  s25: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight 정리됨 #183; 공지 1회
+  s26: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s27: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s28: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s29: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s30: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight 나이로 삭제
+  s31: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s32: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s33: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s34: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s35: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s36: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s37: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight 나이로 삭제
+  s38: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s39: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s40: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s41: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s42: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s43: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s44: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s45: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s46: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s47: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s48: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s49: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s50: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s51: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s52: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s53: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s54: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s55: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s56: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s57: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s58: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s59: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s60: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s61: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s62: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s63: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s64: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s65: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s66: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s67: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  s68: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s69: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s70: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s71: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s72: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s73: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s74: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s75: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 정리됨 #183; 공지 1회
+  s76: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s77: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s78: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s79: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s80: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s81: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s82: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s83: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  s84: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 부팅 복구 전)
+  s85: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s86: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대, 부팅 복구 전)
+  s87: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 부팅 복구 전)
+  s88: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s89: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s90: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s91: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s92: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s93: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s94: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  s95: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 나이로 삭제
+  s96: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence busy #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  s97: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대)
+  s98: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight terminal kind 행(이전 세대, 공지 ack) #183; 공지 1회
+  s99: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s100: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 경로 없는 행(이전 세대)
+  s101: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대)
+  s102: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight before-start receipt 행(이전 세대, 공지 ack) #183; 공지 1회
+  s103: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  s104: 취소#183;row end 끝 #183; 실행 Retired #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 한때 끝남 #183; 재시작 뒤 #183; inflight 나이로 삭제 #183; 공지 1회
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  s0 --> s4: stale-age 삭제
+  s0 --> s5: terminate#183;row end 퇴역
+  s1 --> s4: stale-age 삭제
+  s1 --> s6: terminate#183;row end 퇴역
+  s2 --> s4: stale-age 삭제
+  s2 --> s7: terminate#183;row end 퇴역
+  s3 --> s4: stale-age 삭제
+  s3 --> s8: terminate#183;row end 퇴역
+  s4 --> s14: terminate#183;row end 퇴역
+  s5 --> s9: terminate settle_captured
+  s5 --> s13: terminate settle_captured
+  s5 --> s14: stale-age 삭제
+  s5 --> s15: 600초 정체 #8594; unknown
+  s6 --> s10: terminate settle_captured
+  s6 --> s13: terminate settle_captured
+  s6 --> s14: stale-age 삭제
+  s6 --> s16: 600초 정체 #8594; unknown
+  s7 --> s11: terminate settle_captured
+  s7 --> s13: terminate settle_captured
+  s7 --> s14: stale-age 삭제
+  s7 --> s17: 600초 정체 #8594; unknown
+  s8 --> s12: terminate settle_captured
+  s8 --> s13: terminate settle_captured
+  s8 --> s14: stale-age 삭제
+  s8 --> s18: 600초 정체 #8594; unknown
+  s9 --> s19: stale-age 삭제
+  s9 --> s21: 600초 정체 #8594; unknown
+  s9 --> s26: dcserver 재시작
+  s10 --> s19: stale-age 삭제
+  s10 --> s22: 600초 정체 #8594; unknown
+  s10 --> s27: dcserver 재시작
+  s11 --> s19: stale-age 삭제
+  s11 --> s23: 600초 정체 #8594; unknown
+  s11 --> s28: dcserver 재시작
+  s12 --> s19: stale-age 삭제
+  s12 --> s24: 600초 정체 #8594; unknown
+  s12 --> s29: dcserver 재시작
+  s13 --> s20: dcserver 재시작
+  s13 --> s25: 600초 정체 #8594; unknown
+  s14 --> s13: terminate settle_captured
+  s14 --> s19: terminate settle_captured
+  s14 --> s30: 600초 정체 #8594; unknown
+  s15 --> s21: terminate settle_captured
+  s15 --> s25: terminate settle_captured
+  s15 --> s30: stale-age 삭제
+  s16 --> s22: terminate settle_captured
+  s16 --> s25: terminate settle_captured
+  s16 --> s30: stale-age 삭제
+  s17 --> s23: terminate settle_captured
+  s17 --> s25: terminate settle_captured
+  s17 --> s30: stale-age 삭제
+  s18 --> s24: terminate settle_captured
+  s18 --> s25: terminate settle_captured
+  s18 --> s30: stale-age 삭제
+  s19 --> s36: dcserver 재시작
+  s19 --> s37: 600초 정체 #8594; unknown
+  s20 --> s31: 300초 경과
+  s20 --> s38: 600초 정체 #8594; unknown
+  s21 --> s37: stale-age 삭제
+  s21 --> s45: dcserver 재시작
+  s22 --> s37: stale-age 삭제
+  s22 --> s46: dcserver 재시작
+  s23 --> s37: stale-age 삭제
+  s23 --> s47: dcserver 재시작
+  s24 --> s37: stale-age 삭제
+  s24 --> s48: dcserver 재시작
+  s25 --> s38: dcserver 재시작
+  s26 --> s32: 300초 경과
+  s26 --> s36: stale-age 삭제
+  s26 --> s39: 부팅 복구 1회
+  s26 --> s40: 부팅 복구 1회
+  s26 --> s20: 부팅 복구 1회
+  s26 --> s45: 600초 정체 #8594; unknown
+  s27 --> s33: 300초 경과
+  s27 --> s36: stale-age 삭제
+  s27 --> s41: 부팅 복구 1회
+  s27 --> s20: 부팅 복구 1회
+  s27 --> s46: 600초 정체 #8594; unknown
+  s28 --> s34: 300초 경과
+  s28 --> s36: stale-age 삭제
+  s28 --> s42: 부팅 복구 1회
+  s28 --> s47: 600초 정체 #8594; unknown
+  s29 --> s35: 300초 경과
+  s29 --> s36: stale-age 삭제
+  s29 --> s43: 부팅 복구 1회
+  s29 --> s44: 부팅 복구 1회
+  s29 --> s20: 부팅 복구 1회
+  s29 --> s48: 600초 정체 #8594; unknown
+  s30 --> s25: terminate settle_captured
+  s30 --> s37: terminate settle_captured
+  s31 --> s49: stale sweep idle
+  s31 --> s51: 600초 정체 #8594; unknown
+  s32 --> s52: stale sweep idle
+  s32 --> s50: stale-age 삭제
+  s32 --> s56: 부팅 복구 1회
+  s32 --> s57: 부팅 복구 1회
+  s32 --> s31: 부팅 복구 1회
+  s32 --> s62: 600초 정체 #8594; unknown
+  s33 --> s53: stale sweep idle
+  s33 --> s50: stale-age 삭제
+  s33 --> s58: 부팅 복구 1회
+  s33 --> s31: 부팅 복구 1회
+  s33 --> s63: 600초 정체 #8594; unknown
+  s34 --> s54: stale sweep idle
+  s34 --> s50: stale-age 삭제
+  s34 --> s59: 부팅 복구 1회
+  s34 --> s64: 600초 정체 #8594; unknown
+  s35 --> s55: stale sweep idle
+  s35 --> s50: stale-age 삭제
+  s35 --> s60: 부팅 복구 1회
+  s35 --> s61: 부팅 복구 1회
+  s35 --> s31: 부팅 복구 1회
+  s35 --> s65: 600초 정체 #8594; unknown
+  s36 --> s50: 300초 경과
+  s36 --> s66: 600초 정체 #8594; unknown
+  s37 --> s66: dcserver 재시작
+  s38 --> s51: 300초 경과
+  s36 --> s20: 부팅 복구 1회
+  s36 --> s67: 부팅 복구 1회
+  s39 --> s20: row end pass 정리
+  s39 --> s56: 300초 경과
+  s39 --> s36: stale-age 삭제
+  s39 --> s68: 600초 정체 #8594; unknown
+  s40 --> s20: row end pass 정리
+  s40 --> s57: 300초 경과
+  s40 --> s67: stale-age 삭제
+  s40 --> s69: 600초 정체 #8594; unknown
+  s41 --> s58: 300초 경과
+  s41 --> s36: stale-age 삭제
+  s41 --> s20: row end pass 정리
+  s41 --> s70: 600초 정체 #8594; unknown
+  s42 --> s59: 300초 경과
+  s42 --> s36: stale-age 삭제
+  s42 --> s20: row end pass 정리
+  s42 --> s71: 600초 정체 #8594; unknown
+  s43 --> s20: row end pass 정리
+  s43 --> s60: 300초 경과
+  s43 --> s36: stale-age 삭제
+  s43 --> s72: 600초 정체 #8594; unknown
+  s44 --> s20: row end pass 정리
+  s44 --> s61: 300초 경과
+  s44 --> s67: stale-age 삭제
+  s44 --> s73: 600초 정체 #8594; unknown
+  s45 --> s62: 300초 경과
+  s45 --> s66: stale-age 삭제
+  s45 --> s68: 부팅 복구 1회
+  s45 --> s69: 부팅 복구 1회
+  s45 --> s38: 부팅 복구 1회
+  s46 --> s63: 300초 경과
+  s46 --> s66: stale-age 삭제
+  s46 --> s70: 부팅 복구 1회
+  s46 --> s38: 부팅 복구 1회
+  s47 --> s64: 300초 경과
+  s47 --> s66: stale-age 삭제
+  s47 --> s71: 부팅 복구 1회
+  s48 --> s65: 300초 경과
+  s48 --> s66: stale-age 삭제
+  s48 --> s72: 부팅 복구 1회
+  s48 --> s73: 부팅 복구 1회
+  s48 --> s38: 부팅 복구 1회
+  s49 --> s75: 600초 정체 #8594; unknown
+  s50 --> s74: stale sweep idle
+  s50 --> s76: 600초 정체 #8594; unknown
+  s51 --> s75: stale sweep idle
+  s52 --> s74: stale-age 삭제
+  s52 --> s77: 부팅 복구 1회
+  s52 --> s78: 부팅 복구 1회
+  s52 --> s49: 부팅 복구 1회
+  s52 --> s84: 600초 정체 #8594; unknown
+  s53 --> s74: stale-age 삭제
+  s53 --> s79: 부팅 복구 1회
+  s53 --> s49: 부팅 복구 1회
+  s53 --> s85: 600초 정체 #8594; unknown
+  s54 --> s74: stale-age 삭제
+  s54 --> s80: 부팅 복구 1회
+  s54 --> s86: 600초 정체 #8594; unknown
+  s55 --> s74: stale-age 삭제
+  s55 --> s81: 부팅 복구 1회
+  s55 --> s82: 부팅 복구 1회
+  s55 --> s49: 부팅 복구 1회
+  s55 --> s87: 600초 정체 #8594; unknown
+  s50 --> s31: 부팅 복구 1회
+  s50 --> s83: 부팅 복구 1회
+  s56 --> s31: row end pass 정리
+  s56 --> s77: stale sweep idle
+  s56 --> s50: stale-age 삭제
+  s56 --> s88: 600초 정체 #8594; unknown
+  s57 --> s31: row end pass 정리
+  s57 --> s78: stale sweep idle
+  s57 --> s83: stale-age 삭제
+  s57 --> s89: 600초 정체 #8594; unknown
+  s58 --> s79: stale sweep idle
+  s58 --> s50: stale-age 삭제
+  s58 --> s31: row end pass 정리
+  s58 --> s90: 600초 정체 #8594; unknown
+  s59 --> s80: stale sweep idle
+  s59 --> s50: stale-age 삭제
+  s59 --> s31: row end pass 정리
+  s59 --> s91: 600초 정체 #8594; unknown
+  s60 --> s31: row end pass 정리
+  s60 --> s81: stale sweep idle
+  s60 --> s50: stale-age 삭제
+  s60 --> s92: 600초 정체 #8594; unknown
+  s61 --> s31: row end pass 정리
+  s61 --> s82: stale sweep idle
+  s61 --> s83: stale-age 삭제
+  s61 --> s93: 600초 정체 #8594; unknown
+  s62 --> s84: stale sweep idle
+  s62 --> s76: stale-age 삭제
+  s62 --> s88: 부팅 복구 1회
+  s62 --> s89: 부팅 복구 1회
+  s62 --> s51: 부팅 복구 1회
+  s63 --> s85: stale sweep idle
+  s63 --> s76: stale-age 삭제
+  s63 --> s90: 부팅 복구 1회
+  s63 --> s51: 부팅 복구 1회
+  s64 --> s86: stale sweep idle
+  s64 --> s76: stale-age 삭제
+  s64 --> s91: 부팅 복구 1회
+  s65 --> s87: stale sweep idle
+  s65 --> s76: stale-age 삭제
+  s65 --> s92: 부팅 복구 1회
+  s65 --> s93: 부팅 복구 1회
+  s65 --> s51: 부팅 복구 1회
+  s66 --> s76: 300초 경과
+  s67 --> s83: 300초 경과
+  s67 --> s94: 600초 정체 #8594; unknown
+  s66 --> s38: 부팅 복구 1회
+  s66 --> s94: 부팅 복구 1회
+  s68 --> s38: row end pass 정리
+  s68 --> s88: 300초 경과
+  s68 --> s66: stale-age 삭제
+  s69 --> s38: row end pass 정리
+  s69 --> s89: 300초 경과
+  s69 --> s94: stale-age 삭제
+  s70 --> s90: 300초 경과
+  s70 --> s66: stale-age 삭제
+  s70 --> s38: row end pass 정리
+  s71 --> s91: 300초 경과
+  s71 --> s66: stale-age 삭제
+  s71 --> s38: row end pass 정리
+  s72 --> s38: row end pass 정리
+  s72 --> s92: 300초 경과
+  s72 --> s66: stale-age 삭제
+  s73 --> s38: row end pass 정리
+  s73 --> s93: 300초 경과
+  s73 --> s94: stale-age 삭제
+  s74 --> s95: 600초 정체 #8594; unknown
+  s76 --> s95: stale sweep idle
+  s74 --> s49: 부팅 복구 1회
+  s74 --> s96: 부팅 복구 1회
+  s77 --> s49: row end pass 정리
+  s77 --> s74: stale-age 삭제
+  s77 --> s97: 600초 정체 #8594; unknown
+  s78 --> s49: row end pass 정리
+  s78 --> s96: stale-age 삭제
+  s78 --> s98: 600초 정체 #8594; unknown
+  s79 --> s74: stale-age 삭제
+  s79 --> s49: row end pass 정리
+  s79 --> s99: 600초 정체 #8594; unknown
+  s80 --> s74: stale-age 삭제
+  s80 --> s49: row end pass 정리
+  s80 --> s100: 600초 정체 #8594; unknown
+  s81 --> s49: row end pass 정리
+  s81 --> s74: stale-age 삭제
+  s81 --> s101: 600초 정체 #8594; unknown
+  s82 --> s49: row end pass 정리
+  s82 --> s96: stale-age 삭제
+  s82 --> s102: 600초 정체 #8594; unknown
+  s83 --> s96: stale sweep idle
+  s83 --> s103: 600초 정체 #8594; unknown
+  s84 --> s95: stale-age 삭제
+  s84 --> s97: 부팅 복구 1회
+  s84 --> s98: 부팅 복구 1회
+  s84 --> s75: 부팅 복구 1회
+  s85 --> s95: stale-age 삭제
+  s85 --> s99: 부팅 복구 1회
+  s85 --> s75: 부팅 복구 1회
+  s86 --> s95: stale-age 삭제
+  s86 --> s100: 부팅 복구 1회
+  s87 --> s95: stale-age 삭제
+  s87 --> s101: 부팅 복구 1회
+  s87 --> s102: 부팅 복구 1회
+  s87 --> s75: 부팅 복구 1회
+  s76 --> s51: 부팅 복구 1회
+  s76 --> s103: 부팅 복구 1회
+  s88 --> s51: row end pass 정리
+  s88 --> s97: stale sweep idle
+  s88 --> s76: stale-age 삭제
+  s89 --> s51: row end pass 정리
+  s89 --> s98: stale sweep idle
+  s89 --> s103: stale-age 삭제
+  s90 --> s99: stale sweep idle
+  s90 --> s76: stale-age 삭제
+  s90 --> s51: row end pass 정리
+  s91 --> s100: stale sweep idle
+  s91 --> s76: stale-age 삭제
+  s91 --> s51: row end pass 정리
+  s92 --> s51: row end pass 정리
+  s92 --> s101: stale sweep idle
+  s92 --> s76: stale-age 삭제
+  s93 --> s51: row end pass 정리
+  s93 --> s102: stale sweep idle
+  s93 --> s103: stale-age 삭제
+  s94 --> s103: 300초 경과
+  s96 --> s104: 600초 정체 #8594; unknown
+  s95 --> s75: 부팅 복구 1회
+  s95 --> s104: 부팅 복구 1회
+  s97 --> s75: row end pass 정리
+  s97 --> s95: stale-age 삭제
+  s98 --> s75: row end pass 정리
+  s98 --> s104: stale-age 삭제
+  s99 --> s95: stale-age 삭제
+  s99 --> s75: row end pass 정리
+  s100 --> s95: stale-age 삭제
+  s100 --> s75: row end pass 정리
+  s101 --> s75: row end pass 정리
+  s101 --> s95: stale-age 삭제
+  s102 --> s75: row end pass 정리
+  s102 --> s104: stale-age 삭제
+  s103 --> s104: stale sweep idle
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s2 bugPath
+  class s4 breaks
+  class s4 bugPath
+  class s14 breaks
+  class s19 breaks
+  class s30 breaks
+  class s36 breaks
+  class s37 breaks
+  class s50 breaks
+  class s66 breaks
+  class s74 breaks
+  class s76 breaks
+  class s95 breaks
