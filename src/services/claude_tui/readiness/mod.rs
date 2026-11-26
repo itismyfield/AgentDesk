@@ -126,17 +126,23 @@ impl Proof {
     }
 }
 pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
-    evidence(session, path, None)
+    evidence(session, path, None, false)
+}
+
+/// A turn of the current source ended, including a hard terminal followed by session metadata.
+#[cfg(unix)]
+pub(crate) fn observe_terminal_completion(session: &str, path: &Path) -> bool {
+    evidence(session, Some(path), None, true).is_some()
 }
 /// Herdr only: current evidence, else a pane that outlived the daemon restart idling on its
 /// last hard terminal.
 pub(crate) fn observe_restored(session: &str, path: Option<&Path>) -> Option<Proof> {
-    evidence(session, path, Some(ProofOrigin::RestoredHard))
+    evidence(session, path, Some(ProofOrigin::RestoredHard), false)
         .or_else(|| observe_restored_reply(session, path))
 }
 /// Only a pinned reply of this launch; never the composer's historical hard-terminal proof.
 pub(crate) fn observe_restored_reply(session: &str, path: Option<&Path>) -> Option<Proof> {
-    evidence(session, path, Some(ProofOrigin::RestoredReply))
+    evidence(session, path, Some(ProofOrigin::RestoredReply), false)
         .filter(|proof| proof.origin == ProofOrigin::RestoredReply)
 }
 /// The shared observer stops at a `permission-mode`; a session-state block after a hard
@@ -157,7 +163,12 @@ fn launched_before_run(nonce: &str) -> bool {
     crate::services::tui_prompt_dedupe::binding_context::execution_context("claude", nonce)
         .is_ok_and(|ctx| ctx.created_at < *STARTED)
 }
-fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> Option<Proof> {
+fn evidence(
+    session: &str,
+    path: Option<&Path>,
+    origin: Option<ProofOrigin>,
+    terminal_only: bool,
+) -> Option<Proof> {
     let restart_ok = origin == Some(ProofOrigin::RestoredHard);
     let source = Source::current(session, path)?;
     let clear = clear::current(&source)?;
@@ -303,7 +314,7 @@ fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> 
                 && compact::completion::read(&source.path, &done.floor, &source.native, true)
                     .is_some()
         });
-    let settled = compact_ready
+    let settled = (!terminal_only && compact_ready)
         || (native_idle
             && entry.compact_ticket.is_none()
             && match &tail {
@@ -329,14 +340,22 @@ fn evidence(session: &str, path: Option<&Path>, origin: Option<ProofOrigin>) -> 
                         || (tail.end == End::Summary
                             && final_stop.is_some_and(|floor| tail.activity <= floor));
                     (terminal && recovered && after_pending && after_continuation)
-                        || (entry.start_open() && tail.empty && blocked.is_none())
+                        || (!terminal_only && entry.start_open() && tail.empty && blocked.is_none())
                 }
-                None => entry.start_open() && entry.file.is_none() && !source.path.exists(),
+                None => {
+                    !terminal_only
+                        && entry.start_open()
+                        && entry.file.is_none()
+                        && !source.path.exists()
+                }
             })
             // A resumed run's terminal is its own; the old history's never settles it.
             && entry.resumed.is_none_or(|(floor, _)| {
                 tail.as_ref().is_none_or(|tail| tail.activity > floor)
             });
+    if terminal_only && !settled {
+        return None;
+    }
     // A resumed session idles at its composer whatever its old history ends with.
     let resumed = !settled
         && entry.compact_ticket.is_none()
@@ -395,6 +414,7 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
         &proof.source.session,
         Some(&proof.source.path),
         Some(proof.origin),
+        false,
     )?;
     if current.source != proof.source
         || current.origin != proof.origin

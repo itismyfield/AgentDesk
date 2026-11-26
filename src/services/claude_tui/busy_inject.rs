@@ -395,15 +395,20 @@ impl Pane {
     }
 
     pub(crate) fn capture(&self) -> Option<String> {
-        self.ok(&[
-            "capture-pane",
-            "-p",
-            "-e",
-            "-t",
-            &self.target,
-            "-S",
-            CAPTURE_SCROLLBACK,
-        ])
+        self.capture_window(Some(CAPTURE_SCROLLBACK))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn capture_visible(&self) -> Option<String> {
+        self.capture_window(None)
+    }
+
+    fn capture_window(&self, scrollback: Option<&str>) -> Option<String> {
+        let mut args = vec!["capture-pane", "-p", "-e", "-t", self.target()];
+        if let Some(scrollback) = scrollback {
+            args.extend(["-S", scrollback]);
+        }
+        self.ok(&args)
     }
 }
 

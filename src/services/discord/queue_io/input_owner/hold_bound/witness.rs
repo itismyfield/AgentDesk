@@ -295,7 +295,7 @@ fn read_tmux(
     let Ok(pane) = Pane::with_program(session, "tmux".into()) else {
         return Unknown("pane_unavailable");
     };
-    let capture = pane.ok(&["capture-pane", "-p", "-e", "-t", pane.target()]);
+    let capture = pane.capture_visible();
     let observed = panes_and_transcript(Host::Tmux, provider, capture.as_deref(), || {
         match processes::observe(session) {
             Descendants::Present => return End::Open,
@@ -351,18 +351,21 @@ fn read_herdr(
 }
 
 fn claude_end(session: &str, path: &Path) -> End {
-    match tui_turn_state::observe_claude_jsonl_running_turn_state(path) {
-        TuiTurnState::Idle => (),
-        TuiTurnState::Streaming | TuiTurnState::UserSubmitted => return End::Open,
-        TuiTurnState::Unknown => return End::Unknown,
+    let state = tui_turn_state::observe_claude_jsonl_running_turn_state(path);
+    if state.is_busy() {
+        return End::Open;
     }
     match tui_turn_state::provider_tool_calls(&ProviderKind::Claude, path) {
         ToolCalls::Open => End::Open,
         ToolCalls::Inconclusive => End::Unknown,
         ToolCalls::Closed
-            if tui_turn_state::jsonl_completion_scan_idle(&ProviderKind::Claude, path)
-                || claude_readiness::observe(session, Some(path)).is_some() =>
+            if state == TuiTurnState::Idle
+                && (tui_turn_state::jsonl_completion_scan_idle(&ProviderKind::Claude, path)
+                    || claude_readiness::observe(session, Some(path)).is_some()) =>
         {
+            End::Proven
+        }
+        ToolCalls::Closed if claude_readiness::observe_terminal_completion(session, path) => {
             End::Proven
         }
         ToolCalls::Closed => End::Unknown,

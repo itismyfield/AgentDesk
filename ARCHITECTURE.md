@@ -2351,6 +2351,11 @@ src/
 │   │   │   │   │   └── herdr_tests.rs
 │   │   │   │   ├── held_watch/
 │   │   │   │   │   └── readiness.rs
+│   │   │   │   ├── hold_bound/
+│   │   │   │   │   └── witness.rs
+│   │   │   │   ├── hold_bound_tests/
+│   │   │   │   │   ├── claude_transcript_tests.rs
+│   │   │   │   │   └── restart_notice_tests.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
@@ -2364,6 +2369,8 @@ src/
 │   │   │   │   ├── effort_continue.rs
 │   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs
+│   │   │   │   ├── hold_bound.rs
+│   │   │   │   ├── hold_bound_tests.rs
 │   │   │   │   ├── ingress.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
@@ -4560,6 +4567,7 @@ src/
 │   │   ├── herdr_gate/
 │   │   │   ├── closing.rs
 │   │   │   ├── enter_readmit_tests.rs
+│   │   │   ├── hold_bound_capture.rs
 │   │   │   ├── legacy_return.rs
 │   │   │   ├── legacy_return_tests.rs
 │   │   │   ├── missing_marker_rig_tests.rs
