@@ -444,9 +444,9 @@ pub(in crate::services::discord) async fn seed_permit(
         Selected::Target(target) => target,
     };
     let retired = target.record.state == HostedState::Retired;
-    if Some(target.record.execution_nonce.as_str()) != against.nonce {
-        // Another execution's retired row is vacant; a live one is not this restart's successor.
-        return match retired {
+    let nonce = target.record.execution_nonce.as_str();
+    if Some(nonce) != against.nonce {
+        return match other_execution_admits(context, nonce, retired) {
             true => Ok(()),
             false => Err("재시작 대상이 아닌 세션이 실행 중입니다".into()),
         };
@@ -495,6 +495,16 @@ pub(in crate::services::discord) async fn seed_permit(
         )),
     }
 }
+
+/// Another execution's row lets the greeting start when it is retired, or when it is the successor
+/// the greeting's own launch recorded before creating it; its next turn recovers it by its form.
+fn other_execution_admits(context: &serde_json::Value, nonce: &str, retired: bool) -> bool {
+    retired || seed::successor_nonce(context) == Some(nonce)
+}
+
+#[cfg(test)]
+#[path = "seed_successor_tests.rs"]
+mod seed_successor_tests;
 
 enum Applied {
     Vacant,

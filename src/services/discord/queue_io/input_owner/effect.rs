@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::services::claude_tui::busy_inject;
 use crate::services::claude_tui::owner_input;
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::turn_orchestrator::{ChannelMailboxHandle, SeedStopAuthority};
 
 /// One attempt's input as the actor prepared it; the frame may carry several sources.
 pub(crate) struct PreparedPayload {
@@ -117,6 +117,7 @@ pub(crate) async fn run(
         }
         let watch = held.then(|| proof.take_preparation_watch()).flatten();
         let at = clock.clone();
+        let stopped = proof.herdr_user_stop();
         let ended = mailbox
             .v2_request(move |slot| {
                 let owner = slot.as_mut().ok_or("V2 not adopted")?;
@@ -124,6 +125,12 @@ pub(crate) async fn run(
                 // Past its original's readiness due the leaf's own proof ends the input for good.
                 let ended = owner.leaf_outlived_due(&key, &*at);
                 match (held && !ended, refused || ended) {
+                    // A restart greeting a Herdr stop closed is cancelled, never held to run later.
+                    (true, _) if stopped && owner.seed_attempt(&key) => {
+                        let attempt = key.clone();
+                        let stop = SeedStopAuthority::Reserved { attempt, proof };
+                        owner.cancel_seed_not_sent(stop)
+                    }
                     (true, _) if readiness_held => owner.hold_readiness_not_sent(&key, proof, at()),
                     (true, _) => owner.hold_not_sent(&key, proof),
                     (_, true) => owner.refuse_not_sent(&key, proof),

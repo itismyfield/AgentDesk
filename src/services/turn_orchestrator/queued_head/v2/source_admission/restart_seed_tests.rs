@@ -244,3 +244,58 @@ fn restart_seed_snapshot_keeps_the_old_format() {
     assert!(!ChannelMailboxHandle::person_input(Some(execution)));
     assert!(!ChannelMailboxHandle::effort_input(Some(execution)));
 }
+
+fn claim(owner: &mut Owner) -> (Front, u64) {
+    let front = owner.front().unwrap();
+    owner.grant_front(&front).unwrap();
+    owner.claim_turn(front.1.message_id, &front).unwrap();
+    (front, owner.claim_number())
+}
+
+/// A successor record or stop settlement whose claim or greeting is gone changes nothing: the
+/// cancelled greeting stays gone and the next restart's greeting keeps only its own record.
+#[test]
+fn stale_successor_callback_does_not_revive_withdrawn_seed() {
+    let _root = TestRuntimeRootGuard::new();
+    let mut owner = owner(81287);
+    waiting(&mut owner, 1);
+    assert_eq!(admit(&mut owner, SEED, "restart-a"), Ok(Admitted::Queued));
+    let (front, number) = claim(&mut owner);
+    let stop = || SeedStopAuthority::Claimed {
+        front: front.clone(),
+        number,
+    };
+    assert_eq!(owner.cancel_seed_not_sent(stop()), Ok(()));
+    let after = owner.json().unwrap();
+    assert!(
+        owner
+            .record_seed_successor((&front, number), "late")
+            .is_err()
+    );
+    assert_eq!(
+        owner.json().unwrap(),
+        after,
+        "the cancelled greeting stays gone"
+    );
+    assert_eq!(
+        admit(&mut owner, SEED + 1, "restart-b"),
+        Ok(Admitted::Queued)
+    );
+    let (next, current) = claim(&mut owner);
+    assert!(
+        owner
+            .record_seed_successor((&front, number), "late")
+            .is_err()
+    );
+    assert!(owner.cancel_seed_not_sent(stop()).is_err());
+    assert_eq!(order(&owner), [SEED + 1, 1]);
+    assert_eq!(
+        owner.record_seed_successor((&next, current), "mine"),
+        Ok(())
+    );
+    let json = owner.json().unwrap();
+    let binds = json["admission_binds"].as_array().unwrap();
+    let seed = binds.iter().find(|b| b["at"]["index"] == 0).unwrap();
+    let recorded = &seed["context"]["execution"]["metadata"]["restart_seed"]["successor_nonce"];
+    assert_eq!(recorded, "mine");
+}

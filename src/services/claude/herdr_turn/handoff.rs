@@ -126,6 +126,10 @@ pub(super) fn launched_source(
         }
     };
     let prepare = |prepared: &PreparedIncarnation| {
+        // A greeting's own execution is known before its Pending row or pane can exist.
+        let nonce = &prepared.context.execution_nonce;
+        crate::services::claude_tui::owner_input::record_successor(nonce)
+            .map_err(|e| launch_error("prepare_command", e))?;
         let (system, model) = (turn.system_prompt, turn.model);
         let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
         let command = super::super::tui_session_launch::prepare_claude_herdr_launch(
