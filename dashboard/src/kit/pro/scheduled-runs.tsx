@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { CircleCheck, CircleDot, Files, GitPullRequest, Hand, Link, MessageSquare, Sparkles, X } from 'lucide-react';
@@ -12,6 +12,65 @@ export interface ScheduledTask { id: string; title: string; usage: number; agent
 export interface ScheduleDay { label: string; date?: string | number }
 export interface ScheduleAgent { name: string; mark?: string }
 export interface SchedulePiece { taskId: string; day: number; session: number; amount: number; part: number; parts: number }
+export interface ScheduledRunsLabels {
+  title: string;
+  close: string;
+  statNames: Record<TaskStatKind, string>;
+  pastSession: string;
+  cellFull: string;
+  underOnePercent: string;
+  remainingCapacity: (pct: number) => string;
+  missingUsage: string;
+  noWholeSession: string;
+  insufficientSplitCapacity: string;
+  insufficientTotalCapacity: string;
+  insufficientCapacity: string;
+  samePosition: string;
+  autoCompleteAnnounce: (placed: number, failedCount: number) => string;
+  splitPlanPrefix: (parts: number) => string;
+  unavailablePlan: (reason: string) => string;
+  unavailableTargetPlan: (reason: string) => string;
+  targetAvailable: (posLabel: string, planText: string) => string;
+  targetUnavailable: (posLabel: string, reason: string) => string;
+  cannotPlaceKeepChoosing: (reason: string) => string;
+  placedAnnounce: (title: string, planText: string) => string;
+  moveCancelled: (title: string) => string;
+  pastSessionReadOnlyAnnounce: string;
+  pickedAnnounce: (title: string, targetDesc: string) => string;
+  insufficientWithReason: (reason: string) => string;
+  unplaceableTag: string;
+  unplaceableWithReason: (reason: string) => string;
+  unplaceableLabel: (reason: string) => string;
+  partLabel: (part: number, total: number) => string;
+  requiredPctLabel: (pct: number) => string;
+  noUsageValue: string;
+  pastHint: string;
+  moveHint: string;
+  agentLabel: string;
+  sessionLabel: string;
+  waitingStatus: string;
+  requiredLabel: string;
+  thisPartPct: (pct: number) => string;
+  pastDetailHint: string;
+  sheetMoveHint: string;
+  desktopMoveHint: string;
+  agentGroupLabel: string;
+  agentHighlightLabel: (name: string) => string;
+  agentTaskCount: (selectedAgent: string | null, count: number) => string;
+  modeGroupLabel: string;
+  autoMode: string;
+  manualMode: string;
+  queueLabel: string;
+  remainingCountLabel: (count: number) => string;
+  allPlaced: string;
+  noTasks: string;
+  boardLabel: string;
+  cellAriaLabel: (day: string, session: string, meterPct: number, count: number, isPast: boolean, cellPlan: { ok: boolean; reason?: string } | null) => string;
+  morePieces: (count: number) => string;
+  moveTargetTitle: string;
+  selectSession: string;
+  moveHere: string;
+}
 export interface ScheduledRunsProps {
   tasks: ScheduledTask[];
   days?: (string | ScheduleDay)[];
@@ -26,6 +85,7 @@ export interface ScheduledRunsProps {
   loop?: boolean;
   title?: string;
   subtitle?: string;
+  labels?: Partial<ScheduledRunsLabels>;
   onAutoComplete?: (pieces: SchedulePiece[]) => void;
   onPlace?: (task: ScheduledTask, pieces: SchedulePiece[]) => void;
   onMove?: (piece: SchedulePiece, target: { day: number; session: number }) => void;
@@ -39,6 +99,65 @@ interface Plan { ok: boolean; cells: { pos: number; amount: number }[]; reason?:
 const EPS = 1e-9;
 const statIcon: Record<TaskStatKind, typeof Files> = { files: Files, pr: GitPullRequest, tests: CircleCheck, messages: MessageSquare, issues: CircleDot, links: Link };
 const statName: Record<TaskStatKind, string> = { files: '파일', pr: '변경 요청', tests: '테스트', messages: '메시지', issues: '이슈', links: '링크' };
+export const scheduledRunsDefaultLabels: ScheduledRunsLabels = {
+  title: '주간 실행 배치',
+  close: '닫기',
+  statNames: statName,
+  pastSession: '지난 세션',
+  cellFull: '카드 2개로 꽉 참',
+  underOnePercent: '남은 용량 1% 미만',
+  remainingCapacity: (pct) => `남은 용량 ${pct}%`,
+  missingUsage: '사용량 값이 없어 배치할 수 없음',
+  noWholeSession: '통째로 들어갈 세션이 없음',
+  insufficientSplitCapacity: '나눠도 남은 용량이 부족함',
+  insufficientTotalCapacity: '전체를 담을 용량이 부족함',
+  insufficientCapacity: '용량 부족',
+  samePosition: '이미 같은 위치',
+  autoCompleteAnnounce: (placed, failedCount) => `자동 배치 완료: 작업 ${placed}개 배치${failedCount ? `, ${failedCount}개는 용량 부족` : ''}`,
+  splitPlanPrefix: (parts) => `${parts}조각으로 나눠 `,
+  unavailablePlan: (reason) => `불가: ${reason}`,
+  unavailableTargetPlan: (reason) => `불가 · ${reason}`,
+  targetAvailable: (posLabel, planText) => `${posLabel}: 놓을 수 있음 · ${planText}`,
+  targetUnavailable: (posLabel, reason) => `${posLabel}: 놓을 수 없음 · ${reason}`,
+  cannotPlaceKeepChoosing: (reason) => `놓을 수 없음: ${reason}. 계속 옮길 곳을 고르세요.`,
+  placedAnnounce: (title, planText) => `${title} 배치 완료: ${planText}`,
+  moveCancelled: (title) => `${title} 옮기기 취소`,
+  pastSessionReadOnlyAnnounce: '지난 세션의 작업은 옮길 수 없습니다. Enter로 상세만 볼 수 있습니다.',
+  pickedAnnounce: (title, targetDesc) => `${title} 집음. 방향키로 옮길 곳을 고르고 Space나 Enter로 놓습니다. ${targetDesc}`,
+  insufficientWithReason: (reason) => `용량 부족 · ${reason}`,
+  unplaceableTag: '배치 불가',
+  unplaceableWithReason: (reason) => `배치 불가 · ${reason}`,
+  unplaceableLabel: (reason) => `배치 불가: ${reason}`,
+  partLabel: (part, total) => `${part}/${total} 조각`,
+  requiredPctLabel: (pct) => `필요량 ${pct}%`,
+  noUsageValue: '사용량 값 없음',
+  pastHint: '지난 세션이라 옮길 수 없습니다. Enter로 상세를 봅니다.',
+  moveHint: 'Enter 상세, Space로 집어 방향키로 옮긴 뒤 Space로 놓기. 마우스로 끌어 옮길 수 있습니다.',
+  agentLabel: '에이전트',
+  sessionLabel: '세션',
+  waitingStatus: '대기 중',
+  requiredLabel: '필요량',
+  thisPartPct: (pct) => ` (이 조각 ${pct}%)`,
+  pastDetailHint: '지난 세션이라 옮길 수 없습니다.',
+  sheetMoveHint: '아래에서 옮길 세션을 고르면 나뉘는 결과를 먼저 보여 줍니다.',
+  desktopMoveHint: '끌어서 옮기거나 Space로 집어 방향키로 옮깁니다.',
+  agentGroupLabel: '에이전트 강조',
+  agentHighlightLabel: (name) => `${name} 작업 강조`,
+  agentTaskCount: (selectedAgent, count) => (selectedAgent ? `${selectedAgent} ${count}개` : `작업 ${count}개`),
+  modeGroupLabel: '배치 방식',
+  autoMode: '자동',
+  manualMode: '수동',
+  queueLabel: '배치 대기',
+  remainingCountLabel: (count) => `남은 작업 ${count}개`,
+  allPlaced: '모든 작업을 배치했습니다.',
+  noTasks: '배치할 작업이 없습니다.',
+  boardLabel: '날짜별 세션 배치',
+  cellAriaLabel: (day, session, meterPct, count, isPast, cellPlan) => `${day} ${session}, 사용 ${meterPct}%, 카드 ${count}개${isPast ? ', 지난 세션' : ''}${cellPlan ? (cellPlan.ok ? ', 놓을 수 있음' : `, 놓을 수 없음: ${cellPlan.reason ?? ''}`) : ''}`,
+  morePieces: (count) => `외 ${count}개 조각`,
+  moveTargetTitle: '옮길 세션',
+  selectSession: '세션을 고르세요',
+  moveHere: '여기로 옮기기',
+};
 const fin = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
 export const effectiveUsage = (task: ScheduledTask) => fin(task.usage) ? Math.max(1, task.usage) : 0;
 const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
@@ -47,13 +166,13 @@ const letter = (text: string) => (text.replace(/\s+/g, '')[0] ?? '').toUpperCase
 
 function cellOf(pieces: Piece[], pos: number) { let count = 0; let used = 0; for (const piece of pieces) if (piece.pos === pos) { count += 1; used += piece.amount; } return { count, used }; }
 /** Ordered reason for a first target cell: past → card count → under 1% → remaining share. */
-export function cellReason(pieces: Piece[], pos: number, amount: number, current: number, limit: number, minSplit: number) {
-  if (pos < current) return '지난 세션';
+export function cellReason(pieces: Piece[], pos: number, amount: number, current: number, limit: number, minSplit: number, labels: ScheduledRunsLabels = scheduledRunsDefaultLabels) {
+  if (pos < current) return labels.pastSession;
   const { count, used } = cellOf(pieces, pos);
   const free = limit - used;
-  if (count >= 2) return '카드 2개로 꽉 참';
-  if (free < limit * 0.01) return '남은 용량 1% 미만';
-  if (free + EPS < Math.min(minSplit, amount)) return `남은 용량 ${Math.round((free / limit) * 100)}%`;
+  if (count >= 2) return labels.cellFull;
+  if (free < limit * 0.01) return labels.underOnePercent;
+  if (free + EPS < Math.min(minSplit, amount)) return labels.remainingCapacity(Math.round((free / limit) * 100));
   return null;
 }
 function fill(pieces: Piece[], order: number[], amount: number, limit: number, minSplit: number) {
@@ -67,22 +186,22 @@ function fill(pieces: Piece[], order: number[], amount: number, limit: number, m
   }
   return { out, rest };
 }
-export function planAutoPlacement(pieces: Piece[], amount: number, current: number, total: number, limit: number, minSplit: number): Plan {
-  if (amount <= 0) return { ok: false, cells: [], reason: '사용량 값이 없어 배치할 수 없음' };
+export function planAutoPlacement(pieces: Piece[], amount: number, current: number, total: number, limit: number, minSplit: number, labels: ScheduledRunsLabels = scheduledRunsDefaultLabels): Plan {
+  if (amount <= 0) return { ok: false, cells: [], reason: labels.missingUsage };
   if (amount <= limit + EPS) {
     for (let pos = current; pos < total; pos += 1) { const { count, used } = cellOf(pieces, pos); if (count < 2 && limit - used + EPS >= amount) return { ok: true, cells: [{ pos, amount }] }; }
-    return { ok: false, cells: [], reason: '통째로 들어갈 세션이 없음' };
+    return { ok: false, cells: [], reason: labels.noWholeSession };
   }
   const { out, rest } = fill(pieces, Array.from({ length: Math.max(0, total - current) }, (_, i) => current + i), amount, limit, minSplit);
-  return rest <= EPS ? { ok: true, cells: out } : { ok: false, cells: [], reason: '나눠도 남은 용량이 부족함' };
+  return rest <= EPS ? { ok: true, cells: out } : { ok: false, cells: [], reason: labels.insufficientSplitCapacity };
 }
-export function planManualPlacement(pieces: Piece[], amount: number, target: number, current: number, total: number, limit: number, minSplit: number): Plan {
-  if (amount <= 0) return { ok: false, cells: [], reason: '사용량 값이 없어 배치할 수 없음' };
-  const first = cellReason(pieces, target, amount, current, limit, minSplit);
+export function planManualPlacement(pieces: Piece[], amount: number, target: number, current: number, total: number, limit: number, minSplit: number, labels: ScheduledRunsLabels = scheduledRunsDefaultLabels): Plan {
+  if (amount <= 0) return { ok: false, cells: [], reason: labels.missingUsage };
+  const first = cellReason(pieces, target, amount, current, limit, minSplit, labels);
   if (first) return { ok: false, cells: [], reason: first };
   const order = [...Array.from({ length: total - target }, (_, i) => target + i), ...Array.from({ length: Math.max(0, target - current) }, (_, i) => current + i)];
   const { out, rest } = fill(pieces, order, amount, limit, minSplit);
-  return rest <= EPS ? { ok: true, cells: out } : { ok: false, cells: [], reason: '전체를 담을 용량이 부족함' };
+  return rest <= EPS ? { ok: true, cells: out } : { ok: false, cells: [], reason: labels.insufficientTotalCapacity };
 }
 function initialPieces(tasks: ScheduledTask[], days: number, sessions: number, limit: number, minSplit: number) {
   const pieces: Piece[] = [];
@@ -126,7 +245,7 @@ function Mark({ src, text, className }: { src?: string; text: string; className:
   return <span className={className} aria-hidden="true">{src && !failed ? <img src={src} alt="" onError={() => setFailed(true)} /> : letter(text)}</span>;
 }
 
-function Sheet({ title, onClose, children, returnTo }: { title: string; onClose: () => void; children: ReactNode; returnTo: HTMLElement | null }) {
+function Sheet({ title, closeLabel, onClose, children, returnTo }: { title: string; closeLabel: string; onClose: () => void; children: ReactNode; returnTo: HTMLElement | null }) {
   const panel = useRef<HTMLDivElement>(null);
   const titleId = useId();
   useEffect(() => {
@@ -145,14 +264,17 @@ function Sheet({ title, onClose, children, returnTo }: { title: string; onClose:
   return createPortal(<div className="aui-scheduled-runs-layer" onPointerDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <style>{styles}</style>
     <div ref={panel} className="aui-scheduled-runs-sheet" role="dialog" aria-modal="true" aria-labelledby={titleId} onKeyDown={keys}>
-      <div className="aui-scheduled-runs-sheet-head"><h2 id={titleId}>{title}</h2><button type="button" className="aui-scheduled-runs-sheet-close" aria-label="닫기" onClick={onClose}><X size={18} aria-hidden="true" /></button></div>
+      <div className="aui-scheduled-runs-sheet-head"><h2 id={titleId}>{title}</h2><button type="button" className="aui-scheduled-runs-sheet-close" aria-label={closeLabel} onClick={onClose}><X size={18} aria-hidden="true" /></button></div>
       <div className="aui-scheduled-runs-sheet-body">{children}</div>
     </div>
   </div>, document.body);
 }
 
-export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], sessions = ['09:00', '14:00', '20:00'], current: currentInput = { day: 0, session: 0 }, limit = 100, minSplit = 15, agents: agentInput, defaultMode = 'auto', autoStart = false, loop = false, title = '주간 실행 배치', subtitle, onAutoComplete, onPlace, onMove, className = '', style }: ScheduledRunsProps) {
+export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], sessions = ['09:00', '14:00', '20:00'], current: currentInput = { day: 0, session: 0 }, limit = 100, minSplit = 15, agents: agentInput, defaultMode = 'auto', autoStart = false, loop = false, title: titleProp, subtitle, labels, onAutoComplete, onPlace, onMove, className = '', style }: ScheduledRunsProps) {
   const id = useId();
+  const text: ScheduledRunsLabels = { ...scheduledRunsDefaultLabels, ...labels, statNames: { ...scheduledRunsDefaultLabels.statNames, ...labels?.statNames } };
+  const title = titleProp ?? text.title;
+  const missingUsageDetail = labels?.missingUsage ?? '사용량 값이 없어 배치할 수 없습니다.';
   // Narrow viewports and touch tablets use the sheet so the tap-to-move path is always reachable.
   const sheetMode = useMedia('(max-width: 899px), (pointer: coarse)');
   const days: ScheduleDay[] = dayInput.map((day) => typeof day === 'string' ? { label: day } : day);
@@ -236,8 +358,8 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
       const next = tasks.find((task) => !outOfRange(task) && !onBoard.has(task.id) && !tried.has(task.id));
       if (!next) break;
       tried.add(next.id);
-      const plan = planAutoPlacement(piecesRef.current, effectiveUsage(next), current, total, limit, minSplit);
-      if (!plan.ok) { failures[next.id] = plan.reason ?? '용량 부족'; setFailed((prev) => ({ ...prev, [next.id]: failures[next.id] })); continue; }
+      const plan = planAutoPlacement(piecesRef.current, effectiveUsage(next), current, total, limit, minSplit, text);
+      if (!plan.ok) { failures[next.id] = plan.reason ?? text.insufficientCapacity; setFailed((prev) => ({ ...prev, [next.id]: failures[next.id] })); continue; }
       setFailed((prev) => { const copy = { ...prev }; delete copy[next.id]; return copy; });
       setFlying(next.id);
       setPieces([...piecesRef.current, ...plan.cells.map((cell) => ({ taskId: next.id, pos: cell.pos, amount: cell.amount }))]);
@@ -261,7 +383,7 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     setRunning(false);
     const all = toPublic(piecesRef.current);
     onAutoComplete?.(all);
-    setAnnounce(`자동 배치 완료: 작업 ${placed}개 배치${Object.keys(failures).length ? `, ${Object.keys(failures).length}개는 용량 부족` : ''}`);
+    setAnnounce(text.autoCompleteAnnounce(placed, Object.keys(failures).length));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [signature, current, onAutoComplete]);
 
@@ -278,7 +400,7 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     const timer = setInterval(() => {
       if (interacted.current || pointerInside.current || running) return;
       const onBoard = new Set(piecesRef.current.map((piece) => piece.taskId));
-      const placeable = tasks.some((task) => !outOfRange(task) && !onBoard.has(task.id) && planAutoPlacement(piecesRef.current, effectiveUsage(task), current, total, limit, minSplit).ok);
+      const placeable = tasks.some((task) => !outOfRange(task) && !onBoard.has(task.id) && planAutoPlacement(piecesRef.current, effectiveUsage(task), current, total, limit, minSplit, text).ok);
       if (placeable) return;
       clearInterval(timer);
       setPieces(initialPieces(tasks, D, S, limit, minSplit)); setFailed({});
@@ -351,9 +473,9 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
 
   const sourceAmount = (source: Source) => source.kind === 'queue' ? effectiveUsage(taskMap.get(source.taskId)!) : (piecesRef.current.find((piece) => piece.taskId === source.taskId && piece.pos === source.pos)?.amount ?? 0);
   const evaluate = (source: Source, target: number): Plan => {
-    if (source.kind === 'piece' && source.pos === target) return { ok: false, cells: [], reason: '이미 같은 위치' };
+    if (source.kind === 'piece' && source.pos === target) return { ok: false, cells: [], reason: text.samePosition };
     const base = source.kind === 'queue' ? piecesRef.current : piecesRef.current.filter((piece) => !(piece.taskId === source.taskId && piece.pos === source.pos));
-    return planManualPlacement(base, sourceAmount(source), target, current, total, limit, minSplit);
+    return planManualPlacement(base, sourceAmount(source), target, current, total, limit, minSplit, text);
   };
   const apply = (source: Source, target: number) => {
     const plan = evaluate(source, target);
@@ -376,7 +498,7 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     else if (before) onMove?.(before, { day: Math.floor(target / S), session: target % S });
     return plan;
   };
-  const planText = (plan: Plan) => plan.ok ? `${plan.cells.length > 1 ? `${plan.cells.length}조각으로 나눠 ` : ''}${plan.cells.map((cell) => `${posLabel(cell.pos)} ${Math.round((cell.amount / limit) * 100)}%`).join(', ')}` : `불가: ${plan.reason}`;
+  const planText = (plan: Plan) => plan.ok ? `${plan.cells.length > 1 ? text.splitPlanPrefix(plan.cells.length) : ''}${plan.cells.map((cell) => `${posLabel(cell.pos)} ${Math.round((cell.amount / limit) * 100)}%`).join(', ')}` : text.unavailablePlan(plan.reason ?? '');
   const movable = (source: Source) => source.kind === 'queue' ? effectiveUsage(taskMap.get(source.taskId)!) > 0 : source.pos >= current;
   const startDrag = () => { interrupt(); if (running) { stopAfterLanding.current = true; paused.current = false; } if (mode === 'auto') toManual(false); setDetail(null); };
 
@@ -450,7 +572,7 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     setPendingFocus(null);
   }, [pendingFocus, pieces]);
 
-  const describeTarget = (source: Source, target: number) => { const plan = evaluate(source, target); return `${posLabel(target)}: ${plan.ok ? `놓을 수 있음 · ${planText(plan)}` : `놓을 수 없음 · ${plan.reason}`}`; };
+  const describeTarget = (source: Source, target: number) => { const plan = evaluate(source, target); return plan.ok ? text.targetAvailable(posLabel(target), planText(plan)) : text.targetUnavailable(posLabel(target), plan.reason ?? ''); };
   const cardKeys = (event: ReactKeyboardEvent<HTMLButtonElement>, source: Source) => {
     const task = taskMap.get(source.taskId)!;
     if (pick && pick.source.taskId === source.taskId && (pick.source.kind === source.kind) && (source.kind === 'queue' || (pick.source.kind === 'piece' && pick.source.pos === source.pos))) {
@@ -464,13 +586,13 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
       else if (event.key === ' ' || event.key === 'Enter') {
         event.preventDefault();
         const plan = apply(source, pick.target);
-        if (!plan) { setAnnounce(`놓을 수 없음: ${evaluate(source, pick.target).reason}. 계속 옮길 곳을 고르세요.`); return; }
+        if (!plan) { setAnnounce(text.cannotPlaceKeepChoosing(evaluate(source, pick.target).reason ?? '')); return; }
         setPick(null);
-        setAnnounce(`${task.title} 배치 완료: ${planText(plan)}`);
+        setAnnounce(text.placedAnnounce(task.title, planText(plan)));
         setPendingFocus(`${source.taskId}#${plan.cells[0].pos}`);
         return;
-      } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setPick(null); setAnnounce(`${task.title} 옮기기 취소`); return; }
-      else if (event.key === 'Tab') { setPick(null); setAnnounce(`${task.title} 옮기기 취소`); return; }
+      } else if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); setPick(null); setAnnounce(text.moveCancelled(task.title)); return; }
+      else if (event.key === 'Tab') { setPick(null); setAnnounce(text.moveCancelled(task.title)); return; }
       else return;
       event.preventDefault();
       setPick({ source, target });
@@ -480,13 +602,13 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     if (event.key === 'Enter') { event.preventDefault(); toggleDetail(source, event.currentTarget); return; }
     if (event.key === ' ') {
       event.preventDefault();
-      if (!movable(source)) { setAnnounce(source.kind === 'piece' ? '지난 세션의 작업은 옮길 수 없습니다. Enter로 상세만 볼 수 있습니다.' : '사용량 값이 없어 배치할 수 없습니다.'); return; }
+      if (!movable(source)) { setAnnounce(source.kind === 'piece' ? text.pastSessionReadOnlyAnnounce : missingUsageDetail); return; }
       startDrag();
       let start = source.kind === 'piece' ? source.pos : current;
       if (source.kind === 'queue') { for (let pos = current; pos < total; pos += 1) if (evaluate(source, pos).ok) { start = pos; break; } }
       start = Math.min(total - 1, start);
       setPick({ source, target: start });
-      setAnnounce(`${task.title} 집음. 방향키로 옮길 곳을 고르고 Space나 Enter로 놓습니다. ${describeTarget(source, start)}`);
+      setAnnounce(text.pickedAnnounce(task.title, describeTarget(source, start)));
     }
     if (event.key === 'Escape' && detail) { event.preventDefault(); setDetail(null); }
   };
@@ -508,21 +630,21 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     const sub = [task.agent, task.description].filter(Boolean).join(' · ');
     return <>
       <span className="aui-scheduled-runs-card-top"><Mark src={task.mark} text={task.title} className="aui-scheduled-runs-card-mark" /><span className="aui-scheduled-runs-card-title">{task.title}</span></span>
-      <span className="aui-scheduled-runs-card-sub" data-warn={reason || (!piece && U === 0) || undefined}>{reason ? `용량 부족 · ${reason}` : !piece && U === 0 ? '사용량 값이 없어 배치할 수 없음' : sub}</span>
+      <span className="aui-scheduled-runs-card-sub" data-warn={reason || (!piece && U === 0) || undefined}>{reason ? text.insufficientWithReason(reason) : !piece && U === 0 ? text.missingUsage : sub}</span>
       <span className="aui-scheduled-runs-card-foot">
         <span className="aui-scheduled-runs-stats">{(task.stats ?? []).slice(0, 2).map((stat, index) => { const Icon = statIcon[stat.kind]; return <span key={index} className="aui-scheduled-runs-stat"><Icon size={12} strokeWidth={1.5} aria-hidden="true" />{formatStat(stat.value)}</span>; })}</span>
         {piece && own.length > 1 && <span className="aui-scheduled-runs-part">{part}/{own.length}</span>}
-        <span className="aui-scheduled-runs-tag" data-warn={reason || pct === null || undefined}>{reason ? '배치 불가' : pct === null ? '—' : `${pct}%`}</span>
+        <span className="aui-scheduled-runs-tag" data-warn={reason || pct === null || undefined}>{reason ? text.unplaceableTag : pct === null ? '—' : `${pct}%`}</span>
       </span>
     </>;
   };
   const cardLabel = (task: ScheduledTask, piece?: Piece) => {
     const own = piece ? byTask.get(task.id) ?? [] : [];
-    const stats = (task.stats ?? []).slice(0, 2).map((stat) => `${stat.label ?? statName[stat.kind]} ${stat.value}`).join(', ');
-    const where = piece ? `${posLabel(piece.pos)}${own.length > 1 ? `, ${own.indexOf(piece) + 1}/${own.length} 조각` : ''}, ${Math.round((piece.amount / limit) * 100)}%` : failed[task.id] ? `배치 불가: ${failed[task.id]}` : effectiveUsage(task) > 0 ? `필요량 ${Math.round((effectiveUsage(task) / limit) * 100)}%` : '사용량 값 없음';
+    const stats = (task.stats ?? []).slice(0, 2).map((stat) => `${stat.label ?? text.statNames[stat.kind]} ${stat.value}`).join(', ');
+    const where = piece ? `${posLabel(piece.pos)}${own.length > 1 ? `, ${text.partLabel(own.indexOf(piece) + 1, own.length)}` : ''}, ${Math.round((piece.amount / limit) * 100)}%` : failed[task.id] ? text.unplaceableLabel(failed[task.id]) : effectiveUsage(task) > 0 ? text.requiredPctLabel(Math.round((effectiveUsage(task) / limit) * 100)) : text.noUsageValue;
     return `${task.title}${task.agent ? `, ${task.agent}` : ''}, ${where}${stats ? `, ${stats}` : ''}`;
   };
-  const hintFor = (source: Source) => source.kind === 'piece' && source.pos < current ? '지난 세션이라 옮길 수 없습니다. Enter로 상세를 봅니다.' : 'Enter 상세, Space로 집어 방향키로 옮긴 뒤 Space로 놓기. 마우스로 끌어 옮길 수 있습니다.';
+  const hintFor = (source: Source) => source.kind === 'piece' && source.pos < current ? text.pastHint : text.moveHint;
   const renderCard = (task: ScheduledTask, source: Source, piece?: Piece) => {
     const key = detailKey(source);
     const past = source.kind === 'piece' && source.pos < current;
@@ -555,12 +677,12 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
       <p className="aui-scheduled-runs-detail-title">{task.title}</p>
       {task.description && <p className="aui-scheduled-runs-detail-desc">{task.description}</p>}
       <dl className="aui-scheduled-runs-detail-table">
-        {task.agent && <><dt>에이전트</dt><dd>{task.agent}</dd></>}
-        <dt>세션</dt><dd>{piece ? `${posLabel(piece.pos)}${own.length > 1 ? ` · ${own.indexOf(piece) + 1}/${own.length} 조각` : ''}` : failed[task.id] ? `배치 불가 · ${failed[task.id]}` : '대기 중'}</dd>
-        {(task.stats ?? []).slice(0, 2).map((stat, index) => <span key={index} style={{ display: 'contents' }}><dt>{stat.label ?? statName[stat.kind]}</dt><dd>{typeof stat.value === 'number' ? stat.value.toLocaleString('en-US') : stat.value}</dd></span>)}
-        <dt>필요량</dt><dd>{Math.round((U / limit) * 100)}%{piece && own.length > 1 ? ` (이 조각 ${Math.round((piece.amount / limit) * 100)}%)` : ''}</dd>
+        {task.agent && <><dt>{text.agentLabel}</dt><dd>{task.agent}</dd></>}
+        <dt>{text.sessionLabel}</dt><dd>{piece ? `${posLabel(piece.pos)}${own.length > 1 ? ` · ${text.partLabel(own.indexOf(piece) + 1, own.length)}` : ''}` : failed[task.id] ? text.unplaceableWithReason(failed[task.id]) : text.waitingStatus}</dd>
+        {(task.stats ?? []).slice(0, 2).map((stat, index) => <span key={index} style={{ display: 'contents' }}><dt>{stat.label ?? text.statNames[stat.kind]}</dt><dd>{typeof stat.value === 'number' ? stat.value.toLocaleString('en-US') : stat.value}</dd></span>)}
+        <dt>{text.requiredLabel}</dt><dd>{Math.round((U / limit) * 100)}%{piece && own.length > 1 ? text.thisPartPct(Math.round((piece.amount / limit) * 100)) : ''}</dd>
       </dl>
-      <p className="aui-scheduled-runs-detail-hint">{source.kind === 'piece' && source.pos < current ? '지난 세션이라 옮길 수 없습니다.' : U <= 0 ? '사용량 값이 없어 배치할 수 없습니다.' : sheetMode ? '아래에서 옮길 세션을 고르면 나뉘는 결과를 먼저 보여 줍니다.' : '끌어서 옮기거나 Space로 집어 방향키로 옮깁니다.'}</p>
+      <p className="aui-scheduled-runs-detail-hint">{source.kind === 'piece' && source.pos < current ? text.pastDetailHint : U <= 0 ? missingUsageDetail : sheetMode ? text.sheetMoveHint : text.desktopMoveHint}</p>
     </>;
   };
   const openInfo = detail ? detailFor(detail) : null;
@@ -569,17 +691,17 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
   const header = <div className="aui-scheduled-runs-head">
     <div className="aui-scheduled-runs-heading"><h3 className="aui-scheduled-runs-title">{title}</h3>{subtitle && <span className="aui-scheduled-runs-subtitle" title={subtitle}>{subtitle}</span>}</div>
     <div className="aui-scheduled-runs-tools">
-      {agents.length > 0 && <div className="aui-scheduled-runs-agents" role="group" aria-label="에이전트 강조" data-open={selectedAgent !== null || undefined}>
-        {agents.map((agent, index) => <button key={agent.name} type="button" className="aui-scheduled-runs-agent" aria-pressed={selectedAgent === agent.name} data-other={selectedAgent !== null && selectedAgent !== agent.name || undefined} style={{ zIndex: agents.length - index }} title={agent.name} aria-label={`${agent.name} 작업 강조`}
+      {agents.length > 0 && <div className="aui-scheduled-runs-agents" role="group" aria-label={text.agentGroupLabel} data-open={selectedAgent !== null || undefined}>
+        {agents.map((agent, index) => <button key={agent.name} type="button" className="aui-scheduled-runs-agent" aria-pressed={selectedAgent === agent.name} data-other={selectedAgent !== null && selectedAgent !== agent.name || undefined} style={{ zIndex: agents.length - index }} title={agent.name} aria-label={text.agentHighlightLabel(agent.name)}
           onClick={() => { interrupt(); setSelectedAgent((now) => now === agent.name ? null : agent.name); }}>
           <Mark src={agent.mark} text={agent.name} className="aui-scheduled-runs-agent-mark" /><span className="aui-scheduled-runs-agent-name">{agent.name}</span>
         </button>)}
       </div>}
-      <span className="aui-scheduled-runs-count">{selectedAgent ? `${selectedAgent} ${agentCount}개` : `작업 ${agentCount}개`}</span>
-      <div className="aui-scheduled-runs-modes" role="radiogroup" aria-label="배치 방식">
+      <span className="aui-scheduled-runs-count">{text.agentTaskCount(selectedAgent, agentCount)}</span>
+      <div className="aui-scheduled-runs-modes" role="radiogroup" aria-label={text.modeGroupLabel}>
         {(['auto', 'manual'] as const).map((value) => <button key={value} id={`${id}-mode-${value}`} type="button" role="radio" aria-checked={mode === value} tabIndex={mode === value ? 0 : -1} className="aui-scheduled-runs-mode" onClick={() => chooseMode(value, false)}
           onKeyDown={(event) => { if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) { event.preventDefault(); chooseMode(value === 'auto' ? 'manual' : 'auto', true); } }}>
-          {value === 'auto' ? <Sparkles size={12} strokeWidth={1.5} aria-hidden="true" /> : <Hand size={12} strokeWidth={1.5} aria-hidden="true" />}{value === 'auto' ? '자동' : '수동'}
+          {value === 'auto' ? <Sparkles size={12} strokeWidth={1.5} aria-hidden="true" /> : <Hand size={12} strokeWidth={1.5} aria-hidden="true" />}{value === 'auto' ? text.autoMode : text.manualMode}
         </button>)}
       </div>
     </div>
@@ -589,17 +711,17 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
     <style>{styles}</style>
     {header}
     <div className="aui-scheduled-runs-body">
-      <section className="aui-scheduled-runs-queue" aria-label="배치 대기">
-        <div className="aui-scheduled-runs-queue-head"><span>배치 대기</span><span className="aui-scheduled-runs-queue-count" aria-label={`남은 작업 ${remaining}개`}>{remaining}</span></div>
+      <section className="aui-scheduled-runs-queue" aria-label={text.queueLabel}>
+        <div className="aui-scheduled-runs-queue-head"><span>{text.queueLabel}</span><span className="aui-scheduled-runs-queue-count" aria-label={text.remainingCountLabel(remaining)}>{remaining}</span></div>
         <div className="aui-scheduled-runs-queue-list">
           {queue.map((task) => <div key={task.id} className="aui-scheduled-runs-slot" data-flying={flying === task.id || undefined} data-leaving={leaving.includes(task.id) || undefined}>{renderCard(task, { kind: 'queue', taskId: task.id })}</div>)}
-          {remaining === 0 && <p className="aui-scheduled-runs-queue-empty">{tasks.length ? '모든 작업을 배치했습니다.' : '배치할 작업이 없습니다.'}</p>}
+          {remaining === 0 && <p className="aui-scheduled-runs-queue-empty">{tasks.length ? text.allPlaced : text.noTasks}</p>}
         </div>
       </section>
       <div className="aui-scheduled-runs-board-scroll" ref={boardRef}>
-        <div className="aui-scheduled-runs-board" role="grid" aria-label="날짜별 세션 배치" aria-rowcount={S + 1} aria-colcount={D + 1} style={{ '--aui-scheduled-runs-days': D, minWidth: 38 + D * 128 } as CSSProperties}>
+        <div className="aui-scheduled-runs-board" role="grid" aria-label={text.boardLabel} aria-rowcount={S + 1} aria-colcount={D + 1} style={{ '--aui-scheduled-runs-days': D, minWidth: 38 + D * 128 } as CSSProperties}>
           <div role="row" className="aui-scheduled-runs-row">
-            <span role="columnheader" className="aui-scheduled-runs-corner"><span className="aui-scheduled-runs-sr">세션</span></span>
+            <span role="columnheader" className="aui-scheduled-runs-corner"><span className="aui-scheduled-runs-sr">{text.sessionLabel}</span></span>
             {days.map((day, index) => <span key={index} role="columnheader" className="aui-scheduled-runs-day"><span className="aui-scheduled-runs-day-label">{day.label}</span>{day.date !== undefined && <span className="aui-scheduled-runs-day-date">{day.date}</span>}</span>)}
           </div>
           {sessions.map((session, s) => <div key={s} role="row" className="aui-scheduled-runs-row">
@@ -616,11 +738,11 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
               const drop = cellPlan ? (cellPlan.ok ? (isTarget ? 'ok' : 'open') : 'no') : undefined;
               const shown = here.length > 2 ? here.slice(0, 1) : here;
               return <div key={d} role="gridcell" className="aui-scheduled-runs-cell" data-cell-pos={pos} data-past={pos < current || undefined} data-current={pos === current || undefined} data-drop={drop} data-target={isTarget || undefined}
-                aria-label={`${days[d].label} ${session}, 사용 ${Math.round(meter)}%, 카드 ${here.length}개${pos < current ? ', 지난 세션' : ''}${cellPlan ? cellPlan.ok ? ', 놓을 수 있음' : `, 놓을 수 없음: ${cellPlan.reason}` : ''}`}>
+                aria-label={text.cellAriaLabel(days[d].label, session, Math.round(meter), here.length, pos < current, cellPlan)}>
                 {pos === current && <span className="aui-scheduled-runs-now" aria-hidden="true" />}
                 <div className="aui-scheduled-runs-cell-cards">
                   {shown.map((piece) => { const task = taskMap.get(piece.taskId); if (!task) return null; const own = byTask.get(piece.taskId) ?? []; const hidden = flying === piece.taskId; return <div key={`${piece.taskId}#${piece.pos}`} className="aui-scheduled-runs-piece" data-hidden={hidden || undefined} data-first={own[0] === piece || undefined}>{renderCard(task, { kind: 'piece', taskId: task.id, pos }, piece)}</div>; })}
-                  {here.length > 2 && <div className="aui-scheduled-runs-more">외 {here.length - 1}개 조각</div>}
+                  {here.length > 2 && <div className="aui-scheduled-runs-more">{text.morePieces(here.length - 1)}</div>}
                 </div>
                 <span className="aui-scheduled-runs-meter" aria-hidden="true"><i style={{ width: `${meter}%` }} /></span>
                 {cellPlan && !cellPlan.ok && <span className="aui-scheduled-runs-reason" aria-hidden="true">{cellPlan.reason}</span>}
@@ -631,13 +753,13 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
       </div>
     </div>
     {openInfo && !sheetMode && detailPos && <div className="aui-scheduled-runs-detail" role="dialog" aria-label={openInfo.task.title} style={{ left: detailPos.left, top: detailPos.top }}>{detailBody(openInfo)}</div>}
-    {openInfo && sheetMode && <Sheet title={openInfo.task.title} returnTo={invoker.current} onClose={() => setDetail(null)}>
+    {openInfo && sheetMode && <Sheet title={openInfo.task.title} closeLabel={text.close} returnTo={invoker.current} onClose={() => setDetail(null)}>
       {detailBody(openInfo)}
       {movable(openInfo.source) && <div className="aui-scheduled-runs-tapmove">
-        <p className="aui-scheduled-runs-tapmove-title">옮길 세션</p>
-        <div className="aui-scheduled-runs-targets" role="radiogroup" aria-label="옮길 세션">
+        <p className="aui-scheduled-runs-tapmove-title">{text.moveTargetTitle}</p>
+        <div className="aui-scheduled-runs-targets" role="radiogroup" aria-label={text.moveTargetTitle}>
           {Array.from({ length: total - current }, (_, i) => current + i).map((pos) => { const plan = evaluate(openInfo.source, pos); return <button key={pos} type="button" role="radio" aria-checked={tapTarget === pos} className="aui-scheduled-runs-target" data-ok={plan.ok || undefined} onClick={() => setTapTarget(pos)}>
-            <span className="aui-scheduled-runs-target-name">{posLabel(pos)}</span><span className="aui-scheduled-runs-target-plan">{plan.ok ? planText(plan) : `불가 · ${plan.reason}`}</span>
+            <span className="aui-scheduled-runs-target-name">{posLabel(pos)}</span><span className="aui-scheduled-runs-target-plan">{plan.ok ? planText(plan) : text.unavailableTargetPlan(plan.reason ?? '')}</span>
           </button>; })}
         </div>
         <button type="button" className="aui-scheduled-runs-confirm" disabled={tapTarget === null || !evaluate(openInfo.source, tapTarget).ok} onClick={() => {
@@ -645,11 +767,11 @@ export function ScheduledRuns({ tasks, days: dayInput = ['월', '화', '수'], s
           startDrag();
           const plan = apply(openInfo.source, tapTarget);
           if (!plan) return;
-          setAnnounce(`${openInfo.task.title} 배치 완료: ${planText(plan)}`);
+          setAnnounce(text.placedAnnounce(openInfo.task.title, planText(plan)));
           invoker.current = null;
           setDetail(null); setTapTarget(null);
           setPendingFocus(`${openInfo.task.id}#${plan.cells[0].pos}`);
-        }}>{tapTarget === null ? '세션을 고르세요' : '여기로 옮기기'}</button>
+        }}>{tapTarget === null ? text.selectSession : text.moveHere}</button>
       </div>}
     </Sheet>}
     {drag && typeof document !== 'undefined' && createPortal(<div className="aui-scheduled-runs-float" style={{ left: drag.x - drag.dx, top: drag.y - drag.dy, width: drag.w, height: drag.h }}><style>{styles}</style><div className="aui-scheduled-runs-card" data-ghost>{cardBody(taskMap.get(drag.source.taskId)!, drag.source.kind === 'piece' ? pieces.find((piece) => piece.taskId === drag.source.taskId && piece.pos === (drag.source as { pos: number }).pos) : undefined)}</div></div>, document.body)}
