@@ -52,6 +52,7 @@ use routing::{
 mod delivery_commit;
 mod delivery_frontier;
 mod delivery_outcome_classify;
+mod headless_replay;
 mod idle_jsonl;
 #[cfg(test)]
 pub(in crate::services::discord) use idle_jsonl::idle_range_is_committed;

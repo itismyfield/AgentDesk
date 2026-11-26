@@ -8,6 +8,9 @@ use super::{
 };
 use crate::services::session_backend::ReadOutputFailure;
 
+#[cfg(unix)]
+pub(crate) mod wrapper_terminal;
+
 /// Under settlement a Herdr turn's reader ends only on its provider's own terminal record; the
 /// pane's logical name identifies its frames. Settlement is read first, so production reads nothing.
 pub(crate) fn herdr_provider_terminal_only(token: Option<&CancelToken>) -> Option<String> {
@@ -117,6 +120,8 @@ where
         )
     })?;
     opened_file(&file);
+    #[cfg(unix)]
+    let mut wrapper_capture = wrapper_terminal::Capture::take_for(output_path, start_offset);
     file.seek(SeekFrom::Start(start_offset)).map_err(|e| {
         ReadOutputFailure::new(
             format!("Failed to seek output file: {e}"),
@@ -228,6 +233,14 @@ where
                     }
 
                     tap.file_activity();
+                    #[cfg(unix)]
+                    if wrapper_capture.is_some()
+                        && wrapper_terminal::successful_result(trimmed)
+                        && let Some(capture) = wrapper_capture.take()
+                        && let Err(error) = capture.record_result(&file, committed_offset)
+                    {
+                        tracing::warn!(%error, "could not record the wrapper terminal range before delivery");
+                    }
                     if !process_line(trimmed, state) {
                         return Ok(ReadOutputResult::Cancelled {
                             offset: committed_offset,

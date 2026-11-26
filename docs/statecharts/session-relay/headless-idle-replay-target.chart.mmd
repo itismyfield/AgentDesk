@@ -1,0 +1,23 @@
+---
+title: "Headless answer and idle replay"
+---
+stateDiagram-v2
+  s0: Wrapper terminal readable
+  s1: First reply queued
+  s2: First reply visible in Discord
+  s3: Outbox confirms the first answer
+  s4: Inflight gone and idle grace active
+  s5: Idle replay eligible
+  s6: First replay settled
+  s7: Both answers visible once
+  s8: Later headless answer sent
+  [*] --> s0
+  s0 --> s1: queue answer
+  s1 --> s2: worker posts answer
+  s2 --> s3: confirm outbox sent
+  s3 --> s4: remove inflight
+  s4 --> s5: ten-second grace expires
+  s5 --> s6: consume proven span
+  s6 --> s7: idle relay posts span
+  s6 --> s8: confirm outbox sent
+  s8 --> s7: consume proven span

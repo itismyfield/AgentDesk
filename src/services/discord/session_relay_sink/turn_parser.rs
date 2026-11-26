@@ -95,6 +95,22 @@ impl SessionRelayParser {
         &mut self,
         frame: &StreamFrame,
     ) -> Vec<SessionRelayDelivery> {
+        self.ingest(frame, None)
+    }
+
+    pub(super) fn parse_ordered_idle(
+        frame: &StreamFrame,
+        start: u64,
+        end: u64,
+    ) -> Vec<SessionRelayDelivery> {
+        Self::default().ingest(frame, Some((start, end)))
+    }
+
+    fn ingest(
+        &mut self,
+        frame: &StreamFrame,
+        mut ordered: Option<(u64, u64)>,
+    ) -> Vec<SessionRelayDelivery> {
         self.frames_observed = self.frames_observed.saturating_add(1);
         self.last_sequence = frame.sequence;
         match self.read_source_marks.classify(frame.read_source) {
@@ -204,6 +220,14 @@ impl SessionRelayParser {
                 // the previous turn's prose.
                 let source_generation_mtime_ns = self.source_generation_mtime_ns;
                 let relay_source_stamp = self.relay_source_stamp.flatten();
+                let relay_range = if let Some((start, end)) = ordered.as_mut() {
+                    let terminal_end = *end - self.buffer.len() as u64;
+                    let range = (*start, terminal_end);
+                    *start = terminal_end;
+                    Some(range)
+                } else {
+                    frame.relay_range
+                };
                 self.reset_turn();
                 deliveries.push(SessionRelayDelivery {
                     provider: frame.binding.provider.clone(),
@@ -216,11 +240,13 @@ impl SessionRelayParser {
                     frame_turn_user_msg_id: frame.turn_user_msg_id,
                     frame_turn_started_at: frame.turn_started_at.clone(),
                     frame_turn_start_offset: frame.turn_start_offset,
-                    relay_range: frame.relay_range,
+                    relay_range,
                     relay_generation_mtime_ns: source_generation_mtime_ns,
                     relay_source_stamp,
                 });
-                break;
+                if ordered.is_none() {
+                    break;
+                }
             } else {
                 self.reset_turn();
             }

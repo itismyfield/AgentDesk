@@ -1,0 +1,34 @@
+---
+title: "Headless answer and idle replay"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoDuplicate
+    lg1: Path to the NoDuplicate bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: Wrapper terminal readable
+  s1: First reply queued
+  s2: First reply visible in Discord
+  s3: Outbox confirms the first answer
+  s4: Inflight gone and idle grace active
+  s5: Idle replay eligible
+  s6: Same answer posted twice
+  [*] --> s0
+  s0 --> s0: read completed record
+  s0 --> s1: queue answer
+  s1 --> s2: worker posts answer
+  s2 --> s3: confirm outbox sent
+  s3 --> s4: remove inflight
+  s4 --> s5: ten-second grace expires
+  s5 --> s6: idle relay posts span
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 breaks
+  class s6 bugPath

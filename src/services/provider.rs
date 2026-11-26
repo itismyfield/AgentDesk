@@ -20,6 +20,10 @@ pub(crate) mod session_probe;
 pub(crate) mod session_prompt;
 pub(crate) mod session_source;
 pub(crate) use output_reader::herdr_provider_terminal_only;
+#[cfg(unix)]
+pub(crate) use output_reader::wrapper_terminal::{
+    Capture as WrapperTerminalCapture, WrapperTerminalRead, wrapper_terminal_reads,
+};
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(test)]
 pub(crate) mod read_fault;

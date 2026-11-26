@@ -136,7 +136,15 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         // terminal → `FrameAccepted` → watcher timed out). The co-chunked confusion is now
         // handled by the per-sequence ACK. The fence still ONLY gates the OFFSET ADVANCE
         // (inline in `deliver_response`) — outcome and advance are decoupled.
-        let deliveries = self.ingest_frame(frame, native_response.as_deref());
+        use super::headless_replay::{IdleFrame, Ownership, idle_frame};
+        let ordered = idle_frame(&self.health_registry, frame).await?;
+        let deliveries = match (&ordered, frame.relay_range) {
+            (IdleFrame::Stale, _) => return Ok(RelaySinkOutcome::TerminalNotDelivered),
+            (IdleFrame::Ordered(_, _), Some((start, end))) => {
+                super::SessionRelayParser::parse_ordered_idle(frame, start, end)
+            }
+            _ => self.ingest_frame(frame, native_response.as_deref()),
+        };
         let fenced_terminal_without_delivery = deliveries.is_empty()
             && matches!(
                 (frame.turn_start_offset, frame.terminal_consumed_end),
@@ -146,6 +154,21 @@ impl RelaySink for SessionBoundDiscordRelaySink {
         let mut terminal_fresh_delivered = None;
         let mut terminal_not_delivered = false;
         for mut delivery in deliveries {
+            if let (IdleFrame::Ordered(source, reads), Some((_, end))) =
+                (&ordered, delivery.relay_range)
+            {
+                if !source.current_through(end) {
+                    return Ok(RelaySinkOutcome::TerminalNotDelivered);
+                }
+                match reads.at_terminal_end(end) {
+                    Ownership::Sent(_) => {
+                        terminal_delivered = true;
+                        continue;
+                    }
+                    Ownership::Pending => return Ok(RelaySinkOutcome::TerminalNotDelivered),
+                    Ownership::Unclaimed => {}
+                }
+            }
             if let Some(response) = &native_response {
                 delivery.response_text.clone_from(response);
             }
@@ -185,6 +208,9 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     // Transport landed, but the captured source authority was
                     // stale or its proof could not be durably recorded. Never
                     // retry this POST into the replacement incarnation.
+                    if matches!(ordered, IdleFrame::Ordered(_, _)) {
+                        return Ok(RelaySinkOutcome::TerminalDelivered);
+                    }
                     terminal_delivered = true;
                 }
                 Ok(SessionRelayDeliveryOutcome::FreshDelivered {
@@ -197,6 +223,9 @@ impl RelaySink for SessionBoundDiscordRelaySink {
                     return Ok(RelaySinkOutcome::TerminalUnknown);
                 }
                 Ok(SessionRelayDeliveryOutcome::NotDelivered) => {
+                    if matches!(ordered, IdleFrame::Ordered(_, _)) {
+                        return Ok(RelaySinkOutcome::TerminalNotDelivered);
+                    }
                     terminal_not_delivered = true;
                 }
                 Err(error) => return Err(error),

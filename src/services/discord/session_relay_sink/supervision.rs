@@ -1,3 +1,4 @@
+use super::headless_replay::{Ownership, Source, read_proofs};
 use super::*;
 use crate::services::discord::recovery_engine::relay_output_replacements::relay_output_replacements;
 
@@ -242,11 +243,54 @@ pub(super) async fn run_idle_jsonl_relay_loop(
             );
             pending_ends.insert(session_name.clone(), RetainedForRetry(was_deferred));
             let end = len.min(start.saturating_add(IDLE_JSONL_RELAY_MAX_BYTES_PER_TICK));
-            let Ok(opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
+            let source = Source {
+                session: &session_name,
+                path: &relay_source.path,
+                generation: current_generation_signature,
+                file: expected_file,
+            };
+            let proofs = match read_proofs(
+                shared.pg_pool.as_ref(),
+                &matched.provider,
+                channel_id,
+                &source,
+                (start, end),
+            )
+            .await
+            {
+                Ok(proofs) => proofs,
+                Err(error) => {
+                    tracing::warn!(channel_id, %error, "headless terminal evidence could not be read");
+                    continue;
+                }
+            };
+            match proofs.at_cursor(start) {
+                Ownership::Sent(through) => {
+                    if through <= len && source.current_through(through) {
+                        *offset = through;
+                        session_init_seen.insert(session_name.clone());
+                    }
+                    pending_ends.insert(session_name.clone(), Deferred);
+                    continue;
+                }
+                Ownership::Pending => {
+                    pending_ends.insert(session_name.clone(), Deferred);
+                    continue;
+                }
+                Ownership::Unclaimed => {}
+            }
+            let Ok(mut opened_range) = read_jsonl_range(&relay_source.path, start, end) else {
                 continue;
             };
             if opened_range.file_identity != expected_file {
                 continue;
+            }
+            if proofs.recorded_source()
+                && let Some(last_newline) =
+                    opened_range.payload.iter().rposition(|byte| *byte == b'\n')
+            {
+                opened_range.payload.truncate(last_newline + 1);
+                opened_range.end = start + opened_range.payload.len() as u64;
             }
             let (payload, end) = (&opened_range.payload, opened_range.end);
             if payload.is_empty() {
@@ -289,7 +333,12 @@ pub(super) async fn run_idle_jsonl_relay_loop(
                         continue;
                     }
                     let end = suffix.end;
-                    let source_stamp = source_marker.and_then(|marker| {
+                    let marker = source_marker.or_else(|| {
+                        proofs.recorded_source().then(|| {
+                            source_epoch_observer::read_source_epoch_witness(&session_name)
+                        })
+                    });
+                    let source_stamp = marker.and_then(|marker| {
                         source_epoch_observer::source_stamp(
                             &session_name,
                             marker,

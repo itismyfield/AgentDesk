@@ -1194,7 +1194,8 @@ src/
 │   │   ├── session_handoff_tests.rs
 │   │   ├── stream_result.rs
 │   │   ├── tui_session_launch.rs
-│   │   └── tui_session_launch_geometry_tests.rs
+│   │   ├── tui_session_launch_geometry_tests.rs
+│   │   └── wrapper_terminal_tests.rs
 │   ├── claude_compact_trigger/
 │   │   └── turn_identity.rs
 │   ├── claude_tui/
@@ -2999,6 +3000,7 @@ src/
 │   │   │   ├── delivery_frontier.rs
 │   │   │   ├── delivery_orchestration_tests.rs
 │   │   │   ├── delivery_outcome_classify.rs
+│   │   │   ├── headless_replay.rs
 │   │   │   ├── idle_jsonl.rs
 │   │   │   ├── journal.rs
 │   │   │   ├── o_adoption_e2e_tests.rs
@@ -3452,7 +3454,8 @@ src/
 │   │   │   │   ├── intake_outbox_argument.rs
 │   │   │   │   ├── observation_tests.rs
 │   │   │   │   ├── outcome.rs
-│   │   │   │   └── production_seam_tests.rs
+│   │   │   │   ├── production_seam_tests.rs
+│   │   │   │   └── wrapper_idle_delivery_tests.rs
 │   │   │   ├── recovery_text/
 │   │   │   │   └── replay.rs
 │   │   │   ├── retry_state/
@@ -4305,6 +4308,8 @@ src/
 │   │   │   └── target.rs
 │   │   ├── native_stop/
 │   │   │   └── persistence_tests.rs
+│   │   ├── output_reader/
+│   │   │   └── wrapper_terminal.rs
 │   │   ├── session_prompt/
 │   │   │   └── tests.rs
 │   │   ├── cancel_token_claude_interrupt.rs

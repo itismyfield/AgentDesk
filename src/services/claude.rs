@@ -57,8 +57,6 @@ mod active_usage;
 mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
-#[cfg(all(test, unix))]
-mod wrapper_terminal_tests;
 #[cfg(unix)]
 pub(crate) mod fresh_notice;
 #[cfg(unix)]
@@ -69,6 +67,8 @@ pub(crate) mod host_gate;
 #[cfg(unix)]
 pub(crate) mod session_handoff;
 mod stream_result;
+#[cfg(all(test, unix))]
+mod wrapper_terminal_tests;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
 use self::backend_routing::{
@@ -2779,6 +2779,18 @@ fn send_followup_to_tmux(
 
     // Get current output file size (we'll read from this offset)
     let start_offset = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
+    use crate::services::provider::WrapperTerminalCapture;
+    let terminal_capture = cancel_token
+        .as_deref()
+        .and_then(CancelToken::turn_nonce)
+        .and_then(|nonce| {
+            WrapperTerminalCapture::before_input(
+                tmux_session_name,
+                output_path,
+                start_offset,
+                nonce,
+            )
+        });
 
     debug_log(&format!("Output file offset: {}", start_offset));
 
@@ -2815,13 +2827,15 @@ fn send_followup_to_tmux(
 
     // Read output file from the offset
     let read_result = observe_claude_wrapper_followup(cancel_token.as_deref(), || {
-        read_output_file_until_result(
-            output_path,
-            start_offset,
-            sender.clone(),
-            cancel_token.clone(),
-            host_gate::tmux_wrapper_poll_probe(tmux_session_name),
-        )
+        WrapperTerminalCapture::around_read(terminal_capture, || {
+            read_output_file_until_result(
+                output_path,
+                start_offset,
+                sender.clone(),
+                cancel_token.clone(),
+                host_gate::tmux_wrapper_poll_probe(tmux_session_name),
+            )
+        })
     })?;
 
     let outcome = classify_followup_result(

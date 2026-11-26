@@ -1928,6 +1928,10 @@ session-lifecycle/TmuxSessionRawAliasParsed.cfg	TmuxSession	RawMissNeedsRace	-
 session-lifecycle/TmuxSessionRawAliasProviderDefault.cfg	TmuxSession	RawProviderFromRecord	-
 session-lifecycle/TmuxSessionRawAliasUnnormalized.cfg	TmuxSession	RawAliasReachesRow,NoDeadlock	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
+session-relay/HeadlessIdleReplayCurrent.cfg	HeadlessIdleReplay	NoDuplicate	-
+session-relay/HeadlessIdleReplayEofRange.cfg	HeadlessIdleReplay	NoQuietLoss	EveryAnswerPosts
+session-relay/HeadlessIdleReplayNoLink.cfg	HeadlessIdleReplay	NoDuplicate	-
+session-relay/HeadlessIdleReplayTarget.cfg	HeadlessIdleReplay	-	-
 thread-host/ThreadHostS1aAfterAll.cfg	ThreadHostS1a	-	-
 thread-host/ThreadHostS1aAfterBoot.cfg	ThreadHostS1a	-	-
 thread-host/ThreadHostS1aAfterBusy.cfg	ThreadHostS1a	-	-
