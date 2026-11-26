@@ -4879,6 +4879,7 @@ src/
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
+│   │   │   │   ├── notice_owner_command_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_settlement.rs
