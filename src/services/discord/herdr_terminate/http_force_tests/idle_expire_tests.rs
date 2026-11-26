@@ -232,46 +232,6 @@ fn idle_kill_ends_a_herdr_execution_no_runtime_serves_pg() {
     });
 }
 
-/// The owning bot runs no runtime on a booted server; `moved`: another bot serves the channel now,
-/// and its runtime is never the one that ends the old pane.
-fn orphaned(name: &str, moved: bool) {
-    let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::idle(&rig, None).await;
-        let mut registry = HealthRegistry::new();
-        registry.age_for_tests(3_600);
-        let registry = Arc::new(registry);
-        if moved {
-            let mut other = shared_on(&node.pool).await;
-            Arc::get_mut(&mut other).unwrap().token_hash = "another-bot".into();
-            other.settings.write().await.allowed_channel_ids = vec![CHANNEL];
-            registry.register("claude".into(), other).await;
-        }
-        let reply = node.idle_kill_on(registry).await;
-        node.assert_ended(&rig, &reply).await;
-        node.finish().await;
-    });
-}
-
-#[test]
-fn idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg() {
-    orphaned(
-        "idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg",
-        false,
-    );
-}
-
-#[test]
-fn idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg() {
-    orphaned(
-        "idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg",
-        true,
-    );
-}
-
 /// As `idle`, for a Codex execution; answers the thread its live O cursor reads at EOF.
 async fn idle_codex(rig: &herdr::P11TerminationRig) -> (Node, String) {
     use crate::services::tui_prompt_dedupe::binding_context::{
@@ -426,6 +386,13 @@ fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, eff
     );
 }
 
+/// Production adopts a local TUI channel's queue owner on its first input.
+async fn adopt(node: &Node) {
+    use crate::services::discord::queue_io::input_owner::ingress;
+    let adopt = ingress::adopt(&node.shared, &ProviderKind::Codex, channel());
+    assert_eq!(ingress::ADOPTS.scope(true, adopt).await, Ok(true));
+}
+
 /// The resume the channel's owner holds, as the production port reads it.
 async fn owner_effort(node: &Node) -> Owed {
     let owed = crate::services::discord::commands::effort_restart::herdr_resume;
@@ -443,10 +410,7 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
         let (node, native) = idle_codex(&rig).await;
-        // Production adopts a local TUI channel's queue owner on its first input.
-        use crate::services::discord::queue_io::input_owner::ingress;
-        let adopt = ingress::adopt(&node.shared, &ProviderKind::Codex, channel());
-        assert_eq!(ingress::ADOPTS.scope(true, adopt).await, Ok(true));
+        adopt(&node).await;
         let reply = node.idle_kill().await;
         assert_eq!(reply["tmux_killed"], true, "{reply}");
         assert_eq!(node.effects(&rig).await.row, retired());
@@ -455,48 +419,77 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
     });
 }
 
-/// A Codex execution whose owning bot runs no runtime on a booted server still ends, and its
-/// owner's next launch resumes the thread. `moved`: another bot serves the channel now.
-fn codex_orphaned(name: &str, moved: bool) {
+/// The owning bot runs no runtime on a booted server, yet its execution ends, and a Codex owner's
+/// next launch resumes the thread. `moved`: another bot serves the channel now, and its runtime is
+/// never the one that ends the old pane.
+fn orphaned(name: &str, moved: bool, codex: bool) {
     let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
         return;
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
-        let (node, native) = idle_codex(&rig).await;
+        let (node, native) = match codex {
+            true => idle_codex(&rig).await,
+            false => (Node::idle(&rig, None).await, String::new()),
+        };
         let mut registry = HealthRegistry::new();
         registry.age_for_tests(3_600);
         let registry = Arc::new(registry);
+        let provider = if codex {
+            ProviderKind::Codex
+        } else {
+            ProviderKind::Claude
+        };
         if moved {
             let mut other = shared_on(&node.pool).await;
             Arc::get_mut(&mut other).unwrap().token_hash = "another-bot".into();
             let mut settings = other.settings.write().await;
-            (settings.provider, settings.allowed_channel_ids) =
-                (ProviderKind::Codex, vec![CHANNEL]);
+            (settings.provider, settings.allowed_channel_ids) = (provider.clone(), vec![CHANNEL]);
             drop(settings);
-            registry.register("codex".into(), other).await;
+            registry.register(provider.as_str().into(), other).await;
         }
         let reply = node.idle_kill_on(registry).await;
-        assert_eq!(reply["tmux_killed"], true, "{reply}");
-        let after = node.effects(&rig).await;
-        assert_eq!((after.closes(), after.row), (1, retired()));
-        assert_resumes(&node, &rig, &native, Owed(None));
+        if codex {
+            assert_eq!(reply["tmux_killed"], true, "{reply}");
+            let after = node.effects(&rig).await;
+            assert_eq!((after.closes(), after.row), (1, retired()));
+            assert_resumes(&node, &rig, &native, Owed(None));
+        } else {
+            node.assert_ended(&rig, &reply).await;
+        }
         node.finish().await;
     });
 }
 
 #[test]
-fn idle_kill_ends_a_codex_execution_whose_owner_bot_is_gone_pg() {
-    codex_orphaned(
-        "idle_kill_ends_a_codex_execution_whose_owner_bot_is_gone_pg",
+fn idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg() {
+    orphaned(
+        "idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg",
+        false,
         false,
     );
 }
 
 #[test]
+fn idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg() {
+    let name = "idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg";
+    orphaned(name, true, false);
+}
+
+#[test]
+fn idle_kill_ends_a_codex_execution_whose_owner_bot_is_gone_pg() {
+    orphaned(
+        "idle_kill_ends_a_codex_execution_whose_owner_bot_is_gone_pg",
+        false,
+        true,
+    );
+}
+
+#[test]
 fn idle_kill_ends_a_codex_execution_of_a_channel_moved_to_another_bot_pg() {
-    codex_orphaned(
+    orphaned(
         "idle_kill_ends_a_codex_execution_of_a_channel_moved_to_another_bot_pg",
+        true,
         true,
     );
 }
@@ -512,9 +505,7 @@ fn a_losing_idle_kill_leaves_the_kept_codex_thread_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
         let (node, native) = idle_codex(&rig).await;
-        use crate::services::discord::queue_io::input_owner::ingress;
-        let adopt = ingress::adopt(&node.shared, &ProviderKind::Codex, channel());
-        assert_eq!(ingress::ADOPTS.scope(true, adopt).await, Ok(true));
+        adopt(&node).await;
         let second = Arc::new(Mutex::new(None));
         let (slot, request) = (second.clone(), node.kill_request(node.registry.clone()));
         probe_after_fence(Box::new(move || {
