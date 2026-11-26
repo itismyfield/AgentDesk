@@ -1,4 +1,4 @@
-"""CLI: `tick` (launchd), `hold -- argv` (manual E2E under the channel lock), `submit` (deploy inbox)."""
+"""Continuous E2E launchd, manual run, diagnostics and deploy inbox commands."""
 
 import argparse
 import json
@@ -16,6 +16,7 @@ def main(argv=None):
     commands.add_parser("tick")
     inspect = commands.add_parser("inspect")
     inspect.add_argument("--head", required=True)
+    commands.add_parser("lease-status", help="Probe the current channel flock without changing its owner record.")
     hold = commands.add_parser("hold")
     hold.add_argument("argv", nargs=argparse.REMAINDER)
     submit = commands.add_parser("submit")
@@ -38,11 +39,15 @@ def main(argv=None):
                 parser.error("hold needs a command after --")
             return runner.hold(args.config, command)
         else:
-            state = runner.load_config(args.config).get("state_dir")
+            config = runner.load_config(args.config)
+            state = config.get("state_dir")
             if not isinstance(state, str) or not Path(state).is_absolute():
                 raise ValueError("state_dir must be an absolute path")
-            result = {"status": "SUBMITTED",
-                      **inbox.submit(Path(state), args.request_id, args.deploy_sha, time.time())}
+            if args.command == "lease-status":
+                result = {"status": "HELD" if channel_lock.is_held(state, config.get("resource")) else "FREE"}
+            else:
+                result = {"status": "SUBMITTED",
+                          **inbox.submit(Path(state), args.request_id, args.deploy_sha, time.time())}
     except channel_lock.LeaseBusy:
         result = {"status": "DEFERRED_LEASE"}
     except (channel_lock.LeaseError, ValueError, OSError) as error:

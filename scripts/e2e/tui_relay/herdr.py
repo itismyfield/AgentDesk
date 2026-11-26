@@ -21,6 +21,9 @@ TMUX_STEPS = {
 # Server reasons name a channel only as its raw Discord id; provider and counter aggregates never do.
 AGGREGATE_REASON_PREFIXES = ("provider:", "global_active_counter_", "no_providers_registered")
 CHANNEL_ID = re.compile(r"\d{17,}")
+FOREIGN_DEGRADED_REASONS = ("turn_presence_unknown:*", "tui_o:reader_retention_stalled:*", "relay_verdict_unknown_*",
+                           "tui_o:binding_missing:*", "provider:claude:pending_queue_depth:1",
+                           "provider:codex:pending_queue_depth:1")
 # Text !clear refusals as worded in commands/control/native.rs and control.rs, which share this prefix.
 # A wording change only loses the fail-fast: the acknowledgement wait then times out as before.
 CLEAR_REFUSAL_PREFIXES = ("세션을 초기화하지 못했어요:",)
@@ -87,7 +90,7 @@ def add_degraded_reason_arguments(parser):
              "Herdr and target-channel reasons are never waived.")
     parser.add_argument(
         "--herdr-foreign-degraded-only", action="store_true",
-        help="Require same-response evidence that each waived reason belongs to another channel.")
+        help="Waive proven foreign degraded reasons using the shared defaults or explicitly supplied patterns.")
 
 
 def validate_arguments(parser, args):
@@ -96,6 +99,13 @@ def validate_arguments(parser, args):
         parser.error("--herdr-allowed-degraded-reason applies only to Herdr cells")
     if any(pattern.strip() in ("", "*") for pattern in allowed):
         parser.error("--herdr-allowed-degraded-reason must name a reason or prefix; empty or bare '*' waives everything")
+
+
+def degraded_patterns(args):
+    explicit = getattr(args, "herdr_allowed_degraded_reason", None)
+    if explicit:
+        return list(explicit)
+    return list(FOREIGN_DEGRADED_REASONS) if getattr(args, "herdr_foreign_degraded_only", False) else []
 
 
 def detail_ready(driver, http_status, payload, *, allowed, channel, foreign_only=False):
@@ -146,7 +156,7 @@ def unattributed(reasons):
 
 
 def waiver_summary(args, observations):
-    allowed = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    allowed = degraded_patterns(args)
     readiness = [o.get("readiness") or {} for o in observations if isinstance(o, dict)]
     ignored = sorted({r for item in readiness for r in item.get("ignored_degraded_reasons", [])})
     # Derived from the union, so observations recorded before the marker existed are still marked.
@@ -237,8 +247,7 @@ def current_row(status, *, channel, provider, cold=False):
 
 
 def observe(driver, args, *, reconnected=False, cold=False, waivable=True):
-    # Scenario-declared health steps keep their strict meaning; the waiver is withheld there.
-    operator = list(getattr(args, "herdr_allowed_degraded_reason", None) or [])
+    operator = degraded_patterns(args)
     allowed = operator if waivable else []
     foreign_only = getattr(args, "herdr_foreign_degraded_only", False)
     # Waiver metadata precedes the request so refused or failed requests still record it.
@@ -735,7 +744,8 @@ def _run_checked(driver, scenario, args, client, run_id, result):
                         time.sleep(2)
                 result["herdr_observations"].append(evidence)
             elif "assert_health" in step:
-                result["herdr_observations"].append(observe(driver, args, waivable=False))
+                result["herdr_observations"].append(
+                    observe(driver, args, waivable=getattr(args, "herdr_foreign_degraded_only", False)))
             else:
                 raise ValueError(f"unsupported Herdr step: {step}")
         phase = "assertions"

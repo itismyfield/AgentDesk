@@ -6,6 +6,11 @@
 
 실행 중에는 `status.json`에 running과 heartbeat를, 완료 시에는 `summaries/<run-id>.json`·최신 `summary.json`·outbox pending·마지막 완료 run을 발행한다. 정상 NOT_DUE tick도 heartbeat를 갱신한다. schema2 driver report는 `outputs/e2e/<run-id>/<occurrence hash>.json`에 원래 schema 그대로 보존한다. continuous summary는 별도 schema1이다.
 
+`python3 -m scripts.e2e.continuous --config <시험 config> lease-status`는 현재 채널 flock을 읽기 전용으로 조회해
+`HELD` 또는 `FREE`를 반환한다. 조회 오류는 `REJECTED`다. 잠금 파일의 PID는 마지막 owner 기록이며,
+상속된 FD를 포함한 마지막 FD가 닫히면 다음 러너가 동일 inode를 획득한다. 조회 결과는 시점 관측이고
+러너와 수동 실행은 각각 획득 시점에 exclusive flock을 다시 요구한다.
+
 ## Driver와 예산
 
 provider 자동 실행에는 `usage:<provider>`·`turn_budget:<provider>` capability와 측정된 turn/token/time 예약 및 일일 한도가 필요하다. null 한도·예약은 잠금 전에 반환하며 파일을 바꾸지 않는다. 일일 예산 소진으로 실행 전 보류된 배포 ID는 다음 창의 후보로 남는다. 최신 요청이 오면 기존 보류 요청도 superseded 처리한다.

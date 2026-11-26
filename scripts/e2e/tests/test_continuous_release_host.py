@@ -372,6 +372,63 @@ class Driver(Fixture):
         self.assertEqual(len(prompts), 3)
         self.assertEqual(report["status"], "FAIL")
 
+    def test_live_reason_shapes_share_preflight_policy_with_direct_harness(self):
+        smoke = smoke_driver._smoke()[0]
+        driver = smoke.cell_driver
+        target, relay, binding, queue, presence = (
+            1509350778043895902, 1574279895679504388, 1473922824350601297, 70, 71)
+        reasons = ["relay_verdict_unknown_claude_1574279895679504388",
+                   "tui_o:binding_missing:1473922824350601297", "provider:claude:pending_queue_depth:1",
+                   "turn_presence_unknown:claude:ch-ad:session_identity_unresolved:hosted_active_or_unknown:1:602",
+                   "turn_presence_unknown:claude:ch-dd:session_identity_unresolved:hosted_active_or_unknown:1:596"]
+        codes = ("relay_verdict_unknown", "tui_o:binding_missing", "provider:pending_queue_depth", "turn_presence_unknown")
+        cell = "codex-herdr"
+        self.config["release_host"]["cells"][cell] = {
+            **self.config["release_host"]["cells"]["claude-herdr"], "channel_id": str(target)}
+        write_json(self.root / "herdr-status.json", {
+            "executions": [{**RUNNING, "provider": "codex", "channel": str(target)}], "other_input_holds": []})
+        scenario = {"id": "E-51", "agent_mode": "real_live", "coverage_class": "live", "steps": []}
+        for child, code in ((None, None), *zip((relay, binding, queue, presence), codes),
+                            (target, "turn_presence_unknown"), ("missing", "turn_presence_unknown")):
+            with self.subTest(child=child):
+                target_box = {**TARGET_BOX, "provider": "codex", "channel_id": target}
+                if code and child not in (target, "missing"):
+                    target_box["relay_health"] = {"thread_channel_id": child}
+                detail = {**degraded_detail(*reasons), "mailboxes": [target_box, {**FOREIGN_BOX, "channel_id": queue}],
+                          "tui_o_writer_readiness": [{"provider": "codex", "channel_id": str(target), "accepts": True}],
+                          "turn_presence_unknown": [] if child == "missing" else [
+                              {"channel_id": owner, "provider": "claude", "agent_id": agent, "elapsed_secs": age,
+                               "reason": "session_identity_unresolved", "hold_leaf": "hosted_active_or_unknown",
+                               "unknown_since": "2026-11-22T00:00:00Z"}
+                              for owner, agent, age in [(target if child == target else presence, "ch-ad", 602),
+                                                        (72, "ch-dd", 596)]]}
+                herdr = {"configured_channels": [str(target)]}
+                with mock.patch.object(smoke_driver, "_harness", return_value=2) as harness:
+                    report, _, _ = self.drive(scenario="E-51", cell=cell, detail_fields=detail, herdr=herdr)
+                self.assertEqual(harness.called, code is None, report)
+
+                out = self.root / "direct"
+                argv = ["run_tui_relay.py", "--cell", cell, "--filter", "E-51", "--channel-id", str(target),
+                        "--base-url", "http://127.0.0.1:9", "--herdr-endpoint", "ep",
+                        "--herdr-status-bin", self.config["release_host"]["binary"],
+                        "--herdr-foreign-degraded-only", "--output", str(out)]
+                client = mock.Mock()
+                client.send_control.return_value = {"id": "100"}
+                client.fetch_messages.return_value = []
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(driver.lease, "DEFAULT_LEASE_DIR", self.root), \
+                        mock.patch.object(driver, "load_scenarios", return_value=[scenario]), \
+                        mock.patch.object(driver.discord, "DiscordClient", return_value=client), \
+                        mock.patch.object(driver.time, "sleep"), contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(driver.main(), 0 if code is None else 1)
+                row = read_json(out / f"report.{cell}.json", {})["scenarios"][0]
+                if code is None:
+                    self.assertEqual(row["herdr_readiness_waiver"]["ignored_degraded_reasons"], sorted(reasons))
+                else:
+                    expected = {"code": code, "scope": "unknown" if child == "missing" else "target"}
+                    self.assertIn(expected, report["preflight_failure"]["reasons"])
+                    self.assertIn(expected, row["observation_failure"]["reasons"])
+                    client.send_control.assert_not_called()
+
     def publish_fixture_report(self, report):
         identity = release_host.identity(self.config["release_host"], DETAIL)
         config = {**self.config, **identity, "required_assertions": {"E-50": [smoke_driver.ASSERTION]}}

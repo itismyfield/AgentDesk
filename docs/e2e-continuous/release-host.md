@@ -69,6 +69,9 @@ manifest의 `codex/herdr` 공백은 회전 묶음을 계속 막고, `E-51/herdr`
   missing과 Claude·Codex 각각 깊이 1의 pending queue다. 응답에서 시험 채널의 자식으로 확인된
   thread도 시험 범위에 들어간다. 큐는 대상 mailbox의 깊이 0, mailbox 행의 유일성, 제공자별 합과
   양수인 큐 전부의 범위가 확인돼야 한다. mailbox 읽기 실패도 입력 전에 거절한다.
+  직접 Herdr 하네스에 `--herdr-foreign-degraded-only`를 주면 같은 허용 목록이 활성화된다.
+  명시한 `--herdr-allowed-degraded-reason` 패턴은 같은 응답의 foreign 귀속 검사를 거친다.
+  이 옵션을 사용한 시나리오의 `assert_health`도 같은 판정을 적용한다.
   Herdr의 hold·CLI 검사와 대상 mailbox의 활성 상태 검사는 별도로 적용한다.
   사유가 실제 busy 또는 준비 조건 거절이면 `CELL_NOT_IDLE`, health·CLI 관측에 실패하면
   `SERVER_UNOBSERVABLE`로 기록한다. 서버가 mailbox 읽기 실패를 보고한 경우와 하네스 실행 중

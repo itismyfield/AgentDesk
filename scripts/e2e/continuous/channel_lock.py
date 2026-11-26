@@ -33,21 +33,29 @@ def resource_key(resource):
     return hashlib.sha256(json.dumps([guild, sorted(parents), sorted(set(bots))]).encode()).hexdigest()[:32]
 
 
+def _check_private_dir(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.geteuid():
+        raise LeaseError(f"{path} must be a private directory")
+
+
 def private_dir(path):
     path = Path(path)
     for level in reversed([path, *path.parents]):
         if not level.exists():
             level.mkdir(mode=0o700, exist_ok=True)  # Directories this creates are private; a racer may win.
-    info = os.stat(path, follow_symlinks=False)
-    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o700 or info.st_uid != os.geteuid():
-        raise LeaseError(f"{path} must be a private directory")
+    _check_private_dir(path)
     return path
 
 
 class ChannelLease:
     def __init__(self, path, key, fd):
         self.path, self.key, self.fd = path, key, fd
-        self.identity = os.fstat(fd)
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.geteuid() or info.st_nlink != 1):
+            raise LeaseError("invalid channel lock file")
+        self.identity = info
 
     def same_file(self):
         leaf = os.stat(self.path, follow_symlinks=False)
@@ -83,21 +91,42 @@ def acquire(state_dir, resource):
     path = private_dir(Path(private_dir(state_dir)) / "locks") / f"{key}.lock"
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
-        info = os.fstat(fd)
-        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
-                or info.st_uid != os.geteuid() or info.st_nlink != 1):
-            raise LeaseError("invalid channel lock file")
+        lease = ChannelLease(path, key, fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise LeaseBusy(key) from None
-        lease = ChannelLease(path, key, fd)
         if not lease.same_file():
             raise LeaseError("channel lock file was replaced")
         return lease
     except BaseException:
         os.close(fd)
         raise
+
+
+def is_held(state_dir, resource):
+    """Probe current kernel ownership without creating files or reading the last-owner record."""
+    key = resource_key(resource)
+    root = Path(state_dir)
+    path = root / "locks" / f"{key}.lock"
+    try:
+        _check_private_dir(root)
+        _check_private_dir(path.parent)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        return False
+    try:
+        lease = ChannelLease(path, key, fd)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            held = False
+        except BlockingIOError:
+            held = True
+        if not lease.same_file():
+            raise LeaseError("channel lock file was replaced")
+        return held
+    finally:
+        os.close(fd)
 
 
 def inherited(environ=os.environ):

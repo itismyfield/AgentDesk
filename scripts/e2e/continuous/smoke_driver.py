@@ -30,9 +30,6 @@ GATED_STEPS = {"send_discord_prompt", "wait_for_discord_text", "wait_for_raw_dis
                "relay_author", "timeout_s"}
 # Only the shared release's two core Herdr cells opt in to proven foreign reasons.
 RELEASE_HERDR_CELLS = {("default", "E-50", "claude-herdr"), ("default", "E-51", "codex-herdr")}
-RELEASE_HERDR_REASONS = ("turn_presence_unknown:*", "tui_o:reader_retention_stalled:*", "relay_verdict_unknown_*",
-                        "tui_o:binding_missing:*", "provider:claude:pending_queue_depth:1",
-                        "provider:codex:pending_queue_depth:1")
 
 
 def _smoke():
@@ -157,8 +154,6 @@ def run(args, config, spawn=subprocess.run):
         host_args = ["--herdr-endpoint", next(iter(endpoints)), "--herdr-status-bin", host["binary"]]
         if (args.profile, args.scenario, args.cell) in RELEASE_HERDR_CELLS:
             host_args += ["--herdr-foreign-degraded-only"]
-            for pattern in RELEASE_HERDR_REASONS:
-                host_args += ["--herdr-allowed-degraded-reason", pattern]
     run_id = f"{args.run_id}-{args.scenario}-{harness_cell}"
     markers = smoke.expected_markers(SCENARIOS, args.scenario, run_id)
     remaining, limit = json.loads(args.budget), cell["turn_tokens"]
