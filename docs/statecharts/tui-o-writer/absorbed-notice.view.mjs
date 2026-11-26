@@ -16,10 +16,15 @@ export function state(v) {
   if (v.effects.length > 1) return '같은 입력이 두 번 게시됨';
   if (settled(v)) return v.effects.length ? '재생까지 끝나고 공지 한 건 확인' : '재생까지 끝났지만 공지 없음';
   if (v.replay.length) return v.effects.length ? '기존 게시를 보존하며 spool 재생' : '원본 spool 재생 대기';
-  if (v.excluded.length && v.absorption.reviewed) return '흡수 소유 근거로 논리 ID를 원장에서 제외';
+  if (v.excluded.length && v.absorption.reviewed) {
+    return v.absorption.executed ? '흡수 소유 근거로 논리 ID를 원장에서 제외' : 'native 종료 전에 공지 제외';
+  }
   if (v.excluded.length) return '물리 수신 근거로 논리 ID를 제외';
   if (v.absorption.reviewed) return '소유권 재평가 뒤에도 공지 부채가 남음';
-  if (v.absorption.executed) return '등록 입력 실행이 정상 완료됨';
+  if (v.owned && v.forms.includes('remove') && v.spool.some(form => form !== 'remove')) {
+    return '공지 정산 전에 후속 표현을 캡처';
+  }
+  if (v.absorption.executed) return '등록 입력의 native 종료를 확인';
   if (v.posted.length) return '게시 확인 기록';
   if (v.effects.length) return 'Discord 게시, 원장 확인 대기';
   if (v.prepared.length) return '게시 준비를 원장에 기록';

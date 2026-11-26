@@ -166,3 +166,52 @@ W2와 뮤턴트 모두 정상 native Executed → writer 재시작 → 원본 �
 이 scope는 정확히 귀속 가능한 등록 입력 하나와 같은 논리 ID인 후속 표현을 탐색한다.
 모호한 등록이나 동일 본문을 가진 다른 ID에서 증거를 거부하는지는 파서·소유권 회귀 시험에서
 검증한다. 은퇴 행동은 공지 부채 외의 차단 조건을 검증하지 않는다.
+
+## W4 소비된 등록의 후속 귀속과 종료 전제
+
+기준 `817982f76e14256ec24b4c023dba7ec5392a3552`.
+[후속 입력 모델](WriterAbsorbedNoticeReuse.tla)은 하나의 source에서 본문이 같은 서로 다른 입력을
+검사한다. A의 공지는 native 종료 근거로 이미 제외됐다. 물리 receipt를 요구하는 실행 원장에는
+A가 여전히 열린 등록이다. 공지 전용 귀속은 durable 소비 범위의 끝을 exclusive 상한으로 사용한다.
+A의 과거 membership을 보존하고 이후 행의 경쟁에서는 A를 제외한다. 새 B는 Excluded, 별도
+미소유 C는 실제 POST 1건, 실제 경쟁 등록 또는 검증할 수 없는 source는 Pending이다.
+재생은 같은 source의 정산과 전송 기록을 보존한다.
+
+단일 입력 모델에도 native 종료 근거를 필수로 두고 command/user 캡처와 공지 정산의 순서를
+독립시켰다. `NativeExecuted`는 읽기 전용 분석의 `Executed | Cancelled` 근거를 표현한다.
+
+### W4 전이와 코드 진입점
+
+좌표는 W3 기준이며 W4 신규 연결은 함수 이름으로 표시했다.
+
+| 행동 | 코드 위치와 결과 |
+| --- | --- |
+| FirstCapture, NextCapture | `src/services/tui_o/writer/actor.rs:442–450` → `src/services/tui_o/writer/rotation/retained_capture.rs:35–119` → `src/services/tui_o/writer/actor/notice_work.rs:213–261`에서 캡처하고 공지 근거를 기록한다. |
+| FirstClose, NextClose, NativeExecuted | `src/services/tui_o/writer/input_facts/native.rs:621–646,757–824`와 `src/services/tui_o/writer/input_facts/native/projection/notice_absorption.rs:30–80`에서 해당 턴의 종료와 흡수 membership을 확인한다. 실행 원장의 receipt 요구는 `src/services/tui_input/human_frame/history/v2/native.rs:590–604`다. |
+| FirstSettle, ReviewAbsorption | `src/services/tui_o/writer/actor/notice_settlement.rs:124–163` → `src/services/tui_o/store/ledger/input_notices/settlement.rs:87–142,146–183`가 remove 원본의 논리 키를 제외하고 등록 identity와 범위를 durable하게 남긴다. |
+| NextEnqueue | `src/services/tui_input/human_frame/history/v2/read_stamp.rs:174–195`가 열린 등록을 제공하며 `src/services/tui_o/writer/input_facts/native.rs:651–697`가 해당 범위의 enqueue를 귀속한다. |
+| ReviewNext | `src/services/tui_input/human_frame/history/notice_owner/absorption.rs:23–83`의 `collect`가 이미 소비된 범위를 인증 경로에 전달한다. `src/services/tui_o/writer/input_notices/absorption.rs`의 `authenticated_proofs` → `src/services/tui_o/writer/input_facts/native/projection/notice_absorption.rs`의 `notice_absorptions` → `src/services/tui_o/writer/input_facts/native.rs`의 `reduce`가 공지 전용 상한을 적용한다. `src/services/tui_input/human_frame/history/notice_owner.rs:627–680`의 일반 census 예약 계약과 함께 확인한다. |
+| PrepareNext, PostNext, ConfirmNext | `src/services/tui_o/writer/input_notices/admission.rs:121–136`에서 `Batch::absorbed_unowned`가 허용한 입력이 `src/services/tui_o/writer/deliver.rs:550–606,690–714`의 Prepared·POST·Posted를 거친다. |
+| Restart, Replay, Done | `src/services/tui_o/writer/rotation/readers.rs:94–123`와 `src/services/tui_o/writer/replay.rs:15–48`이 spool을 재생하고 durable Excluded·Posted를 확인한다. `collect`가 이전 소비 범위를 복원한다. Done은 모델의 종결 대기다. |
+| W4 alias Capture | `src/services/tui_o/writer/rotation/retained_capture.rs:35–119`의 일반 캡처이며 공지 정산 완료를 전제로 삼지 않는다. |
+
+### W4 TLC 결과
+
+| cfg (`WriterAbsorbedNotice` 접두사) | 실제 결과 |
+| --- | --- |
+| ReuseBefore | RED `RegisteredSecondSettles`, `SeparateInputCanPost`, `EventuallyHandled`. 이미 소비된 A가 B/C 귀속을 막는다. |
+| ReuseTarget | GREEN. B 제외와 C POST 1건, debt 0, 재생 중복 0. 경쟁·증거 부재는 Pending으로 유지한다. |
+| ReuseDropConsumedRange | RED. 소비 상한 적용만 제거하면 Before와 같은 세 규칙이 깨진다. |
+| ReuseDropUnowned | RED `SeparateInputCanPost` 및 `EventuallyHandled`. 소유 후보가 없는 C가 공지를 못 받는다. |
+| W4OwnedRemove | GREEN `NoEarlyAbsorptionSettlement` 및 기존 정산 규칙. |
+| W4DropNativeEnd | RED `NoEarlyAbsorptionSettlement`. native 종료 전의 제외를 검출한다. |
+| W4AliasInterleaves | 도달 확인용 `AliasCaptureWaitsForReview` RED. 정산 전에도 후속 표현을 캡처할 수 있고 종료 규칙은 GREEN이다. |
+
+기존 12개와 신규 7개를 포함해 19개 설정, TLC 57회에서 expected와 일치했다.
+원문은 레인 `logs/fix-w4-model.log`, `fix-w4-model-*.out`에 있다. 모델의 범위는
+같은 source의 두 논리 입력이며 파일 변경, receipt 전송, 실행 원장의 상태 변경은 별도 계약이다.
+
+최종 TLC checker rc 0, 48.4초. 후속 입력 RED는 각각 6단계, 종료 누락 및
+정산 전 후속 행 캡처의 도달 경로는 각각 5단계다.
+[후속 입력 Target 차트](absorbed-notice-reuse.chart.mmd)와
+[단일 입력 종료 Target 차트](absorbed-notice-native-close.chart.mmd).

@@ -56,7 +56,6 @@ Capture(form) ==
     /\ handed /\ form \in forms \ spool /\ replay = {}
     /\ (form = "remove" => enqueued)
     /\ (owned /\ ~OwnedRemove /\ form = "user" => "command" \in scanned /\ physicalReceipt)
-    /\ (OwnedRemove /\ form # "remove" => absorption.reviewed)
     /\ spool' = spool \cup {form}
     /\ UNCHANGED <<forms, handed, hookObserved, enqueued, scanned, evidence, prepared,
                     effects, posted, restarted, replay, owned, physicalReceipt, commandEvidence,
@@ -113,7 +112,7 @@ Restart ==
     /\ UNCHANGED <<forms, handed, hookObserved, enqueued, spool, evidence, prepared, effects,
                     posted, owned, physicalReceipt, commandEvidence, excluded, absorption>>
 
-\* The normal native execution result does not mint a physical receipt for a remove.
+\* A native Executed or Cancelled proof needs no physical remove receipt for notice ownership.
 NativeExecuted ==
     /\ OwnedRemove /\ "remove" \in spool /\ ~absorption.executed
     /\ absorption' = [absorption EXCEPT !.executed = TRUE]
@@ -124,8 +123,10 @@ NativeExecuted ==
 ReviewAbsorption ==
     /\ OwnedRemove /\ "remove" \in scanned /\ LogicalKey \in evidence
     /\ ~absorption.reviewed /\ replay = {}
+    /\ (absorption.executed \/ Mode = "drop-native-end")
     /\ absorption' = [absorption EXCEPT !.reviewed = TRUE]
-    /\ excluded' = IF Mode = "w3" THEN excluded \cup {LogicalKey} ELSE excluded
+    /\ excluded' = IF Mode \in {"w3", "w4", "drop-native-end"}
+                   THEN excluded \cup {LogicalKey} ELSE excluded
     /\ UNCHANGED <<forms, handed, hookObserved, enqueued, spool, scanned, evidence, prepared,
                     effects, posted, restarted, replay, owned, physicalReceipt, commandEvidence>>
 
@@ -166,6 +167,9 @@ NoOwnedExtraPost == owned => effects = {}
 CanonicalOwnedExclusion == (owned /\ Settled) => LogicalKey \in excluded
 OwnedAbsorptionDebtCleared ==
     (OwnedRemove /\ absorption.reviewed) => (NoticeDebt = 0 /\ LogicalKey \in excluded)
+NoEarlyAbsorptionSettlement == (OwnedRemove /\ LogicalKey \in excluded) => absorption.executed
+AliasCaptureWaitsForReview ==
+    (OwnedRemove /\ "remove" \in scanned /\ spool \cap {"command", "user"} # {}) => absorption.reviewed
 NoticeDoesNotBlockRetirement == absorption.retirement # "notice-debt"
 EventuallySettles == <>Settled
 =============================================================================
