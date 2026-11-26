@@ -846,9 +846,8 @@ fn cfg_args(args: &str) -> Vec<String> {
     parts
 }
 
-/// A `cfg` predicate that holds only in test builds: `test` or the `test-support` feature (on only
-/// for dependents' tests), `all(..)` with such an argument, or `any(..)` whose every argument is one.
-/// `not(..)` and an `any(..)` with another argument can hold in production, so they stay production.
+/// True when a `cfg` only holds in test builds: `test`, the dependents-only `test-support` feature, `all(..)`
+/// with one of them, or `any(..)` of only those; `not(..)` and any other `any(..)` stay production.
 fn cfg_requires_test(predicate: &str) -> bool {
     let predicate = predicate.trim();
     let group = |name: &str| {
