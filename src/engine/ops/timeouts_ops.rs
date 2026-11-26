@@ -8,7 +8,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 // Typed I/O for the stale-turn owner. Candidate timing and maintenance decisions
 // belong to services::stale_turn_reconciler.
 
-pub(super) mod host_repair;
+pub(crate) mod host_repair;
 
 pub(super) fn register_timeouts_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;

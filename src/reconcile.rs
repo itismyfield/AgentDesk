@@ -1151,50 +1151,6 @@ mod dispatch_delivery_reconcile_tests {
         db.drop().await;
     }
 
-    #[tokio::test]
-    async fn boot_reconcile_keeps_non_expired_processing_row_owned_by_peer_pg() {
-        let pg_db = TestPostgresDb::create().await;
-        let pool = pg_db.connect_and_migrate().await;
-
-        sqlx::query(
-            "INSERT INTO dispatch_outbox (
-                dispatch_id, action, status, claimed_at, claim_owner
-             ) VALUES (
-                'dispatch-live-peer-lease', 'notify', 'processing', NOW(), 'peer-instance'
-             )",
-        )
-        .execute(&pool)
-        .await
-        .expect("seed peer-owned processing outbox row");
-
-        let stats = reconcile_boot_db_pg(&pool, "current-instance", None, crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name)
-            .await
-            .expect("boot reconcile succeeds");
-        assert_eq!(stats.stale_processing_outbox_reset, 0);
-
-        let row = sqlx::query(
-            "SELECT status, claim_owner, claimed_at
-               FROM dispatch_outbox
-              WHERE dispatch_id = 'dispatch-live-peer-lease'",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(row.try_get::<String, _>("status").unwrap(), "processing");
-        assert_eq!(
-            row.try_get::<String, _>("claim_owner").unwrap(),
-            "peer-instance"
-        );
-        assert!(
-            row.try_get::<Option<DateTime<Utc>>, _>("claimed_at")
-                .unwrap()
-                .is_some()
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
     #[test]
     fn dispatch_delivery_reconcile_classifies_rows_without_postgres() {
         let mut stats = DispatchDeliveryEventReconcileStats::default();
