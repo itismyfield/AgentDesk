@@ -24,7 +24,7 @@ pub(super) async fn inspect(
         .ok_or_else(|| AppError::internal("runtime unavailable"))?;
     let identity = turn_lease::inspect(registry, &provider, ChannelId::new(channel_id.get()))
         .await
-        .map_err(AppError::conflict)?;
+        .map_err(lease_conflict)?;
     Ok(Json(
         serde_json::to_value(identity).map_err(|e| AppError::internal(e.to_string()))?,
     ))
@@ -43,6 +43,14 @@ pub(super) async fn release(
         .ok_or_else(|| AppError::internal("runtime unavailable"))?;
     let value = turn_lease::release(registry, request)
         .await
-        .map_err(AppError::conflict)?;
+        .map_err(lease_conflict)?;
     Ok((StatusCode::OK, Json(value)))
+}
+
+fn lease_conflict(error: turn_lease::LeaseError) -> AppError {
+    let response = AppError::conflict(error.to_string());
+    match error {
+        turn_lease::LeaseError::Unobservable(_) => response.with_context("status", "unobservable"),
+        turn_lease::LeaseError::Conflict(_) => response,
+    }
 }
