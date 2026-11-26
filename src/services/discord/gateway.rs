@@ -337,7 +337,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                 &self.http,
                 serenity::CreateMessage::new()
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await
@@ -375,7 +377,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                         .fail_if_not_exists(false),
                     )
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await
@@ -450,7 +454,9 @@ impl DiscordOutboundClient for SerenityTurnOutboundClient {
                 message_id,
                 serenity::EditMessage::new()
                     .content(content)
-                    .allowed_mentions(super::http::relay_allowed_mentions()),
+                    .allowed_mentions(
+                        crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                    ),
             ),
         )
         .await

@@ -110,7 +110,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
                     channel_id.get(),
                 )
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions()),
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                ),
             ),
         )
         .await
@@ -145,7 +147,9 @@ impl DiscordOutboundClient for SerenityReferenceOutboundClient {
                         .fail_if_not_exists(false),
                 )
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions()),
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                ),
             ),
         )
         .await

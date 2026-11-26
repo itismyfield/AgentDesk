@@ -179,14 +179,19 @@ mod tool_markdown;
 use self::tool_markdown::convert_markdown_tables;
 // These facade exports preserve the pre-split module paths even when a given
 // build target has no in-crate consumer.
-#[allow(unused_imports)]
-pub(super) use self::tool_markdown::{
-    ALL_TOOLS, BUILTIN_SKILLS, canonical_tool_name, escape_for_code_fence,
-    extract_skill_description, filter_codex_tool_logs, format_for_discord_with_provider,
-    format_for_discord_with_status_panel, format_tool_input, is_command_tool_name,
-    normalize_empty_lines, shorten_path, strip_codex_tool_log_lines, truncate_str,
+pub(crate) use crate::domain::tool_text::{
+    normalize_allowed_tools, redact_sensitive_for_placeholder,
 };
-pub(crate) use self::tool_markdown::{normalize_allowed_tools, redact_sensitive_for_placeholder};
+#[allow(unused_imports)]
+pub(super) use {
+    self::tool_markdown::{
+        BUILTIN_SKILLS, escape_for_code_fence, extract_skill_description, filter_codex_tool_logs,
+        format_for_discord_with_provider, format_for_discord_with_status_panel, format_tool_input,
+        is_command_tool_name, normalize_empty_lines, shorten_path, strip_codex_tool_log_lines,
+        truncate_str,
+    },
+    crate::domain::tool_text::{ALL_TOOLS, canonical_tool_name},
+};
 
 #[path = "formatting/streaming_status.rs"]
 mod streaming_status;
@@ -195,16 +200,19 @@ mod streaming_status;
 use self::streaming_status::char_count;
 use self::streaming_status::strip_placeholder_lines;
 #[allow(unused_imports)]
-pub(super) use self::streaming_status::{
-    LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus, StreamingRolloverPlan,
-    build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
-    build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
-    build_processing_status_block, build_status_panel_streaming_edit_text,
-    build_streaming_placeholder_text, byte_index_at_discord_message_units,
-    classify_long_running_tool, discord_message_units, finalize_in_progress_tool_status,
-    finalize_stale_streaming_footer, floor_char_boundary, format_for_discord, humanize_tool_status,
-    is_streaming_placeholder_status_line, plan_streaming_rollover, preserve_previous_tool_status,
-    resolve_raw_tool_status, streaming_split_boundary, text_ends_with_streaming_footer,
+pub(super) use {
+    self::streaming_status::{
+        LongRunningCloseTrigger, MonitorHandoffReason, MonitorHandoffStatus, StreamingRolloverPlan,
+        build_monitor_handoff_placeholder, build_monitor_handoff_placeholder_with_context,
+        build_monitor_handoff_placeholder_with_live_events, build_placeholder_status_block,
+        build_processing_status_block, build_status_panel_streaming_edit_text,
+        build_streaming_placeholder_text, classify_long_running_tool,
+        finalize_in_progress_tool_status, finalize_stale_streaming_footer, floor_char_boundary,
+        format_for_discord, humanize_tool_status, is_streaming_placeholder_status_line,
+        plan_streaming_rollover, preserve_previous_tool_status, resolve_raw_tool_status,
+        streaming_split_boundary, text_ends_with_streaming_footer,
+    },
+    crate::domain::message_split::{byte_index_at_discord_message_units, discord_message_units},
 };
 
 #[path = "formatting/delivery.rs"]

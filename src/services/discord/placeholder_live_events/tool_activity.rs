@@ -122,7 +122,11 @@ impl ToolActivityRing {
                     });
                     let codex_spawn = agent_call == Some(AgentCall::Spawn);
                     let agent = (agent_call == Some(AgentCall::Close))
-                        .then(|| input.as_deref().map(super::status_events::tool_input_value))
+                        .then(|| {
+                            input
+                                .as_deref()
+                                .map(crate::domain::tool_summary::tool_input_value)
+                        })
                         .flatten()
                         .and_then(|value| value.get("target")?.as_str().map(str::to_owned));
                     self.rows.push_back(Row {
@@ -143,7 +147,7 @@ impl ToolActivityRing {
                             || matches!(class(name).as_str(), "Task" | "Bash")
                                 && input
                                     .as_deref()
-                                    .map(super::status_events::tool_input_value)
+                                    .map(crate::domain::tool_summary::tool_input_value)
                                     .and_then(|value| {
                                         value.get("run_in_background").and_then(Value::as_bool)
                                     })

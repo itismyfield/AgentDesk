@@ -6,7 +6,7 @@ pub(crate) mod restart_recovery;
 mod retired_wake;
 pub(crate) mod root_replaced;
 
-pub(crate) use crate::services::session_host::operation_policy::terminate_enabled;
+use crate::services::session_host::operation_policy::terminate_enabled;
 pub(crate) use crate::services::turn_orchestrator::RetiredExclusion;
 pub(in crate::services::discord) use never_started::{
     NeverStartedTerminate, terminate_never_started,

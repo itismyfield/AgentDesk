@@ -481,7 +481,7 @@ async fn send_channel_message(
         base_url,
         token,
         &format!("/channels/{channel_id}/messages"),
-        &crate::services::discord::http::relay_message_payload(content),
+        &crate::services::message_outbox::mentions::relay_message_payload(content),
     )
     .await?;
     if response.status().is_success() {

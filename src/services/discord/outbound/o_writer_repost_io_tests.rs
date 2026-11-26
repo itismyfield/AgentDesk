@@ -441,7 +441,7 @@ async fn repost_sends_keep_one_nonce_and_marker_outside_the_content() {
         .build();
     let legacy_message = serenity::CreateMessage::new()
         .content(content.clone())
-        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
+        .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions());
     // The mock's reply is not a full Message, so only the request it recorded matters here.
     let _ = ChannelId::new(CHANNEL)
         .send_message(&legacy, legacy_message)
