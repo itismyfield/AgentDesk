@@ -350,6 +350,7 @@ async fn operator_release_cas_then_successor_keeps_new_turn_and_row() {
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
             request: request.clone(),
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };
@@ -623,6 +624,7 @@ async fn restart_mode_row_still_refuses_operator_inspect_and_release() {
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
             request,
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };
@@ -680,6 +682,7 @@ async fn rebind_origin_row_still_refuses_operator_inspect_and_release() {
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
             request,
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };
@@ -741,6 +744,7 @@ async fn restart_mode_pinned_token_still_refuses_release_without_any_row() {
         .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
             request,
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };
@@ -871,6 +875,7 @@ async fn claim_refuses_unbound_message_id_without_panic() {
                 expected,
                 reason: "operator verified the provider finished".into(),
             },
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };
@@ -892,12 +897,12 @@ async fn late_projection_sweep_clears_only_this_episodes_row() {
         let request = seed(&shared, channel).await;
         let nonce = request.expected.turn_nonce.clone();
         assert_eq!(
-            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce),
+            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce, false),
             inflight::GuardedClearOutcome::Cleared
         );
         assert!(inflight::load_inflight_state_read_only(&PROVIDER, channel.get()).is_none());
         assert_eq!(
-            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce),
+            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce, false),
             inflight::GuardedClearOutcome::Missing,
             "no row at all is reported as Missing, not as a clear"
         );
@@ -918,7 +923,7 @@ async fn late_projection_sweep_clears_only_this_episodes_row() {
         successor.turn_nonce = Some(format!("{nonce}-successor"));
         inflight::save_inflight_state(&successor).unwrap();
         assert_eq!(
-            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce),
+            OperatorRelease::clear_late_projection(&PROVIDER, channel, &nonce, false),
             inflight::GuardedClearOutcome::Missing
         );
         assert_eq!(
@@ -947,6 +952,7 @@ async fn operator_release_follow_up_never_latches_a_successor_recovery() {
             .with_episode_nonce(Some(&request.expected.turn_nonce));
         let operator = OperatorRelease {
             request,
+            mailbox: None,
             observed_before: Instant::now(),
             clear_outcome: Default::default(),
         };

@@ -173,6 +173,7 @@ pub(in crate::services::discord) fn owner_drive(
         (mailbox.clone(), provider.as_str().to_string()),
     );
     let drains = pool.clone();
+    let hold_bound = runtime.clone().map(|shared| (shared, provider.clone()));
     #[cfg(unix)]
     let restart = runtime.clone();
     let handoff: Handoff = std::sync::Arc::new(move |front| {
@@ -370,12 +371,15 @@ pub(in crate::services::discord) fn owner_drive(
     #[cfg(test)]
     let settled =
         owned_busy::observe_settlement(channel, tests::idle::observe_settlement(channel, settled));
-    std::sync::Arc::new(Drive {
-        mailbox,
-        channel,
-        handoff,
-        settled,
-    })
+    crate::services::discord::queue_io::input_owner::hold_bound::attach(
+        Drive {
+            mailbox,
+            channel,
+            handoff,
+            settled,
+        },
+        hold_bound,
+    )
 }
 
 /// The context kept with the exact front; read failures stay unsent.

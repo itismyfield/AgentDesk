@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use serenity::model::id::{ChannelId, MessageId};
 
 use super::{SharedData, inflight, turn_finalizer::*};
-use crate::services::{provider::ProviderKind, turn_orchestrator::FinishTurnResult};
+use crate::services::{
+    provider::ProviderKind,
+    turn_orchestrator::{ChannelMailboxHandle, FinishTurnResult},
+};
 
 mod registry;
 pub(crate) use registry::{inspect, release};
@@ -41,9 +44,9 @@ pub(crate) struct LeaseIdentity {
     pub(crate) channel_id: u64,
     generation: u64,
     runtime: String,
-    user_message_id: u64,
-    turn_nonce: String,
-    started_at: DateTime<Utc>,
+    pub(in crate::services::discord) user_message_id: u64,
+    pub(in crate::services::discord) turn_nonce: String,
+    pub(in crate::services::discord) started_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -56,6 +59,7 @@ pub(crate) struct ReleaseRequest {
 #[derive(Clone)]
 pub(in crate::services::discord) struct OperatorRelease {
     request: ReleaseRequest,
+    mailbox: Option<ChannelMailboxHandle>,
     observed_before: Instant,
     clear_outcome: Arc<OnceLock<inflight::GuardedClearOutcome>>,
 }
@@ -73,10 +77,42 @@ async fn identity(
     provider: &ProviderKind,
     channel: ChannelId,
 ) -> Result<Option<LeaseIdentity>, String> {
-    let Some(mailbox) = shared.mailbox_peek(channel) else {
-        return Ok(None);
+    identity_for_actor(shared, provider, channel, None).await
+}
+
+fn is_current_actor(
+    shared: &SharedData,
+    channel: ChannelId,
+    mailbox: &ChannelMailboxHandle,
+) -> bool {
+    shared
+        .mailbox_peek(channel)
+        .is_some_and(|current| mailbox.same_actor(&current))
+}
+
+async fn identity_for_actor(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    mailbox: Option<&ChannelMailboxHandle>,
+) -> Result<Option<LeaseIdentity>, String> {
+    let snapshot = if let Some(mailbox) = mailbox {
+        if !is_current_actor(shared, channel, mailbox) {
+            return Err("mailbox incarnation changed".into());
+        }
+        mailbox
+            .try_snapshot()
+            .await
+            .map_err(|_| "mailbox observation unavailable")?
+    } else {
+        let Some(mailbox) = shared.mailbox_peek(channel) else {
+            return Ok(None);
+        };
+        mailbox.snapshot().await
     };
-    let snapshot = mailbox.snapshot().await;
+    if mailbox.is_some_and(|mailbox| !is_current_actor(shared, channel, mailbox)) {
+        return Err("mailbox incarnation changed".into());
+    }
     let Some(token) = snapshot.cancel_token.clone() else {
         return Ok(None);
     };
@@ -110,6 +146,33 @@ async fn identity(
     }))
 }
 
+fn read_inflight(
+    provider: &ProviderKind,
+    channel: u64,
+    strict: bool,
+) -> Result<Option<inflight::InflightTurnState>, String> {
+    if strict {
+        return inflight::load_inflight_state_read_only_result(provider, channel)
+            .map_err(|error| format!("inflight observation unavailable: {error}"));
+    }
+    Ok(inflight::load_inflight_state_read_only(provider, channel))
+}
+
+fn matching_inflight(
+    provider: &ProviderKind,
+    expected: &LeaseIdentity,
+) -> Result<Option<inflight::InflightTurnState>, String> {
+    matching_inflight_for_actor(provider, expected, false)
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) fn matching_inflight_for_hold_bound(
+    provider: &ProviderKind,
+    expected: &LeaseIdentity,
+) -> Result<Option<inflight::InflightTurnState>, String> {
+    matching_inflight_for_actor(provider, expected, true)
+}
+
 /// #5951 RG1 — the row is a projection, not the authority, so its ABSENCE is
 /// reported as `Ok(None)` rather than refused: that is the rowless lane an
 /// operator needs when no automatic path can see the turn any more. A row that
@@ -117,14 +180,15 @@ async fn identity(
 /// `restart_mode` copy) keeps pinning authority — those stay refusals, reported
 /// apart from a plain identity mismatch so an operator can tell the two states
 /// apart.
-fn matching_inflight(
+fn matching_inflight_for_actor(
     provider: &ProviderKind,
     expected: &LeaseIdentity,
+    strict: bool,
 ) -> Result<Option<inflight::InflightTurnState>, String> {
     // #5951 P2-1 — read-only: the plain loader rewrites the sidecar under a
     // lock whenever it backfills `finalizer_turn_id`, and inspect is advertised
     // as a non-mutating probe.
-    let Some(row) = inflight::load_inflight_state_read_only(provider, expected.channel_id) else {
+    let Some(row) = read_inflight(provider, expected.channel_id, strict)? else {
         return Ok(None);
     };
     // #5951 P1-2 — an episode that bound no user message (id 0) has NO id axis
@@ -151,20 +215,64 @@ async fn release_on(
     channel: ChannelId,
     request: ReleaseRequest,
 ) -> Result<serde_json::Value, String> {
+    release_on_actor(shared, provider, channel, request, None).await
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn identity_for_hold_bound(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    mailbox: &ChannelMailboxHandle,
+) -> Result<Option<LeaseIdentity>, String> {
+    let lease = identity_for_actor(shared, provider, channel, Some(mailbox)).await?;
+    if let Some(expected) = lease.as_ref() {
+        let _ = matching_inflight_for_hold_bound(provider, expected)?;
+    }
+    Ok(lease)
+}
+
+#[cfg(unix)]
+pub(in crate::services::discord) async fn release_for_hold_bound(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    mailbox: &ChannelMailboxHandle,
+    expected: LeaseIdentity,
+) -> Result<bool, String> {
+    let request = ReleaseRequest {
+        expected,
+        reason: "input_hold_bound".into(),
+    };
+    let response = release_on_actor(shared, provider, channel, request, Some(mailbox)).await?;
+    Ok(response["released"].as_bool() == Some(true))
+}
+
+async fn release_on_actor(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    request: ReleaseRequest,
+    mailbox: Option<&ChannelMailboxHandle>,
+) -> Result<serde_json::Value, String> {
     if request.reason.trim().is_empty() {
         return Err("operator reason is required".into());
     }
     if request.expected.generation != shared.restart.current_generation {
         return Err("runtime generation changed; inspect again".into());
     }
-    let Some(current) = identity(shared, provider, channel).await? else {
+    let Some(current) = identity_for_actor(shared, provider, channel, mailbox).await? else {
         return Ok(serde_json::json!({"released": false, "status": "already_released"}));
     };
     if current != request.expected {
         return Err("lease changed; inspect again".into());
     }
-    let _ = matching_inflight(provider, &current)?;
-    let held = shared.mailbox(channel).snapshot().await.cancel_token;
+    let _ = matching_inflight_for_actor(provider, &current, mailbox.is_some())?;
+    let held = match mailbox {
+        Some(mailbox) => mailbox.snapshot().await,
+        None => shared.mailbox(channel).snapshot().await,
+    }
+    .cancel_token;
     let provider_preserved = held
         .as_ref()
         .filter(|token| token.turn_nonce() == Some(current.turn_nonce.as_str()))
@@ -197,6 +305,7 @@ async fn release_on(
     let clear_outcome = Arc::new(OnceLock::new());
     let event = TerminalEvent::OperatorRelease(Box::new(OperatorRelease {
         request,
+        mailbox: mailbox.cloned(),
         observed_before: Instant::now(),
         clear_outcome: clear_outcome.clone(),
     }));
@@ -241,7 +350,10 @@ async fn release_on(
                 ),
             }))
         }
-        _ if identity(shared, provider, channel).await?.is_none() => {
+        _ if identity_for_actor(shared, provider, channel, mailbox)
+            .await?
+            .is_none() =>
+        {
             Ok(serde_json::json!({"released": false, "status": "already_released"}))
         }
         _ => Err("lease changed before release committed; inspect again".into()),
@@ -255,9 +367,10 @@ impl OperatorRelease {
         provider: &ProviderKind,
         channel_id: ChannelId,
         turn_nonce: &str,
+        strict: bool,
     ) -> inflight::GuardedClearOutcome {
-        match inflight::load_inflight_state_read_only(provider, channel_id.get()) {
-            Some(row) if row.turn_nonce.as_deref() == Some(turn_nonce) => {
+        match read_inflight(provider, channel_id.get(), strict) {
+            Ok(Some(row)) if row.turn_nonce.as_deref() == Some(turn_nonce) => {
                 inflight::clear_inflight_state_for_captured_episode(
                     provider,
                     channel_id.get(),
@@ -265,7 +378,8 @@ impl OperatorRelease {
                     Some(turn_nonce),
                 )
             }
-            _ => inflight::GuardedClearOutcome::Missing,
+            Ok(_) => inflight::GuardedClearOutcome::Missing,
+            Err(_) => inflight::GuardedClearOutcome::IoError,
         }
     }
 
@@ -276,7 +390,7 @@ impl OperatorRelease {
         provider: &ProviderKind,
         key: TurnKey,
     ) -> Option<FinishTurnResult> {
-        if identity(shared, provider, key.channel_id)
+        if identity_for_actor(shared, provider, key.channel_id, self.mailbox.as_ref())
             .await
             .ok()
             .flatten()
@@ -285,7 +399,8 @@ impl OperatorRelease {
         {
             return None;
         }
-        let row = matching_inflight(provider, &self.request.expected).ok()?;
+        let strict = self.mailbox.is_some();
+        let row = matching_inflight_for_actor(provider, &self.request.expected, strict).ok()?;
         // `MessageId::new(0)` panics and an unbound episode carries no CAS key.
         // `release_on` already refuses id 0 before building the `TurnKey`, so
         // this is unreachable from the HTTP lane; it is the guard for a direct
@@ -294,7 +409,12 @@ impl OperatorRelease {
         if key.user_msg_id == 0 {
             return None;
         }
-        let handle = shared.mailbox_peek(key.channel_id)?;
+        // A replacement mailbox must never receive a cleanup authorized on the old actor.
+        let handle = match self.mailbox.as_ref() {
+            Some(mailbox) if is_current_actor(shared, key.channel_id, mailbox) => mailbox.clone(),
+            Some(_) => return None,
+            None => shared.mailbox_peek(key.channel_id)?,
+        };
         let result = handle
             .release_turn_lease_if_matches(
                 MessageId::new(key.user_msg_id),
@@ -321,6 +441,7 @@ impl OperatorRelease {
                 provider,
                 key.channel_id,
                 &self.request.expected.turn_nonce,
+                strict,
             ),
         };
         let _ = self.clear_outcome.set(cleared);

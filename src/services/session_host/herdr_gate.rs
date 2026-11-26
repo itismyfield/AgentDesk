@@ -8,6 +8,10 @@ pub(crate) mod root_replaced;
 #[path = "herdr_gate/legacy_return.rs"]
 pub(crate) mod legacy_return;
 
+#[cfg(unix)]
+#[path = "herdr_gate/hold_bound_capture.rs"]
+mod hold_bound_capture;
+
 #[path = "herdr_gate/closing.rs"]
 mod closing;
 pub(crate) use closing::execution_closing;

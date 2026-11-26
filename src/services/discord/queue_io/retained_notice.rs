@@ -144,6 +144,60 @@ pub(crate) async fn input_hold(
     .map_err(|e| e.to_string())
 }
 
+#[cfg(unix)]
+pub(in crate::services::discord) async fn hold_bound(
+    pool: &sqlx::PgPool,
+    provider: &str,
+    channel: u64,
+    message_id: u64,
+    text: &str,
+    waiting_reason: Option<&str>,
+) -> Result<i64, String> {
+    let excerpt: String = text
+        .trim()
+        .chars()
+        .take(40)
+        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+        .collect();
+    let excerpt = excerpt.trim().replace("<@", "<\u{200b}@");
+    let excerpt = if excerpt.is_empty() {
+        "본문 없음"
+    } else {
+        &excerpt
+    };
+    let (kind, reason_code, body) = match waiting_reason {
+        Some(reason) => (
+            "waiting",
+            "hold_bound.waiting",
+            format!(
+                "⏱️ 이 입력(「{excerpt}」)은 3분 넘게 보류 중입니다(사유: {reason}). 상태가 풀리면 전달합니다."
+            ),
+        ),
+        None => (
+            "released",
+            "hold_bound.released",
+            format!(
+                "⏱️ 이 입력(「{excerpt}」)은 앞 턴 기록이 정리되지 않아 3분 넘게 보류됐습니다. 세션이 입력 대기 상태임을 확인하고 남은 턴 기록을 정리한 뒤 전달합니다."
+            ),
+        ),
+    };
+    let key = format!("hold_bound:{channel}:{message_id}:{kind}");
+    let text = super::super::dispatch_policy::prepend_operational_alert_origin(&body);
+    enqueue_outbox_pg_returning_id_with_persistent_dedupe(
+        pool,
+        OutboxMessage {
+            target: &format!("channel:{channel}"),
+            content: &text,
+            bot: provider,
+            source: "retained_input_notice",
+            reason_code: Some(reason_code),
+            session_key: Some(&key),
+        },
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
 impl crate::services::turn_orchestrator::ChannelMailboxHandle {
     #[cfg(test)]
     pub(crate) fn v2_notice_is_non_turn(text: &str) -> bool {

@@ -7,6 +7,8 @@ pub(crate) mod drive;
 pub(crate) mod effect;
 pub(crate) mod effort_continue;
 pub(crate) mod held_watch;
+#[cfg(unix)]
+pub(in crate::services::discord) mod hold_bound;
 #[cfg(all(test, unix))]
 mod hold_bound_tests;
 pub(crate) mod ingress;
