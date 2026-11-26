@@ -1,7 +1,6 @@
 # HerdrRetiredRow
 
-TLC reached 142 states and 327 steps. The chart draws 88 states and 206 arrows.
-The chart does not draw 56 steps that stay in one chart state.
+TLC reached 695 states, more than the chart budget of 500, so the command wrote no chart.mmd.
 
 ## Rules that hold
-RowGoneWithTerminal, NoticeOnce, ExeclessRowResolves
+RowGoneWithTerminal, NoticeOnce, ExeclessRowResolves, HeldInputRuns

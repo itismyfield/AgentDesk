@@ -14,15 +14,16 @@
 \* (Path "terminate") and who ends it once dcserver restarts; see the ownership section below.
 EXTENDS Naturals
 CONSTANTS Path, Fence, FenceNonce, Cleanup, NewTurns, Restarts, ReaderStops, FlushObserves, ToolGuard,
-          Owner, Shapes
+          Owner, Shapes, Flaws
 VARIABLES exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
           lost, seen, lostWrite, oldOverNew,
-          inf, igen, shape, boot, committed, notices, gone
+          inf, igen, shape, boot, committed, notices, gone, reader, inq
 
 vars == <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-          lost, seen, lostWrite, oldOverNew, inf, igen, shape, boot, committed, notices, gone>>
+          lost, seen, lostWrite, oldOverNew, inf, igen, shape, boot, committed, notices, gone,
+          reader, inq>>
 readerVars == <<lost, seen, lostWrite, oldOverNew>>
-ownVars == <<inf, igen, shape, boot, committed, notices, gone>>
+ownVars == <<inf, igen, shape, boot, committed, notices, gone, reader, inq>>
 Ended == {"disconnected", "idle"}
 On == Owner # "off"
 
@@ -33,6 +34,7 @@ Init ==
     /\ inf = (IF On THEN "present" ELSE "none") /\ igen = "current"
     /\ shape \in (IF On THEN Shapes ELSE {"pathless"})
     /\ boot = "idle" /\ committed = FALSE /\ notices = 0 /\ gone = "no"
+    /\ reader = "none" /\ inq = "none"
 
 \* update_target WHERE (canonical_identity.rs:927) plus retired_revival_fence when Fence.
 Blocked(s, n) ==
@@ -173,7 +175,7 @@ Restart ==
     /\ UNCHANGED <<exec, row, nonce, fresh, ended, refused, turns, pres, phase, readerVars>>
     /\ igen' = IF inf = "present" THEN "prior" ELSE igen
     /\ boot' = IF inf = "present" THEN "pending" ELSE boot
-    /\ UNCHANGED <<inf, shape, committed, notices, gone>>
+    /\ UNCHANGED <<inf, shape, committed, notices, gone, reader, inq>>
 
 \* turn_presence/activity.rs:733-735: an open transcript quiet for STALE_OPEN_AFTER leaves busy.
 PresenceStale ==
@@ -183,24 +185,39 @@ PresenceStale ==
 
 
 \* ---- Inflight row ownership after a terminate and a restart (Owner # "off") ----
-\* inf: the turn's inflight row; igen: its born_generation against this process
+\* Code b04ea56650. inf: the turn's inflight row; igen: its born_generation against this process
 \* (reconcile_gate.rs:29); shape: the row fields that pick its restart owner (Shapes):
 \*   pathless  herdr_row_end.rs:53-72 target() holds
 \*   path      output_path set, no kind/receipt/hand-off/rebind/replay (owner.rs:127-141 false)
 \*   kind      tui_terminal_kind set (herdr_admitted_restart.rs:23-45)
 \*   receipt   herdr_before_start_stop or receipt file (herdr_before_start_restart.rs:9-24)
+\*   replay    replay_rerun_blocked (model/identity.rs:107; restore_inflight.rs:165-168)
 \* boot: restore_inflight.rs:120-229 one pass; committed: the row's own notice ack
-\* (terminal_delivery_committed / receipt notice_pending false); notices: terminal notices shown;
-\* gone: "settled" by an owner, "dropped" by age alone.
-\* Current: hold owner.rs:110-123 (every shape), end pass target() only.
-\* Target: one owner predicate; the end pass picks every held shape and runs that shape's settle.
-\* mutant_split: Target with target() kept as the pass filter. target_redeliver: Target whose
-\* re-run ignores committed. target_stale_drop: Target plus stale-age removal of Herdr rows.
-AllShapes == {"pathless", "path", "kind", "receipt"}
-HoldSet == AllShapes
-PickSet == IF Owner \in {"current", "mutant_split"} THEN {"pathless"} ELSE AllShapes
-Held == On /\ inf = "present" /\ igen = "prior" /\ shape \in HoldSet
+\* (terminal_delivery_committed / receipt notice_pending false / replay debt acknowledged);
+\* notices: terminal notices shown (capped at 2); gone: "settled" by an owner, "dropped" by age.
+\* reader: a wrapper-restored reader of this row's episode, "live" while its watcher handle is
+\* live (relay_state.rs:476-483), "mapping" once only the channel mapping is left (:544-559).
+\* inq: an owner input that arrived after the restart; "asleep" is Wait::Event, which returns
+\* before the claim (owner_input.rs:978-980) and no timer re-reads (presence wakes an owned
+\* queue only on its Idle transition, turn_presence/supervisor.rs:681-700).
+\* Current: hold owner.rs:110-123 (every shape), end pass target() only, unpinned on a new nonce.
+\* Target: one owner predicate; the end pass picks every held shape, settles it, then wakes.
+\* Flaws turn one Target repair off each: split (pass filter stays target()), redeliver (re-run
+\* ignores committed), stale_drop (stale-age drops Herdr rows), path_refused (Restored clear keeps
+\* the path-less refusal, clear_store/herdr_row_end.rs:43), nowake (no closed() after a re-run
+\* settle), replay_keep (Replay only logs a hold), mapping_gate (the reader gate reads the channel
+\* mapping), pin_strict (a newer execution nonce reads as unpinned, herdr_row_end.rs:541-549).
+AllShapes == {"pathless", "path", "kind", "receipt", "replay"}
+Cur == Owner = "current"
+Fl(f) == ~Cur /\ f \in Flaws
+PickSet == IF Cur \/ Fl("split") THEN {"pathless"} ELSE AllShapes
+Held == On /\ inf = "present" /\ igen = "prior" /\ shape \in AllShapes
 Show(c) == IF c THEN notices ELSE notices + 1
+Bump == IF notices < 2 THEN notices + 1 ELSE 2
+\* The row's own execution is gone: Retired, or a newer nonce was installed over it
+\* (install_pending_pg only over a retired older nonce, hosted_execution.rs:417-425).
+ExecGone == exec = "retired" \/ (exec = "pending" /\ ~Cur /\ ~Fl("pin_strict"))
+ReaderHolds == IF Fl("mapping_gate") THEN reader # "none" ELSE reader = "live"
 
 \* herdr_terminate.rs settle_and_release -> settle_captured: the HostTerminated finalize either
 \* clears the row with its terminal or its actor CAS refuses and the row stays (#8435 (b)).
@@ -209,55 +226,94 @@ TermSettle ==
     /\ \/ inf' = "none" /\ gone' = "settled" /\ notices' = notices + 1
        \/ UNCHANGED <<inf, gone, notices>>
     /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres,
-                   readerVars, igen, shape, boot, committed>>
+                   readerVars, igen, shape, boot, committed, reader, inq>>
 
 \* restore_inflight.rs: a pathless row skips (held_at_restore, :215); kind/receipt run their one
-\* settle (:143,:209,:224) and may keep the row "for the next boot"; a path row takes the wrapper
-\* restore, whose reader can leave it (carried_turn_close.rs:197-201 no native end).
+\* settle (:143,:209,:224) and may keep the row "for the next boot"; replay delivers its debt and
+\* always keeps the row (:165-168, replay_hold.rs:113-175); a path row takes the wrapper restore,
+\* which may attach a reader and may leave the row (carried_turn_close.rs:197-201).
 BootRestore ==
     /\ On /\ boot = "pending" /\ boot' = "done"
-    /\ IF shape = "pathless" THEN UNCHANGED <<inf, committed, notices, gone>>
-       ELSE IF shape = "path"
-       THEN \/ inf' = "none" /\ gone' = "settled" /\ notices' = notices + 1
-                /\ UNCHANGED committed
-            \/ UNCHANGED <<inf, committed, notices, gone>>
-       ELSE \/ UNCHANGED <<inf, committed, notices, gone>>
-            \/ committed' = TRUE /\ notices' = Show(committed) /\ UNCHANGED <<inf, gone>>
-            \/ inf' = "none" /\ gone' = "settled" /\ committed' = TRUE
-               /\ notices' = Show(committed)
+    /\ CASE shape = "pathless" -> UNCHANGED <<inf, committed, notices, gone, reader>>
+         [] shape = "path" ->
+              \/ inf' = "none" /\ gone' = "settled" /\ notices' = notices + 1
+                 /\ UNCHANGED <<committed, reader>>
+              \/ reader' \in {"none", "live"} /\ UNCHANGED <<inf, committed, notices, gone>>
+         [] shape = "replay" ->
+              \/ UNCHANGED <<inf, committed, notices, gone, reader>>
+              \/ committed' = TRUE /\ notices' = Show(committed)
+                 /\ UNCHANGED <<inf, gone, reader>>
+         [] OTHER ->
+              \/ UNCHANGED <<inf, committed, notices, gone, reader>>
+              \/ committed' = TRUE /\ notices' = Show(committed)
+                 /\ UNCHANGED <<inf, gone, reader>>
+              \/ inf' = "none" /\ gone' = "settled" /\ committed' = TRUE
+                 /\ notices' = Show(committed) /\ UNCHANGED reader
     /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-                   readerVars, igen, shape>>
+                   readerVars, igen, shape, inq>>
 
-\* herdr_row_end.rs:112-140 / 153-181 after reconcile: a picked row whose execution reads Retired
-\* is settled (observe keeps retire None, commit releases the hold, notice, clear).
-\* Gates that read unclear retry on the next 5 s pass; the model takes the pass that succeeds.
-EndPass ==
-    /\ On /\ boot = "done" /\ inf = "present" /\ igen = "prior" /\ exec = "retired"
-    /\ shape \in PickSet
-    /\ inf' = "none" /\ gone' = "settled"
-    /\ committed' = TRUE
-    /\ notices' = IF Owner = "target_redeliver" THEN notices + 1 ELSE Show(committed)
+\* The restored reader's watcher stops or goes stale; the channel mapping it left stays.
+ReaderExit ==
+    /\ On /\ reader = "live" /\ reader' = "mapping"
     /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-                   readerVars, igen, shape, boot>>
+                   readerVars, inf, igen, shape, boot, committed, notices, gone, inq>>
 
-\* inflight/removal.rs:417-498 with the Herdr preservation removed: age alone drops the row,
+\* A new incarnation's Pending record over the retired nonce (/restart, clear recovery).
+Reincarnate ==
+    /\ On /\ igen = "prior" /\ exec = "retired" /\ exec' = "pending"
+    /\ UNCHANGED <<row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
+                   readerVars, ownVars>>
+
+\* An owner input after the restart: a held channel puts it to sleep (Wait::Event).
+InputArrive ==
+    /\ On /\ igen = "prior" /\ boot = "done" /\ inq = "none"
+    /\ inq' = IF Held THEN "asleep" ELSE "run"
+    /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
+                   readerVars, inf, igen, shape, boot, committed, notices, gone, reader>>
+
+\* queue_io/input_owner/closed.rs:22-34 kickoff: the woken owner reads the front again.
+OwnerReeval ==
+    /\ On /\ inq = "woken" /\ inq' = IF Held THEN "asleep" ELSE "run"
+    /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
+                   readerVars, inf, igen, shape, boot, committed, notices, gone, reader>>
+
+\* One 5 s pass over the row (herdr_row_end.rs:112-181, after reconcile_done). Its result follows
+\* from the state: a picked row whose own execution is gone and no live reader of its episode
+\* holds is settled (notice once, clear, then closed() wakes the owner); a Restored clear that
+\* keeps the path-less refusal shows its notice and is refused; anything else changes nothing.
+EndTick ==
+    /\ On /\ boot = "done" /\ inf = "present" /\ igen = "prior"
+    /\ shape \in PickSet /\ ExecGone /\ ~(shape = "path" /\ ReaderHolds)
+    /\ ~(shape = "replay" /\ Fl("replay_keep"))
+    /\ IF shape = "path" /\ Fl("path_refused")
+       THEN notices' = Bump /\ UNCHANGED <<inf, gone, committed, inq>>
+       ELSE /\ inf' = "none" /\ gone' = "settled" /\ committed' = TRUE
+            /\ notices' = IF Fl("redeliver") THEN Bump ELSE Show(committed)
+            /\ inq' = IF inq = "asleep" /\ ~(Fl("nowake") /\ shape # "pathless")
+                      THEN "woken" ELSE inq
+    /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
+                   readerVars, igen, shape, boot, reader>>
+
+\* inflight/removal.rs:417-509 with the Herdr preservation removed: age alone drops the row,
 \* whatever the execution or its terminal.
 StaleDrop ==
-    /\ Owner = "target_stale_drop" /\ inf = "present" /\ inf' = "none" /\ gone' = "dropped"
+    /\ Fl("stale_drop") /\ inf = "present" /\ inf' = "none" /\ gone' = "dropped"
     /\ UNCHANGED <<exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,
-                   readerVars, igen, shape, boot, committed, notices>>
+                   readerVars, igen, shape, boot, committed, notices, reader, inq>>
 
 Next ==
     \/ Retire \/ ForcePostlude \/ LiveEnd \/ Heartbeat \/ BridgeExit \/ BridgeFinal
     \/ StaleTick \/ Sweep \/ Install \/ NewTurn \/ NewTurnEnd \/ Restart \/ PresenceStale
     \/ NextPreflight \/ ToolUse
-    \/ TermSettle \/ BootRestore \/ EndPass \/ StaleDrop
+    \/ TermSettle \/ BootRestore \/ EndTick \/ StaleDrop
+    \/ ReaderExit \/ Reincarnate \/ InputArrive \/ OwnerReeval
 
 Fair ==
     /\ WF_vars(Retire) /\ WF_vars(ForcePostlude) /\ WF_vars(LiveEnd) /\ WF_vars(Heartbeat)
     /\ WF_vars(BridgeExit) /\ WF_vars(BridgeFinal) /\ WF_vars(StaleTick) /\ WF_vars(Sweep)
     /\ WF_vars(NewTurnEnd) /\ WF_vars(PresenceStale) /\ WF_vars(Restart) /\ WF_vars(NextPreflight)
-    /\ WF_vars(TermSettle) /\ WF_vars(BootRestore) /\ WF_vars(EndPass)
+    /\ WF_vars(TermSettle) /\ WF_vars(BootRestore) /\ WF_vars(EndTick)
+    /\ WF_vars(ReaderExit) /\ WF_vars(OwnerReeval)
 
 Spec == Init /\ [][Next]_vars /\ Fair
 
@@ -279,6 +335,8 @@ NoticeOnce == notices <= 1
 
 RowSettles == <>[](row \in Ended)
 \* A Herdr row whose execution is gone is eventually ended or no longer holds new inputs.
-ExeclessRowResolves == (exec = "retired" /\ inf = "present") ~> (inf = "none" \/ ~Held)
+ExeclessRowResolves == (exec # "bound" /\ inf = "present") ~> (inf = "none" \/ ~Held)
+\* An owner input that went to sleep behind the row runs once the row no longer holds it.
+HeldInputRuns == (inq = "asleep") ~> (inq = "run")
 PresenceLeavesBusy == (exec = "retired" /\ nonce = 1) ~> (pres # "busy")
 ====

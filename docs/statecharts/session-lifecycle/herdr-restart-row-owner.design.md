@@ -28,28 +28,56 @@ T ⊂ D ⊂ H다. 칸마다 일어나는 일:
 
 ## 2. 목표 술어
 
-`owner.rs`에 분류 함수 하나를 둔다. 기존 세 판정은 모두 이 함수에서 나온다.
+`owner.rs`에 분류 함수 하나를 둔다. 기존 세 판정은 모두 이 함수에서 나온다. (w2: 리뷰 P1 3·P2 3 반영, 2.2절 표)
 
 ```text
 restarted_row(provider, row, current) -> Option<RestartedRow>
-  None      : hosted provider 아님 | channel 0 | 현 세대 | Herdr 표식·execution nonce 모두 없음 | turn_nonce 없음·빔
+  None      : hosted provider 아님 | channel 0 | 현 세대 | Herdr 표식·execution nonce 모두 없음
   Some(Receipt)   : herdr_before_start_stop | receipt 파일
   Some(Admitted)  : tui_terminal_kind
   Some(Planned)   : restart_mode == HotSwapHandoff
-  Some(Replay)    : replay_rerun_blocked
+  Some(Replay)    : replay_rerun_blocked (inflight/model/identity.rs:107-109)
   Some(Pathless)  : 위가 아니고 지금 target()의 나머지 조건(output_path 빔·runtime kind 해석됨)
   Some(Restored)  : 그 밖(output_path 있음 등)
 ```
 
 - `restarted_owner` 보류 = `dedicated_cleanup_owner` = end pass 대상 = `restarted_row(..).is_some()`. 이 하나로 세 판정을 정한다.
-- `row_end_pass`·`request_row_end`는 `is_some()`인 모든 행을 집고 모양별 settle로 보낸다. 집은 뒤 막히면 반드시 `diagnostics::held` 사유를 남긴다. 조용히 반환하는 곳(`herdr_row_end.rs:161`)은 없어진다.
-  - Pathless: 지금 `end_row`/`settle_row` 그대로(`:194-301`). `:238`의 `target()` 재확인은 "같은 모양인가"로 바꾼다.
-  - Admitted: 부팅과 같은 `AdmittedRestartTerminal::settle_checked`(`herdr_admitted_restart.rs:82-195`)를 다시 부른다. 재호출해도 공지는 한 번이다. `delivered = terminal_delivery_committed`(`:43`)이면 다시 보내지 않기 때문이다. 모델 `Redeliver` 변형이 이 조건을 지키는 규칙(NoticeOnce)이다.
-  - Receipt: `herdr_before_start_restart::decode(..).settle(..)`(`:76-110`, `:113-190`)를 다시 부른다. `notice_pending()`이 거짓이면 다시 보내지 않는다(`:149`, ack `:164`, 정리 `:182`).
-  - Restored: `settle_row`의 E 경로를 탄다. `observe`는 `row.output_path`를 읽지 않고 `logged_source`를 읽는다(`herdr_row_end.rs:403-450`). 관문 하나를 더한다. 이 프로세스의 reader가 그 채널에 붙어 있으면(`engine_runtime/relay_state.rs:544` `channel_binding`) `restored_reader_bound`로 보존한다. 붙은 reader가 있는 동안에는 그 reader가 owner이고, 둘이 같은 턴의 끝을 따로 게시하지 않게 하는 관문이다. 실행이 Bound이면 지금처럼 `provider_alive_after_pane_exit` 또는 I 판독 실패로 보존한다(`:419-431`).
-  - Planned: 겹친 이전 프로세스가 아직 owner일 수 있다(`herdr_admitted_restart.rs:89-96`). 그래서 `planned_restart_owner`로 보존한다. 끝은 planned-restart 보존 기한 삭제(`inflight/removal.rs:447-490`)가 맡는다. 이 기한 삭제는 Herdr 여부와 상관없이 HotSwap 행을 지운다. tmux 확인은 DrainRestart에만 한다.
-  - Replay: `replay_owner`로 보존한다. 끝내는 쪽은 replay 처리다([U2], 모델 범위 밖).
-- `turn_nonce`가 없는 Herdr 행은 지금 H에 들고 T에는 못 든다. 목표에서는 어느 판정에도 넣지 않고 일반 recovery에 둔다. end pass의 정리·hold 해제가 모두 nonce를 요구하기 때문이다(`inflight/clear_store/herdr_row_end.rs:34-36`, `herdr_row_end.rs:505-517` `release_hold(&seen.nonce)` `:512`). 그래서 이 행은 영원히 집을 수 없는 행이다. 행동이 바뀌는 칸은 이것 하나다. 리뷰 확인을 요청한다([D1]).
+- `row_end_pass`·`request_row_end`는 `is_some()`인 모든 행을 집고, 새 child `herdr_row_end/restarted_shapes.rs`의 dispatcher가 모양별 settle로 보낸다. 집은 뒤 막히면 반드시 `diagnostics::held` 사유를 남긴다. 조용히 반환하는 곳(`herdr_row_end.rs:161`)은 없어진다.
+
+### 2.1 모든 모양에 공통인 것
+
+- **실행이 끝났다는 증거(E).** 행의 실행이 `HostedState::Retired`이거나(`herdr_row_end.rs:413`), 끝났음을 읽거나(`execution_end`, `:414-431`), **새 incarnation이 그 nonce를 대체한 경우**다. 마지막 경우가 새로 들어간다. `install_pending_pg`는 Pending을 "legacy 행이나 retired된 이전 nonce" 위에만 설치한다(`db/dispatched_sessions/hosted_execution.rs:417-425`). 그래서 행의 `hosted_execution_nonce = Some(n)`이고, 같은 logical key·record id의 현 record nonce가 n이 아니면, n의 실행은 이미 retired다. 지금 `hosted_record`(`herdr_row_end.rs:520-551`)는 이 경우를 `execution_unpinned`로 영구 보존한다(Pathless 포함). 목표에서는 `Superseded`를 돌려주고, `observe`는 retire 없이 E로 다룬다. 이때 hold 해제와 source 판독은 행의 nonce n으로 한다. `release_hold(n)`은 파일이 없으면 `Released`를 돌려주므로 멱등이다(`services/claude/herdr_turn.rs:525-537`). 행에 `hosted_execution_nonce`가 없으면 지금처럼 현 record를 그대로 받는다(대체 판단 불가, 지금 동작 유지).
+- **actor 없음.** `actor_absent`(`herdr_row_end.rs:347-364`, mailbox token과 Herdr index)를 그대로 쓴다.
+- **두 nonce의 역할([D1] 정정).** `turn_nonce`는 행의 턴 식별자다. 정리 때 잠금 안에서 신원 대조에 쓴다(`clear_store/herdr_row_end.rs:35-36`). 레거시 행은 `None`일 수 있고, 그때는 신원만으로 정리하는 계약이 있다(`inflight/model.rs:400-404`). `release_hold`의 인자는 **실행 nonce**(`record.execution_nonce`, `herdr_row_end.rs:409`)이고 `turn_nonce`가 아니다. w1의 "nonce 없는 행은 집을 수 없다"는 두 nonce를 섞은 결론이었다. w2에서는 `turn_nonce` 없는 행도 분류에 넣는다. 정리는 신원·`save_generation`·episode pin 대조(`fresh.turn_nonce == self.turn_nonce`, 둘 다 `None`)로 하고, `:35`의 빈 nonce 거절은 Pathless·Restored 정리에서 이 대조로 바꾼다. [D1]의 "보류에서 뺀다"는 철회한다. 빼더라도 비Managed 행이 남아 REST(`health/turn_deliver.rs:131-142`)와 native owner(`owner_input.rs:778-781`)가 따로 막기 때문이다.
+- **공통 성공 경로와 깨우기(P1-2).** 모양별 settle이 `Settled`를 돌려주면 dispatcher가 `diagnostics::settled` → 전환 락 해제 → `queue_io::input_owner::closed::closed(shared, provider, channel, "herdr_row_end")`(`closed.rs:22-34`, 즉시 idle kickoff)을 부른다. Pathless의 지금 순서(`herdr_row_end.rs:292-296`)와 같다. 이 깨우기가 필요한 이유는 이렇다. owner 입력은 `Wait::Event`에서 claim 전에 돌아가고(`owner_input.rs:978-980`), 큐에는 타이머가 없다. presence도 owned 큐는 Idle 전이 때만 깨운다(`turn_presence/supervisor.rs:681-700`). 부팅 경로의 Admitted·Receipt settle은 바꾸지 않는다. 부팅 settle은 `reconcile_done` 전에 끝나고, 그 뒤의 첫 kickoff가 큐를 읽는다.
+
+### 2.2 모양별 settle
+
+| 모양 | settle | 정리 함수(잠금 안 대조) | 공지 1회 근거 |
+|---|---|---|---|
+| Pathless | 지금 `settle_row`(`herdr_row_end.rs:222-301`). `:238` 재확인은 "같은 모양인가"로 바꾼다 | `clear_restarted_herdr_row`(`clear_store/herdr_row_end.rs:9-65`). 모양 인자 Pathless는 지금 거절 조건과 같다 | commit → notice → clear 순서. clear가 거절되면 다음 pass는 `fresh_mismatch`(`:235-237`) |
+| Admitted | 부팅과 같은 `AdmittedRestartTerminal::settle_checked`(`herdr_admitted_restart.rs:82-195`) 재호출 | `clear_admitted_restart_terminal`(`clear_store/identity.rs:279`) | `delivered = terminal_delivery_committed`(`:43`)이면 다시 보내지 않는다. TUI-O 소유 Aborted 분기(`:122-130`)는 ack를 남기지 않지만 전송 키 `herdr-stop:{turn_nonce}`로 dedupe한다(`turn_bridge/before_start_stop.rs:272-292`). 프로세스를 넘기는 dedupe는 [U5] |
+| Receipt | `herdr_before_start_restart::decode(..).settle(..)`(`:76-110`, `:113-190`) 재호출 | `clear_before_start_receipt`(`:182`) | `notice_pending()` 거짓이면 다시 보내지 않는다(`:149`, ack `:164`) |
+| Restored(P1-1) | `settle_row`의 E 경로. 정리 직전 관문: 이 행 episode의 reader가 살아 있으면 `restored_reader_live`로 보존한다. 판정은 `tmux_watchers.tmux_session_live_for_relay(row 세션) == Some(true)` ∧ `watcher_output_path(row 세션) == row.output_path`(`engine_runtime/relay_state.rs:476-492`). 채널 매핑(`channel_binding`, `:544-559`)만 남은 경우는 막지 않는다 | `clear_restarted_herdr_row`에 기대 모양을 받게 한다. 잠금 안에서 `:42-46`의 고정 거절 대신 "잠긴 최신 행의 분류 == 기대 모양"을 보고, Restored면 `fresh.output_path == self.output_path`를 본다. `:26`·`:33-41`(receipt, nonce·세대·episode pin·신원, 현 세대)과 `:50`(silent O)은 유지한다 | Pathless와 같다. 모양이 맞으면 정리가 거절되는 경우는 행이 실제로 바뀐 경우뿐이다 |
+| Replay(P1-3) | 아래 2.3 | `archive_inflight_state_if_matches_identity_generation`(`clear_store/mod.rs:223-330`, 신원·`updated_at`·`save_generation` 대조, 파일은 `archive/`로 이동) | `deliver_held_debt_checked`는 `terminal_delivery_completed()`면 다시 보내지 않는다(`replay_hold.rs:132-136`) |
+| Planned | `planned_restart_owner`로 보존한다. 겹친 이전 프로세스가 owner일 수 있다(`herdr_admitted_restart.rs:89-96`). 끝은 planned 보존 기한 삭제(`inflight/removal.rs:447-490`)다 | — | — |
+
+Restored의 path-less 거절(`clear_store/herdr_row_end.rs:43`)이 지키던 것은 "wrapper 복구 reader가 owner인 행을 지우지 않는다"였다. w2는 그 대리 조건을 다음 세 가지 증거로 바꾼다. (1) 2.1의 E, (2) actor 없음, (3) 같은 episode의 reader 생존 판정(세션 핸들이 살아 있고 heartbeat가 신선하며 출력 경로가 같음). wrapper 복구는 `reconcile_done` 전에만 reader를 붙인다. 그래서 (3)을 확인한 뒤 정리하기 전에 새 reader가 붙는 경로는 없다.
+
+### 2.3 Replay의 끝 owner (U2 닫음)
+
+Replay 행은 두 가지를 함께 진다. 하나는 이전 요청의 **재실행 금지**이고, 다른 하나는 채널에 대한 **새 입력 보류**다. w2는 둘을 나눈다.
+
+- **재실행 금지는 PG가 진다.** 판정 원천은 intake_outbox 영수증의 disposition이다(`replay_hold.rs:38-89` → `stored_disposition_blocks_rerun`). 복구 재시도(`turn_bridge/recovery_text/replay.rs:35-58`)와 세대 정리(`inflight/removal/scoped_restore.rs:54-66`)는 행이 아니라 PG를 읽는다. TUI 실행에서는 저장 본문도 PG `replay_preserved`에 있다(`replay_hold_tests.rs:146-157`가 `{"body": full_response}`를 단언).
+- **새 입력 보류는 실행이 끝나면 내려놓는다.** pass는 다음 순서로 진행한다.
+  1. 2.1의 E와 actor 없음을 확인한다.
+  2. `hydrate_replay_hold_checked`(`replay_hold.rs:38-89`)가 `Verified`이고, 막는 영수증이 있음을 다시 확인한다. 미확인이면 `replay_unverified`로 보존한다.
+  3. 저장 본문이 있고 전달이 끝나지 않았으면 `deliver_held_debt_checked`(`:114-175`)가 `Acknowledged`여야 한다. 아니면 `replay_debt_unacked`로 보존한다. 본문이 비면 E 경로 중립 공지 1회(`settle_row`와 같은 notice)로 끝을 알린다.
+  4. 행을 지우지 않고 **archive**한다(위 표).
+  5. 2.1 공통 깨우기를 한다.
+- 선례: owner 정리(clear teardown)가 이미 같은 일을 한다. withheld replay 행을 세션이 사라졌거나 native 완료가 확인됐을 때 archive한다(`commands/control/clear_teardown/execution_cleanup.rs:396,465-484`).
+- 부팅 경로(`restore_inflight.rs:165-168`)와 기존 시험(`replay_hold_tests.rs:136-178`, 부팅 뒤 행이 남음)은 바꾸지 않는다. archive는 부팅 뒤 end pass만 한다.
+- 가시성: `restore_inflight.rs:53`의 `mod replay_hold;`를 `pub(super)`로, 두 함수와 결과 enum을 `pub(in crate::services::discord::recovery_engine)`으로 넓힌다. giant 파일(`restore_inflight.rs`)에는 이 한 줄만 바꾼다.
 
 브리프의 두 문장과의 대응:
 - "dedicated owner로 분류한 행은 end pass가 반드시 집는다" → 같은 함수의 `is_some()`이다.
@@ -78,7 +106,7 @@ restarted_row(provider, row, current) -> Option<RestartedRow>
 | end pass | `herdr_row_end.rs:112-140` | `live ∨ T`만 | `live ∨ is_some()`, 모양별 settle. live 분기(`herdr_row_end_live.rs`)는 바꾸지 않음 |
 | 입력·sweep의 end 요청 | `herdr_row_end.rs:153-181` | T 아니면 조용히 반환 | `is_some()`이면 task, 아니면 반환(보류도 안 했으므로 대기 입력 없음) |
 | settle_row 재확인 | `herdr_row_end.rs:235-240` | `target()` 재확인 | 같은 모양 재확인 |
-| 정리 | `inflight/clear_store/herdr_row_end.rs:9-` | Pathless 정리 | 그대로. Restored도 이 정리를 쓴다(nonce·save_generation·episode pin 확인) |
+| 정리 | `inflight/clear_store/herdr_row_end.rs:9-65` | Pathless 정리, `:43`이 `output_path` 행 거절 | 기대 모양 인자. 잠긴 최신 행의 분류가 같을 때만 정리한다(2.2). Replay는 archive(`clear_store/mod.rs:223-330`) |
 | admitted settle | `herdr_admitted_restart.rs:82-195`, 정리 `clear_store/identity.rs:279` | 부팅 1회 | 부팅 + end pass 재호출 |
 | receipt settle | `herdr_before_start_restart.rs:9-24,113-190`, 정리 `clear_store/identity.rs:339` | 부팅 1회 | 부팅 + end pass 재호출 |
 | foreign recovery 위임 | `foreign_recovery.rs:378-393` | D면 손 떼고 요청 | 그대로(D가 넓어져 Restored도 위임) |
@@ -124,8 +152,8 @@ restarted_row(provider, row, current) -> Option<RestartedRow>
 
 1. 세대: 행의 `born_generation`은 생성 때 한 번 찍힌다(`inflight/model.rs:1068`). 현 세대 판정은 `reconcile_gate.rs:29-34`다. 세대 할당에 실패하면 이전 행이 현 세대로 보일 수 있다. 이 과보류는 의도된 것이다(`restore_inflight.rs:128-134` 주석). 목표 술어는 현 세대를 None으로 두므로 이 성질을 바꾸지 않는다.
 2. 부팅 순서(`restore_inflight.rs:98-229`): `receipt_settle::settle_boot`(`:104`) → 행마다 agy 보류 → receipt settle(`:143`) → routine → replay hydrate·보류(`:157-168`) → recovery intake skip → rebind 정리(`:190-196`) → receipt decode(`:209`) → `held_at_restore`(`:215`) → admitted(`:224`) → runtime kind skew 정리(`:257`) → wrapper 복구. 목표는 이 순서를 바꾸지 않는다. 부팅 owner가 보존한 행을 end pass가 이어받을 뿐이다.
-3. `reconcile_done` 뒤에만 end pass가 돈다(`herdr_row_end.rs:116`). 그 전에 들어온 입력은 보류되고, `request_row_end`는 `reconcile_done`을 보지 않는다(`:153-181`). 목표에서는 부팅 owner가 아직 처리 중인 행을 입력 요청이 먼저 집지 않도록, 모양이 Pathless가 아니면 `request_row_end`도 `reconcile_done`을 확인한다. 부팅 settle과 end pass settle이 같은 행에서 겹치지 않게 하는 관문이다(모델은 `BootRestore` 뒤에만 `EndPass`가 열린다).
-4. 실행 incarnation: install(`hosted_execution.rs:419`) → bind(`:460`) → retire(`:471`, 호출부 4.2). end pass E 경로는 `HostedState::Retired`면 retire 없이 settle한다(`herdr_row_end.rs:413`). 그 밖이면 `execution_end`로 끝을 확인한다(`:414-431`).
+3. `reconcile_done` 뒤에만 end pass가 돈다(`herdr_row_end.rs:116`). 그 전에 들어온 입력은 보류되고, `request_row_end`는 `reconcile_done`을 보지 않는다(`:153-181`). 목표에서는 부팅 owner가 아직 처리 중인 행을 입력 요청이 먼저 집지 않도록, 모양이 Pathless가 아니면 `request_row_end`도 `reconcile_done`을 확인한다. 부팅 settle과 end pass settle이 같은 행에서 겹치지 않게 하는 관문이다(모델은 `BootRestore` 뒤에만 `EndTick`이 열린다).
+4. 실행 incarnation: install(`hosted_execution.rs:419`) → bind(`:460`) → retire(`:471`, 호출부 4.2). end pass E 경로는 `HostedState::Retired`면 retire 없이 settle한다(`herdr_row_end.rs:413`). 그 밖이면 `execution_end`로 끝을 확인한다(`:414-431`). 새 incarnation이 행의 nonce를 대체했으면 w2부터 E로 본다(2.1). 지금은 `execution_unpinned`로 영구 보존한다(`:541-549`).
 5. 서버 교체: `herdr_server_replaced::ensure_server/demand`(`owner.rs:67`, `herdr_row_end.rs:171`), root-replaced preclaim(`queue_dispatch.rs:224-231`). 목표에서 바뀌지 않는다.
 
 ### (ii) 같은 상태를 소비하는 인접 경로
@@ -135,7 +163,7 @@ restarted_row(provider, row, current) -> Option<RestartedRow>
 | Cancel (queue·HTTP force) | `services/queue/http_force.rs:53-87`, `herdr_terminate/http_force.rs` | scoped terminate. actor가 없으면 행을 건드리지 않음 | 없음. 남은 행은 end pass가 끝낸다 |
 | Terminate (herdr terminate) | `herdr_terminate.rs:414-449,596-641` | 4.2와 같음 | 없음 |
 | clear (사용자 /clear) | `commands/control.rs:585` → `commands/control/herdr_recovery.rs:21-` | root-replaced 복구가 "original inflight execution exists"로 보류(`herdr_recovery.rs:224-232`) | 목표가 행을 끝내면 이 보류도 풀린다. 코드 변경 없음 |
-| clear teardown(owner 정리) | `commands/control/clear_teardown/execution_cleanup.rs:358-410,474-484` | identity·withheld disposition이 맞을 때만 archive | 없음 |
+| clear teardown(owner 정리) | `commands/control/clear_teardown/execution_cleanup.rs:358-397,465-484` | identity·withheld disposition이 맞을 때만 archive | 없음. Replay archive(2.3)의 선례 |
 | stop (`/stop`·`!stop`) | `turn_bridge/tmux_runtime/judged_stop.rs:59-109`, `codex_stop_delivery.rs:355-363` | Idle·pending이면 `host_owned`로 키를 보내지 않음 | 없음(설계상 host 소유) |
 | 운영자 turn-lease release | `turn_lease.rs:195-299`, 정리 `:261,309` | actor CAS 필요 | 없음 |
 
@@ -156,20 +184,25 @@ RestartedHerdrRow가 막는 것은 위 앞의 다섯 출처뿐이다. 앞의 셋
 
 ## 6. 구현 조각안
 
-| 조각 | 바꿀 prod 파일 | 추정 | 수용 시험(수정 전 RED → 후 GREEN) |
-|---|---|---|---|
-| A. 한 술어 + 부팅 owner 재호출 | `recovery_engine/herdr_row_end/owner.rs`(분류 함수, 세 판정 교체), `recovery_engine/herdr_row_end.rs`(pass·request 필터·dispatch, `:238` 재확인, 비Pathless `reconcile_done` 확인), 새 child `recovery_engine/herdr_row_end/restarted_shapes.rs`(Admitted·Receipt·Planned·Replay 처리와 held 사유), `herdr_row_end.rs` 부모에 `mod` 한 줄 | 3 파일(+새 1), 순 +150 내외 | ① 이전 세대 kind 행, 부팅 settle을 actor 존재로 보존 → actor 사라진 뒤 `row_end_pass` → 행 정리·공지 1회. 지금은 pass가 집지 않아 RED. ② 같은 상황의 receipt 행. ③ 부팅에서 공지 commit 뒤 보존된 kind 행 → pass 재호출이 공지를 다시 보내지 않음(이미 있는 `delivered` 시험이 이 경계를 덮으면 새로 쓰지 않는다) |
-| B. Restored 모양 E 경로 | `restarted_shapes.rs`(Restored → `settle_row`, `restored_reader_bound` 관문), `herdr_row_end.rs`(`settle_row` 모양 인자) | 2 파일, 순 +70 내외 | ④ 이전 세대 `output_path` 행, 실행 Retired, 붙은 reader 없음 → pass가 중립 공지 뒤 정리. 지금 RED. ⑤ 같은 행에 reader가 붙어 있으면 `restored_reader_bound`로 보존(공지 0) |
+리뷰 P1-1 지적("A에서 Restored까지 새 분류에 넣는다면 B의 삭제 계약도 함께 착지해야 한다")에 따라 **착지 단위를 하나**로 한다. 그 안을 커밋 3개(A·B·C)로 나눈다. 분류 함수가 Restored·Replay를 집기 시작하는 시점과 그 모양의 정리 계약이 같은 PR에 든다.
 
-- 순서는 A → B다. A만 착지해도 kind·receipt 행(사례로 확인한 D \ T)이 풀린다. B는 H \ D의 공백을 닫는다.
-- 합계 추정은 prod 5파일(새 1 포함), 순 +220 내외다. 상한(30파일/+1500)과 정지선(+1200) 아래다. giant 파일에는 얹지 않는다. `herdr_row_end.rs`는 724줄이고 본체는 새 child에 둔다.
-- S1 겹침: `herdr_row_end_live.rs`·`completion_delivery.rs`·`turn_finalizer/episode.rs`의 계약은 바꾸지 않는다. pass의 live 분기 선택(`live_target`)도 그대로다. `DESIGN_DELTA` 없음.
-- 시험 위치: 기존 rig(`herdr_row_end_rig_tests.rs`, `herdr_row_end_settle_tests.rs`)의 진입 경계(`row_end_pass`·`request_row_end`)에서 한다. 판정 함수 내부 단언은 쓰지 않는다.
+| 커밋 | 바꿀 prod 파일 | 추정 | 수용 시험(수정 전 RED → 후 GREEN) |
+|---|---|---|---|
+| A. 한 술어·공통 성공 경로·실행 대체 증거·Admitted/Receipt 재호출 | `recovery_engine/herdr_row_end/owner.rs`(분류 함수, 세 판정 교체), `recovery_engine/herdr_row_end.rs`(pass·request 필터, 비Pathless `reconcile_done`, `hosted_record` Superseded, `settle_row` 모양 재확인), 새 child `recovery_engine/herdr_row_end/restarted_shapes.rs`(dispatcher, 공통 성공 경로 settled → 락 해제 → `closed`, Admitted·Receipt·Planned) | 3 파일(새 1), 순 +170 | ① 이전 세대 kind 행, 부팅 settle을 actor 존재로 보존, owner 큐 선두가 `Wait::Event`로 잠든 상태 → actor 사라진 뒤 `row_end_pass` 1회 → 행 정리·공지 1회·추가 이벤트 없이 wake 1·dequeue 1. 지금은 pass가 집지 않아 RED. wake를 뺀 뮤턴트는 RED. ② 같은 조건의 receipt 행(①의 fixture 인자). ⑥ 행 실행 nonce n, 현 record가 새 nonce m → pass가 E로 정리. 지금은 `execution_unpinned` 보존이라 RED. ⑧ `turn_nonce` 없는 비Managed 이전 세대 Retired 행 → 정리 뒤 REST deliver(`turn_deliver.rs:131-142`)와 native owner 시작(`owner_input.rs:778-781`)이 진행 |
+| B. Restored 정리 | `restarted_shapes.rs`(Restored → `settle_row`, `restored_reader_live` 관문), `inflight/clear_store/herdr_row_end.rs`(기대 모양 인자, 잠금 안 분류 대조, `output_path` 일치) | 2 파일, 순 +45 | ④ 이전 세대 `output_path` 행, 실행 Retired, actor·reader 없음 → 연속 두 pass에서 첫 pass가 공지 1회·정리·입력 진행, 둘째 pass는 아무것도 하지 않음. `:43` 거절을 되살린 뮤턴트는 RED(공지 2·행 남음). ⑤ 같은 episode reader가 살아 있으면 보존(공지 0) → reader 핸들이 멈추고 매핑만 남으면 다음 pass가 정리. 매핑만 보는 뮤턴트는 RED |
+| C. Replay 끝 owner | `restarted_shapes.rs`(PG 영수증 재확인, debt ACK 또는 중립 공지, archive), `recovery_engine/restore_inflight/replay_hold.rs`(두 함수·enum 가시성), `recovery_engine/restore_inflight.rs:53`(`mod` 가시성 한 줄, FILES_AUTO 대상) | 3 파일, 순 +60 | ⑦ 부팅부터 재현: (a) 본문 없음, (b) 부팅에서 debt ACK 완료 → 부팅 뒤 pass가 archive, 이전 요청은 재실행되지 않음(복구 재시도가 `recovery_text/replay.rs:35-58`에서 거절), 새 입력은 진행. 지금은 RED(행이 남아 보류). `replay_keep` 뮤턴트(보존만)는 RED |
+
+- 합계 추정은 prod 6파일(새 1 포함), 순 +275 내외다. 상한(30파일/+1500)과 정지선(+1200) 아래다. giant 파일 `restore_inflight.rs`에는 `mod` 가시성 한 줄만 바꾼다. `herdr_row_end.rs`(724줄)에는 필터·호출 교체만 하고 본체는 새 child에 둔다.
+- 시험 줄 상한(바꾼 prod 줄 이하)을 지키려면 ①②, ④⑤, ⑦(a)(b)를 각각 fixture 인자로 묶는다. ③(재호출이 공지를 다시 보내지 않음)은 기존 admitted `delivered` 시험이 덮으면 새로 쓰지 않는다. 넘치면 구현 레그가 `TEST_OVER_PROD` 사유를 적는다.
+- S1 겹침: `herdr_row_end_live.rs`·`completion_delivery.rs`·`turn_finalizer/episode.rs`의 계약은 바꾸지 않는다. Replay settle은 `deliver_held_debt_checked`를 통해 `completion_delivery.rs:112`의 `relay_captured_recovery_terminal_notice`를 읽기 전용으로 부른다. pass의 live 분기 선택(`live_target`)도 그대로다. `DESIGN_DELTA` 없음.
+- 시험 위치: 기존 rig(`herdr_row_end_rig_tests.rs`, `herdr_row_end_settle_tests.rs`, `restore_inflight/replay_hold_tests.rs`)의 진입 경계(`row_end_pass`·`request_row_end`·`restore_inflight_turns`)에서 한다. 판정 함수 내부 단언은 쓰지 않는다.
 
 ## 7. 미해결
 
-- [U1] 사례 행의 X 항(kind·receipt·HotSwap·rebind·replay 중 무엇이었는지). 운영 행을 읽지 않았다. 목표 설계는 어느 항이든 같은 경로로 덮는다.
-- [U2] Replay 모양의 끝 owner. replay 보류 행이 부팅 뒤 어떻게 풀리는지는 이 레그에서 추적하지 않았다. 목표는 보류 사유만 남기고 정리 주체는 바꾸지 않는다.
-- [U3] wrapper 복구가 Herdr `output_path` 행에 reader를 붙이는지, 붙인다면 mailbox token을 다시 세우는지. `actor_absent`(`herdr_row_end.rs:347-364`)와 새 `restored_reader_bound` 중 어느 쪽이 그 reader를 잡는지는 구현 레그에서 rig로 확인한다.
-- [D1] nonce 없는 Herdr 행을 보류에서 빼는 행동 변경. 리뷰 판정을 요청한다.
+- [U1] 사례 행의 X 항(kind·receipt·HotSwap·rebind·replay 중 무엇이었는지). 운영 행을 읽지 않았다. 목표 설계는 어느 항이든 덮는다.
+- [U2] (w2에서 닫음) Replay 끝 owner는 2.3이다.
+- [U3] wrapper 복구가 Herdr `output_path` 행에 reader를 붙이는지, 붙인다면 mailbox token도 세우는지. `actor_absent`와 `restored_reader_live` 중 어느 관문이 그 reader를 잡든 두 관문이 함께 있으므로 정리하지 않는다. 구현 레그에서 rig로 어느 쪽인지 확인한다.
+- [U4] Replay archive 뒤, 운영자 replay 결정 도구가 live inflight 행을 custody로 읽는지. 선례(clear teardown archive)와 PG `replay_preserved`로 보아 archive 사본으로 충분하다고 본다. 구현 레그에서 소비자를 grep으로 확인한다.
+- [U5] TUI-O Aborted 공지(`herdr-stop:{turn_nonce}` 키)의 dedupe가 프로세스를 넘어 유지되는지. 넘지 않으면 "부팅에서 게시 → 보존 → 다음 프로세스 재호출"에서 2회가 될 수 있다. 구현 레그에서 deduper 저장소를 확인하고, 확인되기 전까지는 1회 보장을 같은 프로세스 안으로 한정한다.
+- [D1] (w2에서 철회) 2.1의 두 nonce 정정 참조.
 - 범위 밖: (b) HostTerminated CAS 거부 자체, (c) live row end 공지 반복(S1), 현 세대(재시작 전) Retired 행.

@@ -1,0 +1,62 @@
+---
+title: "Herdr 실행 퇴역 뒤 세션 행 status"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoticeOnce
+    lg1: Path to the ExeclessRowResolves or HeldInputRuns or NoticeOnce bug
+    lg2: Repeats forever, so ExeclessRowResolves or HeldInputRuns breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: 턴 진행 #183; 실행 Bound #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s1: terminate settle 전 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s2: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence busy #183; inflight output_path 행(현 세대)
+  s3: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 살아 있음 #183; presence unknown #183; inflight output_path 행(현 세대)
+  s4: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s5: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s6: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s7: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대, 부팅 복구 전)
+  s8: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 1회
+  s9: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대)
+  s10: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence busy #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 2회
+  s11: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; owner 입력 잠듦
+  s12: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 1회 #183; owner 입력 잠듦
+  s13: 취소#183;row end 끝 #183; 실행 Retired #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 2회 #183; owner 입력 잠듦
+  s14: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 turn_active(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 2회 #183; owner 입력 잠듦
+  s15: 취소#183;row end 끝 #183; 새 실행 Pending #183; 행 idle(퇴역 턴) #183; reader 없음 #183; presence unknown #183; heartbeat 오래됨 #183; 재시작 뒤 #183; inflight output_path 행(이전 세대) #183; 공지 2회 #183; owner 입력 잠듦
+  [*] --> s0
+  s0 --> s1: terminate#183;row end 퇴역
+  s1 --> s2: terminate settle_captured
+  s2 --> s3: 600초 정체 #8594; unknown
+  s2 --> s4: dcserver 재시작
+  s3 --> s6: dcserver 재시작
+  s4 --> s5: 부팅 복구 1회
+  s5 --> s8: row end pass 1회
+  s6 --> s7: 300초 경과
+  s7 --> s9: 부팅 복구 1회
+  s8 --> s10: row end pass 1회
+  s9 --> s11: owner 입력 도착
+  s11 --> s12: row end pass 1회
+  s12 --> s13: row end pass 1회
+  s13 --> s14: 새 실행 설치
+  s14 --> s15: stale sweep idle
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s2 bugPath
+  class s3 bugPath
+  class s4 bugPath
+  class s5 bugPath
+  class s6 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s9 bugPath
+  class s10 breaks
+  class s10 bugPath
+  class s11 bugPath
+  class s12 bugPath
+  class s13 bugPath
+  class s14 bugPath
+  class s15 repeats

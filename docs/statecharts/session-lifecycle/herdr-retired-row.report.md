@@ -54,48 +54,71 @@ caught by these cfgs is not addressed here.
 
 Code SHA: `b04ea56650e5397989d33f1be199be21a83c8d0e`. `Owner # "off"` adds the turn's inflight row
 after an HTTP terminate (`Path = "terminate"`), a dcserver restart, and who ends that row. Existing
-cfgs set `Owner = "off"`, so the ownership variables stay at their initial values and every
-existing rule result is unchanged. Before and NewTurnToolBefore draw a different shortest
-counterexample with the same broken rules, so their chart and report were regenerated. Design and
+cfgs set `Owner = "off"` and `Flaws = {}`, so the ownership variables stay at their initial values
+and every existing rule result is unchanged; Before and NoNonce draw a different shortest
+counterexample with the same broken rules, so their charts were regenerated. Design and
 entrypoints: [herdr-restart-row-owner.design.md](herdr-restart-row-owner.design.md).
+w2 adds the review's P1 paths: the Restored clear refusal, the owner wake, Replay, plus a reader
+that leaves only its channel mapping and a newer incarnation over the row's execution nonce.
 
 | Action | Code |
 |---|---|
 | TermSettle | `herdr_terminate.rs:327-391` `settle_and_release` → `settle_captured`: HostTerminated clears the row, or the actor CAS refuses and the row stays (#8435 (b), refusal cause out of range) |
 | Restart (Owner on) | `born_generation` is stamped once (`inflight/model.rs:1068`), so a kept row turns prior-generation (`reconcile_gate.rs:29-34`); the mailbox actor dies with the process |
-| BootRestore | `restore_inflight.rs:120-229` one pass: pathless skips (`:215`); kind (`:224`) and receipt (`:143,:209`) run their settle once and may keep the row "for the next boot" (`herdr_admitted_restart.rs:193`, `herdr_before_start_restart.rs:114`); an `output_path` row takes the wrapper restore, whose reader can leave it (`carried_turn_close.rs:197-201`) |
-| EndPass | `herdr_row_end.rs:112-181` after `reconcile_done`; on a Retired execution `observe` keeps retire None (`:413`), `commit` releases the hold (`:505-517`), notice, clear. Unclear gates retry every 5 s; the model takes the passing run |
+| BootRestore | `restore_inflight.rs:120-229` one pass: pathless skips (`:215`); kind (`:224`) and receipt (`:143,:209`) run their settle once and may keep the row "for the next boot" (`herdr_admitted_restart.rs:193`, `herdr_before_start_restart.rs:114`); replay delivers its debt and keeps the row (`:165-168`, `replay_hold.rs:114-175`); an `output_path` row takes the wrapper restore, which may attach a reader and may leave the row (`carried_turn_close.rs:197-201`) |
+| ReaderExit | the restored watcher stops or goes stale (`relay_state.rs:476-483`) while its channel mapping stays (`:544-559`) |
+| Reincarnate | a newer Pending record over the retired nonce (`hosted_execution.rs:417-425`) |
+| InputArrive / OwnerReeval | an owner input after the restart sleeps on `Wait::Event` (`owner_input.rs:978-980`); presence wakes an owned queue only on its Idle transition (`turn_presence/supervisor.rs:681-700`); `closed()` (`queue_io/input_owner/closed.rs:22-34`) makes it read the front again |
+| EndTick | one 5 s pass (`herdr_row_end.rs:112-181`, after `reconcile_done`), fair as a tick; its result follows from the state: a picked row whose execution is gone and that no live reader of its episode holds is settled once, cleared, and the owner is woken |
 | StaleDrop | design alternative only: `inflight/removal.rs:417-509` without the Herdr preservation |
 
 Shapes (`Shapes`, chosen at init): `pathless` = `target()` holds (`herdr_row_end.rs:53-72`);
-`path` = `output_path` set and no kind/receipt/hand-off/rebind/replay (`dedicated_cleanup_owner`
-false, `owner.rs:127-141`); `kind` = `tui_terminal_kind`; `receipt` = before-start stop or receipt.
-Held = prior-generation row of any shape (`owner.rs:110-123`). Current picks only `pathless`;
-Target picks every held shape and runs that shape's settle again.
+`path` = `output_path` set and no kind/receipt/hand-off/rebind/replay; `kind` = `tui_terminal_kind`;
+`receipt` = before-start stop or receipt; `replay` = `replay_rerun_blocked`. Held = prior-generation
+row of any shape (`owner.rs:110-123`). Current picks only `pathless` and reads a newer nonce as
+unpinned. Target picks every held shape and runs that shape's settle again, treats a superseded
+nonce as an ended execution, gates Restored on a live same-episode reader, clears Restored with a
+shape-checked clear, archives Replay after its debt, and wakes the owner after every settle.
+`Flaws` turns one of those repairs off per cfg.
 
-Rules: `ExeclessRowResolves` (PROPERTY) — a row whose execution is Retired is eventually gone or no
-longer held. `RowGoneWithTerminal` — a row leaves only after its terminal notice was shown.
-`NoticeOnce` — that notice shows once.
+Rules: `ExeclessRowResolves` (PROPERTY) — a row whose execution is not Bound is eventually gone or
+no longer held. `HeldInputRuns` (PROPERTY) — an owner input asleep behind the row eventually runs.
+`RowGoneWithTerminal` — a row leaves only after its terminal notice was shown. `NoticeOnce` — that
+notice shows once.
 
-| cfg | Breaks | Holds |
-|---|---|---|
-| OwnerCurrent | ExeclessRowResolves (path, kind, receipt) | RowGoneWithTerminal, NoticeOnce |
-| OwnerTarget | — | all |
-| OwnerMutantSplit (Target, `target()` kept as the pass filter) | ExeclessRowResolves | RowGoneWithTerminal, NoticeOnce |
-| OwnerRedeliver (Target re-run ignores the committed ack) | NoticeOnce | RowGoneWithTerminal, ExeclessRowResolves |
-| OwnerStaleDrop (Target + stale-age drops Herdr rows) | RowGoneWithTerminal | NoticeOnce, ExeclessRowResolves |
+| cfg | Flaws | Breaks | Holds |
+|---|---|---|---|
+| OwnerCurrent | (current code) | ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal, NoticeOnce |
+| OwnerW1 | path_refused, nowake, replay_keep, mapping_gate, pin_strict (the w1 design) | NoticeOnce, ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal |
+| OwnerTarget | — | — | all (695 states, over the chart budget: report only) |
+| OwnerPathRefused (P1-1) | path_refused | NoticeOnce, ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal |
+| OwnerNoWake (P1-2) | nowake | HeldInputRuns | RowGoneWithTerminal, NoticeOnce, ExeclessRowResolves |
+| OwnerReplayKeep (P1-3) | replay_keep | ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal, NoticeOnce |
+| OwnerMappingGate (P2) | mapping_gate | ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal, NoticeOnce |
+| OwnerPinStrict (P2) | pin_strict | ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal, NoticeOnce |
+| OwnerMutantSplit | split | ExeclessRowResolves, HeldInputRuns | RowGoneWithTerminal, NoticeOnce |
+| OwnerRedeliver | redeliver | NoticeOnce | RowGoneWithTerminal, ExeclessRowResolves, HeldInputRuns |
+| OwnerStaleDrop | stale_drop | RowGoneWithTerminal, HeldInputRuns | NoticeOnce, ExeclessRowResolves |
 
-Scratch runs with one shape each (not committed): Current and MutantSplit break only for `path`,
-`kind` and `receipt`; `pathless` holds; Target holds for all four.
+Counterexamples, replayed against the code:
 
-The OwnerCurrent counterexample, replayed against the code: retire (`herdr_terminate.rs:623`); the
-settle is refused and the row stays (`:395-411` "captured turn still active"); restart makes it
-prior-generation; boot restore leaves an `output_path` row (`target()` false at `:63`,
-`admitted()` needs a kind); from then on `restarted_owner` holds inputs, `row_end_pass` skips it
-(`:122`), `request_row_end` returns without a log (`:161`), and stale-age keeps it
-(`removal.rs:417-421`). The kind/receipt variant keeps the row at boot, then the same three
-consumers apply with `dedicated_cleanup_owner` true. The case log's 14:48:35 "dedicated owner" line
-with no row end diagnostics matches that variant; which X field the row carried is not confirmed.
+- OwnerCurrent: retire (`herdr_terminate.rs:623`); the settle is refused and the row stays
+  (`:395-411`); restart makes it prior-generation; boot restore leaves it; from then on
+  `restarted_owner` holds inputs, `row_end_pass` skips a non-pathless row (`:122`),
+  `request_row_end` returns without a log (`:161`), and stale-age keeps it (`removal.rs:417-421`).
+- OwnerPathRefused: an `output_path` row, Retired, no reader; each pass shows the notice
+  (`herdr_row_end.rs:270-276`) and the clear refuses on `clear_store/herdr_row_end.rs:43`
+  (`:286-291` keeps the row), so the next pass shows it again.
+- OwnerNoWake: the row is cleared but the owner input asleep on `Wait::Event` is never read again.
+- OwnerReplayKeep: the replay row stays held after its boot debt (`restore_inflight.rs:165-168`).
+- OwnerMappingGate: the restored reader stops, its channel mapping stays, and a gate on
+  `channel_binding` holds forever.
+- OwnerPinStrict: a newer incarnation replaces the row's execution nonce and `hosted_record`
+  answers `execution_unpinned` (`herdr_row_end.rs:541-549`) on every pass.
+
+The case log's 14:48:35 "dedicated owner" line with no row end diagnostics matches the
+kind/receipt/replay variant; which field the row carried is not confirmed.
 
 Out of range: the CAS refusal cause (#8435 (b)), the live row end notice repeat (#8435 (c)),
-HotSwap/rebind/replay rows, and current-generation rows before a restart.
+HotSwap/rebind rows, current-generation rows before a restart, and a notice dedupe that would have
+to survive a process (design [U5]).
