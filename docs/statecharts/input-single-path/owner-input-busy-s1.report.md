@@ -1,96 +1,125 @@
-# owner 입력 S1(Claude): 바로 합류 + 답 귀속 + transcript 없는 키 (#8328 1단계 설계 w4)
+# owner 입력 S1(Claude): 바로 합류 + 답 귀속 + transcript 없는 키 (#8328 1단계 설계 w4-w5)
 
 - 기준 코드: `82702fe252`
-- 범위: 1단계를 둘로 나눈 것 가운데 **S1**(Claude 바로 합류와 답 귀속)이다. 다루는 것은 사람 입력 B 하나와 앞 턴 A 하나다.
-- Codex 항상 Tab과 채널 lease·slot 공유는 S2다. S2 모델은 `OwnerInputBusySplit.tla`([보고서](owner-input-busy-split.report.md))이고, w3 상태 그대로 둔다.
-- S1은 실행 용량을 새로 잡지 않으므로 이 모델에는 lease 변수가 없다(설계 문서 §1.1).
+- 범위: 1단계 S1(Claude 바로 합류와 답 귀속)이다. 다루는 것은 사람 입력 B 하나와 앞 턴 A 하나다.
+- Codex 항상 Tab과 채널 lease·slot 공유는 S2이고, 모델은 `OwnerInputBusySplit.tla`([보고서](owner-input-busy-split.report.md))다.
+- S1은 실행 용량을 새로 잡지 않으므로 lease 변수가 없다(설계 §1.1).
 - 설계 문서: [`docs/design/8328-owner-input-busy-inject.md`](../../design/8328-owner-input-busy-inject.md)
 - 모델 결과는 Rust 시험을 대신하지 않는다.
 
-## 왜 S1을 따로 두는가
+## 판 이력
 
-설계 리뷰 i8328-design-3의 P1-3 때문이다. 수용 기준은 "transcript 없는 정상 입력 보류 0"이다. 그런데 키 전에 source를 묻는 곳이 어댑터 말고도 둘 더 있다.
-- Herdr `BusyObservation::admits`(`src/services/claude_tui/host_input/busy.rs:245-261`): 관찰한 source 경로가 요청의 transcript와 같아야 한다.
-- O writer owner 경로 `Producer::wrap`(`src/services/discord/router/message_handler/provider_dispatch/owner_input/native_input.rs:71-109`): 어댑터 앞에서 `pin_source`(`src/services/discord/turn_finalizer/native_binding.rs:18-106`)를 부르고, 현재 실행의 `Bound` 기록이 없으면 실패한다.
-
-w3 모델은 이 둘을 다루지 않았다. S1 모델은 source 결합 상태(`src`)와 보류 사유(`why`)를 변수로 두고, 세 검사를 각각 mutant로 둔다.
+- **w4**(`c603bfb08c`, cfg 24): source 결합 상태 `src`, 키 전 등록 `reg`, 보류 사유 `why`. P1-3 mutant(`AdmitsPathMatch`·`PinSourceFirst`·`RequireTranscript`).
+- **w5**(이 판, cfg 33): 설계 리뷰 i8328-design-4의 P1 3건과 P2를 반영했다.
+  - transcript 파일 생성(`trans`, `TuiStart`)과 AgentDesk의 source 결합(`src`, writer의 `Bound` 기록 `BindSource`)을 나눴다(P2). w4에서는 `TuiStart`가 곧바로 `src = bound`를 만들어, 결합을 빠뜨린 구현도 GREEN이 될 수 있었다.
+  - 지연 pin 단일 확정점: `pin`(recorded·deferred), `sel`(BindingIntent.selected). `Select`가 `None → Some`을 한 번만 만든다(P1-3).
+  - 귀속 결합: `aBound`(꼬리표 없는 opener A를 receipt로 결합), `bBound`(B 결합). A 답은 A 결합 뒤, 합류 B가 있으면 B 결합 뒤에 나간다. B 답은 B 결합 뒤에 나간다. 합류 표시는 B 결합(흡수 증거) 때 단다(P1-1).
+  - source 관문 mutant 2개를 더했다: `RequireIdleObserverBeforeKey`(토큰 없는 tmux 자기 턴 observer의 transcript 선요구), `RequireBusyReadStateWithoutSource`(Herdr `Context::read`의 source 없음 → Held)(P1-2).
+  - `RequireTranscript`는 토큰과 무관하게 적용한다(P2).
+  - 새 liveness `NoCircularWait`: transcript가 없고 보류 조건이 없는 대기 입력은 결국 키를 받는다. 첫 입력이 transcript를 만드는 순환 대기를 잡는다.
+  - 항상 허용되는 stutter `Done`을 두었다. 막힌 상태는 deadlock이 아니라 liveness 위반으로 드러난다.
 
 ## 변수와 시나리오
 
-변수:
-- `src`: transcript source가 결합됐는가
-- `reg`: anchor·nonce·frame hash·target incarnation이 키 전에 durable 등록됐는가
+변수(S2 모델과 같은 것은 생략):
+- `trans`: transcript 파일이 있다
+- `src`: writer가 이 실행의 `Bound`를 기록했다
+- `reg`: 키 전 durable 등록
 - `why`: 보류 사유
-- 나머지 변수는 S2 모델과 같다
+- `pin`: 키 시점 pin(recorded·deferred)
+- `sel`: 확정된 source
+- `aBound`·`bBound`: J2 anchor 결합
 
 시나리오:
-- `busy`: A 실행 중, 토큰 A, source 결합됨
-- `i8432`: A terminal 미제출로 토큰이 남음
-- `external`: AgentDesk가 시작하지 않은 턴. anchor·토큰 없음
-- `fresh`: 새 세션. 턴이 transcript를 쓰기 전까지 source가 없다
-- `rebind`: A 실행 중이고 composer는 준비됐지만, writer가 재시작한 source를 아직 결합하지 않았다. `BindSource`로 나중에 결합된다
+- `busy`·`i8432`·`external`: w4와 같다
+- `fresh`: 새 세션. 파일도 `Bound`도 없다. B의 턴이 파일을 만든다
+- `rebind`: 파일은 있지만 writer가 재시작한 실행의 `Bound`를 아직 기록하지 않았다
 
 ## 규칙
 
 | 규칙 | 종류 | 뜻 |
 |---|---|---|
-| `NoDuplicate` | INVARIANT | 키 효과(붙여넣기+Enter)는 최대 1회 |
-| `NoSilentLoss` | INVARIANT | B는 알림 없이 사라지지 않는다 |
+| `NoDuplicate`·`NoSilentLoss` | INVARIANT | 키 효과 최대 1회, 조용한 유실 0 |
 | `ReplyExactlyOnce` | INVARIANT | 답은 각각 최대 1회. 답이 게시된 B의 몫은 자기 답 XOR A 답에 합쳐짐 |
-| `JoinedMarked` | INVARIANT | A 답에 합쳐진 B에는 합류 표시가 있다 |
-| `MarkOnlyJoined` | INVARIANT | 합류 표시는 합류했거나 합쳐진 B에만 있다(P2-3) |
-| `AnswerBound` | INVARIANT | A 답은 `ATarget`에, B 자기 답은 B anchor에 reply로 건다 |
-| `KeyBeforeLeave` | INVARIANT | front는 키 효과로만 대기열을 떠난다 |
-| `KeyAfterRegister` | INVARIANT | 키 효과 전에 durable 등록이 끝나 있다 |
-| `NoSourceHold` | INVARIANT | source가 아직 결합되지 않았다는 이유로 정상 입력을 보류하지 않는다(P1-3) |
-| `IdleDelivers` | PROPERTY | 대기·보류 중 B + Idle 화면이면 B는 결국 주입된다 |
-| `ReplyPosted` | PROPERTY | B의 몫은 결국 게시된다 |
+| `JoinedMarked`·`MarkOnlyJoined` | INVARIANT | 합쳐진 B에는 ➕, ➕는 합류했거나 합쳐진 B에만 |
+| `AnswerBound` | INVARIANT | A 답은 `ATarget`(A anchor), B 답은 B anchor에 reply |
+| `KeyBeforeLeave`·`KeyAfterRegister` | INVARIANT | 키로만 대기열을 떠나고, 키 전에 등록한다 |
+| `NoSourceHold` | INVARIANT | source 미결합을 이유로 정상 입력을 보류하지 않는다 |
+| `IdleDelivers`·`ReplyPosted` | PROPERTY | Idle이면 결국 주입, B의 몫은 결국 게시 |
+| `NoCircularWait` | PROPERTY | transcript 없는 첫 입력도 결국 키를 받는다 |
 
-공정성: 정상 행동에는 weak fairness를 준다. `TuiAbsorb`와 mutant 행동에는 공정성이 없다(`RegisterLate`는 mutant 안의 후속 행동이라 공정성을 준다).
+공정성: 정상 행동과 결합 행동(`BindSource`·`Select`·`BindA`·`BindB`)에 weak fairness를 준다. `TuiAbsorb`와 mutant 행동에는 주지 않는다.
 
-## 결과 (`statecharts_tlc.check_cfg`, 24/24 기대 집합 일치)
+## 결과 (`statecharts_tlc.check_cfg`, 33/33 기대 집합 일치)
 
-| cfg | 조건 | 결과 |
+w4 → w5 전후표(모든 cfg에 `NoCircularWait`를 더했다):
+
+| cfg | w4 | w5 |
 |---|---|---|
-| `Current8432` | 현재, 남은 토큰 + Idle | **RED** `IdleDelivers`·`ReplyPosted`·`MarkOnlyJoined` |
-| `CurrentBusy` | 현재, 정상 | **RED** `MarkOnlyJoined`(붙여넣기 때 바로 ➕) |
-| `CurrentRebind` | 현재, source 결합 전 | **RED** `NoSourceHold`·`MarkOnlyJoined` |
-| `TargetBusy`·`Target8432`·`TargetExternal` | S1 목표 | GREEN |
-| `TargetFresh` | 새 세션, transcript 없음 | GREEN |
-| `TargetRebind` | source 결합 전 composer 준비 | GREEN |
-| `TargetHoldCleared`·`TargetComposerNotReady` | 보류 뒤 해소 | GREEN |
-| `TargetDraftStuck` | 초안 영구, 알림만(U1) | RED `IdleDelivers`·`ReplyPosted`(수용) |
-| `TargetAdmitsPathMatch` | mutant: Herdr `admits` 경로 일치 유지 | RED `NoSourceHold` |
-| `TargetPinSourceFirst` | mutant: `Producer::wrap`의 `pin_source` 선호출, 새 세션 | RED `NoSourceHold`·`IdleDelivers`·`ReplyPosted` |
-| `TargetPinSourceFirstRebind` | 같은 mutant, 재바인딩 | RED `NoSourceHold` |
-| `TargetRequireTranscript` | mutant: 어댑터 transcript metadata 선확인 | RED `NoSourceHold` |
-| `TargetRegisterAfterKey` | mutant: 키 뒤 등록 | RED `KeyAfterRegister`·`AnswerBound` |
-| `TargetMarkOnPaste` | mutant: 붙여넣기 때 ➕ | RED `MarkOnlyJoined` |
-| `TargetJoinUnmarked` | mutant: 흡수 때 ➕ 누락 | RED `JoinedMarked` |
-| `TargetJoinDoublePost` | mutant: 합류 몫 이중 게시 | RED `ReplyExactlyOnce` |
-| `TargetPostOrder` | mutant: 게시 순서 귀속 | RED `AnswerBound` |
-| `TargetNoReference` | mutant: reference 없는 게시 | RED `AnswerBound` |
-| `TargetTokenAttribution` | mutant: 토큰 보유자 귀속 | RED `ReplyExactlyOnce`·`ReplyPosted` |
-| `TargetResendBeforeEcho` | mutant: echo 전 재전송 | RED `NoDuplicate` |
-| `TargetTuiDrop` | mutant: TUI가 입력을 버림 | RED `NoSilentLoss`·`ReplyPosted` |
+| `Current8432` | RED IdleDelivers·MarkOnlyJoined·ReplyPosted | RED IdleDelivers·MarkOnlyJoined·ReplyPosted |
+| `CurrentBusy` | RED MarkOnlyJoined | RED MarkOnlyJoined |
+| `CurrentFresh` | (없음) | RED IdleDelivers·NoCircularWait·NoSourceHold·ReplyPosted |
+| `CurrentRebind` | RED MarkOnlyJoined·NoSourceHold | RED MarkOnlyJoined·NoSourceHold |
+| `Target8432` | GREEN | GREEN |
+| `TargetAdmitsPathMatch` | RED NoSourceHold | RED NoSourceHold |
+| `TargetBusy` | GREEN | GREEN |
+| `TargetComposerNotReady` | GREEN | GREEN |
+| `TargetDeferredEquality` | (없음) | RED ReplyPosted |
+| `TargetDeferredEqualityRebind` | (없음) | RED ReplyPosted |
+| `TargetDraftStuck` | RED IdleDelivers·ReplyPosted | RED IdleDelivers·ReplyPosted |
+| `TargetExternal` | GREEN | GREEN |
+| `TargetFresh` | GREEN | GREEN |
+| `TargetHoldCleared` | GREEN | GREEN |
+| `TargetJoinDoublePost` | RED ReplyExactlyOnce | RED ReplyExactlyOnce |
+| `TargetJoinUnmarked` | RED JoinedMarked | RED JoinedMarked |
+| `TargetMarkOnPaste` | RED MarkOnlyJoined | RED MarkOnlyJoined |
+| `TargetNoLateBind` | (없음) | RED ReplyPosted |
+| `TargetNoLateBindFresh` | (없음) | RED ReplyPosted |
+| `TargetNoReference` | RED AnswerBound | RED AnswerBound |
+| `TargetPinSourceFirst` | RED IdleDelivers·NoSourceHold·ReplyPosted | RED IdleDelivers·NoCircularWait·NoSourceHold·ReplyPosted |
+| `TargetPinSourceFirstRebind` | RED NoSourceHold | RED NoSourceHold |
+| `TargetPostOrder` | RED AnswerBound | RED AnswerBound |
+| `TargetRebind` | GREEN | GREEN |
+| `TargetRegisterAfterKey` | RED AnswerBound·KeyAfterRegister | RED KeyAfterRegister |
+| `TargetRequireBusyReadStateWithoutSource` | (없음) | RED NoSourceHold |
+| `TargetRequireIdleObserverBeforeKey` | (없음) | RED IdleDelivers·NoCircularWait·NoSourceHold·ReplyPosted |
+| `TargetRequireTranscript` | RED NoSourceHold | RED NoSourceHold |
+| `TargetRequireTranscriptFresh` | (없음) | RED IdleDelivers·NoCircularWait·NoSourceHold·ReplyPosted |
+| `TargetResendBeforeEcho` | RED NoDuplicate | RED NoDuplicate |
+| `TargetTaggedHeaderOnly` | (없음) | RED AnswerBound |
+| `TargetTokenAttribution` | RED ReplyExactlyOnce·ReplyPosted | RED ReplyExactlyOnce·ReplyPosted |
+| `TargetTuiDrop` | RED NoSilentLoss·ReplyPosted | RED NoSilentLoss·ReplyPosted |
 
-합계: GREEN 7, expected RED 17(Current 3, 수용 1, mutant 13).
+합계(w5): Current RED 4, Target GREEN 7, 수용 RED 1(DraftStuck), mutant RED 21.
+
+mutant 뜻(w5에서 새로 넣은 것):
+- `TaggedHeaderOnly`: J2가 헤더 nonce만 읽는다. 꼬리표 없는 opener A는 결합되지 않고, A 답이 합류 B에 걸린다(`AnswerBound`).
+- `RequireIdleObserverBeforeKey`: 토큰 없는 tmux 자기 턴에서 observer가 transcript를 먼저 요구한다 → `idle_unobserved`(새 세션이면 순환 대기).
+- `RequireBusyReadStateWithoutSource`: Herdr `admits`가 source를 읽는 `Context::read` 상태를 요구한다.
+- `DeferredEquality`: 지연 pin에도 `select_source`의 session·path 동등성을 적용한다 → 확정 0, 결합 0, 답 0(`ReplyPosted`).
+- `NoLateBind`: writer의 `Bound` 기록이 끝내 오지 않는다(결합을 빠뜨린 구현). `ReplyPosted` RED. w4 모델에서는 GREEN이었다.
+- `RequireTranscriptFresh`: 무토큰 새 세션에도 transcript를 요구한다(w4에서는 GREEN으로 빠져나갔다).
 
 차트:
-- [현재 source 결합 전 반례](owner-input-busy-s1.current-rebind.chart.mmd)
-- [현재 #8432 반례](owner-input-busy-s1.current-8432.chart.mmd)
-- [목표 재바인딩](owner-input-busy-s1.target-rebind.chart.mmd): source 없이 붙여넣고 나중에 결합
+- [현재 새 세션 순환 대기](owner-input-busy-s1.current-fresh.chart.mmd)
+- [현재 source 결합 전](owner-input-busy-s1.current-rebind.chart.mmd)
+- [현재 #8432](owner-input-busy-s1.current-8432.chart.mmd)
+- [목표 재바인딩](owner-input-busy-s1.target-rebind.chart.mmd)
 - [목표 새 세션](owner-input-busy-s1.target-fresh.chart.mmd)
-- [목표 합류](owner-input-busy-s1.target-busy-join.chart.mmd): ➕는 흡수 뒤 상태에만 있다
+- [목표 합류](owner-input-busy-s1.target-busy-join.chart.mmd)
 - [목표 #8432](owner-input-busy-s1.target-8432.chart.mmd)
-- [admits 경로 일치 반례](owner-input-busy-s1.admits-path-match.chart.mmd)
-- [pin_source 선호출 반례](owner-input-busy-s1.pin-source-first.chart.mmd)
-- [붙여넣기 때 ➕ 반례](owner-input-busy-s1.mark-on-paste.chart.mmd)
+- [admits 경로 일치](owner-input-busy-s1.admits-path-match.chart.mmd)
+- [pin_source 선호출](owner-input-busy-s1.pin-source-first.chart.mmd)
+- [idle observer 관문](owner-input-busy-s1.idle-observer-gate.chart.mmd)
+- [지연 pin 동등성](owner-input-busy-s1.deferred-equality.chart.mmd)
+- [헤더 nonce만](owner-input-busy-s1.tagged-header-only.chart.mmd)
+- [붙여넣기 때 ➕](owner-input-busy-s1.mark-on-paste.chart.mmd)
 
 ## 읽는 법과 한계
 
-- 세 source mutant는 모델에서는 같은 동작이다(`src = none`이면 보류). 차이는 코드 위치뿐이다. 그래서 Rust 시험은 실제 owner 진입점에서 각각 하나씩 둔다(설계 §11 S1-B 시험).
-- pane 교체·실행 세대 변경은 키 0이어야 한다(대조군). 이 모델에는 incarnation 변수가 없으므로 Rust 시험이 맡는다.
-- 두 입력이 한 턴에 합쳐지는 경우는 다루지 않는다. 설계 §6.3 규칙과 S1-A의 두 nonce fixture가 맡는다.
+- source mutant 다섯은 모델에서는 같은 동작이다(`src = none`이면 보류). 차이는 코드 위치뿐이라, Rust 시험은 실제 owner 진입점에서 하나씩 둔다(설계 §11 S1-B).
+- custody ACK는 `Select`·`BindB` 사이의 원자적 단계로 다룬다. 확정 직후·history binding 직후·ACK 전 재시작 수렴은 S1-B Rust 시험이 맡는다.
+- pane·실행 세대 교체는 키 0 대조군이다. incarnation 변수가 없으므로 Rust 시험이 맡는다.
+- 두 입력이 한 턴에 합쳐지는 경우는 설계 §6.3과 S1-A 두 nonce fixture가 맡는다.
 
-원시 로그: `/tmp/i8328d1/`(`direct-s1.out`, `s1-*` 차트 출력). 저장소에는 넣지 않았다.
+원시 로그: `/tmp/i8328d1/`(`direct-s1.out` w4, `direct-s1w5.out` w5, `s1w5-*` 차트 출력). 저장소에는 넣지 않았다.

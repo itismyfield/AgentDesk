@@ -1,13 +1,14 @@
-# #8328 1단계 설계 (w4): owner 입력 바쁜 중 주입 — S1(Claude 바로 합류 + 답 anchor 귀속) 먼저, S2(Codex 항상 Tab + 채널 lease)는 뒤로
+# #8328 1단계 설계 (w5): owner 입력 바쁜 중 주입 — S1(Claude 바로 합류 + 답 anchor 귀속) 먼저, S2(Codex 항상 Tab + 채널 lease)는 뒤로
 
-<!-- doc-path-refs: proposed src/services/cluster/execution_capacity/channel_lease.rs src/services/tui_input/human_frame/history/v2/key_admit.rs src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/tui_o/store/anchor_bindings.rs src/services/tui_o/writer/deliver/prepared.rs src/services/tui_o/writer/reply_anchor.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
+<!-- doc-path-refs: proposed src/services/claude_tui/hosting/deferred_source.rs src/services/cluster/execution_capacity/channel_lease.rs src/services/tui_input/human_frame/history/v2/key_admit.rs src/services/codex_tui/busy_inject/tab_protocol.rs src/services/discord/recovery_engine/awaiting_echo_boot.rs src/services/discord/router/message_handler/intake_turn/owned_busy/late_start.rs src/services/discord/router/message_handler/provider_dispatch/owner_input/inject.rs src/services/tui_o/store/anchor_bindings.rs src/services/tui_o/writer/deliver/prepared.rs src/services/tui_o/writer/reply_anchor.rs src/services/turn_orchestrator/queued_head/v2/awaiting_echo.rs -->
 
-- 기준 코드: `origin/main` = `82702fe252`. 브랜치는 `wt/i8328-design`이다(w1 `cafed27b40`, w2 `1113953fa4`, w3 `9b934cfcb8` 위에 이어서).
+- 기준 코드: `origin/main` = `82702fe252`. 브랜치는 `wt/i8328-design`이다(w1 `cafed27b40`, w2 `1113953fa4`, w3 `9b934cfcb8`, w4 `c603bfb08c` 위에 이어서).
 - 결정 출처:
   - 사용자 결정 busy-inject-step0-1126 a (13:01)
   - 메인 판단·코디 결정 (13:20): Codex는 항상 Tab, 1단계 핵심 범위는 귀속
   - 설계 리뷰 i8328-design-2(`1113953fa4`, P1 2·P2 4): w3에서 모두 반영했다. 반영 위치는 아래 표와 같다.
   - 설계 리뷰 i8328-design-3(`14e9998f50`, P1 3·P2 5)과 메인 순서 결정(15:02): 단계를 S1·S2로 나눈다. 사용자 결정 busy-inject-step0-1126 a의 범위 안에서 순서만 나눈 것이다(아래 "단계 분리").
+  - 설계 리뷰 i8328-design-4(`c603bfb08c`, P1 3·P2 1)와 사용자 결정 i8328-s1-scope-1126 c(S1 범위 유지): w5에서 S1 P1 세 건을 닫는다(아래 "w5 반영").
   - 입력: 설계 준비 보고서, 0단계 실측(`report-e2e-1.md`), Codex Tab 실측(`report-tab-1.md`, `logs/tab-1/`), 코디 요약(`coord-note-tab-for-design.md`), 이슈 #8328
 - 운영 코드는 바꾸지 않는다. 바뀌는 것은 문서·모델·cfg·보고서·색인 행뿐이다. cargo는 0회다.
 - 약어. 경로는 `src/services/discord/` 기준이다.
@@ -30,6 +31,15 @@
 - 사용자 체감 문제(Claude 채널 무한 보류: #8432 모양, source 결합 전 보류)를 S1이 먼저 없앤다.
 - S2 모델 `OwnerInputBusySplit.tla`(cfg 30)는 w3 상태 그대로 둔다. S1 모델은 새 `OwnerInputBusyS1.tla`(cfg 24)다.
 
+### w5 반영 (리뷰 i8328-design-4)
+
+| 지적 | 결정 | 반영 위치 |
+|---|---|---|
+| P1-1 꼬리표 없는 Idle·Cold opener를 J2가 결합하지 못함 | J2는 기존 native membership receipt(ticket·row·range·frame hash)로 결합한다. 헤더 nonce는 보조 근거다. 프롬프트 바이트는 바꾸지 않는다. 짝이 하나가 아니면 결합하지 않는다(오귀속 0) | §6.1 J2, §6.2-1·5, 조각 S1-A, 모델 `TaggedHeaderOnly` RED |
+| P1-2 E1–E8 밖 source 관문(idle observer → `idle_unobserved`, Herdr `Context::read` → Held) | 관문 전수표 G1–G10을 만들었다. 키 허가 관찰(pane·writer·세대·composer)과 source 관찰을 나눈다. tmux 자기 턴 observer는 source를 키 뒤에 기다린다 | §5.5.4, 조각 S1-B, 모델 `RequireIdleObserverBeforeKey`·`RequireBusyReadStateWithoutSource` RED, liveness `NoCircularWait` |
+| P1-3 지연 pin이 `select_source` 동등성 검사에 걸림 | `BindingIntent.selected`의 None → Some을 단일 확정점으로 쓴다. 지연 분기에서는 미정 session·path 비교를 하지 않고, 확정 뒤 변경은 계속 거절한다 | §5.5.3, 조각 S1-B, 모델 `DeferredEquality` RED |
+| P2 GREEN이 늦은 결합을 보장하지 못함 | transcript 생성(`trans`)과 `Bound` 기록(`src`)·확정(`sel`)·결합(`aBound`·`bBound`)을 나눴다. 게시와 ➕는 결합을 소비한다 | §1.0, 모델 `NoLateBind`·`RequireTranscriptFresh` RED |
+
 w3 반영 표(리뷰 i8328-design-2). "S2"라고 적힌 행은 §13으로 옮겼다.
 
 | 리뷰 지적 | 결정 | 반영 위치 |
@@ -47,8 +57,9 @@ w3 반영 표(리뷰 i8328-design-2). "S2"라고 적힌 행은 §13으로 옮겼
    - 어느 anchor에 걸지는 transcript에서 그 답이 속한 native 턴과, 그 턴을 연(또는 그 턴에 합류한) 입력의 frame nonce로 정한다.
    - 게시 순서, mailbox 토큰, 주입한 경로로는 정하지 않는다.
    - 합류 입력은 합친 답 한 번으로 친다. 답은 그 턴을 연 입력의 anchor에 건다. 합류한 입력에는 ➕ '진행 중 턴에 합류' 표시를 단다. 다는 시점은 흡수 증거(J2)가 나온 뒤이고, 별도 턴이면 달지 않거나 거둔다.
+   - J2의 결합 근거는 native membership receipt(등록 ticket ↔ 검증된 user 행의 row·range·frame hash)다(w5). 꼬리표 없는 정상 Idle·Cold 입력도 이것으로 결합한다.
 2. **Claude 바로 주입**: 바쁜지 확인하지 않는다. 보류 조건(§2.2)만 보고 붙여넣기+Enter를 한다. 다음 도구 경계에서 흡수되면 합류, 아니면 자기 턴이다.
-3. **transcript 없는 키**: 키 전에 anchor·nonce·frame hash·target incarnation을 durable하게 등록한다. source(transcript 경로·offset)는 J2가 나중에 결합한다. source가 결합되지 않았다는 이유로는 보류하지 않는다. 어댑터의 metadata 읽기, Herdr `admits`의 경로 일치, O writer `pin_source`의 `Bound` 요구가 모두 여기에 든다(§5.5). pane·writer·실행 세대 검사는 그대로 둔다.
+3. **transcript 없는 키**: 키 전에 anchor·nonce·frame hash·target incarnation을 durable하게 등록한다. source(transcript 경로·offset)는 나중에 확정·결합한다. source가 결합되지 않았다는 이유로는 보류하지 않는다. 키 전 source 관문은 E1–E8(§5.5.1)과 G1–G10(§5.5.4) 전부다. pane·writer·실행 세대 검사는 그대로 둔다. 지연 pin의 source는 `BindingIntent.selected`에서 한 번만 확정한다(§5.5.3).
 4. echo가 아직 없다는 사실은 재전송 근거가 아니다(w1 그대로).
 5. **실행 용량**: S1은 새로 잡지 않는다. 합류 입력은 A의 기존 lease로 돈다(§1.1). 채널 lease 공유 표는 S2다.
 6. Codex는 S1에서 지금 동작 그대로 둔다. 항상 Tab은 S2(§13.1)다.
@@ -57,48 +68,49 @@ w3 반영 표(리뷰 i8328-design-2). "S2"라고 적힌 행은 §13으로 옮겼
 
 ### 1.0 S1 모델
 
-모델은 `docs/statecharts/input-single-path/OwnerInputBusyS1.tla`(새 파일, Claude만)이다. 보고서는 `owner-input-busy-s1.report.md`다.
-- 변수: `src`(source 결합 여부), `reg`(키 전 durable 등록), `why`(보류 사유). Codex Tab과 lease 변수는 없다.
-- 시나리오: `busy`, `i8432`, `external`, `fresh`(새 세션, 턴 전 transcript 없음), `rebind`(composer 준비 뒤 writer가 source를 늦게 결합)
-- 새 규칙
-  - `NoSourceHold == why # "source"`: transcript 없는 정상 입력 보류 0
-  - `KeyAfterRegister == keys ≥ 1 ⇒ reg`
-  - `MarkOnlyJoined`·`JoinedMarked`: 합류 표시
-  - 그 밖에 `NoDuplicate`·`NoSilentLoss`·`ReplyExactlyOnce`·`AnswerBound`·`KeyBeforeLeave`, liveness `IdleDelivers`·`ReplyPosted`
-- P1-3 mutant
-  - `AdmitsPathMatch`: Herdr `BusyObservation::admits`의 경로 일치 유지
-  - `PinSourceFirst`: `Producer::wrap`의 `pin_source` 선호출이 `Bound` 기록을 요구
-  - `RequireTranscript`: 어댑터의 transcript metadata 선확인
+모델은 `docs/statecharts/input-single-path/OwnerInputBusyS1.tla`(Claude만)이고 cfg는 33개다(w4 24개). 보고서는 `owner-input-busy-s1.report.md`이고 w4 → w5 전후표가 거기에 있다.
 
-`statecharts_tlc.check_cfg`로 24개를 모두 직접 돌렸고, 결과가 전부 기대 집합과 일치했다.
+변수:
+- `trans`: transcript 파일 있음. B의 턴이 만든다(`TuiStart`)
+- `src`: writer의 `Bound` 기록(`BindSource`, 파일이 있어야 한다)
+- `reg`: 키 전 durable 등록
+- `pin`: recorded·deferred
+- `sel`: `BindingIntent.selected` 확정(`Select`, 한 번)
+- `aBound`·`bBound`: J2 결합(`BindA`: 꼬리표 없는 opener를 receipt로, `BindB`: B)
+- `why`: 보류 사유
 
-| cfg | 결과 | 뜻 |
+A 답은 A 결합 뒤(합류 B가 있으면 B 결합도 뒤)에, B 답은 B 결합 뒤에 나간다. ➕는 `BindB`(흡수 증거)에서 단다.
+
+시나리오: `busy`, `i8432`, `external`, `fresh`(파일도 `Bound`도 없음), `rebind`(파일은 있고 `Bound`가 늦음)
+
+규칙:
+- INVARIANT: `NoDuplicate`·`NoSilentLoss`·`ReplyExactlyOnce`(합류 시 합친 답 1회)·`JoinedMarked`·`MarkOnlyJoined`·`AnswerBound`·`KeyBeforeLeave`·`KeyAfterRegister`·`NoSourceHold`(transcript 없는 정상 입력 보류 0)
+- PROPERTY: `IdleDelivers`·`ReplyPosted`·**`NoCircularWait`**(w5: transcript 없고 보류 조건 없는 대기 입력은 결국 키를 받는다)
+
+`statecharts_tlc.check_cfg`로 33개를 모두 직접 돌렸고, 결과가 전부 기대 집합과 일치했다.
+
+| 묶음 | cfg | 결과 |
 |---|---|---|
-| `Current8432` | **RED** `IdleDelivers`·`ReplyPosted`·`MarkOnlyJoined` | 남은 토큰 + Idle이면 hand_busy 보류가 되풀이된다. 붙여넣기 때 바로 ➕ |
-| `CurrentBusy` | **RED** `MarkOnlyJoined` | 바쁜 화면 붙여넣기에 바로 ➕(별도 턴이 돼도 남음) |
-| `CurrentRebind` | **RED** `NoSourceHold`·`MarkOnlyJoined` | source 결합 전 보류 |
-| `TargetBusy`·`Target8432`·`TargetExternal`·`TargetFresh`·`TargetRebind`·`TargetHoldCleared`·`TargetComposerNotReady` | **GREEN** | S1 목표: 보류 조건만, 키 전 등록, 늦은 결합, 흡수 뒤 ➕ |
-| `TargetDraftStuck` | RED `IdleDelivers`·`ReplyPosted`(U1로 수용) | 사람 초안이 끝내 남으면 알림만 |
-| `TargetAdmitsPathMatch` | mutant RED `NoSourceHold` | P1-3: Herdr 경로 일치 |
-| `TargetPinSourceFirst` | mutant RED `NoSourceHold`·`IdleDelivers`·`ReplyPosted` | P1-3: 새 세션에서 `pin_source` 선호출 |
-| `TargetPinSourceFirstRebind` | mutant RED `NoSourceHold` | P1-3: 재바인딩 구간에서 `pin_source` 선호출 |
-| `TargetRequireTranscript` | mutant RED `NoSourceHold` | 어댑터 transcript 선확인 |
-| `TargetRegisterAfterKey` | mutant RED `KeyAfterRegister`·`AnswerBound` | 키 뒤 등록이면 답이 anchor를 잃는다 |
-| `TargetMarkOnPaste`·`TargetJoinUnmarked` | mutant RED `MarkOnlyJoined` / `JoinedMarked` | ➕ 시점 |
-| `TargetJoinDoublePost`·`TargetTokenAttribution` | mutant RED `ReplyExactlyOnce`(+`ReplyPosted`) | 합류 몫 이중 게시, 토큰 귀속 |
-| `TargetPostOrder`·`TargetNoReference` | mutant RED `AnswerBound` | 게시 순서 귀속, reference 없는 게시 |
-| `TargetResendBeforeEcho` | mutant RED `NoDuplicate` | echo 전 재전송 |
-| `TargetTuiDrop` | mutant RED `NoSilentLoss`·`ReplyPosted` | TUI가 입력을 버림 |
+| Current RED 4 | `Current8432` | IdleDelivers·ReplyPosted·MarkOnlyJoined |
+| | `CurrentBusy` | MarkOnlyJoined |
+| | `CurrentRebind` | NoSourceHold·MarkOnlyJoined |
+| | **`CurrentFresh`**(w5 새) | **NoCircularWait**·IdleDelivers·ReplyPosted·NoSourceHold: 첫 입력이 transcript를 만들어야 하는 순환 대기 |
+| Target GREEN 7 | Busy, 8432, External, Fresh, Rebind, HoldCleared, ComposerNotReady | 모든 규칙 성립(NoCircularWait 포함) |
+| 수용 RED 1 | `TargetDraftStuck` | IdleDelivers·ReplyPosted(U1) |
+| mutant RED 21: source 관문 7 | `AdmitsPathMatch`, `PinSourceFirstRebind`, `RequireTranscript`, **`RequireBusyReadStateWithoutSource`**(G2) | NoSourceHold |
+| | `PinSourceFirst`, **`RequireTranscriptFresh`**, **`RequireIdleObserverBeforeKey`**(G1) | NoSourceHold·NoCircularWait·IdleDelivers·ReplyPosted |
+| ③ 지연 pin | **`DeferredEquality`**, **`DeferredEqualityRebind`** | ReplyPosted(확정 0 → 결합 0 → 답 0) |
+| ① receipt | **`TaggedHeaderOnly`** | AnswerBound(A 답이 합류 B에 걸림) |
+| P2 늦은 결합 | **`NoLateBind`**, **`NoLateBindFresh`** | ReplyPosted(w4 모델에서는 GREEN이던 변형) |
+| 그 밖 | RegisterAfterKey(KeyAfterRegister), MarkOnPaste(MarkOnlyJoined), JoinUnmarked(JoinedMarked), JoinDoublePost·TokenAttribution(ReplyExactlyOnce), PostOrder·NoReference(AnswerBound), ResendBeforeEcho(NoDuplicate), TuiDrop(NoSilentLoss) | |
 
-정리:
-- S1은 Current RED 3, Target GREEN 7, mutant RED 13이고, 수용한 RED가 1(DraftStuck)이다.
-- P1-3 경로 mutant 4개(`AdmitsPathMatch`, `PinSourceFirst` ×2, `RequireTranscript`)가 모두 RED다.
+- liveness 전후: `NoCircularWait`는 Current fresh에서 RED, Target 7개 모두 GREEN이다. ①②③을 되돌리는 mutant(`TaggedHeaderOnly`, G1·G2 관문, `DeferredEquality`)는 모두 RED다.
+- w4 결과가 바뀐 cfg는 `TargetPinSourceFirst`(+NoCircularWait)와 `TargetRegisterAfterKey`(AnswerBound가 빠짐: 결합이 등록을 기다리므로 귀속은 지켜지고 KeyAfterRegister만 깨진다) 둘이다.
+- 차트(`owner-input-busy-s1.*.chart.mmd`)
+  - RED: current-fresh, current-rebind, current-8432, admits-path-match, pin-source-first, idle-observer-gate, deferred-equality, tagged-header-only, mark-on-paste
+  - GREEN: target-rebind, target-fresh, target-busy-join, target-8432
 
-차트(`docs/statecharts/input-single-path/owner-input-busy-s1.*.chart.mmd`):
-- RED: `current-rebind`, `current-8432`, `admits-path-match`, `pin-source-first`, `mark-on-paste`
-- GREEN: `target-rebind`, `target-fresh`, `target-busy-join`, `target-8432`
-
-S2 모델: `OwnerInputBusySplit.tla` cfg 30(GREEN 11 / expected RED 19)은 w3 그대로다. 리뷰 i8328-design-3이 짚은 S2 모델 가드 보강은 §13.5에 남긴다.
+S2 모델: `OwnerInputBusySplit.tla` cfg 30은 w3 그대로다(§13.5에 가드 숙제).
 
 ### 1.1 S1 독립성 판정: `s1_independent = yes`
 
@@ -266,11 +278,62 @@ U3로 H5에 포함된다. 조각 S1-E에서 `restore_inflight.rs:2248` kickoff �
 - source가 결합 전(`pre_source`)이면 경로·offset 비교를 건너뛴다.
 - 이것은 형식 전환 장치가 아니다. owner 범위 밖 legacy 호출자는 지금의 `register_inner`(`history.rs:242`)를 그대로 쓴다.
 
-#### 5.5.3 늦은 결합 (J2, 기존 기계 재사용)
+#### 5.5.3 지연 pin의 단일 확정점과 늦은 결합 (P1-3)
 
-- 기존 재시도 경로: `native_supply.rs:602` → `native_binding.rs:162-181` `retry_source_bindings` → `bind_source`(183-262) → `resolve_pending`(264-) / `bound_source`(354-) → V2 `select_source` → `history.bind_native_source` → V2 `ack_source`(custody ACK).
-- 지연 pin이면 `bound_source`가 `seq > deferred_after_seq`인 첫 `Bound` 기록을 고른다. 조건은 같은 channel·provider·owner·execution nonce다. `Source`면 그대로, `Pending`이면 짝 `Resolved`로 source를 얻는다. `resolve_pending`의 launch 권한 검사(`execution_context`, spawn nonce marker)는 그대로 둔다.
-- 결합되면 같은 nonce가 원래 anchor에 묶인다(§6 J2). 재주입은 0이다. 실행 세대가 바뀌었으면 결합을 거절하고, 키는 이미 나갔으므로 `awaiting_echo`를 retained로 정산하고 알린다(재주입 없음).
+지금 코드: `Owner::select_source`(`src/services/turn_orchestrator/queued_head/v2/cold_source.rs:89-116`)는 새 source가 pin의 session·transcript·offset·file과 같아야 한다(96-103, "source binding differs from pre-key pin"). 지연 pin에는 비교할 값이 없으므로 이 검사에서 반드시 거절된다. 호출 순서는 `select_source` 성공 → `history.bind_native_source` → `ack_source`(`native_binding.rs:240-261`)이므로 결합·ACK에 닿지 못한다.
+
+목표: **`BindingIntent.selected`의 None → Some이 유일한 확정점**이다.
+- 지연 pin(`deferred_after_seq: Some(w)`)에 불변으로 보관하는 것: ticket(target·provider·owner·execution nonce 포함), watermark `w`, owner root.
+- `bound_source`(지연 분기)는 다음을 모두 만족하는 첫 기록을 고른다: `seq > w`, 같은 channel·provider·owner·execution nonce, `Bound(Source)` 또는 `Bound(Pending)` + 짝 `Resolved`. 옛 실행의 `Bound`(다른 execution nonce)와 watermark 이전 `Bound`는 고르지 않는다. 이어 `verify_source`(파일 신원)를 거친다.
+- `select_source`의 지연 분기
+  - `intent.selected`가 None이면 session·transcript·offset·file 선행 동등성을 요구하지 않는다. `Source::validate(&ticket.key)`(`history/v2.rs:21-58`: provider·target·execution nonce·파일 신원, `pre_source` 기대값은 null이면 통과)는 그대로 거친다. 통과하면 `selected = Some(source)`를 commit하고 flush한다.
+  - `intent.selected`가 Some이면 같은 source만 받는다. 다른 source는 계속 거절한다.
+- 지연 pin의 offset은 0이다. 키 시점에 파일이 없었으므로(fresh) 처음부터가 B의 범위다. rebind처럼 파일이 이미 있던 경우에도 0부터 읽는다. 대신 J2 receipt의 유일성 검사(같은 frame hash가 offset 이후 정확히 한 번, `receipt.rs:131-149`)가 오귀속을 막는다. 둘 이상이면 결합하지 않고 reference 없이 게시한다.
+- 이후 `bind_native_source`와 `ack_source`는 기존의 같은-source·재시도 가능 계약 그대로다. `retry_source_bindings`는 `selected`가 Some이면 해석을 건너뛴다(`native_binding.rs:223-224`).
+
+확정 전·후에 들어오는 입력:
+- 확정 전에 다른 입력 C가 오면 C도 자기 ticket·자기 지연 pin을 가진다(`Bound`가 아직 없으므로). 각 BindingIntent는 독립으로 확정된다.
+- 확정 뒤 같은 실행에 `Bound`가 기록되면 새 입력의 `pin_source`는 기존 경로(recorded pin)를 탄다.
+- 확정은 입력마다 한 번이다. 입력 B의 확정이 C의 pin을 바꾸지 않는다.
+- 부채 상한 `CAPACITY`(4096, `history.rs:27`, 검사 `cold_source.rs:46`)는 지연 pin도 센다. 상한에 닿으면 "source binding debt full"로 키 0이다(G5).
+
+재시작 뒤 복원:
+- `selected`가 durable commit된 뒤라면 부팅 뒤 `retry_source_bindings`가 같은 source로 `bind_native_source` → `ack_source`를 이어 간다.
+- 확정 전이라면 지연 분기 해석을 처음부터 다시 한다. `Bound` 기록은 append-only라 같은 첫 기록을 고른다.
+- 키를 다시 누르지 않는다(재주입 0).
+- 실행 세대가 바뀌었으면 확정하지 않는다. `awaiting_echo` retained 정산 + 알림.
+
+#### 5.5.4 E1–E8 밖 source 의존 관문 전수 (P1-2)
+
+| # | 관문 file:line | 타는 입력 | 지금 | S1 처리 |
+|---|---|---|---|---|
+| G1 | tmux 자기 턴 observer: OI:1275-1276 `observer()` → OI:1367-1383 → `claude_tui/hosting/warm_followup.rs:589-611` `owner_observer`(`resolve_live_claude_tui_session(...).ok()?` 609-610, `std::fs::metadata(transcript).ok()?` 611) → None → OI:1495-1498 `NotSent("idle_unobserved")` | I1·I2·I8·I11·I12·I14 Claude, 토큰 없음, 살아 있는 tmux pane(ClaudeIdle) | 새 세션·재결합 창에서 키 0. 첫 입력이 transcript를 만드는 경우 순환 대기 | **키 허가 관찰과 source 관찰을 나눈다.** 키 전에는 pane·overlay·auth profile(602-605)만 요구하고 observer를 만든다. source 해석과 시작 offset은 키 뒤로 옮긴다. 새 child `src/services/claude_tui/hosting/deferred_source.rs`가 이미 구독 중인 hook 이벤트(`subscribe_hook_events`, 612)의 transcript 경로나 기존 `rebind` 해석을 기다린다. cancel·custody 정산과 함께 끝나며 sleep 폴링은 없다. 해석되면 offset 0부터 읽는다(지금 `rebound_source`의 "rebound session read from this submit's time"과 같은 규칙). `until_done` 검사(OI:1495-1498)는 남는다. pane 신원 실패만 막고, capacity 유지·취소·완료 정산을 지킨다 |
+| G2 | Herdr `Context::read` `claude_tui/host_input/busy/herdr.rs:303-343`: clear·idle readiness 특례(307) 밖에서 `current_source(authority)?`(320, 399-) → 없으면 `Reading::held()` → `admits`의 Busy·Idle 요구(`busy.rs:259-260`) false → `busy_source_unavailable`(herdr.rs:80-86) | Claude 토큰 있음(합류 장부), Herdr, source 재결합 창 | 키 0 | `Context::key_ready()`를 더한다(같은 파일, 443줄이라 giant 아님). 검사 항목: `execution_alive`(304), spawn nonce marker == `self.nonce`(idle_ready 352-355와 같은 검사), `output_ready`(310), capture 가능·모달 아님(311). `pre_source` 요청의 `admits`는 `read().state` 대신 `key_ready()`를 쓴다. 초안(H1)·composer(Hc)는 adapter가 같은 잠금에서 본다. `read()`는 source가 결합된 요청과 관찰용으로 남는다 |
+| G3 | `BusyObservation` 생성 `busy/herdr.rs:280-299` `observe()`(생성 때 `read()`의 state·source를 담음), 호출 `queue_io/input_owner/claude_handoff.rs:574` | G2와 같음 | 생성 시점 source None을 들고 간다 | G2로 덮는다(`admits`가 생성 시점 state를 쓰지 않는다) |
+| G4 | `native_binding.rs:108-130` `boundary`: 파일 끝이 개행이 아니면 "incomplete pre-key record" | recorded pin(파일 있음) | 쓰는 중이면 키 0, held_watch 재시도 | **유지**. 파일이 있을 때의 일시 상태이고 transcript 없음과 무관하다. 지연 pin은 파일을 읽지 않으므로 해당 없음 |
+| G5 | `cold_source.rs:46` source binding 부채 `CAPACITY`(4096) | 모든 pre_source | 상한이면 키 0 | **유지**. 명시된 상한 보류이고, 지연 pin 결합이 부채를 줄인다. 상한 도달은 경보 대상 |
+| G6 | `native_binding.rs:215-221` 종결된 cold ticket은 source를 얻지 못함 | 키 뒤 Cancel·cleanup된 입력 | 키 뒤 결합 거절 | **유지**(키 전 관문 아님). Cancel·Terminate 정산이 `awaiting_echo`를 끝낸다(§5.6) |
+| G7 | `discord/health/turn_deliver/inject/herdr.rs:96` `TranscriptUnavailable` | I6 HTTP deliver(기계, 보관) | 키 0 | S1 범위 밖. 기계 시작은 START_WAITS 유지(U2) |
+| G8 | OI:1714-1720 Codex `read_turn` 관문 | Codex | 키 0 | S2(§13.1) |
+| G9 | OB:33-97 `running`, OB:399-470 `late`(transcript 재판정) | 지금 hand_busy 늦은 판정 | 보류 | S1-D에서 사람 입력 가지 삭제(§3) |
+| G10 | `claude/herdr_turn/first_input.rs:126-133` Cold·HerdrIdle 첫 입력 source | Cold·HerdrIdle | metadata 실패면 이미 `pre_source` | 관문 아님(확인만). 이후 `Producer::wrap` E2를 탄다 |
+
+순환 대기 해소: 첫 입력이 transcript를 만드는 경우 G1·E2·E5–E7 모두 키 전에 source를 묻지 않는다. 모델 `TargetFresh` GREEN, `CurrentFresh`·`RequireIdleObserverBeforeKey`·`RequireTranscriptFresh`·`PinSourceFirst` RED(`NoCircularWait`).
+
+### 5.6 같은 상태를 소비하는 진입점 (BindingIntent·source pin·receipt·anchor 결합)
+
+| 진입점 | 소비하는 상태 | S1 계약 |
+|---|---|---|
+| 키 전 `Producer::wrap` → `pin_source`(E2·E3) | BindingIntent 생성 | recorded 또는 지연 pin. 실패면 키 0, `release_unkeyed_source`(`native_binding.rs:134-160`)가 no-key proof로 정리 |
+| 늦은 결합 `retry_source_bindings`(`native_supply.rs:602`) | BindingIntent·selected | §5.5.3 단일 확정 → history binding → ACK |
+| J2 receipt `observe` → `port.inner.receipt`(`tui_o/writer/rotation/owe.rs:594-617`) | MembershipReceipt | 등록 ticket과 user 행을 잇는다. S1-A `reply_anchor`가 이 receipt의 ticket → V2 attempt의 anchor message id(`sources`, OI:124-127)를 쓴다 |
+| `anchor_bindings`·`Prepared.reply_to`(§5.2) | 결합 기록 | 게시·재게시가 같은 anchor를 쓴다 |
+| 부팅 `retry_source_bindings`, writer boot | BindingIntent·anchor_bindings | §8 |
+| HTTP Cancel·force Cancel(§9 A1a·A1b) | 키 뒤 BindingIntent | 키 뒤 Cancel이면 G6 규칙대로 결합하지 않는다. `awaiting_echo` HostTerminated/Cancelled 정산. 이미 결합된 답은 원래 anchor에 그대로 둔다 |
+| Herdr Terminate(A2) | BindingIntent·awaiting_echo | 실행 세대가 끝나 확정하지 않는다. retained 알림 |
+| `/clear`(A3) | BindingIntent·awaiting_echo | clear 뒤 새 실행의 `Bound`는 execution nonce가 달라 옛 지연 pin에 고르지 않는다. 옛 항목은 정산 + 알림 |
+| `/stop`·`!stop`(A4a) | awaiting_echo | 흡수 전 Esc 회수는 미전송 + 재전송 요청. 키 뒤 미확정 pin은 G6 |
+| 세션 교체·incarnation | ticket target(execution nonce) | 다른 세대의 `Bound`·receipt는 결합하지 않는다 |
 
 ## 6. 귀속 모델: 입력 anchor ↔ native 턴 ↔ 게시 답
 
@@ -279,14 +342,14 @@ U3로 H5에 포함된다. 조각 S1-E에서 `restore_inflight.rs:2248` kickoff �
 | # | 결합 | 지금 코드 | 새로 할 일 |
 |---|---|---|---|
 | J1 | **입력 anchor ↔ frame nonce** | 키 전 등록. Codex `history::append::register((session,id,author), transcript, offset, frame, target_turn, message_id, …)`(`src/services/tui_input/human_frame/history/append.rs:128-165`, 호출 `codex/herdr_turn/busy.rs:82-90`). Owner 모드는 `src/services/tui_input/human_frame/history/v2.rs` `scoped_register`(native evidence `Ticket{key, channel_id, source}`, `src/domain/human_input/native_source.rs:26-33`). Claude `history::register(who, transcript, offset, &frame)`(`claude_tui/host_input/busy/herdr.rs:67`, message id 없음) | 두 provider 모두 V2 admission의 anchor message id(follower 포함)를 nonce와 함께 `awaiting_echo`에 쓴다(§5.1). Claude history 등록에도 message id를 싣는다 |
-| J2 | **frame nonce ↔ native 턴** | transcript 입력 행 판정: `src/services/tui_input/human_frame/history.rs:838` `attempt_row`(자기 user 행 = true, queued command = false). Claude 분류 `src/services/tui_o/writer/input_facts/native.rs:20-60`(`QueueRecord`: Prompt·Absorbed·Human). 턴 경계 `src/services/tui_o/writer/input_facts.rs:40-57`(`Ordered::Opened{range, native_turn_id}`·`Closed{…, aborted}`·`Input{range, record}`). Codex native turn id는 rollout `task_started`의 turn id(`codex_tui/busy_inject/rollout.rs` `read_turn`) | 입력 행에서 frame 헤더의 nonce 꼬리표(`src/services/tui_input/human_frame.rs:102-119` `plain_inject`/`untagged`)를 읽고, 그 행을 감싼 native 턴에 결합한다. 자기 user 행이 턴을 열면 그 턴의 opener, 진행 중 턴 안의 흡수·queued command면 합류 |
+| J2 | **입력 등록 ↔ native 턴**(w5: receipt 우선, nonce 보조) | transcript 입력 행 판정: `src/services/tui_input/human_frame/history.rs:838` `attempt_row`(자기 user 행 = true, queued command = false). Claude 분류 `src/services/tui_o/writer/input_facts/native.rs:20-60`(`QueueRecord`: Prompt·Absorbed·Human). 턴 경계 `src/services/tui_o/writer/input_facts.rs:40-57`(`Ordered::Opened{range, native_turn_id}`·`Closed{…, aborted}`·`Input{range, record}`). Codex native turn id는 rollout `task_started`의 turn id(`codex_tui/busy_inject/rollout.rs` `read_turn`) | **결합 근거는 native membership receipt**다(`src/services/tui_o/writer/input_facts/native/receipt.rs:6-22` `MembershipReceipt{namespace, ticket, row, kind, range, frame_hash}`, 생성 `receipt.rs:82-167` `candidates`, 소비 `tui_o/writer/rotation/owe.rs:594-617`). receipt는 등록 ticket의 exact frame hash와 user·queued command 행 본문의 hash(붙여넣기 내부 hash 포함, `receipt.rs:66-69`)를 맞춘다. 정상 Idle·Cold 입력은 `human_frame::idle()`(`human_frame.rs:54`)이 nonce 꼬리표 없이 만들고(OI:1607-1621, 1695-1702), Busy만 꼬리표가 있다(OI:1652-1653). 그래서 꼬리표는 보조 근거로만 쓴다. 프롬프트 바이트는 바꾸지 않는다. receipt의 ticket이 V2 attempt를 가리키고, 그 attempt의 `sources`(OI:124-127)가 anchor다. receipt 행을 감싼 native 턴에서 자기 user 행이 턴을 열면 opener, 진행 중 턴 안의 흡수·queued command면 합류다.<br>**실패 처리(오귀속 0)**: 짝 ticket이 하나가 아니거나(`receipt.rs:110-128`의 `let [owner]`), 같은 hash 행이 offset 이후 둘 이상이거나(131-149), 중복 row(93-100)면 receipt가 없다. 그러면 결합하지 않고 reference 없이 게시하며 사유를 남긴다. 추측으로 다른 anchor에 걸지 않는다 |
 | J3 | **native 턴 ↔ 게시 답 조각** | tui_o writer가 record마다 조각을 만든다: `src/services/tui_o/writer/pieces.rs:115-202` `UnitDeriver::derive*` → `OwedWork{derived, source, range}`(`src/services/tui_o/writer/pieces.rs:45-52`). 조각에는 이미 `output_origin` 운반 칸이 있다(`src/services/tui_o/writer/pieces.rs:22-29,81-86,131-132`) | 새 child `src/services/tui_o/writer/reply_anchor.rs`가 같은 record 흐름에서 현재 native 턴을 따라가며 조각에 `reply_to`를 붙인다(`output_origin`과 같은 운반 방식). 조각의 range가 속한 턴의 결합 기록에서 정한다 |
 | J4 | **게시 ↔ Discord reply reference** | `src/services/tui_o/writer/deliver.rs:532-563` `send_piece`가 `LedgerEntry::Prepared` 뒤 `port.post_unit(channel, payload, origin, kind)`(`src/services/tui_o/writer/deliver.rs:590-595`)를 부른다. 포트 `src/services/tui_o/writer/mod.rs:115-145`, Discord 구현 `discord/outbound/o_writer_io.rs:184-210`. **reference 인자가 없다** | `post_unit`에 `reply_to`를 더하고, Discord 구현은 기존 `discord/outbound/serenity_reference.rs`로 message reference를 붙인다. anchor가 지워졌으면(삭제된 메시지) reference 없이 게시하고 결합 기록에 사유를 남긴다 |
 | J5 | **결합 관측 기록** | `relay_delivery` 이벤트는 session_relay_sink 경로에만 있다(`session_relay_sink/task_notification_context.rs:576-605`). tui_o writer는 내지 않는다(실측 이벤트 0, bridge 확인 0/94의 원인) | 게시마다 `tui_o reply anchored` 한 줄(channel, native turn id, anchor, msg id, 근거 range)과 `emit_relay_delivery(…, prompt_anchor, "tui_o_writer", …)`를 남긴다 |
 
 ### 6.2 규칙
 
-1. **답 조각의 anchor는 그 조각이 속한 native 턴의 결합 기록이 정한다.**
+1. **답 조각의 anchor는 그 조각이 속한 native 턴의 결합 기록이 정한다.** 결합 기록은 receipt(J2)로 만든다. 꼬리표 없는 opener도 마찬가지다(모델 `TaggedHeaderOnly` RED).
    - 턴을 연 입력에 Discord anchor가 있으면 그 anchor에 건다.
    - 없으면(TUI 직접 입력, 백그라운드 알림이 연 턴) 그 턴에 처음 합류한 Discord 입력의 anchor에 건다.
    - 그것도 없으면 reference 없이 게시한다(지금과 같음).
@@ -299,7 +362,7 @@ U3로 H5에 포함된다. 조각 S1-E에서 `restore_inflight.rs:2248` kickoff �
    - 한 Discord 메시지에는 reference를 하나만 걸 수 있으므로 여러 anchor에 나누지 않는다.
 3. **게시 순서로 귀속하지 않는다**(`PostOrder` RED). "가장 오래된 미답 입력"에 붙이는 규칙은 외부 턴 A의 답을 Tab으로 대기한 B에 붙인다. 0단계 S1T의 "B 답이 A bridge 수명 안에서 게시"가 바로 이 모양이다.
 4. **reply reference 없이 게시하지 않는다**(`NoReference` RED). anchor가 있는 답은 반드시 reference를 단다.
-5. **결합이 확정되기 전에는 그 턴의 조각을 보내지 않는다.** 턴 opener 행이 이미 spool에 들어왔고 nonce 판정은 같은 record에서 끝나므로 지연은 0에 가깝다. 단 nonce가 있는데 `awaiting_echo`·history에 짝이 없으면 결합 근거가 없는 것이다. 이때는 reference 없이 게시하고 사유를 남긴다. 조각을 막지 않는다(유실 0 우선).
+5. **결합이 확정되기 전에는 그 턴의 조각을 보내지 않는다.** 조각은 결합된 source에서만 나오고(tui_o writer는 결합된 source를 읽는다), receipt 판정은 같은 record에서 끝나므로 지연은 0에 가깝다. 결합이 **확정적으로 불가능**하면 reference 없이 게시하고 사유를 남긴다. 불가능한 경우는 receipt 유일성 실패, 실행 세대 변경, Cancel·Terminate 정산이다. 조각을 막지 않는다(유실 0 우선). 늦게 오는 것(`Bound` 대기)은 불가능이 아니다.
 6. **echo가 없다는 사실은 재전송 근거가 아니다**(w1 규칙 유지, `ResendBeforeEcho` RED).
 
 ### 6.3 Claude와 Codex를 한 모델로
@@ -336,7 +399,7 @@ i8328tab1은 답 대상 99건 중 본문·native 턴 일치 87건을 보고했�
 
 | # | 출처 | 진입 | 처리 | 답 anchor |
 |---|---|---|---|---|
-| I1 | 사람 owner front(Discord) | IG:120 → `intake_dispatch.rs:815` → `ingress.rs:407` | Claude: **바로 주입**(S1). Codex: 지금 경로(S1), 항상 Tab은 S2 | 자기 메시지(합류면 턴 opener) |
+| I1 | 사람 owner front(Discord) | IG:120 → `intake_dispatch.rs:815` → `ingress.rs:407` | Claude: **바로 주입**(S1). 토큰 없는 tmux 자기 턴은 G1 observer를 source 없이 만든다. Codex: 지금 경로(S1), 항상 Tab은 S2 | 자기 메시지(합류면 턴 opener). 결합은 receipt(꼬리표 유무 무관) |
 | I2 | 허용 봇·announce·wake | `ingress.rs:418-425`(`bot`은 표식, origin=Discord) | **I1과 같다**(U4) | I1과 같다 |
 | I3 | busy follow-up retry | owner 채널은 V2 `control.rs:108-115`가 RequeueFront 거절 | 따로 없음. 보관 front가 다음 wake에 I1을 탄다 | I1 |
 | I4 | 루틴 | `routines/agent_executor/owner_input.rs:180,219` | **보관**(START_WAITS) | 루틴 자기 카드(기존). 이번 범위에서 바꾸지 않음 |
@@ -349,7 +412,7 @@ i8328tab1은 답 대상 99건 중 본문·native 턴 일치 87건을 보고했�
 | I11 | 첨부 대기 | `ingress.rs` Hold::Uploads | **보관**(H4) 뒤 바로 주입 | I1 |
 | I12 | 스레드 입력 | IG:228, 스레드마다 V2 owner | 스레드 채널마다 I1. THREAD-GUARD(IG:870-926)는 명시 보류로 유지 | 스레드 안 자기 메시지 |
 | I13 | TUI 직접 입력 | owner 밖(ExternalInput) | owner 입력이 아님. 사람 초안(H1)의 근원 | 그 입력이 연 턴은 anchor 없음 → 처음 합류한 Discord 입력 또는 none |
-| I14 | Claude 입력, source 결합 전(새 세션·재바인딩·Herdr observation `source=None`) | I1과 같다 | **바로 주입**(S1). 키 전 등록 + 지연 pin, 결합은 J2(§5.5). 보류 0 | I1과 같다(결합 뒤 확정) |
+| I14 | Claude 입력, source 결합 전(새 세션·재바인딩·Herdr observation `source=None`) | I1과 같다 | **바로 주입**(S1). 키 전 등록 + 지연 pin. G1 observer는 키 뒤 source를 기다리고, G2 Herdr는 `key_ready()`를 쓴다. 확정은 `selected` 한 번(§5.5.3). 보류 0 | I1과 같다(확정·receipt 결합 뒤) |
 
 ### 7.1 composer 소유 분류 (H1, P2-2)
 
@@ -389,7 +452,9 @@ U 결정(코드 근거, w1 그대로):
 | R9-R12 | 각자 보류 | 그대로. preclaim은 합류 장부에도 적용 | |
 | 키 전 등록 뒤, source 미정(`pre_source`) | V2 attempt(`pre_source`)와 `awaiting_echo` `AwaitingAcceptance` | 키를 눌렀는지 모르는 상태는 현행 `head_injection` 복구(R6)가 정한다. 키가 들어갔다면 J2가 새 source에서 같은 nonce·frame hash를 찾아 V2 `bind`로 결합한다 | 원래 anchor에 결합. 재주입 0 |
 | 수락 뒤(`AcceptedAwaitingNative`, Claude는 queue 기록) | `awaiting_echo` | 짧은 기한 없이 남는다. TUI 대기열에 있던 입력이 재시작 뒤 native 턴이 되면 J2가 결합한다 | 게시 1회, 재전송 요청 0 |
-| 지연 pin(`deferred_after_seq`, §5.5) | V2 `source_bindings`(BindingIntent) | 부팅 뒤 `retry_source_bindings`가 이어받는다. 재시작 중 생긴 `Bound` 기록도 `seq > deferred_after_seq`로 찾는다. 실행 세대가 바뀌었으면 결합하지 않고 retained 정산 + 알림 | 결합 1회, 재주입 0 |
+| 지연 pin(`deferred_after_seq`, §5.5.3) | V2 `source_bindings`(BindingIntent, `selected`) | `selected`가 commit된 뒤면 같은 source로 history binding → ACK를 이어 간다. 확정 전이면 지연 분기 해석을 다시 한다(append-only `Bound`라 같은 첫 기록). 확정 직후·history binding 직후 ACK 전 재시작 모두 같은 source로 수렴한다. 실행 세대가 바뀌었으면 확정하지 않고 retained 정산 + 알림 | 확정 1회, 결합 1회, 재주입 0 |
+| receipt 결합(J2) | tui_o native custody(receipt event), `anchor_bindings` | writer boot가 custody를 이어받고, resume 지점 앞 결합은 `anchor_bindings`에서 읽는다 | 같은 anchor |
+| G1 observer(키 뒤 source 대기) | 메모리(observer closure) | 재시작하면 observer는 사라진다. 키가 나간 입력은 `awaiting_echo`·BindingIntent로 이어지고, 완료는 writer·native custody가 정산한다(지금 재시작 뒤 owner 턴 정산과 같은 경로) | 재주입 0 |
 | 실행 용량 | S1은 바꾸지 않는다(§1.1) | 기존 guard는 프로세스와 함께 사라지고 DB 행은 TTL로 만료된다(지금과 같음). 채널 lease 복구는 S2(§13.4) | 지금과 같음 |
 | 출력 소유 | boot policy·adoption | 부팅 때 `tui_o/cutover` 판정을 다시 한다. writer 준비 전(`channel_accepts` 거짓)에도 소유는 그대로다 | O 소유 채널에서 legacy 본문 0, writer 회복 뒤 O 본문 1 |
 
@@ -438,42 +503,56 @@ S1은 `execution_capacity`를 건드리지 않는다(§1.1). Codex 파일도 건
 
 순서: **S1-A → S1-B → S1-C → S1-D → S1-E**. S1-B(transcript 없는 키)를 S1-D(단일 경로)보다 앞에 둔다. 그래야 S1-D가 보류를 지울 때 source 보류가 다시 생기지 않는다.
 
-### S1-A — 답 anchor 귀속과 합류 표시 (w3 A1)
-- 파일(prod 10개):
-  - 새 child: `src/services/tui_o/writer/reply_anchor.rs`(+230: native 턴 추적, nonce 판독, 결합·합류 규칙), `src/services/tui_o/store/anchor_bindings.rs`(+130: durable journal), `src/services/tui_o/writer/deliver/prepared.rs`(블록 이동 +15)
-  - 수정: `src/services/tui_o/writer/pieces.rs`(+15, `reply_to` 운반), `src/services/tui_o/writer/mod.rs`(+8, 포트 인자), `src/services/tui_o/writer/deliver.rs`(-15 +3), `tui_o/store/ledger.rs`(+3, 선택 필드), `discord/outbound/o_writer_io.rs`(+20, message reference), `turn_view_reconciler/injected.rs`(+30, 흡수 확인 뒤 ➕와 별도 턴이면 거두기), `src/services/tui_input/human_frame/history/v2.rs`(+25, nonce → anchor 조회)
-- 예상: prod 10파일 / 순 +465.
+### S1-A — 답 anchor 귀속과 합류 표시 (w3 A1 + w5 receipt 결합)
+- 파일(prod 11개):
+  - 새 child: `src/services/tui_o/writer/reply_anchor.rs`(+270: native 턴 추적, receipt 결합(꼬리표 없는 opener 포함), nonce 보조 판독, 결합·합류 규칙, 실패면 결합 0), `src/services/tui_o/store/anchor_bindings.rs`(+130: durable journal), `src/services/tui_o/writer/deliver/prepared.rs`(블록 이동 +15)
+  - 수정:
+    - `src/services/tui_o/writer/pieces.rs`(+15, `reply_to` 운반)
+    - `src/services/tui_o/writer/mod.rs`(+8, 포트 인자)
+    - `src/services/tui_o/writer/deliver.rs`(-15 +3)
+    - `tui_o/store/ledger.rs`(+3, 선택 필드)
+    - `discord/outbound/o_writer_io.rs`(+20, message reference)
+    - `turn_view_reconciler/injected.rs`(+30, 흡수 결합 뒤 ➕와 별도 턴이면 거두기)
+    - `src/services/tui_input/human_frame/history/v2.rs`(+25, ticket → attempt anchor 조회)
+    - `src/services/tui_o/writer/rotation/owe.rs`(+8, 기록한 receipt를 reply_anchor에 넘김)
+- 예상: prod 11파일 / 순 +515.
 - RED 계획(현행에서 실패 확인 뒤 구현):
   1. tui_o 조각 게시에 reference가 없다(현행 `post_unit`에 인자 없음). 목표는 opener anchor reply다.
-  2. 외부 턴 A + 붙여넣은 B: A의 조각은 reference 없음(합류가 아니면), B의 조각은 B reply(게시 순서 귀속 금지).
-  3. Claude 흡수(`absorbed_mid_turn` fixture): 합친 답은 A anchor, B에 ➕ 1회, B 별도 게시 0.
-  4. **➕ 시점(P2-3)**: 바쁜 화면에 붙여넣었지만 A 뒤 자기 턴으로 돈 B는 ➕ 0, B 답 1회(B reply)다. 키 직후 ➕ 변형(`MarkOnPaste`)은 RED다. 키 직후 달린 ➕가 있는 fixture에서 별도 턴 결합 뒤 ➕가 거둬진다.
-  5. 한 user 행에 nonce 둘(두 nonce fixture): 첫 anchor reply, 둘째 ➕와 알림.
-  6. 재시작: `Prepared{reply_to}` 뒤 결과 모르는 POST 확인 스캔이 같은 조각으로 인정, `anchor_bindings`에서 anchor 복구.
-  7. 결합 근거 없는 nonce: reference 없이 게시하고 조각을 막지 않는다.
-  8. J5 관측 줄과 `relay_delivery` 1회.
+  2. **꼬리표 없는 opener(w5 P1-1)**: 실제 owner Idle 경로(`human_frame::idle`)가 만든 태그 없는 A → A 답 reference = A. 시험용 A에 nonce를 붙이지 않는다.
+  3. 같은 A에 태그 있는 B가 흡수되면: 합친 답은 A reference, B에 흡수 결합 뒤 ➕ 1회, B 별도 답 0. 헤더 nonce만 읽는 변형(`TaggedHeaderOnly`)은 RED다(A 답이 B에 걸림).
+  4. Cold·HerdrIdle opener와 재시작 뒤에도 같은 identity로 결합한다.
+  5. receipt 유일성 실패(같은 본문 두 번, 짝 ticket 둘) → 결합 0, reference 없이 게시, 오귀속 0.
+  6. 외부 턴 A + 붙여넣은 B: A의 조각은 reference 없음(합류가 아니면), B의 조각은 B reply(게시 순서 귀속 금지).
+  7. ➕ 시점(P2-3): 바쁜 화면에 붙여넣었지만 A 뒤 자기 턴으로 돈 B는 ➕ 0, B 답 1회. `MarkOnPaste` 변형 RED. 키 직후 달린 ➕는 별도 턴 결합 뒤 거둬진다.
+  8. 한 user 행에 nonce 둘(두 nonce fixture): 첫 anchor reply, 둘째 ➕와 알림.
+  9. 재시작: `Prepared{reply_to}` 뒤 결과 모르는 POST 확인 스캔이 같은 조각으로 인정, `anchor_bindings`에서 anchor 복구.
+  10. J5 관측 줄과 `relay_delivery` 1회.
 
-### S1-B — Claude 키 전 등록과 늦은 source 결합 (P1-3)
-- 파일(prod 10개):
-  - 새 child: `src/services/tui_input/human_frame/history/v2/key_admit.rs`(+70)
+### S1-B — Claude 키 전 등록, source 관문 전수, 지연 pin 확정 (P1-2·P1-3)
+- 파일(prod 12개):
+  - 새 child: `src/services/tui_input/human_frame/history/v2/key_admit.rs`(+70), `src/services/claude_tui/hosting/deferred_source.rs`(+80, G1 키 뒤 source 대기)
   - 수정:
     - OI(E1, metadata 실패면 `pre_source`, +4/-2)
     - `owner_input/native_input.rs`(E2 호출부, +4)
-    - `turn_finalizer/native_binding.rs`(E2 지연 pin 만들기 +30, `bound_source`·`resolve_pending` 지연 pin 처리 +30)
+    - `turn_finalizer/native_binding.rs`(E2 지연 pin 만들기 +30, `bound_source`·`resolve_pending` 지연 분기 +30)
     - `turn_orchestrator/queued_head/v2_types/cold_source.rs`(E3 선택 필드 +3)
-    - `turn_orchestrator/queued_head/v2/cold_source.rs`(E3 검사 분기 +10)
-    - `claude_tui/host_input/busy.rs`(E4 `admits`, +8/-4)
-    - `claude_tui/host_input/busy/herdr.rs`(E5, +12/-10)
+    - `turn_orchestrator/queued_head/v2/cold_source.rs`(E3 검사 분기 +10, `select_source` 지연 분기 단일 확정 +15)
+    - `claude_tui/host_input/busy.rs`(E4 `admits`, G2 `key_ready` 사용, +11/-4)
+    - `claude_tui/host_input/busy/herdr.rs`(E5 +12/-10, G2 `Context::key_ready` +20)
     - `claude_tui/busy_inject.rs`(E6, +12/-10)
     - `src/services/tui_input/human_frame/history.rs`(E7 owner 범위 분기, +8)
-- 예상: prod 10파일 / 순 +165.
-- RED 계획(실제 owner 진입점에서, 리뷰 i8328-design-3 P1-3 요구):
-  1. Herdr observation `source=None` + composer 준비 + 초안·모달 없음 → paste 1, Enter 1, 늦은 결합 1, 재주입 0. 현행은 `busy_source_unavailable` 보류다(`AdmitsPathMatch`).
-  2. O writer 준비 + `Bound` 기록 없음 → paste 1, Enter 1. 이어 `Bound` 기록 뒤 `retry_source_bindings`가 결합하고 V2 `ack_source`까지 간다. 재주입 0. 현행은 "cold source binding not recorded" 키 0이다(`PinSourceFirst`).
-  3. 새 세션(transcript 파일 없음), tmux·Herdr 각각 → paste 1, Enter 1(`RequireTranscript`).
-  4. 대조군: pane 교체(실행 nonce 변경, spawn marker 불일치)는 키 0. writer 바뀜도 키 0.
-  5. 재시작: 지연 pin이 든 `BindingIntent`가 부팅 뒤 결합된다. 실행 세대가 바뀌었으면 결합 0 + retained 알림.
-  6. 등록 실패는 키 0(`KeyAfterRegister`).
+    - `claude_tui/hosting/warm_followup.rs`(1057줄 giant: G1 source 해석을 `deferred_source` 호출로 교체, +6/-4)
+- 예상: prod 12파일 / 순 +285.
+- RED 계획(실제 owner 진입점에서):
+  1. **G1**: `owner_drive → start_idle → execute_owned → take_owned`에 토큰 없음·live tmux pane·O ready·transcript 파일 없음 → paste 1, Enter 1. 이후 `Bound` 공급 시 확정·결합·ACK, 재주입 0. 현행은 `NotSent("idle_unobserved")`이고, observer를 키 전에 요구하는 변형(`RequireIdleObserverBeforeKey`)은 RED다.
+  2. **G2**: 실제 `Context::read()`를 돌린다. `cleared=false`, `idle_ready=false`, `source=None`, pane·composer 정상 → paste 1, Enter 1. 상태를 손으로 Busy로 만들지 않는다. `RequireBusyReadStateWithoutSource` 변형은 RED다.
+  3. **E2**: O writer 준비 + `Bound` 없음 → paste 1, Enter 1(`PinSourceFirst` RED).
+  4. **단일 확정(P1-3)**: 지연 pin 뒤 `Bound(Source)`, `Bound(Pending)`→`Resolved` 두 경로 모두 실제 V2 `Owner`에서 `selected` 확정 → `bind_native_source` → `ack_source` 완료. 지연 pin에도 session·path 동등성을 적용하는 변형(`DeferredEquality`)은 RED다.
+  5. 재시작: `selected` 저장 직후, history binding 직후 ACK 전에서 각각 재시작해도 같은 source로 수렴하고 재주입 0.
+  6. 선택 제외: 다른 execution nonce·owner·provider, watermark 이전 `Bound`, 같은 owner의 옛 실행 `Bound`가 남은 fixture에서 선택 0.
+  7. 새 세션(transcript 파일 없음), tmux·Herdr 각각 → paste 1, Enter 1(`RequireTranscript`, 무토큰 포함).
+  8. 대조군(키 0): pane·실행 nonce 교체, writer 변경, 모달, 사람 초안.
+  9. 등록 실패는 키 0(`KeyAfterRegister`).
 
 ### S1-C — 귀속 대기 손잡이와 인접 경로 (w3 A2의 Claude 부분)
 - 파일(prod 11개):
@@ -500,6 +579,7 @@ S1은 `execution_capacity`를 건드리지 않는다(§1.1). Codex 파일도 건
   5. busy child가 키 전에 고정됨
   6. 사람 초안 보류, tmux·Herdr 각각: (a) stash A + 초안 B → NotSent, C-s·paste·Enter 0, 두 초안 보존. (b) 사람 글자만 있음 → C-s 0, paste·Enter 0, 알림 1. `Unsettled`를 통과시키는 변형과, 키 전 거절을 제출 뒤 알림으로 바꾸는 변형은 RED다.
   7. 출력 소유: O 소유 채널에서 `resumed=false`·`stopping=true` → legacy 본문 0, writer 회복 뒤 O 본문 1. legacy 소유 채널에서 anchor reply 1회와 `Pending → Committed` 전환이 송신 직전에 겹쳐도 본문 합계 1회(대조군).
+  8. 관문 회귀(리뷰 i8328-design-4): 사람 입력을 `inject::hand`로 옮긴 뒤에도 G1·G2·E1–E8의 source 관문이 다른 이름으로 남지 않는지, 실제 `owner_drive` 진입점에서 새 세션·재결합 창 입력이 paste 1·Enter 1인지 확인한다.
 
 ### S1-E — intake 적재·wake와 재시작 정리 (w3 A4)
 - 파일(prod 5개): IG(-30/+25), `intake_gate/queue_effects.rs`(+10), `mailbox_probe.rs`(+5), `ingress.rs`(+5), `stale_turn.rs`(-10).
@@ -507,8 +587,11 @@ S1은 `execution_capacity`를 건드리지 않는다(§1.1). Codex 파일도 건
 - RED 계획: blocking 토큰이 있을 때 적재하면 owner wake 1회(현행 없음). kickoff → reconcile 순서를 고정한다.
 
 ### S1 합계
-- 서로 다른 prod 파일 약 44개, 순 약 +855(+465, +165, +385, -165, +5).
-- 조각 최대 증가는 S1-A(10파일·+465)다. 조각마다 30파일·+1500 상한과 PLAN_READY 선 +1200 아래다.
+- 서로 다른 prod 파일 약 47개, 순 약 +1025(+515, +285, +385, -165, +5).
+- w4 추정(44 / +855, 최대 S1-A 10 / +465)보다 +3파일·+170줄이다. 사유:
+  - S1-A +1파일·+50: receipt 결합 경로(`reply_anchor` +40, `owe.rs` receipt 전달 +8)
+  - S1-B +2파일·+120: G1 `deferred_source.rs` +80, `warm_followup.rs` 호출 교체, G2 `key_ready` +23, `select_source` 지연 분기 +15
+- 조각 최대 증가는 S1-A(11파일·+515)다. 조각마다 30파일·+1500 상한과 PLAN_READY 선 +1200 아래다.
 - 추정이다. 이 설계 레그의 실측(`pr_cap_prod.py`)은 prod 0이다(문서·모델만).
 
 ## 12. 남은 위험·미확인
@@ -520,6 +603,8 @@ S1은 `execution_capacity`를 건드리지 않는다(§1.1). Codex 파일도 건
 5. **S1의 실행 용량 미계상(§1.1)**: 흡수되지 않은 합류 B와 #8432 모양의 B는 lease 없이 자기 턴으로 돈다. 앞의 것은 지금 hand_busy와 같은 성질이고, 뒤의 것은 지금은 무한 보류라서 S1이 "전달됨·미계상"으로 바꾼다. 노드 용량을 채널당 최대 1턴 과소 계상할 수 있다. S2의 채널 lease 표가 고친다. 메인이 S1 착지 전에 받아들일지 확인할 항목이다.
 6. 앞 턴 relay가 뒤 입력의 자기 턴 출력까지 앞 턴 몫으로 보내지 않는지(w1 위험 1)는 tui_o writer 하나가 게시하고 조각마다 턴 결합으로 anchor를 정하는 구조에서는 문제가 되지 않는다. 다만 legacy 소유 채널(위 1)에서는 남는다.
 7. **원시 증거 재집계**: 리뷰는 12건 불일치 분류의 원시 증거가 head에 없어 다시 셀 수 없었다고 적었다. 원시 증거(`logs/tab-1/attribution-*`)는 비밀값 검사 전이라 저장소에 넣지 않았다. 대신 S1-A 시험 5와 S2 Codex 두 입력 fixture(§13.5)가 같은 모양의 fixture를 저장소에 들인다.
+
+8. **P2(리뷰 i8328-design-4)**: S1 모델에서 transcript 생성과 source 결합·확정·anchor 결합을 나눴고, `NoLateBind`·`RequireTranscriptFresh`를 RED로 확인했다(§1.0). custody ACK의 재시작 수렴은 S1-B Rust 시험 5가 맡는다.
 
 ## 13. S2 설계 항목 (이번에 풀지 않음)
 

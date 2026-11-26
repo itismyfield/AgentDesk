@@ -1,5 +1,5 @@
 ---
-title: "owner 입력 S1(Claude): busy 분기와 source 선검사(현재) 대 바로 주입, 키 전 등록, 늦은 source 결합, 흡수 뒤 합류 표시(목표)"
+title: "owner 입력 S1(Claude): busy 분기와 source 선검사(현재) 대 바로 주입, 키 전 등록, 지연 pin 단일 확정, receipt 결합, 흡수 뒤 합류 표시(목표)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -8,67 +8,106 @@ stateDiagram-v2
   }
   class lg0 breaks
   class lg1 bugPath
-  s0: A 실행 중 / B 도착 전 / 토큰 A / 화면 Busy, source 없음
-  s1: A 실행 중 / B 도착 전 / 토큰 A / 화면 Busy, source 결합됨
-  s2: A 끝남 / B 도착 전 / 토큰 없음 / 화면 Idle, source 없음, A 답 reply#8594;A
-  s3: A 실행 중 / B 대기열 / 토큰 A / 화면 Busy, source 없음
-  s4: A 끝남 / B 도착 전 / 토큰 없음 / 화면 Idle, source 결합됨, A 답 reply#8594;A
-  s5: A 실행 중 / B 대기열 / 토큰 A / 화면 Busy, source 결합됨
-  s6: A 끝남 / B 대기열 / 토큰 없음 / 화면 Idle, source 없음, A 답 reply#8594;A
-  s7: A 실행 중 / B 보류(키 0) / 토큰 A / 화면 Busy, source 없음, 보류 사유: source 미결합
-  s8: A 끝남 / B 대기열 / 토큰 없음 / 화면 Idle, source 결합됨, A 답 reply#8594;A
-  s9: A 실행 중 / B 보류(키 0) / 토큰 A / 화면 Busy, source 결합됨, 보류 사유: source 미결합
-  s10: A 실행 중 / B 주입됨(echo 전) / 토큰 A / 화면 Busy, source 결합됨, 키 전 등록됨
-  s11: A 끝남 / B 보류(키 0) / 토큰 없음 / 화면 Idle, source 없음, 보류 사유: source 미결합, A 답 reply#8594;A
-  s12: A 끝남 / B 주입됨(echo 전) / 토큰 B / 화면 Idle, source 없음, 키 전 등록됨, A 답 reply#8594;A
-  s13: A 끝남 / B 보류(키 0) / 토큰 없음 / 화면 Idle, source 결합됨, 보류 사유: source 미결합, A 답 reply#8594;A
-  s14: A 끝남 / B 주입됨(echo 전) / 토큰 B / 화면 Idle, source 결합됨, 키 전 등록됨, A 답 reply#8594;A
-  s15: A 끝남 / B 주입됨(echo 전) / 토큰 없음 / 화면 Idle, source 결합됨, 키 전 등록됨, A 답 reply#8594;A
-  s16: A 끝남 / B 자기 턴 실행 / 토큰 B / 화면 Busy, source 결합됨, 키 전 등록됨, A 답 reply#8594;A
-  s17: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, source 결합됨, 키 전 등록됨, 합류 표시
-  s18: A 끝남 / B 몫이 A 답에 합쳐 게시 / 토큰 없음 / 화면 Idle, source 결합됨, 키 전 등록됨, 합류 표시, A 답 reply#8594;A
-  s19: A 끝남 / B 끝, 답 게시 전 / 토큰 없음 / 화면 Idle, source 결합됨, 키 전 등록됨, A 답 reply#8594;A
-  s20: A 끝남 / B 자기 턴 실행 / 토큰 없음 / 화면 Busy, source 결합됨, 키 전 등록됨, A 답 reply#8594;A
-  s21: A 끝남 / B 답 게시 / 토큰 없음 / 화면 Idle, source 결합됨, 키 전 등록됨, A 답 reply#8594;A, B 답 reply#8594;B
+  s0: A 실행 중 / B 도착 전 / 토큰 A / 화면 Busy, transcript 있음, Bound 없음
+  s1: A 실행 중 / B 도착 전 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록
+  s2: A 실행 중 / B 대기열 / 토큰 A / 화면 Busy, transcript 있음, Bound 없음
+  s3: A 실행 중 / B 도착 전 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, A anchor 결합
+  s4: A 실행 중 / B 대기열 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록
+  s5: A 실행 중 / B 보류(키 0) / 토큰 A / 화면 Busy, transcript 있음, Bound 없음, 보류 사유: source 미결합
+  s6: A 끝남 / B 도착 전 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, A anchor 결합, A 답 reply#8594;A
+  s7: A 실행 중 / B 보류(키 0) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 보류 사유: source 미결합
+  s8: A 실행 중 / B 주입됨(echo 전) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin
+  s9: A 실행 중 / B 대기열 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, A anchor 결합
+  s10: A 끝남 / B 대기열 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, A anchor 결합, A 답 reply#8594;A
+  s11: A 실행 중 / B 보류(키 0) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, A anchor 결합, 보류 사유: source 미결합
+  s12: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin
+  s13: A 실행 중 / B 주입됨(echo 전) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합
+  s14: A 실행 중 / B 주입됨(echo 전) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정
+  s15: A 끝남 / B 보류(키 0) / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, A anchor 결합, 보류 사유: source 미결합, A 답 reply#8594;A
+  s16: A 끝남 / B 주입됨(echo 전) / 토큰 B / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합, A 답 reply#8594;A
+  s17: A 끝남 / B 주입됨(echo 전) / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합, A 답 reply#8594;A
+  s18: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합
+  s19: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정
+  s20: A 실행 중 / B 주입됨(echo 전) / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합
+  s21: A 끝남 / B 자기 턴 실행 / 토큰 B / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합, A 답 reply#8594;A
+  s22: A 끝남 / B 자기 턴 실행 / 토큰 없음 / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합, A 답 reply#8594;A
+  s23: A 끝남 / B 주입됨(echo 전) / 토큰 B / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, A 답 reply#8594;A
+  s24: A 끝남 / B 주입됨(echo 전) / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, A 답 reply#8594;A
+  s25: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합
+  s26: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, B anchor 결합, 합류 표시
+  s27: A 끝남 / B 끝, 답 게시 전 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, A anchor 결합, A 답 reply#8594;A
+  s28: A 끝남 / B 자기 턴 실행 / 토큰 B / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, A 답 reply#8594;A
+  s29: A 끝남 / B 자기 턴 실행 / 토큰 없음 / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, A 답 reply#8594;A
+  s30: A 실행 중 / B 진행 중 턴에 합류 / 토큰 A / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, 합류 표시
+  s31: A 끝남 / B 끝, 답 게시 전 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, A 답 reply#8594;A
+  s32: A 끝남 / B 몫이 A 답에 합쳐 게시 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, 합류 표시, A 답 reply#8594;A
+  s33: A 끝남 / B 자기 턴 실행 / 토큰 B / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, A 답 reply#8594;A
+  s34: A 끝남 / B 자기 턴 실행 / 토큰 없음 / 화면 Busy, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, A 답 reply#8594;A
+  s35: A 끝남 / B 끝, 답 게시 전 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, A 답 reply#8594;A
+  s36: A 끝남 / B 답 게시 / 토큰 없음 / 화면 Idle, transcript 있음, Bound 기록, 키 전 등록됨, pin, source 확정, A anchor 결합, B anchor 결합, A 답 reply#8594;A, B 답 reply#8594;B
   [*] --> s0
-  s0 --> s1: writer가 재시작한 source를 결합
-  s0 --> s2: A 종료와 답 게시 (합류한 B 몫 포함)
-  s0 --> s3: 사람 입력 B 도착
-  s1 --> s4: A 종료와 답 게시 (합류한 B 몫 포함)
-  s1 --> s5: 사람 입력 B 도착
-  s2 --> s4: writer가 재시작한 source를 결합
-  s2 --> s6: 사람 입력 B 도착
-  s3 --> s5: writer가 재시작한 source를 결합
-  s3 --> s6: A 종료와 답 게시 (합류한 B 몫 포함)
-  s3 --> s7: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s4 --> s8: 사람 입력 B 도착
-  s5 --> s8: A 종료와 답 게시 (합류한 B 몫 포함)
-  s5 --> s10: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s6 --> s8: writer가 재시작한 source를 결합
-  s6 --> s12: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s7 --> s9: writer가 재시작한 source를 결합
-  s7 --> s11: A 종료와 답 게시 (합류한 B 몫 포함)
-  s8 --> s14: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s9 --> s13: A 종료와 답 게시 (합류한 B 몫 포함)
-  s10 --> s15: A 종료와 답 게시 (합류한 B 몫 포함)
-  s10 --> s17: Claude가 도구 경계에서 B를 흡수 (목표: 이때 합류 표시)
-  s11 --> s12: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s11 --> s13: writer가 재시작한 source를 결합
-  s12 --> s14: writer가 재시작한 source를 결합
-  s12 --> s16: TUI가 B를 자기 턴으로 시작 (transcript 생김)
-  s13 --> s14: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s14 --> s16: TUI가 B를 자기 턴으로 시작 (transcript 생김)
-  s15 --> s20: TUI가 B를 자기 턴으로 시작 (transcript 생김)
-  s16 --> s19: B 종료
-  s9 --> s10: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
-  s17 --> s18: A 종료와 답 게시 (합류한 B 몫 포함)
-  s19 --> s21: B 답 게시 (J2 nonce 결합)
-  s20 --> s19: B 종료
+  s0 --> s1: writer가 실행의 Bound를 기록
+  s0 --> s2: 사람 입력 B 도착
+  s1 --> s3: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s1 --> s4: 사람 입력 B 도착
+  s2 --> s4: writer가 실행의 Bound를 기록
+  s2 --> s5: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s3 --> s6: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s3 --> s9: 사람 입력 B 도착
+  s4 --> s8: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s4 --> s9: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s5 --> s7: writer가 실행의 Bound를 기록
+  s6 --> s10: 사람 입력 B 도착
+  s7 --> s11: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s8 --> s12: Claude가 도구 경계에서 B를 흡수
+  s8 --> s13: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s8 --> s14: BindingIntent.selected 확정(한 번)
+  s9 --> s10: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s9 --> s13: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s10 --> s16: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s7 --> s8: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s11 --> s15: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s12 --> s18: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s12 --> s19: BindingIntent.selected 확정(한 번)
+  s13 --> s17: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s13 --> s18: Claude가 도구 경계에서 B를 흡수
+  s13 --> s20: BindingIntent.selected 확정(한 번)
+  s14 --> s19: Claude가 도구 경계에서 B를 흡수
+  s14 --> s20: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s15 --> s16: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s16 --> s21: TUI가 B를 자기 턴으로 시작 (transcript 파일 생김)
+  s16 --> s23: BindingIntent.selected 확정(한 번)
+  s17 --> s22: TUI가 B를 자기 턴으로 시작 (transcript 파일 생김)
+  s17 --> s24: BindingIntent.selected 확정(한 번)
+  s11 --> s13: owner drive(S1): 보류 조건만 보고 키 전 등록 뒤 붙여넣기+Enter
+  s18 --> s25: BindingIntent.selected 확정(한 번)
+  s19 --> s25: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s19 --> s26: J2: B를 결합 (흡수면 이때 합류 표시)
+  s20 --> s24: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s20 --> s25: Claude가 도구 경계에서 B를 흡수
+  s21 --> s27: B 종료
+  s21 --> s28: BindingIntent.selected 확정(한 번)
+  s22 --> s27: B 종료
+  s22 --> s29: BindingIntent.selected 확정(한 번)
+  s23 --> s28: TUI가 B를 자기 턴으로 시작 (transcript 파일 생김)
+  s24 --> s29: TUI가 B를 자기 턴으로 시작 (transcript 파일 생김)
+  s25 --> s30: J2: B를 결합 (흡수면 이때 합류 표시)
+  s26 --> s30: J2: 꼬리표 없는 opener A를 receipt로 결합
+  s27 --> s31: BindingIntent.selected 확정(한 번)
+  s28 --> s31: B 종료
+  s28 --> s33: J2: B를 결합 (흡수면 이때 합류 표시)
+  s29 --> s31: B 종료
+  s29 --> s34: J2: B를 결합 (흡수면 이때 합류 표시)
+  s30 --> s32: A 종료와 답 게시 (A anchor 결합 뒤, 합류한 B 몫 포함)
+  s31 --> s35: J2: B를 결합 (흡수면 이때 합류 표시)
+  s33 --> s35: B 종료
+  s34 --> s35: B 종료
+  s35 --> s36: B 답 게시 (B anchor reply)
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 bugPath
-  class s3 bugPath
+  class s2 bugPath
+  class s5 breaks
+  class s5 bugPath
   class s7 breaks
-  class s7 bugPath
-  class s9 breaks
   class s11 breaks
-  class s13 breaks
+  class s15 breaks
