@@ -217,9 +217,9 @@ async fn a_cleanup_left_by_a_failed_submit_is_finished_by_the_kept_ports_retry_p
 async fn a_cut_source_submits_nothing_until_a_reopened_seed_reads_new_rows_pg() {
     use sha2::Digest;
     let mut rig = Rig::new(83850021, false).await;
-    // Without custody the first receipt is offered and held, so every poll would offer it again.
+    // Populate the seed before custody arrives. An empty view can skip the Idle handoff.
     poll(&mut rig.capture, &rig.port).await;
-    assert!(rig.calls()[3] > 0 && rig.receipts().is_empty());
+    assert!(rig.capture.sources.native_reductions() > 0 && rig.receipts().is_empty());
     rig.custody().await;
     // Cut the same inode inside the row the receipt names; the registration offset is 0.
     let path = rig.f.ticket.source.as_ref().unwrap().transcript.clone();

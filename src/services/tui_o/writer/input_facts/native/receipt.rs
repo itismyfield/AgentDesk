@@ -210,6 +210,67 @@ mod tests {
     }
 
     #[test]
+    fn same_body_successor_keeps_the_not_sent_attempts_confirmed_row() {
+        let (_guard, old, binding) = fixture();
+        let namespace = "native-fixture";
+        let frame = old.input["payload"]["frame"].as_str().unwrap();
+        assert_eq!(
+            old.history.receipt(
+                namespace,
+                &old.ticket.key,
+                (
+                    &binding.source.path,
+                    0,
+                    "user",
+                    Some("already-confirmed"),
+                    frame
+                ),
+            ),
+            Some(true),
+        );
+        old.history
+            .try_native_not_sent(namespace, &old.ticket)
+            .unwrap();
+        let mut next_input = old.input.clone();
+        next_input["attempt"]["nonce"] = json!("retry-same-body");
+        let mut next = old.ticket.clone();
+        next.key["attempt"] = next_input["attempt"].clone();
+        old.history.prepare(namespace, &next_input).unwrap();
+        old.history.prepare_native(namespace, &next).unwrap();
+        old.history.note_native_any_key(namespace, &next).unwrap();
+        let mut registrations = old.history.native_classification_registrations().unwrap();
+
+        let fact = |uuid: &str| {
+            let row = json!({"type":"user","uuid":uuid,"message":{"content":frame}});
+            let line = serde_json::to_vec(&row).unwrap();
+            read(&row, &line, (0, line.len() as u64 + 1)).unwrap()
+        };
+        let new_row = fact("new-row");
+        let available = candidates(&binding, &[&new_row], &registrations);
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].identity(), (namespace, &next));
+        let confirmed = fact("already-confirmed");
+        assert!(candidates(&binding, &[&confirmed], &registrations).is_empty());
+
+        let successor = registrations.iter_mut().find(|r| r.ticket == next).unwrap();
+        successor.receipts.push("new-row".into());
+        let owner = successor.clone();
+        let hashes = [owner.frame_hash.clone()];
+        let foreign = |registrations: &[Registration]| {
+            super::super::terminal::foreign_prompt(
+                registrations,
+                &binding,
+                &owner,
+                ((0, 4), Some("new-row")),
+                ((4, 8), Some("already-confirmed"), &hashes),
+            )
+            .unwrap()
+        };
+        assert!(foreign(&registrations).is_none());
+        assert!(foreign(std::slice::from_ref(&owner)).is_some());
+    }
+
+    #[test]
     fn native_8148_receipt_compaction_markers_are_not_delivery() {
         let (_guard, f, binding) = fixture();
         let regs = f.history.native_classification_registrations().unwrap();

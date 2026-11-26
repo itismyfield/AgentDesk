@@ -401,6 +401,71 @@ fn rejected_native_check_keeps_a_twelve_megabyte_history_warm() {
 }
 
 #[test]
+fn rejected_native_receipt_keeps_a_twelve_megabyte_history_warm() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let f = Fixture::at(path.clone(), 83850055, true);
+    f.history.note_native_any_key(NS, &f.ticket).unwrap();
+    let mut synthetic = f.history.json().unwrap();
+    synthetic["live"][0]["registration"]["native_settlement"]["fixture_padding"] =
+        json!("a".repeat(12_000_000));
+    let raw = synthetic.to_string();
+    std::fs::write(&path, &raw).unwrap();
+
+    let history = Registry::at(path.clone());
+    history
+        .cached
+        .lock()
+        .unwrap()
+        .refresh(&path, later(), fstat)
+        .unwrap();
+    let cache_stamp = || {
+        let cache = history.cached.lock().unwrap();
+        (
+            cache.reads,
+            cache.derived,
+            cache.revision().unwrap(),
+            cache.kept.as_ref().unwrap().stamp.clone(),
+        )
+    };
+    let view = history.native_classification_registrations().unwrap();
+    assert!(view[0].receipts.is_empty());
+    let before = cache_stamp();
+    assert!(before.3.is_some());
+
+    let frame_hash = hash(FRAME);
+    let receipt = ("user", "membership", (0, 4), 4, frame_hash.as_str());
+    assert_eq!(
+        history
+            .try_native_receipt(NS, &f.ticket, receipt, "stale")
+            .unwrap_err(),
+        "native receipt registrations superseded"
+    );
+    assert!(
+        history.native_classification_registrations().unwrap()[0]
+            .receipts
+            .is_empty()
+    );
+    assert_eq!(cache_stamp(), before);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    eprintln!(
+        "synthetic receipt history bytes={} tick_reads={}",
+        raw.len(),
+        cache_stamp().0 - before.0
+    );
+
+    let expected = native::registrations_fingerprint(&view).unwrap();
+    history
+        .try_native_receipt(NS, &f.ticket, receipt, &expected)
+        .unwrap();
+    assert_eq!(
+        history.native_classification_registrations().unwrap()[0].receipts,
+        ["membership"]
+    );
+    assert_ne!(cache_stamp().2, before.2);
+}
+
+#[test]
 fn native_durability_read_refreshes_the_cache_after_external_replacement() {
     let (_runtime, dir) = scratch();
     let path = dir.path().join("frames.json");
