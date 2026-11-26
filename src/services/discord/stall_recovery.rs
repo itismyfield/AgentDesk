@@ -110,3 +110,8 @@ pub(super) fn finalize_orphaned_clear_preserve_session(
         counter_decremented
     );
 }
+
+#[cfg(test)]
+mod ke_queue_tests;
+#[cfg(all(test, unix))]
+mod ke_queue_unix_tests;

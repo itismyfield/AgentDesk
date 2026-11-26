@@ -300,7 +300,7 @@ fn write_cleared_files(
         queued_head::keep_disk_terminal(state, &path);
     }
     let unlinked = report.attempt("queue_unlink", || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(after) = take_fault(channel_id, Op::Queue) {
             if after {
                 let _ = std::fs::remove_file(&path);
@@ -310,7 +310,7 @@ fn write_cleared_files(
         unlink(&path)
     });
     let marker_removed = report.attempt("marker_unlink", || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(after) = take_fault(channel_id, Op::Marker) {
             if after {
                 remove_channel_pending_dispatch_marker(provider, token_hash, channel_id)?;
@@ -323,7 +323,7 @@ fn write_cleared_files(
     let snapshot =
         queued_head::snapshot_json(Vec::new(), meta).unwrap_or_else(|_| "[]".to_string());
     let published = report.attempt("queue_publish", || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if super::pending_queue_persistence::save_fault::take(channel_id) {
             return Err(format!(
                 "injected pending queue save failure {}",
@@ -359,17 +359,17 @@ fn unlink(path: &Path) -> Result<(), String> {
 }
 
 /// Which removal a test fault fails.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Op {
     Queue,
     Marker,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FAULTS: std::sync::Mutex<Vec<(ChannelId, Op, bool)>> = std::sync::Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn take_fault(channel: ChannelId, op: Op) -> Option<bool> {
     let mut armed = FAULTS.lock().unwrap_or_else(|e| e.into_inner());
     let index = armed
@@ -378,7 +378,7 @@ fn take_fault(channel: ChannelId, op: Op) -> Option<bool> {
     Some(armed.remove(index).2)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl super::ChannelMailboxRegistry {
     /// Test-only: fail the channel's next `times` clear removals of its queue file, or of its
     /// dispatch marker; `after_removal` removes the file before reporting the failure.

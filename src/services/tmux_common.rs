@@ -6,7 +6,7 @@ mod session_markers;
 #[cfg(unix)]
 pub(crate) mod spawn_markers;
 pub mod unified_thread;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
 pub(crate) use session_markers::{
     AuthMarkers, advance_claude_session_auth, claude_session_auth,
@@ -1295,7 +1295,7 @@ pub fn tmux_channel_path(tmux_session_name: &str) -> String {
 }
 
 /// Persist the Discord channel owning a tmux session across dcserver restarts.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn write_tmux_channel_binding(tmux_session_name: &str, channel_id: u64) -> Result<(), String> {
     with_tmux_source_authority(tmux_session_name, |authority| {
         write_tmux_channel_binding_with_name(authority, tmux_session_name, channel_id)
@@ -1477,7 +1477,7 @@ pub const JSONL_TARGET_KEEP_BYTES: u64 = 15 * 1024 * 1024;
 
 /// Keep complete tail lines only when every EOF witness matches the opened regular file.
 /// The resolved path must still name that FD before rename; refusals return `Ok(None)`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn truncate_jsonl_head_safe(
     path: &Path,
     size_cap_bytes: u64,

@@ -12,6 +12,9 @@ use crate::db::session_agent_resolution::{
     normalize_thread_channel_id, parse_thread_channel_id_from_session_key,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::services::dispatched_sessions::{
+    ListDispatchedSessionsQuery, list_dispatched_sessions_pg,
+};
 use crate::services::session_activity::SessionActivityResolver;
 
 // Frozen listing implementation from d419392; the service result is compared independently.
@@ -552,7 +555,7 @@ async fn listing_json_matches_frozen_oracle_and_leaves_rows_unchanged_pg() {
         let expected = legacy_list_dispatched_sessions_pg(&pool, include_all)
             .await
             .unwrap();
-        let actual = super::list_dispatched_sessions_pg(&pool, include_all)
+        let actual = list_dispatched_sessions_pg(&pool, include_all)
             .await
             .unwrap();
         assert_same_bytes(&actual, &expected);
@@ -619,7 +622,7 @@ async fn listing_marker_refusal_preserves_heartbeat_projection_and_avoids_tmux_p
         let expected = legacy_list_dispatched_sessions_pg(&pool, include_all)
             .await
             .unwrap();
-        let actual = super::list_dispatched_sessions_pg(&pool, include_all)
+        let actual = list_dispatched_sessions_pg(&pool, include_all)
             .await
             .unwrap();
         assert_same_bytes(&actual, &expected);
@@ -640,9 +643,7 @@ async fn listing_marker_refusal_preserves_heartbeat_projection_and_avoids_tmux_p
     let expected = legacy_list_dispatched_sessions_pg(&pool, true)
         .await
         .unwrap();
-    let actual = super::list_dispatched_sessions_pg(&pool, true)
-        .await
-        .unwrap();
+    let actual = list_dispatched_sessions_pg(&pool, true).await.unwrap();
     assert_same_bytes(&actual, &expected);
     assert!(
         !tmux.take_calls().is_empty(),
@@ -708,7 +709,7 @@ async fn listing_get_and_cluster_owner_summary_consume_the_same_projection_pg() 
         );
         let (status, body) = crate::server::routes::dispatched_sessions::list_dispatched_sessions(
             State(state.clone()),
-            Query(super::ListDispatchedSessionsQuery {
+            Query(ListDispatchedSessionsQuery {
                 include_merged: include_all.then(|| "1".to_string()),
             }),
         )

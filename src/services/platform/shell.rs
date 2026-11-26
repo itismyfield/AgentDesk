@@ -20,7 +20,7 @@ pub(crate) use crate::services::git::{
 ///
 /// Equivalent to `hostname -s` on Unix. Falls back to "localhost" on failure.
 pub fn hostname_short() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(host) = TEST_HOSTNAME.with(|slot| slot.borrow().clone()) {
         return host;
     }
@@ -211,12 +211,12 @@ mod hostname_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_HOSTNAME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {

@@ -495,7 +495,7 @@ impl Drop for LaunchGuard {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
@@ -600,7 +600,7 @@ pub(crate) fn capture_owner_scope<R>(
         });
     (result, proof)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn with_scope<R>(
     provider: String,
     target: serde_json::Value,

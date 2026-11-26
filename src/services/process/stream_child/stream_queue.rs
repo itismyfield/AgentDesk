@@ -4,16 +4,16 @@ use std::time::Duration;
 #[derive(Default)]
 struct State {
     sealed: bool,
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     published: usize,
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     received: usize,
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     producers: usize,
 }
 struct Gate {
     state: Mutex<State>,
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     changed: std::sync::Condvar,
 }
 
@@ -29,10 +29,10 @@ pub(crate) fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::channel();
     let gate = Arc::new(Gate {
         state: Mutex::new(State::default()),
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         changed: std::sync::Condvar::new(),
     });
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     {
         gate.state.lock().unwrap().producers = 1;
         test_delay::register_gate(gate.clone());
@@ -47,7 +47,7 @@ pub(crate) fn channel<T>() -> (Sender<T>, Receiver<T>) {
 }
 impl<T> Clone for Sender<T> {
     fn clone(&self) -> Self {
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         {
             self.gate.state.lock().unwrap().producers += 1;
         }
@@ -64,7 +64,7 @@ impl<T> Sender<T> {
             return Err(mpsc::SendError(value));
         }
         let result = self.inner.send(value);
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         {
             let mut state = state;
             if result.is_ok() {
@@ -74,7 +74,7 @@ impl<T> Sender<T> {
         result
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl<T> Drop for Sender<T> {
     fn drop(&mut self) {
         let mut state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -91,7 +91,7 @@ impl<T> Receiver<T> {
             .sealed = true;
     }
     pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         test_delay::before_receive(&self.gate);
         let sealed = self
             .gate
@@ -107,7 +107,7 @@ impl<T> Receiver<T> {
         } else {
             self.inner.recv_timeout(timeout)
         };
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         if result.is_ok() {
             self.gate.state.lock().unwrap().received += 1;
         }
@@ -115,7 +115,7 @@ impl<T> Receiver<T> {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) mod test_delay;
 #[cfg(test)]
 mod tests;

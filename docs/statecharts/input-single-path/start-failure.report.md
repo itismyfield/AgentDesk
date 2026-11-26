@@ -108,7 +108,7 @@ and duplicate notifications cannot release another closing pin or create another
 Correction to the initial lane table: the policy API is **not** restricted to malformed, zero-owned
 or old-generation rows. It can remove a normal nonzero A, subject to its existing receipt protection,
 lock and discard handoff. It belongs to the notification funnel. Its existing public JS test uses
-user_msg_id=7 (`exec_ops.rs:681–778`); the live test must add matching closing / wake-once assertions.
+user_msg_id=7 (`src/engine/ops/exec_ops/inflight_remove_tests.rs:36–152`); the live test must add matching closing / wake-once assertions.
 The scoped-restore unlink (`inflight/removal/scoped_restore.rs:76`) is behind `#[cfg(test)]`
 (`:3`); it is not a seventeenth production removal point and adds no live cleanup authority.
 

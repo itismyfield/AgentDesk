@@ -26,7 +26,7 @@ fn test_instance_draft_capture_uses_declared_socket_over_default_trap() {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
-    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let (_temp, root) = crate::config::test_instance::test_support::fixture();
     let program = root.join("fixture-worktree/target/debug/tmux");
     std::fs::write(
         &program,
@@ -47,7 +47,7 @@ printf 'declared socket draft\n'
     .unwrap();
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
     let trap = root.join("default-socket-trap");
-    let output = crate::config::test_instance::tests::command(&root)
+    let output = crate::config::test_instance::test_support::command(&root)
         .args(["--exact", NAME, "--nocapture"])
         .env("TMUX", "/synthetic/default/socket,42,0")
         .env("TMUX_PANE", "%99")
@@ -62,7 +62,7 @@ printf 'declared socket draft\n'
         )
         .output()
         .unwrap();
-    crate::config::test_instance::tests::assert_single_test_passed(&output, NAME);
+    crate::config::test_instance::test_support::assert_single_test_passed(&output, NAME);
     assert!(!trap.exists(), "default socket trap must never run");
 }
 
@@ -114,7 +114,7 @@ fn test_instance_tmux_entries_use_private_socket_and_refuse_foreign_targets() {
         return;
     }
     use std::os::unix::fs::PermissionsExt;
-    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let (_temp, root) = crate::config::test_instance::test_support::fixture();
     let fake = root.join("fixture-worktree/target/debug/tmux");
     std::fs::write(&fake, r##"#!/bin/sh
 {
@@ -146,7 +146,7 @@ esac
         "AdkTest-{}-claude-test",
         root.file_name().unwrap().to_str().unwrap()
     );
-    let output = crate::config::test_instance::tests::command(&root)
+    let output = crate::config::test_instance::test_support::command(&root)
         .args(["--exact", NAME, "--nocapture"])
         .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
         .env("AGENTDESK_ROOT_DIR", &root)
@@ -380,7 +380,7 @@ fn instance_if_shell_physical_target_reports_receipt_refusal_for_legacy_and_code
         return;
     }
     for mode in ["legacy", "codex"] {
-        let (temp, previous) = crate::config::test_instance::tests::fixture();
+        let (temp, previous) = crate::config::test_instance::test_support::fixture();
         let home = temp.path().canonicalize().unwrap();
         let root = home
             .join(".adk/dev/instances")
@@ -413,11 +413,11 @@ fn instance_if_shell_physical_target_reports_receipt_refusal_for_legacy_and_code
                 std::fs::write(path, value.to_string()).unwrap();
             }
         }
-        let output = crate::config::test_instance::tests::command(&root)
+        let output = crate::config::test_instance::test_support::command(&root)
             .args(["--exact", NAME, "--nocapture"])
             .env("ADK_PHYSICAL_REFUSAL_CHILD", mode)
             .output()
             .unwrap();
-        crate::config::test_instance::tests::assert_single_test_passed(&output, NAME);
+        crate::config::test_instance::test_support::assert_single_test_passed(&output, NAME);
     }
 }

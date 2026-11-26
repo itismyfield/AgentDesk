@@ -129,7 +129,7 @@ pub(crate) async fn classify_no_effect(
 }
 
 /// Holds the attempt with its reason and preserved result; the receipt keeps blocking either way.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn withhold(
     pool: &PgPool,
     attempt: &ExactAttempt,

@@ -72,7 +72,7 @@ impl AdvisoryLockLease {
 
     /// Acquire under PostgreSQL `application_name`; with `idle_expiry` the server ends the
     /// session after that long without a statement, so a vanished holder cannot keep the lock.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn try_acquire_named_expiring(
         pool: &PgPool,
         lock_id: i64,
@@ -169,7 +169,7 @@ impl AdvisoryLockLease {
     }
 
     /// The idle timeout this lease's own session runs under, as PostgreSQL reports it.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn session_idle_timeout(&mut self) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SHOW idle_session_timeout")
             .fetch_one(&mut self.conn)

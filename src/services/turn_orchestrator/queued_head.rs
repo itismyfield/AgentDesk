@@ -88,7 +88,7 @@ impl SnapshotMeta {
 
 pub(super) mod compat;
 mod snapshot;
-mod v2;
+pub(crate) mod v2;
 #[cfg(unix)]
 pub(crate) use v2::actor::proves_not_sent;
 pub(crate) use v2::actor::v2_queue;
@@ -105,13 +105,13 @@ pub(crate) use v2::source_admission::restart_seed::{
     SOURCE as RESTART_SEED_SOURCE, SeedStatus, SeedStopAuthority,
 };
 pub(crate) use v2_types::OwedDrop;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use v2_types::cold_source::BindingIntent;
 #[cfg(unix)]
 pub(crate) use v2_types::cold_source::PreKeyPin;
 #[cfg(unix)]
 pub(crate) use v2_types::retry_wait::RetryCause as RetryWaitCause;
-mod v2_types;
+pub(crate) mod v2_types;
 pub(super) use snapshot::{parse_snapshot, snapshot_json};
 pub(crate) use v2_types::effort_restart as effort_intent;
 
@@ -591,7 +591,7 @@ mod claim {
                     Some((channel, parent, gate, check)) => {
                         channel == channel_id && check(&persistence.provider, channel, parent, gate)
                     }
-                    None => cfg!(test),
+                    None => cfg!(any(test, feature = "test-support")),
                 };
                 if !enabled {
                     let _ = reply.send(QueuedHeadClaim::NotEligible);
@@ -780,7 +780,7 @@ mod claim {
     }
 
     impl ChannelMailboxHandle {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(crate) async fn claim_queued_head(
             &self,
             expected: QueueIdentity,

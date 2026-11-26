@@ -153,6 +153,6 @@ pub(crate) async fn legacy_snapshot_turn(
     .await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "turn_completion_tests.rs"]
 pub(crate) mod tests;

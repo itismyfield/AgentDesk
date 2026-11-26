@@ -356,8 +356,8 @@ fn hold_resolve_enter_refused_from_real_reserve_clears_paste_settles_reservation
         root.path().join("turn.jsonl"),
         root.path().join("other.jsonl"),
     );
-    readiness::tests::pre_source("hold-session", &path);
-    readiness::tests::pre_source("other-session", &other);
+    readiness::test_support::pre_source("hold-session", &path);
+    readiness::test_support::pre_source("other-session", &other);
     let others = readiness::reserve(readiness::observe("other-session", Some(&other)).unwrap());
     let empty = || Some(shown(""));
     let refused = InputRun::Indeterminate {
@@ -486,7 +486,7 @@ fn hold_resolve_recovery_during_notice_enqueue_wakes_after_registration() {
     let root = tempfile::tempdir().unwrap();
     let _root = crate::config::set_agentdesk_root_for_test(root.path());
     let path = root.path().join("turn.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source("hold-session", &path);
+    crate::services::claude_tui::readiness::test_support::pre_source("hold-session", &path);
     write(&hold("recovered", SendOutcome::InFlight, &path)).unwrap();
     let fake = Fake::on("no composer");
     assert_eq!(

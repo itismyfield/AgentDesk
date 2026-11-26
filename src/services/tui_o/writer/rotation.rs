@@ -82,7 +82,7 @@ struct Validation {
     fingerprint: Fingerprint,
     observed_at: SystemTime,
     result: mpsc::Receiver<std::io::Result<Fingerprint>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -131,9 +131,9 @@ pub struct Sources<B> {
     producer_absent: bool,
     last_wall: Option<SystemTime>,
     validation: Option<Validation>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     jobs_started: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     hold_validation: bool,
 }
 
@@ -307,9 +307,9 @@ impl<B: BindingEvents> Sources<B> {
             producer_absent: false,
             last_wall: None,
             validation: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             jobs_started: 0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             hold_validation: false,
         }
     }
@@ -874,7 +874,7 @@ impl<B: BindingEvents> Sources<B> {
         readers.map(|r| (r.source.clone(), keep(r))).collect()
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod probe {
     //! Reads a live reader's rotation start, which no store row or alarm shows.
     use super::{Instant, SourceId, Sources};

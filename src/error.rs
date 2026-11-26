@@ -90,7 +90,7 @@ impl AppError {
         self.status
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> ErrorCode {
         self.code
     }

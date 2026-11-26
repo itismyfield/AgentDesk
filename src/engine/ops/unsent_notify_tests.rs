@@ -59,7 +59,7 @@ fn policy_context(pool: &PgPool) -> (Runtime, Context) {
     let runtime = Runtime::new().unwrap();
     let context = Context::full(&runtime).unwrap();
     context.with(|ctx| {
-        super::register_globals_with_supervisor_and_pg(
+        crate::engine::ops::register_globals_with_supervisor_and_pg(
             &ctx,
             Some(pool.clone()),
             crate::supervisor::BridgeHandle::new(),

@@ -4,7 +4,7 @@ use crate::db::turns::TerminalOutcome;
 impl Owner {
     /// Positive no-content ends this attempt; the original keeps its queue slot and receipt.
     /// Only the distinct successor may acquire a new effect permit.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn successor_not_sent(
         &mut self,
         key: &AttemptRef,

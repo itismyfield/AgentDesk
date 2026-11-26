@@ -163,7 +163,7 @@ fn codex_tui_home(
     Ok((home, unpinned))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) fn prepare_codex_tui_incarnation(
     tmux: &str,
     channel: Option<u64>,
@@ -193,7 +193,7 @@ thread_local! {
     pub(super) static BEFORE_PANE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn prepare_codex_tui_launch_script(
     tmux: &str,
     session_id: Option<&str>,
@@ -265,7 +265,7 @@ impl CodexHerdrLaunchable {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexHerdrLaunchable {
     /// A verified launchable that runs `bin`, for tests that render a pane command.
     pub(crate) fn for_tests(bin: &str) -> Self {

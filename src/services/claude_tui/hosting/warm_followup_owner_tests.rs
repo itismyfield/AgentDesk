@@ -51,7 +51,7 @@ fn b2_legacy_warm_submit_and_reader_collect_the_actual_token() {
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, &path);
     tmux.on_enter(&path,&format!("{}\n{}\n{}",user("warm-a"),
         serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"finished"}]}}),
         serde_json::json!({"type":"system","subtype":"stop_hook_summary"})));
@@ -133,7 +133,7 @@ fn a_legacy_warm_submit_keys_only_through_its_tokens_first_key_gate() {
                 relay_last_offset: None,
             },
         );
-        crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
+        crate::services::claude_tui::readiness::test_support::pre_source(&session, &path);
         tmux.on_enter(&path,&format!("{}\n{}\n{}",user("gate-a"),
             serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}),
             serde_json::json!({"type":"system","subtype":"stop_hook_summary"})));
@@ -274,7 +274,10 @@ impl ClearedPane {
                 relay_last_offset: None,
             },
         );
-        crate::services::claude_tui::readiness::tests::pre_source(&self.session, &self.path(sid));
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            &self.session,
+            &self.path(sid),
+        );
     }
 
     /// One answered turn of `prompt` in session `sid`.

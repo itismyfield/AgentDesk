@@ -8,7 +8,7 @@ pub enum ShutdownOutcome {
 
 impl StreamRelayHandle {
     /// Compatibility entry point: discard the shutdown join result.
-    #[cfg(test)] // Test-only wrapper; production calls shutdown_with_result to observe the join.
+    #[cfg(any(test, feature = "test-support"))] // Test-only wrapper; production calls shutdown_with_result to observe the join.
     pub async fn shutdown(self) {
         let _ = self.shutdown_with_result().await;
     }

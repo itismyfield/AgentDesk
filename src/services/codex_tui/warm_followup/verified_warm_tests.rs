@@ -1,4 +1,4 @@
-use super::tests::install_clear_end;
+use super::test_support::install_clear_end;
 use crate::config::TestEnvVarGuard;
 use crate::services::{
     claude_tui::hook_server::observation_ingress::observe_binding_hook,

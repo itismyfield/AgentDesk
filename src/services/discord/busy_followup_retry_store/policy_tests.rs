@@ -1,9 +1,17 @@
-use super::RetryClass::{Parked, Ready, Unavailable};
-use super::UnavailableReason::{
+use crate::services::discord::busy_followup_retry_store as store;
+use crate::services::discord::busy_followup_retry_store::MAX_BUSY_RETRY_COUNT;
+use crate::services::discord::busy_followup_retry_store::policy::RetryClass::{
+    Parked, Ready, Unavailable,
+};
+use crate::services::discord::busy_followup_retry_store::policy::UnavailableReason::{
     IncompleteRecord, IncompleteView, InvalidNotice, MalformedRecord, ReadFailed, RootUnavailable,
 };
-use super::*;
-use crate::services::discord::busy_followup_retry_store as store;
+use crate::services::discord::busy_followup_retry_store::policy::*;
+use crate::services::discord::runtime_store;
+use crate::services::provider::ProviderKind;
+use serenity::model::id::MessageId;
+use std::fs;
+use std::path::Path;
 
 const MINUTE_MS: u64 = 60_000;
 const UNREAD: RetryClass = Unavailable(ReadFailed);
@@ -653,7 +661,7 @@ fn an_unreadable_source_holds_the_queue_until_it_reads_as_parked() {
     with_root(|root| {
         let provider = ProviderKind::Claude;
         let channel = 68_970;
-        let path = |id: u64| store::input_file_path_in_root(root, &provider, channel, id);
+        let path = |id: u64| store::input_file_path_in_root_for_tests(root, &provider, channel, id);
         let (primary, capped_source, broken_source, later) = (68_971, 68_972, 68_973, 68_974);
         fs::create_dir_all(path(primary).parent().unwrap()).unwrap();
         fs::write(
@@ -713,7 +721,7 @@ fn writer_stores_the_latch_and_a_rolled_back_reader_still_reads_it() {
     with_root(|root| {
         let provider = ProviderKind::Claude;
         let channel = 68_975;
-        let path = store::input_file_path_in_root(root, &provider, channel, 68_976);
+        let path = store::input_file_path_in_root_for_tests(root, &provider, channel, 68_976);
         store::bind_notice_if_absent(&provider, channel, 68_976, 700).unwrap();
         let bound = decode_checked(&fs::read(&path).unwrap()).unwrap();
         assert_eq!(
@@ -758,7 +766,7 @@ fn each_refusal_keeps_its_reason_and_absence_stays_ready() {
     with_root(|root| {
         let provider = ProviderKind::Claude;
         let channel = 68_980;
-        let path = |id: u64| store::input_file_path_in_root(root, &provider, channel, id);
+        let path = |id: u64| store::input_file_path_in_root_for_tests(root, &provider, channel, id);
         fs::create_dir_all(path(1).parent().unwrap()).unwrap();
         fs::create_dir(path(2)).unwrap();
         fs::write(
@@ -788,7 +796,8 @@ fn each_refusal_keeps_its_reason_and_absence_stays_ready() {
             "a refusal outranks a cap"
         );
         assert_eq!(class(6, &[1]), Parked);
-        let rootless = CheckedInputView::read_in(None, &provider, channel, 1, &[MessageId::new(6)]);
+        let rootless =
+            CheckedInputView::read_in_for_tests(None, &provider, channel, 1, &[MessageId::new(6)]);
         assert_eq!(rootless.classify(), Unavailable(RootUnavailable));
         assert_eq!(
             rootless.reads().len(),
