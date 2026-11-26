@@ -1178,7 +1178,7 @@ expected_cache = {
 cache_steps = Array(job["steps"]).select { |step| step["uses"] == "Swatinem/rust-cache@v2" }
 errors << "#{label}: rust-cache must save the shared key from main only" unless cache_steps.map { |step| step["with"] } == [expected_cache]
 commands = warm_compile.map { |step| step["run"].strip }
-errors << "#{label}: must build exactly check + lib test binary without running tests" unless commands == ["cargo check --workspace --all-targets", "cargo test --lib --no-run"]
+errors << "#{label}: must build exactly check + lib test binary without running tests" unless commands == ["cargo check --workspace --all-targets", "cargo test --workspace --lib --no-run"]
 errors << "#{label}: must not gate or depend on other jobs" if job.key?("needs") || job.key?("if")
 errors << "#{label}: must stay advisory (continue-on-error: true)" unless job["continue-on-error"] == true
 errors << "#{label}: must run on windows-latest" unless job["runs-on"] == "windows-latest"

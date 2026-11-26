@@ -115,7 +115,7 @@ Nightly macOS lib tests are paused due to hosted-runner memory pressure (#6082).
 The macOS-only `herdr_loaded_image_macos_` tests currently run outside CI.
 `scripts/ci/herdr_loaded_image_macos_ids.txt` lists them and a static test pins it
 to the macOS source inventory. A local Mac run checks that exactly those ran:
-`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test --lib herdr_loaded_image_macos_ -- --test-threads=1`.
+`python3 scripts/run_test_lane.py --lane macos-loaded-image --expected-ids scripts/ci/herdr_loaded_image_macos_ids.txt -- env -u AGENTDESK_ROOT_DIR cargo test -p adk-runtime --lib herdr_loaded_image_macos_ -- --test-threads=1`.
 
 A broader sweep was attempted with:
 

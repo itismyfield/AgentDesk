@@ -2407,7 +2407,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "save-if": (source.replace("${{ github.ref == 'refs/heads/main' }}", "${{ github.event_name == 'pull_request' }}"),
                         None, "rust-cache must save the shared key from main only"),
             "env drift": (source.replace('      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1), None, "env must equal check_fast_cross_os"),
-            "runs tests": (source.replace("cargo test --lib --no-run", "cargo test --lib"), None, "without running tests"),
+            "runs tests": (source.replace("cargo test --workspace --lib --no-run", "cargo test --workspace --lib"), None, "without running tests"),
             "sccache disabled": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', '  SCCACHE_GHA_ENABLED: "false"\n', 1), None, "sccache must write"),
             "sccache read-only": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "  SCCACHE_GHA_RW_MODE: READ_ONLY\n", 1), None, "sccache must write"),
             "sccache enable unset": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', "", 1), None, "sccache must write"),
