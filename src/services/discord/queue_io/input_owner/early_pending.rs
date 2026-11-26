@@ -27,16 +27,15 @@ pub(crate) fn eligible(raw: &Intervention) -> bool {
 /// after the reaction, so a cancel during that call is caught here by reading custody again.
 pub(crate) async fn note(shared: &SharedData, channel: ChannelId, message: MessageId) -> bool {
     let target = TurnViewTarget::intake_user_message(channel, message);
-    let noted = shared
-        .turn_view_reconciler
-        .note_accept_pending(
-            shared,
-            target,
-            TurnViewIdentity::IntakeShared,
-            "owner_accept_pending",
-        )
-        .await
-        .is_some();
+    // The reconciler's delivery futures are large; boxed so intake and exit callers stay small.
+    let noted = Box::pin(shared.turn_view_reconciler.note_accept_pending(
+        shared,
+        target,
+        TurnViewIdentity::IntakeShared,
+        "owner_accept_pending",
+    ))
+    .await
+    .is_some();
     if noted {
         clear_if_gone(shared, channel, message, "owner_accept_pending_left").await;
     }
@@ -73,10 +72,12 @@ pub(crate) async fn settle(
     let handle = shared.mailbox(channel);
     let held = owner_holds(&handle, message.get());
     let source = "owner_handoff_accept_pending_settle";
-    let settled = shared
-        .turn_view_reconciler
-        .settle_accept_pending(shared, target, held, source)
-        .await;
+    let settled = Box::pin(
+        shared
+            .turn_view_reconciler
+            .settle_accept_pending(shared, target, held, source),
+    )
+    .await;
     warn_kept(channel, message, settled, source);
     settled
 }
@@ -112,10 +113,13 @@ async fn clear_if_gone(
         return;
     }
     let target = TurnViewTarget::intake_user_message(channel, message);
-    let settled = shared
-        .turn_view_reconciler
-        .settle_accept_pending(shared, target, std::future::ready(false), source)
-        .await;
+    let settled = Box::pin(shared.turn_view_reconciler.settle_accept_pending(
+        shared,
+        target,
+        std::future::ready(false),
+        source,
+    ))
+    .await;
     warn_kept(channel, message, settled, source);
 }
 
