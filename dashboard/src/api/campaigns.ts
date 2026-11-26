@@ -117,6 +117,10 @@ const campaignSaveResponseSchema = z.looseObject({
   handoff: campaignHandoffSchema.optional(),
   handoff_error: z.string().optional(),
 });
+const campaignDeleteResponseSchema = z.looseObject({
+  deleted: z.string(),
+  deleted_revisions: z.number().int().nonnegative(),
+});
 
 export type CampaignStatus = z.infer<typeof campaignStatusSchema>;
 export type CampaignNodeStatus = z.infer<typeof campaignNodeStatusSchema>;
@@ -309,4 +313,13 @@ export async function addCampaignNode(campaign: Campaign, added: CampaignNode): 
 export async function setCampaignAutoQueue(campaign: Campaign, enabled: boolean) {
   const result = await saveCampaign(campaign, { auto_queue: enabled }, 60_000);
   return { campaign: result.campaign, handoff: result.handoff ?? null, handoffError: result.handoff_error ?? null };
+}
+
+/** Deletes a non-active ledger campaign (`active` returns 409; linked Kanban cards stay untouched). */
+export async function deleteCampaign(id: string): Promise<{ deleted: string; deleted_revisions: number }> {
+  return request(
+    `/api/campaigns/${encodeURIComponent(id)}`,
+    { method: "DELETE", suppressErrorToast: true },
+    campaignDeleteResponseSchema,
+  );
 }

@@ -64,7 +64,7 @@ pub(crate) fn o_owns_tui_output_for_channel_reserving(
 }
 
 /// Test builds: the raw claim's answer alone, its send counted as finished at once.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
@@ -72,7 +72,7 @@ pub(crate) fn o_owns_tui_output_for_channel(
     o_owns_tui_output_for_channel_reserving(channel_id, kind).map(|claimed| claimed.owned)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
@@ -437,7 +437,7 @@ fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityErr
         return Ok(legacy(ClaimReason::NoClaim));
     };
     let claimed = claim.claim()?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     CLAIMS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -459,11 +459,11 @@ pub(crate) fn legacy_sends_report(channel_id: u64) -> Option<String> {
 }
 
 /// Test builds: every body claim this process judged, with whether O took the body.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static CLAIMS: std::sync::Mutex<Vec<(u64, bool)>> = std::sync::Mutex::new(Vec::new());
 
 /// The body claims judged for `channel` so far, true where O took the body.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn claims_judged(channel: u64) -> Vec<bool> {
     let claims = CLAIMS
         .lock()

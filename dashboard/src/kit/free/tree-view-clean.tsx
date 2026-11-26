@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@3024685b30
 "use client";
 // Adapted from affectUI (https://github.com/flohoeller/affectui @ e610c3ba), MIT License, Copyright (c) 2026 Florian Höller (adfects). See LICENSE.affectui.
 // Changes: aui- class prefix; coarse-pointer targets at least 44px; max-width containment for phone, tablet and desktop.
@@ -482,7 +482,7 @@ const css = /* css */ `
 }
 
 /* Touch screens: rows at least 36px tall */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-tree-view-clean { --ui-tvc-h: 36px; --ui-tvc-indent: 18px; }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -504,7 +504,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-tree-view-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-tree-view-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-tree-view-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;

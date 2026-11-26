@@ -783,16 +783,16 @@ pub(crate) fn provider_resolution_allowed(provider: &str) -> Result<bool, String
     Ok(!provider.trim().eq_ignore_ascii_case("codex") || !claude_login_enabled_checked()?)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static METADATA_TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_metadata_program_for_tests(path: PathBuf) {
     *METADATA_TEST_PROGRAM.lock().unwrap() = Some(path);
 }
 
 fn metadata_program() -> PathBuf {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(path) = METADATA_TEST_PROGRAM.lock().unwrap().clone() {
         return path;
     }
@@ -921,7 +921,7 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
     configure_child_command(command)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
     super::login_test_support::review_fixture()
 }

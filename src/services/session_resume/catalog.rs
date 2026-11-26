@@ -28,10 +28,10 @@ struct CachedPreview {
 
 static PREVIEWS: OnceLock<Mutex<HashMap<PathBuf, CachedPreview>>> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { pub(super) static TEST_HOME: PathBuf; }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn scope_claude_home_for_tests<F: std::future::Future>(
     home: PathBuf,
     future: F,
@@ -39,13 +39,13 @@ pub(crate) async fn scope_claude_home_for_tests<F: std::future::Future>(
     TEST_HOME.scope(home, future).await
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static PREVIEW_DELAYS: OnceLock<Mutex<HashMap<PathBuf, Duration>>> = OnceLock::new();
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct PreviewDelay(PathBuf);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for PreviewDelay {
     fn drop(&mut self) {
         PREVIEW_DELAYS
@@ -57,7 +57,7 @@ impl Drop for PreviewDelay {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn delay_previews_for_tests(root: PathBuf, delay: Duration) -> PreviewDelay {
     PREVIEW_DELAYS
         .get_or_init(Mutex::default)
@@ -68,7 +68,7 @@ pub(crate) fn delay_previews_for_tests(root: PathBuf, delay: Duration) -> Previe
 }
 
 pub(crate) fn claude_home() -> Option<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Ok(home) = TEST_HOME.try_with(Clone::clone) {
         return Some(home);
     }
@@ -628,7 +628,7 @@ pub(crate) fn choices(
 }
 
 fn preview(path: &Path, modified: SystemTime, len: u64) -> Preview {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(delays) = PREVIEW_DELAYS.get() {
         let delay = delays
             .lock()

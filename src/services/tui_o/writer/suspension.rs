@@ -93,7 +93,7 @@ impl Suspension {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) fn extend(
         &self,
         nonce: String,

@@ -2,8 +2,9 @@
 //! Configuration and orchestration administration is composed separately.
 use super::super::{
     ApiRouter, AppState, agents, agents_crud, agents_input_result, agents_turn_deliver, cluster,
-    dispatched_sessions, dispatches, dm_reply, health_api, hooks, monitoring, prompt_audit,
-    protected_api_domain, provider_cli_api, queue_api, termination_events, turn_lease,
+    decisions, dispatched_sessions, dispatches, dm_reply, health_api, hooks, monitoring,
+    prompt_audit, protected_api_domain, provider_cli_api, queue_api, termination_events,
+    turn_lease,
 };
 use axum::{
     Router,
@@ -142,6 +143,8 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 get(agents_input_result::input_result),
             )
             .route("/agents/{id}/timeline", get(agents::agent_timeline))
+            .route("/decisions", post(decisions::ask))
+            .route("/decisions/{id}", get(decisions::show))
             .route("/agents/{id}/prompt-audit", get(prompt_audit::prompt))
             .route("/agents/{id}/anchors", get(prompt_audit::anchors))
             .route("/sessions", get(agents_crud::list_sessions))

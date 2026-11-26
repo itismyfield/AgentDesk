@@ -29,7 +29,7 @@ fn an_unrestorable_busy_hold_ends_at_its_due_with_one_notice_and_no_key_pg() {
             "message":{"role":"user","content":"work that never reports its end"}}),
         ],
     );
-    readiness::tests::forget_session(fx.logical());
+    readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe_restored_reply(fx.logical(), Some(&started.path)).is_none());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {
@@ -133,7 +133,7 @@ fn a_restored_reply_ends_the_same_busy_hold_with_one_delivery_and_no_refusal_pg(
         })
         .collect();
     append(&started.path, &records);
-    readiness::tests::forget_session(fx.logical());
+    readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let idle = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -230,7 +230,7 @@ fn restored(fx: &Fixture, started: &Started, idle: bool) {
         json!({"type":"pane_read","read":{
         "pane_id":PANE,"source":"recent_unwrapped","text":text,"revision":2,"truncated":false}}),
     );
-    readiness::tests::forget_session(fx.logical());
+    readiness::test_support::forget_session(fx.logical());
 }
 
 /// With no active turn, a restored current reply and an idle screen at the first read delegate to

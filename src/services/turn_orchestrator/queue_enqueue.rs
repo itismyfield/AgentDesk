@@ -118,7 +118,7 @@ pub(super) fn enqueue_behind(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn enqueue_intervention(
     queue: &mut Vec<Intervention>,
     intervention: Intervention,

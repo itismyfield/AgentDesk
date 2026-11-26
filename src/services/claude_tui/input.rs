@@ -17,7 +17,7 @@ use literal_chunks::split_literal_chunks;
 pub(crate) use preparation_hold::EffectPhase;
 pub(crate) use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use user_receipt::native_read_byte_total;
 pub(crate) use user_receipt::revalidate_native_pin;
 pub(crate) use user_receipt::{PaneIdentity, UserReceipt};

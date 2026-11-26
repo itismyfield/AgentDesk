@@ -19,7 +19,10 @@ use serde::{Deserialize, Serialize};
 use serenity::model::id::{ChannelId, MessageId};
 
 use super::{SharedData, inflight, turn_finalizer::*};
-use crate::services::{provider::ProviderKind, turn_orchestrator::FinishTurnResult};
+use crate::services::{
+    provider::{CancelToken, ProviderKind},
+    turn_orchestrator::{ChannelMailboxHandle, FinishTurnResult},
+};
 
 mod registry;
 pub(crate) use registry::{inspect, release};
@@ -53,6 +56,26 @@ pub(crate) struct ReleaseRequest {
     pub(crate) reason: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LeaseError {
+    #[error("{0}")]
+    Conflict(String),
+    #[error("unobservable: {0}")]
+    Unobservable(&'static str),
+}
+
+impl From<String> for LeaseError {
+    fn from(message: String) -> Self {
+        Self::Conflict(message)
+    }
+}
+
+impl From<&str> for LeaseError {
+    fn from(message: &str) -> Self {
+        Self::Conflict(message.into())
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::services::discord) struct OperatorRelease {
     request: ReleaseRequest,
@@ -68,16 +91,25 @@ impl std::fmt::Debug for OperatorRelease {
     }
 }
 
-async fn identity(
+struct ActiveLease {
+    identity: LeaseIdentity,
+    token: Arc<CancelToken>,
+    mailbox: ChannelMailboxHandle,
+}
+
+async fn active_lease(
     shared: &SharedData,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Result<Option<LeaseIdentity>, String> {
-    let Some(mailbox) = shared.mailbox_peek(channel) else {
-        return Ok(None);
-    };
-    let snapshot = mailbox.snapshot().await;
-    let Some(token) = snapshot.cancel_token.clone() else {
+) -> Result<Option<ActiveLease>, LeaseError> {
+    let mailbox = shared
+        .mailbox_peek(channel)
+        .ok_or(LeaseError::Unobservable("mailbox is not registered"))?;
+    let snapshot = mailbox
+        .try_snapshot()
+        .await
+        .map_err(|_| LeaseError::Unobservable("mailbox actor did not answer"))?;
+    let Some(token) = snapshot.cancel_token else {
         return Ok(None);
     };
     // #5951 P1-1 — the lease is the authority, so its PIN is the token's too.
@@ -90,7 +122,7 @@ async fn identity(
             "lease cannot be released: the active episode is pinned by a planned restart".into(),
         );
     }
-    Ok(Some(LeaseIdentity {
+    let identity = LeaseIdentity {
         provider: provider.as_str().into(),
         channel_id: channel.get(),
         generation: shared.restart.current_generation,
@@ -107,7 +139,22 @@ async fn identity(
         started_at: snapshot
             .turn_started_at
             .ok_or("active lease has no start version")?,
+    };
+    Ok(Some(ActiveLease {
+        identity,
+        token,
+        mailbox,
     }))
+}
+
+async fn identity(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Result<Option<LeaseIdentity>, LeaseError> {
+    Ok(active_lease(shared, provider, channel)
+        .await?
+        .map(|observed| observed.identity))
 }
 
 /// #5951 RG1 — the row is a projection, not the authority, so its ABSENCE is
@@ -150,38 +197,41 @@ async fn release_on(
     provider: &ProviderKind,
     channel: ChannelId,
     request: ReleaseRequest,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, LeaseError> {
     if request.reason.trim().is_empty() {
         return Err("operator reason is required".into());
     }
     if request.expected.generation != shared.restart.current_generation {
         return Err("runtime generation changed; inspect again".into());
     }
-    let Some(current) = identity(shared, provider, channel).await? else {
+    if request.expected.runtime != shared.token_hash {
+        return Err("runtime identity changed; inspect again".into());
+    }
+    let Some(ActiveLease {
+        identity: current,
+        token,
+        ..
+    }) = active_lease(shared, provider, channel).await?
+    else {
         return Ok(serde_json::json!({"released": false, "status": "already_released"}));
     };
     if current != request.expected {
         return Err("lease changed; inspect again".into());
     }
     let _ = matching_inflight(provider, &current)?;
-    let held = shared.mailbox(channel).snapshot().await.cancel_token;
-    let provider_preserved = held
-        .as_ref()
-        .filter(|token| token.turn_nonce() == Some(current.turn_nonce.as_str()))
-        .is_some_and(|token| {
-            token.herdr_interrupt_state().is_some()
-                || token.tmux_session_name().is_some_and(|name| {
-                    #[cfg(unix)]
-                    {
-                        super::turn_bridge::herdr_marked(&name)
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        let _ = name;
-                        false
-                    }
-                })
-        });
+    let provider_preserved = token.turn_nonce() == Some(current.turn_nonce.as_str())
+        && (token.herdr_interrupt_state().is_some()
+            || token.tmux_session_name().is_some_and(|name| {
+                #[cfg(unix)]
+                {
+                    super::turn_bridge::herdr_marked(&name)
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = name;
+                    false
+                }
+            }));
     // The mailbox CAS (`release_turn_lease_if_matches`) binds an exact
     // `MessageId`, and an episode that never bound one has no such key —
     // `MessageId::new(0)` panics. Refuse explicitly instead of releasing an
@@ -221,10 +271,10 @@ async fn release_on(
                     inflight::GuardedClearOutcome::Cleared | inflight::GuardedClearOutcome::Missing
                 )
             ) {
-                return Err(format!(
+                return Err(LeaseError::Conflict(format!(
                     "lease released but inflight cleanup is incomplete ({:?}); provider preserved",
                     clear_outcome.get()
-                ));
+                )));
             }
             // `rebind_origin` has no in-memory counterpart, so a release that
             // cleared no row could not observe it. Report that instead of
@@ -276,13 +326,11 @@ impl OperatorRelease {
         provider: &ProviderKind,
         key: TurnKey,
     ) -> Option<FinishTurnResult> {
-        if identity(shared, provider, key.channel_id)
+        let observed = active_lease(shared, provider, key.channel_id)
             .await
             .ok()
-            .flatten()
-            .as_ref()
-            != Some(&self.request.expected)
-        {
+            .flatten()?;
+        if observed.identity != self.request.expected {
             return None;
         }
         let row = matching_inflight(provider, &self.request.expected).ok()?;
@@ -294,7 +342,7 @@ impl OperatorRelease {
         if key.user_msg_id == 0 {
             return None;
         }
-        let handle = shared.mailbox_peek(key.channel_id)?;
+        let handle = observed.mailbox;
         let result = handle
             .release_turn_lease_if_matches(
                 MessageId::new(key.user_msg_id),

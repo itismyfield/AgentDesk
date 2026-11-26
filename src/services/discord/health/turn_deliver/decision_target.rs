@@ -204,6 +204,8 @@ where
     let Some((_, ticket)) = ticket.filter(|_| event.approves(text)) else {
         return Ok(FirstAttempt::NotApproved);
     };
+    // The run's start is fixed before the row is moved, so boot recovery never reads it as old.
+    crate::services::discord::decision_drain::run(pool).await?;
     if !decisions::reserve_first_attempt(pool, event_id, &ticket).await? {
         return Ok(FirstAttempt::AlreadyReserved);
     }

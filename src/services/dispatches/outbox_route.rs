@@ -1228,7 +1228,7 @@ mod role_map_retirement_tests {
         std::fs::write(root.path().join("config/role_map.json"),
             r#"{"byChannelId":{"73490009":{"roleId":"legacy","channelName":"only-json"}},"byChannelName":{"only-json":{"channelId":"73490009"}}}"#).unwrap();
         assert_eq!(resolve_channel_alias("only-json"), None);
-        crate::services::discord::agentdesk_config::write_bindings_for_test(
+        crate::config::test_env::write_bindings_for_test(
             root.path(),
             serde_json::json!([{"id":"yaml-agent","name":"YAML Agent","provider":"codex","channels":{"codex":{"id":"73490001","name":"only-json"}}}]),
         );

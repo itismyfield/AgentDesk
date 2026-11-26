@@ -8,14 +8,14 @@ struct ReadinessScope;
 
 impl Drop for ReadinessScope {
     fn drop(&mut self) {
-        readiness::tests::forget_session(LOGICAL);
+        readiness::test_support::forget_session(LOGICAL);
     }
 }
 
 #[test]
 fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
     let fx = BindingFixture::new();
-    readiness::tests::forget_session(LOGICAL);
+    readiness::test_support::forget_session(LOGICAL);
     let readiness_scope = ReadinessScope;
     let source = live_source(&fx);
     let rig = HerdrRig::start();

@@ -570,12 +570,17 @@ pub(crate) fn load_instance_declaration_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use agy_cell::tests::agy_fixture;
+pub(crate) use test_support::agy_fixture;
 
 #[cfg(all(test, unix))]
 #[path = "test_instance/host_scope_tests.rs"]
 pub(crate) mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/login_test_support.rs"]
 pub(crate) mod login_test_support;
+
+/// Fixtures upper-crate tests reuse (KRX-TS); the unit tests in `tests` import them.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "test_instance/test_support.rs"]
+pub(crate) mod test_support;

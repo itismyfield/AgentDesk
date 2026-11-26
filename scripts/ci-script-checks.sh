@@ -356,6 +356,7 @@ fi
 if run_check guards "Test wait cap source check"; then
 "$PYTHON" -m unittest tests.test_rust_test_wait_caps
 "$PYTHON" -m unittest scripts.crate_split.tests.test_vistool
+"$PYTHON" -m unittest scripts.crate_split.tests.test_test_support
 fi
 
 if run_check guards "CI setup-node reads .nvmrc"; then

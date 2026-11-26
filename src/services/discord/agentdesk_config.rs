@@ -592,14 +592,7 @@ pub(crate) fn configured_workspaces() -> Vec<String> {
 }
 
 #[cfg(test)]
-pub(crate) fn write_bindings_for_test(root: &Path, agents: serde_json::Value) {
-    let mut config = Config::default();
-    config.agents = serde_json::from_value(agents).expect("test agent bindings");
-    let path = crate::config::config_path::config_path_in(root);
-    crate::config::test_env::assert_test_config_write_within_root(root, &path);
-    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
-}
+pub(crate) use crate::config::test_env::write_bindings_for_test;
 
 #[cfg(test)]
 mod worktree_isolation_policy_tests {

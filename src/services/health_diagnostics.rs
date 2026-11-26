@@ -161,7 +161,7 @@ pub async fn is_recent_cluster_worker(
 
 mod request_batch;
 mod session_state;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use request_batch::load_auto_queue_cleanup_backlog_pg;
 pub(crate) use request_batch::{HealthKvMeta, SessionLookups};
 

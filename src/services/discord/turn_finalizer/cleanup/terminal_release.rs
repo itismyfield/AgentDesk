@@ -85,7 +85,7 @@ pub(in crate::services::discord) async fn release_restored_watcher_active_turn_b
             )
             .await
         }
-        Err(()) => return false,
+        Err(_) => return false,
     };
     let Some(token) = finish.removed_token.as_ref() else {
         return false;

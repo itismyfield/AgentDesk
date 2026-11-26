@@ -49,7 +49,7 @@ fn a_restored_reply_stays_unproven_behind_an_unclosed_or_working_compaction_pg()
             None => {}
         }
         append(&started.path, &records);
-        readiness::tests::forget_session(fx.logical());
+        readiness::test_support::forget_session(fx.logical());
         let proof = readiness::observe_restored_reply(fx.logical(), Some(&started.path));
         assert_eq!(proof.is_some(), restored, "{change:?}");
     }
@@ -73,7 +73,7 @@ fn delivers_once_after_restart(records: fn(&str) -> Vec<serde_json::Value>) {
     );
     let intake = Intake::new(&fx, &started);
     append(&started.path, &records(&started.session));
-    readiness::tests::forget_session(fx.logical());
+    readiness::test_support::forget_session(fx.logical());
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_none());
     let idle = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),

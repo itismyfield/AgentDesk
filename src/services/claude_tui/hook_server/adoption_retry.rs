@@ -562,7 +562,7 @@ pub(crate) fn forget_pending_record_for_tests(tmux: &str) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_deferred_adoptions_for_tests() {
     deferred().clear();
 }

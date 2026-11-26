@@ -77,7 +77,7 @@ async fn leaf(
     });
     tokio::task::spawn_blocking(move || {
         let _lease = lease;
-        crate::services::claude_tui::readiness::tests::pre_source(
+        crate::services::claude_tui::readiness::test_support::pre_source(
             NAME,
             &crate::config::runtime_root()
                 .unwrap()

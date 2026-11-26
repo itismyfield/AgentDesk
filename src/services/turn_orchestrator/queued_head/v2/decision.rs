@@ -51,8 +51,22 @@ impl Owner {
         }
     }
 
-    /// Ends the event's original unrun: a queued or proven-unsent copy leaves the queue alone,
-    /// and every record kept of it stops owing its notice. An attempted head is not touched.
+    /// The Decision tickets whose originals this owner still holds queued, attempted or kept:
+    /// what a settlement checks against the events PG already closed.
+    pub(crate) fn decision_tickets(&self) -> Vec<String> {
+        let tag = format!("{}-", crate::db::decisions::TICKET_TAG);
+        let held = (self.snapshot.admission_binds.iter())
+            .filter(|bind| !matches!(bind.at, BindAt::Settled { .. }))
+            .filter_map(|bind| bind.receipt.strip_prefix("tk:")?.split(':').next())
+            .filter(|ticket| ticket.starts_with(&tag));
+        let mut tickets: Vec<String> = held.map(str::to_string).collect();
+        tickets.sort();
+        tickets.dedup();
+        tickets
+    }
+
+    /// Ends the event's original unrun: its queued or kept copy leaves with its body and no record
+    /// of it owes a notice. An attempted head and a unit carrying another input are not touched.
     pub(crate) fn discard_decision(&mut self, message: u64, origin: &str) -> Result<(), String> {
         let queued = (self.snapshot.items.iter())
             .chain((self.snapshot.retained_inputs.iter()).flat_map(|entry| entry.input.members()))
@@ -65,6 +79,31 @@ impl Owner {
             }
         }
         let mut next = self.snapshot.clone();
+        let own = |entry: &RetainedInput| {
+            (entry.input.members()).all(|item| named(item, message, origin))
+        };
+        let gone: Vec<InputAttempt> = (next.retained_inputs.iter())
+            .filter(|entry| own(*entry))
+            .map(|entry| entry.input.clone())
+            .collect();
+        next.retained_inputs.retain(|entry| !own(entry));
+        // The tickets of a removed original end with it; their receipts keep a retry a duplicate.
+        let digests: Vec<String> = (gone.iter())
+            .map(|input| source_admission::digest(&source_admission::canonical(&input.original)))
+            .collect();
+        next.admission_binds.retain(|bind| match &bind.at {
+            BindAt::Attempt { identity, attempt } => !gone.iter().any(|input| {
+                input.attempt.as_ref() == Some(attempt)
+                    && (input.members()).any(|item| sources::identity(item) == *identity)
+            }),
+            BindAt::Opaque => {
+                !(digests.iter()).any(|digest| bind.receipt.ends_with(&format!(":{digest}")))
+            }
+            _ => true,
+        });
+        for input in &gone {
+            next.handoff_input_left(&sources::identity(&input.original));
+        }
         let kept = (next.retained_inputs.iter_mut())
             .filter(|entry| {
                 entry
@@ -84,7 +123,7 @@ impl Owner {
             owed |= !notice.enqueued;
             notice.enqueued = true;
         }
-        match owed {
+        match owed || !gone.is_empty() {
             true => self.commit(next),
             false => Ok(()),
         }

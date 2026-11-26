@@ -90,6 +90,10 @@ mod tests {
         ),
         ("reconcile", include_str!("../reconcile.rs")),
         (
+            "reconcile::boot_lease_tests",
+            include_str!("../reconcile/boot_lease_tests.rs"),
+        ),
+        (
             "server::routes::dispatches::crud",
             include_str!("routes/dispatches/crud.rs"),
         ),

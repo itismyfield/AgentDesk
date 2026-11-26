@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@3024685b30
 "use client";
 // Adapted from affectUI (https://github.com/flohoeller/affectui @ e610c3ba), MIT License, Copyright (c) 2026 Florian Höller (adfects). See LICENSE.affectui.
 // Changes: aui- class prefix; coarse-pointer targets at least 44px; max-width containment for phone, tablet and desktop.
@@ -476,7 +476,7 @@ const css = /* css */ `
 .aui-code-block-clean__t-var { color: var(--ui-codec-var); }
 
 /* Touch screens: a bigger hit area around the copy button, the look stays */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-code-block-clean__copy::after { content: ""; position: absolute; inset: -6px; }
 }
 
@@ -509,7 +509,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-code-block-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-code-block-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-code-block-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;
