@@ -499,3 +499,59 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
         db.drop().await;
     });
 }
+
+// A thread under a Herdr parent whose host is held ends the Herdr row it stores, never a guessed
+// tmux: a Pending row goes to the terminate service, an unreadable row warns, and both are fenced.
+#[tokio::test]
+async fn a_held_herdr_threads_clear_ends_its_stored_row_not_a_guessed_tmux_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let (provider, parent) = (ProviderKind::Claude, 1_479_671_305_341_100_030);
+    let _hosts =
+        crate::config::session_hosts::force_for_test(Some("test-node"), &[(parent, "test-node")]);
+    for n in [1, 2] {
+        let thread = ChannelId::new(parent + n);
+        let _thread = force_relation_for_test(thread.get(), Relation::Child { parent });
+        let name = format!("adk-clear-held-{n}-{}", uuid::Uuid::new_v4().simple());
+        let managed = Managed::launch(&shared, &provider, (thread, &name)).await;
+        let mut owner = tests::owner(&thread.get().to_string());
+        (owner.discord_token_hash, owner.logical_key) =
+            (shared.token_hash.clone(), managed.tmux.clone());
+        owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
+        let raw = match n {
+            1 => tests::wire(&tests::record(&owner, "nonce-held", HostedState::Pending)),
+            _ => serde_json::json!({"schema": 99}),
+        };
+        sqlx::query(
+            "INSERT INTO sessions (session_key, provider, status, identity_kind, discord_token_hash,
+                                   channel_id, claude_session_id, hosted_execution)
+             VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, $4, $5)",
+        )
+        .bind(&managed.key)
+        .bind(&shared.token_hash)
+        .bind(thread.get().to_string())
+        .bind(OLD_SESSION)
+        .bind(raw)
+        .execute(&pool)
+        .await
+        .expect("seed the thread's row");
+
+        let reply = clear(&shared, &provider, thread).await;
+
+        assert!(reply.contains(END_UNCONFIRMED), "{n}: {reply}");
+        assert!(!managed.ended(), "{n}: no guessed tmux teardown");
+        let fenced: bool = sqlx::query_scalar(
+            "SELECT provider_resume_fence IS NOT NULL FROM sessions WHERE session_key = $1",
+        )
+        .bind(&managed.key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(fenced, "{n}: the cleared conversation is not resumed");
+    }
+    pool.close().await;
+    db.drop().await;
+}

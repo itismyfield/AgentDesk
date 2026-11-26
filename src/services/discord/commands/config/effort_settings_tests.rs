@@ -550,6 +550,75 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
     );
 }
 
+/// A Codex thread whose Bound pane runs on its Herdr parent's endpoint takes `/effort` there,
+/// though no boot entry names the thread: the capability and the save read one current host.
+#[cfg(unix)]
+#[test]
+fn a_bound_codex_thread_under_a_herdr_parent_takes_effort_pg() {
+    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    fixture(|_, _, _| {
+        runtime().block_on(async {
+            let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate().await;
+            let shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+                pool.clone(),
+            ));
+            let (parent, thread, tmux) = (8_118_490, 8_118_491, "AgentDesk-codex-s2a1-effort");
+            // The settings owner check compares the pane's node with this instance.
+            let node =
+                crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
+            let hosts = [(parent, node.as_str())];
+            let _hosts = crate::config::session_hosts::force_for_test(Some(&node), &hosts);
+            let _thread = force_relation_for_test(thread, Relation::Child { parent });
+            let _codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
+            let mut owner = tests::owner(&thread.to_string());
+            (owner.provider, owner.logical_key) = ("codex".into(), tmux.into());
+            (owner.discord_token_hash, owner.owner_node) =
+                (shared.token_hash.clone(), node.clone());
+            owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
+            let mut bound = tests::record(&owner, "nonce-effort", HostedState::Bound);
+            let at = bound.location.as_mut().unwrap();
+            (at.execution_node, at.endpoint_config_key) =
+                (node.clone(), format!("{node}-endpoint"));
+            at.socket_addr = "/adk/herdr/agentdesk.sock".into();
+            sqlx::query(
+                "INSERT INTO sessions (session_key, provider, status, identity_kind,
+                                       discord_token_hash, channel_id, hosted_execution)
+                 VALUES ($1, 'codex', 'idle', 'discord_channel', $2, $3, $4)",
+            )
+            .bind(
+                crate::services::discord::adk_session::build_namespaced_session_key(
+                    &shared.token_hash,
+                    &ProviderKind::Codex,
+                    tmux,
+                ),
+            )
+            .bind(&shared.token_hash)
+            .bind(thread.to_string())
+            .bind(tests::wire(&bound))
+            .execute(&pool)
+            .await
+            .unwrap();
+            let (codex, channel) = (ProviderKind::Codex, serenity::ChannelId::new(thread));
+            shared
+                .overrides
+                .model_overrides
+                .insert(channel, ASTRA.into());
+
+            let level = validate_effort_entry(&shared, &codex, channel, "ultra").await;
+            assert_eq!(level, Ok("ultra"));
+            let saved = update_channel_effort(&shared, TOKEN, channel, &codex, "ultra").await;
+            assert!(
+                saved.unwrap(),
+                "the level is saved for the thread's Herdr pane"
+            );
+            pool.close().await;
+            db.drop().await;
+        })
+    });
+}
+
 /// An effort restart's end spends the Codex goals reset it reflects, as it spends `/fast` and `/model`.
 #[cfg(unix)]
 #[tokio::test]

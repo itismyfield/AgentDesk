@@ -337,6 +337,26 @@ async fn a_turn_refused_over_a_verified_bound_thread_keeps_its_recorded_pane_pg(
     db.drop().await;
 }
 
+// A refused turn of a thread no judgement verified on a Bound row records no current Herdr pane.
+#[tokio::test]
+async fn a_refused_turn_without_a_verified_bound_row_records_no_current_pane() {
+    use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
+    use crate::services::session_host::thread_host::{Execution, current_execution_cached};
+    let (parent, child) = (8_118_330, 8_118_331);
+    let _child = force_relation_for_test(child, Relation::Child { parent });
+    {
+        // The thread's own boot entry sends it to a configured turn no row of it verified.
+        let _own = force_hosts(Some("mac-mini"), &[(child, "mac-book")]);
+        let host = for_turn(None, &ProviderKind::Claude, child, Some(SESSION_KEY)).await;
+        assert!(matches!(
+            refusal(host),
+            HerdrRefusal::EndpointNotLocal { .. }
+        ));
+    }
+    let _parent = force_hosts(Some("mac-mini"), &[(parent, "mac-mini")]);
+    assert_eq!(current_execution_cached(child), Execution::Unknown);
+}
+
 // The record table: verified evidence sets it, the row's own refusal or a return forgets it.
 #[test]
 fn the_recorded_execution_is_the_verified_evidence_not_the_turns_permission() {
