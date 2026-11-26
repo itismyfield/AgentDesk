@@ -129,6 +129,16 @@ fn merge<T: PartialEq>(kept: &mut Option<T>, next: Option<T>) -> Result<(), Stri
 }
 
 impl NoticeEvidence {
+    pub(crate) fn is_absorbed_remove(&self) -> bool {
+        let token = b"\"absorbed_mid_turn\"";
+        self.raw_record
+            .windows(token.len())
+            .any(|window| window == token)
+            && serde_json::from_slice(&self.raw_record).is_ok_and(|raw: serde_json::Value| {
+                crate::services::tui_o::writer::input_notices::is_absorbed_remove(&raw)
+            })
+    }
+
     /// Receipts address the attachment row even when the notice uses the original input UUID.
     pub(crate) fn command_row_uuid(&self) -> Option<String> {
         if !may_be_claude_queued_command(&self.raw_record) {

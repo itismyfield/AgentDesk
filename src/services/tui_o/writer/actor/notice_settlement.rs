@@ -126,13 +126,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             else {
                 return false;
             };
-            let command_row_uuid = evidence.command_row_uuid();
-            let receipt_uuid = command_row_uuid.as_deref().unwrap_or(&key.native_key);
-            let Some(owner) = self
-                .writer
-                .notice_owners
-                .owned_proof(origin, receipt_uuid, prompt)
-            else {
+            let owners = &self.writer.notice_owners;
+            let owner = if evidence.is_absorbed_remove() {
+                owners.absorbed_owner(origin, prompt)
+            } else {
+                let command_row_uuid = evidence.command_row_uuid();
+                let receipt_uuid = command_row_uuid.as_deref().unwrap_or(&key.native_key);
+                owners.owned_proof(origin, receipt_uuid, prompt)
+            };
+            let Some(owner) = owner else {
                 return false;
             };
             let expired = self

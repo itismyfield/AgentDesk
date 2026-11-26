@@ -106,6 +106,12 @@ pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
             .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
 }
 
+pub(crate) fn is_absorbed_remove(row: &serde_json::Value) -> bool {
+    row["type"] == "queue-operation"
+        && row["operation"] == "remove"
+        && row["reason"] == "absorbed_mid_turn"
+}
+
 enum NoticeOwnership {
     Known,
     KnownCommand,
@@ -118,10 +124,16 @@ fn observed_notice_attempt(
     prompts: &[String],
     input_uuid: &str,
     command_row_uuid: Option<&str>,
+    absorbed: bool,
 ) -> Result<NoticeOwnership, String> {
     let row = command_row_uuid.unwrap_or(input_uuid);
     let observed = |uuid| history::observed_attempt_checked("claude", session, prompts, Some(uuid));
-    Ok(match observed(row)? {
+    let attempt = if absorbed {
+        history::observed_attempt_checked("claude", session, prompts, None)?
+    } else {
+        observed(row)?
+    };
+    Ok(match attempt {
         ObservedAttempt::Known(_) if command_row_uuid.is_some() => NoticeOwnership::KnownCommand,
         ObservedAttempt::Known(_) => NoticeOwnership::Known,
         ObservedAttempt::Pending
@@ -203,6 +215,7 @@ impl Projection {
             std::slice::from_ref(&prompt),
             &native_key,
             command_row_uuid.as_deref(),
+            is_absorbed_remove(&value),
         )? {
             NoticeOwnership::Known => return Ok(None),
             // Keep the physical receipt row until ownership settles the original input key.

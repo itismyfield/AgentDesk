@@ -96,6 +96,7 @@ pub(crate) fn admit_notice<R>(
     if floored {
         return exclude(piece, store, "input_notice_migration_floor");
     }
+    let absorbed = evidence.is_absorbed_remove();
     let command_row_uuid = evidence.command_row_uuid();
     let receipt_uuid = command_row_uuid
         .as_deref()
@@ -115,12 +116,14 @@ pub(crate) fn admit_notice<R>(
             std::slice::from_ref(&prompt),
             &piece.unit_key.native_key,
             command_row_uuid.as_deref(),
+            absorbed,
         )
         .map_err(withheld)?
         {
             NoticeOwnership::Known | NoticeOwnership::KnownCommand => {
                 return exclude(piece, store, "input_notice_source");
             }
+            NoticeOwnership::Pending if absorbed => return Err(NoticeRefusal::OwnershipPending),
             NoticeOwnership::Pending => {
                 match owners.map(|owners| owners.decision(origin, receipt_uuid, &prompt)) {
                     Some(history::notice_owner::Decision::Owned) => {

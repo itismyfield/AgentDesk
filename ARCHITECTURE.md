@@ -4672,6 +4672,7 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── generation/
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── absorption.rs
 │   │   │   │   │   ├── census.rs
 │   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
@@ -4880,6 +4881,7 @@ src/
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
+│   │   │   │   ├── notice_owner_absorbed_tests.rs
 │   │   │   │   ├── notice_owner_command_order_tests.rs
 │   │   │   │   ├── notice_owner_command_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
@@ -4931,6 +4933,8 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
+│   │   │   │   │   ├── projection/
+│   │   │   │   │   │   └── notice_absorption.rs
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs

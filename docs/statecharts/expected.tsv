@@ -2026,8 +2026,11 @@ tui-o-writer/WriterAbsorbedNoticeW1Owner.cfg	WriterAbsorbedNotice	CanonicalOwned
 tui-o-writer/WriterAbsorbedNoticeW1Remove.cfg	WriterAbsorbedNotice	NoticeExactlyOnce	-
 tui-o-writer/WriterAbsorbedNoticeW2DropOwnedEvidence.cfg	WriterAbsorbedNotice	CanonicalOwnedExclusion,NoOwnedExtraPost	-
 tui-o-writer/WriterAbsorbedNoticeW2NoRemove.cfg	WriterAbsorbedNotice	NoticeExactlyOnce	-
+tui-o-writer/WriterAbsorbedNoticeW2OwnedRemove.cfg	WriterAbsorbedNotice	NoticeDoesNotBlockRetirement,OwnedAbsorptionDebtCleared	EventuallySettles
 tui-o-writer/WriterAbsorbedNoticeW2Owner.cfg	WriterAbsorbedNotice	-	-
 tui-o-writer/WriterAbsorbedNoticeW2Remove.cfg	WriterAbsorbedNotice	-	-
+tui-o-writer/WriterAbsorbedNoticeW3DropAbsorptionSettlement.cfg	WriterAbsorbedNotice	NoticeDoesNotBlockRetirement,OwnedAbsorptionDebtCleared	EventuallySettles
+tui-o-writer/WriterAbsorbedNoticeW3OwnedRemove.cfg	WriterAbsorbedNotice	-	-
 tui-o-writer/WriterAdoptionBudgetMut.cfg	WriterAdoption	RowClearedHasEvidence	-
 tui-o-writer/WriterAdoptionExemptAll.cfg	WriterAdoption	OtherCustodyBlocks	-
 tui-o-writer/WriterAdoptionGateOnly.cfg	WriterAdoption	HeldBodyNotSkipped,RowClearedHasEvidence	HeldTurnAnswered,AdoptionSettles

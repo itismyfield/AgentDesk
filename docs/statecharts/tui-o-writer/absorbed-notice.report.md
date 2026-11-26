@@ -116,3 +116,53 @@ Owner 반례는 다른 입력의 user receipt가 같은 source의 native offer �
 `absorbed_remove_without_command_posts_once_across_restart`와
 `known_command_receipt_excludes_logical_notice_across_restart`다. 입력 소유권 판정,
 본문 동치, 기계·철회 행의 parser 분류는 코드 시험 범위다.
+
+## W3 등록 입력의 remove-only 정산
+
+W2 기준 `67f5d283e6a32b07d7731d3964343387cfcab8e0`. 기존 설정은 direct remove와
+물리 receipt가 있는 owned command를 각각 검사했다. `Scope="owned-remove"`에서 등록 입력의
+enqueue→remove-only와 같은 논리 ID의 후속 command/user가 오는 경우를 추가했다. 이 scope에서는
+물리 receipt가 없는 상황을 유지한다. native 실행 경로의 `Executed` 및 공지 소유권 재평가는
+별개 행동이다. 재평가는 같은 source/range와 등록 identity에 대해 정확한 귀속 근거가 있는
+입력에서만 모델링하며, 등록이나 본문이 일치한다는 사실만으로 이 행동을 가능하게 두지 않는다.
+
+`ReviewAbsorption`은 공지 owner 재평가와 성공 시 `Settled::Owned` 기록까지를
+하나의 모델 행동으로 표현한다. `ReadRetirement`는 native 실행 종료, 재생 완료, 동일 입력에 대한
+공지 재평가 뒤의 부채 조회다. 다른 출력과 바인딩 부채가 0이고 child 은퇴의 나머지 전제가
+갖춰진 상황에서 공지 부채가 은퇴를 가로막는지 검증한다.
+
+### W3 모델 전이와 코드 진입점
+
+W3의 소유권 정산과 기존 기록·재생 경로를 함께 연결한다.
+
+| 행동 | 코드 좌표 | 효과 |
+| --- | --- | --- |
+| Handoff, Observe | `src/services/tui_o/writer/actor/notice_work.rs:132–169`, `src/services/discord/tui_prompt_relay/synthetic_start_wiring.rs:141–149` | durable 인계와 direct 관측의 hook POST 생략 |
+| Enqueue | `src/services/tui_o/writer/input_facts/native.rs:41–47,682–697` | 대기 입력과 source-bound 등록을 연결한다. enqueue의 공지 부채는 0건이다. |
+| Capture | `src/services/tui_o/writer/actor.rs:442–450,905`, `src/services/tui_o/writer/rotation/retained_capture.rs:35–119` | 일치하는 source의 완전한 remove 행을 spool에 보존한다. |
+| Project | `src/services/tui_prompt_dedupe/extract.rs:244–265`, `src/services/tui_o/writer/input_notices.rs:95–145,179–226`, `src/services/tui_o/writer/input_notices/evidence.rs:8–54`, `src/services/tui_o/writer/actor/notice_work.rs:213–261` | remove의 commandUuid를 논리 공지 키로 기록한다. 등록 소유권이 미확정인 원본이 Materialized 된다. |
+| RecordPhysicalReceipt | `src/services/tui_o/writer/input_facts/native/receipt.rs:49–75`, `src/services/tui_o/writer/rotation/owe.rs:621–658` | 기존 command/user receipt 경로를 보존한다. W3 교차 scope에 필요한 remove 근거는 새 물리 receipt를 기록하지 않는다. |
+| NativeExecuted | `src/services/tui_o/writer/input_facts/native.rs:626–651,762–829,879–890`, `src/services/tui_o/writer/rotation/owe.rs:702–733` | 원본 등록이 해당 턴에 흡수된 사실과 정상 종료를 실행 경로에 제안한다. |
+| ReviewAbsorption, SettleOwned | `src/services/tui_input/human_frame/history/notice_owner/absorption.rs:20–98,110–199`, `src/services/tui_o/writer/input_facts/native/projection/notice_absorption.rs:11–68`, `src/services/tui_input/human_frame/history/notice_owner.rs:346–398,635–709`, `src/services/tui_o/writer/actor/notice_settlement.rs:124–163` | W3는 source가 검증한 등록과 remove 범위를 흡수 증거로 대조한다. 일치하면 `settle_notice`에서 같은 논리 키의 `Settled::Owned`를 기록한다. |
+| Prepare, Post, Confirm | `src/services/tui_o/writer/actor/notice_work.rs:285–495`, `src/services/tui_o/writer/input_notices/admission.rs:121–135`, `src/services/tui_o/writer/deliver.rs:550–606,690–714` | 등록 Pending은 POST를 막는다. 정산된 키도 이후 준비와 게시에서 배제한다. |
+| Restart, Replay | `src/services/tui_o/writer/actor.rs:345–389`, `src/services/tui_o/writer/rotation/readers.rs:94–123`, `src/services/tui_o/store/ledger/input_notices/settlement.rs:72–85,87–142,146–183` | 원본을 재생하고 durable terminal 및 canonical 제외를 보존한다. |
+| ReadRetirement | `src/services/tui_o/writer/actor/notice_work.rs:536–559`, `src/services/tui_o/writer/actor.rs:849–864`, `src/services/tui_o/writer/host/child_retirement.rs:112–129` | fresh `notice_owed`가 0일 때 공지 부채 거부를 피한다. |
+| Done | 기존 완료 상태의 모델용 대기 | POST와 debt가 추가로 바뀌지 않는 종결을 표현한다. |
+
+### W3 TLC 결과
+
+| cfg (`WriterAbsorbedNotice` 접두사) | 도달 상태 | Debt 0 / 은퇴 / liveness | writer 추가 POST 0 |
+| --- | ---: | --- | --- |
+| W2OwnedRemove | 110 | RED. `OwnedAbsorptionDebtCleared` 5단계, `NoticeDoesNotBlockRetirement` 8단계, `EventuallySettles` 위반. | GREEN |
+| W3OwnedRemove | 110 | GREEN. durable Excluded와 debt 0을 확인하고 재시작 뒤에도 은퇴를 공지 부채로 막지 않는다. | GREEN |
+| W3DropAbsorptionSettlement | 110 | RED. remove 소유권의 정산 연결만 없애면 W2와 같은 세 규칙이 깨진다. | GREEN |
+
+W2와 뮤턴트 모두 정상 native Executed → writer 재시작 → 원본 재생 → 소유권 정산 시도 →
+공지 부채 1로 은퇴 거부가 남는 경로를 탐색했다. Target은 [W3 차트](absorbed-notice-owned-remove.chart.mmd)에
+110 상태·223 전이를 10 상태·20 화살표로 묶었다. CI checker는 이전 9개 설정을 포함한 12개 설정과
+36 TLC 실행에서 예상 결과와 일치했다(28.5초, rc 0). 원문은 레인 `logs/fix-w3-model.log`,
+`fix-w3-model-*.tlc.out`이다.
+
+이 scope는 정확히 귀속 가능한 등록 입력 하나와 같은 논리 ID인 후속 표현을 탐색한다.
+모호한 등록이나 동일 본문을 가진 다른 ID에서 증거를 거부하는지는 파서·소유권 회귀 시험에서
+검증한다. 은퇴 행동은 공지 부채 외의 차단 조건을 검증하지 않는다.

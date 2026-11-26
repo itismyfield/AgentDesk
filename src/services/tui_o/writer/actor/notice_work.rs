@@ -346,7 +346,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         }
         let mut owners = std::mem::take(&mut self.writer.notice_owners);
-        owners.refresh(self.writer.store());
+        owners.refresh(
+            self.writer.store(),
+            #[cfg(unix)]
+            Some(&self.sources),
+        );
         let mut cache = std::mem::take(&mut self.writer.notice_cache);
         cache.track_contexts(
             &owners,

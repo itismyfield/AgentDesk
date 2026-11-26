@@ -181,6 +181,8 @@ mod projection {
     use crate::services::tui_o::shadow::identity::{RecordFact, classify, row_key};
     use crate::services::tui_o::shadow::seal::{TurnEvent, TurnTracker};
     use std::io;
+
+    mod notice_absorption;
     #[cfg(test)]
     use std::io::Write;
 
@@ -213,6 +215,7 @@ mod projection {
         event: Option<Event>,
         boundaries: Vec<Edge>,
         receipt: Option<receipt::Fact>,
+        notice_absorption: Option<Box<notice_absorption::Removal>>,
         interrupt: Option<Vec<String>>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
@@ -287,6 +290,7 @@ mod projection {
                     aborted: raw.aborted,
                 }],
                 receipt: None,
+                notice_absorption: None,
                 interrupt: None,
             });
             let facts = (self.facts.as_slice(), closer.as_ref());
@@ -444,6 +448,7 @@ mod projection {
                     receipt: (!strict)
                         .then(|| receipt::read(&value, line, range))
                         .flatten(),
+                    notice_absorption: notice_absorption::removal(&value, line),
                     interrupt: strict.then(|| terminal::interrupt_hashes(&value)).flatten(),
                     event,
                     boundaries,

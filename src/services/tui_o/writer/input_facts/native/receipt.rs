@@ -25,10 +25,10 @@ pub(super) struct Fact {
     row: String,
     kind: String,
     range: (u64, u64),
-    hashes: Vec<String>,
+    pub(super) hashes: Vec<String>,
     digest: String,
 }
-fn exact_body(value: &Value) -> Option<String> {
+pub(super) fn exact_body(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => Some(text.clone()),
         Value::Array(blocks) if !blocks.is_empty() => blocks
@@ -38,6 +38,13 @@ fn exact_body(value: &Value) -> Option<String> {
             .map(|texts| texts.join("\n")),
         _ => None,
     }
+}
+pub(super) fn exact_hashes(body: &str) -> Vec<String> {
+    let mut hashes = vec![format!("{:x}", Sha256::digest(body.as_bytes()))];
+    if let Some(inner) = crate::services::claude_tui::busy_inject::pasted_inner(body) {
+        hashes.push(format!("{:x}", Sha256::digest(inner.as_bytes())));
+    }
+    hashes
 }
 pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact> {
     if ["isMeta", "isSidechain"].iter().any(|k| value[*k] == true)
@@ -64,10 +71,7 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
     } else {
         value["uuid"].as_str().filter(|r| !r.is_empty())?.to_owned()
     };
-    let mut hashes = vec![format!("{:x}", Sha256::digest(body.as_bytes()))];
-    if let Some(inner) = crate::services::claude_tui::busy_inject::pasted_inner(&body) {
-        hashes.push(format!("{:x}", Sha256::digest(inner.as_bytes())));
-    }
+    let hashes = exact_hashes(&body);
     let mut digest = Sha256::new();
     digest.update(line);
     digest.update(b"\n");

@@ -1,2 +1,2 @@
 key: 595-tui-o-writer-absorbed-notice
-| `tui-o-writer` 턴 도중 흡수 입력 공지 (#8437) | `b04ea56650e5397989d33f1be199be21a83c8d0e`, W2 기준 `819d1338a5a37cf74342b084816c07987ab4e282` | Current는 command-only 행을 재생해도 공지 0건. SplitKey는 한 입력의 두 표현에서 2건 | W2는 remove-only 유실과 선착 receipt의 중복을 막는다. 수리 전·후와 원인 제거 뮤턴트 포함 9 cfg를 검증했다. [모델 보고서](tui-o-writer/absorbed-notice.report.md) |
+| `tui-o-writer` 턴 도중 흡수 입력 공지 (#8437) | `b04ea56650e5397989d33f1be199be21a83c8d0e`, W2 기준 `819d1338a5a37cf74342b084816c07987ab4e282`, W3 기준 `67f5d283e6a32b07d7731d3964343387cfcab8e0` | Current는 command-only 행을 재생해도 공지 0건. SplitKey는 한 입력의 두 표현에서 2건 | W3는 등록 입력의 remove-only 정산 뒤 공지 부채와 추가 POST가 모두 0인지 확인한다. 이전 9개와 W3 3개 cfg를 검증했다. [모델 보고서](tui-o-writer/absorbed-notice.report.md) |
