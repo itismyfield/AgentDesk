@@ -71,6 +71,7 @@ struct Herdr {
     procs: HashMap<u32, Proc>,
     next: u32,
     lose_create_reply: bool,
+    unconfirmed_command: Option<bool>,
     /// Labels arrive as a launch from before the marker sent them.
     bare_labels: bool,
     /// Removal requests are answered but change nothing.
@@ -229,6 +230,12 @@ impl Herdr {
                 self.inputs += 1;
                 let text = params["text"].as_str().unwrap_or("");
                 if let Some(context) = text.strip_prefix("provider ") {
+                    if let Some(started) = self.unconfirmed_command.take() {
+                        if started {
+                            self.run(&pane, Path::new(context));
+                        }
+                        return json!({"type": "unexpected"});
+                    }
                     self.run(&pane, Path::new(context));
                 }
                 json!({"type": "ok"})
@@ -879,4 +886,60 @@ async fn a_resolver_that_holds_the_lease_excludes_the_next_until_it_retires_pg()
         );
     }
     rig.end().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s2b1_placed_command_reply_loss_adopts_the_provider_pg() {
+    let rig = Rig::new().await;
+    let host = rig.host();
+    rig.state().unconfirmed_command = Some(true);
+    rig.launch(&host).await.unwrap();
+    let pending = rig.record().await;
+    assert!(pending.location.is_some());
+    assert!(pending.expected.is_none(), "command reply is unconfirmed");
+    assert_eq!(
+        rig.resolve(&host, &pending.execution_nonce).await,
+        Resolution::Adopted
+    );
+    let adopted = rig.record().await;
+    assert_eq!(adopted.location, pending.location);
+    assert!(adopted.expected.is_some());
+    assert_eq!(rig.state().creates, 1);
+    assert!(rig.state().removed.is_empty());
+    rig.end().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn s2b1_placed_shell_is_disposed_only_while_pristine_pg() {
+    for touched in [true, false] {
+        let rig = Rig::new().await;
+        let host = rig.host();
+        rig.state().unconfirmed_command = Some(false);
+        rig.launch(&host).await.unwrap();
+        let pending = rig.record().await;
+        assert!(pending.expected.is_none());
+        let pane = pending.location.as_ref().unwrap().pane_id.clone();
+        if touched {
+            rig.state().split(&pane);
+        }
+        let result = rig.resolve(&host, &pending.execution_nonce).await;
+        if touched {
+            assert!(matches!(result, Resolution::Held(_)), "{result:?}");
+            unchanged(&rig, &pending, "additional pane").await;
+        } else {
+            assert_eq!(result, Resolution::Retired);
+            assert_eq!(rig.state().removed, vec![pane]);
+            assert_eq!(rig.record().await.state, HostedState::Retired);
+            let successor = rig.launch(&host).await.unwrap();
+            assert!(matches!(
+                successor,
+                HerdrLaunchOutcome::Launched {
+                    evidence: Ok(()),
+                    ..
+                }
+            ));
+            assert_eq!(rig.state().workspaces.len(), 1);
+        }
+        rig.end().await;
+    }
 }

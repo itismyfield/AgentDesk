@@ -1173,3 +1173,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod duplicate_archive_tests;

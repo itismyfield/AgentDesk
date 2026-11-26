@@ -511,3 +511,76 @@ mod success;
 
 #[path = "provider_dispatch_herdr_missing_race_tests.rs"]
 mod capture_race;
+
+#[test]
+fn s2b1_pending_with_first_key_retires_after_restart_without_resubmission_pg() {
+    use crate::services::herdr_launch::unplaced::QUIET;
+    let fx = Fixture::new("s2b1-first-key", None);
+    let launcher = Arc::new(Launcher::default());
+    let (result, _) = fx.turn(&HostedRecord::Legacy, &fx.ports(&launcher), || {
+        let started = fx
+            .start_provider(&launcher, true)
+            .expect("own SessionStart");
+        crate::services::claude_tui::readiness::tests::pre_source(fx.logical(), &started.path);
+        assert!(wait_for(&fx.finished, "first submit", || fx.rig.sends()
+            == prompt_sends()));
+        assert!(
+            !started.path.exists(),
+            "wait is before the provider transcript"
+        );
+        let HostedRecord::Known(row) = fx.record() else {
+            panic!("launch row");
+        };
+        assert_eq!(row.state, HostedState::Pending);
+        assert!(
+            row.expected.is_some(),
+            "launch evidence precedes the first input"
+        );
+        fx.rig.show_panes(&[]);
+        fx.cancel_now();
+    });
+    assert_eq!(fx.row(), Some(HostedState::Pending), "{result:?}");
+    assert_eq!(fx.rig.sends(), prompt_sends());
+
+    let HostedRecord::Known(before) = fx.record() else {
+        panic!("Pending row");
+    };
+    let mut shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(fx.pool.clone()));
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .token_hash
+        .clone_from(&before.owner.discord_token_hash);
+    let endpoint = fx.endpoint();
+    let config: crate::config::Config = serde_json::from_value(json!({
+        "server": {}, "cluster": {"instance_id": NODE},
+        "agents": [{"id": "placed", "name": "Placed", "channels": {
+            "claude": {"id": CHANNEL.to_string(), "runtime": "tui"}
+        }}],
+        "session_hosts": {"herdr": {
+            "endpoints": { KEY: {
+                "execution_node": NODE, "socket_path": endpoint.socket_addr,
+                "herdr_home": "/adk/herdr", "herdr_session": SESSION
+            }},
+            "channels": {CHANNEL.to_string(): KEY}
+        }}
+    }))
+    .unwrap();
+    let _host = crate::config::session_hosts::force_config_for_test(&config);
+    let _runtime = fx.rt.enter();
+    let install = fx.rig.thread_installer_with_launch(NODE, KEY, SESSION);
+    install();
+    QUIET.with(|quiet| quiet.set(Some(Duration::ZERO)));
+    crate::services::discord::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
+        &shared,
+        &ProviderKind::Claude,
+    );
+    QUIET.with(|quiet| quiet.set(None));
+    assert_eq!(fx.row(), Some(HostedState::Retired));
+    assert_eq!(
+        fx.rig.sends(),
+        prompt_sends(),
+        "the original is not submitted again"
+    );
+    assert_eq!(launcher.creates.load(Ordering::SeqCst), 1);
+}

@@ -136,3 +136,6 @@ fn the_restart_pass_reads_nothing_without_a_local_endpoint() {
     assert_eq!(passes(), 1, "a local endpoint gets past the switch");
     assert_eq!(local_reconnect_health(), counted(Some(Ok(1))));
 }
+
+#[path = "herdr_reader_placed_tests.rs"]
+mod placed;
