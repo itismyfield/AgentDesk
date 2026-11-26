@@ -726,6 +726,20 @@ class LoopGuard(unittest.TestCase):
         ok, line, *_, manifest = self.scripted([([thing("restricted")], []), ([], [])])
         self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, ["pub(crate) struct Thing {"]))
 
+    def test_e0616_path_is_read_by_the_side_that_reported_it(self):
+        # Lower names its own `core::core::Point`; upper names the outer one `probe_lower::core::Point`.
+        def nested(repo):
+            with open(repo / "src/core.rs", "a") as f:
+                f.write("\npub(crate) mod core {\n    pub(crate) struct Point {\n        pub(crate) x: u32,\n    }\n}\n")
+
+        field = lambda path: {"level": "error", "code": {"code": "E0616"}, "children": [], "spans": [],
+                              "message": f"field `x` of struct `{path}` is private"}
+        for local, path, after in ((True, "core::core::Point", "        pub x: u32,"),
+                                   (False, "probe_lower::core::Point", "    pub x: u32,")):
+            first = ([field(path)], []) if local else ([], [field(path)])
+            ok, line, *_, manifest = self.scripted([first, ([], [])], nested)
+            self.assertEqual((ok, [e["after"] for e in manifest["final_edits"]]), (True, [after]), line)
+
     def test_upper_test_use_of_a_gated_lower_item_is_test_cfg(self):
         # A method in a `#[cfg(test)] impl` (one shares its name with an ungated method) and a fn under
         # `cfg(all(test, unix))`: lower builds none of them, so the shadow line and the list must count them.
@@ -919,7 +933,9 @@ STRUCT = "pub(crate) struct {} {{\n    pub(crate) id: u32,\n}}\n"
 # The lower lib path leaves its member dir (`../upper/src/low/lib.rs`), like adk-runtime's `../../src`.
 OUTSIDE = {"lower/Cargo.toml": '[package]\nname = "lower"\nversion = "0.1.0"\nedition = "2024"\n\n'
                                '[lib]\npath = "../upper/src/low/lib.rs"\n',
-           "upper/src/low/lib.rs": "pub(crate) mod a;\npub(crate) mod b;\n",
+           "upper/src/low/lib.rs": "pub(crate) mod a;\npub(crate) mod b;\npub(crate) mod lower;\n",
+           # A module named like the crate: `lower::b::Context` from upper is b.rs, not this one.
+           "upper/src/low/lower.rs": "pub(crate) mod b {\n    pub(crate) struct Context(pub(crate) u32, u16,);\n}\n",
            "upper/src/low/a.rs": STRUCT.format("Context") + STRUCT.format("Config"),
            "upper/src/low/b.rs": STRUCT.format("Context")}
 
@@ -933,7 +949,7 @@ def diag(code, message, at=None):
 
 class RealOutsideMember(unittest.TestCase):
     def test_lower_lib_outside_its_member_dir(self):
-        a, b = "upper/src/low/a.rs", "upper/src/low/b.rs"
+        a, b, inner = "upper/src/low/a.rs", "upper/src/low/b.rs", "upper/src/low/lower.rs"
         cases = [
             # RED before: the resolver sided a.rs by member dir (upper), so it was cut_residue with 0 edits.
             ("upper", a, "pub struct Config", diag("E0603", "struct `Config` is private", a),
@@ -941,9 +957,13 @@ class RealOutsideMember(unittest.TestCase):
             # RED before: its src_path is outside lower/, so run_check dropped it and the run was cargo_failed.
             ("lower", a, "never", diag("E0425", "cannot find value `gone` in this scope", a),
              "VISTOOL_FAIL lower_probe_broken", []),
-            # RED before: two `Context` structs left this E0616 (no definition span) unresolved, "defined 2 times".
+            # RED before: same-named `Context` structs left this E0616 (no definition span) unresolved, and
+            # read as module path `lower::b` it picked lower.rs's struct.
             ("upper", b, "pub id", diag("E0616", "field `id` of struct `lower::b::Context<u8>` is private"),
              "VISTOOL_OK", [(b, "    pub id: u32,")]),
+            # RED before: rewriting the tuple fields dropped the trailing comma (non_vis_edit).
+            ("upper", inner, "pub u32", diag("E0616", "field `0` of struct `lower::lower::b::Context` is private"),
+             "VISTOOL_OK", [(inner, "    pub(crate) struct Context(pub u32, u16,);")]),
         ]
         for member, rel, done, d, want_line, want_edits in cases:
             with self.subTest(d["message"]), tempfile.TemporaryDirectory() as tmp:

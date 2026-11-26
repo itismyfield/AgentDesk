@@ -132,6 +132,8 @@ class RealProbe:
         name = lambda rel: members[rel][1]["package"]["name"]
         self.lower_pkg, self.upper_pkg = name(self.lower_dir), name(self.upper_dir)
         self.crate = self.lower_pkg
+        lower_cargo = members[self.lower_dir][1]
+        self.lib_name = lower_cargo.get("lib", {}).get("name") or self.lower_pkg.replace("-", "_")
         manifest.update(crate=self.lower_pkg, upper=self.upper_pkg, lower_dir=self.lower_dir,
                         upper_dir=self.upper_dir)
         layout = RealLayout(self.repo, members, self.lower_dir, self.upper_dir, self.lower_pkg)
