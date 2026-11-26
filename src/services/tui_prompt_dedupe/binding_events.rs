@@ -19,7 +19,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::source_verify::{
     Observation, PinJudgment, SourceHistory, judge_pin, observe_transcript,
 };
-pub(crate) use crate::services::tui_o::shadow::SourceId;
+pub use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::file_identity;
 use herdr_resume::resumes_under_new_execution;
 pub(crate) use herdr_resume::{herdr_resume_launch, logged_by};
@@ -29,13 +29,13 @@ use claude_fold::Waiting;
 pub(crate) use claude_fold::binding_events_judged_since;
 pub(crate) use claude_fold::published_claude_history;
 pub(crate) use claude_fold::unverified_current_source;
-pub(crate) mod codex;
+pub mod codex;
 mod log_record;
 mod read_cache;
 use log_record::{Logged, LoggedRef};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BindingCause {
+pub enum BindingCause {
     Startup,
     Resume,
     Clear,
@@ -49,7 +49,7 @@ pub(crate) enum BindingCause {
 /// Codex typed ownership can name the exact Pending a rejection closes.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum BindingTarget {
+pub enum BindingTarget {
     Source(SourceId),
     Pending {
         payload_session_id: String,
@@ -66,13 +66,13 @@ pub(crate) enum BindingTarget {
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingEvidence {
+pub struct BindingEvidence {
     pub hook_event: Option<String>,
     pub received_at: DateTime<Utc>,
 }
 /// `seq` rises by exactly one per record of a channel, so a gap means a skipped line.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingEvent {
+pub struct BindingEvent {
     pub seq: u64,
     pub channel_id: u64,
     pub provider: String,
@@ -93,7 +93,7 @@ pub(crate) struct BindingPersistError {
 }
 /// What one hook said about a session switch; `source` is the SessionStart reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HookSignal {
+pub struct HookSignal {
     pub event: String,
     pub source: Option<String>,
     pub transcript_path: Option<String>,
@@ -291,7 +291,7 @@ fn parse_log<T: DeserializeOwned>(path: &Path) -> io::Result<LogRead<T>> {
 
 /// Records of `channel_id` with `seq > after_seq`, in log order. Read-only; a corrupt line fails
 /// the read, since skipping it would hide a binding from the reader.
-pub(crate) fn binding_events_since(
+pub fn binding_events_since(
     channel_id: u64,
     after_seq: u64,
 ) -> io::Result<Vec<BindingEvent>> {
@@ -301,13 +301,13 @@ pub(crate) fn binding_events_since(
 
 /// Why a strict read refused a log; `line` counts complete non-empty lines from 1.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Corrupt {
+pub struct Corrupt {
     pub line: u64,
     pub kind: CorruptKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CorruptKind {
+pub enum CorruptKind {
     Unparseable,
     SeqGap {
         expected: u64,
@@ -319,7 +319,7 @@ pub(crate) enum CorruptKind {
 
 /// Every record of `channel_id`, or the first line that is unreadable or out of `seq` order.
 /// A torn tail is not corruption: it was never published and the writer cuts it off on load.
-pub(crate) fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
+pub fn records_strict(channel_id: u64) -> io::Result<Result<Vec<BindingEvent>, Corrupt>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(Ok(Vec::new()));
     };
@@ -356,7 +356,7 @@ fn strict_records(bytes: &[u8]) -> Result<Vec<BindingEvent>, Corrupt> {
 }
 
 /// The latest committed `seq` of `channel_id`, updated after every append. Read-only.
-pub(crate) fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Receiver<u64>> {
+pub fn subscribe_binding_events(channel_id: u64) -> io::Result<watch::Receiver<u64>> {
     let Some(path) = log_path(channel_id)? else {
         return Ok(watch::channel(0).1);
     };

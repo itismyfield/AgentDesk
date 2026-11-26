@@ -11,16 +11,16 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::future::Future;
 
 pub(crate) mod adoption;
-pub(crate) mod cleanup;
-pub(crate) mod custody;
-pub(crate) mod event;
+pub mod cleanup;
+pub mod custody;
+pub mod event;
 pub(crate) mod fallback;
-pub(crate) mod input_start;
-pub(crate) mod output;
+pub mod input_start;
+pub mod output;
 pub(crate) mod plan;
 pub(crate) mod snapshot;
 
-pub(crate) use crate::domain::intake_identity::OwnerIdentity;
+pub use crate::domain::intake_identity::OwnerIdentity;
 
 /// Idempotency key for an admission attempt (§3.8). Ambiguous-commit retries
 /// of the same `(provider, channel, user_msg, attempt_no)` reproduce the same
@@ -147,7 +147,7 @@ pub(crate) enum AdmissionOutcome {
 
 /// Latest (highest-generation, status-agnostic) owner row for an identity, or
 /// `None` when the channel has never been owned.
-pub(crate) async fn read_latest_owner_in_tx(
+pub async fn read_latest_owner_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
 ) -> Result<Option<OwnerRecordSnapshot>, sqlx::Error> {
@@ -823,7 +823,7 @@ pub(crate) async fn sweep_stale_pre_accept_claims_fenced(
 /// serialize this transition with concurrent claims; the advisory lock is not
 /// relied on for legacy admission inserts or worker claims. A zero-row result
 /// means another actor won the race.
-pub(crate) async fn retire_stale_pending_route_for_local(
+pub async fn retire_stale_pending_route_for_local(
     pool: &PgPool,
     provider: &str,
     channel_id: &str,

@@ -586,7 +586,7 @@ const OWNER_RETIRED_NOTICE: &str = "⚠ 세션이 응답 전에 중단되어 새
 /// The owner's idle submit observed as a warm follow-up observes its own, set up before that
 /// submit; a session that died before any output is retired with a notice, never resent.
 #[cfg(unix)]
-pub(crate) fn owner_observer(
+pub fn owner_observer(
     (tmux, prompt, channel): (&str, &str, u64),
     (session_id, working_dir): (Option<&str>, &std::path::Path),
     sender: Sender<StreamMessage>,
@@ -736,7 +736,7 @@ fn late_rebind(
 /// A paste into a running turn read as its caller's answer, from the user row the attempt took to
 /// that turn's end; a dead pane or a turn ending with no such row ends the read in error, unresent.
 #[cfg(unix)]
-pub(crate) fn busy_owner_observer(
+pub fn busy_owner_observer(
     (tmux, nonce, frame, channel): (&str, &str, &str, u64),
     transcript: &std::path::Path,
     sender: Sender<StreamMessage>,

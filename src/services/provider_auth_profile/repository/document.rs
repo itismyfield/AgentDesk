@@ -61,7 +61,7 @@ pub(crate) struct OrgAgentDef {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct OrgChannelsConfig {
+pub struct OrgChannelsConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) by_id: BTreeMap<String, OrgChannelBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,7 +92,7 @@ pub(crate) fn default_org_version() -> u32 {
     1
 }
 
-pub(crate) fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
+pub fn load_org_document(path: &Path) -> Result<OrgDocument, String> {
     if !path.exists() {
         return Ok(OrgDocument {
             version: default_org_version(),

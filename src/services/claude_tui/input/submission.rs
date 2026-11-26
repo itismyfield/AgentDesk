@@ -248,13 +248,13 @@ impl StashAuthority for Unmanaged {
 
 // A watcher can suggest a wake; it neither claims an attempt nor removes draft protection.
 #[cfg(unix)]
-pub(crate) fn wake_hint(session: &str) -> Option<String> {
+pub fn wake_hint(session: &str) -> Option<String> {
     wake_hint_observed(session).ok().flatten()
 }
 
 /// Failed observation cannot authorize skipping a capped head; confirmed non-targets can.
 #[cfg(unix)]
-pub(crate) fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
+pub fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
     let Some(binding) =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(session)
     else {

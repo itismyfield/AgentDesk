@@ -667,7 +667,7 @@ fn tail_to_end(
 /// The owner's idle submit observed as this follow-up observes its own: handoff, dedupe and
 /// channel records come before that submit, then the rollout is tailed to its end on `sender`.
 #[cfg(unix)]
-pub(crate) fn owner_observer(
+pub fn owner_observer(
     (tmux, prompt, channel): (&str, &str, u64),
     (session_id, working_dir): (Option<&str>, &Path),
     sender: Sender<StreamMessage>,

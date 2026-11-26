@@ -8,8 +8,8 @@ use tracing::field;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
 
-pub(crate) mod auto_queue;
-pub(crate) mod intake_timing;
+pub mod auto_queue;
+pub mod intake_timing;
 
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;
 const DEFAULT_DCSERVER_LOG_MAX_FILES: usize = 10;
@@ -200,7 +200,7 @@ fn init_tracing_once() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn init_tracing() -> Result<()> {
+pub fn init_tracing() -> Result<()> {
     static TRACING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
     let init_result =
@@ -254,7 +254,7 @@ fn log_level(hint: Option<tracing::level_filters::LevelFilter>) -> log::LevelFil
     }
 }
 
-pub(crate) fn init_dcserver_tracing() -> Result<()> {
+pub fn init_dcserver_tracing() -> Result<()> {
     static DCSERVER_TRACING_INIT: OnceLock<std::result::Result<(), String>> = OnceLock::new();
 
     let init_result = DCSERVER_TRACING_INIT
@@ -350,7 +350,7 @@ impl<'a> MakeWriter<'a> for RedactingStdout {
     }
 }
 
-pub(crate) fn redact_log_text(text: &str) -> String {
+pub fn redact_log_text(text: &str) -> String {
     crate::utils::redact::redact_known_secrets(text)
 }
 
@@ -572,7 +572,7 @@ impl<'a> TraceContext<'a> {
     }
 }
 
-pub(crate) fn dispatch_span(
+pub fn dispatch_span(
     name: &'static str,
     dispatch_id: Option<&str>,
     card_id: Option<&str>,
@@ -585,7 +585,7 @@ pub(crate) fn dispatch_span(
         .span(name)
 }
 
-pub(crate) fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing::Span {
+pub fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing::Span {
     TraceContext::from_payload(payload)
         .with_hook_name(Some(hook_name))
         .span("policy_hook")
@@ -593,7 +593,7 @@ pub(crate) fn hook_span(hook_name: &str, payload: &serde_json::Value) -> tracing
 
 /// Sibling to `dispatch_span` for callers that also carry a channel/session
 /// identity; `dispatch_span`'s signature stays unchanged for existing callers.
-pub(crate) fn session_span(
+pub fn session_span(
     name: &'static str,
     dispatch_id: Option<&str>,
     agent_id: Option<&str>,

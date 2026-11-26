@@ -24,7 +24,7 @@ const START_MARGIN: Duration = Duration::from_secs(1);
 /// The running server's effective `[session] resume_agents_on_restore`. `Off` needs the
 /// server's provenance, started from the canonical config, and names that server.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RestoreResume {
+pub enum RestoreResume {
     Off { witness: ServerWitness },
     On,
     Unverified(RestoreUnverified),
@@ -32,7 +32,7 @@ pub(crate) enum RestoreResume {
 
 /// Why a reading is not `Off`; every failed or unsupported observation lands here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RestoreUnverified {
+pub enum RestoreUnverified {
     /// No connection, no handshake, or its peer process could not be read.
     NoPeer,
     /// The server answered, but its version or protocol is not one this adapter supports.

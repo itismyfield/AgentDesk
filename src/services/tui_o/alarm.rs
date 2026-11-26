@@ -194,7 +194,7 @@ impl AlarmHealth {
 static PROCESS_HEALTH: LazyLock<Arc<AlarmHealth>> = LazyLock::new(Arc::default);
 
 /// Alarm conditions in force for this process's health snapshot, as `tui_o:<kind>:<channel>`.
-pub(crate) fn health_reasons() -> Vec<String> {
+pub fn health_reasons() -> Vec<String> {
     PROCESS_HEALTH.current_at(Instant::now())
 }
 
@@ -239,7 +239,7 @@ const PAUSED_NO_GATEWAY: &str = "paused_no_gateway";
 const WAITING_TOO_LONG: &str = "waiting_too_long";
 
 /// Routes each writer incident once; NotFound only alarms past its frequency.
-pub(crate) struct AlarmRouter {
+pub struct AlarmRouter {
     alert_channel: Option<u64>,
     notifier: Option<Arc<dyn AlarmNotifier>>,
     health: Arc<AlarmHealth>,

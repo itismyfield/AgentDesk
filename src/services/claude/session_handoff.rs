@@ -1,7 +1,7 @@
 //! A Claude session keeps its id across hosts. Forward handoff closes one verified legacy pane;
 //! the reverse path retains its existing guarded `/exit` policy.
 
-pub(crate) mod pinned_tmux;
+pub mod pinned_tmux;
 
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -19,7 +19,7 @@ const START_WAIT: Duration = Duration::from_secs(30);
 
 /// Whether the earlier execution's provider still runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Liveness {
+pub enum Liveness {
     Running,
     Ended,
     Unknown(String),
@@ -27,7 +27,7 @@ pub(crate) enum Liveness {
 
 /// What one `/exit` attempt did to the earlier execution's composer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExitSend {
+pub enum ExitSend {
     Sent,
     /// Nothing was typed: a draft, a dialog, a busy screen or a refused gate.
     Untouched(String),
@@ -36,7 +36,7 @@ pub(crate) enum ExitSend {
 }
 
 /// The earlier execution, on the host the session leaves.
-pub(crate) trait EarlierExecution {
+pub trait EarlierExecution {
     fn liveness(&mut self) -> Liveness;
     /// Types `/exit` and Enter once, only into an empty ready composer.
     fn send_exit(&mut self) -> ExitSend;
@@ -96,7 +96,7 @@ pub(crate) fn exit_sent(run: InputRun) -> ExitSend {
 }
 
 /// The legacy tmux session of a logical key; its pane ends with the provider it execs.
-pub(crate) struct LegacyTmux<'a>(pub(crate) &'a str);
+pub struct LegacyTmux<'a>(pub &'a str);
 
 impl EarlierExecution for LegacyTmux<'_> {
     /// A tmux with no server socket runs nothing; a socket that cannot be read stays unobserved.

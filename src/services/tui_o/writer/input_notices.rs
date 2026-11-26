@@ -33,7 +33,7 @@ pub(crate) fn writer_owns(channel: u64, provider: ShadowProvider) -> bool {
 
 /// The live relay leaves a notice to the writer only once the writer's frozen legacy cohort is
 /// durable, so every input it still announced before that stays inside the cohort.
-pub(crate) fn writer_posts(channel: u64, provider: ShadowProvider) -> bool {
+pub fn writer_posts(channel: u64, provider: ShadowProvider) -> bool {
     writer_owns(channel, provider) && handed_over(channel)
 }
 

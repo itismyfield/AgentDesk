@@ -1,7 +1,7 @@
 //! Read-only inflight observations for absent Codex TUI launch checks.
 
-pub(crate) mod replacement;
-pub(crate) mod row;
+pub mod replacement;
+pub mod row;
 
 use crate::services::provider::{CancelToken, ProviderKind, cancel_requested};
 use crate::services::provider_hosting::{
@@ -11,7 +11,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::TurnEpisodeR
 use std::future::Future;
 use std::sync::Arc;
 
-pub(crate) struct InflightObs {
+pub struct InflightObs {
     channel: u64,
     tmux: String,
     kind: ObservationKind,
@@ -48,7 +48,7 @@ fn local_tui(channel: u64, tmux: &str) -> bool {
             == ProviderSessionDriver::TuiHosting
 }
 
-pub(crate) fn readiness(channel: u64, tmux: &str) -> Option<InflightObs> {
+pub fn readiness(channel: u64, tmux: &str) -> Option<InflightObs> {
     if !local_tui(channel, tmux) || !matches!(row::load_read_only(channel), Ok(None)) {
         return None;
     }
@@ -61,7 +61,7 @@ pub(crate) fn readiness(channel: u64, tmux: &str) -> Option<InflightObs> {
 
 /// The async caller checks the mailbox once, before entering the blocking provider; `episode`
 /// is the caller's unpolled mailbox observation and runs only for a local TUI.
-pub(crate) async fn observe_turn(
+pub async fn observe_turn(
     channel: u64,
     tmux: &str,
     token: &Arc<CancelToken>,

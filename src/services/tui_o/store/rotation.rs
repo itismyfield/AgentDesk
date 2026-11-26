@@ -23,7 +23,7 @@ pub(crate) const TAKEOVER_END_FILE: &str = "takeover_end";
 /// The end of the execution a late takeover took; its source and nonce tie it to that init.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct TakeoverEnd {
+pub struct TakeoverEnd {
     pub(crate) source: SourceId,
     pub(crate) nonce: String,
     pub(crate) basis: String,

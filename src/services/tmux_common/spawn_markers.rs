@@ -15,7 +15,7 @@ use std::io::Write;
 /// adoption preserves it. NOTE: this mtime signal is the #1270 wrapper-identity
 /// consumer ONLY. The status-panel session-instance key (#3087) reads the
 /// dedicated `.spawn_nonce` marker content instead.
-pub(crate) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
+pub fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
     let Some(path) =
         crate::services::tmux_common::resolve_session_temp_path(tmux_session_name, "generation")
     else {
@@ -39,7 +39,7 @@ pub(crate) fn read_generation_file_mtime_ns(tmux_session_name: &str) -> i64 {
 /// wrapper-identity signal and whose CONTENT is the runtime generation number
 /// parsed by the adoption path (`watchers::lifecycle`). The nonce lives in its
 /// own file so neither of those `.generation` consumers is perturbed.
-pub(crate) const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
+pub const SPAWN_NONCE_SUFFIX: &str = "spawn_nonce";
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) type GenerationStampBeforeCreateHook = std::sync::Arc<dyn Fn() + Send + Sync + 'static>;
@@ -290,7 +290,7 @@ fn run_spawn_markers_after_generation_hook_for_tests() {
 
 /// Validate prepared evidence and publish both markers under the source authority; generation remains best-effort.
 /// Nonce failures remove the stale destination; the v4 UUID is mtime-independent and never rewritten by live wrappers between turns.
-pub(crate) fn stamp_spawn_markers(
+pub fn stamp_spawn_markers(
     tmux_session_name: &str,
     prepared: Option<&crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation>,
 ) -> std::io::Result<String> {

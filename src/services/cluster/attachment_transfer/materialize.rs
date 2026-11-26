@@ -2,7 +2,7 @@
 use super::uploads::Upload;
 
 #[derive(Debug)]
-pub(crate) struct MaterializedUploads {
+pub struct MaterializedUploads {
     pub records: Vec<String>,
     files: Vec<MaterializedFile>,
     _directory: Option<super::temporary::Directory>,
@@ -76,7 +76,7 @@ impl MaterializedUploads {
     }
 }
 
-pub(crate) async fn prepare(
+pub async fn prepare(
     uploads: &[Upload],
     pool: Option<&sqlx::PgPool>,
 ) -> Result<MaterializedUploads, String> {

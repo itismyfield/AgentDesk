@@ -20,7 +20,7 @@ pub fn execute(request: ProviderTurnRequest, sender: Sender<StreamMessage>) -> R
     run_prepared(prepared, sender, request.timeout, request.cancel)
 }
 
-pub(crate) fn execute_recorded(
+pub fn execute_recorded(
     request: ProviderTurnRequest,
     sender: Sender<StreamMessage>,
     spool: &mut AgySpool,

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Source {
+pub struct Source {
     pub path: PathBuf,
     pub session_id: Option<String>,
     identity: SourceFileIdentity,
@@ -98,7 +98,7 @@ fn nonce(tmux: &str) -> Option<String> {
         .map(|text| text.trim().to_string())
 }
 
-pub(crate) fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
+pub fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
     if offset > file.metadata()?.len() {
         return Err(io::Error::other("Codex checkpoint beyond source"));
     }
@@ -123,12 +123,12 @@ pub(crate) fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
     Ok(0)
 }
 
-pub(crate) fn at(path: &Path, offset: u64) -> io::Result<u64> {
+pub fn at(path: &Path, offset: u64) -> io::Result<u64> {
     boundary(&mut File::open(path)?, offset)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Advance {
+pub enum Advance {
     Advanced {
         source: SourceFileIdentity,
         start: u64,
@@ -141,7 +141,7 @@ pub(crate) enum Advance {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ScanStats {
+pub struct ScanStats {
     pub assistant_records: u64,
     pub records: u64,
     pub source_bytes: u64,
@@ -150,7 +150,7 @@ pub(crate) struct ScanStats {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ObservationKind {
+pub enum ObservationKind {
     Unknown,
     Delegated,
 }
@@ -205,10 +205,10 @@ impl ScanStats {
     }
 }
 
-pub(crate) type ParkedOwnerKey = (u64, String, String, String, u64, u64);
+pub type ParkedOwnerKey = (u64, String, String, String, u64, u64);
 
 #[derive(Clone, Debug)]
-pub(crate) struct RestorePlan<C> {
+pub struct RestorePlan<C> {
     pub source: Source,
     pub input_start: u64,
     pub held: Option<C>,

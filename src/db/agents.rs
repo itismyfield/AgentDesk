@@ -154,7 +154,7 @@ impl AgentChannelBindings {
             .or_else(ProviderKind::default_channel_provider)
     }
 
-    pub(crate) fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
+    pub fn resolved_primary_provider_kind(&self) -> Option<ProviderKind> {
         self.resolved_primary_provider_kind_with_provider(self.primary_provider_kind())
     }
 
@@ -178,7 +178,7 @@ impl AgentChannelBindings {
     }
 
     /// Explicit provider columns win over the legacy primary channel.
-    pub(crate) fn provider_for_channel(
+    pub fn provider_for_channel(
         &self,
         matches: impl Fn(&str) -> bool,
     ) -> Option<ProviderKind> {

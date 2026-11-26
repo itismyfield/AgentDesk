@@ -5,18 +5,18 @@ use std::num::NonZeroU64;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct OutboundChannelId(#[serde(with = "snowflake")] NonZeroU64);
+pub struct OutboundChannelId(#[serde(with = "snowflake")] NonZeroU64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct OutboundMessageId(#[serde(with = "snowflake")] NonZeroU64);
+pub struct OutboundMessageId(#[serde(with = "snowflake")] NonZeroU64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-pub(crate) struct OutboundUserId(#[serde(with = "snowflake")] NonZeroU64);
+pub struct OutboundUserId(#[serde(with = "snowflake")] NonZeroU64);
 
 impl OutboundChannelId {
     /// Panics on zero, as the Serenity id constructors do.
     #[track_caller]
-    pub(crate) fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(NonZeroU64::new(id).expect("channel id must be non-zero"))
     }
 
@@ -27,11 +27,11 @@ impl OutboundChannelId {
 
 impl OutboundMessageId {
     #[track_caller]
-    pub(crate) fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(NonZeroU64::new(id).expect("message id must be non-zero"))
     }
 
-    pub(crate) fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0.get()
     }
 }

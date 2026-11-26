@@ -11,7 +11,7 @@ const SCAN_BLOCK_BYTES: u64 = 64 * 1024;
 
 /// The open native turn, as Enter in the composer would meet it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TurnVerdict {
+pub enum TurnVerdict {
     /// A model or manual compaction turn that can accept composer input.
     KnownModelTurn(String),
     /// A shell/review turn or a sandbox other than full access is outside this input path.
@@ -22,7 +22,7 @@ pub(crate) enum TurnVerdict {
     NotBusy,
 }
 
-pub(crate) struct TurnRead {
+pub struct TurnRead {
     pub verdict: TurnVerdict,
     pub reason: &'static str,
     pub bytes_read: u64,
@@ -37,7 +37,7 @@ pub(crate) struct TurnRead {
 /// The rollout's latest native turn as a gate that waits for its end reads it; only `Ended` is
 /// an end, from that turn's own `task_complete` or `turn_aborted`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NativeEnd {
+pub enum NativeEnd {
     Open,
     Ended,
     /// No turn start anywhere in the rollout.
@@ -79,11 +79,11 @@ fn text<'a>(value: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 /// Each verdict opens its own EOF snapshot and retains no read position between calls.
-pub(crate) fn read_turn(path: &Path) -> Option<TurnVerdict> {
+pub fn read_turn(path: &Path) -> Option<TurnVerdict> {
     read_turn_detail(path).map(|read| read.verdict)
 }
 
-pub(crate) fn read_turn_detail(path: &Path) -> Option<TurnRead> {
+pub fn read_turn_detail(path: &Path) -> Option<TurnRead> {
     let began = std::time::Instant::now();
     let read = (|| {
         let mut file = std::fs::File::open(path).ok()?;
@@ -102,12 +102,12 @@ pub(crate) fn read_turn_detail(path: &Path) -> Option<TurnRead> {
 }
 
 /// The native end of the rollout's latest turn, read back only to that turn's start.
-pub(crate) fn read_native_end(path: &Path) -> NativeEnd {
+pub fn read_native_end(path: &Path) -> NativeEnd {
     read_latest_turn(path).map_or(NativeEnd::Unknown, |read| read.end)
 }
 
 /// The rollout's latest turn with its id and record times, read back only to that turn's start.
-pub(crate) fn read_latest_turn(path: &Path) -> Option<TurnRead> {
+pub fn read_latest_turn(path: &Path) -> Option<TurnRead> {
     let mut file = std::fs::File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
     scan(path, &mut file, &metadata, |_| {}, true).ok()
@@ -454,7 +454,7 @@ fn ends(review: &Review, turn_id: Option<&str>) -> bool {
 
 /// The turn a complete user record after `offset` carrying the nonce names, the first one found.
 /// The outer Some is the sighting; the inner value is the turn id when the record names one.
-pub(crate) fn submitted(path: &Path, offset: u64, nonce: &str) -> Option<Option<String>> {
+pub fn submitted(path: &Path, offset: u64, nonce: &str) -> Option<Option<String>> {
     #[cfg(test)]
     if let Some(source) = crate::services::tui_input::human_frame::history::v2::scoped_source() {
         let source = source.ok()?;

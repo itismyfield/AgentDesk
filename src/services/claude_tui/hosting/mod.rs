@@ -14,4 +14,4 @@ pub(crate) use host_draft::FollowupHost;
 pub(crate) use warm_followup::{ClaudeTuiDraftRecoveryOutcome, ClaudeTuiRecreateState};
 pub(crate) use warm_followup::{ClaudeTuiWarmFollowupOutcome, try_claude_tui_warm_followup};
 #[cfg(unix)]
-pub(crate) use warm_followup::{busy_owner_observer, owner_observer};
+pub use warm_followup::{busy_owner_observer, owner_observer};

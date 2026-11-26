@@ -29,7 +29,7 @@ use crate::services::tui_prompt_dedupe::{
 use chrono::{DateTime, Utc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotEligible {
+pub enum NotEligible {
     NoNonceMarker,
     LegacyNonceNone,
     NonceMismatch,
@@ -39,7 +39,7 @@ pub(crate) enum NotEligible {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Unavailable {
+pub enum Unavailable {
     LogRead(io::ErrorKind),
     NonceMarkerUnreadable,
     LaunchUnreadable,
@@ -52,13 +52,13 @@ pub(crate) enum Unavailable {
 /// The pane was bound to a transcript not verified yet: only this exact path may bind it,
 /// never the newest file of the same directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ExactPathWait {
+pub struct ExactPathWait {
     pub session_id: String,
     pub transcript: PathBuf,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PendingRestore {
+pub enum PendingRestore {
     HealthyNoPending,
     Seeded {
         pending_seq: u64,
@@ -103,7 +103,7 @@ impl PendingRestore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LaunchTranscript {
+pub struct LaunchTranscript {
     pub session_id: String,
     pub transcript: PathBuf,
 }
@@ -521,7 +521,7 @@ pub(crate) fn forget_seeded_restore(tmux_session: &str) {
 }
 
 /// Whether `binding` is a transcript a restore bound before it existed; nothing may stand in.
-pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding) -> bool {
+pub fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding) -> bool {
     matches!(
         last_restore_outcome(tmux_session),
         Some(PendingRestore::BoundFromLedger { exact_wait: Some(wait), .. })
@@ -532,7 +532,7 @@ pub(crate) fn awaits_exact_path(tmux_session: &str, binding: &TuiRuntimeBinding)
 
 /// Restores `tmux_session`'s durable Pending before the rehydrate pass judges its binding; `None`
 /// is a bound pane whose restore already settled. `bind` builds a transcript's binding.
-pub(crate) fn restore_claude_pane(
+pub fn restore_claude_pane(
     tmux_session: &str,
     channel_id: u64,
     launch: Option<LaunchTranscript>,

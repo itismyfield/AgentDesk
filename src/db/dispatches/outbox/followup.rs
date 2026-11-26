@@ -2,7 +2,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 use super::model::CompletedDispatchInfo;
 
-pub(crate) async fn load_completed_dispatch_info_pg(
+pub async fn load_completed_dispatch_info_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<Option<CompletedDispatchInfo>, String> {
@@ -57,7 +57,7 @@ pub(crate) async fn load_completed_dispatch_info_pg(
     .transpose()
 }
 
-pub(crate) async fn load_card_status_pg(
+pub async fn load_card_status_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<String>, String> {
@@ -73,7 +73,7 @@ pub(crate) async fn load_card_status_pg(
     .transpose()
 }
 
-pub(crate) async fn clear_all_dispatch_threads_pg(
+pub async fn clear_all_dispatch_threads_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<(), String> {

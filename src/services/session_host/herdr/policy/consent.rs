@@ -4,7 +4,7 @@ use super::{
     super::contract::ServerWitness,
     durable::{self, Directory},
 };
-pub(crate) use crate::domain::intake_consent::IntentRef;
+pub use crate::domain::intake_consent::IntentRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
@@ -16,7 +16,7 @@ const PRE_RETURN_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConsentKey {
+pub struct ConsentKey {
     pub node: String,
     pub user: u32,
     // Use the registry endpoint's socket_path verbatim; do not introduce a second alias policy.
@@ -62,7 +62,7 @@ impl ConsentKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Preview {
+pub struct Preview {
     pub revision: u64,
     #[serde(with = "super::witness_codec")]
     pub witness: ServerWitness,
@@ -72,7 +72,7 @@ pub(crate) struct Preview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum State {
+pub enum State {
     Pending,
     Denied,
     Expired,
@@ -117,7 +117,7 @@ pub(crate) struct ApplyResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Consent {
+pub struct Consent {
     schema: u32,
     pub key: ConsentKey,
     pub preview: Preview,
@@ -191,7 +191,7 @@ struct IntentPreview {
     preview: Preview,
 }
 
-pub(crate) struct Question {
+pub struct Question {
     pub key: ConsentKey,
     pub preview: Preview,
     pub owner: u64,
@@ -202,7 +202,7 @@ pub(crate) struct Question {
     pub intent: IntentRef,
 }
 
-pub(crate) struct ConsentStore(Directory);
+pub struct ConsentStore(Directory);
 impl ConsentStore {
     pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))
@@ -675,15 +675,15 @@ impl ConsentStore {
     }
 }
 
-pub(crate) mod settlement;
-pub(crate) mod workflow;
+pub mod settlement;
+pub mod workflow;
 
 #[cfg(test)]
 #[path = "consent_tests.rs"]
 mod tests;
 
 pub(crate) mod apply_owner;
-pub(crate) mod boot_recovery;
-pub(crate) mod card;
-pub(crate) mod engine;
-pub(crate) mod preview;
+pub mod boot_recovery;
+pub mod card;
+pub mod engine;
+pub mod preview;

@@ -379,7 +379,7 @@ impl BootChannels {
     }
 
     /// Called once per shared view before provider dispatch; recorded relationships need no REST.
-    pub(crate) fn refresh_child_records(&self) {
+    pub fn refresh_child_records(&self) {
         if self
             .children
             .entries
@@ -393,7 +393,7 @@ impl BootChannels {
             .refresh_records(self, crate::config::runtime_root().as_deref());
     }
 
-    pub(crate) fn configured_binding(&self, channel: u64) -> bool {
+    pub fn configured_binding(&self, channel: u64) -> bool {
         self.bindings.contains(&channel)
     }
 
@@ -473,7 +473,7 @@ impl BootChannels {
     }
 
     /// The channel whose boot policy governs `channel`: a child's parent, or the channel itself.
-    pub(crate) fn policy_channel(&self, channel: u64) -> u64 {
+    pub fn policy_channel(&self, channel: u64) -> u64 {
         match self.child(channel) {
             Some(Ok(child)) => child.parent,
             _ => channel,

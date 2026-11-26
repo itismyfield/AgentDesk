@@ -3,7 +3,7 @@ use crate::config::{ClusterIntakeRoutingConfig, ClusterIntakeRoutingMode};
 /// How aggressively to apply the Phase-2 routing decision in front of
 /// the existing leader intake path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingMode {
+pub enum IntakeRoutingMode {
     /// Hook is a no-op; the leader runs every intake locally as today.
     /// Default until Phase 5 flips the global flag — keeps prod
     /// behaviour byte-identical while phases 1-4 land.
@@ -79,7 +79,7 @@ impl IntakeRoutingEnvOverride {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OwnerAuthorityChannelOptIn {
+pub enum OwnerAuthorityChannelOptIn {
     OptedIn,
     NotOptedIn,
     Unknown,
@@ -96,8 +96,8 @@ impl OwnerAuthorityChannelOptIn {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EffectiveIntakeRoutingConfig {
-    pub(crate) mode: IntakeRoutingMode,
+pub struct EffectiveIntakeRoutingConfig {
+    pub mode: IntakeRoutingMode,
     pub(crate) source: IntakeRoutingModeSource,
     pub(crate) yaml_enabled: bool,
     pub(crate) yaml_mode: ClusterIntakeRoutingMode,
@@ -105,14 +105,14 @@ pub(crate) struct EffectiveIntakeRoutingConfig {
     pub(crate) warnings: Vec<&'static str>,
     pub(crate) owner_authority_channel_ids: Vec<String>,
     pub(crate) owner_authority_config_known: bool,
-    pub(crate) forward_pre_claim_timeout_secs: u64,
+    pub forward_pre_claim_timeout_secs: u64,
     pub(crate) stale_claim_recovery_secs: u64,
     pub(crate) max_attempts_per_message: u32,
     pub(crate) retry_authorization_secs: u64,
 }
 
 impl EffectiveIntakeRoutingConfig {
-    pub(crate) fn mode_is_enforce(&self) -> bool {
+    pub fn mode_is_enforce(&self) -> bool {
         matches!(self.mode, IntakeRoutingMode::Enforce)
     }
 
@@ -120,7 +120,7 @@ impl EffectiveIntakeRoutingConfig {
         !matches!(self.mode, IntakeRoutingMode::Disabled)
     }
 
-    pub(crate) fn owner_authority_channel_opt_in(
+    pub fn owner_authority_channel_opt_in(
         &self,
         channel_id: &str,
     ) -> OwnerAuthorityChannelOptIn {
@@ -216,7 +216,7 @@ fn effective_intake_routing_config_for(
     effective_intake_routing_config_for_with_known(config, env_override, true)
 }
 
-pub(crate) fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig {
+pub fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig {
     let (config, owner_authority_config_known) = match crate::config::snapshot() {
         Some(config) => (config.cluster.intake_routing.clone(), true),
         None => {
@@ -234,7 +234,7 @@ pub(crate) fn effective_intake_routing_config() -> EffectiveIntakeRoutingConfig 
     )
 }
 
-pub(crate) fn intake_routing_status_json() -> serde_json::Value {
+pub fn intake_routing_status_json() -> serde_json::Value {
     effective_intake_routing_config().status_json()
 }
 

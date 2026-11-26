@@ -14,7 +14,7 @@ pub(super) mod managed_empty;
 /// Share the native tail's parser and explicit completion policy without its
 /// polling, prompt observation, or heuristic EOF completion.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct RolloutRecordDecoder(RolloutParseState);
+pub struct RolloutRecordDecoder(RolloutParseState);
 
 impl RolloutRecordDecoder {
     pub(crate) fn is_native_record(record: &Value) -> bool {
@@ -74,7 +74,7 @@ impl RolloutRecordDecoder {
 /// Detached terminal recovery uses the native parser and its existing fallback
 /// text policy. Missing completion/text remains unknown, just as the live
 /// explicit-completion schema-drift guard requires.
-pub(crate) fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
+pub fn recover_captured_rollout_response(bytes: &[u8]) -> Result<String, String> {
     RolloutRecordDecoder::from_reader(bytes)?.completed_response()
 }
 

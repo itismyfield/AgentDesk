@@ -49,7 +49,7 @@ pub use emit::{
 // reports are WARN lines plus observability events, never Discord messages.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use relay_signal_alert::idle_cleanup_preserved_count;
-pub(crate) use relay_signal_alert::{
+pub use relay_signal_alert::{
     record_idle_cleanup_preserved, report_relay_signal_threshold_crossings_pg,
 };
 
@@ -109,7 +109,7 @@ pub(super) struct RelaySignal {
 /// must be the SAME string: `relay_signal_alert` matches `status` exactly and has
 /// no wildcard, so a drifted key silences the alert instead of failing anything.
 /// Both sides read this symbol, which makes the match structural.
-pub(super) const LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT: &str =
+pub const LIVE_TURN_PROVEN_BY_PROGRESS_INVARIANT: &str =
     "live_turn_proven_by_progress_not_presence";
 
 /// Canonical relay-loss signal table monitored by the #3561 operator alert

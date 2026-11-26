@@ -131,7 +131,7 @@ impl DecisionGateConfig {
     }
 }
 
-pub(crate) fn normalize_repository(raw: &str) -> Option<String> {
+pub fn normalize_repository(raw: &str) -> Option<String> {
     let value = raw.trim().to_ascii_lowercase();
     let value = match value.as_str() {
         "adk" => "itismyfield/agentdesk",

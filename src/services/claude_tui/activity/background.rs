@@ -6,13 +6,13 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Background {
+pub enum Background {
     Unknown,
     ChildPending,
     Clear,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Child {
+pub struct Child {
     pub tool_id: String,
     pub tool_name: String,
     pub agent_id: Option<String>,

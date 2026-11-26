@@ -20,10 +20,10 @@ use probe::matcher::ObservedMessage;
 
 // The read-only reader, declared beside its reads so it stays dormant with them.
 #[path = "../../tui_o/repost/probe.rs"]
-pub(crate) mod probe;
+pub mod probe;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Unsupported {
+pub enum Unsupported {
     /// Without the gateway's limiter there are no route buckets to share.
     NoRatelimiter,
     /// Legacy ignores the proxy while a limiter is set, so the two would reach different hosts.
@@ -31,7 +31,7 @@ pub(crate) enum Unsupported {
     Client(String),
 }
 
-pub(crate) struct RepostHttp {
+pub struct RepostHttp {
     http: Arc<serenity::Http>,
     client: reqwest::Client,
     pub(crate) base: Option<String>,

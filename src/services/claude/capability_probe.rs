@@ -37,7 +37,7 @@ struct Applied {
 
 /// Whether a launch of `model` under `home` in `cwd` can turn ultracode on. A launch folder that
 /// is not known, a probe that fails and an answer that does not add up are all unknown.
-pub(crate) fn ultracode_available(
+pub fn ultracode_available(
     model: Option<&str>,
     home: Option<&Path>,
     cwd: Option<&Path>,

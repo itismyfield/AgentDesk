@@ -190,7 +190,7 @@ fn semantic_sentence_split_boundary_from(text: &str, starts_in_code_block: bool)
     boundary
 }
 
-pub(crate) fn semantic_sentence_split_boundary(text: &str) -> Option<usize> {
+pub fn semantic_sentence_split_boundary(text: &str) -> Option<usize> {
     semantic_sentence_split_boundary_from(text, false)
 }
 
@@ -214,7 +214,7 @@ pub(crate) fn message_split_boundary(
 /// `trim_start().starts_with("```")`) — the same toggle
 /// `chunk_compose::streamed_text_inside_open_code_fence` mirrors on the #3608
 /// streaming path.
-pub(crate) fn text_ends_inside_open_code_fence(text: &str) -> bool {
+pub fn text_ends_inside_open_code_fence(text: &str) -> bool {
     let mut in_code_block = false;
     for line in text.lines() {
         if line_starts_code_fence(line) {
@@ -224,7 +224,7 @@ pub(crate) fn text_ends_inside_open_code_fence(text: &str) -> bool {
     in_code_block
 }
 
-pub(crate) fn semantic_chunk_separator_needed(prefix: &str, incoming: &str) -> bool {
+pub fn semantic_chunk_separator_needed(prefix: &str, incoming: &str) -> bool {
     if prefix.is_empty()
         || incoming.is_empty()
         || prefix.chars().last().is_some_and(char::is_whitespace)

@@ -13,7 +13,7 @@ const QUIET_START_HOUR: i64 = 23;
 const QUIET_END_HOUR: i64 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NoticeClass {
+pub enum NoticeClass {
     /// Tool cards, input echoes, recaps, rollovers, lifecycle and watchdog notices.
     Progress,
     /// Notices nobody asked for, such as operational alerts.
@@ -24,7 +24,7 @@ pub(crate) enum NoticeClass {
     Reminder,
 }
 
-pub(crate) fn outbox_class(source: &str, reason_code: Option<&str>) -> NoticeClass {
+pub fn outbox_class(source: &str, reason_code: Option<&str>) -> NoticeClass {
     match (source.trim(), reason_code.map(str::trim)) {
         ("headless_turn", _) => NoticeClass::Answer,
         ("scheduled_message", _) => NoticeClass::Reminder,
@@ -48,7 +48,7 @@ pub(crate) fn outbox_class(source: &str, reason_code: Option<&str>) -> NoticeCla
     }
 }
 
-pub(crate) fn unit_class(kind: UnitKind) -> NoticeClass {
+pub fn unit_class(kind: UnitKind) -> NoticeClass {
     match kind {
         UnitKind::Body => NoticeClass::Answer,
         UnitKind::Tool | UnitKind::ToolResult | UnitKind::InputNotice | UnitKind::Recap => {
@@ -97,14 +97,14 @@ tokio::task_local! {
 }
 
 /// Runs `send` with `class`; every Discord post it makes is judged against its resolved channel.
-pub(crate) fn scoped<F: std::future::Future>(
+pub fn scoped<F: std::future::Future>(
     class: NoticeClass,
     send: F,
 ) -> impl std::future::Future<Output = F::Output> {
     SCOPE.scope(class, send)
 }
 
-pub(crate) fn progress<F: std::future::Future>(
+pub fn progress<F: std::future::Future>(
     send: F,
 ) -> impl std::future::Future<Output = F::Output> {
     scoped(NoticeClass::Progress, send)
@@ -118,11 +118,11 @@ pub(crate) fn scoped_suppresses(channel: u64) -> bool {
 }
 
 /// `message` for `channel` carrying the current scope's push decision.
-pub(crate) fn scoped_flags(channel: u64, message: CreateMessage) -> CreateMessage {
+pub fn scoped_flags(channel: u64, message: CreateMessage) -> CreateMessage {
     silence(message, scoped_suppresses(channel))
 }
 
-pub(crate) fn scoped_message(channel: u64) -> CreateMessage {
+pub fn scoped_message(channel: u64) -> CreateMessage {
     scoped_flags(channel, CreateMessage::new())
 }
 

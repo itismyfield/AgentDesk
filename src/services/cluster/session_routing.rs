@@ -12,7 +12,7 @@ fn normalize_api_base_url(raw: &str) -> Option<String> {
     }
 }
 
-pub(crate) fn resolve_worker_api_base_url(config: &ClusterConfig) -> Option<String> {
+pub fn resolve_worker_api_base_url(config: &ClusterConfig) -> Option<String> {
     if let Some(raw) = config.api_base_url.as_deref() {
         return normalize_api_base_url(raw);
     }
@@ -121,7 +121,7 @@ pub(crate) fn session_owner_routing_status(
     })
 }
 
-pub(crate) fn enrich_session_owner_routing(
+pub fn enrich_session_owner_routing(
     sessions: &mut [Value],
     local_instance_id: Option<&str>,
     worker_nodes: &[Value],

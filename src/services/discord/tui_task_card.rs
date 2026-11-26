@@ -44,7 +44,7 @@ const RESULT_PREVIEW_TRUNCATED_MARKER: &str = "… (truncated)";
 /// content and the exact tag set varies (some repeats omit `<tool-use-id>`,
 /// `<output-file>` is hidden by default, `result` may be Markdown or JSON).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct TaskNotification {
+pub struct TaskNotification {
     pub task_id: Option<String>,
     /// The launching tool's `tool_use_id` (e.g. `toolu_…`). Hyphenated child tag
     /// in live payloads; the panel slot key the #3393 terminal bridge pairs on.
@@ -75,7 +75,7 @@ pub(super) struct TaskNotification {
 /// and attributes are ignored. Returns the parsed fields; callers decide how to
 /// render. `output-file` is intentionally NOT surfaced (hidden by default per
 /// the issue) so it is not stored here.
-pub(super) fn parse_task_notification(raw: &str) -> TaskNotification {
+pub fn parse_task_notification(raw: &str) -> TaskNotification {
     let text = strip_terminal_controls(raw);
     let trimmed = text.trim();
     // #3169 (codex R3/R5): the real `<usage>`/`<duration>` are top-level children
@@ -207,7 +207,7 @@ fn extract_one_tag(haystack: &str, name: &str) -> Option<String> {
 }
 
 mod completion_card;
-pub(super) use completion_card::{format_legacy, format_task_notification_card};
+pub use completion_card::{format_legacy, format_task_notification_card};
 
 /// Quoted reports retain a completion card; Monitor events keep their legacy card bytes.
 pub(super) fn has_completion_body(note: &TaskNotification) -> bool {
@@ -223,7 +223,7 @@ pub(super) fn has_completion_body(note: &TaskNotification) -> bool {
             .is_some_and(|result| !result.trim().is_empty())
 }
 
-pub(super) fn status_icon(status: &str) -> &'static str {
+pub fn status_icon(status: &str) -> &'static str {
     match status.trim().to_ascii_lowercase().as_str() {
         "completed" | "complete" | "done" | "success" | "succeeded" => "✅",
         "failed" | "error" | "errored" => "❌",
@@ -468,7 +468,7 @@ fn blockquote_preview(preview: &str, first_line_prefix: &str) -> String {
     truncate_preview_at_boundary(&rendered, RESULT_PREVIEW_BUDGET)
 }
 
-pub(super) fn clamp_discord_message_content(value: &str) -> String {
+pub fn clamp_discord_message_content(value: &str) -> String {
     truncate_preview_at_boundary(value, DISCORD_MESSAGE_LIMIT_UNITS)
 }
 
@@ -556,7 +556,7 @@ fn extract_pr_urls(result: &str) -> Vec<String> {
 /// NOTE: does NOT decode entities — that is a per-field concern applied once at
 /// the point each prose field enters the card (#4338). This helper runs per
 /// preview LINE, so decoding here would double-decode an already-decoded result.
-pub(super) fn sanitize_oneline(value: &str) -> String {
+pub fn sanitize_oneline(value: &str) -> String {
     value
         .replace('\r', " ")
         .replace('\n', " ")
@@ -596,7 +596,7 @@ fn sanitize_multiline(value: &str) -> String {
 /// single left-to-right scan that never re-examines emitted output guarantees the
 /// single-layer property independent of entity ordering (`&amp;lt;` → `&lt;`, not
 /// `<`). Unrecognized `&…;` sequences and bare `&` pass through verbatim.
-pub(super) fn decode_entities_once(input: &str) -> String {
+pub fn decode_entities_once(input: &str) -> String {
     // Fast path: nothing to decode (also preserves exact bytes for the common
     // no-entity case).
     if !input.contains('&') {
@@ -664,7 +664,7 @@ fn decode_entity_body(body: &str) -> Option<char> {
 /// Char-bounded truncation appending `...` (ASCII) on overflow. Shared with the
 /// SSH-direct / continuation formatters in `tui_prompt_relay` (#3075 consolidated
 /// the duplicate helper here).
-pub(super) fn truncate_chars_ascii(value: &str, limit: usize) -> String {
+pub fn truncate_chars_ascii(value: &str, limit: usize) -> String {
     let mut chars = value.chars();
     let truncated = chars.by_ref().take(limit).collect::<String>();
     if chars.next().is_some() {
@@ -678,7 +678,7 @@ pub(super) fn truncate_chars_ascii(value: &str, limit: usize) -> String {
 /// `<task-notification>` tag, preserving newlines/tabs. Shared sanitizer so the
 /// relay's classifier, the SSH-direct/continuation formatters, and this card
 /// parser all see the same clean text (#3075 consolidated the duplicate).
-pub(super) fn strip_terminal_controls(value: &str) -> String {
+pub fn strip_terminal_controls(value: &str) -> String {
     crate::services::tui_prompt_control::strip_terminal_controls(value)
 }
 

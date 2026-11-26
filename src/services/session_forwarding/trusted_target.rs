@@ -12,7 +12,7 @@ use crate::config::{ClusterConfig, ClusterNodeConfig};
 const FORWARD_TIMEOUT_SECS: u64 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TrustedTargetError {
+pub enum TrustedTargetError {
     MissingConfig,
     InvalidConfiguredOrigin,
     InvalidAdvertisedOrigin,
@@ -67,7 +67,7 @@ impl TrustedTargetError {
 }
 
 #[derive(Clone)]
-pub(crate) struct TrustedForwardTarget {
+pub struct TrustedForwardTarget {
     owner_instance_id: String,
     origin: Url,
     client: reqwest::Client,
@@ -165,7 +165,7 @@ impl ForwardDnsResolver for SystemForwardDnsResolver {
     }
 }
 
-pub(crate) async fn build_trusted_target(
+pub async fn build_trusted_target(
     cluster: &ClusterConfig,
     owner_instance_id: &str,
     advertised_origin: &str,

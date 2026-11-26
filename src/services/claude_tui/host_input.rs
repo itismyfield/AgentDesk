@@ -3,9 +3,9 @@
 //! Herdr pane takes them only through its own gate.
 
 #[cfg(unix)]
-pub(crate) mod busy;
+pub mod busy;
 #[cfg(unix)]
-pub(crate) use busy::{BusyOperation, BusyOutcome};
+pub use busy::{BusyOperation, BusyOutcome};
 mod transport;
 pub(crate) use transport::InputTransport;
 
@@ -27,7 +27,7 @@ use crate::services::tmux_common::tmux_capture_indicates_claude_tui_interactive_
 use std::process::Output;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InputTarget {
+pub enum InputTarget {
     /// A confirmed tmux session.
     Tmux(String),
     /// A recorded Herdr pane; it takes keys only through its own gate.
@@ -36,7 +36,7 @@ pub(crate) enum InputTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InputRefusal {
+pub enum InputRefusal {
     Unsupported(HostKind),
     Unknown,
     /// The readiness budget ended on an idle source that proves no boundary; no look clears it.
@@ -356,7 +356,7 @@ fn with_transport<R>(operation: impl FnOnce(&mut dyn InputTransport) -> R) -> R 
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum InputRun {
+pub enum InputRun {
     Applied,
     /// Nothing reached the pane.
     Refused(InputRefusal),
@@ -371,14 +371,14 @@ pub(crate) enum InputRun {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum StopCause {
+pub enum StopCause {
     Refused(InputRefusal),
     Send(String),
 }
 
 impl InputRun {
     /// The `Result` legacy tmux callers return, with their original error text.
-    pub(crate) fn into_legacy(self) -> Result<(), String> {
+    pub fn into_legacy(self) -> Result<(), String> {
         match self {
             Self::Applied => Ok(()),
             Self::Cancelled { .. } => Err(PROMPT_READY_CANCELLED_ERROR.to_string()),
@@ -663,7 +663,7 @@ fn ensure_named_success(output: Output, name: &str) -> Result<(), String> {
 
 /// A plan on a Herdr pane: its own gate admits each write and pins the server for it.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn run_herdr(
+pub fn run_herdr(
     target: &HerdrTarget,
     actions: &[TuiInputAction],
     cancel_token: Option<&CancelToken>,
@@ -697,7 +697,7 @@ pub(crate) fn capture_draft_with(
 }
 
 /// The legacy tmux session as the draft-protection reader needs it.
-pub(crate) fn observe_draft(session_name: &str) -> Option<String> {
+pub fn observe_draft(session_name: &str) -> Option<String> {
     with_transport(|transport| transport.capture_draft(session_name))
 }
 
@@ -740,7 +740,7 @@ pub(crate) fn legacy_write(
 /// A pane read; `Truncated` is a host saying it cut the text.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostCapture {
+pub enum HostCapture {
     Complete(String),
     Truncated,
     Unavailable,
@@ -748,7 +748,7 @@ pub(crate) enum HostCapture {
 
 /// Executor result a follow-up consumes; never folded into a generic error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostInputOutcome {
+pub enum HostInputOutcome {
     Cleared,
     ReadySameExecution,
     Busy,
@@ -798,7 +798,7 @@ impl HostInputOutcome {
 /// Readiness from one observation. A blind, truncated or failed read is never
 /// ready, and only a confirmed tmux session that reads dead may be recreated.
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn classify(
+pub fn classify(
     target: &InputTarget,
     liveness: SessionLiveness,
     capture: &HostCapture,

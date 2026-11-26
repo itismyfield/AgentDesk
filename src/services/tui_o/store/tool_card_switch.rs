@@ -17,21 +17,21 @@ const MAX_BYTES: u64 = 4 << 10;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Override {
+pub struct Override {
     schema: u32,
     pub enabled: bool,
     pub by: u64,
     pub at: DateTime<Utc>,
 }
 
-pub(crate) type Value = Result<Option<Override>, String>;
+pub type Value = Result<Option<Override>, String>;
 type Versions = HashMap<(PathBuf, u64), watch::Sender<Value>>;
 static VERSIONS: LazyLock<Mutex<Versions>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 static WRITE: Mutex<()> = Mutex::new(());
 
 /// An error before publication changes nothing; a rename followed by a failed sync is distinct.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Published {
+pub enum Published {
     Durable,
     PublishedUnsynced(String),
 }
@@ -74,17 +74,17 @@ fn sender(root: &Path, channel: u64) -> watch::Sender<Value> {
         .clone()
 }
 
-pub(crate) fn status(root: &Path, channel: u64) -> Value {
+pub fn status(root: &Path, channel: u64) -> Value {
     sender(root, channel).borrow().clone()
 }
 
-pub(crate) fn global_enabled() -> bool {
+pub fn global_enabled() -> bool {
     crate::config_live_reload::current()
         .and_then(|config| config.tui_o.as_ref().map(|o| o.tool_cards.enabled))
         .unwrap_or(true)
 }
 
-pub(crate) fn effective(global: bool, value: &Value) -> bool {
+pub fn effective(global: bool, value: &Value) -> bool {
     global
         && value
             .as_ref()
@@ -126,7 +126,7 @@ impl ToolCardSwitch {
     }
 }
 
-pub(crate) fn set(root: &Path, channel: u64, enabled: bool, by: u64) -> Result<Published, String> {
+pub fn set(root: &Path, channel: u64, enabled: bool, by: u64) -> Result<Published, String> {
     let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     let value = Override {
         schema: 1,

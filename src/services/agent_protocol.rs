@@ -508,7 +508,7 @@ impl StatusTodoStatus {
     }
 }
 
-pub(crate) fn status_events_from_workflow_json(value: &Value) -> Vec<StatusEvent> {
+pub fn status_events_from_workflow_json(value: &Value) -> Vec<StatusEvent> {
     match value.get("type").and_then(Value::as_str).unwrap_or("") {
         "system" => workflow_system_status_events(value),
         "workflow_phase" => workflow_phase_status_event(value, workflow_task_id(value))
@@ -668,6 +668,6 @@ pub(crate) fn session_id_regex() -> &'static Regex {
 /// Leading dashes are rejected so a session id can never be interpreted as a
 /// provider CLI flag when appended after `--resume`/`--resume-session-id`.
 /// Max length reduced to 64 characters for security.
-pub(crate) fn is_valid_session_id(session_id: &str) -> bool {
+pub fn is_valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
 }

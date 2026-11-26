@@ -6,28 +6,28 @@ use crate::db::session_agent_resolution::normalize_thread_channel_id;
 
 #[path = "dispatched_sessions/listing.rs"]
 mod listing;
-pub(crate) use listing::{DispatchedSessionSnapshot, list_dispatched_session_snapshots_pg};
+pub use listing::{DispatchedSessionSnapshot, list_dispatched_session_snapshots_pg};
 
 #[path = "dispatched_sessions/force_kill.rs"]
 mod force_kill;
 #[path = "dispatched_sessions/hosted_execution.rs"]
-pub(crate) mod hosted_execution;
+pub mod hosted_execution;
 #[path = "dispatched_sessions/provider_resume_fence.rs"]
-pub(crate) mod provider_resume_fence;
+pub mod provider_resume_fence;
 #[cfg(unix)]
 #[path = "dispatched_sessions/rotation_selector.rs"]
-pub(crate) mod rotation_selector;
+pub mod rotation_selector;
 #[cfg(unix)]
-pub(crate) use force_kill::{
+pub use force_kill::{
     ForceKillHosted, load_force_kill_session_hosted_pg, prepare_force_kill_retry_pg,
 };
-pub(crate) use force_kill::{
+pub use force_kill::{
     disconnect_session_and_prepare_retry_pg, fail_force_killed_dispatch_without_retry_pg,
     load_force_kill_session_pg,
 };
 #[path = "dispatched_sessions/thread_gc.rs"]
 mod thread_gc;
-pub(crate) use thread_gc::{
+pub use thread_gc::{
     delete_stale_thread_cleanup_row_pg, load_stale_thread_cleanup_rows_pg, thread_session_exists_pg,
 };
 
@@ -41,7 +41,7 @@ async fn resolve_session_locator_pg(
         .map_err(|error| format!("resolve {operation} locator: {error:?}"))
 }
 
-pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
+pub async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Option<String> {
     let thread_id = sqlx::query_scalar::<_, Option<String>>(
         "SELECT thread_id FROM task_dispatches WHERE id = $1",
     )
@@ -55,12 +55,12 @@ pub(crate) async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str)
 }
 
 #[derive(Debug)]
-pub(crate) struct RetryDispatchMeta {
-    pub(crate) origin_dispatch_id: String,
-    pub(crate) card_id: String,
+pub struct RetryDispatchMeta {
+    pub origin_dispatch_id: String,
+    pub card_id: String,
     pub(crate) to_agent_id: Option<String>,
-    pub(crate) dispatch_type: Option<String>,
-    pub(crate) title: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub title: Option<String>,
     pub(crate) context: Option<String>,
     pub(crate) retry_count: i64,
 }
@@ -77,7 +77,7 @@ pub(crate) struct RetryDispatchMeta {
 /// behind a live-pane check, an instance-id guard, and a dedupe-mirror agreement
 /// check before promoting it; this function is read-only and never authoritative
 /// on its own.
-pub(crate) async fn load_session_channel_id_pg(
+pub async fn load_session_channel_id_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<(u64, Option<String>)>, String> {
@@ -125,15 +125,15 @@ pub(crate) async fn load_session_channel_id_pg(
 /// can refuse to rebind a channel with in-flight dispatch work), plus the
 /// currently-bound `cwd` and `claude_session_id` that the rebind will replace.
 /// `Ok(None)` means no session row exists for `session_key`.
-pub(crate) struct SessionRebindContext {
+pub struct SessionRebindContext {
     pub(crate) resolved_session_key: String,
     pub(crate) session_id: i64,
     pub(crate) active_dispatch_id: Option<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) claude_session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub claude_session_id: Option<String>,
 }
 
-pub(crate) async fn load_session_rebind_context_pg(
+pub async fn load_session_rebind_context_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<SessionRebindContext>, String> {
@@ -189,7 +189,7 @@ pub(crate) async fn load_session_rebind_context_pg(
 /// doing so would repoint two channels at one session id and thrash their
 /// bindings (the #2843 live-binding hazard). A rotated/superseded prior session
 /// is not in this set (its row was overwritten), so it stays selectable.
-pub(crate) async fn load_live_bound_session_ids_pg(
+pub async fn load_live_bound_session_ids_pg(
     pool: &PgPool,
 ) -> Result<std::collections::HashSet<String>, String> {
     let rows = sqlx::query_scalar::<_, Option<String>>(
@@ -250,7 +250,7 @@ pub(crate) async fn rebind_session_provider_pg(
     .map_err(|error| format!("rebind session {session_key} provider binding: {error}"))
 }
 
-pub(crate) async fn rebind_session_provider_by_id_pg(
+pub async fn rebind_session_provider_by_id_pg(
     pool: &PgPool,
     session_id: i64,
     target_cwd: &str,
@@ -438,7 +438,7 @@ async fn load_retry_owner_on_pg_tx(
 
 /// Retry ownership taken before the origin dispatch fails: the d1 retry token, the
 /// entry owner's run token and the context-owner publication guard.
-pub(crate) struct RetryDispatchClaim {
+pub struct RetryDispatchClaim {
     owner_before_failed_sync: Option<RetryAutoQueueOwner>,
 }
 
@@ -450,7 +450,7 @@ impl RetryDispatchClaim {
     }
 }
 
-pub(crate) async fn claim_retry_dispatch_on_pg_tx(
+pub async fn claim_retry_dispatch_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
 ) -> Result<RetryDispatchClaim, String> {
@@ -482,7 +482,7 @@ pub(crate) async fn claim_retry_dispatch_on_pg_tx(
 
 /// Replacement dispatch rows and entry re-attachment once the origin dispatch failed on
 /// the same tx.
-pub(crate) async fn attach_retry_dispatch_on_pg_tx(
+pub async fn attach_retry_dispatch_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
     claim: RetryDispatchClaim,
@@ -1305,7 +1305,7 @@ pub(crate) mod selector_cleanup_tests {
     }
 }
 
-pub(crate) async fn load_session_event_payload_pg(
+pub async fn load_session_event_payload_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -1380,7 +1380,7 @@ pub(crate) async fn load_session_event_payload_pg(
     })))
 }
 
-pub(crate) async fn load_agent_status_payload_pg(
+pub async fn load_agent_status_payload_pg(
     pool: &PgPool,
     agent_id: &str,
     session_key: &str,
@@ -1434,7 +1434,7 @@ pub(crate) async fn load_agent_status_payload_pg(
     })))
 }
 
-pub(crate) async fn load_session_update_payload_pg(
+pub async fn load_session_update_payload_pg(
     pool: &PgPool,
     id: i64,
 ) -> Result<Option<serde_json::Value>, String> {
@@ -1505,7 +1505,7 @@ pub(crate) async fn load_session_update_payload_pg(
 /// Sibling of `mark_session_disconnected_for_idle_cleanup` in the discord
 /// module (in-memory expiry path); both preserve selectors but guard differently.
 /// Returns true if a row transitioned.
-pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
+pub async fn reconcile_orphaned_tmuxless_session_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> bool {
@@ -1549,7 +1549,7 @@ pub(crate) async fn reconcile_orphaned_tmuxless_session_pg(
 /// Used by the kill-time live-activity guard (#3053) to compare against runtime
 /// file mtimes (relay output / generation marker / provider transcript).
 /// `None` when the row is absent or the timestamp cannot be decoded.
-pub(crate) async fn session_last_seen_unix_nanos_pg(
+pub async fn session_last_seen_unix_nanos_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Option<i64> {
@@ -1571,7 +1571,7 @@ pub(crate) async fn session_last_seen_unix_nanos_pg(
 /// Refresh `sessions.last_heartbeat` to the exact runtime activity timestamp.
 /// This keeps idle cleanup anchored to "last output" rather than the later
 /// cleanup tick that noticed the missed heartbeat.
-pub(crate) async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
+pub async fn refresh_session_heartbeat_by_key_to_unix_nanos_pg(
     pool: &PgPool,
     session_key: &str,
     unix_nanos: i64,
@@ -1684,7 +1684,7 @@ pub async fn gc_stale_fixed_working_sessions_db_pg(pool: &PgPool) -> usize {
     }
 }
 
-pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
+pub async fn disconnect_stale_fixed_session_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> usize {
@@ -1770,7 +1770,7 @@ pub(crate) async fn disconnect_stale_fixed_session_by_key_pg(
         }
     }
 }
-pub(crate) async fn load_session_by_id_pg(
+pub async fn load_session_by_id_pg(
     pool: &PgPool,
     id: i64,
 ) -> Result<
@@ -1816,7 +1816,7 @@ pub(crate) async fn load_session_by_id_pg(
     Ok(Some((session_key, agent_id, provider, status, instance_id)))
 }
 
-pub(crate) struct HookSessionUpsert<'a> {
+pub struct HookSessionUpsert<'a> {
     pub(crate) session_key: &'a str,
     pub(crate) instance_id: Option<&'a str>,
     pub(crate) agent_id: Option<&'a str>,
@@ -1844,23 +1844,23 @@ pub(crate) struct HookSessionUpsert<'a> {
     pub(crate) dispatched_origin: bool,
 }
 
-pub(crate) struct DeleteSessionResult {
-    pub(crate) session_id: Option<i64>,
-    pub(crate) deleted: u64,
+pub struct DeleteSessionResult {
+    pub session_id: Option<i64>,
+    pub deleted: u64,
 }
 
-pub(crate) struct ProviderSessionIds {
-    pub(crate) resolved_session_key: String,
-    pub(crate) claude_session_id: Option<String>,
-    pub(crate) raw_provider_session_id: Option<String>,
-    pub(crate) cwd: Option<String>,
+pub struct ProviderSessionIds {
+    pub resolved_session_key: String,
+    pub claude_session_id: Option<String>,
+    pub raw_provider_session_id: Option<String>,
+    pub cwd: Option<String>,
     pub(crate) cache_entry_age_secs: Option<i64>,
     pub(crate) raw_provider_transcript_len_watermark: Option<i64>,
     pub(crate) raw_provider_transcript_watermark_session_id: Option<String>,
     pub(crate) raw_provider_transcript_growth_proven: bool,
 }
 
-pub(crate) struct UpdateSessionParams<'a> {
+pub struct UpdateSessionParams<'a> {
     pub(crate) status: Option<&'a str>,
     pub(crate) active_dispatch_id: Option<&'a str>,
     pub(crate) model: Option<&'a str>,
@@ -1889,7 +1889,7 @@ pub(crate) async fn upsert_hook_session_pg(
 }
 
 /// Applies an explicit delete after the service judged markers outside the row lock.
-pub(crate) async fn apply_session_delete_pg(
+pub async fn apply_session_delete_pg(
     pool: &PgPool,
     session_key: &str,
     judged: Option<&hosted_execution::CleanupRow>,
@@ -1921,7 +1921,7 @@ pub(crate) async fn apply_session_delete_pg(
     })
 }
 
-pub(crate) async fn load_provider_session_ids_pg(
+pub async fn load_provider_session_ids_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,
@@ -1982,7 +1982,7 @@ pub(crate) async fn load_provider_session_ids_pg(
     .map_err(|error: sqlx::Error| format!("{error}"))
 }
 
-pub(crate) async fn update_raw_provider_transcript_len_watermark_pg(
+pub async fn update_raw_provider_transcript_len_watermark_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,
@@ -2022,7 +2022,7 @@ pub(crate) async fn update_raw_provider_transcript_len_watermark_pg(
     .map_err(|error| format!("{error}"))
 }
 
-pub(crate) async fn mark_raw_provider_transcript_growth_if_observed_pg(
+pub async fn mark_raw_provider_transcript_growth_if_observed_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,
@@ -2054,7 +2054,7 @@ pub(crate) async fn mark_raw_provider_transcript_growth_if_observed_pg(
 
 /// Clears a stale selector from Legacy rows only; a hosted row or a Herdr-configured
 /// channel's row keeps its selectors and transcript watermark.
-pub(crate) async fn clear_stale_session_id_pg(
+pub async fn clear_stale_session_id_pg(
     pool: &PgPool,
     session_id: &str,
 ) -> Result<u64, String> {
@@ -2079,7 +2079,7 @@ pub(crate) async fn clear_stale_session_id_pg(
     .map_err(|error| format!("{error}"))
 }
 
-pub(crate) async fn clear_session_id_by_key_pg(
+pub async fn clear_session_id_by_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<u64, String> {
@@ -2122,7 +2122,7 @@ pub(crate) async fn clear_session_id_by_key_pg(
     Ok(cleared)
 }
 
-pub(crate) async fn update_session_pg(
+pub async fn update_session_pg(
     pool: &PgPool,
     id: i64,
     params: UpdateSessionParams<'_>,

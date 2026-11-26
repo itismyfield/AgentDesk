@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 /// The original request: stable key, scope, every absorbed source, original text and side inputs.
-pub(crate) struct CanonicalInput {
+pub struct CanonicalInput {
     pub(crate) request_key: String,
     pub(crate) provider: String,
     pub(crate) channel: String,
@@ -29,7 +29,7 @@ impl CanonicalInput {
 
 /// Registers the request once under its key, or returns the receipt already stored under it.
 /// Same-key registrations are serialised, so a later one reuses the first instead of being fenced.
-pub(crate) async fn register_or_reuse(
+pub async fn register_or_reuse(
     pool: &PgPool,
     input: &CanonicalInput,
     instance: &str,
@@ -67,7 +67,7 @@ pub(crate) async fn register_or_reuse_on_tx(
 }
 
 /// Refuses an exact retry whose input is not the request stored under the receipt; writes nothing.
-pub(crate) async fn ensure_same_request(
+pub async fn ensure_same_request(
     pool: &PgPool,
     receipt_id: i64,
     input: &CanonicalInput,
@@ -179,7 +179,7 @@ async fn insert_registered(
 
 /// Binds the session to a registered receipt's nonce before its begin, so an exact retry can move
 /// it later; `Ok(false)` when no session row carries the key.
-pub(crate) async fn bind_session(
+pub async fn bind_session(
     pool: &PgPool,
     session_key: &str,
     receipt_id: i64,
@@ -199,7 +199,7 @@ pub(crate) async fn bind_session(
 }
 
 /// Which attempt a begin starts: the registered nonce, or the next nonce after a no-effect one.
-pub(crate) enum BeginFrom<'a> {
+pub enum BeginFrom<'a> {
     Registered {
         nonce: &'a str,
     },
@@ -211,7 +211,7 @@ pub(crate) enum BeginFrom<'a> {
 }
 
 /// The effect binding stored with the start; the permit can only be spent on it.
-pub(crate) struct EffectProjection<'a> {
+pub struct EffectProjection<'a> {
     pub(crate) effect_target: &'a str,
     pub(crate) input_hash: &'a str,
     pub(crate) binding: &'a serde_json::Value,
@@ -279,7 +279,7 @@ impl BeginAck {
 
 /// Starts one exact attempt with its projection; a retry also moves its session off the stale
 /// resume in the same commit. A start exists only when this returns `Ok`.
-pub(crate) async fn begin(
+pub async fn begin(
     pool: &PgPool,
     receipt_id: i64,
     from: BeginFrom<'_>,

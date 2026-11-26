@@ -3,7 +3,7 @@ use std::path::Path;
 
 use super::{ProviderAuthProfileDef, validate_profile_def};
 
-pub(in crate::services) mod document;
+pub mod document;
 use document::{ORG_PROFILE_WRITE_LOCK, load_org_document, org_yaml_path, persist_org_document};
 
 fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
@@ -13,7 +13,7 @@ fn normalized_auth_profile(value: Option<&str>) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn set_provider_primary_profile(provider: &str, profile_id: &str) -> Result<(), String> {
+pub fn set_provider_primary_profile(provider: &str, profile_id: &str) -> Result<(), String> {
     set_provider_primary_profile_at(&org_yaml_path()?, provider, profile_id)
 }
 
@@ -47,7 +47,7 @@ pub(crate) fn set_provider_primary_profile_at(
     persist_org_document(org_path, &document)
 }
 
-pub(crate) fn append_provider_auth_profile(
+pub fn append_provider_auth_profile(
     profile_id: &str,
     def: ProviderAuthProfileDef,
 ) -> Result<(), String> {
@@ -76,7 +76,7 @@ pub(crate) fn append_provider_auth_profile_at(
     persist_org_document(org_path, &document)
 }
 
-pub(crate) fn set_agent_auth_profile(
+pub fn set_agent_auth_profile(
     role_id: &str,
     auth_profile: Option<&str>,
 ) -> Result<(), String> {
@@ -125,7 +125,7 @@ pub(crate) fn set_agent_auth_profile_at(
     persist_org_document(org_path, &document)
 }
 
-pub(crate) fn set_channel_auth_profile(
+pub fn set_channel_auth_profile(
     channel_id: &str,
     auth_profile: Option<&str>,
 ) -> Result<(), String> {
@@ -191,7 +191,7 @@ pub(crate) fn set_channel_auth_profile_at(
 }
 
 /// Removes only an unbound catalog entry, preserving credential material in its managed home.
-pub(crate) fn remove_provider_auth_profile(profile_id: &str, provider: &str) -> Result<(), String> {
+pub fn remove_provider_auth_profile(profile_id: &str, provider: &str) -> Result<(), String> {
     remove_provider_auth_profile_at(&org_yaml_path()?, profile_id, provider)
 }
 

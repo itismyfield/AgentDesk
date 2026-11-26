@@ -29,7 +29,7 @@ pub(crate) enum Unknown {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Presence {
+pub enum Presence {
     Present,
     Absent(AbsentKind),
     Unknown(Unknown),
@@ -73,7 +73,7 @@ pub(crate) trait PresenceOs {
 /// listening socket whose backlog is full refuses too on BSD.
 const CONFIRMATIONS: usize = 3;
 
-pub(crate) fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
+pub fn classify(socket: &Path, os: &dyn PresenceOs) -> Presence {
     classify_except(socket, os, &[])
 }
 
@@ -256,7 +256,7 @@ pub(crate) fn table(
 
 /// This host's reads. The process table comes from `ps`, then each `herdr`'s own argv and
 /// environment from the kernel.
-pub(crate) struct HostOs;
+pub struct HostOs;
 
 impl PresenceOs for HostOs {
     fn euid(&self) -> u32 {

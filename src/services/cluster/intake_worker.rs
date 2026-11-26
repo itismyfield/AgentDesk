@@ -34,14 +34,14 @@ use std::time::Duration;
 mod host;
 mod o_input;
 #[cfg(unix)]
-pub(crate) use crate::intake_consent_authority::BeforeEffects;
-pub(crate) use host::{
+pub use crate::intake_consent_authority::BeforeEffects;
+pub use host::{
     CheckpointWaits, ExecuteIntakeTurn, IntakeHost, IntakeTurnFuture, IntakeTurnPort,
     IntakeWorkerRuntime, ResolveRuntimeFuture, ShutdownProbe,
 };
 use o_input::{execute_before_effects as execute_intake_turn_core, hold_off_o_gateway};
 #[cfg(unix)]
-pub(crate) use o_input::{scope_key::WorkerScopeKey, take_before_effects};
+pub use o_input::{scope_key::WorkerScopeKey, take_before_effects};
 
 #[derive(Default)]
 struct MarkDoneMissCounters {
@@ -114,7 +114,7 @@ async fn classify_mark_done_miss(pool: &PgPool, row_id: i64, channel_id: &str, u
 /// Provider-local worker activity used by the restart marker poller. The
 /// process-global shutdown counters remain separate; each provider waits only
 /// for its own accepted intake tick before consuming its barrier slot.
-pub(crate) struct IntakeWorkerLifecycle {
+pub struct IntakeWorkerLifecycle {
     admission_fenced: AtomicBool,
     active_ticks: std::sync::atomic::AtomicUsize,
     drained: tokio::sync::Notify,
@@ -150,7 +150,7 @@ impl IntakeWorkerLifecycle {
         Some(IntakeWorkerTickGuard { lifecycle: self })
     }
 
-    pub(crate) fn fence_admission(&self) {
+    pub fn fence_admission(&self) {
         self.admission_fenced.store(true, Ordering::SeqCst);
     }
 
@@ -171,7 +171,7 @@ impl IntakeWorkerLifecycle {
     /// Wait for all active ticks. Create `Notified` before checking the count:
     /// `notify_waiters` reaches futures created before the broadcast, even if
     /// not polled yet, but retains no permit for futures created afterwards.
-    pub(crate) async fn wait_until_drained(&self) {
+    pub async fn wait_until_drained(&self) {
         loop {
             let notified = self.drained.notified();
             #[cfg(test)]
@@ -226,7 +226,7 @@ fn admission_action(
 /// of forwarded intakes drains fast, slower idle cadence so the
 /// worker does not pin its DB pool.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct IntakeWorkerConfig {
+pub struct IntakeWorkerConfig {
     /// Sleep between poll attempts when the queue had no rows to claim.
     pub idle_poll_interval: Duration,
     /// Sleep between poll attempts when the previous tick claimed a row.
@@ -560,7 +560,7 @@ async fn release_cancelled_claim(
 /// set it before restart acknowledgement, fencing new poll ticks while an
 /// active tick drains to completion.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn run_intake_worker_loop<S: IntakeHost>(
+pub async fn run_intake_worker_loop<S: IntakeHost>(
     pool: PgPool,
     shared: Arc<S>,
     target_instance_id: String,

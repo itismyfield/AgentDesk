@@ -49,7 +49,7 @@ impl Record {
 pub(crate) static RECORDS: Mutex<BTreeMap<String, Record>> = Mutex::new(BTreeMap::new());
 static TASK: OnceLock<()> = OnceLock::new();
 
-pub(crate) fn records() -> BTreeMap<String, Record> {
+pub fn records() -> BTreeMap<String, Record> {
     RECORDS.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
@@ -129,7 +129,7 @@ fn read_e7(boot: &BootSessionHosts, key: &str) -> Option<RestoreResume> {
 /// A home's notice target: a stable fault identity and the one channel that hears it. Delivery
 /// lives beside the Unknown notice owner it reuses, in `turn_presence/operator_notice.rs`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct OperatorNotice {
+pub struct OperatorNotice {
     /// Where its receipt is kept; `None` is the runtime's own root.
     pub(crate) root: Option<PathBuf>,
     pub(crate) fault: String,
@@ -284,14 +284,14 @@ pub(crate) async fn notify(faults: Vec<Fault>, observe: ObserveNotice) {
 }
 
 /// The boot pass over the snapshot this process installed, never a re-read config.
-pub(crate) fn boot() {
+pub fn boot() {
     if let Some(boot) = with_boot(|boot| boot.cloned()) {
         let _ = pass(&boot, &PersonalPaths::current(), false);
     }
 }
 
 /// Starts the process's one upkeep task when the booted snapshot has a local dedicated home.
-pub(crate) fn spawn(observe: ObserveNotice) -> bool {
+pub fn spawn(observe: ObserveNotice) -> bool {
     let Some(boot) = with_boot(|boot| boot.cloned()) else {
         return false;
     };

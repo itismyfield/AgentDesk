@@ -1,4 +1,4 @@
-pub(crate) mod boot_id;
+pub mod boot_id;
 mod config_merge;
 mod legacy_migration;
 mod paths;
@@ -317,7 +317,7 @@ pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
 /// Workspace directory names the skill distributor actually walks. Manifest
 /// workspace names are resolved against these and silently dropped otherwise,
 /// so this set - not the configured roster - decides delivery (#5720).
-pub(crate) fn distributed_workspace_names(root: &Path) -> Result<Vec<String>, String> {
+pub fn distributed_workspace_names(root: &Path) -> Result<Vec<String>, String> {
     skill_sync::discover_workspaces(root)
 }
 
@@ -358,7 +358,7 @@ fn ensure_layout_dirs(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn ensure_credential_layout(root: &Path) -> Result<(), String> {
+pub fn ensure_credential_layout(root: &Path) -> Result<(), String> {
     let canonical = credential_dir(root);
     let legacy = legacy_credential_dir(root);
 

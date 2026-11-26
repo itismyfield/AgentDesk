@@ -20,8 +20,8 @@ pub(crate) use hook_event::HookFanout;
 pub(crate) mod adoption_retry;
 pub(crate) mod observation_ingress;
 pub(crate) mod relay_receipts;
-pub(crate) use adoption_retry::retry_deferred_claude_adoptions;
-pub(crate) use observation_ingress::{
+pub use adoption_retry::retry_deferred_claude_adoptions;
+pub use observation_ingress::{
     boot_discovery_done, mark_boot_discovery_complete, note_claude_pane_registration,
 };
 use relay_receipts::{RelayReceiptBegin, RelayReceiptLedger, RelayReceiptPin, RelayReceiptTicket};

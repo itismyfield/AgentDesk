@@ -19,11 +19,11 @@ use super::*;
 
 mod operations;
 mod provider_errors;
-pub(crate) use operations::{
+pub use operations::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
 };
-pub(crate) use provider_errors::observe_provider_error;
+pub use provider_errors::observe_provider_error;
 
 #[cfg(test)]
 mod postgres_tests;

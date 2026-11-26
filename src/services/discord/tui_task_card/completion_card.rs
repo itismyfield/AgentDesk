@@ -6,14 +6,14 @@ use super::{
     sanitize_oneline, status_icon,
 };
 
-pub(in crate::services::discord) fn format_task_notification_card(
+pub fn format_task_notification_card(
     note: &TaskNotification,
     update_count: u64,
 ) -> String {
     render(note, update_count, has_completion_body(note))
 }
 
-pub(in crate::services::discord) fn format_legacy(
+pub fn format_legacy(
     note: &TaskNotification,
     update_count: u64,
 ) -> String {

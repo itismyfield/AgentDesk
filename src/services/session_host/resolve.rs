@@ -13,7 +13,7 @@ use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_m
 /// Host-kind evidence the caller already read at its own site. The resolver
 /// performs no lookups, so each site keeps its probe order and timeouts.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct HostEvidence<'a> {
+pub struct HostEvidence<'a> {
     pub session_name: Option<&'a str>,
     /// Turn-bound `runtime_kind` (inflight row or cancel token).
     pub durable_runtime_kind: Option<RuntimeHandoffKind>,
@@ -25,7 +25,7 @@ pub(crate) struct HostEvidence<'a> {
 
 /// Pure: votes in fixed evidence order; disagreement reports the first vote and
 /// the first vote that differs from it.
-pub(crate) fn resolve_host_kind(evidence: HostEvidence<'_>) -> HostKindResolution {
+pub fn resolve_host_kind(evidence: HostEvidence<'_>) -> HostKindResolution {
     if !evidence
         .session_name
         .is_some_and(|name| !name.trim().is_empty())
@@ -67,7 +67,7 @@ fn kind_hint(kind: RuntimeHandoffKind) -> HostKind {
 /// How a consumer names a session. The full key is kept as given: no host or
 /// name is ever cut from its `:` suffix.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum SessionTargetInput {
+pub enum SessionTargetInput {
     SessionKey(String),
     Canonical {
         provider: String,
@@ -81,7 +81,7 @@ pub(crate) enum SessionTargetInput {
 
 /// One host-location witness as its reader saw it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostWitness {
+pub enum HostWitness {
     /// The reader confirmed nothing is recorded.
     Absent,
     /// `target` is the host session id (pane id for Herdr) when the witness names one.
@@ -105,7 +105,7 @@ pub(crate) enum HostWitness {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TargetSource {
+pub enum TargetSource {
     SessionRecord,
     InflightLocator,
     HostMarker,
@@ -115,7 +115,7 @@ pub(crate) enum TargetSource {
 /// Evidence an injected source read for one target. Start from `unread()` so a
 /// witness the source skipped stays fail-closed instead of reading as absent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SessionTargetEvidence {
+pub struct SessionTargetEvidence {
     /// Full key of the matched sessions row.
     pub session_key: Option<String>,
     /// Name the row records for a tmux/process host; never used for Herdr.
@@ -176,12 +176,12 @@ impl SessionTargetEvidence {
 }
 
 /// Reads host evidence for a target; the sessions-row adapter and test fakes implement it.
-pub(crate) trait SessionTargetEvidenceSource {
+pub trait SessionTargetEvidenceSource {
     fn read_evidence(&self, input: &SessionTargetInput) -> SessionTargetEvidence;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum UnknownHost {
+pub enum UnknownHost {
     NoHostEvidence,
     Unreadable {
         source: TargetSource,
@@ -196,7 +196,7 @@ pub(crate) enum UnknownHost {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TargetHost {
+pub enum TargetHost {
     Known {
         kind: HostKind,
         source: TargetSource,
@@ -211,7 +211,7 @@ pub(crate) enum TargetHost {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ResolvedSessionTarget {
+pub struct ResolvedSessionTarget {
     pub input: SessionTargetInput,
     pub session_key: Option<String>,
     pub host: TargetHost,
@@ -236,7 +236,7 @@ impl ResolvedSessionTarget {
     }
 }
 
-pub(crate) fn resolve_session_target(
+pub fn resolve_session_target(
     input: SessionTargetInput,
     source: &dyn SessionTargetEvidenceSource,
 ) -> ResolvedSessionTarget {
@@ -449,7 +449,7 @@ static UNCONFIGURED_HERDR_HOST: UnconfiguredHerdrHost = UnconfiguredHerdrHost;
 
 /// Herdr gets the boot registry's one local endpoint, read-only since input goes through its
 /// gate; without exactly one it gets the fail-closed host, never a default socket.
-pub(crate) fn host_for(kind: HostKind) -> &'static dyn InteractiveSessionHost {
+pub fn host_for(kind: HostKind) -> &'static dyn InteractiveSessionHost {
     match kind {
         HostKind::Tmux => &TMUX_HOST,
         HostKind::Process => &PROCESS_HOST,

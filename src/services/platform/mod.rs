@@ -5,9 +5,9 @@
 
 pub mod binary_resolver;
 mod dump_tool;
-pub(crate) mod network;
+pub mod network;
 mod session_host_label;
-pub(crate) use session_host_label::session_host_label;
+pub use session_host_label::session_host_label;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use session_host_label::with_session_host_label_path_for_test;
 pub mod shell;
@@ -43,7 +43,7 @@ pub(crate) mod owner_publication_fence {
     }
 }
 
-pub(crate) use binary_resolver::active_provider_context;
+pub use binary_resolver::active_provider_context;
 pub use binary_resolver::{
     BinaryResolution, apply_binary_resolution, augment_exec_path, merged_runtime_path,
     probe_provider_binary_version, resolve_provider_binary, with_provider_execution_context,

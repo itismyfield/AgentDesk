@@ -1,5 +1,5 @@
-pub(crate) mod reaping;
-pub(crate) mod stream_child;
+pub mod reaping;
+pub mod stream_child;
 
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -596,7 +596,7 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
 
 /// Shell-escape a string using single quotes (POSIX safe).
 /// Internal single quotes are replaced with `'\''`.
-pub(crate) fn shell_escape(s: &str) -> String {
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

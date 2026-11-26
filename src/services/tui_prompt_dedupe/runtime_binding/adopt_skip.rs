@@ -127,7 +127,7 @@ static LISTING_ORDER: LazyLock<Mutex<HashMap<String, std::sync::Weak<Mutex<()>>>
 
 /// The lock a handoff holds on `logical` from its owner judgement until its claim commits, so a
 /// launch or reconcile lists the pane before that judgement or after the claim, never between.
-pub(crate) fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
+pub fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
     let mut locks = LISTING_ORDER.lock().unwrap_or_else(|p| p.into_inner());
     if let Some(lock) = locks.get(logical).and_then(std::sync::Weak::upgrade) {
         return lock;
@@ -173,7 +173,7 @@ thread_local! {
 /// The admission a watcher claim on `logical` commits under, the map locked until it drops.
 /// `Err` withholds a listed pane no reconcile admitted, or a Herdr host the map does not list.
 #[allow(clippy::result_unit_err)]
-pub(crate) fn herdr_claim_admission(
+pub fn herdr_claim_admission(
     logical: &str,
     herdr_host: bool,
 ) -> Result<Option<std::sync::MutexGuard<'static, HerdrExecutions>>, ()> {
@@ -226,7 +226,7 @@ pub(crate) fn restore_herdr_execution_under_source_authority(
 }
 
 /// The reconcile admitted execution `nonce` on `logical`, unless a newer one is installed there.
-pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
+pub fn admit_herdr_execution(logical: &str, nonce: &str) {
     change_hold(logical, |executions| match executions.get(logical) {
         Some((listed, _)) if listed != nonce => {}
         _ => drop(executions.insert(logical.to_owned(), (nonce.to_owned(), true))),
@@ -235,7 +235,7 @@ pub(crate) fn admit_herdr_execution(logical: &str, nonce: &str) {
 
 /// The reconcile refused execution `nonce` on `logical`, or could not name one (`None`): that
 /// only withholds a listed pane, and a refusal of another execution leaves the listed one alone.
-pub(crate) fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
+pub fn withhold_herdr_execution(logical: &str, nonce: Option<&str>) {
     change_hold(logical, |executions| {
         match (executions.get_mut(logical), nonce) {
             (Some((listed, _)), Some(nonce)) if nonce != listed => {}
@@ -263,12 +263,12 @@ pub(crate) fn release_herdr_execution(logical: &str, nonce: &str) {
 
 /// Whether a claim on `logical` may be withheld: a Herdr host, or a pane a launch listed.
 /// Any other claim is admitted, whatever other panes are listed. Read under `herdr_listing_order`.
-pub(crate) fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
+pub fn herdr_claim_may_be_withheld(logical: &str, herdr_host: bool) -> bool {
     herdr_host || herdr_execution_listed(logical)
 }
 
 /// Whether a launch or a reconcile listed `logical` as a Herdr pane, admitted or not.
-pub(crate) fn herdr_execution_listed(logical: &str) -> bool {
+pub fn herdr_execution_listed(logical: &str) -> bool {
     if !listed(|flag| flag.load(Acquire)) {
         return false;
     }
@@ -295,7 +295,7 @@ pub(crate) fn herdr_listed_execution(logical: &str) -> Option<String> {
 }
 
 /// The execution listed on `logical` and whether a reconcile admitted it; the lock is a leaf.
-pub(crate) fn herdr_listing(logical: &str) -> Option<(String, bool)> {
+pub fn herdr_listing(logical: &str) -> Option<(String, bool)> {
     let executions = HERDR_EXECUTIONS.lock();
     let executions = executions.unwrap_or_else(|poison| poison.into_inner());
     executions.get(logical).cloned()

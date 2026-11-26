@@ -6,7 +6,7 @@ pub(crate) mod compact;
 pub(crate) use source::adopt_awaiting_clear;
 mod dialog;
 mod evidence;
-pub(crate) mod idle;
+pub mod idle;
 mod restored_reply;
 mod resume_record;
 mod source;
@@ -20,7 +20,7 @@ pub(crate) mod test_support;
 pub(crate) mod tests;
 mod wait;
 mod watched;
-pub(crate) use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
+pub use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
 
 use super::hook_server::HookEventKind;
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
@@ -91,7 +91,7 @@ struct Ledger {
     published: HashMap<FileKey, DateTime<Utc>>,
 }
 static STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
-pub(crate) fn initialize() {
+pub fn initialize() {
     LazyLock::force(&STARTED);
 }
 static LEDGER: LazyLock<Mutex<Ledger>> = LazyLock::new(|| Mutex::new(Ledger::default()));
@@ -111,7 +111,7 @@ enum ProofOrigin {
     RestoredHard,
     RestoredReply,
 }
-pub(crate) struct Proof {
+pub struct Proof {
     source: Source,
     stamp: Option<Stamp>,
     revision: u64,
@@ -128,7 +128,7 @@ impl Proof {
         )
     }
 }
-pub(crate) fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
+pub fn observe(session: &str, path: Option<&Path>) -> Option<Proof> {
     evidence(session, path, None)
 }
 /// Herdr only: current evidence, else a pane that outlived the daemon restart idling on its
@@ -747,7 +747,7 @@ pub(crate) fn note_hook(
 }
 
 /// A complete empty input box is draft evidence even when the status footer is clipped.
-pub(crate) fn empty_draft(capture: &str) -> bool {
+pub fn empty_draft(capture: &str) -> bool {
     matches!(
         super::busy_inject::screen::input_box(capture),
         super::busy_inject::screen::Composer::Empty

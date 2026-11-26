@@ -276,7 +276,7 @@ fn home_at(root: &Path, provider: &str) -> Result<PathBuf, String> {
     }
 }
 
-pub(crate) fn provider_home(provider: &str) -> Result<Option<PathBuf>, String> {
+pub fn provider_home(provider: &str) -> Result<Option<PathBuf>, String> {
     let Some(snapshot) = scope()? else {
         return Ok(None);
     };
@@ -296,7 +296,7 @@ pub(crate) fn managed_profiles_root() -> Result<Option<PathBuf>, String> {
     Ok(scope()?.map(|env| Path::new(&env.required["HOME"]).join(".adk/profiles")))
 }
 
-pub(crate) fn validate_provider_home(provider: &str, path: &Path) -> Result<(), String> {
+pub fn validate_provider_home(provider: &str, path: &Path) -> Result<(), String> {
     if let Some(expected) = provider_home(provider)? {
         if path != expected {
             return Err(rejected());
@@ -435,7 +435,7 @@ pub(crate) fn shell_environment() -> Result<String, String> {
     Ok(script)
 }
 
-pub(crate) fn validate_api_target(target: &str) -> Result<(), String> {
+pub fn validate_api_target(target: &str) -> Result<(), String> {
     if let Some(snapshot) = scope()?
         && snapshot.api != target
     {
@@ -444,7 +444,7 @@ pub(crate) fn validate_api_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn http_agent() -> ureq::Agent {
+pub fn http_agent() -> ureq::Agent {
     if requested() {
         ureq::AgentBuilder::new()
             .redirects(0)
@@ -455,7 +455,7 @@ pub(crate) fn http_agent() -> ureq::Agent {
     }
 }
 
-pub(crate) fn refuse_service_management() -> Result<(), String> {
+pub fn refuse_service_management() -> Result<(), String> {
     if requested() { Err(rejected()) } else { Ok(()) }
 }
 
@@ -474,7 +474,7 @@ pub(crate) fn validate_config(config: &crate::config::Config) -> Result<(), Stri
     Ok(())
 }
 
-pub(crate) fn validate_path(path: &Path) -> Result<(), String> {
+pub fn validate_path(path: &Path) -> Result<(), String> {
     if scope()?.is_some() {
         let instance = current()?.ok_or_else(rejected)?;
         if !path.starts_with(&instance.root) {

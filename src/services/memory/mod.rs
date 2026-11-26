@@ -1,7 +1,7 @@
 mod local;
 pub(crate) mod memento;
 mod memento_throttle;
-pub(crate) mod memento_writer_guard;
+pub mod memento_writer_guard;
 mod runtime_state;
 
 use std::future::Future;
@@ -15,23 +15,23 @@ use crate::services::provider::ProviderKind;
 pub(crate) use local::LocalMemoryBackend;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use memento::with_memento_test_endpoint;
-pub(crate) use memento::{
+pub use memento::{
     MementoBackend, MementoRememberRequest, SessionAnchorRequest, load_session_anchor_snapshot,
     resolve_memento_agent_id, resolve_memento_workspace, sanitize_memento_workspace_segment,
 };
-pub(crate) use memento_throttle::{
+pub use memento_throttle::{
     memento_call_metrics_snapshot, note_memento_tool_feedback_trigger,
 };
-pub(crate) use runtime_state::{
+pub use runtime_state::{
     ExternalMemoryBackendState, backend_is_active, backend_state, refresh_backend_health,
 };
 
-pub(crate) const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
+pub const UNBOUND_MEMORY_ROLE_ID: &str = "__unbound_role__";
 
 pub(crate) type MemoryFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TokenUsage {
+pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
 }
@@ -41,14 +41,14 @@ impl TokenUsage {
         self.input_tokens == 0 && self.output_tokens == 0
     }
 
-    pub(crate) fn saturating_add_assign(&mut self, other: Self) {
+    pub fn saturating_add_assign(&mut self, other: Self) {
         self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
     }
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct CaptureRequest {
+pub struct CaptureRequest {
     pub provider: ProviderKind,
     pub role_id: String,
     pub channel_id: u64,
@@ -59,7 +59,7 @@ pub(crate) struct CaptureRequest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionEndReason {
+pub enum SessionEndReason {
     IdleExpiry,
     LocalSessionReset,
 }
@@ -74,7 +74,7 @@ impl SessionEndReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReflectRequest {
+pub struct ReflectRequest {
     pub provider: ProviderKind,
     pub role_id: String,
     pub channel_id: u64,
@@ -85,13 +85,13 @@ pub(crate) struct ReflectRequest {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CaptureResult {
+pub struct CaptureResult {
     pub warnings: Vec<String>,
     pub skipped: bool,
     pub token_usage: TokenUsage,
 }
 
-pub(crate) trait MemoryBackend: Send + Sync {
+pub trait MemoryBackend: Send + Sync {
     fn capture<'a>(&'a self, request: CaptureRequest) -> MemoryFuture<'a, CaptureResult>;
     fn reflect<'a>(&'a self, request: ReflectRequest) -> MemoryFuture<'a, CaptureResult> {
         Box::pin(async move {
@@ -104,7 +104,7 @@ pub(crate) trait MemoryBackend: Send + Sync {
     }
 }
 
-pub(crate) fn build_resolved_memory_backend(
+pub fn build_resolved_memory_backend(
     settings: &ResolvedMemorySettings,
 ) -> Box<dyn MemoryBackend + Send + Sync> {
     match settings.backend {
@@ -113,13 +113,13 @@ pub(crate) fn build_resolved_memory_backend(
     }
 }
 
-pub(crate) fn resolve_memory_role_id(role_id: Option<&str>) -> String {
+pub fn resolve_memory_role_id(role_id: Option<&str>) -> String {
     role_id
         .map(|role_id| role_id.to_string())
         .unwrap_or_else(|| UNBOUND_MEMORY_ROLE_ID.to_string())
 }
 
-pub(crate) fn resolve_memory_session_id(session_id: Option<&str>, channel_id: u64) -> String {
+pub fn resolve_memory_session_id(session_id: Option<&str>, channel_id: u64) -> String {
     session_id
         .map(str::trim)
         .filter(|value| !value.is_empty())

@@ -1,7 +1,7 @@
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
 #[path = "key_promotion.rs"]
-pub(crate) mod key_promotion;
+pub mod key_promotion;
 use key_promotion::RegistrationWitness;
 #[cfg(all(test, unix))]
 #[path = "key_promotion_pg_tests.rs"]
@@ -17,7 +17,7 @@ const SCHEDULED_SNAPSHOT_KIND: &str = "scheduled_snapshot";
 pub(crate) const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionIdentityKind {
+pub enum SessionIdentityKind {
     DiscordChannel,
     ScheduledSnapshot,
 }
@@ -40,14 +40,14 @@ impl SessionIdentityKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CanonicalSessionIdentity<'a> {
-    pub(crate) kind: SessionIdentityKind,
+pub struct CanonicalSessionIdentity<'a> {
+    pub kind: SessionIdentityKind,
     pub(crate) discord_token_hash: &'a str,
     pub(crate) channel_id: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SessionIdentityConflictKind {
+pub enum SessionIdentityConflictKind {
     AmbiguousCanonical,
     AmbiguousLegacy,
     EvidenceDivergence,
@@ -56,7 +56,7 @@ pub(crate) enum SessionIdentityConflictKind {
 }
 
 impl SessionIdentityConflictKind {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::AmbiguousCanonical => "ambiguous_canonical",
             Self::AmbiguousLegacy => "ambiguous_legacy",
@@ -68,7 +68,7 @@ impl SessionIdentityConflictKind {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct SessionIdentityConflict {
+pub struct SessionIdentityConflict {
     pub(crate) kind: SessionIdentityConflictKind,
     message: String,
 }
@@ -80,13 +80,13 @@ impl SessionIdentityConflict {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HookSessionUpsertError {
+pub enum HookSessionUpsertError {
     Conflict(SessionIdentityConflict),
     Database(String),
 }
 
 impl HookSessionUpsertError {
-    pub(crate) fn conflict_kind(&self) -> Option<SessionIdentityConflictKind> {
+    pub fn conflict_kind(&self) -> Option<SessionIdentityConflictKind> {
         match self {
             Self::Conflict(conflict) => Some(conflict.kind),
             Self::Database(_) => None,
@@ -100,16 +100,16 @@ impl HookSessionUpsertError {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct HookSessionUpsertOutcome {
-    pub(crate) inserted: bool,
-    pub(crate) session_key: String,
+pub struct HookSessionUpsertOutcome {
+    pub inserted: bool,
+    pub session_key: String,
     /// False when an existing row's update was skipped by its `WHERE` fence (no row change).
-    pub(crate) applied: bool,
+    pub applied: bool,
 }
 
 /// Durable actor state observed before admitting a new mailbox actor.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum HookSessionActorPin {
+pub enum HookSessionActorPin {
     Missing,
     Existing {
         id: i64,
@@ -119,7 +119,7 @@ pub(crate) enum HookSessionActorPin {
 }
 
 impl HookSessionActorPin {
-    pub(crate) fn active_for_other_actor(&self, actor_nonce: Option<&str>) -> bool {
+    pub fn active_for_other_actor(&self, actor_nonce: Option<&str>) -> bool {
         matches!(self, Self::Existing { active_turn_nonce, status, .. }
             if status.as_deref().is_some_and(|status| status.eq_ignore_ascii_case("turn_active"))
                 && active_turn_nonce.as_deref().zip(actor_nonce)
@@ -127,7 +127,7 @@ impl HookSessionActorPin {
     }
 }
 
-pub(crate) async fn capture_hook_session_actor_pin_pg(
+pub async fn capture_hook_session_actor_pin_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<HookSessionActorPin, HookSessionUpsertError> {
@@ -152,7 +152,7 @@ pub(crate) async fn capture_hook_session_actor_pin_pg(
     Ok(pin)
 }
 
-pub(crate) async fn upsert_hook_session_with_actor_pin_pg(
+pub async fn upsert_hook_session_with_actor_pin_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
     pin: &HookSessionActorPin,
@@ -186,7 +186,7 @@ struct SessionEvidence {
     channel_id: Option<String>,
 }
 
-pub(crate) async fn upsert_hook_session_with_identity_pg(
+pub async fn upsert_hook_session_with_identity_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
@@ -199,7 +199,7 @@ pub(crate) async fn upsert_hook_session_with_identity_pg(
         .map(|(outcome, _)| outcome)
 }
 
-pub(crate) async fn upsert_hook_session_terminal_pg(
+pub async fn upsert_hook_session_terminal_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
     identity: Option<CanonicalSessionIdentity<'_>>,
@@ -330,7 +330,7 @@ async fn upsert_hook_session_pg(
     Ok(outcome)
 }
 
-pub(crate) async fn resolve_session_key_pg(
+pub async fn resolve_session_key_pg(
     pool: &PgPool,
     session_key: &str,
 ) -> Result<Option<String>, HookSessionUpsertError> {
@@ -376,7 +376,7 @@ pub(crate) async fn resolve_session_key_with_identity_pg(
 
 /// Converge exact locators and the canonical tuple through locked operational
 /// promotion; a disconnected owner on another terminal yields to a lone operational row.
-pub(crate) async fn resolve_session_row_pg(
+pub async fn resolve_session_row_pg(
     pool: &PgPool,
     session_key: Option<&str>,
     provider: Option<&str>,

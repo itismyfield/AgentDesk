@@ -58,7 +58,7 @@ pub(crate) struct TaskId(String);
 pub(crate) struct ToolUseId(String);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct TaskCompletionV1 {
+pub struct TaskCompletionV1 {
     #[serde(rename = "type")]
     frame_type: &'static str,
     subtype: &'static str,

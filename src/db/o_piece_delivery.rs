@@ -21,7 +21,7 @@ const ROW_COLUMNS: &str = "channel_id, provider, native_key, kind, piece_index, 
                            conflict_sha256, revision";
 
 #[derive(Debug)]
-pub(crate) enum LedgerError {
+pub enum LedgerError {
     /// PostgreSQL failed or was unreachable; the caller learned nothing about the row.
     Pg(sqlx::Error),
     /// A value the schema cannot hold, or a stored row this build cannot read.
@@ -54,14 +54,14 @@ fn from_pg(value: i64, what: &str) -> Result<u64, LedgerError> {
 /// A piece's budget identity. Session, node, epoch and local serial are deliberately absent, so a
 /// fork, a new holder or a renumbered ledger reaches the same row.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub(crate) struct PieceKey {
+pub struct PieceKey {
     unit: UnitKey,
     piece_index: u32,
 }
 
 impl PieceKey {
     /// `None` for what is never posted as its own message: tool calls and Codex tool results.
-    pub(crate) fn new(unit: UnitKey, piece_index: u32) -> Option<Self> {
+    pub fn new(unit: UnitKey, piece_index: u32) -> Option<Self> {
         let postable = match (unit.provider, unit.kind) {
             (ShadowProvider::Antigravity, _) => false,
             (_, UnitKind::Body) | (ShadowProvider::Claude, UnitKind::ToolResult) => true,

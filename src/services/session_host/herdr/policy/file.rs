@@ -37,7 +37,7 @@ struct SymlinkIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(unix, derive(serde::Serialize))]
-pub(crate) struct FileToken {
+pub struct FileToken {
     logical_path: PathBuf,
     resolved_path: PathBuf,
     identity: FileIdentity,
@@ -142,7 +142,7 @@ pub(crate) fn read(path: &Path) -> Result<FileSnapshot, Unverified> {
 }
 
 /// Executable images are hashed incrementally; their bytes are never retained as config text.
-pub(crate) fn image(path: &Path) -> Result<FileToken, Unverified> {
+pub fn image(path: &Path) -> Result<FileToken, Unverified> {
     snapshot(path, None, false, || {}).map(|snapshot| snapshot.token)
 }
 

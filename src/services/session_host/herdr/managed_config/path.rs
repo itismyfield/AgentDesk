@@ -9,7 +9,7 @@ use crate::config::session_hosts::{BootSessionHosts, EndpointMode, SessionHostsC
 use crate::domain::file_sync::fsync_parent_dir;
 
 #[derive(Debug)]
-pub(crate) struct PersonalPaths {
+pub struct PersonalPaths {
     pub home: PathBuf,
     pub xdg: Option<PathBuf>,
 }
@@ -28,14 +28,14 @@ impl PersonalPaths {
 
 /// The endpoints that share one managed home, or why they may not be written.
 #[derive(Debug)]
-pub(crate) struct Target {
+pub struct Target {
     pub keys: Vec<String>,
     pub declared: PathBuf,
     pub home: io::Result<ManagedHome>,
 }
 
 #[derive(Debug)]
-pub(crate) struct ManagedHome {
+pub struct ManagedHome {
     pub(super) path: PathBuf,
     pub(super) uid: u32,
 }

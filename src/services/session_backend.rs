@@ -5,9 +5,9 @@
 //! - the shared in-memory process session registry
 //! - normalized output-file tailing/parsing for wrapper JSONL streams
 
-pub(crate) mod auth_profiles;
+pub mod auth_profiles;
 mod output;
-pub(crate) use output::capture_process_output;
+pub use output::capture_process_output;
 
 use crate::db::turns::TurnTokenUsage;
 use crate::services::agent_protocol::{
@@ -853,7 +853,7 @@ mod process_registry_stop_tests {
 #[path = "session_backend/stream_line.rs"]
 mod stream_line;
 pub use stream_line::{StreamLineState, parse_assistant_extra_tool_uses, process_stream_line};
-pub(crate) use stream_line::{
+pub use stream_line::{
     classify_task_notification_kind, emit_status_events_from_stream_json, observe_stream_context,
     parse_stream_message_with_state, process_claude_transcript_line,
 };
@@ -933,7 +933,7 @@ pub fn read_output_file_until_result_with_harvest(
 
 /// Reads native Claude TUI bodies through the same file, terminal and offset machinery.
 #[cfg(unix)]
-pub(crate) fn read_claude_tui_output_file_until_result_with_harvest(
+pub fn read_claude_tui_output_file_until_result_with_harvest(
     output_path: &str,
     start_offset: u64,
     sender: Sender<StreamMessage>,

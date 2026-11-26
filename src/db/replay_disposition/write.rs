@@ -3,9 +3,9 @@
 mod hold_notice;
 mod settle;
 mod start;
-pub(crate) use hold_notice::recover_hold_notice;
+pub use hold_notice::recover_hold_notice;
 pub(crate) use hold_notice::withhold_and_notify;
-pub(crate) use start::{
+pub use start::{
     BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
     ensure_same_request, register_or_reuse, register_or_reuse_on_tx,
 };
@@ -15,7 +15,7 @@ use sqlx::PgPool;
 
 /// Why a transition produced no acknowledgement.
 #[derive(Debug)]
-pub(crate) enum WriteError {
+pub enum WriteError {
     /// The receipt is not in the state this exact attempt expects; nothing changed.
     CasMiss,
     /// A replay fence refused the change; nothing changed.

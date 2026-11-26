@@ -93,13 +93,13 @@ fn pending() -> io::Result<Pending> {
 }
 
 /// Dropping this owner closes its pipes and schedules a wait, without killing the child.
-pub(crate) struct ReapingChild {
+pub struct ReapingChild {
     child: Option<Child>,
     pending: Pending,
     cancel: Option<CancelRegistration>,
 }
 
-pub(crate) trait CommandReapExt {
+pub trait CommandReapExt {
     fn spawn_reaping(&mut self) -> io::Result<ReapingChild>;
 }
 

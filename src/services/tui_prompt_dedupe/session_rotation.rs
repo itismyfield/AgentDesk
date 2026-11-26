@@ -45,7 +45,7 @@ const ROTATION_RECORD_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
 /// One observed Claude session rotation for a tmux pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClaudeSessionRotation {
+pub struct ClaudeSessionRotation {
     pub tmux_session_name: String,
     /// Session id the pane was bound to before the FIRST unsettled rotation.
     pub old_session_id: Option<String>,
@@ -149,7 +149,7 @@ pub(crate) fn record_claude_session_rotation(rotation: ClaudeSessionRotation) {
 }
 
 /// Notes that the channel's stored selector moved to `new_session_id`; a later hop clears it.
-pub(crate) fn mark_claude_rotation_selector_followed(
+pub fn mark_claude_rotation_selector_followed(
     tmux_session_name: &str,
     new_session_id: &str,
 ) {
@@ -169,7 +169,7 @@ pub(crate) fn claude_rotation_blocks_adoption(tmux_session_name: &str) -> bool {
 }
 
 /// The unsettled rotation for `tmux_session_name`, if any.
-pub(crate) fn claude_session_rotation_for_tmux(
+pub fn claude_session_rotation_for_tmux(
     tmux_session_name: &str,
 ) -> Option<ClaudeSessionRotation> {
     lock_rotations()
@@ -178,7 +178,7 @@ pub(crate) fn claude_session_rotation_for_tmux(
 }
 
 /// Every unsettled rotation. Used by the per-tick Discord-side settle pass.
-pub(crate) fn pending_claude_session_rotations() -> Vec<ClaudeSessionRotation> {
+pub fn pending_claude_session_rotations() -> Vec<ClaudeSessionRotation> {
     lock_rotations()
         .values()
         .map(|entry| entry.rotation.clone())
@@ -221,7 +221,7 @@ pub(crate) fn record_hook_adopted_claude_session_id(tmux_session_name: &str, ses
 /// `persist_claude_continuation_session` has rewritten the launch script the
 /// signal stops applying on its own and the ordinary match-launch path wins
 /// again.
-pub(crate) fn hook_adopted_claude_session_id(tmux_session_name: &str) -> Option<String> {
+pub fn hook_adopted_claude_session_id(tmux_session_name: &str) -> Option<String> {
     lock_adopted_sessions()
         .get(tmux_session_name.trim())
         .map(|entry| entry.session_id.clone())
@@ -231,7 +231,7 @@ pub(crate) fn hook_adopted_claude_session_id(tmux_session_name: &str) -> Option<
 ///
 /// Only for genuine pane death / mirror eviction. The settle path must NEVER
 /// call this — that coupling is the exact defect the two-store split removes.
-pub(crate) fn forget_hook_adopted_claude_session_id(tmux_session_name: &str) -> bool {
+pub fn forget_hook_adopted_claude_session_id(tmux_session_name: &str) -> bool {
     lock_adopted_sessions()
         .remove(tmux_session_name.trim())
         .is_some()
@@ -240,7 +240,7 @@ pub(crate) fn forget_hook_adopted_claude_session_id(tmux_session_name: &str) -> 
 /// Fold a fresh drain observation into the record and return the resulting
 /// `polls_without_drain_progress`. A frontier that advanced resets the counter to
 /// zero; a frontier that stood still increments it.
-pub(crate) fn record_rotation_drain_progress(tmux_session_name: &str, frontier: u64) -> u32 {
+pub fn record_rotation_drain_progress(tmux_session_name: &str, frontier: u64) -> u32 {
     let mut rotations = lock_rotations();
     let Some(entry) = rotations.get_mut(tmux_session_name.trim()) else {
         return 0;
@@ -265,7 +265,7 @@ pub(crate) fn record_rotation_drain_progress(tmux_session_name: &str, frontier: 
 /// [`ADOPTED_SESSIONS`] deliberately survives: this function runs on the ~500ms
 /// settle tick, and taking the authority down with it is what previously left
 /// the 5s rehydration pass with nothing to out-rank the launch script.
-pub(crate) fn clear_claude_session_rotation(tmux_session_name: &str) -> bool {
+pub fn clear_claude_session_rotation(tmux_session_name: &str) -> bool {
     lock_rotations().remove(tmux_session_name.trim()).is_some()
 }
 

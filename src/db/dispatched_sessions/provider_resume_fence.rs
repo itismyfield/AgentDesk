@@ -16,7 +16,7 @@ use crate::db::dispatched_session_canonical_identity::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResumeFence {
+pub struct ResumeFence {
     pub session_row_id: i64,
     pub token: Uuid,
 }
@@ -72,7 +72,7 @@ async fn owner_row(pool: &PgPool, owner: &HostedOwner) -> Result<Option<i64>, St
 
 /// The common clear commit also fences legacy or unreadable records without changing that record.
 #[cfg(unix)]
-pub(crate) async fn set_for_channel_pg(
+pub async fn set_for_channel_pg(
     pool: &PgPool,
     provider: &str,
     identity: CanonicalSessionIdentity<'_>,
@@ -158,7 +158,7 @@ pub(crate) async fn set_for_channel_pg(
 
 /// A Held clear forgets only the exact execution observed, leaving any successor untouched.
 #[cfg(unix)]
-pub(crate) async fn set_for_execution_pg(
+pub async fn set_for_execution_pg(
     pool: &PgPool,
     session_row_id: i64,
     record: &HostedExecution,
@@ -213,7 +213,7 @@ pub(crate) async fn load_for_owner_pg(
 }
 
 /// The API already resolved aliases before loading its provider selectors.
-pub(crate) async fn load_by_resolved_key_pg(
+pub async fn load_by_resolved_key_pg(
     pool: &PgPool,
     resolved_key: &str,
 ) -> Result<Option<ResumeFence>, String> {

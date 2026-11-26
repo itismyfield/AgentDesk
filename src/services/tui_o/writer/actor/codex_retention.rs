@@ -11,7 +11,7 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     codex::{SettledCompanions, observe_channel},
 };
 
-pub(crate) fn for_hop(
+pub fn for_hop(
     observed: &Snapshot,
     key: &str,
     old: &SourceId,

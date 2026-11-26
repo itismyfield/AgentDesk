@@ -21,7 +21,7 @@ pub(super) fn same_runtime_source(
 
 /// Raw diagnostic state; `Present` also passed a read-only source permission check.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RuntimeObservation {
+pub enum RuntimeObservation {
     Missing,
     Expired(TuiRuntimeBinding),
     Withheld(TuiRuntimeBinding),
@@ -29,7 +29,7 @@ pub(crate) enum RuntimeObservation {
 }
 
 /// Observes without TTL purge, refresh, publication or reacquiring the caller's source authority.
-pub(crate) fn runtime_observation_under_source_authority(
+pub fn runtime_observation_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
 ) -> RuntimeObservation {
     let raw = {
@@ -147,7 +147,7 @@ pub fn register_provider_session(
     }
 }
 
-pub(crate) fn runtime_binding_for_tmux_session(
+pub fn runtime_binding_for_tmux_session(
     tmux_session_name: &str,
 ) -> Option<TuiRuntimeBinding> {
     let tmux_session_name = tmux_session_name.trim();
@@ -159,7 +159,7 @@ pub(crate) fn runtime_binding_for_tmux_session(
     })
 }
 
-pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
+pub fn runtime_binding_for_tmux_session_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
 ) -> Option<TuiRuntimeBinding> {
     let tmux_session_name = authority.session();
@@ -172,7 +172,7 @@ pub(crate) fn runtime_binding_for_tmux_session_under_source_authority(
     codex_verified::consumer_allowed(authority, &binding).then_some(binding)
 }
 
-pub(crate) fn runtime_bindings_for_kind(
+pub fn runtime_bindings_for_kind(
     runtime_kind: RuntimeHandoffKind,
 ) -> Vec<(String, TuiRuntimeBinding)> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
@@ -197,14 +197,14 @@ pub(crate) fn runtime_bindings_for_kind(
         .collect()
 }
 
-pub(crate) fn codex_verified_publication_allowed(
+pub fn codex_verified_publication_allowed(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
     codex_verified::publication_allowed(authority, binding)
 }
 
-pub(crate) fn codex_verified_marker_metadata(
+pub fn codex_verified_marker_metadata(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     path: &std::path::Path,
     id: Option<&str>,

@@ -4,12 +4,12 @@
 use sqlx::PgPool;
 
 /// Whether a stored disposition blocks a rerun; an unrecognised spelling blocks too.
-pub(crate) fn stored_disposition_blocks_rerun(value: Option<&str>) -> bool {
+pub fn stored_disposition_blocks_rerun(value: Option<&str>) -> bool {
     value.is_some_and(|value| !matches!(value, "registered_not_started" | "classified_normal"))
 }
 
 /// The disposition of one receipt; `Ok(None)` when the row or its disposition is absent.
-pub(crate) async fn receipt_disposition(
+pub async fn receipt_disposition(
     pool: &PgPool,
     receipt_id: i64,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -22,7 +22,7 @@ pub(crate) async fn receipt_disposition(
 }
 
 /// The `sources` that belong to no started request of `provider`, in input order.
-pub(crate) async fn unblocked_sources(
+pub async fn unblocked_sources(
     pool: &PgPool,
     provider: &str,
     channel: &str,
@@ -40,7 +40,7 @@ pub(crate) async fn unblocked_sources(
     .await
 }
 
-pub(crate) async fn blocked_receipt_for_sources(
+pub async fn blocked_receipt_for_sources(
     pool: &PgPool,
     provider: &str,
     channel: &str,
@@ -61,7 +61,7 @@ pub(crate) async fn blocked_receipt_for_sources(
 }
 
 /// Whether the dispatch's projected disposition forbids an automatic rerun.
-pub(crate) async fn dispatch_blocked(
+pub async fn dispatch_blocked(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<bool, sqlx::Error> {
@@ -82,11 +82,11 @@ pub(crate) async fn dispatch_blocked_on_tx(
         .await
 }
 
-pub(crate) mod hold_notice;
-pub(crate) mod receipt;
+pub mod hold_notice;
+pub mod receipt;
 #[cfg(test)]
 mod register_tests;
-pub(crate) mod write;
+pub mod write;
 #[cfg(test)]
 mod write_tests;
 

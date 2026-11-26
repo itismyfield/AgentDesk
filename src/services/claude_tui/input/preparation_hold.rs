@@ -8,9 +8,9 @@ pub(crate) enum EffectPhase {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PreparationHold {
+pub struct PreparationHold {
     pub(crate) target: String,
-    pub(crate) reason: &'static str,
+    pub reason: &'static str,
     pub(crate) phase: EffectPhase,
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
@@ -73,7 +73,7 @@ impl PreparationHold {
         }
     }
 
-    pub(crate) fn may_requeue(&self) -> bool {
+    pub fn may_requeue(&self) -> bool {
         self.phase == EffectPhase::BeforePayload
     }
 }

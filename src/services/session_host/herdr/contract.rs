@@ -48,7 +48,7 @@ pub(crate) trait HerdrTransport: Send + Sync {
 /// The server behind one configured socket. Connections that reach the same socket, pid
 /// and start reach the same server; when or how often it was dialled is not part of it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ServerWitness {
+pub struct ServerWitness {
     pub socket: PathBuf,
     pub pid: u32,
     pub start: StartIdentity,

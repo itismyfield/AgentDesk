@@ -96,7 +96,7 @@ pub(super) fn foreign_prompt(
 /// The complete cursor an EOF proof starts from and the unterminated bytes buffered after it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Tail {
+pub struct Tail {
     pub(crate) through: u64,
     pub(crate) prefix_hash: String,
     pub(crate) fingerprint: Fingerprint,
@@ -106,7 +106,7 @@ pub(crate) struct Tail {
 /// One strict closer read whole at the EOF of an ended execution; the capture cursor stays put.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawWitness {
+pub struct RawWitness {
     pub(crate) version: u32,
     pub(crate) tail: Tail,
     pub(crate) aborted: bool,
@@ -151,7 +151,7 @@ pub(super) fn gate(binding: &SourceBinding, value: &Value) -> Result<(), String>
 }
 
 /// Whether an unterminated tail is one whole strict closer of this source: `Ok(aborted)`.
-pub(crate) fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, String> {
+pub fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, String> {
     let whole = binding.provider == ShadowProvider::Claude
         && bytes.first() == Some(&b'{')
         && bytes.last() == Some(&b'}')
@@ -168,7 +168,7 @@ pub(crate) fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, 
 }
 
 /// Whether the evidence ends inside what the observation authenticated.
-pub(crate) fn within(observed: &Observation, evidence: &Evidence) -> bool {
+pub fn within(observed: &Observation, evidence: &Evidence) -> bool {
     match &evidence.raw {
         None => evidence.range.1 <= observed.through,
         Some(raw) => {

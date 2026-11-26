@@ -11,12 +11,12 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Descendants {
+pub enum Descendants {
     Present,
     NoneObserved,
     Unknown,
 }
-pub(crate) fn observe(session: &str) -> Descendants {
+pub fn observe(session: &str) -> Descendants {
     let Some((root, text)) = process_table(session) else {
         return Descendants::Unknown;
     };

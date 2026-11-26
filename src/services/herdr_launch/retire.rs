@@ -9,14 +9,14 @@ use crate::services::claude::herdr_turn::{HoldRelease, release_hold};
 use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Scope {
+pub enum Scope {
     Ended,
     Missing,
 }
 
 /// Why a retire changed nothing: the row and every hold are as they were.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RetireRefusal {
+pub enum RetireRefusal {
     NoLocalEndpoint,
     NoRow(&'static str),
     ProviderRunning,
@@ -26,14 +26,14 @@ pub(crate) enum RetireRefusal {
 
 /// A retired execution and what became of its input hold.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Retired {
+pub struct Retired {
     pub nonce: String,
     pub now: bool,
     pub hold: HoldRelease,
 }
 
 /// Reads only the registered exact endpoint, then retires only that observed row and nonce.
-pub(crate) async fn observed(
+pub async fn observed(
     pool: &PgPool,
     row: &HostedObservation,
     scope: Scope,
@@ -110,7 +110,7 @@ type MissingRetirements = Vec<(HostedOwner, String)>;
 static MISSING: std::sync::LazyLock<std::sync::Mutex<MissingRetirements>> =
     std::sync::LazyLock::new(Default::default);
 
-pub(crate) fn recovered_missing(record: &HostedExecution) -> bool {
+pub fn recovered_missing(record: &HostedExecution) -> bool {
     let mut missing = MISSING.lock().unwrap_or_else(|e| e.into_inner());
     if record.state != HostedState::Retired {
         missing.retain(|(owner, _)| owner != &record.owner);

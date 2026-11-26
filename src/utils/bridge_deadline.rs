@@ -10,7 +10,7 @@ thread_local! {
 }
 
 /// Installs a deadline on this thread and restores the previous (outer) one on drop.
-pub(crate) struct ScopedBridgeDeadline {
+pub struct ScopedBridgeDeadline {
     previous: Option<Instant>,
 }
 
@@ -34,12 +34,12 @@ impl Drop for ScopedBridgeDeadline {
 }
 
 /// The armed deadline, or `None` when no bounded eval is in flight and callers keep their defaults.
-pub(crate) fn current() -> Option<Instant> {
+pub fn current() -> Option<Instant> {
     CURRENT.with(|cell| cell.get())
 }
 
 /// The remaining budget: `Some(Duration::ZERO)` once the deadline has passed, `None` when unarmed.
-pub(crate) fn remaining() -> Option<Duration> {
+pub fn remaining() -> Option<Duration> {
     current().map(|deadline| {
         deadline
             .checked_duration_since(Instant::now())

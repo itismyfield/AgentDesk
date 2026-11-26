@@ -1,7 +1,7 @@
 //! Injected input uses the idle user header plus its attempt's nonce, ` · <nonce>]`; the durable
 //! ledger identifies injected frames. Untagged, v1 and `[📱 …]` frames remain readable.
 
-pub(crate) mod history;
+pub mod history;
 
 const USER: &str = "[User: ";
 const SCHEMA: &str = " · 📱 v1 mode=";
@@ -11,7 +11,7 @@ const SCHEMA_FOLDED: &str = "·📱v1mode=inject";
 const MAX_NAME_CHARS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Mode {
+pub enum Mode {
     /// A new turn's prompt.
     New,
     /// Input that joins the turn already running.
@@ -20,7 +20,7 @@ pub(crate) enum Mode {
 
 /// The fields of one v1 header, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Header<'a> {
+pub struct Header<'a> {
     pub(crate) name: &'a str,
     pub(crate) author: &'a str,
     pub(crate) mode: Mode,
@@ -53,7 +53,7 @@ pub(crate) fn author_name(name: &str, id: impl std::fmt::Display) -> String {
 
 /// The name Discord shows for a person: the server nickname, else the global display name, else
 /// the username.
-pub(crate) fn display_name<'a>(
+pub fn display_name<'a>(
     nick: Option<&'a str>,
     global_name: Option<&'a str>,
     username: &'a str,
@@ -96,7 +96,7 @@ fn source_key(source: &str) -> String {
     key
 }
 
-pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
+pub fn idle(name: &str, author: &str, body: &str) -> String {
     framed(name, author, "", body)
 }
 
@@ -144,7 +144,7 @@ pub fn preserved_decision_body(
 
 /// The idle frame tagged with the attempt's nonce, so two attempts of one text differ; a nonce
 /// not shaped like `fresh_nonce`'s adds no tag.
-pub(crate) fn plain_inject(
+pub fn plain_inject(
     _source: &str,
     author: &str,
     name: &str,
@@ -173,7 +173,7 @@ pub(crate) fn untagged(inner: &str) -> (&str, &str) {
 
 /// The v1 formatter remains only for reconstructing already written frames.
 
-pub(crate) fn inject(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
+pub fn inject(source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
     let id: String = author
         .chars()
         .map(|c| if c.is_control() || c == ']' { ' ' } else { c })
@@ -186,7 +186,7 @@ pub(crate) fn inject(source: &str, author: &str, name: &str, nonce: &str, body: 
 }
 
 /// The frame inputs were pasted with before v1, rebuilt only to read old transcripts.
-pub(crate) fn legacy_inject(source: &str, author: &str, nonce: &str, body: &str) -> String {
+pub fn legacy_inject(source: &str, author: &str, nonce: &str, body: &str) -> String {
     let clean = |value: &str| -> String {
         value
             .chars()
@@ -222,7 +222,7 @@ pub(crate) fn opens_legacy_inject(text: &str) -> bool {
 
 /// A durable-owned plain user header, tagged or not, or a v1 header, with the bytes after its
 /// closing bracket. Metadata is read from the right, so a name that looks like it never supplies it.
-pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
+pub fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     let rest = text.strip_prefix(USER)?;
     let close = rest.find(']')?;
     let (inner, after) = (&rest[..close], &rest[close + 1..]);

@@ -48,7 +48,7 @@ pub(super) fn announce(
 
 /// Logs that the thread's stored session `requested` has no hook-verified binding to resume under,
 /// and posts the channel one notice that the turn starts fresh with the thread's recent messages.
-pub(crate) async fn announce_unverified(
+pub async fn announce_unverified(
     pool: Option<&sqlx::PgPool>,
     channel: u64,
     requested: &str,

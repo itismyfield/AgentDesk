@@ -10,7 +10,7 @@ use crate::services::tui_o::writer::transition_cleanup::ReaderView;
 
 /// How a source retired by a transition cleanup is watched for growth from then on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Watch {
+pub enum Watch {
     /// A legacy reader keeps its FD for the retired watch, as a provider retirement keeps it.
     Fd,
     /// A configured reader closes its FD and watches the path.

@@ -2,7 +2,7 @@
 #[path = "replay_evidence/live.rs"]
 pub(crate) mod live;
 #[path = "replay_evidence/recovery.rs"]
-pub(crate) mod recovery;
+pub mod recovery;
 
 /// A terminal the provider itself reported, not one a wrapper synthesised.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -12,7 +12,7 @@ pub(crate) enum TerminalKind {
 }
 
 /// Borrowed identity observed from the saved local snapshot, without recovery authority.
-pub(crate) struct SnapshotIdentity<'a> {
+pub struct SnapshotIdentity<'a> {
     pub(crate) replay_receipt_id: Option<i64>,
     pub(crate) provider: &'a str,
     pub(crate) channel_id: u64,

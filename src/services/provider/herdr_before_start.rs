@@ -15,19 +15,19 @@ pub(crate) enum InputPhase {
 
 /// The negative evidence a close rested on: no attempt began, or a typed attempt left it untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CloseBasis {
+pub enum CloseBasis {
     NoAttempt,
     Untouched,
 }
 
-pub(crate) struct HerdrInputState {
+pub struct HerdrInputState {
     pub(crate) submission: HerdrSubmission,
     pub(crate) phase: InputPhase,
     pub(crate) exit: Option<ExitDecision>,
     /// Recorded by the close itself, so a later seal still names its evidence.
     pub(crate) closed_from: Option<CloseBasis>,
     /// The execution nonce this input went to, recorded under this lock before any write.
-    pub(crate) execution: Option<String>,
+    pub execution: Option<String>,
     /// The executor returned an error: no reader is left to read this turn's terminal.
     pub(crate) failed: bool,
     /// The row pass logged once that the execution ended while its source read nothing.
@@ -173,15 +173,15 @@ pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, Stri
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BeforeStartProof {
-    pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-    pub(crate) turn_nonce: String,
-    pub(crate) generation: u64,
-    pub(crate) basis: CloseBasis,
+pub struct BeforeStartProof {
+    pub owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    pub turn_nonce: String,
+    pub generation: u64,
+    pub basis: CloseBasis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ExitDecision {
+pub enum ExitDecision {
     Normal,
     Hold,
     PolicyClose(BeforeStartProof),
@@ -194,7 +194,7 @@ thread_local! {
         const { std::cell::Cell::new(None) };
 }
 
-pub(crate) fn seal_exit(
+pub fn seal_exit(
     token: &CancelToken,
     cancelled: bool,
     terminal_admitted: bool,

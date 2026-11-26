@@ -16,9 +16,9 @@ pub(super) fn run_finalize_due(status: &str) -> bool {
 }
 
 /// Result of the tx-scoped entry status writer.
-pub(crate) struct EntryStatusWrite {
-    pub(crate) result: EntryStatusUpdateResult,
-    pub(crate) run_finalize_due: bool,
+pub struct EntryStatusWrite {
+    pub result: EntryStatusUpdateResult,
+    pub run_finalize_due: bool,
 }
 
 impl EntryStatusWrite {
@@ -37,7 +37,7 @@ impl EntryStatusWrite {
 }
 
 /// Result of the pool-scoped entry status writer.
-pub(crate) enum EntryStatusStage {
+pub enum EntryStatusStage {
     Unchanged(EntryStatusUpdateResult),
     Staged(StagedEntryStatus),
 }
@@ -56,7 +56,7 @@ impl EntryStatusStage {
 }
 
 /// A changed entry row on its still-open pool transaction.
-pub(crate) struct StagedEntryStatus {
+pub struct StagedEntryStatus {
     tx: sqlx::Transaction<'static, sqlx::Postgres>,
     entry_id: String,
     result: EntryStatusUpdateResult,
@@ -78,19 +78,19 @@ impl StagedEntryStatus {
         }
     }
 
-    pub(crate) fn run_finalize_due(&self) -> bool {
+    pub fn run_finalize_due(&self) -> bool {
         self.run_finalize_due
     }
 
-    pub(crate) fn run_id(&self) -> &str {
+    pub fn run_id(&self) -> &str {
         &self.result.run_id
     }
 
-    pub(crate) fn transaction(&mut self) -> &mut sqlx::Transaction<'static, sqlx::Postgres> {
+    pub fn transaction(&mut self) -> &mut sqlx::Transaction<'static, sqlx::Postgres> {
         &mut self.tx
     }
 
-    pub(crate) async fn commit(self) -> Result<EntryStatusUpdateResult, String> {
+    pub async fn commit(self) -> Result<EntryStatusUpdateResult, String> {
         let Self {
             tx,
             entry_id,
@@ -106,7 +106,7 @@ impl StagedEntryStatus {
 
 /// Locks the entries a terminal dispatch moves. Rows come back raw; the caller decodes and
 /// writes them one at a time.
-pub(crate) async fn lock_dispatch_terminal_entry_rows_on_pg_tx(
+pub async fn lock_dispatch_terminal_entry_rows_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     dispatch_id: &str,
     new_status: &str,
@@ -183,16 +183,16 @@ pub(crate) async fn lock_dispatch_terminal_entry_rows_on_pg_tx(
 }
 
 /// One locked entry of a terminal dispatch.
-pub(crate) struct DispatchTerminalEntryRow {
-    pub(crate) entry_id: String,
-    pub(crate) run_id: String,
+pub struct DispatchTerminalEntryRow {
+    pub entry_id: String,
+    pub run_id: String,
     linked_dispatch_id: Option<String>,
     slot_index: Option<i64>,
     entry_status: String,
 }
 
 impl DispatchTerminalEntryRow {
-    pub(crate) fn decode(row: &PgRow, dispatch_id: &str) -> Result<Self, String> {
+    pub fn decode(row: &PgRow, dispatch_id: &str) -> Result<Self, String> {
         let entry_id: String = row.try_get("id").map_err(|error| {
             format!("decode postgres auto-queue entry id for {dispatch_id}: {error}")
         })?;
@@ -222,7 +222,7 @@ impl DispatchTerminalEntryRow {
         self.entry_status == ENTRY_STATUS_FAILED && new_status == ENTRY_STATUS_DONE
     }
 
-    pub(crate) fn update_trigger_source<'a>(
+    pub fn update_trigger_source<'a>(
         &self,
         new_status: &str,
         trigger_source: &'a str,
@@ -235,7 +235,7 @@ impl DispatchTerminalEntryRow {
     }
 
     /// History and dispatch-link writes after this entry's status changed.
-    pub(crate) async fn record_lineage_on_pg_tx(
+    pub async fn record_lineage_on_pg_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         dispatch_id: &str,

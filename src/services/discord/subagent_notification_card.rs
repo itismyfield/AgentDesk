@@ -40,13 +40,13 @@ enum Render {
     Unknown,
 }
 
-pub(in crate::services::discord) struct SubagentNotificationSemantic {
+pub struct SubagentNotificationSemantic {
     pub(in crate::services::discord) task_id: Option<String>,
     pub(in crate::services::discord) tool_use_id: Option<String>,
     pub(in crate::services::discord) payload_fingerprint: String,
 }
 
-pub(in crate::services::discord) fn semantic_event(
+pub fn semantic_event(
     prompt: &str,
 ) -> Option<SubagentNotificationSemantic> {
     let payload = extract_payload(prompt).ok()?;
@@ -106,7 +106,7 @@ pub(in crate::services::discord) fn is_start_anchored_subagent_notification(prom
     starts_with_xmlish_tag(&normalized, "subagent_notification")
 }
 
-pub(in crate::services::discord) fn format_subagent_notification_card(
+pub fn format_subagent_notification_card(
     tmux_session_name: Option<&str>,
     prompt: &str,
 ) -> String {
@@ -144,7 +144,7 @@ pub(in crate::services::discord) fn status_summary(input: &str) -> Option<String
     })
 }
 
-pub(in crate::services::discord) fn status_summary_from(
+pub fn status_summary_from(
     current_tool_line: Option<&str>,
     full_response: &str,
 ) -> Option<String> {
@@ -153,7 +153,7 @@ pub(in crate::services::discord) fn status_summary_from(
         .or_else(|| status_summary(full_response))
 }
 
-pub(in crate::services::discord) fn streaming_rollover_should_skip(input: &str) -> bool {
+pub fn streaming_rollover_should_skip(input: &str) -> bool {
     status_summary(input).is_some()
 }
 

@@ -22,7 +22,7 @@ pub(crate) use fresh_admission::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Captured {
+pub struct Captured {
     pub seq: u64,
     pub nonce: String,
     pub committed_at: DateTime<Utc>,
@@ -112,7 +112,7 @@ fn capture_under(authority: &TmuxSourceAuthority<'_>) -> Result<Option<Captured>
     }))
 }
 
-pub(crate) fn capture(tmux: &str) -> Result<Option<Captured>, String> {
+pub fn capture(tmux: &str) -> Result<Option<Captured>, String> {
     tc::with_tmux_source_authority(tmux, capture_under)
 }
 
@@ -149,15 +149,15 @@ pub(super) fn open_under(authority: &TmuxSourceAuthority<'_>) -> bool {
     current.seq <= mark.retired_through_seq && current.nonce == mark.nonce
 }
 
-pub(crate) fn relaunch_open(tmux: &str) -> bool {
+pub fn relaunch_open(tmux: &str) -> bool {
     tc::with_tmux_source_authority(tmux, open_under)
 }
 
-pub(crate) fn launch_blocked(tmux: &str) -> bool {
+pub fn launch_blocked(tmux: &str) -> bool {
     codex_verified_input_blocked(tmux) && !relaunch_open(tmux)
 }
 
-pub(crate) fn launch_blocked_observed(
+pub fn launch_blocked_observed(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
 ) -> bool {
@@ -165,7 +165,7 @@ pub(crate) fn launch_blocked_observed(
         || (absent_capture(tmux, observation).is_none() && launch_blocked(tmux))
 }
 
-pub(crate) fn absent_capture(
+pub fn absent_capture(
     tmux: &str,
     observation: &crate::services::discord::codex_absence::InflightObs,
 ) -> Option<Captured> {
@@ -204,7 +204,7 @@ pub(super) fn successor_unproved_under(
     absent_open::successor_unproved_under(authority, nonce, context)
 }
 
-pub(crate) fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
+pub fn commit(captured: &Captured, origin: &str) -> Result<(), String> {
     let fence = tc::runtime_hint_fence::RuntimeHintFence::acquire(&captured.context.tmux_session)?;
     tc::with_tmux_source_authority(&captured.context.tmux_session, |authority| {
         fence.validate(authority.session())?;

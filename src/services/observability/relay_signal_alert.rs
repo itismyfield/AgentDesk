@@ -106,7 +106,7 @@ pub(super) fn relay_signal_threshold_summary(
 /// and report each breached one. Returns the number of signals over their
 /// threshold this cycle. Never panics; an individual signal's query failure
 /// surfaces as the job error so the scheduler records it.
-pub(crate) async fn report_relay_signal_threshold_crossings_pg(pool: &PgPool) -> Result<u64> {
+pub async fn report_relay_signal_threshold_crossings_pg(pool: &PgPool) -> Result<u64> {
     let override_threshold = relay_alert_threshold_override_pg(pool).await?;
     let mut counts = Vec::with_capacity(RELAY_SIGNAL_DEFINITIONS.len());
     for signal in RELAY_SIGNAL_DEFINITIONS {
@@ -179,7 +179,7 @@ static PRESERVED_WARN: Mutex<(Option<Instant>, u64)> = Mutex::new((None, 0));
 
 /// #5993: idle cleanup kept a session it could not prove idle. Always records an
 /// `idle_cleanup_preserved` event; warns at most once per interval process-wide.
-pub(crate) fn record_idle_cleanup_preserved(
+pub fn record_idle_cleanup_preserved(
     session_key: &str,
     channel: &str,
     preserved_reason: &str,

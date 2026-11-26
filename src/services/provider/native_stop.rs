@@ -20,7 +20,7 @@ pub(crate) struct State {
 
 /// Stable evidence of one native input; no prompt text is persisted here.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct NativeUserPin {
+pub struct NativeUserPin {
     pub(crate) uuid: String,
     pub(crate) source_file: (u64, u64),
     pub(crate) range: (u64, u64),
@@ -28,14 +28,14 @@ pub(crate) struct NativeUserPin {
     pub(crate) row_digest: String,
     pub(crate) frame_digest: String,
     pub(crate) session_id: String,
-    pub(crate) output_path: String,
+    pub output_path: String,
     pub(crate) tmux_session: String,
     pub(crate) spawn_nonce: Option<String>,
     pub(crate) direct: bool,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PinSaveOutcome {
+pub enum PinSaveOutcome {
     Saved,
     #[default]
     Retry,
@@ -52,7 +52,7 @@ struct PinPersistence {
 
 /// The writer's receipt is observational; it grants no cancellation authority.
 #[derive(Default)]
-pub(crate) struct ReceiptSink {
+pub struct ReceiptSink {
     inner: Mutex<WriterReceipt>,
     accepted: OnceLock<NativeUserPin>,
     rejected: AtomicBool,
@@ -173,7 +173,7 @@ impl ReceiptSink {
             .is_some()
     }
     /// The pin a stop may target, rechecked against the live pane now; a failed check targets none.
-    pub(crate) fn stop_pin(&self) -> Option<NativeUserPin> {
+    pub fn stop_pin(&self) -> Option<NativeUserPin> {
         let live = crate::services::claude_tui::input::revalidate_native_pin;
         match self.observe() {
             Some(Ok(pin)) => return live(&pin).then_some(pin),
@@ -227,7 +227,7 @@ impl ReceiptSink {
             || self.inner.lock().unwrap_or_else(|e| e.into_inner()).applied
     }
     /// A pin may still come: the writer may have written and no pin was taken or refused.
-    pub(crate) fn pin_pending(&self) -> bool {
+    pub fn pin_pending(&self) -> bool {
         self.may_have_written() && self.cached().is_none()
     }
     pub(crate) fn on_pin(&self, observer: PinObserver) {
@@ -273,7 +273,7 @@ pub(crate) struct Inner {
     idle: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
-pub(crate) struct Attempt {
+pub struct Attempt {
     key: String,
     pub(crate) delivered: OnceLock<bool>,
     started: AtomicBool,

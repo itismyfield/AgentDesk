@@ -25,7 +25,7 @@ const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 mod anchor;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use anchor::load_session_anchor_prompt;
-pub(crate) use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
+pub use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
 #[path = "memento_endpoint.rs"]
 mod endpoint;
 #[cfg(all(test, unix))]
@@ -36,7 +36,7 @@ mod scope;
 #[path = "memento_transport.rs"]
 mod transport;
 use endpoint::{mcp_url, normalize_memento_endpoint};
-pub(crate) use scope::{
+pub use scope::{
     resolve_memento_agent_id, resolve_memento_workspace, resolve_memento_workspace_for_channel,
     sanitize_memento_workspace_segment,
 };
@@ -82,7 +82,7 @@ struct ToolCallResult {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct MementoRememberRequest {
+pub struct MementoRememberRequest {
     pub content: String,
     pub topic: String,
     pub kind: String,
@@ -104,14 +104,14 @@ pub(crate) struct MementoRememberRequest {
 }
 
 #[derive(Clone)]
-pub(crate) struct MementoBackend {
+pub struct MementoBackend {
     client: reqwest::Client,
     settings: ResolvedMemorySettings,
     mcp_session: Arc<Mutex<Option<CachedMcpSession>>>,
 }
 
 impl MementoBackend {
-    pub(crate) fn new(settings: ResolvedMemorySettings) -> Self {
+    pub fn new(settings: ResolvedMemorySettings) -> Self {
         Self {
             client: reqwest::Client::new(),
             settings,
@@ -300,7 +300,7 @@ impl MementoBackend {
         self.initialize_session(config).await
     }
 
-    pub(crate) async fn remember(
+    pub async fn remember(
         &self,
         request: MementoRememberRequest,
     ) -> Result<TokenUsage, String> {

@@ -1,6 +1,6 @@
 //! Channel alias lookup over the agents' configured channel bindings.
 
-pub(crate) fn resolve_channel_alias(alias: &str) -> Option<u64> {
+pub fn resolve_channel_alias(alias: &str) -> Option<u64> {
     let alias = alias.trim();
     if alias.is_empty() {
         return None;

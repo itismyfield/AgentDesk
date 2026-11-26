@@ -47,7 +47,7 @@ pub(crate) fn binding_identity(context: &BindingContext) -> Result<ManagedIdenti
     Ok(identity)
 }
 
-pub(crate) fn provider_identity(
+pub fn provider_identity(
     session: &str,
     provider: &str,
     channel: Option<u64>,

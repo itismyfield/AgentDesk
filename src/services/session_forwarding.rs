@@ -8,14 +8,14 @@ use sqlx::PgPool;
 use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
 mod cancel_lookup;
-pub(crate) mod probe;
+pub mod probe;
 mod trusted_target;
 #[cfg(test)]
 use cancel_lookup::legacy_session_key_matches_channel;
 #[cfg(unix)]
-pub(crate) use cancel_lookup::load_cancel_turn_hosted;
-pub(crate) use cancel_lookup::load_cancel_turn_session;
-pub(crate) use trusted_target::build_trusted_target;
+pub use cancel_lookup::load_cancel_turn_hosted;
+pub use cancel_lookup::load_cancel_turn_session;
+pub use trusted_target::build_trusted_target;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use trusted_target::loopback_seam;
 use trusted_target::{TrustedForwardTarget, TrustedTargetError};
@@ -24,33 +24,33 @@ const FORWARDED_BY_HEADER: &str = "x-agentdesk-forwarded-by";
 const SESSION_OWNER_HEADER: &str = "x-agentdesk-session-owner";
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum ForwardResolution {
+pub enum ForwardResolution {
     Local,
     Forward(TrustedForwardTarget),
     Unavailable { status: StatusCode, body: Value },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CancelTurnSessionInfo {
-    pub(crate) session_key: String,
-    pub(crate) dispatch_id: Option<String>,
-    pub(crate) provider_name: Option<String>,
-    pub(crate) agent_id: Option<String>,
-    pub(crate) requested_provider: Option<String>,
-    pub(crate) owner_instance_id: Option<String>,
-    pub(crate) match_rank: i64,
+pub struct CancelTurnSessionInfo {
+    pub session_key: String,
+    pub dispatch_id: Option<String>,
+    pub provider_name: Option<String>,
+    pub agent_id: Option<String>,
+    pub requested_provider: Option<String>,
+    pub owner_instance_id: Option<String>,
+    pub match_rank: i64,
 }
 
 /// Narrow state needed by session-control callers outside HTTP route handlers.
 #[derive(Clone)]
-pub(crate) struct ForwardCallerContext {
+pub struct ForwardCallerContext {
     pub(crate) pg_pool: Option<PgPool>,
-    pub(crate) config: std::sync::Arc<crate::config::Config>,
-    pub(crate) cluster_instance_id: Option<String>,
+    pub config: std::sync::Arc<crate::config::Config>,
+    pub cluster_instance_id: Option<String>,
 }
 
 impl ForwardCallerContext {
-    pub(crate) fn from_live_globals(pg_pool: Option<PgPool>) -> Self {
+    pub fn from_live_globals(pg_pool: Option<PgPool>) -> Self {
         Self {
             pg_pool,
             config: crate::config_live_reload::current()
@@ -66,11 +66,11 @@ impl ForwardCallerContext {
     }
 }
 
-pub(crate) fn is_forwarded_request(headers: &HeaderMap) -> bool {
+pub fn is_forwarded_request(headers: &HeaderMap) -> bool {
     headers.contains_key(FORWARDED_BY_HEADER)
 }
 
-pub(crate) fn forwarded_session_owner(headers: &HeaderMap) -> Option<&str> {
+pub fn forwarded_session_owner(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(SESSION_OWNER_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -82,7 +82,7 @@ pub(crate) fn forwarded_by(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.to_str().ok())
 }
 
-pub(crate) fn enforce_receiver_fence(
+pub fn enforce_receiver_fence(
     headers: &HeaderMap,
     expected_db_owner: Option<&str>,
     local_instance_id: Option<&str>,
@@ -228,7 +228,7 @@ pub(crate) async fn resolve_cancel_forward_target(
         .await
 }
 
-pub(crate) async fn resolve_forward_target(
+pub async fn resolve_forward_target(
     state: &ForwardCallerContext,
     owner_instance_id: Option<&str>,
     pool: &PgPool,
@@ -291,7 +291,7 @@ async fn resolve_forward_target_with_capability(
     .await
 }
 
-pub(crate) async fn forward_tmux_output(
+pub async fn forward_tmux_output(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     session_id: i64,
@@ -305,7 +305,7 @@ pub(crate) async fn forward_tmux_output(
     forward_json_response(request, "tmux-output", target).await
 }
 
-pub(crate) async fn forward_force_kill(
+pub async fn forward_force_kill(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     session_key: &str,
@@ -323,7 +323,7 @@ pub(crate) async fn forward_force_kill(
     forward_json_response(request, "force-kill", target).await
 }
 
-pub(crate) async fn forward_kill_tmux(
+pub async fn forward_kill_tmux(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     session_key: &str,
@@ -359,7 +359,7 @@ pub(crate) async fn forward_resume_candidates(
     forward_json_response(request, "resume-candidates", target).await
 }
 
-pub(crate) async fn forward_resume_previous(
+pub async fn forward_resume_previous(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     session_key: &str,
@@ -472,7 +472,7 @@ pub(crate) async fn forward_cancel_with_owner_retry(
     }
 }
 
-pub(crate) async fn forward_remote_cancel_if_needed(
+pub async fn forward_remote_cancel_if_needed(
     state: &ForwardCallerContext,
     headers: &HeaderMap,
     channel_id: &str,
@@ -520,7 +520,7 @@ pub(crate) async fn load_cancel_owner(
         .and_then(|session| session.owner_instance_id))
 }
 
-pub(crate) async fn revalidate_local_cancel_owner(
+pub async fn revalidate_local_cancel_owner(
     state: &ForwardCallerContext,
     channel_id: &str,
     expected_session_key: Option<&str>,
@@ -578,7 +578,7 @@ fn cancel_forward_error(status: StatusCode, body: Value, channel_id: &str) -> Se
     .with_context("remote_response", body)
 }
 
-pub(crate) fn trusted_request(
+pub fn trusted_request(
     state: &ForwardCallerContext,
     target: &TrustedForwardTarget,
     method: reqwest::Method,

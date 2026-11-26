@@ -49,7 +49,7 @@ static APPEND: std::sync::OnceLock<AppendExact> = std::sync::OnceLock::new();
 
 /// Installs the delivery journal's strict append beside the health registry; the first install wins.
 #[cfg(unix)]
-pub(crate) fn install_append(append: AppendExact) {
+pub fn install_append(append: AppendExact) {
     let _ = APPEND.set(append);
 }
 

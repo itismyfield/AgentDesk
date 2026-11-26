@@ -35,7 +35,7 @@ impl Intent {
             && row["hosted_execution_nonce"] == source.target["execution_nonce"]
     }
 
-    pub(crate) fn runtime_matches(&self, row: &Value) -> bool {
+    pub fn runtime_matches(&self, row: &Value) -> bool {
         self.owns_row(row)
             && self.row.as_ref().is_some_and(|saved| {
                 saved["started_at"] == row["started_at"]
@@ -69,7 +69,7 @@ impl Registry {
     pub(crate) fn same_control_registry(&self, other: &Self) -> bool {
         self.path == other.path
     }
-    pub(crate) fn try_native_settlement(
+    pub fn try_native_settlement(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -89,7 +89,7 @@ impl Registry {
             Ok(current.clone())
         })
     }
-    pub(crate) fn try_ack_native_cleanup(
+    pub fn try_ack_native_cleanup(
         &self,
         namespace: &str,
         ticket: &Ticket,

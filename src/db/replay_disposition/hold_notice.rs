@@ -19,7 +19,7 @@ pub(crate) struct HoldNotice {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct NoticeRouting<'a> {
+pub struct NoticeRouting<'a> {
     pub(crate) bot: &'a str,
     pub(crate) session_key: Option<&'a str>,
 }
@@ -47,7 +47,7 @@ pub(super) fn from_preserved(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum NoticeRead {
+pub enum NoticeRead {
     Missing,
     NotNotified,
     Notified(HoldNotice),
@@ -68,7 +68,7 @@ impl std::fmt::Display for NoticeReadError {
     }
 }
 
-pub(crate) async fn read(pool: &PgPool, receipt_id: i64) -> Result<NoticeRead, NoticeReadError> {
+pub async fn read(pool: &PgPool, receipt_id: i64) -> Result<NoticeRead, NoticeReadError> {
     let row: Option<(Option<serde_json::Value>, Option<String>)> = sqlx::query_as(
         "SELECT replay_preserved, replay_episode_nonce FROM intake_outbox WHERE id = $1",
     )

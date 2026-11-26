@@ -11,7 +11,7 @@ use super::run_status::is_live_run_status;
 
 /// Runs owning dispatch `td`. The context arm uses the migration `json_extract(text, text)`
 /// helper, which yields NULL for malformed JSON on PostgreSQL 15 and later.
-pub(crate) const RUN_OWNERS_FOR_DISPATCH: &str = r#"
+pub const RUN_OWNERS_FOR_DISPATCH: &str = r#"
     SELECT e.run_id
     FROM auto_queue_entries e
     WHERE e.dispatch_id = td.id
@@ -28,14 +28,14 @@ pub(crate) const RUN_OWNERS_FOR_DISPATCH: &str = r#"
 
 /// A guarded write failed either on the owner guard or on the database statement.
 #[derive(Debug)]
-pub(crate) enum OwnerWriteError {
+pub enum OwnerWriteError {
     Guard(String),
     Db(sqlx::Error),
 }
 
 impl OwnerWriteError {
     /// Split a guard refusal (`Err`) from a database error the caller may classify.
-    pub(crate) fn into_db(self) -> Result<sqlx::Error, String> {
+    pub fn into_db(self) -> Result<sqlx::Error, String> {
         match self {
             Self::Guard(refusal) => Err(refusal),
             Self::Db(error) => Ok(error),
@@ -59,7 +59,7 @@ impl From<String> for OwnerWriteError {
 }
 
 /// Columns of a freshly created `pending` dispatch.
-pub(crate) struct NewDispatchRow<'a> {
+pub struct NewDispatchRow<'a> {
     pub(crate) id: &'a str,
     pub(crate) kanban_card_id: &'a str,
     pub(crate) to_agent_id: &'a str,
@@ -83,7 +83,7 @@ pub(crate) struct NewRetryDispatchRow<'a> {
 }
 
 /// A canonical status write that applies only while the row still has `current_status`.
-pub(crate) struct StatusRowUpdate<'a> {
+pub struct StatusRowUpdate<'a> {
     pub(crate) dispatch_id: &'a str,
     pub(crate) current_status: &'a str,
     pub(crate) to_status: &'a str,
@@ -158,7 +158,7 @@ async fn context_owner_run_id_on_pg_tx(
 
 /// Guard a new dispatch whose context names a `phase_gate.run_id` owner. A caller holding an
 /// entry owner's token passes it, and a different context run is refused, not locked late.
-pub(crate) async fn guard_context_owner_publication_on_pg_tx(
+pub async fn guard_context_owner_publication_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     context: Option<&str>,
     already_locked_run: Option<&str>,
@@ -179,7 +179,7 @@ pub(crate) async fn guard_context_owner_publication_on_pg_tx(
 }
 
 /// Insert a new `pending` dispatch after guarding its context owner.
-pub(crate) async fn insert_dispatch_row_on_pg_tx(
+pub async fn insert_dispatch_row_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     row: &NewDispatchRow<'_>,
 ) -> Result<(), OwnerWriteError> {
@@ -360,7 +360,7 @@ async fn guard_dispatch_revival_on_pg_tx(
 }
 
 /// Apply a canonical status write; one to a live status first passes the revival guard.
-pub(crate) async fn update_dispatch_status_row_on_pg_tx(
+pub async fn update_dispatch_status_row_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     update: &StatusRowUpdate<'_>,
 ) -> Result<u64, OwnerWriteError> {
@@ -372,7 +372,7 @@ pub(crate) async fn update_dispatch_status_row_on_pg_tx(
 
 /// Rewrite a review dispatch's target context and status while it is still `from_status`,
 /// after the revival guard.
-pub(crate) async fn update_review_recovery_row_on_pg_tx(
+pub async fn update_review_recovery_row_on_pg_tx(
     tx: &mut Transaction<'_, Postgres>,
     dispatch_id: &str,
     context: &str,

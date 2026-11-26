@@ -11,7 +11,7 @@ use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
 pub(crate) use super::transition_cleanup::scope::ScopeDigest;
 use super::transition_cleanup::{Judged, Summary};
-pub(crate) use super::transition_cleanup::{Request, Termination, Verdict};
+pub use super::transition_cleanup::{Request, Termination, Verdict};
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 
@@ -19,13 +19,13 @@ use crate::services::tui_o::shadow::SourceId;
 const MAILBOX: usize = 4;
 
 /// The actor Inspect budget, shared with the read-only sweep deadline.
-pub(crate) const INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+pub const INSPECT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The wall clock the actor's probes stamp, read on the worker as each probe starts.
 pub(crate) type Wall = Arc<dyn Fn() -> SystemTime + Send + Sync>;
 
 #[derive(Clone, Debug)]
-pub(crate) enum Operation {
+pub enum Operation {
     /// Judges after both probes and writes nothing.
     Inspect(Request),
     /// Retires each source the judgment passes, one per actor poll, while the scope is still the
@@ -40,7 +40,7 @@ type IdleFuture = std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Sen
 
 /// A runtime-owned check; a missing or unreachable mailbox never counts as idle.
 #[derive(Clone)]
-pub(crate) struct Idle(pub Arc<dyn Fn() -> IdleFuture + Send + Sync>);
+pub struct Idle(pub Arc<dyn Fn() -> IdleFuture + Send + Sync>);
 
 impl std::fmt::Debug for Idle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,13 +50,13 @@ impl std::fmt::Debug for Idle {
 
 /// The operation a job runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Kind {
+pub enum Kind {
     Inspect,
     Apply,
 }
 
 /// What the requester vouches for beside the request.
-pub(crate) struct Context {
+pub struct Context {
     /// The pane and spawn nonce of the execution the request was checked against.
     pub tmux: String,
     pub nonce: String,
@@ -75,7 +75,7 @@ pub(crate) struct Envelope {
 
 /// Why a request was answered without a job.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Refused {
+pub enum Refused {
     ForeignRun,
     CodexDeferred,
     /// Another job holds the channel.
@@ -90,7 +90,7 @@ pub(crate) enum Refused {
 
 /// The automatic retention policy that kept a source readable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum PolicyHold {
+pub enum PolicyHold {
     Young,
     AgeUnknown,
     NotIdle,
@@ -98,7 +98,7 @@ pub(crate) enum PolicyHold {
 
 /// Why nothing was written for a source.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Hold {
+pub enum Hold {
     /// Its cursor, reader, successor, file, execution or rotation changed since its probes.
     Stale,
     TransitionBusy,
@@ -118,7 +118,7 @@ pub(crate) enum Hold {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Unchanged,
     Held(Hold),
     /// Retired with its audit durably, then watched as `Watch` says.
@@ -132,13 +132,13 @@ pub(crate) enum Outcome {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Hop {
+pub struct Hop {
     pub judged: Judged,
     pub outcome: Outcome,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Reply {
+pub struct Reply {
     pub job_id: String,
     pub refused: Option<Refused>,
     /// The operation of the job answering; `None` when refused without one.
@@ -157,7 +157,7 @@ pub(crate) struct Reply {
 
 /// The pane's execution as the final snapshot read it, and the old sources it may be.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Diagnostics {
+pub struct Diagnostics {
     pub nonce: String,
     pub history: Result<HistoryView, String>,
     pub overlaps: Vec<Overlap>,
@@ -169,14 +169,14 @@ pub(crate) struct Diagnostics {
 
 /// An old source of the judgment by its spool key, with the pane its hop resolves to, if any.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Candidate {
+pub struct Candidate {
     pub key: String,
     pub source: SourceId,
     pub pane: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct HistoryView {
+pub struct HistoryView {
     pub complete: bool,
     pub pinned: Option<SourceId>,
     /// The current, awaiting and left sessions in that order, each with its pin if it has one.
@@ -186,7 +186,7 @@ pub(crate) struct HistoryView {
 /// An old source sharing a path, session ID or inode with a pin, as the judgment holds it, or
 /// whose session ID an unpinned session has.
 #[derive(Clone, Debug, Serialize)]
-pub(crate) struct Overlap {
+pub struct Overlap {
     pub key: String,
     pub held_by: Vec<SourceId>,
     pub unpinned: Vec<String>,
@@ -210,7 +210,7 @@ impl Reply {
 
 /// The sending side of one run's mailbox.
 #[derive(Clone)]
-pub(crate) struct TransitionPort {
+pub struct TransitionPort {
     provider: Option<crate::services::tui_o::shadow::ShadowProvider>,
     suspension: super::suspension::Suspension,
     generation: u64,
@@ -247,7 +247,7 @@ impl TransitionPort {
         self
     }
 
-    pub(crate) fn sources_unsuspended(&self) -> bool {
+    pub fn sources_unsuspended(&self) -> bool {
         self.suspension.is_empty()
     }
 
@@ -287,7 +287,7 @@ impl TransitionPort {
 
     /// Dropped before the mailbox takes the envelope, nothing is applied; dropped after, the job
     /// runs to its end, and only the reply is lost.
-    pub(crate) async fn request(
+    pub async fn request(
         &self,
         operation: Operation,
         context: Context,

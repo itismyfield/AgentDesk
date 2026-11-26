@@ -4,14 +4,14 @@ mod adopt_skip;
 mod claude_source;
 #[cfg(test)]
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
-pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
+pub use claude_source::{Persisted, Record, reclaim_with_current_prompt};
 mod binding_access;
 mod codex_cursor;
-pub(crate) use codex_cursor::exports::*;
+pub use codex_cursor::exports::*;
 mod codex_policy;
 #[cfg(test)]
 pub(crate) use codex_policy::DISPOSITIONS;
-pub(crate) use codex_policy::{
+pub use codex_policy::{
     clear_relaunch, codex_verified_channel_delivery_allowed, codex_verified_channel_requires_proof,
     codex_verified_events_allowed, codex_verified_hold_detail, codex_verified_hold_reason,
     codex_verified_input_blocked, codex_verified_o_source_allowed, codex_verified_requires_proof,
@@ -21,15 +21,15 @@ pub(crate) use codex_policy::{
 mod codex_hook;
 pub use binding_access::register_provider_session;
 use binding_access::same_runtime_source;
-pub(crate) use binding_access::{
+pub use binding_access::{
     RuntimeObservation, codex_verified_marker_metadata, codex_verified_publication_allowed,
     runtime_binding_for_tmux_session, runtime_binding_for_tmux_session_under_source_authority,
     runtime_bindings_for_kind, runtime_observation_under_source_authority,
 };
-pub(crate) mod codex_verified;
+pub mod codex_verified;
 #[cfg(test)]
 pub(crate) use codex_hook::SHADOW_IO_CALLS;
-pub(crate) use codex_hook::{
+pub use codex_hook::{
     codex_tail_source_retired, codex_tui_binding_is_subagent, observe_codex_herdr_hook,
     observe_codex_hook, observe_codex_shadow, publish_unless_codex_tail_retired,
     register_codex_herdr_placeholder, register_launched_tmux_runtime_binding,
@@ -40,14 +40,14 @@ pub(crate) use codex_verified::{
     DeliveryPermission as CodexDeliveryPermissionForTests,
     set_permission_for_tests as set_codex_delivery_permission_for_tests,
 };
-pub(crate) use codex_verified::{
+pub use codex_verified::{
     channel_allowed_under_source_authority as codex_verified_channel_allowed_under_source_authority,
     codex_verified_discovered_channel, observe_verified_codex_hook,
     recover_discovered_codex_binding, resolve_registered_claims as resolve_codex_claims,
 };
-pub(crate) mod pane_registration;
-pub(crate) use adopt_skip::*;
-pub(crate) use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
+pub mod pane_registration;
+pub use adopt_skip::*;
+pub use pane_registration::register_rehydrated_tmux_runtime_binding_under_source_authority;
 struct RuntimeBindingPublication<'a, 'b> {
     target: &'a mut TuiPromptDedupeState,
     staged: TuiPromptDedupeState,
@@ -196,7 +196,7 @@ pub fn register_tmux_channel(tmux_session_name: &str, channel_id: u64) {
     });
 }
 
-pub(crate) fn register_tmux_channel_under_source_authority(
+pub fn register_tmux_channel_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel_id: u64,
 ) {
@@ -237,13 +237,13 @@ pub(crate) fn register_tmux_channel_under_source_authority(
     );
 }
 
-pub(crate) fn register_tmux_runtime_binding(tmux_session_name: &str, binding: TuiRuntimeBinding) {
+pub fn register_tmux_runtime_binding(tmux_session_name: &str, binding: TuiRuntimeBinding) {
     crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
         register_tmux_runtime_binding_under_source_authority(authority, binding)
     });
 }
 
-pub(crate) fn register_tmux_runtime_binding_under_source_authority(
+pub fn register_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
@@ -347,7 +347,7 @@ fn publish_runtime_binding(
     })
 }
 
-pub(crate) fn register_rehydrated_tmux_runtime_binding(
+pub fn register_rehydrated_tmux_runtime_binding(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -413,7 +413,7 @@ fn register_rehydrated_under_source_authority(
 
 /// Resolve and optionally replace one binding while its source authority stays held.
 #[rustfmt::skip]
-pub(crate) fn reconcile_rehydrated_tmux_runtime_binding(
+pub fn reconcile_rehydrated_tmux_runtime_binding(
     provider: &str, tmux_session_name: &str, channel_id: u64,
     observe_before_replace: impl FnOnce(),
     decide: impl FnOnce(Option<TuiRuntimeBinding>) -> Option<(TuiRuntimeBinding, bool)>,
@@ -425,7 +425,7 @@ pub(crate) fn reconcile_rehydrated_tmux_runtime_binding(
 }
 
 #[rustfmt::skip]
-pub(crate) fn reconcile_rehydrated_tmux_runtime_binding_with_authority(
+pub fn reconcile_rehydrated_tmux_runtime_binding_with_authority(
     provider: &str, tmux_session_name: &str, channel_id: u64,
     observe_before_replace: impl FnOnce(),
     decide: impl FnOnce(&crate::services::tmux_common::TmuxSourceAuthority<'_>, Option<TuiRuntimeBinding>) -> Option<(TuiRuntimeBinding, bool)>,
@@ -507,7 +507,7 @@ pub(crate) fn record_prompt_anchor_aged_for_tests(
     );
 }
 
-pub(crate) fn record_prompt_anchor(
+pub fn record_prompt_anchor(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -542,7 +542,7 @@ pub(crate) fn take_prompt_anchor_for_response(
     Some(anchor)
 }
 
-pub(crate) fn prompt_anchor_for_response(
+pub fn prompt_anchor_for_response(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -562,7 +562,7 @@ pub(crate) fn prompt_anchor_for_response(
     Some(anchor)
 }
 
-pub(crate) fn clear_prompt_anchor_for_response(
+pub fn clear_prompt_anchor_for_response(
     provider: &str,
     tmux_session_name: &str,
     anchor: TuiPromptAnchor,
@@ -597,7 +597,7 @@ pub(crate) fn clear_prompt_anchor_for_response(
 
 /// Refresh only a live matching-channel submit anchor, without creating an anchor or purging other maps.
 /// An expired matching anchor is removed; unrelated relay ledgers remain untouched on this hot path.
-pub(crate) fn touch_prompt_anchor_on_activity(
+pub fn touch_prompt_anchor_on_activity(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -629,7 +629,7 @@ pub(crate) fn touch_prompt_anchor_on_activity(
 
 /// Remember completion until the matching submitted anchor appears, scoped to the nonzero turn generation.
 /// A later turn cannot drain an older completion; recording the matching anchor drains it.
-pub(crate) fn record_deferred_anchor_completion(
+pub fn record_deferred_anchor_completion(
     provider: &str,
     tmux_session_name: &str,
     channel_id: u64,
@@ -665,7 +665,7 @@ pub(crate) fn record_deferred_anchor_completion(
 /// once the swap can actually be delivered; if command_http is unavailable the
 /// marker is left in place (mirrors the #3164 ⏳-add fail-open: never strand
 /// worse than before).
-pub(crate) fn deferred_anchor_completion_present_for_turn(
+pub fn deferred_anchor_completion_present_for_turn(
     provider: &str,
     tmux_session_name: &str,
     turn_lease_generation: u64,
@@ -698,7 +698,7 @@ pub(crate) fn deferred_anchor_completion_present_for_turn(
 /// recorded. A marker set by a DIFFERENT turn (older or newer) on the same
 /// `(provider, tmux)` carries a different generation and is left untouched — it
 /// can never cross-complete the wrong turn's ⏳.
-pub(crate) fn take_deferred_anchor_completion(
+pub fn take_deferred_anchor_completion(
     provider: &str,
     tmux_session_name: &str,
     turn_lease_generation: u64,
@@ -903,7 +903,7 @@ fn adopt_continuation(
     Some((tmux_session_name, new_output_path))
 }
 
-pub(crate) fn refresh_tmux_runtime_binding_activity(
+pub fn refresh_tmux_runtime_binding_activity(
     tmux_session_name: &str,
     output_path: &str,
 ) -> bool {
@@ -926,7 +926,7 @@ pub(crate) fn refresh_tmux_runtime_binding_activity(
     })
 }
 
-pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
+pub fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
         return false;
@@ -945,7 +945,7 @@ pub(crate) fn clear_tmux_runtime_binding(tmux_session_name: &str) -> bool {
 
 /// Forget both runtime and channel mirrors for an independently judged dead pane.
 /// Return whether anything was removed; legitimate later registration can recreate the mirrors.
-pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
+pub fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
     let tmux_session_name = tmux_session_name.trim();
     if tmux_session_name.is_empty() {
         return false;
@@ -966,7 +966,7 @@ pub(crate) fn evict_dead_tmux_mirror(tmux_session_name: &str) -> bool {
 #[cfg(test)]
 mod codex_legacy_lock_tests;
 
-pub(crate) fn advance_tmux_runtime_binding_offset(
+pub fn advance_tmux_runtime_binding_offset(
     tmux_session_name: &str,
     output_path: &str,
     last_offset: u64,

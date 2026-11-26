@@ -188,7 +188,7 @@ pub(crate) enum AdmittedKeys {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum OriginalGate {
+pub enum OriginalGate {
     /// PG did not take retry authority for this fresh original.
     SendLocal,
     /// PG's durable intent owns any further send.

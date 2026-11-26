@@ -34,14 +34,14 @@ impl std::fmt::Display for PrePublishError {
 
 /// Directory flush that failed after the rename.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SyncStage {
+pub enum SyncStage {
     ParentOpen,
     ParentSync,
     Ancestors,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FlushStatus {
+pub enum FlushStatus {
     /// The parent and every directory up to the trusted root were flushed.
     Flushed,
     /// The rename is visible, but this platform offers no directory flush.
@@ -162,13 +162,13 @@ pub(super) fn flush_dir(
 
 /// Flushes `path`'s parent and the directories up to `root` before `path` is published, so
 /// files written in place there are durable before the publication that vouches for them.
-pub(crate) fn flush_chain_before_publish(root: &Path, path: &Path) -> FlushStatus {
+pub fn flush_chain_before_publish(root: &Path, path: &Path) -> FlushStatus {
     flush_published(root, path)
 }
 
 /// `fsync_parent_dir`, then the directories up to the runtime root, for writers that classify the
 /// post-rename outcome themselves; outside the runtime root only the parent is synced.
-pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
+pub fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
     super::fsync_parent_dir(path)?;
     match super::runtime_root() {
         Some(root) if path.starts_with(&root) => fsync_created_ancestors(&root, path),
@@ -178,7 +178,7 @@ pub(crate) fn fsync_parent_and_ancestors(path: &Path) -> io::Result<()> {
 
 /// Flushes the parent after a successful removal so a crash cannot bring the file back; a
 /// failure is only logged, because the removal already happened.
-pub(crate) fn sync_removed(path: &Path) {
+pub fn sync_removed(path: &Path) {
     if PARENT_DIR_FSYNC_FLUSHES && let Err((stage, error)) = flush_parent(path) {
         tracing::warn!(
             path = %path.display(),
@@ -192,7 +192,7 @@ pub(crate) fn sync_removed(path: &Path) {
 
 /// After a rename of `from` to `to`, flushes the destination chain up to `root`, then the source,
 /// so a crash never keeps the removal without the copy; failures are only logged.
-pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
+pub fn sync_moved(root: &Path, from: &Path, to: &Path) {
     let failed = match flush_published(root, to) {
         FlushStatus::Flushed => flush_parent(from)
             .err()
@@ -214,7 +214,7 @@ pub(crate) fn sync_moved(root: &Path, from: &Path, to: &Path) {
 
 /// Recovery-critical publication of `<trusted root>/<store>/<provider>/<file>`, the trusted root
 /// being the runtime root in production; store and provider names come from the path.
-pub(crate) fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
+pub fn publish_store_row(path: &Path, data: &str) -> Result<(), String> {
     fn name(dir: Option<&Path>) -> Option<&str> {
         dir.and_then(Path::file_name).and_then(|name| name.to_str())
     }
@@ -266,7 +266,7 @@ fn log_flush_status(path: &Path, context: &AtomicWriteContext<'_>, status: &Flus
 
 /// Recovery-critical publication: only a pre-rename failure is an `Err` (same text and log as
 /// before); a later flush failure is logged as published so callers never roll memory back.
-pub(crate) fn critical_publish(
+pub fn critical_publish(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -274,7 +274,7 @@ pub(crate) fn critical_publish(
     critical_publish_status(path, data, context).map(|_| ())
 }
 
-pub(crate) fn critical_publish_status(
+pub fn critical_publish_status(
     path: &Path,
     data: &str,
     context: AtomicWriteContext<'_>,
@@ -302,14 +302,14 @@ pub(crate) fn critical_publish_status(
     }
 }
 
-pub(crate) fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
+pub fn retry_published_status(path: &Path, context: AtomicWriteContext<'_>) -> FlushStatus {
     let status = flush_published(&trusted_root(&context), path);
     log_flush_status(path, &context, &status);
     status
 }
 
 /// Best-effort durable publication: never fails its caller, but every failure is logged.
-pub(crate) fn best_effort_publish_logged(path: &Path, data: &str, context: AtomicWriteContext<'_>) {
+pub fn best_effort_publish_logged(path: &Path, data: &str, context: AtomicWriteContext<'_>) {
     match publish_durable(&trusted_root(&context), path, data) {
         Ok(published) => log_flush_status(path, &context, &published.flush_status),
         Err(error) => tracing::warn!(

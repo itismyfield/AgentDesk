@@ -4,7 +4,7 @@ use super::key::{OutboundDeliveryId, OutboundOperationKey, OutboundTargetKey};
 use super::policy::DiscordOutboundPolicy;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct OutboundIntent {
+pub struct OutboundIntent {
     pub(crate) idempotency: OutboundDeliveryId,
     pub(crate) content: String,
     pub(crate) target: OutboundTargetKey,
@@ -13,7 +13,7 @@ pub(crate) struct OutboundIntent {
 }
 
 impl OutboundIntent {
-    pub(crate) fn new(
+    pub fn new(
         correlation_id: impl Into<String>,
         semantic_event_id: impl Into<String>,
         content: impl Into<String>,
@@ -29,7 +29,7 @@ impl OutboundIntent {
         }
     }
 
-    pub(crate) fn with_operation(mut self, operation: OutboundOperationKey) -> Self {
+    pub fn with_operation(mut self, operation: OutboundOperationKey) -> Self {
         self.operation = operation;
         self
     }

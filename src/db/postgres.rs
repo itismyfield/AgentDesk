@@ -16,14 +16,14 @@ mod agent_sync;
 mod backpressure;
 #[cfg(test)]
 use backpressure::should_yield_for_counters;
-pub(crate) use backpressure::{PressureSnapshot, pressure_snapshot};
+pub use backpressure::{PressureSnapshot, pressure_snapshot};
 #[cfg(test)]
 mod intake_timing_pg_tests;
 mod pool_return;
 #[cfg(test)]
 mod pool_return_pg_tests;
 pub use advisory_lock::AdvisoryLockLease;
-pub(crate) use advisory_lock::PooledAdvisoryLock;
+pub use advisory_lock::PooledAdvisoryLock;
 pub use agent_sync::sync_agents_from_config_pg;
 use pool_return::{RETURN_CLEANUP_BUDGET, with_return_cleanup};
 pub(crate) mod shared_config;
@@ -49,7 +49,7 @@ static FOREGROUND_RESERVE: AtomicU32 = AtomicU32::new(0);
 /// #3651: minimum interval between "yielding under pool pressure" log lines in
 /// a single background loop. The predicate is stateless, so each loop holds its
 /// own `Instant` and consults this to avoid log spam during sustained pressure.
-pub(crate) const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
+pub const BACKPRESSURE_LOG_THROTTLE: Duration = Duration::from_secs(30);
 
 /// #3651: backpressure predicate for background chore loops.
 ///
@@ -99,7 +99,7 @@ struct PoolConnectSettings {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PgConnectFailureKind {
+pub enum PgConnectFailureKind {
     PoolTimedOut,
     /// The database carries migrations newer than this binary embeds; retrying cannot help.
     SchemaAhead,
@@ -107,20 +107,20 @@ pub(crate) enum PgConnectFailureKind {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PgConnectFailure {
+pub struct PgConnectFailure {
     kind: PgConnectFailureKind,
     message: String,
 }
 
 impl PgConnectFailure {
-    pub(crate) fn other(message: impl Into<String>) -> Self {
+    pub fn other(message: impl Into<String>) -> Self {
         Self {
             kind: PgConnectFailureKind::Other,
             message: message.into(),
         }
     }
 
-    pub(crate) fn schema_ahead(message: impl Into<String>) -> Self {
+    pub fn schema_ahead(message: impl Into<String>) -> Self {
         Self {
             kind: PgConnectFailureKind::SchemaAhead,
             message: message.into(),
@@ -138,7 +138,7 @@ impl PgConnectFailure {
         }
     }
 
-    pub(crate) fn kind(&self) -> PgConnectFailureKind {
+    pub fn kind(&self) -> PgConnectFailureKind {
         self.kind
     }
 }
@@ -318,7 +318,7 @@ pub async fn connect(config: &Config) -> Result<Option<PgPool>, String> {
 /// work. Its 10-second acquire deadline tolerates slow TCP/TLS/auth handshakes;
 /// the separate long-lived runtime pool is built only after initialization and
 /// retains the normal 10-second acquire timeout.
-pub(crate) async fn connect_for_bootstrap(
+pub async fn connect_for_bootstrap(
     config: &Config,
 ) -> Result<Option<PgPool>, PgConnectFailure> {
     connect_with_settings_typed(
@@ -331,7 +331,7 @@ pub(crate) async fn connect_for_bootstrap(
 
 /// Activate the eager long-lived runtime pool after bootstrap initialization.
 /// This stays typed so `PoolTimedOut` classification reaches bootstrap logs.
-pub(crate) async fn connect_runtime_after_bootstrap(
+pub async fn connect_runtime_after_bootstrap(
     config: &Config,
 ) -> Result<Option<PgPool>, PgConnectFailure> {
     let pool = connect_with_settings_typed(

@@ -1,7 +1,7 @@
 //! Immutable launch evidence; binding authority remains with the runtime binding.
 
 #[cfg(unix)]
-pub(crate) mod registration;
+pub mod registration;
 
 use crate::services::claude_tui::hook_output_guard::configured_claude_projects_root;
 use crate::services::{platform::tmux::SessionPresence, tmux_common as tc};
@@ -19,11 +19,11 @@ pub(crate) const UNSET_CONTEXT: &str = "unset AGENTDESK_BINDING_CONTEXT\n";
 pub(crate) mod herdr_resume;
 mod inventory;
 pub(crate) use herdr_resume::ResumeStart;
-pub(crate) use inventory::inventory;
+pub use inventory::inventory;
 use inventory::read_hook_context;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct BindingContext {
+pub struct BindingContext {
     pub schema: u32,
     pub provider: String,
     pub created_at: DateTime<Utc>,
@@ -44,7 +44,7 @@ pub(crate) struct BindingContext {
 }
 
 #[derive(Debug)]
-pub(crate) struct PreparedIncarnation {
+pub struct PreparedIncarnation {
     pub context: BindingContext,
     pub path: PathBuf,
 }
@@ -56,13 +56,13 @@ pub(crate) enum ContextPresence {
     Unknown,
 }
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SpawnNonceMarker {
+pub enum SpawnNonceMarker {
     Known(String),
     Absent,
     Unreadable,
 }
 
-pub(crate) fn stable_host_identity() -> Option<String> {
+pub fn stable_host_identity() -> Option<String> {
     crate::config::runtime_config()
         .cluster
         .instance_id
@@ -102,7 +102,7 @@ pub(crate) fn context_presence(provider: &str, nonce: &str) -> ContextPresence {
     }
 }
 
-pub(crate) fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
+pub fn observe_spawn_nonce_marker(tmux: &str) -> SpawnNonceMarker {
     for path in [
         tc::session_temp_path(tmux, "spawn_nonce"),
         tc::legacy_tmp_session_path(tmux, "spawn_nonce"),
@@ -123,7 +123,7 @@ const CONTEXT_LIMIT: u64 = 16 * 1024;
 const HEADER_LIMIT: usize = 32 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum AbsentReason {
+pub enum AbsentReason {
     EnvUnset,
     Unreadable,
     Corrupt,
@@ -133,18 +133,18 @@ pub(crate) enum AbsentReason {
     LegacyRequest,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CapturedContext {
+pub enum CapturedContext {
     Captured(Box<BindingContext>),
     Absent(AbsentReason),
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ObservedHookProcess {
+pub struct ObservedHookProcess {
     pub tmux: Option<String>,
     pub tmux_pane: Option<String>,
     pub provider_pid: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HookBindingEnvelope {
+pub struct HookBindingEnvelope {
     pub context: CapturedContext,
     pub observed: ObservedHookProcess,
 }
@@ -213,7 +213,7 @@ fn checked_context(path: &Path, provider: &str) -> Result<BindingContext, Absent
 }
 
 /// Execution `nonce`'s own context, read from its own path under the hook's rules.
-pub(crate) fn execution_context(provider: &str, nonce: &str) -> Result<BindingContext, String> {
+pub fn execution_context(provider: &str, nonce: &str) -> Result<BindingContext, String> {
     let own = context_path(provider, nonce).map_err(|error| error.to_string())?;
     let ctx = checked_context(&own, provider).map_err(|reason| format!("{reason:?}"))?;
     if ctx.execution_nonce != nonce {

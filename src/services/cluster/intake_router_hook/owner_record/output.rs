@@ -22,7 +22,7 @@ pub(crate) struct Origin {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Artifact {
+pub struct Artifact {
     origin: Box<Origin>,
     payload_hash: String,
 }
@@ -42,7 +42,7 @@ impl Origin {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Scope {
+pub struct Scope {
     pub(crate) pool: PgPool,
     pub(crate) provider: String,
 }
@@ -127,7 +127,7 @@ impl Artifact {
         }
     }
 
-    pub(crate) fn provider(&self) -> &str {
+    pub fn provider(&self) -> &str {
         &self.origin.provider
     }
 }

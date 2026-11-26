@@ -20,7 +20,7 @@ impl Drop for Restored {
 }
 
 /// Runs `turn` on this thread as the greeting of restart `operation`; `None` changes nothing.
-pub(crate) fn scope<R>(operation: Option<String>, turn: impl FnOnce() -> R) -> R {
+pub fn scope<R>(operation: Option<String>, turn: impl FnOnce() -> R) -> R {
     let Some(operation) = operation else {
         return turn();
     };
@@ -31,7 +31,7 @@ pub(crate) fn scope<R>(operation: Option<String>, turn: impl FnOnce() -> R) -> R
 /// The thread an effort restart ended with execution `retired_nonce`, which the next launch from
 /// that retired row resumes. `required`: a continuation waits for it and runs nowhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct EffortResume {
+pub struct EffortResume {
     pub(crate) operation: String,
     pub(crate) native_session: String,
     pub(crate) retired_nonce: String,
@@ -77,7 +77,7 @@ pub(super) fn resume_of(
 }
 
 /// The channel's one live O cursor's source: the native session its ended execution read.
-pub(crate) fn live_source(channel: u64) -> Result<(OStore, SourceId), String> {
+pub fn live_source(channel: u64) -> Result<(OStore, SourceId), String> {
     let runtime = crate::config::runtime_root().ok_or("no runtime root")?;
     let store = OStore::existing(&runtime).ok_or("no O store")?;
     let cursors = store

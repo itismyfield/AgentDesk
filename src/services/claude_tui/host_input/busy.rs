@@ -1,8 +1,8 @@
 //! Busy input's host boundary; the owner keeps framing, notices and settlement.
 pub(crate) mod herdr;
 mod tmux;
-pub(crate) use herdr::observe as observe_herdr;
-pub(crate) use tmux::{cause, loads};
+pub use herdr::observe as observe_herdr;
+pub use tmux::{cause, loads};
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,9 +12,9 @@ use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
 use crate::services::provider::CancelToken;
 use crate::services::session_host::HerdrTarget;
 
-pub(crate) type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
+pub type BusyProbe = Box<dyn FnMut() -> Screen + Send>;
 
-pub(crate) enum BusyOutcome {
+pub enum BusyOutcome {
     NotSent {
         reason: String,
         waits: bool,
@@ -59,7 +59,7 @@ impl BusyReport {
 type BusySubmit = Box<dyn Fn(&Request<'_>) -> BusyReport + Send>;
 
 /// One already-resolved host's busy transaction, ending at Enter without a resend.
-pub(crate) struct BusyOperation {
+pub struct BusyOperation {
     submit: BusySubmit,
     host_tag: Option<&'static str>,
 }
@@ -129,7 +129,7 @@ impl BusyOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BusyState {
+pub enum BusyState {
     Legacy,
     Idle,
     Held,
@@ -138,7 +138,7 @@ pub(crate) enum BusyState {
 
 /// The immutable target read for this front and the source its later key must still name.
 #[derive(Clone)]
-pub(crate) struct BusyObservation {
+pub struct BusyObservation {
     pub(crate) context: Option<Arc<herdr::Context>>,
     state: BusyState,
     source: Option<herdr::Source>,

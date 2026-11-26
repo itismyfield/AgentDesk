@@ -4,24 +4,24 @@
 pub mod activation;
 pub mod actor;
 pub mod adoption;
-pub(crate) mod agy_delivery;
+pub mod agy_delivery;
 pub mod binding;
 pub(crate) mod boot;
 pub mod codex_adoption;
-pub(crate) mod codex_snapshot;
+pub mod codex_snapshot;
 pub mod confirm;
 mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
-pub(crate) mod input_notices;
+pub mod input_notices;
 pub(crate) mod late_adopt;
 pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod progress;
 pub(in crate::services) mod replay;
-pub(crate) mod restart_end;
+pub mod restart_end;
 pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;
 pub mod resume;
@@ -287,7 +287,7 @@ mod renumbered;
 pub(crate) use renumbered::claude_cursor_continues;
 pub(crate) mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.
-pub(crate) mod transition_port;
+pub mod transition_port;
 
 #[cfg(test)]
 #[path = "writer_tests.rs"]

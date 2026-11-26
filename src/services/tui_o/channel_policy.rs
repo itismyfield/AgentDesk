@@ -17,7 +17,7 @@ use crate::services::tui_o::writer::WriterAlarm;
 mod adoption;
 mod agy;
 mod children;
-pub(crate) use adoption::{
+pub use adoption::{
     Adoption, BodyClaimed, Candidate, ClaimReason, FirstAdmission, FirstPause, FirstProof,
     LateBoundary, LegacyRun, LegacySend, SendStage, Site, first_nonce_id, first_prompt_digest,
 };
@@ -29,7 +29,7 @@ pub(crate) use adoption::{
 pub(crate) use children::RetirementTicket;
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct BootChannels {
+pub struct BootChannels {
     /// The selection and, on the home, each committed channel the selection left out.
     channels: BTreeSet<u64>,
     bindings: BTreeSet<u64>,
@@ -75,7 +75,7 @@ impl PartialEq for BootChannels {
 static BOOT: OnceLock<BootChannels> = OnceLock::new();
 
 /// The config's `tui_o` section, or its defaults when the config has none.
-pub(crate) fn tui_o_of(config: &Config) -> &TuiOConfig {
+pub fn tui_o_of(config: &Config) -> &TuiOConfig {
     TuiOConfig::or_default(config.tui_o.as_ref())
 }
 
@@ -373,7 +373,7 @@ impl BootChannels {
     }
 
     /// Every channel O may own here: the selection plus, on the home, its kept committed channels.
-    pub(crate) fn channels(&self) -> &BTreeSet<u64> {
+    pub fn channels(&self) -> &BTreeSet<u64> {
         &self.channels
     }
 
@@ -433,17 +433,17 @@ impl BootChannels {
     }
 
     /// The boot kind of a member, or of the parent a resolved child inherits its policy from.
-    pub(crate) fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
+    pub fn kind(&self, channel: u64) -> Option<RuntimeHandoffKind> {
         let configured = self.kinds.get(&channel).copied();
         configured.or_else(|| Some(self.child(channel)?.ok()?.kind))
     }
 
-    pub(crate) fn site(&self) -> &Site {
+    pub fn site(&self) -> &Site {
         &self.site
     }
 
     /// `cluster.instance_id` when clustering is on: the id the home judgement used.
-    pub(crate) fn configured_id(&self) -> Option<&str> {
+    pub fn configured_id(&self) -> Option<&str> {
         self.configured_id.as_deref()
     }
 
@@ -452,7 +452,7 @@ impl BootChannels {
         self.candidates.get(&channel)
     }
 
-    pub(crate) fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
+    pub fn execution(&self, channel: u64) -> Option<super::ownership::execution::View> {
         self.execution
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -469,7 +469,7 @@ impl BootChannels {
             .map(|candidate| candidate.with_init_scope(self.init_scope_view()))
     }
 
-    pub(crate) fn install_execution(
+    pub fn install_execution(
         &self,
         channel: u64,
         permit: Option<Result<Arc<super::ownership::execution::OwnerPermit>, String>>,
@@ -545,7 +545,7 @@ impl BootChannels {
             .insert(channel, view);
     }
 
-    pub(crate) fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
+    pub fn suspend_execution(&self, channel: u64, reason: String, temporary: bool) {
         use super::ownership::execution::View;
         let _install = self
             .execution_install
@@ -576,7 +576,7 @@ impl BootChannels {
             );
     }
 
-    pub(crate) fn resume_execution(
+    pub fn resume_execution(
         &self,
         channel: u64,
         next: Option<&Arc<super::ownership::execution::OwnerPermit>>,
@@ -677,7 +677,7 @@ fn site(config: &Config, selects: bool) -> Result<(Site, Option<String>)> {
     Ok((site, Some(local)))
 }
 
-pub(crate) fn install(config: &Config) -> Result<()> {
+pub fn install(config: &Config) -> Result<()> {
     crate::services::session_host::surface_policy::install_policy_channel(
         super::cutover::policy_channel,
     );
@@ -699,7 +699,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn boot() -> Option<&'static BootChannels> {
+pub fn boot() -> Option<&'static BootChannels> {
     BOOT.get()
 }
 

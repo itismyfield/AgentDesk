@@ -14,7 +14,7 @@ use std::sync::atomic::Ordering;
 
 /// Cleanup intent for a managed tmux turn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TmuxCleanupIntent {
+pub enum TmuxCleanupIntent {
     PreserveSession,
     /// A PID-only escalation; it must not consume the tmux-name claim.
     PidOnly,
@@ -23,7 +23,7 @@ pub(crate) enum TmuxCleanupIntent {
 
 /// One authorized cleanup request. Callers must not compose PID and tmux kills.
 #[derive(Clone, Debug)]
-pub(crate) struct CleanupRequest {
+pub struct CleanupRequest {
     pub(crate) cancel_source: String,
     pub(crate) intent: TmuxCleanupIntent,
     pub(crate) termination_reason: Option<&'static str>,
@@ -32,7 +32,7 @@ pub(crate) struct CleanupRequest {
 
 /// The binding a stop decided on; a destructive cleanup kills only while the token still names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ExpectedBinding<'a> {
+pub enum ExpectedBinding<'a> {
     /// The stop's own target: its `.host_kind` marker must still admit tmux.
     Decided(Option<&'a str>),
     /// A force-kill verdict's session, whose host, marker included, that verdict already read.
@@ -60,7 +60,7 @@ fn host_refusal(name: Option<&str>, expected: Option<ExpectedBinding<'_>>) -> Op
 
 /// Observable result of a cleanup request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CleanupOutcome {
+pub struct CleanupOutcome {
     pub(crate) authorization: KillAuthorizationState,
     pub(crate) pid_killed: bool,
     pub(crate) retry_pid_cleanup: bool,
@@ -107,7 +107,7 @@ impl CancelToken {
 
     /// As [`Self::request_cleanup`], with no PID or tmux kill unless the binding still
     /// names `expected`, the target a stop decided on.
-    pub(crate) fn request_cleanup_expecting(
+    pub fn request_cleanup_expecting(
         &self,
         request: CleanupRequest,
         expected: ExpectedBinding<'_>,

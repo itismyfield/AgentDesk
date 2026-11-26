@@ -3,7 +3,7 @@ use super::*;
 use crate::services::tui_o::writer::{adoption::LegacyTurnIdentity, binding::BindingEvent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LegacyRun {
+pub struct LegacyRun {
     pub(crate) binding: BindingEvent,
     pub(crate) turn: Option<LegacyTurnIdentity>,
     pub(crate) observed_end: u64,

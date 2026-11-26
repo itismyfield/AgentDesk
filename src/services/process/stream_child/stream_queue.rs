@@ -21,11 +21,11 @@ pub(crate) struct Sender<T> {
     inner: mpsc::Sender<T>,
     gate: Arc<Gate>,
 }
-pub(crate) struct Receiver<T> {
+pub struct Receiver<T> {
     inner: mpsc::Receiver<T>,
     gate: Arc<Gate>,
 }
-pub(crate) fn channel<T>() -> (Sender<T>, Receiver<T>) {
+pub fn channel<T>() -> (Sender<T>, Receiver<T>) {
     let (tx, rx) = mpsc::channel();
     let gate = Arc::new(Gate {
         state: Mutex::new(State::default()),

@@ -19,7 +19,7 @@ static WRITE: Mutex<()> = Mutex::new(());
 /// The exact episode a restart cut: the row's channel, provider, turn nonce and born generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Intent {
+pub struct Intent {
     pub channel: u64,
     pub provider: ShadowProvider,
     pub turn_nonce: String,
@@ -67,7 +67,7 @@ fn done(root: &Path, intent: &Intent) -> PathBuf {
 }
 
 /// Durable before it returns; the same episode recorded again is a no-op.
-pub(crate) fn record(root: &Path, intent: &Intent) -> Result<(), String> {
+pub fn record(root: &Path, intent: &Intent) -> Result<(), String> {
     let exact = Intent::exact(
         intent.channel,
         intent.provider,

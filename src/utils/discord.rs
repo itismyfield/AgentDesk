@@ -43,7 +43,7 @@ pub fn normalize_discord_recipient_ids(
 
 /// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
 /// Uses "discord_" prefix to namespace Discord bot entries in settings.
-pub(crate) fn discord_token_hash(token: &str) -> String {
+pub fn discord_token_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let result = hasher.finalize();

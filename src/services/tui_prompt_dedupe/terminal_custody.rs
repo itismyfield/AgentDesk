@@ -4,7 +4,7 @@ use super::clear_relaunch::Captured;
 use std::sync::OnceLock;
 
 /// The custody store's two read-only questions, supplied by `discord::terminal_delivery_custody`.
-pub(crate) struct TerminalCustody {
+pub struct TerminalCustody {
     pub(crate) retains_channel: fn(u64) -> Result<bool, String>,
     pub(crate) codex_absent_launch_clear: fn(&Captured) -> bool,
 }
@@ -12,7 +12,7 @@ pub(crate) struct TerminalCustody {
 static READERS: OnceLock<TerminalCustody> = OnceLock::new();
 
 /// Installs the custody store's readers beside the health registry; the first install wins.
-pub(crate) fn install(readers: TerminalCustody) {
+pub fn install(readers: TerminalCustody) {
     let _ = READERS.set(readers);
 }
 

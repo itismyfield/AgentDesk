@@ -32,7 +32,7 @@ use crate::services::session_host::model::HostMutation;
 
 /// What serves an endpoint now, against the server a nonce's grant admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GrantedServer {
+pub enum GrantedServer {
     /// The granted server answers, or no grant names one.
     Kept,
     /// No server answered.
@@ -43,9 +43,9 @@ pub(crate) enum GrantedServer {
 /// Another server than the granted one answers; `startup` says `observe_policy` proved its policy
 /// from its start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReplacedServer {
+pub struct ReplacedServer {
     pub(crate) current: ServerWitness,
-    pub(crate) startup: bool,
+    pub startup: bool,
 }
 
 pub(crate) struct SocketHerdrLaunchHost {

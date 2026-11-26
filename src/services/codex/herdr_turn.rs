@@ -3,10 +3,10 @@
 //! a Bound pane takes each later prompt once; owned delivery also permits a person's draft.
 
 #[cfg(unix)]
-pub(crate) mod busy;
+pub mod busy;
 mod first_input;
 #[cfg(unix)]
-pub(crate) mod restart_intent;
+pub mod restart_intent;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -66,7 +66,7 @@ const SOURCE_WAIT: Duration = Duration::from_secs(60);
 const SOURCE_WAIT: Duration = Duration::from_secs(3);
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
-pub(crate) struct CodexHerdrTurn<'a> {
+pub struct CodexHerdrTurn<'a> {
     pub pool: &'a PgPool,
     pub owner: HostedOwner,
     pub channel_id: u64,
@@ -88,7 +88,7 @@ pub(crate) struct CodexHerdrTurn<'a> {
 }
 
 /// What a turn takes from its caller: the launch host and the source attach.
-pub(crate) trait CodexHerdrPorts {
+pub trait CodexHerdrPorts {
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>>;
     /// `Ok(bound)` once the launch's own hook source is confirmed; `Err` attached nothing.
     fn attach(
@@ -136,7 +136,7 @@ fn refused(why: PromptRefused) -> String {
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
-pub(crate) fn execute(
+pub fn execute(
     turn: CodexHerdrTurn<'_>,
     ports: &dyn CodexHerdrPorts,
     sender: Sender<StreamMessage>,

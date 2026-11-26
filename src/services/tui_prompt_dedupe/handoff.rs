@@ -78,7 +78,7 @@ pub(super) struct ParkedObservation {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct HandoffReservation {
+pub struct HandoffReservation {
     pub(super) generation: u64,
     pub(super) origin: String,
     pub(super) reserved_wall: DateTime<Utc>,
@@ -90,7 +90,7 @@ pub(crate) struct HandoffReservation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BindOutcome {
+pub enum BindOutcome {
     NoReservation,
     NotOrigin,
     /// No turn and creation time: the reservation ends and behaves as before reservations.
@@ -112,7 +112,7 @@ enum Proof<'a> {
 
 /// Held from before a Discord prompt is submitted until its handoff tail returns.
 #[must_use]
-pub(crate) struct HandoffGuard {
+pub struct HandoffGuard {
     provider: String,
     tmux: String,
     generation: u64,
@@ -127,7 +127,7 @@ impl Drop for HandoffGuard {
 }
 
 /// Reserves `tmux`'s handoff for `origin`; call before the prompt can reach the pane.
-pub(crate) fn reserve_discord_handoff(provider: &str, tmux: &str, origin: &str) -> HandoffGuard {
+pub fn reserve_discord_handoff(provider: &str, tmux: &str, origin: &str) -> HandoffGuard {
     let provider = normalize_provider(provider);
     let tmux = tmux.trim().to_string();
     if provider.is_empty() || tmux.is_empty() || origin.trim().is_empty() {
@@ -171,7 +171,7 @@ pub(crate) fn reserve_discord_handoff(provider: &str, tmux: &str, origin: &str) 
 }
 
 /// The handoff tail read its own origin record: binds the reservation on the record's evidence.
-pub(crate) fn bind_discord_handoff_record(
+pub fn bind_discord_handoff_record(
     tmux: &str,
     prompt: &str,
     record: &RecordEvidence,
@@ -293,7 +293,7 @@ fn release(provider: &str, tmux: &str, generation: Option<u64>) {
 }
 
 /// Relays the held observations of reservations that outlived their TTL.
-pub(crate) fn drain_expired_handoffs() {
+pub fn drain_expired_handoffs() {
     let expired = {
         let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
         state.purge_expired();
@@ -530,7 +530,7 @@ fn saved_handoff(tmux: &str) -> std::io::Result<Option<DurableHandoff>> {
 }
 
 #[cfg(unix)]
-pub(crate) fn codex_restore_has_custody(tmux: &str) -> std::io::Result<bool> {
+pub fn codex_restore_has_custody(tmux: &str) -> std::io::Result<bool> {
     if STATE
         .lock()
         .unwrap_or_else(|error| error.into_inner())
@@ -754,7 +754,7 @@ pub(super) fn restored_record_allowed(
 /// Rejudges only the restored reservation's origin and held inputs on their own cursor.
 /// A response writer advancing the shared cursor cannot consume these unprocessed records.
 #[cfg(unix)]
-pub(crate) fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Path) {
+pub fn codex_replay_restored_handoff_inputs(tmux: &str, rollout_path: &Path) {
     use std::io::{BufRead, Seek, SeekFrom};
     let key = PromptKey::new("codex", tmux.trim());
     let restored = STATE

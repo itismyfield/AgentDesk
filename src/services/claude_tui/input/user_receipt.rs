@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 /// A pane stays the same across handoff and SID rehydration, but not a respawn.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct PaneIdentity {
+pub struct PaneIdentity {
     runtime_kind: RuntimeHandoffKind,
     output_path: String,
     nonce: SpawnNonceMarker,
@@ -34,7 +34,7 @@ impl PaneIdentity {
 }
 
 #[derive(Debug)]
-pub(crate) struct UserReceipt {
+pub struct UserReceipt {
     session: String,
     pane: Arc<PaneIdentity>,
     sid: String,
@@ -384,7 +384,7 @@ impl UserReceipt {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_pin_before_tail(
+    pub fn native_pin_before_tail(
         session: &str,
         prompt: &str,
         sid: Option<&str>,
@@ -536,7 +536,7 @@ fn digest(bytes: &[u8]) -> String {
 }
 
 /// Re-adopt only the stored row on the same live pane, never search for another input.
-pub(crate) fn revalidate_native_pin(
+pub fn revalidate_native_pin(
     pin: &crate::services::provider::native_stop::NativeUserPin,
 ) -> bool {
     #[cfg(not(unix))]

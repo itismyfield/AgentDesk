@@ -10,7 +10,7 @@ use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_m
 
 /// The endpoint part of a stored location; a pane id means nothing on another endpoint.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrEndpointId {
+pub struct HerdrEndpointId {
     pub host: String,
     pub execution_node: String,
     pub endpoint_config_key: String,
@@ -32,7 +32,7 @@ impl HerdrEndpointId {
 
 /// What the pane runs now; `None` is a value the reader could not read.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct HerdrPaneEvidence {
+pub struct HerdrPaneEvidence {
     pub binding_nonce: Option<String>,
     /// The pane's `shell_pid` with its process start.
     pub root: Option<ProcessStamp>,
@@ -42,7 +42,7 @@ pub(crate) struct HerdrPaneEvidence {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrPaneReading {
+pub enum HerdrPaneReading {
     /// A complete, protocol-matching snapshot of the endpoint has no such pane.
     Missing,
     /// The control plane, snapshot or process read gave no usable answer.
@@ -51,14 +51,14 @@ pub(crate) enum HerdrPaneReading {
 }
 
 /// Reads one exact pane on its own endpoint; it never lists, searches or creates panes.
-pub(crate) trait HerdrExecutionReader {
+pub trait HerdrExecutionReader {
     /// `None` when no endpoint is configured.
     fn endpoint(&self) -> Option<&HerdrEndpointId>;
     fn read_pane(&self, pane_id: &str) -> HerdrPaneReading;
 }
 
 /// The production reader until a Herdr endpoint is configured: nothing is observable.
-pub(crate) struct NoHerdrEndpoint;
+pub struct NoHerdrEndpoint;
 
 impl HerdrExecutionReader for NoHerdrEndpoint {
     fn endpoint(&self) -> Option<&HerdrEndpointId> {
@@ -72,7 +72,7 @@ impl HerdrExecutionReader for NoHerdrEndpoint {
 
 /// Reads the stored pane on the endpoint this node registered for it; it never lists, searches,
 /// creates or writes panes.
-pub(crate) struct SocketHerdrReader {
+pub struct SocketHerdrReader {
     endpoint: HerdrEndpointId,
     view: HerdrPaneView,
     nonce: String,
@@ -80,7 +80,7 @@ pub(crate) struct SocketHerdrReader {
 
 impl SocketHerdrReader {
     /// `None` when no registered endpoint holds the record's location.
-    pub(crate) fn of(stored: &HostedExecution) -> Option<Self> {
+    pub fn of(stored: &HostedExecution) -> Option<Self> {
         let location = stored.location.as_ref()?;
         Some(Self {
             endpoint: HerdrEndpointId::of(location),
@@ -138,7 +138,7 @@ pub(crate) struct HerdrCurrentExecution {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HerdrUnknown {
+pub enum HerdrUnknown {
     NoStoredEvidence,
     EndpointChanged,
     MarkerLost,
@@ -148,7 +148,7 @@ pub(crate) enum HerdrUnknown {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HerdrMismatch {
+pub enum HerdrMismatch {
     OtherPane,
     OtherHostMarker,
     OtherNonce,
@@ -157,7 +157,7 @@ pub(crate) enum HerdrMismatch {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HerdrExecutionMatch {
+pub enum HerdrExecutionMatch {
     Match,
     Mismatch(HerdrMismatch),
     Unknown(HerdrUnknown),
@@ -232,7 +232,7 @@ pub(crate) fn compare_herdr_execution(
 }
 
 /// A durable execution (owner, location, expected) and the witness reading its endpoint now.
-pub(crate) struct HostRecover<'a> {
+pub struct HostRecover<'a> {
     record: &'a HostedExecution,
     witness: &'a dyn HerdrExecutionReader,
 }
@@ -249,7 +249,7 @@ impl<'a> HostRecover<'a> {
 /// The stored execution as read now. Only `SameExecution` is that execution; the row's owner
 /// decides every effect, and `Unknown` is never taken as gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostRecovery {
+pub enum HostRecovery {
     SameExecution,
     /// A complete snapshot of the stored endpoint has no such pane.
     Gone,

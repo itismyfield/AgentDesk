@@ -21,7 +21,7 @@ const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT=";
 
 /// Why a pane reading is not launch evidence; nothing is stored for any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EvidenceGap {
+pub enum EvidenceGap {
     UnknownEndpoint,
     /// The pane read failed or answered off-contract.
     ReadFailed(String),
@@ -202,7 +202,7 @@ pub(crate) fn start_text(start: StartIdentity) -> String {
 
 /// What one reading of a pane runs, before anyone judges whose it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaneOccupant {
+pub enum PaneOccupant {
     /// The root shell alone in the foreground.
     LoneShell {
         root: ProcessStamp,

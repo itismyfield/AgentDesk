@@ -122,7 +122,7 @@ impl ExecutionPurpose {
     }
 }
 
-pub(crate) struct ClaudeCommandBuilder {
+pub struct ClaudeCommandBuilder {
     command: Command,
     purpose: ExecutionPurpose,
 }

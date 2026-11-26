@@ -2,12 +2,12 @@ use super::*;
 
 const SNAPSHOT_CHANGED: &str = "registration snapshot changed; rediscover before retry";
 
-pub(crate) fn snapshot_changed(error: &HookSessionUpsertError) -> bool {
+pub fn snapshot_changed(error: &HookSessionUpsertError) -> bool {
     matches!(error, HookSessionUpsertError::Conflict(conflict) if conflict.message == SNAPSHOT_CHANGED)
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RegistrationSnapshot {
+pub struct RegistrationSnapshot {
     pub(crate) id: i64,
     pub(crate) primary: String,
     pub(crate) nonce: Option<String>,
@@ -16,14 +16,14 @@ pub(crate) struct RegistrationSnapshot {
 }
 
 /// The host reader retains its explicit namespace observation until commit.
-pub(crate) struct RegistrationWitness<'a> {
+pub struct RegistrationWitness<'a> {
     pub(crate) snapshot: &'a RegistrationSnapshot,
     pub(crate) new_key: &'a str,
     pub(crate) new_nonce: &'a str,
     pub(crate) old_host_absent: &'a (dyn Fn() -> bool + Send + Sync),
 }
 
-pub(crate) async fn discover_registration_pg(
+pub async fn discover_registration_pg(
     pool: &PgPool,
     provider: &str,
     identity: CanonicalSessionIdentity<'_>,
@@ -53,7 +53,7 @@ async fn load_snapshot<'e>(
         .transpose()
 }
 
-pub(crate) async fn register_hook_session_pg(
+pub async fn register_hook_session_pg(
     pool: &PgPool,
     params: HookSessionUpsert<'_>,
     identity: CanonicalSessionIdentity<'_>,
@@ -138,7 +138,7 @@ pub(super) async fn validate_registration(
     Ok(())
 }
 
-pub(crate) fn same_physical_locator(left: &str, right: &str) -> bool {
+pub fn same_physical_locator(left: &str, right: &str) -> bool {
     if left == right {
         return true;
     }

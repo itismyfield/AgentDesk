@@ -19,7 +19,7 @@ use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ResumeStart {
+pub struct ResumeStart {
     pub operation: String,
     pub path: PathBuf,
     pub dev: u64,

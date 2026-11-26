@@ -29,6 +29,6 @@ pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {
     })
 }
 
-pub(crate) fn input_notice_line(text: &str) -> String {
+pub fn input_notice_line(text: &str) -> String {
     format_ssh_direct_prompt_notification("claude", "", text)
 }

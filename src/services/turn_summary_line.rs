@@ -3,24 +3,24 @@
 use chrono::{DateTime, Utc};
 use chrono_tz::Asia::Seoul;
 
-pub(crate) mod quota;
+pub mod quota;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     Completed,
     Cancelled,
     Failed,
 }
 
 #[derive(Default)]
-pub(crate) struct Model<'a> {
+pub struct Model<'a> {
     pub name: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub fast: bool,
 }
 
 #[derive(Default)]
-pub(crate) struct Footer<'a> {
+pub struct Footer<'a> {
     pub elapsed_ms: Option<u64>,
     pub started: Option<DateTime<Utc>>,
     pub ended: Option<DateTime<Utc>>,
@@ -42,7 +42,7 @@ fn model_name(raw: &str) -> Option<&str> {
     .then_some(name)
 }
 
-pub(crate) fn render(outcome: Outcome, footer: Footer<'_>) -> String {
+pub fn render(outcome: Outcome, footer: Footer<'_>) -> String {
     let name = footer.model.name.and_then(model_name);
     let effort = footer.model.effort.map(str::trim).filter(|effort| {
         !effort.is_empty()

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 /// Shared by the delivery record, its reachability ledger and the engine's inject ring.
-pub(in crate::services::discord) struct DeliveryRecordLock {
+pub struct DeliveryRecordLock {
     _file: fs::File,
 }
 
@@ -20,7 +20,7 @@ impl Drop for DeliveryRecordLock {
     }
 }
 
-pub(in crate::services::discord) fn lock_record_path(
+pub fn lock_record_path(
     record_path: &Path,
 ) -> Result<DeliveryRecordLock, String> {
     let lock_path = record_path.with_extension("json.lock");

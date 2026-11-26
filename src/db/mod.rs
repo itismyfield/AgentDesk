@@ -1,4 +1,4 @@
-pub(crate) mod agent_read;
+pub mod agent_read;
 pub mod agents;
 pub mod auto_queue;
 pub(crate) mod automation_candidate_card_program;
@@ -7,9 +7,9 @@ pub mod calendar_sync;
 pub mod campaigns;
 pub use adk_store::cancel_tombstones;
 pub(crate) mod channel_custody_lock;
-pub(crate) mod channel_home_preferences;
-pub(crate) mod decision_forums;
-pub(crate) mod decisions;
+pub mod channel_home_preferences;
+pub mod decision_forums;
+pub mod decisions;
 #[cfg(test)]
 mod discarded_tx_result_scan_tests;
 pub mod dispatch_semaphores;
@@ -17,9 +17,9 @@ pub mod dispatch_semaphores;
 #[path = "dispatch_test_db_tests.rs"]
 pub(crate) mod dispatch_test_db;
 #[path = "dispatched_sessions/canonical_identity.rs"]
-pub(crate) mod dispatched_session_canonical_identity;
+pub mod dispatched_session_canonical_identity;
 #[path = "dispatched_sessions/rebind_override.rs"]
-pub(crate) mod dispatched_session_rebind_override;
+pub mod dispatched_session_rebind_override;
 pub mod dispatched_sessions;
 pub mod dispatches;
 #[cfg(any(test, feature = "test-support"))]
@@ -27,29 +27,29 @@ mod fixture_target;
 pub mod idempotency;
 pub mod imsg_reply;
 pub mod intake_outbox;
-pub(crate) mod intake_outbox_delivery_proof;
+pub mod intake_outbox_delivery_proof;
 pub(crate) mod intake_outbox_dispatch_stamp;
-pub(crate) mod intake_outbox_dispatched_audit;
-pub(crate) mod intake_outbox_force_fail;
+pub mod intake_outbox_dispatched_audit;
+pub mod intake_outbox_force_fail;
 pub(crate) mod intake_outbox_open_status;
-pub(crate) mod intake_outbox_status;
+pub mod intake_outbox_status;
 pub mod kanban;
 pub mod kanban_cards;
 pub(crate) mod message_outbox;
-pub(crate) mod o_channel_activation;
+pub mod o_channel_activation;
 // Stays at its allowlisted path: its forwarding loop waits on a channel without a cap.
 #[cfg(any(test, feature = "test-support"))]
 #[path = "../services/health_diagnostics/pg_wire_proxy_tests.rs"]
 pub(crate) mod pg_wire_proxy;
 pub mod postgres;
 pub mod prompt_manifests;
-pub(crate) use adk_store::provider_session_prompts;
+pub use adk_store::provider_session_prompts;
 pub mod relay_dead_letter;
-pub(crate) mod replay_disposition;
+pub mod replay_disposition;
 pub mod scheduled_messages;
 pub mod server_campaigns;
-pub(crate) mod session_agent_resolution;
-pub(crate) mod session_evidence;
+pub mod session_agent_resolution;
+pub mod session_evidence;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;

@@ -7,13 +7,13 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 mod input;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use input::{InputProbe, install_probe};
-pub(crate) use input::{
+pub use input::{
     for_claimed_input, for_input_placement, held_input_channels, selected_codex_input,
     text_for_input_placement,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoute {
+pub enum IntakeRoute {
     /// Not an O channel, or the writer is off: existing placement applies unchanged.
     Unselected,
     /// This process's writer can take the channel now.
@@ -22,7 +22,7 @@ pub(crate) enum IntakeRoute {
     Hold(String),
 }
 
-pub(crate) fn route(provider: &str, channel: u64) -> IntakeRoute {
+pub fn route(provider: &str, channel: u64) -> IntakeRoute {
     route_parsed(provider, || Some(channel))
 }
 

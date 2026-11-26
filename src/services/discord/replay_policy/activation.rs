@@ -43,7 +43,7 @@ static PROCESS: LazyLock<Settings> = LazyLock::new(|| {
     )
 });
 
-pub(crate) fn requested(channel: &str) -> bool {
+pub fn requested(channel: &str) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if test_activation::active(channel) {
         return true;
@@ -79,7 +79,7 @@ pub(crate) fn production_requested(channel: &str) -> bool {
     PROCESS.selected(channel)
 }
 
-pub(crate) fn supported(provider: &str, driver: &str, runtime: &str) -> bool {
+pub fn supported(provider: &str, driver: &str, runtime: &str) -> bool {
     runtime == "owned_direct"
         && driver == "legacy-prompt"
         && ProviderKind::from_str(provider).is_some_and(|p| {

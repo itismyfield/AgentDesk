@@ -8,16 +8,16 @@ pub struct NativePort {
 }
 
 #[cfg(unix)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub generation: u64,
     pub registrations: Vec<super::super::input_facts::native::Registration>,
 }
 
 #[cfg(unix)]
-pub(crate) type Terminal = Result<super::super::input_facts::native::terminal::RawWitness, String>;
+pub type Terminal = Result<super::super::input_facts::native::terminal::RawWitness, String>;
 
 #[cfg(unix)]
-pub(crate) trait EvidencePort: Send + Sync {
+pub trait EvidencePort: Send + Sync {
     fn snapshot(
         &self,
         origin: super::super::input_notices::NoticeOrigin,
@@ -134,7 +134,7 @@ where
 
 use super::super::host::HostIo;
 /// A host's re-post turn for one channel writer.
-pub(crate) type RepostTurn<I> = Box<
+pub type RepostTurn<I> = Box<
     dyn crate::services::tui_o::repost::runner::RepostHook<
             ChannelWriter<<I as HostIo>::Port, <I as HostIo>::Lease, <I as HostIo>::Alarms>,
         >,

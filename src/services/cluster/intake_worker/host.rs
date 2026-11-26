@@ -11,24 +11,24 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 /// A live read of one runtime's shutdown flag; it cannot set the flag.
-pub(crate) type ShutdownProbe = Box<dyn Fn() -> bool + Send + Sync>;
+pub type ShutdownProbe = Box<dyn Fn() -> bool + Send + Sync>;
 
 /// One runtime as the worker sees it: its tick admission gate and its shutdown flag.
-pub(crate) trait IntakeHost: Send + Sync + 'static {
+pub trait IntakeHost: Send + Sync + 'static {
     fn intake_lifecycle(&self) -> &IntakeWorkerLifecycle;
     fn shutdown_probe(&self) -> ShutdownProbe;
 }
 
 /// The channel owner's runtime with the REST client and credentials of that same runtime.
-pub(crate) struct IntakeWorkerRuntime<S> {
-    pub(crate) http: Arc<serenity::Http>,
-    pub(crate) shared: Arc<S>,
+pub struct IntakeWorkerRuntime<S> {
+    pub http: Arc<serenity::Http>,
+    pub shared: Arc<S>,
     pub(crate) token: String,
 }
 
 /// The router's admission check for a channel, consulted before replay sources are trusted.
-pub(crate) type CheckpointWaits = fn(ChannelId) -> bool;
-pub(crate) type IntakeTurnFuture<'a> = Pin<
+pub type CheckpointWaits = fn(ChannelId) -> bool;
+pub type IntakeTurnFuture<'a> = Pin<
     Box<
         dyn Future<Output = Result<IntakeExecution, Box<dyn std::error::Error + Send + Sync>>>
             + Send
@@ -36,20 +36,20 @@ pub(crate) type IntakeTurnFuture<'a> = Pin<
     >,
 >;
 /// Runs one claimed request as a Discord turn.
-pub(crate) type ExecuteIntakeTurn<S> = for<'a> fn(
+pub type ExecuteIntakeTurn<S> = for<'a> fn(
     &'a Arc<serenity::http::Http>,
     &'a Arc<S>,
     &'a str,
     IntakeRequest,
     PendingUploads,
 ) -> IntakeTurnFuture<'a>;
-pub(crate) type ResolveRuntimeFuture<'a, S> =
+pub type ResolveRuntimeFuture<'a, S> =
     Pin<Box<dyn Future<Output = Result<IntakeWorkerRuntime<S>, String>> + Send + 'a>>;
 /// Finds the runtime that owns a channel, starting from the runtime that claimed the row.
 pub(crate) type ResolveRuntime<S> = for<'a> fn(&'a S, ChannelId) -> ResolveRuntimeFuture<'a, S>;
 
 /// Router decisions the worker needs; the Discord runtime hands them in when it starts the loop.
-pub(crate) struct IntakeTurnPort<S> {
+pub struct IntakeTurnPort<S> {
     pub(crate) checkpoint_waits: CheckpointWaits,
     pub(crate) execute: ExecuteIntakeTurn<S>,
     pub(crate) resolve_runtime: ResolveRuntime<S>,

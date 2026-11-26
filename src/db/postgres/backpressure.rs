@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering;
 use sqlx::PgPool;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PressureSnapshot {
+pub struct PressureSnapshot {
     pub(crate) pool_size: u32,
     pub(crate) pool_idle: u32,
     pub(crate) pool_max: u32,
@@ -24,7 +24,7 @@ impl PressureSnapshot {
     }
 }
 
-pub(crate) fn pressure_snapshot(pool: &PgPool) -> PressureSnapshot {
+pub fn pressure_snapshot(pool: &PgPool) -> PressureSnapshot {
     PressureSnapshot {
         effective_reserve: super::FOREGROUND_RESERVE.load(Ordering::Acquire),
         pool_size: pool.size(),

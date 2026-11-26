@@ -3,7 +3,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 use super::completion_write::{PreparedCompletion, RunCompletionPrepared};
 use super::slots::release_run_slots_on_pg_tx;
 
-pub(crate) async fn acquire_run_advisory_xact_lock_on_pg_tx(
+pub async fn acquire_run_advisory_xact_lock_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<(), String> {
@@ -20,7 +20,7 @@ pub(crate) async fn acquire_run_advisory_xact_lock_on_pg_tx(
 /// Loading the ordered ids separately makes lock acquisition order explicit;
 /// it does not rely on a planner preserving an `ORDER BY` through a CTE that
 /// also invokes `pg_advisory_xact_lock`.
-pub(crate) async fn acquire_run_advisory_xact_locks_on_pg_tx(
+pub async fn acquire_run_advisory_xact_locks_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_ids: &[String],
 ) -> Result<Vec<String>, String> {
@@ -58,7 +58,7 @@ async fn try_acquire_run_advisory_xact_lock_on_pg_tx(
 /// dispatch, event, outbox, and card writes. The caller must restore the
 /// setting in the same transaction; this helper only changes the
 /// transaction-local flag.
-pub(crate) async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
+pub async fn set_terminal_entry_finalize_suppressed_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     suppressed: bool,
 ) -> Result<(), String> {
@@ -234,7 +234,7 @@ async fn run_entry_readiness_on_pg_tx(
 /// `run_completion_contract_tests`: the operator `end` command and the two resets.
 /// This is the DB half of the canonical completion writer; the service stages the notice
 /// through the returned [`PreparedCompletion`] on this same tx.
-pub(crate) async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
+pub async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
     tx: &'borrow mut sqlx::Transaction<'conn, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<RunCompletionPrepared<'borrow, 'conn>, String> {
@@ -367,7 +367,7 @@ pub(crate) async fn prepare_run_completion_on_pg_tx<'borrow, 'conn>(
     )))
 }
 
-pub(crate) async fn auto_queue_run_review_disabled_on_pg_tx(
+pub async fn auto_queue_run_review_disabled_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
 ) -> Result<bool, String> {

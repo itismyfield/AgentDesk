@@ -10,7 +10,7 @@ use crate::domain::campaign::model::{
 #[cfg(test)]
 use crate::domain::campaign::model::*;
 
-pub(crate) mod command_transaction;
+pub mod command_transaction;
 pub mod evidence_store;
 mod read;
 pub(crate) mod write;

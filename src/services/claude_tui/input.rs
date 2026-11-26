@@ -10,17 +10,17 @@ use super::{
 
 mod literal_chunks;
 mod preparation_hold;
-pub(crate) mod submission;
+pub mod submission;
 mod user_receipt;
 use literal_chunks::split_literal_chunks;
 #[cfg(unix)]
 pub(crate) use preparation_hold::EffectPhase;
-pub(crate) use preparation_hold::PreparationHold;
+pub use preparation_hold::PreparationHold;
 pub(crate) use preparation_hold::readiness_failure;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use user_receipt::native_read_byte_total;
-pub(crate) use user_receipt::revalidate_native_pin;
-pub(crate) use user_receipt::{PaneIdentity, UserReceipt};
+pub use user_receipt::revalidate_native_pin;
+pub use user_receipt::{PaneIdentity, UserReceipt};
 
 mod draft_hold;
 use draft_hold::admit_automatic_write;
@@ -190,7 +190,7 @@ pub fn prompt_readiness_snapshot(session_name: &str) -> PromptReadinessSnapshot 
     prompt_readiness_snapshot_from_capture(pane.as_deref(), alive)
 }
 
-pub(crate) fn prompt_readiness_snapshot_from_capture(
+pub fn prompt_readiness_snapshot_from_capture(
     pane: Option<&str>,
     tmux_pane_alive: bool,
 ) -> PromptReadinessSnapshot {
@@ -357,7 +357,7 @@ pub fn wait_for_prompt_ready_or_idle_transcript(
     wait_for_prompt_ready_inner(session_name, readiness, cancel_token, Some(transcript_path))
 }
 
-pub(crate) fn send_warm_followup_owned(
+pub fn send_warm_followup_owned(
     session_name: &str,
     prompt: &str,
     cancel_token: Option<&CancelToken>,
@@ -475,7 +475,7 @@ pub(super) fn prompt_marker_confirms_prompt_ready(
 }
 
 /// A live, captured pane whose marker passes the follow-up send's draft, busy and auth vetoes.
-pub(crate) fn final_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
+pub fn final_prompt_ready(snapshot: &PromptReadinessSnapshot) -> bool {
     snapshot.tmux_pane_alive
         && snapshot.capture_available
         && prompt_marker_confirms_prompt_ready(PromptReadinessKind::Followup, snapshot)

@@ -280,7 +280,7 @@ impl TmuxPublisherObservation {
 }
 
 #[derive(Debug)]
-pub(crate) struct RuntimeHintFence {
+pub struct RuntimeHintFence {
     #[cfg(unix)]
     entries: Vec<Entry>,
     #[cfg(unix)]
@@ -342,7 +342,7 @@ impl RuntimeHintFence {
     }
 
     #[cfg(unix)]
-    pub(crate) fn try_acquire(session: &str) -> Result<Option<Self>, String> {
+    pub fn try_acquire(session: &str) -> Result<Option<Self>, String> {
         let _ = super::agentdesk_temp_dir();
         Self::acquire_mode(session, true)
     }
@@ -472,7 +472,7 @@ impl RuntimeHintFence {
         Ok(Some(fence))
     }
 
-    pub(crate) fn validate(&self, session: &str) -> Result<(), String> {
+    pub fn validate(&self, session: &str) -> Result<(), String> {
         #[cfg(unix)]
         {
             let mut keys = Self::paths(session)

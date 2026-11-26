@@ -13,7 +13,7 @@ use crate::domain::replay_evidence::recovery::root::{OwnedRuntimeRoot, issuer};
 pub(crate) mod issuer_key;
 
 #[cfg(unix)]
-pub(crate) struct Singleton {
+pub struct Singleton {
     file: Arc<File>,
     root: Option<PathBuf>,
 }

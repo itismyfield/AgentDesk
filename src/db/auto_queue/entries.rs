@@ -8,7 +8,7 @@ use super::runs::{
 };
 
 mod dispatch_failure;
-pub(crate) mod status_write;
+pub mod status_write;
 use status_write::{EntryStatusStage, EntryStatusWrite, StagedEntryStatus, run_finalize_due};
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -179,7 +179,7 @@ pub async fn reactivate_done_entry_on_pg(
 
 /// Keep done-entry reactivation symmetric across the dedicated reactivate and
 /// kanban-reopen paths after their run token has been acquired.
-pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
+pub async fn ensure_done_entry_run_live_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     entry_id: &str,
@@ -279,7 +279,7 @@ pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
 /// Lock and return the full entry identity used to accept a concurrent
 /// done-to-dispatched transition. Status alone is not sufficient: a different
 /// dispatch or slot is a competing owner, not an idempotent target state.
-pub(crate) async fn lock_entry_dispatch_identity_on_pg_tx(
+pub async fn lock_entry_dispatch_identity_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
 ) -> Result<(String, String, Option<String>, Option<i64>), String> {
@@ -415,7 +415,7 @@ pub async fn reconcile_failed_entry_done_on_pg(
 
 /// Pool-scoped entry status writer. A changed row comes back staged on its still-open tx so
 /// the service can attempt run completion there before committing.
-pub(crate) async fn stage_entry_status_on_pg(
+pub async fn stage_entry_status_on_pg(
     pool: &PgPool,
     entry_id: &str,
     new_status: &str,
@@ -782,7 +782,7 @@ pub(crate) async fn stage_entry_status_on_pg(
 /// that identity drifts it returns an error instead of looping. The caller
 /// composes this into a wider atomic operation, so observed state is already a
 /// stable snapshot inside the transaction.
-pub(crate) async fn write_entry_status_on_pg_tx(
+pub async fn write_entry_status_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
     new_status: &str,
@@ -1016,7 +1016,7 @@ pub(crate) async fn write_entry_status_on_pg_tx(
 /// Acquire every run token before a caller-owned transaction writes any row.
 /// Sorting and deduplication keep multi-run attachment transactions on one
 /// advisory-lock order; the dispatched choke point re-enters these tokens.
-pub(crate) async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
+pub async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_ids: &[String],
 ) -> Result<(), String> {

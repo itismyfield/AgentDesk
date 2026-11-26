@@ -10,7 +10,7 @@ use crate::services::session_host::{
 };
 
 /// Callbacks for session status checks during output file polling.
-pub(crate) struct SessionProbe {
+pub struct SessionProbe {
     /// Returns true if the session process is still running.
     pub is_alive: Box<dyn Fn() -> bool + Send>,
     /// Returns true if the session is idle and ready for new input.
@@ -122,7 +122,7 @@ fn tmux_session_alive(tmux_session_name: &str) -> bool {
 
 /// Host-aware liveness. Only `Missing` is a death verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionLiveness {
+pub enum SessionLiveness {
     Alive,
     Missing,
     /// Unresolved host, or a host this build cannot observe.

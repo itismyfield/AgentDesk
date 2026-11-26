@@ -7,14 +7,14 @@ const RETRY_BACKOFF_MAX_SECONDS: i64 = 15 * 60;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecoveryResolution {
+pub enum RecoveryResolution {
     Retry,
     Adopt,
     ConfirmNotApplied,
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct Claim {
+pub struct Claim {
     pub id: Uuid,
     pub target_id: Uuid,
     pub event_id: Uuid,
@@ -29,7 +29,7 @@ pub(crate) struct Claim {
     pub attempts: i32,
 }
 
-pub(crate) async fn claim(
+pub async fn claim(
     pool: &PgPool,
     accounts: &[String],
 ) -> Result<Option<Claim>, sqlx::Error> {
@@ -59,7 +59,7 @@ pub(crate) async fn claim(
     Ok(row)
 }
 
-pub(crate) async fn dispatch(pool: &PgPool, claim: &Claim) -> Result<bool, sqlx::Error> {
+pub async fn dispatch(pool: &PgPool, claim: &Claim) -> Result<bool, sqlx::Error> {
     // Lock the parent in the same order as mutation. Revision/tombstone cannot change during the fence.
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT id FROM kakao_calendar_events WHERE id=$1 FOR UPDATE")
@@ -78,7 +78,7 @@ pub(crate) async fn dispatch(pool: &PgPool, claim: &Claim) -> Result<bool, sqlx:
     Ok(result.rows_affected() == 1)
 }
 
-pub(crate) async fn complete(
+pub async fn complete(
     pool: &PgPool,
     claim: &Claim,
     remote: Option<&str>,
@@ -123,7 +123,7 @@ pub(crate) async fn complete(
     Ok(changed)
 }
 
-pub(crate) async fn fail(
+pub async fn fail(
     pool: &PgPool,
     claim: &Claim,
     status: &str,
@@ -147,7 +147,7 @@ pub(crate) async fn fail(
     Ok(())
 }
 
-pub(crate) async fn recovery_target(
+pub async fn recovery_target(
     pool: &PgPool,
     event: Uuid,
     operation: Uuid,
@@ -159,7 +159,7 @@ pub(crate) async fn recovery_target(
         .bind(operation).bind(event).fetch_optional(pool).await?.ok_or(CalendarDbError::Conflict)
 }
 
-pub(crate) async fn recover(
+pub async fn recover(
     pool: &PgPool,
     claim: &Claim,
     resolution: RecoveryResolution,

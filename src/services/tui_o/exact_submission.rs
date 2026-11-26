@@ -82,7 +82,7 @@ pub(crate) fn observe_untouched(untouched: bool) {
 }
 
 // Every executor exit converges here; error labels never decide whether input was sent.
-pub(crate) fn dispatch<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+pub fn dispatch<T>(run: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let result = run();
     let capability = CURRENT.with(|current| current.borrow().clone());
     let Some(capability) = capability else {

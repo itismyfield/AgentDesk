@@ -18,7 +18,7 @@ use crate::services::turn_host;
 
 /// Why no host is decided; every consumer leaves both hosts untouched.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum HoldReason {
+pub enum HoldReason {
     RelationUnresolved,
     ProviderUnknown,
     Execution(String),
@@ -36,7 +36,7 @@ impl std::fmt::Display for HoldReason {
 
 /// The host a channel's operation targets. It grants no execution; consumers match all three.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum HostDecision {
+pub enum HostDecision {
     Tmux,
     Herdr {
         endpoint_key: String,
@@ -54,7 +54,7 @@ impl HostDecision {
     }
 
     /// For a consumer that leaves the tmux session as it is unless the decision is tmux.
-    pub(crate) fn tmux_refusal(&self) -> Option<String> {
+    pub fn tmux_refusal(&self) -> Option<String> {
         match self {
             Self::Tmux => None,
             Self::Herdr { endpoint_key, .. } => Some(format!(
@@ -66,13 +66,13 @@ impl HostDecision {
         }
     }
 
-    pub(crate) fn is_herdr(&self) -> bool {
+    pub fn is_herdr(&self) -> bool {
         matches!(self, Self::Herdr { .. })
     }
 }
 
 /// The decision for `channel`. Only a thread under a Herdr parent reads its row and tmux session.
-pub(crate) async fn host_decision(
+pub async fn host_decision(
     pool: Option<&PgPool>,
     token_hash: Option<&str>,
     provider: Option<&ProviderKind>,
@@ -83,7 +83,7 @@ pub(crate) async fn host_decision(
 
 /// The decision for a caller holding `channel`'s session key: its row is read by that key, a
 /// legacy `host:tmux` key included, and a missing provider is read from the key.
-pub(crate) async fn host_decision_for_key(
+pub async fn host_decision_for_key(
     pool: Option<&PgPool>,
     session_key: &str,
     provider: Option<&ProviderKind>,
@@ -102,7 +102,7 @@ pub(crate) async fn host_decision_for_key(
 
 /// The decision for a slot thread from every row it has (`channel_id` or `thread_channel_id`).
 /// No row at all, read without error, is no execution; any row decides by its own key.
-pub(crate) async fn host_decision_for_rows(pool: &PgPool, channel: u64) -> HostDecision {
+pub async fn host_decision_for_rows(pool: &PgPool, channel: u64) -> HostDecision {
     if let Err(decided) = thread_endpoint(channel) {
         return decided;
     }
@@ -148,7 +148,7 @@ fn provider_of_key(session_key: &str) -> Option<ProviderKind> {
 
 /// Whether an input of `channel` runs on Herdr now: the same decision, without the tmux probe
 /// that tells tmux from no execution, since neither runs on Herdr.
-pub(crate) async fn input_runs_herdr(
+pub async fn input_runs_herdr(
     pool: Option<&PgPool>,
     token_hash: &str,
     provider: &ProviderKind,

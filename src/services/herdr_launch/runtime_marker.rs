@@ -21,7 +21,7 @@ pub(super) fn clear_fresh(
     })
 }
 
-pub(crate) async fn clear_retired(record: &HostedExecution) -> Result<(), String> {
+pub async fn clear_retired(record: &HostedExecution) -> Result<(), String> {
     if record.state != HostedState::Retired {
         return Err("runtime marker cleanup requires a retired execution".into());
     }

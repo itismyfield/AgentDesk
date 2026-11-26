@@ -31,7 +31,7 @@ use crate::services::tmux_common::host_marker::{HostKindMarker, read_host_kind_m
 
 /// Why the gate let nothing through; every case is decided before any input is written.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HerdrGateRefusal {
+pub enum HerdrGateRefusal {
     AdmissionStopped(StopCause),
     /// The server resumes agents when it restores.
     RestoreOn,
@@ -61,7 +61,7 @@ pub(crate) enum HerdrGateRefusal {
 /// What one server reports of the recorded pane: a reading for a reconnect or a retire, never an
 /// input judgment.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaneReading {
+pub enum PaneReading {
     /// A complete snapshot of the server has no such pane.
     Missing,
     Unreadable(String),
@@ -78,7 +78,7 @@ enum WitnessChanged {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaneProvider {
+pub enum PaneProvider {
     /// The root shell is the only foreground process.
     Exited,
     /// The one foreground child of the root shell, its environment naming this execution.
@@ -88,7 +88,7 @@ pub(crate) enum PaneProvider {
 
 /// What an input does to the pane: a cancel key only stops work, so admission lets it through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Mutation {
+pub enum Mutation {
     Input,
     Cancel,
     Terminate,
@@ -164,7 +164,7 @@ fn fence_at(key: FenceKey) -> Arc<ExecutionFence> {
 
 /// Restores the fence a restart lost for a Bound execution a reconnect matched exactly, so a
 /// notice admission finds it; an existing entry keeps its closing tombstone.
-pub(crate) fn restore_execution_fence(stored: &HostedExecution) -> bool {
+pub fn restore_execution_fence(stored: &HostedExecution) -> bool {
     let (Some(location), Some(expected)) = (&stored.location, &stored.expected) else {
         return false;
     };
@@ -213,7 +213,7 @@ impl ExecutionFence {
     }
 }
 
-pub(crate) fn try_notice_fence<R>(
+pub fn try_notice_fence<R>(
     endpoint: &crate::config::session_hosts::ChannelEndpoint,
     nonce: &str,
     start: impl FnOnce() -> R,
@@ -253,10 +253,10 @@ pub(crate) fn try_notice_fence<R>(
     Ok(result)
 }
 
-pub(crate) struct TerminationFence(MutationPermit, bool);
+pub struct TerminationFence(MutationPermit, bool);
 impl TerminationFence {
     /// A pre-write refusal can reopen only this execution, never a successor nonce.
-    pub(crate) fn reopen(&self) {
+    pub fn reopen(&self) {
         self.0
             .fence
             .state
@@ -296,7 +296,7 @@ pub(crate) struct PaneGate {
 /// A recorded Herdr pane on this node's registered endpoint; every input to it passes the gate.
 /// Its calls block on the socket, so callers stay off the async runtime.
 #[derive(Clone)]
-pub(crate) struct HerdrTarget(pub(crate) Arc<PaneGate>);
+pub struct HerdrTarget(pub(crate) Arc<PaneGate>);
 
 impl std::fmt::Debug for HerdrTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -424,7 +424,7 @@ impl HerdrTarget {
         self.0.restore_witness(Mutation::Terminate)
     }
 
-    pub(crate) fn provider_absent(&self) -> Result<bool, String> {
+    pub fn provider_absent(&self) -> Result<bool, String> {
         match pane_probe::recorded_process(self.0.os.as_ref(), &self.0.expected.provider_process) {
             pane_probe::RecordedProcess::ExactAlive => Ok(false),
             pane_probe::RecordedProcess::ProvenAbsent | pane_probe::RecordedProcess::Replaced => {
@@ -765,7 +765,7 @@ impl Reads<'_> {
 
 /// A recorded pane read, never written, on this node's registered endpoint. Unlike a target it
 /// needs only the stored location, so an execution without launch evidence can still be read.
-pub(crate) struct HerdrPaneView {
+pub struct HerdrPaneView {
     transport: Arc<dyn HerdrTransport>,
     pane: String,
     nonce: String,

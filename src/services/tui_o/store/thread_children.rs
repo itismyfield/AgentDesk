@@ -10,7 +10,7 @@ use crate::services::session_host::surface_policy::VerifiedSurface;
 
 mod child_store;
 mod lifecycle;
-pub(crate) use child_store::ChildStore;
+pub use child_store::ChildStore;
 pub(crate) use lifecycle::ChildLifecycle;
 
 const FLOOR: &str = "thread_children.floor";

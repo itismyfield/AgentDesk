@@ -7,11 +7,11 @@ use super::channel_policy::{self, BootChannels, Candidate, Site};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod channel_gate;
-pub(crate) mod claude_thread;
-pub(crate) mod intake_route;
+pub mod claude_thread;
+pub mod intake_route;
 #[cfg(unix)]
-pub(crate) use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
-pub(crate) use channel_gate::{
+pub use channel_gate::peek_o_owns_tui_output_for_channel_quiet;
+pub use channel_gate::{
     BodyClaim, BodySend, BodySite, BodyTransport, IdentityError, claim_then_send,
     claim_then_send_at, claim_then_send_held_at, legacy_sends_report, o_keeps_body,
     o_owns_tui_output_for_channel_reserving, peek_o_owns_tui_output_for_channel,
@@ -28,13 +28,13 @@ pub(crate) use channel_gate::{
     claims_judged, o_owns_tui_output_for_channel, o_owns_tui_output_for_channel_tmux,
 };
 
-pub(crate) fn boot_snapshot() -> Option<BootChannels> {
+pub fn boot_snapshot() -> Option<BootChannels> {
     test_override::with_channels(|snapshot| snapshot.cloned())
 }
 
 /// Each boot-snapshot channel with its boot kind and, where this node may host it, its adoption;
 /// the writer host derives its channels from this, never from a reloaded config.
-pub(crate) fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)> {
+pub fn boot_ownership() -> Vec<(u64, Option<RuntimeHandoffKind>, Option<Candidate>)> {
     let evaluate = |snapshot: Option<&channel_policy::BootChannels>| {
         let Some(snapshot) = snapshot else {
             return Vec::new();
@@ -126,7 +126,7 @@ type ChannelLookups = std::collections::BTreeMap<String, ChannelLookup>;
 static CHANNEL_LOOKUPS: std::sync::LazyLock<std::sync::Mutex<ChannelLookups>> =
     std::sync::LazyLock::new(Default::default);
 
-pub(crate) fn install_channel_lookup(provider: &str, lookup: ChannelLookup) {
+pub fn install_channel_lookup(provider: &str, lookup: ChannelLookup) {
     // A restarted provider replaces its old client; other providers keep their own credentials.
     test_override::with_lookups(|lookups| {
         lookups.insert(provider.to_owned(), lookup);
@@ -163,7 +163,7 @@ async fn resolve_reserved_with(channel: u64, lookup: Option<ChannelLookup>) -> R
 
 /// Records a thread Discord returned under an O parent; `fresh` only for a thread this process
 /// just created, where no Legacy turn has run. Returns whether O now hosts it.
-pub(crate) fn record_thread_child(
+pub fn record_thread_child(
     channel: &poise::serenity_prelude::GuildChannel,
     fresh: bool,
 ) -> bool {
@@ -172,7 +172,7 @@ pub(crate) fn record_thread_child(
 
 /// As `record_thread_child` for a channel known by id, read through the checked lookup; only
 /// when `hinted_parent`, which is no evidence, names a channel O selects.
-pub(crate) async fn record_thread_child_by_id(
+pub async fn record_thread_child_by_id(
     channel: u64,
     hinted_parent: u64,
 ) -> Result<bool, String> {
@@ -253,7 +253,7 @@ fn held_children() -> Vec<u64> {
 }
 
 /// The boot turn selection while a selected Codex channel O owns has not confirmed turn mode.
-pub(crate) fn codex_turn_awaited(
+pub fn codex_turn_awaited(
     channel: u64,
 ) -> Option<crate::services::tui_o::turn_mode::TurnConfig> {
     if owned_kind(channel) != Some(RuntimeHandoffKind::CodexTui)
@@ -266,14 +266,14 @@ pub(crate) fn codex_turn_awaited(
 }
 
 /// Whether the boot turn selection names `channel`, so a Codex input there may wait for turn mode.
-pub(crate) fn turn_selected(channel: u64) -> bool {
+pub fn turn_selected(channel: u64) -> bool {
     test_override::with_channels(|snapshot| {
         snapshot.is_some_and(|s| s.turn().selects(s.policy_channel(channel)))
     })
 }
 
 /// The channel whose boot policy governs `channel`: a resolved thread child's parent, or itself.
-pub(crate) fn policy_channel(channel: u64) -> u64 {
+pub fn policy_channel(channel: u64) -> u64 {
     test_override::with_channels(|snapshot| snapshot.map_or(channel, |s| s.policy_channel(channel)))
 }
 
@@ -323,7 +323,7 @@ pub(crate) fn mark_codex_turn_admitted(
 }
 
 /// Installs the hold before spawning the provider, only for a fresh local Codex turn.
-pub(crate) fn admit_codex_first(
+pub fn admit_codex_first(
     channel: u64,
     provider: &crate::services::provider::ProviderKind,
     session: Option<&str>,
@@ -374,14 +374,14 @@ pub(crate) fn attach_codex_first(
     });
 }
 
-pub(crate) fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
+pub fn pause_codex_first(channel: u64) -> Option<channel_policy::FirstPause> {
     test_override::with_channels(|boot| {
         let boot = boot.filter(|b| b.kind(channel) == Some(RuntimeHandoffKind::CodexTui))?;
         Some(boot.output_candidate(channel)?.pause_first())
     })
 }
 
-pub(crate) fn invalidate_codex_first(
+pub fn invalidate_codex_first(
     channel: Option<u64>,
     nonce: Option<&str>,
     tmux: Option<&str>,
@@ -399,7 +399,7 @@ pub(crate) fn invalidate_codex_first(
     });
 }
 
-pub(crate) async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
+pub async fn wait_codex_first(channel: u64, nonce: Option<&str>) {
     wait_codex_first_id(channel, nonce.map(channel_policy::first_nonce_id)).await;
 }
 

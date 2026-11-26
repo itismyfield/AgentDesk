@@ -11,7 +11,7 @@ use crate::services::claude_tui::readiness::compact::{self, Outcome};
 use crate::services::provider::ProviderKind;
 
 mod turn_identity;
-pub(in crate::services) use turn_identity::CompactTurnIdentity;
+pub use turn_identity::CompactTurnIdentity;
 
 /// Per-pane key for the once-per-fill-cycle armed flag. Keyed by both the Discord
 /// channel and the physical tmux pane so [`clear_for_tmux`] can forget every
@@ -40,7 +40,7 @@ struct PaneArmState {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services) enum CompactWindowSource {
+pub enum CompactWindowSource {
     Proven,
     FallbackMax,
 }
@@ -283,7 +283,7 @@ fn trigger_window_for_resolution(resolution: Option<u64>) -> Option<(u64, Compac
 
 /// Validate and forward one complete active Claude usage snapshot. Missing model,
 /// launch provenance, or any usage component fails closed before pane state exists.
-pub(in crate::services) fn observe_active_usage<T: CompactTurnIdentity>(
+pub fn observe_active_usage<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     model: Option<&str>,
@@ -354,7 +354,7 @@ pub(in crate::services) fn observe_active_usage<T: CompactTurnIdentity>(
 /// (Codex compacts natively), an unresolvable window, or a `0`/disabled percent.
 /// A `0`/low `usage_tokens` is deliberately NOT short-circuited: it is the
 /// post-compact re-arm signal handled inside [`observe_and_decide_with_source`].
-pub(in crate::services) fn maybe_inject_compact<T: CompactTurnIdentity>(
+pub fn maybe_inject_compact<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,
@@ -373,7 +373,7 @@ pub(in crate::services) fn maybe_inject_compact<T: CompactTurnIdentity>(
     );
 }
 
-pub(in crate::services) fn maybe_inject_compact_with_source<T: CompactTurnIdentity>(
+pub fn maybe_inject_compact_with_source<T: CompactTurnIdentity>(
     turn_identity: T,
     provider: &ProviderKind,
     usage_tokens: u64,

@@ -20,7 +20,7 @@ pub(crate) struct FirstTurn {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct FirstProof {
+pub struct FirstProof {
     pub(crate) channel: u64,
     pub(crate) mark: TurnMark,
     pub(crate) nonce: String,
@@ -29,11 +29,11 @@ pub(crate) struct FirstProof {
     pub(crate) source: SourceId,
 }
 
-pub(crate) fn digest(prompt: &str) -> String {
+pub fn digest(prompt: &str) -> String {
     format!("sha256:{:x}", Sha256::digest(prompt.as_bytes()))
 }
 
-pub(crate) fn nonce_id(nonce: &str) -> [u8; 32] {
+pub fn nonce_id(nonce: &str) -> [u8; 32] {
     Sha256::digest(nonce.as_bytes()).into()
 }
 
@@ -93,7 +93,7 @@ impl FirstProof {
 }
 
 /// A clear invalidates once and excludes fresh admission until its final effect has finished.
-pub(crate) struct FirstPause(Candidate);
+pub struct FirstPause(Candidate);
 
 impl Drop for FirstPause {
     fn drop(&mut self) {
@@ -104,7 +104,7 @@ impl Drop for FirstPause {
     }
 }
 
-pub(crate) struct FirstAdmission {
+pub struct FirstAdmission {
     candidate: Candidate,
     nonce: String,
     completed: bool,
@@ -112,7 +112,7 @@ pub(crate) struct FirstAdmission {
 }
 
 impl FirstAdmission {
-    pub(crate) fn completed(&mut self) {
+    pub fn completed(&mut self) {
         self.completed = true;
     }
 }

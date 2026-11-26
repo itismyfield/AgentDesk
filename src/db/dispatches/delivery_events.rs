@@ -6,7 +6,7 @@ use sqlx::PgPool;
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "text", rename_all = "snake_case")]
-pub(crate) enum DispatchDeliveryEventStatus {
+pub enum DispatchDeliveryEventStatus {
     Reserved,
     Sent,
     Fallback,
@@ -16,7 +16,7 @@ pub(crate) enum DispatchDeliveryEventStatus {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct DispatchDeliveryEventFinalize<'a> {
+pub struct DispatchDeliveryEventFinalize<'a> {
     pub(crate) dispatch_id: &'a str,
     pub(crate) status: DispatchDeliveryEventStatus,
     pub(crate) target_channel_id: Option<&'a str>,
@@ -29,7 +29,7 @@ pub(crate) struct DispatchDeliveryEventFinalize<'a> {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, sqlx::FromRow)]
-pub(crate) struct DispatchDeliveryEvent {
+pub struct DispatchDeliveryEvent {
     pub(crate) id: i64,
     pub(crate) dispatch_id: String,
     pub(crate) correlation_id: String,
@@ -58,7 +58,7 @@ fn semantic_event_id(dispatch_id: &str) -> String {
     format!("dispatch:{dispatch_id}:notify")
 }
 
-pub(crate) async fn insert_reserved_dispatch_delivery_event_pg(
+pub async fn insert_reserved_dispatch_delivery_event_pg(
     pool: &PgPool,
     dispatch_id: &str,
     target_channel_id: Option<&str>,
@@ -115,7 +115,7 @@ pub(crate) async fn insert_reserved_dispatch_delivery_event_pg(
 /// previous pool-only entrypoint wrote each finalize statement independently and
 /// swallowed its error, which could leave a delivered message with no dedup key
 /// and let recovery re-send it.
-pub(crate) async fn finalize_dispatch_delivery_event_conn(
+pub async fn finalize_dispatch_delivery_event_conn(
     conn: &mut sqlx::PgConnection,
     input: DispatchDeliveryEventFinalize<'_>,
 ) -> Result<bool, sqlx::Error> {
@@ -217,7 +217,7 @@ pub(crate) async fn finalize_dispatch_delivery_event_conn(
     Ok(insert.rows_affected() > 0)
 }
 
-pub(crate) async fn list_dispatch_delivery_events_pg(
+pub async fn list_dispatch_delivery_events_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<Vec<DispatchDeliveryEvent>, sqlx::Error> {

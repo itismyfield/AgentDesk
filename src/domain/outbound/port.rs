@@ -7,13 +7,13 @@ use super::intent::OutboundIntent;
 use super::result::DeliveryResult;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DispatchMessagePostErrorKind {
+pub enum DispatchMessagePostErrorKind {
     MessageTooLong,
     Other,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchMessagePostError {
+pub struct DispatchMessagePostError {
     kind: DispatchMessagePostErrorKind,
     detail: String,
     http_status: Option<reqwest::StatusCode>,
@@ -85,7 +85,7 @@ impl std::error::Error for DispatchMessagePostError {}
 /// Production wraps `reqwest`; tests inject a deterministic client. Each call returns the
 /// created or edited message id.
 #[allow(async_fn_in_trait)]
-pub(crate) trait DiscordOutboundClient: Send + Sync {
+pub trait DiscordOutboundClient: Send + Sync {
     async fn post_message(
         &self,
         target_channel: &str,
@@ -156,6 +156,6 @@ pub(crate) trait DiscordOutboundClient: Send + Sync {
 }
 
 /// Delivers one intent; the implementation owns the dedup reservation and nonce use.
-pub(crate) trait OutboundDelivery: Send + Sync {
+pub trait OutboundDelivery: Send + Sync {
     fn deliver(&self, intent: OutboundIntent) -> impl Future<Output = DeliveryResult> + Send;
 }

@@ -86,7 +86,7 @@ pub(crate) enum Tick {
     Ran(TickReport),
 }
 
-pub(crate) struct Runner {
+pub struct Runner {
     pool: PgPool,
     sender_id: u64,
     run: RunScope,
@@ -311,7 +311,7 @@ pub(crate) type Turned<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// The re-post side of one channel's writer, run only from that writer's actor turn, so it never
 /// sends beside the writer's own posts.
-pub(crate) trait RepostHook<W>: Send {
+pub trait RepostHook<W>: Send {
     /// One turn, serialized with the channel's original posts.
     fn turn<'a>(&'a mut self, writer: &'a mut W) -> Turned<'a, ()>;
     /// A fresh original may go only for an unadmitted key with a durable intent.
@@ -325,7 +325,7 @@ pub(crate) type OpenTransport<T> = Box<dyn FnMut() -> Option<Arc<T>> + Send>;
 
 /// One channel's re-post turn: admits uncertain on originals, probes them and sends at most one
 /// granted re-post per turn.
-pub(crate) struct ChannelTurn<T> {
+pub struct ChannelTurn<T> {
     runner: Runner,
     open: OpenTransport<T>,
     io: Option<Arc<T>>,

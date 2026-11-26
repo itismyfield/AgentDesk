@@ -143,7 +143,7 @@ pub(crate) fn ensure_absent_durable(nonce: &str) -> Result<(), String> {
 }
 
 /// The status fields of execution `nonce`'s v2 hold; no path or input text. A v1 hold has none.
-pub(crate) fn summary(nonce: &str) -> Option<serde_json::Value> {
+pub fn summary(nonce: &str) -> Option<serde_json::Value> {
     let Ok(Some(Held::V2(record))) = read(nonce) else {
         return None;
     };

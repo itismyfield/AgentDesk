@@ -1,12 +1,12 @@
 //! Channel role projections and memory settings independent of Discord assembly.
-pub(crate) mod config_projection;
+pub mod config_projection;
 mod memory_policy;
 
 use crate::domain::memory::{MemoryBackendKind, MemoryConfigOverride, ResolvedMemorySettings};
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::ChannelId;
 
-pub(crate) struct RoleProjection {
+pub struct RoleProjection {
     pub role_id: String,
     pub prompt_file: String,
     pub provider: Option<ProviderKind>,
@@ -18,7 +18,7 @@ pub(crate) struct RoleProjection {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RegisteredChannelBinding {
+pub struct RegisteredChannelBinding {
     pub channel_id: u64,
     pub owner_provider: ProviderKind,
     pub fallback_name: Option<String>,
@@ -32,7 +32,7 @@ fn load_org_document() -> Option<crate::services::org_catalog::OrgSchema> {
     crate::services::org_catalog::load_runtime_document_at(org_schema_path().as_deref())
 }
 
-pub(crate) fn resolve_role_binding(
+pub fn resolve_role_binding(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<RoleProjection> {
@@ -47,7 +47,7 @@ pub(crate) fn resolve_role_binding(
     None
 }
 
-pub(crate) fn resolve_workspace(
+pub fn resolve_workspace(
     channel_id: ChannelId,
     channel_name: Option<&str>,
 ) -> Option<String> {
@@ -62,7 +62,7 @@ pub(crate) fn resolve_workspace(
     None
 }
 
-pub(crate) fn resolve_memory_settings(
+pub fn resolve_memory_settings(
     base: Option<&MemoryConfigOverride>,
     override_cfg: Option<&MemoryConfigOverride>,
 ) -> ResolvedMemorySettings {
@@ -90,7 +90,7 @@ pub(crate) fn resolve_memory_settings(
     )
 }
 
-pub(crate) fn resolve_agent_memory_settings(
+pub fn resolve_agent_memory_settings(
     agent: Option<&crate::config::AgentDef>,
 ) -> ResolvedMemorySettings {
     ResolvedMemorySettings {
@@ -99,7 +99,7 @@ pub(crate) fn resolve_agent_memory_settings(
     }
 }
 
-pub(crate) fn memory_settings_for_role(role_id: &str) -> ResolvedMemorySettings {
+pub fn memory_settings_for_role(role_id: &str) -> ResolvedMemorySettings {
     let config = crate::config::runtime_config_optional();
     let agent = config
         .as_ref()
@@ -107,7 +107,7 @@ pub(crate) fn memory_settings_for_role(role_id: &str) -> ResolvedMemorySettings 
     resolve_agent_memory_settings(agent)
 }
 
-pub(crate) fn memory_settings_for_binding(
+pub fn memory_settings_for_binding(
     memory: Option<&ResolvedMemorySettings>,
 ) -> ResolvedMemorySettings {
     memory

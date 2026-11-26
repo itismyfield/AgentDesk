@@ -13,17 +13,17 @@ pub(crate) mod body_check;
 use crate::services::tui_o::store::OStore;
 
 mod child_run;
-pub(crate) use child_run::LegacyRun;
+pub use child_run::LegacyRun;
 mod first_turn;
-pub(crate) use first_turn::{
+pub use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,
 };
 mod send_stage;
-pub(crate) use send_stage::SendStage;
+pub use send_stage::SendStage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Adoption {
+pub enum Adoption {
     /// Undecided: a Legacy body or placement releases it, a first `init` commits it.
     Pending,
     /// The channel's store exists, so O owns its output.
@@ -56,7 +56,7 @@ struct LegacySends {
 /// A Legacy body send under way on its channel, held until its transport is done; `seq` is its
 /// claim order on that channel.
 #[derive(Debug)]
-pub(crate) struct LegacySend {
+pub struct LegacySend {
     sends: Arc<LegacySends>,
     seq: u64,
 }
@@ -77,7 +77,7 @@ impl Drop for LegacySend {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum ClaimReason {
+pub enum ClaimReason {
     EmptySelection,
     NonMember,
     NoCandidate,
@@ -104,10 +104,10 @@ impl Adoption {
 
 /// A body claim's answer: whether O owns the channel and, when Legacy sends, that send.
 #[derive(Debug)]
-pub(crate) struct BodyClaimed {
-    pub(crate) owned: bool,
-    pub(crate) send: Option<LegacySend>,
-    pub(crate) reason: ClaimReason,
+pub struct BodyClaimed {
+    pub owned: bool,
+    pub send: Option<LegacySend>,
+    pub reason: ClaimReason,
 }
 
 /// A sends snapshot taken before reading the binding log; order is local to this candidate.
@@ -121,7 +121,7 @@ pub(crate) struct TurnMark {
 /// A late reservation's floors from its first read: the deferred `baseline` (0 unless clean), and
 /// `takeover_after` with the Legacy sends read before it, the floor a takeover judges from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LateBoundary {
+pub struct LateBoundary {
     pub(crate) baseline: u64,
     pub(crate) takeover_after: u64,
     pub(crate) sends: (u64, u64),
@@ -129,7 +129,7 @@ pub(crate) struct LateBoundary {
 
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
-pub(crate) struct Candidate {
+pub struct Candidate {
     init_scope: Option<Arc<crate::services::session_host::surface_policy::InitScope>>,
     state: Arc<Mutex<Adoption>>,
     sends: Arc<LegacySends>,
@@ -501,7 +501,7 @@ impl Drop for LateReservationGuard {
 
 /// Where this node stands for the selected channels: only the O home hosts or adopts them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Site {
+pub enum Site {
     #[default]
     Home,
     Foreign {

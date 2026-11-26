@@ -76,7 +76,7 @@ impl State {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct Projection {
+pub struct Projection {
     pub id: String,
     pub target_turn: String,
     pub message_id: Option<u64>,
@@ -87,7 +87,7 @@ pub(crate) struct Projection {
     pub decision: Option<Decision>,
 }
 
-pub(crate) struct Receipt {
+pub struct Receipt {
     pub session: String,
     pub attempt: Projection,
     pub prompt: String,

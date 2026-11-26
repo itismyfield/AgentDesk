@@ -9,7 +9,7 @@ pub(crate) const ADMISSION_ENV: &str = "ADK_HERDR_ADMISSION";
 const STOP_FILE: [&str; 2] = ["herdr", "admission-off"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StopCause {
+pub enum StopCause {
     /// The environment switch disables admission.
     Env,
     /// The stop file exists now or existed earlier in this process.
@@ -83,7 +83,7 @@ pub(crate) fn stop_file_path() -> Option<PathBuf> {
 static PROCESS: OnceLock<Admission> = OnceLock::new();
 
 /// The process switch, built on first use: only a configured channel's judgement reaches it.
-pub(crate) fn check() -> Result<(), StopCause> {
+pub fn check() -> Result<(), StopCause> {
     if crate::config::session_hosts::with_boot_migration(|metadata| {
         metadata.is_some_and(|metadata| metadata.admission_stopped())
     }) {

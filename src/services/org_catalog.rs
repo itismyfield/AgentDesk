@@ -12,7 +12,7 @@ pub(super) use document::{
     AgentDef, ChannelBinding, OrgSchema, fallback_candidates, load_runtime_document_at,
 };
 
-pub(super) use document::parse_org_schema;
+pub use document::parse_org_schema;
 
 pub(crate) fn read_auth_catalog_at(
     path: &std::path::Path,

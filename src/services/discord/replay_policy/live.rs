@@ -171,7 +171,7 @@ pub(crate) enum Verdict {
 /// The in-process record of one started protected attempt. Only the token of the executor that
 /// spent its start permit carries one, so a restored or foreign turn never decides with it.
 #[derive(Debug)]
-pub(crate) struct LiveAttempt {
+pub struct LiveAttempt {
     pub(crate) attempt: Mutex<Option<ExactAttempt>>,
     pub(crate) observation: Mutex<RawObservation>,
     recorded: tokio::sync::Notify,

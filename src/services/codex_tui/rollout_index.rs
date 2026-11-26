@@ -42,7 +42,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-pub(crate) mod summary_context;
+pub mod summary_context;
 
 /// Maximum header lines scanned looking for the `session_meta` record. Mirrors
 /// the legacy bound in `session.rs` / `rollout_tail.rs` so the bounded-read
@@ -166,7 +166,7 @@ fn is_rollout_jsonl(path: &Path) -> bool {
 }
 
 /// Whether Codex left a regular compressed sibling for this JSONL rollout.
-pub(crate) fn archived_rollout(path: &Path) -> bool {
+pub fn archived_rollout(path: &Path) -> bool {
     if !path
         .extension()
         .is_some_and(|extension| extension == "jsonl")
@@ -185,7 +185,7 @@ pub fn read_rollout_session_meta(path: &Path) -> Option<RolloutSessionMeta> {
     session_meta_from_header(std::fs::File::open(path).ok()?)
 }
 
-pub(crate) fn rollout_is_subagent(path: &Path) -> bool {
+pub fn rollout_is_subagent(path: &Path) -> bool {
     read_rollout_session_meta(path).is_some_and(|meta| meta.is_subagent())
 }
 

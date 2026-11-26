@@ -1,5 +1,5 @@
-pub(crate) mod checkpoint;
-pub(crate) mod source_observation;
+pub mod checkpoint;
+pub mod source_observation;
 
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -187,7 +187,7 @@ pub fn write_codex_tui_rollout_marker_with_start_offset(
     })
 }
 
-pub(crate) fn write_codex_tui_rollout_marker_under_source_authority(
+pub fn write_codex_tui_rollout_marker_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     rollout_path: &Path,
     session_id: Option<&str>,
@@ -382,7 +382,7 @@ fn install_binding(
     })
 }
 
-pub(crate) fn install_codex_tui_runtime_binding_under_source_authority(
+pub fn install_codex_tui_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     rollout_start_offset: Option<u64>,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
@@ -473,7 +473,7 @@ pub(crate) fn advance_codex_tui_rollout_marker_start_offset_under_source_authori
     )
 }
 
-pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
+pub fn advance_codex_tui_runtime_binding_and_marker_offset(
     tmux_session_name: &str,
     rollout_path: &Path,
     offset: u64,
@@ -509,7 +509,7 @@ pub(crate) fn advance_codex_tui_runtime_binding_and_marker_offset(
     let _ = advance_codex_tui_checkpoint(tmux_session_name, rollout_path, None, offset);
 }
 
-pub(crate) fn advance_codex_tui_checkpoint(
+pub fn advance_codex_tui_checkpoint(
     tmux_session_name: &str,
     rollout_path: &Path,
     expected: Option<u64>,
@@ -608,7 +608,7 @@ fn preserved_rollout_start_offset_for_marker(
     }
 }
 
-pub(crate) fn codex_tui_rollout_paths_same(left: &Path, right: &Path) -> bool {
+pub fn codex_tui_rollout_paths_same(left: &Path, right: &Path) -> bool {
     let left = std::fs::canonicalize(left).unwrap_or_else(|_| left.to_path_buf());
     let right = std::fs::canonicalize(right).unwrap_or_else(|_| right.to_path_buf());
     left == right
@@ -810,7 +810,7 @@ fn matching_rollout_candidates(
 
 /// The rollout of a stored provider session id, accepted only when exactly one TUI rollout
 /// matches the id and cwd. Err is the operator diagnostic of what was searched and missing.
-pub(crate) fn prove_codex_rollout_by_session_id(
+pub fn prove_codex_rollout_by_session_id(
     session_id: Option<&str>,
     cwd: Option<&str>,
     sessions_dir: Option<&Path>,

@@ -17,7 +17,7 @@ pub(crate) enum StoreError {
     Read,
     Permissions,
 }
-pub(crate) struct PrivateDirectory {
+pub struct PrivateDirectory {
     directory: File,
 }
 

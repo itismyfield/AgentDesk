@@ -10,7 +10,7 @@ use crate::services::session_backend::ReadOutputFailure;
 
 /// Under settlement a Herdr turn's reader ends only on its provider's own terminal record; the
 /// pane's logical name identifies its frames. Settlement is read first, so production reads nothing.
-pub(crate) fn herdr_provider_terminal_only(token: Option<&CancelToken>) -> Option<String> {
+pub fn herdr_provider_terminal_only(token: Option<&CancelToken>) -> Option<String> {
     if let Some(logical) = crate::services::tui_o::exact_submission::logical_key() {
         return Some(logical);
     }

@@ -7,8 +7,8 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub(crate) mod agy_cell;
-pub(crate) mod environment;
-pub(crate) mod lifecycle;
+pub mod environment;
+pub mod lifecycle;
 
 pub(crate) const MARKER: &str = "AGENTDESK_TEST_MANIFEST";
 static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
@@ -44,11 +44,11 @@ pub(crate) struct HerdrHost {
     pub(crate) endpoint_key: String,
 }
 
-pub(crate) fn requested() -> bool {
+pub fn requested() -> bool {
     INSTANCE.get().is_some() || std::env::var_os(MARKER).is_some()
 }
 
-pub(crate) fn initialize() -> Result<(), String> {
+pub fn initialize() -> Result<(), String> {
     if !requested() {
         return Ok(());
     }

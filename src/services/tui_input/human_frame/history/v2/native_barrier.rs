@@ -2,15 +2,15 @@
 use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Barrier {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
+pub struct Barrier {
+    pub namespace: String,
+    pub ticket: Ticket,
     pub(crate) membership_range: [u64; 2],
     pub(crate) membership_row: String,
     pub(crate) foreign_range: [u64; 2],
     pub(crate) foreign_row: String,
     pub(crate) foreign_hashes: Vec<String>,
-    pub(crate) through: u64,
+    pub through: u64,
     pub(crate) registrations_fingerprint: String,
 }
 
@@ -108,7 +108,7 @@ impl Settlement {
 }
 
 impl Registry {
-    pub(crate) fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
+    pub fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
         proof.validate(&proof.namespace, &proof.ticket)?;
         self.native_transaction_checked(
             &proof.namespace,

@@ -52,12 +52,12 @@ pub(crate) fn terminate_hosted_session(
 
 // Its only production caller is the operator termination service.
 #[cfg(unix)]
-pub(crate) mod herdr_terminate {
+pub mod herdr_terminate {
     use crate::services::session_host::HerdrTarget;
 
     mod contract;
 
-    pub(crate) use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
+    pub use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
 
     impl<'a> OperatorTerminateWarrant<'a> {
         #[cfg(any(test, feature = "test-support"))]
@@ -79,7 +79,7 @@ pub(crate) mod herdr_terminate {
     }
 
     /// Consumes the operator proof; no locator or cancel verdict can replace it.
-    pub(crate) fn terminate_herdr_once(
+    pub fn terminate_herdr_once(
         warrant: OperatorTerminateWarrant<'_>,
     ) -> HerdrTerminateResult {
         use super::{HostTerminateEffect, HostTerminateWarrant, terminate_hosted_session};

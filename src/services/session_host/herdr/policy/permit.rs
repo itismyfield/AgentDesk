@@ -5,7 +5,7 @@ use super::{NextRestartProof, PeerSource, StartupProof, Unverified};
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CreatePermit {
+pub struct CreatePermit {
     endpoint: HerdrLaunchEndpoint,
     proof: NextRestartProof,
 }
@@ -54,7 +54,7 @@ impl CreatePermit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LaunchAdmissionGrant {
+pub struct LaunchAdmissionGrant {
     endpoint: HerdrLaunchEndpoint,
     nonce: String,
     witness: ServerWitness,

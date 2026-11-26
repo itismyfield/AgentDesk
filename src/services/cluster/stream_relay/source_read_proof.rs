@@ -82,7 +82,7 @@ impl SourcePin {
 }
 
 #[derive(Clone)]
-pub(crate) struct SourceCertificate {
+pub struct SourceCertificate {
     pin: SourcePin,
     end: u64,
     generation: i64,

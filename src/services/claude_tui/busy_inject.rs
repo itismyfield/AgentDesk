@@ -17,7 +17,7 @@ pub(crate) use submit::inject;
 pub(crate) use submit::inject_owned;
 #[cfg(all(test, unix))]
 use submit::{inject_gated, inject_listed};
-pub(crate) use submit::{inject_report, inject_report_any_turn};
+pub use submit::{inject_report, inject_report_any_turn};
 
 #[derive(Clone, Copy)]
 enum TurnGate {
@@ -50,7 +50,7 @@ impl Policy {
         screen_proven: false,
     };
 }
-pub(crate) use receipt::exact as exact_receipt;
+pub use receipt::exact as exact_receipt;
 pub(crate) use receipt::pasted_inner;
 #[cfg(test)]
 mod receipt_interleave_tests;
@@ -61,7 +61,7 @@ pub(in crate::services::claude_tui) mod screen;
 mod screen_identity_tests;
 #[cfg(test)]
 mod screen_tests;
-pub(crate) mod stash;
+pub mod stash;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 mod stash_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -76,12 +76,12 @@ use crate::services::platform::tmux::pane_dead_is_live;
 use crate::services::tui_input::bounded_tmux::BoundedTmuxError;
 
 /// Larger inputs are refused before any tmux call.
-pub(crate) const MAX_INPUT_BYTES: usize = 64 * 1024;
+pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 const CAPTURE_SCROLLBACK: &str = "-80";
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Veto {
+pub enum Veto {
     InvalidInput,
     LockContended,
     PaneUnavailable,
@@ -97,14 +97,14 @@ pub(crate) enum Veto {
 
 /// An actual tmux write failed; no observation failure can produce this result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum WriteFailure {
+pub enum WriteFailure {
     Stash,
     Paste,
     Enter,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     /// The paste and Enter were sent; only `confirm` reads whether Claude received them.
     Injected,
     NotSent(Veto),
@@ -112,7 +112,7 @@ pub(crate) enum Outcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Report {
+pub struct Report {
     pub outcome: Outcome,
     /// What `confirm` checks once the paste and Enter were sent.
     sent: Option<Sent>,
@@ -140,7 +140,7 @@ impl Report {
 
 /// How the transcript answered a sent paste.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Receipt {
+pub enum Receipt {
     Observed,
     /// The frame was submitted together with other composer text.
     Contaminated,
@@ -151,19 +151,19 @@ pub(crate) enum Receipt {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReceiptError {
+pub enum ReceiptError {
     ContaminatedSubmit,
     NotObserved,
 }
 
-pub(crate) struct Timing {
+pub struct Timing {
     pub lock_retries: &'static [Duration],
     pub settle: Duration,
     pub confirm_window: Duration,
     pub confirm_poll: Duration,
 }
 
-pub(crate) const TIMING: Timing = Timing {
+pub const TIMING: Timing = Timing {
     lock_retries: &[
         Duration::ZERO,
         Duration::from_millis(80),
@@ -174,7 +174,7 @@ pub(crate) const TIMING: Timing = Timing {
     confirm_poll: Duration::from_millis(250),
 };
 
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub session: &'a str,
     pub transcript: &'a Path,
     pub source: &'a str,
@@ -186,12 +186,12 @@ pub(crate) struct Request<'a> {
 }
 
 /// A fresh 8-hex nonce that names this input in the transcript.
-pub(crate) fn fresh_nonce() -> String {
+pub fn fresh_nonce() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
 }
 
 /// The header line keeps the first character off `/`, `!` and `#` and names the person.
-pub(crate) use crate::services::tui_input::human_frame::plain_inject as frame;
+pub use crate::services::tui_input::human_frame::plain_inject as frame;
 
 fn marker(nonce: &str) -> String {
     format!(" · {nonce}]")
@@ -328,7 +328,7 @@ fn human_input_text(record: &serde_json::Value, prompt_only: bool) -> Option<(St
 
 /// Bounded tmux calls against one session; the program is injectable for tests.
 #[derive(Clone)]
-pub(crate) struct Pane {
+pub struct Pane {
     program: PathBuf,
     target: String,
 }
@@ -386,7 +386,7 @@ impl Pane {
 
     /// `Gone` only on tmux's own word that the pane died or its session is missing.
     #[cfg(unix)]
-    pub(crate) fn lost(&self) -> Screen {
+    pub fn lost(&self) -> Screen {
         use crate::services::platform::tmux::{SessionPresence, classify_has_session_output};
         let dead = self.ok(&["display-message", "-p", "-t", &self.target, "#{pane_dead}"]);
         if dead.as_deref().map(str::trim) == Some("1") {
@@ -427,7 +427,7 @@ pub(crate) fn held_read(capture: &str) -> HeldRead {
 
 /// One read of a held pane by the owned entry's own screen check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Screen {
+pub enum Screen {
     /// Enter would submit now.
     Ready,
     /// The screen still refuses keys.
@@ -440,7 +440,7 @@ pub(crate) enum Screen {
 
 /// Whether Enter would submit on the pane now, by the owned entry's own screen read.
 #[cfg(unix)]
-pub(crate) fn screen_submits(pane: &Pane) -> Screen {
+pub fn screen_submits(pane: &Pane) -> Screen {
     match before_paste_by(pane, None, true) {
         Ok(_) => Screen::Ready,
         Err(Veto::PaneUnavailable) => pane.lost(),
@@ -517,7 +517,7 @@ fn stash_channels_configured() -> &'static [u64] {
 }
 
 #[cfg(unix)]
-pub(crate) fn stash_enabled(channel: Option<u64>) -> bool {
+pub fn stash_enabled(channel: Option<u64>) -> bool {
     #[cfg(any(test, feature = "test-support"))]
     if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
         return stash_channel_listed(channel, &stash_tests::configured_channels());
@@ -627,7 +627,7 @@ fn inject_locked(
 
 /// Records a sent paste's receipt in the frame ledger off the caller's thread; the result stays
 /// Enter-terminal, so nothing is retried and a missing receipt confirms nothing.
-pub(crate) fn collect_receipt(request: &Request<'_>, report: &Report, timing: &Timing) {
+pub fn collect_receipt(request: &Request<'_>, report: &Report, timing: &Timing) {
     let Some(sent) = report.sent.clone() else {
         return;
     };
@@ -651,7 +651,7 @@ pub(crate) fn collect_receipt(request: &Request<'_>, report: &Report, timing: &T
 
 /// The transcript's answer to a sent paste: one window, at most one finishing Enter under the
 /// composer lock, one more window. The waits hold no lock; `None` when nothing was sent.
-pub(crate) fn confirm(
+pub fn confirm(
     pane: &Pane,
     request: &Request<'_>,
     report: &Report,
@@ -738,7 +738,7 @@ fn finish_submit(pane: &Pane, request: &Request<'_>, sent: &Sent) -> bool {
 
 /// Polls the transcript after `offset` until `deadline` for the submission carrying `nonce`:
 /// only the exact `text`, bare or in one paste block, is a receipt; another body is contaminated.
-pub(crate) fn await_receipt(
+pub fn await_receipt(
     (transcript, offset, nonce, text): (&Path, u64, &str, &str),
     deadline: Instant,
     poll: Duration,

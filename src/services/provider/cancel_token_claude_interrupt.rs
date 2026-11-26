@@ -7,15 +7,15 @@ use std::sync::{Arc, Mutex};
 
 /// Observations of this token's Herdr input, not a source or settlement authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum HerdrSubmission {
+pub enum HerdrSubmission {
     Unsubmitted,
     Submitted,
     Unknown,
 }
 
-pub(crate) struct HerdrInterruptState {
+pub struct HerdrInterruptState {
     pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-    pub(crate) submission: Mutex<super::herdr_before_start::HerdrInputState>,
+    pub submission: Mutex<super::herdr_before_start::HerdrInputState>,
     pub(crate) user_stop: AtomicBool,
     /// Where this token's own input began; terminal admission reads its turn from here only.
     pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
@@ -26,7 +26,7 @@ pub(crate) struct HerdrInterruptState {
 }
 
 /// A stop's one late delivery attempt; it holds the token only weakly.
-pub(crate) type LateStop = Box<dyn Fn() + Send>;
+pub type LateStop = Box<dyn Fn() + Send>;
 
 pub(crate) enum OwnStart {
     Unseen(Option<LateStop>),
@@ -41,7 +41,7 @@ pub(crate) enum OwnStart {
 
 /// The source and offset an executor observed at this token's input, never taken from a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HerdrTurnStart {
+pub struct HerdrTurnStart {
     pub(crate) execution_nonce: String,
     pub(crate) source: std::path::PathBuf,
     /// The source's (dev, ino) at the input; a cold start's transcript does not exist yet.
@@ -321,7 +321,7 @@ pub(crate) struct CodexOwnTurn {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum OwnTurnRead {
+pub enum OwnTurnRead {
     Unreadable,
     /// No record of any turn follows the input yet.
     NotYet,
@@ -348,7 +348,7 @@ type HerdrTurns =
     std::collections::HashMap<(String, String), Vec<std::sync::Weak<HerdrInterruptState>>>;
 
 /// The interrupt state of Herdr turn `turn_nonce` on `logical`, while that one turn's token lives.
-pub(crate) fn herdr_turn(logical: &str, turn_nonce: &str) -> Option<Arc<HerdrInterruptState>> {
+pub fn herdr_turn(logical: &str, turn_nonce: &str) -> Option<Arc<HerdrInterruptState>> {
     let turns = HERDR_TURNS.lock().unwrap_or_else(|e| e.into_inner());
     let key = (logical.to_owned(), turn_nonce.to_owned());
     let live: Vec<_> = turns
@@ -362,7 +362,7 @@ pub(crate) fn herdr_turn(logical: &str, turn_nonce: &str) -> Option<Arc<HerdrInt
 }
 
 /// Whether a live turn holds this exact index; with `herdr_turn` empty, that means ambiguous.
-pub(crate) fn herdr_turn_indexed(logical: &str, nonce: &str) -> bool {
+pub fn herdr_turn_indexed(logical: &str, nonce: &str) -> bool {
     HERDR_TURNS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -452,7 +452,7 @@ impl CancelToken {
         Some(state)
     }
 
-    pub(crate) fn herdr_interrupt_state(&self) -> Option<Arc<HerdrInterruptState>> {
+    pub fn herdr_interrupt_state(&self) -> Option<Arc<HerdrInterruptState>> {
         self.herdr_interrupt
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -463,7 +463,7 @@ impl CancelToken {
 /// A guarded channel stop's cancel, decided once under the token's Herdr slot and handed back as
 /// is: a later change to the token never turns one outcome into another.
 #[derive(Clone)]
-pub(crate) enum StopCancel {
+pub enum StopCancel {
     /// The token was not the channel's turn: nothing was published.
     NotCurrent,
     /// The token was already cancelling: nothing was published.
@@ -532,7 +532,7 @@ fn run_publish_hook() {
 }
 
 /// Settlement runs wherever Herdr hosts turns; a test override can only switch it off.
-pub(crate) fn herdr_stop_settlement_available() -> bool {
+pub fn herdr_stop_settlement_available() -> bool {
     #[cfg(all(test, unix))]
     if !HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get()) {
         return false;
@@ -541,7 +541,7 @@ pub(crate) fn herdr_stop_settlement_available() -> bool {
 }
 
 /// A requested switch cannot enable Escape before provider-terminal settlement exists.
-pub(crate) fn herdr_cancel_enabled() -> bool {
+pub fn herdr_cancel_enabled() -> bool {
     #[cfg(test)]
     if let Some(enabled) = HERDR_CANCEL_OVERRIDE.with(|value| value.get()) {
         return enabled && herdr_stop_settlement_available();
@@ -572,7 +572,7 @@ thread_local! {
     static PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) struct ClaudeInterruptDeliveryGuard<'a> {
+pub struct ClaudeInterruptDeliveryGuard<'a> {
     token: &'a CancelToken,
     _session: SessionKillGuard,
 }
@@ -657,7 +657,7 @@ impl CancelToken {
     /// The returned guard holds the registry lock through the caller's provider
     /// write and synchronous claim commit. A newer turn cannot publish its
     /// generation between the check and the write.
-    pub(crate) fn lock_current_claude_interrupt_session(
+    pub fn lock_current_claude_interrupt_session(
         &self,
         tmux_session_name: &str,
     ) -> Option<ClaudeInterruptDeliveryGuard<'_>> {
@@ -694,7 +694,7 @@ impl CancelToken {
     }
 
     /// Store a tmux name without publishing a managed generation slot.
-    pub(crate) fn bind_unmanaged_session_name(&self, tmux_session_name: &str) {
+    pub fn bind_unmanaged_session_name(&self, tmux_session_name: &str) {
         let tmux_session_name = tmux_session_name.trim();
         if tmux_session_name.is_empty() {
             return;
@@ -709,7 +709,7 @@ impl CancelToken {
         );
     }
 
-    pub(crate) fn tmux_session_name(&self) -> Option<String> {
+    pub fn tmux_session_name(&self) -> Option<String> {
         self.tmux_binding
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -723,7 +723,7 @@ impl CancelToken {
             .store(true, Ordering::Release);
     }
 
-    pub(crate) fn claude_interrupt_submit_pending(&self) -> bool {
+    pub fn claude_interrupt_submit_pending(&self) -> bool {
         self.claude_interrupt_submit_pending.load(Ordering::Acquire)
     }
 
@@ -747,7 +747,7 @@ impl CancelToken {
             .is_ok()
     }
 
-    pub(crate) fn claude_interrupt_generation(&self) -> u64 {
+    pub fn claude_interrupt_generation(&self) -> u64 {
         self.claude_interrupt_generation
     }
 }

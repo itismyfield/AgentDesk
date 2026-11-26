@@ -2,12 +2,12 @@
 use super::super::runtime_store;
 use super::row::ReplayRow;
 use crate::domain::replay_evidence::recovery::{root::OwnedRuntimeRoot, snapshot::issuer};
-pub(crate) use crate::domain::replay_evidence::{SnapshotIdentity, recovery::LocalSnapshot};
+pub use crate::domain::replay_evidence::{SnapshotIdentity, recovery::LocalSnapshot};
 
 pub(crate) mod issuer_key;
 
 impl LocalSnapshot {
-    pub(in crate::services::discord) fn load<S: ReplayRow>(
+    pub fn load<S: ReplayRow>(
         root: Option<&OwnedRuntimeRoot>,
         state: &S,
     ) -> Option<Self> {

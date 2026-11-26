@@ -28,7 +28,7 @@ pub(crate) trait ApprovalStore {
     }
 }
 
-pub(crate) struct FileApprovalStore(pub(crate) Option<PathBuf>);
+pub struct FileApprovalStore(pub(crate) Option<PathBuf>);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,7 +38,7 @@ struct PendingMarker {
 }
 
 impl FileApprovalStore {
-    pub(crate) fn runtime() -> Self {
+    pub fn runtime() -> Self {
         Self(crate::config::runtime_root().map(|root| root.join("runtime/session_hosts_approval")))
     }
 

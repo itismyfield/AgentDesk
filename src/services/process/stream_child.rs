@@ -1,4 +1,4 @@
-pub(crate) mod stream_queue;
+pub mod stream_queue;
 
 use std::io;
 use std::process::{Child, ExitStatus};
@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use crate::services::provider::{CancelToken, CancelWatchdog, cancel_requested};
 
-pub(crate) const EXIT_POLL: Duration = Duration::from_millis(100);
+pub const EXIT_POLL: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_secs(1);
 
-pub(crate) struct StreamChild {
+pub struct StreamChild {
     pid: u32,
     #[cfg(unix)]
     owned_group: bool,
@@ -148,7 +148,7 @@ impl StreamChild {
     }
 }
 
-pub(crate) fn spawn_reader<T: Send + 'static>(
+pub fn spawn_reader<T: Send + 'static>(
     read: impl FnOnce() -> T + Send + 'static,
 ) -> mpsc::Receiver<T> {
     let (tx, rx) = mpsc::channel();
@@ -159,7 +159,7 @@ pub(crate) fn spawn_reader<T: Send + 'static>(
 }
 
 // Called only after child exit/termination; escaped descendants cannot hold up finalization.
-pub(crate) fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
+pub fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
     rx.recv_timeout(EXIT_DRAIN).unwrap_or_default()
 }
 

@@ -21,7 +21,7 @@ fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
 }
 
 mod observation;
-pub(crate) use observation::observe_channel;
+pub use observation::observe_channel;
 mod commit;
 #[cfg(unix)]
 pub(crate) mod settled;
@@ -94,7 +94,7 @@ pub(crate) fn superseded(context: &BindingContext, session: &str) -> io::Result<
 }
 
 /// The hook-recorded current source when the claimed source is one it already retired.
-pub(crate) fn source_ahead(
+pub fn source_ahead(
     channel: u64,
     tmux: &str,
     nonce: &str,
@@ -613,13 +613,13 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
     Ok(fold)
 }
 
-pub(crate) fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
+pub fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
     let channel = ownership_context(context)?;
     let _logs = lock_logs();
     fold_records(context, &ownership_records(channel)?)
 }
 
-pub(crate) fn proof_at_seq(
+pub fn proof_at_seq(
     context: &BindingContext,
     seq: u64,
 ) -> io::Result<Option<VerifiedProof>> {
@@ -643,7 +643,7 @@ pub(crate) fn proof_at_seq(
     }))
 }
 
-pub(crate) fn latest_ownership(
+pub fn latest_ownership(
     channel: u64,
     tmux: &str,
 ) -> io::Result<Option<(u64, String, DateTime<Utc>)>> {
@@ -664,7 +664,7 @@ pub(crate) fn latest_ownership(
         }))
 }
 
-pub(crate) fn context_for_nonce(
+pub fn context_for_nonce(
     channel: u64,
     tmux: &str,
     nonce: Option<&str>,

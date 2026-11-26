@@ -1,7 +1,7 @@
 //! Database read models for the agent management views.
 //! HTTP response shaping and runtime identity resolution belong to callers.
 
-pub(crate) async fn list_agent_rows(
+pub async fn list_agent_rows(
     pool: &sqlx::PgPool,
 ) -> Result<Vec<sqlx::postgres::PgRow>, String> {
     let sql = "
@@ -53,7 +53,7 @@ pub(crate) async fn list_agent_rows(
         .map_err(|error| format!("query agents: {error}"))
 }
 
-pub(crate) async fn load_agent_row(
+pub async fn load_agent_row(
     pool: &sqlx::PgPool,
     id: &str,
 ) -> Result<Option<sqlx::postgres::PgRow>, String> {

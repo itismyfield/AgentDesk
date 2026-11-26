@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SubmissionError {
+pub enum SubmissionError {
     Legacy(String),
     Guarded(InputRun),
     Held(PreparationHold),
@@ -43,7 +43,7 @@ impl SubmissionError {
     }
 }
 
-pub(crate) trait Owner: Send + Sync {
+pub trait Owner: Send + Sync {
     fn started(&self);
     fn finished(&self, run: &InputRun);
     fn preparation_held(&self, _hold: &PreparationHold) {}
@@ -88,7 +88,7 @@ thread_local! {
     static RECEIPT_SINK: RefCell<Option<Arc<crate::services::provider::native_stop::ReceiptSink>>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnce() -> R) -> R {
+pub fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnce() -> R) -> R {
     struct Restore(Option<Arc<crate::services::provider::native_stop::ReceiptSink>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -116,7 +116,7 @@ impl Drop for Restore {
     }
 }
 
-pub(crate) fn with_owner<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> R {
+pub fn with_owner<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> R {
     scoped(owner, run).0
 }
 #[cfg(unix)]

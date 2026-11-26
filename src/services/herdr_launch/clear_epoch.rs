@@ -40,10 +40,10 @@ fn cell(key: &Key) -> Arc<Cell> {
 
 /// The restart postlude keeps this cell alive across a predecessor's exact termination.
 #[cfg(unix)]
-pub(crate) struct Epoch(Arc<Cell>, Option<u64>);
+pub struct Epoch(Arc<Cell>, Option<u64>);
 
 #[cfg(unix)]
-pub(crate) fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch {
+pub fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch {
     let cell = cell(&(provider.into(), token_hash.into(), channel));
     let epoch = {
         let state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -54,15 +54,15 @@ pub(crate) fn snapshot(provider: &str, token_hash: &str, channel: u64) -> Epoch 
 
 #[cfg(unix)]
 impl Epoch {
-    pub(crate) fn unchanged(&self) -> bool {
+    pub fn unchanged(&self) -> bool {
         let state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         state.clearing == 0 && self.1 == Some(state.epoch)
     }
 }
 
-pub(crate) struct ClearGuard(Arc<Cell>);
+pub struct ClearGuard(Arc<Cell>);
 
-pub(crate) fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> ClearGuard {
+pub fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> ClearGuard {
     let cell = cell(&(provider.into(), token_hash.into(), channel));
     {
         let mut state = cell.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -75,7 +75,7 @@ pub(crate) fn begin_clear(provider: &str, token_hash: &str, channel: u64) -> Cle
 
 impl ClearGuard {
     #[cfg(any(unix, test))]
-    pub(crate) fn overlapped_startup(&self) -> bool {
+    pub fn overlapped_startup(&self) -> bool {
         self.0
             .state
             .lock()
@@ -83,7 +83,7 @@ impl ClearGuard {
             .overlap
     }
 
-    pub(crate) async fn wait_idle(&self) {
+    pub async fn wait_idle(&self) {
         loop {
             let notified = self.0.changed.notified();
             tokio::pin!(notified);

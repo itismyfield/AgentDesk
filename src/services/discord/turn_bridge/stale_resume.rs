@@ -64,7 +64,7 @@ pub(super) fn contains_stale_resume_error_text(text: &str) -> bool {
     STALE_PHRASES.iter().any(|p| lower.contains(p))
 }
 
-pub(in crate::services::discord) fn result_event_has_stale_resume_error(
+pub fn result_event_has_stale_resume_error(
     value: &serde_json::Value,
 ) -> bool {
     if value.get("type").and_then(|v| v.as_str()) != Some("result") {
@@ -103,7 +103,7 @@ pub(in crate::services::discord) fn result_event_has_stale_resume_error(
         .unwrap_or(false)
 }
 
-pub(super) fn output_file_has_stale_resume_error_after_offset(
+pub fn output_file_has_stale_resume_error_after_offset(
     output_path: &str,
     start_offset: u64,
 ) -> bool {
@@ -129,14 +129,14 @@ pub(super) fn output_file_has_stale_resume_error_after_offset(
         })
 }
 
-pub(in crate::services::discord) fn stream_error_has_stale_resume_error(
+pub fn stream_error_has_stale_resume_error(
     message: &str,
     stderr: &str,
 ) -> bool {
     contains_stale_resume_error_text(message) || contains_stale_resume_error_text(stderr)
 }
 
-pub(super) fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
+pub fn stream_error_requires_terminal_session_reset(message: &str, stderr: &str) -> bool {
     let lower = format!("{} {}", message, stderr).to_ascii_lowercase();
     // A StreamJson process that produced no output cannot safely be resumed.
     // Its persisted selector is the only repeatable input across attempts, so

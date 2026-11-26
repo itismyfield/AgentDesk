@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{future::Future, pin::Pin, sync::Arc};
 
 #[derive(Clone, Default)]
-pub(in crate::services) struct Context {
+pub struct Context {
     pub(in crate::services) scope: Option<Scope>,
     pub(in crate::services) artifact: Option<Artifact>,
     pub(in crate::services) body: Arc<str>,
@@ -16,11 +16,11 @@ tokio::task_local! {
 }
 
 /// The raw request boundary's read; `None` outside every scope.
-pub(in crate::services) fn current() -> Option<Context> {
+pub fn current() -> Option<Context> {
     CONTEXT.try_with(Clone::clone).ok()
 }
 
-pub(crate) fn current_census() -> Option<Value> {
+pub fn current_census() -> Option<Value> {
     CONTEXT
         .try_with(|context| context.census.clone())
         .ok()
@@ -28,7 +28,7 @@ pub(crate) fn current_census() -> Option<Value> {
 }
 
 /// Observation metadata cannot install or replace PG authority.
-pub(crate) fn census_scope<T>(
+pub fn census_scope<T>(
     tag: Option<Value>,
     operation: impl Future<Output = T>,
 ) -> Pin<Box<impl Future<Output = T>>> {
@@ -40,7 +40,7 @@ pub(crate) fn census_scope<T>(
 }
 
 /// Contains provenance only, never an open transaction or a composite request deadline.
-pub(in crate::services) fn scope<T>(
+pub fn scope<T>(
     scope: Option<Scope>,
     artifact: Option<&Artifact>,
     body: &str,

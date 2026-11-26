@@ -3,11 +3,11 @@
 //! Same-channel exclusive intake. Mailbox handoff is never used.
 
 mod accounts;
-pub(crate) mod admission;
-pub(crate) use accounts::pinned_auth_profile;
+pub mod admission;
+pub use accounts::pinned_auth_profile;
 mod wakeup;
-pub(crate) use durable::observe_provider_error;
-pub(crate) use wakeup::recovery_wakeup;
+pub use durable::observe_provider_error;
+pub use wakeup::recovery_wakeup;
 pub mod checkpoint;
 pub mod context;
 pub mod detector;
@@ -521,7 +521,7 @@ mod durable;
 pub use durable::observe_durable;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable::test_store;
-pub(crate) use durable::{
+pub use durable::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
 };

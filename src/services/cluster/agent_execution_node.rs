@@ -1,9 +1,9 @@
 //! Agent defaults select a node only after existing session ownership is resolved.
 use sqlx::PgPool;
 
-pub(crate) use crate::domain::cluster_policy::AgentExecutionNode;
+pub use crate::domain::cluster_policy::AgentExecutionNode;
 
-pub(crate) async fn get(
+pub async fn get(
     pool: &PgPool,
     agent: &str,
 ) -> Result<Option<AgentExecutionNode>, sqlx::Error> {
@@ -15,14 +15,14 @@ pub(crate) async fn get(
     Ok(node.map(|default_node_id| AgentExecutionNode { default_node_id }))
 }
 
-pub(crate) async fn node_registered(pool: &PgPool, node: &str) -> Result<bool, sqlx::Error> {
+pub async fn node_registered(pool: &PgPool, node: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM worker_nodes WHERE instance_id=$1)")
         .bind(node)
         .fetch_one(pool)
         .await
 }
 
-pub(crate) async fn set(
+pub async fn set(
     pool: &PgPool,
     agent: &str,
     policy: &AgentExecutionNode,
@@ -38,7 +38,7 @@ pub(crate) async fn set(
     )
 }
 
-pub(crate) async fn for_channel(
+pub async fn for_channel(
     pool: &PgPool,
     channel: &str,
 ) -> Result<Option<String>, sqlx::Error> {
@@ -52,7 +52,7 @@ pub(crate) async fn for_channel(
     Ok(value.flatten())
 }
 
-pub(crate) async fn channel_is_bound(pool: &PgPool, channel: &str) -> Result<bool, sqlx::Error> {
+pub async fn channel_is_bound(pool: &PgPool, channel: &str) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM agents WHERE discord_channel_id=$1
          OR discord_channel_alt=$1 OR discord_channel_cc=$1 OR discord_channel_cdx=$1)",
@@ -62,7 +62,7 @@ pub(crate) async fn channel_is_bound(pool: &PgPool, channel: &str) -> Result<boo
     .await
 }
 
-pub(crate) async fn has_channel_policy(pool: &PgPool) -> Result<bool, sqlx::Error> {
+pub async fn has_channel_policy(pool: &PgPool) -> Result<bool, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM agents WHERE default_execution_node_id IS NOT NULL
          OR execution_requirements <> '{}'::jsonb OR preferred_intake_node_labels <> '[]'::jsonb)",

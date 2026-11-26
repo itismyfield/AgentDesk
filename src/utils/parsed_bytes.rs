@@ -27,7 +27,7 @@ thread_local! {
 }
 
 /// `build`'s value for `raw`, the bytes just read from `path`; a failed build is never kept.
-pub(crate) fn reuse<T: Any + Send + Sync>(
+pub fn reuse<T: Any + Send + Sync>(
     path: &Path,
     raw: Vec<u8>,
     build: impl FnOnce(&[u8]) -> Result<T, String>,

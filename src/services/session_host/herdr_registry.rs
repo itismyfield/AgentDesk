@@ -123,7 +123,7 @@ type TestReads = (
     Arc<dyn super::herdr::pane_probe::ProcessOs>,
 );
 
-pub(crate) struct HerdrRegistry {
+pub struct HerdrRegistry {
     endpoints: Vec<Registered>,
     #[cfg(unix)]
     launch: Option<SocketHerdrLaunchHost>,
@@ -298,7 +298,7 @@ impl HerdrRegistry {
     }
 
     /// Reads cwd only on the endpoint named by this execution, never another endpoint's pane.
-    pub(crate) fn working_dir(&self, stored: &HostedExecution) -> Option<PathBuf> {
+    pub fn working_dir(&self, stored: &HostedExecution) -> Option<PathBuf> {
         let entry = self.endpoints.iter().find(|entry| {
             HerdrPaneView::new(&entry.endpoint, Arc::new(entry.transport.clone()), stored).is_some()
         })?;
@@ -316,12 +316,12 @@ impl HerdrRegistry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn launch_host(&self) -> Option<&SocketHerdrLaunchHost> {
+    pub fn launch_host(&self) -> Option<&SocketHerdrLaunchHost> {
         self.launch.as_ref()
     }
 
     /// The gated input target of a stored execution located on a registered endpoint.
-    pub(crate) fn target(&self, stored: &HostedExecution) -> Option<HerdrTarget> {
+    pub fn target(&self, stored: &HostedExecution) -> Option<HerdrTarget> {
         #[cfg(unix)]
         let evidence = if let Some(location) = &stored.location {
             self.endpoints
@@ -380,7 +380,7 @@ impl HerdrRegistry {
 
     /// A read-only view of a stored execution located on a registered endpoint; unlike a target
     /// it needs no launch evidence.
-    pub(crate) fn view(&self, stored: &HostedExecution) -> Option<HerdrPaneView> {
+    pub fn view(&self, stored: &HostedExecution) -> Option<HerdrPaneView> {
         let view = self.endpoints.iter().find_map(|registered| {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
             HerdrPaneView::new(&registered.endpoint, transport, stored)
@@ -394,7 +394,7 @@ impl HerdrRegistry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn retired_probe(
+    pub fn retired_probe(
         &self,
         stored: &HostedExecution,
     ) -> Option<super::herdr_gate::legacy_return::RetiredProbe> {
@@ -429,7 +429,7 @@ static REGISTRY: OnceLock<HerdrRegistry> = OnceLock::new();
 
 /// The registry of the boot section, fixed on first use after boot installed it.
 #[cfg(not(any(test, feature = "test-support")))]
-pub(crate) fn registry() -> &'static HerdrRegistry {
+pub fn registry() -> &'static HerdrRegistry {
     if let Some(registry) = REGISTRY.get() {
         return registry;
     }
@@ -441,7 +441,7 @@ pub(crate) fn registry() -> &'static HerdrRegistry {
 
 /// Tests see only a registry they installed on their own thread.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn registry() -> &'static HerdrRegistry {
+pub fn registry() -> &'static HerdrRegistry {
     FORCED.with(|forced| forced.get()).unwrap_or(&EMPTY)
 }
 

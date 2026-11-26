@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-pub(crate) mod decision_gate;
-pub(crate) mod decisions;
+pub mod decision_gate;
+pub mod decisions;
 mod runtime_settings;
 pub(crate) mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
@@ -16,24 +16,24 @@ pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
 mod agent_channels;
 pub use agent_channels::AgentChannels;
 mod channel_alias;
-pub(crate) use channel_alias::resolve_channel_alias;
-pub(crate) mod runtime_profile;
-pub(crate) mod test_instance;
+pub use channel_alias::resolve_channel_alias;
+pub mod runtime_profile;
+pub mod test_instance;
 pub use runtime_profile::{ClusterConfig, ClusterIntakeRoutingConfig, RuntimeProfile};
 mod cluster_role;
 pub use cluster_role::ClusterRole;
-pub(crate) mod session_hosts;
+pub mod session_hosts;
 pub use session_hosts::SessionHostsConfig;
 pub mod config_path;
-pub(crate) mod disk_write;
+pub mod disk_write;
 mod peer_filter;
 pub mod reload_classes;
-pub(crate) mod retired_providers;
+pub mod retired_providers;
 mod server_surface;
 mod tool_activity_display;
-pub(crate) mod transcript_homes;
+pub mod transcript_homes;
 pub use config_path::resolved_config_path;
-pub(crate) use disk_write::render_config_for_path;
+pub use disk_write::render_config_for_path;
 pub use disk_write::save_to_path;
 pub use peer_filter::PeerFilterMode;
 pub use server_surface::BrowserGuardMode;
@@ -46,19 +46,19 @@ pub fn snapshot() -> Option<std::sync::Arc<Config>> {
 }
 
 /// Boot preparation and standalone CLI keep their existing loader until LIVE is published.
-pub(crate) fn runtime_config() -> Config {
+pub fn runtime_config() -> Config {
     snapshot()
         .map(|config| (*config).clone())
         .unwrap_or_else(load_graceful)
 }
 
-pub(crate) fn runtime_config_strict() -> Result<Config> {
+pub fn runtime_config_strict() -> Result<Config> {
     snapshot()
         .map(|config| Ok((*config).clone()))
         .unwrap_or_else(load)
 }
 
-pub(crate) fn runtime_config_optional() -> Option<Config> {
+pub fn runtime_config_optional() -> Option<Config> {
     snapshot()
         .map(|config| (*config).clone())
         .or_else(|| config_path::load_runtime_config_file().map(|(config, _)| config))
@@ -857,7 +857,7 @@ impl ClusterDispatchRoutingConfig {
 }
 
 /// The routing constraint that admits every candidate; the default constraint list holds only it.
-pub(crate) const NOOP_CONSTRAINT_NAME: &str = "noop";
+pub const NOOP_CONSTRAINT_NAME: &str = "noop";
 
 fn default_dispatch_routing_constraints() -> Vec<String> {
     vec![NOOP_CONSTRAINT_NAME.to_string()]
@@ -1424,12 +1424,12 @@ fn is_structural_relay_verdict_source(source: &RelayVerdictSource) -> bool {
 
 /// A conservative bound that stays within chrono's duration and UTC datetime
 /// ranges while remaining far above any operational sweep TTL.
-pub(crate) const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
+pub const MAX_INTAKE_SWEEP_CUTOFF_SECS: u64 = i64::MAX as u64 / 1_000_000_000;
 /// Gives startup recovery and session restoration two minutes before the first
 /// intake-delivery sweep. This matches the sibling session-GC startup delay.
-pub(crate) const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
+pub const INTAKE_DELIVERY_SWEEP_INITIAL_DELAY_SECS: u64 = 120;
 /// Bounds each intake-delivery settlement transaction's PostgreSQL lock wait.
-pub(crate) const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
+pub const INTAKE_DELIVERY_SWEEP_LOCK_TIMEOUT_SECS: u64 = 3;
 
 #[cfg(test)]
 mod runtime_hook_registry_config_tests {
@@ -2507,7 +2507,7 @@ pub fn load_from_path(path: &Path) -> Result<Config> {
     Ok(config)
 }
 
-pub(crate) fn validate_config(config: &Config) -> Result<()> {
+pub fn validate_config(config: &Config) -> Result<()> {
     test_instance::environment::validate_config(config).map_err(anyhow::Error::msg)?;
     runtime_validation::validate(config)?;
     config.decision_gate.validate()?;

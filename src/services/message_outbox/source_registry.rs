@@ -3,7 +3,7 @@
 use crate::domain::outbound::outbox::source::{is_allowed_static_source, is_static_notice_kind};
 use crate::services::discord::org_schema;
 
-pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
+pub const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {

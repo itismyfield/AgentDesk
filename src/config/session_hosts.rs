@@ -16,8 +16,8 @@ const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
 const RETIRED_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
 const RETIRED_GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
 
-pub(crate) mod approval_store;
-pub(crate) mod migration;
+pub mod approval_store;
+pub mod migration;
 pub(crate) mod projection;
 mod user_default;
 
@@ -103,7 +103,7 @@ pub struct EndpointConfig {
 
 /// One configured endpoint, named by its config key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelEndpoint {
+pub struct ChannelEndpoint {
     pub key: String,
     pub execution_node: String,
     pub socket_path: PathBuf,
@@ -113,7 +113,7 @@ pub(crate) struct ChannelEndpoint {
 
 /// The validated section and this node's id, as the process booted with them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BootSessionHosts {
+pub struct BootSessionHosts {
     config: SessionHostsConfig,
     channels: BTreeMap<u64, ChannelEndpoint>,
     local_node: Option<String>,
@@ -132,7 +132,7 @@ fn normalized(config: &Config) -> Result<Config> {
 }
 
 impl BootSessionHosts {
-    pub(crate) fn from_config(config: &Config) -> Result<Self> {
+    pub fn from_config(config: &Config) -> Result<Self> {
         let effective = normalized(config)?;
         let channels = validate_effective(&effective)?;
         let yaml = effective.session_hosts.retired_guard.0;
@@ -168,7 +168,7 @@ impl BootSessionHosts {
         &self.channels
     }
 
-    pub(crate) fn config(&self) -> &SessionHostsConfig {
+    pub fn config(&self) -> &SessionHostsConfig {
         &self.config
     }
 }
@@ -288,7 +288,7 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
 
 /// Migration metadata stays outside the boot configuration's equality contract.
 #[derive(Debug, Clone)]
-pub(crate) struct BootMigration {
+pub struct BootMigration {
     candidate: SessionHostsConfig,
     diagnostic: Option<migration::Diagnostic>,
     admission_stopped: bool,
@@ -303,11 +303,11 @@ impl BootMigration {
         &self.candidate
     }
 
-    pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
+    pub fn migration(&self) -> Option<&migration::Diagnostic> {
         self.diagnostic.as_ref()
     }
 
-    pub(crate) fn admission_stopped(&self) -> bool {
+    pub fn admission_stopped(&self) -> bool {
         self.admission_stopped
     }
 }
@@ -322,7 +322,7 @@ pub(crate) fn install(config: &Config) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
+pub fn install_selected(selection: migration::HostsBootSelection) {
     let (hosts, migration) = selection.into_parts();
     BOOT.get_or_init(|| {
         let _ = BOOT_MIGRATION.set(migration);
@@ -331,7 +331,7 @@ pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
 }
 
 /// The boot section, or `None` before install, which configures nothing.
-pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
+pub fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return read(Some(&forced));
@@ -339,7 +339,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
     read(BOOT.get())
 }
 
-pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
+pub fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
     #[cfg(any(test, feature = "test-support"))]
     if FORCED.with(|forced| forced.borrow().is_some()) {
         return FORCED_MIGRATION.with(|forced| read(forced.borrow().as_ref()));
@@ -347,12 +347,12 @@ pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -
     read(BOOT_MIGRATION.get())
 }
 
-pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
+pub fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
 /// Whether boot config routes this channel to a Herdr endpoint; callers outside the host-policy owners ask this instead of reading the endpoint.
-pub(crate) fn has_herdr_endpoint(channel: u64) -> bool {
+pub fn has_herdr_endpoint(channel: u64) -> bool {
     with_boot(|boot| boot.is_some_and(|boot| boot.herdr_endpoint(channel).is_some()))
 }
 
@@ -362,7 +362,7 @@ pub(crate) fn configured_channel_ids() -> Vec<String> {
     with_boot(|boot| boot.map_or_else(Vec::new, ids))
 }
 
-pub(crate) fn local_node() -> Option<String> {
+pub fn local_node() -> Option<String> {
     with_boot(|boot| {
         boot.and_then(BootSessionHosts::local_node)
             .map(str::to_owned)

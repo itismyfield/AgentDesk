@@ -54,7 +54,7 @@ pub(crate) struct SourceFacts {
 
 /// Output the channel still owes. The general queue names no source, so any of it holds every hop.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
-pub(crate) struct Obligations {
+pub struct Obligations {
     pub owed: usize,
     pub prepared: usize,
     pub unsealed: usize,
@@ -86,7 +86,7 @@ pub(crate) struct Snapshot {
 
 /// How the request vouches that the execution writing a source has ended.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub(crate) enum Termination {
+pub enum Termination {
     /// The operator checked the host and pane and states the basis.
     Confirmed(ExecutionEnd),
     /// Automatic source-specific retention; never a provider End+Seal proof.
@@ -98,7 +98,7 @@ pub(crate) enum Termination {
 
 /// The operator's request as its route reads it.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-pub(crate) struct Request {
+pub struct Request {
     pub channel: u64,
     /// The last hop seq the transition covers.
     pub cutoff: u64,
@@ -110,7 +110,7 @@ pub(crate) struct Request {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Owed {
+pub enum Owed {
     Queue,
     Prepared,
     Unsealed,
@@ -119,7 +119,7 @@ pub(crate) enum Owed {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Refusal {
+pub enum Refusal {
     OtherChannel,
     IncompleteRequest,
     CodexDeferred,
@@ -144,7 +144,7 @@ pub(crate) enum Refusal {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Unclear {
+pub enum Unclear {
     HomeUnread(String),
     CursorMissing,
     HistoryUnread(String),
@@ -168,7 +168,7 @@ pub(crate) enum Unclear {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Verdict {
+pub enum Verdict {
     /// Every condition holds; the draft is what the retirement would record.
     Eligible(Box<TransitionCleanup>),
     /// This job retired it, and the cursor and file still match what it verified.
@@ -180,14 +180,14 @@ pub(crate) enum Verdict {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct Judged {
+pub struct Judged {
     pub key: String,
     pub hop_seq: Option<u64>,
     pub verdict: Verdict,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct Summary {
+pub struct Summary {
     /// Old sources whose cursor is not retired, counted as `rotation_unsettled` counts them.
     pub unsettled: usize,
     pub eligible: usize,

@@ -83,13 +83,13 @@ fn wait_for_tmux_output(
 
 mod availability;
 mod instance_scope;
-pub(crate) use instance_scope::{input_command, validate_target};
-pub(crate) mod health_probe;
+pub use instance_scope::{input_command, validate_target};
+pub mod health_probe;
 pub(crate) mod session_identity;
 #[cfg(all(test, unix))]
 pub(crate) mod session_identity_tests;
 #[cfg(unix)]
-pub(crate) mod session_inventory;
+pub mod session_inventory;
 
 pub use availability::{
     cached_unavailable_due_to_missing, invalidate_cache as invalidate_availability_cache,
@@ -107,7 +107,7 @@ pub fn version() -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionPresence {
+pub enum SessionPresence {
     Present,
     Missing,
     ProbeFailed,
@@ -137,7 +137,7 @@ pub(crate) fn classify_has_session_output(output: &Output) -> SessionPresence {
     }
 }
 
-pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
+pub fn session_presence(session_name: &str) -> SessionPresence {
     if is_blank_session_name(session_name) {
         return SessionPresence::ProbeFailed;
     }
@@ -173,7 +173,7 @@ pub fn create_session(
     create_session_with_identity(session_name, working_dir, shell_command, &identity)
 }
 
-pub(crate) fn create_session_with_identity(
+pub fn create_session_with_identity(
     session_name: &str,
     working_dir: Option<&str>,
     shell_command: &str,

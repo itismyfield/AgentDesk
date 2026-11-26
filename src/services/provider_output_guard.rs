@@ -33,14 +33,14 @@ const CONTROL_ANCHORS: &[&str] = &[
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderOutputKind {
+pub enum ProviderOutputKind {
     ClaudeSystemNotification,
     ClaudeToolWrapper,
     PartialControlMarker,
 }
 
 impl ProviderOutputKind {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ClaudeSystemNotification => "claude_system_notification",
             Self::ClaudeToolWrapper => "claude_tool_wrapper",
@@ -50,7 +50,7 @@ impl ProviderOutputKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ProviderOutputVerdict {
+pub enum ProviderOutputVerdict {
     Clean,
     Hold { kind: ProviderOutputKind },
     Blocked { kind: ProviderOutputKind },
@@ -70,7 +70,7 @@ pub(crate) fn inspect_provider_output(
 /// control token is not enough to block a legitimate explanation, but it is
 /// held while the response is still growing because a later chunk could turn
 /// it into one of the forbidden compounds.
-pub(crate) fn inspect_provider_streaming_output(
+pub fn inspect_provider_streaming_output(
     provider: &ProviderKind,
     text: &str,
 ) -> ProviderOutputVerdict {
@@ -88,7 +88,7 @@ pub(crate) fn inspect_provider_streaming_output(
     }
 }
 
-pub(crate) fn inspect_provider_streaming_rollover(
+pub fn inspect_provider_streaming_rollover(
     provider: &ProviderKind,
     unsent_response: &str,
     frozen_chunk: &str,
@@ -105,7 +105,7 @@ pub(crate) fn inspect_provider_streaming_rollover(
     }
 }
 
-pub(crate) fn safe_blocked_body(_kind: ProviderOutputKind) -> &'static str {
+pub fn safe_blocked_body(_kind: ProviderOutputKind) -> &'static str {
     BLOCKED_PROVIDER_OUTPUT_BODY
 }
 

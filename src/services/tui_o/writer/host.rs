@@ -26,7 +26,7 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::store::ledger::Unsent;
 
 mod activation_io;
-pub(crate) mod agy_host;
+pub mod agy_host;
 mod child_retirement;
 mod first_init;
 mod fresh_input;
@@ -34,10 +34,10 @@ mod managed_start;
 mod missing;
 mod recover;
 mod transition;
-pub(crate) use super::actor::native_input::RepostTurn;
+pub use super::actor::native_input::RepostTurn;
 use super::actor::native_input::{hold, stopped, unless_stopped};
 pub use activation_io::{Custody, FencedFacts};
-pub(crate) use child_retirement::{ChildStores, keep_stoppable};
+pub use child_retirement::{ChildStores, keep_stoppable};
 pub(crate) use fresh_input::initial_fresh_refusal;
 use recover::{Recovered, recover, recover_boot};
 /// Only pane writers enter the native turn retirement callback.
@@ -241,7 +241,7 @@ impl Readiness {
     }
 
     /// Whether the channel's running writer obeys `gate`, so only that gate can retire it.
-    pub(crate) fn hosted_under(&self, channel: u64, gate: &Arc<OwnershipGate>) -> bool {
+    pub fn hosted_under(&self, channel: u64, gate: &Arc<OwnershipGate>) -> bool {
         let live = locked(&self.live);
         live.get(&channel)
             .is_some_and(|live| Arc::ptr_eq(&live.gate, gate))
@@ -390,12 +390,12 @@ static PROCESS: LazyLock<Arc<Readiness>> = LazyLock::new(|| {
     Arc::default()
 });
 
-pub(crate) fn process_readiness() -> Arc<Readiness> {
+pub fn process_readiness() -> Arc<Readiness> {
     Arc::clone(&PROCESS)
 }
 
 /// Whether this process's writer can take work for `channel`; false for any channel O does not own.
-pub(crate) fn channel_accepts(channel: u64) -> bool {
+pub fn channel_accepts(channel: u64) -> bool {
     PROCESS.accepts(channel)
 }
 

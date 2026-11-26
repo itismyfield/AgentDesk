@@ -2,7 +2,7 @@
 //! piece's own anchor, each under a fresh permission proof. Reads only: no POST, slot or SQL.
 
 #[path = "evidence.rs"]
-pub(crate) mod evidence;
+pub mod evidence;
 #[path = "matcher.rs"]
 pub(crate) mod matcher;
 
@@ -25,7 +25,7 @@ pub(crate) const PAGE_LIMIT: u8 = 100;
 pub(crate) const PAGES_PER_STEP: usize = 10;
 
 /// Read-only Discord access. A failure or timeout is never an empty answer.
-pub(crate) trait ProbeRead {
+pub trait ProbeRead {
     /// Names the credentials both reads use, so a change discards the pass.
     fn credentials(&self) -> String;
     /// One message by id; `Ok(None)` is a 404.

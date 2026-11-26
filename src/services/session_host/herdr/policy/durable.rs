@@ -14,9 +14,9 @@ use sha2::{Digest, Sha256};
 #[cfg(unix)]
 const LIMIT: usize = 1024 * 1024;
 #[derive(Clone)]
-pub(crate) struct Directory(pub(crate) Option<PathBuf>);
+pub struct Directory(pub(crate) Option<PathBuf>);
 
-pub(crate) fn key(value: &impl Serialize) -> Result<String, String> {
+pub fn key(value: &impl Serialize) -> Result<String, String> {
     Ok(format!(
         "{:x}",
         Sha256::digest(serde_json::to_vec(value).map_err(|e| e.to_string())?)

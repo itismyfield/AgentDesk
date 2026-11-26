@@ -27,7 +27,7 @@ pub(crate) mod owner_fence_pg_tests;
 /// hands it to `services::discord::router::execute_intake_turn_core` after
 /// converting `into_intake_request()`.
 #[derive(Clone, Debug, sqlx::FromRow)]
-pub(crate) struct IntakeOutboxRow {
+pub struct IntakeOutboxRow {
     pub id: i64,
     pub target_instance_id: String,
     pub forwarded_by_instance_id: String,
@@ -251,8 +251,8 @@ pub(crate) mod pre_accept_sweep;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
 
-pub(crate) mod consent_handoff;
-pub(crate) mod consent_projection;
+pub mod consent_handoff;
+pub mod consent_projection;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
@@ -267,7 +267,7 @@ pub(crate) use worker_status::{
 /// (or rows for a specific channel when `channel_id_filter` is Some),
 /// ordered by `created_at DESC`. Phase 5 ops CLI uses this for
 /// `agentdesk intake-outbox status`.
-pub(crate) async fn list_recent_rows(
+pub async fn list_recent_rows(
     pool: &PgPool,
     channel_id_filter: Option<&str>,
     limit: i64,

@@ -9,11 +9,11 @@ use std::{
     },
 };
 
-pub(crate) type Commit = Arc<dyn Fn(Option<PaneEpoch>) -> Result<(), String> + Send + Sync>;
-pub(crate) type Pin = Arc<dyn Fn(Option<PaneEpoch>, String) -> Result<(), String> + Send + Sync>;
-pub(crate) type Hold = Arc<dyn Fn(serde_json::Value) -> Result<(), String> + Send + Sync>;
+pub type Commit = Arc<dyn Fn(Option<PaneEpoch>) -> Result<(), String> + Send + Sync>;
+pub type Pin = Arc<dyn Fn(Option<PaneEpoch>, String) -> Result<(), String> + Send + Sync>;
+pub type Hold = Arc<dyn Fn(serde_json::Value) -> Result<(), String> + Send + Sync>;
 /// The owner's consent to the attempt's first key, asked before any C-s.
-pub(crate) type Approve = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
+pub type Approve = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 #[cfg(unix)]
 pub(crate) type PreparationWatch = Box<dyn FnMut() -> super::busy_inject::Screen + Send>;
 struct Scope {
@@ -53,7 +53,7 @@ pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
             .unwrap_or_else(|e| e.into_inner()) = Some(probe);
     }
 }
-pub(crate) fn key_attempted() -> Option<bool> {
+pub fn key_attempted() -> Option<bool> {
     Some(current()?.keyed.load(Ordering::SeqCst))
 }
 
@@ -88,7 +88,7 @@ pub(crate) fn epoch() -> Option<PaneEpoch> {
 }
 /// Why the owner refused a leaf before C-s; either way no key reached the pane.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ReadyRefusal {
+pub enum ReadyRefusal {
     /// The pinned server, pane, process or known execution is no longer the observed one.
     Target(String),
     /// The physical writer lease or the exact attempt binding was not granted.
@@ -97,7 +97,7 @@ pub(crate) enum ReadyRefusal {
 
 /// Before any C-s: the owner consents to the first key, and the known execution, the server-side
 /// pane identity and the writer lease still hold. A refusal here leaves no key and no payload start.
-pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
+pub fn ready_payload() -> Result<(), ReadyRefusal> {
     let Some(scope) = current() else {
         return Ok(());
     };
@@ -112,7 +112,7 @@ pub(crate) fn ready_payload() -> Result<(), ReadyRefusal> {
 }
 
 /// After the optional C-s and before content: the idempotent payload-start commit.
-pub(crate) fn start_payload() -> Result<(), String> {
+pub fn start_payload() -> Result<(), String> {
     let Some(scope) = current() else {
         return Ok(());
     };
@@ -126,14 +126,14 @@ pub(crate) fn before_payload() -> Result<(), String> {
 }
 
 /// A key (C-s included) is about to reach the pane; no later refusal is a not-sent proof.
-pub(crate) fn keyed() {
+pub fn keyed() {
     if let Some(scope) = current() {
         scope.keyed.store(true, Ordering::SeqCst);
     }
 }
 
 /// A stop took the writer token's first-key gate: the attempt settles unconfirmed, never resent.
-pub(crate) fn stop_took_gate() {
+pub fn stop_took_gate() {
     if let Some(scope) = current() {
         scope.stopped.store(true, Ordering::SeqCst);
     }
@@ -157,7 +157,7 @@ pub(crate) fn buffer_failed() -> bool {
 /// The leaf's typed veto came before any key; a key already sent keeps it from proving unsent,
 /// and a refusal the scope already recorded keeps its own reason.
 #[cfg(unix)]
-pub(crate) fn vetoed(reason: &str) {
+pub fn vetoed(reason: &str) {
     if let Some(scope) = current()
         && !scope.keyed.load(Ordering::SeqCst)
         && (scope.refused.lock().unwrap_or_else(|e| e.into_inner())).is_none()
@@ -169,7 +169,7 @@ pub(crate) fn vetoed(reason: &str) {
 /// The first payload key, with no C-s before it, was held before tmux ran it: nothing reached
 /// the pane, so the attempt still proves not-sent.
 #[cfg(unix)]
-pub(crate) fn first_key_held(reason: &str) {
+pub fn first_key_held(reason: &str) {
     if let Some(scope) = current() {
         scope.allowed.store(false, Ordering::SeqCst);
         scope.keyed.store(false, Ordering::SeqCst);
@@ -204,7 +204,7 @@ pub(crate) fn hold_content(host: &str, physical: &str, key: &str) -> Option<Resu
 /// Couples a Herdr owner to the physical writer its launch or binding observed, once; another
 /// writer later is refused. Without an owner it does nothing.
 #[cfg(unix)]
-pub(crate) fn bind_writer(physical: &str) -> Result<(), String> {
+pub fn bind_writer(physical: &str) -> Result<(), String> {
     let Some(scope) = current() else {
         return Ok(());
     };
@@ -350,13 +350,13 @@ impl guarded_outcome::Owner for Scope {
 }
 /// Writes the reserved frame as a created execution's first prompt inside the owner's scope.
 #[cfg(unix)]
-pub(crate) type CreatedSubmit =
+pub type CreatedSubmit =
     Box<dyn FnOnce(String) -> Result<(), guarded_outcome::SubmissionError> + Send>;
 /// What the driver observed of the execution it hands over: created now, pending from an earlier
 /// launch, or already bound.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Lineage {
+pub enum Lineage {
     Created,
     Pending,
     Existing,
@@ -364,7 +364,7 @@ pub(crate) enum Lineage {
 /// The first prompt of an execution this thread's driver observed: its lineage, its own target
 /// and source read after the create or attach, its physical writer, and the driver's submit.
 #[cfg(unix)]
-pub(crate) type LaunchHook = Box<
+pub type LaunchHook = Box<
     dyn FnOnce(
         Lineage,
         serde_json::Value,
@@ -415,7 +415,7 @@ pub(crate) fn launch_refuses_live() -> Result<(), String> {
 /// The created tmux execution's target, read from its spawn marker and binding context as the
 /// owner's live epoch reads them.
 #[cfg(unix)]
-pub(crate) fn created_tmux_target(
+pub fn created_tmux_target(
     provider: &str,
     session: &str,
 ) -> Result<serde_json::Value, String> {
@@ -434,12 +434,12 @@ pub(crate) fn created_tmux_target(
 
 /// Hands this thread's next created first prompt to `hook` until the guard drops.
 #[cfg(unix)]
-pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
+pub fn install_launch(hook: LaunchHook) -> LaunchGuard {
     LAUNCH.with(|slot| *slot.borrow_mut() = Some(hook));
     LaunchGuard
 }
 #[cfg(unix)]
-pub(crate) struct LaunchGuard;
+pub struct LaunchGuard;
 #[cfg(unix)]
 impl LaunchGuard {
     /// A driver that ended well without handing its first prompt over wrote nothing owned.
@@ -483,7 +483,7 @@ pub(crate) fn capture_scope<R>(
 
 /// As `capture_scope`, with the owner asked to approve the first key before any C-s.
 #[cfg(unix)]
-pub(crate) fn capture_owner_scope<R>(
+pub fn capture_owner_scope<R>(
     provider: String,
     target: serde_json::Value,
     channel: u64,
@@ -669,7 +669,7 @@ fn pin_key(record: &PaneEpoch) -> Result<String, String> {
     ))
     .map_err(|e| e.to_string())
 }
-pub(crate) struct NotSentProof {
+pub struct NotSentProof {
     #[cfg(unix)]
     preparation_watch: Option<(u64, PreparationWatch)>,
     attempt: serde_json::Value,
@@ -677,7 +677,7 @@ pub(crate) struct NotSentProof {
 }
 impl NotSentProof {
     #[cfg(unix)]
-    pub(crate) fn take_preparation_watch(&mut self) -> Option<(u64, PreparationWatch)> {
+    pub fn take_preparation_watch(&mut self) -> Option<(u64, PreparationWatch)> {
         self.preparation_watch.take()
     }
     pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {

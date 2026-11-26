@@ -5,7 +5,7 @@ use super::model::HostKind;
 use super::resolve::HostWitness;
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 
-pub(crate) fn session_record_witness(lookup: &HostedLookup) -> HostWitness {
+pub fn session_record_witness(lookup: &HostedLookup) -> HostWitness {
     match lookup {
         HostedLookup::Found(found) => match &found.record {
             HostedRecord::Legacy => HostWitness::LegacyRow,

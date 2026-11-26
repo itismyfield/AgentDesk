@@ -25,7 +25,7 @@ pub(crate) fn launch_policy(channel: u64) -> Option<String> {
 /// Whether a cold tmux resume of `native` in this thread is one the reservation refuses for want
 /// of a hook-verified binding. A history that cannot be read answers false, so the refusal stands.
 #[cfg(unix)]
-pub(crate) fn cold_resume_unverified(channel: u64, native: &str) -> bool {
+pub fn cold_resume_unverified(channel: u64, native: &str) -> bool {
     launch_policy(channel).is_some()
         && matches!(claude_fold::names_session(channel, native), Ok(false))
 }
@@ -149,7 +149,7 @@ fn tmux_context(channel: u64, session: &str) -> Option<BindingContext> {
     .then_some(context)
 }
 
-pub(crate) fn restored_kind(
+pub fn restored_kind(
     channel: u64,
     tmux: Option<&str>,
     native_session: Option<&str>,
@@ -289,7 +289,7 @@ pub(super) fn names_legacy_turn(
         })
 }
 
-pub(crate) fn record_restored(destination: &poise::serenity_prelude::GuildChannel, session: &str) {
+pub fn record_restored(destination: &poise::serenity_prelude::GuildChannel, session: &str) {
     use crate::services::session_host::surface_policy::VerifiedSurface;
     let parent = VerifiedSurface::checked_parent(destination);
     let resumed = claude_fold::read_thread_resumes(destination.id.get()).is_ok_and(|entries| {

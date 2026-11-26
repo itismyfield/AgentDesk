@@ -13,7 +13,7 @@ mod receipt;
 
 #[cfg(unix)]
 #[derive(Clone, serde::Serialize)]
-pub(crate) struct EvidenceRegistration {
+pub struct EvidenceRegistration {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
     pub(crate) frame_hash: String,
@@ -28,7 +28,7 @@ pub(crate) struct EvidenceRegistration {
 }
 
 #[cfg(unix)]
-pub(crate) fn registrations_fingerprint(
+pub fn registrations_fingerprint(
     registrations: &[EvidenceRegistration],
 ) -> Result<String, String> {
     serde_json::to_vec(registrations)
@@ -48,7 +48,7 @@ pub(crate) enum Intent {
 }
 
 impl Intent {
-    pub(crate) fn attribution(&self, sources: &[String]) -> serde_json::Value {
+    pub fn attribution(&self, sources: &[String]) -> serde_json::Value {
         serde_json::json!({"sources": sources, "native_intent": self})
     }
 
@@ -523,7 +523,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_classification_registrations(
+    pub fn native_classification_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
         self.inspect(|s| evidence_registrations(s, true))
@@ -588,7 +588,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn record_native_outcome_at_stamp(
+    pub fn record_native_outcome_at_stamp(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -670,7 +670,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn ack_native_withdrawal_notice(
+    pub fn ack_native_withdrawal_notice(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -747,7 +747,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_settlement(
+    pub fn native_settlement(
         &self,
         namespace: &str,
         ticket: &Ticket,

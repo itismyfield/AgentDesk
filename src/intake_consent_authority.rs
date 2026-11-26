@@ -3,10 +3,10 @@
 use crate::db::intake_outbox::IntakeOutboxRow;
 
 /// Owned evidence issued inside the worker scope and consumed before effects.
-pub(crate) struct BeforeEffects(IntakeOutboxRow);
+pub struct BeforeEffects(IntakeOutboxRow);
 
 impl BeforeEffects {
-    pub(crate) fn row(&self) -> &IntakeOutboxRow {
+    pub fn row(&self) -> &IntakeOutboxRow {
         &self.0
     }
 

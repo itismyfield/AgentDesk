@@ -6,7 +6,7 @@ use sqlx::postgres::PgRow;
 use super::CancelTurnSessionInfo;
 use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
 
-pub(crate) async fn load_cancel_turn_session(
+pub async fn load_cancel_turn_session(
     pool: &PgPool,
     channel_id: &str,
 ) -> ServiceResult<Option<CancelTurnSessionInfo>> {
@@ -18,15 +18,15 @@ pub(crate) async fn load_cancel_turn_session(
 /// execution record, as the same read returned them.
 #[cfg(unix)]
 #[derive(Debug)]
-pub(crate) struct SelectedRow {
-    pub(crate) identity: [Option<String>; 4],
-    pub(crate) hosted: Option<serde_json::Value>,
+pub struct SelectedRow {
+    pub identity: [Option<String>; 4],
+    pub hosted: Option<serde_json::Value>,
 }
 
 /// [`load_cancel_turn_session`]'s selection with the chosen row as it was read; `None` when its
 /// hosted columns do not read, so that row is no Herdr execution rather than a failed selection.
 #[cfg(unix)]
-pub(crate) async fn load_cancel_turn_hosted(
+pub async fn load_cancel_turn_hosted(
     pool: &PgPool,
     channel_id: &str,
 ) -> ServiceResult<Option<(CancelTurnSessionInfo, Option<SelectedRow>)>> {

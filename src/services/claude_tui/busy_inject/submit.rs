@@ -6,7 +6,7 @@ pub(crate) fn inject(pane: &Pane, request: &Request<'_>, timing: &Timing) -> Out
     inject_report(pane, request, None, timing).outcome
 }
 
-pub(crate) fn inject_report(
+pub fn inject_report(
     pane: &Pane,
     request: &Request<'_>,
     channel: Option<u64>,
@@ -16,7 +16,7 @@ pub(crate) fn inject_report(
 }
 
 // The caller limits this policy to Claude tmux channels with confirmed transcript output.
-pub(crate) fn inject_report_any_turn(
+pub fn inject_report_any_turn(
     pane: &Pane,
     request: &Request<'_>,
     channel: Option<u64>,

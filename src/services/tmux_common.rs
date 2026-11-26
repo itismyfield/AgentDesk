@@ -1,20 +1,20 @@
 pub(crate) mod claude_footer;
-pub(crate) mod host_marker;
-pub(crate) mod runtime_activity;
-pub(crate) mod runtime_hint_fence;
+pub mod host_marker;
+pub mod runtime_activity;
+pub mod runtime_hint_fence;
 mod session_markers;
 #[cfg(unix)]
-pub(crate) mod spawn_markers;
+pub mod spawn_markers;
 pub mod unified_thread;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use session_markers::write_tmux_runtime_kind_marker;
-pub(crate) use session_markers::{
+pub use session_markers::{
     AuthMarkers, advance_claude_session_auth, claude_session_auth,
     resolve_tmux_runtime_kind_marker, tmux_session_auth_profile_matches,
     write_tmux_session_auth_profile,
 };
 #[cfg(unix)]
-pub(crate) use session_markers::{
+pub use session_markers::{
     claude_session_auth_matches, write_claude_session_auth,
     write_tmux_runtime_kind_marker_under_fence,
 };
@@ -55,7 +55,7 @@ pub(crate) fn source_authority_contention_key_for_tests(
     }
 }
 
-pub(crate) struct TmuxSourceAuthority<'a>(&'a str, &'a str);
+pub struct TmuxSourceAuthority<'a>(&'a str, &'a str);
 
 impl<'a> TmuxSourceAuthority<'a> {
     pub(crate) fn session(&self) -> &'a str {
@@ -81,7 +81,7 @@ impl<'a> TmuxSourceAuthority<'a> {
     }
 }
 
-pub(crate) fn invalidate_session_temp_source(stem: &str) {
+pub fn invalidate_session_temp_source(stem: &str) {
     crate::services::cluster::stream_relay::source_read_proof::invalidate_source(stem);
 }
 
@@ -126,14 +126,14 @@ fn with_source_authority_key<R>(key: &str, operation: impl FnOnce() -> R) -> R {
     operation()
 }
 
-pub(crate) fn with_session_temp_source_authority<R>(
+pub fn with_session_temp_source_authority<R>(
     session_temp_stem: &str,
     operation: impl FnOnce() -> R,
 ) -> R {
     with_source_authority_key(session_temp_stem, operation)
 }
 
-pub(crate) fn with_tmux_source_authority<R>(
+pub fn with_tmux_source_authority<R>(
     tmux_session_name: &str,
     operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
 ) -> R {
@@ -143,7 +143,7 @@ pub(crate) fn with_tmux_source_authority<R>(
     })
 }
 
-pub(crate) fn try_with_tmux_source_authority<R>(
+pub fn try_with_tmux_source_authority<R>(
     tmux_session_name: &str,
     operation: impl FnOnce(&TmuxSourceAuthority<'_>) -> R,
 ) -> Option<R> {
@@ -161,7 +161,7 @@ pub(crate) fn try_with_tmux_source_authority<R>(
 }
 
 const CLAUDE_TUI_READY_SCAN_LINES: usize = 12;
-pub(crate) const CLAUDE_TUI_READINESS_SCAN_LINES: usize = 36;
+pub const CLAUDE_TUI_READINESS_SCAN_LINES: usize = 36;
 const CLAUDE_TUI_DRAFT_SCAN_LINES: usize = CLAUDE_TUI_READINESS_SCAN_LINES;
 // Readiness must never accept a composer from deeper scrollback than the busy
 // classifiers can veto. Keep the acceptance window inside the veto window.
@@ -188,7 +188,7 @@ pub(crate) fn tmux_line_is_claude_tui_ready_prompt(line: &str) -> bool {
 /// prior turn is busy: busy-turn steering needs the empty bottom composer, not
 /// an idle transcript. The bottom-most prompt marker must be exactly `❯`; a
 /// historical prompt, ghost text, or editable draft never qualifies.
-pub(crate) fn tmux_capture_indicates_claude_tui_exact_empty_composer(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_exact_empty_composer(capture: &str) -> bool {
     capture
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -202,7 +202,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_exact_empty_composer(capture: &s
 /// `esc to interrupt` and the persistent `bypass permissions` footer) is not a
 /// modal. Permission approval cards, startup/resume selectors, and generic
 /// confirmation selectors are rejected before any machine key is sent.
-pub(crate) fn tmux_capture_indicates_claude_tui_interactive_modal(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_interactive_modal(capture: &str) -> bool {
     if tmux_capture_indicates_claude_tui_selector_open(capture) {
         return true;
     }
@@ -333,7 +333,7 @@ fn tmux_lines_after_claude_prompt_show_freshly_submitted_footer(lines: &[&str]) 
         .any(|line| trim_prompt_line(line).contains("Tools: 0 done"))
 }
 
-pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -> bool {
     let non_empty = capture
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -440,7 +440,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_ready_for_input(capture: &str) -
 /// indicator AND is not ready-for-input ⇒ a live turn that lost its inflight.
 /// Anything ambiguous (blank / error / scrolled / non-Claude / generic prompt)
 /// biases to `false` (keep suppressing) — the safe direction.
-pub(crate) fn tmux_capture_indicates_claude_tui_actively_streaming(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_actively_streaming(capture: &str) -> bool {
     if capture.trim().is_empty() {
         return false;
     }
@@ -477,7 +477,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_actively_streaming(capture: &str
 /// Bare `processing`/`thinking`/`running` NOT anchored to spinner structure or
 /// the `esc to interrupt` footer are DROPPED. Anything that is not a
 /// recognizable Claude-TUI in-progress frame biases to FALSE.
-pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
     let non_empty = capture
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -499,7 +499,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_busy(capture: &str) -> bool {
 /// Only candidates inside a fence pair that is balanced in this capture are
 /// excluded. An unmatched fence can be a closing fence whose opener scrolled
 /// away, so it must not hide later live status chrome.
-pub(crate) fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_structured_spinner(capture: &str) -> bool {
     let lines = capture.lines().collect::<Vec<_>>();
     let recent_start = lines
         .iter()
@@ -549,7 +549,7 @@ pub(crate) fn tmux_capture_indicates_claude_tui_background_agent_pending(capture
 /// Capture failures and dead sessions return `false`: treating an unknown pane
 /// as not-pending keeps completion unblocked, and the footer TTL/watchdog bounds
 /// the damage from a wrong false.
-pub(crate) fn sniff_background_agent_pending(tmux_session_name: &str) -> bool {
+pub fn sniff_background_agent_pending(tmux_session_name: &str) -> bool {
     crate::services::platform::tmux::capture_pane(tmux_session_name, 0)
         .map(|pane| tmux_capture_indicates_claude_tui_background_agent_pending(&pane))
         .unwrap_or(false)
@@ -602,7 +602,7 @@ fn tmux_lines_after_claude_prompt_have_interrupt_footer(lines: &[&str]) -> bool 
         .any(|line| claude_footer::bypass_interrupt(line) == Some(true))
 }
 
-pub(crate) fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
+pub fn tmux_recent_lines_show_claude_tui_interrupt_chrome(lines: &[&str]) -> bool {
     let footer = lines
         .iter()
         .rposition(|line| trim_prompt_line(line).starts_with(CLAUDE_TUI_PROMPT_MARKER))
@@ -747,7 +747,7 @@ fn is_claude_tui_duration_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_digit())
 }
 
-pub(crate) fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_prompt_draft(capture: &str) -> bool {
     tmux_capture_claude_tui_prompt_draft_backspace_budget(capture).is_some()
 }
 
@@ -1006,7 +1006,7 @@ pub(crate) fn tmux_capture_indicates_generic_ready_banner(capture: &str) -> bool
 /// "selector still open" failures.
 ///
 /// An overlay a person opened locally is a modal no machine key may be sent into.
-pub(crate) fn tmux_capture_indicates_claude_tui_selector_open(capture: &str) -> bool {
+pub fn tmux_capture_indicates_claude_tui_selector_open(capture: &str) -> bool {
     let non_empty = capture
         .lines()
         .filter(|l| !l.trim().is_empty())
@@ -1050,12 +1050,12 @@ pub fn tmux_exact_target(session_name: &str) -> String {
 
 /// Subdirectory under the runtime root where session temp files live.
 const SESSIONS_SUBDIR: &str = "runtime/sessions";
-pub(crate) const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
-pub(crate) const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
+pub const CLAUDE_TUI_HOOK_SETTINGS_TEMP_EXT: &str = "claude-tui-settings.json";
+pub const CLAUDE_TUI_LAUNCH_SCRIPT_TEMP_EXT: &str = "claude-tui.sh";
 pub(crate) const CODEX_TUI_HOME_TEMP_EXT: &str = "codex-tui-home";
 pub(crate) const CODEX_TUI_ROLLOUT_MARKER_TEMP_EXT: &str = "codex-tui-rollout.json";
 pub(crate) const TMUX_DEAD_MARKER_TEMP_EXT: &str = "pane_dead";
-pub(crate) const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
+pub const TMUX_RUNTIME_KIND_TEMP_EXT: &str = "runtime-kind";
 pub(crate) const TMUX_CHANNEL_TEMP_EXT: &str = "channel";
 
 /// Returns the persistent AgentDesk sessions directory, if a runtime root
@@ -1207,7 +1207,7 @@ pub fn cleanup_session_temp_files(session_name: &str) {
 }
 
 #[cfg(unix)]
-pub(crate) fn cleanup_session_temp_files_under_fence(
+pub fn cleanup_session_temp_files_under_fence(
     fence: &runtime_hint_fence::RuntimeHintFence,
     session_name: &str,
 ) -> Result<(), String> {
@@ -1223,13 +1223,13 @@ pub(crate) fn cleanup_session_temp_files_under_fence(
 }
 
 /// [`cleanup_session_temp_files`] for a session the host guard admitted.
-pub(crate) fn cleanup_cleared_session_temp_files(
+pub fn cleanup_cleared_session_temp_files(
     session: &crate::services::session_host::ClearedHostSession,
 ) {
     cleanup_session_temp_files(session.name());
 }
 
-pub(crate) fn cleanup_session_temp_files_under_source_authority(
+pub fn cleanup_session_temp_files_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     session_name: &str,
     #[cfg(unix)] fence: &runtime_hint_fence::RuntimeHintFence,
@@ -1493,7 +1493,7 @@ pub fn truncate_jsonl_head_safe(
     )
 }
 
-pub(crate) fn truncate_jsonl_head_safe_under_source_authority(
+pub fn truncate_jsonl_head_safe_under_source_authority(
     authority: &TmuxSourceAuthority<'_>,
     path: &Path,
     size_cap_bytes: u64,

@@ -66,7 +66,7 @@ pub fn process_stream_line(
 }
 
 /// Native TUI transcripts expose their visible blocks as ordered body frames.
-pub(crate) fn process_claude_transcript_line(
+pub fn process_claude_transcript_line(
     line: &str,
     sender: &Sender<StreamMessage>,
     state: &mut StreamLineState,
@@ -274,7 +274,7 @@ fn process_stream_line_with_body_policy(
     true
 }
 
-pub(crate) fn emit_status_events_from_stream_json(
+pub fn emit_status_events_from_stream_json(
     json: &Value,
     sender: &Sender<StreamMessage>,
 ) -> bool {
@@ -312,7 +312,7 @@ fn parse_claude_tool_use(item: &Value) -> Option<StreamMessage> {
     })
 }
 
-pub(crate) fn parse_stream_message_with_state(
+pub fn parse_stream_message_with_state(
     json: &Value,
     state: &StreamLineState,
 ) -> Option<StreamMessage> {
@@ -494,7 +494,7 @@ fn claude_session_id(json: &Value) -> Option<String> {
         .map(String::from)
 }
 
-pub(crate) fn observe_stream_context(json: &Value, state: &mut StreamLineState) {
+pub fn observe_stream_context(json: &Value, state: &mut StreamLineState) {
     let Some(msg_type) = json.get("type").and_then(|value| value.as_str()) else {
         return;
     };
@@ -549,7 +549,7 @@ pub(crate) fn observe_stream_context(json: &Value, state: &mut StreamLineState) 
     }
 }
 
-pub(crate) fn classify_task_notification_kind(
+pub fn classify_task_notification_kind(
     json: &Value,
     state: &StreamLineState,
 ) -> TaskNotificationKind {

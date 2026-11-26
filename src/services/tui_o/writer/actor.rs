@@ -516,7 +516,7 @@ pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
-pub(crate) mod codex_retention;
+pub mod codex_retention;
 pub(crate) mod transition;
 mod transition_snapshot;
 

@@ -6,7 +6,7 @@ use super::model::{HostKind, HostLiveness, HostSessionRef};
 use super::resolve::{ResolvedSessionTarget, TargetHost};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AutomaticEffect {
+pub enum AutomaticEffect {
     Clear,
     Finalize,
     FailDispatch,
@@ -15,7 +15,7 @@ pub(crate) enum AutomaticEffect {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StateChange {
+pub enum StateChange {
     /// Turn completion backed by a delivered transcript; host evidence never blocks it.
     TranscriptCompletion,
     /// Repair inferred from the host, with the probe result if one ran.
@@ -26,7 +26,7 @@ pub(crate) enum StateChange {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GuardRefusal {
+pub enum GuardRefusal {
     UnknownHost,
     HostConflict,
     ProbeFailed,
@@ -34,7 +34,7 @@ pub(crate) enum GuardRefusal {
 
 #[must_use]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GuardVerdict {
+pub enum GuardVerdict {
     /// The consumer's existing legacy decision may run.
     Proceed,
     /// A Herdr session: no automatic state change; its existing recovery owns it.
@@ -42,7 +42,7 @@ pub(crate) enum GuardVerdict {
     Refused(GuardRefusal),
 }
 
-pub(crate) fn guard_first_state_change(
+pub fn guard_first_state_change(
     target: &ResolvedSessionTarget,
     change: StateChange,
 ) -> GuardVerdict {
@@ -66,18 +66,18 @@ pub(crate) fn guard_first_state_change(
 /// A tmux/process session the guard admitted for an automatic change. Only
 /// [`clear_legacy_session`] builds one, so a keyed entry cannot run unguarded.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ClearedHostSession {
+pub struct ClearedHostSession {
     name: String,
 }
 
 impl ClearedHostSession {
-    pub(crate) fn name(&self) -> &str {
+    pub fn name(&self) -> &str {
         &self.name
     }
 }
 
 /// The keyed gate's verdict for a caller outside the discord module.
-pub(crate) enum ChannelTeardown {
+pub enum ChannelTeardown {
     /// A found legacy row with no host trace.
     Cleared(ClearedHostSession),
     /// No sessions row and no marker or inflight trace of another host.
@@ -87,7 +87,7 @@ pub(crate) enum ChannelTeardown {
 }
 
 /// The guard verdict for `change`; `Proceed` also needs a tmux/process ref to act on.
-pub(crate) fn clear_legacy_session(
+pub fn clear_legacy_session(
     target: &ResolvedSessionTarget,
     change: StateChange,
 ) -> Result<ClearedHostSession, GuardVerdict> {
@@ -104,7 +104,7 @@ pub(crate) fn clear_legacy_session(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DeferReason {
+pub enum DeferReason {
     Herdr,
     UnknownHost,
     HostConflict,
@@ -112,7 +112,7 @@ pub(crate) enum DeferReason {
 
 /// Answer of the tmux-compatible liveness probe policies read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PolicyProbe {
+pub enum PolicyProbe {
     Probed(HostLiveness),
     /// No probe ran and the whole row is left alone, inflight or not.
     DeferredToExistingRecovery(DeferReason),
@@ -132,7 +132,7 @@ impl PolicyProbe {
 }
 
 /// Runs `probe` only on a known tmux/process target.
-pub(crate) fn probe_for_policy(
+pub fn probe_for_policy(
     target: &ResolvedSessionTarget,
     probe: impl FnOnce(HostSessionRef<'_>) -> HostLiveness,
 ) -> PolicyProbe {

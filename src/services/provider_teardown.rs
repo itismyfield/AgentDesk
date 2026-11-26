@@ -4,7 +4,7 @@ use crate::services::session_host::ClearedHostSession;
 
 /// Whether the turn's tmux session may be torn down, judged before spawn.
 #[derive(Debug)]
-pub(crate) enum TeardownClearance {
+pub enum TeardownClearance {
     /// The turn's sessions row is a found legacy row with no host trace.
     Cleared(ClearedHostSession),
     /// The guard kept the session; every teardown effect is skipped.

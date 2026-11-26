@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 /// The durable "may have submitted" mark could not be persisted, so no payload was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PreSubmitPersistenceRefused {
+pub struct PreSubmitPersistenceRefused {
     pub(crate) reason: String,
 }
 
@@ -17,7 +17,7 @@ impl std::fmt::Display for PreSubmitPersistenceRefused {
 }
 
 /// Durable submission boundary of one turn attempt.
-pub(crate) trait SubmissionFence: Send + Sync {
+pub trait SubmissionFence: Send + Sync {
     /// Persists the boundary before the first payload; idempotent once it succeeded.
     fn before_first_payload(&self) -> Result<(), PreSubmitPersistenceRefused>;
     /// The refusal that closed this attempt's input, if any.
@@ -39,14 +39,14 @@ pub(crate) trait SubmissionFence: Send + Sync {
     }
 }
 
-pub(crate) struct IdleStashContext {
+pub struct IdleStashContext {
     pub(crate) channel: u64,
     pub(crate) target: String,
     pub(crate) available: bool,
 }
 
 #[cfg(unix)]
-pub(crate) fn idle_stash_scope() -> Option<(Arc<dyn SubmissionFence>, IdleStashContext)> {
+pub fn idle_stash_scope() -> Option<(Arc<dyn SubmissionFence>, IdleStashContext)> {
     let fence = current()?;
     let context = fence.idle_stash_context()?;
     Some((fence, context))
@@ -66,7 +66,7 @@ impl Drop for ScopeReset {
 }
 
 /// Runs `run` with `fence` as this thread's submission boundary; the previous one returns after.
-pub(crate) fn with_scope<R>(fence: Option<Arc<dyn SubmissionFence>>, run: impl FnOnce() -> R) -> R {
+pub fn with_scope<R>(fence: Option<Arc<dyn SubmissionFence>>, run: impl FnOnce() -> R) -> R {
     let previous = SCOPE.with(|slot| std::mem::replace(&mut *slot.borrow_mut(), fence));
     let _reset = ScopeReset(previous);
     run()

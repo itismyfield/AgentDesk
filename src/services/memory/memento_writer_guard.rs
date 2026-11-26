@@ -197,7 +197,7 @@ pub(crate) fn writer_fingerprint(
 /// Invalidate the entire endpoint because a privileged maintenance credential
 /// can consolidate facts written under other client credentials. Fingerprints
 /// still isolate credentials: this can permit extra writes, never merge tenants.
-pub(crate) fn invalidate_writer_receipts(
+pub fn invalidate_writer_receipts(
     directory: &Path,
     endpoint: &str,
     _auth_identity: &str,

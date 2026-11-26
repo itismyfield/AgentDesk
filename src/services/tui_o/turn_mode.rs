@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct TurnConfig {
+pub struct TurnConfig {
     pub channels: BTreeSet<u64>,
     /// Selects every channel O owns; unset means on unless `channels` lists the selection.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -26,7 +26,7 @@ impl TurnConfig {
     }
 
     /// Whether any channel can be selected.
-    pub(crate) fn selects_any(&self) -> bool {
+    pub fn selects_any(&self) -> bool {
         self.all_owned() || !self.channels.is_empty()
     }
 
@@ -38,7 +38,7 @@ impl TurnConfig {
 static CONFIRMED: OnceLock<RwLock<BTreeSet<u64>>> = OnceLock::new();
 
 // Configuration and current output ownership do not confirm a turn transition.
-pub(crate) fn transcript_turns(channel: u64) -> bool {
+pub fn transcript_turns(channel: u64) -> bool {
     CONFIRMED.get().is_some_and(|channels| {
         channels
             .read()
@@ -48,7 +48,7 @@ pub(crate) fn transcript_turns(channel: u64) -> bool {
 }
 
 /// The channels confirmed for turn mode in this process.
-pub(crate) fn confirmed_channels() -> Vec<u64> {
+pub fn confirmed_channels() -> Vec<u64> {
     CONFIRMED.get().map_or_else(Vec::new, |channels| {
         let channels = channels.read().unwrap_or_else(|e| e.into_inner());
         channels.iter().copied().collect()
@@ -75,7 +75,7 @@ pub(crate) fn admit_effect<T>(
 
 // The caller must read the retirement population before confirming a selected channel.
 // Returns whether this call added the channel to the confirmed set.
-pub(crate) fn confirm(channel: u64) -> bool {
+pub fn confirm(channel: u64) -> bool {
     channel != 0
         && CONFIRMED
             .get_or_init(|| RwLock::new(BTreeSet::new()))
@@ -86,7 +86,7 @@ pub(crate) fn confirm(channel: u64) -> bool {
 
 /// Confirms each channel of `owned` whose `policy` channel is selected, only after `retire` reports
 /// it fully retired. No config or an explicitly empty selection returns before `owned` or `retire` runs.
-pub(crate) fn confirm_selected(
+pub fn confirm_selected(
     config: Option<&TurnConfig>,
     owned: impl FnOnce() -> Vec<u64>,
     policy: impl Fn(u64) -> u64,

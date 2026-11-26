@@ -3,7 +3,7 @@
 
 pub(crate) mod first_input;
 pub(crate) mod handoff;
-pub(crate) mod hold_record;
+pub mod hold_record;
 pub(crate) mod hold_resolve;
 use handoff::launched_source;
 
@@ -131,13 +131,13 @@ impl HerdrLaunchHost for Boot<'_> {
 }
 
 /// The boot registry's launch host, on its endpoints only.
-pub(crate) fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
+pub fn boot_launch_host() -> Option<Arc<dyn HerdrLaunchHost>> {
     let host = herdr_endpoints().launch_host()?;
     Some(Arc::new(Boot(host)))
 }
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
-pub(crate) struct HerdrTurn<'a> {
+pub struct HerdrTurn<'a> {
     pub pool: &'a PgPool,
     pub owner: HostedOwner,
     pub channel_id: u64,
@@ -156,7 +156,7 @@ pub(crate) struct HerdrTurn<'a> {
 }
 
 /// The stored execution whose launched session the turn asks to attach, and its pane gate.
-pub(crate) struct AttachRequest<'a> {
+pub struct AttachRequest<'a> {
     pub owner: &'a HostedOwner,
     pub record: &'a HostedExecution,
     pub session_id: &'a str,
@@ -165,7 +165,7 @@ pub(crate) struct AttachRequest<'a> {
 }
 
 /// What a turn takes from its caller: launch host, hook events and the source reconcile.
-pub(crate) trait HerdrTurnPorts {
+pub trait HerdrTurnPorts {
     fn launch_host(&self) -> Option<Arc<dyn HerdrLaunchHost>>;
     fn hook_events(&self) -> broadcast::Receiver<HookEvent>;
     /// `Ok(bound)` once the launched source is published; `Err` attached nothing.
@@ -201,7 +201,7 @@ pub(crate) trait HerdrTurnPorts {
 }
 
 /// Enqueues the notice of hold `(execution nonce, hold id)`; a repeat returns the same row.
-pub(crate) type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
+pub type HoldNotice = dyn Fn(&str, &str) -> Result<i64, String> + Send + Sync;
 
 /// The source a prompt goes to.
 pub(crate) struct Attached {
@@ -266,7 +266,7 @@ fn physical(record: &HostedExecution) -> Option<(String, String)> {
 }
 
 /// Runs one turn on a blocking thread inside the runtime; every error leaves the pane as it is.
-pub(crate) fn execute(
+pub fn execute(
     turn: HerdrTurn<'_>,
     ports: &dyn HerdrTurnPorts,
     sender: Sender<StreamMessage>,
@@ -349,7 +349,7 @@ fn bound_source(
 }
 
 /// The clear Pending a Bound execution's next prompt goes to.
-pub(crate) struct AwaitedClear {
+pub struct AwaitedClear {
     pub session_id: String,
     /// The transcript path the Pending's hook named.
     pub transcript: Option<String>,
@@ -357,7 +357,7 @@ pub(crate) struct AwaitedClear {
 
 /// Execution `nonce`'s latest own SessionStart(clear) Pending, when every record after the source
 /// it logged last is such a Pending taken from that source and the canonical fold awaits it.
-pub(crate) fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
+pub fn awaited_clear(channel: u64, logical: &str, nonce: &str) -> Option<AwaitedClear> {
     let events = binding_events_since(channel, 0).unwrap_or_default();
     let moved = |event: &BindingEvent| !matches!(event.new, BindingTarget::Rejected { .. });
     let pane = events
@@ -526,7 +526,7 @@ fn holds_dir() -> Result<PathBuf, String> {
 
 /// What releasing an input hold left behind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HoldRelease {
+pub enum HoldRelease {
     /// Removed and synced, or there was none.
     Released,
     /// Removed, but the directory sync failed, so the removal may not survive a crash.
@@ -537,7 +537,7 @@ pub(crate) enum HoldRelease {
 
 /// Ends execution `nonce`'s hold; an absent hold is already ended. A confirmed retire calls it,
 /// as does a Codex cold start once its launch's own source is bound.
-pub(crate) fn release_hold(nonce: &str) -> HoldRelease {
+pub fn release_hold(nonce: &str) -> HoldRelease {
     let (path, removed) = match unlink_hold(nonce) {
         Ok(unlinked) => unlinked,
         Err(error) => return HoldRelease::Kept(error),
@@ -562,7 +562,7 @@ pub(crate) fn unlink_hold(nonce: &str) -> Result<(PathBuf, bool), String> {
 }
 
 /// Each held nonce and when its hold was recorded, from a v1 time or a v2 record.
-pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
+pub fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
     let dir = holds_dir()?;
     let entries = match std::fs::read_dir(&dir) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -592,7 +592,7 @@ pub(crate) fn input_holds() -> Result<Vec<(String, Option<String>)>, String> {
 }
 
 /// Whether an earlier prompt may sit in execution `nonce`'s composer; `Err` when unreadable.
-pub(crate) fn input_held(nonce: &str) -> Result<bool, String> {
+pub fn input_held(nonce: &str) -> Result<bool, String> {
     match std::fs::symlink_metadata(hold_path(nonce)?) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Ok(_) => Ok(true),
@@ -705,7 +705,7 @@ pub(crate) fn gate(record: &HostedExecution) -> Result<HerdrTarget, String> {
         .ok_or_else(|| "herdr turn: the execution is not on a registered endpoint".into())
 }
 
-pub(crate) async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
+pub async fn load(pool: &PgPool, owner: &HostedOwner) -> HostedLookup {
     let identity = CanonicalSessionIdentity {
         kind: SessionIdentityKind::DiscordChannel,
         discord_token_hash: &owner.discord_token_hash,
@@ -945,7 +945,7 @@ mod never_attached;
 use live_reader::read_to_provider_terminal;
 pub(crate) mod start_offset;
 mod terminal_replay;
-pub(crate) use terminal_replay::{
+pub use terminal_replay::{
     EndedTurn, Terminal, TurnOutput, TurnRead, closed_turn_read, ended_turn, ended_turn_read,
     replay_herdr_turn,
 };
@@ -963,7 +963,7 @@ mod boot_host_tests;
 pub(crate) mod composer;
 
 thread_local! { static OWNER_BOUND_FAILURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-pub(crate) fn take_owner_bound_failure() -> bool {
+pub fn take_owner_bound_failure() -> bool {
     OWNER_BOUND_FAILURE.with(|flag| flag.replace(false))
 }
 

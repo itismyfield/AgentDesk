@@ -54,7 +54,7 @@ pub(in crate::services::codex) fn tui_preflight_with_policy(
 }
 
 #[cfg(unix)]
-pub(crate) fn successor_hooks_ready() -> bool {
+pub fn successor_hooks_ready() -> bool {
     verified_hook_eligibility(None).is_ok()
 }
 
@@ -293,7 +293,7 @@ pub(crate) fn prepare_codex_herdr_launch(
 
 /// Fresh panes must carry no resume command, even if the renderer changes its option order.
 #[cfg(unix)]
-pub(crate) fn validate_herdr_fresh_argv(
+pub fn validate_herdr_fresh_argv(
     mode: &str,
     resume: Option<&str>,
     args: &[String],

@@ -179,7 +179,7 @@ fn graph_error(value: DagError) -> DefinitionError {
     }
 }
 
-pub(crate) fn validate_pipeline(pipeline: &PipelineDefinition) -> Result<(), DefinitionError> {
+pub fn validate_pipeline(pipeline: &PipelineDefinition) -> Result<(), DefinitionError> {
     let pipeline_errors = pipeline.validate();
     if pipeline_errors.is_empty() {
         Ok(())

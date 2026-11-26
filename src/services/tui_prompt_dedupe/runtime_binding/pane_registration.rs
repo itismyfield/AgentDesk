@@ -61,7 +61,7 @@ pub(crate) fn register_launched_claude_pane(
 
 /// A rehydrate pass's registration of `binding`, decided from the pane's binding `judged`. It is
 /// given up when a hook moved the binding since, so a stale source never replaces a newer one.
-pub(crate) fn register_judged_claude_pane(
+pub fn register_judged_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -85,7 +85,7 @@ pub(crate) fn register_judged_claude_pane(
         .is_some_and(Persisted::published)
 }
 
-pub(crate) fn register_rehydrated_tmux_runtime_binding_under_source_authority(
+pub fn register_rehydrated_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     provider: &str,
     channel_id: u64,
@@ -129,7 +129,7 @@ pub(crate) fn register_claude_pane_with(
 }
 
 /// `register_judged_claude_pane` of the pane's own binding, given up if a hook moved it since.
-pub(crate) fn register_unmoved_claude_pane(
+pub fn register_unmoved_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -224,7 +224,7 @@ fn launch_cause(
 
 /// `register_claude_pane_with` for a caller that holds the pane's source authority across its
 /// own judgment, so the registration and its completion land in that same hold.
-pub(crate) fn register_claude_pane_under_source_authority(
+pub fn register_claude_pane_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -246,7 +246,7 @@ pub(crate) fn register_claude_pane_under_source_authority(
 
 /// A restart's restore of a Codex pane's logged `source`, for a caller holding its source
 /// authority: published only while the path still names that file, and nothing new is logged.
-pub(crate) fn register_restored_codex_pane_under_source_authority(
+pub fn register_restored_codex_pane_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -267,7 +267,7 @@ fn begin_pane_registration(key: &Pane, binding: &TuiRuntimeBinding) {
     }
 }
 
-pub(crate) fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {
+pub fn note_claude_pane_registration(tmux: &str, launch: Option<&str>, ok: bool) {
     let Some(launch) = launch.filter(|s| !s.trim().is_empty()) else {
         return;
     };

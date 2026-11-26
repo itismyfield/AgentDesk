@@ -9,7 +9,7 @@ const WAIT: Duration = Duration::from_secs(5);
 const FORMAT: &str = "#{pid} #{session_id} #{window_id} #{pane_id} #{pane_pid} #{pane_dead}";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Pin {
+pub struct Pin {
     pub(crate) nonce: String,
     server: u32,
     session: String,
@@ -233,7 +233,7 @@ impl Pin {
 
 /// Persist and recheck this exact pane before its only destructive command. Reconnects do not
 /// inherit a previous connection's authority, even if the numeric pane id is the same.
-pub(crate) async fn end<F, Fut>(
+pub async fn end<F, Fut>(
     logical: &str,
     channel: u64,
     expected: Option<&Pin>,

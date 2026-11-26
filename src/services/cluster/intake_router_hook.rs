@@ -39,12 +39,12 @@ mod execution_requirement_tests;
 pub(crate) mod o_input;
 #[cfg(test)]
 mod o_route_tests;
-pub(crate) mod owner_record;
+pub mod owner_record;
 mod session_owner;
 
-pub(crate) use session_owner::{SessionOwnerResolution, resolve_session_owner};
+pub use session_owner::{SessionOwnerResolution, resolve_session_owner};
 
-pub(crate) use super::intake_routing_config::{
+pub use super::intake_routing_config::{
     EffectiveIntakeRoutingConfig, IntakeRoutingMode, effective_intake_routing_config,
     intake_routing_status_json,
 };
@@ -52,7 +52,7 @@ pub(crate) use super::intake_routing_config::{
 mod model;
 mod placement;
 use model::build_payload_for_insert;
-pub(crate) use model::{
+pub use model::{
     IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis,
     ObservedIntakeOutcome, RanLocalReason, ResolvedSessionOwner,
 };
@@ -149,7 +149,7 @@ async fn check_required_target(
 
 /// Run the leader-side placement hook. Enforce mode fails safe whenever a
 /// local execution could split an existing session or duplicate an open route.
-pub(crate) async fn try_route_intake(
+pub async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {

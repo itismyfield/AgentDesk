@@ -31,7 +31,7 @@ pub(crate) fn session_turn_lock(tmux_session_name: &str) -> Arc<Mutex<()>> {
 /// same pane. Readiness waits deliberately stay outside this helper so a normal
 /// follow-up cannot block a busy-turn `/compact` for its whole wait interval.
 #[cfg(unix)]
-pub(crate) fn with_composer_mutation_lock<R>(tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
+pub fn with_composer_mutation_lock<R>(tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
     let composer_lock = COMPOSER_MUTATION_LOCKS
         .entry(tmux_session_name.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
@@ -50,7 +50,7 @@ pub(crate) fn with_composer_mutation_lock<R>(_tmux_session_name: &str, f: impl F
 /// Try the existing composer fence; contention or poison leaves the callback unrun.
 #[cfg(unix)]
 #[allow(dead_code)]
-pub(crate) fn try_with_composer_mutation_lock<R>(
+pub fn try_with_composer_mutation_lock<R>(
     tmux_session_name: &str,
     operation: impl FnOnce() -> R,
 ) -> Option<R> {
@@ -101,7 +101,7 @@ pub(crate) fn try_with_composer_permit<R>(
 
 /// Why a pane's composer is protected; in memory only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DraftGuard {
+pub enum DraftGuard {
     /// Where the person's draft went is not known.
     RecoveryRequired,
     /// The person's draft is back in the composer, theirs to send or clear.
@@ -119,7 +119,7 @@ pub(crate) enum DraftSighting {
 
 /// What automatic writers may do to a pane now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ComposerAdmission {
+pub enum ComposerAdmission {
     Any,
     /// Only a verified stash transaction, which hands the person's draft back.
     StashOnly,
@@ -147,13 +147,13 @@ fn draft_guards() -> MutexGuard<'static, DraftGuards> {
 fn draft_key(session: &str) -> DraftKey {
     (session.into(), super::owner_input::epoch())
 }
-pub(crate) fn guard_draft(tmux_session_name: &str, guard: DraftGuard) {
+pub fn guard_draft(tmux_session_name: &str, guard: DraftGuard) {
     draft_guards().insert(draft_key(tmux_session_name), guard);
 }
 
 /// Decides one automatic write under the composer lock, before any key. Only a protected pane is
 /// captured: an empty composer without a stash releases it, the person's text allows a stash.
-pub(crate) fn composer_admission(
+pub fn composer_admission(
     tmux_session_name: &str,
     capture: impl FnOnce() -> Option<String>,
 ) -> ComposerAdmission {
@@ -190,7 +190,7 @@ pub(crate) fn composer_admission(
 }
 
 /// Whether this pane protects a person's draft now; reads no pane.
-pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
+pub fn draft_guarded(tmux_session_name: &str) -> bool {
     if super::owner_input::active() {
         draft_guards().contains_key(&draft_key(tmux_session_name))
     } else {
@@ -202,7 +202,7 @@ pub(crate) fn draft_guarded(tmux_session_name: &str) -> bool {
 
 /// One look, between composer mutations, for whether automatic writes may run again; a pane
 /// another writer holds right now counts as still protected.
-pub(crate) fn draft_released(tmux_session_name: &str) -> bool {
+pub fn draft_released(tmux_session_name: &str) -> bool {
     let capture = || super::host_input::observe_draft(tmux_session_name);
     let admit = || composer_admission(tmux_session_name, capture) == ComposerAdmission::Any;
     try_with_composer_mutation_lock(tmux_session_name, admit).unwrap_or(false)

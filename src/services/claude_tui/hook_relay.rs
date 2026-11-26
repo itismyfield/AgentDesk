@@ -762,7 +762,7 @@ fn handoff_hook_relay_failure(
     Ok(())
 }
 
-pub(crate) fn run_failure_marker_worker_from_env() -> Option<Result<(), String>> {
+pub fn run_failure_marker_worker_from_env() -> Option<Result<(), String>> {
     if let Some(encoded) = std::env::var_os(FAILURE_MARKER_WORKER_ENV) {
         return Some(
             encoded

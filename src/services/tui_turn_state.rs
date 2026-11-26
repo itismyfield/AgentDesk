@@ -17,7 +17,7 @@ mod completion_scan;
 #[cfg(any(test, feature = "test-support"))]
 #[path = "tui_turn_state/idle_compaction_tests.rs"]
 pub(crate) mod idle_compaction_tests;
-pub(crate) use self::completion_scan::{
+pub use self::completion_scan::{
     envelope_is_turn_end_terminator, jsonl_completion_scan_idle, jsonl_strict_terminator_idle,
     jsonl_turn_end_terminator_idle,
 };
@@ -25,12 +25,12 @@ pub(crate) use self::completion_scan::{
 use self::completion_scan::{is_interactive_mode_housekeeping_type, is_torn_trailing_fragment};
 #[path = "tui_turn_state/tool_open.rs"]
 mod tool_open;
-pub(crate) use self::tool_open::{
+pub use self::tool_open::{
     ToolCalls, latest_provider_record_unix_nanos_widening, provider_tool_calls,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TuiTurnState {
+pub enum TuiTurnState {
     Idle,
     Streaming,
     UserSubmitted,
@@ -38,7 +38,7 @@ pub(crate) enum TuiTurnState {
 }
 
 impl TuiTurnState {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Streaming => "streaming",
@@ -47,13 +47,13 @@ impl TuiTurnState {
         }
     }
 
-    pub(crate) fn is_busy(self) -> bool {
+    pub fn is_busy(self) -> bool {
         matches!(self, Self::Streaming | Self::UserSubmitted)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum TuiReadyState {
+pub enum TuiReadyState {
     Ready,
     Busy,
     Unknown,
@@ -84,7 +84,7 @@ impl TuiReadyState {
 // #4353: a plain `i64`. `destructive_cancel_gate`, `manual_rebind_output_path`
 // and `dispatched_sessions` all read it unguarded, so `cfg(unix)` broke non-unix
 // builds without gating anything platform-specific.
-pub(crate) const STALE_USER_SUBMITTED_RECLAIM_SECS: i64 = 600;
+pub const STALE_USER_SUBMITTED_RECLAIM_SECS: i64 = 600;
 
 /// #3981/#4024: decide whether a busy JSONL `UserSubmitted` turn-state is a
 /// stale stranded turn rather than a live submission still awaiting its first
@@ -94,7 +94,7 @@ pub(crate) const STALE_USER_SUBMITTED_RECLAIM_SECS: i64 = 600;
 /// prompt marker. `Streaming` is unconditionally live because an assistant
 /// envelope already exists.
 #[cfg(unix)]
-pub(crate) fn user_submitted_is_stale_stranded(
+pub fn user_submitted_is_stale_stranded(
     state: TuiTurnState,
     activity_age_secs: i64,
     prompt_marker_detected: bool,
@@ -111,7 +111,7 @@ pub(crate) fn user_submitted_is_stale_stranded(
 /// [`user_submitted_is_stale_stranded`] never reclaims a turn without positive
 /// quiescence evidence.
 #[cfg(unix)]
-pub(crate) fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
+pub fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
     let activity_nanos =
         crate::services::tmux_common::runtime_activity::latest_runtime_activity_unix_nanos(
             tmux_session_name,
@@ -127,11 +127,11 @@ pub(crate) fn runtime_activity_age_secs(tmux_session_name: &str) -> i64 {
     now_nanos.saturating_sub(activity_nanos) / 1_000_000_000
 }
 
-pub(crate) trait TuiTurnStateProbe {
+pub trait TuiTurnStateProbe {
     fn observe(&self) -> TuiTurnState;
 }
 
-pub(crate) struct JsonlTurnStateProbe<'a> {
+pub struct JsonlTurnStateProbe<'a> {
     provider: &'a ProviderKind,
     path: &'a Path,
 }
@@ -148,7 +148,7 @@ impl TuiTurnStateProbe for JsonlTurnStateProbe<'_> {
     }
 }
 
-pub(crate) fn observe_provider_jsonl_turn_state(
+pub fn observe_provider_jsonl_turn_state(
     provider: &ProviderKind,
     path: &Path,
 ) -> TuiTurnState {
@@ -161,7 +161,7 @@ pub(crate) fn observe_provider_jsonl_turn_state(
 
 /// Unix nanos of the newest stamped provider conversation record in `path`'s tail window.
 /// `None` is "no measurable output": unstamped records and the file mtime never stand in.
-pub(crate) fn latest_provider_record_unix_nanos(
+pub fn latest_provider_record_unix_nanos(
     provider: &ProviderKind,
     path: &Path,
 ) -> Option<i64> {
@@ -235,7 +235,7 @@ fn codex_event_is_conversation(payload_type: &str) -> bool {
     )
 }
 
-pub(crate) fn provider_runtime_has_structured_jsonl_turn_state(
+pub fn provider_runtime_has_structured_jsonl_turn_state(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,
 ) -> bool {
@@ -256,7 +256,7 @@ pub(crate) fn pane_ready_fallback_allowed(
     !provider_runtime_has_structured_jsonl_turn_state(provider, runtime_kind)
 }
 
-pub(crate) fn claude_tui_output_path_missing(
+pub fn claude_tui_output_path_missing(
     runtime_kind: Option<RuntimeHandoffKind>,
     output_path: Option<&str>,
 ) -> bool {
@@ -267,7 +267,7 @@ pub(crate) fn claude_tui_output_path_missing(
             .is_none()
 }
 
-pub(crate) fn jsonl_ready_for_input(
+pub fn jsonl_ready_for_input(
     provider: &ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,
     path: &Path,
@@ -317,7 +317,7 @@ pub(crate) fn jsonl_ready_for_input(
     ))
 }
 
-pub(crate) fn runtime_binding_ready_for_input(
+pub fn runtime_binding_ready_for_input(
     provider: &ProviderKind,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
     require_consumed: bool,
@@ -338,7 +338,7 @@ pub(crate) fn runtime_binding_ready_for_input(
     )
 }
 
-pub(crate) fn runtime_binding_turn_state(
+pub fn runtime_binding_turn_state(
     provider: &ProviderKind,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
 ) -> Option<TuiTurnState> {
@@ -353,7 +353,7 @@ pub(crate) fn runtime_binding_turn_state(
     Some(observe_provider_jsonl_turn_state(provider, path))
 }
 
-pub(crate) fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
+pub fn observe_claude_jsonl_turn_state(path: &Path) -> TuiTurnState {
     claude_meta::observe(path)
 }
 

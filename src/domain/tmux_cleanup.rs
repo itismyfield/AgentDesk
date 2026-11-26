@@ -3,7 +3,7 @@
 use crate::domain::lifecycle::InflightRestartMode;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum TmuxCleanupPolicy {
+pub enum TmuxCleanupPolicy {
     PreserveSession,
     PreserveSessionAndInflight {
         restart_mode: InflightRestartMode,
@@ -21,11 +21,11 @@ impl TmuxCleanupPolicy {
         }
     }
 
-    pub(crate) const fn should_cleanup_tmux(self) -> bool {
+    pub const fn should_cleanup_tmux(self) -> bool {
         matches!(self, Self::CleanupSession { .. })
     }
 
-    pub(crate) const fn should_clear_inflight(self) -> bool {
+    pub const fn should_clear_inflight(self) -> bool {
         !matches!(self, Self::PreserveSessionAndInflight { .. })
     }
 }

@@ -342,7 +342,7 @@ fn channel_runtime_mode_explicit(channel: &crate::config::AgentChannel) -> Optio
 }
 
 /// Match the installed resolver precedence so hook publication agrees with driver selection.
-pub(crate) fn channel_effective_tui_request(
+pub fn channel_effective_tui_request(
     config: &Config,
     channel: &crate::config::AgentChannel,
     provider_id: &str,

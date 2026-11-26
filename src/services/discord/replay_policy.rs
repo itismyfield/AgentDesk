@@ -1,17 +1,17 @@
 //! Decisions for a protected attempt's stale resume or terminal: keep the legacy path, retry the
 //! exact attempt once, classify it as ordinary, or hold it.
 
-pub(crate) mod activation;
-pub(crate) mod live;
+pub mod activation;
+pub mod live;
 #[cfg(all(test, unix))]
 mod live_tests;
-pub(crate) mod permit;
+pub mod permit;
 #[cfg(test)]
 mod permit_tests;
 #[cfg(test)]
 mod policy_tests;
-pub(crate) mod recovery;
-pub(crate) mod row;
+pub mod recovery;
+pub mod row;
 
 use crate::db::replay_disposition::write::{self, ExactAttempt, NoEffectAck};
 use crate::services::provider::CancelToken;
@@ -19,7 +19,7 @@ use live::{LiveAttempt, RawObservation, Verdict};
 use row::ReplayRow;
 use sqlx::PgPool;
 
-pub(crate) use crate::domain::process_incarnation::incarnation;
+pub use crate::domain::process_incarnation::incarnation;
 
 #[derive(Debug)]
 pub(crate) enum ReplayDecision {
@@ -94,7 +94,7 @@ async fn withhold(
 
 /// The right to prepare one exact retry of a committed no-effect nonce.
 #[derive(Debug)]
-pub(crate) struct RetryPermit {
+pub struct RetryPermit {
     receipt_id: i64,
     previous_nonce: String,
     next_nonce: String,
@@ -121,33 +121,33 @@ impl RetryPermit {
         self.abandonment.clone()
     }
 
-    pub(crate) fn receipt_id(&self) -> i64 {
+    pub fn receipt_id(&self) -> i64 {
         self.receipt_id
     }
 
-    pub(crate) fn previous_nonce(&self) -> &str {
+    pub fn previous_nonce(&self) -> &str {
         &self.previous_nonce
     }
 
-    pub(crate) fn next_nonce(&self) -> &str {
+    pub fn next_nonce(&self) -> &str {
         &self.next_nonce
     }
 }
 
 /// The original request an exact retry starts again, and the permit only its next start may take.
 #[derive(Debug)]
-pub(crate) struct ExactRetry {
-    pub(crate) user_message_id: poise::serenity_prelude::MessageId,
-    pub(crate) sources: Vec<poise::serenity_prelude::MessageId>,
-    pub(crate) request_owner: poise::serenity_prelude::UserId,
-    pub(crate) text: String,
-    pub(crate) reply_context: Option<String>,
-    pub(crate) permit: RetryPermit,
+pub struct ExactRetry {
+    pub user_message_id: poise::serenity_prelude::MessageId,
+    pub sources: Vec<poise::serenity_prelude::MessageId>,
+    pub request_owner: poise::serenity_prelude::UserId,
+    pub text: String,
+    pub reply_context: Option<String>,
+    pub permit: RetryPermit,
 }
 
 /// Whether the request's next start took the exact continuation and began its attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ExactHandoff {
+pub enum ExactHandoff {
     Started,
     /// Nothing started; the receipt keeps blocking reruns.
     Refused,
@@ -163,7 +163,7 @@ tokio::task_local! {
 }
 
 /// Runs `start` with the continuation in reach of this task's next start only.
-pub(crate) async fn hand_over<F: std::future::Future>(
+pub async fn hand_over<F: std::future::Future>(
     permit: RetryPermit,
     start: F,
 ) -> (F::Output, ExactHandoff) {
@@ -185,7 +185,7 @@ pub(crate) async fn hand_over<F: std::future::Future>(
 }
 
 /// The continuation handed to this task's start, taken at most once.
-pub(crate) fn take_continuation() -> Option<RetryPermit> {
+pub fn take_continuation() -> Option<RetryPermit> {
     CONTINUATION
         .try_with(|slot| slot.borrow_mut().permit.take())
         .ok()
@@ -193,13 +193,13 @@ pub(crate) fn take_continuation() -> Option<RetryPermit> {
 }
 
 /// Records that the start which took the continuation committed its begin.
-pub(crate) fn continuation_started() {
+pub fn continuation_started() {
     let _ = CONTINUATION.try_with(|slot| slot.borrow_mut().started = true);
 }
 
 /// What a stale-resume branch may do with its turn.
 #[derive(Debug)]
-pub(in crate::services::discord) enum StaleResume {
+pub enum StaleResume {
     /// No protected request, or one already classified ordinary: the legacy reset and retry run.
     Legacy,
     /// Committed no-effect evidence: only this continuation may start the request again.
@@ -253,7 +253,7 @@ fn bar_legacy_retry(inflight: &dyn ReplayRow) -> bool {
 }
 
 /// Whether the legacy history retry must refuse this request.
-pub(crate) fn legacy_retry_barred(channel_id: u64, message_id: u64) -> bool {
+pub fn legacy_retry_barred(channel_id: u64, message_id: u64) -> bool {
     RETRY_CLAIMS
         .get(&(channel_id, message_id))
         .is_some_and(|claim| *claim == RetryClaim::Barred)
@@ -261,7 +261,7 @@ pub(crate) fn legacy_retry_barred(channel_id: u64, message_id: u64) -> bool {
 
 /// Claims the request for the legacy history retry right before its history write and enqueue;
 /// false when the protected decision barred it first.
-pub(crate) fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
+pub fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
     use dashmap::mapref::entry::Entry;
     match RETRY_CLAIMS.entry((channel_id, message_id)) {
         Entry::Occupied(claim) if *claim.get() == RetryClaim::Barred => false,
@@ -273,18 +273,18 @@ pub(crate) fn claim_legacy_retry(channel_id: u64, message_id: u64) -> bool {
 }
 
 mod decision;
-pub(in crate::services::discord) use decision::{
+pub use decision::{
     error_is_ordinary, hold_recovery, ordinary_outcome, stale_resume,
 };
 
 /// Non-executable custody follows a refusal even after the start right moved to a gateway.
 #[derive(Clone)]
-pub(crate) struct Abandonment {
+pub struct Abandonment {
     pool: PgPool,
     proofs: Vec<write::HoldProof>,
 }
 impl Abandonment {
-    pub(crate) fn new(pool: &PgPool, proof: write::HoldProof) -> Self {
+    pub fn new(pool: &PgPool, proof: write::HoldProof) -> Self {
         Self {
             pool: pool.clone(),
             proofs: vec![proof],

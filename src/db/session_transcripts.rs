@@ -80,16 +80,16 @@ pub struct PersistSessionTranscript<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelTranscriptPair {
+pub struct ChannelTranscriptPair {
     pub(crate) user_message: String,
     pub(crate) assistant_message: String,
 }
 
-pub(crate) fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {
+pub fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {
     message_id.map(|message_id| message_id.created_at().timestamp_millis())
 }
 
-pub(crate) async fn record_channel_clear_boundary(
+pub async fn record_channel_clear_boundary(
     pg_pool: Option<&PgPool>,
     channel_id: &str,
 ) -> Result<()> {
@@ -110,7 +110,7 @@ pub(crate) async fn record_channel_clear_boundary(
 /// The transaction's `NOW()` — the value that becomes `cleared_at` — is already
 /// frozen here, which is why it can be earlier than a transcript this clear
 /// ends up covering.
-pub(crate) async fn begin_channel_clear_boundary_tx(
+pub async fn begin_channel_clear_boundary_tx(
     pool: &PgPool,
 ) -> Result<Transaction<'_, Postgres>> {
     pool.begin()
@@ -121,7 +121,7 @@ pub(crate) async fn begin_channel_clear_boundary_tx(
 /// #5707 phase 2: take the channel lock, advance both durable markers, commit.
 /// `cleared_through_id` is `MAX(session_transcripts.id)` read after the lock, so
 /// it covers every transcript row serialized before this clear.
-pub(crate) async fn finish_channel_clear_boundary_tx(
+pub async fn finish_channel_clear_boundary_tx(
     mut tx: Transaction<'_, Postgres>,
     channel_id: &str,
 ) -> Result<()> {
@@ -163,7 +163,7 @@ pub(crate) async fn finish_channel_clear_boundary_tx(
     Ok(())
 }
 
-pub(crate) async fn fetch_recent_channel_pairs(
+pub async fn fetch_recent_channel_pairs(
     pool: &PgPool,
     channel_id: &str,
     limit: u64,
@@ -220,7 +220,7 @@ const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_mes
 /// The last `session_transcripts.id` for a channel, or 0 when it has none.
 /// Runs on a caller-owned transaction so the frontier is consistent with a
 /// subsequent [`fetch_channel_pairs_up_to_frontier_tx`] read.
-pub(crate) async fn fetch_channel_frontier_tx(
+pub async fn fetch_channel_frontier_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     channel_id: &str,
 ) -> Result<i64> {
@@ -236,7 +236,7 @@ pub(crate) async fn fetch_channel_frontier_tx(
 
 /// Recent channel pairs at or before `frontier`, clear-boundary filtered and
 /// returned oldest-first (same ordering contract as `fetch_recent_channel_pairs`).
-pub(crate) async fn fetch_channel_pairs_up_to_frontier_tx(
+pub async fn fetch_channel_pairs_up_to_frontier_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     channel_id: &str,
     frontier: i64,
@@ -311,7 +311,7 @@ struct PreparedSessionTranscript {
 /// Fixed first observation bound to its exact channel; -1 permanently means failure.
 /// A fence captured for one channel must never authorize another channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChannelClearFence {
+pub struct ChannelClearFence {
     channel_id: String,
     generation: i64,
 }
@@ -339,7 +339,7 @@ async fn channel_clear_fence_tx<'a>(
 
 /// First observation is immutable, including a failed observation.
 /// The caller owns the slot; later captures cannot replace its channel or generation.
-pub(crate) async fn observe_channel_clear_fence_once(
+pub async fn observe_channel_clear_fence_once(
     slot: &tokio::sync::OnceCell<ChannelClearFence>,
     pool: Option<&PgPool>,
     channel_id: &str,
@@ -367,7 +367,7 @@ pub(crate) async fn capture_channel_clear_fence(
 
 /// DM / thread-creation fallback may have no thread, but exact channel ownership
 /// is always required; accepting NULL does not authorize a different channel.
-pub(crate) async fn routine_attempt_owns_turn_pg(
+pub async fn routine_attempt_owns_turn_pg(
     pool: Option<&PgPool>,
     turn_id: &str,
     channel_id: &str,
@@ -382,7 +382,7 @@ pub(crate) async fn routine_attempt_owns_turn_pg(
 }
 
 /// Whether routine run `run_id` was claimed as headless; `None` when no such run exists.
-pub(crate) async fn routine_run_claimed_headless_pg(
+pub async fn routine_run_claimed_headless_pg(
     pool: &PgPool,
     run_id: &str,
 ) -> sqlx::Result<Option<bool>> {
@@ -412,7 +412,7 @@ pub(crate) async fn persist_turn_db_with_clear_fence(
 
 /// `channel_context` false stores the turn as completion evidence that its channel's
 /// recent-context and snapshot reads never return; a stored exclusion is never lifted.
-pub(crate) async fn persist_turn_db_in_context(
+pub async fn persist_turn_db_in_context(
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,
     fence: Option<ChannelClearFence>,

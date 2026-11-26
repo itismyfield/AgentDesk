@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::{collections::HashMap, path::Path};
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct OrgSchema {
+pub struct OrgSchema {
     #[serde(default)]
     pub provider_auth_fallbacks: HashMap<String, fallback::FallbackPolicy>,
     // Retain wire-only fields without adding dead-code suppressions at the new owner.
@@ -32,7 +32,7 @@ pub(crate) struct OrgSchema {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct AgentDef {
+pub struct AgentDef {
     pub display_name: String,
     pub prompt_file: Option<String>,
     pub provider: Option<String>,
@@ -48,13 +48,13 @@ pub(crate) struct AgentDef {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChannelsConfig {
+pub struct ChannelsConfig {
     pub by_id: Option<HashMap<String, ChannelBinding>>,
     pub by_name: Option<ChannelsByName>,
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChannelBinding {
+pub struct ChannelBinding {
     pub agent: String,
     pub workspace: Option<String>,
     pub provider: Option<String>,
@@ -69,12 +69,12 @@ pub(crate) struct ChannelBinding {
 }
 
 #[derive(Debug, Deserialize)]
-pub(crate) struct ChannelsByName {
+pub struct ChannelsByName {
     pub enabled: Option<bool>,
     pub mappings: Option<HashMap<String, ChannelBinding>>,
 }
 
-pub(crate) fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
+pub fn parse_org_schema(content: &str) -> Result<OrgSchema, String> {
     let schema: OrgSchema =
         serde_yaml::from_str(content).map_err(|error| format!("org schema yaml: {error}"))?;
     if let Some(catalog) = schema.provider_auth_profiles.as_ref() {

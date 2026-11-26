@@ -9,7 +9,7 @@ use crate::services::session_host::policy::permit::{CreatePermit, LaunchAdmissio
 pub(crate) type PermitFuture<'a> =
     Pin<Box<dyn Future<Output = Result<CreatePermit, String>> + Send + 'a>>;
 
-pub(crate) struct UserDefaultCreateRequest {
+pub struct UserDefaultCreateRequest {
     pub endpoint: HerdrLaunchEndpoint,
     pub label: String,
     pub cwd: std::path::PathBuf,
@@ -18,7 +18,7 @@ pub(crate) struct UserDefaultCreateRequest {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait LaunchGrantStore: Send + Sync {
+pub trait LaunchGrantStore: Send + Sync {
     async fn load(
         &self,
         endpoint: &HerdrLaunchEndpoint,

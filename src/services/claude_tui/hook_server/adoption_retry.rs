@@ -51,14 +51,14 @@ pub(crate) enum AdoptionHttp {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DurableKind {
+pub enum DurableKind {
     Pending,
     Adopted,
     AlreadyRecorded,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum NotDurableReason {
+pub enum NotDurableReason {
     Append,
     QueuedBehind,
     ExecutionChanged,
@@ -467,7 +467,7 @@ pub(crate) fn seed_restored(
 }
 
 /// Re-runs each pane's deferred adoptions in hook order with their original evidence.
-pub(crate) fn retry_deferred_claude_adoptions() {
+pub fn retry_deferred_claude_adoptions() {
     let panes: Vec<String> = deferred().keys().cloned().collect();
     for tmux in panes {
         with_tmux_source_authority(&tmux, |_| {

@@ -7,7 +7,7 @@ use crate::services::provider::ProviderKind;
 /// structured on-disk JSONL turn state. Structured TUI sessions must use the
 /// transcript-derived readiness/completion signal instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct FallbackPaneReadiness {
+pub struct FallbackPaneReadiness {
     ready: bool,
 }
 
@@ -23,7 +23,7 @@ impl FallbackPaneReadiness {
         Some(Self { ready: scrape() })
     }
 
-    pub(crate) fn is_ready(self) -> bool {
+    pub fn is_ready(self) -> bool {
         self.ready
     }
 }

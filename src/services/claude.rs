@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
 use crate::services::process::reaping::CommandReapExt;
-pub(crate) mod capability_probe;
+pub mod capability_probe;
 mod process_session_launch;
 pub(crate) use process_session_launch::execute_streaming_local_process;
 
@@ -58,14 +58,14 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
-pub(crate) mod fresh_notice;
+pub mod fresh_notice;
 #[cfg(unix)]
-pub(crate) mod herdr_return;
+pub mod herdr_return;
 #[cfg(unix)]
-pub(crate) mod herdr_turn;
-pub(crate) mod host_gate;
+pub mod herdr_turn;
+pub mod host_gate;
 #[cfg(unix)]
-pub(crate) mod session_handoff;
+pub mod session_handoff;
 mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
@@ -93,7 +93,7 @@ const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from
 const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
 
 /// Default ON; `0`, `false`, `off` or `no` disables follow-up requeue.
-pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
+pub fn claude_tui_followup_requeue_enabled() -> bool {
     crate::utils::env_flag(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, true)
 }
 
@@ -1497,14 +1497,14 @@ pub(crate) fn emit_followup_restart_suppressed_notice(
 
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-pub(crate) struct ClaudeTuiSessionResolution {
+pub struct ClaudeTuiSessionResolution {
     pub(crate) session_id: String,
     pub(crate) transcript_path: std::path::PathBuf,
     pub(crate) resume: bool,
 }
 
 #[cfg(unix)]
-pub(crate) fn resolve_claude_tui_session_for_launch(
+pub fn resolve_claude_tui_session_for_launch(
     working_dir: &std::path::Path,
     requested_session_id: Option<&str>,
     claude_home: Option<&std::path::Path>,

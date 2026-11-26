@@ -40,7 +40,7 @@ pub async fn load_active_turn_targets_for_card_pg(
         .collect()
 }
 
-pub(crate) async fn clear_session_for_turn_target_on_pg_tx(
+pub async fn clear_session_for_turn_target_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_key: &str,
 ) -> anyhow::Result<()> {

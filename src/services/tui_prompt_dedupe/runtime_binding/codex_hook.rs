@@ -7,7 +7,7 @@ use super::*;
 mod herdr_resume_tests;
 
 /// Launch paths let the execution's context name the cause of a new source.
-pub(crate) fn register_launched_tmux_runtime_binding(
+pub fn register_launched_tmux_runtime_binding(
     tmux_session_name: &str,
     binding: TuiRuntimeBinding,
 ) {
@@ -16,7 +16,7 @@ pub(crate) fn register_launched_tmux_runtime_binding(
     });
 }
 
-pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
+pub fn register_launched_tmux_runtime_binding_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: TuiRuntimeBinding,
 ) -> bool {
@@ -32,7 +32,7 @@ pub(crate) fn register_launched_tmux_runtime_binding_under_source_authority(
 
 /// A Herdr Codex pane before its first prompt: the hook that records its source finds a Codex pane
 /// on the channel, while the empty path gives no reader or relay and logs no binding event.
-pub(crate) fn register_codex_herdr_placeholder(logical: &str, channel_id: u64) {
+pub fn register_codex_herdr_placeholder(logical: &str, channel_id: u64) {
     super::register_tmux_channel(logical, channel_id);
     crate::services::tmux_common::with_tmux_source_authority(logical, |authority| {
         with_runtime_binding_state_under_source_authority(authority, |state| {
@@ -59,7 +59,7 @@ pub(crate) fn register_codex_herdr_placeholder(logical: &str, channel_id: u64) {
 }
 
 /// Child rollouts cannot supply the output source of a Codex TUI pane.
-pub(crate) fn codex_tui_binding_is_subagent(
+pub fn codex_tui_binding_is_subagent(
     tmux_session_name: &str,
     binding: &TuiRuntimeBinding,
 ) -> bool {
@@ -94,7 +94,7 @@ thread_local! { pub(crate) static SHADOW_IO_CALLS: std::cell::Cell<usize> = cons
 thread_local! { pub(crate) static AFTER_LEGACY_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 /// ObservationOnly uses the existing tracing sink; never installs or publishes a source.
-pub(crate) fn observe_codex_shadow(
+pub fn observe_codex_shadow(
     command: Option<&str>,
     payload_session: Option<&str>,
     payload: &serde_json::Value,
@@ -300,7 +300,7 @@ fn reject(reason: NotApplicableReason, session: &str) -> IngressOutcome {
     IngressOutcome::NotApplicable(reason)
 }
 
-pub(crate) fn observe_codex_hook(
+pub fn observe_codex_hook(
     command: &str,
     payload_session: &str,
     hook: &HookSignal,
@@ -325,7 +325,7 @@ pub(crate) fn observe_codex_hook(
 }
 
 /// The relay names a native UUID; only a listed Herdr execution may use its context's logical key.
-pub(crate) fn observe_codex_herdr_hook(
+pub fn observe_codex_herdr_hook(
     payload_session: &str,
     hook: &HookSignal,
     envelope: Option<&HookBindingEnvelope>,
@@ -595,7 +595,7 @@ fn retiring_source(
 
 /// A finished tail must not republish a source that a later hook already replaced,
 /// nor, with hooks on, one whose hook history cannot be read.
-pub(crate) fn codex_tail_source_retired(
+pub fn codex_tail_source_retired(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
@@ -627,7 +627,7 @@ pub(crate) fn codex_tail_source_retired(
 }
 
 /// Runs `publish` unless a hook replaced `binding`'s source; the check and `publish` share one authority.
-pub(crate) fn publish_unless_codex_tail_retired(
+pub fn publish_unless_codex_tail_retired(
     binding: &TuiRuntimeBinding,
     tmux_session_name: &str,
     publish: impl FnOnce(),

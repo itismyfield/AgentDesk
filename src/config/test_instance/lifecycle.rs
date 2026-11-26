@@ -23,13 +23,13 @@ fn rejected() -> String {
     "test instance lease admission rejected".into()
 }
 
-pub(crate) fn legacy_cleanup_if_unscoped(cleanup: impl FnOnce()) {
+pub fn legacy_cleanup_if_unscoped(cleanup: impl FnOnce()) {
     if !requested() {
         cleanup();
     }
 }
 
-pub(crate) fn admit_dcserver() -> Result<Option<HeldLease>, String> {
+pub fn admit_dcserver() -> Result<Option<HeldLease>, String> {
     if !requested() {
         return Ok(None);
     }
@@ -349,7 +349,7 @@ pub(crate) fn has_admitted_run() -> bool {
 }
 
 /// Bot identity count of the admitted run's profile (three for agy, four for TUI live).
-pub(crate) fn admitted_identity_count() -> Option<usize> {
+pub fn admitted_identity_count() -> Option<usize> {
     #[cfg(unix)]
     {
         if !has_admitted_run() {
@@ -366,7 +366,7 @@ pub(crate) fn admitted_identity_count() -> Option<usize> {
     }
 }
 
-pub(crate) fn bound_listener(address: std::net::SocketAddr) -> Result<(), String> {
+pub fn bound_listener(address: std::net::SocketAddr) -> Result<(), String> {
     if !requested() {
         return Ok(());
     }
@@ -392,7 +392,7 @@ pub(crate) fn bound_listener(address: std::net::SocketAddr) -> Result<(), String
     }
 }
 
-pub(crate) fn health_witness() -> Result<Option<serde_json::Value>, String> {
+pub fn health_witness() -> Result<Option<serde_json::Value>, String> {
     let Some(instance) = super::current()? else {
         return Ok(None);
     };
@@ -421,7 +421,7 @@ pub(crate) fn health_witness() -> Result<Option<serde_json::Value>, String> {
     }
 }
 
-pub(crate) fn with_control_routes(app: axum::Router) -> Result<axum::Router, String> {
+pub fn with_control_routes(app: axum::Router) -> Result<axum::Router, String> {
     if !has_admitted_run() {
         return Ok(app);
     }

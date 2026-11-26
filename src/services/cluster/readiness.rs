@@ -173,7 +173,7 @@ fn with_forwarding(mut report: ReadinessReport, node: &Value) -> ReadinessReport
     report
 }
 
-pub(crate) fn attach_diagnostics(node: &mut Value) {
+pub fn attach_diagnostics(node: &mut Value) {
     let providers = node
         .pointer("/capabilities/intake_worker/providers")
         .and_then(Value::as_array)

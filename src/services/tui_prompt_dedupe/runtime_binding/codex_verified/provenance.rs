@@ -39,7 +39,7 @@ pub struct CodexEpisodeDeny {
     pub episode: TurnEpisodeRef,
 }
 
-pub(crate) mod admission;
+pub mod admission;
 pub(crate) mod dormant;
 
 pub(crate) mod permission;

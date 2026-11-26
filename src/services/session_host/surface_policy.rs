@@ -22,7 +22,7 @@ pub(crate) fn policy_channel(channel: u64) -> u64 {
 
 /// What the boot view holds for a thread: its checked parent, or a child it could not resolve.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Relation {
+pub enum Relation {
     NotChild,
     Child {
         parent: u64,
@@ -38,7 +38,7 @@ pub(crate) fn install_relation(read: fn(u64) -> Relation) {
     let _ = RELATION.set(read);
 }
 
-pub(crate) fn relation(channel: u64) -> Relation {
+pub fn relation(channel: u64) -> Relation {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_RELATIONS.with(|forced| forced.borrow().get(&channel).copied()) {
         return forced;
@@ -72,7 +72,7 @@ impl Drop for ForcedRelation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedSurface {
+pub struct VerifiedSurface {
     destination: u64,
     parent: u64,
     kind: RuntimeHandoffKind,
@@ -109,7 +109,7 @@ impl VerifiedSurface {
         })
     }
 
-    pub(crate) fn checked_parent(channel: &poise::serenity_prelude::GuildChannel) -> Option<u64> {
+    pub fn checked_parent(channel: &poise::serenity_prelude::GuildChannel) -> Option<u64> {
         use poise::serenity_prelude::ChannelType;
         if !matches!(
             channel.kind,

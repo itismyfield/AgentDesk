@@ -51,7 +51,7 @@ impl RepostIds {
 
 /// What one dispatch sends: the stored piece content unchanged, identifiers outside it.
 #[derive(Clone, Debug)]
-pub(crate) struct RepostEnvelope {
+pub struct RepostEnvelope {
     pub(crate) channel: u64,
     content: String,
     ids: RepostIds,
@@ -123,7 +123,7 @@ pub(crate) struct CreatedMessage {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum WireOutcome {
+pub enum WireOutcome {
     Created(CreatedMessage),
     Withheld(String),
     /// 400, 403 or 404: the channel refuses the bot.
@@ -146,7 +146,7 @@ struct WireCount {
 }
 
 /// Checked right before each request leaves.
-pub(crate) struct AttemptGuard {
+pub struct AttemptGuard {
     count: Arc<WireCount>,
     live: Arc<dyn Fn() -> bool + Send + Sync>,
 }
@@ -181,7 +181,7 @@ pub(crate) struct DispatchReport {
     pub(crate) throttled: u32,
 }
 
-pub(crate) trait BoundedTransport {
+pub trait BoundedTransport {
     fn create(
         &self,
         envelope: &RepostEnvelope,

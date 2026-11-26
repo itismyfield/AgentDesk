@@ -8,7 +8,7 @@ use std::time::Instant;
 
 /// The last step an open Legacy body send's holder reported; only its guard's drop ends it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum SendStage {
+pub enum SendStage {
     /// Claimed, with the transport still out.
     BeforeSend,
     /// The transport returned and the follow-up settlement has not.
