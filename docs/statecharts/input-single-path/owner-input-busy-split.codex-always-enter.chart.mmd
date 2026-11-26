@@ -1,0 +1,45 @@
+---
+title: "owner 입력: busy 분기(현재) 대 바로 주입, 합류, 키 선택(목표)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoSilentLoss
+    lg1: Path to the NoSilentLoss bug
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  s0: A 실행 중 #183; B 도착 전 #183; 토큰 A #183; 화면 Busy
+  s1: A 답 게시됨 #183; B 도착 전 #183; 토큰 없음 #183; 화면 Idle
+  s2: A 실행 중 #183; B 대기열 #183; 토큰 A #183; 화면 Busy
+  s3: A 답 게시됨 #183; B 대기열 #183; 토큰 없음 #183; 화면 Idle
+  s4: A 실행 중 #183; B 키 고르는 중(관측 Busy) #183; 토큰 A #183; 화면 Busy
+  s5: A 답 게시됨 #183; B 키 고르는 중(관측 Idle) #183; 토큰 없음 #183; 화면 Idle
+  s6: A 답 게시됨 #183; B 키 고르는 중(관측 Busy) #183; 토큰 없음 #183; 화면 Idle
+  s7: A 실행 중 #183; B 진행 중 턴에 합류 #183; 토큰 A #183; 화면 Busy, A 작업 유실
+  s8: A 답 게시됨 #183; B 주입됨(echo 전) #183; 토큰 B #183; 화면 Idle
+  s9: A 답 게시됨 #183; B 몫이 A 답에 합쳐 게시 #183; 토큰 없음 #183; 화면 Idle, A 작업 유실
+  s10: A 답 게시됨 #183; B 자기 턴 실행(echo 있음) #183; 토큰 B #183; 화면 Busy
+  s11: A 답 게시됨 #183; B 끝, 답 게시 전 #183; 토큰 없음 #183; 화면 Idle
+  s12: A 답 게시됨 #183; B 답 게시 #183; 토큰 없음 #183; 화면 Idle
+  [*] --> s0
+  s0 --> s1: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s0 --> s2: 사람 입력 B 도착
+  s1 --> s3: 사람 입력 B 도착
+  s2 --> s3: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s2 --> s4: owner drive(Codex): 보류 조건 확인 뒤 화면 한 번 읽어 키 고름
+  s3 --> s5: owner drive(Codex): 보류 조건 확인 뒤 화면 한 번 읽어 키 고름
+  s4 --> s6: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s4 --> s7: Codex 키 입력 (바쁨 Tab #183; idle Enter #183; 불확실 규칙)
+  s5 --> s8: Codex 키 입력 (바쁨 Tab #183; idle Enter #183; 불확실 규칙)
+  s6 --> s8: Codex 키 입력 (바쁨 Tab #183; idle Enter #183; 불확실 규칙)
+  s7 --> s9: A 종료#183;답 게시 (합류한 B 몫 포함, terminal 제출 여부는 시나리오)
+  s8 --> s10: TUI가 B를 자기 턴으로 시작, transcript echo
+  s10 --> s11: B 종료
+  s11 --> s12: B 답 게시(echo 귀속)
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s2 bugPath
+  class s4 bugPath
+  class s7 breaks
+  class s7 bugPath
+  class s9 breaks
