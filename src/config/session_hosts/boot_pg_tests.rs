@@ -1,7 +1,7 @@
 use crate::config::session_hosts::approval_store::{ApprovalStore, FileApprovalStore};
 use crate::config::session_hosts::migration::{self, NoHoldStore, PgRows, RowSource};
 use crate::config::session_hosts::{self, BootSessionHosts};
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 
 fn config(root: &std::path::Path, socket: &str) -> crate::config::Config {

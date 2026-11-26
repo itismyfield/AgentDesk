@@ -314,7 +314,7 @@ impl TestLiveGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for TestLiveGuard {
     fn drop(&mut self) {
         crate::config::test_env_lock::assert_shared_test_env_lock_held();

@@ -187,7 +187,9 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::db::dispatched_sessions::hosted_execution::{ExpectedExecution, tests::owner};
+    use crate::db::dispatched_sessions::hosted_execution::{
+        ExpectedExecution, test_support::owner,
+    };
     use crate::services::herdr_launch::{EvidenceProbe, HerdrLaunchEndpoint, clear_epoch};
     use crate::services::session_host::{
         EvidenceGap, InteractiveSessionHost, RestoreResume, ServerWitness, TmuxHost, host_for,

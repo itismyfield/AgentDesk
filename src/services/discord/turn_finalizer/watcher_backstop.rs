@@ -459,7 +459,8 @@ mod tests {
             );
             std::fs::write(&marker, "herdr").unwrap();
             assert!(terminal(true), "an unindexed prior row concedes");
-            let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner("1");
+            let mut owner =
+                crate::db::dispatched_sessions::hosted_execution::test_support::owner("1");
             owner.logical_key = session.clone();
             let _live = token.prepare_herdr_interrupt(ProviderKind::Claude, &owner);
             assert!(!terminal(true), "a live Herdr turn outlasts the deadline");

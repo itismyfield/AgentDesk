@@ -1,5 +1,5 @@
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::services::platform::binary_resolver::runtime_command;
 
 const NONCE: &str = "11111111111111111111111111111111";

@@ -21,7 +21,7 @@ pub(super) mod exports {
         complete_codex_parked_owner, finish_codex_restore, link_codex_parked_owner,
         prepare_codex_restore, record_codex_unknown_span, settle_codex_parked_delivery,
     };
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) use super::{codex_restore_observation_for_tests, codex_restore_settled_for_tests};
     #[cfg(unix)]
     pub(in crate::services::tui_prompt_dedupe) use super::{
@@ -544,7 +544,7 @@ pub fn record_codex_unknown_span(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn codex_restore_observation_for_tests(
     tmux: &str,
 ) -> Option<(
@@ -990,7 +990,7 @@ pub fn finish_codex_restore(
     Ok(input_start)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn codex_restore_settled_for_tests(tmux: &str) -> Option<usize> {
     STATE
         .lock()

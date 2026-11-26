@@ -318,7 +318,7 @@ async fn only_a_turn_this_process_indexed_is_held_at_restart() {
 
     let fixture = Fixture::new("live", true);
     let token = CancelToken::new();
-    let mut owner = crate::db::dispatched_sessions::hosted_execution::tests::owner("1");
+    let mut owner = crate::db::dispatched_sessions::hosted_execution::test_support::owner("1");
     owner.logical_key = fixture.row.tmux_session_name.clone().unwrap();
     let _state = token.prepare_herdr_interrupt(fixture.provider.clone(), &owner);
     let mut live = fixture.row.clone();

@@ -1,6 +1,6 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::legacy_return::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::*;
 use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg as delete_disconnected_sessions_pg;
 use crate::services::session_host::legacy_return::tests::{ended, provider_alive};
@@ -134,7 +134,8 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
         record: HostedRecord::Legacy,
         ..observed
     };
-    let next = crate::db::dispatched_sessions::hosted_execution::tests::pending(&r.owner, "n-new");
+    let next =
+        crate::db::dispatched_sessions::hosted_execution::test_support::pending(&r.owner, "n-new");
     assert_eq!(
         install_pending_pg(&pool, &legacy, next).await.unwrap(),
         HostedCasOutcome::Written
@@ -243,7 +244,7 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE id = $1")
         .bind(observed.session_id)
         .bind(wire(
-            &crate::db::dispatched_sessions::hosted_execution::tests::pending(
+            &crate::db::dispatched_sessions::hosted_execution::test_support::pending(
                 &r.owner,
                 "concurrent",
             ),

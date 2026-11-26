@@ -22,7 +22,7 @@ mod clear_epoch_tests;
 #[cfg(unix)]
 #[path = "herdr_launch/restart_resume_pg_tests.rs"]
 mod restart_resume_tests;
-use crate::db::dispatched_sessions::hosted_execution::tests::{
+use crate::db::dispatched_sessions::hosted_execution::test_support::{
     expected, location, owner, pending, record,
 };
 use crate::services::session_host::{RestoreUnverified, ServerWitness};

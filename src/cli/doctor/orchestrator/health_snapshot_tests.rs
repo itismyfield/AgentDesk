@@ -33,7 +33,7 @@ fn legacy_doctor_fetches_no_checker_evidence_and_user_default_uses_only_doctor_r
 
 #[test]
 fn startup_health_snapshot_uses_published_port_and_boot_fallback() {
-    use crate::config::snapshot_reader_tests::{Fixture, isolated};
+    use crate::config::snapshot_reader_support::{Fixture, isolated};
     isolated(|| {
         let fixture = Fixture::new();
         let first = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

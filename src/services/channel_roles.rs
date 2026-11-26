@@ -115,7 +115,7 @@ pub fn memory_settings_for_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::snapshot_reader_tests::{Fixture, isolated};
+    use crate::config::snapshot_reader_support::{Fixture, isolated};
 
     #[test]
     fn config_snapshot_precedes_org_then_reload_exposes_org_overrides() {

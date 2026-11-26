@@ -1,7 +1,7 @@
 use super::{gc_stale_thread_sessions_with_probe_pg, probe_locally_owned_tmux};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{TOKEN, owner, record, wire};
 use crate::services::platform::tmux::SessionPresence;
 use serde_json::Value;
 use sqlx::PgPool;

@@ -325,7 +325,7 @@ mod tests {
 
     use super::*;
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
     use crate::services::session_host::{InteractiveSessionHost, TmuxHost};
 
     struct Witness(Cell<usize>);

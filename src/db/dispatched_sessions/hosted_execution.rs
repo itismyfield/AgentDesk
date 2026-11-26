@@ -797,6 +797,10 @@ pub(crate) async fn delete_locked_session_pg(
     .map_err(|error| format!("delete postgres session: {error}"))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "hosted_execution_support.rs"]
+pub(crate) mod test_support;
+
 #[cfg(test)]
 #[path = "hosted_execution_tests.rs"]
 pub(crate) mod tests;

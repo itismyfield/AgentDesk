@@ -368,7 +368,7 @@ async fn transition_route_sends_nothing_to_an_actor_that_takes_no_work() {
 mod pg {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::record;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLocation, HostedOwner, HostedState,
     };

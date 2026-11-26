@@ -211,11 +211,11 @@ fn ambient() -> [Option<OsString>; 3] {
     ]
 }
 pub fn observe_inventory(channel: u64) -> Observation {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
-        tests::record_channel_probe(channel);
+        test_support::record_channel_probe(channel);
         if let Some((command, socket)) =
-            tests::take_command().or_else(|| tests::channel_command(channel))
+            test_support::take_command().or_else(|| test_support::channel_command(channel))
         {
             return observe_command(command, socket, Duration::from_secs(3), false);
         }
@@ -387,6 +387,9 @@ fn classify_socket_failure(
 
 #[cfg(test)]
 mod real_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "session_inventory/test_support.rs"]
+pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "session_inventory/unit_tests.rs"]
 pub(crate) mod tests;

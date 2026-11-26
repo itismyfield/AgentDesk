@@ -69,6 +69,10 @@ pub(crate) struct RuntimeConfigSource {
     pub(crate) path: PathBuf,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "config/snapshot_reader_support.rs"]
+pub(crate) mod snapshot_reader_support;
+
 #[cfg(test)]
 #[path = "config/snapshot_reader_tests.rs"]
 pub(crate) mod snapshot_reader_tests;

@@ -1,10 +1,4 @@
 pub(crate) use super::test_support::{after_first_look, daemon_restart, forget_session};
-
-// Stays test-only: its unlink counts as production in the destructive call-site ratchet under test-support.
-/// A resume accepted before start records existed: its restart finds no record to restore from.
-pub(crate) fn lose_resume_record(nonce: &str) {
-    fs::remove_file(resume_record::record_path(nonce).unwrap()).unwrap();
-}
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::hook_server;
