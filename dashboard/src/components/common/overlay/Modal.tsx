@@ -53,7 +53,7 @@ export function Modal({
       modal
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/45" />
+        <Dialog.Overlay className="fixed inset-0 z-[90] bg-black/45" />
         <Dialog.Content
           aria-label={accessibleTitle}
           onEscapeKeyDown={(event) => {
@@ -63,7 +63,7 @@ export function Modal({
             if (!closeOnBackdrop) event.preventDefault();
           }}
           onCloseAutoFocus={returnFocus}
-          className={`fixed left-1/2 top-1/2 z-[80] flex max-h-[85dvh] w-[calc(100vw-2rem)] ${SIZE_CLASS[size]} -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none`}
+          className={`fixed left-1/2 top-1/2 z-[100] flex max-h-[85dvh] w-[calc(100vw-2rem)] ${SIZE_CLASS[size]} -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none`}
           style={{ borderColor: "var(--th-border, rgba(148,163,184,0.18))" }}
         >
           {(hideHeader || !title) && (

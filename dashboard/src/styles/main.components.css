@@ -148,7 +148,7 @@
   color: var(--th-text-heading);
 }
 
-@media (max-width: 767px) {
+@media (max-width: 899px) {
   /* FSM editor PC/mobile split — JS controls which surface renders, but the
      spec class names provide a CSS-driven fallback for grid sizing. */
   .fsm-actions {

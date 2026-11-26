@@ -516,11 +516,8 @@ describe("provider summary, attention header, and active provider resolution", (
     const tabLabels = Array.from(seg.querySelectorAll(".aui-segmented-control-clean__label"), (el) => el.textContent);
     expect(tabLabels).toEqual(["전체", "작업 중", "대기", "쉬는 중", "세션 없음"]);
 
-    const detailsHeading = document.body.querySelector("#agent-form-details")!;
-    expect(detailsHeading.textContent).toBe("역할 · 성격");
-    expect(document.body.querySelector('label[for="agent-personality"]')).toBeNull();
-    const personalityArea = document.body.querySelector<HTMLTextAreaElement>("#agent-personality")!;
-    expect(personalityArea.getAttribute("aria-label")).toBe("성격");
+    expect(document.body.querySelector("#agent-form-details")).toBeNull();
+    expect(document.body.querySelector("#agent-personality")).toBeNull();
   });
 
   it("removes department copy and collapses idle toolu_* subagent sessions in AgentsUnlinkedSessions modal", async () => {

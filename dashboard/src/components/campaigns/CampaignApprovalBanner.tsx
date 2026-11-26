@@ -59,11 +59,11 @@ export function CampaignGateApprovalCard({
   } else if (prUrl && safeCampaignLink(prUrl)) {
     const link = safeCampaignLink(prUrl)!;
     const prNo = new URL(link).pathname.match(/\/pull\/(\d+)/)?.[1];
-    details.push({ label: "PR", value: <a href={link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline min-[900px]:!min-h-5 min-[900px]:!py-0">{prNo ? `#${prNo}` : tr("PR 열기", "Open PR")}<ExternalLink aria-hidden className="size-3" /></a> });
+    details.push({ label: "PR", value: <a href={link} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline min-[900px]:pointer-fine:!min-h-5 min-[900px]:pointer-fine:!py-0 pointer-coarse:!min-h-11">{prNo ? `#${prNo}` : tr("PR 열기", "Open PR")}<ExternalLink aria-hidden className="size-3" /></a> });
   }
   if (gate.openedAt) details.push({ label: tr("요청 시각", "Requested"), value: formatCampaignTime(gate.openedAt, tr) });
   if (gate.evidenceUrl && safeCampaignLink(gate.evidenceUrl)) {
-    details.push({ label: tr("승인 요청", "Decision post"), value: <a href={safeCampaignLink(gate.evidenceUrl)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline min-[900px]:!min-h-5 min-[900px]:!py-0">{tr("결정 포럼 열기", "Open decision forum")}<ExternalLink aria-hidden className="size-3" /></a> });
+    details.push({ label: tr("승인 요청", "Decision post"), value: <a href={safeCampaignLink(gate.evidenceUrl)} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 underline min-[900px]:pointer-fine:!min-h-5 min-[900px]:pointer-fine:!py-0 pointer-coarse:!min-h-11">{tr("결정 포럼 열기", "Open decision forum")}<ExternalLink aria-hidden className="size-3" /></a> });
   }
 
   const disabledReason = !canSubmitForum
@@ -92,8 +92,8 @@ export function CampaignGateApprovalCard({
 
   const preview = (onOpenTask || canSubmitForum) ? <div className="grid min-w-0 gap-2">
     <div className="flex flex-wrap items-center gap-2">
-      {onOpenTask && <Button variant="secondary" size="sm" data-task-id={taskId} className="max-[899px]:!min-h-11" onClick={() => onOpenTask(taskId)}>{taskNumber ? `${taskNumber} · ` : ""}{tr("작업 상세 보기", "View task details")}</Button>}
-      {canSubmitForum && <Button variant="ghost" size="sm" aria-expanded={formOpen} className="max-[899px]:!min-h-11" onClick={() => setFormOpen((v) => !v)}><ChevronDown aria-hidden className={`size-3.5 transition-transform ${formOpen ? "" : "-rotate-90"}`} />{tr("포럼 승인 근거 입력", "Enter forum evidence")}</Button>}
+      {onOpenTask && <Button variant="secondary" size="sm" data-task-id={taskId} className="max-[899px]:!min-h-11 pointer-coarse:!min-h-11" onClick={() => onOpenTask(taskId)}>{taskNumber ? `${taskNumber} · ` : ""}{tr("작업 상세 보기", "View task details")}</Button>}
+      {canSubmitForum && <Button variant="ghost" size="sm" aria-expanded={formOpen} className="max-[899px]:!min-h-11 pointer-coarse:!min-h-11" onClick={() => setFormOpen((v) => !v)}><ChevronDown aria-hidden className={`size-3.5 transition-transform ${formOpen ? "" : "-rotate-90"}`} />{tr("포럼 승인 근거 입력", "Enter forum evidence")}</Button>}
     </div>
     {canSubmitForum && formOpen && <div className="grid gap-2 pt-1 sm:grid-cols-3">
       <TextField size="sm" label={tr("결정 ID (decision_ref)", "Decision ID (decision_ref)")} placeholder="i7438-landing-1" value={decisionRef} onChange={(e) => setDecisionRef(e.target.value)} />
@@ -146,7 +146,7 @@ export function CampaignGateApprovalCard({
           : tr(`거절됨: ${ttl}`, `Denied: ${ttl}`),
   };
 
-  return <div className="campaign-gate min-w-0 [&_.aui-approval-card-button]:max-[899px]:!min-h-11">
+  return <div className="campaign-gate min-w-0 [&_.aui-approval-card-button]:max-[899px]:!min-h-11 [&_.aui-approval-card-button]:pointer-coarse:!min-h-11">
     <ApprovalCard
       title={`${tr(`${gateWord} 승인 대기`, `Waiting for ${GATE_LABELS[gate.gate][1].toLowerCase()} approval`)} · ${taskTitle}`}
       context={[taskNumber, waitLabel].filter(Boolean).join(" · ") || undefined}
@@ -242,10 +242,10 @@ export function CampaignBatchTracker({ campaign, tasks, onOpenTask, tr }: {
       </span>
       <span className="flex min-w-0 flex-wrap items-center gap-1.5">
         {summary.piecesTotal > 0 && <Chip tone="info" title={tr(`진행 중 작업 ${summary.pieceTaskCount}건의 조각 합계`, `Pieces summed across ${summary.pieceTaskCount} tasks`)}><Num>{tr(`조각 ${summary.piecesDone}/${summary.piecesTotal}`, `Pieces ${summary.piecesDone}/${summary.piecesTotal}`)}</Num></Chip>}
-        {summary.landReadyIds.length > 0 && <button type="button" onClick={() => onOpenTask(summary.landReadyIds[0])} style={{ padding: "2px 9px", borderRadius: 999 }} className="!m-0 inline-flex cursor-pointer items-center gap-1 !border !border-[color-mix(in_srgb,var(--warn)_45%,var(--line))] !bg-[var(--warn-soft)] !text-xs font-medium !text-[var(--warn)] max-[899px]:!min-h-11 min-[900px]:!min-h-6 min-[900px]:!min-w-0"><ShieldCheck aria-hidden className="size-3" /><Num>{tr(`착지 후보 ${summary.landReadyIds.length}`, `${summary.landReadyIds.length} land-ready`)}</Num></button>}
+        {summary.landReadyIds.length > 0 && <button type="button" onClick={() => onOpenTask(summary.landReadyIds[0])} style={{ padding: "2px 9px", borderRadius: 999 }} className="!m-0 inline-flex cursor-pointer items-center gap-1 !border !border-[color-mix(in_srgb,var(--warn)_45%,var(--line))] !bg-[var(--warn-soft)] !text-xs font-medium !text-[var(--warn)] max-[899px]:!min-h-11 pointer-coarse:!min-h-11 pointer-coarse:!min-w-11 min-[900px]:pointer-fine:!min-h-6 min-[900px]:pointer-fine:!min-w-0"><ShieldCheck aria-hidden className="size-3" /><Num>{tr(`착지 후보 ${summary.landReadyIds.length}`, `${summary.landReadyIds.length} land-ready`)}</Num></button>}
         {summary.openPrCount > 0 && <Chip tone="neutral"><GitPullRequest aria-hidden className="size-3" /><Num>{tr(`열린 PR ${summary.openPrCount}`, `${summary.openPrCount} open PRs`)}</Num></Chip>}
         {summary.holdCount > 0 && <Chip tone="warn"><Num>{tr(`머지 후 보류 ${summary.holdCount}`, `${summary.holdCount} post-merge hold`)}</Num></Chip>}
-        {summary.batches.map(({ code, taskId }) => <button key={code} type="button" onClick={() => onOpenTask(taskId)} title={tr(`배치 ${code} 작업 열기`, `Open batch ${code} task`)} style={{ padding: "2px 8px", borderRadius: 999 }} className="!m-0 inline-flex cursor-pointer items-center !border !border-[var(--line)] !bg-[var(--bg-2)] font-mono !text-[11px] !text-[var(--fg-dim)] hover:!border-[var(--accent)] hover:!text-[var(--fg)] max-[899px]:!min-h-11 min-[900px]:!min-h-6 min-[900px]:!min-w-0">{code}</button>)}
+        {summary.batches.map(({ code, taskId }) => <button key={code} type="button" onClick={() => onOpenTask(taskId)} title={tr(`배치 ${code} 작업 열기`, `Open batch ${code} task`)} style={{ padding: "2px 8px", borderRadius: 999 }} className="!m-0 inline-flex cursor-pointer items-center !border !border-[var(--line)] !bg-[var(--bg-2)] font-mono !text-[11px] !text-[var(--fg-dim)] hover:!border-[var(--accent)] hover:!text-[var(--fg)] max-[899px]:!min-h-11 pointer-coarse:!min-h-11 pointer-coarse:!min-w-11 min-[900px]:pointer-fine:!min-h-6 min-[900px]:pointer-fine:!min-w-0">{code}</button>)}
       </span>
     </div>
     <StageTrack segments={segments} />
