@@ -100,9 +100,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             let mark = LocalRetryMark::Attempt {
                 root_serial: root.root_serial,
             };
-            let step = self
-                .send_piece(&root.piece, None, Some(mark), None, None)
-                .await;
+            let step = self.send_piece(&root.piece, None, Some(mark), None).await;
             if notice && matches!(step, Step::Withheld | Step::LeaseBusy) {
                 continue;
             }

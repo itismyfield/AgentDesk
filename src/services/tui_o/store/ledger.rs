@@ -574,7 +574,6 @@ impl LedgerState {
                     }
                 }
                 self.latest.insert((unit_key.clone(), piece_index), serial);
-                self.tool_images.note_attempt(&unit_key, serial);
                 let piece = PieceRecord {
                     unit_key,
                     piece_index,
@@ -595,14 +594,10 @@ impl LedgerState {
                 self.pieces.insert(serial, piece);
             }
             LedgerEntry::Posted { serial, msg_id, .. } => {
-                match tool_images::late_confirm(self, serial, msg_id) {
-                    tool_images::LateConfirm::Accept { anchor } => self.anchor = anchor,
-                    tool_images::LateConfirm::Reject(detail) => self.violate(detail),
-                    _ if msg_id > self.anchor => self.anchor = msg_id,
-                    _ if !self.reordered_post(msg_id) => {
-                        self.violate(format!("serial {serial} posted {msg_id} behind the anchor"))
-                    }
-                    tool_images::LateConfirm::Ordinary => {}
+                if msg_id > self.anchor {
+                    self.anchor = msg_id;
+                } else if !self.reordered_post(msg_id) {
+                    self.violate(format!("serial {serial} posted {msg_id} behind the anchor"));
                 }
                 self.posted.insert(msg_id);
                 self.resolve(serial, PieceOutcome::Posted(msg_id), at);
