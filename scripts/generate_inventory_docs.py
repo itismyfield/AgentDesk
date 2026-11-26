@@ -122,6 +122,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "intake_consent_authority.rs": "Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys.",
     "kanban/": "High-level kanban orchestration, state machine facade, and shared test support.",
     "launch.rs": "Starts the Tokio runtime and hands off to server boot.",
+    "launch/": "Test-only hosts that declare KE turn tests calling root-crate items, so they leave the KE crate.",
     "lib.rs": "Library crate boundary that exposes the server/CLI modules for the slim binary entry point and tests.",
     "logging/": "Shared tracing adapters and tests for structured correlation fields.",
     "logging.rs": "Tracing span helpers that stamp dispatch, card, agent, and hook context onto logs.",

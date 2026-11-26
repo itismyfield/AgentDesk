@@ -622,6 +622,9 @@ src/
 │   ├── runtime_validation_tests.rs
 │   ├── settings_cli_tests.rs
 │   └── skill_sync_shipped_tree_tests.rs
+├── launch/
+│   ├── ke_turn_tests.rs
+│   └── ke_turn_unix_tests.rs
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
@@ -2018,7 +2021,8 @@ src/
 │   │   │   ├── retired_wake.rs
 │   │   │   └── root_replaced.rs
 │   │   ├── host_key_derivation/
-│   │   │   └── ke_session_tests.rs
+│   │   │   ├── ke_session_tests.rs
+│   │   │   └── ke_tests.rs
 │   │   ├── host_liveness/
 │   │   │   ├── krx_discord_dl_tests.rs
 │   │   │   └── krx_discord_dl_unix_tests.rs
@@ -4599,7 +4603,8 @@ src/
 │   │   ├── background.rs
 │   │   ├── background_tests.rs
 │   │   ├── catalog.rs
-│   │   └── errors.rs
+│   │   ├── errors.rs
+│   │   └── host_rebind_tests.rs
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
@@ -4615,6 +4620,7 @@ src/
 │   │   ├── inflight_episode.rs
 │   │   ├── owner_boundary_tests.rs
 │   │   ├── policy_maintenance.rs
+│   │   ├── root_lookup_tests.rs
 │   │   └── test_barriers.rs
 │   ├── stream_json_cli/
 │   │   ├── codec/
@@ -5283,6 +5289,8 @@ src/
 │   │   ├── idle_compaction_tests.rs
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
+│   │   ├── host_guard_tests.rs
+│   │   ├── queue_truth_tests.rs
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
 │   │   ├── checked_purge/
@@ -5633,6 +5641,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
+| `src/launch/` | Test-only hosts that declare KE turn tests calling root-crate items, so they leave the KE crate. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
