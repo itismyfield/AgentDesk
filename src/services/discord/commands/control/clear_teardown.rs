@@ -60,7 +60,7 @@ pub(super) async fn forget_selector(shared: &SharedData, key: &str, report: &mut
 
 /// Ends a live Herdr execution's provider CLI through the terminate service, otherwise the managed
 /// process and tmux; the clear's transition guard is held until then (terminate takes its own).
-/// Unless the host is tmux, the stored Herdr row is ended first, and an unread one ends nothing.
+/// Unless the host is tmux, the stored Herdr row is ended first; a held host ends nothing else.
 pub(super) async fn end_session(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
@@ -77,8 +77,15 @@ pub(super) async fn end_session(
     if decision.tmux_refusal().is_some() {
         drop(transition.take());
         clear_epoch.wait_idle().await;
-        if end_herdr(shared, session_key, &mut transition, report).await != HerdrEnd::NoExecution {
-            return;
+        match end_herdr(shared, session_key, &mut transition, report).await {
+            // A channel's own Herdr endpoint with a legacy row ends its managed session as before.
+            HerdrEnd::NoExecution if herdr => {}
+            // Held: a legacy row or none does not confirm tmux either, so nothing is ended.
+            HerdrEnd::NoExecution => {
+                report.end_unconfirmed = true;
+                return;
+            }
+            HerdrEnd::Ended | HerdrEnd::Unconfirmed => return,
         }
     }
     #[cfg(not(unix))]
@@ -150,14 +157,14 @@ pub(super) async fn end_session(
 enum HerdrEnd {
     /// The execution was ended or its retired selector handled (its result is reported).
     Ended,
-    /// A legacy row or none: the managed session is the one to end.
+    /// A legacy row or none: no Herdr execution is stored (it grants no tmux end by itself).
     NoExecution,
     /// The row could not be read; nothing is ended and the clear warns.
     Unconfirmed,
 }
 
-/// Terminates the channel's stored Herdr execution. Only a legacy row or none lets the caller end
-/// a managed session instead; an execution it cannot read warns and ends nothing.
+/// Terminates the channel's stored Herdr execution; an execution it cannot read warns and ends
+/// nothing.
 #[cfg(unix)]
 async fn end_herdr(
     shared: &Arc<SharedData>,
