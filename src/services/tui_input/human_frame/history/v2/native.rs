@@ -22,6 +22,8 @@ pub(crate) struct EvidenceRegistration {
     pub(crate) receipts: Vec<String>,
     #[serde(skip)]
     pub(crate) candidate: bool,
+    #[serde(skip)]
+    pub(crate) not_sent: bool,
     /// The unsettled registration's stored barrier, read-only input to a supersession candidate.
     #[serde(skip)]
     pub(crate) barrier: Option<barrier::Barrier>,
@@ -115,6 +117,11 @@ impl Outcome {
 }
 
 impl Settlement {
+    #[cfg(unix)]
+    pub(super) fn not_sent(&self) -> bool {
+        self.extra.get("not_sent") == Some(&Value::Bool(true))
+    }
+
     #[cfg(unix)]
     pub(super) fn matches_key_witness(&self, captured: &Ticket) -> bool {
         let current = &self.ticket;
@@ -249,6 +256,13 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 
 #[cfg(unix)]
 use super::read_stamp::evidence_registrations;
+
+#[cfg(unix)]
+pub(crate) struct ChannelClassification {
+    pub revision: u64,
+    pub has_open_barrier: bool,
+    pub registrations: Vec<EvidenceRegistration>,
+}
 
 impl Registry {
     #[cfg(unix)]
@@ -475,14 +489,33 @@ impl Registry {
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect_cache(|cache| cache.evidence(false))
+        self.inspect_cache(|cache| cache.evidence(false, None))
     }
 
     #[cfg(unix)]
     pub(crate) fn native_classification_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect_cache(|cache| cache.evidence(true))
+        self.inspect_cache(|cache| cache.evidence(true, None))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_classification_revision(&self) -> Result<u64, String> {
+        self.inspect_cache(|cache| cache.revision())
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn native_classification_for_channel(
+        &self,
+        channel: u64,
+    ) -> Result<ChannelClassification, String> {
+        self.inspect_cache(|cache| {
+            Ok(ChannelClassification {
+                revision: cache.revision()?,
+                has_open_barrier: cache.has_open_barrier(channel)?,
+                registrations: cache.evidence(true, Some(channel))?,
+            })
+        })
     }
 
     /// The cold effect calls this before arming only when its payload carries explicit intent.
@@ -561,6 +594,9 @@ impl Registry {
                     .ok_or("native ticket missing")?;
                 if current.ticket != *ticket {
                     return Err("native result ticket mismatch".into());
+                }
+                if current.not_sent() {
+                    return Err("native result follows confirmed NotSent".into());
                 }
                 let native = outcome.extra.contains_key("native_proof");
                 if native {
@@ -689,7 +725,7 @@ impl Registry {
             if !current.matches_key_witness(ticket) || current.outcome.is_some() {
                 return Err("native key receipt ticket mismatch".into());
             }
-            if current.extra.get("not_sent") == Some(&Value::Bool(true)) {
+            if current.not_sent() {
                 return Err("native key follows confirmed NotSent".into());
             }
             registration
@@ -775,8 +811,7 @@ impl Registry {
         check: impl FnOnce(&Snapshot) -> Result<(), String>,
         apply: impl FnOnce(&mut Registration) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.transaction(|snapshot| {
-            check(snapshot)?;
+        self.transaction_checked(check, |snapshot| {
             let mut active = snapshot
                 .live
                 .iter_mut()
