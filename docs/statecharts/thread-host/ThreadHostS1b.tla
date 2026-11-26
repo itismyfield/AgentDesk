@@ -260,8 +260,12 @@ CommandsAnswer == <>(restartHost # "None" /\ tmuxOp # "None" /\ relaunch # "None
 \* sends a Herdr parent's thread without a selector to configured_turn, and nothing else changes
 \* (no first launch permit, no tmux probe in turn_host, boot unplaced pass, idle cleanup, slot
 \* gates and recorded_execution as in main). "S2" is the contract of design-s2-1 (refs/review/
-\* i8118-s2-prep-1 input). "MutS2*" removes one rule from S2.
-\* Entries (s2-prep entry table; s2-design-check for the last three):
+\* i8118-s2-prep-1 input), refined by design w2 and w3. "MutS2*" removes one rule from S2;
+\* "MutW1*" and "MutW3*" restore a design w1 or w2 gap.
+\* Entries (s2-prep entry table; s2-design-check for the last three; w2 and w3 entries below):
+\*   LostCommand       new thread whose first create was answered but its command input failed
+\*   LostCommandHeld   the same, but the shell left in the pane was touched
+\*   SlotSuccessor     a released slot thread that takes new work after the slot map moved on
 \*   NewThread         Herdr parent, new thread, no row, no selector (first human/bot message)
 \*   FreshAfterKill    Herdr parent, legacy row, tmux killed and selector cleared (11-26 18:12)
 \*   ResumeTmux        Herdr parent, legacy row, tmux Missing, selector kept (existing tmux thread)

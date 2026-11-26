@@ -234,3 +234,30 @@ New rules: `KeyAfterReservation` (no first key before its output reservation) an
 | `MutW1RestartNoSeed` | RED | `FirstInputResolves` |
 
 Each w1 counterexample was checked against the code coordinates in the table above. The other three P1 (4 command unsent after a tab create, 6 slot archive before settlement, 8 per-provider current execution) are covered by production tests in the design, not by this model.
+
+### Design w3 (review-design-s2-2 P1 1, 2)
+
+Written against `b52e052e24e13781569050ec940eb35b9496ed54`.
+The second design review left two P1 open and called them outside the model; both fit as a small extension.
+Mode `S2` is now the w3 contract; each w2 gap is a `MutW3*` mutant.
+The new entries and rules live in new configs only, and every earlier config keeps its result (56/56 configs as expected).
+
+| P1 | Model | Code |
+|---|---|---|
+| 1 placed Pending whose command never ran | Entry `LostCommand`: an answered create may leave `ran = FALSE` once (a single failed command input); `SubmitHerdr` needs `ran` (attach needs the pane's own logged start). `PlacedResidue` is the shared unplaced residue rule applied to a placed Pending: the shell is closed and the row retired, then the same original goes on in a fresh successor. Entry `LostCommandHeld`: the residue is touched, so it is held | `session_host/herdr/launch_host.rs:645-655` (`CreatedUnconfirmed` for the command input), `herdr_launch.rs:645-650`, `claude/herdr_turn/pending.rs:31-34` (`PendingUnproven`), `herdr_launch/unplaced.rs:173-203` (exact marker, root, pristine), `herdr_launch.rs:695-715` (`retire_own_pending` with the placed location) |
+| 2 slot archive after the map moved on | Entry `SlotSuccessor`: after release and slot reset, `Successor` starts a new execution in the same thread. `ArchiveThread` (only `MutW3ArchiveAfterRelease`, design w2's order) archives the thread ID afterwards; w3 never archives a thread released from Herdr | `auto_queue/runtime.rs:387-445` (archive by thread ID, `:423-427` optional Discord side), `intake_turn/adk_thread.rs:154-205` (`active_thread_id` reuse), `router/thread_binding.rs:77-110` (unarchive on reuse) |
+
+New rules: `ResidueNeverRan` (a residue close never ends a pane whose command ran), `TouchedResidueHeld` (a touched shell is never closed), `ArchiveSparesLive` (a release's archive never lands on a live successor).
+
+| cfg | expected | result |
+|---|---|---|
+| `S2W3Lost` (S2; LostCommand) | GREEN | GREEN |
+| `S2W3Held` (S2; LostCommandHeld, safety only: a held residue claims no progress) | GREEN | GREEN |
+| `S2W3Slot` (S2; SlotSuccessor) | GREEN | GREEN |
+| `S2W3All` (S2; NewThread, RetryNew, DispatchNew, RestartVacant and the three w3 entries, safety) | GREEN | GREEN |
+| `MutW3NoPlacedResidue` | RED | `FirstInputResolves` (stuck at a placed pane whose command never ran) |
+| `MutW3ResidueByAbsence` | RED | `ResidueNeverRan` (a cold Claude has no transcript before its first key, so the guess closes a running pane), `FirstInputResolves` (every successor is closed the same way) |
+| `MutW3NoPristine` | RED | `TouchedResidueHeld` (2 steps after the create) |
+| `MutW3ArchiveAfterRelease` | RED | `ArchiveSparesLive` (release, slot reset, successor, archive) |
+
+The model still does not prove what the review's P2-2 lists: the reservation's exact owner and nonce (`reserved` is a bool), Bind after the first submit with the O output done, settlement before release, and a second provider's execution in the same thread. Those stay with the production tests T-S2-1, T-S2-8, T-S2-19 and T-S2-21 of the design.

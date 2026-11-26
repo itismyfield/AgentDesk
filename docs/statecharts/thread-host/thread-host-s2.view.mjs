@@ -3,7 +3,7 @@ export const state = (v) =>
   v.inq === "Refused" ? "Input refused"
   : v.exec === "Unread" ? "Row unreadable"
   : v.exec === "Pending" ? (v.made ? "Herdr pane made, location not recorded" : "Herdr row Pending, no pane yet")
-  : v.exec === "Placed" ? "Herdr pane placed, not bound yet"
+  : v.exec === "Placed" ? (v.ran === false ? "Herdr pane placed, its command may not have run" : "Herdr pane placed, not bound yet")
   : v.boot === "Gate" ? "Boot waits before consumers"
   : v.exec === "Bound" ? (v.inq === "Queued" ? "Herdr pane bound, first input waiting" : v.idle ? "Herdr pane idle" : "Herdr pane running")
   : v.exec === "Tmux" ? (v.idle ? "tmux session idle" : "tmux session running")
@@ -41,6 +41,9 @@ const steps = {
   ReleaseIdle: "idle cleanup ends the session",
   Gc: "thread_gc deletes the row",
   SlotReset: "auto-queue resets the slot thread",
+  PlacedResidue: "the placed pane's untouched shell (exact marker, root, pristine tab) is closed and the row retired",
+  Successor: "a reused dispatch or a direct message starts a successor in the released thread",
+  ArchiveThread: "the slot reset archives the thread on Discord",
 };
 export const step = (action, from, to) =>
   action === "Launch" && to.exec === "Tmux" ? "a queued input starts the session on tmux"
