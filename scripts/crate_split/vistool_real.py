@@ -152,8 +152,11 @@ class RealProbe:
         import vistool_paths
         roots = {rel: self.lower / rel / cargo.get("lib", {}).get("path", "src/lib.rs")
                  for rel, (_, cargo) in self.members.items() if rel != self.lower_dir}
-        crates = {lib_name(self.members[rel][1]): root for rel, root in roots.items() if root.is_file()}
-        return vistool_paths.Owner(layout, read, self.lib_name, crates, roots[self.upper_dir], self.lower)
+        crates = {lib_name(self.members[rel][1]): (root, self.lower, self.lower / rel)
+                  for rel, root in roots.items() if root.is_file()}
+        crates[self.lib_name] = (layout.repo / layout.root_file, layout.repo, self.members[self.lower_dir][0].parent)
+        renamed = vistool_paths.renamed_deps(cargo for _, cargo in self.members.values())
+        return vistool_paths.Owner(self.lib_name, read, crates, roots[self.upper_dir], renamed)
 
     def _check(self, cargo, pkg, rel, args):
         own = self.lower / rel

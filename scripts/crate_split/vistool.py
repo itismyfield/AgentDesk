@@ -712,6 +712,7 @@ class Widener:
         self.original = {}
         self._level_cache = {}
         self.owner = None  # vistool_paths.Owner: reads E0616 type paths across crates
+        self.holds = []  # this round's diagnostics left to a hand check, one line each
 
     def lines(self, rel):
         if rel not in self.text:
@@ -754,7 +755,11 @@ class Widener:
             names = NAME_IN_MSG.findall(diag.get("message", ""))
             if len(hits) > 1 and self.owner and len(names) > 1:
                 # Same-named structs: the type path picks one only when its owner is certain.
-                hits = self.owner.owned(names[1], owner, reporter, diag.get("_src"), hits) or hits
+                picked, why = self.owner.owned(names[1], owner, reporter, diag.get("_src"), hits)
+                if not picked:
+                    self.holds.append(f"{where(diag, resolver)} struct={owner} field={name} hold={why}")
+                    return {}, ("unresolved", f"struct `{owner}` held: {why}")
+                hits = picked
             if len(hits) != 1:
                 return {}, ("unresolved", f"struct `{owner}` defined {len(hits)} times in {self.layout.crate}")
             return self._field(*hits[0], name, owner)
@@ -1296,7 +1301,8 @@ class ShadowProbe:
         cargo = tomllib.loads((self.repo / "Cargo.toml").read_text("utf-8"))
         name = cargo.get("lib", {}).get("name") or cargo["package"]["name"].replace("-", "_")
         root = self.upper / layout.root_file
-        return vistool_paths.Owner(layout, read, self.lib_name, {name: root}, root, self.upper)
+        crates = {self.lib_name: (layout.repo / layout.root_file, layout.repo, None), name: (root, self.upper, None)}
+        return vistool_paths.Owner(self.lib_name, read, crates, root, vistool_paths.renamed_deps([cargo]))
 
     def accept(self, manifest):
         """Last word on a converged run; shadow leaves residue to the slices that own it."""
@@ -1337,6 +1343,7 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
         restricted = restricted_defs(layout, widener.lines)
         while True:
             iters += 1
+            widener.holds = []
             low, low_s = probe.check_lower(cargo)
             up, up_s, ran_upper = [], 0.0, False
             if not any(d.get("level") == "error" for d in low):
@@ -1465,6 +1472,8 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
             status, reason = "fail", VisFail("unresolved_glob_reexport" if r["kind"] == "glob" else
                                              "glob_prelude_collision", f"{r['name']} ({r['kind']}) <- {r['importer']}")
     manifest["final_edits"] = [{k: v for k, v in e.items() if k != "bindings"} for e in edits_final]
+    manifest["holds"] = widener.holds if widener else []
+    (out_dir / f"vistool-{label}-holds.txt").write_text("".join(h + "\n" for h in manifest["holds"]), "utf-8")
     manifest["files"] = len({p[0] for p in pairs})
     if status == "ok":
         manifest["equiv"] = equiv_verdict(repo, head, patch, out_dir)

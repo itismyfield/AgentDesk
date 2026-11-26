@@ -928,17 +928,55 @@ class RealOutsideMember(unittest.TestCase):
              "VISTOOL_OK", [(inner, "    pub(crate) struct Context(pub u32, u16,);")]),
         ]
         for member, rel, done, d, want_line, want_edits in cases:
-            with self.subTest(d["message"]), tempfile.TemporaryDirectory() as tmp:
-                repo, _ = real_repo(Path(tmp), OUTSIDE)
-                cargo = Path(tmp) / "cargo"
-                cargo.write_text(f"#!{sys.executable}\n{FAKE_CARGO}")
-                cargo.chmod(0o755)
-                cargo.with_suffix(".json").write_text(json.dumps({"diags": {member: [[rel, done, d]]}, "libs": {
-                    "lower": ["lower", "upper/src/low/lib.rs"], "upper": ["upper", "upper/src/lib.rs"]}}))
-                ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
-                                                       cargo=str(cargo), log=lambda *a, **k: None)
+            with self.subTest(d["message"]):
+                line, manifest = self.run_fake({member: [[rel, done, d]]})
                 self.assertTrue(line.startswith(want_line + " "), (line, manifest.get("fail")))
                 self.assertEqual([(e["file"], e["after"]) for e in manifest["final_edits"]], want_edits)
+
+    def run_fake(self, diags, extra=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _ = real_repo(Path(tmp), {**OUTSIDE, **(extra or {})})
+            cargo = Path(tmp) / "cargo"
+            cargo.write_text(f"#!{sys.executable}\n{FAKE_CARGO}")
+            cargo.chmod(0o755)
+            cargo.with_suffix(".json").write_text(json.dumps({"diags": diags, "libs": {
+                "lower": ["lower", "upper/src/low/lib.rs"], "upper": ["upper", "upper/src/lib.rs"]}}))
+            ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
+                                                   cargo=str(cargo), log=lambda *a, **k: None)
+            return line, manifest
+
+    def test_uncertain_owner_is_held_with_its_code(self):
+        # Upper reports a same-named `Context` field (lower has three); each reading below cannot be certain.
+        mod = lambda name, body: f"pub mod {name} {{\n    {body}\n}}\n"
+        shared = {"upper/src/shared.rs": "pub mod b {\n    pub struct Context {\n        id: u32,\n    }\n}\n"}
+        renamed = '[package]\nname = "upper"\nversion = "0.1.0"\nedition = "2024"\n\n' \
+                  '[dependencies]\nlow2 = { package = "lower", path = "../lower" }\n'
+        cases = [
+            ("absolute_path", "m::b::Context", {"upper/src/lib.rs": mod("m", "pub use ::nothere::b;")}),
+            ("absolute_path", "m::b::Context", {"upper/src/lib.rs": mod("m", "pub use self::{x, ::lower::b};")}),
+            ("glob_priority", "g::Context", {"upper/src/lib.rs": mod("g", "pub use lower::a::*;\n    pub use lower::b::*;")}),
+            ("use_cycle", "p::Context", {"upper/src/lib.rs": mod("p", "pub use crate::q::Context;")
+                                         + mod("q", "pub use crate::p::Context;")}),
+            ("module_crate_name", "lower::b::Context", {"upper/src/lib.rs": mod("lower", "pub mod b {}")}),
+            ("multi_module_file", "lower::b::Context", {**shared, "upper/src/lib.rs":
+                '#[path = "shared.rs"]\npub mod aaa;\n#[path = "shared.rs"]\npub mod lower;\n'}),
+            ("cfg_module", "lower::b::Context", {"upper/src/unix.rs": "", "upper/src/win.rs": "", "upper/src/lib.rs":
+                '#[cfg(unix)]\n#[path = "unix.rs"]\npub mod lower;\n#[cfg(windows)]\n#[path = "win.rs"]\npub mod lower;\n'}),
+            ("map_failed", "lower::b::Context", {"upper/src/lower.rs": "", "upper/src/unix.rs": "", "upper/src/lib.rs":
+                '#[cfg_attr(unix, path = "unix.rs")]\npub mod lower;\n'}),
+            ("map_failed", "lower::b::Context", {"upper/src/lib.rs": "pub mod missing;\n"}),
+            ("renamed_dep", "m::b::Context", {"upper/Cargo.toml": renamed, "upper/src/lib.rs": mod("m", "pub use low2::b;")}),
+            ("trimmed_path", "b::Context", {}),
+            ("unresolved_path", "m::b::Context", {"upper/src/lib.rs": mod("m", "pub use crate::nothere::b;")}),
+            ("non_struct_item", "n::Context", {"upper/src/lib.rs": mod("n", "pub type Context = lower::a::Context;")}),
+            ("not_lower", "u::Context", {"upper/src/lib.rs": mod("u", "pub struct Context {\n        id: u32,\n    }")}),
+        ]
+        for code, path, extra in cases:
+            with self.subTest(code=code, path=path):
+                d = diag("E0616", f"field `id` of struct `{path}` is private")
+                line, manifest = self.run_fake({"upper": [["upper/src/lib.rs", "never", d]]}, extra)
+                self.assertEqual((manifest["final_edits"], line.split(" mode=")[0]), ([], "VISTOOL_FAIL no_progress"))
+                self.assertEqual([h.split(" hold=")[1].split()[0] for h in manifest["holds"]], [code], manifest["holds"])
 
 
 # Wrappers and incremental settings of the caller (CI's global RUSTC_WRAPPER=sccache, cargo-shim's
@@ -1011,7 +1049,8 @@ class EndToEnd(unittest.TestCase):
         lower = {"lower/src/lib.rs": "pub mod b;\npub mod c;\npub mod lower;\n",
                  "lower/src/b.rs": point.format("Point", "x") + point.format("Context", "id")
                  + "pub fn build() -> Point {\n    Point { x: 1 }\n}\npub fn ctx() -> Context {\n    Context { id: 1 }\n}\n",
-                 "lower/src/c.rs": point.format("Point", "x"),
+                 "lower/src/c.rs": point.format("Point", "x") + point.format("Context", "id")
+                 + "pub fn ctx() -> Context {\n    Context { id: 1 }\n}\n",
                  "lower/src/lower.rs": "pub mod b {\n    pub struct Context {\n        pub id: u32,\n    }\n}\n"}
         local = "pub mod lower {\n    pub mod b {\n        pub struct Context {\n            id: u32,\n        }\n" \
                 "        pub fn ctx() -> Context {\n            Context { id: 1 }\n        }\n    }\n}\n"
@@ -1020,20 +1059,32 @@ class EndToEnd(unittest.TestCase):
             # An upper integration test names it `upper::b::Point` through `pub use lower::{b, c};`.
             ({"upper/src/lib.rs": "pub use lower::{b, c};\n",
               "upper/tests/reads.rs": "#[test]\nfn reads() {\n    assert_eq!(upper::b::build().x, 1);\n}\n"},
-             "VISTOOL_OK", [(b, "    pub x: u32,")]),
-            ({"upper/src/lib.rs": "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\n"}, "VISTOOL_OK", [(b, "    pub id: u32,")]),
+             "VISTOOL_OK", [(b, "    pub x: u32,")], []),
+            ({"upper/src/lib.rs": "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\n"}, "VISTOOL_OK", [(b, "    pub id: u32,")], []),
+            # RED before: `pub use ::lower::b;` read as the local `mod lower` re-export widened c.rs instead.
+            ({"upper/src/lib.rs": "pub mod lower {\n    pub mod b {\n        pub use ::lower::c::Context;\n"
+              "        pub use ::lower::c::ctx;\n    }\n}\npub use ::lower::b;\n",
+              "upper/tests/reads.rs": "#[test]\nfn reads() {\n    assert_eq!(upper::b::ctx().id, 1);\n}\n"},
+             "VISTOOL_OK", [(b, "    pub id: u32,")], []),
+            # RED before: the module map kept only `aaa` for shared.rs, so the crate reading widened b.rs.
+            ({"upper/src/shared.rs": local.split("\n", 1)[1].rsplit("}", 1)[0],
+              "upper/src/lib.rs": '#[path = "shared.rs"]\npub mod aaa;\n#[path = "shared.rs"]\npub mod lower;\n'
+              "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\npub fn other() -> ::lower::c::Context {\n"
+              "    ::lower::c::ctx()\n}\n"}, "VISTOOL_FAIL no_progress", [], ["multi_module_file"]),
             # An upper-local `pub mod lower` prints the same `lower::b::Context` once upper also names the lower
             # crate: the owner is not certain, so no edit.
             ({"upper/src/lib.rs": local + "pub fn id() -> u32 {\n    lower::b::ctx().id\n}\n"
-              "pub fn other() -> ::lower::b::Point {\n    ::lower::b::build()\n}\n"}, "VISTOOL_FAIL no_progress", []),
+              "pub fn other() -> ::lower::b::Point {\n    ::lower::b::build()\n}\n"}, "VISTOOL_FAIL no_progress", [],
+             ["module_crate_name"]),
         ]
-        for upper, want_line, want_edits in cases:
+        for upper, want_line, want_edits, want_holds in cases:
             with self.subTest(upper["upper/src/lib.rs"][-40:]), tempfile.TemporaryDirectory() as tmp:
                 repo, _ = real_repo(Path(tmp), {**lower, **upper})
                 ok, line, manifest = vistool_real.real(repo, "lower", "upper", out_dir=Path(tmp) / "out",
                                                        log=lambda *a, **k: None)
                 self.assertTrue(line.startswith(want_line + " "), (line, manifest.get("fail")))
                 self.assertEqual([(e["file"], e["after"]) for e in manifest["final_edits"]], want_edits)
+                self.assertEqual([h.split(" hold=")[1].split()[0] for h in manifest["holds"]], want_holds)
 
     def test_real_test_cfg_residue_fails_with_the_list(self):
         upper = (FX / "realws/upper/src/lib.rs").read_text().replace(
