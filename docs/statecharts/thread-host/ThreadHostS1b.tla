@@ -267,8 +267,8 @@ CommandsAnswer == <>(restartHost # "None" /\ tmuxOp # "None" /\ relaunch # "None
 \* sends a Herdr parent's thread without a selector to configured_turn, and nothing else changes
 \* (no first launch permit, no tmux probe in turn_host, boot unplaced pass, idle cleanup, slot
 \* gates and recorded_execution as in main). "S2" is the contract of design-s2-1 (refs/review/
-\* i8118-s2-prep-1 input), refined by design w2 and w3. "MutS2*" removes one rule from S2;
-\* "MutW1*" and "MutW3*" restore a design w1 or w2 gap.
+\* i8118-s2-prep-1 input), refined by design w2, w3 and w4. "MutS2*" removes one rule from S2;
+\* "MutW1*", "MutW3*" and "MutW4*" restore a design w1, w2 or w3 gap.
 \* Entries (s2-prep entry table; s2-design-check for the last three; w2 and w3 entries below):
 \*   LostCommand       new thread whose first create was answered but its command input failed
 \*   LostCommandHeld   the same, but the residue changed observably (another pane or tab in its
@@ -530,7 +530,7 @@ SlotReset == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHAN
 ResidueJudged == CASE Mode = "MutW3ResidueByAbsence" -> TRUE
                    [] Mode = "MutW3NoPristine" -> ~ran
                    [] OTHER -> ~ran /\ entry # "LostCommandHeld"
-\* w4: the close (host.dispose_residue, unplaced.rs:365-375) and the retire are two steps. A restart
+\* w4: the close (host.dispose_residue, unplaced.rs:367-377) and the retire are two steps. A restart
 \* between them, or a close applied whose answer was lost, leaves this state: the pane gone, the
 \* row still the placed Pending.
 ResidueClose == /\ UNCHANGED vars /\ S2Like /\ Mode # "MutW3NoPlacedResidue"
