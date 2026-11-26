@@ -11,7 +11,7 @@ use super::model::{HerdrCall, HerdrReply};
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FrameError {
+pub enum FrameError {
     /// The peer closed before sending any byte of the frame.
     Closed,
     /// The peer closed mid-frame after this many bytes.

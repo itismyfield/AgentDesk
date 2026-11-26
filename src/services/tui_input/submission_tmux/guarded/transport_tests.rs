@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 pub struct Fixture {
     _env: [Env; 4],
     pub root: tempfile::TempDir,
-    pub(crate) real: PathBuf,
-    pub(crate) socket: String,
+    pub real: PathBuf,
+    pub socket: String,
     _lock: Option<crate::config::test_env_lock::SharedTestEnvLockGuard>,
 }
 
@@ -26,7 +26,7 @@ impl Fixture {
         ))
     }
 
-    pub(crate) fn after_shared_test_env_lock() -> Self {
+    pub fn after_shared_test_env_lock() -> Self {
         Self::with_lock(None)
     }
 
@@ -129,7 +129,7 @@ while True:
         self.session_with_screen(name, &format!("{name}\r\n"))
     }
 
-    pub(crate) fn session_with_screen(&self, name: &str, screen: &str) -> String {
+    pub fn session_with_screen(&self, name: &str, screen: &str) -> String {
         let command = self.receiver(name);
         std::fs::write(self.root.path().join(name).join("screen"), screen).unwrap();
         let pane = self.tmux(&[

@@ -12,7 +12,7 @@ struct Scope {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Suspension(Arc<Mutex<Scope>>);
+pub struct Suspension(Arc<Mutex<Scope>>);
 
 impl std::fmt::Debug for Suspension {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

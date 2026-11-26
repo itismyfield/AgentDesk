@@ -101,7 +101,7 @@ impl HerdrInterruptState {
         })
     }
 
-    pub(crate) fn prepare_input(&self, input: &mut HerdrInputState) -> bool {
+    pub fn prepare_input(&self, input: &mut HerdrInputState) -> bool {
         if self.close_before_start(input) {
             return false;
         }
@@ -112,7 +112,7 @@ impl HerdrInterruptState {
         true
     }
 
-    pub(crate) fn finish_input(
+    pub fn finish_input(
         &self,
         input: &mut HerdrInputState,
         submission: HerdrSubmission,

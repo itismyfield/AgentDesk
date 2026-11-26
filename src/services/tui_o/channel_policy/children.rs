@@ -28,10 +28,10 @@ struct ChildEntry {
 
 /// A resolved child of an O parent, as every snapshot clone reads it.
 #[derive(Clone, Debug)]
-pub(crate) struct Child {
+pub struct Child {
     pub(crate) parent: u64,
     pub(crate) kind: RuntimeHandoffKind,
-    pub(crate) candidate: Candidate,
+    pub candidate: Candidate,
 }
 
 #[cfg(test)]
@@ -72,7 +72,7 @@ impl ChildEntry {
 
 /// A known child whose relationship is unresolved, conflicting or unreadable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ChildHeld;
+pub struct ChildHeld;
 
 impl ChildEntry {
     /// `None` once the child resolved under a parent O does not select.

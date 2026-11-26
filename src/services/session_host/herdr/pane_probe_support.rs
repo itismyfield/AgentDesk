@@ -30,7 +30,7 @@ pub struct FakeOs {
 
 impl FakeOs {
     /// Shell 10 runs provider 20, which runs child 30, all started after the launch.
-    pub(crate) fn launched(environ: Vec<String>) -> Self {
+    pub fn launched(environ: Vec<String>) -> Self {
         let starts = [
             (SHELL, at(1_001)),
             (PROVIDER, at(1_002)),

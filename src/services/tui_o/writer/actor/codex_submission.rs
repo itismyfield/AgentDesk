@@ -143,7 +143,7 @@ impl Port {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn same_run(&self, other: &Self) -> bool {
+    pub fn same_run(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.run, &other.run)
     }
 

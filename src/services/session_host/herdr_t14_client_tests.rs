@@ -861,13 +861,13 @@ pub(crate) struct RealClient {
 }
 
 impl RealClient {
-    pub(crate) fn screen_path(&self) -> &Path {
+    pub fn screen_path(&self) -> &Path {
         &self.screen
     }
-    pub(crate) fn receipt_path(&self) -> &Path {
+    pub fn receipt_path(&self) -> &Path {
         &self.receipt
     }
-    pub(crate) fn send_prompt(&mut self, prompt: &str) {
+    pub fn send_prompt(&mut self, prompt: &str) {
         assert!(!prompt.contains(['\r', '\u{1b}']));
         writeln!(
             self.stdin.as_mut().unwrap(),
@@ -877,7 +877,7 @@ impl RealClient {
         .unwrap();
         self.stdin.as_mut().unwrap().flush().unwrap();
     }
-    pub(crate) fn detach(&mut self) -> bool {
+    pub fn detach(&mut self) -> bool {
         let Some(mut child) = self.child.take() else {
             return true;
         };

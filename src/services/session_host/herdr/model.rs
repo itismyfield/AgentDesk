@@ -346,7 +346,7 @@ pub enum HerdrResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrErrorBody {
+pub struct HerdrErrorBody {
     pub code: String,
     pub message: String,
 }

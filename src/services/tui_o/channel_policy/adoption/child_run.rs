@@ -4,10 +4,10 @@ use crate::services::tui_o::writer::{adoption::LegacyTurnIdentity, binding::Bind
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LegacyRun {
-    pub(crate) binding: BindingEvent,
-    pub(crate) turn: Option<LegacyTurnIdentity>,
+    pub binding: BindingEvent,
+    pub turn: Option<LegacyTurnIdentity>,
     pub(crate) observed_end: u64,
-    pub(crate) delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
+    pub delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
 }
 #[derive(Debug)]
 pub(super) struct RunState {
@@ -36,7 +36,7 @@ impl Candidate {
             .owed
             .clone()
     }
-    pub(crate) fn child_boundary_epoch(&self) -> u64 {
+    pub fn child_boundary_epoch(&self) -> u64 {
         self.child_run
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -57,7 +57,7 @@ impl Candidate {
             .run
             .clone()
     }
-    pub(crate) fn child_parked(&self) -> bool {
+    pub fn child_parked(&self) -> bool {
         self.child_parked_in(self.peek())
     }
     pub(crate) fn child_parked_in(&self, state: Adoption) -> bool {

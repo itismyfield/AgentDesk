@@ -112,7 +112,7 @@ pub struct BodyClaimed {
 
 /// A sends snapshot taken before reading the binding log; order is local to this candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TurnMark {
+pub struct TurnMark {
     pub(crate) sends: (u64, u64),
     pub(crate) seq: u64,
     pub(crate) order: u64,
@@ -240,7 +240,7 @@ impl Candidate {
         (self.sends(), order)
     }
 
-    pub(crate) fn turn_mark(&self) -> Option<TurnMark> {
+    pub fn turn_mark(&self) -> Option<TurnMark> {
         *self
             .turn_mark
             .lock()
@@ -287,7 +287,7 @@ impl Candidate {
     }
 
     /// The late reservation's binding boundary, once fixed.
-    pub(crate) fn late_boundary(&self) -> Option<LateBoundary> {
+    pub fn late_boundary(&self) -> Option<LateBoundary> {
         self.child_retry_boundary()
             .or_else(|| self.late_boundary.get().copied())
     }
@@ -345,7 +345,7 @@ impl Candidate {
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
     #[track_caller]
-    pub(in crate::services) fn claim_body(&self, channel: u64) -> BodyClaimed {
+    pub fn claim_body(&self, channel: u64) -> BodyClaimed {
         self.claim_body_from(channel, std::panic::Location::caller())
     }
 

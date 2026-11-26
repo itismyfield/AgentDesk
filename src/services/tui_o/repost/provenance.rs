@@ -60,8 +60,8 @@ struct ProvenanceLine {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Activation {
-    pub(crate) generation: u64,
+pub struct Activation {
+    pub generation: u64,
     pub(crate) frontier: u64,
 }
 
@@ -107,7 +107,7 @@ impl Provenance {
     }
 
     /// Serials whose admission was started and not seen through.
-    pub(crate) fn pending(&self) -> impl Iterator<Item = u64> + '_ {
+    pub fn pending(&self) -> impl Iterator<Item = u64> + '_ {
         self.pending.difference(&self.admitted).copied()
     }
 

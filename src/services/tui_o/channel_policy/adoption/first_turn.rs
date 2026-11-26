@@ -150,7 +150,7 @@ impl Candidate {
         FirstPause(self.clone())
     }
 
-    pub(crate) fn admit_first(
+    pub fn admit_first(
         &self,
         channel: u64,
         nonce: &str,
@@ -260,7 +260,7 @@ impl Candidate {
         drop(guard);
     }
 
-    pub(crate) fn attach_first_execution(
+    pub fn attach_first_execution(
         &self,
         context: &BindingContext,
         prompt: &str,
@@ -318,7 +318,7 @@ impl Candidate {
         }))
     }
 
-    pub(crate) fn invalidate_first(&self, nonce: Option<&str>, tmux: Option<&str>) {
+    pub fn invalidate_first(&self, nonce: Option<&str>, tmux: Option<&str>) {
         let guard = self.lock();
         self.first_turn.send_if_modified(|first| {
             if let Some(first) = first.as_mut().filter(|first| {

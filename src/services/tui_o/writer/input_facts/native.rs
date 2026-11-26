@@ -158,9 +158,9 @@ pub struct Evidence {
 pub use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
 #[cfg(unix)]
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct Analysis {
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) barriers: Vec<Barrier>,
+pub struct Analysis {
+    pub evidence: Vec<Evidence>,
+    pub barriers: Vec<Barrier>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]

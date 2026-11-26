@@ -139,7 +139,7 @@ pub fn report_backlog<'r>(
 }
 
 #[derive(Debug)]
-pub(crate) enum AdoptError {
+pub enum AdoptError {
     /// The sidecar did not take the entry; nothing was admitted and nothing is re-sent.
     Sidecar(io::Error),
     /// PostgreSQL did not answer; the admission stays pending and is retried, never replaced by a
