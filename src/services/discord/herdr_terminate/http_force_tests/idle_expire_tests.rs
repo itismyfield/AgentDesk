@@ -2,6 +2,13 @@
 //! with its provider session kept only when no dispatch, turn or inflight row holds the channel.
 
 use super::*;
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedExecution, HostedOwner, HostedRecord,
+};
+use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn, restart_intent};
+use crate::services::discord::host_teardown_gate::test_support::shared_on;
+use crate::services::session_host::HerdrTarget;
+use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
 const IDLE: &str = "idle 7시간 초과 — 자동 정리";
 const IDLE_AGAIN: &str = "UPDATE sessions SET status = 'idle', active_dispatch_id = $2, last_heartbeat = NOW() - INTERVAL '7 hours' WHERE session_key = $1";
@@ -200,10 +207,9 @@ fn idle_kill_ends_a_herdr_execution_no_runtime_serves_pg() {
     runtime.block_on(async {
         let node = Node::idle(&rig, None).await;
         node.shared.settings.write().await.allowed_channel_ids = vec![OTHER];
-        let provider = ProviderKind::Claude;
         let served = node
             .registry
-            .shared_for_provider_on_channel(&provider, channel());
+            .shared_for_provider_on_channel(&ProviderKind::Claude, channel());
         assert!(served.await.is_none(), "no runtime serves the channel");
         let reply = node.idle_kill().await;
         node.assert_ended(&rig, &reply).await;
@@ -211,53 +217,44 @@ fn idle_kill_ends_a_herdr_execution_no_runtime_serves_pg() {
     });
 }
 
-/// A booted server whose runtimes do not include the row's owning bot; `moved`: another bot's
-/// runtime serves the channel now.
-async fn orphaned(node: &Node, moved: bool) -> Arc<HealthRegistry> {
-    let mut registry = HealthRegistry::new();
-    registry.age_for_tests(3_600);
-    let registry = Arc::new(registry);
-    if moved {
-        let mut other =
-            crate::services::discord::host_teardown_gate::test_support::shared_on(&node.pool).await;
-        Arc::get_mut(&mut other).unwrap().token_hash = "another-bot".into();
-        other.settings.write().await.allowed_channel_ids = vec![CHANNEL];
-        registry.register("claude".into(), other).await;
-    }
-    registry
+/// The owning bot runs no runtime on a booted server; `moved`: another bot serves the channel now,
+/// and its runtime is never the one that ends the old pane.
+fn orphaned(name: &str, moved: bool) {
+    let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let node = Node::idle(&rig, None).await;
+        let mut registry = HealthRegistry::new();
+        registry.age_for_tests(3_600);
+        let registry = Arc::new(registry);
+        if moved {
+            let mut other = shared_on(&node.pool).await;
+            Arc::get_mut(&mut other).unwrap().token_hash = "another-bot".into();
+            other.settings.write().await.allowed_channel_ids = vec![CHANNEL];
+            registry.register("claude".into(), other).await;
+        }
+        let reply = node.idle_kill_on(registry).await;
+        node.assert_ended(&rig, &reply).await;
+        node.finish().await;
+    });
 }
 
-// The owning bot registered no runtime: the recorded local execution is fenced and closed.
 #[test]
 fn idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg() {
-    let name = "idle_expire_tests::idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg";
-    let Some((rig, runtime)) = rig_child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::idle(&rig, None).await;
-        let reply = node.idle_kill_on(orphaned(&node, false).await).await;
-        node.assert_ended(&rig, &reply).await;
-        node.finish().await;
-    });
+    orphaned(
+        "idle_kill_ends_a_herdr_execution_whose_owner_bot_is_gone_pg",
+        false,
+    );
 }
 
-// The channel moved to another bot: that bot's runtime is never the one that ends the old pane.
 #[test]
 fn idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg() {
-    let name =
-        "idle_expire_tests::idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg";
-    let Some((rig, runtime)) = rig_child(name) else {
-        return;
-    };
-    let _root = crate::config::TestRuntimeRootGuard::new();
-    runtime.block_on(async {
-        let node = Node::idle(&rig, None).await;
-        let reply = node.idle_kill_on(orphaned(&node, true).await).await;
-        node.assert_ended(&rig, &reply).await;
-        node.finish().await;
-    });
+    orphaned(
+        "idle_kill_ends_a_herdr_execution_of_a_channel_moved_to_another_bot_pg",
+        true,
+    );
 }
 
 /// As `idle`, for a Codex execution; answers the thread its live O cursor reads at EOF.
@@ -267,11 +264,11 @@ async fn idle_codex(rig: &herdr::P11TerminationRig) -> (Node, String) {
     };
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let mut shared =
-        crate::services::discord::host_teardown_gate::test_support::shared_on(&pool).await;
+    let mut shared = shared_on(&pool).await;
     let registry = Arc::new(HealthRegistry::new());
     Arc::get_mut(&mut shared).unwrap().health_registry = Arc::downgrade(&registry);
     shared.settings.write().await.provider = ProviderKind::Codex;
+    registry.register("codex".into(), shared.clone()).await;
     // Codex channels run on the local TUI, whose input owner keeps the thread to resume.
     let mut config = crate::config::Config::default();
     let hosted = crate::config::ProviderConfig {
@@ -280,25 +277,13 @@ async fn idle_codex(rig: &herdr::P11TerminationRig) -> (Node, String) {
     };
     config.providers.insert("codex".into(), hosted);
     crate::services::provider_hosting::install_provider_hosting_config(&config);
-    registry.register("codex".into(), shared.clone()).await;
     let logical = "AgentDesk-codex-e07".to_string();
     let key = format!("codex/{}/{}:{logical}", shared.token_hash, herdr::NODE);
-    let context = BindingContext {
-        schema: 1,
-        provider: "codex".into(),
-        created_at: chrono::Utc::now(),
-        execution_nonce: herdr::EXECUTION.into(),
-        tmux_session: logical.clone(),
-        channel_id: Some(CHANNEL),
-        owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
-        host: None,
-        expected_native_session_id: None,
-        launch_mode: "fresh".into(),
-        provider_root: None,
-        first_prompt_digest: None,
-        source_policy: None,
-        resume_start: None,
-    };
+    let context: BindingContext = serde_json::from_value(json!({"schema": 1, "provider": "codex",
+        "created_at": chrono::Utc::now(), "execution_nonce": herdr::EXECUTION,
+        "tmux_session": logical, "channel_id": CHANNEL, "launch_mode": "fresh",
+        "owner_runtime_root": crate::services::tmux_common::current_tmux_owner_marker()}))
+    .unwrap();
     let prepared = PreparedIncarnation::create(context).unwrap();
     let named = (shared.token_hash.as_str(), key.as_str());
     let bound = herdr::HostedState::Bound;
@@ -317,36 +302,31 @@ async fn idle_codex(rig: &herdr::P11TerminationRig) -> (Node, String) {
     };
     node.sql(IDLE_AGAIN, None).await;
     // The ended rollout, and the channel's one live O cursor captured through its EOF.
+    use sha2::Digest;
+    use std::os::unix::fs::MetadataExt;
     let runtime = crate::config::runtime_root().unwrap();
     let native = uuid::Uuid::new_v4().to_string();
-    let rollout = runtime
-        .join("codex/sessions")
-        .join(format!("rollout-{native}.jsonl"));
+    let rollout = runtime.join(format!("codex/sessions/rollout-{native}.jsonl"));
     std::fs::create_dir_all(rollout.parent().unwrap()).unwrap();
     let line = json!({"type":"session_meta","payload":{"id":native,"cwd":"/tmp"}});
     let bytes = format!("{line}\n").into_bytes();
     std::fs::write(&rollout, &bytes).unwrap();
     let path = rollout.canonicalize().unwrap();
     let meta = std::fs::metadata(&path).unwrap();
-    use std::os::unix::fs::MetadataExt;
-    let source = crate::services::tui_prompt_dedupe::binding_events::SourceId {
-        session_id: native.clone(),
-        path,
-        dev: meta.dev(),
-        ino: meta.ino(),
-    };
-    use sha2::Digest;
+    let (dev, ino, session_id) = (meta.dev(), meta.ino(), native.clone());
     let cursor = crate::services::tui_o::store::spool::Cursor {
-        source,
+        source: SourceId {
+            session_id,
+            path,
+            dev,
+            ino,
+        },
         captured_through: meta.len(),
         prefix_hash: hex::encode(sha2::Sha256::digest(&bytes)),
         retired: false,
         transition_cleanup: None,
     };
-    let dir = runtime
-        .join("o_store")
-        .join(CHANNEL.to_string())
-        .join("cursor");
+    let dir = runtime.join(format!("o_store/{CHANNEL}/cursor"));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("source.json"),
@@ -357,35 +337,33 @@ async fn idle_codex(rig: &herdr::P11TerminationRig) -> (Node, String) {
 }
 
 /// Ports that launch nothing; the effort resume is the one the channel's owner holds.
-struct Owed(Option<crate::services::codex::herdr_turn::restart_intent::EffortResume>);
+struct Owed(Option<restart_intent::EffortResume>);
 
-impl crate::services::codex::herdr_turn::CodexHerdrPorts for Owed {
+impl CodexHerdrPorts for Owed {
     fn launch_host(&self) -> Option<Arc<dyn crate::services::herdr_launch::HerdrLaunchHost>> {
         None
     }
     fn attach(
         &self,
-        _: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-        _: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
-        _: &crate::services::tui_prompt_dedupe::binding_events::SourceId,
-        _: &crate::services::session_host::HerdrTarget,
+        _: &HostedOwner,
+        _: &HostedExecution,
+        _: &SourceId,
+        _: &HerdrTarget,
     ) -> Result<bool, String> {
         Err("no attach".into())
     }
     fn confirm_bound(
         &self,
-        _: &crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-        _: &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
-        _: &crate::services::session_host::HerdrTarget,
+        _: &HostedOwner,
+        _: &HostedExecution,
+        _: &HerdrTarget,
     ) -> Result<(), String> {
         Err("no bound".into())
     }
     fn owner_port(&self) -> crate::services::herdr_launch::OwnerPort {
         crate::services::discord::HERDR_OWNER_PORT
     }
-    fn effort_resume(
-        &self,
-    ) -> Option<crate::services::codex::herdr_turn::restart_intent::EffortResume> {
+    fn effort_resume(&self) -> Option<restart_intent::EffortResume> {
         self.0.clone()
     }
 }
@@ -407,79 +385,31 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
         assert_eq!(ingress::ADOPTS.scope(true, adopt).await, Ok(true));
         let reply = node.idle_kill().await;
         assert_eq!(reply["tmux_killed"], true, "{reply}");
-        assert_eq!(
-            node.effects(&rig).await.row,
-            Some((herdr::HostedState::Retired, herdr::EXECUTION.into()))
-        );
+        assert_eq!(node.effects(&rig).await.row, retired());
         let owed = crate::services::discord::commands::effort_restart::herdr_resume;
-        let owed = owed(&node.shared, channel())
-            .await
-            .expect("the idle end owes a resume");
-        let named = (
-            owed.native_session.as_str(),
-            owed.retired_nonce.as_str(),
-            owed.required,
-        );
+        let owed = owed(&node.shared, channel()).await.expect("the idle end owes a resume");
+        let named = (owed.native_session.as_str(), owed.retired_nonce.as_str(), owed.required);
         assert_eq!(named, (native.as_str(), herdr::EXECUTION, false));
-        let lookup = crate::db::dispatched_sessions::hosted_execution::HostedLookupKey::SessionKey(
-            &node.key,
-        );
-        let load = crate::db::dispatched_sessions::hosted_execution::load_hosted_execution_pg;
-        let crate::db::dispatched_sessions::hosted_execution::HostedLookup::Found(row) =
-            load(&node.pool, lookup).await
-        else {
-            panic!("the retired row");
-        };
-        let crate::db::dispatched_sessions::hosted_execution::HostedRecord::Known(record) =
-            &row.record
-        else {
-            panic!("a known record");
-        };
-        let turn = crate::services::codex::herdr_turn::CodexHerdrTurn {
-            pool: &node.pool,
-            owner: record.owner.clone(),
-            channel_id: CHANNEL,
-            endpoint: crate::services::herdr_launch::HerdrLaunchEndpoint {
-                execution_node: "test".into(),
-                config_key: "test".into(),
-                socket_addr: "/test/herdr.sock".into(),
-                herdr_session: "test".into(),
-            },
-            row: Some(&row.record),
-            prompt: "다음 메시지",
-            working_dir: "/tmp",
-            system_prompt: None,
-            allowed_tools: &[],
-            model: None,
-            effort: None,
-            fast_mode: None,
-            goals: None,
-            compact_token_limit: None,
-            cancel: None,
-            bootstrap: false,
+        let ended = (node.shared.token_hash.as_str(), node.key.as_str());
+        let record = rig.record_as(ended, herdr::HostedState::Retired, "codex");
+        let row = HostedRecord::Known(record.clone());
+        let endpoint: crate::services::herdr_launch::HerdrLaunchEndpoint = serde_json::from_value(
+            json!({"execution_node": "test", "config_key": "test", "socket_addr": "/test/herdr.sock", "herdr_session": "test"}),
+        )
+        .unwrap();
+        let turn = CodexHerdrTurn {
+            pool: &node.pool, owner: record.owner, channel_id: CHANNEL, endpoint, row: Some(&row),
+            prompt: "다음 메시지", working_dir: "/tmp", system_prompt: None, allowed_tools: &[],
+            model: None, effort: None, fast_mode: None, goals: None, compact_token_limit: None,
+            cancel: None, bootstrap: false,
         };
         let operation = owed.operation.clone();
-        let launch_of = crate::services::codex::herdr_turn::launch_of_for_test;
-        let root = Some(std::path::Path::new("/test"));
-        let launch = launch_of(
-            &turn,
-            root,
-            &Owed(Some(owed)),
-            crate::services::discord::HERDR_OWNER_PORT,
-        )
-        .expect("the next launch resumes");
-        assert!(
-            launch.resume,
-            "an ordinary message after the idle end resumes"
-        );
-        assert_eq!(
-            launch.expected_native_session_id.as_deref(),
-            Some(native.as_str())
-        );
-        assert_eq!(
-            launch.resume_start.map(|start| start.operation),
-            Some(operation)
-        );
+        let (root, port) = (Some(std::path::Path::new("/test")), crate::services::discord::HERDR_OWNER_PORT);
+        let launch = crate::services::codex::herdr_turn::launch_of_for_test(&turn, root, &Owed(Some(owed)), port);
+        let launch = launch.expect("the next launch resumes");
+        assert!(launch.resume, "an ordinary message after the idle end resumes");
+        assert_eq!(launch.expected_native_session_id.as_deref(), Some(native.as_str()));
+        assert_eq!(launch.resume_start.map(|start| start.operation), Some(operation));
         node.finish().await;
     });
 }
