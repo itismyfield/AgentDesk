@@ -73,7 +73,7 @@ C-owner 차단은 main `1fe3a57d266e1e7fe384796d22a925076f1d99fc`에서 이미 �
 | S `issuer::take(key:WorkerScopeKey)->Option<BeforeEffects>` | pub(crate), private key 필수; task-local slot private | by-value key 소비 후 destructive slot.take. raw take를 key 없이 호출할 API 없음 |
 | S `o_input::take_before_effects(request)`(현 :96–104) | 기존 pub(crate) wrapper | 내부에서 별도 일회용 WorkerScopeKey를 만들어 issuer::take 호출 후 기존 `intake_request_from_row(...)=request` filter. filter/decoder는 기존 service에 남아 decoder 가시성 확대 없음. wrong request도 slot 복원0 |
 | S `intake_worker.rs:35–38` | `WorkerScopeKey` **타입만** pub(crate) reexport; 기존 BeforeEffects/take 호환경로 | 타입 reexport가 private tuple 생성자를 공개하지 않음. raw key/proof factory reexport 없음. execute_before_effects는 현 pub(super), scope는 private 그대로 |
-| A `worker_status.rs:330–336` | `mark_spawned(...)->Result<bool,...>` | **변경 없음**. bool 외 값/receipt/key/proof를 돌려주지 않음. d1 mark_spawned_before_effects/SpawnPermit/into_before_effects는 계획에서 완전히 제거 |
+| A `worker_status.rs:326–328` | `mark_spawned(...)->Result<bool,...>` | **변경 없음**. bool 외 값/receipt/key/proof를 돌려주지 않음. d1 mark_spawned_before_effects/SpawnPermit/into_before_effects는 계획에서 완전히 제거 |
 | D `domain/intake_consent.rs`, `decision.rs` | IntentRef actual wire, row/payload projections, digest, unresolved predicate, checked HoldInput | 값/순수 판정만, DB/service/Directory/task-local/key/proof 발급 없음. payload 26 fields+마지막 Null=27 슬롯 유지 |
 | S `herdr_consent/worker_handoff.rs` | 기존 :481 자리에 by-value `hold(pool, proof, store, expected, intent)` | private admission child helper가 load/full equality/unresolved/source 검사 후 D binding → A. bool/unchecked DTO가 proof를 대체하지 않음 |
 | A `consent_handoff.rs` | `hold_before_effects(pool, proof:BeforeEffects,input:HoldInput)` / `return_before_record(pool, proof)` | capsule의 실제 proof 타입 직접 소비. DB는 service/key/issuer 참조0. FS/callback 주입0, exact row/marker CAS 및 기존 transaction만 |
@@ -132,14 +132,14 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | E19 | `services/discord/commands/control.rs:510–559,715–755`; `control/clear_report.rs:128–192` | mailbox clear/cancel OOS, FS eligibility | clear 후 원본 source+queued generation 부재를 확인하고 **mailbox intent만** acknowledge_discard. outbox proof가 되지 않음 | command service scoped, settlement은 mailbox만 |
 | E20 | `db/intake_outbox_force_fail.rs:55–121` | Drift(forceFail) | 운영자가 row lock으로 terminalize하고 별도 child INSERT; 새 child는 다른 row/attempt. 이번 설계가 새 운영 권한을 호출/추가하지 않음 | force-fail DB pub(crate), proof 없음 |
 | E21 | `services/maintenance/jobs/db_retention.rs:1–4,463–535` | OOS retention observation | intake_outbox는 후보 count만, 삭제 없음. 모델/제안에서 delete나 TTL 초기화 추가 0 | maintenance observation, proof 없음 |
-| E22 | `db/intake_outbox/worker_status.rs:379–414`; `services/cluster/intake_router_hook/owner_record.rs:814–819` | ReclaimPreAccept / AbortStale | 실제 stamped sweep은 claimed만. cfg(test) legacy sweep을 runtime 정리로 활성화하지 않음 | stamped sweep pub(crate), legacy leaf cfg(test) |
+| E22 | `db/intake_outbox/worker_status.rs:367–402`; `services/cluster/intake_router_hook/owner_record.rs:814–819` | ReclaimPreAccept / AbortStale | 실제 stamped sweep은 claimed만. cfg(test) legacy sweep을 runtime 정리로 활성화하지 않음 | stamped sweep pub(crate), legacy leaf cfg(test) |
 | E23 | `services/cluster/intake_router_hook/owner_record.rs:304–322,382–435` | Drift(retire), live | production promote는 같은 tx에서 old open row retire→owner transfer. OwnerOnly 진단 뮤턴트는 이 결합을 제거한 운영 가정 밖 trace | transfer pub(crate), retire_open_on_tx private |
 | E24 | `services/cluster/intake_worker/consent_scope_tests.rs:4–43`; `db/intake_outbox/consent_handoff_tests.rs:260–275` | test-only issue / take mismatch | test ctor·test wrapper만 존재. prod 발급 경로 집계와 분리, 테스트 0건/skip으로 I1 증명하지 않음 | test-only for_test pub(crate), production 없음 |
 
 | E25 | 신규 `intake_consent_authority.rs` | opaque proof actual definition | A 값의 private field, raw ctor/convert0 | type/getter pub(crate), field private |
 | E26 | `o_input.rs` 기존 scope/take 안의 신규 WorkerScopeKey 생성2곳 | R2PrivateScopeKey / private take permission | scope/take wrapper 내부만, key 반환0 | key type pub(crate), tuple ctor private |
 | E27 | 신규 `services/cluster/intake_worker/consent_scope.rs`(capsule issuer child) | R2EnterKeyedScope / destructive take | o_input key를 by value 소비, private slot, same future result | functions pub(crate) + inaccessible key; slot private |
-| E28 | `db/intake_outbox/worker_status.rs:330–336` | CAS bool only | 기존 API 그대로, receipt/key 발급0 | pub(crate) bool |
+| E28 | `db/intake_outbox/worker_status.rs:326–328` | CAS bool only | 기존 API 그대로, receipt/key 발급0 | pub(crate) bool |
 | E29 | d1 design :185–192의 SpawnPermit/into_before_effects | D1RetainReceipt / D1ConvertOutsideScope(진단 모델만) | **r2 API에서 삭제**, production에는 원래 없음 | r2에는 타입/함수 모두 없음 |
 
 ### 2.1 Store load 전수표
@@ -171,7 +171,7 @@ cfg(unix)는 기존 proof와 동일하게 유지한다. non-unix의 mark_spawned
 | [r2 handoff (308)](https://github.com/itismyfield/AgentDesk/blob/08e2336e47986d70d0cbe95e56215858377aed5c/src/db/intake_outbox/consent_handoff.rs#L308) | Commit(hold) | A 구현 대상, 원본 row CAS |
 | `db/intake_outbox/worker_status.rs:164` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 |
 | `db/intake_outbox/worker_status.rs:260` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 |
-| `db/intake_outbox/worker_status.rs:385` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 — :385 함수는 cfg(test), runtime 아님 |
+| `db/intake_outbox/worker_status.rs:373` | Claim / AdvanceStatus / pending rearm | A, stamp/live-owner fence 유지 — :385 함수는 cfg(test), runtime 아님 |
 | `db/intake_outbox_delivery_proof.rs:186` | Drift(status), terminal settlement | A 기존 delivery/unknown/operator CAS, 변경 제외 |
 | `db/intake_outbox_delivery_proof.rs:258` | Drift(status), terminal settlement | A 기존 delivery/unknown/operator CAS, 변경 제외 |
 | `db/intake_outbox_delivery_proof.rs:294` | Drift(status), terminal settlement | A 기존 delivery/unknown/operator CAS, 변경 제외 |

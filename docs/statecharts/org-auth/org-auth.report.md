@@ -60,7 +60,7 @@ not a claim of a preexisting bug. Runtime traces are also tested at the actual e
 | `src/services/provider_auth_profile/repository.rs:145` | `let mut document = load_org_document(org_path)?;` |
 | `src/services/provider_auth_profile/repository.rs:208` | `let mut document = load_org_document(org_path)?;` |
 | `src/services/provider_auth_profile/repository.rs:260` | `pub(crate) fn read_org_schema(path: &Path) -> Result<Option<OrgSchema>, String> {` |
-| `src/services/provider_auth_profile/repository.rs:262` | `Ok(content) => parse_org_schema(&content)` |
+| [repository.rs at main L262](https://github.com/itismyfield/AgentDesk/blob/8896695e659467a2243fe7b09123e26ba8f033b8/src/services/provider_auth_profile/repository.rs#L262) | `Ok(content) => parse_org_schema(&content)` |
 | `src/services/provider_auth_profile/repository/document.rs:95` | `pub(crate) fn load_org_document(path: &Path) -> Result<OrgDocument, String> {` |
 
 The additional production decoder caller is Discord's effect-free registration read at
