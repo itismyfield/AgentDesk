@@ -579,8 +579,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 body_param("string", false, "Accepted-input id the execution's receipt names, as on turn/start (not allowed with delegation=true)"),
             ),
             (
+                "x-channel-id",
+                header_param("string", false, "Requesting Discord channel ID for a delegation. Send the current session's channel ID. It must be bound to from_agent_id. Omit for the requester's primary channel."),
+            ),
+            (
                 "delegation",
-                body_param("boolean", false, "Delegation: the server mints origin_id (dlg:<requester channel>:<nonce>:<target>) and returns it, posts an accept card with [상태]/[중단] in the requester's primary channel (accept_card.message_id or accept_card.error), and stages one result card there through message_outbox once the execution's terminal receipt commits. 404 delegation_requester_not_found, 422 delegation_requester_has_no_channel, 400 origin_id_conflict").with_default(false),
+                body_param("boolean", false, "Delegation: the server mints origin_id (dlg:<requester channel>:<nonce>:<target>) and returns it, posts an accept card with [상태]/[중단] in the requesting channel (accept_card.message_id or accept_card.error), and stages one result card there through message_outbox once the execution's terminal receipt commits. 404 delegation_requester_not_found, 422 delegation_requester_has_no_channel or delegation_request_channel_not_bound, 400 origin_id_conflict").with_default(false),
             ),
         ])
         .with_example(

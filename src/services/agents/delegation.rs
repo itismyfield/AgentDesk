@@ -84,6 +84,7 @@ pub async fn handoff_origin(
     from_agent_id: &str,
     to_agent_id: &str,
     delegation: bool,
+    request_channel_id: Option<&str>,
     origin_id: Option<&str>,
     metadata: Option<Value>,
 ) -> Result<(Option<Value>, Option<Delegation>), (u16, &'static str)> {
@@ -98,16 +99,7 @@ pub async fn handoff_origin(
         .await
         .map_err(|_| (503, "delegation_requester_unavailable"))?
         .ok_or((404, "delegation_requester_not_found"))?;
-    let channel = bindings.primary_channel().and_then(|channel| {
-        crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&channel)
-            .or_else(|| channel.parse::<u64>().ok())
-            .filter(|id| *id > 0)
-    });
-    let (Some(channel), Some(requester_provider)) =
-        (channel, bindings.resolved_primary_provider_kind())
-    else {
-        return Err((422, "delegation_requester_has_no_channel"));
-    };
+    let (channel, requester_provider) = requester_route(&bindings, request_channel_id)?;
     let origin = DelegationOrigin::new(channel, to_agent_id).map_err(|e| (400, e))?;
     let metadata =
         start_metadata_with_origin(metadata, Some(&origin.id())).map_err(|e| (400, e))?;
@@ -116,6 +108,35 @@ pub async fn handoff_origin(
         requester_provider,
     };
     Ok((metadata, Some(delegation)))
+}
+
+fn requester_route(
+    bindings: &crate::db::agents::AgentChannelBindings,
+    request_channel_id: Option<&str>,
+) -> Result<(u64, ProviderKind), (u16, &'static str)> {
+    use crate::services::dispatches::outbox_route::{parse_channel_id, resolve_channel_alias_pub};
+
+    if let Some(request_channel_id) = request_channel_id {
+        let error = (422, "delegation_request_channel_not_bound");
+        let channel = request_channel_id
+            .parse::<u64>()
+            .ok()
+            .filter(|id| *id > 0)
+            .ok_or(error)?;
+        let provider = bindings
+            .provider_for_channel(|binding| parse_channel_id(binding) == Some(channel))
+            .ok_or(error)?;
+        return Ok((channel, provider));
+    }
+
+    let channel = bindings.primary_channel().and_then(|channel| {
+        resolve_channel_alias_pub(&channel)
+            .or_else(|| channel.parse::<u64>().ok())
+            .filter(|id| *id > 0)
+    });
+    channel
+        .zip(bindings.resolved_primary_provider_kind())
+        .ok_or((422, "delegation_requester_has_no_channel"))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

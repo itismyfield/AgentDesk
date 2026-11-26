@@ -24,7 +24,7 @@
 | `PUT` | `/api/agents/{id}/execution-node` | `execution_requirements::put_node` | `src/server/routes/execution_requirements.rs:29` | `src/server/routes/domains/agents.rs:36` |
 | `GET` | `/api/agents/{id}/execution-requirements` | `execution_requirements::get` | `src/server/routes/execution_requirements.rs:62` | `src/server/routes/domains/agents.rs:32` |
 | `PUT` | `/api/agents/{id}/execution-requirements` | `execution_requirements::put` | `src/server/routes/execution_requirements.rs:77` | `src/server/routes/domains/agents.rs:32` |
-| `POST` | `/api/agents/{id}/handoff` | `agents::agent_handoff` | `src/server/routes/agents.rs:1081` | `src/server/routes/domains/agents.rs:43` |
+| `POST` | `/api/agents/{id}/handoff` | `agents::agent_handoff` | `src/server/routes/agents/handoff.rs:21` | `src/server/routes/domains/agents.rs:43` |
 | `GET` | `/api/agents/{id}/input-result` | `agents_input_result::input_result` | `src/server/routes/agents_input_result.rs:35` | `src/server/routes/domains/runtime.rs:141` |
 | `POST` | `/api/agents/{id}/message` | `agents::agent_message` | `src/server/routes/agents.rs:1033` | `src/server/routes/domains/agents.rs:42` |
 | `GET` | `/api/agents/{id}/prompt-audit` | `prompt_audit::prompt` | `src/server/routes/prompt_audit.rs:120` | `src/server/routes/domains/runtime.rs:148` |

@@ -151,7 +151,15 @@ async fn a_delegation_handoff_carries_a_server_minted_origin_pg() {
     .await
     .unwrap();
 
-    let started = handoff_origin(&pool, "sec", "worker-a", true, None, Some(json!({"k": 1})));
+    let started = handoff_origin(
+        &pool,
+        "sec",
+        "worker-a",
+        true,
+        None,
+        None,
+        Some(json!({"k": 1})),
+    );
     let (metadata, delegation) = started.await.unwrap();
     let delegation = delegation.unwrap();
     let id = delegation.origin.id();
@@ -170,11 +178,11 @@ async fn a_delegation_handoff_carries_a_server_minted_origin_pg() {
     );
     assert_eq!(delegation.requester_provider, ProviderKind::Antigravity);
 
-    let refused = handoff_origin(&pool, "sec", "worker-a", true, Some("G-1"), None).await;
+    let refused = handoff_origin(&pool, "sec", "worker-a", true, None, Some("G-1"), None).await;
     assert_eq!(refused.unwrap_err(), (400, "origin_id_conflict"));
-    let unknown = handoff_origin(&pool, "nobody", "worker-a", true, None, None).await;
+    let unknown = handoff_origin(&pool, "nobody", "worker-a", true, None, None, None).await;
     assert_eq!(unknown.unwrap_err().0, 404);
-    let plain = handoff_origin(&pool, "sec", "worker-a", false, Some("G-9"), None).await;
+    let plain = handoff_origin(&pool, "sec", "worker-a", false, None, Some("G-9"), None).await;
     let (metadata, delegation) = plain.unwrap();
     assert_eq!(
         (metadata_origin_id(metadata.as_ref()).as_deref(), delegation),
