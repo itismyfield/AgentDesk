@@ -57,6 +57,8 @@ mod active_usage;
 mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
+#[cfg(all(test, unix))]
+mod wrapper_terminal_tests;
 #[cfg(unix)]
 pub(crate) mod fresh_notice;
 #[cfg(unix)]

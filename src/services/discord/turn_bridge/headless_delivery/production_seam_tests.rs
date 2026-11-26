@@ -3,6 +3,9 @@ use crate::services::message_outbox::{OutboxEnqueueOutcome, OutboxMessage};
 
 #[path = "observation_tests.rs"]
 mod observation_tests;
+#[cfg(unix)]
+#[path = "wrapper_idle_delivery_tests.rs"]
+mod wrapper_idle_delivery_tests;
 
 #[tokio::test]
 async fn tui_no_direct_enqueue_keeps_source_until_real_worker_delivery_pg() {
