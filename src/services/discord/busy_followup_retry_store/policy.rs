@@ -311,7 +311,7 @@ impl CheckedInputView {
     }
 
     /// A fresh read of the same identity, for re-checking at claim time.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reread(&self) -> Self {
         Self::read(&self.provider, self.channel_id, self.primary, &self.sources)
     }

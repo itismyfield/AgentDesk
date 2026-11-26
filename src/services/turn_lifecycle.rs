@@ -20,12 +20,12 @@ impl<T: TurnStopPort<SharedData>> LifecycleStopPort for T {}
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
 pub(crate) const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FORCE_KILL_PRESERVE_TMUX_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_force_kill_preserve_tmux_for_test(tmux_session_name: &str, preserve: bool) {
     let mut sessions = FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
         .lock()
@@ -37,7 +37,7 @@ pub(crate) fn set_force_kill_preserve_tmux_for_test(tmux_session_name: &str, pre
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn force_kill_preserves_tmux_for_test(tmux_session_name: &str) -> bool {
     FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
         .lock()
@@ -490,9 +490,9 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
             record_tmux_exit_reason(kill_target, &format!("explicit cleanup via {reason}"));
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let preserve_for_test = force_kill_preserves_tmux_for_test(kill_target);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let preserve_for_test = false;
         let killed_now = if preserve_for_test {
             false
