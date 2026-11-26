@@ -29,11 +29,41 @@ mod worker_recovery;
 mod worker_registry;
 pub mod ws;
 
-use std::sync::{Arc, OnceLock};
+mod github_sync;
+mod message_outbox_drain;
+mod policy_tick;
+mod rate_limit_fetch;
+mod routine_runtime;
+
+use std::sync::Arc;
 
 use anyhow::Result;
-use serde::Serialize;
 use sqlx::{PgPool, Row};
+
+use github_sync::github_sync_loop;
+use message_outbox_drain::{
+    MessageOutboxFailureAction, PendingMessageOutboxRow, dm_reply_retry_loop,
+    drain_message_outbox_batch_once, message_outbox_failure_action,
+};
+pub(crate) use policy_tick::PolicyTickHookOutcome;
+#[cfg(test)]
+pub(crate) use policy_tick::run_five_min_policy_tiers_for_test;
+use policy_tick::{
+    PolicyTickHookExecution, cleanup_stale_pending_queue_tmp_files_for_five_min_tick,
+    fire_tick_hook_by_name_with_pg, is_five_min_policy_tick,
+    refresh_memory_health_for_five_min_tick, run_leader_epoch_slo_api_friction_kickstart,
+    run_slo_api_friction_aggregation_tick, should_run_slo_api_friction_aggregation,
+};
+use rate_limit_fetch::{
+    CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT, claude_rate_limit_refresh_lock,
+    fetch_codex_oauth_usage, fetch_openai_rate_limits, parse_claude_oauth_usage_buckets,
+    parse_header_i64, parse_header_reset, refresh_dispatch_gate_snapshots,
+};
+pub(crate) use rate_limit_fetch::{
+    ClaudeRateLimitRefreshOutcome, spawn_claude_rate_limit_refresh_if_leader,
+    trigger_claude_rate_limit_refresh_if_leader,
+};
+use routine_runtime::routine_runtime_loop;
 
 use crate::db::postgres::AdvisoryLockLease;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -45,67 +75,8 @@ use crate::services::discord::health::HealthRegistry;
 use crate::services::engine_runtime::health_port::stale_sweep_port;
 
 const MEMORY_HEALTH_STARTUP_REASON: &str = "startup";
-const MEMORY_HEALTH_FIVE_MIN_REASON: &str = "OnTick5min";
-const FIVE_MIN_POLICY_TICK_INTERVAL: u64 = 10;
 const MESSAGE_OUTBOX_CLAIM_STALE_SECS: i64 = 300;
-const MESSAGE_OUTBOX_MAX_RETRY_COUNT: i64 = 4;
-const MESSAGE_OUTBOX_RETRY_BACKOFF_SECS: [i64; 4] = [60, 300, 900, 3600];
 const POLICY_TICK_ADVISORY_LOCK_ID: i64 = 7_801_001;
-const GITHUB_SYNC_ADVISORY_LOCK_ID: i64 = 7_801_002;
-const POLICY_TICK_HOOK_TIMEOUT: Duration = Duration::from_secs(5);
-const CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT: Duration = Duration::from_secs(8);
-
-fn claude_rate_limit_refresh_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
-struct PolicyTickHookGuard {
-    in_flight: Arc<AtomicBool>,
-}
-
-impl PolicyTickHookGuard {
-    fn acquire(engine: &PolicyEngine) -> Option<Self> {
-        let in_flight = engine.tick_hook_in_flight();
-        in_flight
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| Self { in_flight })
-    }
-}
-
-impl Drop for PolicyTickHookGuard {
-    fn drop(&mut self) {
-        self.in_flight.store(false, Ordering::Release);
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PolicyTickHookOutcome {
-    Ok,
-    Error,
-    Timeout,
-    SkippedInFlight,
-    JoinError,
-}
-
-impl PolicyTickHookOutcome {
-    fn status(self) -> &'static str {
-        match self {
-            Self::Ok => "ok",
-            Self::Error => "error",
-            Self::Timeout => "timeout",
-            Self::SkippedInFlight => "skipped_inflight",
-            Self::JoinError => "join_error",
-        }
-    }
-}
-
-struct PolicyTickHookExecution {
-    outcome: PolicyTickHookOutcome,
-    elapsed: Duration,
-    error: Option<String>,
-}
 
 async fn try_acquire_pg_singleton_lock(
     pool: &PgPool,
@@ -123,129 +94,6 @@ async fn release_pg_singleton_lock(lease: AdvisoryLockLease, lock_id: i64, job_n
 
 async fn refresh_memory_health_for_startup() {
     crate::services::memory::refresh_backend_health(MEMORY_HEALTH_STARTUP_REASON).await;
-}
-
-async fn refresh_memory_health_for_five_min_tick() {
-    crate::services::memory::refresh_backend_health(MEMORY_HEALTH_FIVE_MIN_REASON).await;
-}
-
-async fn cleanup_stale_pending_queue_tmp_files_for_five_min_tick() {
-    let result = tokio::task::spawn_blocking(
-        crate::services::turn_orchestrator::cleanup_stale_pending_queue_tmp_files_all_tokens,
-    )
-    .await;
-    match result {
-        Ok(audits) => {
-            let removed_stale = audits
-                .iter()
-                .filter(|audit| audit.action == "removed_stale")
-                .count();
-            let remove_failed = audits
-                .iter()
-                .filter(|audit| audit.action == "remove_failed")
-                .count();
-            let preserved_active = audits
-                .iter()
-                .filter(|audit| audit.action == "preserved_active")
-                .count();
-            if removed_stale > 0 || remove_failed > 0 {
-                tracing::warn!(
-                    scanned_tmp = audits.len(),
-                    removed_stale,
-                    remove_failed,
-                    preserved_active,
-                    "[policy-tick] pending_queue tmp cleanup completed"
-                );
-            } else if preserved_active > 0 {
-                tracing::debug!(
-                    scanned_tmp = audits.len(),
-                    preserved_active,
-                    "[policy-tick] pending_queue tmp cleanup found only active tmp writes"
-                );
-            }
-        }
-        Err(error) => {
-            tracing::warn!("[policy-tick] pending_queue tmp cleanup task failed: {error}");
-        }
-    }
-}
-
-fn is_five_min_policy_tick(count: u64) -> bool {
-    count != 0 && count % FIVE_MIN_POLICY_TICK_INTERVAL == 0
-}
-
-fn should_run_slo_api_friction_aggregation(count: u64, leader_epoch_pending: bool) -> bool {
-    leader_epoch_pending || is_five_min_policy_tick(count)
-}
-
-async fn run_slo_api_friction_aggregation_tick(
-    engine: &PolicyEngine,
-    pg_pool: Option<&PgPool>,
-    reason: &str,
-) {
-    let pool = pg_pool.or_else(|| engine.pg_pool());
-    tracing::debug!(reason, "[policy-tick] running SLO/api-friction aggregation");
-
-    if let Err(error) =
-        crate::services::api_friction::process_api_friction_patterns(pool, None, None).await
-    {
-        tracing::warn!(
-            reason,
-            "[policy-tick] api-friction aggregation failed: {error}"
-        );
-    }
-
-    // Turn-lifecycle SLO aggregation: compute, persist, and alert on threshold breach.
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let aggregates = crate::services::slo::run_aggregation_tick(pool, now_ms).await;
-    tracing::debug!(
-        reason,
-        aggregate_count = aggregates.len(),
-        "[policy-tick] SLO aggregation completed"
-    );
-}
-
-async fn run_leader_epoch_slo_api_friction_kickstart(
-    engine: &PolicyEngine,
-    pg_pool: Option<&PgPool>,
-) -> bool {
-    let pool = pg_pool.or_else(|| engine.pg_pool());
-    let advisory_lock = if let Some(pool) = pool {
-        match try_acquire_pg_singleton_lock(
-            pool,
-            POLICY_TICK_ADVISORY_LOCK_ID,
-            "policy-tick-leader-epoch",
-        )
-        .await
-        {
-            Ok(Some(conn)) => Some(conn),
-            Ok(None) => {
-                tracing::debug!(
-                    "[policy-tick] leader-epoch SLO/API-friction kickstart skipped: advisory lock held elsewhere"
-                );
-                return false;
-            }
-            Err(error) => {
-                tracing::warn!("[policy-tick] leader-epoch advisory lock failed: {error}");
-                return false;
-            }
-        }
-    } else {
-        None
-    };
-
-    run_slo_api_friction_aggregation_tick(engine, pool, "leader_epoch").await;
-
-    if let Some(conn) = advisory_lock {
-        release_pg_singleton_lock(
-            conn,
-            POLICY_TICK_ADVISORY_LOCK_ID,
-            "policy-tick-leader-epoch",
-        )
-        .await;
-    }
-
-    true
 }
 
 pub(crate) async fn run(
@@ -688,121 +536,6 @@ async fn policy_tick_loop(
     }
 }
 
-#[cfg(test)]
-pub(crate) async fn run_five_min_policy_tiers_for_test(
-    pool: &PgPool,
-    engine: &PolicyEngine,
-) -> Result<()> {
-    let mut logging = policy_tick_logging::TickLogging::default();
-    for (hook, label) in [("OnTick1min", "1min"), ("OnTick5min", "5min")] {
-        fire_tick_hook_by_name_with_pg(engine, Some(pool), &mut logging, hook, label).await;
-    }
-    crate::reconcile::reconcile_completed_queue_review_drift_pg(pool, engine).await?;
-    Ok(())
-}
-
-async fn fire_tick_hook_by_name_with_pg(
-    engine: &PolicyEngine,
-    pg_pool: Option<&PgPool>,
-    tick_logging: &mut policy_tick_logging::TickLogging,
-    hook_name: &str,
-    label: &str,
-) {
-    // The orphan review timeout runs on the one-minute tier, including five-minute cycles.
-    if hook_name == "OnTick1min"
-        && let Some(pool) = pg_pool.or_else(|| engine.pg_pool())
-        && let Err(error) =
-            crate::reconcile::reconcile_missing_queue_review_dispatches_pg(pool, engine).await
-    {
-        tracing::warn!("[policy-tick] missing queue review dispatch reconcile failed: {error}");
-    }
-    let execution =
-        fire_tick_hook_by_name_with_timeout(engine, hook_name, label, POLICY_TICK_HOOK_TIMEOUT)
-            .await;
-    if let Some(pool) = pg_pool.or_else(|| engine.pg_pool()) {
-        record_tick_hook_execution_pg(pool, tick_logging, label, &execution).await;
-    }
-    crate::kanban::drain_hook_side_effects_with_backends(engine);
-}
-
-async fn fire_tick_hook_by_name_with_timeout(
-    engine: &PolicyEngine,
-    hook_name: &str,
-    label: &str,
-    hook_timeout: Duration,
-) -> PolicyTickHookExecution {
-    let Some(in_flight_guard) = PolicyTickHookGuard::acquire(engine) else {
-        tracing::warn!(
-            "[policy-tick] {} skipped: previous tick hook is still running",
-            label
-        );
-        return PolicyTickHookExecution {
-            outcome: PolicyTickHookOutcome::SkippedInFlight,
-            elapsed: Duration::ZERO,
-            error: None,
-        };
-    };
-
-    let start = std::time::Instant::now();
-    let engine_for_task = engine.clone();
-    let hook_name_owned = hook_name.to_string();
-    let label_owned = label.to_string();
-    let timed_out = std::sync::Arc::new(AtomicBool::new(false));
-    let timed_out_for_task = timed_out.clone();
-    let mut handle = tokio::task::spawn_blocking(move || {
-        let _guard = in_flight_guard;
-        let result = engine_for_task.try_fire_hook_by_name(&hook_name_owned, serde_json::json!({}));
-        let elapsed = start.elapsed();
-        if timed_out_for_task.load(Ordering::Acquire) {
-            tracing::warn!(
-                engine_label = engine_for_task.actor_label(),
-                queue_depth = engine_for_task.actor_queue_depth(),
-                "[policy-tick] {} finished after timeout in {}ms (post-timeout completion)",
-                label_owned,
-                elapsed.as_millis()
-            );
-        }
-        match result {
-            Ok(()) => PolicyTickHookExecution {
-                outcome: PolicyTickHookOutcome::Ok,
-                elapsed,
-                error: None,
-            },
-            Err(error) => PolicyTickHookExecution {
-                outcome: PolicyTickHookOutcome::Error,
-                elapsed,
-                error: Some(error.to_string()),
-            },
-        }
-    });
-
-    tokio::select! {
-        joined = &mut handle => match joined {
-            Ok(execution) => execution,
-            Err(error) => PolicyTickHookExecution {
-                outcome: PolicyTickHookOutcome::JoinError,
-                elapsed: start.elapsed(),
-                error: Some(error.to_string()),
-            },
-        },
-        _ = tokio::time::sleep(hook_timeout) => {
-            timed_out.store(true, Ordering::Release);
-            tracing::warn!(
-                engine_label = engine.actor_label(),
-                queue_depth = engine.actor_queue_depth(),
-                timeout_ms = hook_timeout.as_millis() as u64,
-                "[policy-tick] {} hook timed out; tick actor continues running in background",
-                label
-            );
-            PolicyTickHookExecution {
-                outcome: PolicyTickHookOutcome::Timeout,
-                elapsed: start.elapsed(),
-                error: None,
-            }
-        }
-    }
-}
-
 async fn record_tick_hook_execution_pg(
     pg_pool: &PgPool,
     tick_logging: &mut policy_tick_logging::TickLogging,
@@ -890,658 +623,14 @@ async fn upsert_kv_meta_pg_ignore(pg_pool: &PgPool, key: &str, value: &str) {
     .ok();
 }
 
-async fn record_periodic_job_execution_pg(
-    pg_pool: &PgPool,
-    label: &str,
-    status: &str,
-    elapsed: std::time::Duration,
-) {
-    let now_ms = chrono::Utc::now().timestamp_millis().to_string();
-    let elapsed_ms = elapsed.as_millis().to_string();
-    let key_ms = format!("last_tick_{}_ms", label);
-    let key_status = format!("last_tick_{}_status", label);
-    let key_duration = format!("last_tick_{}_duration_ms", label);
-
-    upsert_kv_meta_pg_ignore(pg_pool, &key_ms, &now_ms).await;
-    upsert_kv_meta_pg_ignore(pg_pool, &key_status, status).await;
-    upsert_kv_meta_pg_ignore(pg_pool, &key_duration, &elapsed_ms).await;
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ClaudeRateLimitRefreshOutcome {
-    pub triggered: bool,
-    pub dispatch_gate_refreshed: bool,
-    pub refreshed_at: Option<i64>,
-    pub reason: Option<&'static str>,
-    pub error: Option<String>,
-}
-
-impl ClaudeRateLimitRefreshOutcome {
-    fn scheduled() -> Self {
-        Self {
-            triggered: true,
-            dispatch_gate_refreshed: false,
-            refreshed_at: None,
-            reason: Some("refresh_scheduled"),
-            error: None,
-        }
-    }
-
-    fn skipped(reason: &'static str) -> Self {
-        Self {
-            triggered: false,
-            dispatch_gate_refreshed: false,
-            refreshed_at: None,
-            reason: Some(reason),
-            error: None,
-        }
-    }
-
-    fn failed(error: anyhow::Error) -> Self {
-        Self {
-            triggered: false,
-            dispatch_gate_refreshed: false,
-            refreshed_at: None,
-            reason: Some("sync_failed"),
-            error: Some(error.to_string()),
-        }
-    }
-}
-
-pub(crate) fn spawn_claude_rate_limit_refresh_if_leader(
-    pg_pool: PgPool,
-) -> ClaudeRateLimitRefreshOutcome {
-    if !worker_registry::rate_limit_sync_active() {
-        return ClaudeRateLimitRefreshOutcome::skipped("rate_limit_sync_not_active_on_this_node");
-    }
-
-    tokio::spawn(async move {
-        match tokio::time::timeout(
-            CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT,
-            trigger_claude_rate_limit_refresh_if_leader(&pg_pool),
-        )
-        .await
-        {
-            Ok(outcome) if outcome.error.is_none() => {
-                tracing::info!(
-                    triggered = outcome.triggered,
-                    dispatch_gate_refreshed = outcome.dispatch_gate_refreshed,
-                    refreshed_at = ?outcome.refreshed_at,
-                    reason = ?outcome.reason,
-                    "[rate-limit-sync] dashboard-triggered Claude refresh completed"
-                );
-            }
-            Ok(outcome) => {
-                tracing::warn!(
-                    reason = ?outcome.reason,
-                    error = ?outcome.error,
-                    "[rate-limit-sync] dashboard-triggered Claude refresh failed"
-                );
-            }
-            Err(_) => {
-                tracing::warn!(
-                    timeout_secs = CLAUDE_RATE_LIMIT_FORCED_REFRESH_TIMEOUT.as_secs(),
-                    "[rate-limit-sync] dashboard-triggered Claude refresh timed out"
-                );
-            }
-        }
-    });
-
-    ClaudeRateLimitRefreshOutcome::scheduled()
-}
-
-pub(crate) async fn trigger_claude_rate_limit_refresh_if_leader(
-    pg_pool: &PgPool,
-) -> ClaudeRateLimitRefreshOutcome {
-    if !worker_registry::rate_limit_sync_active() {
-        return ClaudeRateLimitRefreshOutcome::skipped("rate_limit_sync_not_active_on_this_node");
-    }
-
-    match rate_limit_sync::sync_claude_rate_limit_cache_once_and_refresh_dispatch_gate_serialized(
-        pg_pool,
-    )
-    .await
-    {
-        Ok(_) => ClaudeRateLimitRefreshOutcome {
-            triggered: true,
-            dispatch_gate_refreshed: true,
-            refreshed_at: Some(chrono::Utc::now().timestamp()),
-            reason: None,
-            error: None,
-        },
-        Err(error) => ClaudeRateLimitRefreshOutcome::failed(error),
-    }
-}
-
-/// Rebuild the `dispatch_gate` snapshots off the hot dispatch path, once per rate-limit tick.
-/// This only warms the leader; followers refresh lazily via `refresh_snapshots_if_stale`.
-async fn refresh_dispatch_gate_snapshots(pg_pool: &PgPool) {
-    let now = chrono::Utc::now().timestamp();
-    crate::services::dispatch_gate::refresh_snapshots_from_db(pg_pool, now).await;
-    // Keeps the activation-path throttle from redundantly re-reading the cache.
-    crate::services::dispatch_gate::mark_snapshots_refreshed(now);
-}
+#[cfg(test)]
+mod policy_tick_schedule_tests;
 
 #[cfg(test)]
-mod policy_tick_schedule_tests {
-    use super::{is_five_min_policy_tick, should_run_slo_api_friction_aggregation};
-
-    #[test]
-    fn slo_api_friction_aggregation_runs_while_leader_epoch_is_pending() {
-        assert!(should_run_slo_api_friction_aggregation(0, true));
-        assert!(should_run_slo_api_friction_aggregation(1, true));
-        assert!(should_run_slo_api_friction_aggregation(9, true));
-        assert!(should_run_slo_api_friction_aggregation(10, true));
-    }
-
-    #[test]
-    fn slo_api_friction_aggregation_falls_back_to_five_min_after_kickstart() {
-        assert!(!should_run_slo_api_friction_aggregation(0, false));
-        assert!(!should_run_slo_api_friction_aggregation(1, false));
-        assert!(!should_run_slo_api_friction_aggregation(9, false));
-        assert!(should_run_slo_api_friction_aggregation(10, false));
-        assert!(should_run_slo_api_friction_aggregation(20, false));
-    }
-
-    #[test]
-    fn five_min_policy_tick_runs_on_every_tenth_nonzero_iteration() {
-        assert!(!is_five_min_policy_tick(0));
-        assert!(!is_five_min_policy_tick(1));
-        assert!(!is_five_min_policy_tick(9));
-        assert!(is_five_min_policy_tick(10));
-        assert!(is_five_min_policy_tick(20));
-    }
-}
-
-/// Fetch rate limits from the OpenAI API via the models endpoint (free, read-only).
-/// Parses `x-ratelimit-*` response headers into bucket format.
-async fn fetch_openai_rate_limits(api_key: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.openai.com/v1/models")
-        .header("authorization", format!("Bearer {api_key}"))
-        .send()
-        .await?;
-
-    let headers = resp.headers().clone();
-    let mut buckets = Vec::new();
-
-    if let Some(limit) = parse_header_i64(&headers, "x-ratelimit-limit-requests") {
-        let remaining =
-            parse_header_i64(&headers, "x-ratelimit-remaining-requests").unwrap_or(limit);
-        let reset = parse_header_reset(&headers, "x-ratelimit-reset-requests");
-        buckets.push(serde_json::json!({
-            "name": "requests",
-            "limit": limit,
-            "used": limit - remaining,
-            "remaining": remaining,
-            "reset": reset,
-        }));
-    }
-
-    if let Some(limit) = parse_header_i64(&headers, "x-ratelimit-limit-tokens") {
-        let remaining = parse_header_i64(&headers, "x-ratelimit-remaining-tokens").unwrap_or(limit);
-        let reset = parse_header_reset(&headers, "x-ratelimit-reset-tokens");
-        buckets.push(serde_json::json!({
-            "name": "tokens",
-            "limit": limit,
-            "used": limit - remaining,
-            "remaining": remaining,
-            "reset": reset,
-        }));
-    }
-
-    Ok(buckets)
-}
-
-fn parse_header_i64(headers: &reqwest::header::HeaderMap, name: &str) -> Option<i64> {
-    headers.get(name)?.to_str().ok()?.parse().ok()
-}
-
-/// Parse a rate-limit reset header into unix epoch seconds. Accepts RFC3339 (Anthropic) and
-/// relative durations such as `6m0s` (OpenAI).
-fn parse_header_reset(headers: &reqwest::header::HeaderMap, name: &str) -> i64 {
-    headers
-        .get(name)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| parse_rate_limit_reset_value(s, chrono::Utc::now().timestamp()))
-        .unwrap_or(0)
-}
-
-fn parse_rate_limit_reset_value(value: &str, now: i64) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .ok()
-        .map(|dt| dt.timestamp())
-        .or_else(|| parse_rate_limit_duration_seconds(value).map(|seconds| now + seconds))
-}
-
-fn parse_rate_limit_duration_seconds(value: &str) -> Option<i64> {
-    let input = value.trim();
-    if input.is_empty() {
-        return None;
-    }
-    if let Ok(seconds) = input.parse::<i64>() {
-        return Some(seconds.max(0));
-    }
-
-    let mut total = 0.0_f64;
-    let mut number = String::new();
-    let mut consumed = false;
-    let chars = input.chars().collect::<Vec<_>>();
-    let mut index = 0;
-    while index < chars.len() {
-        let ch = chars[index];
-        if ch.is_ascii_digit() || ch == '.' {
-            number.push(ch);
-            index += 1;
-            continue;
-        }
-        if number.is_empty() {
-            return None;
-        }
-        let amount = number.parse::<f64>().ok()?;
-        number.clear();
-        let multiplier = match ch {
-            'd' => 86_400.0,
-            'h' => 3_600.0,
-            'm' => {
-                if chars.get(index + 1) == Some(&'s') {
-                    index += 1;
-                    0.001
-                } else {
-                    60.0
-                }
-            }
-            's' => 1.0,
-            _ => return None,
-        };
-        total += amount * multiplier;
-        consumed = true;
-        index += 1;
-    }
-
-    if !number.is_empty() || !consumed {
-        return None;
-    }
-    Some(total.ceil().max(0.0) as i64)
-}
+mod rate_limit_header_tests;
 
 #[cfg(test)]
-mod rate_limit_header_tests {
-    use super::{parse_rate_limit_duration_seconds, parse_rate_limit_reset_value};
-
-    #[test]
-    fn parses_openai_relative_reset_duration() {
-        assert_eq!(parse_rate_limit_duration_seconds("6m0s"), Some(360));
-        assert_eq!(parse_rate_limit_duration_seconds("1s"), Some(1));
-        assert_eq!(parse_rate_limit_reset_value("500ms", 1_000), Some(1_001));
-    }
-
-    #[test]
-    fn parses_rfc3339_reset_timestamp() {
-        assert_eq!(
-            parse_rate_limit_reset_value("2026-06-17T00:00:00Z", 1_000),
-            Some(1_781_654_400)
-        );
-    }
-}
-
-fn push_claude_oauth_usage_bucket(
-    buckets: &mut Vec<serde_json::Value>,
-    bucket: &serde_json::Value,
-    label: &str,
-    utilization_field: &str,
-) {
-    let Some(utilization) = bucket
-        .get(utilization_field)
-        .and_then(serde_json::Value::as_f64)
-    else {
-        return;
-    };
-    let resets_at = bucket
-        .get("resets_at")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("");
-    // Also report used/limit, but keep the precise `utilization` so the dispatch gate
-    // cannot round 99.5% into a false 100% saturation.
-    let limit = 100i64;
-    let used = utilization.floor().clamp(0.0, 100.0) as i64;
-    let reset_ts = chrono::DateTime::parse_from_rfc3339(resets_at)
-        .map(|dt| dt.timestamp())
-        .unwrap_or(0);
-
-    buckets.push(serde_json::json!({
-        "name": label,
-        "limit": limit,
-        "used": used,
-        "remaining": limit - used,
-        "utilization": utilization,
-        "reset": reset_ts,
-    }));
-}
-
-fn parse_claude_oauth_usage_buckets(data: &serde_json::Value) -> Vec<serde_json::Value> {
-    let mut buckets = Vec::new();
-    for (key, label) in [("five_hour", "5h"), ("seven_day", "7d")] {
-        if let Some(bucket) = data.get(key) {
-            push_claude_oauth_usage_bucket(&mut buckets, bucket, label, "utilization");
-        }
-    }
-    if let Some(bucket) = data
-        .get("limits")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|limits| {
-            limits.iter().find(|bucket| {
-                bucket.get("kind").and_then(serde_json::Value::as_str) == Some("weekly_scoped")
-                    && bucket
-                        .pointer("/scope/model/display_name")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("Fable")
-                    && bucket
-                        .get("percent")
-                        .and_then(serde_json::Value::as_f64)
-                        .is_some()
-            })
-        })
-    {
-        push_claude_oauth_usage_bucket(&mut buckets, bucket, "7d Fable", "percent");
-    }
-    buckets
-}
-
-#[cfg(test)]
-mod claude_oauth_usage_tests {
-    use super::parse_claude_oauth_usage_buckets;
-
-    #[test]
-    fn maps_fable_weekly_scoped_limit_without_synthesizing_missing_sonnet() {
-        let data = serde_json::json!({
-            "five_hour": {"utilization": 5.0, "resets_at": "2026-07-24T00:00:00Z"},
-            "seven_day": {"utilization": 58.0, "resets_at": "2026-07-28T00:00:00Z"},
-            "seven_day_sonnet": null,
-            "limits": [{
-                "kind": "weekly_scoped",
-                "percent": 55.0,
-                "resets_at": "2026-07-28T00:00:00Z",
-                "scope": {"model": {"display_name": "Fable"}}
-            }]
-        });
-
-        let buckets = parse_claude_oauth_usage_buckets(&data);
-        assert_eq!(buckets.len(), 3);
-        assert_eq!(buckets[2]["name"], "7d Fable");
-        assert_eq!(buckets[2]["used"], 55);
-    }
-
-    #[test]
-    fn omits_fable_bucket_when_percent_is_missing_null_or_non_numeric() {
-        for invalid_percent in [
-            serde_json::Value::Null,
-            serde_json::json!("55"),
-            serde_json::json!({"renamed": 55.0}),
-        ] {
-            let mut fable = serde_json::json!({
-                "kind": "weekly_scoped",
-                "resets_at": "2026-07-28T00:00:00Z",
-                "scope": {"model": {"display_name": "Fable"}}
-            });
-            if !invalid_percent.is_object() {
-                fable["percent"] = invalid_percent;
-            }
-            let data = serde_json::json!({"limits": [fable]});
-
-            assert!(
-                parse_claude_oauth_usage_buckets(&data).is_empty(),
-                "invalid Fable usage must not synthesize 0%: {data}"
-            );
-        }
-    }
-
-    #[test]
-    fn selects_numeric_fable_from_multiple_scoped_limits() {
-        let data = serde_json::json!({
-            "limits": [
-                {
-                    "kind": "weekly_scoped",
-                    "percent": 73.0,
-                    "scope": {"model": {"display_name": "Sonnet"}}
-                },
-                {
-                    "kind": "weekly_scoped",
-                    "percent": null,
-                    "scope": {"model": {"display_name": "Fable"}}
-                },
-                {
-                    "kind": "weekly_scoped",
-                    "percent": 41.5,
-                    "scope": {"model": {"display_name": "Fable"}}
-                }
-            ]
-        });
-
-        let buckets = parse_claude_oauth_usage_buckets(&data);
-        assert_eq!(buckets.len(), 1);
-        assert_eq!(buckets[0]["name"], "7d Fable");
-        assert_eq!(buckets[0]["utilization"], 41.5);
-        assert_eq!(buckets[0]["used"], 41);
-    }
-}
-
-async fn fetch_codex_oauth_usage(token: &str) -> Result<Vec<serde_json::Value>, anyhow::Error> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://chatgpt.com/backend-api/codex/usage")
-        .header("authorization", format!("Bearer {token}"))
-        .header("user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
-        .header("accept", "application/json")
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow::anyhow!(
-            "Codex usage API returned {}",
-            resp.status()
-        ));
-    }
-
-    let data: serde_json::Value = resp.json().await?;
-    let mut buckets = Vec::new();
-
-    if let Some(rl) = data.get("rate_limit") {
-        for window_key in &["primary_window", "secondary_window"] {
-            if let Some(window) = rl.get(window_key) {
-                let used_percent = window
-                    .get("used_percent")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                let window_seconds = window
-                    .get("limit_window_seconds")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let reset_at = window.get("reset_at").and_then(|v| v.as_i64()).unwrap_or(0);
-
-                let label = if window_seconds <= 18000 {
-                    "5h"
-                } else if window_seconds <= 86400 {
-                    "1d"
-                } else {
-                    "7d"
-                };
-
-                let limit = 100i64;
-                let used = used_percent.round() as i64;
-
-                buckets.push(serde_json::json!({
-                    "name": label,
-                    "limit": limit,
-                    "used": used,
-                    "remaining": limit - used,
-                    "reset": reset_at,
-                }));
-            }
-        }
-    }
-
-    Ok(buckets)
-}
-
-/// Background task that periodically syncs GitHub issues for all registered repos.
-async fn github_sync_loop(pg_pool: Arc<PgPool>, interval_minutes: u64) {
-    use std::time::Duration;
-
-    if !crate::github::gh_available() {
-        tracing::warn!("[github-sync] gh CLI not available — periodic sync disabled");
-        return;
-    }
-
-    tracing::info!(
-        "[github-sync] Periodic sync enabled (every {} minutes)",
-        interval_minutes
-    );
-
-    let interval = Duration::from_secs(interval_minutes * 60);
-
-    loop {
-        tokio::time::sleep(interval).await;
-        let sync_start = std::time::Instant::now();
-
-        let mut advisory_lock = match try_acquire_pg_singleton_lock(
-            &pg_pool,
-            GITHUB_SYNC_ADVISORY_LOCK_ID,
-            "github-sync",
-        )
-        .await
-        {
-            Ok(Some(conn)) => Some(conn),
-            Ok(None) => {
-                tracing::debug!("[github-sync] skipped: advisory lock held elsewhere");
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!("[github-sync] advisory lock failed: {error}");
-                continue;
-            }
-        };
-
-        tracing::debug!("[github-sync] Running periodic sync...");
-
-        let repos = match crate::github::list_repos_pg(&pg_pool).await {
-            Ok(repos) => repos,
-            Err(error) => {
-                tracing::error!("[github-sync] Failed to list repos from PG: {error}");
-                record_periodic_job_execution_pg(
-                    &pg_pool,
-                    "github_sync",
-                    "error",
-                    sync_start.elapsed(),
-                )
-                .await;
-                if let Some(conn) = advisory_lock.take() {
-                    release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync")
-                        .await;
-                }
-                continue;
-            }
-        };
-
-        let mut had_errors = false;
-        for repo in &repos {
-            if !repo.sync_enabled {
-                continue;
-            }
-
-            let issues = match crate::github::sync::fetch_issues(&repo.id) {
-                Ok(i) => i,
-                Err(e) => {
-                    tracing::warn!("[github-sync] Fetch failed for {}: {e}", repo.id);
-                    had_errors = true;
-                    continue;
-                }
-            };
-
-            match crate::github::triage::triage_new_issues_pg(&pg_pool, &repo.id, &issues).await {
-                Ok(count) if count > 0 => {
-                    tracing::info!("[github-sync] Triaged {count} new issues for {}", repo.id);
-                }
-                Err(error) => {
-                    tracing::warn!("[github-sync] Triage failed for {}: {error}", repo.id);
-                    had_errors = true;
-                }
-                _ => {}
-            }
-
-            match crate::github::sync::sync_github_issues_for_repo_pg(&pg_pool, &repo.id, &issues)
-                .await
-            {
-                Ok(result) => {
-                    if result.campaign_nodes.failed() {
-                        tracing::warn!(
-                            "[github-sync] {}: campaign node sync failed: {:?}",
-                            repo.id,
-                            result.campaign_nodes
-                        );
-                        had_errors = true;
-                    }
-                    if result.closed_count > 0
-                        || result.inconsistency_count > 0
-                        || result.stale_card_issue_check_count > 0
-                        || result.stale_card_issue_error_count > 0
-                    {
-                        tracing::info!(
-                            "[github-sync] {}: closed={}, inconsistencies={}, stale_issue_checks={}, stale_issue_batches={}, stale_issue_errors={}",
-                            repo.id,
-                            result.closed_count,
-                            result.inconsistency_count,
-                            result.stale_card_issue_check_count,
-                            result.stale_card_issue_batch_count,
-                            result.stale_card_issue_error_count
-                        );
-                    }
-                }
-                Err(error) => {
-                    tracing::error!("[github-sync] Sync failed for {}: {error}", repo.id);
-                    had_errors = true;
-                }
-            }
-        }
-
-        record_periodic_job_execution_pg(
-            &pg_pool,
-            "github_sync",
-            if had_errors { "error" } else { "ok" },
-            sync_start.elapsed(),
-        )
-        .await;
-
-        if let Some(conn) = advisory_lock.take() {
-            release_pg_singleton_lock(conn, GITHUB_SYNC_ADVISORY_LOCK_ID, "github-sync").await;
-        }
-    }
-}
-
-/// A `message_outbox` row claimed (up to 10 per batch) for in-process Discord delivery.
-#[derive(Clone, Debug)]
-struct PendingMessageOutboxRow {
-    id: i64,
-    target: String,
-    content: String,
-    bot: String,
-    source: String,
-    reason_code: Option<String>,
-    session_key: Option<String>,
-    retry_count: i64,
-    attachment:
-        Result<Option<Arc<crate::services::message_outbox::StoredOutboxAttachment>>, &'static str>,
-    claim_owner: String,
-    claimed_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MessageOutboxFailureAction {
-    Retry { retry_count: i64, backoff_secs: i64 },
-    Fail { retry_count: i64 },
-}
+mod claude_oauth_usage_tests;
 
 // reason: callers branch on the variant only; the fields are kept for `Debug` diagnostics.
 #[allow(dead_code)]
@@ -1553,28 +642,6 @@ enum MessageOutboxLeaseUpdateError {
         claim_owner: String,
         claimed_at: chrono::DateTime<chrono::Utc>,
     },
-}
-
-fn is_terminal_turn_delivery_outbox_source(source: &str) -> bool {
-    matches!(source, "headless_turn" | "turn_bridge_tmux_handoff")
-}
-
-#[cfg(test)]
-fn session_can_be_released_for_terminal_outbox_failure(
-    session_key: Option<&str>,
-    failed_outbox_session_key: Option<&str>,
-    active_turn_delivery_outbox_id: Option<i64>,
-    failed_outbox_id: i64,
-) -> bool {
-    let session_key_matches = match failed_outbox_session_key
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(failed_session_key) => session_key == Some(failed_session_key),
-        None => true,
-    };
-
-    session_key_matches && active_turn_delivery_outbox_id == Some(failed_outbox_id)
 }
 
 async fn release_session_for_terminal_outbox_failure(
@@ -1614,424 +681,263 @@ async fn release_session_for_terminal_outbox_failure(
     Ok(result.rows_affected())
 }
 
-fn message_outbox_failure_action(retry_count: i64) -> MessageOutboxFailureAction {
-    let next_retry_count = retry_count.saturating_add(1);
-    if next_retry_count > MESSAGE_OUTBOX_MAX_RETRY_COUNT {
-        return MessageOutboxFailureAction::Fail {
-            retry_count: next_retry_count,
-        };
-    }
+#[cfg(test)]
+mod message_outbox_retry_tests;
 
-    let backoff_idx = (next_retry_count - 1) as usize;
-    let backoff_secs = MESSAGE_OUTBOX_RETRY_BACKOFF_SECS
-        .get(backoff_idx)
-        .copied()
-        .unwrap_or(3600);
-    MessageOutboxFailureAction::Retry {
-        retry_count: next_retry_count,
-        backoff_secs,
-    }
+#[cfg(test)]
+use crate::dispatch::test_support::DispatchPostgresTestDb;
+
+/// Via the hourly `relay_signal_alerter` entry point, a breached signal is reported (WARN and
+/// event, see the `relay_signal_alert` tests) and never becomes an outbox row.
+#[cfg(test)]
+async fn relay_signal_threshold_report_enqueues_nothing_pg(pg_db: DispatchPostgresTestDb) {
+    let pool = pg_db.connect_and_migrate().await;
+    // `relay_uncommitted_inflight_cleared` trips at a single occurrence.
+    sqlx::query(
+        "INSERT INTO observability_events (event_type, status)
+             VALUES ('relay_root_cause_counter', 'relay_uncommitted_inflight_cleared')",
+    )
+    .execute(&pool)
+    .await
+    .expect("seed breached relay signal");
+
+    let crossed = crate::services::observability::report_relay_signal_threshold_crossings_pg(&pool)
+        .await
+        .expect("report relay signals");
+
+    assert_eq!(crossed, 1);
+    let outbox_rows: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox")
+        .fetch_one(&pool)
+        .await
+        .expect("count outbox rows");
+    assert_eq!(
+        outbox_rows, 0,
+        "the report never enqueues a Discord message"
+    );
+
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 #[cfg(test)]
-mod message_outbox_retry_tests {
-    use super::outbox_delivery_alert::outbox_alert_snippet;
-    use super::{
-        MessageOutboxFailureAction, MessageOutboxLeaseUpdateError, drain_message_outbox_batch_once,
-        is_terminal_turn_delivery_outbox_source, mark_message_outbox_sent_pg,
-        message_outbox_failure_action, session_can_be_released_for_terminal_outbox_failure,
-    };
-    use sqlx::Row as _;
+async fn old_owner_completion_after_stale_reclaim_is_noop_pg(pg_db: DispatchPostgresTestDb) {
+    let pool = pg_db.connect_and_migrate().await;
 
-    #[test]
-    fn outbox_alert_snippet_truncates_and_handles_empty() {
-        assert_eq!(outbox_alert_snippet("  hello  "), "hello");
-        assert_eq!(outbox_alert_snippet("   "), "(빈 내용)");
-        let long: String = "a".repeat(200);
-        let snippet = outbox_alert_snippet(&long);
-        assert!(
-            snippet.chars().count() <= 121,
-            "120 content chars + one ellipsis"
-        );
-        assert!(snippet.ends_with('…'));
-    }
-
-    /// Via the hourly `relay_signal_alerter` entry point, a breached signal is reported (WARN and
-    /// event, see the `relay_signal_alert` tests) and never becomes an outbox row.
-    #[tokio::test]
-    async fn relay_signal_threshold_report_enqueues_nothing_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_relay_signal_report",
-            "relay signal threshold report",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        // `relay_uncommitted_inflight_cleared` trips at a single occurrence.
-        sqlx::query(
-            "INSERT INTO observability_events (event_type, status)
-             VALUES ('relay_root_cause_counter', 'relay_uncommitted_inflight_cleared')",
-        )
-        .execute(&pool)
-        .await
-        .expect("seed breached relay signal");
-
-        let crossed =
-            crate::services::observability::report_relay_signal_threshold_crossings_pg(&pool)
-                .await
-                .expect("report relay signals");
-
-        assert_eq!(crossed, 1);
-        let outbox_rows: i64 = sqlx::query_scalar("SELECT COUNT(*)::bigint FROM message_outbox")
-            .fetch_one(&pool)
-            .await
-            .expect("count outbox rows");
-        assert_eq!(
-            outbox_rows, 0,
-            "the report never enqueues a Discord message"
-        );
-
-        pool.close().await;
-        pg_db.drop().await;
-    }
-
-    #[test]
-    fn message_outbox_failure_action_retries_then_fails() {
-        assert_eq!(
-            message_outbox_failure_action(0),
-            MessageOutboxFailureAction::Retry {
-                retry_count: 1,
-                backoff_secs: 60,
-            }
-        );
-        assert_eq!(
-            message_outbox_failure_action(3),
-            MessageOutboxFailureAction::Retry {
-                retry_count: 4,
-                backoff_secs: 3600,
-            }
-        );
-        assert_eq!(
-            message_outbox_failure_action(4),
-            MessageOutboxFailureAction::Fail { retry_count: 5 }
-        );
-    }
-
-    #[test]
-    fn session_release_is_limited_to_terminal_turn_delivery_sources() {
-        assert!(is_terminal_turn_delivery_outbox_source("headless_turn"));
-        assert!(is_terminal_turn_delivery_outbox_source(
-            "turn_bridge_tmux_handoff"
-        ));
-
-        assert!(!is_terminal_turn_delivery_outbox_source(
-            crate::services::message_outbox::LIFECYCLE_NOTIFIER_SOURCE
-        ));
-        assert!(!is_terminal_turn_delivery_outbox_source("routine-runtime"));
-        assert!(!is_terminal_turn_delivery_outbox_source("system"));
-    }
-
-    #[test]
-    fn session_release_requires_same_failed_outbox_session_when_present() {
-        assert!(session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("session-current"),
-            Some(42),
-            42,
-        ));
-        assert!(!session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("session-old"),
-            Some(42),
-            42,
-        ));
-        assert!(session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("  "),
-            Some(42),
-            42,
-        ));
-    }
-
-    #[test]
-    fn session_release_requires_matching_terminal_delivery_outbox_marker() {
-        assert!(!session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("session-current"),
-            None,
-            42,
-        ));
-        assert!(!session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("session-current"),
-            Some(41),
-            42,
-        ));
-        assert!(session_can_be_released_for_terminal_outbox_failure(
-            Some("session-current"),
-            Some("session-current"),
-            Some(42),
-            42,
-        ));
-    }
-
-    #[tokio::test]
-    async fn old_owner_completion_after_stale_reclaim_is_noop_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_message_outbox_lease",
-            "message outbox lease fencing tests",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-
-        let row = sqlx::query(
-            "INSERT INTO message_outbox (
+    let row = sqlx::query(
+        "INSERT INTO message_outbox (
                 target, content, bot, source, status, retry_count, claimed_at, claim_owner
              ) VALUES (
                 'channel:123', 'hello', 'notify', 'system', 'processing', 0,
                 NOW() - INTERVAL '10 minutes', 'old-owner'
              )
              RETURNING id, claimed_at",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("seed claimed message outbox row");
-        let outbox_id: i64 = row.try_get("id").unwrap();
-        let old_claimed_at: chrono::DateTime<chrono::Utc> = row.try_get("claimed_at").unwrap();
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("seed claimed message outbox row");
+    let outbox_id: i64 = row.try_get("id").unwrap();
+    let old_claimed_at: chrono::DateTime<chrono::Utc> = row.try_get("claimed_at").unwrap();
 
-        sqlx::query(
-            "UPDATE message_outbox
+    sqlx::query(
+        "UPDATE message_outbox
                 SET claim_owner = 'new-owner',
                     claimed_at = NOW()
               WHERE id = $1",
-        )
-        .bind(outbox_id)
-        .execute(&pool)
-        .await
-        .expect("reclaim message outbox row");
+    )
+    .bind(outbox_id)
+    .execute(&pool)
+    .await
+    .expect("reclaim message outbox row");
 
-        let result =
-            mark_message_outbox_sent_pg(&pool, outbox_id, "old-owner", old_claimed_at).await;
-        assert!(matches!(
-            result,
-            Err(MessageOutboxLeaseUpdateError::StaleLeaseLost { .. })
-        ));
+    let result = mark_message_outbox_sent_pg(&pool, outbox_id, "old-owner", old_claimed_at).await;
+    assert!(matches!(
+        result,
+        Err(MessageOutboxLeaseUpdateError::StaleLeaseLost { .. })
+    ));
 
-        let state = sqlx::query(
-            "SELECT status, claim_owner, sent_at
+    let state = sqlx::query(
+        "SELECT status, claim_owner, sent_at
                FROM message_outbox
               WHERE id = $1",
-        )
-        .bind(outbox_id)
-        .fetch_one(&pool)
-        .await
-        .unwrap();
-        assert_eq!(state.try_get::<String, _>("status").unwrap(), "processing");
-        assert_eq!(
-            state.try_get::<String, _>("claim_owner").unwrap(),
-            "new-owner"
-        );
-        assert!(
-            state
-                .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("sent_at")
-                .unwrap()
-                .is_none()
-        );
+    )
+    .bind(outbox_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(state.try_get::<String, _>("status").unwrap(), "processing");
+    assert_eq!(
+        state.try_get::<String, _>("claim_owner").unwrap(),
+        "new-owner"
+    );
+    assert!(
+        state
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("sent_at")
+            .unwrap()
+            .is_none()
+    );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+    pool.close().await;
+    pg_db.drop().await;
+}
 
-    /// The real claim/drain path keeps the stall alert's provider-owned DM identity.
-    #[tokio::test]
-    async fn stall_alert_dm_row_drains_with_provider_bot_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_stall_alert_outbox_drain",
-            "stall alert message-outbox drain routing tests",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        let target = "channel:1479662682909966499";
-        let session_key = "codex/test/host:AgentDesk-codex-dm-343742347365974026";
-        let inserted = crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
-            &pool,
-            crate::services::message_outbox::OutboxMessage {
-                target,
-                content: "stall alert drain fixture",
-                bot: "notify",
-                source: "stall_watchdog",
-                reason_code: Some("stall_watchdog_suspected_stall"),
-                session_key: Some(session_key),
-            },
-            1800,
-        )
-        .await
-        .expect("enqueue stall alert row");
-        assert!(inserted);
+/// The real claim/drain path keeps the stall alert's provider-owned DM identity.
+#[cfg(test)]
+async fn stall_alert_dm_row_drains_with_provider_bot_pg(pg_db: DispatchPostgresTestDb) {
+    let pool = pg_db.connect_and_migrate().await;
+    let target = "channel:1479662682909966499";
+    let session_key = "codex/test/host:AgentDesk-codex-dm-343742347365974026";
+    let inserted = crate::services::message_outbox::enqueue_outbox_pg_with_ttl(
+        &pool,
+        crate::services::message_outbox::OutboxMessage {
+            target,
+            content: "stall alert drain fixture",
+            bot: "notify",
+            source: "stall_watchdog",
+            reason_code: Some("stall_watchdog_suspected_stall"),
+            session_key: Some(session_key),
+        },
+        1800,
+    )
+    .await
+    .expect("enqueue stall alert row");
+    assert!(inserted);
 
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let observed_delivery = observed.clone();
-        let drained = drain_message_outbox_batch_once(&pool, Some("stall-alert-drain-test"), {
-            move |row| {
-                let observed_delivery = observed_delivery.clone();
-                async move {
-                    let bot = crate::services::message_outbox::delivery_bot_for_target_session(
-                        &row.target,
-                        &row.bot,
-                        row.session_key.as_deref(),
-                    )
-                    .into_owned();
-                    observed_delivery
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .push((row.target.clone(), row.source.clone(), bot));
-                    ("200 OK".to_string(), String::new())
-                }
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed_delivery = observed.clone();
+    let drained = drain_message_outbox_batch_once(&pool, Some("stall-alert-drain-test"), {
+        move |row| {
+            let observed_delivery = observed_delivery.clone();
+            async move {
+                let bot = crate::services::message_outbox::delivery_bot_for_target_session(
+                    &row.target,
+                    &row.bot,
+                    row.session_key.as_deref(),
+                )
+                .into_owned();
+                observed_delivery
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push((row.target.clone(), row.source.clone(), bot));
+                ("200 OK".to_string(), String::new())
             }
-        })
-        .await;
+        }
+    })
+    .await;
 
-        assert_eq!(drained, 1);
-        assert_eq!(
-            *observed.lock().unwrap_or_else(|poison| poison.into_inner()),
-            vec![(
-                target.to_string(),
-                "stall_watchdog".to_string(),
-                "codex".to_string(),
-            )]
-        );
-        let status: String =
-            sqlx::query_scalar("SELECT status FROM message_outbox WHERE source='stall_watchdog'")
-                .fetch_one(&pool)
-                .await
-                .expect("load drained stall alert status");
-        assert_eq!(status, "sent");
+    assert_eq!(drained, 1);
+    assert_eq!(
+        *observed.lock().unwrap_or_else(|poison| poison.into_inner()),
+        vec![(
+            target.to_string(),
+            "stall_watchdog".to_string(),
+            "codex".to_string(),
+        )]
+    );
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM message_outbox WHERE source='stall_watchdog'")
+            .fetch_one(&pool)
+            .await
+            .expect("load drained stall alert status");
+    assert_eq!(status, "sent");
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+    pool.close().await;
+    pg_db.drop().await;
+}
 
-    /// Mutation sentinel: removing the drain loop's fence call turns this into a delivery.
-    #[tokio::test]
-    async fn drain_fences_superseded_circuit_row_before_delivery_pg() {
-        let Some(pg_db) = crate::dispatch::test_support::DispatchPostgresTestDb::try_create(
-            "agentdesk_drain_delivery_fence",
-            "worker delivery fence drain integration",
-        )
-        .await
-        else {
-            return;
-        };
-        let pool = pg_db.connect_and_migrate().await;
-        // Stage a genuine circuit-stamped row through the validated producers.
-        use crate::services::message_outbox_circuit_authority as circuit;
-        sqlx::query(
+/// Mutation sentinel: removing the drain loop's fence call turns this into a delivery.
+#[cfg(test)]
+async fn drain_fences_superseded_circuit_row_before_delivery_pg(pg_db: DispatchPostgresTestDb) {
+    let pool = pg_db.connect_and_migrate().await;
+    // Stage a genuine circuit-stamped row through the validated producers.
+    use crate::services::message_outbox_circuit_authority as circuit;
+    sqlx::query(
             "INSERT INTO intake_session_owners(provider,raw_channel_id,owner_instance_id,generation,status)
              VALUES('discord','777','node-a',7,'active')",
         )
         .execute(&pool)
         .await
         .expect("seed active intake owner");
-        let coord = match circuit::reserve_next_authority(
-            &pool, "discord", "777", "node-a", 7, "e1", 10, 1, None,
-        )
-        .await
-        .expect("reserve authority")
-        {
-            circuit::AuthorityReservation::Reserved(coordinate) => coordinate,
-            other => panic!("unexpected reservation: {other:?}"),
-        };
-        let id = match circuit::stage_held(
-            &pool,
-            crate::services::message_outbox::OutboxMessage {
-                target: "channel:777",
-                content: "fenced body",
-                bot: "notify",
-                source: "system",
-                reason_code: Some("fence"),
-                session_key: Some("channel:777"),
-            },
-            &coord,
-            300,
-        )
-        .await
-        .expect("stage held circuit row")
-        {
-            circuit::StageHeldOutcome::Staged { id } => id,
-            other => panic!("unexpected stage outcome: {other:?}"),
-        };
-        assert_eq!(
-            circuit::activate_fenced(&pool, id, &coord)
-                .await
-                .expect("activate"),
-            circuit::CircuitActivation::Activated
-        );
-        // A newer episode reserves epoch 2, superseding the row's stamped epoch 1.
-        assert!(matches!(
-            circuit::reserve_next_authority(
-                &pool,
-                "discord",
-                "777",
-                "node-a",
-                7,
-                "e2",
-                10,
-                1,
-                Some(1)
-            )
+    let coord = match circuit::reserve_next_authority(
+        &pool, "discord", "777", "node-a", 7, "e1", 10, 1, None,
+    )
+    .await
+    .expect("reserve authority")
+    {
+        circuit::AuthorityReservation::Reserved(coordinate) => coordinate,
+        other => panic!("unexpected reservation: {other:?}"),
+    };
+    let id = match circuit::stage_held(
+        &pool,
+        crate::services::message_outbox::OutboxMessage {
+            target: "channel:777",
+            content: "fenced body",
+            bot: "notify",
+            source: "system",
+            reason_code: Some("fence"),
+            session_key: Some("channel:777"),
+        },
+        &coord,
+        300,
+    )
+    .await
+    .expect("stage held circuit row")
+    {
+        circuit::StageHeldOutcome::Staged { id } => id,
+        other => panic!("unexpected stage outcome: {other:?}"),
+    };
+    assert_eq!(
+        circuit::activate_fenced(&pool, id, &coord)
+            .await
+            .expect("activate"),
+        circuit::CircuitActivation::Activated
+    );
+    // A newer episode reserves epoch 2, superseding the row's stamped epoch 1.
+    assert!(matches!(
+        circuit::reserve_next_authority(&pool, "discord", "777", "node-a", 7, "e2", 10, 1, Some(1))
             .await
             .expect("supersede authority"),
-            circuit::AuthorityReservation::Reserved(_)
-        ));
+        circuit::AuthorityReservation::Reserved(_)
+    ));
 
-        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
-        let observed_delivery = observed.clone();
-        let drained = drain_message_outbox_batch_once(&pool, Some("fence-drain-test"), {
-            move |row| {
-                let observed_delivery = observed_delivery.clone();
-                async move {
-                    observed_delivery
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .push(row.id);
-                    ("200 OK".to_string(), String::new())
-                }
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<i64>::new()));
+    let observed_delivery = observed.clone();
+    let drained = drain_message_outbox_batch_once(&pool, Some("fence-drain-test"), {
+        move |row| {
+            let observed_delivery = observed_delivery.clone();
+            async move {
+                observed_delivery
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(row.id);
+                ("200 OK".to_string(), String::new())
             }
-        })
-        .await;
+        }
+    })
+    .await;
 
-        assert_eq!(drained, 1, "the row is claimed and accounted for");
-        assert!(
-            observed
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .is_empty(),
-            "a superseded circuit row must never reach deliver()"
-        );
-        let row =
-            sqlx::query("SELECT status,delivery_fence_checked_at FROM message_outbox WHERE id=$1")
-                .bind(id)
-                .fetch_one(&pool)
-                .await
-                .expect("load fenced row");
-        assert_eq!(row.get::<String, _>("status"), "cancelled");
-        assert!(
-            row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
-                .is_some(),
-            "the fenced row must stamp delivery_fence_checked_at"
-        );
+    assert_eq!(drained, 1, "the row is claimed and accounted for");
+    assert!(
+        observed
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .is_empty(),
+        "a superseded circuit row must never reach deliver()"
+    );
+    let row =
+        sqlx::query("SELECT status,delivery_fence_checked_at FROM message_outbox WHERE id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .expect("load fenced row");
+    assert_eq!(row.get::<String, _>("status"), "cancelled");
+    assert!(
+        row.get::<Option<chrono::DateTime<chrono::Utc>>, _>("delivery_fence_checked_at")
+            .is_some(),
+        "the fenced row must stamp delivery_fence_checked_at"
+    );
 
-        pool.close().await;
-        pg_db.drop().await;
-    }
+    pool.close().await;
+    pg_db.drop().await;
 }
 
 async fn mark_message_outbox_sent_pg(
@@ -2194,600 +1100,7 @@ async fn schedule_message_outbox_retry_pg(
 
 use outbox_worker::claim::claim_pending_message_outbox_batch_pg;
 
-async fn drain_message_outbox_batch_once<F, Fut>(
-    pg_pool: &PgPool,
-    claim_owner: Option<&str>,
-    mut deliver: F,
-) -> usize
-where
-    F: FnMut(PendingMessageOutboxRow) -> Fut,
-    Fut: std::future::Future<Output = (String, String)>,
-{
-    let pending =
-        claim_pending_message_outbox_batch_pg(pg_pool, claim_owner.unwrap_or("message-outbox"))
-            .await;
-    if pending.is_empty() {
-        return 0;
-    }
-
-    for row in &pending {
-        // Re-check circuit authority under the claim lease: `revoke_on_fresh_vouch` misses rows
-        // superseded after their claim. Fails closed: any error skips the row this cycle.
-        use crate::services::message_outbox_circuit_authority::DeliveryFenceOutcome;
-        match crate::services::message_outbox_circuit_authority::fence_claimed_delivery(
-            pg_pool,
-            row.id,
-            &row.claim_owner,
-            row.claimed_at,
-        )
-        .await
-        {
-            Ok(DeliveryFenceOutcome::Cleared) => {}
-            Ok(DeliveryFenceOutcome::Fenced) => {
-                tracing::info!(
-                    outbox_id = row.id,
-                    target = %row.target,
-                    "[outbox] delivery fenced: circuit authority superseded before send"
-                );
-                continue;
-            }
-            Ok(DeliveryFenceOutcome::LeaseLost) => {
-                tracing::warn!(
-                    outbox_id = row.id,
-                    claim_owner = %row.claim_owner,
-                    "[outbox] delivery fence: stale lease, skipping send"
-                );
-                continue;
-            }
-            Err(error) => {
-                tracing::warn!(
-                    outbox_id = row.id,
-                    %error,
-                    "[outbox] delivery fence db error, deferring send this cycle"
-                );
-                continue;
-            }
-        }
-        if crate::services::message_outbox::routine_incident::is_incident(
-            &row.source,
-            row.reason_code.as_deref(),
-        ) {
-            outbox_actionable_delivery::routine_incident::deliver(pg_pool, row, || {
-                deliver(row.clone())
-            })
-            .await;
-            continue;
-        }
-        let (status, err_text) = match &row.attachment {
-            Err(error) => ("invalid_attachment".to_string(), error.to_string()),
-            Ok(_) => deliver(row.clone()).await,
-        };
-        if status == "200 OK" {
-            if mark_message_outbox_sent_pg(pg_pool, row.id, &row.claim_owner, row.claimed_at)
-                .await
-                .is_ok()
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                tracing::debug!(
-                    "[{ts}] [outbox] ✅ delivered msg {} → {}",
-                    row.id,
-                    row.target
-                );
-            }
-        } else {
-            let error_text = format!("{status}: {err_text}");
-            let action = outbox_actionable_delivery::failure_action(row, &status);
-            match action {
-                MessageOutboxFailureAction::Fail { retry_count } => {
-                    let failed_update = mark_message_outbox_failed_pg(
-                        pg_pool,
-                        row.id,
-                        &error_text,
-                        retry_count,
-                        &row.claim_owner,
-                        row.claimed_at,
-                    )
-                    .await;
-                    // Release only terminal turn-delivery rows, and only while the session
-                    // still points at this row (no newer turn has taken the channel).
-                    if failed_update.is_ok() && is_terminal_turn_delivery_outbox_source(&row.source)
-                    {
-                        if let Some(channel_id_str) = row.target.strip_prefix("channel:") {
-                            let released_sessions =
-                                match release_session_for_terminal_outbox_failure(
-                                    pg_pool,
-                                    channel_id_str,
-                                    row.id,
-                                )
-                                .await
-                                {
-                                    Ok(count) => count,
-                                    Err(error) => {
-                                        tracing::warn!(
-                                            "[outbox] failed to release session for channel {} after msg {} failure: {}",
-                                            channel_id_str,
-                                            row.id,
-                                            error,
-                                        );
-                                        0
-                                    }
-                                };
-                            tracing::warn!(
-                                "[outbox] ❌ permanent delivery failure for channel {} (msg {}, released_sessions={}): {}",
-                                channel_id_str,
-                                row.id,
-                                released_sessions,
-                                error_text,
-                            );
-                        }
-                    }
-                    // After the release, so reporting never delays freeing the channel. The
-                    // destination is never notified: it may be the failing target itself.
-                    if failed_update.is_ok() {
-                        outbox_delivery_alert::note_terminal_outbox_delivery_failure(
-                            row,
-                            &error_text,
-                        );
-                    }
-                }
-                MessageOutboxFailureAction::Retry {
-                    retry_count,
-                    backoff_secs,
-                } => {
-                    let _ = schedule_message_outbox_retry_pg(
-                        pg_pool,
-                        row.id,
-                        &error_text,
-                        retry_count,
-                        backoff_secs,
-                        &row.claim_owner,
-                        row.claimed_at,
-                    )
-                    .await;
-                }
-            }
-            tracing::warn!(
-                "[outbox] ❌ msg {} → {} failed: {status} ({action:?})",
-                row.id,
-                row.target
-            );
-        }
-    }
-
-    pending.len()
-}
-
-async fn dm_reply_retry_loop(pg_pool: Arc<PgPool>) {
-    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-    interval.tick().await; // skip immediate first tick
-    loop {
-        interval.tick().await;
-        crate::services::discord::retry_failed_dm_notifications(Some(pg_pool.as_ref())).await;
-    }
-}
-
-async fn routine_runtime_loop(
-    pg_pool: Arc<PgPool>,
-    health_registry: Option<Arc<HealthRegistry>>,
-    routines_config: crate::config::RoutinesConfig,
-    tick_interval_secs: u64,
-) {
-    use crate::services::routines::{
-        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineStore,
-        after_startup_grace, poll_agent_turns, run_due_tick,
-    };
-    let boot = tokio::time::Instant::now();
-    let Some(tick_interval_secs) = std::num::NonZeroU64::new(tick_interval_secs) else {
-        tracing::warn!("routine runtime not started: tick_interval_secs must be greater than zero");
-        return;
-    };
-
-    let _routine_action_validator: fn(serde_json::Value) -> anyhow::Result<RoutineAction> =
-        crate::services::routines::validate_routine_action;
-
-    let routine_script_dirs = routines_config.script_dirs();
-    let initial_script_dirs = routine_script_dirs.clone();
-    let script_loader = match tokio::task::spawn_blocking(move || {
-        routine_script_audit::load_registry(&initial_script_dirs)
-    })
-    .await
-    {
-        Ok(Ok((loader, count))) => {
-            tracing::info!(count, "routine script registry initialized");
-            loader
-        }
-        Ok(Err(e)) => {
-            tracing::warn!(error = %e, "routine runtime not started: script registry initialization failed");
-            return;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "routine runtime not started: script registry blocking task failed");
-            return;
-        }
-    };
-
-    let store = RoutineStore::new_with_timezone_and_checkpoint_limit(
-        pg_pool.clone(),
-        routines_config.default_timezone.clone(),
-        routines_config.max_checkpoint_bytes,
-    );
-    routine_script_audit::warn_once_unregistered(pg_pool.as_ref(), &routine_script_dirs).await;
-    let discord_logger =
-        RoutineDiscordLogger::new_with_health_registry(pg_pool.clone(), health_registry.clone());
-    let agent_executor =
-        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
-            .with_headless_fresh_agents(routines_config.headless_fresh_agents);
-    match agent_executor.recover_stale_running_runs(&store).await {
-        Ok(recovered) if !recovered.is_empty() => {
-            for run in &recovered {
-                // Reap owned orphaned fresh sessions before they look like abrupt exits.
-                agent_executor
-                    .teardown_recovered_fresh_session(&store, run)
-                    .await;
-                discord_logger.log_recovery(&store, run).await;
-            }
-            tracing::info!(
-                recovered = recovered.len(),
-                "routine boot recovery: stale runs marked interrupted"
-            )
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "routine boot recovery failed"),
-    }
-    let mut interval =
-        tokio::time::interval(std::time::Duration::from_secs(tick_interval_secs.get()));
-    loop {
-        interval.tick().await;
-        // Per-tick tunables follow the live config; boot-bound values (script dirs, store
-        // limits, agent timeout) keep their startup values in the objects built above.
-        let routines_config = crate::config_live_reload::current()
-            .map(|cfg| cfg.routines.clone())
-            .unwrap_or_else(|| routines_config.clone());
-        match agent_executor.recover_stale_running_runs(&store).await {
-            Ok(recovered) if !recovered.is_empty() => {
-                for run in &recovered {
-                    // No fresh-session reap here: a concurrent re-claim can reuse the same tmux
-                    // name, so the reap would race a live turn. Idle-kill collects any orphan.
-                    discord_logger.log_recovery(&store, run).await;
-                }
-                tracing::info!(
-                    recovered = recovered.len(),
-                    "routine periodic recovery: expired-lease runs marked interrupted"
-                )
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "routine periodic recovery failed"),
-        }
-        if routines_config.hot_reload {
-            let reload_dirs = routine_script_dirs.clone();
-            let loader = Arc::clone(&script_loader);
-            match tokio::task::spawn_blocking(move || loader.load_dirs(&reload_dirs)).await {
-                Ok(Ok(count)) if count > 0 => {
-                    tracing::debug!(count, "routine script registry hot-reload pass complete")
-                }
-                Ok(Ok(_)) => {}
-                Ok(Err(e)) => {
-                    tracing::warn!(error = %e, "routine script registry hot-reload failed")
-                }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    "routine script registry hot-reload blocking task failed"
-                ),
-            }
-        }
-        // Paused routines are never claimed, so alert on ones paused past the threshold
-        // instead of letting them silently never run again. 0 (the default) disables it.
-        let stale_paused_alert_secs = routines_config.stale_paused_alert_secs;
-        if stale_paused_alert_secs > 0 {
-            let now = chrono::Utc::now();
-            let cutoff = now - chrono::Duration::seconds(stale_paused_alert_secs as i64);
-            match store.list_stale_paused_routines(cutoff).await {
-                Ok(stale) => {
-                    for routine in &stale {
-                        let paused_for_secs = (now - routine.updated_at).num_seconds().max(0);
-                        if paused_for_secs >= stale_paused_alert_secs as i64 {
-                            discord_logger
-                                .log_stale_paused(
-                                    &store,
-                                    routine,
-                                    paused_for_secs,
-                                    routines_config.stale_paused_alert_ttl_secs as i64,
-                                )
-                                .await;
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "routine stale-paused scan failed")
-                }
-            }
-        }
-        // Opt-in auto-resume, only for `pause_reason = 'failure'` routines; 0 (the default)
-        // disables it, e.g. 3600 resumes after a 1-hour backoff.
-        let auto_resume_secs = routines_config.failure_pause_auto_resume_secs;
-        let pause_on_terminal_failure = routines_config.failure_pause_auto_resume_secs > 0;
-        // Failure alerts are not tied to the pause knob: 0 there still alerts at this streak.
-        let max_consecutive_failures = routines_config.max_consecutive_failures;
-        if pause_on_terminal_failure {
-            let now = chrono::Utc::now();
-            let cutoff = now - chrono::Duration::seconds(auto_resume_secs as i64);
-            match store.list_failure_paused_routines(cutoff).await {
-                Ok(candidates) => {
-                    for routine in &candidates {
-                        match store
-                            .auto_resume_failure_paused_routine(&routine.id, cutoff)
-                            .await
-                        {
-                            Ok(true) => {
-                                tracing::info!(
-                                    routine_id = %routine.id,
-                                    routine_name = %routine.name,
-                                    "auto-resumed failure-paused routine"
-                                );
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    routine_id = %routine.id,
-                                    "auto-resume: routine no longer eligible (already resumed or re-paused)"
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    routine_id = %routine.id,
-                                    error = %error,
-                                    "auto-resume failure-paused routine failed"
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(error = %error, "routine auto-resume scan failed")
-                }
-            }
-        }
-        match poll_agent_turns(
-            &store,
-            &agent_executor,
-            routines_config.max_agent_polls_per_tick,
-            pause_on_terminal_failure,
-        )
-        .await
-        {
-            Ok(outcomes) if !outcomes.is_empty() => {
-                for outcome in &outcomes {
-                    discord_logger.log_run_outcome(&store, outcome).await;
-                    discord_logger
-                        .alert_consecutive_failures(&store, outcome, max_consecutive_failures)
-                        .await;
-                }
-                tracing::info!(count = outcomes.len(), "routine agent turns completed")
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "routine agent turn polling failed"),
-        }
-        let due_tick = run_due_tick(
-            &store,
-            &script_loader,
-            &routine_script_dirs,
-            Some(&agent_executor),
-            Some(&discord_logger),
-            routines_config.max_due_per_tick,
-            pause_on_terminal_failure,
-        );
-        match after_startup_grace(boot.elapsed(), routines_config.startup_grace_secs, due_tick)
-            .await
-        {
-            Ok(Some(outcomes)) if !outcomes.is_empty() => {
-                for outcome in &outcomes {
-                    discord_logger
-                        .alert_consecutive_failures(&store, outcome, max_consecutive_failures)
-                        .await;
-                }
-                tracing::info!(count = outcomes.len(), "routine due tick executed")
-            }
-            Ok(None) => tracing::debug!("routine due tick held by startup grace"),
-            Ok(_) => {}
-            Err(e) => tracing::warn!(error = %e, "routine due tick failed"),
-        }
-    }
-}
-
 /// Auth-boundary tests for the root-mounted control-plane routers (`/tui/*`, `/hooks/*`).
 /// They live here because composing a router with `auth_middleware` is a server-layer job.
 #[cfg(test)]
-mod control_plane_auth_tests {
-    use std::net::SocketAddr;
-    use std::sync::Arc;
-
-    use axum::Router;
-    use axum::body::{Body, to_bytes};
-    use axum::extract::ConnectInfo;
-    use axum::http::{Method, Request, StatusCode, header::AUTHORIZATION};
-    use serde_json::{Value, json};
-    use tower::ServiceExt;
-
-    use crate::server::routes::AppState;
-    use crate::server::routes::auth::auth_middleware;
-    use crate::services::claude_tui::hook_server::{
-        HookServerState, hook_receiver_router_with_state,
-    };
-    use crate::services::claude_tui::tui_relay::{FakeSendBackend, router_with_send_backend};
-
-    fn test_app_state(auth_token: Option<&str>) -> AppState {
-        let mut config = crate::config::Config::default();
-        // Non-loopback host so the middleware cannot fall back to a host-based
-        // shortcut; the boundary must be proven by peer addr / Bearer alone.
-        config.server.host = "0.0.0.0".to_string();
-        config.server.auth_token = auth_token.map(str::to_string);
-        let tx = crate::eventbus::new_broadcast();
-        let buf = crate::eventbus::spawn_batch_flusher(tx.clone());
-        AppState {
-            pg_pool: None,
-            engine: crate::engine::PolicyEngine::new(&config).expect("test policy engine"),
-            config: Arc::new(config),
-            broadcast_tx: tx,
-            batch_buffer: buf,
-            health_registry: None,
-            cluster_instance_id: None,
-        }
-    }
-
-    fn protected_tui_router(auth_token: Option<&str>) -> Router {
-        router_with_send_backend(Arc::new(FakeSendBackend)).layer(
-            axum::middleware::from_fn_with_state(test_app_state(auth_token), auth_middleware),
-        )
-    }
-
-    fn protected_hook_router(auth_token: Option<&str>) -> Router {
-        hook_receiver_router_with_state(HookServerState::new()).layer(
-            axum::middleware::from_fn_with_state(test_app_state(auth_token), auth_middleware),
-        )
-    }
-
-    fn tui_send_request(peer: &str, token: Option<&str>, text: &str) -> Request<Body> {
-        let body = json!({
-            "session_name": "test-session",
-            "text": text,
-            "submit": true,
-        });
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri("/tui/send")
-            .header("content-type", "application/json")
-            .body(Body::from(body.to_string()))
-            .expect("build request");
-        request.extensions_mut().insert(ConnectInfo(
-            peer.parse::<SocketAddr>().expect("valid socket addr"),
-        ));
-        if let Some(token) = token {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                format!("Bearer {token}").parse().expect("valid bearer"),
-            );
-        }
-        request
-    }
-
-    fn hook_request(peer: &str, token: Option<&str>) -> Request<Body> {
-        let mut request = Request::builder()
-            .method(Method::POST)
-            .uri("/hooks/claude/Stop?session_id=sess-auth")
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"hook_event_name":"Stop"}"#))
-            .expect("build request");
-        request.extensions_mut().insert(ConnectInfo(
-            peer.parse::<SocketAddr>().expect("valid socket addr"),
-        ));
-        if let Some(token) = token {
-            request.headers_mut().insert(
-                AUTHORIZATION,
-                format!("Bearer {token}").parse().expect("valid bearer"),
-            );
-        }
-        request
-    }
-
-    async fn response_json(response: axum::response::Response) -> Value {
-        let bytes = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read response body");
-        serde_json::from_slice(&bytes).expect("json response")
-    }
-
-    #[tokio::test]
-    async fn tui_send_rejects_unauthenticated_non_loopback_when_protected() {
-        let app = protected_tui_router(Some("secret"));
-
-        let response = app
-            .oneshot(tui_send_request("10.0.0.5:8791", None, "hello"))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn tui_send_rejects_unauthenticated_non_loopback_when_unconfigured() {
-        // Defense in depth: even with no auth_token configured ("local-only
-        // mode"), a non-loopback caller must NOT reach the control plane.
-        let app = protected_tui_router(None);
-
-        let response = app
-            .oneshot(tui_send_request("10.0.0.5:8791", None, "hello"))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn tui_send_valid_input_with_valid_auth_returns_success() {
-        let app = protected_tui_router(Some("secret"));
-
-        let response = app
-            .oneshot(tui_send_request(
-                "10.0.0.5:8791",
-                Some("secret"),
-                "hello\nworld",
-            ))
-            .await
-            .expect("response");
-        let status = response.status();
-        let body = response_json(response).await;
-
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["ok"], true);
-        assert_eq!(body["session_name"], "test-session");
-        assert_eq!(body["bytes"].as_u64(), Some("hello\nworld".len() as u64));
-        assert_eq!(body["submitted"], true);
-    }
-
-    #[tokio::test]
-    async fn tui_send_allows_loopback_without_bearer_when_protected() {
-        let app = protected_tui_router(Some("secret"));
-
-        let response = app
-            .oneshot(tui_send_request("127.0.0.1:8791", None, "hello"))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn hook_receiver_rejects_unauthenticated_non_loopback_when_protected() {
-        let app = protected_hook_router(Some("secret"));
-
-        let response = app
-            .oneshot(hook_request("10.0.0.5:8791", None))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn hook_receiver_rejects_unauthenticated_non_loopback_when_unconfigured() {
-        let app = protected_hook_router(None);
-
-        let response = app
-            .oneshot(hook_request("10.0.0.5:8791", None))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn hook_receiver_allows_loopback_without_bearer_when_protected() {
-        let app = protected_hook_router(Some("secret"));
-
-        let response = app
-            .oneshot(hook_request("127.0.0.1:8791", None))
-            .await
-            .expect("response");
-
-        assert_eq!(response.status(), StatusCode::ACCEPTED);
-    }
-}
+mod control_plane_auth_tests;

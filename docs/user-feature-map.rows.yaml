@@ -976,7 +976,7 @@ host_parity:
     herdr: 이름이 같아도 다른 host 또는 교체 run은 건드리지 않는 기존 조건이 적용. 실제 Herdr 종료는 legacy 효과에서 빠짐
     verdict: 다름
     owner: '#8128 R2c. R2a 효과 및 #7583 actual-owner 종료 포트'
-    evidence: '`src/server/mod.rs:2698–2705`, `src/services/routines/agent_executor.rs:937–966,995–1006`, `src/services/routines/session_control.rs:236–278,676–698`.
+    evidence: '`src/server/routine_runtime.rs:54–61`, `src/services/routines/agent_executor.rs:937–966,995–1006`, `src/services/routines/session_control.rs:236–278,676–698`.
       소유 증거 부재 및 교체 실행의 종료 0건 검증'
   - feature_id: herdr-handoff
     scope: tmux→Herdr 넘김
