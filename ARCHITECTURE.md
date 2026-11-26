@@ -2471,6 +2471,7 @@ src/
 │   │   │   ├── herdr_before_start_restart_tests.rs
 │   │   │   ├── herdr_reader.rs
 │   │   │   ├── herdr_reader_missing_tests.rs
+│   │   │   ├── herdr_reader_placed_tests.rs
 │   │   │   ├── herdr_reader_tests.rs
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
@@ -4040,6 +4041,9 @@ src/
 │   │   └── tmux_cleanup.rs
 │   ├── dispatches/
 │   │   ├── discord_delivery/
+│   │   │   ├── transport/
+│   │   │   │   ├── duplicate_archive.rs
+│   │   │   │   └── duplicate_archive_tests.rs
 │   │   │   ├── guard.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── orchestration.rs
@@ -4108,6 +4112,8 @@ src/
 │   │   │   └── tests.rs
 │   │   ├── runtime_marker/
 │   │   │   └── tests.rs
+│   │   ├── unplaced/
+│   │   │   └── placed.rs
 │   │   ├── clear_epoch.rs
 │   │   ├── codex_resume.rs
 │   │   ├── owner_port.rs
@@ -4481,6 +4487,8 @@ src/
 │   │   │   │   ├── spawn.rs
 │   │   │   │   ├── spawn_real_tests.rs
 │   │   │   │   └── spawn_tests.rs
+│   │   │   ├── launch_host_tests/
+│   │   │   │   └── command_tests.rs
 │   │   │   ├── managed_config/
 │   │   │   │   ├── maintenance.rs
 │   │   │   │   ├── maintenance_tests.rs
@@ -4534,6 +4542,8 @@ src/
 │   │   │   │   ├── witness_codec.rs
 │   │   │   │   ├── writer_compat.rs
 │   │   │   │   └── writer_compat_tests.rs
+│   │   │   ├── unplaced_rig_tests/
+│   │   │   │   └── placed_tests.rs
 │   │   │   ├── autostart.rs
 │   │   │   ├── autostart_real_tests.rs
 │   │   │   ├── autostart_tests.rs

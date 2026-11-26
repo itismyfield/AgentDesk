@@ -1,5 +1,4 @@
 use super::*;
-use crate::config::session_hosts::EndpointMode;
 use crate::db::dispatched_sessions::hosted_execution::{HostedObservation, retire_pg};
 use crate::services::herdr_launch::retire_own_pending;
 use crate::services::session_host::HostPresence;
@@ -81,22 +80,21 @@ async fn observe(
     location: &HostedLocation,
     created: SystemTime,
 ) -> Result<(ServerWitness, Plan, HostPresence), String> {
-    let saved = match target.host.mode(target.endpoint) {
-        EndpointMode::LegacyDedicated => None,
-        EndpointMode::UserDefault => {
-            let grant = target
-                .host
-                .grants()
-                .load(target.endpoint, target.nonce)
-                .await?
-                .ok_or("pending launch grant missing")?;
-            Some(
-                grant
-                    .witness_for(target.endpoint, target.nonce)
-                    .map_err(|why| format!("pending grant: {why:?}"))?
-                    .clone(),
-            )
-        }
+    let saved = if target.host.uses_launch_grants(target.endpoint) {
+        let grant = target
+            .host
+            .grants()
+            .load(target.endpoint, target.nonce)
+            .await?
+            .ok_or("pending launch grant missing")?;
+        Some(
+            grant
+                .witness_for(target.endpoint, target.nonce)
+                .map_err(|why| format!("pending grant: {why:?}"))?
+                .clone(),
+        )
+    } else {
+        None
     };
     let (endpoint, owner, nonce, pane) = (
         target.endpoint.clone(),

@@ -173,6 +173,9 @@ pub(crate) struct EvidenceProbe {
 /// Herdr calls of one launch. They run on a blocking thread with no DB transaction open.
 pub(crate) trait HerdrLaunchHost: Send + Sync {
     fn mode(&self, endpoint: &HerdrLaunchEndpoint) -> EndpointMode;
+    fn uses_launch_grants(&self, endpoint: &HerdrLaunchEndpoint) -> bool {
+        self.mode(endpoint) == EndpointMode::UserDefault
+    }
     fn create_permit<'a>(&'a self, _: &'a HerdrLaunchEndpoint) -> PermitFuture<'a> {
         Box::pin(async { Err("user-default policy source unavailable".into()) })
     }
@@ -453,8 +456,8 @@ pub(crate) async fn launch_herdr_session(
     let launching =
         clear_epoch::Launching::for_launch(&launch.owner).map_err(HerdrLaunchError::Prepare)?;
     let endpoint = admit(launch.endpoint.as_ref())?.clone();
-    let mode = host.mode(&endpoint);
-    let admitted = if mode == EndpointMode::LegacyDedicated {
+    let uses_launch_grants = host.uses_launch_grants(&endpoint);
+    let admitted = if !uses_launch_grants {
         Some(
             restore_off_witness(&host, &endpoint)
                 .await
@@ -521,7 +524,7 @@ pub(crate) async fn launch_herdr_session(
         HostedRecord::Known(record) => return Err(HerdrLaunchError::Occupied(Some(record.state))),
         HostedRecord::Unknown(_) => return Err(HerdrLaunchError::Occupied(None)),
     }
-    let create_permit = if mode == EndpointMode::UserDefault {
+    let create_permit = if uses_launch_grants {
         Some(
             host.create_permit(&endpoint)
                 .await

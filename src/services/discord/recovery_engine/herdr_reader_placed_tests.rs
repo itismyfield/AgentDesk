@@ -138,9 +138,9 @@ fn placed_recovery(snapshot: Snapshot) {
         !matches!(snapshot, Snapshot::ReplacedUserDefault),
         "the grant gate precedes the snapshot",
     );
-    assert!(!requests.iter().any(|request| matches!(
+    assert!(requests.iter().all(|request| matches!(
         request["method"].as_str(),
-        Some("pane.close" | "pane.send_input" | "workspace.create")
+        Some("session.snapshot" | "pane.process_info" | "ping")
     )));
     runtime.block_on(async {
         pool.close().await;
