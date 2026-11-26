@@ -147,11 +147,12 @@ async fn capture_and_deliver(actor: &mut Host) {
 #[tokio::test(start_paused = true)]
 async fn absorbed_human_command_posts_one_writer_notice_across_restart() {
     let _turns = TURNS.lock().await;
-    let _guard = crate::config::TestRuntimeRootGuard::new();
-    let runtime = tempfile::tempdir().unwrap();
-    let path = runtime.path().join("native.jsonl");
+    // The hand-off check reads the migration record under the process runtime root.
+    let guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = guard.path();
+    let path = runtime.join("native.jsonl");
     std::fs::write(&path, b"").unwrap();
-    let (o, _binding) = begin(runtime.path(), &path, "absorbed-notice-pane");
+    let (o, _binding) = begin(runtime, &path, "absorbed-notice-pane");
     let port = Arc::new(Port::default());
     let _confirmed = TestConfirmation::new(CHANNEL);
     let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
