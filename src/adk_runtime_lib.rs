@@ -196,6 +196,7 @@ pub mod services {
         pub mod tui_task_card;
 
         pub mod outbound {
+            pub mod image_format;
             pub mod notification_policy;
         }
 

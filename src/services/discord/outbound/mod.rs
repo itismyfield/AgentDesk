@@ -13,7 +13,7 @@ pub(crate) mod decision;
 pub(crate) mod delivery;
 pub(in crate::services::discord) mod delivery_frontier_probe;
 pub(in crate::services::discord) mod delivery_record; // #3089 B0
-pub(crate) mod image_format;
+pub(crate) use adk_runtime::services::discord::outbound::image_format;
 #[cfg(test)]
 mod image_format_tests;
 pub(crate) mod manual_delivery;
