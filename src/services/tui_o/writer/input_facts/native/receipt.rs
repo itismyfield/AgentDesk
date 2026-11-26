@@ -84,6 +84,14 @@ pub(super) fn candidates(
     facts: &[&Fact],
     registrations: &[Registration],
 ) -> Vec<MembershipReceipt> {
+    let eligible: Vec<_> = registrations.iter().filter(|r| !r.not_sent).collect();
+    if eligible.is_empty() {
+        return Vec::new();
+    }
+    let confirmed_rows: std::collections::HashSet<_> = registrations
+        .iter()
+        .flat_map(|r| r.receipts.iter())
+        .collect();
     let mut result = Vec::new();
     let mut rows = std::collections::HashMap::new();
     let mut duplicates = std::collections::HashSet::new();
@@ -102,13 +110,12 @@ pub(super) fn candidates(
         if !matches!(fact.kind.as_str(), "user" | "command") {
             continue;
         }
-        if duplicates.contains(&fact.row)
-            || registrations.iter().any(|r| r.receipts.contains(&fact.row))
-        {
+        if duplicates.contains(&fact.row) || confirmed_rows.contains(&fact.row) {
             continue;
         }
-        let owners: Vec<_> = registrations
+        let owners: Vec<_> = eligible
             .iter()
+            .copied()
             .filter(|r| {
                 fact.hashes.contains(&r.exact_frame_hash)
                     && (r.ticket.source.is_none()
@@ -187,6 +194,21 @@ mod tests {
         };
         (guard, f, binding)
     }
+    #[test]
+    fn not_sent_is_classified_without_a_membership_receipt_candidate() {
+        let (_guard, f, binding) = fixture();
+        let row =
+            json!({"type":"user","uuid":"same-body","message":{"content":"한국어 원본 입력"}});
+        let line = serde_json::to_vec(&row).unwrap();
+        let fact = read(&row, &line, (0, line.len() as u64 + 1)).unwrap();
+        let view = || f.history.native_classification_registrations().unwrap();
+        assert_eq!(candidates(&binding, &[&fact], &view()).len(), 1);
+        f.history
+            .try_native_not_sent("native-fixture", &f.ticket)
+            .unwrap();
+        assert!(candidates(&binding, &[&fact], &view()).is_empty());
+    }
+
     #[test]
     fn native_8148_receipt_compaction_markers_are_not_delivery() {
         let (_guard, f, binding) = fixture();

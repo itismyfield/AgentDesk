@@ -74,7 +74,8 @@ impl Registry {
         namespace: &str,
         ticket: &Ticket,
     ) -> Result<Settlement, String> {
-        self.try_control_transaction(|snapshot| {
+        self.try_with_transaction_cache(|cache, _| {
+            let snapshot = cache.state().ok_or("history cache unavailable")?;
             let (registration, _) = snapshot
                 .locate(namespace, &ticket.key)
                 .ok_or("native registration missing")?;
@@ -86,6 +87,8 @@ impl Registry {
             if current.ticket != *ticket {
                 return Err("native settlement ticket mismatch".into());
             }
+            // A different process may have renamed this file without confirming the directory.
+            self.confirm_native_durability()?;
             Ok(current.clone())
         })
     }
@@ -262,6 +265,46 @@ impl Registry {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.try_with_transaction_cache(|cached, pending| {
+            let context = AtomicWriteContext::new("injected_frames_v2");
+            let state = cached.state_mut().ok_or("history cache unavailable")?;
+            let encoded = apply(state).and_then(|result| {
+                if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err("history encoding failed".to_string());
+                }
+                Ok((result, state.encode()?))
+            });
+            let (result, candidate) = match encoded {
+                Ok(value) => value,
+                Err(error) => {
+                    cached.clear();
+                    return Err(error);
+                }
+            };
+            if cached.raw() == Some(candidate.as_str()) {
+                self.confirm_native_durability()?;
+                return Ok(result);
+            }
+            match durable_publish::critical_publish_status(&self.path, &candidate, context) {
+                Ok(FlushStatus::Flushed) => {
+                    cached.published(candidate)?;
+                    Ok(result)
+                }
+                status => {
+                    let old = cached.take_raw();
+                    if status.is_ok() {
+                        *pending = old.map(|raw| (raw, candidate));
+                    }
+                    Err("history publication unconfirmed; preserve registration".into())
+                }
+            }
+        })
+    }
+
+    fn try_with_transaction_cache<T>(
+        &self,
+        apply: impl FnOnce(&mut read_stamp::Cache, &mut PendingPublication) -> Result<T, String>,
+    ) -> Result<T, String> {
         let mut cached = try_mutex(&self.cached, CACHE_BUSY)?;
         std::fs::create_dir_all(self.path.parent().ok_or("history parent missing")?)
             .map_err(|e| e.to_string())?;
@@ -273,65 +316,21 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.try_lock().map_err(|_| HISTORY_BUSY)?;
-        let raw = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => migration::MISSING.into(),
-            Err(e) => return Err(e.to_string()),
-        };
-        let context = || AtomicWriteContext::new("injected_frames_v2");
         let mut pending = try_mutex(&self.pending, PUBLICATION_BUSY)?;
-        if let Some((old, candidate)) = pending.as_ref() {
-            if raw == *candidate {
-                if durable_publish::retry_published_status(&self.path, context())
-                    != FlushStatus::Flushed
-                {
-                    return Err("native control candidate durability unconfirmed".into());
-                }
-            } else if raw != *old {
-                return Err(
-                    "history changed after an unconfirmed publication; preserve both".into(),
-                );
-            }
-            *pending = None;
+        self.refresh_transaction_cache(
+            &mut cached,
+            &mut pending,
+            "native control candidate durability unconfirmed",
+        )?;
+        apply(&mut cached, &mut pending)
+    }
+
+    fn confirm_native_durability(&self) -> Result<(), String> {
+        let context = AtomicWriteContext::new("injected_frames_v2");
+        if durable_publish::retry_published_status(&self.path, context) != FlushStatus::Flushed {
+            return Err("native control durability unconfirmed".into());
         }
-        if cached.raw() != Some(raw.as_str()) {
-            cached.replace(raw.clone(), migration::restore(&raw)?);
-        }
-        let state = cached.state_mut().ok_or("history cache unavailable")?;
-        let encoded = apply(state).and_then(|result| {
-            if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err("history encoding failed".to_string());
-            }
-            Ok((result, state.encode()?))
-        });
-        let (result, candidate) = match encoded {
-            Ok(value) => value,
-            Err(error) => {
-                cached.clear();
-                return Err(error);
-            }
-        };
-        if candidate == raw {
-            if durable_publish::retry_published_status(&self.path, context())
-                != FlushStatus::Flushed
-            {
-                return Err("native control durability unconfirmed".into());
-            }
-            return Ok(result);
-        }
-        match durable_publish::critical_publish_status(&self.path, &candidate, context()) {
-            Ok(FlushStatus::Flushed) => {
-                cached.published(candidate)?;
-                Ok(result)
-            }
-            status => {
-                cached.clear();
-                if status.is_ok() {
-                    *pending = Some((raw, candidate));
-                }
-                Err("history publication unconfirmed; preserve registration".into())
-            }
-        }
+        Ok(())
     }
 }
 
