@@ -96,6 +96,10 @@ pub(crate) fn admit_notice<R>(
     if floored {
         return exclude(piece, store, "input_notice_migration_floor");
     }
+    let command_row_uuid = evidence.command_row_uuid();
+    let receipt_uuid = command_row_uuid
+        .as_deref()
+        .unwrap_or(&piece.unit_key.native_key);
     tc::try_with_tmux_source_authority(&origin.logical_session, |_| {
         let events = p5::records_strict(store.init().channel)
             .map_err(|error| withheld(error.to_string()))?
@@ -110,22 +114,22 @@ pub(crate) fn admit_notice<R>(
             "claude",
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(&piece.unit_key.native_key),
+            Some(receipt_uuid),
         )
         .map_err(withheld)?
         {
             ObservedAttempt::Known(_) => return exclude(piece, store, "input_notice_source"),
-            ObservedAttempt::Pending => match owners
-                .map(|owners| owners.decision(origin, &piece.unit_key.native_key, &prompt))
-            {
-                Some(history::notice_owner::Decision::Owned) => {
-                    return exclude(piece, store, "input_notice_source");
+            ObservedAttempt::Pending => {
+                match owners.map(|owners| owners.decision(origin, receipt_uuid, &prompt)) {
+                    Some(history::notice_owner::Decision::Owned) => {
+                        return exclude(piece, store, "input_notice_source");
+                    }
+                    Some(history::notice_owner::Decision::Unowned) => {}
+                    Some(history::notice_owner::Decision::Pending(_)) | None => {
+                        return Err(NoticeRefusal::OwnershipPending);
+                    }
                 }
-                Some(history::notice_owner::Decision::Unowned) => {}
-                Some(history::notice_owner::Decision::Pending(_)) | None => {
-                    return Err(NoticeRefusal::OwnershipPending);
-                }
-            },
+            }
             ObservedAttempt::None => {}
         }
         match crate::services::session_host::thread_host::current_execution_cached(

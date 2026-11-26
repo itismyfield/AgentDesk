@@ -610,6 +610,39 @@ async fn notice_owner_v2_exact_receipt_settles_without_current_native_file() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn queued_command_receipt_excludes_the_notice_by_original_input_id() {
+    let c = Case::new("queued-command-receipt");
+    let frame = c.frame();
+    let (registry, key) = c.v2(&frame, 8820, false);
+    let mut actor = c.open();
+    let command = json!({
+        "type": "attachment",
+        "uuid": "physical-command",
+        "sessionId": "native",
+        "attachment": {
+            "type": "queued_command",
+            "commandMode": "prompt",
+            "origin": {"kind": "human"},
+            "source_uuid": "original-input",
+            "prompt": frame
+        }
+    });
+    append(&c.path, format!("{command}\n").as_bytes());
+    let fresh = actor.read_sources_for_test();
+    assert_eq!(notice_evidence(&mut actor, &input_key("original-input")), 1);
+    assert_eq!(
+        registry.receipt(
+            NAMESPACE,
+            &key,
+            (&c.path, 0, "command", Some("physical-command"), &frame)
+        ),
+        Some(true)
+    );
+    actor.prepare_notices_for_test(&fresh).await;
+    c.excluded(&mut actor, "original-input");
+}
+
+#[tokio::test(start_paused = true)]
 async fn registered_headless_routine_input_settles_excluded() {
     let c = Case::new("routine");
     let frame = "[User: routine (ID: 1)]\nroutine input";

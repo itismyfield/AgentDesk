@@ -160,13 +160,30 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
     Some((prompt, entry_id))
 }
 
-/// What the tui_o writer announces off a native row: a typed input, or with the flag set a
-/// scheduled fire's own row. The idle scanner keeps to the shared extraction, which drops it.
-pub(crate) fn extract_claude_writer_input_with_entry_id(
-    json: &Value,
-) -> Option<(String, Option<String>, bool)> {
-    if let Some((prompt, entry_id)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
-        return Some((prompt, entry_id, false));
+pub(crate) struct ClaudeWriterInput {
+    pub(crate) prompt: String,
+    pub(crate) uuid: Option<String>,
+    pub(crate) command_row_uuid: Option<String>,
+    pub(crate) scheduled: bool,
+}
+
+pub(crate) fn may_be_claude_queued_command(raw: &[u8]) -> bool {
+    let token = b"\"queued_command\"";
+    raw.windows(token.len()).any(|window| window == token)
+}
+
+/// A native input the writer can announce. Idle scanning still uses the user-only extractor.
+pub(crate) fn extract_claude_writer_input_with_entry_id(json: &Value) -> Option<ClaudeWriterInput> {
+    if json["type"] == "attachment" {
+        return claude_queued_command_input(json);
+    }
+    if let Some((prompt, uuid)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
+        return Some(ClaudeWriterInput {
+            prompt,
+            uuid,
+            command_row_uuid: None,
+            scheduled: false,
+        });
     }
     // The shared extraction drops every `isMeta` row; the writer takes back only a fire's own.
     let scheduled_fire = json.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -183,8 +200,39 @@ pub(crate) fn extract_claude_writer_input_with_entry_id(
         return None;
     }
     let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
-    let entry_id = extract_claude_transcript_entry_id(json, message);
-    Some((prompt, entry_id, true))
+    Some(ClaudeWriterInput {
+        prompt,
+        uuid: extract_claude_transcript_entry_id(json, message),
+        command_row_uuid: None,
+        scheduled: true,
+    })
+}
+
+fn claude_queued_command_input(json: &Value) -> Option<ClaudeWriterInput> {
+    let command = json.get("attachment")?;
+    if command["type"] != "queued_command"
+        || command["commandMode"] != "prompt"
+        || command["origin"]["kind"] != "human"
+        || json["isMeta"] == true
+        || json["isSidechain"] == true
+        || crate::services::tui_o::shadow::identity::record_is_compact_summary(json)
+    {
+        return None;
+    }
+    let uuid = command["source_uuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let row = json["uuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let prompt = reject_synthetic_claude_user_prompt(non_empty(command["prompt"].as_str()?)?)?;
+    Some(ClaudeWriterInput {
+        prompt,
+        // The queue's command UUID names the input. The attachment UUID names its receipt row.
+        uuid: Some(uuid.into()),
+        command_row_uuid: Some(row.into()),
+        scheduled: false,
+    })
 }
 
 /// #3540: pull the stable entry identity for a Claude transcript `user` entry.

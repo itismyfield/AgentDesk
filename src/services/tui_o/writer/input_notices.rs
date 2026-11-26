@@ -19,6 +19,7 @@ use crate::services::tui_o::shadow::{
     CapturedRecord, ShadowProvider, SourceRange, UnitKey, UnitKind,
 };
 use crate::services::tui_prompt_dedupe;
+pub(crate) use crate::services::tui_prompt_dedupe::ClaudeWriterInput as NativeInput;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoticeOrigin {
@@ -66,23 +67,8 @@ pub(crate) fn discord_input(prompt: &str) -> bool {
     tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
 }
 
-/// A native row the writer may announce.
-pub(crate) struct NativeInput {
-    pub prompt: String,
-    pub uuid: Option<String>,
-    /// A scheduled-task fire, which the shared extraction drops as `isMeta`.
-    pub scheduled: bool,
-}
-
-/// The writer's own reading of a native row: a typed input, or a scheduled fire's row.
 pub(crate) fn native_input(row: &serde_json::Value) -> Option<NativeInput> {
-    let (prompt, uuid, scheduled) =
-        tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)?;
-    Some(NativeInput {
-        prompt,
-        uuid,
-        scheduled,
-    })
+    tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)
 }
 
 impl NativeInput {
@@ -105,14 +91,15 @@ impl NativeInput {
     }
 }
 
-/// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
-fn may_be_user(line: &[u8]) -> bool {
+/// These native rows carry a type token. Other rows can skip the notice parse.
+fn may_be_input(line: &[u8]) -> bool {
     line.windows(6).any(|window| window == b"\"user\"")
+        || tui_prompt_dedupe::may_be_claude_queued_command(line)
 }
 
 /// Only a row that may become a notice needs its binding origin, which reads the whole binding log.
 pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
-    may_be_user(&record.line)
+    may_be_input(&record.line)
         && serde_json::from_slice(&record.line)
             .ok()
             .and_then(|value| native_input(&value))
@@ -153,7 +140,7 @@ impl Projection {
         record: &CapturedRecord,
         origin: Result<NoticeOrigin, String>,
     ) -> Result<Option<PieceWork>, String> {
-        if !self.enabled || provider != ShadowProvider::Claude || !may_be_user(&record.line) {
+        if !self.enabled || provider != ShadowProvider::Claude || !may_be_input(&record.line) {
             return Ok(None);
         }
         let value = serde_json::from_slice(&record.line)
@@ -167,7 +154,12 @@ impl Projection {
         let Some(payload) = input.notice() else {
             return Ok(None);
         };
-        let NativeInput { prompt, uuid, .. } = input;
+        let NativeInput {
+            prompt,
+            uuid,
+            command_row_uuid,
+            ..
+        } = input;
         let native_key = uuid.ok_or("input notice has no native user UUID")?;
         let origin = origin?;
         if origin.record.start != record.start
@@ -182,7 +174,7 @@ impl Projection {
             "claude",
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(&native_key),
+            Some(command_row_uuid.as_deref().unwrap_or(&native_key)),
         )? {
             ObservedAttempt::Known(_) => return Ok(None),
             // Unconfirmed ownership is kept as evidence and debt until a receipt decides it.

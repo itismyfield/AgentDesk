@@ -389,6 +389,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.defer_notice(id, "migration_unresolved");
                 continue;
             }
+            let command_row_uuid = evidence.command_row_uuid();
             let (Some(unit_key), Some(payload), Some(origin)) =
                 (evidence.unit_key, evidence.payload, evidence.origin)
             else {
@@ -418,8 +419,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     return;
                 }
                 Err(NoticeRefusal::OwnershipPending) => {
+                    let receipt_uuid = command_row_uuid
+                        .as_deref()
+                        .unwrap_or(&piece.unit_key.native_key);
                     let reason = match self.writer.notice_owners.decision(piece.notice_origin.as_deref().unwrap(),
-                        &piece.unit_key.native_key, evidence.prompt.as_deref().unwrap_or("")) {
+                        receipt_uuid, evidence.prompt.as_deref().unwrap_or("")) {
                         crate::services::tui_input::human_frame::history::notice_owner::Decision::Pending(reason) => reason,
                         _ => "ownership_pending",
                     };
