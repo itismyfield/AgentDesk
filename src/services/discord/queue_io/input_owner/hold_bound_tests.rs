@@ -106,10 +106,11 @@ impl Capture {
                 )
                 .is_none()
         );
-        let observed = observation(channel).unwrap();
+        let (observed, source) = observation(channel).unwrap();
         assert_eq!(observed.host, first.host);
         assert_eq!(observed.capture, first.capture);
         assert_eq!(observed.transcript, first.transcript);
+        assert!(source.is_none());
         SAMPLES.lock().unwrap().get_mut(&channel).unwrap().reads = 0;
         Self(channel)
     }
