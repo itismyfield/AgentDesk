@@ -12,7 +12,6 @@ use super::outbound::message::{
     DiscordOutboundMessage, OutboundOperation, OutboundReferenceContext, OutboundTarget,
 };
 use super::outbound::policy::DiscordOutboundPolicy;
-use super::outbound::result::DeliveryResult;
 use super::outbound::{
     DiscordOutboundClient, post_serenity_message_with_nonce, shared_outbound_deduper,
 };
@@ -23,6 +22,7 @@ use super::{
     queued_card_gate, rate_limit_wait, resolve_discord_bot_provider, validate_live_channel_routing,
 };
 use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
+use crate::domain::outbound::result::DeliveryResult;
 use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::provider::ProviderKind;
 use formatting::ReplaceLongMessageOutcome;

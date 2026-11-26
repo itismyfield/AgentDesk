@@ -316,7 +316,7 @@ pub(in crate::services::discord) fn build_long_message_attachment(
 fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     let footer = format!("\n\n{ATTACHMENT_FOOTER_PREFIX} ({} bytes)", text.len());
     let has_operational_alert_origin =
-        crate::services::discord::dispatch_policy::strip_operational_alert_origin(text).1;
+        crate::domain::outbound::alert_origin::strip_operational_alert_origin(text).1;
     let trimmed_summary = summary.and_then(|s| {
         let t = s.trim();
         (!t.is_empty()).then_some(t)
@@ -329,7 +329,7 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
     // generic notice instead of producing an over-limit inline message.
     let with_provenance = |inline: String| {
         if has_operational_alert_origin {
-            crate::services::discord::dispatch_policy::prepend_operational_alert_origin(&inline)
+            crate::domain::outbound::alert_origin::prepend_operational_alert_origin(&inline)
         } else {
             inline
         }
@@ -360,9 +360,10 @@ fn build_attachment_inline(text: &str, summary: Option<&str>) -> String {
 #[cfg(test)]
 mod attachment_delivery_tests {
     use super::build_long_message_attachment;
+    use crate::domain::outbound::alert_origin::prepend_operational_alert_origin;
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use crate::services::discord::dispatch_policy::{
-        has_non_turn_provenance, is_allowed_turn_sender, prepend_operational_alert_origin,
+        has_non_turn_provenance, is_allowed_turn_sender,
     };
 
     const ANNOUNCE_ID: u64 = 1_001;

@@ -5,10 +5,9 @@ use crate::services::discord::{SharedData, mailbox_snapshot};
 use crate::services::provider::{ProviderKind, session_prompt};
 use crate::utils::{format::expand_tilde_path, input_validation::validate_agent_id};
 
-use super::super::{
-    agentdesk_config::{default_prompt_path, shared_prompt_fallback_path},
-    settings::read_canon_prompt,
-};
+use super::super::agentdesk_config::shared_prompt_fallback_path;
+use super::super::settings::read_canon_prompt;
+use crate::services::channel_roles::config_projection::default_prompt_path;
 
 pub(crate) async fn current_session(
     shared: &SharedData,

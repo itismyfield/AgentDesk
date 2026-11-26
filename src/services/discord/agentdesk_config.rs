@@ -9,7 +9,7 @@ use super::settings::{
 };
 use crate::config::{AgentChannel, AgentChannelConfig, AgentChannels, AgentDef, Config};
 use crate::services::agent_identity::{identity_from_parts, identity_label};
-pub(crate) use crate::services::channel_roles::config_projection::default_prompt_path;
+use crate::services::channel_roles::config_projection::default_prompt_path;
 use crate::services::channel_roles::config_projection::{
     binding_provider, default_workspace, find_channel_binding, role_projection_from_channel,
 };

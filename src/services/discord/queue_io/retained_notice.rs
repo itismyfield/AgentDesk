@@ -43,7 +43,7 @@ pub(crate) async fn enqueue(
             "⚠️ 이 입력은 전달 여부를 확인하지 못해 원문을 보관했습니다. 다음 입력은 계속 처리합니다. 자동으로 다시 보내지 않습니다. 같은 내용을 새 메시지로 보내면 중복 실행될 수 있습니다."
         }
     };
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(body);
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         pool,
         OutboxMessage {
@@ -73,7 +73,7 @@ pub(crate) async fn draft_unproven(
     let stable = serde_json::to_vec(&(provider, channel, sources)).map_err(|e| e.to_string())?;
     let key = format!("draft-unproven:{:x}", Sha256::digest(stable));
     let body = "⚠️ 입력을 전달했지만 작성 중이던 초안은 보존 여부를 확인하지 못했습니다.";
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(body);
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         pool,
         OutboxMessage {
@@ -102,7 +102,7 @@ pub(crate) async fn carried_unverified_closed(
         serde_json::to_vec(&(provider, channel, turn, nonce)).map_err(|e| e.to_string())?;
     let key = format!("carried-unverified:{:x}", Sha256::digest(stable));
     let body = "⚠️ 재시작 전에 받은 입력이 처리됐는지 확인하지 못한 채 그 턴을 닫았습니다. 다음 입력은 계속 처리합니다. 답을 받지 못했다면 같은 내용을 다시 보내 주세요.";
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(body);
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         pool,
         OutboxMessage {
@@ -128,7 +128,7 @@ pub(crate) async fn input_hold(
 ) -> Result<i64, String> {
     let key = format!("input-hold:{nonce}:{hold}");
     let body = "⚠️ 앞선 입력이 입력창에 남아 있거나 전달 여부를 확인하지 못해 다음 메시지가 기다리고 있습니다. 입력창이 비거나 다시 읽히면 자동으로 이어집니다. 앞선 입력은 전달되지 않았을 수 있고 자동으로 다시 보내지 않습니다. 이어진 뒤에도 앞선 입력에 응답이 없으면 그 내용을 다시 보내 주세요.";
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin(body);
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(body);
     enqueue_outbox_pg_returning_id_with_persistent_dedupe(
         pool,
         OutboxMessage {
@@ -164,7 +164,9 @@ impl crate::services::turn_orchestrator::ChannelMailboxHandle {
 
 #[test]
 fn retained_notice_provenance_prevents_allowed_bot_turn_admission() {
-    let text = super::super::dispatch_policy::prepend_operational_alert_origin("retained original");
+    let text = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(
+        "retained original",
+    );
     assert!(crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&text));
 }
 

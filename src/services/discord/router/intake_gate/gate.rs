@@ -28,7 +28,7 @@
 //!    no second inline fallback, so a length rejection propagates unchanged.
 //!    No bounded fixture measures that path.
 //! 4. The marker is not an authentication boundary. It is plain message text
-//!    prepended by `dispatch_policy::prepend_operational_alert_origin`
+//!    prepended by `domain::outbound::alert_origin::prepend_operational_alert_origin`
 //!    (`src/services/discord/dispatch_policy.rs:59`), not signed metadata, so
 //!    any sender who can author in the channel can forge or omit it.
 
@@ -262,7 +262,7 @@ mod tests {
             true,
             "-# ✅ Background command done",
         ));
-        let marked = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+        let marked = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(
             "DISPATCH:watchdog alert",
         );
         assert!(!should_admit_turn_message(
@@ -293,7 +293,7 @@ mod tests {
             true,
             &incident
         ));
-        let notice = crate::services::discord::dispatch_policy::prepend_operational_alert_origin(
+        let notice = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(
             "루틴 quiet · 시간 초과 · 3회 연속 실패",
         );
         assert!(!should_admit_turn_message(

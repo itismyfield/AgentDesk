@@ -198,8 +198,9 @@ pub(super) fn routine_metadata_role_binding(
     // agents root and falls back to the legacy `<id>.prompt.md` layout, so
     // agents on either layout still get their role prompt for routine turns
     // (#3463). Falls back to the canonical IDENTITY.md path when unset.
-    let prompt_file = crate::services::discord::agentdesk_config::default_prompt_path(agent_id)
-        .unwrap_or_default();
+    let prompt_file =
+        crate::services::channel_roles::config_projection::default_prompt_path(agent_id)
+            .unwrap_or_default();
 
     Some(settings::RoleBinding {
         role_id: agent_id.to_string(),

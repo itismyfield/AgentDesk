@@ -23,11 +23,11 @@ use super::decision::{
 use super::message::{
     DiscordOutboundMessage, OutboundDedupKey, OutboundOperation, OutboundReferenceContext,
 };
-use super::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
 use super::transport::{
     OutboundDedupClaim, OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
 };
 use crate::domain::outbound::port::DiscordOutboundClient;
+use crate::domain::outbound::result::{DeliveredMessage, DeliveryResult, FallbackUsed};
 
 const DISCORD_EMPTY_CONTENT_PLACEHOLDER: &str = "\u{200B}";
 

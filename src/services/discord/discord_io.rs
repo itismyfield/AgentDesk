@@ -1,7 +1,7 @@
 use super::*;
+use crate::domain::outbound::result::FallbackUsed;
 use crate::services::discord::outbound::delivery::{deliver_outbound, first_raw_message_id};
 use crate::services::discord::outbound::message::OutboundTarget;
-use crate::services::discord::outbound::result::FallbackUsed;
 use crate::services::discord::outbound::{
     DeliveryResult, DiscordOutboundMessage, DiscordOutboundPolicy, HttpOutboundClient,
     shared_outbound_deduper,
