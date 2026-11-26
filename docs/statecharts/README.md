@@ -67,7 +67,8 @@ Open the generated index alongside this README for working relative links. The P
 contracts jobs publish the full tables and an index change summary as an artifact named `statechart-index-*`.
 
 The [Q-P3 consent row](index.d/051-intake-consent-parent-endpoint.md) checks consent for an already held
-child original against the parent's endpoint, including retry, receipt replay and exact custody.
+child original against the parent's endpoint, including retry, live owner validation, receipt replay,
+eventual exact release, and clear by source generation.
 
 The [clear-authorities integration row](index.d/650-input-single-path-clear-authorities.md) records the
 historical **41ace S2-before** public-Ready/invalid-certificate scenario and DualCoupled

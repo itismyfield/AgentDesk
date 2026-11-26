@@ -7,20 +7,30 @@ stateDiagram-v2
   s2: retry
   s3: accepted
   s4: Applied, no originals released
-  s5: Applied receipt after restart
-  s6: Applied, one original released
-  s7: Both originals released
+  s5: Applied, one original cleared
+  s6: Applied receipt after restart
+  s7: Applied, one original released
+  s8: Remaining original released after clear
+  s9: Both originals released
   [*] --> s0
   s0 --> s1: post card on child
   s0 --> s2: card needs retry
   s1 --> s3: owner approves the exact card
   s2 --> s1: owner retries from an original's channel
   s3 --> s4: apply once on parent endpoint
-  s4 --> s5: restart with the durable receipt
-  s4 --> s6: release one stored original
-  s5 --> s4: replay the receipt
-  s6 --> s5: restart with the durable receipt
-  s6 --> s7: release one stored original
-  s5 --> s6: replay the receipt
-  s7 --> s5: restart with the durable receipt
-  s5 --> s7: replay the receipt
+  s3 --> s5: apply once on parent endpoint
+  s4 --> s5: discard the cleared original
+  s4 --> s6: restart with the durable receipt
+  s4 --> s7: release one stored original
+  s5 --> s6: restart with the durable receipt
+  s5 --> s8: release one stored original
+  s6 --> s4: replay the receipt
+  s7 --> s6: restart with the durable receipt
+  s7 --> s9: release one stored original
+  s7 --> s8: discard the cleared original
+  s6 --> s5: replay the receipt
+  s6 --> s7: replay the receipt
+  s8 --> s6: restart with the durable receipt
+  s9 --> s6: restart with the durable receipt
+  s6 --> s8: replay the receipt
+  s6 --> s9: replay the receipt

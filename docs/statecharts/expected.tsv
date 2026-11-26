@@ -1307,9 +1307,12 @@ intake-consent/IntakeConsentD1Public.cfg	IntakeConsent	NoUnauthorizedIssue,NoEff
 intake-consent/IntakeConsentForge.cfg	IntakeConsent	NoUnauthorizedIssue	-
 intake-consent/IntakeConsentOwnerOnly.cfg	IntakeConsent	NoStaleProofWrite	-
 intake-consent/IntakeConsentProposed.cfg	IntakeConsent	-	-
-intake-consent/IntakeConsentQp3Before.cfg	IntakeConsent	-	EffectEventuallyOne
+intake-consent/IntakeConsentQp3Before.cfg	IntakeConsent	-	EffectEventuallyOne,RetryEventuallyPosts
 intake-consent/IntakeConsentQp3Fixed.cfg	IntakeConsent	-	-
+intake-consent/IntakeConsentQp3MutClearGeneration.cfg	IntakeConsent	ClearPreservesUnmatched	-
+intake-consent/IntakeConsentQp3MutDuplicateRelease.cfg	IntakeConsent	OriginalReleaseAtMostOnce	-
 intake-consent/IntakeConsentQp3MutOwnEndpoint.cfg	IntakeConsent	-	EffectEventuallyOne
+intake-consent/IntakeConsentQp3MutOwnRoute.cfg	IntakeConsent	-	EffectEventuallyOne,OriginalEventuallySettled,RetryEventuallyPosts,LiveOwnerEventuallyApplies,AppliedEventuallyResumes
 intake-consent/IntakeConsentQp3MutReplayEffect.cfg	IntakeConsent	EffectAtMostOnce,ReplayAddsNoEffect	-
 intake-consent/IntakeConsentReuse.cfg	IntakeConsent	ProofConsumedOnce	-
 intake-consent/IntakeConsentScopeOpen.cfg	IntakeConsent	NoUnauthorizedIssue,NoEffectsThenRollback	-

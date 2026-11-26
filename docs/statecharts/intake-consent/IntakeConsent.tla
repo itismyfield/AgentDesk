@@ -5,7 +5,8 @@ EXTENDS Naturals
 CONSTANTS Boundary, Mutant, MaxClaims
 ASSUME Boundary \in {"current", "d1", "r2"}
 ASSUME Mutant \in {"none", "forge", "reuse", "stale", "bookkeeping", "owner-only", "open-key", "qp3-before",
-                  "qp3-own-endpoint", "qp3-reapply"}
+                  "qp3-own-endpoint", "qp3-reapply", "qp3-duplicate-release",
+                  "qp3-own-route", "qp3-broad-clear"}
 ASSUME MaxClaims \in 2..3
 Ids == 1..MaxClaims
 EmptyRow == [status |-> "pending", payload |-> "original", source |-> "original",
@@ -234,21 +235,33 @@ TransactionEventuallyEnds == \A i \in Ids : (s.a[i].pc \in {"wantLock", "ownerLo
 \* Card and custody protocol after a durable hold. The older Spec still
 \* checks the before-effects proof and CAS; this spec starts after that boundary.
 ParentEndpoint == "parent"
-Qp3Intents == [i \in {"child", "sibling"} |->
-    [channel |-> i, provider |-> "claude", source |-> <<i, 31>>,
-     generation |-> 7, ticket |-> <<i, 7>>]]
+Qp3Originals == {"child", "sibling"}
+Qp3Custody == Qp3Originals \cup {"newer", "foreign"}
+Qp3Intents == [i \in Qp3Custody |->
+    [channel |-> IF i = "sibling" THEN "sibling" ELSE "child",
+     provider |-> "claude", source |-> 31,
+     generation |-> IF i = "newer" THEN 8 ELSE 7,
+     endpoint |-> IF i = "foreign" THEN "foreign" ELSE ParentEndpoint,
+     ticket |-> i]]
 NoCard == [channel |-> "none", message |-> 0, nonce |-> 0]
 Qp3Card(n) == [channel |-> "child", message |-> 900 + n, nonce |-> n]
+Qp3RouteFaults == IF Mutant = "qp3-own-route"
+                  THEN {"retry", "recovery", "live-owner"} ELSE {"none"}
 Qp3Init ==
-    s = [phase |-> "held", endpoint |-> ParentEndpoint, card |-> NoCard,
-         intents |-> Qp3Intents, releases |-> [i \in DOMAIN Qp3Intents |-> 0],
-         effects |-> 0, effectsAtApply |-> 0,
-         restarted |-> FALSE, ready |-> TRUE, replays |-> 0]
+    \E fault \in Qp3RouteFaults :
+        s = [phase |-> "held", endpoint |-> ParentEndpoint, card |-> NoCard,
+             intents |-> Qp3Intents, releases |-> [i \in Qp3Custody |-> 0],
+             discarded |-> {}, effects |-> 0, effectsAtApply |-> 0,
+             restarted |-> FALSE, ready |-> TRUE, replays |-> 0,
+             routeFault |-> fault]
 
 Qp3Endpoint(channel) ==
     IF Mutant = "qp3-before"
     THEN IF channel = "child" THEN "none" ELSE "child-own"
     ELSE ParentEndpoint
+
+Qp3Route(stage, channel) ==
+    IF s.routeFault = stage THEN "child-own" ELSE Qp3Endpoint(channel)
 
 IssueCard ==
     /\ s.phase = "held"
@@ -262,9 +275,9 @@ CardSendFailed ==
 Retry(channel, intent) ==
     /\ s.phase = "retry"
     /\ channel = intent.channel
-    /\ intent \in {s.intents[i] : i \in DOMAIN s.intents}
-    /\ Qp3Endpoint(channel) = s.endpoint
-    /\ Qp3Endpoint("child") = s.endpoint
+    /\ intent \in {s.intents[i] : i \in Qp3Originals}
+    /\ Qp3Route("retry", channel) = s.endpoint
+    /\ Qp3Route("retry", "child") = s.endpoint
     /\ s' = [s EXCEPT !.phase = "pending", !.card = Qp3Card(2)]
 
 CardMatches(card, actor, provider) ==
@@ -279,41 +292,65 @@ Decide(card, actor, provider) ==
 
 ApplyConsent ==
     /\ s.phase = "accepted"
+    /\ Qp3Route("live-owner", s.card.channel) = s.endpoint
     /\ s' = [s EXCEPT !.phase = "applied", !.effects = @ + 1,
                   !.effectsAtApply = s.effects + 1]
 
 RestartApplied ==
-    /\ s.phase = "applied" /\ ~s.restarted
+    /\ s.phase = "applied" /\ ~s.restarted /\ s.replays < 2
     /\ s' = [s EXCEPT !.restarted = TRUE, !.ready = FALSE]
 
 ReplayApplied ==
     /\ s.phase = "applied" /\ s.replays < 2
-    /\ Qp3Endpoint(s.card.channel) = s.endpoint
+    /\ Qp3Route("recovery", s.card.channel) = s.endpoint
     /\ s' = [s EXCEPT !.ready = TRUE, !.replays = @ + 1,
                   !.effects = IF Mutant = "qp3-reapply" THEN @ + 1 ELSE @]
 
 ReleaseOriginal(i) ==
     /\ s.phase = "applied" /\ s.ready
-    /\ s.intents[i] = Qp3Intents[i] /\ s.releases[i] = 0
-    /\ s' = [s EXCEPT !.releases[i] = 1]
+    /\ i \notin s.discarded /\ s.intents[i] = Qp3Intents[i]
+    /\ (s.releases[i] = 0
+        \/ (Mutant = "qp3-duplicate-release" /\ s.replays > 0 /\ s.releases[i] = 1))
+    /\ s' = [s EXCEPT !.releases[i] = @ + 1]
+
+ClearMatches(intent, request) ==
+    /\ intent.channel = request.channel /\ intent.provider = request.provider
+    /\ intent.source = request.source /\ intent.endpoint = request.endpoint
+    /\ (Mutant = "qp3-broad-clear" \/ intent.generation = request.generation)
+
+ClearOriginal ==
+    /\ s.discarded = {} /\ s.releases["child"] = 0
+    /\ s' = [s EXCEPT !.discarded =
+        {i \in Qp3Custody : s.releases[i] = 0 /\ ClearMatches(s.intents[i], Qp3Intents["child"])}]
 
 OwnerDecision == Decide(s.card, "owner", "claude")
 Qp3IssueOrRetry == IssueCard \/ Retry("child", Qp3Intents["child"])
 Qp3Next ==
     \/ IssueCard \/ CardSendFailed
-    \/ \E channel \in {"child", "sibling"}, i \in DOMAIN Qp3Intents :
+    \/ \E channel \in {"child", "sibling"}, i \in Qp3Originals :
         Retry(channel, Qp3Intents[i])
     \/ \E n \in {1, 2}, message \in {901, 902}, channel \in {"child", "sibling"},
           actor \in {"owner", "other"}, provider \in {"claude", "codex"} :
         Decide([channel |-> channel, message |-> message, nonce |-> n], actor, provider)
-    \/ ApplyConsent \/ RestartApplied \/ ReplayApplied
-    \/ \E i \in DOMAIN Qp3Intents : ReleaseOriginal(i)
+    \/ ApplyConsent \/ RestartApplied \/ ReplayApplied \/ ClearOriginal
+    \/ \E i \in Qp3Originals : ReleaseOriginal(i)
 
 SpecQp3 == Qp3Init /\ [][Qp3Next]_vars
     /\ WF_vars(Qp3IssueOrRetry) /\ WF_vars(OwnerDecision) /\ WF_vars(ApplyConsent)
+    /\ WF_vars(ReplayApplied)
+    /\ \A i \in Qp3Originals : WF_vars(ReleaseOriginal(i))
 
 EffectAtMostOnce == s.effects <= 1 /\ s.intents = Qp3Intents
-    /\ \A i \in DOMAIN s.releases : s.releases[i] \in 0..1
 EffectEventuallyOne == <>(s.effects = 1)
 ReplayAddsNoEffect == s.replays > 0 => s.effects = s.effectsAtApply
+OriginalReleaseAtMostOnce ==
+    /\ \A i \in Qp3Originals : s.releases[i] \in 0..1
+    /\ \A i \in Qp3Custody : i \notin Qp3Originals \/ i \in s.discarded => s.releases[i] = 0
+OriginalEventuallySettled ==
+    \A i \in Qp3Originals :
+        (s.phase = "applied") ~> (s.releases[i] >= 1 \/ i \in s.discarded)
+ClearPreservesUnmatched == s.discarded \subseteq {"child"}
+RetryEventuallyPosts == (s.phase = "retry") ~> (s.card.nonce > 0)
+LiveOwnerEventuallyApplies == (s.phase = "accepted") ~> (s.effects = 1)
+AppliedEventuallyResumes == (s.phase = "applied" /\ ~s.ready) ~> s.ready
 =============================================================================
