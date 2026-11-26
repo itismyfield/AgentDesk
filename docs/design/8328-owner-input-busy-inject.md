@@ -245,7 +245,7 @@ tui_o store에 채널별 durable journal `anchor_bindings`(새 child `src/servic
 - 키는 `(source id, native turn id)`다. source id는 dev·ino를 포함한 transcript 신원(`tui_o/shadow/mod.rs:50-`)이다.
 - 값: opener anchor(없으면 None), 합류 anchor 목록, 결합 근거(입력 행 range, nonce), 확정 시각.
 - tui_o store는 이미 채널별 ledger·spool을 durable하게 쓴다(`tui_o/store/ledger.rs`, `spool.rs`). 같은 디렉터리·같은 잠금 규칙을 따른다.
-- 게시 ledger의 `LedgerEntry::Prepared`(`tui_o/store/ledger.rs:65-76`)에 `reply_to: Option<u64>`를 선택 필드로 더한다. 재시작 뒤 같은 조각을 다시 보낼 때 같은 reply를 쓰고, 확인 스캔(`src/services/tui_o/writer/confirm.rs`)이 같은 조각으로 인정하게 하기 위해서다.
+- (S1-A 구현) `Prepared` 형식은 그대로 두고, `OutputOrigin`과 같은 방식의 새 항목 `LedgerEntry::ReplyTo{serial, anchor}`를 `Prepared` 바로 앞에 쓴다(`src/services/tui_o/store/ledger/reply_to.rs`). 결합 기록이 durable해진 뒤에만 쓴다. 로컬 재시도·operator resume은 이 값을 `ReplyRef::Fixed`로 다시 실어 같은 reply를 쓴다. `Prepared`에 선택 필드를 더하지 않은 이유: 시험 fixture의 `Prepared` 리터럴 약 75곳이 모두 바뀌기 때문이다(동작은 같다).
 
 ### 5.3 복구 kickoff 전 보류 (H10)
 
@@ -320,14 +320,21 @@ U3로 H5에 포함된다. 조각 S1-E에서 `restore_inflight.rs:2248` kickoff �
 
 순환 대기 해소: 첫 입력이 transcript를 만드는 경우 G1·E2·E5–E7 모두 키 전에 source를 묻지 않는다. 모델 `TargetFresh` GREEN, `CurrentFresh`·`RequireIdleObserverBeforeKey`·`RequireTranscriptFresh`·`PinSourceFirst` RED(`NoCircularWait`).
 
+**P2-1 (리뷰 i8328-design-5, S1-B가 닫는다).** 진입 관문을 지난 뒤에도 source를 다시 요구하는 사슬이 둘 있다.
+- Idle 전송: `src/services/discord/queue_io/input_owner/effect.rs:216-229` `idle_claude` → `src/services/claude_tui/input.rs:360-370` `send_warm_followup_owned` → `src/services/claude_tui/input/submission.rs:35-37`(`wait_for_prompt_ready`)·`:171-192`(`readiness::observe`·`reserve`). warm follow-up 준비 증명이 source 관찰에 기대면 G1을 고쳐도 여기서 키가 0이 된다.
+- Herdr 재시도: `src/services/claude_tui/host_input/busy/herdr.rs:41-44`(모달 보류의 probe) → `src/services/claude_tui/host_input/busy.rs:206-212` `probe`(`read.state == Busy || idle_verified`일 때만 `Screen::Ready`) → `src/services/discord/queue_io/input_owner/held_watch.rs:65-69` `verdict`·`:140-149`(Ready여야 Wake). `read()`가 source를 요구하므로(G2) source가 없으면 Ready가 되지 않고 보류가 풀리지 않는다.
+
+계약: **허용한 `pre_source` 입력의 전송·보류 해제에 source 생성이 다시 필수 조건으로 들어오지 않는다.** S1-B는 두 사슬이 G2의 `key_ready()`와 같은 검사(실행 세대·spawn nonce·출력 준비·모달 아님)로 판정하게 하고, 시험은 source 없는 Herdr·tmux 입력에서 전송 1·보류 해제 1을 본다.
+
 ### 5.6 같은 상태를 소비하는 진입점 (BindingIntent·source pin·receipt·anchor 결합)
 
 | 진입점 | 소비하는 상태 | S1 계약 |
 |---|---|---|
 | 키 전 `Producer::wrap` → `pin_source`(E2·E3) | BindingIntent 생성 | recorded 또는 지연 pin. 실패면 키 0, `release_unkeyed_source`(`native_binding.rs:134-160`)가 no-key proof로 정리 |
 | 늦은 결합 `retry_source_bindings`(`native_supply.rs:602`) | BindingIntent·selected | §5.5.3 단일 확정 → history binding → ACK |
-| J2 receipt `observe` → `port.inner.receipt`(`tui_o/writer/rotation/owe.rs:594-617`) | MembershipReceipt | 등록 ticket과 user 행을 잇는다. S1-A `reply_anchor`가 이 receipt의 ticket → V2 attempt의 anchor message id(`sources`, OI:124-127)를 쓴다 |
-| `anchor_bindings`·`Prepared.reply_to`(§5.2) | 결합 기록 | 게시·재게시가 같은 anchor를 쓴다 |
+| J2 receipt `observe` → `port.inner.receipt`(`tui_o/writer/rotation/owe.rs:594-617`) | MembershipReceipt | 등록 ticket과 user 행을 잇는다. receipt를 다 기록한 뒤 같은 poll에서 `settle_anchors`가 evidence 축약의 ticket→run 관계(`input_facts/native/projection/membership.rs`)로 run별 opener·합류를 다시 계산한다. anchor는 ticket `key.identity.primary`다 |
+| `anchor_bindings`·`LedgerEntry::ReplyTo`(§5.2) | 결합 기록 | 게시·재게시·로컬 재시도가 같은 anchor를 쓴다 |
+| Idle 전송 `idle_claude` → `send_warm_followup_owned` → `submission::send`, Herdr 재시도 `probe` → `held_watch::verdict`(§5.5.4 P2-1) | 키 허가·보류 해제 | 허용한 `pre_source` 입력의 전송·보류 해제에 source 생성이 다시 필수 조건으로 들어오지 않는다(S1-B) |
 | 부팅 `retry_source_bindings`, writer boot | BindingIntent·anchor_bindings | §8 |
 | HTTP Cancel·force Cancel(§9 A1a·A1b) | 키 뒤 BindingIntent | 키 뒤 Cancel이면 G6 규칙대로 결합하지 않는다. `awaiting_echo` HostTerminated/Cancelled 정산. 이미 결합된 답은 원래 anchor에 그대로 둔다 |
 | Herdr Terminate(A2) | BindingIntent·awaiting_echo | 실행 세대가 끝나 확정하지 않는다. retained 알림 |

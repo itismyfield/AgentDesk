@@ -20,6 +20,7 @@ pub(crate) mod local_retry;
 pub(crate) mod owed;
 pub mod pieces;
 pub mod progress;
+pub mod reply_anchor;
 // Test builds open it to the replay tests mounted in the discord-layer test host.
 #[cfg(not(any(test, feature = "test-support")))]
 mod replay;
@@ -141,6 +142,27 @@ pub trait DiscordPort: Send + Sync + 'static {
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let _ = kind;
         self.post_origin(channel, content, origin)
+    }
+
+    /// `post_unit` as a reply to `reply_to`; a port without references posts it plainly.
+    fn post_unit_reply(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+        reply_to: Option<u64>,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        let _ = reply_to;
+        self.post_unit(channel, content, origin, kind)
+    }
+
+    /// Marks an input confirmed to have joined a running turn; a port without reactions skips it.
+    fn mark_joined(&self, channel: u64, message: u64) -> impl Future<Output = ()> + Send + 'static {
+        let _ = (channel, message);
+        std::future::ready(())
     }
 
     /// One writer unit's image under its caption; a port without uploads sends nothing.

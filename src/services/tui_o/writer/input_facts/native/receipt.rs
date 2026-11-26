@@ -79,6 +79,19 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
         digest: format!("{:x}", digest.finalize()),
     })
 }
+/// More than one row of a kind after the ticket's offset carries its exact hash.
+pub(super) fn repeated(facts: &[&Fact], registration: &Registration) -> bool {
+    let offset = registration
+        .ticket
+        .source
+        .as_ref()
+        .map_or(u64::MAX, |s| s.offset);
+    ["user", "command", "enqueue"].iter().any(|kind| {
+        let same = |f: &&&Fact| f.kind == *kind && f.range.0 >= offset;
+        let hash = |f: &&&Fact| f.hashes.contains(&registration.exact_frame_hash);
+        facts.iter().filter(same).filter(hash).count() > 1
+    })
+}
 pub(super) fn candidates(
     binding: &SourceBinding,
     facts: &[&Fact],

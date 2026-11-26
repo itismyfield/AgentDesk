@@ -34,6 +34,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 mod notice_migration;
 #[path = "input_notices/retry.rs"]
 mod notice_retry;
+mod prepared;
 mod usage_footer;
 // Test seams for the writer tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
@@ -230,6 +231,7 @@ pub struct ChannelWriter<P, L, A> {
     repost_stops: Vec<watch::Receiver<bool>>,
     /// Shared receipts read at start; a receipted rejection or approval reads as settled.
     receipts: ReceiptOverlay,
+    reply_anchors: Option<super::reply_anchor::Anchors>,
 }
 
 /// Whether a re-post request may still leave: re-post on and the writer neither stopped nor gone.
@@ -290,6 +292,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             repost_live: RepostLive::default(),
             repost_stops: Vec::new(),
             receipts,
+            reply_anchors: None,
         };
         writer.exclude_stored_tool_results();
         let ledger = writer.store.ledger();
@@ -529,6 +532,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         if let Some(step) = self.exclude_tool_result(&piece.unit_key) {
             return step;
         }
+        let reply_to = match self.reply_for(piece).await {
+            Ok(reply_to) => reply_to,
+            Err(step) => return step,
+        };
         let (serial, anchor_id) = (
             self.store.ledger().next_serial(),
             self.store.ledger().anchor(),
@@ -564,15 +571,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                             epoch,
                             local_retry: local_retry.clone(),
                         };
-                        // Returning here comes before `port.post`, so this piece's POST was never created.
-                        if let Some(artifact) = &piece.output_origin {
-                            store
-                                .append_ledger(LedgerEntry::OutputOrigin {
-                                    serial,
-                                    artifact: artifact.clone(),
-                                })
-                                .map_err(|e| Refusal::Violation(format!("output origin: {e:?}")))?;
-                        }
+                        prepared::append_origins(store, serial, piece, reply_to)?;
                         store
                             .append_ledger(prepared())
                             .map_err(|error| Refusal::Store {
@@ -587,11 +586,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                                 "[tui_o] operator approval consumed by Prepared");
                         }
                         let running = posts.take().map(Running::start);
-                        let post = port.post_unit(
+                        let post = port.post_unit_reply(
                             channel,
                             piece.payload.clone(),
                             piece.output_origin.clone(),
                             piece.unit_key.kind,
+                            reply_to,
                         );
                         // `map` forwards each poll to the request; the count ends when it is ready or dropped.
                         let mut request: Request = match running {
@@ -893,15 +893,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
                 .as_ref()
                 .map(|posts| Running::start(Arc::clone(posts))),
         )
-    }
-
-    fn output_origin(
-        &self,
-        key: &crate::services::tui_o::repost::identity::PieceKey,
-    ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
-        let ledger = self.store.ledger();
-        let (serial, _) = ledger.latest_piece(key.unit(), key.piece_index())?;
-        ledger.output_origin(serial).cloned()
     }
 
     fn prepare(&mut self, epoch: u64, permit: &DispatchPermit) -> Result<(), String> {

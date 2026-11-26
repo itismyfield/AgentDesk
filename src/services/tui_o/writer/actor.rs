@@ -253,6 +253,9 @@ where
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
     }
+    if let Some(anchors) = sources.reply_anchors() {
+        writer.attach_reply_anchors(anchors);
+    }
     let owed = VecDeque::new();
     let ready = admission::owed_delivery_ready(writer.channel());
     let verified = ready.then(|| super::owed::OwedLog::new(writer.channel(), provider));
@@ -560,6 +563,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         index: piece.piece_index,
                         payload: piece.payload.clone(),
                         notice_origin: piece.notice_origin.clone(),
+                        reply: self
+                            .writer
+                            .store()
+                            .ledger()
+                            .reply_to(rejected)
+                            .map(super::reply_anchor::ReplyRef::Fixed),
                     },
                 )
             })

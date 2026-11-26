@@ -26,6 +26,7 @@ pub struct PieceWork {
     pub output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     pub notice_origin: Option<Box<super::input_notices::NoticeOrigin>>,
+    pub reply: Option<super::reply_anchor::ReplyRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,6 +122,15 @@ impl UnitDeriver {
         logical_session: impl Fn() -> Option<String>,
     ) -> Vec<Derived> {
         let mut derived = self.derive_with_session(record, version, logical_session);
+        let coord = super::reply_anchor::Coord {
+            source: source.clone(),
+            range: record.start..record.end,
+        };
+        for item in &mut derived {
+            if let Derived::Piece(piece) = item {
+                piece.reply = Some(super::reply_anchor::ReplyRef::At(coord.clone()));
+            }
+        }
         if self.notices.enabled() {
             match self
                 .notices
@@ -408,6 +418,7 @@ impl UnitDeriver {
                         index,
                         payload,
                         notice_origin: None,
+                        reply: None,
                     })
                 };
                 pieces.map(piece).collect()

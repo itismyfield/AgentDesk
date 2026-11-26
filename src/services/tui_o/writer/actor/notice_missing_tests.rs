@@ -8,6 +8,7 @@ fn piece(evidence: &NoticeEvidence) -> Derived {
         index: 0,
         payload: evidence.payload.clone().unwrap(),
         notice_origin: evidence.origin.clone(),
+        reply: None,
     })
 }
 

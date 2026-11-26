@@ -148,6 +148,7 @@ impl Fixture {
             index: 0,
             payload: crate::services::discord::input_notice_content(prompt).unwrap(),
             notice_origin: Some(Box::new(origin.clone())),
+            reply: None,
         };
         store
             .append_ledger(LedgerEntry::InputNotice {

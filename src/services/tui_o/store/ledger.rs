@@ -18,6 +18,7 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub mod input_notices;
+mod reply_to;
 // Test seams for the ledger notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
@@ -61,6 +62,11 @@ pub enum LedgerEntry {
     OutputOrigin {
         serial: u64,
         artifact: crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+    },
+    /// Written before the POST once its anchor binding is durable; the serial replies to `anchor`.
+    ReplyTo {
+        serial: u64,
+        anchor: u64,
     },
     Prepared {
         serial: u64,
@@ -233,6 +239,7 @@ pub struct LedgerState {
     budget_roots: BTreeSet<u64>,
     output_origins:
         BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    reply_tos: BTreeMap<u64, u64>,
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
@@ -508,6 +515,7 @@ impl LedgerState {
                 }
                 self.exact_evidence.push(*metadata);
             }
+            LedgerEntry::ReplyTo { serial, anchor } => self.replay_reply_to(serial, anchor),
             LedgerEntry::OutputOrigin { serial, artifact } => {
                 if serial != self.next_serial
                     || self.open_serial.is_some()

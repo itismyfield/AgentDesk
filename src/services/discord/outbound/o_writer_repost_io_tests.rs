@@ -807,6 +807,7 @@ mod settle_over_http {
             index: 0,
             payload,
             notice_origin: None,
+            reply: None,
         });
         let started = Instant::now();
         assert_eq!(writer.deliver(&piece).await, Step::Done);

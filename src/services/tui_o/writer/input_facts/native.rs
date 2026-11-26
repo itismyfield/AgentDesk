@@ -174,6 +174,7 @@ pub(crate) type Projection = projection::Projection;
 
 #[cfg(unix)]
 mod projection {
+    mod membership;
     use super::*;
     use crate::services::tui_o::shadow::capture::{
         MAX_PARTIAL_BYTES, PrefixConsumer, SourceCapture,

@@ -63,6 +63,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                         index: original.piece_index,
                         payload: original.payload.clone(),
                         notice_origin: original.notice_origin.clone(),
+                        reply: ledger
+                            .reply_to(rejected_serial)
+                            .map(super::super::reply_anchor::ReplyRef::Fixed),
                     },
                     Some(rejected_serial),
                 )

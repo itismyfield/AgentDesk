@@ -266,6 +266,7 @@ fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
         index: 0,
         payload: evidence.payload.unwrap(),
         notice_origin: evidence.origin,
+        reply: None,
     };
     actor
         .owed_mut_for_test()
@@ -639,6 +640,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
             index: 0,
             payload: "-# ⌨️ held".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
@@ -653,6 +655,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
                 index: 0,
                 payload: format!("answer-{pass}"),
                 notice_origin: None,
+                reply: None,
             },
         ));
         VISITS.with(|visits| visits.set((0, Some(2))));
@@ -871,6 +874,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             index: 0,
             payload: "-# ⌨️ open".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     actor.owed_mut_for_test().push_back(Derived::Piece(
@@ -885,6 +889,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             index: 0,
             payload: "later answer".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     actor.set_replay_deferred_for_test(true);

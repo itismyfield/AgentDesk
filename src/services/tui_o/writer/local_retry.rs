@@ -40,6 +40,9 @@ pub(crate) fn pending(ledger: &LedgerState) -> Option<Pending> {
                 index: root.piece_index,
                 payload: root.payload.clone(),
                 notice_origin: root.notice_origin.clone(),
+                reply: ledger
+                    .reply_to(serial)
+                    .map(super::reply_anchor::ReplyRef::Fixed),
             },
             due,
         })

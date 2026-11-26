@@ -276,6 +276,7 @@ pub(super) struct NativeSources {
     seeds: std::collections::HashMap<SourceId, observe_memo::Seed>,
     #[cfg(unix)]
     revision: u64,
+    anchors: super::super::reply_anchor::Anchors,
 }
 
 pub(super) fn open_native(
@@ -296,6 +297,7 @@ pub(super) fn open_native(
             cursor.captured_through,
             &cursor.prefix_hash,
         )?;
+        native.anchors.track(&cursor.source);
         native
             .seeds
             .insert(cursor.source.clone(), observe_memo::Seed::new(seed));
@@ -333,6 +335,29 @@ impl NativeSources {
 
 #[cfg(unix)]
 impl NativeSources {
+    /// Runs and their anchors for the source as analysed, once no receipt is left to record.
+    fn settle_anchors(
+        &self,
+        channel: u64,
+        source: &SourceId,
+        registrations: Vec<super::super::input_facts::native::Registration>,
+    ) {
+        use super::super::input_facts::native::registrations_fingerprint;
+        let Some(Ok(projection)) = self.seeds.get(source).map(|seed| seed.projection()) else {
+            return;
+        };
+        let registrations: Vec<_> = registrations
+            .into_iter()
+            .filter(|r| r.ticket.channel_id == channel)
+            .collect();
+        let Ok(fingerprint) = registrations_fingerprint(&registrations) else {
+            return;
+        };
+        let key = (projection.through(), fingerprint);
+        self.anchors
+            .settle(source, key, || projection.memberships(&registrations));
+    }
+
     fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
         if let Some(seed) = self.seeds.get_mut(source) {
             seed.append(record);
@@ -387,6 +412,11 @@ impl NativeSources {
 }
 
 impl<B: BindingEvents> Sources<B> {
+    /// The reply anchors this channel's native sources settle, when native inputs are read.
+    pub(crate) fn reply_anchors(&self) -> Option<super::super::reply_anchor::Anchors> {
+        self.native.as_ref().map(|native| native.anchors.clone())
+    }
+
     pub(crate) fn with_native_inputs(mut self, enabled: bool) -> Self {
         if enabled && self.provider == crate::services::tui_o::shadow::ShadowProvider::Claude {
             self.native = Some(NativeSources::default());
@@ -586,6 +616,7 @@ impl<B: BindingEvents> Sources<B> {
             let Some(native) = self.native.as_ref() else {
                 continue;
             };
+            let mut kept = snapshot.registrations.clone();
             let Ok((mut observed, mut barriers)) =
                 native.observe(self.channel, &source, &origin, snapshot, None)
             else {
@@ -621,6 +652,7 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
+                kept = snapshot.registrations.clone();
                 let Ok(fresh) = native.observe(self.channel, &source, &origin, snapshot, None)
                 else {
                     continue;
@@ -630,6 +662,7 @@ impl<B: BindingEvents> Sources<B> {
                     continue;
                 }
             }
+            native.settle_anchors(self.channel, &source, kept);
             for proof in &barriers {
                 let Some(target) = proof.ticket.source.as_ref().map(|s| &s.target) else {
                     continue;
