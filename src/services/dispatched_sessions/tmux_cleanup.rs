@@ -9,7 +9,6 @@ use serde_json::json;
 use crate::app_state::AppState;
 use crate::db::dispatched_sessions as dispatched_sessions_db;
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::tmux_turn_liveness::cleanup_host::CleanupHostRefusal;
 
 use super::{
     ProviderOutputEvidence, RawProviderTranscriptObservationMode,
@@ -115,8 +114,11 @@ pub(super) async fn kill_tmux_session_impl(
     let reason_is_idle_cleanup = reason_is_idle_cleanup_reason(reason);
     if let Err(refusal) = host {
         // The idle policy's Herdr row gets the idle end instead of a preserve alarm.
-        let idle_policy = reason_is_idle_cleanup && minimum_idle_minutes.is_some();
-        if idle_policy && refusal == CleanupHostRefusal::NotLegacyTmux {
+        #[cfg(unix)]
+        if reason_is_idle_cleanup
+            && minimum_idle_minutes.is_some()
+            && refusal == crate::services::tmux_turn_liveness::cleanup_host::CleanupHostRefusal::NotLegacyTmux
+        {
             let herdr = super::herdr_idle::herdr_idle_kill(state, pool, session_key, &tmux_name);
             if let Some(reply) = herdr.await {
                 return reply;

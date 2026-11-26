@@ -43,6 +43,7 @@ mod raw_alias_pg_tests;
 mod force_kill;
 #[cfg(unix)]
 mod herdr_idle;
+#[cfg(unix)]
 mod herdr_kill;
 mod hook;
 use force_kill::{Entry, force_kill_session_impl_with_reason_and_forwarding};
