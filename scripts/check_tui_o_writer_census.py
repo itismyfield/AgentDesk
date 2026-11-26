@@ -499,7 +499,7 @@ EXPECTED_GATES: dict[str, tuple[str, ...]] = {
     ),
     "src/services/discord/turn_bridge/watcher_handoff.rs": ("o_body_needs_bridge_terminal:peek",),
     "src/services/discord/turn_finalizer/watcher_backstop.rs": (
-        "watcher_backstop_turn_is_terminal:peek",
+        "watcher_backstop_check:peek",
     ),
     "src/services/herdr_launch.rs": ("o_owns_seeded:peek",),
     "src/services/tui_o/cutover.rs": (

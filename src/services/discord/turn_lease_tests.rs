@@ -8,6 +8,9 @@ use std::sync::atomic::Ordering;
 
 const PROVIDER: ProviderKind = ProviderKind::Codex;
 
+#[path = "turn_lease_observation_tests.rs"]
+mod observation;
+
 #[tokio::test]
 async fn committed_a_recovery_after_operator_release_cannot_cancel_claimed_b_r3() {
     with_isolated_runtime_root(|| async {
@@ -323,7 +326,10 @@ async fn operator_release_rejects_changed_identity_or_generation_without_effects
         let error = release_on(&shared, &PROVIDER, channel, request)
             .await
             .unwrap_err();
-        assert!(error.contains("differs from this episode"), "{error}");
+        assert!(
+            error.to_string().contains("differs from this episode"),
+            "{error}"
+        );
         assert!(Arc::ptr_eq(
             &token,
             &mailbox.snapshot().await.cancel_token.unwrap()
@@ -565,7 +571,10 @@ async fn unbound_message_id_lease_is_inspectable_and_refuses_release_without_eff
         )
         .await
         .unwrap_err();
-        assert!(error.contains("no bound message identity"), "{error}");
+        assert!(
+            error.to_string().contains("no bound message identity"),
+            "{error}"
+        );
         assert!(mailbox.snapshot().await.cancel_token.is_some());
         assert!(!token.is_completion_cleanup());
         assert!(!token.cancelled.load(Ordering::Acquire));
@@ -601,7 +610,9 @@ async fn restart_mode_row_still_refuses_operator_inspect_and_release() {
             .await
             .unwrap_err();
         assert!(
-            error.contains("protected by a planned restart or a rebind origin"),
+            error
+                .to_string()
+                .contains("protected by a planned restart or a rebind origin"),
             "{error}"
         );
         assert!(Arc::ptr_eq(
@@ -660,7 +671,9 @@ async fn rebind_origin_row_still_refuses_operator_inspect_and_release() {
             .await
             .unwrap_err();
         assert!(
-            error.contains("protected by a planned restart or a rebind origin"),
+            error
+                .to_string()
+                .contains("protected by a planned restart or a rebind origin"),
             "{error}"
         );
         assert!(Arc::ptr_eq(
@@ -721,13 +734,18 @@ async fn restart_mode_pinned_token_still_refuses_release_without_any_row() {
         let mut rx = turn_completion_events::subscribe_turn_completion_events(&shared);
         let inspect_error = identity(&shared, &PROVIDER, channel).await.unwrap_err();
         assert!(
-            inspect_error.contains("pinned by a planned restart"),
+            inspect_error
+                .to_string()
+                .contains("pinned by a planned restart"),
             "{inspect_error}"
         );
         let error = release_on(&shared, &PROVIDER, channel, request.clone())
             .await
             .unwrap_err();
-        assert!(error.contains("pinned by a planned restart"), "{error}");
+        assert!(
+            error.to_string().contains("pinned by a planned restart"),
+            "{error}"
+        );
         assert!(Arc::ptr_eq(
             &token,
             &mailbox.snapshot().await.cancel_token.unwrap()

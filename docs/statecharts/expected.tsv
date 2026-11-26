@@ -728,6 +728,11 @@ input-single-path/HumanHoldBoundTargetRowOnly.cfg	HumanHoldBound	-	-
 input-single-path/HumanHoldBoundTargetRowPane.cfg	HumanHoldBound	-	-
 input-single-path/HumanHoldBoundTargetRunLive.cfg	HumanHoldBound	-	-
 input-single-path/HumanHoldBoundTargetRunning.cfg	HumanHoldBound	-	-
+input-single-path/HerdrWatcherCompletionAfter.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionBefore.cfg	HerdrWatcherCompletion	NoSilentLoss	HeldEventuallyDelivered
+input-single-path/HerdrWatcherCompletionBoundaries.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionIgnoreIdentity.cfg	HerdrWatcherCompletion	ExactFrameAuthority	-
+input-single-path/HerdrWatcherCompletionRestart.cfg	HerdrWatcherCompletion	-	-
 input-single-path/I7651RestartAfter.cfg	I7651Restart	-	-
 input-single-path/I7651RestartBlindRetry.cfg	I7651Restart	ClosedNoticeWasDelivered,NoticeAtMostOnce	-
 input-single-path/I7651RestartDecisive.cfg	I7651Restart	-	-
