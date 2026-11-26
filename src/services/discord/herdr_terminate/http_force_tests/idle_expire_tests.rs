@@ -343,9 +343,12 @@ impl CodexHerdrPorts for Owed {
     }
 }
 
-/// The owner's next ordinary launch from the retired row, with `effort` as its owner holds it:
-/// it resumes `native` at the boundary the O cursor captured.
-fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, effort: Owed) {
+/// The owner's next ordinary launch from the retired row, with `effort` as its owner holds it.
+fn next_launch(
+    node: &Node,
+    rig: &herdr::P11TerminationRig,
+    effort: Owed,
+) -> crate::services::herdr_launch::HerdrLaunch {
     let ended = (node.shared.token_hash.as_str(), node.key.as_str());
     let record = rig.record_as(ended, herdr::HostedState::Retired, "codex");
     let row = HostedRecord::Known(record.clone());
@@ -374,7 +377,12 @@ fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, eff
         crate::services::discord::HERDR_OWNER_PORT,
     );
     let launch = crate::services::codex::herdr_turn::launch_of_for_test(&turn, root, &effort, port);
-    let launch = launch.expect("the next launch resumes");
+    launch.expect("the next launch starts")
+}
+
+/// That launch resumes `native` at the boundary the O cursor captured.
+fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, effort: Owed) {
+    let launch = next_launch(node, rig, effort);
     assert!(
         launch.resume,
         "an ordinary message after the idle end resumes"
@@ -384,6 +392,26 @@ fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, eff
         launch.resume_start.is_some(),
         "resumed at the captured boundary"
     );
+}
+
+/// The owner's `/clear`, then its next launch: a fresh session that never names `native`.
+async fn assert_clear_starts_fresh(node: &Node, rig: &herdr::P11TerminationRig, native: &str) {
+    let http = Arc::new(poise::serenity_prelude::Http::new(""));
+    let clear = crate::services::discord::commands::control::clear_channel_session_state;
+    let report = clear(
+        &http,
+        &node.shared,
+        &ProviderKind::Codex,
+        channel(),
+        "!clear",
+    );
+    report.await.unwrap();
+    let launch = next_launch(node, rig, owner_effort(node).await);
+    assert!(
+        !launch.resume,
+        "the next message after a clear starts fresh"
+    );
+    assert_ne!(launch.expected_native_session_id.as_deref(), Some(native));
 }
 
 /// Production adopts a local TUI channel's queue owner on its first input.
@@ -415,12 +443,13 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
         assert_eq!(reply["tmux_killed"], true, "{reply}");
         assert_eq!(node.effects(&rig).await.row, retired());
         assert_resumes(&node, &rig, &native, owner_effort(&node).await);
+        assert_clear_starts_fresh(&node, &rig, &native).await;
         node.finish().await;
     });
 }
 
-/// With no owner runtime on a booted server the execution still ends and a Codex owner's next launch
-/// resumes the thread. `moved`: another bot, never the one ending the pane, serves the channel.
+/// With no owner runtime on a booted server the execution still ends; a returning Codex owner resumes
+/// the thread until it clears. `moved`: the new bot starts its own session (no handover).
 fn orphaned(name: &str, moved: bool, codex: bool) {
     let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
         return;
@@ -452,7 +481,10 @@ fn orphaned(name: &str, moved: bool, codex: bool) {
             assert_eq!(reply["tmux_killed"], true, "{reply}");
             let after = node.effects(&rig).await;
             assert_eq!((after.closes(), after.row), (1, retired()));
-            assert_resumes(&node, &rig, &native, Owed(None));
+            if !moved {
+                assert_resumes(&node, &rig, &native, Owed(None));
+                assert_clear_starts_fresh(&node, &rig, &native).await;
+            }
         } else {
             node.assert_ended(&rig, &reply).await;
         }
