@@ -12,6 +12,7 @@
 <!-- doc-path-refs: proposed src/services/discord/herdr_terminate/idle.rs -->
 
 <!-- doc-path-refs: proposed src/services/session_host/herdr_gate/child_residue.rs -->
+<!-- doc-path-refs: proposed src/services/herdr_launch/unplaced/placed.rs -->
 
 ## w3 변경
 
