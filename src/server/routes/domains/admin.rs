@@ -10,6 +10,9 @@ use super::super::{
     server_campaigns, settings, stats,
 };
 
+#[cfg(test)]
+mod human_waits;
+
 // Category: admin
 
 /// The ledger PUT carries the whole DAG, so only these routes raise the body limit.
