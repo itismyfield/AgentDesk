@@ -10,18 +10,18 @@
 EXTENDS Naturals
 
 CONSTANTS Expire, CheckTurn, CheckInflight, CheckIdle, Exclude, RecordResume, KeepAtLock,
-          OrphanCodex, ClearForgets
+          OrphanCodex, ClearForgets, BanEvery
 
 VARIABLES prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle, phase,
           alerts, closedBusy, closedUsed, selector, slot, file, effort, resumed, cleared,
-          clearResumed
+          clearResumed, clearing
 
 vars == <<prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle, phase,
           alerts, closedBusy, closedUsed, selector, slot, file, effort, resumed, cleared,
-          clearResumed>>
+          clearResumed, clearing>>
 
-\* Every action below leaves the /clear pair as it is unless it names it.
-KeepClear == UNCHANGED <<cleared, clearResumed>>
+\* Every action below leaves the /clear state as it is unless it names it.
+KeepClear == UNCHANGED <<cleared, clearResumed, clearing>>
 
 Init ==
     /\ prov \in {"claude", "codex"} /\ gone \in BOOLEAN
@@ -30,7 +30,7 @@ Init ==
     /\ turn = FALSE /\ inflight = FALSE /\ dispatch = FALSE /\ idle = FALSE
     /\ phase = "none" /\ alerts = 0 /\ closedBusy = FALSE /\ closedUsed = FALSE
     /\ selector = "live" /\ slot = "none" /\ file = FALSE /\ effort = "none" /\ resumed = "none"
-    /\ cleared = FALSE /\ clearResumed = FALSE
+    /\ cleared = FALSE /\ clearResumed = FALSE /\ clearing = "none"
 
 \* phase "reserved": the transition lock and the sessions row lock are held and the fence is shut.
 \* No input or /effort end runs under the transition lock (terminate_scoped acquire).
@@ -52,11 +52,15 @@ Input ==
     /\ IF rec = "retired"
          THEN /\ rec' = "bound" /\ pane' = "live" /\ selector' = "live"
               /\ slot' = "none" /\ file' = FALSE
-              /\ resumed' = IF cleared THEN resumed ELSE IF Resumes THEN "same" ELSE "fresh"
+              /\ resumed' = IF cleared \/ clearing # "none" THEN resumed
+                             ELSE IF Resumes THEN "same" ELSE "fresh"
               /\ effort' = IF effort = "recorded" THEN "stale" ELSE effort
               /\ clearResumed' = (clearResumed \/ (cleared /\ Resumes))
               /\ cleared' = FALSE
-         ELSE UNCHANGED <<rec, pane, selector, slot, file, resumed, effort, cleared, clearResumed>>
+              \* A clear still between its two writes now names a row that moved on.
+              /\ clearing' = "none"
+         ELSE UNCHANGED <<rec, pane, selector, slot, file, resumed, effort, cleared, clearResumed,
+                          clearing>>
     /\ UNCHANGED <<prov, gone, srv, registered, grace, inflight, dispatch, phase, alerts,
                    closedBusy, closedUsed>>
 
@@ -213,22 +217,38 @@ Restore ==
                    alerts, closedBusy, closedUsed, selector, slot, file, effort, resumed>>
     /\ KeepClear
 
-\* The owner's /clear of a retired execution (commands/control/herdr_recovery.rs:116-131): the
-\* idle record for that owner and nonce is cancelled first (ClearForgets, idle_resume.rs:75), then
-\* the SQL selector (http_force.rs clear_retired_selector_pg); the owner slot's open intent is
-\* cancelled too (queued_head/v2/clear.rs:219-224).
-Clear ==
-    /\ srv = "up" /\ registered /\ rec = "retired" /\ Unlocked /\ ~cleared
-    /\ cleared' = TRUE /\ selector' = "live"
-    /\ slot' = IF slot \in {"effort", "idle"} THEN "cancelled" ELSE slot
-    /\ file' = (file /\ ~ClearForgets)
+\* The owner's /clear of a retired execution, on one of three paths (control.rs:584-585): alone
+\* (herdr_recovery.rs:117), over a launch's start scope (codex/herdr_turn.rs:147 registered; the
+\* clear takes clear_teardown.rs:174) or past a held transition (herdr_recovery.rs:167). First the
+\* idle record of that owner and nonce is cancelled (herdr_recovery.rs:339 -> idle_resume.rs:75):
+\* every path with BanEvery, only the lone one before. A cancel that fails ends the clear unclaimed.
+\* "failed": a clear whose selector write did not land; the user was told it did not reset.
+ClearBan ==
+    /\ srv = "up" /\ registered /\ rec = "retired" /\ ~cleared /\ clearing \in {"none", "failed"}
+    /\ \E path \in {"alone", "over_start", "held"}, landed \in BOOLEAN :
+         /\ clearing' = IF landed THEN path ELSE clearing
+         /\ file' = (file /\ ~(landed /\ ClearForgets /\ (path = "alone" \/ BanEvery)))
     /\ UNCHANGED <<prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle,
-                   phase, alerts, closedBusy, closedUsed, effort, resumed, clearResumed>>
+                   phase, alerts, closedBusy, closedUsed, selector, slot, effort, resumed, cleared,
+                   clearResumed>>
+
+\* Then the SQL selector (http_force.rs clear_retired_selector_pg, or provider_resume_fence.rs
+\* set_for_execution_pg when held); only a write that lands claims the reset, and the owner slot's
+\* open intent is cancelled (queued_head/v2/clear.rs:219-224).
+ClearSelector ==
+    /\ clearing \in {"alone", "over_start", "held"}
+    /\ \E landed \in BOOLEAN :
+         /\ cleared' = landed
+         /\ selector' = IF landed THEN "live" ELSE selector
+         /\ slot' = IF landed /\ slot \in {"effort", "idle"} THEN "cancelled" ELSE slot
+         /\ clearing' = IF landed THEN "none" ELSE "failed"
+    /\ UNCHANGED <<prov, gone, srv, registered, grace, rec, pane, turn, inflight, dispatch, idle,
+                   phase, alerts, closedBusy, closedUsed, file, effort, resumed, clearResumed>>
 
 Next ==
     \/ Input \/ SaveInflight \/ DispatchAttach \/ TurnEnd \/ Elapse \/ EffortStart \/ EffortEnd
     \/ IdleKillTick \/ Reserve \/ Close \/ Crash \/ Boot \/ GracePass \/ Register \/ Return
-    \/ Restore \/ Clear
+    \/ Restore \/ ClearBan \/ ClearSelector
 
 Spec == Init /\ [][Next]_vars
     /\ WF_vars(IdleKillTick) /\ WF_vars(Reserve) /\ WF_vars(Close)
@@ -238,9 +258,10 @@ Spec == Init /\ [][Next]_vars
 NeverClosesBusy == ~closedBusy
 \* INVARIANT: a pane used again after the tick selected it is not closed (idle read at the close).
 NeverClosesUsed == ~closedUsed
-\* INVARIANT: the next message after an end that kept the session resumes the same session.
+\* INVARIANT: the next message after an end that kept the session resumes the same session, unless
+\* the owner asked to clear it.
 NextMessageResumes == resumed # "fresh"
-\* INVARIANT: the first launch after a /clear never resumes the conversation the clear ended.
+\* INVARIANT: the first launch after a /clear that claimed the reset never resumes the conversation.
 ClearNeverResumes == ~clearResumed
 \* INVARIANT: the preserved alarm is not repeated tick after tick.
 AlarmNotRepeated == alerts <= 1
@@ -250,6 +271,7 @@ TypeOK ==
     /\ selector \in {"live", "kept"} /\ slot \in {"none", "effort", "idle", "cancelled"}
     /\ file \in BOOLEAN /\ effort \in {"none", "recorded", "stale"} /\ resumed \in {"none", "same", "fresh"}
     /\ cleared \in BOOLEAN /\ clearResumed \in BOOLEAN
+    /\ clearing \in {"none", "alone", "over_start", "held", "failed"}
 
 \* PROPERTY: a quiet, idle, undispatched Herdr session is eventually closed unless work arrives,
 \* with or without its owner's runtime.
