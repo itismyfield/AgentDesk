@@ -677,7 +677,7 @@ pub(super) async fn handle_text_message(
         )
         .await?
         else {
-            return Ok(IntakeExecution::deferred(channel_id));
+            return Ok(crate::services::discord::router::deferred_execution(channel_id));
         };
         let (mut session_id, mut memento_context_loaded, current_path) =
             intake_runtime_transition.state.clone();
@@ -989,7 +989,7 @@ pub(super) async fn handle_text_message(
         ).await {
             Ok(owner) => owner,
             Err(()) => {
-                return Ok(IntakeExecution::deferred(channel_id));
+                return Ok(crate::services::discord::router::deferred_execution(channel_id));
             }
         };
 
@@ -1117,7 +1117,7 @@ pub(super) async fn handle_text_message(
                 race_loss::QueuedIntakeCause::RaceLoss,
                 route,
             )
-            .await.map(|_| IntakeExecution::deferred(channel_id));
+            .await.map(|_| crate::services::discord::router::deferred_execution(channel_id));
         }
 
         let defer_busy_view = super::super::intake_gate::busy_inject::defer_owned_busy_view(
@@ -1701,7 +1701,7 @@ pub(super) async fn handle_text_message(
                     (&current_path, session_id.clone()),
                 ).await;
                 intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
-                return Ok(IntakeExecution::deferred(channel_id));
+                return Ok(crate::services::discord::router::deferred_execution(channel_id));
             }
             let bot_owner_provider = super::super::super::resolve_discord_bot_provider(token);
             let queue_kickoff_scheduled_by_release = release_mailbox_after_hosted_tui_busy_pre_submit(
@@ -1833,7 +1833,7 @@ pub(super) async fn handle_text_message(
             // emit the partial span (input/total render `-`); the retry re-enters
             // intake and emits its own `submitted` span.
             intake_latency.log(channel_id.get(), provider_label, "deferred_busy");
-            return Ok(IntakeExecution::deferred(channel_id));
+            return Ok(crate::services::discord::router::deferred_execution(channel_id));
         }
         #[cfg(unix)]
         if recapture_offset_after_busy_wait {
@@ -1962,7 +1962,7 @@ pub(super) async fn handle_text_message(
             Err(requeued) => {
                 start_placeholder.discard_refused(http, shared, user_msg_id, "bridge_registration").await;
                 return if requeued {
-                    Ok(IntakeExecution::deferred(channel_id))
+                    Ok(crate::services::discord::router::deferred_execution(channel_id))
                 } else {
                     Err("original bridge start deferred; retry enqueue refused".into())
                 };
@@ -1977,7 +1977,7 @@ pub(super) async fn handle_text_message(
             // The recovery read guard is released before the delete waits on Discord.
             drop(original_registration);
             start_placeholder.discard_refused(http, shared, user_msg_id, "foreign_row").await;
-            return admitted.map(|_| IntakeExecution::deferred(channel_id)).map_err(Into::into);
+            return admitted.map(|_| crate::services::discord::router::deferred_execution(channel_id)).map_err(Into::into);
         }
         // A replaced Codex source is saved as the wrapper end; the watcher follows the saved row.
         inflight_offset = inflight_state.last_offset;
