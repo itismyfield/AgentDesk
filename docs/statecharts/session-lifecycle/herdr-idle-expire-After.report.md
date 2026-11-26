@@ -1,7 +1,7 @@
 # HerdrIdleExpire
 
-TLC reached 120 states and 384 steps. The chart draws 120 states and 370 arrows.
-The chart does not draw 10 steps that stay in one chart state.
+TLC reached 280 states and 884 steps. The chart draws 280 states and 852 arrows.
+The chart does not draw 20 steps that stay in one chart state.
 
 ## Rules that hold
-TypeOK, NeverClosesBusy, NextMessageResumes, AlarmNotRepeated, IdleEventuallyCloses
+TypeOK, NeverClosesBusy, NeverClosesUsed, NextMessageResumes, AlarmNotRepeated, IdleEventuallyCloses
