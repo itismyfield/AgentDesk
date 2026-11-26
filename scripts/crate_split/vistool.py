@@ -621,8 +621,7 @@ def split_fields(text):
             cur = ""
         else:
             cur += ch
-    if cur.strip():
-        parts.append(cur)
+    parts.append(cur)  # blank after a trailing comma: kept so the comma survives a rewrite
     return parts
 
 
@@ -645,12 +644,12 @@ def widen_tuple_fields(line, name=None, only=None, probe=False):
     fields = split_fields(line[m.end():close])
     new = []
     for index, field in enumerate(fields):
-        lead = field[:len(field) - len(field.lstrip())]
-        body = field.strip()
-        if only is None or index == only:
-            vis = re.match(r"(?:" + VIS + r")(?=[\s(])", body)
-            body = "pub " + body[vis.end():].lstrip() if vis else "pub " + body
-        new.append(lead + body)
+        lead = len(field) - len(field.lstrip())
+        if field.strip() and (only is None or index == only):
+            # Only the visibility token changes; the type and the spacing around it stay as written.
+            vis = re.match(r"(?:" + VIS + r")(?=[\s(])", field[lead:])
+            field = field[:lead] + ("pub" + field[lead + vis.end():] if vis else "pub " + field[lead:])
+        new.append(field)
     out = line[:m.end()] + ",".join(new) + line[close:]
     return out if out != line else None
 
@@ -727,13 +726,18 @@ class Widener:
                     hits.append((rel, i))
         return hits
 
-    def _struct_at_path(self, diag, hits):
-        """Same-named structs narrowed to the module of the message's type path (`krate::a::b::Name<T>`,
-        `a::b::Name`); rustc names the crate only when the type is foreign to the reporting crate."""
+    def _struct_at_path(self, diag, hits, side, lib):
+        """Same-named structs narrowed to the module of the message's type path. Lower reports its own
+        types as `a::b::Name`; upper names a lower type `<lib>::a::b::Name`, and any other path is not ours."""
         names = NAME_IN_MSG.findall(diag.get("message", ""))
-        segs = [s for s in re.sub(r"<.*", "", names[1] if len(names) > 1 else "").split("::")[:-1] if s != "crate"]
-        at = lambda module: [(rel, i) for rel, i in hits if self.layout.module_at(rel, i + 1) == module]
-        return (at(tuple(segs)) or at(tuple(segs[1:]))) if segs else []
+        segs = re.sub(r"<.*", "", names[1] if len(names) > 1 else "").split("::")[:-1]
+        if side == "lower" and segs:
+            module = segs[1:] if segs[0] == "crate" else segs
+        elif side == "upper" and lib and segs[:1] == [lib]:
+            module = segs[1:]
+        else:
+            return []
+        return [(rel, i) for rel, i in hits if self.layout.module_at(rel, i + 1) == tuple(module)]
 
     def _edit(self, rel, index, op, what):
         if apply_op(self.lines(rel)[index], op) == self.lines(rel)[index]:
@@ -748,8 +752,9 @@ class Widener:
             return ("outside_crate", f"{rel} ({where or 'not in partition'})")
         return None
 
-    def resolve(self, diag, resolver, run_root):
-        """(edits {(rel, idx): op}, outcome) for one visibility diagnostic.
+    def resolve(self, diag, resolver, run_root, side=None, lib=None):
+        """(edits {(rel, idx): op}, outcome) for one visibility diagnostic reported by `side` ('lower' |
+        'upper'); `lib` is lower's crate name as upper's messages spell it.
 
         outcome: 'edit' | (residue class | 'outside_crate' | 'unresolved', why)."""
         kind, name, owner = message_target(diag)
@@ -759,7 +764,7 @@ class Widener:
         if span is None and kind == "field":
             hits = self.unique_struct(owner)
             if len(hits) > 1:
-                hits = self._struct_at_path(diag, hits) or hits
+                hits = self._struct_at_path(diag, hits, side, lib) or hits
             if len(hits) != 1:
                 return {}, ("unresolved", f"struct `{owner}` defined {len(hits)} times in {self.layout.crate}")
             return self._field(*hits[0], name, owner)
@@ -1266,6 +1271,7 @@ def changed_pairs(original, final):
 class ShadowProbe:
     """Two throwaway copies of HEAD (lower, upper) under <repo>/target/crate_split_probe/<X>/."""
     mode = "shadow"
+    lib_name = "probe_lower"
 
     def __init__(self, repo, partition_path, crate):
         self.repo, self.crate, self.label = repo, crate, crate
@@ -1359,7 +1365,8 @@ def run_probe(probe, repo, *, out_dir, max_iters=10, apply=False, keep_probe=Fal
                     residue[classify_residue(d, restricted)].append(d)
             edits, unresolved, outside = {}, [], []
             for d, run_root, from_lower in vis:
-                new, outcome = widener.resolve(d, resolver, run_root)
+                new, outcome = widener.resolve(d, resolver, run_root, "lower" if from_lower else "upper",
+                                               probe.lib_name)
                 if outcome == "edit":
                     for key, op in new.items():
                         entry = edits.setdefault(key, [set(), set(), set()])
