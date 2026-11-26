@@ -448,12 +448,6 @@ impl ChannelStore {
         spool.map_or(0, |spool| spool.segments.len())
     }
 
-    /// Where the oldest retained segment of `source` ends.
-    pub fn oldest_segment_end(&self, source: &SourceId) -> Option<u64> {
-        let spool = self.sources.get(&source_key(source))?;
-        spool.segments.first().map(|segment| segment.end)
-    }
-
     pub fn spool_bytes(&self) -> u64 {
         let segments = self.sources.values().flat_map(|spool| &spool.segments);
         segments.map(|segment| segment.bytes).sum()

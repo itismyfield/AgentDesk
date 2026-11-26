@@ -64,14 +64,6 @@ where
     Ok(None)
 }
 
-/// Messages a scan never takes for the payload: reserved notice ids, and posts the ledger
-/// already gave other serials.
-#[derive(Clone, Copy, Default)]
-struct Skip<'a> {
-    notices: Option<&'a NoticeState>,
-    owned: &'a [u64],
-}
-
 /// What one bounded scan after the anchor saw.
 #[derive(Default)]
 struct Seen {
@@ -88,10 +80,10 @@ async fn scan<P: DiscordPort>(
     channel: u64,
     anchor: u64,
     payload: &str,
-    skip: Skip<'_>,
+    notices: Option<&NoticeState>,
 ) -> Result<Seen, String> {
     let allowed = |id| {
-        !skip.owned.contains(&id) && skip.notices.is_none_or(|state| {
+        notices.is_none_or(|state| {
             !state.reserved_ids.contains(&id)
                 && !state.imported.values().any(|reserved| *reserved == id)
                 && !matches!(
@@ -155,7 +147,6 @@ pub async fn settle<P: DiscordPort>(
     earlier_same_payload: bool,
     proof_ids: &[u64],
 ) -> Verdict {
-    let skip = Skip::default();
     settle_filtered(
         port,
         channel,
@@ -163,34 +154,7 @@ pub async fn settle<P: DiscordPort>(
         payload,
         earlier_same_payload,
         proof_ids,
-        skip,
-    )
-    .await
-}
-
-/// As [`settle`], past posts the ledger gave other serials: they are never this payload's, and
-/// their listing still proves history readable. Other same-author posts stay unresolved.
-pub(crate) async fn settle_past_owned<P: DiscordPort>(
-    port: &P,
-    channel: u64,
-    anchor: u64,
-    payload: &str,
-    earlier_same_payload: bool,
-    proof_ids: &[u64],
-    owned: &[u64],
-) -> Verdict {
-    let skip = Skip {
-        notices: None,
-        owned,
-    };
-    settle_filtered(
-        port,
-        channel,
-        anchor,
-        payload,
-        earlier_same_payload,
-        proof_ids,
-        skip,
+        None,
     )
     .await
 }
@@ -202,17 +166,17 @@ async fn settle_filtered<P: DiscordPort>(
     payload: &str,
     earlier_same_payload: bool,
     proof_ids: &[u64],
-    skip: Skip<'_>,
+    notices: Option<&NoticeState>,
 ) -> Verdict {
     let looks = async {
         tokio::time::sleep(FIRST_LOOK).await;
-        if let Ok(seen) = scan(port, channel, anchor, payload, skip).await
+        if let Ok(seen) = scan(port, channel, anchor, payload, notices).await
             && let Some(verdict) = judge(&seen.exact, earlier_same_payload)
         {
             return verdict;
         }
         tokio::time::sleep(LAST_LOOK - FIRST_LOOK).await;
-        match scan(port, channel, anchor, payload, skip).await {
+        match scan(port, channel, anchor, payload, notices).await {
             Err(reason) => Verdict::Unresolved(reason),
             Ok(seen) => match judge(&seen.exact, earlier_same_payload) {
                 Some(verdict) => verdict,
@@ -241,10 +205,6 @@ pub(super) async fn settle_notice<P: DiscordPort>(
     ) {
         return Verdict::Unresolved("legacy notice history is unavailable".into());
     }
-    let skip = Skip {
-        notices: Some(notices),
-        owned: &[],
-    };
     settle_filtered(
         port,
         channel,
@@ -252,7 +212,7 @@ pub(super) async fn settle_notice<P: DiscordPort>(
         payload,
         earlier_same_payload,
         proof_ids,
-        skip,
+        Some(notices),
     )
     .await
 }
