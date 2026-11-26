@@ -343,20 +343,18 @@ impl CodexHerdrPorts for Owed {
     }
 }
 
-/// The owner's next ordinary launch from the retired row, with `effort` as its owner holds it.
-fn next_launch(
-    node: &Node,
-    rig: &herdr::P11TerminationRig,
-    effort: Owed,
-) -> crate::services::herdr_launch::HerdrLaunch {
-    let ended = (node.shared.token_hash.as_str(), node.key.as_str());
-    let record = rig.record_as(ended, herdr::HostedState::Retired, "codex");
-    let row = HostedRecord::Known(record.clone());
+/// The owner's next ordinary launch from the row the database holds now, with `effort` as its
+/// owner holds it.
+async fn next_launch(node: &Node, effort: Owed) -> crate::services::herdr_launch::HerdrLaunch {
+    let row = HostedRecord::Known(retired_row(node).await);
+    let HostedRecord::Known(record) = &row else {
+        unreachable!()
+    };
     let endpoint = json!({"execution_node": "test", "config_key": "test",
         "socket_addr": "/test/herdr.sock", "herdr_session": "test"});
     let turn = CodexHerdrTurn {
         pool: &node.pool,
-        owner: record.owner,
+        owner: record.owner.clone(),
         channel_id: CHANNEL,
         endpoint: serde_json::from_value(endpoint).unwrap(),
         row: Some(&row),
@@ -381,8 +379,8 @@ fn next_launch(
 }
 
 /// That launch resumes `native` at the boundary the O cursor captured.
-fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, effort: Owed) {
-    let launch = next_launch(node, rig, effort);
+async fn assert_resumes(node: &Node, native: &str, effort: Owed) {
+    let launch = next_launch(node, effort).await;
     assert!(
         launch.resume,
         "an ordinary message after the idle end resumes"
@@ -394,8 +392,35 @@ fn assert_resumes(node: &Node, rig: &herdr::P11TerminationRig, native: &str, eff
     );
 }
 
-/// The owner's `/clear`, then its next launch: a fresh session that never names `native`.
-async fn assert_clear_starts_fresh(node: &Node, rig: &herdr::P11TerminationRig, native: &str) {
+/// How the owner's `/clear` meets the channel: alone, while a launch holds its start scope, or
+/// past a transition held beyond the clear's wait.
+enum Clear {
+    Alone,
+    OverLaunchStart,
+    Held,
+}
+
+/// The owner's `/clear`, then its next launch: the clear says it reset the conversation, and the
+/// launch is a fresh session that never names `native`.
+async fn assert_clear_starts_fresh(node: &Node, native: &str, how: Clear) {
+    let owner = retired_row(node).await.owner;
+    let launching = match how {
+        Clear::OverLaunchStart => {
+            let launching = crate::services::herdr_launch::clear_epoch::Launching::for_launch;
+            Some(launching(&owner).unwrap())
+        }
+        _ => None,
+    };
+    let held = match how {
+        Clear::Held => Some(
+            node.shared
+                .session_transition_locks
+                .lock(channel())
+                .lock_owned()
+                .await,
+        ),
+        _ => None,
+    };
     let http = Arc::new(poise::serenity_prelude::Http::new(""));
     let clear = crate::services::discord::commands::control::clear_channel_session_state;
     let report = clear(
@@ -405,13 +430,28 @@ async fn assert_clear_starts_fresh(node: &Node, rig: &herdr::P11TerminationRig, 
         channel(),
         "!clear",
     );
-    report.await.unwrap();
-    let launch = next_launch(node, rig, owner_effort(node).await);
+    let reply = report.await.unwrap().reply();
+    drop((launching, held));
+    assert!(reply.contains("초기화했어요"), "{reply}");
+    let launch = next_launch(node, owner_effort(node).await).await;
     assert!(
         !launch.resume,
-        "the next message after a clear starts fresh"
+        "the next message after a clear starts fresh: {reply}"
     );
     assert_ne!(launch.expected_native_session_id.as_deref(), Some(native));
+}
+
+/// The execution the database row records now.
+async fn retired_row(node: &Node) -> HostedExecution {
+    use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedLookupKey};
+    let load = crate::db::dispatched_sessions::hosted_execution::load_hosted_execution_pg;
+    match load(&node.pool, HostedLookupKey::SessionKey(&node.key)).await {
+        HostedLookup::Found(row) => match row.record {
+            HostedRecord::Known(record) => record,
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
 }
 
 /// Production adopts a local TUI channel's queue owner on its first input.
@@ -442,8 +482,8 @@ fn idle_kill_keeps_the_codex_thread_for_the_next_launch_pg() {
         let reply = node.idle_kill().await;
         assert_eq!(reply["tmux_killed"], true, "{reply}");
         assert_eq!(node.effects(&rig).await.row, retired());
-        assert_resumes(&node, &rig, &native, owner_effort(&node).await);
-        assert_clear_starts_fresh(&node, &rig, &native).await;
+        assert_resumes(&node, &native, owner_effort(&node).await).await;
+        assert_clear_starts_fresh(&node, &native, Clear::Alone).await;
         node.finish().await;
     });
 }
@@ -482,8 +522,8 @@ fn orphaned(name: &str, moved: bool, codex: bool) {
             let after = node.effects(&rig).await;
             assert_eq!((after.closes(), after.row), (1, retired()));
             if !moved {
-                assert_resumes(&node, &rig, &native, Owed(None));
-                assert_clear_starts_fresh(&node, &rig, &native).await;
+                assert_resumes(&node, &native, Owed(None)).await;
+                assert_clear_starts_fresh(&node, &native, Clear::Alone).await;
             }
         } else {
             node.assert_ended(&rig, &reply).await;
@@ -555,7 +595,66 @@ fn a_losing_idle_kill_leaves_the_kept_codex_thread_pg() {
         let lost = handle.await.unwrap();
         assert_eq!(lost["tmux_killed"], false, "{lost}");
         assert_eq!(node.effects(&rig).await.closes(), 1);
-        assert_resumes(&node, &rig, &native, owner_effort(&node).await);
+        assert_resumes(&node, &native, owner_effort(&node).await).await;
+        node.finish().await;
+    });
+}
+
+/// An idle end of an adopted Codex owner, then its `/clear` met `how`.
+fn cleared_after_idle(name: &str, how: Clear) {
+    let Some((rig, runtime)) = rig_child(&format!("idle_expire_tests::{name}")) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let (node, native) = idle_codex(&rig).await;
+        adopt(&node).await;
+        let reply = node.idle_kill().await;
+        assert_eq!(reply["tmux_killed"], true, "{reply}");
+        assert_clear_starts_fresh(&node, &native, how).await;
+        node.finish().await;
+    });
+}
+
+// A clear that overlaps a launch's start takes the start-overlap teardown, which ends the kept
+// thread as the plain clear does.
+#[test]
+fn a_clear_over_a_launch_start_forgets_the_kept_codex_thread_pg() {
+    let name = "a_clear_over_a_launch_start_forgets_the_kept_codex_thread_pg";
+    cleared_after_idle(name, Clear::OverLaunchStart);
+}
+
+// A clear past a held transition says the conversation was reset only with the kept thread ended.
+#[test]
+fn a_held_clear_forgets_the_kept_codex_thread_pg() {
+    cleared_after_idle("a_held_clear_forgets_the_kept_codex_thread_pg", Clear::Held);
+}
+
+// A clear whose selector write fails never says the session was reset.
+#[test]
+fn a_clear_whose_selector_write_fails_does_not_say_reset_pg() {
+    let name = "idle_expire_tests::a_clear_whose_selector_write_fails_does_not_say_reset_pg";
+    let Some((rig, runtime)) = rig_child(name) else {
+        return;
+    };
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    runtime.block_on(async {
+        let (node, _) = idle_codex(&rig).await;
+        node.sql("UPDATE sessions SET claude_session_id = 'kept-thread' WHERE session_key = $1 AND $2::TEXT IS NULL", None).await;
+        adopt(&node).await;
+        assert_eq!(node.idle_kill().await["tmux_killed"], true);
+        for refuse in [
+            "CREATE FUNCTION refuse_selector_clear() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'selector clear refused'; END $$",
+            "CREATE TRIGGER refuse_selector_clear BEFORE UPDATE ON sessions FOR EACH ROW WHEN (OLD.claude_session_id IS NOT NULL AND NEW.claude_session_id IS NULL) EXECUTE FUNCTION refuse_selector_clear()",
+        ] {
+            sqlx::query(refuse).execute(&node.pool).await.unwrap();
+        }
+        let http = Arc::new(poise::serenity_prelude::Http::new(""));
+        let clear = crate::services::discord::commands::control::clear_channel_session_state;
+        let report = clear(&http, &node.shared, &ProviderKind::Codex, channel(), "!clear");
+        let reply = report.await.unwrap().reply();
+        let reset = crate::services::discord::commands::SESSION_CLEARED_RESPONSE;
+        assert!(!reply.contains(reset), "{reply}");
         node.finish().await;
     });
 }
