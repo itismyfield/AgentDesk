@@ -14,8 +14,6 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 use sqlx::PgPool;
-#[cfg(test)]
-use sqlx::Row as SqlxRow;
 use std::{
     sync::{
         Arc, OnceLock,
