@@ -838,7 +838,7 @@ pub fn tmux_session_fallback_ready_for_input(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn tmux_session_fallback_ready_for_input(
+pub fn tmux_session_fallback_ready_for_input(
     _tmux_session_name: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,

@@ -13,7 +13,7 @@ pub use session_host_label::with_session_host_label_path_for_test;
 pub mod shell;
 pub mod tmux;
 #[cfg(windows)]
-pub(crate) mod windows_job;
+pub mod windows_job;
 
 /// Test builds mark the thread inside the watcher registry's owner publication, so tmux
 /// namespace I/O can assert it never runs under that fence.

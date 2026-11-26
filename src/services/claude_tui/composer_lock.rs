@@ -43,7 +43,7 @@ pub fn with_composer_mutation_lock<R>(tmux_session_name: &str, f: impl FnOnce() 
 }
 
 #[cfg(not(unix))]
-pub(crate) fn with_composer_mutation_lock<R>(_tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
+pub fn with_composer_mutation_lock<R>(_tmux_session_name: &str, f: impl FnOnce() -> R) -> R {
     f()
 }
 
@@ -64,7 +64,7 @@ pub fn try_with_composer_mutation_lock<R>(
 
 #[cfg(not(unix))]
 #[allow(dead_code)]
-pub(crate) fn try_with_composer_mutation_lock<R>(
+pub fn try_with_composer_mutation_lock<R>(
     _tmux_session_name: &str,
     _operation: impl FnOnce() -> R,
 ) -> Option<R> {
