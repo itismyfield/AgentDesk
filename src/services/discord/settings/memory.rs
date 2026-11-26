@@ -1,5 +1,7 @@
 use super::*;
-use crate::domain::memory::{MemoryBackendKind, ResolvedMemorySettings};
+#[cfg(test)]
+use crate::domain::memory::MemoryBackendKind;
+use crate::domain::memory::ResolvedMemorySettings;
 
 pub(crate) fn memory_settings_for_binding(
     role_binding: Option<&RoleBinding>,

@@ -22,14 +22,14 @@
 //!    persisted field plus the marker can exceed Discord's limit: the literal
 //!    `[origin=operational_alert]` is 26 UTF-8 bytes encoded as eight
 //!    zero-width scalars per byte, i.e. 208 characters
-//!    (`src/services/discord/dispatch_policy.rs:10` and `:30`). The attachment
+//!    (`src/domain/outbound/alert_origin.rs:6` and `:11`). The attachment
 //!    branch of `formatting::delivery::build_attachment_inline`
-//!    (`src/services/discord/formatting/delivery.rs:491`, note at `:528`) has
+//!    (`src/services/discord/formatting/delivery.rs:314`, note at `:349`) has
 //!    no second inline fallback, so a length rejection propagates unchanged.
 //!    No bounded fixture measures that path.
 //! 4. The marker is not an authentication boundary. It is plain message text
 //!    prepended by `domain::outbound::alert_origin::prepend_operational_alert_origin`
-//!    (`src/services/discord/dispatch_policy.rs:59`), not signed metadata, so
+//!    (`src/domain/outbound/alert_origin.rs:28`), not signed metadata, so
 //!    any sender who can author in the channel can forge or omit it.
 
 use super::*;

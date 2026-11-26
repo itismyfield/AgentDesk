@@ -6,6 +6,8 @@ use super::QueueExitKind;
 use super::SharedData;
 use super::parse_dispatch_id;
 
+use crate::domain::outbound::alert_origin::strip_operational_alert_origin;
+
 const MONITOR_AUTO_TURN_ORIGIN_LITERAL: &str = "[origin=monitor_auto_turn]";
 
 fn hidden_monitor_auto_turn_origin_marker() -> &'static str {
