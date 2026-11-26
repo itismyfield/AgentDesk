@@ -17,23 +17,22 @@ stateDiagram-v2
   s2: Herdr pane made, location not recorded
   s3: Herdr pane placed, not bound yet
   s4: Herdr execution retired
-  s5: Herdr pane bound, first input waiting
-  s6: Herdr pane running
-  s7: Herdr pane idle
-  s8: Row deleted by thread_gc
+  s5: Herdr pane running
+  s6: Herdr pane idle
+  s7: Row deleted by thread_gc
   [*] --> s0
   s0 --> s1: a queued input starts the thread's session (turn host judges the host)
   s1 --> s2: Herdr creates the pane (answer may be lost)
   s1 --> s3: Herdr creates the pane (answer may be lost)
   s1 --> s4: unplaced row resolved: the pane adopted (not bound), or the row retired
   s2 --> s3: unplaced row resolved: the pane adopted (not bound), or the row retired
-  s3 --> s5: own SessionStart and source checked: the row binds
+  s3 --> s3: the output reservation is made durable before the first key or the first input is submitted to the Herdr pane or AgentDesk restarts
   s4 --> s1: a queued input starts the thread's session (turn host judges the host)
-  s5 --> s6: the first input is submitted to the Herdr pane
-  s6 --> s7: the turn ends and the thread stays idle past an hour
-  s7 --> s4: idle cleanup ends the session
-  s4 --> s8: thread_gc deletes the row
-  s4 --> s4: AgentDesk restarts or auto-queue resets the slot thread
+  s3 --> s5: own SessionStart and source checked: the row binds
+  s5 --> s6: the turn ends and the thread stays idle past an hour
+  s6 --> s4: idle cleanup ends the session
+  s4 --> s7: thread_gc deletes the row
+  s7 --> s7: auto-queue resets the slot thread
   class s0 blue
   class s0 bugPath
   class s1 teal
@@ -47,7 +46,6 @@ stateDiagram-v2
   class s5 bugPath
   class s6 teal
   class s6 bugPath
-  class s7 teal
+  class s7 blue
   class s7 bugPath
-  class s8 blue
-  class s8 repeats
+  class s7 repeats

@@ -203,3 +203,34 @@ New rules: `LiveTmuxStaysTmux`, `RetiredFollowsHerdr`, `SeedMatchesBound`; liven
 
 Counterexamples checked against code: `S2ExecMain` both 1-step paths (`turn_host.rs:233-238`; `turn_host.rs:224,236,98-99,242`). `S2ExecNaive` `LiveTmuxStaysTmux` rests on the absence of a probe in `turn_host.rs:200-252`. Whether a refused input is dropped or returned to its author is outside the model.
 The contract assumptions behind the liveness rules are a local endpoint, a placeable parent, an O writer that recovers, fair workers and terminate permission on (design §7.3).
+
+### Design w2 (review-design-s2-1 P1 1, 2, 3, 5, 7)
+
+Written against `b52e052e24e13781569050ec940eb35b9496ed54`.
+The independent review of design w1 found eight P1 defects; the model takes the five on the first turn, the boot order and the restart seed.
+Mode `S2` is now the w2 contract; each w1 defect is a `MutW1*` mutant.
+The new entries and rules live in new configs only, and every earlier config keeps its result.
+
+| P1 | Model | Code |
+|---|---|---|
+| 1 first key before Bind | `Reserve` then `SubmitHerdr` from `Placed`; `Bind` needs the key (`hkey`). `MutW1BindFirst` keys only a Bound pane | `claude/herdr_turn/first_input.rs:534-601` (bind after the transcript's first record), `claude/herdr_turn.rs:752-777`, `tui_prompt_relay/herdr_source.rs:177-190` |
+| 2 exact retry reservation | Entry `RetryNew`; the reservation is required in the common write. `MutW1RetrySkipsReserve` keys without it | `intake_turn/worker_entry.rs:182`, `queue_io/input_owner/ingress.rs:415-417`, `claude/herdr_turn.rs:770` |
+| 3 default dispatch reset | Entry `DispatchNew`; `DispatchReset` reads a confirmed vacant child's reset as fresh intent. `MutW1ResetRefuses` (and activation alone) refuse it and end the turn | `src/dispatch/dispatch_context.rs:205-212`, `intake_turn.rs:867-888`, `admin_host_guard.rs:96-142` |
+| 5 boot gate and stale Bound | Entry `StaleBound` (a Bound row whose pane is gone, right after a restart) and one other channel's work. `BootNoGate` (main), `BootRetireDead` (w2), `RelayRetire`, `OtherServe`. `MutW1BootGateBlocks` waits on the Bound forever | `discord/runtime_bootstrap.rs:298-340`, `tui_prompt_relay/rehydration.rs:270-274`, `recovery_engine/herdr_reader.rs:436-470` |
+| 7 restart seed | Entry `RestartVacant`; `CmdRestartVacant` adopts the V2 owner then seeds. `MutW1RestartNoSeed` has no owner, so `Seed::of` fails | `commands/restart/herdr.rs:279-310`, `queue_io/input_owner/restart_seed.rs:56-58` |
+
+New rules: `KeyAfterReservation` (no first key before its output reservation) and liveness `BootServesOthers` (a stale Bound child never stops other channels' work at boot).
+
+| cfg | expected | result |
+|---|---|---|
+| `S2W2All` (S2; NewThread, RetryNew, DispatchNew, RestartVacant) | GREEN | GREEN |
+| `S2W2Main` (Main; RetryNew, DispatchNew, RestartVacant) | RED | `NewThreadFollowsParent` |
+| `S2W2Boot` (S2; StaleBound) | GREEN | GREEN |
+| `S2W2BootMain` (Main; StaleBound) | GREEN (control: main has no seed gate) | GREEN |
+| `MutW1BindFirst` | RED | `FirstInputResolves` (stuck at `Placed`: Bind waits for the key, the key waits for Bound) |
+| `MutW1RetrySkipsReserve` | RED | `KeyAfterReservation` (3 steps) |
+| `MutW1ResetRefuses` | RED | `NoInputRefused` (1 step), `FirstInputResolves` |
+| `MutW1BootGateBlocks` | RED | `BootServesOthers` (0 steps: the gate waits forever) |
+| `MutW1RestartNoSeed` | RED | `FirstInputResolves` |
+
+Each w1 counterexample was checked against the code coordinates in the table above. The other three P1 (4 command unsent after a tab create, 6 slot archive before settlement, 8 per-provider current execution) are covered by production tests in the design, not by this model.

@@ -1966,6 +1966,11 @@ thread-host/ThreadHostS1bMutS2SlotFuturePolicy.cfg	ThreadHostS1b	-	SlotRotates
 thread-host/ThreadHostS1bMutS2TabNoMarker.cfg	ThreadHostS1b	NoDuplicatePane	FirstInputResolves
 thread-host/ThreadHostS1bMutSeedLate.cfg	ThreadHostS1b	RestoredBeforeRead	-
 thread-host/ThreadHostS1bMutUnknownSkipsTmux.cfg	ThreadHostS1b	TmuxThreadKeepsTmuxPath	-
+thread-host/ThreadHostS1bMutW1BindFirst.cfg	ThreadHostS1b	-	FirstInputResolves
+thread-host/ThreadHostS1bMutW1BootGateBlocks.cfg	ThreadHostS1b	-	BootServesOthers
+thread-host/ThreadHostS1bMutW1ResetRefuses.cfg	ThreadHostS1b	NoInputRefused	FirstInputResolves
+thread-host/ThreadHostS1bMutW1RestartNoSeed.cfg	ThreadHostS1b	-	FirstInputResolves
+thread-host/ThreadHostS1bMutW1RetrySkipsReserve.cfg	ThreadHostS1b	KeyAfterReservation	-
 thread-host/ThreadHostS1bRev4All.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,RestoredBeforeRead,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bRev4S1b.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bS1bFirstAll.cfg	ThreadHostS1b	RestoredBeforeRead,SlotRotationProceeds	-
@@ -1978,6 +1983,10 @@ thread-host/ThreadHostS1bS2MainFresh.cfg	ThreadHostS1b	NewThreadFollowsParent	-
 thread-host/ThreadHostS1bS2NaiveAll.cfg	ThreadHostS1b	NoInputRefused	EventuallyReleased,FirstInputResolves,SlotRotates
 thread-host/ThreadHostS1bS2Replay.cfg	ThreadHostS1b	-	FirstInputSettles
 thread-host/ThreadHostS1bS2SeedAll.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W2All.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W2Boot.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W2BootMain.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2W2Main.cfg	ThreadHostS1b	NewThreadFollowsParent	-
 tui-o-turn-mode/CodexTakeoverAfter.cfg	CodexTakeover	-	-
 tui-o-turn-mode/CodexTakeoverBefore.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
 tui-o-turn-mode/CodexTakeoverNoArchive.cfg	CodexTakeover	-	TakeoverEventuallyConfirms
