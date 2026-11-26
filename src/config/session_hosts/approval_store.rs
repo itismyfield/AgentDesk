@@ -6,13 +6,13 @@ use super::BootSessionHosts;
 use super::projection::{self, Decoded, Projection};
 use crate::services::discord::runtime_store;
 
-pub(crate) enum Loaded {
+pub enum Loaded {
     Missing,
     Known(BootSessionHosts, Option<&'static str>),
     Unavailable(&'static str),
 }
 
-pub(crate) trait ApprovalStore {
+pub trait ApprovalStore {
     fn load(&self) -> Loaded;
     fn save(&self, hosts: &BootSessionHosts) -> Result<(), String>;
     fn recovery_action(&self, reason: &str, stopped: bool) -> String {

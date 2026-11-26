@@ -21,7 +21,7 @@ pub struct DispatchMessagePostError {
 }
 
 impl DispatchMessagePostError {
-    pub(crate) fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
+    pub fn new(kind: DispatchMessagePostErrorKind, detail: String) -> Self {
         Self {
             kind,
             detail,
@@ -30,7 +30,7 @@ impl DispatchMessagePostError {
         }
     }
 
-    pub(crate) fn http(
+    pub fn http(
         kind: DispatchMessagePostErrorKind,
         status: reqwest::StatusCode,
         discord_error_code: Option<i64>,
@@ -44,25 +44,25 @@ impl DispatchMessagePostError {
         }
     }
 
-    pub(crate) fn kind(&self) -> DispatchMessagePostErrorKind {
+    pub fn kind(&self) -> DispatchMessagePostErrorKind {
         self.kind
     }
 
-    pub(crate) fn http_status(&self) -> Option<reqwest::StatusCode> {
+    pub fn http_status(&self) -> Option<reqwest::StatusCode> {
         self.http_status
     }
 
-    pub(crate) fn discord_error_code(&self) -> Option<i64> {
+    pub fn discord_error_code(&self) -> Option<i64> {
         self.discord_error_code
     }
 
-    pub(crate) fn is_length_error(&self) -> bool {
+    pub fn is_length_error(&self) -> bool {
         self.kind == DispatchMessagePostErrorKind::MessageTooLong
     }
 
     /// 5xx/429/408 and failures without an HTTP response keep retry authority; other 4xx
     /// responses and payload/policy failures are terminal.
-    pub(crate) fn is_transient(&self) -> bool {
+    pub fn is_transient(&self) -> bool {
         if self.is_length_error() {
             return false;
         }

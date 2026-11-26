@@ -14,7 +14,7 @@ pub struct TurnConfig {
 
 impl TurnConfig {
     /// Explicitly off: no channel is selected.
-    pub(crate) fn off() -> Self {
+    pub fn off() -> Self {
         Self {
             channels: BTreeSet::new(),
             all_owned: Some(false),
@@ -30,7 +30,7 @@ impl TurnConfig {
         self.all_owned() || !self.channels.is_empty()
     }
 
-    pub(crate) fn selects(&self, channel: u64) -> bool {
+    pub fn selects(&self, channel: u64) -> bool {
         channel != 0 && (self.all_owned() || self.channels.contains(&channel))
     }
 }

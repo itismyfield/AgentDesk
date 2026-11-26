@@ -90,7 +90,7 @@ impl PendingRestore {
 impl PendingRestore {
     /// The rehydrate pass must not register the launch binding over this outcome: the restore
     /// registered the pane, found the log corrupt, or failed to register what the log names.
-    pub(crate) fn skips_launch_refresh(&self) -> bool {
+    pub fn skips_launch_refresh(&self) -> bool {
         matches!(
             self,
             Self::Seeded { .. }

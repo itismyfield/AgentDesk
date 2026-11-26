@@ -314,7 +314,7 @@ pub enum StreamMessage {
 }
 
 impl StreamMessage {
-    pub(crate) fn redacted_thinking() -> Self {
+    pub fn redacted_thinking() -> Self {
         Self::Thinking { summary: None }
     }
 }

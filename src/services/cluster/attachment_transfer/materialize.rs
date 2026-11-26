@@ -17,12 +17,12 @@ struct MaterializedFile {
 }
 
 impl MaterializedUploads {
-    pub(crate) fn has_materialized_files(&self) -> bool {
+    pub fn has_materialized_files(&self) -> bool {
         !self.files.is_empty()
     }
 
     /// Copies private bundle files into an existing upload retention policy, keeping local records.
-    pub(crate) fn copy_into(self, directory: &std::path::Path) -> Result<Vec<String>, String> {
+    pub fn copy_into(self, directory: &std::path::Path) -> Result<Vec<String>, String> {
         let Self {
             mut records,
             files,

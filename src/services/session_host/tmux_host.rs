@@ -109,11 +109,11 @@ impl TmuxHost {
         tmux::pane_liveness(name)
     }
 
-    pub(crate) fn pane_current_path(&self, name: &str) -> Option<String> {
+    pub fn pane_current_path(&self, name: &str) -> Option<String> {
         tmux::pane_current_path(name)
     }
 
-    pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
+    pub fn list_session_names(&self) -> Result<Vec<String>, String> {
         tmux::list_session_names()
     }
 
@@ -142,7 +142,7 @@ impl TmuxHost {
         tmux::kill_session_output(name, reason)
     }
 
-    pub(crate) fn kill_output_timeout(
+    pub fn kill_output_timeout(
         &self,
         name: &str,
         reason: &str,

@@ -41,9 +41,9 @@ enum Render {
 }
 
 pub struct SubagentNotificationSemantic {
-    pub(in crate::services::discord) task_id: Option<String>,
-    pub(in crate::services::discord) tool_use_id: Option<String>,
-    pub(in crate::services::discord) payload_fingerprint: String,
+    pub task_id: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub payload_fingerprint: String,
 }
 
 pub fn semantic_event(prompt: &str) -> Option<SubagentNotificationSemantic> {

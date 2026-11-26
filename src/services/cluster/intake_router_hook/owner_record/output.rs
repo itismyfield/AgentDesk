@@ -48,7 +48,7 @@ pub struct Scope {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum AcquireError {
+pub enum AcquireError {
     #[error("{0}")]
     Withheld(&'static str),
     #[error(transparent)]
@@ -56,7 +56,7 @@ pub(crate) enum AcquireError {
 }
 
 #[must_use]
-pub(crate) struct EffectGuard(Option<Transaction<'static, Postgres>>);
+pub struct EffectGuard(Option<Transaction<'static, Postgres>>);
 
 async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
     let mut tx = pool.begin().await?;
@@ -148,7 +148,7 @@ pub(crate) async fn enqueue_on_tx(
 
 impl EffectGuard {
     /// Move this future, including its guard, into any task that owns the raw request.
-    pub(crate) async fn run<T>(mut self, request: impl Future<Output = T>) -> Result<T, String> {
+    pub async fn run<T>(mut self, request: impl Future<Output = T>) -> Result<T, String> {
         if self.0.is_none() {
             return Ok(request.await);
         }
@@ -164,7 +164,7 @@ impl EffectGuard {
     }
 }
 
-pub(crate) async fn acquire(
+pub async fn acquire(
     scope: Option<&Scope>,
     channel: &str,
     payload: &str,
@@ -178,7 +178,7 @@ pub(crate) async fn acquire(
 }
 
 /// Restores the immutable admission, not the channel's current owner.
-pub(crate) async fn source_artifact(
+pub async fn source_artifact(
     pool: Option<&PgPool>,
     provider: &str,
     channel: &str,
@@ -202,10 +202,7 @@ pub(crate) async fn source_artifact(
     Ok(rows.into_iter().next().map(|origin| origin.seal(payload)))
 }
 
-pub(crate) async fn acquire_unstamped(
-    pool: &PgPool,
-    channel: &str,
-) -> Result<EffectGuard, AcquireError> {
+pub async fn acquire_unstamped(pool: &PgPool, channel: &str) -> Result<EffectGuard, AcquireError> {
     use crate::services::provider::ProviderKind;
     let mut tx = begin(pool).await?;
     // Old rows cannot name a provider; serialize with every supported owner namespace.

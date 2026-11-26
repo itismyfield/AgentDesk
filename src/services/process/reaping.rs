@@ -142,7 +142,7 @@ impl ReapingChild {
         drop(self.child.take());
     }
 
-    pub(crate) fn track_cancel_token(&mut self, token: Option<&Arc<CancelToken>>) {
+    pub fn track_cancel_token(&mut self, token: Option<&Arc<CancelToken>>) {
         self.cancel = token.map(|token| CancelRegistration {
             token: Arc::downgrade(token),
             generation: token.child_reap_generation(),

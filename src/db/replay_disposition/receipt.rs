@@ -27,7 +27,7 @@ impl From<String> for Disposition {
 }
 
 impl Disposition {
-    pub(crate) fn blocks_rerun(&self) -> bool {
+    pub fn blocks_rerun(&self) -> bool {
         !matches!(self, Self::RegisteredNotStarted | Self::ClassifiedNormal)
     }
 }

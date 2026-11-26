@@ -117,7 +117,7 @@ impl RetryPermit {
         }
     }
 
-    pub(crate) fn abandonment(&self) -> Abandonment {
+    pub fn abandonment(&self) -> Abandonment {
         self.abandonment.clone()
     }
 
@@ -288,7 +288,7 @@ impl Abandonment {
             proofs: vec![proof],
         }
     }
-    pub(crate) async fn abandon(&self, reason: &str) {
+    pub async fn abandon(&self, reason: &str) {
         loop {
             let mut retry = false;
             for proof in &self.proofs {
@@ -307,7 +307,7 @@ impl Abandonment {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
     }
-    pub(crate) fn schedule(self, reason: &'static str) {
+    pub fn schedule(self, reason: &'static str) {
         crate::utils::observed_task::spawn_observed("replay_unstarted_hold", async move {
             self.abandon(reason).await;
         });

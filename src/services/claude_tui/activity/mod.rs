@@ -175,7 +175,7 @@ impl Snapshot {
     }
 
     /// Watch holders must not wait on authority or a collector that is waiting on authority.
-    pub(crate) fn try_current(&self) -> bool {
+    pub fn try_current(&self) -> bool {
         let Some(source) = &self.source else {
             return false;
         };

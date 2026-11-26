@@ -440,7 +440,7 @@ pub struct LaunchGuard;
 #[cfg(unix)]
 impl LaunchGuard {
     /// A driver that ended well without handing its first prompt over wrote nothing owned.
-    pub(crate) fn finish(self, driven: Result<(), String>) -> Result<(), String> {
+    pub fn finish(self, driven: Result<(), String>) -> Result<(), String> {
         match driven {
             Ok(()) if LAUNCH.with(|hook| hook.borrow().is_some()) => {
                 Err("NotSent(\"launch_not_owned\")".into())
@@ -677,7 +677,7 @@ impl NotSentProof {
     pub fn take_preparation_watch(&mut self) -> Option<(u64, PreparationWatch)> {
         self.preparation_watch.take()
     }
-    pub(crate) fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
+    pub fn into_reason(self, key: &serde_json::Value) -> Result<String, String> {
         if self.attempt != *key {
             return Err("NotSent proof belongs to another attempt".into());
         }

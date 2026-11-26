@@ -159,11 +159,11 @@ impl Drop for HomeLock {
 }
 
 impl ManagedHome {
-    pub(crate) fn ensure(&self) -> io::Result<EnsureResult> {
+    pub fn ensure(&self) -> io::Result<EnsureResult> {
         self.ensure_with(|_| Ok(()))
     }
 
-    pub(crate) fn inspect(&self) -> Inspection {
+    pub fn inspect(&self) -> Inspection {
         let config = self.path.join("config.toml");
         let record = match publication::state(&config) {
             Ok(record) => record,

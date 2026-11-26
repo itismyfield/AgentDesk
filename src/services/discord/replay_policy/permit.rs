@@ -70,11 +70,11 @@ impl StartPermit {
         self.attempt.hold_proof()
     }
 
-    pub(crate) fn attempt(&self) -> &ExactAttempt {
+    pub fn attempt(&self) -> &ExactAttempt {
         &self.attempt
     }
 
-    pub(crate) fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
+    pub fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
         driver == "legacy-prompt"
             && [("driver_scope", driver), ("runtime_scope", runtime)]
                 .iter()
@@ -86,7 +86,7 @@ impl StartPermit {
     }
 
     /// Spends the permit on its own target and prepared input; a mismatch drops it without the effect.
-    pub(crate) fn consume<R>(
+    pub fn consume<R>(
         self,
         target: &EffectTarget,
         input_hash: &str,
@@ -122,7 +122,7 @@ pub struct PreparedRetryStart<P> {
 }
 
 impl<P> PreparedRetryStart<P> {
-    pub(crate) fn new(prepared: P, permit: StartPermit) -> Result<Self, PermitRefusal> {
+    pub fn new(prepared: P, permit: StartPermit) -> Result<Self, PermitRefusal> {
         if permit.attempt.retry_of().is_none() {
             return Err(PermitRefusal::NotARetry);
         }
@@ -130,11 +130,7 @@ impl<P> PreparedRetryStart<P> {
     }
 
     /// Runs the approved local reset, then moves the same values and permit into the provider call.
-    pub(crate) fn launch<R>(
-        self,
-        reset: impl FnOnce(&P),
-        start: impl FnOnce(P, StartPermit) -> R,
-    ) -> R {
+    pub fn launch<R>(self, reset: impl FnOnce(&P), start: impl FnOnce(P, StartPermit) -> R) -> R {
         reset(&self.prepared);
         start(self.prepared, self.permit)
     }

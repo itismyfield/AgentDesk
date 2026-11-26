@@ -1498,9 +1498,9 @@ pub(crate) fn emit_followup_restart_suppressed_notice(
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 pub struct ClaudeTuiSessionResolution {
-    pub(crate) session_id: String,
+    pub session_id: String,
     pub(crate) transcript_path: std::path::PathBuf,
-    pub(crate) resume: bool,
+    pub resume: bool,
 }
 
 #[cfg(unix)]

@@ -14,7 +14,7 @@ use super::{BootSessionHosts, ChannelEndpoint, SessionHostsConfig};
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Diagnostic {
+pub struct Diagnostic {
     pub reason: &'static str,
     pub channels: Vec<u64>,
     pub blockers: Vec<String>,
@@ -69,20 +69,20 @@ impl HostsBootSelection {
     }
 }
 
-pub(crate) struct MigrationRow {
+pub struct MigrationRow {
     pub id: i64,
     pub channel: u64,
     pub record: HostedRecord,
 }
 
-pub(crate) trait RowSource {
+pub trait RowSource {
     fn available(&self) -> bool {
         true
     }
     async fn rows(&self, channels: &BTreeSet<u64>) -> Result<Vec<MigrationRow>, String>;
 }
 
-pub(crate) trait HoldSource {
+pub trait HoldSource {
     const INTRODUCED: bool;
     async fn unresolved(&self, channels: &BTreeSet<u64>) -> Result<Vec<u64>, String>;
     /// Held channels for this move; only a return reserved for `candidate` lets its input pass.

@@ -39,7 +39,7 @@ pub struct RepostHttp {
 }
 
 impl RepostHttp {
-    pub(crate) fn with_owner_scope(
+    pub fn with_owner_scope(
         mut self,
         scope: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
     ) -> Self {
@@ -47,7 +47,7 @@ impl RepostHttp {
         self
     }
 
-    pub(crate) fn new(http: Arc<serenity::Http>) -> Result<Self, Unsupported> {
+    pub fn new(http: Arc<serenity::Http>) -> Result<Self, Unsupported> {
         if http.proxy.is_some() {
             return Err(Unsupported::Proxy);
         }
@@ -393,7 +393,7 @@ fn ids(channel: u64, id: Option<u64>) -> Result<(ChannelId, Option<MessageId>), 
 
 impl RepostHttp {
     /// What reads over `http` name as their credentials; a token change discards every pass.
-    pub(crate) fn credentials_of(http: &serenity::Http) -> String {
+    pub fn credentials_of(http: &serenity::Http) -> String {
         hex::encode(Sha256::digest(http.token().as_bytes()))[..16].to_owned()
     }
 }

@@ -5,11 +5,11 @@ use super::policy::DiscordOutboundPolicy;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutboundIntent {
-    pub(crate) idempotency: OutboundDeliveryId,
-    pub(crate) content: String,
-    pub(crate) target: OutboundTargetKey,
-    pub(crate) operation: OutboundOperationKey,
-    pub(crate) policy: DiscordOutboundPolicy,
+    pub idempotency: OutboundDeliveryId,
+    pub content: String,
+    pub target: OutboundTargetKey,
+    pub operation: OutboundOperationKey,
+    pub policy: DiscordOutboundPolicy,
 }
 
 impl OutboundIntent {

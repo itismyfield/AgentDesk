@@ -204,7 +204,7 @@ impl SubmitOutcome {
         }
     }
 
-    pub(crate) fn into_output(self) -> Result<Output, String> {
+    pub fn into_output(self) -> Result<Output, String> {
         match self.evidence {
             Evidence::Output(output) => output,
             Evidence::Bounded(output) => output.map_err(|error| error.to_string()),
@@ -238,7 +238,7 @@ impl SubmitOutcome {
     }
 
     #[cfg(unix)]
-    pub(crate) fn into_wrapper(self) -> Result<(), String> {
+    pub fn into_wrapper(self) -> Result<(), String> {
         match self.evidence {
             Evidence::Wrapper(result) => result,
             _ => Err("host submit evidence is not a wrapper frame".into()),

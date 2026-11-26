@@ -23,7 +23,7 @@ pub enum SessionIdentityKind {
 }
 
 impl SessionIdentityKind {
-    pub(crate) fn parse(value: &str) -> Option<Self> {
+    pub fn parse(value: &str) -> Option<Self> {
         match value {
             DISCORD_CHANNEL_KIND => Some(Self::DiscordChannel),
             SCHEDULED_SNAPSHOT_KIND => Some(Self::ScheduledSnapshot),
@@ -31,7 +31,7 @@ impl SessionIdentityKind {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::DiscordChannel => DISCORD_CHANNEL_KIND,
             Self::ScheduledSnapshot => SCHEDULED_SNAPSHOT_KIND,
@@ -74,7 +74,7 @@ pub struct SessionIdentityConflict {
 }
 
 impl SessionIdentityConflict {
-    pub(crate) fn into_message(self) -> String {
+    pub fn into_message(self) -> String {
         self.message
     }
 }

@@ -22,7 +22,7 @@ impl PaneIdentity {
             nonce,
         })
     }
-    pub(crate) fn capture(session: &str) -> Option<Self> {
+    pub fn capture(session: &str) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
             let binding =
                 tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(
@@ -296,7 +296,7 @@ impl UserReceipt {
         })
     }
 
-    pub(crate) fn seal(&mut self) {
+    pub fn seal(&mut self) {
         if self.ended {
             return;
         }
@@ -332,7 +332,7 @@ impl UserReceipt {
 
     /// An external turn uses the native reader's sealed byte range and original file identity.
     #[cfg(unix)]
-    pub(crate) fn from_native_range(
+    pub fn from_native_range(
         session: &str,
         prompt: &str,
         sid: Option<&str>,
@@ -453,7 +453,7 @@ impl UserReceipt {
         Some(pin)
     }
 
-    pub(crate) fn confirmed(&mut self) -> bool {
+    pub fn confirmed(&mut self) -> bool {
         let Some(end) = self.end else {
             return false;
         };

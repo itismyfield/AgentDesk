@@ -156,15 +156,15 @@ impl BootSessionHosts {
         })
     }
 
-    pub(crate) fn herdr_endpoint(&self, channel: u64) -> Option<&ChannelEndpoint> {
+    pub fn herdr_endpoint(&self, channel: u64) -> Option<&ChannelEndpoint> {
         self.channels.get(&channel)
     }
 
-    pub(crate) fn local_node(&self) -> Option<&str> {
+    pub fn local_node(&self) -> Option<&str> {
         self.local_node.as_deref()
     }
 
-    pub(crate) fn channels(&self) -> &BTreeMap<u64, ChannelEndpoint> {
+    pub fn channels(&self) -> &BTreeMap<u64, ChannelEndpoint> {
         &self.channels
     }
 
@@ -295,11 +295,11 @@ pub struct BootMigration {
 }
 
 impl BootMigration {
-    pub(crate) fn restart_required(&self, config: &Config) -> bool {
+    pub fn restart_required(&self, config: &Config) -> bool {
         normalized(config).map_or(true, |effective| self.candidate != effective.session_hosts)
     }
 
-    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
+    pub fn candidate(&self) -> &SessionHostsConfig {
         &self.candidate
     }
 

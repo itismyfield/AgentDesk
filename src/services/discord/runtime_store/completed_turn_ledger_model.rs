@@ -48,13 +48,13 @@ fn entry_backs(entry: &CompletedTurnEntry, alias: &MergedAlias) -> bool {
 }
 
 impl CompletedTurnLedger {
-    pub(in crate::services::discord) fn backs(&self, alias: &MergedAlias) -> bool {
+    pub fn backs(&self, alias: &MergedAlias) -> bool {
         self.entries.iter().any(|entry| entry_backs(entry, alias))
     }
 
     /// `entries.ids ∪ { a ∈ alias.absorbed | entry(alias.primary, Some(alias.turn_nonce)) }`,
     /// from this one read.
-    pub(in crate::services::discord) fn settled_ids(&self) -> HashSet<u64> {
+    pub fn settled_ids(&self) -> HashSet<u64> {
         self.settled_commit_ms().into_keys().collect()
     }
 
@@ -80,11 +80,7 @@ impl CompletedTurnLedger {
     }
 
     /// The ids episode `turn_nonce` of `primary` absorbed, per its durable alias.
-    pub(in crate::services::discord) fn absorbed_by_episode(
-        &self,
-        primary: u64,
-        turn_nonce: &str,
-    ) -> Vec<u64> {
+    pub fn absorbed_by_episode(&self, primary: u64, turn_nonce: &str) -> Vec<u64> {
         self.merged_aliases
             .iter()
             .filter(|alias| alias.primary == primary && alias.turn_nonce == turn_nonce)

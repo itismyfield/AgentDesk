@@ -132,7 +132,7 @@ impl TaskNotification {
     ///   - `Agent "…"` / `Background agent "…"` / anything else → `subagent`
     ///     (a `SubagentEnd`; the default is the safe one — it only finalizes a
     ///     slot whose tool-use-id matches, so an unknown prefix never mis-fires).
-    pub(super) fn kind(&self) -> &'static str {
+    pub fn kind(&self) -> &'static str {
         let summary = self.summary.as_deref().unwrap_or("").trim_start();
         if summary.starts_with("Background command") {
             "background"

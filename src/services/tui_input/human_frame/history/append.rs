@@ -13,7 +13,7 @@ pub(crate) enum Admission {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Decision {
+pub enum Decision {
     Joined,
     HandedPending,
 }

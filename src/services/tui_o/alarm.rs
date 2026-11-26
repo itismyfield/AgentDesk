@@ -259,7 +259,7 @@ impl AlarmRouter {
     }
 
     /// Router for this process: `tui_o.alert_channel_id` via the notify bot's outbox when a pool exists.
-    pub(crate) fn for_process(config: Option<&TuiOConfig>, pool: Option<PgPool>) -> Self {
+    pub fn for_process(config: Option<&TuiOConfig>, pool: Option<PgPool>) -> Self {
         let notifier = pool.map(|pool| Arc::new(OutboxNotifier { pool }) as Arc<dyn AlarmNotifier>);
         let alert_channel = config.and_then(|config| config.alert_channel_id);
         Self::new(alert_channel, notifier, PROCESS_HEALTH.clone())

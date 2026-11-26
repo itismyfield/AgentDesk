@@ -6,14 +6,14 @@ use std::path::Path;
 use super::selector::Role;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AbsentKind {
+pub enum AbsentKind {
     NoFile,
     /// A stale socket file: connections are refused.
     Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Unknown {
+pub enum Unknown {
     SocketDirMissing,
     NotSocket,
     ForeignOwner,
@@ -36,27 +36,27 @@ pub enum Presence {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EntryKind {
+pub enum EntryKind {
     Socket,
     Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Entry {
+pub struct Entry {
     pub kind: EntryKind,
     pub uid: u32,
 }
 
 /// A process of this user whose executable is named `herdr`; `None` fields could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrProcess {
+pub struct HerdrProcess {
     pub pid: u32,
     pub argv: Option<Vec<String>>,
     pub environ: Option<Vec<String>>,
 }
 
 /// The OS reads behind one judgment, so tests can script them.
-pub(crate) trait PresenceOs {
+pub trait PresenceOs {
     fn euid(&self) -> u32;
     /// The path itself, without following a final symlink.
     fn entry(&self, path: &Path) -> std::io::Result<Entry>;

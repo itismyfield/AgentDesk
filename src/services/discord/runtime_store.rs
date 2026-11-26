@@ -251,7 +251,7 @@ pub(in crate::services::discord) enum GenerationAllocationRoute {
 /// Generation and allocation route are published as one value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessGenerationAllocation {
-    pub(in crate::services::discord) generation: u64,
+    pub generation: u64,
     route: GenerationAllocationRoute,
 }
 
@@ -328,11 +328,11 @@ impl GenerationAllocationRoute {
 }
 
 impl ProcessGenerationAllocation {
-    pub(in crate::services::discord) fn epoch_advanced(self) -> bool {
+    pub fn epoch_advanced(self) -> bool {
         self.route.advanced()
     }
 
-    pub(in crate::services::discord) fn epoch_route(self) -> &'static str {
+    pub fn epoch_route(self) -> &'static str {
         self.route.as_str()
     }
 }
@@ -979,7 +979,7 @@ pub struct AtomicWriteContext<'a> {
 }
 
 impl<'a> AtomicWriteContext<'a> {
-    pub(crate) fn new(store: &'a str) -> Self {
+    pub fn new(store: &'a str) -> Self {
         Self {
             store,
             provider: None,
@@ -991,22 +991,22 @@ impl<'a> AtomicWriteContext<'a> {
         }
     }
 
-    pub(crate) fn durable_root(mut self, root: &'a Path) -> Self {
+    pub fn durable_root(mut self, root: &'a Path) -> Self {
         self.durable_root = Some(root);
         self
     }
 
-    pub(crate) fn provider(mut self, provider: &'a str) -> Self {
+    pub fn provider(mut self, provider: &'a str) -> Self {
         self.provider = Some(provider);
         self
     }
 
-    pub(crate) fn token_hash(mut self, token_hash: &'a str) -> Self {
+    pub fn token_hash(mut self, token_hash: &'a str) -> Self {
         self.token_hash = Some(token_hash);
         self
     }
 
-    pub(crate) fn channel_id(mut self, channel_id: u64) -> Self {
+    pub fn channel_id(mut self, channel_id: u64) -> Self {
         self.channel_id = Some(channel_id);
         self
     }

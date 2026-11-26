@@ -429,7 +429,7 @@ impl BootChannels {
 
     /// Reserves each unconfigured thread a boot read left open whose hinted parent O selects. The
     /// hint only picks the reservation; the parent is bound by a later checked read.
-    pub(crate) fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
+    pub fn reserve_boot_children(&self, threads: &[(u64, u64)]) {
         for &(channel, hinted) in threads {
             if !self.configured_binding(channel) && self.channels.contains(&hinted) {
                 self.children.reserve(channel);
@@ -453,7 +453,7 @@ impl BootChannels {
     }
 
     /// Boot membership plus every known child, held ones included so no reader drops them.
-    pub(crate) fn output_channels(&self) -> std::collections::BTreeSet<u64> {
+    pub fn output_channels(&self) -> std::collections::BTreeSet<u64> {
         let entries = self
             .children
             .entries

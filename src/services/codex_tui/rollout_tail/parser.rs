@@ -17,7 +17,7 @@ pub(super) mod managed_empty;
 pub struct RolloutRecordDecoder(RolloutParseState);
 
 impl RolloutRecordDecoder {
-    pub(crate) fn is_native_record(record: &Value) -> bool {
+    pub fn is_native_record(record: &Value) -> bool {
         matches!(
             record.get("type").and_then(Value::as_str),
             Some(
@@ -30,15 +30,15 @@ impl RolloutRecordDecoder {
         )
     }
 
-    pub(crate) fn from_reader(reader: impl std::io::BufRead) -> Result<Self, String> {
+    pub fn from_reader(reader: impl std::io::BufRead) -> Result<Self, String> {
         replay_captured_reader(reader).map(Self)
     }
 
-    pub(crate) fn response(&self) -> &str {
+    pub fn response(&self) -> &str {
         &self.0.final_text
     }
 
-    pub(crate) fn completed_response(mut self) -> Result<String, String> {
+    pub fn completed_response(mut self) -> Result<String, String> {
         super::promote_task_complete_fallback_text(&mut self.0);
         if self.0.has_pending_tool_call()
             || !self.0.turn_complete_seen
@@ -50,7 +50,7 @@ impl RolloutRecordDecoder {
         Ok(self.0.final_text)
     }
 
-    pub(crate) fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
+    pub fn decode(&mut self, record: &Value) -> Option<Vec<StreamMessage>> {
         if !Self::is_native_record(record) {
             return None;
         }

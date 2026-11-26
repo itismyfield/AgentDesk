@@ -21,7 +21,7 @@ pub enum CloseBasis {
 }
 
 pub struct HerdrInputState {
-    pub(crate) submission: HerdrSubmission,
+    pub submission: HerdrSubmission,
     pub(crate) phase: InputPhase,
     pub(crate) exit: Option<ExitDecision>,
     /// Recorded by the close itself, so a later seal still names its evidence.
@@ -31,7 +31,7 @@ pub struct HerdrInputState {
     /// The executor returned an error: no reader is left to read this turn's terminal.
     pub(crate) failed: bool,
     /// The row pass logged once that the execution ended while its source read nothing.
-    pub(crate) source_unknown_logged: bool,
+    pub source_unknown_logged: bool,
 }
 
 impl Default for HerdrInputState {
@@ -95,7 +95,7 @@ impl HerdrInterruptState {
     }
 
     /// Nonblocking diagnostic: contention is not proof that nothing was written.
-    pub(crate) fn closed_probe(&self) -> Option<bool> {
+    pub fn closed_probe(&self) -> Option<bool> {
         self.submission.try_lock().ok().map(|input| {
             input.phase == InputPhase::Closed && input.submission == HerdrSubmission::Unsubmitted
         })

@@ -164,20 +164,20 @@ pub struct CodexLaunchOptions {
 }
 
 impl CodexLaunchOptions {
-    pub(crate) fn new(prompt: &str) -> Self {
+    pub fn new(prompt: &str) -> Self {
         Self {
             prompt: prompt.to_string(),
             ..Self::default()
         }
     }
 
-    pub(crate) fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
+    pub fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
         self.resume_session_id =
             clean_nonempty(value).filter(|session_id| is_valid_session_id(session_id));
         self
     }
 
-    pub(crate) fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
+    pub fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
         self.developer_instructions = clean_nonempty(value);
         self
     }

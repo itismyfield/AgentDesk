@@ -15,7 +15,7 @@ use crate::services::tui_o::store::agy_spool::replay::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct AgyReadPermit {
+pub struct AgyReadPermit {
     pub(crate) target: AgyTarget,
     pub(crate) generation: NonZeroU64,
     incarnation: uuid::Uuid,

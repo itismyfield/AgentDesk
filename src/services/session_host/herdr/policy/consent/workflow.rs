@@ -5,13 +5,13 @@ use super::QuestionResult;
 use super::{ApplyResult, CardState, Consent, ConsentKey, ConsentStore, Preview, Question, State};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Request {
+pub enum Request {
     ExplicitLaunch,
     Automatic,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Effect {
+pub enum Effect {
     KeepHeld,
     RevisionChanged,
     SendCard,
@@ -22,14 +22,14 @@ pub(crate) enum Effect {
 }
 
 #[derive(Debug)]
-pub(crate) struct Transition {
+pub struct Transition {
     pub consent: Consent,
     pub effect: Effect,
 }
 
 /// The async owner supplies current settings, registry bindings and validated peer evidence.
 #[derive(Clone)]
-pub(crate) struct Current {
+pub struct Current {
     pub owner: Option<u64>,
     pub bot: u64,
     pub provider: String,

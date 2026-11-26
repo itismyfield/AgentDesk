@@ -70,5 +70,5 @@ pub struct CompletedDispatchInfo {
     pub result_json: Option<String>,
     pub context_json: Option<String>,
     pub thread_id: Option<String>,
-    pub(crate) duration_seconds: Option<i64>,
+    pub duration_seconds: Option<i64>,
 }

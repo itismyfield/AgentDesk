@@ -3,7 +3,7 @@ use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ReturnEndRefusal {
+pub enum ReturnEndRefusal {
     NotRetired,
     Incomplete,
     EndpointMismatch,
@@ -14,14 +14,14 @@ pub(crate) enum ReturnEndRefusal {
 
 #[cfg(unix)]
 #[derive(Debug)]
-pub(crate) enum RetiredProbeRefusal {
+pub enum RetiredProbeRefusal {
     Gate(HerdrGateRefusal),
     Observation(ReturnEndRefusal),
 }
 
 #[cfg(unix)]
 impl RetiredProbeRefusal {
-    pub(crate) fn retryable(&self) -> bool {
+    pub fn retryable(&self) -> bool {
         matches!(
             self,
             Self::Gate(HerdrGateRefusal::MutationBusy)
@@ -32,11 +32,11 @@ impl RetiredProbeRefusal {
 
 /// Carries the exact record whose two termination observations succeeded.
 #[derive(Debug)]
-pub(crate) struct RetiredEnd(HostedExecution);
+pub struct RetiredEnd(HostedExecution);
 
 /// A retired execution's endpoint reads and nonce exclusion; it exposes no pane mutation.
 #[cfg(unix)]
-pub(crate) struct RetiredProbe {
+pub struct RetiredProbe {
     endpoint: HerdrEndpoint,
     transport: Arc<dyn HerdrTransport>,
     record: HostedExecution,
@@ -68,7 +68,7 @@ impl RetiredProbe {
         self
     }
 
-    pub(crate) fn confirm(self) -> Result<(TerminationFence, RetiredEnd), RetiredProbeRefusal> {
+    pub fn confirm(self) -> Result<(TerminationFence, RetiredEnd), RetiredProbeRefusal> {
         let location = self
             .record
             .location
@@ -91,7 +91,7 @@ impl RetiredProbe {
 }
 
 impl RetiredEnd {
-    pub(crate) fn matches(&self, record: &HostedExecution) -> bool {
+    pub fn matches(&self, record: &HostedExecution) -> bool {
         self.0 == *record
     }
 

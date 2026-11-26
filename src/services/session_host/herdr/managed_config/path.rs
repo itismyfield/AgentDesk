@@ -16,7 +16,7 @@ pub struct PersonalPaths {
 
 impl PersonalPaths {
     /// The executing account's home and XDG config home; an unknown home authorizes nothing.
-    pub(crate) fn current() -> Self {
+    pub fn current() -> Self {
         Self {
             home: dirs::home_dir().unwrap_or_default(),
             xdg: std::env::var_os("XDG_CONFIG_HOME")
@@ -147,7 +147,7 @@ impl ManagedHome {
     }
 
     /// Only this node's dedicated endpoints; a user-default endpoint is never resolved or opened.
-    pub(crate) fn of(
+    pub fn of(
         node: Option<&str>,
         hosts: &SessionHostsConfig,
         personal: &PersonalPaths,

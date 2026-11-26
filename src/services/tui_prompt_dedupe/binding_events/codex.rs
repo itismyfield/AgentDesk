@@ -219,7 +219,7 @@ impl Writer {
 /// Additive launch evidence; Claude's `verified` flag is not Codex ownership.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Ownership {
+pub struct Ownership {
     pub schema: u32,
     pub seq: u64,
     pub context: BindingContext,
@@ -237,7 +237,7 @@ pub(crate) struct Ownership {
 /// Canonical equivalence checked at append time, bound to both recorded descriptors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CanonicalWitness {
+pub struct CanonicalWitness {
     pub observation_seq: u64,
     pub observed: SourceId,
     pub source: SourceId,
@@ -258,7 +258,7 @@ pub(crate) enum ClaimEvidence {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Claim {
+pub struct Claim {
     pub session_id: String,
     pub path: Option<PathBuf>,
     pub evidence: ClaimEvidence,
@@ -319,21 +319,21 @@ impl Claim {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClaimRecord {
+pub struct ClaimRecord {
     pub seq: u64,
     pub published_at: Option<DateTime<Utc>>,
     pub claim: Claim,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedProof {
+pub struct VerifiedProof {
     pub seq: u64,
     pub source: SourceId,
     pub ownership: Ownership,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Fold {
+pub struct Fold {
     pub legacy_unverified: Vec<BindingEvent>,
     pub pending: Vec<ClaimRecord>,
     // Consumers must refuse `conflicted` before using the retained proof.

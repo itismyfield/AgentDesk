@@ -9,22 +9,22 @@ pub(crate) enum EffectPhase {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparationHold {
-    pub(crate) target: String,
+    pub target: String,
     pub reason: &'static str,
     pub(crate) phase: EffectPhase,
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
-    pub(crate) modal: bool,
+    pub modal: bool,
     /// The readiness wait ended idle with nothing in flight: no look clears it, and its kind says
     /// whether the input is retained or refused for good.
-    pub(crate) unproven: Option<crate::services::claude_tui::readiness::Unproven>,
+    pub unproven: Option<crate::services::claude_tui::readiness::Unproven>,
 }
 
 impl PreparationHold {
-    pub(crate) const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
-    pub(crate) const OWNER_READINESS_DEADLINE: &str = "readiness_deadline";
+    pub const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
+    pub const OWNER_READINESS_DEADLINE: &str = "readiness_deadline";
 
-    pub(crate) fn waits_for_idle_evidence(&self) -> bool {
+    pub fn waits_for_idle_evidence(&self) -> bool {
         self.may_requeue()
             && self.reason == Self::IDLE_EVIDENCE_PENDING
             && !self.modal

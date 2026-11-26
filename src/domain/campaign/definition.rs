@@ -82,7 +82,7 @@ impl ValidatedDefinition {
     pub fn hashes(&self) -> &BTreeMap<String, DefinitionHashes> {
         &self.hashes
     }
-    pub(crate) fn set_pipeline(
+    pub fn set_pipeline(
         &mut self,
         pipeline: Box<PipelineDefinition>,
         active_revision: Option<u64>,

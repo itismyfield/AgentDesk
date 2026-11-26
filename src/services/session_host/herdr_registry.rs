@@ -228,15 +228,12 @@ impl HerdrRegistry {
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
     }
 
     /// Reads whole registered endpoints. A changed server or exceeded budget is not a census.
-    pub(crate) fn read_pane_census(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(String, Vec<String>)>, String> {
+    pub fn read_pane_census(&self, limit: usize) -> Result<Vec<(String, Vec<String>)>, String> {
         use super::herdr::model::{HERDR_PROTOCOL, HerdrRequest, HerdrResult};
         let mut census = Vec::new();
         let mut count = self.endpoints.len();

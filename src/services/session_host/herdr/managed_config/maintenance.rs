@@ -24,7 +24,7 @@ const JOB_ENV: &str = "herdr_job_env_mismatch";
 
 /// The latest upkeep of one dedicated endpoint's home, as health shows it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Record {
+pub struct Record {
     pub config: &'static str,
     pub backup: Option<PathBuf>,
     pub last_e7: String,
@@ -39,7 +39,7 @@ pub(crate) struct Record {
 
 impl Record {
     /// An upkeep that stopped reporting is never read as healthy; its confirmed cause still stands.
-    pub(crate) fn stale_at(&self, now: DateTime<Utc>) -> bool {
+    pub fn stale_at(&self, now: DateTime<Utc>) -> bool {
         (now - self.observed_at)
             .to_std()
             .is_ok_and(|age| age > STALE_AFTER)
@@ -131,9 +131,9 @@ fn read_e7(boot: &BootSessionHosts, key: &str) -> Option<RestoreResume> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperatorNotice {
     /// Where its receipt is kept; `None` is the runtime's own root.
-    pub(crate) root: Option<PathBuf>,
-    pub(crate) fault: String,
-    pub(crate) channel: u64,
+    pub root: Option<PathBuf>,
+    pub fault: String,
+    pub channel: u64,
 }
 
 impl OperatorNotice {

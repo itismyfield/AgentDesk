@@ -29,8 +29,8 @@ pub enum FallbackPolicy {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscordOutboundPolicy {
-    pub(crate) length_strategy: LengthStrategy,
-    pub(crate) fallback: FallbackPolicy,
+    pub length_strategy: LengthStrategy,
+    pub fallback: FallbackPolicy,
     /// How long dedup entries are kept; zero leaves dedup to the caller.
     #[serde(with = "duration_secs")]
     pub idempotency_window: Duration,

@@ -33,7 +33,7 @@ impl<'a> HostSessionRef<'a> {
     }
 
     /// The name for a tmux/process-registry lookup; a Herdr pane id is never one.
-    pub(crate) fn legacy_name(self) -> Result<&'a str, HostError> {
+    pub fn legacy_name(self) -> Result<&'a str, HostError> {
         match self.kind {
             HostKind::Tmux | HostKind::Process => Ok(self.name),
             HostKind::Herdr => Err(HostError::Unsupported(HostKind::Herdr, "legacy_name")),

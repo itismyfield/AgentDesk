@@ -10,7 +10,7 @@ use crate::services::discord::runtime_store::{
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Intent {
+pub struct Intent {
     pub(crate) namespace: String,
     pub(crate) ticket: Ticket,
     pub(crate) disposition: Disposition,
@@ -18,7 +18,7 @@ pub(crate) struct Intent {
 }
 
 impl Intent {
-    pub(crate) fn owns_row(&self, row: &Value) -> bool {
+    pub fn owns_row(&self, row: &Value) -> bool {
         let Some(source) = &self.ticket.source else {
             return false;
         };
@@ -43,7 +43,7 @@ impl Intent {
             })
     }
 
-    pub(crate) fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
+    pub fn validates(&self, namespace: &str, ticket: &Ticket, outcome: &Outcome) -> bool {
         self.namespace == namespace
             && self.ticket == *ticket
             && ticket.source.as_ref().is_some_and(|source| {
@@ -66,7 +66,7 @@ impl Intent {
 }
 
 impl Registry {
-    pub(crate) fn same_control_registry(&self, other: &Self) -> bool {
+    pub fn same_control_registry(&self, other: &Self) -> bool {
         self.path == other.path
     }
     pub fn try_native_settlement(
@@ -118,7 +118,7 @@ impl Registry {
             Ok(first)
         })
     }
-    pub(crate) fn try_native_boot_record(
+    pub fn try_native_boot_record(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -153,21 +153,13 @@ impl Registry {
     }
 
     /// The same no-key record, waiting for the registry lock; only off the async workers.
-    pub(crate) fn native_not_sent_blocking(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub fn native_not_sent_blocking(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.transaction(|state| mark_not_sent(state, namespace, ticket))
     }
 
     /// The no-key record outlasts a brief registry contention by awaiting between tries, so it
     /// never parks a worker; past the bound the busy refusal stands.
-    pub(crate) async fn native_not_sent(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub async fn native_not_sent(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(1500);
         loop {
             match self.try_native_not_sent(namespace, ticket) {
@@ -182,7 +174,7 @@ impl Registry {
         }
     }
 
-    pub(crate) fn try_native_control(
+    pub fn try_native_control(
         &self,
         namespace: &str,
         ticket: &Ticket,

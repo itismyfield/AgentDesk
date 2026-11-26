@@ -14,7 +14,7 @@ pub enum TmuxCleanupPolicy {
 }
 
 impl TmuxCleanupPolicy {
-    pub(crate) const fn preserves_inflight(self) -> Option<InflightRestartMode> {
+    pub const fn preserves_inflight(self) -> Option<InflightRestartMode> {
         match self {
             Self::PreserveSessionAndInflight { restart_mode } => Some(restart_mode),
             Self::PreserveSession | Self::CleanupSession { .. } => None,

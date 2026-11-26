@@ -170,7 +170,7 @@ impl<'a> BodyClaim<'a> {
         }
     }
 
-    pub(crate) fn for_source(self, path: Option<&str>) -> Self {
+    pub fn for_source(self, path: Option<&str>) -> Self {
         Self {
             source: path.map(channel_policy::first_nonce_id),
             ..self
@@ -178,7 +178,7 @@ impl<'a> BodyClaim<'a> {
     }
 
     /// Pin a row's reserved launch before dropping the row used to create this offer.
-    pub(crate) fn for_tmux_session(self, session: Option<&str>) -> Self {
+    pub fn for_tmux_session(self, session: Option<&str>) -> Self {
         let reserved = session
             .is_some_and(|session| super::claude_thread::holds_tmux_body(self.channel_id, session));
         Self { reserved, ..self }
@@ -193,7 +193,7 @@ impl<'a> BodyClaim<'a> {
     }
 
     /// A caller without a direct gateway; see [`o_keeps_body`].
-    pub(crate) fn direct(self, direct: bool) -> Self {
+    pub fn direct(self, direct: bool) -> Self {
         Self { direct, ..self }
     }
 
@@ -390,7 +390,7 @@ impl BodyTransport {
     }
 
     /// The holder's report of how far its claimed send got; an unclaimed transport has none.
-    pub(crate) fn reached(&self, stage: SendStage) {
+    pub fn reached(&self, stage: SendStage) {
         if let Some(send) = &self._send {
             send.reached(stage);
         }

@@ -334,7 +334,7 @@ pub struct Pane {
 }
 
 impl Pane {
-    pub(crate) fn with_program(session: &str, program: PathBuf) -> Result<Self, String> {
+    pub fn with_program(session: &str, program: PathBuf) -> Result<Self, String> {
         crate::services::platform::tmux::session_identity::require_managed_with_program(
             session,
             &program,
@@ -362,7 +362,7 @@ impl Pane {
         crate::services::session_host::TmuxHost.busy_input(&self.program, &self.target, payload)
     }
 
-    pub(crate) fn input_ok(
+    pub fn input_ok(
         &self,
         payload: crate::services::session_host::SubmitPayload<'_>,
     ) -> Option<String> {
@@ -377,7 +377,7 @@ impl Pane {
         crate::services::session_host::TmuxHost.first_key()
     }
 
-    pub(crate) fn ok(&self, args: &[&str]) -> Option<String> {
+    pub fn ok(&self, args: &[&str]) -> Option<String> {
         self.run(args)
             .ok()
             .filter(|output| output.status.success())

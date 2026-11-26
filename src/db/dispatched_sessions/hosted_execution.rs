@@ -177,7 +177,7 @@ pub enum HostedRecord {
 }
 
 impl HostedRecord {
-    pub(crate) fn decode(raw: Option<&Value>) -> Self {
+    pub fn decode(raw: Option<&Value>) -> Self {
         let Some(raw) = raw else {
             return Self::Legacy;
         };
@@ -633,7 +633,7 @@ impl CleanupRow {
     }
 
     /// Payload and canonical row ownership only; the service judges Legacy markers.
-    pub(crate) fn record_deletable(&self) -> bool {
+    pub fn record_deletable(&self) -> bool {
         let record = HostedRecord::decode(self.raw.as_ref());
         record.deletable()
             && match &record {
@@ -647,7 +647,7 @@ impl CleanupRow {
         self.raw.is_none()
     }
 
-    pub(crate) fn locator_keys(&self) -> impl Iterator<Item = &str> {
+    pub fn locator_keys(&self) -> impl Iterator<Item = &str> {
         self.session_key
             .iter()
             .chain(&self.aliases)

@@ -7,7 +7,7 @@ use std::sync::Arc;
 /// The durable "may have submitted" mark could not be persisted, so no payload was written.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreSubmitPersistenceRefused {
-    pub(crate) reason: String,
+    pub reason: String,
 }
 
 impl std::fmt::Display for PreSubmitPersistenceRefused {
@@ -40,8 +40,8 @@ pub trait SubmissionFence: Send + Sync {
 }
 
 pub struct IdleStashContext {
-    pub(crate) channel: u64,
-    pub(crate) target: String,
+    pub channel: u64,
+    pub target: String,
     pub(crate) available: bool,
 }
 

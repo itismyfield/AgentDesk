@@ -17,7 +17,7 @@ struct Gate {
     changed: std::sync::Condvar,
 }
 
-pub(crate) struct Sender<T> {
+pub struct Sender<T> {
     inner: mpsc::Sender<T>,
     gate: Arc<Gate>,
 }
@@ -58,7 +58,7 @@ impl<T> Clone for Sender<T> {
     }
 }
 impl<T> Sender<T> {
-    pub(crate) fn send(&self, value: T) -> Result<(), mpsc::SendError<T>> {
+    pub fn send(&self, value: T) -> Result<(), mpsc::SendError<T>> {
         let state = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.sealed {
             return Err(mpsc::SendError(value));
@@ -90,7 +90,7 @@ impl<T> Receiver<T> {
             .unwrap_or_else(|e| e.into_inner())
             .sealed = true;
     }
-    pub(crate) fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<T, mpsc::RecvTimeoutError> {
         #[cfg(all(any(test, feature = "test-support"), unix))]
         test_delay::before_receive(&self.gate);
         let sealed = self

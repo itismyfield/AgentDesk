@@ -15,7 +15,7 @@ pub struct ScopedBridgeDeadline {
 }
 
 impl ScopedBridgeDeadline {
-    pub(crate) fn install(deadline: Instant) -> Self {
+    pub fn install(deadline: Instant) -> Self {
         let previous = CURRENT.with(|cell| cell.replace(Some(deadline)));
         Self { previous }
     }

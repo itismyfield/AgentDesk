@@ -7,9 +7,9 @@ use super::key::OutboundDedupKey;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiscordTransportReceipt {
-    pub(crate) requested_channel_id: String,
-    pub(crate) returned_channel_id: String,
-    pub(crate) message_id: String,
+    pub requested_channel_id: String,
+    pub returned_channel_id: String,
+    pub message_id: String,
 }
 
 /// Which degraded path a [`DeliveryResult::Fallback`] took.

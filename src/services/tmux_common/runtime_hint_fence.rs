@@ -288,7 +288,7 @@ pub struct RuntimeHintFence {
 }
 
 impl RuntimeHintFence {
-    pub(crate) fn acquire(session: &str) -> Result<Self, String> {
+    pub fn acquire(session: &str) -> Result<Self, String> {
         Self::acquire_initialized(session, true)
     }
 
@@ -506,7 +506,7 @@ impl RuntimeHintFence {
     }
 
     #[cfg(unix)]
-    pub(crate) fn validate_tmux_publisher(&self, session: &str) -> Result<(), String> {
+    pub fn validate_tmux_publisher(&self, session: &str) -> Result<(), String> {
         self.validate(session)?;
         use super::host_marker::{HostKindMarker, read_host_kind_marker};
         match read_host_kind_marker(session) {

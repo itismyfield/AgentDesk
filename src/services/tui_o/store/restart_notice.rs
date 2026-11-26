@@ -28,7 +28,7 @@ pub struct Intent {
 
 impl Intent {
     /// `None` without an exact episode identity; no notice is ever synthesized from less.
-    pub(crate) fn exact(
+    pub fn exact(
         channel: u64,
         provider: ShadowProvider,
         turn_nonce: Option<&str>,

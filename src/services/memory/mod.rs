@@ -35,7 +35,7 @@ pub struct TokenUsage {
 }
 
 impl TokenUsage {
-    pub(crate) fn is_zero(self) -> bool {
+    pub fn is_zero(self) -> bool {
         self.input_tokens == 0 && self.output_tokens == 0
     }
 
@@ -63,7 +63,7 @@ pub enum SessionEndReason {
 }
 
 impl SessionEndReason {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::IdleExpiry => "idle_expiry",
             Self::LocalSessionReset => "local_session_reset",

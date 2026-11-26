@@ -21,7 +21,7 @@ pub struct StreamChild {
 }
 
 impl StreamChild {
-    pub(crate) fn new(
+    pub fn new(
         child: &Child,
         token: Option<Arc<CancelToken>>,
         watchdog: Option<CancelWatchdog>,
@@ -110,7 +110,7 @@ impl StreamChild {
         Ok(())
     }
 
-    pub(crate) fn observe_and_seal<T>(
+    pub fn observe_and_seal<T>(
         &mut self,
         child: &mut Child,
         output: &stream_queue::Receiver<T>,
@@ -122,7 +122,7 @@ impl StreamChild {
         Ok(())
     }
 
-    pub(crate) fn terminate(&mut self, child: &mut Child) {
+    pub fn terminate(&mut self, child: &mut Child) {
         if self.observe_exit(child).is_err() {
             return;
         }
@@ -134,7 +134,7 @@ impl StreamChild {
         }
     }
 
-    pub(crate) fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+    pub fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         loop {
             self.observe_exit(child)?;
             if let Some(status) = self.status {

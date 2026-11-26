@@ -7,23 +7,23 @@ use super::super::{PeerSource, apply, checker, peer::PeerSnapshot};
 use super::{ConsentKey, Preview};
 
 #[derive(Debug, Clone)]
-pub(crate) struct Prepared {
+pub struct Prepared {
     pub token: Preview,
     pub(super) plan: apply::ApplyPlan,
     pub(super) peer: PeerSnapshot,
 }
 
 impl Prepared {
-    pub(crate) fn logical(&self) -> &Path {
+    pub fn logical(&self) -> &Path {
         self.plan.logical()
     }
-    pub(crate) fn target(&self) -> &Path {
+    pub fn target(&self) -> &Path {
         self.plan.target()
     }
     pub(crate) fn before_hash(&self) -> Option<[u8; 32]> {
         self.plan.before_hash()
     }
-    pub(crate) fn matches_key(&self, key: &ConsentKey) -> bool {
+    pub fn matches_key(&self, key: &ConsentKey) -> bool {
         key.config == self.logical()
             && key.target == self.target()
             && key.socket == self.peer.witness.socket
@@ -43,10 +43,7 @@ impl Prepared {
     }
 }
 
-pub(crate) async fn prepare(
-    source: Arc<dyn PeerSource>,
-    revision: u64,
-) -> Result<Prepared, String> {
+pub async fn prepare(source: Arc<dyn PeerSource>, revision: u64) -> Result<Prepared, String> {
     tokio::task::spawn_blocking(move || {
         let peer = source.snapshot().map_err(|e| format!("peer: {e:?}"))?;
         let plan = apply::preview(&peer.config).map_err(|e| e.detail)?;

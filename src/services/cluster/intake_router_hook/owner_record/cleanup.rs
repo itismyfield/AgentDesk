@@ -8,7 +8,7 @@ use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Work {
+pub struct Work {
     pub operation: Uuid,
     #[serde(default = "control_seconds")]
     pub control_seconds: i32,
@@ -18,7 +18,7 @@ pub(crate) struct Work {
     pub native: Option<Value>,
 }
 #[derive(Clone, Debug, sqlx::FromRow)]
-pub(crate) struct Record {
+pub struct Record {
     pub id: i64,
     pub provider: String,
     pub raw_channel_id: String,
@@ -33,7 +33,7 @@ pub(crate) struct Record {
     pub routing_cleanup_claim: Option<Uuid>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Response {
+pub enum Response {
     Busy,
     Retry,
     Ended,
@@ -87,11 +87,7 @@ pub(crate) async fn request(
     Ok(changed == 1)
 }
 
-pub(crate) async fn due(
-    pool: &PgPool,
-    provider: &str,
-    local: &str,
-) -> Result<Vec<Record>, sqlx::Error> {
+pub async fn due(pool: &PgPool, provider: &str, local: &str) -> Result<Vec<Record>, sqlx::Error> {
     sqlx::query_as("SELECT * FROM intake_session_owners WHERE provider=$1 AND owner_instance_id=$2 AND routing_cleanup IS NOT NULL AND ((routing_cleanup_state IN ('pending','busy','running','retry','deferred') AND routing_cleanup_attempts<3) OR (routing_cleanup_state IN ('ended','deferred') AND EXISTS(SELECT 1 FROM intake_outbox d WHERE d.id::TEXT=routing_cleanup->>'pending' AND d.routing_state='held'))) AND routing_cleanup_next<=NOW() ORDER BY routing_cleanup_next,id LIMIT 32")
         .bind(provider).bind(local).fetch_all(pool).await
 }
@@ -111,7 +107,7 @@ async fn locked<'a>(
     Ok(tx)
 }
 /// Claim leases bound retries after crashes; callbacks must match the exact operation and lease.
-pub(crate) async fn claim(pool: &PgPool, row: &Record) -> Result<Option<Record>, sqlx::Error> {
+pub async fn claim(pool: &PgPool, row: &Record) -> Result<Option<Record>, sqlx::Error> {
     let mut tx = locked(pool, row).await?;
     let lease = Uuid::new_v4();
     let picked=sqlx::query_as("UPDATE intake_session_owners SET routing_cleanup_state='running',routing_cleanup_claim=$3,routing_cleanup_next=NOW()+make_interval(secs=>COALESCE((routing_cleanup->>'control_seconds')::INT,12)::DOUBLE PRECISION) WHERE id=$1 AND routing_cleanup=$2 AND routing_cleanup_state IN ('pending','busy','running','retry','deferred') AND routing_cleanup_attempts<3 AND routing_cleanup_next<=NOW() RETURNING *")
@@ -120,16 +116,12 @@ pub(crate) async fn claim(pool: &PgPool, row: &Record) -> Result<Option<Record>,
     Ok(picked)
 }
 /// The attempt is durable before the existing end path may produce an effect.
-pub(crate) async fn begin_end(pool: &PgPool, row: &Record) -> Result<bool, sqlx::Error> {
+pub async fn begin_end(pool: &PgPool, row: &Record) -> Result<bool, sqlx::Error> {
     let changed=sqlx::query("UPDATE intake_session_owners SET routing_cleanup_attempts=routing_cleanup_attempts+1 WHERE id=$1 AND routing_cleanup=$2 AND routing_cleanup_claim=$3 AND routing_cleanup_state='running' AND routing_cleanup_attempts=$4 AND routing_cleanup_attempts<3")
         .bind(row.id).bind(&row.routing_cleanup).bind(row.routing_cleanup_claim).bind(row.routing_cleanup_attempts).execute(pool).await?.rows_affected();
     Ok(changed == 1)
 }
-pub(crate) async fn respond(
-    pool: &PgPool,
-    row: &Record,
-    response: Response,
-) -> Result<bool, sqlx::Error> {
+pub async fn respond(pool: &PgPool, row: &Record, response: Response) -> Result<bool, sqlx::Error> {
     let mut tx = locked(pool, row).await?;
     let changed=sqlx::query("UPDATE intake_session_owners SET routing_cleanup_state=CASE WHEN $4='retry' AND (routing_cleanup_attempts>=3 OR routing_cleanup_deadline<=NOW()) THEN 'deferred' ELSE $4 END,routing_cleanup_seen=NOW(),routing_cleanup_next=NOW()+INTERVAL '2 seconds',routing_cleanup_deferred=($4 IN ('retry','needs_operator','identity_changed')) WHERE id=$1 AND routing_cleanup=$2 AND (routing_cleanup_claim=$3 OR $5) AND routing_cleanup_state='running'")
         .bind(row.id).bind(&row.routing_cleanup).bind(row.routing_cleanup_claim).bind(response.state()).bind(false).execute(&mut *tx).await?.rows_affected();
@@ -138,7 +130,7 @@ pub(crate) async fn respond(
 }
 
 /// Only persisted control results can release a staged source; absence of an ACK is deferred.
-pub(crate) async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
+pub async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
     let Some(row) = sqlx::query_as::<_, Record>(
         "SELECT * FROM intake_session_owners WHERE id=$1 AND routing_cleanup IS NOT NULL",
@@ -219,7 +211,7 @@ pub(crate) async fn allows_on_tx(
 }
 
 /// Any healthy runtime may advance an already stored control request; physical end stays local.
-pub(crate) async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(), sqlx::Error> {
+pub async fn advance_pending(pool: &PgPool, provider: &str) -> Result<(), sqlx::Error> {
     sqlx::query("UPDATE intake_outbox d SET routing_state='superseded' WHERE d.provider=$1 AND d.routing_state='held' AND EXISTS(SELECT 1 FROM intake_outbox r WHERE r.id=d.routing_receipt_id AND r.replay_disposition IN ('withheld','classified_normal'))").bind(provider).execute(pool).await?;
     let ids:Vec<i64>=sqlx::query_scalar("SELECT o.id FROM intake_session_owners o JOIN LATERAL (SELECT d.* FROM intake_outbox d WHERE d.provider=o.provider AND d.channel_id=o.raw_channel_id AND d.routing_wait_owner_generation=o.generation AND d.routing_state='held' ORDER BY d.id LIMIT 1) d ON TRUE WHERE o.provider=$1 AND d.routing_state='held' AND d.routing_home_revision=COALESCE((SELECT revision FROM channel_home_preferences h WHERE h.provider=d.provider AND h.raw_channel_id=d.channel_id),0) AND (o.routing_cleanup_state IN ('ended','needs_operator','identity_changed','deferred') OR o.routing_cleanup_attempts>=3 OR (o.routing_cleanup_deadline<=NOW() AND (o.routing_cleanup_seen IS NULL OR o.routing_cleanup_seen+make_interval(secs=>COALESCE((o.routing_cleanup->>'control_seconds')::INT,12)::DOUBLE PRECISION)<=NOW()))) ORDER BY o.routing_cleanup_deadline,o.id LIMIT 32")
         .bind(provider).fetch_all(pool).await?;

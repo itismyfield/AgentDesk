@@ -60,7 +60,7 @@ struct GatewayWaiterState {
 pub struct GatewayWaiterCancellation(std::sync::Weak<GatewayWaiterState>);
 
 impl GatewayWaiterCancellation {
-    pub(crate) fn withdraw(self) {
+    pub fn withdraw(self) {
         if let Some(state) = self.0.upgrade() {
             state.withdraw();
         }

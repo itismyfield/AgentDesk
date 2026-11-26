@@ -165,7 +165,7 @@ impl Probe {
 }
 
 #[derive(Clone)]
-pub(crate) struct Cleanup {
+pub struct Cleanup {
     _held: Arc<CleanupState>,
 }
 

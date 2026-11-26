@@ -1845,10 +1845,10 @@ pub struct ProviderSessionIds {
     pub claude_session_id: Option<String>,
     pub raw_provider_session_id: Option<String>,
     pub cwd: Option<String>,
-    pub(crate) cache_entry_age_secs: Option<i64>,
-    pub(crate) raw_provider_transcript_len_watermark: Option<i64>,
-    pub(crate) raw_provider_transcript_watermark_session_id: Option<String>,
-    pub(crate) raw_provider_transcript_growth_proven: bool,
+    pub cache_entry_age_secs: Option<i64>,
+    pub raw_provider_transcript_len_watermark: Option<i64>,
+    pub raw_provider_transcript_watermark_session_id: Option<String>,
+    pub raw_provider_transcript_growth_proven: bool,
 }
 
 pub struct UpdateSessionParams<'a> {

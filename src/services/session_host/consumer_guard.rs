@@ -120,7 +120,7 @@ pub enum PolicyProbe {
 
 impl PolicyProbe {
     /// The `hasLivePane` string; a deferred row reads `unknown`, never `dead`.
-    pub(crate) fn js_state(self) -> &'static str {
+    pub fn js_state(self) -> &'static str {
         match self {
             Self::Probed(HostLiveness::Live) => "live",
             Self::Probed(HostLiveness::DeadOrAbsent) => "dead",

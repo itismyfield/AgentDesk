@@ -94,7 +94,7 @@ pub struct Runner {
 }
 
 impl Runner {
-    pub(crate) fn new(pool: PgPool, sender_id: u64, run: RunScope) -> Self {
+    pub fn new(pool: PgPool, sender_id: u64, run: RunScope) -> Self {
         Self {
             pool,
             sender_id,
@@ -337,12 +337,7 @@ pub struct ChannelTurn<T> {
 }
 
 impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
-    pub(crate) fn new(
-        runner: Runner,
-        open: OpenTransport<T>,
-        channel: u64,
-        sidecar: PathBuf,
-    ) -> Self {
+    pub fn new(runner: Runner, open: OpenTransport<T>, channel: u64, sidecar: PathBuf) -> Self {
         Self {
             runner,
             open,

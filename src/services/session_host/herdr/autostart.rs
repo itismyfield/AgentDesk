@@ -31,7 +31,7 @@ pub struct Environment {
 impl Environment {
     /// The execution user's `home` with this process's PATH; AgentDesk's own `~/.adk` copies are
     /// excluded.
-    pub(crate) fn for_home(home: Option<PathBuf>) -> Self {
+    pub fn for_home(home: Option<PathBuf>) -> Self {
         let excluded = home.iter().map(|home| home.join(".adk")).collect();
         Self {
             home,

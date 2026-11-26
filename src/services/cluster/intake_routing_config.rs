@@ -27,7 +27,7 @@ impl IntakeRoutingMode {
         }
     }
 
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Disabled => "disabled",
             Self::Observe => "observe",
@@ -37,13 +37,13 @@ impl IntakeRoutingMode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingModeSource {
+pub enum IntakeRoutingModeSource {
     ConfigYaml,
     EnvOverride,
 }
 
 impl IntakeRoutingModeSource {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::ConfigYaml => "yaml",
             Self::EnvOverride => "env_override",
@@ -86,7 +86,7 @@ pub enum OwnerAuthorityChannelOptIn {
 }
 
 impl OwnerAuthorityChannelOptIn {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::OptedIn => "opted_in",
             Self::NotOptedIn => "not_opted_in",
@@ -98,7 +98,7 @@ impl OwnerAuthorityChannelOptIn {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffectiveIntakeRoutingConfig {
     pub mode: IntakeRoutingMode,
-    pub(crate) source: IntakeRoutingModeSource,
+    pub source: IntakeRoutingModeSource,
     pub(crate) yaml_enabled: bool,
     pub(crate) yaml_mode: ClusterIntakeRoutingMode,
     pub(crate) env_override: Option<&'static str>,
@@ -116,7 +116,7 @@ impl EffectiveIntakeRoutingConfig {
         matches!(self.mode, IntakeRoutingMode::Enforce)
     }
 
-    pub(crate) fn worker_consumer_should_spawn(&self) -> bool {
+    pub fn worker_consumer_should_spawn(&self) -> bool {
         !matches!(self.mode, IntakeRoutingMode::Disabled)
     }
 

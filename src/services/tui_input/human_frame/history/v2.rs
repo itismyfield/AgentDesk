@@ -4,19 +4,19 @@ use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
 #[cfg(unix)]
-pub(crate) mod carried;
+pub mod carried;
 mod collision;
 mod migration;
-pub(crate) mod native;
+pub mod native;
 #[cfg(unix)]
 mod native_binding;
 #[cfg(all(test, unix))]
 pub(crate) mod native_tests;
 
-pub(crate) use crate::domain::human_input::native_source::Source;
+pub use crate::domain::human_input::native_source::Source;
 
 impl Source {
-    pub(crate) fn validate(&self, key: &Value) -> Result<(), String> {
+    pub fn validate(&self, key: &Value) -> Result<(), String> {
         let attempt = &key["attempt"];
         let expected = &attempt["source"];
         let meta = std::fs::metadata(&self.transcript).map_err(|e| e.to_string())?;
@@ -227,7 +227,7 @@ impl Snapshot {
 }
 
 #[derive(Clone)]
-pub(crate) struct Registry {
+pub struct Registry {
     path: PathBuf,
     cached: Arc<Mutex<Option<(String, Snapshot)>>>,
     /// (old, candidate) of a publication whose durability is unconfirmed.
@@ -235,7 +235,7 @@ pub(crate) struct Registry {
     encode_fault: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Registry {
-    pub(crate) fn at(path: PathBuf) -> Self {
+    pub fn at(path: PathBuf) -> Self {
         Self {
             path,
             cached: Arc::new(Mutex::new(None)),
@@ -243,7 +243,7 @@ impl Registry {
             encode_fault: Arc::default(),
         }
     }
-    pub(crate) fn runtime() -> Result<Self, String> {
+    pub fn runtime() -> Result<Self, String> {
         Ok(Self::shared(path()?))
     }
     /// The process's one handle for `path`: callers share its parse cache, unconfirmed publication
@@ -331,7 +331,7 @@ impl Registry {
             }
         }
     }
-    pub(crate) fn prepare(&self, namespace: &str, input: &Value) -> Result<(), String> {
+    pub fn prepare(&self, namespace: &str, input: &Value) -> Result<(), String> {
         let key = json!({"identity":input["identity"],"attempt":input["attempt"]});
         let frame = input["payload"]["frame"]
             .as_str()
@@ -449,7 +449,7 @@ impl Registry {
             Ok(())
         })
     }
-    pub(crate) fn project(&self, snapshot: &Value) -> Result<(), String> {
+    pub fn project(&self, snapshot: &Value) -> Result<(), String> {
         let namespace = snapshot["namespace"]
             .as_str()
             .ok_or("missing queue namespace")?;
@@ -677,7 +677,7 @@ impl Drop for Scope {
 fn context() -> Option<Context> {
     CONTEXT.with(|slot| slot.borrow().clone())
 }
-pub(crate) fn with_attempt<T>(
+pub fn with_attempt<T>(
     registry: &Registry,
     namespace: &str,
     key: &Value,

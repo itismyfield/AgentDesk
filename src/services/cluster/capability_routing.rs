@@ -3,7 +3,7 @@ use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct CapabilityRouteDecision {
-    pub(crate) instance_id: Option<String>,
+    pub instance_id: Option<String>,
     pub eligible: bool,
     pub reasons: Vec<String>,
 }
@@ -12,7 +12,7 @@ pub struct CapabilityRouteDecision {
 pub struct CapabilityRouteCandidate {
     pub decision: CapabilityRouteDecision,
     pub score: i64,
-    pub(crate) last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub fn explain_capability_match(

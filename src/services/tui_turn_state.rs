@@ -68,7 +68,7 @@ impl TuiReadyState {
         }
     }
 
-    pub(crate) fn is_ready(self) -> bool {
+    pub fn is_ready(self) -> bool {
         matches!(self, Self::Ready)
     }
 }
@@ -137,7 +137,7 @@ pub struct JsonlTurnStateProbe<'a> {
 }
 
 impl<'a> JsonlTurnStateProbe<'a> {
-    pub(crate) fn new(provider: &'a ProviderKind, path: &'a Path) -> Self {
+    pub fn new(provider: &'a ProviderKind, path: &'a Path) -> Self {
         Self { provider, path }
     }
 }

@@ -184,7 +184,7 @@ pub struct LiveAttempt {
 }
 
 impl LiveAttempt {
-    pub(crate) fn new(attempt: ExactAttempt) -> Self {
+    pub fn new(attempt: ExactAttempt) -> Self {
         Self {
             observation: Mutex::new(RawObservation::new(&attempt)),
             attempt: Mutex::new(Some(attempt)),

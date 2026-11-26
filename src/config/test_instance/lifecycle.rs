@@ -1,7 +1,7 @@
 use super::{environment, requested};
 
 #[derive(Debug)]
-pub(crate) struct HeldLease {
+pub struct HeldLease {
     #[cfg(unix)]
     _file: std::fs::File,
     #[cfg(unix)]

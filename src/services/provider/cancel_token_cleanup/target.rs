@@ -1,7 +1,7 @@
 use crate::services::process::ProcessIdentity;
 
 #[derive(Clone, Debug)]
-pub(crate) struct CapturedProcess {
+pub struct CapturedProcess {
     pub pid: u32,
     pub identity: Option<ProcessIdentity>,
 }

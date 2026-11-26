@@ -428,7 +428,7 @@ impl BootChannels {
         self.late_adopt_capable
     }
 
-    pub(crate) fn turn(&self) -> &crate::services::tui_o::turn_mode::TurnConfig {
+    pub fn turn(&self) -> &crate::services::tui_o::turn_mode::TurnConfig {
         &self.turn
     }
 

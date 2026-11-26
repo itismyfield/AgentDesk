@@ -315,7 +315,7 @@ impl CancelToken {
     }
 
     /// Binds the attempt whose start permit this turn's executor spent; at most once per token.
-    pub(crate) fn attach_replay_attempt(
+    pub fn attach_replay_attempt(
         &self,
         live: std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
     ) -> bool {
@@ -348,7 +348,7 @@ impl CancelToken {
             .and_then(|guard| guard.as_ref().map(|process| process.pid))
     }
 
-    pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
+    pub fn captured_child_process(&self) -> Option<CapturedProcess> {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
 
@@ -409,7 +409,7 @@ impl CancelToken {
         *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub(crate) fn store_child_pid_if_empty(&self, pid: u32) {
+    pub fn store_child_pid_if_empty(&self, pid: u32) {
         let captured = CapturedProcess::capture(pid);
         let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         if child_pid.is_none() {
@@ -517,7 +517,7 @@ impl CancelToken {
         admitted
     }
 
-    pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
+    pub fn publish_cancel(&self, source: impl Into<String>) {
         let _publication = self
             .cancellation_publication
             .lock()
@@ -875,12 +875,12 @@ impl ReadyForInputIdleTracker {
         }
     }
 
-    pub(crate) fn record_output(&mut self) {
+    pub fn record_output(&mut self) {
         self.recovery_primed = false;
         self.reset();
     }
 
-    pub(crate) fn observe_idle_state(
+    pub fn observe_idle_state(
         &mut self,
         output_ever_grew: bool,
         ready_for_input: bool,

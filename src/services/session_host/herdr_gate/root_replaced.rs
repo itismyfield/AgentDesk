@@ -2,14 +2,14 @@
 use super::*;
 
 #[derive(Debug)]
-pub(crate) struct ReplacedRootEnd {
+pub struct ReplacedRootEnd {
     record: HostedExecution,
     witness: ServerWitness,
 }
 
 impl HerdrTarget {
     /// E7, pane and original process absence must all belong to the same server.
-    pub(crate) fn replaced_root_end(
+    pub fn replaced_root_end(
         &self,
         record: &HostedExecution,
         previous: Option<&ReplacedRootEnd>,
@@ -17,7 +17,7 @@ impl HerdrTarget {
         self.recovery_end(record, previous, false)
     }
 
-    pub(crate) fn recovery_end(
+    pub fn recovery_end(
         &self,
         record: &HostedExecution,
         previous: Option<&ReplacedRootEnd>,

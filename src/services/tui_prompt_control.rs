@@ -76,8 +76,8 @@ pub enum CodexInputClass {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LocalOnlySlashControl {
-    pub(crate) kind: String,
+pub struct LocalOnlySlashControl {
+    pub kind: String,
 }
 
 /// Returns the local-only control carried by `prompt`, if it is a complete,

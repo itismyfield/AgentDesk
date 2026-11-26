@@ -59,7 +59,7 @@ impl FileToken {
         Ok(Sha256::digest(bytes).into())
     }
 
-    pub(crate) fn digest(&self) -> [u8; 32] {
+    pub fn digest(&self) -> [u8; 32] {
         self.hash
     }
 

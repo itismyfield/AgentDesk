@@ -18,14 +18,10 @@ pub struct Source {
 }
 
 impl Source {
-    pub(crate) fn matches_path(&self, path: &Path) -> bool {
+    pub fn matches_path(&self, path: &Path) -> bool {
         crate::services::codex_tui::session::codex_tui_rollout_paths_same(&self.path, path)
     }
-    pub(crate) fn open(
-        tmux: &str,
-        path: &Path,
-        session_id: Option<String>,
-    ) -> io::Result<(Self, File)> {
+    pub fn open(tmux: &str, path: &Path, session_id: Option<String>) -> io::Result<(Self, File)> {
         let mut file = File::open(path)?;
         if !file.metadata()?.is_file() {
             return Err(io::Error::other("Codex source is not a regular file"));
@@ -44,7 +40,7 @@ impl Source {
         Ok((source, file))
     }
 
-    pub(crate) fn record(&self, tmux: &str, end: u64) -> io::Result<serde_json::Value> {
+    pub fn record(&self, tmux: &str, end: u64) -> io::Result<serde_json::Value> {
         let mut file = self.reader(tmux)?;
         if end == 0 || boundary(&mut file, end)? != end {
             return Err(io::Error::other("Codex record is not sealed"));
@@ -64,7 +60,7 @@ impl Source {
         serde_json::from_slice(&bytes).map_err(io::Error::other)
     }
 
-    pub(crate) fn check(&self, tmux: &str) -> io::Result<()> {
+    pub fn check(&self, tmux: &str) -> io::Result<()> {
         self.reader(tmux).map(|_| ())
     }
 
@@ -156,7 +152,7 @@ pub enum ObservationKind {
 }
 
 impl ScanStats {
-    pub(crate) fn add(&mut self, stats: Self) {
+    pub fn add(&mut self, stats: Self) {
         self.assistant_records += stats.assistant_records;
         self.records += stats.records;
         self.source_bytes += stats.source_bytes;
@@ -176,7 +172,7 @@ impl ScanStats {
             "Codex observed a physical span"
         );
     }
-    pub(crate) fn observe(&mut self, bytes: usize, json: Option<&serde_json::Value>) {
+    pub fn observe(&mut self, bytes: usize, json: Option<&serde_json::Value>) {
         self.records += 1;
         self.source_bytes += bytes as u64;
         let Some(json) = json else {

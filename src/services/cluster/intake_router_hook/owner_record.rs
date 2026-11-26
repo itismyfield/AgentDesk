@@ -44,7 +44,7 @@ pub(crate) fn idempotency_key(
 
 /// Snapshot of the latest (highest-generation) owner row for an identity.
 #[derive(Clone, Debug, PartialEq, Eq, sqlx::FromRow)]
-pub(crate) struct OwnerRecordSnapshot {
+pub struct OwnerRecordSnapshot {
     pub owner_instance_id: String,
     pub generation: i64,
     pub status: String,

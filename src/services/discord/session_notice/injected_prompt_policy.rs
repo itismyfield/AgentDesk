@@ -32,7 +32,7 @@ pub enum InjectedPromptClass {
 impl InjectedPromptClass {
     /// Whether this class represents a human-driven active turn that should
     /// receive a `⏳` reaction and claim queue/inflight ownership.
-    pub(in crate::services::discord) fn is_human_active_turn(self) -> bool {
+    pub fn is_human_active_turn(self) -> bool {
         matches!(
             self,
             InjectedPromptClass::HumanTuiDirect | InjectedPromptClass::ScheduledPrompt

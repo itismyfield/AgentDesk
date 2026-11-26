@@ -48,7 +48,7 @@ pub struct ReplacedServer {
     pub startup: bool,
 }
 
-pub(crate) struct SocketHerdrLaunchHost {
+pub struct SocketHerdrLaunchHost {
     pub(crate) endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
@@ -245,7 +245,7 @@ impl SocketHerdrLaunchHost {
 
     /// The current next-restart policy of `launch`'s server, recorded for health and remembered
     /// as the witness later mutations of this endpoint compare against.
-    pub(crate) async fn observe_policy(
+    pub async fn observe_policy(
         &self,
         launch: &HerdrLaunchEndpoint,
     ) -> Result<super::policy::NextRestartProof, String> {
@@ -255,7 +255,7 @@ impl SocketHerdrLaunchHost {
     }
 
     /// `observe_policy` through `source`, with the health observation it recorded.
-    pub(crate) async fn observe_policy_from(
+    pub async fn observe_policy_from(
         &self,
         launch: &HerdrLaunchEndpoint,
         source: Arc<dyn PeerSource>,
@@ -280,7 +280,7 @@ impl SocketHerdrLaunchHost {
 
     /// Remember settled admission observations per server/config incarnation; strict targets
     /// still decide whether the observation actually proved this server's startup policy.
-    pub(crate) async fn prepare_existing_policy(
+    pub async fn prepare_existing_policy(
         &self,
         launch: &HerdrLaunchEndpoint,
         nonce: &str,
@@ -378,10 +378,7 @@ impl SocketHerdrLaunchHost {
             .cloned()
     }
 
-    pub(crate) fn consent_source(
-        &self,
-        endpoint: &HerdrLaunchEndpoint,
-    ) -> Option<Arc<dyn PeerSource>> {
+    pub fn consent_source(&self, endpoint: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
         self.source(endpoint)
     }
 
@@ -419,11 +416,7 @@ impl SocketHerdrLaunchHost {
     }
 
     /// The server on `launch` against the one `nonce`'s grant admitted; reads no policy.
-    pub(crate) fn granted_server(
-        &self,
-        launch: &HerdrLaunchEndpoint,
-        nonce: &str,
-    ) -> GrantedServer {
+    pub fn granted_server(&self, launch: &HerdrLaunchEndpoint, nonce: &str) -> GrantedServer {
         let Some((endpoint, transport)) = self.endpoint(launch) else {
             return GrantedServer::Kept;
         };

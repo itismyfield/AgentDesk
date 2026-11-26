@@ -38,7 +38,7 @@ impl Barrier {
 }
 
 impl Settlement {
-    pub(crate) fn barrier(&self, namespace: &str) -> Result<Option<Barrier>, String> {
+    pub fn barrier(&self, namespace: &str) -> Result<Option<Barrier>, String> {
         self.extra
             .get("foreign_prompt_barrier")
             .map(|v| {

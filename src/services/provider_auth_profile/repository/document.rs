@@ -10,7 +10,7 @@ use crate::domain::provider_auth_profile::ProviderAuthProfileDef;
 use crate::services::discord::runtime_store::org_schema_path_for_root;
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct OrgDocument {
+pub struct OrgDocument {
     #[serde(default = "default_org_version")]
     pub(crate) version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -22,9 +22,9 @@ pub(crate) struct OrgDocument {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) skills_root: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) agents: BTreeMap<String, OrgAgentDef>,
+    pub agents: BTreeMap<String, OrgAgentDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) channels: Option<OrgChannelsConfig>,
+    pub channels: Option<OrgChannelsConfig>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) suffix_map: Option<Value>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -39,19 +39,19 @@ pub(crate) struct OrgDocument {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct OrgAgentDef {
+pub struct OrgAgentDef {
     #[serde(default)]
-    pub(crate) display_name: String,
+    pub display_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) prompt_file: Option<String>,
+    pub prompt_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) keywords: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provider: Option<String>,
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) model: Option<String>,
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) workspace: Option<String>,
+    pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -63,7 +63,7 @@ pub(crate) struct OrgAgentDef {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OrgChannelsConfig {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) by_id: BTreeMap<String, OrgChannelBinding>,
+    pub by_id: BTreeMap<String, OrgChannelBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) by_name: Option<Value>,
     #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]

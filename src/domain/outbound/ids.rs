@@ -20,7 +20,7 @@ impl OutboundChannelId {
         Self(NonZeroU64::new(id).expect("channel id must be non-zero"))
     }
 
-    pub(crate) fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0.get()
     }
 }
@@ -38,11 +38,11 @@ impl OutboundMessageId {
 
 impl OutboundUserId {
     #[track_caller]
-    pub(crate) fn new(id: u64) -> Self {
+    pub fn new(id: u64) -> Self {
         Self(NonZeroU64::new(id).expect("user id must be non-zero"))
     }
 
-    pub(crate) fn get(self) -> u64 {
+    pub fn get(self) -> u64 {
         self.0.get()
     }
 }

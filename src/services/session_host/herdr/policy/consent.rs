@@ -27,7 +27,7 @@ pub struct ConsentKey {
 }
 
 impl ConsentKey {
-    pub(crate) fn normalized(mut self) -> Result<Self, String> {
+    pub fn normalized(mut self) -> Result<Self, String> {
         self.node = self.node.trim().to_owned();
         self.named_session = self.named_session.trim().to_owned();
         if self.node.is_empty() || self.named_session.is_empty() {
@@ -82,7 +82,7 @@ pub enum State {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CardState {
+pub enum CardState {
     #[default]
     Bound,
     Awaiting,
@@ -90,14 +90,14 @@ pub(crate) enum CardState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QuestionResult {
+pub enum QuestionResult {
     Current(Consent),
     RevisionChanged(Consent),
     AlreadyApplied(Consent),
 }
 
 impl QuestionResult {
-    pub(crate) fn into_consent(self) -> Consent {
+    pub fn into_consent(self) -> Consent {
         match self {
             Self::Current(value) | Self::RevisionChanged(value) | Self::AlreadyApplied(value) => {
                 value
@@ -108,7 +108,7 @@ impl QuestionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ApplyResult {
+pub struct ApplyResult {
     pub before: Option<[u8; 32]>,
     pub after: Option<[u8; 32]>,
     pub backup: Option<PathBuf>,
@@ -155,7 +155,7 @@ impl Consent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Generation {
+pub struct Generation {
     pub nonce: String,
     pub preview: Preview,
     pub decision: Option<(u64, u64)>,
@@ -204,7 +204,7 @@ pub struct Question {
 
 pub struct ConsentStore(Directory);
 impl ConsentStore {
-    pub(crate) fn new(root: Option<PathBuf>) -> Self {
+    pub fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))
     }
 
@@ -269,7 +269,7 @@ impl ConsentStore {
         decoded.map_err(|e: String| self.0.failure(&name, e))
     }
 
-    pub(crate) fn load(&self, key: &ConsentKey) -> Result<Option<Consent>, String> {
+    pub fn load(&self, key: &ConsentKey) -> Result<Option<Consent>, String> {
         let key = key
             .clone()
             .normalized()
@@ -291,11 +291,7 @@ impl ConsentStore {
             .map(QuestionResult::into_consent)
     }
 
-    pub(crate) fn hold_unbound(
-        &self,
-        question: Question,
-        now: u64,
-    ) -> Result<QuestionResult, String> {
+    pub fn hold_unbound(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, true)
     }
 

@@ -51,7 +51,7 @@ impl ImessageSource {
         format!("imsg-{}", self.0)
     }
 
-    pub(crate) fn digest(&self) -> &str {
+    pub fn digest(&self) -> &str {
         &self.0
     }
 }
@@ -79,11 +79,11 @@ pub struct AgySpool {
 }
 
 impl AgySpool {
-    pub(crate) fn reserve(root: &Path, input: AgyReservation<'_>) -> io::Result<Self> {
+    pub fn reserve(root: &Path, input: AgyReservation<'_>) -> io::Result<Self> {
         Self::reserve_source(root, input, None)
     }
 
-    pub(crate) fn reserve_imessage(
+    pub fn reserve_imessage(
         root: &Path,
         input: AgyReservation<'_>,
         source: &ImessageSource,

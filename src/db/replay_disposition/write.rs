@@ -49,7 +49,7 @@ pub(super) fn refused(error: sqlx::Error) -> WriteError {
 
 /// One started attempt: its receipt, episode nonce, owning incarnation and the nonce it retried.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ExactAttempt {
+pub struct ExactAttempt {
     receipt_id: i64,
     nonce: String,
     incarnation: String,
@@ -57,7 +57,7 @@ pub(crate) struct ExactAttempt {
 }
 
 impl ExactAttempt {
-    pub(crate) fn receipt_id(&self) -> i64 {
+    pub fn receipt_id(&self) -> i64 {
         self.receipt_id
     }
 
@@ -141,7 +141,7 @@ pub(crate) async fn withhold(
 
 /// A copy of custody for settlement only; it cannot construct a start permit.
 #[derive(Debug, Clone)]
-pub(crate) struct HoldProof {
+pub struct HoldProof {
     id: i64,
     nonce: String,
     owner: String,

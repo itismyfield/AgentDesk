@@ -19,7 +19,7 @@ pub struct HerdrEndpointId {
 }
 
 impl HerdrEndpointId {
-    pub(crate) fn of(location: &HostedLocation) -> Self {
+    pub fn of(location: &HostedLocation) -> Self {
         Self {
             host: location.host.clone(),
             execution_node: location.execution_node.clone(),
@@ -238,10 +238,7 @@ pub struct HostRecover<'a> {
 }
 
 impl<'a> HostRecover<'a> {
-    pub(crate) fn herdr(
-        record: &'a HostedExecution,
-        witness: &'a dyn HerdrExecutionReader,
-    ) -> Self {
+    pub fn herdr(record: &'a HostedExecution, witness: &'a dyn HerdrExecutionReader) -> Self {
         Self { record, witness }
     }
 }

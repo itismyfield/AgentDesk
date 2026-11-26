@@ -16,7 +16,7 @@ pub(crate) const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
 
 /// Who reads. A pass begun under one holder, run or credentials proves nothing under another.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct RunScope {
+pub struct RunScope {
     pub(crate) holder: String,
     pub(crate) run: String,
     pub(crate) credentials: String,

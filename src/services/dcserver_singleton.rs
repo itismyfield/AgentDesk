@@ -28,7 +28,7 @@ fn write_dcserver_lock_pid(mut file: &File) -> std::io::Result<()> {
 
 #[cfg(unix)]
 impl Singleton {
-    pub(crate) fn acquire(root: Option<&Path>) -> Result<Self, String> {
+    pub fn acquire(root: Option<&Path>) -> Result<Self, String> {
         use std::os::fd::AsRawFd;
         let path = root
             .map(|root| root.join("runtime/dcserver.lock"))
@@ -51,7 +51,7 @@ impl Singleton {
         })
     }
 
-    pub(crate) fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
+    pub fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
         Some(issuer::owned(
             issuer_key::SingletonRootKey(()),
             self.root.clone()?,

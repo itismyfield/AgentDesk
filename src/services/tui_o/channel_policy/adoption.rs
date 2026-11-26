@@ -38,7 +38,7 @@ pub enum Adoption {
 }
 
 impl Adoption {
-    pub(crate) fn owned(self) -> bool {
+    pub fn owned(self) -> bool {
         matches!(self, Self::Committed | Self::Held)
     }
 }
@@ -230,7 +230,7 @@ impl Candidate {
         }
     }
 
-    pub(crate) fn late_adopt_origin(&self) -> bool {
+    pub fn late_adopt_origin(&self) -> bool {
         self.late_origin
     }
 
@@ -332,7 +332,7 @@ impl Candidate {
     }
 
     /// Read without deciding anything, for callers that carry no body.
-    pub(crate) fn peek(&self) -> Adoption {
+    pub fn peek(&self) -> Adoption {
         *self.lock()
     }
 

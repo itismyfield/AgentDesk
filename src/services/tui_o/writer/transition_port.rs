@@ -238,7 +238,7 @@ impl TransitionPort {
         self
     }
 
-    pub(crate) fn provider(&self) -> Option<crate::services::tui_o::shadow::ShadowProvider> {
+    pub fn provider(&self) -> Option<crate::services::tui_o::shadow::ShadowProvider> {
         self.provider
     }
 

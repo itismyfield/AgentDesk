@@ -50,7 +50,7 @@ impl DecisionProvenance {
         self.channel_id
     }
 
-    pub(crate) fn actor_id(&self) -> u64 {
+    pub fn actor_id(&self) -> u64 {
         self.actor_id
     }
 

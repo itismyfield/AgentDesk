@@ -81,8 +81,8 @@ pub struct PersistSessionTranscript<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelTranscriptPair {
-    pub(crate) user_message: String,
-    pub(crate) assistant_message: String,
+    pub user_message: String,
+    pub assistant_message: String,
 }
 
 pub fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {

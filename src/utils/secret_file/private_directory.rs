@@ -8,7 +8,7 @@ use std::os::unix::{ffi::OsStrExt, fs::MetadataExt};
 use std::path::{Component, Path};
 
 #[derive(Debug)]
-pub(crate) enum StoreError {
+pub enum StoreError {
     Open,
     Write,
     FileSync,
@@ -64,7 +64,7 @@ impl PrivateDirectory {
         )
         .map_err(|_| StoreError::Open)
     }
-    pub(crate) fn open(path: &Path) -> Result<Self, StoreError> {
+    pub fn open(path: &Path) -> Result<Self, StoreError> {
         if !path.is_absolute() {
             return Err(StoreError::Open);
         }
@@ -91,7 +91,7 @@ impl PrivateDirectory {
         }
         Ok(Self { directory })
     }
-    pub(crate) fn lock(&self, filename: &str) -> Result<File, StoreError> {
+    pub fn lock(&self, filename: &str) -> Result<File, StoreError> {
         let file = open_at(
             self.directory.as_raw_fd(),
             &name(filename)?,
@@ -102,7 +102,7 @@ impl PrivateDirectory {
         file.try_lock().map_err(|_| StoreError::Open)?;
         Ok(file)
     }
-    pub(crate) fn read(&self, filename: &str) -> Result<Option<Vec<u8>>, StoreError> {
+    pub fn read(&self, filename: &str) -> Result<Option<Vec<u8>>, StoreError> {
         let file = match open_at(
             self.directory.as_raw_fd(),
             &name(filename)?,
@@ -122,7 +122,7 @@ impl PrivateDirectory {
         }
         Ok(Some(bytes))
     }
-    pub(crate) fn write_atomic(&self, filename: &str, bytes: &[u8]) -> Result<(), StoreError> {
+    pub fn write_atomic(&self, filename: &str, bytes: &[u8]) -> Result<(), StoreError> {
         self.write_stages(filename, bytes, None)
     }
     fn write_stages(

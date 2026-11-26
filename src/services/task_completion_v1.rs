@@ -71,7 +71,7 @@ pub struct TaskCompletionV1 {
 }
 
 impl TaskCompletionV1 {
-    pub(crate) fn codex_background_completed() -> Self {
+    pub fn codex_background_completed() -> Self {
         Self {
             frame_type: TYPE_LITERAL,
             subtype: SUBTYPE_LITERAL,
@@ -84,7 +84,7 @@ impl TaskCompletionV1 {
         }
     }
 
-    pub(crate) fn encode_canonical(&self) -> Result<String, serde_json::Error> {
+    pub fn encode_canonical(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string(self)
     }
 }

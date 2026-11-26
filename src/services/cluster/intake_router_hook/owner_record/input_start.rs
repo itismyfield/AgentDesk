@@ -142,7 +142,7 @@ impl OwnerStartPermit {
     }
 }
 
-pub(crate) async fn has_custody(
+pub async fn has_custody(
     pool: &PgPool,
     input: &write::CanonicalInput,
 ) -> Result<bool, sqlx::Error> {

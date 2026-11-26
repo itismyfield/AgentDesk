@@ -7,7 +7,7 @@ use std::io::Read;
 const BYTE_LIMIT: u64 = 16 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChannelObservation {
+pub struct ChannelObservation {
     pub events: Vec<BindingEvent>,
     pub settled_companions: SettledCompanions,
     pub tail: u64,

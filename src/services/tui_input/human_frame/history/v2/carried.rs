@@ -4,7 +4,7 @@ use super::*;
 pub(crate) const CAP: u64 = 16 * 1024 * 1024;
 
 #[derive(Debug)]
-pub(crate) struct Evidence {
+pub struct Evidence {
     pub(crate) namespace: String,
     pub(crate) key: Value,
     pub(crate) source: Source,
@@ -19,12 +19,12 @@ pub(crate) struct Evidence {
 }
 
 #[derive(Debug)]
-pub(crate) enum Consumed {
+pub enum Consumed {
     User { row: Evidence },
     Command { row: Evidence },
 }
 
-pub(crate) fn lookup(
+pub fn lookup(
     primary: u64,
     namespace: &str,
     owner: &str,
@@ -258,14 +258,14 @@ fn selection(state: &Snapshot, key: &Value, source: &Source, class: &str) -> Opt
 }
 
 impl Consumed {
-    pub(crate) fn evidence(&self) -> &Evidence {
+    pub fn evidence(&self) -> &Evidence {
         match self {
             Self::User { row } | Self::Command { row } => row,
         }
     }
 
     /// Publish only while the registry still has the exact selection and competing owners.
-    pub(crate) fn confirm<T>(&self, publish: impl FnOnce() -> Option<T>) -> Option<T> {
+    pub fn confirm<T>(&self, publish: impl FnOnce() -> Option<T>) -> Option<T> {
         let row = self.evidence();
         Registry::runtime()
             .ok()?

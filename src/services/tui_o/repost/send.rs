@@ -115,7 +115,7 @@ impl RepostEnvelope {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CreatedMessage {
+pub struct CreatedMessage {
     pub(crate) id: u64,
     pub(crate) author_id: u64,
     pub(crate) content: String,

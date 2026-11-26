@@ -36,7 +36,7 @@ pub struct PreparedCommand<'a> {
     stored_seal: Option<CandidateSeal>,
 }
 
-pub(crate) struct StagedCommand<'a> {
+pub struct StagedCommand<'a> {
     tx: Transaction<'a, Postgres>,
     id: String,
     key: String,
@@ -192,11 +192,11 @@ impl<'a> PreparedCommand<'a> {
 }
 
 impl<'a> StagedCommand<'a> {
-    pub(crate) fn outcome(&self) -> &CommandOutcome {
+    pub fn outcome(&self) -> &CommandOutcome {
         &self.outcome
     }
 
-    pub(crate) async fn record_receipt(
+    pub async fn record_receipt(
         self,
         response: ReceiptResponse,
     ) -> StoreResult<(Transaction<'a, Postgres>, CommandReply)> {

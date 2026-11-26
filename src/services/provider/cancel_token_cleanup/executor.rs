@@ -68,11 +68,11 @@ pub struct CleanupOutcome {
     pub(crate) duplicate: bool,
     pub(crate) termination_recorded: bool,
     /// No claim was taken: the binding is not a confirmed legacy tmux one.
-    pub(crate) host_refused: bool,
+    pub host_refused: bool,
 }
 
 impl CleanupOutcome {
-    pub(crate) fn termination_confirmed(self) -> bool {
+    pub fn termination_confirmed(self) -> bool {
         self.termination_recorded
     }
 }
@@ -85,7 +85,7 @@ impl CancelToken {
 
     /// Records a forced stop ahead of its cancel, so the turn never ends on a plain cancel;
     /// a stale generation or a refused or moved host records nothing.
-    pub(crate) fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
+    pub fn intend_termination(&self, expected: Option<ExpectedBinding<'_>>) {
         let binding = self
             .tmux_binding
             .lock()
@@ -101,7 +101,7 @@ impl CancelToken {
     }
 
     /// Execute all token-owned destructive cleanup behind one generation fence.
-    pub(crate) fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
+    pub fn request_cleanup(&self, request: CleanupRequest) -> CleanupOutcome {
         self.request_cleanup_inner(request, None)
     }
 

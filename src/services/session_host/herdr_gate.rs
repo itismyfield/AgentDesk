@@ -391,7 +391,7 @@ impl HerdrTarget {
 
     /// A terminate admits an absent `.host_kind` marker; the close still needs the recorded root
     /// shell, provider and binding nonce. A shared target is returned unchanged.
-    pub(crate) fn verified_by_pane(self) -> Self {
+    pub fn verified_by_pane(self) -> Self {
         match Arc::try_unwrap(self.0) {
             Ok(gate) => Self(Arc::new(PaneGate {
                 marker_absent_by_pane: true,
@@ -416,11 +416,11 @@ impl HerdrTarget {
     }
 
     /// Keeps this nonce closed and excludes all pane writes through settlement.
-    pub(crate) fn termination_fence(&self) -> Result<TerminationFence, HerdrGateRefusal> {
+    pub fn termination_fence(&self) -> Result<TerminationFence, HerdrGateRefusal> {
         self.0.fence.exclude_termination()
     }
 
-    pub(crate) fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
+    pub fn revalidate_termination_reads(&self) -> Result<ServerWitness, HerdrGateRefusal> {
         self.0.restore_witness(Mutation::Terminate)
     }
 
@@ -434,7 +434,7 @@ impl HerdrTarget {
         }
     }
 
-    pub(crate) fn pane_id(&self) -> &str {
+    pub fn pane_id(&self) -> &str {
         &self.0.pane
     }
 
@@ -444,7 +444,7 @@ impl HerdrTarget {
     }
 
     /// Judges the next input and keeps the judgment for the send that follows it.
-    pub(crate) fn pin(&self, mutation: Mutation) -> Result<(), HerdrGateRefusal> {
+    pub fn pin(&self, mutation: Mutation) -> Result<(), HerdrGateRefusal> {
         let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
         *pinned = None;
         let judged = self.0.fence.acquire(mutation).and_then(|permit| {
@@ -555,7 +555,7 @@ impl HerdrTarget {
     }
 
     /// Drops a judgment no send will use, so a later send without its own judgment writes nothing.
-    pub(crate) fn discard_pin(&self) {
+    pub fn discard_pin(&self) {
         let mut pinned = self.0.pinned.lock().unwrap_or_else(PoisonError::into_inner);
         *pinned = None;
     }
@@ -599,7 +599,7 @@ impl HerdrTarget {
     }
 
     /// The stop owner already pinned Cancel; sending Escape consumes that same judgment.
-    pub(crate) fn interrupt(&self) -> Result<HostMutation, HostError> {
+    pub fn interrupt(&self) -> Result<HostMutation, HostError> {
         self.send_keys(&[HostKey::Escape])
     }
 
@@ -640,17 +640,17 @@ impl HerdrTarget {
     }
 
     /// A read of the pane's screen; `scroll_back` follows the tmux capture convention.
-    pub(crate) fn capture(&self, scroll_back: i32) -> Option<String> {
+    pub fn capture(&self, scroll_back: i32) -> Option<String> {
         self.capture_checked(scroll_back).ok()
     }
 
     /// [`Self::capture`] that keeps why a read was refused, for a caller that reports it.
-    pub(crate) fn capture_checked(&self, scroll_back: i32) -> Result<String, HostError> {
+    pub fn capture_checked(&self, scroll_back: i32) -> Result<String, HostError> {
         self.read(contract::capture_request(&self.0.pane, scroll_back))
     }
 
     /// The same read with ANSI styling kept, under the same source and truncation checks.
-    pub(crate) fn capture_ansi(&self, scroll_back: i32) -> Option<String> {
+    pub fn capture_ansi(&self, scroll_back: i32) -> Option<String> {
         self.read(contract::capture_ansi_request(&self.0.pane, scroll_back))
             .ok()
     }
@@ -672,7 +672,7 @@ impl HerdrTarget {
     }
 
     /// Whether the stored execution still runs in the pane, read on one server.
-    pub(crate) fn execution_alive(&self) -> bool {
+    pub fn execution_alive(&self) -> bool {
         self.0
             .transport
             .server_witness()
@@ -681,7 +681,7 @@ impl HerdrTarget {
 
     /// The same read for an attach or reconnect: a gap a short-lived pane process leaves, as the
     /// launch probe allows, is read again for a moment on the same server; each attempt is the whole proof.
-    pub(crate) fn execution_confirmed(&self) -> bool {
+    pub fn execution_confirmed(&self) -> bool {
         let witness = self.0.transport.server_witness();
         let confirmed = witness
             .map_err(|why| format!("{why:?}"))
@@ -801,12 +801,12 @@ impl HerdrPaneView {
         Self { os, ..self }
     }
 
-    pub(crate) fn pane_id(&self) -> &str {
+    pub fn pane_id(&self) -> &str {
         &self.pane
     }
 
     /// The pane's presence, root shell and provider, every answer from one server; no input.
-    pub(crate) fn read_execution(&self) -> PaneReading {
+    pub fn read_execution(&self) -> PaneReading {
         let unreadable = |why: &dyn std::fmt::Debug| PaneReading::Unreadable(format!("{why:?}"));
         let witness = match self.transport.server_witness() {
             Ok(witness) => witness,
@@ -884,7 +884,7 @@ impl HerdrPaneView {
     }
 
     /// `confirmed_ended` of `reading` over this view's process reads.
-    pub(crate) fn ended(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
+    pub fn ended(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
         confirmed_ended(self.os.as_ref(), record, reading)
     }
 }

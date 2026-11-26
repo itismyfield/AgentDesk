@@ -134,7 +134,7 @@ pub struct ObservedTuiPrompt {
     pub native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.
     pub steer_echo: bool,
-    pub(crate) hosted_source: Option<hosted_source::HostedSourcePin>,
+    pub hosted_source: Option<hosted_source::HostedSourcePin>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -210,14 +210,14 @@ pub struct TuiRuntimeBinding {
 }
 
 impl TuiRuntimeBinding {
-    pub(crate) fn relay_output_path(&self) -> &str {
+    pub fn relay_output_path(&self) -> &str {
         self.relay_output_path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
             .unwrap_or(&self.output_path)
     }
 
-    pub(crate) fn relay_last_offset(&self) -> u64 {
+    pub fn relay_last_offset(&self) -> u64 {
         self.relay_last_offset.unwrap_or(self.last_offset)
     }
 }

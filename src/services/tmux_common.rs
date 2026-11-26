@@ -58,11 +58,11 @@ pub(crate) fn source_authority_contention_key_for_tests(
 pub struct TmuxSourceAuthority<'a>(&'a str, &'a str);
 
 impl<'a> TmuxSourceAuthority<'a> {
-    pub(crate) fn session(&self) -> &'a str {
+    pub fn session(&self) -> &'a str {
         self.0
     }
 
-    pub(crate) fn invalidate(&self) {
+    pub fn invalidate(&self) {
         invalidate_session_temp_source(self.1);
     }
 

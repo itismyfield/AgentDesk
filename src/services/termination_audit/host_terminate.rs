@@ -67,7 +67,7 @@ pub mod herdr_terminate {
                 fence: None,
             }
         }
-        pub(crate) fn issue_fenced(
+        pub fn issue_fenced(
             target: HerdrTarget,
             fence: &'a crate::services::session_host::TerminationFence,
         ) -> Self {

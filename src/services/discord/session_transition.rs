@@ -82,7 +82,7 @@ pub struct UnplacedLease {
 
 impl UnplacedLease {
     /// Waits as long as any transition claim does.
-    pub(crate) async fn acquire<S: SessionTransitionHost>(
+    pub async fn acquire<S: SessionTransitionHost>(
         shared: &S,
         channel: ChannelId,
     ) -> Result<Self, SessionTransitionBusy> {

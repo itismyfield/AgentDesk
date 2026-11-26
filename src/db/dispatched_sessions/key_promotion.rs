@@ -8,11 +8,11 @@ pub fn snapshot_changed(error: &HookSessionUpsertError) -> bool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegistrationSnapshot {
-    pub(crate) id: i64,
-    pub(crate) primary: String,
-    pub(crate) nonce: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) hosted: Option<serde_json::Value>,
+    pub id: i64,
+    pub primary: String,
+    pub nonce: Option<String>,
+    pub status: Option<String>,
+    pub hosted: Option<serde_json::Value>,
 }
 
 /// The host reader retains its explicit namespace observation until commit.

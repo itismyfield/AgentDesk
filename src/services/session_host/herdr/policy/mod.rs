@@ -60,7 +60,7 @@ pub trait PeerSource: Send + Sync {
 }
 
 #[async_trait::async_trait]
-pub(crate) trait ConfigChecker: Send + Sync {
+pub trait ConfigChecker: Send + Sync {
     async fn check(&self, peer: &peer::PeerSnapshot) -> Result<(), Unverified>;
 }
 

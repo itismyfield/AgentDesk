@@ -136,7 +136,7 @@ pub struct SessionTargetEvidence {
 }
 
 impl SessionTargetEvidence {
-    pub(crate) fn unread() -> Self {
+    pub fn unread() -> Self {
         let unread = || HostWitness::ReadFailed("not read".to_string());
         Self {
             session_key: None,
@@ -155,7 +155,7 @@ impl SessionTargetEvidence {
 
     /// Reads the `.host_kind` marker under the matched key's tmux name, the name the
     /// launch writes it under and session cleanup reads it by. Without a key it stays unread.
-    pub(crate) fn with_host_marker(mut self) -> Self {
+    pub fn with_host_marker(mut self) -> Self {
         let Some(key) = self.session_key.as_deref() else {
             return self;
         };
@@ -219,7 +219,7 @@ pub struct ResolvedSessionTarget {
 
 impl ResolvedSessionTarget {
     /// A tmux/process ref for a known legacy host; Herdr, Unknown and Conflict get none.
-    pub(crate) fn legacy_ref(&self) -> Option<HostSessionRef<'_>> {
+    pub fn legacy_ref(&self) -> Option<HostSessionRef<'_>> {
         match &self.host {
             TargetHost::Known {
                 kind: HostKind::Tmux,

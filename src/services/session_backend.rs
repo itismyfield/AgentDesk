@@ -39,7 +39,7 @@ impl ReadOutputFailure {
         }
     }
 
-    pub(crate) fn recover_followup(
+    pub fn recover_followup(
         self,
         fallback: impl FnOnce(Self) -> Result<crate::services::provider::FollowupResult, String>,
     ) -> Result<crate::services::provider::FollowupResult, String> {

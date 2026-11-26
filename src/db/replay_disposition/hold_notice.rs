@@ -11,9 +11,9 @@ pub(super) const TEXT: &str =
     "출력 또는 도구 활동이 있어 자동 재실행을 보류했습니다. 원 요청과 부분 결과를 보존했습니다.";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct HoldNotice {
+pub struct HoldNotice {
     pub(crate) dedupe_key: String,
-    pub(crate) outbox_id: i64,
+    pub outbox_id: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hold_nonce: Option<String>,
 }
@@ -54,7 +54,7 @@ pub enum NoticeRead {
 }
 
 #[derive(Debug)]
-pub(crate) enum NoticeReadError {
+pub enum NoticeReadError {
     Storage(sqlx::Error),
     Malformed,
 }

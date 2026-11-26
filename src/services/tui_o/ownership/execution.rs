@@ -63,7 +63,7 @@ impl OwnerPermit {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct View {
+pub struct View {
     pub(crate) permit: Result<Arc<OwnerPermit>, String>,
     pub(crate) candidate: Candidate,
     pub(crate) retained: Option<Arc<OwnerPermit>>,
@@ -77,7 +77,7 @@ impl View {
             retained: None,
         }
     }
-    pub(crate) fn verified(&self) -> Option<Arc<OwnerPermit>> {
+    pub fn verified(&self) -> Option<Arc<OwnerPermit>> {
         self.permit
             .as_ref()
             .ok()

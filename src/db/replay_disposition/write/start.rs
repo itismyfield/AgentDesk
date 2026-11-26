@@ -7,10 +7,10 @@ use sqlx::PgPool;
 
 /// The original request: stable key, scope, every absorbed source, original text and side inputs.
 pub struct CanonicalInput {
-    pub(crate) request_key: String,
-    pub(crate) provider: String,
-    pub(crate) channel: String,
-    pub(crate) sources: Vec<String>,
+    pub request_key: String,
+    pub provider: String,
+    pub channel: String,
+    pub sources: Vec<String>,
     pub(crate) original_text: String,
     pub(crate) owner_id: String,
     pub(crate) agent_id: String,
@@ -41,7 +41,7 @@ pub async fn register_or_reuse(
 }
 
 /// Reuses the caller's transaction so preserving an unstarted delivery cannot commit half custody.
-pub(crate) async fn register_or_reuse_on_tx(
+pub async fn register_or_reuse_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: &CanonicalInput,
     instance: &str,
@@ -218,13 +218,13 @@ pub struct EffectProjection<'a> {
 }
 
 impl EffectProjection<'_> {
-    pub(crate) fn requires_prior_ack(&self) -> bool {
+    pub fn requires_prior_ack(&self) -> bool {
         serde_json::from_str::<Vec<String>>(self.effect_target)
             .is_ok_and(|key| key.first().is_some_and(|kind| kind == "busy_pane"))
     }
 
     /// Saves the busy binding before begin; a different saved projection is never replaced.
-    pub(crate) async fn save(
+    pub async fn save(
         &self,
         pool: &PgPool,
         receipt_id: i64,
@@ -260,7 +260,7 @@ impl EffectProjection<'_> {
 
 /// A committed start; the permit layer seals it into the one `StartPermit` for this attempt.
 #[derive(Debug)]
-pub(crate) struct BeginAck {
+pub struct BeginAck {
     attempt: ExactAttempt,
     effect_target: String,
     input_hash: String,

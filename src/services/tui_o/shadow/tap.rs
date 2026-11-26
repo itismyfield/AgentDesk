@@ -62,7 +62,7 @@ impl WriterChannelsConfig {
         self.all_tui.unwrap_or(self.channels.is_empty())
     }
 
-    pub(crate) fn late_adopt(&self) -> bool {
+    pub fn late_adopt(&self) -> bool {
         self.late_adopt.unwrap_or(true)
     }
 }

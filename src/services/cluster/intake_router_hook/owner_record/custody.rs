@@ -286,7 +286,7 @@ async fn announce_on_tx(
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct StoredDelivery {
+pub struct StoredDelivery {
     pub id: i64,
     pub routing_state: String,
     pub target_instance_id: String,
@@ -294,7 +294,7 @@ pub(crate) struct StoredDelivery {
 }
 
 /// Read prior custody even while new routing producers are disabled.
-pub(crate) async fn lookup_source(
+pub async fn lookup_source(
     pool: &PgPool,
     input: &write::CanonicalInput,
 ) -> Result<Option<StoredDelivery>, sqlx::Error> {

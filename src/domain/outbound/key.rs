@@ -7,22 +7,19 @@ use super::ids::{OutboundChannelId, OutboundMessageId, OutboundUserId};
 /// `correlation_id` groups related attempts; `semantic_event_id` names one event in the group.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OutboundDeliveryId {
-    pub(crate) correlation_id: String,
-    pub(crate) semantic_event_id: String,
+    pub correlation_id: String,
+    pub semantic_event_id: String,
 }
 
 impl OutboundDeliveryId {
-    pub(crate) fn new(
-        correlation_id: impl Into<String>,
-        semantic_event_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(correlation_id: impl Into<String>, semantic_event_id: impl Into<String>) -> Self {
         Self {
             correlation_id: correlation_id.into(),
             semantic_event_id: semantic_event_id.into(),
         }
     }
 
-    pub(crate) fn key_for(
+    pub fn key_for(
         &self,
         target: OutboundTargetKey,
         operation: OutboundOperationKey,
@@ -38,8 +35,8 @@ impl OutboundDeliveryId {
 
 #[derive(Clone, Copy, Debug)]
 pub struct ManualOutboundDeliveryId<'a> {
-    pub(crate) correlation_id: &'a str,
-    pub(crate) semantic_event_id: &'a str,
+    pub correlation_id: &'a str,
+    pub semantic_event_id: &'a str,
 }
 
 /// Typed components instead of a joined string, so `("a::b", "c")` and `("a", "b::c")` differ.

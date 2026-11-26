@@ -14,11 +14,11 @@ pub enum HerdrSubmission {
 }
 
 pub struct HerdrInterruptState {
-    pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    pub owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
     pub submission: Mutex<super::herdr_before_start::HerdrInputState>,
-    pub(crate) user_stop: AtomicBool,
+    pub user_stop: AtomicBool,
     /// Where this token's own input began; terminal admission reads its turn from here only.
-    pub(crate) turn_start: std::sync::OnceLock<HerdrTurnStart>,
+    pub turn_start: std::sync::OnceLock<HerdrTurnStart>,
     /// Whether this turn's reader has seen its own start, and a stop that met the turn unbound.
     pub(crate) own_start: Mutex<OwnStart>,
     /// The backstop's read of this turn from its own start, resumed poll to poll.
@@ -42,13 +42,13 @@ pub(crate) enum OwnStart {
 /// The source and offset an executor observed at this token's input, never taken from a frame.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HerdrTurnStart {
-    pub(crate) execution_nonce: String,
-    pub(crate) source: std::path::PathBuf,
+    pub execution_nonce: String,
+    pub source: std::path::PathBuf,
     /// The source's (dev, ino) at the input; a cold start's transcript does not exist yet.
-    pub(crate) file: Option<(u64, u64)>,
-    pub(crate) offset: u64,
+    pub file: Option<(u64, u64)>,
+    pub offset: u64,
     /// Claude's input instant: its turn begins at the first record stamped at or after it.
-    pub(crate) submitted_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub submitted_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 impl HerdrInterruptState {
@@ -62,7 +62,7 @@ impl HerdrInterruptState {
 
     /// Keeps `stop` until the reader first sees this turn's own start; `false`, dropping it, when
     /// that was already seen. Only the first armed stop is kept.
-    pub(crate) fn arm_late_stop(&self, stop: LateStop) -> bool {
+    pub fn arm_late_stop(&self, stop: LateStop) -> bool {
         match &mut *self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
             OwnStart::Unseen(armed) => {
                 armed.get_or_insert(stop);
@@ -105,7 +105,7 @@ impl HerdrInterruptState {
     }
 
     /// The reader's complete-record end once it has seen this turn's own start.
-    pub(crate) fn seen_progress(&self) -> Option<u64> {
+    pub fn seen_progress(&self) -> Option<u64> {
         match &*self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
             OwnStart::Seen { progress, .. } => Some(*progress),
             OwnStart::Unseen(_) => None,
@@ -113,7 +113,7 @@ impl HerdrInterruptState {
     }
 
     /// The native ID of this turn's start as its reader first saw it.
-    pub(crate) fn seen_turn_id(&self) -> Option<String> {
+    pub fn seen_turn_id(&self) -> Option<String> {
         match &*self.own_start.lock().unwrap_or_else(|e| e.into_inner()) {
             OwnStart::Seen { turn_id, .. } => Some(turn_id.clone()),
             OwnStart::Unseen(_) => None,
@@ -121,7 +121,7 @@ impl HerdrInterruptState {
     }
 
     /// Keeps one more attempt of a stop that sent nothing for the reader's next record past `after`.
-    pub(crate) fn retry_late_stop(&self, stop: LateStop, after: u64) {
+    pub fn retry_late_stop(&self, stop: LateStop, after: u64) {
         if let OwnStart::Seen { retry, .. } =
             &mut *self.own_start.lock().unwrap_or_else(|e| e.into_inner())
         {
@@ -149,7 +149,7 @@ impl HerdrTurnStart {
 
     /// The Codex turn that began at this input: the first record there of any turn must start a
     /// named turn.
-    pub(crate) fn codex_own_turn(&self) -> Result<CodexOwnTurn, OwnTurnRead> {
+    pub fn codex_own_turn(&self) -> Result<CodexOwnTurn, OwnTurnRead> {
         use std::io::{BufRead, Seek};
         let mut file = std::fs::File::open(&self.source).map_err(|_| OwnTurnRead::Unreadable)?;
         let opened = file.metadata().ok();
@@ -276,7 +276,7 @@ impl OwnTurnCursor {
 impl HerdrInterruptState {
     /// This turn read from its start in `source`, `OWN_TURN_POLL_BUDGET` bytes a call, once its end
     /// is read; a partial line, a changed file or a turn the reader did not see proves nothing.
-    pub(crate) fn read_own_codex_turn(
+    pub fn read_own_codex_turn(
         &self,
         source: &std::path::Path,
         expected: Option<&str>,
@@ -313,11 +313,11 @@ impl HerdrInterruptState {
 
 /// The Codex turn a Herdr input began, as its rollout shows it from that input.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CodexOwnTurn {
-    pub(crate) started_at: u64,
-    pub(crate) turn_id: String,
+pub struct CodexOwnTurn {
+    pub started_at: u64,
+    pub turn_id: String,
     /// Read through the turn: it ended on its own abort before any other turn began.
-    pub(crate) aborted: bool,
+    pub aborted: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -478,7 +478,7 @@ pub enum StopCancel {
 impl StopCancel {
     /// The mailbox's cancel of its current `token`, under the slot lock a Herdr prepare takes;
     /// without settlement it is the existing guarded cancel and takes no slot.
-    pub(crate) fn decide(token: Option<Arc<CancelToken>>, reason: String) -> Self {
+    pub fn decide(token: Option<Arc<CancelToken>>, reason: String) -> Self {
         let Some(token) = token else {
             return Self::NotCurrent;
         };
@@ -578,7 +578,7 @@ pub struct ClaudeInterruptDeliveryGuard<'a> {
 }
 
 impl ClaudeInterruptDeliveryGuard<'_> {
-    pub(crate) fn commit_success<R, E>(self, outcome: Result<R, E>) -> Result<R, E> {
+    pub fn commit_success<R, E>(self, outcome: Result<R, E>) -> Result<R, E> {
         if outcome.is_ok() {
             // The claim owner is the only caller that can hold this generation
             // guard. Commit with a plain store while the session lock is still
@@ -629,7 +629,7 @@ impl CancelToken {
     ///
     /// The registry is monotonic per session: delayed recovery/rebind callers may
     /// refresh their token-local tmux name, but cannot replace a newer turn.
-    pub(crate) fn bind_claude_tmux_session(&self, tmux_session_name: &str) {
+    pub fn bind_claude_tmux_session(&self, tmux_session_name: &str) {
         self.bind_interrupt_session(ProviderKind::Claude, tmux_session_name);
     }
 
@@ -665,7 +665,7 @@ impl CancelToken {
     }
 
     /// Keep the provider-specific current generation held through write and claim commit.
-    pub(crate) fn lock_current_interrupt_session(
+    pub fn lock_current_interrupt_session(
         &self,
         provider: ProviderKind,
         tmux_session_name: &str,
@@ -734,14 +734,14 @@ impl CancelToken {
     }
 
     /// Reserve the Claude interrupt-delivery right for this turn.
-    pub(crate) fn claim_claude_interrupt(&self) -> bool {
+    pub fn claim_claude_interrupt(&self) -> bool {
         self.claude_interrupt_claim
             .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
     }
 
     /// Release an undelivered reservation so a later stop can retry this turn.
-    pub(crate) fn release_claude_interrupt_claim(&self) -> bool {
+    pub fn release_claude_interrupt_claim(&self) -> bool {
         self.claude_interrupt_claim
             .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()

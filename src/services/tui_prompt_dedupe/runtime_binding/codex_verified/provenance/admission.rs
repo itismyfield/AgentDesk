@@ -104,7 +104,7 @@ impl EpisodePermissionRecord {
 }
 
 /// A writer that stops for good leaves each of its channel's records Unknown, never settled.
-pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
+pub fn revoke_channel(channel: u64, reason: &'static str) {
     let records: Vec<_> = (registry().iter())
         .filter(|(key, _)| key.0 == channel)
         .map(|(_, record)| Arc::clone(record))
