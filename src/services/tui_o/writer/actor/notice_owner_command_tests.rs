@@ -1,15 +1,22 @@
 use super::*;
 
+#[path = "notice_owner_command_order_tests.rs"]
+mod command_order_tests;
+
 fn append_queued_command(c: &Case, frame: &str) {
+    append_command(c, "physical-command", "original-input", frame);
+}
+
+fn append_command(c: &Case, physical_id: &str, input_id: &str, frame: &str) {
     let command = json!({
         "type": "attachment",
-        "uuid": "physical-command",
+        "uuid": physical_id,
         "sessionId": "native",
         "attachment": {
             "type": "queued_command",
             "commandMode": "prompt",
             "origin": {"kind": "human"},
-            "source_uuid": "original-input",
+            "source_uuid": input_id,
             "prompt": frame
         }
     });

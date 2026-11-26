@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "notice_absorbed_tests.rs"]
+mod absorbed;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 
