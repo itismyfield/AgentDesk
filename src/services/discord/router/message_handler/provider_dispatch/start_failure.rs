@@ -178,9 +178,11 @@ impl Failure {
     pub(super) fn guard_reply(
         &self,
         reply: super::owner_input::Reply,
+        token: Arc<CancelToken>,
     ) -> super::owner_input::Reply {
         let (mailbox, front, number) = (self.mailbox.clone(), self.front.clone(), self.number);
         Arc::new(move |result| {
+            tracing::trace!(turn_nonce = token.turn_nonce(), "owner reply");
             let front = front.clone();
             // Only an unreserved exact claim waits for the failure commit; EffectOwned settles now.
             let before_input = result.is_err()

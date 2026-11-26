@@ -552,6 +552,8 @@ async fn no_key_round(
 #[cfg(target_os = "macos")]
 #[path = "tests/activation_e2e_tests.rs"]
 mod activation_e2e;
+#[path = "tests/pre_key_row_tests.rs"]
+mod pre_key_row;
 
 #[cfg(target_os = "macos")]
 async fn activation_units(

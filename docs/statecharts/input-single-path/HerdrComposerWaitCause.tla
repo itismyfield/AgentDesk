@@ -35,6 +35,13 @@
 \* start (terminal input, task-notification) begins before the first key, up to MaxRacers times.
 \* keyed_hold: the first Enter's result is unknown and the attempt ends held with the body in the
 \* pane (first_input.rs `herdr_input_hold_pending`). racer_restart: the daemon dies mid-attempt.
+\* A held attempt ends in two steps: its producer returns (Attempt), then the start-failure exit
+\* rewinds its row and answers the owner (FinishUnwind); the owner retries only once answered.
+\* racer_native: the native producer unwinds the attempt itself first, cancelling its token as
+\* cleanup (owner_input/native_input.rs `Producer::unwind`). Mutants of the first fixed head:
+\* CleanupAsStop reads that cleanup cancel as a stop and skips the rewind; EarlyReply lets the launch
+\* hook answer the owner when its reserve spent the claim, before the rewind (start_failure.rs
+\* `guard_reply`).
 EXTENDS Naturals
 
 CONSTANTS Policy, Scenario, Mutant
@@ -43,18 +50,18 @@ ASSUME Policy \in {"Before", "S0b", "Fixed", "U", "Row", "Unwind"}
 ASSUME Scenario \in {"source_none", "fence", "unread", "healthy", "launching", "dialog",
                       "dialog_stays", "dialog_unproven", "overlay", "tmux_lost",
                       "own_moved", "own_screen", "own_restart", "own_stop", "own_clear",
-                      "quiet_idle", "racer", "racer_restart", "keyed_hold"}
+                      "quiet_idle", "racer", "racer_restart", "keyed_hold", "racer_native"}
 ASSUME Mutant \in {"None", "SettleAnyNoSource", "NoRewake", "NoWake", "RefuseMoved",
-                    "RetainScreen", "NoUnwind", "UnwindTouched"}
+                    "RetainScreen", "NoUnwind", "UnwindTouched", "CleanupAsStop", "EarlyReply"}
 
 MaxTurns == 2
 MaxRacers == 2
 
 VARIABLES queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts,
-          row, sends, racers, blocked, rewound, lost
+          row, sends, racers, blocked, rewound, lost, answer, unwinding
 
 base == <<queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts>>
-rowVars == <<row, sends, racers, blocked, rewound, lost>>
+rowVars == <<row, sends, racers, blocked, rewound, lost, answer, unwinding>>
 vars == <<base, rowVars>>
 
 \* U's reads carry into the row policies; Fixed's into all three.
@@ -63,7 +70,7 @@ FixedLike == Policy = "Fixed" \/ ULike
 
 \* #8441: the attempt's durable row is modeled only under these policies and scenarios.
 RowModel == Policy \in {"Row", "Unwind"}
-RowScenario == Scenario \in {"racer", "racer_restart", "keyed_hold"}
+RowScenario == Scenario \in {"racer", "racer_restart", "keyed_hold", "racer_native"}
 ASSUME RowModel <=> RowScenario
 
 \* #8128 U scenarios: the session's own turn runs while the front waits; quiet_idle has none.
@@ -106,6 +113,9 @@ Init ==
     /\ rewound = "none"
     \* lost: a turn's answer ended with its row already rewound.
     /\ lost = FALSE
+    \* answer: the owner's reply for its last attempt. unwinding: that attempt's exit still runs.
+    /\ answer = "none"
+    /\ unwinding = FALSE
 
 \* watched.rs `expired`: a moved transcript whose windows end on a screen showing no turn is Refused;
 \* an unmoved one is Retained, whatever its screen shows ("UnprovenTurn" names a turn on it).
@@ -150,8 +160,9 @@ Rewinds(kind) ==
     /\ Policy = "Unwind"
     /\ Mutant # "NoUnwind"
     /\ (kind = "untouched" \/ Mutant = "UnwindTouched")
+    /\ ~(Scenario = "racer_native" /\ Mutant = "CleanupAsStop")
 
-\* The row an attempt of `kind` leaves when it ends unsent (FirstKeyHeld rewinds it first).
+\* The row a keyed attempt of `kind` leaves when it ends held.
 LeftRow(kind) == IF ~RowModel \/ Rewinds(kind) THEN "none" ELSE kind
 Rewound(kind) == IF RowModel /\ Rewinds(kind) THEN kind ELSE rewound
 
@@ -161,11 +172,12 @@ KeyedHold == Scenario = "keyed_hold" /\ sends = 0
 Attempt ==
     /\ queued = "held"
     /\ wake
+    /\ answer # "pending"
     /\ IF row # "none"
          \* foreign_row.rs `admit`: a durable row holds the channel; the front is requeued.
          THEN /\ blocked' = row
               /\ wake' = FALSE
-              /\ UNCHANGED <<queued, cause, row, sends, rewound>>
+              /\ UNCHANGED <<queued, cause, row, sends, rewound, answer, unwinding>>
          ELSE IF proved /\ source = "ok" /\ fence = "none" /\ Clear /\ CauseOf # "Modal"
          THEN IF KeyedHold
               THEN /\ sends' = sends + 1
@@ -173,25 +185,37 @@ Attempt ==
                    /\ row' = LeftRow("touched")
                    /\ rewound' = Rewound("touched")
                    /\ wake' = FALSE
-                   /\ UNCHANGED <<queued, blocked>>
+                   /\ UNCHANGED <<queued, blocked, answer, unwinding>>
               ELSE /\ queued' = "sent"
                    /\ sends' = sends + 1
                    /\ cause' = "none"
                    \* A submitted turn's row answers until its own terminal.
                    /\ row' = IF RowModel THEN "touched" ELSE "none"
                    /\ wake' = FALSE
-                   /\ UNCHANGED <<blocked, rewound>>
+                   /\ UNCHANGED <<blocked, rewound, answer, unwinding>>
          ELSE /\ cause' = CauseOf
               \* "refused": dropped for good with its notice, no body kept (refused.rs).
               /\ queued' = CASE Settles(CauseOf) -> "settled"
                               [] CauseOf = "Refused" -> "refused"
                               [] OTHER -> "held"
               /\ wake' = FALSE
-              \* FirstKeyHeld: no key went out; the row is rewound before the front may retry.
-              /\ row' = LeftRow("untouched")
-              /\ rewound' = Rewound("untouched")
-              /\ UNCHANGED <<sends, blocked>>
+              \* No key went out; the row stays until the exit's FinishUnwind.
+              /\ row' = IF RowModel THEN "untouched" ELSE row
+              /\ unwinding' = RowModel
+              /\ answer' = CASE ~RowModel -> answer
+                               [] Mutant = "EarlyReply" -> "given"
+                               [] OTHER -> "pending"
+              /\ UNCHANGED <<sends, blocked, rewound>>
     /\ UNCHANGED <<turns, source, fence, screen, dialogs, proved, own, moved, restarts, racers, lost>>
+
+\* FirstKeyHeld: the exit rewinds the untouched row, then answers the owner (one transition).
+FinishUnwind ==
+    /\ unwinding
+    /\ row' = IF row = "untouched" /\ Rewinds("untouched") THEN "none" ELSE row
+    /\ rewound' = IF row = "untouched" /\ Rewinds("untouched") THEN "untouched" ELSE rewound
+    /\ answer' = "given"
+    /\ unwinding' = FALSE
+    /\ UNCHANGED <<base, sends, racers, blocked, lost>>
 
 \* A subagent task-notification turn ends and proves the source; the owner wakes. It clears no
 \* missing source, fence or dialog.
@@ -300,7 +324,7 @@ ClearCommand ==
 \* while the front waits, so the next first key meets a Running composer. No fairness: it may never
 \* come, and comes at most MaxRacers times.
 RacerTurnStarts ==
-    /\ Scenario \in {"racer", "racer_restart"}
+    /\ Scenario \in {"racer", "racer_restart", "racer_native"}
     /\ queued = "held"
     /\ racers < MaxRacers
     /\ own # "running"
@@ -309,7 +333,7 @@ RacerTurnStarts ==
     /\ own' = "running"
     /\ screen' = "turn"
     /\ UNCHANGED <<queued, wake, turns, source, fence, cause, dialogs, proved, moved, restarts,
-                   row, sends, blocked, rewound, lost>>
+                   row, sends, blocked, rewound, lost, answer, unwinding>>
 
 \* The turn of a row whose key reached the pane ends on its own terminal: the row is cleared and a
 \* front still held for it is settled as delivered. With that row already rewound the answer has no
@@ -328,7 +352,7 @@ OwnRowEnds ==
           /\ wake' = TRUE
           /\ UNCHANGED <<row, queued>>
     /\ UNCHANGED <<turns, source, fence, screen, cause, dialogs, proved, own, moved, restarts,
-                   sends, racers, blocked, rewound>>
+                   sends, racers, blocked, rewound, answer, unwinding>>
 
 \* The daemon dies while an attempt waits on a busy composer: its row stays and its token is gone.
 \* Boot re-drives the front; nothing in the new process proves that row untouched.
@@ -337,16 +361,17 @@ CrashMidAttempt ==
     /\ queued = "held"
     /\ wake
     /\ row = "none"
+    /\ ~unwinding
     /\ screen = "turn"
     /\ restarts = 0
     /\ row' = "orphan"
     /\ restarts' = 1
     /\ UNCHANGED <<queued, wake, turns, source, fence, screen, cause, dialogs, proved, own, moved,
-                   sends, racers, blocked, rewound, lost>>
+                   sends, racers, blocked, rewound, lost, answer, unwinding>>
 
 Moves == Attempt \/ InternalTurnEnd \/ SourceAppears \/ DialogShown \/ DialogDismissed
          \/ ProofAppears \/ WatchLook \/ OwnTurnEnd \/ StopCommand \/ Restart \/ ClearCommand
-         \/ RacerTurnStarts \/ OwnRowEnds \/ CrashMidAttempt
+         \/ RacerTurnStarts \/ OwnRowEnds \/ CrashMidAttempt \/ FinishUnwind
 
 \* Nothing left to do: the input is resolved, or held with no wake (the stuck case).
 Quiet == ~ENABLED Moves /\ UNCHANGED vars
@@ -357,7 +382,7 @@ Spec == Init /\ [][Next]_vars /\ WF_vars(Attempt) /\ WF_vars(InternalTurnEnd)
         /\ WF_vars(SourceAppears) /\ WF_vars(DialogShown) /\ WF_vars(DialogDismissed)
         /\ WF_vars(ProofAppears) /\ WF_vars(WatchLook) /\ WF_vars(OwnTurnEnd)
         /\ WF_vars(StopCommand) /\ WF_vars(Restart) /\ WF_vars(ClearCommand)
-        /\ WF_vars(OwnRowEnds)
+        /\ WF_vars(OwnRowEnds) /\ WF_vars(FinishUnwind)
 
 TypeOK ==
     /\ queued \in {"held", "sent", "settled", "refused", "cleared"}
@@ -379,6 +404,8 @@ TypeOK ==
     /\ blocked \in {"none", "untouched", "touched", "orphan"}
     /\ rewound \in {"none", "untouched", "touched"}
     /\ lost \in BOOLEAN
+    /\ answer \in {"none", "pending", "given"}
+    /\ unwinding \in BOOLEAN
 
 \* No key reaches a pane without its source, with an open fence, or over an unread composer.
 KeysNeedProof == queued = "sent" => (proved /\ source = "ok" /\ fence = "none" /\ Clear)
@@ -424,6 +451,9 @@ RetryNotRefusedByUntouched == blocked # "untouched"
 \* A row whose first key may have reached the pane is never rewound, so its answer keeps its row
 \* and the body reaches the pane at most once.
 TouchedRowKept == rewound # "touched"
+
+\* The owner hears an attempt's refusal only after that attempt's exit ran (its row rewound).
+AnsweredAfterExit == unwinding => answer # "given"
 NoAnswerLost == ~lost
 AtMostOnce == sends <= 1
 

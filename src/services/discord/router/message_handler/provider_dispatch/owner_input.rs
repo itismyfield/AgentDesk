@@ -1449,7 +1449,7 @@ pub(super) fn execute_front(
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
-    let inside = failure.guard_reply(reply.clone());
+    let inside = failure.guard_reply(reply.clone(), turn.cancel.clone());
     let result = match take_owned(&turn, Some(claim), owner, inside) {
         Some(Taken::Done(result)) => result,
         Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),

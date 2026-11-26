@@ -31,11 +31,14 @@ fn row(channel: ChannelId, token: &CancelToken) -> InflightTurnState {
     row
 }
 
-/// The next admission's verdict, the retry's row key, the first row's key and the durable one.
-type Retried = (Result<bool, String>, [Option<(Option<String>, u64)>; 3]);
+type Key = Option<(Option<String>, u64)>;
+/// The next admission's verdict, the retry's row key, the first row's key, the durable one, and
+/// the row each owner reply saw.
+type Retried = (Result<bool, String>, [Key; 3], Vec<Key>);
 
 /// One owner start of `MESSAGE` whose input ended as `ended` over the row `shape` left on disk,
-/// its unsent failure exit, then the same front's next create through the intake admission.
+/// its unsent failure exit after the reserve spent the claim, as the launch hook's reply and the
+/// front handoff's last reply meet it, then the same front's next create through the intake admission.
 async fn held_then_retried(
     channel: u64,
     ended: (HerdrSubmission, bool),
@@ -92,6 +95,20 @@ async fn held_then_retried(
             .await
             .started
     );
+    let (front, number) = (claim.front().clone(), claim.number());
+    let attempt = serde_json::json!({"nonce":"n-8441","provider":"claude","target":{"host":"herdr",
+        "owner":"unwind","root":"/test","execution_nonce":"e"},"source":{"kind":"pre_source",
+        "expected_session_id":null,"expected_transcript":null,"binding_watermark":null}});
+    let payload = serde_json::json!({"frame":"f","digest":"d","attribution":{}});
+    let reserved = mailbox.v2_request(move |slot| {
+        let attempt = serde_json::from_value(attempt).map_err(|e| e.to_string())?;
+        let payload = serde_json::from_value(payload).map_err(|e| e.to_string())?;
+        let owner = slot.as_mut().ok_or("owner")?;
+        owner
+            .reserve_claimed((&front, number), attempt, payload)
+            .map(drop)
+    });
+    reserved.await.unwrap();
     let mut first = row(channel, &token);
     shape(&mut first);
     inflight::save_inflight_state_create_new(&first).unwrap();
@@ -131,8 +148,23 @@ async fn held_then_retried(
         force_fresh: false,
         submission: None,
     };
-    let exit = Failure::claimed(&mailbox, &claim).finish(&turn, watch, Err(HELD.into()));
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let reply: super::owner_input::Reply = Arc::new({
+        let seen = seen.clone();
+        move |_| {
+            let row = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
+            seen.lock().unwrap().push(row.map(key));
+        }
+    });
+    let failure = Failure::claimed(&mailbox, &claim);
+    let inside = failure.guard_reply(reply.clone(), token.clone());
+    tokio::task::spawn_blocking(move || inside(&Err(HELD.into())))
+        .await
+        .unwrap();
+    let exit = failure.finish(&turn, watch, Err(HELD.into()));
     assert_eq!(exit, Err(HELD.to_string()), "the owner keeps its front");
+    reply(&exit);
+    let seen = seen.lock().unwrap().clone();
 
     let retry = Arc::new(CancelToken::new());
     let mut next = row(channel, &retry);
@@ -142,16 +174,17 @@ async fn held_then_retried(
     let verdict = verdict.await;
     let durable = inflight::load_inflight_state_read_only(&ProviderKind::Claude, channel.get());
     let rows = [Some(next), Some(first), durable].map(|row| row.map(key));
-    (verdict, rows)
+    (verdict, rows, seen)
 }
 
 #[tokio::test]
 async fn a_start_held_before_its_first_key_lets_the_same_front_start_next() {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let untouched = (HerdrSubmission::Unsubmitted, true);
-    let (verdict, [next, _, durable]) = held_then_retried(8_441_101, untouched, |_| {}).await;
-    // The held attempt's row is gone, so the retry is admitted over its own row alone.
-    assert_eq!((verdict, durable), (Ok(true), next));
+    let (verdict, [next, _, durable], seen) = held_then_retried(8_441_101, untouched, |_| {}).await;
+    // The owner hears the refusal once, with the held attempt's row already gone, so its retry
+    // is admitted over its own row alone.
+    assert_eq!((seen, verdict, durable), (vec![None], Ok(true), next));
 }
 
 #[tokio::test]
@@ -163,10 +196,12 @@ async fn a_start_whose_key_may_have_reached_the_pane_keeps_its_row() {
         (HerdrSubmission::Unsubmitted, false),
     ];
     for (case, ended) in reached.into_iter().enumerate() {
-        let (verdict, [_, first, durable]) =
+        let (verdict, [_, first, durable], seen) =
             held_then_retried(8_441_201 + case as u64, ended, |_| {}).await;
+        // A written input answers the owner when its write returns, as before.
         let admitted = verdict == Ok(true);
-        assert_eq!((admitted, durable), (false, first), "case {case}");
+        let answer = (seen.len(), seen[0].clone(), admitted, durable);
+        assert_eq!(answer, (2, first.clone(), false, first), "case {case}");
     }
 }
 
@@ -180,9 +215,10 @@ async fn a_row_of_another_message_generation_or_turn_is_not_rewound() {
         |row| row.turn_nonce = Some("another-turn".into()),
     ];
     for (case, shape) in other.into_iter().enumerate() {
-        let (verdict, [_, first, durable]) =
+        let (verdict, [_, first, durable], seen) =
             held_then_retried(8_441_301 + case as u64, untouched, shape).await;
         let admitted = verdict == Ok(true);
-        assert_eq!((admitted, durable), (false, first), "case {case}");
+        let answer = (seen, admitted, durable);
+        assert_eq!(answer, (vec![first.clone()], false, first), "case {case}");
     }
 }

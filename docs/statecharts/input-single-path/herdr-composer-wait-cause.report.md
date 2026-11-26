@@ -171,3 +171,29 @@ scenarios `racer`, `racer_restart`, `keyed_hold`; variables `row`, `sends`, `rac
 outside this model.
 
 TLC 42/42 as expected (`scripts/ci/statecharts_tlc.py --base`).
+
+### #8441 review fix: the exit order and the native producer's cleanup
+
+Review of the first fixed head found two paths the atomic `FirstKeyHeld` hid. The native producer
+unwinds a pre-key attempt itself and cancels its token as cleanup (`Producer::unwind`), which the
+exit read as a stop, so it skipped the rewind. And the launch hook answered the owner as soon as its
+reserve had spent the claim, before the exit rewound the row (`Failure::guard_reply`).
+
+The held attempt now ends in two steps: `Attempt` (the producer returns) and `FinishUnwind` (the
+exit rewinds the untouched row, then answers the owner); the owner retries only once answered
+(`answer`, `unwinding`). Scenario `racer_native` adds the native producer; mutants `CleanupAsStop`
+and `EarlyReply` are the first fixed head. Invariant `AnsweredAfterExit`: the owner hears a refusal
+only after that attempt's exit ran.
+
+| Model | Code |
+|---|---|
+| `FinishUnwind` | `provider_dispatch/start_failure.rs` `Failure::finish` → `start_failure/herdr_unsent_unwind.rs`, then `owner_input.rs` `execute_front`'s last reply |
+| a cleanup cancel is no stop (`racer_native` without `CleanupAsStop`) | `Failure::finish`: a cancel with completion cleanup and no published cause; `/stop` publishes one (`provider/cancel_watchdog.rs`) |
+| the owner waits for the answer (`answer # "pending"`) | `Failure::guard_reply` holds a refusal whose token shows no key reached the pane |
+
+| cfg | first fixed head (mutant) | fix |
+|---|---|---|
+| UnwindRacerNativeMutCleanupAsStop / UnwindRacerNative | RetryNotRefusedByUntouched, HeldInputDelivers | - |
+| UnwindRacerMutEarlyReply / UnwindRacer | AnsweredAfterExit, RetryNotRefusedByUntouched | - |
+
+The earlier 42 configs keep their results. TLC 45/45 as expected (`scripts/ci/statecharts_tlc.py --base`).

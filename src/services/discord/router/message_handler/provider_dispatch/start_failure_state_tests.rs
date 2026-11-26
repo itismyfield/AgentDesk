@@ -348,9 +348,13 @@ async fn start_failure_guard_preserves_effect_owned_error_settlement_before_comp
         Failure::claimed(&mailbox, &claim),
         Failure::claimed(&mailbox, &claim),
     ];
-    let reply = failures[0].guard_reply(Arc::new(move |result| {
-        tx.send(result.clone()).unwrap();
-    }));
+    let token = Arc::new(CancelToken::new());
+    let reply = failures[0].guard_reply(
+        Arc::new(move |result| {
+            tx.send(result.clone()).unwrap();
+        }),
+        token,
+    );
     let error = Err("NotSent(text cannot override reserve)".to_string());
     let before = reply.clone();
     let first = error.clone();

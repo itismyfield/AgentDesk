@@ -647,7 +647,10 @@ input-single-path/HerdrComposerWaitCauseUSourceNone.cfg	HerdrComposerWaitCause	-
 input-single-path/HerdrComposerWaitCauseUnwindKeyedHold.cfg	HerdrComposerWaitCause	-	-
 input-single-path/HerdrComposerWaitCauseUnwindKeyedHoldMutUnwindTouched.cfg	HerdrComposerWaitCause	AtMostOnce,NoAnswerLost,TouchedRowKept	-
 input-single-path/HerdrComposerWaitCauseUnwindRacer.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUnwindRacerMutEarlyReply.cfg	HerdrComposerWaitCause	AnsweredAfterExit,RetryNotRefusedByUntouched	-
 input-single-path/HerdrComposerWaitCauseUnwindRacerMutNoUnwind.cfg	HerdrComposerWaitCause	RetryNotRefusedByUntouched	HeldInputDelivers
+input-single-path/HerdrComposerWaitCauseUnwindRacerNative.cfg	HerdrComposerWaitCause	-	-
+input-single-path/HerdrComposerWaitCauseUnwindRacerNativeMutCleanupAsStop.cfg	HerdrComposerWaitCause	RetryNotRefusedByUntouched	HeldInputDelivers
 input-single-path/HerdrComposerWaitCauseUnwindRacerRestart.cfg	HerdrComposerWaitCause	-	HeldInputDelivers
 input-single-path/HerdrIdleMetaAnyMetaIdle.cfg	HerdrIdleMeta	IdleNeedsClosedReply,NoIdlePasteOnRunningTurn,NoRunningIdleDelegation	-
 input-single-path/HerdrIdleMetaBefore.cfg	HerdrIdleMeta	-	IdleInputEventuallyResolves
