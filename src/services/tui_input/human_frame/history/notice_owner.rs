@@ -413,7 +413,7 @@ fn candidates(
                 }
             }
         }
-        // Migrated V1 evidence has no execution nonce or native-session field to invent.
+        // Keyless evidence (migrated V1 or a non-scoped writer) has no execution nonce to invent.
         if registration.is_null() || historical_match(registration, entry, origin)? {
             let mut entry = entry.clone();
             // Pair by full registration identity; a nonce can recur in another key or namespace.

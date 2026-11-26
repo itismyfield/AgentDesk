@@ -327,16 +327,13 @@ pub(crate) fn bind_record(
         };
         Ok(Some(projected(&store.entries[index])))
     };
-    super::update_append(apply)
-        .ok()
-        .flatten()
-        .map(|attempt| Receipt {
-            session: session.into(),
-            attempt,
-            prompt,
-            row,
-            native_turn: turn,
-        })
+    super::update(apply).ok().flatten().map(|attempt| Receipt {
+        session: session.into(),
+        attempt,
+        prompt,
+        row,
+        native_turn: turn,
+    })
 }
 
 pub(crate) fn bind_record_at(
@@ -420,7 +417,7 @@ pub(crate) fn settle(id: &str, session: &str, row: &str, decision: Decision) -> 
             a.decision = Some(decision);
             Ok(true)
         };
-    super::update_append(apply).unwrap_or(false)
+    super::update(apply).unwrap_or(false)
 }
 
 pub(super) fn observed(

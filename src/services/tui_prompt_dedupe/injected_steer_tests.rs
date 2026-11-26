@@ -29,14 +29,8 @@ fn frame(nonce: &str) -> String {
 }
 
 fn frame_with(nonce: &str, body: &str) -> String {
-    let frame = crate::services::tui_input::human_frame::inject;
+    let frame = crate::services::tui_input::human_frame::plain_inject;
     frame("discord:1:2", "200", "ann", nonce, body)
-}
-
-/// The frame inputs were pasted with before v1.
-fn legacy_frame(nonce: &str) -> String {
-    let frame = crate::services::tui_input::human_frame::legacy_inject;
-    frame("discord", "200", nonce, "same words every time")
 }
 
 /// Observes `prompt` as a Codex record of `turn` and returns what was published for it.
@@ -77,9 +71,9 @@ fn an_input_joining_its_target_turn_publishes_nothing() {
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
     let tmux = "AgentDesk-codex-injected-join";
-    // Without the ledger an older frame's record opens a direct-input turn.
+    // Without the ledger an unrecorded frame's record opens a direct-input turn.
     let elsewhere = "AgentDesk-codex-injected-join-unknown";
-    let unknown = observe(elsewhere, &legacy_frame("aaaa0000"), None, Some("t1"));
+    let unknown = observe(elsewhere, &frame("aaaa0000"), None, Some("t1"));
     assert_eq!(unknown.observation, PromptObservation::PublishedSshDirect);
     assert!(register(tmux, "aaaa1111", "t1"));
     let steer = PromptObservation::InjectedSteer;
@@ -157,7 +151,7 @@ fn the_nonce_not_the_words_names_the_input() {
 }
 
 /// The ledger refuses a ninth unsettled input and keeps the newest settled results; once it
-/// forgets, an older frame takes the ordinary path, still delivered, and a v1 header opens nothing.
+/// forgets, a frame takes the ordinary path, still delivered.
 #[test]
 fn the_ledger_is_bounded_and_forgets_into_the_ordinary_path() {
     let _guard = TEST_LOCK
@@ -173,28 +167,24 @@ fn the_ledger_is_bounded_and_forgets_into_the_ordinary_path() {
     assert!(register(tmux, "p9999999", "t1"));
     let tmux = "AgentDesk-codex-injected-bounds-settled";
     for n in 0..33 {
-        let nonce = format!("s{n:07}");
+        let nonce = format!("5{n:07}");
         assert!(register(tmux, &nonce, "t1"));
         assert_eq!(observe(tmux, &frame(&nonce), None, Some("t1")).published, 0);
         withdraw_injected_steer("codex", tmux, &nonce);
     }
     let steer = PromptObservation::InjectedSteer;
     assert_ne!(
-        observe(tmux, &frame("s0000000"), None, Some("t1")).observation,
+        observe(tmux, &frame("50000000"), None, Some("t1")).observation,
         steer
     );
     assert_eq!(
-        observe(tmux, &frame("s0000001"), None, Some("t1")).observation,
+        observe(tmux, &frame("50000001"), None, Some("t1")).observation,
         steer
     );
     let tmux = "AgentDesk-codex-injected-bounds-expired";
     assert!(register(tmux, "f0000001", "t1"));
-    assert!(register(tmux, "f0000002", "t1"));
     expire_ledger(tmux);
     let late = observe(tmux, &frame("f0000001"), None, Some("t9"));
-    assert_eq!(late, quiet(PromptObservation::Ignored));
-    assert!(!native_turn_is_open("codex", tmux, "t9"));
-    let late = observe(tmux, &legacy_frame("f0000002"), None, Some("t9"));
     let direct = Observed {
         observation: PromptObservation::PublishedSshDirect,
         published: 1,
@@ -202,24 +192,21 @@ fn the_ledger_is_bounded_and_forgets_into_the_ordinary_path() {
     assert_eq!(late, direct);
 }
 
-/// A v1 inject header opens a turn only when its own record reaches another unowned turn; joined,
-/// unsettled, unrecorded or damaged it publishes, leases and owns nothing. Older frames: as before.
+/// An injected frame opens a turn only when its own record reaches another unowned turn; joined or
+/// unsettled it publishes, leases and owns nothing, and an unrecorded one is a person's input.
 #[test]
 fn an_inject_header_opens_a_turn_only_when_its_record_hands_it_over() {
     let _guard = TEST_LOCK
         .lock()
         .unwrap_or_else(|poison| poison.into_inner());
-    let damaged = frame("abcd0007").replace("mode=inject", "mode=steer");
     // (case, recorded nonce and target, prompt, observed turn, observation, published events)
     type Case = (&'static str, Option<(&'static str, &'static str)>, String);
     #[rustfmt::skip]
-    let cases: [(Case, Option<&str>, PromptObservation, usize); 6] = [
+    let cases: [(Case, Option<&str>, PromptObservation, usize); 4] = [
         (("joined", Some(("abcd0001", "t1")), frame("abcd0001")), Some("t1"), PromptObservation::InjectedSteer, 0),
         (("deferred", Some(("abcd0002", "t1")), frame("abcd0002")), None, PromptObservation::InjectedDeferred, 0),
-        (("unrecorded", None, frame("abcd0003")), Some("t1"), PromptObservation::Ignored, 0),
-        (("damaged", None, damaged), Some("t1"), PromptObservation::Ignored, 0),
+        (("unrecorded", None, frame("abcd0003")), Some("t1"), PromptObservation::PublishedSshDirect, 1),
         (("handed", Some(("abcd0005", "t1")), frame("abcd0005")), Some("t3"), PromptObservation::PublishedSshDirect, 1),
-        (("legacy", None, legacy_frame("abcd0006")), Some("t1"), PromptObservation::PublishedSshDirect, 1),
     ];
     for ((case, record, prompt), turn, observation, events) in cases {
         let tmux = format!("AgentDesk-codex-injected-owner-{case}");
