@@ -411,6 +411,10 @@ mod tests {
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
 
+    #[cfg(unix)]
+    #[path = "destructive_cancel_heartbeat_tests.rs"]
+    mod heartbeat;
+
     struct EnvReset(Option<std::ffi::OsString>);
 
     impl Drop for EnvReset {
