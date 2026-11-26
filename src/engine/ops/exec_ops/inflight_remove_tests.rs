@@ -1,4 +1,5 @@
 //! Inflight remove test that arms the DL policy-op unlink hook.
+#![cfg(unix)]
 use crate::engine::ops::exec_ops::register_exec_ops;
 use rquickjs::Object;
 
