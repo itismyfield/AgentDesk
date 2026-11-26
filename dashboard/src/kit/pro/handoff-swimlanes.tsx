@@ -333,7 +333,7 @@ export function HandoffSwimlanes({
       {previous.length > 0 && <p className="aui-handoff-swimlanes-after">{text.after(previous.join(', '))}</p>}
       {item.detail && <p className="aui-handoff-swimlanes-copy">{item.detail}</p>}
       {item.kind === 'gate' && <div className="aui-handoff-swimlanes-actions">
-        <button type="button" className="aui-handoff-swimlanes-action" data-kind="approve" aria-label={text.approve === 'Approve' ? '승인' : text.approve} onClick={() => onApprove?.(item.id)}>{text.approve}</button>
+        <button type="button" className="aui-handoff-swimlanes-action" data-kind="approve" aria-label={labels?.approve ? text.approve : (text.approve === 'Approve' ? '승인' : text.approve)} onClick={() => onApprove?.(item.id)}>{text.approve}</button>
         <button type="button" className="aui-handoff-swimlanes-action" data-kind="reject" onClick={() => onReject?.(item.id)}>{text.reject}</button>
       </div>}
     </>;

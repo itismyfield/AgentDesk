@@ -43,8 +43,8 @@ function fillSkillTrendKst(points: SkillTrendPoint[], days: number, now = Date.n
     const key = point.day.includes("T") ? toKstDateKey(Date.parse(point.day)) : point.day.slice(0, 10);
     counts.set(key, (counts.get(key) ?? 0) + point.count);
   }
-  return Array.from({ length: days + 1 }, (_, index) => {
-    const day = toKstDateKey(now - (days - index) * DAY_MS);
+  return Array.from({ length: days }, (_, index) => {
+    const day = toKstDateKey(now - (days - 1 - index) * DAY_MS);
     return { day, count: counts.get(day) ?? 0 };
   });
 }

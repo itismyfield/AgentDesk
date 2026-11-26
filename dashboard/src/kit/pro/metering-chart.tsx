@@ -27,10 +27,22 @@ export function meterSlices(day: MeterDay, limit = 4, rest = '기타') {
   const extra = slices.slice(limit).reduce((sum, slice) => sum + slice.value, 0);
   return [...head, { name: rest, value: extra }];
 }
+export function meterAxis(peak: number) {
+  if (peak <= 0) return { max: 15, ticks: [15, 10, 5, 0] };
+  if (peak <= 20) {
+    const max = Math.max(5, Math.ceil(peak / 5) * 5);
+    return max >= 15 ? { max, ticks: [max, Math.max(0, max - 5), Math.max(0, max - 10), 0] } : { max: 15, ticks: [15, 10, 5, 0] };
+  }
+  const raw = peak / 3;
+  const pow = 10 ** Math.floor(Math.log10(raw));
+  const step = ([1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].find((n) => n * pow >= raw) ?? 10) * pow;
+  const max = step * 3;
+  return { max, ticks: [max, step * 2, step, 0] };
+}
 const money = (value: number) => `$${value.toFixed(1)}`;
 const styles = `
-.aui-metering-chart { --aui-meter-surface:#fff; --aui-meter-ink:#171717; --aui-meter-muted:#8f8f8f; --aui-meter-line:#ebebeb; --aui-meter-grid:#e6e6e6; --aui-meter-badge:#e0338f; --aui-meter-badge-bg:rgb(238 62 158 / .1); --aui-meter-focus:rgba(0,96,226,.7); --aui-meter-shadow:0 1px 2px rgb(0 0 0 / .03), 0 8px 24px rgb(0 0 0 / .035); width:100%; min-width:0; padding:20px 20px 28px; border:1px solid var(--aui-meter-line); border-radius:20px; background:var(--aui-meter-surface); color:var(--aui-meter-ink); box-shadow:var(--aui-meter-shadow); font:13px/20px Inter, ui-sans-serif, system-ui, sans-serif; font-variant-numeric:tabular-nums; }
-:where(.dark,[data-theme="dark"]) .aui-metering-chart { --aui-meter-surface:#232326; --aui-meter-ink:#ededed; --aui-meter-line:rgb(255 255 255 / .08); --aui-meter-grid:rgb(255 255 255 / .1); --aui-meter-badge:#f472b6; --aui-meter-badge-bg:rgb(238 62 158 / .18); --aui-meter-focus:rgba(77,141,255,.8); --aui-meter-shadow:0 1px 2px rgb(0 0 0 / .4), 0 8px 24px rgb(0 0 0 / .35); }
+.aui-metering-chart { --aui-meter-surface:var(--aui-bg-1,#fff); --aui-meter-ink:var(--aui-fg,#171717); --aui-meter-muted:var(--aui-fg-muted,#8f8f8f); --aui-meter-line:var(--aui-line,#ebebeb); --aui-meter-grid:var(--aui-line-soft,#e6e6e6); --aui-meter-badge:#e0338f; --aui-meter-badge-bg:rgb(238 62 158 / .1); --aui-meter-focus:var(--aui-focus,rgba(0,96,226,.7)); --aui-meter-shadow:0 1px 2px rgb(0 0 0 / .03), 0 8px 24px rgb(0 0 0 / .035); width:100%; min-width:0; padding:20px 20px 28px; border:1px solid var(--aui-meter-line); border-radius:20px; background:var(--aui-meter-surface); color:var(--aui-meter-ink); box-shadow:var(--aui-meter-shadow); font:13px/20px var(--aui-font-sans, Inter, ui-sans-serif, system-ui, sans-serif); font-variant-numeric:tabular-nums; }
+:where(.dark,[data-theme="dark"]) .aui-metering-chart { --aui-meter-surface:var(--aui-bg-1,#232326); --aui-meter-ink:var(--aui-fg,#ededed); --aui-meter-muted:var(--aui-fg-muted,#8f8f8f); --aui-meter-line:var(--aui-line,rgb(255 255 255 / .08)); --aui-meter-grid:var(--aui-line-soft,rgb(255 255 255 / .1)); --aui-meter-badge:#f472b6; --aui-meter-badge-bg:rgb(238 62 158 / .18); --aui-meter-focus:var(--aui-focus,rgba(77,141,255,.8)); --aui-meter-shadow:0 1px 2px rgb(0 0 0 / .4), 0 8px 24px rgb(0 0 0 / .35); }
 .aui-metering-chart-head { display:flex; gap:12px; align-items:center; min-width:0; }
 .aui-metering-chart-head h2 { margin:0; overflow:hidden; font-size:16px; font-weight:600; line-height:24px; text-overflow:ellipsis; white-space:nowrap; }
 .aui-metering-chart-badge { display:inline-flex; gap:4px; align-items:center; height:22px; padding:0 8px; border-radius:99px; background:var(--aui-meter-badge-bg); color:var(--aui-meter-badge); font-size:12px; line-height:16px; }
@@ -38,15 +50,15 @@ const styles = `
 .aui-metering-chart-totals { display:flex; flex-wrap:wrap; gap:4px 24px; margin:8px 0 4px; }
 .aui-metering-chart-totals span { color:var(--aui-meter-muted); font-size:14px; line-height:26px; }
 .aui-metering-chart-totals b { color:var(--aui-meter-ink); font-size:17px; font-weight:600; }
-.aui-metering-chart-plot { position:relative; display:grid; grid-template-columns:36px minmax(0,1fr); gap:12px; min-width:0; outline:none; touch-action:pan-y; }
+.aui-metering-chart-plot { position:relative; display:grid; grid-template-columns:minmax(36px,max-content) minmax(0,1fr); gap:12px; min-width:0; outline:none; touch-action:pan-y; }
 .aui-metering-chart-plot:focus-visible { outline:2px solid var(--aui-meter-focus); outline-offset:2px; }
-.aui-metering-chart-y { display:flex; flex-direction:column; justify-content:space-between; color:var(--aui-meter-muted); font-size:11px; line-height:16px; text-align:right; }
+.aui-metering-chart-y { display:flex; flex-direction:column; justify-content:space-between; color:var(--aui-meter-muted); font-size:11px; line-height:16px; text-align:right; white-space:nowrap; }
 .aui-metering-chart-bars { position:relative; display:flex; align-items:flex-end; justify-content:space-between; min-width:0; }
 .aui-metering-chart-bars > div { display:flex; flex:1; align-items:flex-end; justify-content:center; min-width:0; height:100%; }
 .aui-metering-chart-bar { width:18px; max-width:42%; border-radius:3.5px 3.5px 0 0; background:linear-gradient(180deg, var(--aui-meter-top, #8b7cff), color-mix(in srgb, var(--aui-meter-top, #8b7cff) 28%, #fff)); }
 :where(.dark,[data-theme="dark"]) .aui-metering-chart-bar { background:linear-gradient(180deg, var(--aui-meter-top-dark, var(--aui-meter-top, #8b7cff)), color-mix(in srgb, var(--aui-meter-top-dark, var(--aui-meter-top, #8b7cff)) 58%, #232326)); }
 .aui-metering-chart-bar[data-on] { outline:2px solid #5e5cff; }
-.aui-metering-chart-x { display:flex; justify-content:space-between; margin-top:6px; color:var(--aui-meter-muted); font-size:11px; }
+.aui-metering-chart-x { display:flex; justify-content:space-between; gap:4px; margin-top:6px; color:var(--aui-meter-muted); font-size:11px; white-space:nowrap; }
 .aui-metering-chart-empty { position:absolute; inset:0; display:grid; place-items:center; margin:0; color:var(--aui-meter-muted); font-size:12px; }
 .aui-metering-chart-tip { position:absolute; z-index:2; min-width:140px; padding:8px 12px 10px; border-radius:12px; background:#171717; color:#fff; font-size:12px; line-height:16px; }
 :where(.dark,[data-theme="dark"]) .aui-metering-chart-tip { background:#ededed; color:#171717; }
@@ -58,10 +70,9 @@ export function MeteringChart({ title, days = [], totals = [], period, live = fa
   const plot = useRef<HTMLDivElement>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const peak = Math.max(0, ...days.map((day) => Math.max(0, day.total)));
-  const step = peak <= 20 ? 5 : 15;
-  const max = peak <= 0 ? 1 : Math.ceil(peak / step) * step;
+  const { max, ticks } = meterAxis(peak);
+  const xStep = days.length > 14 ? Math.ceil(days.length / 6) : 2;
   const empty = days.length === 0;
-  const ticks = [max, Math.max(0, max - step), Math.max(0, max - step * 2), 0];
   const pick = (index: number | null) => { if (!empty) setSelected(index); };
   const keys = (event: ReactKeyboardEvent) => {
     if (empty) return;
@@ -82,7 +93,7 @@ export function MeteringChart({ title, days = [], totals = [], period, live = fa
         {period && <span className="aui-metering-chart-period">{period}</span>}
       </div>
       {!!totals.length && <div className="aui-metering-chart-totals">{totals.map((item) => <span key={item.name}>{item.name} <b>{item.text ?? format(item.value)}</b></span>)}</div>}
-      <div ref={plot} className="aui-metering-chart-plot" tabIndex={0} style={{ height }} onKeyDown={keys} onPointerLeave={() => { if (matchMedia('(hover:hover)').matches) pick(null); }}>
+      <div ref={plot} className="aui-metering-chart-plot" role="group" aria-label={title} tabIndex={empty ? undefined : 0} style={{ height }} onKeyDown={keys} onPointerLeave={() => { if (matchMedia('(hover:hover)').matches) pick(null); }}>
         <div className="aui-metering-chart-y" aria-hidden="true">{ticks.map((tick, index) => <span key={index}>{format(tick)}</span>)}</div>
         <div>
           <div className="aui-metering-chart-bars" style={{ height: height - 22 }} onPointerDown={(event: ReactPointerEvent<HTMLDivElement>) => { const rect = event.currentTarget.getBoundingClientRect(); const index = Math.min(days.length - 1, Math.max(0, Math.floor((event.clientX - rect.left) / rect.width * days.length))); pick(index); }}>
@@ -92,7 +103,11 @@ export function MeteringChart({ title, days = [], totals = [], period, live = fa
               </div>
             ))}
           </div>
-          <div className="aui-metering-chart-x" aria-hidden="true">{days.map((item, index) => <span key={item.label} style={{ visibility: index % 2 === 0 ? 'visible' : 'hidden' }}>{item.label}</span>)}</div>
+          <div className="aui-metering-chart-x" aria-hidden="true">
+            {days.length > 14
+              ? days.filter((_, index) => index % xStep === 0 || index === days.length - 1).map((item) => <span key={item.label}>{item.label}</span>)
+              : days.map((item, index) => <span key={item.label} style={{ visibility: index % 2 === 0 ? 'visible' : 'hidden' }}>{item.label}</span>)}
+          </div>
           {empty && <p className="aui-metering-chart-empty">{emptyLabel}</p>}
           {day && <div className="aui-metering-chart-tip" role="status" style={{ accentColor: accent }}><strong>{day.label} {format(day.total)}</strong>{slices.map((slice) => <div key={slice.name}>{slice.name} {format(slice.value)}</div>)}</div>}
         </div>

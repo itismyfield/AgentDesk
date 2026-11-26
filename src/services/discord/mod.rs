@@ -17,6 +17,7 @@ mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
 pub(crate) mod decision_forums;
+pub(crate) mod decisions;
 pub(crate) mod delegation_card;
 mod delivery_lease_cell;
 mod delivery_lease_key;

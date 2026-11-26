@@ -138,3 +138,81 @@ P2-4 수정(정상 보존 경로):
 모델과 코드가 다른 곳: 코드는 시작 응답을 Observe로 쓰지 않으므로 non-owner·정상화 시작은 receipt가 올 때까지
 `may_have_sent`다(producer 활성 전까지 이 receipt 조회는 owner drain·부팅 때만 돈다). 원본 식별은 event의 안정
 message id와 source origin_id로 하며, 그 밖의 id로 들어간 원본은 찾지 못해 `Gone`으로 읽는다(운영 진입은 `start::original`의 안정 id만 씀).
+
+## 조각 2c — 실행권 holder·종결 뒤 정리·non-owner 큐 (코드 좌표)
+
+좌표는 조각 2c head 기준이다. producer는 여전히 없다.
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| PeerRecover(신규, `tookLive`) · CloseUnknown · CloseAbandoned의 종결 조건 | `src/db/decisions.rs` `end_abandoned`(:265), 판정 `unsettled`(:319), holder 기록 `holder`(:158)·`Run`(:164). 호출 `src/services/discord/queue_io/decision_drain.rs` `settle_as`(:239)의 `row.stale` 분기 | 행을 옮길 때마다 holder(worker_nodes instance id)를 적는다. 종결 UPDATE가 "같은 노드가 이번 실행 시작 전에 옮긴 행" 또는 "holder 노드가 online이 아님"을 다시 확인한다. 시각만으로는 닫지 않는다 |
+| Crash/Boot의 실행 경계 | `decision_drain.rs` `run`(:54). 묻는 곳: `recover_boot`(:450), `hand_idle`(:307), `decision_target.rs:208`(예약 전), `decision_drain/queued.rs` `begin`(:35) | 실행 시작 시각은 먼저 묻는 쪽이 한 번 고정한다. 이 process가 옮긴 행은 그 뒤 시각이라 자기 부팅 복구가 닫지 않는다 |
+| `kept`(신규) · CloseUnknown·Finalize의 `done` 선택 | `decision_drain.rs` `discard`(:136) — owner가 없거나 snapshot commit이 실패하면 원본이 남는다 | PG 종결(실행권)과 owner 원본 제거(정리)는 두 단계다 |
+| Sweep(신규) | `decision_drain.rs` `settle_channel`(:386) → `queued_head/v2/decision.rs` `decision_tickets`(:56) → `src/db/decisions.rs` `closed_under`(:358) → `discard_decision`(:70) | owner가 아직 든 Decision ticket을 종결 event와 대조해 requeue·안내 전에 그 원본만 지운다. ticket이 없고 승인 event도 만난 적 없으면 PG를 읽지 않는다 |
+| Notice(대조) · OtherNotice | `input_owner/notice.rs` `owed`의 `withheld`(:44), 호출 `:16`·`:128` | 정리가 실패한 Decision 원본의 안내만 보류한다. 다른 입력의 안내는 그대로 나간다 |
+| Finalize의 원본 제거(P2-3) | `queued_head/v2/decision.rs` `discard_decision`(:70)의 `gone`(:85) | Unconfirmed·시작 거부·영구 거부로 보관된 Decision 원본을 본문째 지우고 그 시도의 bind를 닫는다. 다른 입력이 섞인 unit과 물리 작업 중인 head는 그대로 둔다 |
+| Journal의 승인 대조(P2-4) · SelfDeclared 대조 | `decision_drain.rs` `claim_of`(:89), `hand_idle`의 `load_event` 대조(:329), `refuse_unapproved`(:108) | origin·channel·actor·본문이 승인 event와 같을 때만 journal. 근거 없는 Decision 주장은 쓰기 0, event 상태 불변 |
+| DrainCurrent(non-owner) → Journal | `router/intake_dispatch/queued.rs:109` → `decision_drain/queued.rs` `begin`(:35) | 수용 경계에서 대조하고 journal을 잡는다. 닫힌·미승인 원본은 실행하지 않고 큐에 돌려놓지 않는다(`ClosedDecision`). 재시작 drain도 같은 경계를 지난다 |
+| ReleaseHeld(non-owner) | `queued.rs:138`·`:201`·`:252`(수용 단계 복귀), `:428`(시작 뒤 큐 복귀) → `decision_drain/queued.rs` `end`(:85) | 아무것도 쓰지 않고 큐로 돌아간 원본만 may_have_sent→normal_wait |
+| CancelClear · CloseUnknown(non-owner) | `queued.rs:429`·`:430` → `end`(:85). kickoff의 재투입 생략 `queue_dispatch/kickoff.rs:288` | clear는 failed(`cleared`), journal 뒤 오류는 unknown_closed(`queue_start_failed`). 실패한 Decision 시작은 큐에 다시 넣지 않는다 |
+| Observe(non-owner) | `queue_dispatch/kickoff.rs:131` → `decision_drain/queued.rs` `settle_started`(:107) | owner 없는 채널은 kickoff의 턴 경계에서 그 턴의 receipt로 정산한다 |
+| ResolvePresent(busy) 유지 | `queue_io/queued_head_inject.rs:124` | Decision head는 busy pane 붙여넣기 대상에서 빠진다 |
+
+수정 전 RED / 후 GREEN(2c 모델, TLC 1.7.4):
+
+| cfg | Mode(수정 전 동작) | 수정 전 | 수정 후(Fixed) |
+|---|---|---|---|
+| TimeOnlyRecovery | 시각만으로 부팅 복구(P2-1) | `LiveHolderKeeps` 반례: holder가 살아 있는데 다른 노드가 종결 | PASS |
+| NoSweepNotice | 종결 뒤 남은 원본을 다시 찾지 않음(P2-2) | `NoDecisionNotice` 반례: 종결된 Decision의 안내가 나감 | PASS |
+| NoSweep | 같은 Mode의 liveness | `ClosedLeavesNothing` 반례: 종결 뒤 원본이 끝내 남음 | PASS |
+| WideSweep | 정리를 채널 전체로 넓힘(대조) | `OthersKept` 반례: 다른 사용자 원본이 지워짐 | PASS |
+
+Fixed는 `LiveHolderKeeps`·`NoDecisionNotice`·`OthersKept`와 liveness `ClosedLeavesNothing`·`OthersTold`를 더해 통과한다.
+
+모델과 코드가 다른 곳: 모델의 PeerRecover는 holder가 죽은 뒤에만 켜지지만, 코드는 holder 노드가 `worker_nodes`에서
+online이 아닐 때를 "죽음"으로 읽는다(leader의 heartbeat 정리가 offline으로 바꾼다). 클러스터를 끈 단일 노드는 instance id가
+하나라서 같은 노드 규칙만 쓴다. Closing 행의 마무리(Finalize)는 holder를 확인하지 않는다 — 원본 제거가 빠져도 Sweep이 다시 찾는다.
+
+## 조각 3 — 게시·회수·비활성 버튼·intake 차단, 2c 리뷰 P2 ①②⑤ 대조 (모델 먼저)
+
+조각 3의 코드는 아직 없다. 아래 행동은 설계 진입점 전수표의 N행(신규 예정 지점)에 대응하고, P2 대조는 2c head의 코드 좌표에 대응한다.
+
+| 모델 전이·변수 | 대응 | 메모 |
+|---|---|---|
+| PostBegin → PostFinish(`posts`) | 설계 N01(ask)·N08(provider 최초 글) | intent를 먼저 저장하고 starter를 한 번 게시한다. 응답을 들으면 `disabled`, 못 들으면 `posting`에 남는다 |
+| Reconcile | 설계 N08(reconcile) | 응답 유실 뒤에는 request marker로 같은 글을 찾는다. 새 POST를 하지 않는다 |
+| PostRejected | 설계 §5의 확정 4xx | 게시 확정 거절은 `post_failed`, 자동 재POST 없음 |
+| `disabled` phase · Activate | 설계 §13 P2-3 표의 조각 3·4 행 | 조각 3은 비활성 버튼과 "아직 선택을 받지 않음"만 노출한다. Activate는 조각 4의 배선이다 |
+| ThreadMessage(대조, `leaked`) | 설계 E49·N22 | decision 글의 메시지는 일반 agent intake로 가지 않는다. guard는 포럼을 기준으로 해야 thread id 저장 전(`posting`)에도 성립한다 |
+| Bootstrap · `tempHeld` (P2 ①) | `src/services/discord/queue_io/decision_drain.rs` `run`(:54)·`node`(:63), `src/db/decisions.rs` `HOLDER`(:155) | 2c head는 cluster 등록 전에 물으면 임시 이름(hostname-pid)을 holder로 고정한다 = `TempHolderId` |
+| MarkOffline · OfflineSettle · `gone` (P2 ②) | `decision_drain.rs` `recover_before`(:429), `src/services/cluster/node_registry.rs` `mark_stale_worker_nodes_offline`(:490) | 2c head에는 offline 전환에서 정산을 다시 부르는 배선이 없다 = `NoOfflineSettle` |
+| RefuseKept · `bound` (P2 ⑤) | `src/services/turn_orchestrator/queued_head/v2/decision.rs` `decision_tickets`(:56), `v2/refused.rs` `refuse_not_sent`(:12) | 2c head의 sweep은 bind에서만 후보를 모은다 = `BindOnlySweep` |
+
+수정 전 RED / 후 GREEN(TLC 1.7.4, `PASS: 34/34 configs`):
+
+| cfg | Mode | 수정 전(RED) | Fixed(GREEN) |
+|---|---|---|---|
+| RePost | 응답 유실 뒤 새 글 POST | `OnePost` 반례 | PASS |
+| EarlyButtons | 비활성 단계에서 선택 수신 | `NoEarlyChoice` 반례 | PASS |
+| NoIntakeGuard | intake 차단 없음 | `NoIntakeLeak` 반례 | PASS |
+| GuardByThread | 저장된 thread id로만 차단 | `NoIntakeLeak` 반례(게시 응답 유실 구간) | PASS |
+| TempHolderId | P2 ①: 등록 전 임시 이름으로 시도를 옮김 | `LiveHolderKeeps` 반례 | PASS |
+| NoOfflineSettle | P2 ②: offline 전환 뒤 재정산 없음 | liveness `AbandonedEnds` 반례 | PASS(`Gone.cfg`) |
+| BindOnlySweep | P2 ⑤: bind에서만 후보 수집 | `NoDecisionNotice` 반례 | PASS |
+
+**P2 ①②⑤는 2c head 코드가 대조 Mode 쪽이다.** Fixed·Gone의 PASS는 조각 4 착수 조건으로 넘긴 목표 계약이고, 현재 코드의 증명이 아니다(producer가 없어 지금은 도달하지 않는다).
+
+모델의 한계: 돌아오지 않는 노드는 `Gone.cfg`에서만 본다(Fixed의 crash는 항상 재부팅한다). 그 노드의 큐 파일·화면은 그 노드만 고칠 수 있어서 `ClosedLeavesNothing`·`OthersTold`·`EventuallySettled`는 `gone`이면 면제한다. 상태 수를 2c 수준으로 묶으려고 `disabled` 단계의 자동 archive, `unknown`이 아닌 동안의 offline 표시, Fixed에서의 RefuseKept는 뺐다.
+
+### 조각 3a 코드 좌표 (요청 저장·API·CLI·cap·intake 차단, 게시 없음)
+
+좌표는 조각 3a head 기준이다. 3a는 게시하지 않으므로 모델에서는 `new` → `posting`(PostBegin, intent 저장)까지만 코드가 있다. PostFinish·Reconcile·`disabled`는 3b다.
+
+| 모델 전이·변수 | 코드 | 메모 |
+|---|---|---|
+| PostBegin(intent 저장) | `src/server/routes/decisions.rs` `ask`(:24) → `src/services/discord/decisions/mod.rs` `store`(:105) → `src/db/decisions/requests.rs` `create_once`(:40) | 질문·선택지·cap hash를 한 transaction으로 저장한다. idempotency key 하나가 요청 하나다. 응답은 202 `publication: pending` |
+| (읽기, 전이 없음) | `src/server/routes/decisions.rs` `show`(:66) → `requests.rs` `load_owned`(:125) | 그 요청을 물은 cap에게만 읽힌다. cap과 cap hash는 읽기에 없다 |
+| requester cap | CLI `src/cli/decision.rs` `ask`(:71)·`get`(:92) → `src/cli/decision/owner_cache.rs` `prepare`(:55)·`of_request`(:75), 서버 `src/services/discord/decisions/requester.rs` `hash`(:18) | cap은 요청을 보내기 전에 사설 cache에 쓰이고, 서버는 hash만 저장한다 |
+| ThreadMessage 대조(`NoIntakeGuard`·`GuardByThread`) | `src/services/discord/router/intake_gate.rs:235` → `src/services/discord/decisions/ingress.rs` `consumes`(:92) → `contains`(:46) → `load_forums`(:24) | 부모가 Decision 포럼(ready 행 + 설정 덮어쓰기)인 thread의 메시지는 dedup 전에 intake에서 빠진다. thread id를 보지 않으므로 게시 응답 유실 구간(`posting` ∧ `posts`=1)에도 성립한다 |
+
+모델과 코드가 다른 곳(3a): 차단은 포럼 집합을 30초마다 다시 읽는다(`ingress.rs` `REFRESH`:14). 방금 기록된 포럼은 다음 판독까지 최대 30초 동안 모른다. 모델의 `GuardByForum`은 포럼을 항상 아는 것으로 둔다. 3b가 게시 전에 그 포럼을 이 process의 집합에 넣어 이 창을 닫아야 한다. thread의 부모는 intake가 이미 읽은 값과 gateway cache에서만 얻는다. 둘 다 없으면(채널 조회 실패 + cache 없음) 판정하지 못하고 기존 intake로 간다.
