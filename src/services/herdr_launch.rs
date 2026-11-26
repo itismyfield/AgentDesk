@@ -146,6 +146,11 @@ pub(crate) enum HerdrCreateOutcome {
     NotSent(String),
     /// The server may have acted without a usable reply: lost ACK, wrong id, remote error.
     Indeterminate(String),
+    /// The pane exists; transport proved the command never left.
+    CreatedCommandNotSent {
+        pane_id: String,
+        detail: String,
+    },
     /// The pane exists but its command was not confirmed to start (cwd mismatch, policy lost,
     /// unclear input reply). The pane is recorded; nothing is resent or killed.
     CreatedUnconfirmed {
@@ -199,6 +204,14 @@ pub(crate) trait HerdrLaunchHost: Send + Sync {
         _nonce: &str,
     ) -> Result<ServerWitness, String> {
         Err("unplaced resolution unsupported".into())
+    }
+    fn pane_presence(
+        &self,
+        _: &HerdrLaunchEndpoint,
+        _: &str,
+        _: &ServerWitness,
+    ) -> Result<crate::services::session_host::HostPresence, String> {
+        Err("pane presence unsupported".into())
     }
     /// Every pane of `logical_key`'s workspaces on `endpoint`, each answer from `witness`'s server.
     fn channel_panes(
@@ -612,10 +625,17 @@ pub(crate) async fn launch_herdr_session(
         Some(HerdrCreateOutcome::CreatedUnconfirmed { pane_id, detail })
             if !pane_id.trim().is_empty() =>
         {
-            (pane_id, Some(detail))
+            (pane_id, Some((detail, false)))
+        }
+        Some(HerdrCreateOutcome::CreatedCommandNotSent { pane_id, detail })
+            if !pane_id.trim().is_empty() =>
+        {
+            (pane_id, Some((detail, true)))
         }
         Some(
-            HerdrCreateOutcome::Created { .. } | HerdrCreateOutcome::CreatedUnconfirmed { .. },
+            HerdrCreateOutcome::Created { .. }
+            | HerdrCreateOutcome::CreatedUnconfirmed { .. }
+            | HerdrCreateOutcome::CreatedCommandNotSent { .. },
         ) => {
             return Ok(indeterminate("create reply named no pane".into()));
         }
@@ -643,7 +663,10 @@ pub(crate) async fn launch_herdr_session(
         )));
     }
     // The pane is recorded where reconcile finds it; its unconfirmed command is never retried.
-    if let Some(detail) = unconfirmed {
+    if let Some((detail, command_not_sent)) = unconfirmed {
+        if command_not_sent {
+            in_flight.command_not_sent();
+        }
         return Ok(indeterminate(format!(
             "pane {}: {detail}",
             location.pane_id

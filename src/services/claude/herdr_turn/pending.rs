@@ -13,8 +13,13 @@ pub(super) fn pending_source(
     use crate::services::turn_orchestrator::RetryWaitCause as Cause;
     let nonce = &record.execution_nonce;
     let adopted = record.location.is_none() && record.expected.is_none();
-    if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {
-        return launched_source(turn, runtime, ports);
+    let retained = "retired the missing execution; retained input needs its own disposition";
+    if adopted {
+        match unplaced_resolved(turn, runtime, ports, nonce)? {
+            Resolution::Retired => return launched_source(turn, runtime, ports),
+            Resolution::RetiredWithEvidence => return Err(retained.into()),
+            _ => {}
+        }
     }
     let session_id = execution_context("claude", nonce)?
         .expected_native_session_id
@@ -28,8 +33,15 @@ pub(super) fn pending_source(
     let record = match record.location {
         Some(_) if record.expected.is_none() => {
             if let Err(gap) = never_attached::probe_again(turn, runtime, ports) {
-                let detail = never_attached::refusal(turn, record, &session_id, Err(gap));
-                return Err(refused(unproven(), detail));
+                match unplaced_resolved(turn, runtime, ports, nonce) {
+                    Ok(Resolution::Retired) => return launched_source(turn, runtime, ports),
+                    Ok(Resolution::RetiredWithEvidence) => return Err(retained.into()),
+                    Ok(Resolution::Adopted) => {}
+                    Ok(Resolution::Held(_)) | Err(_) => {
+                        let detail = never_attached::refusal(turn, record, &session_id, Err(gap));
+                        return Err(refused(unproven(), detail));
+                    }
+                }
             }
             proven = reloaded(turn, runtime, nonce).map_err(|e| refused(unproven(), e))?;
             &proven
@@ -38,6 +50,11 @@ pub(super) fn pending_source(
     };
     let logical = turn.owner.logical_key.as_str();
     if !start_logged(turn.channel_id, logical, nonce, &session_id) {
+        if record.expected.is_some()
+            && unplaced_resolved(turn, runtime, ports, nonce) == Ok(Resolution::RetiredWithEvidence)
+        {
+            return Err(retained.into());
+        }
         let (cause, detail) = match adopted {
             true => (
                 Cause::PendingUnplaced {
@@ -66,7 +83,47 @@ pub(super) fn pending_source(
         };
         return Err(refused(cause, detail));
     }
-    attach(turn, runtime, ports, nonce, &session_id)
+    attach(turn, runtime, ports, nonce, &session_id).map_err(|error| {
+        if unplaced_resolved(turn, runtime, ports, nonce) == Ok(Resolution::RetiredWithEvidence) {
+            retained.into()
+        } else {
+            error
+        }
+    })
+}
+
+/// Preserve an unsubmitted front while the placed launch is reconciled.
+pub(super) fn launch_refusal(turn: &HerdrTurn<'_>, runtime: &Handle, error: String) -> String {
+    if error.starts_with("NotSent(") {
+        return error;
+    }
+    let HostedLookup::Found(found) = runtime.block_on(load(turn.pool, &turn.owner)) else {
+        return error;
+    };
+    let HostedRecord::Known(record) = found.record else {
+        return error;
+    };
+    if record.owner != turn.owner
+        || record.state != HostedState::Pending
+        || record.location.is_none()
+        || record.expected.is_some()
+    {
+        return error;
+    }
+    let Ok(context) = execution_context("claude", &record.execution_nonce) else {
+        return error;
+    };
+    retry_probe::refused(
+        turn,
+        context
+            .expected_native_session_id
+            .as_deref()
+            .unwrap_or_default(),
+        crate::services::turn_orchestrator::RetryWaitCause::PendingUnproven {
+            nonce: record.execution_nonce,
+        },
+        &error,
+    )
 }
 
 /// Pending execution `nonce` read again once its probe recorded the evidence it lacked.

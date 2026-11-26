@@ -282,18 +282,18 @@ async fn a_launch_stays_in_flight_until_its_create_worker_returns_even_when_its_
     let _ = launch.await;
     let past = at(0, 0);
     assert_eq!(
-        quiet_since(&nonce, past, Duration::ZERO),
+        quiet_since(&nonce, past, Duration::ZERO, false),
         Err("launch in flight".into()),
         "the dropped caller must not end a create the server may still act on"
     );
     release.send(()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
-    while quiet_since(&nonce, past, Duration::ZERO).is_err() && Instant::now() < deadline {
+    while quiet_since(&nonce, past, Duration::ZERO, false).is_err() && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(quiet_since(&nonce, past, Duration::ZERO), Ok(()));
+    assert_eq!(quiet_since(&nonce, past, Duration::ZERO, false), Ok(()));
     assert_eq!(
-        quiet_since(&nonce, past, Duration::from_secs(60)),
+        quiet_since(&nonce, past, Duration::from_secs(60), false),
         Err("launch too recent".into())
     );
 }

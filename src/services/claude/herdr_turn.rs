@@ -123,6 +123,14 @@ impl HerdrLaunchHost for Boot<'_> {
     ) -> Result<crate::services::session_host::ServerWitness, String> {
         self.0.unplaced_witness(endpoint, nonce)
     }
+    fn pane_presence(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        pane: &str,
+        witness: &crate::services::session_host::ServerWitness,
+    ) -> Result<crate::services::session_host::HostPresence, String> {
+        self.0.pane_presence(endpoint, pane, witness)
+    }
     fn channel_panes(
         &self,
         endpoint: &HerdrLaunchEndpoint,
@@ -330,7 +338,11 @@ pub(crate) fn execute(
             Some(HostedRecord::Unknown(_)) => {
                 return Err("herdr turn: unreadable hosted record".into());
             }
-            _ => (launched_source(&turn, &runtime, ports)?, Lineage::Created),
+            _ => (
+                launched_source(&turn, &runtime, ports)
+                    .map_err(|error| pending::launch_refusal(&turn, &runtime, error))?,
+                Lineage::Created,
+            ),
         };
         let notice = ports.hold_notice();
         prompt_and_read(&turn, &runtime, attached, (lineage, notice), sender)

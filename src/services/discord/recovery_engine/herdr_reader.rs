@@ -215,7 +215,7 @@ fn reconnect_pass(
             return;
         }
     };
-    resolve_unplaced_rows(&runtime, shared, pool, &node, codex);
+    resolve_unplaced_rows(&runtime, shared, pool, &node, codex, &rows);
     // Pruning drops old Bound observations once their rows are Retired.
     let incomplete: BTreeSet<_> = rows
         .iter()
@@ -332,35 +332,46 @@ fn reconnect_pass(
     }
 }
 
-/// Resolves this bot's Pending rows of the pass's provider whose launch recorded no pane, each
-/// nonce once in a while; it never launches. A busy channel waits for a later pass.
+/// Resolves the pass's own Pending launches under their channel transition leases.
 fn resolve_unplaced_rows(
     runtime: &Handle,
     shared: &std::sync::Arc<crate::services::discord::SharedData>,
     pool: &PgPool,
     node: &str,
     codex: bool,
+    placed: &[HostedObservation],
 ) {
-    use crate::services::herdr_launch::unplaced::{Unplaced, quiet, resolve_unplaced};
+    use crate::services::herdr_launch::unplaced::{Resolution, Unplaced, quiet, resolve_unplaced};
     let rows = match runtime.block_on(list_local_unplaced_pending_pg(pool, node)) {
         Ok(rows) => rows,
         Err(error) => {
             tracing::warn!(%error, "herdr unplaced: rows unreadable");
-            return;
+            Vec::new()
         }
     };
     let root = crate::config::runtime_root().map(|root| root.display().to_string());
-    for row in rows.iter().filter(|row| codex_row(&row.record) == codex) {
+    for row in rows
+        .iter()
+        .chain(placed)
+        .filter(|row| codex_row(&row.record) == codex)
+    {
         let HostedRecord::Known(record) = &row.record else {
             continue;
         };
+        if record.state != HostedState::Pending {
+            continue;
+        }
         let owner = &record.owner;
         let channel = owner
             .channel_id
             .parse::<u64>()
             .ok()
             .filter(|channel| *channel != 0);
-        let endpoint = channel.and_then(crate::config::session_hosts::herdr_endpoint);
+        use crate::services::session_host::thread_host::{PolicyHost, parent_policy};
+        let endpoint = channel.and_then(|channel| match parent_policy(channel) {
+            PolicyHost::Herdr { endpoint, .. } => Some(endpoint),
+            _ => None,
+        });
         let (Some(channel), Some(endpoint)) = (channel, endpoint) else {
             continue;
         };
@@ -390,7 +401,20 @@ fn resolve_unplaced_rows(
             quiet: quiet(),
             close_unrecorded: crate::services::discord::HERDR_OWNER_PORT.close_unrecorded,
         };
-        runtime.block_on(resolve_unplaced(&lease, &target));
+        let result = runtime.block_on(resolve_unplaced(&lease, &target));
+        drop(lease);
+        if record.location.is_some()
+            && record.expected.is_none()
+            && matches!(result, Resolution::Adopted | Resolution::Retired)
+            && let Some(provider) = ProviderKind::from_str(&owner.provider)
+        {
+            crate::services::discord::schedule_deferred_idle_queue_kickoff_immediate(
+                shared.clone(),
+                provider,
+                channel,
+                "herdr_placed_pending",
+            );
+        }
     }
 }
 

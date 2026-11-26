@@ -28,7 +28,7 @@ use crate::services::herdr_launch::{
     launch_command_eligible,
 };
 use crate::services::session_host::herdr_gate::residue;
-use crate::services::session_host::model::HostMutation;
+use crate::services::session_host::model::{HostError, HostMutation, HostPresence};
 
 /// What serves an endpoint now, against the server a nonce's grant admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -652,6 +652,10 @@ impl SocketHerdrLaunchHost {
             Ok(HostMutation::Confirmed) => HerdrCreateOutcome::Created {
                 pane_id: pane.pane_id.clone(),
             },
+            Err(HostError::Transport(detail)) => HerdrCreateOutcome::CreatedCommandNotSent {
+                pane_id: pane.pane_id.clone(),
+                detail,
+            },
             other => unconfirmed(format!("command input: {other:?}")),
         }
     }
@@ -805,6 +809,21 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         ExistingMutationPermit::issue(launch, nonce, current, &evidence)
             .map(|permit| permit.witness().clone())
             .map_err(|why| format!("existing mutation permit: {why:?}"))
+    }
+
+    fn pane_presence(
+        &self,
+        launch: &HerdrLaunchEndpoint,
+        pane: &str,
+        witness: &ServerWitness,
+    ) -> Result<HostPresence, String> {
+        let (_, transport) = self.endpoint(launch).ok_or("endpoint is not configured")?;
+        let call = self.call(HerdrRequest::SessionSnapshot {});
+        let (outcome, answered) = transport.call(&call);
+        if answered.as_ref() != Ok(witness) {
+            return Err(format!("snapshot answered by {answered:?}"));
+        }
+        Ok(contract::snapshot_observation(&call, outcome, pane).presence())
     }
 
     fn channel_panes(

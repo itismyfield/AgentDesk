@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -29,42 +30,59 @@ const ENDED_KEPT: Duration = Duration::from_secs(3_600);
 /// Reads after one round of orphan closes and one residue removal; neither is ever repeated.
 const PASSES: usize = 3;
 
-/// Each launch this process started, and when its last client work ended (`None` while running).
-static IN_FLIGHT: LazyLock<Mutex<HashMap<String, Option<Instant>>>> = LazyLock::new(Mutex::default);
+mod placed;
+
+type Launches = HashMap<String, Option<(Instant, bool)>>;
+
+/// Each launch's last work and whether its command was proved unsent.
+static IN_FLIGHT: LazyLock<Mutex<Launches>> = LazyLock::new(Mutex::default);
 static PROCESS_SEEN: LazyLock<Instant> = LazyLock::new(Instant::now);
 
-fn in_flight() -> MutexGuard<'static, HashMap<String, Option<Instant>>> {
+fn in_flight() -> MutexGuard<'static, Launches> {
     IN_FLIGHT.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// One launch's client work; it ends when the launch and every worker it started drop their clone.
-pub(crate) struct LaunchInFlight(String);
+pub(crate) struct LaunchInFlight(String, AtomicBool);
 
 impl LaunchInFlight {
     pub(crate) fn begin(nonce: &str) -> Arc<Self> {
         LazyLock::force(&PROCESS_SEEN);
         let mut launches = in_flight();
-        launches.retain(|_, ended| ended.is_none_or(|at| at.elapsed() < ENDED_KEPT));
+        launches.retain(|_, ended| ended.is_none_or(|(at, _)| at.elapsed() < ENDED_KEPT));
         launches.insert(nonce.to_owned(), None);
-        Arc::new(Self(nonce.to_owned()))
+        Arc::new(Self(nonce.to_owned(), AtomicBool::new(false)))
     }
 
     pub(crate) fn nonce(&self) -> &str {
         &self.0
     }
+
+    pub(super) fn command_not_sent(&self) {
+        self.1.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for LaunchInFlight {
     fn drop(&mut self) {
-        in_flight().insert(self.0.clone(), Some(Instant::now()));
+        in_flight().insert(
+            self.0.clone(),
+            Some((Instant::now(), self.1.load(Ordering::Relaxed))),
+        );
     }
 }
 
 /// Refuses a launch still running here, or one whose last work or context is too recent.
-fn quiet_since(nonce: &str, created: SystemTime, quiet: Duration) -> Result<(), String> {
+fn quiet_since(
+    nonce: &str,
+    created: SystemTime,
+    quiet: Duration,
+    placed: bool,
+) -> Result<(), String> {
     let since = match in_flight().get(nonce) {
         Some(None) => return Err("launch in flight".into()),
-        Some(Some(ended)) => *ended,
+        Some(Some((_, true))) if placed => return Ok(()),
+        Some(Some((ended, _))) => *ended,
         None => *PROCESS_SEEN,
     };
     let created_age = created.elapsed().unwrap_or(Duration::ZERO);
@@ -209,6 +227,8 @@ pub(crate) enum Resolution {
     Adopted,
     /// The row is Retired, by this resolution or an earlier one; a fresh launch may follow.
     Retired,
+    /// The recorded provider existed. Retiring its pane does not clear possible input.
+    RetiredWithEvidence,
     Held(String),
 }
 
@@ -250,6 +270,24 @@ async fn resolve(target: &Unplaced<'_>) -> Resolution {
     {
         return Resolution::Held("another node's or runtime's launch".into());
     }
+    let observed = match load_row(target.pool, owner).await {
+        Ok(observed) => observed,
+        Err(error) => return Resolution::Held(format!("{error:?}")),
+    };
+    if let HostedRecord::Known(record) = &observed.record {
+        if record.location.is_some() && record.state == HostedState::Pending {
+            return placed::resolve(target, &observed)
+                .await
+                .unwrap_or_else(Resolution::Held);
+        }
+        if &record.owner == owner
+            && record.execution_nonce == nonce
+            && record.state == HostedState::Retired
+            && record.expected.is_some()
+        {
+            return Resolution::RetiredWithEvidence;
+        }
+    }
     let mut closed = false;
     for _ in 0..PASSES {
         match unplaced(target).await {
@@ -261,7 +299,7 @@ async fn resolve(target: &Unplaced<'_>) -> Resolution {
             Ok(ctx) => ctx.created_at.into(),
             Err(why) => return Resolution::Held(why),
         };
-        if let Err(why) = quiet_since(nonce, created, target.quiet) {
+        if let Err(why) = quiet_since(nonce, created, target.quiet, false) {
             return Resolution::Held(why);
         }
         let (endpoint, key) = (target.endpoint.clone(), owner.logical_key.clone());
@@ -320,7 +358,7 @@ pub(crate) fn resolve_for_turn(
 ) -> Result<Resolution, String> {
     let held = |why: &str| {
         format!(
-            "herdr turn: pending execution {} has no recorded pane and is held: {why}",
+            "herdr turn: pending execution {} is held: {why}",
             target.nonce
         )
     };
@@ -353,7 +391,7 @@ async fn unplaced(target: &Unplaced<'_>) -> Result<bool, String> {
     match &current.record {
         HostedRecord::Known(record) if record.execution_nonce == target.nonce => {
             match record.state {
-                HostedState::Retired => Ok(false),
+                HostedState::Retired if record.expected.is_none() => Ok(false),
                 HostedState::Pending if record.location.is_none() && record.expected.is_none() => {
                     Ok(true)
                 }

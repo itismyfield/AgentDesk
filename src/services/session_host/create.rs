@@ -106,7 +106,8 @@ impl CreateOutcome {
             HerdrCreateOutcome::Indeterminate(detail) => {
                 HostCreation::Indeterminate(detail.clone())
             }
-            HerdrCreateOutcome::CreatedUnconfirmed { pane_id, detail } => {
+            HerdrCreateOutcome::CreatedUnconfirmed { pane_id, detail }
+            | HerdrCreateOutcome::CreatedCommandNotSent { pane_id, detail } => {
                 HostCreation::Indeterminate(format!("pane {pane_id}: {detail}"))
             }
         };
