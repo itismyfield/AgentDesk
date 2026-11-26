@@ -294,7 +294,14 @@ mod projection {
                 interrupt: None,
             });
             let facts = (self.facts.as_slice(), closer.as_ref());
-            let mut analysis = reduce(&self.binding, facts, registrations, self.through, None)?;
+            let mut analysis = reduce(
+                &self.binding,
+                facts,
+                registrations,
+                self.through,
+                None,
+                None,
+            )?;
             if let Some(raw) = raw {
                 terminal::attach(&mut analysis.evidence, raw);
             }
@@ -336,6 +343,7 @@ mod projection {
                             && admitted_range == range
                             && admitted_row == Some(row);
                     }),
+                    None,
                 )
                 .is_ok()
                     && matched
@@ -529,6 +537,7 @@ mod projection {
         registrations: &[Registration],
         through: u64,
         mut membership: Option<MembershipRecorder<'_>>,
+        mut notices: Option<&mut notice_absorption::NoticeFold<'_>>,
     ) -> Result<Analysis, String> {
         if binding.provider != super::ShadowProvider::Claude {
             return Ok(Analysis::default());
@@ -542,6 +551,10 @@ mod projection {
             .filter(|r| {
                 (r.candidate || terminal::superseding(r, &interrupts)) && r.matches(binding)
             })
+            .collect();
+        let windows: Vec<_> = registered
+            .iter()
+            .map(|r| notice_absorption::Window::new(r, notices.as_deref()))
             .collect();
         let mut inputs: Vec<Input> = vec![];
         let mut run: Option<Run> = None;
@@ -593,7 +606,9 @@ mod projection {
                             }
                             let Some(owner) = input.owner else { continue };
                             let registration = registered[owner];
-                            if !accepts_row(registration, record) || member[owner].is_some() {
+                            if !windows[owner].accepts_row(registration, record)
+                                || member[owner].is_some()
+                            {
                                 continue;
                             }
                             let Some(pending) = &input.pending else {
@@ -653,13 +668,7 @@ mod projection {
                     }
                 }
             }
-            let eligible = |i: usize| {
-                registered[i]
-                    .ticket
-                    .source
-                    .as_ref()
-                    .is_some_and(|s| s.offset <= record.range.0)
-            };
+            let eligible = |i: usize| windows[i].contains(record.range.0);
             let candidate = |body: &[String], receipt: bool| {
                 let candidates: Vec<_> = registered
                     .iter()
@@ -685,10 +694,8 @@ mod projection {
             };
             match event {
                 Event::Enqueue(body) => {
-                    let owner = candidate(body, false).filter(|i| {
-                    records.iter().filter(|r| r.range.0 >= registered[*i].ticket.source.as_ref().map_or(u64::MAX, |s| s.offset))
-                        .filter(|r| matches!(&r.event, Some(Event::Enqueue(b)) if same_body(b, body))).count() == 1
-                });
+                    let owner = candidate(body, false)
+                        .filter(|&i| windows[i].unique_enqueue(records, body));
                     inputs.push(Input {
                         body: body.clone(),
                         owner,
@@ -793,7 +800,7 @@ mod projection {
                     let owner = receipt
                         .or_else(|| {
                             at.and_then(|at| inputs[at].owner)
-                                .filter(|i| accepts_row(registered[*i], record))
+                                .filter(|i| windows[*i].accepts_row(registered[*i], record))
                         })
                         .or_else(|| {
                             (matches.is_empty()
@@ -807,9 +814,21 @@ mod projection {
                             .flatten()
                         });
                     if let Some(at) = at {
+                        if absorption
+                            && owner.is_none()
+                            && run.is_some()
+                            && inputs[at].owner.is_none()
+                            && let Some(notices) = notices.as_deref_mut()
+                            && !registered
+                                .iter()
+                                .enumerate()
+                                .any(|(i, r)| eligible(i) && body.contains(&r.frame_hash))
+                        {
+                            notices.unowned.insert(record.range, inputs[at].start);
+                        }
                         if inputs[at]
                             .owner
-                            .is_some_and(|i| !accepts_row(registered[i], record))
+                            .is_some_and(|i| !windows[i].accepts_row(registered[i], record))
                         {
                             continue;
                         }
@@ -899,14 +918,6 @@ mod projection {
                 })
                 .collect(),
         })
-    }
-
-    fn accepts_row(registration: &Registration, value: &Fact) -> bool {
-        registration.receipts.is_empty()
-            || value
-                .row
-                .as_deref()
-                .is_some_and(|uuid| registration.receipts.iter().any(|known| known == uuid))
     }
 
     fn settle_removed(

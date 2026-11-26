@@ -123,7 +123,11 @@ pub(crate) fn admit_notice<R>(
             NoticeOwnership::Known | NoticeOwnership::KnownCommand => {
                 return exclude(piece, store, "input_notice_source");
             }
-            NoticeOwnership::Pending if absorbed => return Err(NoticeRefusal::OwnershipPending),
+            NoticeOwnership::Pending if absorbed => {
+                if !owners.is_some_and(|owners| owners.absorbed_unowned(origin, &prompt)) {
+                    return Err(NoticeRefusal::OwnershipPending);
+                }
+            }
             NoticeOwnership::Pending => {
                 match owners.map(|owners| owners.decision(origin, receipt_uuid, &prompt)) {
                     Some(history::notice_owner::Decision::Owned) => {

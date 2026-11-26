@@ -3,7 +3,10 @@ use super::super::binding::BindingEvents;
 use super::super::input_facts::native::{Projection, Registration};
 use super::super::rotation::Sources;
 use super::{NoticeOrigin, ShadowProvider};
-use crate::services::tui_input::human_frame::history::{notice_owner::AbsorptionProofs, v2};
+use crate::services::tui_input::human_frame::history::{
+    notice_owner::{AbsorptionProofs, ConsumedAbsorptions},
+    v2,
+};
 use crate::services::tui_o::shadow::{SourceBinding, capture::Fingerprint};
 use crate::services::tui_o::store::ChannelStore;
 use std::collections::HashMap;
@@ -13,6 +16,7 @@ pub(in crate::services::tui_o::writer) fn authenticated_proofs<B: BindingEvents>
     live: &Sources<B>,
     origin: &NoticeOrigin,
     source_stamp: &Fingerprint,
+    consumed: &ConsumedAbsorptions,
 ) -> Option<AbsorptionProofs> {
     let source = &origin.record.source;
     let cursor = store.cursor(source)?;
@@ -32,24 +36,26 @@ pub(in crate::services::tui_o::writer) fn authenticated_proofs<B: BindingEvents>
         })
         .collect();
     let allowed = verified_attempts(&registry, &mut registrations);
-    if allowed.is_empty() {
-        return None;
-    }
     let mut proofs = if let Some(seed) = live.notice_projection(cursor, source_stamp) {
-        seed.notice_absorptions(&registrations).ok()?
+        seed.notice_absorptions(&registrations, consumed).ok()?
     } else {
         let (capture, projection) =
             Projection::reopen(binding, cursor.captured_through, &cursor.prefix_hash).ok()?;
-        let proofs = projection.ok()?.notice_absorptions(&registrations).ok()?;
+        let proofs = projection
+            .ok()?
+            .notice_absorptions(&registrations, consumed)
+            .ok()?;
         if capture.fingerprint().ok().as_ref() != Some(source_stamp) {
             return None;
         }
         proofs
     };
     proofs.retain(|range, (_, owner)| {
-        allowed
-            .get(owner)
-            .is_some_and(|expected| expected.is_none_or(|r| r == *range))
+        owner.as_ref().is_none_or(|owner| {
+            allowed
+                .get(owner)
+                .is_some_and(|expected| expected.is_none_or(|r| r == *range))
+        })
     });
     (Fingerprint::path(source).ok().as_ref() == Some(source_stamp)).then_some(proofs)
 }

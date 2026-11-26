@@ -110,6 +110,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         let Some(prompt) = evidence.prompt.as_deref() else {
             return false;
         };
+        let absorbed = evidence.is_absorbed_remove();
         let digest = hex::encode(sha2::Sha256::digest(prompt.as_bytes()));
         let (proof, expired_after) = if input_notice::input_notice_content(prompt).is_none()
             && crate::services::tui_o::store::ledger::input_notices::policy_proven(prompt)
@@ -127,7 +128,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 return false;
             };
             let owners = &self.writer.notice_owners;
-            let owner = if evidence.is_absorbed_remove() {
+            let owner = if absorbed {
                 owners.absorbed_owner(origin, prompt)
             } else {
                 let command_row_uuid = evidence.command_row_uuid();
@@ -152,7 +153,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 expired,
             )
         };
-        self.writer
+        let consumes = absorbed && matches!(proof, Settled::Owned { .. });
+        let settled = self
+            .writer
             .record(LedgerEntry::InputNotice {
                 entry: Box::new(NoticeEntry::Settled {
                     record: evidence.record.clone(),
@@ -162,6 +165,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     }),
                 }),
             })
-            .is_ok()
+            .is_ok();
+        if settled && consumes {
+            let source = &evidence.record.source;
+            self.writer.notice_owners.reevaluate_source(source);
+            self.writer.notice_cache.reevaluate_source(source);
+        }
+        settled
     }
 }

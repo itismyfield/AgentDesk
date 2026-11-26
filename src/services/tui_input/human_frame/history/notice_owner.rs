@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 mod absorption;
 use absorption::AbsorptionLookup;
 #[cfg(unix)]
-pub(crate) use absorption::AbsorptionProofs;
+pub(crate) use absorption::{AbsorptionProofs, ConsumedAbsorptions};
 mod census;
 mod context_observation;
 #[cfg(test)]
@@ -335,16 +335,33 @@ impl Batch {
             .flatten()
     }
 
+    pub(crate) fn reevaluate_source(&mut self, source: &crate::services::tui_o::shadow::SourceId) {
+        for scope in self
+            .scopes
+            .iter_mut()
+            .filter(|s| &s.origin.record.source == source)
+        {
+            scope.retry_at = Some(tokio::time::Instant::now());
+        }
+    }
+
     pub(crate) fn absorbed_owner(&self, origin: &NoticeOrigin, prompt: &str) -> Option<String> {
-        let hashes = class_hashes(prompt);
-        let scope = self.valid_scope(origin, &hashes).ok()?;
+        self.absorbed_answer(origin, prompt)?.clone()
+    }
+
+    pub(crate) fn absorbed_unowned(&self, origin: &NoticeOrigin, prompt: &str) -> bool {
+        self.absorbed_answer(origin, prompt)
+            .is_some_and(Option::is_none)
+    }
+
+    fn absorbed_answer(&self, origin: &NoticeOrigin, prompt: &str) -> Option<&Option<String>> {
+        let scope = self.valid_scope(origin, &class_hashes(prompt)).ok()?;
         if !scope.covers(origin) {
             return None;
         }
         scope
             .absorbed
             .get(&(origin.record.start, origin.record.end))
-            .cloned()
     }
 
     fn valid_scope(&self, origin: &NoticeOrigin, hashes: &[String]) -> Result<&Scope, Decision> {

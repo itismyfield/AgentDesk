@@ -349,12 +349,13 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         {
             let store = self.writer.store();
             #[cfg(unix)]
-            let lookup = |origin: &_, stamp: &_| {
+            let lookup = |origin: &_, stamp: &_, consumed: &_| {
                 super::super::input_notices::absorption::authenticated_proofs(
                     store,
                     &self.sources,
                     origin,
                     stamp,
+                    consumed,
                 )
             };
             #[cfg(unix)]
