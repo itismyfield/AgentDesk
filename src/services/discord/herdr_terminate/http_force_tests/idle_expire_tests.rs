@@ -400,39 +400,58 @@ enum Clear {
     Held,
 }
 
-/// The owner's `/clear`, then its next launch: the clear says it reset the conversation, and the
-/// launch is a fresh session that never names `native`.
-async fn assert_clear_starts_fresh(node: &Node, native: &str, how: Clear) {
+/// The owner's real `/clear` met `how`, answering its reply. Over a launch start the clear first
+/// fences the start, then waits for it to leave, so the start is let go only once it is fenced.
+async fn run_clear(node: &Node, how: Clear) -> String {
+    use crate::services::herdr_launch::clear_epoch::Launching;
     let owner = retired_row(node).await.owner;
     let launching = match how {
-        Clear::OverLaunchStart => {
-            let launching = crate::services::herdr_launch::clear_epoch::Launching::for_launch;
-            Some(launching(&owner).unwrap())
-        }
+        Clear::OverLaunchStart => Some(Launching::for_launch(&owner).unwrap()),
         _ => None,
     };
     let held = match how {
-        Clear::Held => Some(
-            node.shared
-                .session_transition_locks
-                .lock(channel())
-                .lock_owned()
-                .await,
-        ),
+        Clear::Held => {
+            let lock = node.shared.session_transition_locks.lock(channel());
+            Some(lock.lock_owned().await)
+        }
         _ => None,
     };
-    let http = Arc::new(poise::serenity_prelude::Http::new(""));
-    let clear = crate::services::discord::commands::control::clear_channel_session_state;
-    let report = clear(
-        &http,
-        &node.shared,
-        &ProviderKind::Codex,
-        channel(),
-        "!clear",
-    );
-    let reply = report.await.unwrap().reply();
-    drop((launching, held));
+    let shared = node.shared.clone();
+    let clear = tokio::spawn(async move {
+        let http = Arc::new(poise::serenity_prelude::Http::new(""));
+        let clear = crate::services::discord::commands::control::clear_channel_session_state;
+        let report = clear(&http, &shared, &ProviderKind::Codex, channel(), "!clear");
+        report.await.unwrap().reply()
+    });
+    if launching.is_some() {
+        let fenced = async {
+            while Launching::for_launch(&owner).is_ok() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        let fenced = tokio::time::timeout(Duration::from_secs(10), fenced).await;
+        fenced.expect("the clear fences the overlapped start");
+        assert!(
+            !clear.is_finished(),
+            "the clear waits for the start to leave"
+        );
+    }
+    drop(launching);
+    let reply = tokio::time::timeout(Duration::from_secs(30), clear).await;
+    drop(held);
+    reply.expect("the clear answers").unwrap()
+}
+
+/// The owner's `/clear`, then its next launch: the clear says it reset the conversation, and the
+/// launch is a fresh session that never names `native`.
+async fn assert_clear_starts_fresh(node: &Node, native: &str, how: Clear) {
+    let reply = run_clear(node, how).await;
     assert!(reply.contains("초기화했어요"), "{reply}");
+    assert_fresh(node, native, &reply).await;
+}
+
+/// The next launch from the database row starts a fresh session that never names `native`.
+async fn assert_fresh(node: &Node, native: &str, reply: &str) {
     let launch = next_launch(node, owner_effort(node).await).await;
     assert!(
         !launch.resume,
@@ -630,7 +649,8 @@ fn a_held_clear_forgets_the_kept_codex_thread_pg() {
     cleared_after_idle("a_held_clear_forgets_the_kept_codex_thread_pg", Clear::Held);
 }
 
-// A clear whose selector write fails never says the session was reset.
+// A clear whose selector write fails says it did not reset, and the thread it already cancelled
+// leaves the next message to a fresh session.
 #[test]
 fn a_clear_whose_selector_write_fails_does_not_say_reset_pg() {
     let name = "idle_expire_tests::a_clear_whose_selector_write_fails_does_not_say_reset_pg";
@@ -639,7 +659,7 @@ fn a_clear_whose_selector_write_fails_does_not_say_reset_pg() {
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
     runtime.block_on(async {
-        let (node, _) = idle_codex(&rig).await;
+        let (node, native) = idle_codex(&rig).await;
         node.sql("UPDATE sessions SET claude_session_id = 'kept-thread' WHERE session_key = $1 AND $2::TEXT IS NULL", None).await;
         adopt(&node).await;
         assert_eq!(node.idle_kill().await["tmux_killed"], true);
@@ -649,12 +669,10 @@ fn a_clear_whose_selector_write_fails_does_not_say_reset_pg() {
         ] {
             sqlx::query(refuse).execute(&node.pool).await.unwrap();
         }
-        let http = Arc::new(poise::serenity_prelude::Http::new(""));
-        let clear = crate::services::discord::commands::control::clear_channel_session_state;
-        let report = clear(&http, &node.shared, &ProviderKind::Codex, channel(), "!clear");
-        let reply = report.await.unwrap().reply();
+        let reply = run_clear(&node, Clear::Alone).await;
         let reset = crate::services::discord::commands::SESSION_CLEARED_RESPONSE;
         assert!(!reply.contains(reset), "{reply}");
+        assert_fresh(&node, &native, &reply).await;
         node.finish().await;
     });
 }
