@@ -42,7 +42,7 @@ pub trait SubmissionFence: Send + Sync {
 pub struct IdleStashContext {
     pub channel: u64,
     pub target: String,
-    pub(crate) available: bool,
+    pub available: bool,
 }
 
 #[cfg(unix)]

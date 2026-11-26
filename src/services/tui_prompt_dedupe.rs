@@ -123,13 +123,13 @@ pub struct ObservedTuiPrompt {
     /// controls carry the unrecorded sentinel for both fields because they
     /// publish no lease/SSH state at all.
     pub external_input_lease_generation: u64,
-    pub(crate) ssh_direct_observation_generation: u64,
+    pub ssh_direct_observation_generation: u64,
     /// Hook-submitted Claude `prompt_id`, held unannounced until the relay's
     /// announcement POST result settles it.
     pub hook_prompt_id: Option<String>,
     /// A transcript row's `prompt_id` that was still unannounced when the scanner published the
     /// row; only looked up again before the relay announces, never settled by it.
-    pub(crate) row_prompt_id: Option<String>,
+    pub row_prompt_id: Option<String>,
     /// Codex native turn this input opened, when its hook or record named one.
     pub native_turn_id: Option<String>,
     /// A steering input that joined its running native turn: its text is shown, nothing is owned.

@@ -60,15 +60,15 @@ impl From<String> for OwnerWriteError {
 
 /// Columns of a freshly created `pending` dispatch.
 pub struct NewDispatchRow<'a> {
-    pub(crate) id: &'a str,
-    pub(crate) kanban_card_id: &'a str,
-    pub(crate) to_agent_id: &'a str,
-    pub(crate) dispatch_type: &'a str,
-    pub(crate) title: &'a str,
-    pub(crate) context: &'a str,
-    pub(crate) parent_dispatch_id: Option<&'a str>,
-    pub(crate) chain_depth: i64,
-    pub(crate) required_capabilities: Option<&'a serde_json::Value>,
+    pub id: &'a str,
+    pub kanban_card_id: &'a str,
+    pub to_agent_id: &'a str,
+    pub dispatch_type: &'a str,
+    pub title: &'a str,
+    pub context: &'a str,
+    pub parent_dispatch_id: Option<&'a str>,
+    pub chain_depth: i64,
+    pub required_capabilities: Option<&'a serde_json::Value>,
 }
 
 /// Columns of a force-kill retry dispatch, which copies the origin context.
@@ -84,11 +84,11 @@ pub(crate) struct NewRetryDispatchRow<'a> {
 
 /// A canonical status write that applies only while the row still has `current_status`.
 pub struct StatusRowUpdate<'a> {
-    pub(crate) dispatch_id: &'a str,
-    pub(crate) current_status: &'a str,
-    pub(crate) to_status: &'a str,
-    pub(crate) result_json: Option<&'a str>,
-    pub(crate) touch_completed_at: bool,
+    pub dispatch_id: &'a str,
+    pub current_status: &'a str,
+    pub to_status: &'a str,
+    pub result_json: Option<&'a str>,
+    pub touch_completed_at: bool,
 }
 
 /// Phase-gate state after the caller trimmed and defaulted every field.

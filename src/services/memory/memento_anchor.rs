@@ -307,12 +307,12 @@ impl MementoBackend {
 }
 
 pub struct SessionAnchorRequest<'a> {
-    pub(crate) settings: &'a ResolvedMemorySettings,
+    pub settings: &'a ResolvedMemorySettings,
     pub provider: &'a ProviderKind,
-    pub(crate) current_path: &'a str,
+    pub current_path: &'a str,
     pub channel_id: u64,
-    pub(crate) memory_scope_channel_id: u64,
-    pub(crate) role_id: Option<&'a str>,
+    pub memory_scope_channel_id: u64,
+    pub role_id: Option<&'a str>,
     pub session_id: Option<&'a str>,
     pub fresh: bool,
 }

@@ -16,15 +16,15 @@ mod receipt;
 pub struct EvidenceRegistration {
     pub namespace: String,
     pub ticket: Ticket,
-    pub(crate) frame_hash: String,
+    pub frame_hash: String,
     #[serde(skip)]
-    pub(crate) exact_frame_hash: String,
-    pub(crate) receipts: Vec<String>,
+    pub exact_frame_hash: String,
+    pub receipts: Vec<String>,
     #[serde(skip)]
-    pub(crate) candidate: bool,
+    pub candidate: bool,
     /// The unsettled registration's stored barrier, read-only input to a supersession candidate.
     #[serde(skip)]
-    pub(crate) barrier: Option<barrier::Barrier>,
+    pub barrier: Option<barrier::Barrier>,
 }
 
 #[cfg(unix)]

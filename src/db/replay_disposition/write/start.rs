@@ -11,13 +11,13 @@ pub struct CanonicalInput {
     pub provider: String,
     pub channel: String,
     pub sources: Vec<String>,
-    pub(crate) original_text: String,
-    pub(crate) owner_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) attachments: serde_json::Value,
-    pub(crate) reply_context: Option<String>,
+    pub original_text: String,
+    pub owner_id: String,
+    pub agent_id: String,
+    pub attachments: serde_json::Value,
+    pub reply_context: Option<String>,
     /// `new_input` for a fresh request, `reentry` for a stored operation coming back.
-    pub(crate) provenance: &'static str,
+    pub provenance: &'static str,
 }
 
 impl CanonicalInput {
@@ -212,9 +212,9 @@ pub enum BeginFrom<'a> {
 
 /// The effect binding stored with the start; the permit can only be spent on it.
 pub struct EffectProjection<'a> {
-    pub(crate) effect_target: &'a str,
-    pub(crate) input_hash: &'a str,
-    pub(crate) binding: &'a serde_json::Value,
+    pub effect_target: &'a str,
+    pub input_hash: &'a str,
+    pub binding: &'a serde_json::Value,
 }
 
 impl EffectProjection<'_> {

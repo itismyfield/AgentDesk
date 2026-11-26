@@ -58,11 +58,11 @@ pub async fn load_dispatch_thread_id_pg(pool: &PgPool, dispatch_id: &str) -> Opt
 pub struct RetryDispatchMeta {
     pub origin_dispatch_id: String,
     pub card_id: String,
-    pub(crate) to_agent_id: Option<String>,
+    pub to_agent_id: Option<String>,
     pub dispatch_type: Option<String>,
     pub title: Option<String>,
-    pub(crate) context: Option<String>,
-    pub(crate) retry_count: i64,
+    pub context: Option<String>,
+    pub retry_count: i64,
 }
 
 /// #3306: narrow durable-truth accessor for the idle-relay drift self-heal.
@@ -126,9 +126,9 @@ pub async fn load_session_channel_id_pg(
 /// currently-bound `cwd` and `claude_session_id` that the rebind will replace.
 /// `Ok(None)` means no session row exists for `session_key`.
 pub struct SessionRebindContext {
-    pub(crate) resolved_session_key: String,
-    pub(crate) session_id: i64,
-    pub(crate) active_dispatch_id: Option<String>,
+    pub resolved_session_key: String,
+    pub session_id: i64,
+    pub active_dispatch_id: Option<String>,
     pub cwd: Option<String>,
     pub claude_session_id: Option<String>,
 }
@@ -1808,31 +1808,31 @@ pub async fn load_session_by_id_pg(
 }
 
 pub struct HookSessionUpsert<'a> {
-    pub(crate) session_key: &'a str,
-    pub(crate) instance_id: Option<&'a str>,
-    pub(crate) agent_id: Option<&'a str>,
-    pub(crate) provider: &'a str,
-    pub(crate) status: &'a str,
-    pub(crate) session_info: Option<&'a str>,
-    pub(crate) model: Option<&'a str>,
+    pub session_key: &'a str,
+    pub instance_id: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub provider: &'a str,
+    pub status: &'a str,
+    pub session_info: Option<&'a str>,
+    pub model: Option<&'a str>,
     /// `None` means "metadata-only hook (e.g. provider session id save) —
     /// do not touch `sessions.tokens` or `sessions.tokens_updated_at`".
     /// `Some` means "authoritative turn-end snapshot — overwrite both".
     /// Avoids the prior `i64` design where `0` meant both "no data" and
     /// "really zero" and silently zeroed out real values.
-    pub(crate) tokens: Option<i64>,
-    pub(crate) cwd: Option<&'a str>,
-    pub(crate) active_dispatch_id: Option<&'a str>,
-    pub(crate) thread_channel_id: Option<&'a str>,
+    pub tokens: Option<i64>,
+    pub cwd: Option<&'a str>,
+    pub active_dispatch_id: Option<&'a str>,
+    pub thread_channel_id: Option<&'a str>,
     /// #3207 (part 2) P0: the unique Discord channel the turn runs in (thread id
     /// for threads, channel id for ordinary channels). Persisted so worktree
     /// reuse can require an exact channel match and never cross two channels
     /// whose names collide onto the same `session_key`.
-    pub(crate) channel_id: Option<&'a str>,
-    pub(crate) claude_session_id: Option<&'a str>,
-    pub(crate) raw_provider_session_id: Option<&'a str>,
-    pub(crate) turn_start_nonce: Option<&'a str>,
-    pub(crate) dispatched_origin: bool,
+    pub channel_id: Option<&'a str>,
+    pub claude_session_id: Option<&'a str>,
+    pub raw_provider_session_id: Option<&'a str>,
+    pub turn_start_nonce: Option<&'a str>,
+    pub dispatched_origin: bool,
 }
 
 pub struct DeleteSessionResult {
@@ -1852,12 +1852,12 @@ pub struct ProviderSessionIds {
 }
 
 pub struct UpdateSessionParams<'a> {
-    pub(crate) status: Option<&'a str>,
-    pub(crate) active_dispatch_id: Option<&'a str>,
-    pub(crate) model: Option<&'a str>,
-    pub(crate) tokens: Option<i64>,
-    pub(crate) cwd: Option<&'a str>,
-    pub(crate) session_info: Option<&'a str>,
+    pub status: Option<&'a str>,
+    pub active_dispatch_id: Option<&'a str>,
+    pub model: Option<&'a str>,
+    pub tokens: Option<i64>,
+    pub cwd: Option<&'a str>,
+    pub session_info: Option<&'a str>,
 }
 
 /// Upsert a hook session row.

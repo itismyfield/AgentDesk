@@ -24,10 +24,10 @@ pub enum TmuxCleanupIntent {
 /// One authorized cleanup request. Callers must not compose PID and tmux kills.
 #[derive(Clone, Debug)]
 pub struct CleanupRequest {
-    pub(crate) cancel_source: String,
-    pub(crate) intent: TmuxCleanupIntent,
-    pub(crate) termination_reason: Option<&'static str>,
-    pub(crate) hard_stop_target: Option<CapturedProcess>,
+    pub cancel_source: String,
+    pub intent: TmuxCleanupIntent,
+    pub termination_reason: Option<&'static str>,
+    pub hard_stop_target: Option<CapturedProcess>,
 }
 
 /// The binding a stop decided on; a destructive cleanup kills only while the token still names it.

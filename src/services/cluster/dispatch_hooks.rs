@@ -10,9 +10,8 @@ use crate::config::ClusterConfig;
 #[derive(Clone, Copy)]
 pub struct DispatchQueueHooks {
     /// Starts one wait-queue wake: pool, cluster config, trigger, source, dispatch id.
-    pub(crate) wake_wait_queue:
-        fn(PgPool, ClusterConfig, &'static str, &'static str, Option<String>),
+    pub wake_wait_queue: fn(PgPool, ClusterConfig, &'static str, &'static str, Option<String>),
     /// Reassigns stale dispatch_outbox claim owners once and returns how many moved.
-    pub(crate) reassign_stale_claim_owners:
+    pub reassign_stale_claim_owners:
         for<'a> fn(&'a PgPool, &'a ClusterConfig) -> BoxFuture<'a, Result<usize, String>>,
 }

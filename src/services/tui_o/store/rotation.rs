@@ -26,7 +26,7 @@ pub(crate) const TAKEOVER_END_FILE: &str = "takeover_end";
 pub struct TakeoverEnd {
     pub source: SourceId,
     pub nonce: String,
-    pub(crate) basis: String,
+    pub basis: String,
 }
 
 #[derive(Serialize, Deserialize)]

@@ -39,11 +39,11 @@ pub struct DispatchReactionRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlotThreadNameInput<'a> {
-    pub(crate) dispatch_id: &'a str,
-    pub(crate) card_id: &'a str,
-    pub(crate) slot_index: i64,
-    pub(crate) issue_number: Option<i64>,
-    pub(crate) title: &'a str,
+    pub dispatch_id: &'a str,
+    pub card_id: &'a str,
+    pub slot_index: i64,
+    pub issue_number: Option<i64>,
+    pub title: &'a str,
 }
 
 fn json_object_from_context(existing: Option<&str>) -> serde_json::Value {

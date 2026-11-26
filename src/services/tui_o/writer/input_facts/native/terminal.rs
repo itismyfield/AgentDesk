@@ -107,11 +107,11 @@ pub struct Tail {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RawWitness {
-    pub(crate) version: u32,
-    pub(crate) tail: Tail,
-    pub(crate) aborted: bool,
-    pub(crate) execution_nonce: String,
-    pub(crate) registrations_fingerprint: String,
+    pub version: u32,
+    pub tail: Tail,
+    pub aborted: bool,
+    pub execution_nonce: String,
+    pub registrations_fingerprint: String,
 }
 
 impl RawWitness {

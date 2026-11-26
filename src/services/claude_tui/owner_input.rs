@@ -17,7 +17,7 @@ pub type Approve = Arc<dyn Fn() -> Result<(), String> + Send + Sync>;
 #[cfg(unix)]
 pub(crate) type PreparationWatch = Box<dyn FnMut() -> super::busy_inject::Screen + Send>;
 struct Scope {
-    provider: String,
+    pub provider: String,
     target: serde_json::Value,
     channel: u64,
     commit: Commit,

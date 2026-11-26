@@ -17,15 +17,15 @@ pub enum DispatchDeliveryEventStatus {
 
 #[derive(Clone, Debug)]
 pub struct DispatchDeliveryEventFinalize<'a> {
-    pub(crate) dispatch_id: &'a str,
-    pub(crate) status: DispatchDeliveryEventStatus,
-    pub(crate) target_channel_id: Option<&'a str>,
-    pub(crate) target_thread_id: Option<&'a str>,
-    pub(crate) message_id: Option<&'a str>,
-    pub(crate) messages_json: Value,
-    pub(crate) fallback_kind: Option<&'a str>,
-    pub(crate) error: Option<&'a str>,
-    pub(crate) result_json: Value,
+    pub dispatch_id: &'a str,
+    pub status: DispatchDeliveryEventStatus,
+    pub target_channel_id: Option<&'a str>,
+    pub target_thread_id: Option<&'a str>,
+    pub message_id: Option<&'a str>,
+    pub messages_json: Value,
+    pub fallback_kind: Option<&'a str>,
+    pub error: Option<&'a str>,
+    pub result_json: Value,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize, sqlx::FromRow)]

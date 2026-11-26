@@ -44,7 +44,7 @@ pub struct CancelTurnSessionInfo {
 /// Narrow state needed by session-control callers outside HTTP route handlers.
 #[derive(Clone)]
 pub struct ForwardCallerContext {
-    pub(crate) pg_pool: Option<PgPool>,
+    pub pg_pool: Option<PgPool>,
     pub config: std::sync::Arc<crate::config::Config>,
     pub cluster_instance_id: Option<String>,
 }

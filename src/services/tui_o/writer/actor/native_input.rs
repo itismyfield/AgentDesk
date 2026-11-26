@@ -4,7 +4,7 @@ use super::*;
 #[derive(Clone)]
 pub struct NativePort {
     #[cfg(unix)]
-    pub(crate) inner: Arc<dyn EvidencePort>,
+    pub inner: Arc<dyn EvidencePort>,
 }
 
 #[cfg(unix)]

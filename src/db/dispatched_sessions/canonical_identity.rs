@@ -42,8 +42,8 @@ impl SessionIdentityKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CanonicalSessionIdentity<'a> {
     pub kind: SessionIdentityKind,
-    pub(crate) discord_token_hash: &'a str,
-    pub(crate) channel_id: &'a str,
+    pub discord_token_hash: &'a str,
+    pub channel_id: &'a str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

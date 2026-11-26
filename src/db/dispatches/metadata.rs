@@ -2,15 +2,15 @@ use sqlx::{PgPool, Row as SqlxRow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchDeliveryMetadata {
-    pub(crate) dispatch_type: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) context: Option<String>,
+    pub dispatch_type: Option<String>,
+    pub status: Option<String>,
+    pub context: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CardIssueInfo {
-    pub(crate) issue_url: Option<String>,
-    pub(crate) issue_number: Option<i64>,
+    pub issue_url: Option<String>,
+    pub issue_number: Option<i64>,
 }
 
 pub fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {

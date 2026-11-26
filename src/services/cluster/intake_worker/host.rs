@@ -23,7 +23,7 @@ pub trait IntakeHost: Send + Sync + 'static {
 pub struct IntakeWorkerRuntime<S> {
     pub http: Arc<serenity::Http>,
     pub shared: Arc<S>,
-    pub(crate) token: String,
+    pub token: String,
 }
 
 /// The router's admission check for a channel, consulted before replay sources are trusted.
@@ -50,9 +50,9 @@ pub(crate) type ResolveRuntime<S> = for<'a> fn(&'a S, ChannelId) -> ResolveRunti
 
 /// Router decisions the worker needs; the Discord runtime hands them in when it starts the loop.
 pub struct IntakeTurnPort<S> {
-    pub(crate) checkpoint_waits: CheckpointWaits,
-    pub(crate) execute: ExecuteIntakeTurn<S>,
-    pub(crate) resolve_runtime: ResolveRuntime<S>,
+    pub checkpoint_waits: CheckpointWaits,
+    pub execute: ExecuteIntakeTurn<S>,
+    pub resolve_runtime: ResolveRuntime<S>,
 }
 
 // Function pointers copy whatever the host is, so the host needs neither `Clone` nor `Copy`.

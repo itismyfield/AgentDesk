@@ -26,7 +26,7 @@ pub struct NativeUserPin {
     pub range: (u64, u64),
     pub receipt_start: u64,
     pub row_digest: String,
-    pub(crate) frame_digest: String,
+    pub frame_digest: String,
     pub session_id: String,
     pub output_path: String,
     pub tmux_session: String,

@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 
 /// The custody store's two read-only questions, supplied by `discord::terminal_delivery_custody`.
 pub struct TerminalCustody {
-    pub(crate) retains_channel: fn(u64) -> Result<bool, String>,
-    pub(crate) codex_absent_launch_clear: fn(&Captured) -> bool,
+    pub retains_channel: fn(u64) -> Result<bool, String>,
+    pub codex_absent_launch_clear: fn(&Captured) -> bool,
 }
 
 static READERS: OnceLock<TerminalCustody> = OnceLock::new();

@@ -17,10 +17,10 @@ pub(crate) const SECOND_PASS_AFTER: Duration = Duration::from_secs(20);
 /// Who reads. A pass begun under one holder, run or credentials proves nothing under another.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunScope {
-    pub(crate) holder: String,
-    pub(crate) run: String,
-    pub(crate) credentials: String,
-    pub(crate) evidence_generation: u64,
+    pub holder: String,
+    pub run: String,
+    pub credentials: String,
+    pub evidence_generation: u64,
 }
 
 /// Everything absence evidence is about; any change means the passes looked for something else.

@@ -4,9 +4,9 @@ use super::*;
 
 type RecordWitness = Box<dyn FnMut(u64, &[u8]) -> Result<(), String> + Send>;
 pub struct FixedRecoverySource {
-    pub(crate) file: std::fs::File,
-    pub(crate) ready: Option<std::sync::mpsc::Sender<()>>,
-    pub(crate) observe: Option<RecordWitness>,
+    pub file: std::fs::File,
+    pub ready: Option<std::sync::mpsc::Sender<()>>,
+    pub observe: Option<RecordWitness>,
 }
 impl From<std::fs::File> for FixedRecoverySource {
     fn from(file: std::fs::File) -> Self {

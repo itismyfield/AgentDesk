@@ -17,10 +17,10 @@ pub struct RegistrationSnapshot {
 
 /// The host reader retains its explicit namespace observation until commit.
 pub struct RegistrationWitness<'a> {
-    pub(crate) snapshot: &'a RegistrationSnapshot,
-    pub(crate) new_key: &'a str,
-    pub(crate) new_nonce: &'a str,
-    pub(crate) old_host_absent: &'a (dyn Fn() -> bool + Send + Sync),
+    pub snapshot: &'a RegistrationSnapshot,
+    pub new_key: &'a str,
+    pub new_nonce: &'a str,
+    pub old_host_absent: &'a (dyn Fn() -> bool + Send + Sync),
 }
 
 pub async fn discover_registration_pg(

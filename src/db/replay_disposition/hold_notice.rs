@@ -20,8 +20,8 @@ pub struct HoldNotice {
 
 #[derive(Clone, Copy)]
 pub struct NoticeRouting<'a> {
-    pub(crate) bot: &'a str,
-    pub(crate) session_key: Option<&'a str>,
+    pub bot: &'a str,
+    pub session_key: Option<&'a str>,
 }
 
 pub(super) fn key(receipt_id: i64) -> String {

@@ -32,10 +32,10 @@ pub fn scope<R>(operation: Option<String>, turn: impl FnOnce() -> R) -> R {
 /// that retired row resumes. `required`: a continuation waits for it and runs nowhere else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EffortResume {
-    pub(crate) operation: String,
-    pub(crate) native_session: String,
-    pub(crate) retired_nonce: String,
-    pub(crate) required: bool,
+    pub operation: String,
+    pub native_session: String,
+    pub retired_nonce: String,
+    pub required: bool,
 }
 
 /// The native session and the read boundary this turn resumes; `Ok(None)` launches fresh. A
