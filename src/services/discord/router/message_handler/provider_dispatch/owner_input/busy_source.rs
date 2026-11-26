@@ -36,10 +36,8 @@ pub(super) fn live_source(
     live.map(|(path, native)| (path.to_owned(), native.map(str::to_owned)))
 }
 
-/// A Codex execution on a Bound Herdr row reads the CodexTui binding its own prompt write reads.
-/// Its row path stays empty until the turn ends; the row turned Bound only once its attach found
-/// this binding naming the execution's new source, so a binding a clear left behind is never read
-/// here. A tmux pane has no such proof and keeps its row path.
+/// A Bound Herdr Codex row reads the binding its attach proved names the new source, so a binding
+/// a clear left is never read; its row path stays empty until the turn ends, and tmux keeps it.
 fn bound_codex_herdr(
     provider: &ProviderKind,
     host: &TurnHost,

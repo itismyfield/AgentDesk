@@ -1,4 +1,4 @@
-//! #8426: a busy Codex front on a Bound Herdr row reads the rollout its attach proved while its
+//! A busy Codex front on a Bound Herdr row reads the rollout its attach proved while its
 //! inflight row still names none; a Pending row, a tmux pane and an unproved source do not.
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedObservation;
