@@ -59,7 +59,7 @@ fn restart_seed_herdr_stop_after_reserve_cancels_seed_keeps_user_input() {
         let mut turn = owner.claude_turn(&pool);
         turn.cancel = cancel;
         let transcript = owner._dir.path().join(format!("{sid}.jsonl"));
-        crate::services::claude_tui::readiness::tests::pre_source(&owner.logical, &transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(&owner.logical, &transcript);
         let _waiting = owner.wait_for("claude", Lineage::Created);
         let _entered = owner.runtime.enter();
         let prompt = crate::services::claude::herdr_turn::owned_prompt_for_tests;
