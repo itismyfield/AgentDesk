@@ -611,6 +611,18 @@ pub(super) const MONITOR_AUTO_TURN_PREAMBLE_HINT: &str = "[system] 모니터 자
 const MONITOR_AUTO_TURN_MISSED_SIGNAL_FALLBACK: tokio::time::Duration =
     tokio::time::Duration::from_secs(30);
 
+/// The monitor auto-turn start a test races against a recovery; `true` once its token is registered.
+#[cfg(test)]
+pub(in crate::services::discord) async fn monitor_start_for_test(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let provider = ProviderKind::Claude;
+    let start = start_monitor_auto_turn_when_available(shared, &provider, channel_id, 128, cancel);
+    start.await.acquired
+}
+
 async fn start_monitor_auto_turn_when_available(
     // #3016 phase-5a: `&Arc<SharedData>` (not `&SharedData`) so `register_start`
     // can downgrade a `Weak` into the `Start` message and prime the finalizer's

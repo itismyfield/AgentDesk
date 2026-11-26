@@ -9,6 +9,7 @@ use crate::services::discord::router::message_handler::provider_dispatch as disp
 use crate::services::discord::shared_state::test_rest;
 use crate::services::session_host::herdr_socket_rig_tests::SHELL;
 use crate::services::turn_orchestrator::{Waiting, waiting_origin};
+use crate::test_support::wait::{await_within, poll_within};
 use axum::http::StatusCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -155,7 +156,24 @@ fn synthetic_case(
                 let token_excluded = lock.try_lock_owned().is_err();
                 let reacquire = crate::services::discord::tmux::tmux_watcher::liveness::reacquire_under_transition;
                 let row_excluded = !reacquire(&shared, channel, || true);
-                seen(token_excluded && row_excluded);
+                // The real monitor auto-turn races in; its token must not appear inside the lease.
+                let racer = shared.clone();
+                let monitor = tokio::spawn(async move {
+                    let cancel = std::sync::atomic::AtomicBool::new(false);
+                    crate::services::discord::tmux::monitor_start_for_test(&racer, channel, &cancel)
+                        .await
+                });
+                *MONITOR.lock().unwrap() = Some(monitor);
+                let mailbox = shared.mailbox(channel);
+                let inside = futures::executor::block_on(poll_within(
+                    async || match mailbox.has_active_turn().await {
+                        Ok(true) => Ok(()),
+                        other => Err(format!("no monitor token: {other:?}")),
+                    },
+                    MONITOR_WINDOW,
+                    "a monitor token inside the recovery lease",
+                ));
+                seen(token_excluded && row_excluded && inside.is_err());
             });
         }
         let lock = intake
@@ -166,7 +184,7 @@ fn synthetic_case(
         let front = synthetic_front(&intake).await;
         let start =
             dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
-        tokio::time::timeout(LIMIT, start).await.unwrap()
+        await_within(start, LIMIT).await
     });
     eprintln!("I8422_SYNTHETIC_RESULT {tag} {result:?}");
     check(&fx, &intake, &nonce, result);
@@ -285,10 +303,7 @@ fn a_watched_synthetic_start_wakes_once_its_execution_is_proven_ended_pg() {
             let drive = Arc::new(dispatch_drive(intake, seen));
             let observed = intake.runtime.block_on(async {
                 let (_, observed) = held_watch::watch_observed(drive, SYNTHETIC);
-                tokio::time::timeout(LIMIT, observed)
-                    .await
-                    .unwrap()
-                    .unwrap()
+                await_within(observed, LIMIT).await.unwrap()
             });
             assert_eq!(observed.verdict, held_watch::Verdict::Wake);
             assert!(!bound(fx, nonce), "the look retired the ended execution");
@@ -335,13 +350,13 @@ fn a_person_input_retires_a_lone_root_shell_under_its_own_guard_pg() {
         let start =
             dispatch::start_idle_for_test(intake.shared.clone(), ChannelId::new(CHANNEL), front);
         let record = async {
-            tokio::time::timeout(LIMIT, entered).await.unwrap().unwrap();
+            await_within(entered, LIMIT).await.unwrap();
             let guard = test_rest::install(intake._api.http.clone());
             resume.send(()).unwrap();
             guard
         };
-        let (result, _rest) = tokio::join!(tokio::time::timeout(LIMIT, start), record);
-        result.unwrap()
+        let (result, _rest) = tokio::join!(await_within(start, LIMIT), record);
+        result
     });
     eprintln!("I8422_PERSON_SHELL_RESULT {result:?}");
     assert!(
@@ -408,21 +423,20 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
     assert_eq!(status, StatusCode::OK, "{body}");
     let pending = fx
         .rt
-        .block_on(async {
-            tokio::time::timeout(LIMIT, async {
-                loop {
-                    if let HostedRecord::Known(record) = hosted(&fx.pool).await
-                        && record.state == HostedState::Pending
-                        && record.execution_nonce != old_nonce
-                    {
-                        break record;
-                    }
-                    tokio::task::yield_now().await;
+        .block_on(poll_within(
+            async || match hosted(&fx.pool).await {
+                HostedRecord::Known(record)
+                    if record.state == HostedState::Pending
+                        && record.execution_nonce != old_nonce =>
+                {
+                    Ok(record)
                 }
-            })
-            .await
-        })
-        .expect("the retired channel reaches a fresh create");
+                other => Err(format!("hosted row {other:?}")),
+            },
+            LIMIT,
+            "the retired channel reaches a fresh create",
+        ))
+        .unwrap();
     let context = crate::services::tui_prompt_dedupe::binding_context::execution_context(
         "claude",
         &pending.execution_nonce,
@@ -435,17 +449,21 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
     fx.rig.foreground(&[20]);
     fx.rig.show_panes(&[PANE]);
     continue_create.send(()).unwrap();
-    fx.rt.block_on(async {
-        tokio::time::timeout(LIMIT, async {
-            while !matches!(hosted(&fx.pool).await, HostedRecord::Known(record)
-                if record.execution_nonce == pending.execution_nonce && record.location.is_some())
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
+    fx.rt
+        .block_on(poll_within(
+            async || match hosted(&fx.pool).await {
+                HostedRecord::Known(record)
+                    if record.execution_nonce == pending.execution_nonce
+                        && record.location.is_some() =>
+                {
+                    Ok(())
+                }
+                other => Err(format!("hosted row {other:?}")),
+            },
+            LIMIT,
+            "the fresh execution records its location",
+        ))
         .unwrap();
-    });
     let path = crate::services::claude_tui::transcript_tail::claude_transcript_path(
         fx.cwd.path(),
         &session,
@@ -478,29 +496,31 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
         crate::services::claude_tui::hook_server::publish_hook_event_for_tests(event);
     }
     fx.rt
-        .block_on(async {
-            tokio::time::timeout(LIMIT, async {
-                while fx.rig.sends().len() < before + 3 {
-                    tokio::task::yield_now().await;
-                }
-            })
-            .await
-        })
-        .expect("the fresh pane takes the resume");
+        .block_on(poll_within(
+            async || match fx.rig.sends().len() {
+                n if n >= before + 3 => Ok(()),
+                n => Err(format!("{n} sends, want {}", before + 3)),
+            },
+            LIMIT,
+            "the fresh pane takes the resume",
+        ))
+        .unwrap();
     fx.finished.store(false, Ordering::SeqCst);
     fx.answer_after(&started, before + 1);
     while let Ok(event) = events.try_recv() {
         crate::services::claude_tui::hook_server::publish_hook_event_for_tests(event);
     }
-    intake.runtime.block_on(async {
-        tokio::time::timeout(LIMIT, async {
-            while intake.mailbox.has_active_turn().await != Ok(false) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the delivered resume settles");
-    });
+    intake
+        .runtime
+        .block_on(poll_within(
+            async || match intake.mailbox.has_active_turn().await {
+                Ok(false) => Ok(()),
+                other => Err(format!("active turn {other:?}")),
+            },
+            LIMIT,
+            "the delivered resume settles",
+        ))
+        .unwrap();
     let sends = fx.rig.sends();
     assert_eq!(sends.len(), before + 3, "{sends:?}");
     assert!(sends[before + 1]["text"].as_str().unwrap().contains(INPUT));
@@ -519,27 +539,40 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
 }
 
 static BARRIER: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+static MONITOR: std::sync::Mutex<Option<tokio::task::JoinHandle<bool>>> =
+    std::sync::Mutex::new(None);
+/// How long the racing monitor gets to register a token inside the lease; it should never.
+const MONITOR_WINDOW: std::time::Duration = std::time::Duration::from_millis(500);
 
 fn barrier_seen(excluded: bool) {
     *BARRIER.lock().unwrap() = Some(excluded);
 }
 
-// T11b: once the recovery holds the lease after its no-turn reads, a registering start cannot take
-// the channel lock and a watcher cannot create a lone inflight row until the CAS is done.
+// T11b: inside the recovery's lease, a lock taker, a lone inflight row and the real monitor
+// auto-turn start are all kept out until the CAS; the monitor registers right after.
 #[test]
 fn a_recovery_in_its_lease_excludes_new_tokens_and_lone_inflight_rows_pg() {
     *BARRIER.lock().unwrap() = None;
     synthetic_case(
         "dead-bound-barrier",
         (Pane::Missing, false, Holds::Barrier(barrier_seen)),
-        |fx, _, nonce, result| {
+        |fx, intake, nonce, result| {
             assert_ne!(result.as_ref().err().map(String::as_str), Some(START_WAITS));
             assert_eq!(
                 *BARRIER.lock().unwrap(),
                 Some(true),
-                "both excluded inside the lease"
+                "a lock taker, a lone inflight row and the real monitor are all excluded"
             );
             assert!(!bound(fx, nonce), "the CAS ran after the barrier");
+            let monitor = MONITOR.lock().unwrap().take().expect("the racing monitor");
+            let registered = intake
+                .runtime
+                .block_on(await_within(monitor, LIMIT))
+                .unwrap();
+            assert!(
+                registered,
+                "the monitor registers once the lease is released"
+            );
         },
     );
 }
