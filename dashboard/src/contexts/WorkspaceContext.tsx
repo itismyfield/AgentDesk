@@ -10,6 +10,7 @@ import {
 } from "react";
 import type { Agent, Department, DispatchedSession, WSEvent } from "../types";
 import * as api from "../api/client";
+import { localeName, useI18n, type UiLanguage } from "../i18n";
 import { pollWhileVisible } from "../lib/pollWhileVisible";
 import { applySessionOverlay, deriveDispatchedAsAgents, mergeAgentStatus } from "./session-overlay";
 
@@ -35,6 +36,7 @@ interface WorkspaceProviderProps {
   initialDepartments: Department[];
   initialSessions?: DispatchedSession[] | null;
   pushNotification: (msg: string, level: "info" | "success" | "warning" | "error") => void;
+  language?: string | null;
   children: ReactNode;
 }
 
@@ -43,6 +45,7 @@ export function WorkspaceProvider({
   initialDepartments,
   initialSessions,
   pushNotification,
+  language,
   children,
 }: WorkspaceProviderProps) {
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
@@ -50,6 +53,10 @@ export function WorkspaceProvider({
   const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions ?? []);
   const [sessionsFailed, setSessionsFailed] = useState(initialSessions === null);
   const seededSessionsRef = useRef(initialSessions !== undefined);
+  const i18n = useI18n(language);
+  const lang: UiLanguage = i18n.__fromProvider || language ? i18n.language : "ko";
+  const langRef = useRef<UiLanguage>(lang);
+  langRef.current = lang;
 
   useEffect(() => {
     if (seededSessionsRef.current || initialSessions === undefined) return;
@@ -107,12 +114,32 @@ export function WorkspaceProvider({
         case "agent_status": {
           const a = event.payload as Agent;
           const previous = agentsRef.current.find((agent) => agent.id === a.id);
-          const label = a.name_ko || a.name || "agent";
+          const curLang = langRef.current;
+          const label =
+            (a.name || a.name_ko || a.alias
+              ? localeName(curLang, { ...a, name: a.name || a.name_ko || "agent" })
+              : "") || "agent";
           if (previous?.status !== a.status) {
             if (a.status === "working") {
-              pushNotificationRef.current(`${label} 작업 시작`, "info");
+              const msg =
+                curLang === "ko"
+                  ? `${label} 작업 시작`
+                  : curLang === "ja"
+                    ? `${label} 作業開始`
+                    : curLang === "zh"
+                      ? `${label} 开始工作`
+                      : `${label} started working`;
+              pushNotificationRef.current(msg, "info");
             } else if (a.status === "idle" && previous?.status === "working") {
-              pushNotificationRef.current(`${label} 작업 완료`, "success");
+              const msg =
+                curLang === "ko"
+                  ? `${label} 작업 완료`
+                  : curLang === "ja"
+                    ? `${label} 作業完了`
+                    : curLang === "zh"
+                      ? `${label} 完成工作`
+                      : `${label} finished working`;
+              pushNotificationRef.current(msg, "success");
             }
           }
           setAgents((prev) => mergeAgentStatus(prev, a));

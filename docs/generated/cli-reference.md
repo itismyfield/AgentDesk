@@ -11,8 +11,8 @@ subcommand starts the server.
 
 Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this file drifts.
 
-- Top-level commands: 56
-- Commands including nested subcommands: 103
+- Top-level commands: 57
+- Commands including nested subcommands: 106
 
 ## Global options
 
@@ -129,6 +129,9 @@ Regenerate with `python3 scripts/generate_cli_reference.py`; CI fails when this 
 | [`agentdesk herdr retire`](#agentdesk-herdr-retire) | Retire a channel's execution once its pane is gone or only its shell is left |  |
 | [`agentdesk herdr terminate`](#agentdesk-herdr-terminate) | Ask the local server to close one execution's pane and retire it; needs the live switch |  |
 | [`agentdesk herdr probe-user-default`](#agentdesk-herdr-probe-user-default) | Check the execution user's own herdr server once; reads no AgentDesk config or database |  |
+| [`agentdesk decision`](#agentdesk-decision) | Ask the operator to decide, and read a Decision request |  |
+| [`agentdesk decision ask`](#agentdesk-decision-ask) | Store a Decision request from a JSON body; nothing is posted until publication is wired |  |
+| [`agentdesk decision get`](#agentdesk-decision-get) | Read one Decision request |  |
 
 ## Commands
 
@@ -1310,3 +1313,34 @@ Usage: `agentdesk herdr probe-user-default [OPTIONS]`
 | Argument | Value | Default | Description |
 |---|---|---|---|
 | `--socket <SOCKET>` | `std::path::PathBuf` |  | Absolute socket path; defaults to $HOME/.config/herdr/herdr.sock |
+
+## `agentdesk decision`
+
+Ask the operator to decide, and read a Decision request
+
+Usage: `agentdesk decision <COMMAND>`
+
+Subcommands:
+
+- `ask` — Store a Decision request from a JSON body; nothing is posted until publication is wired
+- `get` — Read one Decision request
+
+### `agentdesk decision ask`
+
+Store a Decision request from a JSON body; nothing is posted until publication is wired
+
+Usage: `agentdesk decision ask [OPTIONS]`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `--json-file <JSON_FILE>` (required) | `String` |  | Path of the request JSON, or `-` for stdin |
+
+### `agentdesk decision get`
+
+Read one Decision request
+
+Usage: `agentdesk decision get <ID>`
+
+| Argument | Value | Default | Description |
+|---|---|---|---|
+| `<ID>` | `String` |  | Request id the ask answered |

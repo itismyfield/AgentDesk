@@ -43,11 +43,11 @@ fn wrap(frame: String, wrapped: bool) -> String {
 }
 
 fn prompt(nonce: &str, wrapped: bool) -> String {
-    let source = format!("discord:{CHANNEL}:{HEAD}");
-    wrap(
-        human_frame::inject(&source, "200", "ann", nonce, "status?"),
-        wrapped,
-    )
+    wrap(frame(nonce), wrapped)
+}
+
+fn frame(nonce: &str) -> String {
+    human_frame::plain_inject("", "200", "ann", nonce, "status?")
 }
 
 /// Claude's records of an absorbed queued paste: enqueue, removal and human prompt command.
@@ -103,20 +103,20 @@ impl Transcript {
     }
 
     fn want(&self, sources: &[u64], text: &str, recorded: Option<Recorded>) -> Option<Want> {
-        let channel = ChannelId::new(CHANNEL);
         let bound = self.bound(SESSION);
-        Want::of(
-            channel,
-            &identity(sources),
-            &original(text, 200),
-            recorded,
-            &bound,
-        )
+        Want::of(&identity(sources), &original(text, 200), recorded, &bound)
     }
 
-    /// The nonce a head recorded before attempts were is proven taken under, if any.
-    fn legacy(&self) -> Option<String> {
-        Some(self.want(&[HEAD], "status?", None)?.search()?.nonce)
+    /// The nonce the head's paste, registered and recorded from the file's start, is proven taken
+    /// under, if any.
+    fn proven(&self) -> Option<String> {
+        let paste = frame(NONCE);
+        if !human_frame::history::registered(NONCE, &self.path, &paste) {
+            let who = ("claude", "AgentDesk-claude-test", NONCE, "200");
+            human_frame::history::register(who, &self.path, 0, &paste).unwrap();
+        }
+        let recorded = Some(recorded(self, NONCE, 0));
+        Some(self.want(&[HEAD], "status?", recorded)?.search()?.nonce)
     }
 }
 
@@ -145,9 +145,10 @@ fn edit(mut record: Value, path: &[&str], value: Option<Value>) -> Value {
 }
 
 #[test]
-fn a_head_recorded_before_attempts_needs_the_whole_absorbed_chain_after_its_clock() {
+fn a_recorded_head_needs_the_whole_absorbed_chain() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let [enqueue, remove, command] = chain(NONCE, AFTER);
-    let ok = |records: Vec<Value>| Transcript::new(&records).legacy();
+    let ok = |records: Vec<Value>| Transcript::new(&records).proven();
     assert_eq!(
         ok(vec![enqueue.clone(), remove.clone(), command.clone()]).as_deref(),
         Some(NONCE)
@@ -172,14 +173,13 @@ fn a_head_recorded_before_attempts_needs_the_whole_absorbed_chain_after_its_cloc
     assert_eq!(
         ok(earlier_paste.concat()).as_deref(),
         Some(NONCE),
-        "a paste before the clock is not a rival"
+        "another attempt's paste is not a rival"
     );
 
     let field =
         |record: &Value, path: &[&str], value: Option<Value>| edit(record.clone(), path, value);
     let assistant = json!({"type": "assistant", "sessionId": SESSION,
         "message": {"content": prompt(NONCE, true)}});
-    let rival = chain("1e1e1e1e", AFTER);
     let cases: Vec<(&str, Vec<Value>)> = vec![
         ("enqueue only", vec![enqueue.clone()]),
         ("no human command", vec![enqueue.clone(), remove.clone()]),
@@ -288,23 +288,6 @@ fn a_head_recorded_before_attempts_needs_the_whole_absorbed_chain_after_its_cloc
                 command.clone(),
             ],
         ),
-        ("before the clock", chain(NONCE, BEFORE).to_vec()),
-        (
-            "no stamp",
-            vec![
-                field(&enqueue, &["timestamp"], None),
-                remove.clone(),
-                command.clone(),
-            ],
-        ),
-        (
-            "two pastes after the clock",
-            [
-                rival.to_vec(),
-                vec![enqueue.clone(), remove.clone(), command.clone()],
-            ]
-            .concat(),
-        ),
         (
             "a suffix in the block",
             vec![
@@ -340,59 +323,41 @@ fn a_head_recorded_before_attempts_needs_the_whole_absorbed_chain_after_its_cloc
 }
 
 #[test]
-fn a_legacy_head_is_proven_only_for_one_source_its_own_frame_and_its_clock() {
+fn a_recorded_head_is_proven_only_for_its_own_text_author_and_session() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let transcript = Transcript::new(&chain(NONCE, AFTER));
-    assert!(
-        transcript
-            .want(&[HEAD, HEAD + 1], "status?", None)
-            .is_none(),
-        "a merged head"
-    );
-    let other_text = transcript.want(&[HEAD], "status!", None).unwrap();
+    assert_eq!(transcript.proven().as_deref(), Some(NONCE));
+    let at_start = || Some(recorded(&transcript, NONCE, 0));
+    let other_text = transcript.want(&[HEAD], "status!", at_start()).unwrap();
     assert!(other_text.search().is_none(), "another body");
-    let channel = ChannelId::new(CHANNEL);
     let bound = transcript.bound(SESSION);
     let other_author = Want::of(
-        channel,
         &identity(&[HEAD]),
         &original("status?", 201),
-        None,
+        at_start(),
         &bound,
     );
     assert!(other_author.unwrap().search().is_none(), "another author");
-    let mut unclocked = original("status?", 200);
-    unclocked.source_message_queued_generations[0].enqueued_at_epoch_us = None;
-    assert!(Want::of(channel, &identity(&[HEAD]), &unclocked, None, &bound).is_none());
     let named = transcript.bound(OTHER);
     let wrong = Want::of(
-        channel,
         &identity(&[HEAD]),
         &original("status?", 200),
-        None,
+        at_start(),
         &named,
     );
     assert!(
-        wrong.unwrap().search().is_none(),
+        wrong.is_none(),
         "the transcript is bound for another native session"
-    );
-    let named = transcript.bound(SESSION);
-    let right = Want::of(
-        channel,
-        &identity(&[HEAD]),
-        &original("status?", 200),
-        None,
-        &named,
-    );
-    assert_eq!(
-        right.unwrap().search().map(|proof| proof.nonce).as_deref(),
-        Some(NONCE)
     );
 }
 
 #[test]
 fn a_recorded_paste_is_proven_by_its_own_nonce_after_its_offset_in_its_own_file() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let transcript = Transcript::new(&[]);
     let offset = std::fs::metadata(&transcript.path).unwrap().len();
+    let who = ("claude", "AgentDesk-claude-test", NONCE, "200");
+    human_frame::history::register(who, &transcript.path, offset, &frame(NONCE)).unwrap();
     // The fake pane's clock is older than the queue's; a recorded nonce needs no clock.
     for record in chain(NONCE, BEFORE) {
         transcript.write(&format!("{record}\n"));
@@ -438,25 +403,27 @@ fn a_recorded_paste_is_proven_by_its_own_nonce_after_its_offset_in_its_own_file(
 
 #[test]
 fn a_record_still_being_written_or_a_replaced_file_proves_nothing_yet() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let [enqueue, remove, command] = chain(NONCE, AFTER);
     let transcript = Transcript::new(&[enqueue, remove]);
-    assert_eq!(transcript.legacy(), None);
+    assert_eq!(transcript.proven(), None);
     let line = command.to_string();
     transcript.write(&line);
     assert_eq!(
-        transcript.legacy(),
+        transcript.proven(),
         None,
         "the command line has no newline yet"
     );
     transcript.write("\n");
     assert_eq!(
-        transcript.legacy().as_deref(),
+        transcript.proven().as_deref(),
         Some(NONCE),
         "found once it is complete"
     );
 
-    let replaced = transcript.want(&[HEAD], "status?", None).unwrap();
-    let missing = transcript.want(&[HEAD], "status?", None).unwrap();
+    let at_start = || Some(recorded(&transcript, NONCE, 0));
+    let replaced = transcript.want(&[HEAD], "status?", at_start()).unwrap();
+    let missing = transcript.want(&[HEAD], "status?", at_start()).unwrap();
     let copy = transcript.path.with_extension("copy");
     std::fs::copy(&transcript.path, &copy).unwrap();
     std::fs::rename(&copy, &transcript.path).unwrap();
@@ -467,8 +434,9 @@ fn a_record_still_being_written_or_a_replaced_file_proves_nothing_yet() {
 
 #[test]
 fn a_command_counts_only_after_its_removal_in_file_order() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let [enqueue, remove, command] = chain(NONCE, AFTER);
-    let ok = |records: Vec<Value>| Transcript::new(&records).legacy();
+    let ok = |records: Vec<Value>| Transcript::new(&records).proven();
     let id = |key: &str| {
         edit(
             command.clone(),
@@ -504,6 +472,7 @@ fn a_command_counts_only_after_its_removal_in_file_order() {
 
 #[test]
 fn the_proof_session_is_the_one_the_transcript_file_is_named_for() {
+    let _runtime = crate::config::TestRuntimeRootGuard::new();
     let named = |name: &str, bound: Option<&str>| {
         transcript_session(&std::path::Path::new("/p").join(name), bound)
     };
@@ -526,52 +495,10 @@ fn the_proof_session_is_the_one_the_transcript_file_is_named_for() {
         .map(|record| edit(record, &["sessionId"], Some(json!(OTHER))))
         .collect();
     assert_eq!(
-        Transcript::new(&other).legacy(),
+        Transcript::new(&other).proven(),
         None,
         "records of another session in this session's file"
     );
-}
-
-/// Heads pasted before v1 are still proven by their old frame, recorded or not; a v1 frame proves
-/// its head under the name it shows, never under another author or source.
-#[test]
-fn an_old_frame_still_proves_its_head_and_a_v1_frame_needs_its_own_author_and_source() {
-    let source = format!("discord:{CHANNEL}:{HEAD}");
-    let legacy = |nonce: &str| {
-        let frame = crate::services::tui_input::human_frame::legacy_inject;
-        wrap(frame(&source, "200", nonce, "status?"), true)
-    };
-    let unrecorded = Transcript::new(&chain_of(legacy(NONCE), NONCE, AFTER));
-    assert_eq!(unrecorded.legacy().as_deref(), Some(NONCE));
-    let transcript = Transcript::new(&[]);
-    let offset = std::fs::metadata(&transcript.path).unwrap().len();
-    for record in chain_of(legacy(NONCE), NONCE, BEFORE) {
-        transcript.write(&format!("{record}\n"));
-    }
-    let want = transcript.want(
-        &[HEAD],
-        "status?",
-        Some(recorded(&transcript, NONCE, offset)),
-    );
-    let found = want.unwrap().search().map(|proof| proof.nonce);
-    assert_eq!(found.as_deref(), Some(NONCE));
-
-    let v1 = |author: &str, name: &str, source: &str| {
-        wrap(
-            human_frame::inject(source, author, name, NONCE, "status?"),
-            true,
-        )
-    };
-    let proven = |content: String| Transcript::new(&chain_of(content, NONCE, AFTER)).legacy();
-    assert_eq!(
-        proven(v1("200", "renamed (ops)", &source)).as_deref(),
-        Some(NONCE)
-    );
-    assert_eq!(proven(v1("201", "ann", &source)), None, "another author");
-    let other = format!("discord:{CHANNEL}:{}", HEAD - 1);
-    assert_eq!(proven(v1("200", "ann", &other)), None, "another source");
-    let fresh = v1("200", "ann", &source).replace("mode=inject", "mode=new");
-    assert_eq!(proven(fresh), None, "a new turn's header");
 }
 
 #[test]
@@ -583,6 +510,7 @@ fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
         .into_iter()
         .flat_map(|w| [(w, &tagged), (w, &untagged)])
     {
+        let proves = *frame == tagged;
         let transcript = Transcript::new(&[]);
         let offset = std::fs::metadata(&transcript.path).unwrap().len();
         let frame = frame.clone();
@@ -604,13 +532,11 @@ fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
                 Some(recorded(&transcript, NONCE, offset)),
             )
             .unwrap()
-            .search()
-            .expect("plain recorded frame must be scanned without a visible source");
-        assert_eq!(proof.nonce, NONCE);
-        assert_eq!(proof.offset, offset);
-        assert!(
-            transcript.legacy().is_none(),
-            "an unnamed head cannot claim a plain frame"
+            .search();
+        // An attempt pastes its tagged frame; an untagged one is no attempt's paste.
+        assert_eq!(
+            proof.map(|p| (p.nonce, p.offset)),
+            proves.then(|| (NONCE.into(), offset))
         );
         assert!(
             transcript
@@ -627,55 +553,65 @@ fn a_recorded_plain_frame_is_proven_only_with_its_durable_identity() {
     }
 }
 
+/// A V2 attempt input for this head's owner, sourced in `transcript` or not yet.
+fn v2_input(nonce: &str, frame: &str, transcript: Option<&Transcript>) -> Value {
+    let source = transcript.map_or(json!({"kind": "pre_source"}), |t| {
+        json!({"kind": "existing", "session_id": SESSION, "transcript": t.path,
+            "file": t.bound(SESSION).file, "offset": 0})
+    });
+    json!({"identity": {"primary": HEAD, "queued_generation": 7,
+            "sources": [{"message_id": HEAD, "queued_generation": 7}]},
+        "attempt": {"nonce": nonce, "provider": "claude", "source": source,
+            "target": {"owner": "AgentDesk-claude-test", "execution_nonce": "spawn"}},
+        "original": {"author_id": 200}, "payload": {"frame": frame}})
+}
+
+/// A recorded attempt's proof survives its history becoming V2 or V3, live or passive; abandoned
+/// evidence, another body or a second attempt of the same bytes proves nothing.
 #[test]
-fn identical_plain_history_cannot_use_an_earlier_attempts_delayed_removal_chain() {
+fn a_recorded_proof_survives_the_history_moving_to_v2() {
     let _runtime = crate::config::TestRuntimeRootGuard::new();
-    let transcript = Transcript::new(&[]);
-    let offset = std::fs::metadata(&transcript.path).unwrap().len();
-    let frame = human_frame::idle("ann", "200", "status?");
-    let first = chain_of(frame.clone(), NONCE, AFTER);
-    human_frame::history::register(
-        ("claude", "AgentDesk-claude-test", NONCE, "200"),
-        &transcript.path,
-        offset,
-        &frame,
-    )
-    .unwrap();
-    transcript.write(&format!("{}\n", first[0]));
+    let transcript = Transcript::new(&chain(NONCE, AFTER));
+    assert_eq!(transcript.proven().as_deref(), Some(NONCE));
+    let proof = |t: &Transcript, text: &str| {
+        let want = t.want(&[HEAD], text, Some(recorded(t, NONCE, 0)))?;
+        want.search().map(|proof| (proof.nonce, proof.offset))
+    };
+    // The V1 proof names the enqueue line, which the fixture writes after its opening user row.
+    let proven = proof(&transcript, "status?");
+    let written = std::fs::read_to_string(&transcript.path).unwrap();
+    let enqueue_at = written
+        .find(&format!("{}\n", chain(NONCE, AFTER)[0]))
+        .unwrap() as u64;
+    assert_ne!(enqueue_at, 0);
+    assert_eq!(proven, Some((NONCE.to_string(), enqueue_at)));
+    let history = human_frame::history::v2::Registry::runtime().unwrap();
+    // Another input's V2 owner moves the V1 registration into passive evidence.
+    history
+        .prepare("reconcile-test", &v2_input("0f0f0f0f", "other input", None))
+        .unwrap();
+    let file = crate::config::runtime_root()
+        .unwrap()
+        .join("runtime/injected_frames.json");
+    let v2 = std::fs::read_to_string(&file).unwrap();
+    assert!(v2.starts_with("{\"version\":2,") && v2.contains("\"state\":\"retained\""));
+    assert_eq!(proof(&transcript, "status?"), proven, "passive evidence");
+    assert_eq!(proof(&transcript, "status!"), None, "another body");
+    std::fs::write(&file, v2.replacen("{\"version\":2,", "{\"version\":3,", 1)).unwrap();
+    assert_eq!(proof(&transcript, "status?"), proven, "V3");
+    let abandoned = v2.replace("\"state\":\"retained\"", "\"state\":\"abandoned\"");
+    std::fs::write(&file, abandoned).unwrap();
+    assert_eq!(proof(&transcript, "status?"), None, "abandoned evidence");
+    std::fs::write(&file, &v2).unwrap();
+    let twin = v2_input("0e0e0e0e", &frame(NONCE), Some(&transcript));
+    history.prepare("reconcile-test", &twin).unwrap();
     assert_eq!(
-        human_frame::history::receipt(
-            NONCE,
-            &transcript.path,
-            offset,
-            "enqueue",
-            Some("first-enqueue"),
-            &frame,
-        ),
-        Some(true)
+        proof(&transcript, "status?"),
+        None,
+        "a second attempt of the bytes"
     );
-    let second = std::fs::metadata(&transcript.path).unwrap().len();
-    let second_nonce = "1e1e1e1e";
-    human_frame::history::register(
-        ("claude", "AgentDesk-claude-test", second_nonce, "200"),
-        &transcript.path,
-        second,
-        &frame,
-    )
-    .unwrap();
-    let second_chain = chain_of(frame, second_nonce, AFTER);
-    for record in [&second_chain[0], &first[1], &first[2]] {
-        transcript.write(&format!("{record}\n"));
-    }
-    assert!(
-        transcript
-            .want(
-                &[HEAD],
-                "status?",
-                Some(recorded(&transcript, second_nonce, second)),
-            )
-            .unwrap()
-            .search()
-            .is_none(),
-        "the second enqueue plus the first removal and command do not prove the second input"
-    );
+    let live = Transcript::new(&chain(NONCE, AFTER));
+    let own = v2_input(NONCE, &frame(NONCE), Some(&live));
+    history.prepare("reconcile-test", &own).unwrap();
+    assert_eq!(proof(&live, "status?"), proven, "a live V2 registration");
 }

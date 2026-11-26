@@ -227,7 +227,7 @@ export function buildAgentSkillRows(
   if (!ranking) return [];
   const catalogMap = new Map(catalog.map((entry) => [entry.name, entry]));
 
-  return ranking.byAgent.slice(0, 8).map((row, index) => {
+  return ranking.byAgent.map((row, index) => {
     const catalogEntry = catalogMap.get(row.skill_name);
     const description =
       language === "ko"

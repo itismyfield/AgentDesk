@@ -59,9 +59,9 @@ export const groupCycleText = (overview: GroupOverview, path: string[], tr: Tr) 
  * Every group and the dependencies between them, with the chosen group (or the whole campaign) summed up beside it.
  * Ties saved for this graph are drawn and never changed here: ties are made in the relations editor, on tasks.
  */
-export default function CampaignGroupOverview({ campaignId, nodes, live, chosen, onChoose, onOpenGroup, onOpenTask, tr }: {
+export default function CampaignGroupOverview({ campaignId, nodes, live, chosen, onChoose, onOpenGroup, onOpenTask, canvasHeight, tr }: {
   campaignId: string; nodes: CampaignNode[]; live?: Record<string, CampaignNodeLive>; chosen: string | null; onChoose: (group: string | null) => void;
-  onOpenGroup: (group: string) => void; onOpenTask: (id: string) => void; tr: Tr;
+  onOpenGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; tr: Tr;
 }) {
   const scope = useMemo(() => groupViewScope(campaignId), [campaignId]);
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
@@ -114,7 +114,7 @@ export default function CampaignGroupOverview({ campaignId, nodes, live, chosen,
   const cycleText = useCallback((path: string[]) => groupCycleText(overview, path, tr), [overview, tr]);
   const lineLabel = useCallback((line: ViewLine) => tr(`그룹 간 의존성 ${line.count}개`, `${line.count} dependencies between groups`), [tr]);
   return <RelationsViewCanvas label={tr("그룹별 전체 관계", "All campaign group relationships")} nodes={graphNodes} lines={overview.connections} ties={overview.ties}
-    cycles={overview.cycles} components={overview.components} cycleText={cycleText} lineLabel={lineLabel}
+    cycles={overview.cycles} components={overview.components} cycleText={cycleText} lineLabel={lineLabel} height={canvasHeight}
     onSelect={(id) => onChoose(id === null ? null : keyOf(id) ?? null)} onOpen={(id) => { const key = keyOf(id); if (key !== undefined) onOpenGroup(key); }} tr={tr}
     inspector={<CampaignGroupInspector overview={overview} nodes={nodes} live={live} chosen={chosen} cycleText={cycleText} onChoose={onChoose} onOpenGroup={onOpenGroup} onOpenTask={onOpenTask} tr={tr} />} />;
 }

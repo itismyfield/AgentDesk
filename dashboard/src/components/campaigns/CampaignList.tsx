@@ -55,12 +55,12 @@ export default function CampaignList({ entries, selectedKey, onSelect, onCreate,
         const selected = entry.key === selectedKey;
         return <KitCard as="li" key={entry.key} pad="none" selected={selected} style={selected ? SELECTED_CARD_STYLE : undefined}>
           <button type="button" data-campaign-key={entry.key} aria-current={selected || undefined} onClick={() => onSelect(entry)}
-            className={cn("m-0 grid w-full min-w-0 cursor-pointer gap-1.5 border-0 bg-transparent px-3.5 py-3 text-left font-inherit text-inherit motion-reduce:transition-none", !selected && ROW_HOVER_CLASS)}>
+            className={cn("m-0 grid w-full min-w-0 grid-cols-[minmax(0,1fr)] cursor-pointer gap-1.5 border-0 bg-transparent px-3.5 py-3 text-left font-inherit text-inherit motion-reduce:transition-none", !selected && ROW_HOVER_CLASS)}>
             <span className="flex min-w-0 items-start gap-2">
               <strong className="min-w-0 flex-1 text-sm font-semibold leading-5 text-[var(--fg)] [overflow-wrap:anywhere] [word-break:keep-all]">{entry.title}</strong>
               <Badge status={entry.status} label={entry.statusLabel} tr={tr} />
             </span>
-            {entry.description && <Desc className="truncate">{entry.description.split("\n")[0]}</Desc>}
+            {entry.description && <Desc className="min-w-0 truncate">{entry.description.split("\n")[0]}</Desc>}
             {!!entry.split?.length && <EntrySplit entry={entry} tr={tr} />}
             <Cap className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
               <Chip className="h-[18px] px-1.5 text-[11px]">{entry.kind === "legacy" ? tr("원장", "Ledger") : tr("서버", "Server")}</Chip>

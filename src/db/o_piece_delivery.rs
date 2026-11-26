@@ -65,7 +65,8 @@ impl PieceKey {
         let postable = match (unit.provider, unit.kind) {
             (ShadowProvider::Antigravity, _) => false,
             (_, UnitKind::Body) | (ShadowProvider::Claude, UnitKind::ToolResult) => true,
-            (_, UnitKind::Tool | UnitKind::InputNotice | UnitKind::Recap)
+            // A tool image's bytes live in the spool, so the shared text re-post cannot send it.
+            (_, UnitKind::Tool | UnitKind::InputNotice | UnitKind::Recap | UnitKind::ToolImage)
             | (ShadowProvider::Codex, UnitKind::ToolResult) => false,
         };
         let named = unit.channel_id > 0 && !unit.native_key.trim().is_empty();
@@ -128,6 +129,7 @@ pub(crate) fn kind_name(kind: UnitKind) -> &'static str {
         UnitKind::ToolResult => "tool_result",
         UnitKind::InputNotice => "input_notice",
         UnitKind::Recap => "recap",
+        UnitKind::ToolImage => "tool_image",
     }
 }
 

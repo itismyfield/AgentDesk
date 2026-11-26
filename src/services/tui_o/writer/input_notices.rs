@@ -61,16 +61,9 @@ fn handed_over(channel: u64) -> bool {
     found
 }
 
-/// Discord input by its frame, the pre-v1 `[📱 …]` inject frame included even inside the one paste
-/// block Claude may record it in; only this classification looks through the block.
+/// Discord input by its frame.
 pub(crate) fn discord_input(prompt: &str) -> bool {
-    tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt) || legacy_discord_input(prompt)
-}
-
-// Saved retries still pass the source policy for the pre-v1 frame.
-fn legacy_discord_input(prompt: &str) -> bool {
-    let framed = crate::services::claude_tui::busy_inject::pasted_inner(prompt).unwrap_or(prompt);
-    crate::services::tui_input::human_frame::opens_legacy_inject(framed)
+    tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
 }
 
 /// A native row the writer may announce.

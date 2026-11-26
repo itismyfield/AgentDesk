@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+import { I18nProvider } from "../../i18n";
 import { FreshnessIndicator } from "./FreshnessIndicator";
 import { SYSTEM_HEALTH_TONES } from "../../theme/statusTokens";
 
@@ -117,5 +118,21 @@ describe("FreshnessIndicator", () => {
     );
     expect(html).toContain("role=\"status\"");
     expect(html).toContain("aria-live=\"polite\"");
+  });
+
+  it("renders English labels under I18nProvider language='en'", () => {
+    const now = Date.now();
+    const fresh = renderToStaticMarkup(
+      <I18nProvider language="en"><FreshnessIndicator timestamp={now} /></I18nProvider>,
+    );
+    const stale = renderToStaticMarkup(
+      <I18nProvider language="en"><FreshnessIndicator timestamp={now - 45_000} /></I18nProvider>,
+    );
+    const critical = renderToStaticMarkup(
+      <I18nProvider language="en"><FreshnessIndicator timestamp={now - 5 * 60_000} /></I18nProvider>,
+    );
+    expect(fresh).toContain("Updated · just now");
+    expect(stale).toContain("Updated · 45s ago");
+    expect(critical).toContain("Updated · 5m ago");
   });
 });

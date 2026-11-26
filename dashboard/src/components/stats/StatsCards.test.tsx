@@ -129,6 +129,27 @@ describe("DailyTokenCompositionCard", () => {
     });
     expect(container.querySelector('[data-testid="stats-daily-zero"]')?.textContent).toContain("0");
   });
+
+  it("renders English BreakdownChart picker labels and scopes compact picker sizing to min-[900px]", async () => {
+    const enT = (messages: ReturnType<typeof msg>) => messages.en;
+    await act(async () => {
+      root.render(
+        <DailyTokenCompositionCard
+          t={enT}
+          localeTag="en-US"
+          loading={false}
+          failed={false}
+          daily={DAILY}
+          series={dailySeries(enT)}
+        />,
+      );
+    });
+    const scrollWrap = container.querySelector<HTMLElement>('[data-testid="stats-daily-token-scroll"]')!;
+    expect(scrollWrap.className).toContain("min-[900px]:[&_.aui-breakdown-chart-picker-button]:h-7!");
+    expect(
+      Array.from(scrollWrap.querySelectorAll(".aui-breakdown-chart-picker > span"), (el) => el.textContent),
+    ).toEqual(["Measure", "X-axis", "Stack by"]);
+  });
 });
 
 describe("StatsSummaryGrid", () => {

@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import type { TokenAnalyticsDailyPoint, TokenAnalyticsResponse } from "../../types";
 import type { TFunction } from "../dashboard/model";
 import { KpiChart, type KpiChartText } from "../../kit/pro/kpi-chart";
-import { StatCard } from "../../kit/pro/stat-card";
+import { StatCard, type StatCardLabels } from "../../kit/pro/stat-card";
 import { TrendChart } from "../../kit/pro/trend-chart";
 import { SectionCard } from "../common/KitPrimitives";
 import {
@@ -22,12 +22,14 @@ function SummaryFact({
   value,
   note,
   chart,
+  labels,
 }: {
   testId: string;
   label: string;
   value: string;
   note: string;
   chart?: ReactNode;
+  labels?: Partial<StatCardLabels>;
 }) {
   return (
     <div data-testid={testId} className="min-w-0">
@@ -37,6 +39,7 @@ function SummaryFact({
         footer={note}
         chart={chart}
         layout={chart ? "beside" : "stack"}
+        labels={labels}
       />
     </div>
   );
@@ -99,6 +102,12 @@ export function StatsSummaryGrid({
     : "";
   const savingsRate = cacheSavingsDelta ? `(${cacheSavingsDelta.value.replace("-", "")})` : "";
   const text = kpiText(t);
+  const statLabels: Partial<StatCardLabels> = {
+    loading: t(msg("불러오는 중", "Loading", "読み込み中", "加载中")),
+    up: t(msg("증가", "up", "増加", "上升")),
+    down: t(msg("감소", "down", "減少", "下降")),
+    flat: t(msg("변화 없음", "no change", "変化なし", "无变化")),
+  };
   const hasSparkline = daily.length > 1;
   const dailyTokens = daily.map((day) => day.total_tokens);
   const peakIndex = peakDay ? daily.findIndex((day) => day.date === peakDay.date) : -1;
@@ -160,6 +169,7 @@ export function StatsSummaryGrid({
             note={summary
               ? t(msg(`일 평균 ${formatTokens(Math.round(average))}`, `Avg ${formatTokens(Math.round(average))} per day`, `平均 ${formatTokens(Math.round(average))} / 日`, `日均 ${formatTokens(Math.round(average))}`))
               : notice}
+            labels={statLabels}
             chart={hasSparkline ? (
               <TrendChart
                 labels={labels}
@@ -180,6 +190,7 @@ export function StatsSummaryGrid({
             note={peakDay
               ? `${formatTokens(peakDay.total_tokens)}${peakRatio ? t(msg(` · 평균의 ${peakRatio.toFixed(1)}배`, ` · ${peakRatio.toFixed(1)}x avg`, ` · 平均の ${peakRatio.toFixed(1)}x`, ` · ${peakRatio.toFixed(1)}x 平均`)) : ""}`
               : summary ? t(msg("피크 데이터 없음", "No peak-day data")) : notice}
+            labels={statLabels}
             chart={hasSparkline ? (
               <TrendChart
                 labels={labels}

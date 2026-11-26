@@ -25,20 +25,29 @@ export function ActionMenu({ label, items, className = "" }: ActionMenuProps) {
   const [pending, setPending] = useState<ActionMenuItem | null>(null);
   const [busy, setBusy] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const menuId = useId();
 
   useEffect(() => {
     if (!open) return undefined;
-    const close = (event: MouseEvent | KeyboardEvent) => {
-      if (event instanceof KeyboardEvent ? event.key === "Escape" : !rootRef.current?.contains(event.target as Node)) {
+    const onMouseDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
         setOpen(false);
       }
     };
-    document.addEventListener("mousedown", close);
-    document.addEventListener("keydown", close);
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        setOpen(false);
+        triggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    document.addEventListener("keydown", close, true);
     return () => {
-      document.removeEventListener("mousedown", close);
-      document.removeEventListener("keydown", close);
+      document.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("keydown", close, true);
     };
   }, [open]);
 
@@ -55,6 +64,7 @@ export function ActionMenu({ label, items, className = "" }: ActionMenuProps) {
   return (
     <div ref={rootRef} className={`relative inline-flex ${className}`.trim()} onClick={(event) => event.stopPropagation()}>
       <button
+        ref={triggerRef}
         type="button"
         aria-label={label}
         aria-haspopup="menu"
@@ -105,8 +115,11 @@ export function ActionMenu({ label, items, className = "" }: ActionMenuProps) {
               type="button"
               disabled={busy}
               onClick={() => void run(pending)}
-              className="min-h-11 rounded-md px-4 text-sm font-medium text-white disabled:opacity-60"
-              style={{ background: pending.danger ? "var(--th-accent-danger)" : "var(--th-accent-primary)" }}
+              className="min-h-11 rounded-md px-4 text-sm font-medium disabled:opacity-60"
+              style={{
+                background: pending.danger ? "var(--err)" : "var(--accent)",
+                color: pending.danger ? "#fff" : "var(--accent-ink)",
+              }}
             >
               {pending.confirm.confirmLabel}
             </button>

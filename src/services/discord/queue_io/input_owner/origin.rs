@@ -117,7 +117,7 @@ impl InputOrigin {
             b"decision-input:",
             channel,
             origin,
-            "dcsn",
+            crate::db::decisions::TICKET_TAG,
         ))
     }
 

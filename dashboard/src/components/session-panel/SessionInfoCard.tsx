@@ -77,6 +77,12 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
             model={s.model || providerLabel}
             limit={inferSessionContextLimit(s.model)}
             threshold={0.8}
+            labels={{
+              usedOfLimit: (used, lim) => <><b>{used}</b> {tr(`/ ${lim}`, `of ${lim}`)}</>,
+              leftCompactsAt: (left, at) => tr(`남음 ${left} · 압축 기준 ${at}`, `${left} left · compacts at ${at}`),
+              empty: tr("압축할 항목이 없어요.", "Nothing to compact."),
+              compactingPrefix: tr("압축 중 ", "Compacting "),
+            }}
             items={[
               {
                 id: `session-${s.id}-active`,

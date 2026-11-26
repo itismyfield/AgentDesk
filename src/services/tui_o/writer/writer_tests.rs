@@ -76,12 +76,16 @@ pub(crate) struct FakePort {
     pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub(crate) delay: Mutex<Option<std::time::Duration>>,
+    /// File names of image uploads, in order.
+    pub(crate) attachments: Mutex<Vec<String>>,
+    /// Added to every new message id, so a test can mint ids far apart in Discord time.
+    pub(crate) id_gap: std::sync::atomic::AtomicU64,
 }
 
 impl FakePort {
     pub(crate) fn say(&self, author_id: u64, content: &str) -> SeenMessage {
         let mut history = self.history.lock().unwrap();
-        let id = 1000 + history.len() as u64;
+        let id = 1000 + history.len() as u64 + self.id_gap.load(Ordering::SeqCst);
         let content = content.to_string();
         let message = SeenMessage {
             id,
@@ -176,6 +180,21 @@ impl DiscordPort for FakePort {
             }
             outcome
         }
+    }
+
+    fn post_unit_attachment(
+        &self,
+        channel: u64,
+        caption: String,
+        _origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        _kind: UnitKind,
+        _bytes: Vec<u8>,
+        filename: String,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        self.attachments.lock().unwrap().push(filename);
+        self.post(channel, caption)
     }
 
     fn history_after(
@@ -1049,6 +1068,8 @@ mod boundary_pending_health_tests;
 mod codex_launch_cause;
 #[path = "restart_notice_tests.rs"]
 mod restart_notice_tests;
+#[path = "tool_images/wiring_tests.rs"]
+mod tool_image_wiring;
 
 #[tokio::test(start_paused = true)]
 async fn a_gateway_return_ends_the_pause_in_process_health() {

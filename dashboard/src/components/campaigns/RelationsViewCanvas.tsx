@@ -31,9 +31,9 @@ const MINIMAP_STYLE: CSSProperties = {
 };
 
 /** The read-only canvas both relations views share: causal chain highlighting, arrowheads, and toggleable minimap. */
-export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles, components, cycleText, lineLabel, onSelect, onOpen, inspector, tr }: {
+export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles, components, cycleText, lineLabel, onSelect, onOpen, height, inspector, tr }: {
   label: string; nodes: Node[]; lines: ViewLine[]; ties: CableTie[]; cycles: string[][]; components: Set<string>[]; cycleText: (path: string[]) => string;
-  lineLabel: (line: ViewLine) => string; onSelect: (id: string | null) => void; onOpen?: (id: string) => void; inspector: ReactNode; tr: Tr;
+  lineLabel: (line: ViewLine) => string; onSelect: (id: string | null) => void; onOpen?: (id: string) => void; height?: string; inspector: ReactNode; tr: Tr;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
   const [showMiniMap, setShowMiniMap] = useState(false);
@@ -99,7 +99,7 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
     return { graphNodes: graphNodes.map((node) => sizes.current.has(node.id) ? { ...node, measured: sizes.current.get(node.id) } : node), edges };
   }, [nodes, lines, ties, cycles, components, cycleText, lineLabel, tr, activeId, connected]);
 
-  return <section aria-label={label} style={{ "--relations-height": CANVAS_HEIGHT } as CSSProperties}
+  return <section aria-label={label} style={{ "--relations-height": height ?? CANVAS_HEIGHT } as CSSProperties}
     className="grid min-w-0 min-[1280px]:h-[var(--relations-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]">
     <div data-relations-canvas className="relative h-[var(--relations-height)] min-w-0 bg-[var(--bg)]">
       <ReactFlow nodes={graphNodes} edges={edges} nodeTypes={NODE_TYPES} edgeTypes={EDGE_TYPES} proOptions={{ hideAttribution: true }}
@@ -120,7 +120,7 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
       </ReactFlow>
       <RelationsLegend className="max-w-[calc(100%-12rem)]" tr={tr} />
       <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")}
-        minimap={{ open: showMiniMap, onToggle: () => setShowMiniMap((v) => !v) }} tr={tr} />
+        className="max-sm:right-3 max-sm:bottom-3" minimap={{ open: showMiniMap, onToggle: () => setShowMiniMap((v) => !v) }} tr={tr} />
     </div>
     {inspector}
   </section>;

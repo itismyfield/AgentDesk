@@ -9,7 +9,7 @@ export const GRAPH_DIM_OPACITY = 0.24;
 
 /** Floating canvas chrome container and 40px icon tool button styles. */
 export const GRAPH_FLOAT_CLASS = "absolute z-10 rounded-xl border border-[var(--line-soft)] bg-[var(--th-card-bg)] shadow-[var(--shadow-sm)]";
-export const GRAPH_TOOL_CLASS = "!size-10 [&>span]:!size-[18px] aria-pressed:!bg-[var(--accent-soft)] aria-pressed:!text-[var(--fg)]";
+export const GRAPH_TOOL_CLASS = "min-[900px]:!size-10 max-[899px]:!size-11 [&>span]:!size-[18px] aria-pressed:!bg-[var(--accent-soft)] aria-pressed:!text-[var(--fg)]";
 
 export interface GraphStatusTone {
   accent: string;

@@ -218,13 +218,7 @@ pub(super) fn transcript_submission(
         return None;
     }
     let marker = marker(nonce);
-    let legacy = expected.is_none_or(|frame| {
-        !frame.starts_with("[User: ")
-            || frame
-                .split(']')
-                .next()
-                .is_some_and(|header| header.contains(" · 📱 v1 mode="))
-    });
+    let legacy = expected.is_none_or(|frame| !frame.starts_with("[User: "));
     let registered = expected.is_some_and(|frame| {
         crate::services::tui_input::human_frame::history::registered(nonce, path, frame)
     });

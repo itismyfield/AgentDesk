@@ -1,6 +1,7 @@
 use super::EndpointDoc;
 
 mod cluster_execution;
+mod decisions;
 mod kakao_calendar;
 mod part_01;
 mod part_02;
@@ -34,6 +35,7 @@ pub(super) fn all() -> Vec<EndpointDoc> {
     endpoints.extend(part_11::endpoints());
     endpoints.extend(public_surfaces::endpoints());
     endpoints.extend(cluster_execution::endpoints());
+    endpoints.extend(decisions::endpoints());
     endpoints.extend(kakao_calendar::endpoints());
     endpoints.extend(session_evidence::endpoints());
     endpoints.extend(prompt_audit::endpoints());

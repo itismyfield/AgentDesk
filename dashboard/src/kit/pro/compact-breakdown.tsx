@@ -1,4 +1,4 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@b6d2ab1
+// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useEffect, useId, useLayoutEffect, useRef, useState, type FocusEvent, type KeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react';
 import { ArrowDown, ArrowUp } from 'lucide-react';
 
@@ -184,7 +184,7 @@ const styles = `
   .aui-compact-breakdown-row { grid-template-columns: 8px minmax(0, 1fr) auto; }
   .aui-compact-breakdown-period { padding-inline: 6px; }
 }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-compact-breakdown { --aui-compact-breakdown-row-height: 44px; }
   .aui-compact-breakdown-period { min-width: 44px; min-height: 44px; padding-inline: 10px; }
   .aui-compact-breakdown-full-readout { display: block; }
@@ -447,7 +447,7 @@ export function CompactBreakdown({ items, title: titleProp, periods = [], period
           const cells = <><span className="aui-compact-breakdown-dot" style={{ background: item.color }} aria-hidden="true" /><span className="aui-compact-breakdown-label" title={item.label} dir="auto">{item.label}</span><span className="aui-compact-breakdown-value">{format(value)}</span><span className="aui-compact-breakdown-share">{shareText(shareOf(value, amounts.total))}</span></>;
           return <li key={item.id} className="aui-compact-breakdown-list-item" data-item-id={item.id} data-exiting={!item.present} aria-hidden={!item.present || undefined} {...(onSelect ? {} : reading)}>
             {onSelect ? <button type="button" {...row} {...reading} disabled={!item.present} aria-describedby={text.selectHint ? `${id}-select-hint` : undefined} onClick={() => { if (item.present) onSelect(item.source); }}>{cells}</button>
-              : <div {...row} onClick={(event) => { if (event.detail > 0 && (pointerKind === 'touch' || pointerKind === 'pen' || window.matchMedia('(pointer: coarse)').matches)) { setPinned((old) => old === item.id ? null : item.id); setFocused(null); setHovered(null); } }}>{cells}</div>}
+              : <div {...row} onClick={(event) => { if (event.detail > 0 && (pointerKind === 'touch' || pointerKind === 'pen' || window.matchMedia('(pointer: coarse), (max-width: 899px)').matches)) { setPinned((old) => old === item.id ? null : item.id); setFocused(null); setHovered(null); } }}>{cells}</div>}
           </li>;
         })}</ol>
         {onSelect && text.selectHint && <span id={`${id}-select-hint`} className="aui-compact-breakdown-sr">{text.selectHint}</span>}

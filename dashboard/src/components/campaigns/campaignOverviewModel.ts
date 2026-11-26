@@ -151,7 +151,20 @@ export interface OverviewTask {
 /** A session as a card's foot shows it: a dot, the state words and when it was last seen. */
 export interface SessionNow { tone: DotTone; text: string; seenAt: string | null }
 
-const LEDGER_APPROVAL_RE = /\bLAND_READY\b|착지\s*승인\s*대기|사용자\s*승인\s*대기|awaiting\s+landing\s+approval/i;
+const LEDGER_HUMAN_APPROVAL_RE = /(?:착지|머지|배포|사용자|결정\s*포럼)\s*승인\s*대기|awaiting\s+(?:landing|human|user)\s+approval/i;
+
+export function currentLedgerStageSegment(text: string | null | undefined): string {
+  const parts = (text ?? "").trim().split(/\s*(?:→|->)\s*/).filter(Boolean);
+  return parts.at(-1) ?? "";
+}
+
+export function isLedgerHumanApprovalPending(
+  stage?: string | null,
+  nextAction?: string | null,
+  blocker?: string | null,
+): boolean {
+  return [stage, nextAction, blocker].some((field) => LEDGER_HUMAN_APPROVAL_RE.test(currentLedgerStageSegment(field)));
+}
 
 /** Live work makes an open node running. */
 export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): OverviewTask {
@@ -161,8 +174,7 @@ export function legacyTask(node: CampaignNode, live?: CampaignNodeLive): Overvie
   const step = campaignStageStep(stageText).index;
   const title = campaignTaskTitle(node);
   const canAwaitApproval = status === "running" || status === "pending";
-  const textBlob = [stageText, node.next_action].filter(Boolean).join(" ");
-  const gate: PendingGate | null = canAwaitApproval && LEDGER_APPROVAL_RE.test(textBlob)
+  const gate: PendingGate | null = canAwaitApproval && isLedgerHumanApprovalPending(stageText, node.next_action)
     ? { gate: "landing", openedAt: node.updated_at ?? null, evidenceNote: (node.evidence ?? []).at(-1) ?? (node.summary?.trim() || null) }
     : null;
   return {
@@ -214,7 +226,7 @@ export function serverTasks({ definition, view }: ServerCampaignDocument, events
       id: node.id, title: node.title, number: issue ? `#${issue}` : null, status,
       marker: !runtime ? { tone: "plan", ratio: 0 } : status === "running" ? { tone: "progress", ratio: (SERVER_STAGES.indexOf(runtime.stage) + 1) / (SERVER_STAGES.length + 1) } : nodeMarker(status),
       stage, step: runtime ? STAGE_LABELS[runtime.stage] : null, summary: null, benefit: null,
-      blocker, group: null,
+      blocker, group: node.group ?? null,
       updatedAt: null, session: sessionText,
       agent: null, prUrl: null, attention: needsSomeone(status, blocker), gate, progress: runtime ? stage : null,
       sessionNow: observation && sessionText ? { tone: SESSION_TONES[observation.state], text: sessionText, seenAt: observation.state === "unknown" ? observation.last_observed_at : observation.observed_at } : null,
@@ -239,8 +251,53 @@ export function taskCounts(tasks: OverviewTask[]) {
   return {
     running: count((task) => task.status === "running"), approvals: count((task) => !!task.gate), failed: count((task) => task.status === "failed"),
     blocked: count((task) => task.attention && !task.gate && task.status !== "failed"), done: count((task) => task.status === "completed"),
+    skipped: count((task) => task.status === "skipped"),
     withPr: count((task) => task.status === "running" && !!task.prUrl),
   };
+}
+
+export interface GroupProgressSummary {
+  id: string;
+  key: string;
+  name: string;
+  total: number;
+  done: number;
+  running: number;
+  attention: number;
+}
+
+/** Summarizes task progress per group when at least one task carries an explicit group name. */
+export function groupOverviewProgress(tasks: ReadonlyArray<OverviewTask>, ungroupedLabel: string): GroupProgressSummary[] {
+  if (!tasks.some((task) => Boolean(task.group?.trim()))) return [];
+  const buckets = new Map<string, OverviewTask[]>();
+  for (const task of tasks) {
+    const key = task.group?.trim() ?? "";
+    const list = buckets.get(key) ?? [];
+    list.push(task);
+    buckets.set(key, list);
+  }
+  return Array.from(buckets, ([key, members]) => {
+    const done = members.filter((t) => t.status === "completed" || t.status === "skipped").length;
+    const running = members.filter((t) => t.status === "running").length;
+    const attention = members.filter((t) => t.attention || Boolean(t.gate)).length;
+    return {
+      id: key || "__ungrouped__",
+      key,
+      name: key || ungroupedLabel,
+      total: members.length,
+      done,
+      running,
+      attention,
+    };
+  }).sort((a, b) => {
+    const rank = (g: GroupProgressSummary) =>
+      g.attention > 0 ? 0 : g.running > 0 ? 1 : g.done < g.total ? 2 : 3;
+    const diff = rank(a) - rank(b);
+    if (diff !== 0) return diff;
+    if (a.key === "") return 1;
+    if (b.key === "") return -1;
+    return a.name.localeCompare(b.name);
+  });
 }
 
 /** Computes node counts with live card state and real blockers so relations views match the campaign header. */
