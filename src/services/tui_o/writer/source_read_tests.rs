@@ -14,7 +14,9 @@ use crate::services::{
     tui_o::shadow::ShadowProvider,
     tui_prompt_dedupe::{
         self as dedupe,
-        binding_context::{BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess},
+        binding_context::{
+            BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
+        },
         binding_events,
     },
 };

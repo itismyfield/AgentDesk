@@ -24,8 +24,7 @@ impl FakeTmux {
         let reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
         std::fs::write(dir.path().join("reason_path"), reason).unwrap();
         std::fs::write(dir.path().join("session_name"), format!("{name}\n")).unwrap();
-        let identity =
-            crate::services::session_identity_metadata::runtime_identity(name).unwrap();
+        let identity = crate::services::session_identity_metadata::runtime_identity(name).unwrap();
         std::fs::write(
             dir.path().join("identity"),
             identity.environment_assignment().unwrap(),
