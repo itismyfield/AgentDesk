@@ -142,7 +142,7 @@ pub fn enrich_session_owner_routing(
     }
 }
 
-pub(crate) fn attach_active_session_counts_to_worker_nodes(
+pub fn attach_active_session_counts_to_worker_nodes(
     worker_nodes: &mut [Value],
     sessions: &[Value],
 ) {
@@ -177,7 +177,7 @@ pub(crate) fn attach_active_session_counts_to_worker_nodes(
     }
 }
 
-pub(crate) fn summarize_session_owner_routing(sessions: &[Value]) -> Value {
+pub fn summarize_session_owner_routing(sessions: &[Value]) -> Value {
     let mut local = 0_i64;
     let mut foreign = 0_i64;
     let mut unknown_owner = 0_i64;

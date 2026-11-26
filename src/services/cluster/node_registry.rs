@@ -119,7 +119,7 @@ fn auto_node_can_attempt_leadership(config: &Config) -> bool {
     })
 }
 
-pub(crate) async fn bootstrap(
+pub async fn bootstrap(
     config: &Config,
     pg_pool: Option<PgPool>,
     hooks: DispatchQueueHooks,

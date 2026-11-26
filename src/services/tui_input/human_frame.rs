@@ -21,13 +21,13 @@ pub enum Mode {
 /// The fields of one v1 header, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Header<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) author: &'a str,
-    pub(crate) mode: Mode,
+    pub name: &'a str,
+    pub author: &'a str,
+    pub mode: Mode,
     /// Empty for a plain header.
-    pub(crate) source: &'a str,
+    pub source: &'a str,
     /// Empty for a plain header written without an attempt tag.
-    pub(crate) nonce: &'a str,
+    pub nonce: &'a str,
 }
 
 /// The name the idle `[User: …]` header shows: whitespace collapsed, brackets and braces made

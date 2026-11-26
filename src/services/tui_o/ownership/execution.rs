@@ -33,7 +33,7 @@ impl std::fmt::Debug for OwnerPermit {
 }
 
 impl OwnerPermit {
-    pub(crate) fn gate(&self) -> Arc<OwnershipGate> {
+    pub fn gate(&self) -> Arc<OwnershipGate> {
         Arc::clone(&self.gate)
     }
     pub(crate) fn first_binding(&self, other: &Self) -> Option<Arc<Self>> {
@@ -64,7 +64,7 @@ impl OwnerPermit {
 
 #[derive(Clone, Debug)]
 pub struct View {
-    pub(crate) permit: Result<Arc<OwnerPermit>, String>,
+    pub permit: Result<Arc<OwnerPermit>, String>,
     pub(crate) candidate: Candidate,
     pub(crate) retained: Option<Arc<OwnerPermit>>,
 }

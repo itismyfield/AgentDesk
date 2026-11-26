@@ -245,7 +245,7 @@ pub struct CanonicalWitness {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ClaimEvidence {
+pub enum ClaimEvidence {
     NativeHook {
         event: String,
         source: Option<String>,

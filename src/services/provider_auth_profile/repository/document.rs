@@ -71,15 +71,15 @@ pub struct OrgChannelsConfig {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct OrgChannelBinding {
+pub struct OrgChannelBinding {
     #[serde(default)]
-    pub(crate) agent: String,
+    pub agent: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) workspace: Option<String>,
+    pub workspace: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) provider: Option<String>,
+    pub provider: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) model: Option<String>,
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) peer_agents: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

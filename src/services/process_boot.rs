@@ -2,8 +2,8 @@ use std::sync::OnceLock;
 
 #[derive(Clone, Debug)]
 pub struct Boot {
-    pub(crate) id: String,
-    pub(crate) started_at_ms: i64,
+    pub id: String,
+    pub started_at_ms: i64,
     pub(crate) monotonic: std::time::Instant,
 }
 

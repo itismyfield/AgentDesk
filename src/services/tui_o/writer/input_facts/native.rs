@@ -111,16 +111,16 @@ impl Registration {
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Observation {
-    pub(crate) binding: SourceBinding,
-    pub(crate) generation: u64,
-    pub(crate) binding_seq: u64,
-    pub(crate) revision: u64,
-    pub(crate) through: u64,
-    pub(crate) registrations_fingerprint: String,
+    pub binding: SourceBinding,
+    pub generation: u64,
+    pub binding_seq: u64,
+    pub revision: u64,
+    pub through: u64,
+    pub registrations_fingerprint: String,
     /// A verified raw EOF closer at `through`; it never moves `through` itself.
-    pub(crate) terminal: Option<terminal::RawWitness>,
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) receipts: Vec<MembershipReceipt>,
+    pub terminal: Option<terminal::RawWitness>,
+    pub evidence: Vec<Evidence>,
+    pub receipts: Vec<MembershipReceipt>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -132,26 +132,26 @@ pub(super) struct Record {
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Run {
-    pub(crate) start: u64,
+pub struct Run {
+    pub start: u64,
     pub(crate) native_id: Option<String>,
 }
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Evidence {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) run: Option<Run>,
-    pub(crate) range: (u64, u64),
-    pub(crate) membership_range: Option<(u64, u64)>,
-    pub(crate) membership_row: Option<String>,
-    pub(crate) closer_range: Option<(u64, u64)>,
-    pub(crate) disposition: Disposition,
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub run: Option<Run>,
+    pub range: (u64, u64),
+    pub membership_range: Option<(u64, u64)>,
+    pub membership_row: Option<String>,
+    pub closer_range: Option<(u64, u64)>,
+    pub disposition: Disposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) supersedes: Option<terminal::Supersession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) raw: Option<terminal::RawWitness>,
+    pub raw: Option<terminal::RawWitness>,
 }
 
 #[cfg(unix)]

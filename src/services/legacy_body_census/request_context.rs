@@ -5,10 +5,10 @@ use std::{future::Future, pin::Pin, sync::Arc};
 
 #[derive(Clone, Default)]
 pub struct Context {
-    pub(in crate::services) scope: Option<Scope>,
-    pub(in crate::services) artifact: Option<Artifact>,
-    pub(in crate::services) body: Arc<str>,
-    pub(in crate::services) census: Option<Value>,
+    pub scope: Option<Scope>,
+    pub artifact: Option<Artifact>,
+    pub body: Arc<str>,
+    pub census: Option<Value>,
 }
 
 tokio::task_local! {

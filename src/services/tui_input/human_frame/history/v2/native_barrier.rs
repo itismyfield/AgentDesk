@@ -80,7 +80,7 @@ impl Settlement {
     }
 
     /// A native result crosses the barrier stored now only as its exact interrupt supersession.
-    pub(crate) fn admits_native(&self, namespace: &str, outcome: &Outcome) -> Result<(), String> {
+    pub fn admits_native(&self, namespace: &str, outcome: &Outcome) -> Result<(), String> {
         let proof = &outcome.extra["native_proof"];
         let stored = self.extra.contains_key("foreign_prompt_barrier");
         if !stored && proof["supersedes"].is_null() {

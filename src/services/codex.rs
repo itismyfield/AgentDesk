@@ -182,42 +182,42 @@ impl CodexLaunchOptions {
         self
     }
 
-    pub(crate) fn with_model(mut self, value: Option<&str>) -> Self {
+    pub fn with_model(mut self, value: Option<&str>) -> Self {
         self.model = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
+    pub fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
         self.reasoning_effort = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
+    pub fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
         self.compact_token_limit = value.filter(|limit| *limit > 0);
         self
     }
 
-    pub(crate) fn with_readonly_mode(mut self, value: bool) -> Self {
+    pub fn with_readonly_mode(mut self, value: bool) -> Self {
         self.readonly_mode = value;
         self
     }
 
-    pub(crate) fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
         self.fast_mode_enabled = value;
         self
     }
 
-    pub(crate) fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
         self.goals_enabled = value;
         self
     }
 
-    pub(crate) fn with_cwd(mut self, value: Option<&str>) -> Self {
+    pub fn with_cwd(mut self, value: Option<&str>) -> Self {
         self.cwd = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_add_dirs(mut self, values: &[&str]) -> Self {
+    pub fn with_add_dirs(mut self, values: &[&str]) -> Self {
         self.add_dirs = values
             .iter()
             .filter_map(|value| clean_nonempty(Some(value)))

@@ -11,10 +11,10 @@ use crate::services::discord::runtime_store::{
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Intent {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) disposition: Disposition,
-    pub(crate) row: Option<Value>,
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub disposition: Disposition,
+    pub row: Option<Value>,
 }
 
 impl Intent {

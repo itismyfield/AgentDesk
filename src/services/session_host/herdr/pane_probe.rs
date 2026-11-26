@@ -89,7 +89,7 @@ pub(crate) trait ProcessOs: Send + Sync {
 
 /// Absence is separate evidence from failure to read a process start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordedProcess {
+pub enum RecordedProcess {
     ExactAlive,
     ProvenAbsent,
     Replaced,

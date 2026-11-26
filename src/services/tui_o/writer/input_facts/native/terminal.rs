@@ -97,10 +97,10 @@ pub(super) fn foreign_prompt(
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Tail {
-    pub(crate) through: u64,
+    pub through: u64,
     pub(crate) prefix_hash: String,
-    pub(crate) fingerprint: Fingerprint,
-    pub(crate) digest: String,
+    pub fingerprint: Fingerprint,
+    pub digest: String,
 }
 
 /// One strict closer read whole at the EOF of an ended execution; the capture cursor stays put.
@@ -120,7 +120,7 @@ impl RawWitness {
     }
 
     /// Whether this is the closer of `evidence`, for the same file and the same execution.
-    pub(crate) fn seals(&self, evidence: &Evidence) -> bool {
+    pub fn seals(&self, evidence: &Evidence) -> bool {
         let kind = match self.aborted {
             true => Disposition::Cancelled,
             false => Disposition::Executed,

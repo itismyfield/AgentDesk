@@ -78,24 +78,24 @@ pub enum Disposition {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
-    pub(crate) disposition: Disposition,
-    pub(crate) range: Option<[u64; 2]>,
+    pub disposition: Disposition,
+    pub range: Option<[u64; 2]>,
     #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settlement {
-    pub(crate) ticket: Ticket,
-    pub(crate) outcome: Option<Outcome>,
+    pub ticket: Ticket,
+    pub outcome: Option<Outcome>,
     #[serde(default)]
-    pub(crate) withdrawal_notice: bool,
+    pub withdrawal_notice: bool,
     #[serde(default)]
-    pub(crate) cleanup_complete: bool,
+    pub cleanup_complete: bool,
     #[serde(default)]
     pub(crate) warned: bool,
     #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl Outcome {

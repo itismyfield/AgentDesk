@@ -43,7 +43,7 @@ impl Origin {
 
 #[derive(Clone, Debug)]
 pub struct Scope {
-    pub(crate) pool: PgPool,
+    pub pool: PgPool,
     pub(crate) provider: String,
 }
 

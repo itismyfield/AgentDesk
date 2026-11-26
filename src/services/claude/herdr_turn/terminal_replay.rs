@@ -8,12 +8,12 @@ use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 /// A turn's provider terminal as `HerdrTurnLines` accepts it, and the record range it read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Terminal {
-    pub(crate) kind: NativeTerminalKind,
+    pub kind: NativeTerminalKind,
     pub(crate) start: u64,
     pub(crate) end: u64,
-    pub(crate) result: String,
+    pub result: String,
     /// The turn's streamed output in order, as the live bridge receives it.
-    pub(crate) output: Vec<TurnOutput>,
+    pub output: Vec<TurnOutput>,
 }
 
 /// A streamed assistant text chunk, or a tool use between chunks.
