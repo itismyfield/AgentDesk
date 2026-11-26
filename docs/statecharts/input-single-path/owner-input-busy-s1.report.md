@@ -10,7 +10,8 @@
 ## 판 이력
 
 - **w4**(`c603bfb08c`, cfg 24): source 결합 상태 `src`, 키 전 등록 `reg`, 보류 사유 `why`. P1-3 mutant(`AdmitsPathMatch`·`PinSourceFirst`·`RequireTranscript`).
-- **w5**(이 판, cfg 33): 설계 리뷰 i8328-design-4의 P1 3건과 P2를 반영했다.
+- **S1-A fix1**(cfg 35): 구현 리뷰 review-s1a-1 P1-1을 넣었다. 시나리오 `nearmiss`는 외부 A의 프롬프트가 B의 frame과 trim 뒤에만 같고 exact로는 다르다. exact receipt가 없으니 결합 0이어야 하고(`TargetNearMiss` GREEN), class hash로 대체 결합하는 구현(`ClassHashFallback`)은 A 답을 B에 건다(`AnswerBound` RED). 다른 33개 cfg의 기대값은 그대로다.
+- **w5**(cfg 33): 설계 리뷰 i8328-design-4의 P1 3건과 P2를 반영했다.
   - transcript 파일 생성(`trans`, `TuiStart`)과 AgentDesk의 source 결합(`src`, writer의 `Bound` 기록 `BindSource`)을 나눴다(P2). w4에서는 `TuiStart`가 곧바로 `src = bound`를 만들어, 결합을 빠뜨린 구현도 GREEN이 될 수 있었다.
   - 지연 pin 단일 확정점: `pin`(recorded·deferred), `sel`(BindingIntent.selected). `Select`가 `None → Some`을 한 번만 만든다(P1-3).
   - 귀속 결합: `aBound`(꼬리표 없는 opener A를 receipt로 결합), `bBound`(B 결합). A 답은 A 결합 뒤, 합류 B가 있으면 B 결합 뒤에 나간다. B 답은 B 결합 뒤에 나간다. 합류 표시는 B 결합(흡수 증거) 때 단다(P1-1).
@@ -32,6 +33,7 @@
 
 시나리오:
 - `busy`·`i8432`·`external`: w4와 같다
+- `nearmiss`: `external`과 같고, A의 프롬프트가 B의 frame과 공백만 다르다(S1-A fix1)
 - `fresh`: 새 세션. 파일도 `Bound`도 없다. B의 턴이 파일을 만든다
 - `rebind`: 파일은 있지만 writer가 재시작한 실행의 `Bound`를 아직 기록하지 않았다
 
@@ -50,7 +52,14 @@
 
 공정성: 정상 행동과 결합 행동(`BindSource`·`Select`·`BindA`·`BindB`)에 weak fairness를 준다. `TuiAbsorb`와 mutant 행동에는 주지 않는다.
 
-## 결과 (`statecharts_tlc.check_cfg`, 33/33 기대 집합 일치)
+## 결과 (`statecharts_tlc.check_cfg`, 35/35 기대 집합 일치)
+
+S1-A fix1 전후표(새 cfg 2개, 나머지 33개는 아래 w5 열 그대로):
+
+| cfg | 수정 전 구현(class hash 대체 결합) | 수정 후 |
+|---|---|---|
+| `TargetNearMiss` | (없음) | GREEN |
+| `TargetClassHashFallback` | (없음) | RED AnswerBound |
 
 w4 → w5 전후표(모든 cfg에 `NoCircularWait`를 더했다):
 
@@ -90,9 +99,10 @@ w4 → w5 전후표(모든 cfg에 `NoCircularWait`를 더했다):
 | `TargetTokenAttribution` | RED ReplyExactlyOnce·ReplyPosted | RED ReplyExactlyOnce·ReplyPosted |
 | `TargetTuiDrop` | RED NoSilentLoss·ReplyPosted | RED NoSilentLoss·ReplyPosted |
 
-합계(w5): Current RED 4, Target GREEN 7, 수용 RED 1(DraftStuck), mutant RED 21.
+합계(w5): Current RED 4, Target GREEN 7, 수용 RED 1(DraftStuck), mutant RED 21. fix1 뒤: Target GREEN 8, mutant RED 22.
 
-mutant 뜻(w5에서 새로 넣은 것):
+mutant 뜻(w5에서 새로 넣은 것, fix1의 `ClassHashFallback` 포함):
+- `ClassHashFallback`: exact receipt가 없는 행을 trim한 class hash로 등록에 잇는다. 공백만 다른 외부 A의 답이 B에 걸린다(`AnswerBound`).
 - `TaggedHeaderOnly`: J2가 헤더 nonce만 읽는다. 꼬리표 없는 opener A는 결합되지 않고, A 답이 합류 B에 걸린다(`AnswerBound`).
 - `RequireIdleObserverBeforeKey`: 토큰 없는 tmux 자기 턴에서 observer가 transcript를 먼저 요구한다 → `idle_unobserved`(새 세션이면 순환 대기).
 - `RequireBusyReadStateWithoutSource`: Herdr `admits`가 source를 읽는 `Context::read` 상태를 요구한다.

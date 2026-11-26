@@ -36,6 +36,10 @@ pub(crate) trait RepostWriter {
     ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
         None
     }
+    /// The anchor the piece's earlier serial replied to; a re-post replies to the same one.
+    fn reply_to(&self, _key: &PieceKey) -> Option<u64> {
+        None
+    }
 
     fn try_lease(&self) -> Option<Self::Lease>;
     fn gate(&self) -> Arc<OwnershipGate>;
@@ -171,6 +175,7 @@ pub(crate) async fn start<W: RepostWriter>(
     let channel = permit.key().unit().channel_id;
     let mut envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
     envelope.output_origin = writer.output_origin(permit.key());
+    envelope.reply_to = writer.reply_to(permit.key());
     {
         use crate::services::discord::outbound::notification_policy as policy;
         envelope.silent =

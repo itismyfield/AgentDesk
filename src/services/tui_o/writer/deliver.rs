@@ -18,6 +18,7 @@ use super::{AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, Wri
 use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::repost::admission::OriginalGate;
 use crate::services::tui_o::repost::dispatch::{DispatchPermit, RepostWriter};
+use crate::services::tui_o::repost::identity::PieceKey;
 use crate::services::tui_o::repost::projection::ReceiptOverlay;
 use crate::services::tui_o::repost::runner::{RepostHook, TurnWriter};
 use crate::services::tui_o::repost::send::{DispatchReport, WireOutcome};
@@ -571,7 +572,9 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                             epoch,
                             local_retry: local_retry.clone(),
                         };
-                        prepared::append_origins(store, serial, piece, reply_to)?;
+                        let origin = piece.output_origin.clone();
+                        prepared::append_origins(store, serial, origin, reply_to)
+                            .map_err(Refusal::Violation)?;
                         store
                             .append_ledger(prepared())
                             .map_err(|error| Refusal::Store {
@@ -843,6 +846,14 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWriter<P, L, A> {
     type Lease = L::Held;
 
+    fn output_origin(&self, key: &PieceKey) -> Option<prepared::Artifact> {
+        self.piece_origins(key).0
+    }
+
+    fn reply_to(&self, key: &PieceKey) -> Option<u64> {
+        self.piece_origins(key).1
+    }
+
     async fn settle_open(&mut self) -> bool {
         ChannelWriter::settle_open(self).await.is_ok() && self.store.ledger().unresolved().is_none()
     }
@@ -901,12 +912,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> RepostWriter for ChannelWri
         }
         let ledger = self.store.ledger();
         let (serial, anchor_id) = (ledger.next_serial(), ledger.anchor());
-        let origin = self.output_origin(permit.key());
-        if let Some(artifact) = origin {
-            self.store
-                .append_ledger(LedgerEntry::OutputOrigin { serial, artifact })
-                .map_err(|e| format!("output origin: {e:?}"))?;
-        }
+        let (origin, reply) = self.piece_origins(permit.key());
+        prepared::append_origins(&mut self.store, serial, origin, reply)?;
         let prepared = || LedgerEntry::Prepared {
             notice_origin: None,
             serial,

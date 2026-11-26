@@ -2,25 +2,25 @@
 //! anchor, each written to the ledger before the `Prepared` itself.
 
 use super::*;
+pub(super) use crate::services::cluster::intake_router_hook::owner_record::output::Artifact;
 use crate::services::tui_o::writer::reply_anchor::{Anchors, Reply, ReplyRef};
 
-/// Returning an error comes before `port.post`, so the piece's POST was never created.
+/// Returning an error comes before the POST, so the serial's POST was never created.
 pub(super) fn append_origins(
     store: &mut ChannelStore,
     serial: u64,
-    piece: &PieceWork,
+    origin: Option<Artifact>,
     reply_to: Option<u64>,
-) -> Result<(), Refusal> {
-    if let Some(artifact) = &piece.output_origin {
-        let artifact = artifact.clone();
+) -> Result<(), String> {
+    if let Some(artifact) = origin {
         store
             .append_ledger(LedgerEntry::OutputOrigin { serial, artifact })
-            .map_err(|e| Refusal::Violation(format!("output origin: {e:?}")))?;
+            .map_err(|e| format!("output origin: {e:?}"))?;
     }
     if let Some(anchor) = reply_to {
         store
             .append_ledger(LedgerEntry::ReplyTo { serial, anchor })
-            .map_err(|e| Refusal::Violation(format!("reply anchor: {e:?}")))?;
+            .map_err(|e| format!("reply anchor: {e:?}"))?;
     }
     Ok(())
 }
@@ -72,12 +72,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         Ok(Some(binding.anchor))
     }
 
-    fn output_origin(
-        &self,
-        key: &crate::services::tui_o::repost::identity::PieceKey,
-    ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+    /// The output origin and reply of the piece's latest serial, which a re-post repeats.
+    pub(super) fn piece_origins(&self, key: &PieceKey) -> (Option<Artifact>, Option<u64>) {
         let ledger = self.store.ledger();
-        let (serial, _) = ledger.latest_piece(key.unit(), key.piece_index())?;
-        ledger.output_origin(serial).cloned()
+        let Some((serial, _)) = ledger.latest_piece(key.unit(), key.piece_index()) else {
+            return (None, None);
+        };
+        (
+            ledger.output_origin(serial).cloned(),
+            ledger.reply_to(serial),
+        )
     }
 }

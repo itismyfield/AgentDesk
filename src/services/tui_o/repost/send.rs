@@ -60,6 +60,8 @@ pub(crate) struct RepostEnvelope {
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     /// The re-posted unit's push decision, made by the notification policy.
     pub(crate) silent: bool,
+    /// The message the original replied to; a deleted one leaves the re-post unreferenced.
+    pub(crate) reply_to: Option<u64>,
 }
 
 impl RepostEnvelope {
@@ -72,6 +74,7 @@ impl RepostEnvelope {
             additional: false,
             output_origin: None,
             silent: false,
+            reply_to: None,
         }
     }
 
@@ -97,6 +100,16 @@ impl RepostEnvelope {
         .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions())
         .nonce(nonce)
         .enforce_nonce(true);
+        let message = match self.reply_to {
+            Some(id) => message.reference_message(
+                serenity::MessageReference::from((
+                    serenity::ChannelId::new(self.channel),
+                    serenity::MessageId::new(id),
+                ))
+                .fail_if_not_exists(false),
+            ),
+            None => message,
+        };
         if !self.additional {
             return message;
         }

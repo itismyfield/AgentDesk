@@ -61,7 +61,24 @@ fn settle(
     let bytes = std::fs::read(&f.binding.source.path).unwrap();
     let hash = hex::encode(sha2::Sha256::digest(&bytes));
     let (_, projection) = Projection::reopen(f.binding.clone(), bytes.len() as u64, &hash).unwrap();
-    let runs = projection.unwrap().memberships(registrations).unwrap();
+    let projection = projection.unwrap();
+    // As `offer_native`: every receipt is recorded, one per pass, before the runs settle.
+    let mut registrations = registrations.to_vec();
+    while let Some((namespace, ticket, row)) =
+        projection.receipts(&registrations).first().map(|r| {
+            let (namespace, ticket) = r.identity();
+            (
+                namespace.to_owned(),
+                ticket.clone(),
+                r.record().1.to_owned(),
+            )
+        })
+    {
+        let owner = registrations.iter_mut();
+        let mut owner = owner.filter(|r| r.namespace == namespace && r.ticket == ticket);
+        owner.next().unwrap().receipts.push(row);
+    }
+    let runs = projection.memberships(&registrations).unwrap();
     anchors.settle(
         &f.binding.source,
         (bytes.len() as u64, String::new()),
@@ -115,6 +132,36 @@ async fn joined_input_gets_the_merged_answer_in_every_absorption_order() {
             "order={order}"
         );
         assert_eq!(*harness.port.joined.lock().unwrap(), [B], "order={order}");
+    }
+}
+
+/// A row equal to the frame only after trimming, or with an image beside its text, has no exact
+/// receipt, so its answer posts without a reference and nothing is marked.
+#[tokio::test]
+async fn class_hash_match_without_exact_receipt_binds_nothing() {
+    let image =
+        json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA=="}});
+    let mixed = json!({"type":"user","uuid":"u","sessionId":"parent",
+        "message":{"content":[{"type":"text","text":"ours"}, image]}});
+    for (case, row) in [user("u", " ours "), mixed].into_iter().enumerate() {
+        let f = Fixture::new();
+        f.register("b", "ours");
+        let at = append(&f, &[row, answer("one")]);
+        let harness = Harness::new();
+        harness.gate.acquired();
+        let (mut writer, anchors) = (harness.writer(), Anchors::default());
+        writer.attach_reply_anchors(anchors.clone());
+        settle(&f, &anchors, &registrations(&f, &[("b", B)]));
+        assert_eq!(writer.deliver(&piece(&f, "one", at)).await, Step::Done);
+        assert_eq!(
+            *harness.port.reply_to.lock().unwrap(),
+            [None],
+            "case={case}"
+        );
+        assert!(
+            harness.port.joined.lock().unwrap().is_empty(),
+            "case={case}"
+        );
     }
 }
 

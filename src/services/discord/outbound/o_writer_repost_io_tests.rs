@@ -180,6 +180,26 @@ pub(crate) async fn dispatch(
     send_within(port, &envelope(), live, Duration::from_secs(10)).await
 }
 
+/// A replying re-post sends the reference on the same request, keeping its nonce, and a deleted
+/// anchor does not fail the post.
+#[tokio::test]
+async fn repost_reply_travels_as_the_message_reference() {
+    let mock = Mock::start(vec![created(Some(MARKER))]).await;
+    let mut envelope = envelope();
+    envelope.reply_to = Some(4242);
+    let report = send_within(&mock.port(), &envelope, always(), Duration::from_secs(5)).await;
+    assert_eq!((report.wire, report.counted), (1, 1));
+    let requests = mock.requests();
+    let body: Value = serde_json::from_slice(&requests[0].1).unwrap();
+    assert_eq!(body["message_reference"]["message_id"], json!("4242"));
+    assert_eq!(
+        body["message_reference"]["fail_if_not_exists"],
+        json!(false)
+    );
+    let ids = RepostIds::for_piece(MARKER).unwrap();
+    assert_eq!(body["nonce"], json!(ids.nonce()));
+}
+
 fn summary(report: &DispatchReport) -> Summary {
     let kind = match &report.outcome {
         WireOutcome::Created(_) => "created",

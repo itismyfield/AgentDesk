@@ -6,7 +6,8 @@ use crate::services::tui_o::writer::reply_anchor::{RunAnchor, anchor_of};
 
 impl Projection {
     /// Every run opened so far with its opener and joined anchors. Each registration is offered
-    /// to the reduction, whose uniqueness rules decide membership; a repeated body binds nothing.
+    /// to the reduction, whose uniqueness rules decide membership; a member needs exact evidence,
+    /// and a repeated body binds nothing.
     pub(crate) fn memberships(
         &self,
         registrations: &[Registration],
@@ -27,11 +28,12 @@ impl Projection {
             (&self.facts, None),
             &scoped,
             self.through,
-            Some(&mut |registration, range, _| {
+            Some(&mut |registration, range, row| {
                 let known = members.iter().any(|(namespace, ticket, _)| {
                     *namespace == registration.namespace && *ticket == registration.ticket
                 });
-                if !known {
+                // Only exact evidence names an anchor; a trimmed class-hash match is a guess.
+                if !known && super::super::receipt::exact(&receipts, registration, row) {
                     // The same exact body twice after the offset is no single row.
                     let at = (!super::super::receipt::repeated(&receipts, registration))
                         .then_some(range.0);

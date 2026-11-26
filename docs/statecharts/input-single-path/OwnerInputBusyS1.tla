@@ -24,8 +24,11 @@ Bind == <<pin, sel, aBound, bBound>>
 Pending == {"queued", "held"}
 Delivered == {"pasted", "joined", "running", "ended", "answered"}
 TerminalOk == Scenario # "i8432"
-\* A turn AgentDesk did not start has no Discord anchor and no mailbox token.
-AnchoredA == Scenario # "external"
+\* A turn AgentDesk did not start has no Discord anchor and no mailbox token. In "nearmiss" that
+\* external prompt equals B's frame only after trimming: no exact receipt names it, so it binds
+\* nothing (ClassHashFallback mutant binds it to B by the trimmed class hash).
+External == Scenario \in {"external", "nearmiss"}
+AnchoredA == ~External
 ATarget == IF AnchoredA THEN "A" ELSE IF merged THEN "B" ELSE "none"
 \* Pre-key checks that want a bound source (mutants of Target; all of them in Current).
 SourceGate == \/ Policy = "Current"
@@ -36,7 +39,7 @@ SourceGate == \/ Policy = "Current"
 
 Init == /\ a = IF Scenario = "fresh" THEN "none" ELSE "running"
         /\ screen = IF Scenario = "fresh" THEN "Idle" ELSE "Busy"
-        /\ token = IF Scenario \in {"fresh", "external"} THEN "none" ELSE "A"
+        /\ token = IF Scenario = "fresh" \/ External THEN "none" ELSE "A"
         /\ b = "absent" /\ keys = 0 /\ aReplies = 0 /\ bReplies = 0
         /\ wake = FALSE /\ blocker = Blocker
         /\ mark = FALSE /\ merged = FALSE /\ aTo = "unset" /\ bTo = "unset"
@@ -63,6 +66,7 @@ AEnds == /\ a = "running"
          /\ aTo' = CASE Mutant = "NoReference" -> "none"
                       [] AnchoredA /\ aBound -> "A"
                       [] b = "joined" /\ bBound -> "B"
+                      [] Scenario = "nearmiss" /\ Mutant = "ClassHashFallback" /\ reg -> "B"
                       [] Mutant = "PostOrder" /\ b = "pasted" -> "B"
                       [] OTHER -> "none"
          /\ bTo' = IF Mutant = "JoinDoublePost" /\ b = "joined" THEN "B" ELSE bTo

@@ -79,6 +79,22 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
         digest: format!("{:x}", digest.finalize()),
     })
 }
+/// A row with an id needs its recorded receipt; a queue record without one needs the ticket's
+/// single exact enqueue after its offset.
+pub(super) fn exact(facts: &[&Fact], registration: &Registration, row: Option<&str>) -> bool {
+    if let Some(row) = row {
+        return registration.receipts.iter().any(|known| known == row);
+    }
+    let offset = registration
+        .ticket
+        .source
+        .as_ref()
+        .map_or(u64::MAX, |s| s.offset);
+    let enqueue = |f: &&&Fact| f.kind == "enqueue" && f.range.0 >= offset;
+    let hash = |f: &&&Fact| f.hashes.contains(&registration.exact_frame_hash);
+    facts.iter().filter(enqueue).filter(hash).count() == 1
+}
+
 /// More than one row of a kind after the ticket's offset carries its exact hash.
 pub(super) fn repeated(facts: &[&Fact], registration: &Registration) -> bool {
     let offset = registration

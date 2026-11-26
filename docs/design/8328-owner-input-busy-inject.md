@@ -245,7 +245,7 @@ tui_o store에 채널별 durable journal `anchor_bindings`(새 child `src/servic
 - 키는 `(source id, native turn id)`다. source id는 dev·ino를 포함한 transcript 신원(`tui_o/shadow/mod.rs:50-`)이다.
 - 값: opener anchor(없으면 None), 합류 anchor 목록, 결합 근거(입력 행 range, nonce), 확정 시각.
 - tui_o store는 이미 채널별 ledger·spool을 durable하게 쓴다(`tui_o/store/ledger.rs`, `spool.rs`). 같은 디렉터리·같은 잠금 규칙을 따른다.
-- (S1-A 구현) `Prepared` 형식은 그대로 두고, `OutputOrigin`과 같은 방식의 새 항목 `LedgerEntry::ReplyTo{serial, anchor}`를 `Prepared` 바로 앞에 쓴다(`src/services/tui_o/store/ledger/reply_to.rs`). 결합 기록이 durable해진 뒤에만 쓴다. 로컬 재시도·operator resume은 이 값을 `ReplyRef::Fixed`로 다시 실어 같은 reply를 쓴다. `Prepared`에 선택 필드를 더하지 않은 이유: 시험 fixture의 `Prepared` 리터럴 약 75곳이 모두 바뀌기 때문이다(동작은 같다).
+- (S1-A 구현) `Prepared` 형식은 그대로 두고, `OutputOrigin`과 같은 방식의 새 항목 `LedgerEntry::ReplyTo{serial, anchor}`를 `Prepared` 바로 앞에 쓴다(`src/services/tui_o/store/ledger/reply_to.rs`). 결합 기록이 durable해진 뒤에만 쓴다. 로컬 재시도·operator resume은 이 값을 `ReplyRef::Fixed`로 다시 실어 같은 reply를 쓴다. DispatchPermit 재게시는 원본 serial의 값을 새 serial의 `Prepared` 앞에 같은 `ReplyTo`로 쓰고, `RepostEnvelope`가 같은 요청에 message reference(`fail_if_not_exists(false)`)로 싣는다. `Prepared`에 선택 필드를 더하지 않은 이유: 시험 fixture의 `Prepared` 리터럴 약 75곳이 모두 바뀌기 때문이다(동작은 같다).
 
 ### 5.3 복구 kickoff 전 보류 (H10)
 
@@ -332,7 +332,7 @@ U3로 H5에 포함된다. 조각 S1-E에서 `restore_inflight.rs:2248` kickoff �
 |---|---|---|
 | 키 전 `Producer::wrap` → `pin_source`(E2·E3) | BindingIntent 생성 | recorded 또는 지연 pin. 실패면 키 0, `release_unkeyed_source`(`native_binding.rs:134-160`)가 no-key proof로 정리 |
 | 늦은 결합 `retry_source_bindings`(`native_supply.rs:602`) | BindingIntent·selected | §5.5.3 단일 확정 → history binding → ACK |
-| J2 receipt `observe` → `port.inner.receipt`(`tui_o/writer/rotation/owe.rs:594-617`) | MembershipReceipt | 등록 ticket과 user 행을 잇는다. receipt를 다 기록한 뒤 같은 poll에서 `settle_anchors`가 evidence 축약의 ticket→run 관계(`input_facts/native/projection/membership.rs`)로 run별 opener·합류를 다시 계산한다. anchor는 ticket `key.identity.primary`다 |
+| J2 receipt `observe` → `port.inner.receipt`(`tui_o/writer/rotation/owe.rs:594-617`) | MembershipReceipt | 등록 ticket과 user 행을 잇는다. receipt를 다 기록한 뒤 같은 poll에서 `settle_anchors`가 evidence 축약의 ticket→run 관계(`input_facts/native/projection/membership.rs`)로 run별 opener·합류를 다시 계산한다. anchor는 ticket `key.identity.primary`다. 행 id가 있는 결합은 그 행의 기록된 exact receipt가, 행 id 없는 흡수는 유일한 exact enqueue가 있어야 하고, trim한 class hash로만 맞는 행은 결합하지 않는다 |
 | `anchor_bindings`·`LedgerEntry::ReplyTo`(§5.2) | 결합 기록 | 게시·재게시·로컬 재시도가 같은 anchor를 쓴다 |
 | Idle 전송 `idle_claude` → `send_warm_followup_owned` → `submission::send`, Herdr 재시도 `probe` → `held_watch::verdict`(§5.5.4 P2-1) | 키 허가·보류 해제 | 허용한 `pre_source` 입력의 전송·보류 해제에 source 생성이 다시 필수 조건으로 들어오지 않는다(S1-B) |
 | 부팅 `retry_source_bindings`, writer boot | BindingIntent·anchor_bindings | §8 |
