@@ -127,19 +127,23 @@ SyncOutcome == CASE cache = "Herdr" -> "HerdrPath"
                  [] OTHER -> "TmuxPath"
 
 \* ---- S2 placement section: definitions used by Init ----
+ReplacedEntries == {"LegacyReplaced", "LegacyLiveReplacement", "UserDefaultReplaced"}
 S2Entries == {"NewThread", "FreshAfterKill", "ResumeTmux", "TmuxParentThread",
               "LiveTmuxNoSel", "SelUnknown", "RetiredNative",
               "RetryNew", "DispatchNew", "StaleBound", "RestartVacant",
               "LostCommand", "LostCommandHeld", "SlotSuccessor",
-              "LostAfterKey", "LostCommandShellUsed"}
+              "LostAfterKey", "LostCommandShellUsed"} \union ReplacedEntries
 HerdrParentS2 == S2Entries \ {"TmuxParentThread"}
 S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDead"
                       [] entry = "LiveTmuxNoSel" -> "Tmux"
                       [] entry = "SelUnknown" -> "Unread"
                       [] entry = "RetiredNative" -> "Retired"
                       [] entry = "StaleBound" -> "Bound"
+                      [] entry \in ReplacedEntries -> "Placed"
                       [] OTHER -> "None"
-          /\ made = FALSE /\ tabs = 0 /\ tmuxs = 0
+          /\ made = (entry \in ReplacedEntries)
+          /\ tabs = IF entry = "LegacyLiveReplacement" THEN 1 ELSE 0
+          /\ tmuxs = 0
           /\ inq = IF entry \in S2Entries \ {"StaleBound", "RestartVacant"} THEN "Queued" ELSE "None"
           /\ submits = 0
           \* turn_host.rs:446 o_writer_ready(child, kind) at the first judgement; a child that
@@ -160,10 +164,14 @@ S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDe
           /\ rst = (entry = "DispatchNew")
           \* w3: the placed pane ran its command (P1-1); a successor in the released thread and
           \* the thread's archive (P1-2).
-          /\ ran = TRUE /\ closed = "None" /\ succ = FALSE /\ archived = FALSE /\ hitLive = FALSE
+          /\ ran = (entry \notin ReplacedEntries) /\ closed = "None" /\ succ = FALSE /\ archived = FALSE /\ hitLive = FALSE
           \* w4: the current execution's recorded pane is gone; execution generations; the
           \* generation whose pane was seen gone; a retire that hit a later generation.
-          /\ gone = FALSE /\ gen = 0 /\ goneGen = 0 /\ lostSucc = FALSE
+          \* Replacement entries start just after B answers Missing. Only the live-A
+          \* entry still has a pane (outside B), and its input has never been tried.
+          /\ gone = (entry \in ReplacedEntries)
+          /\ gen = IF gone THEN 1 ELSE 0
+          /\ goneGen = gen /\ lostSucc = FALSE
 
 Init == /\ entry \in Entries
         /\ proof \in {"Ok", "Pending"}
@@ -551,16 +559,13 @@ PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
                 /\ gone' = TRUE /\ goneGen' = gen /\ tabs' = tabs - 1
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
                                slot, judged, unsent, receipt, gen, lostSucc>>
-\* w4 (P1-1 rest): the placed resolver owns the exact Missing retire. reconnect_unless_pending
-\* returns for a Pending (recovery_engine/herdr_reader.rs:425-427) before its Missing retire
-\* (:449-458), so design w3 never retires this row (MutW4PendingEarlyReturn). The read is the
-\* existing absence rule (session_host/herdr_gate.rs:856-876: snapshot presence Missing on the
-\* launch's witness), the write the exact CAS retire_own_pending(.., Some(location))
-\* (herdr_launch.rs:695-715: same Pending, nonce, location, no evidence). Missing is no resend
-\* permit: only an untried original is KnownNotSent.
+\* The placed resolver needs Missing on a single witness. LegacyDedicated uses
+\* fresh E7 Off. UserDefault matches the nonce's stored grant before reading.
+\* Missing permits no replay of a submitted input.
 MissingRetireOk == CASE Mode = "MutW4MissingNoCas" -> goneGen > 0 /\ exec \in HerdrExec
                      [] Mode = "MutW4UnreadAsMissing" -> exec = "Placed" /\ ~hkey
                      [] OTHER -> exec = "Placed" /\ gone /\ goneGen = gen
+                                 /\ entry # "UserDefaultReplaced"
 PlacedMissingRetire ==
     /\ UNCHANGED vars /\ S2Like /\ Mode \notin {"MutW3NoPlacedResidue", "MutW4PendingEarlyReturn"}
     /\ (epoch = restarts2 \/ BootResolves) /\ MissingRetireOk
@@ -604,10 +609,10 @@ SpecS2 == Init /\ [][NextS2]_allvars
 
 \* A new execution under a Herdr parent is Herdr: no tmux session, after restart, thread_gc and
 \* slot reset included (every relaunch goes through Launch).
-NewThreadFollowsParent == entry \in {"NewThread", "FreshAfterKill", "RetryNew", "DispatchNew",
+NewThreadFollowsParent == (entry \in {"NewThread", "FreshAfterKill", "RetryNew", "DispatchNew",
                                      "RestartVacant", "LostCommand", "LostCommandHeld",
                                      "SlotSuccessor", "LostAfterKey", "LostCommandShellUsed"}
-                          => tmuxs = 0
+                          \/ entry \in ReplacedEntries) => tmuxs = 0
 ExistingTmuxStaysTmux == entry = "ResumeTmux" => tabs = 0 /\ exec \notin HerdrExec
 TmuxParentStaysTmux == entry = "TmuxParentThread" => tabs = 0 /\ exec \notin HerdrExec
 NoInputRefused == inq # "Refused"
@@ -638,4 +643,5 @@ TouchedResidueHeld == closed # "Touched"
 ArchiveSparesLive == ~hitLive
 \* w4: a Missing retire ends only the generation whose pane it saw gone.
 RetireOwnGeneration == ~lostSucc
+UserDefaultReplacementHeld == entry = "UserDefaultReplaced" => exec = "Placed" /\ submits = 0
 =============================================================================

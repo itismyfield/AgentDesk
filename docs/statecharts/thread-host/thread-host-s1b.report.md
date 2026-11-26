@@ -292,3 +292,20 @@ New rule: `RetireOwnGeneration` (a Missing retire ends only the generation whose
 | `MutW4MissingResubmits` | RED | `SingleSubmit` (Missing taken as a resend permit) |
 
 The model does not separate a list failure from a witness change: both are "no Missing seen", the hold `MutW4UnreadAsMissing` breaks. The production test T-S2-21 names each.
+
+### S2b-1 witness policy
+
+LegacyDedicated reads Missing on one fresh E7-Off witness. UserDefault requires the current witness to match the nonce's saved grant. The replacement entries start with B's snapshot reporting Missing for a placed Pending. In `LegacyReplaced`, A has stopped. In `UserDefaultReplaced`, the missing pane cannot authorize retire and the original stays queued.
+
+| Config suffix | Before | After | Broken rules |
+|---|---:|---:|---|
+| S2W4All | 8,840 states · GREEN | 9,826 states · GREEN | — |
+| S2W4Lost | 4,932 states · GREEN | 5,886 states · GREEN | — |
+| MutW4MissingNoCas | 7,000 states · RED | 7,000 states · RED | RetireOwnGeneration, NoDuplicatePane, FirstInputResolves |
+| MutW4MissingResubmits | 1,390 states · RED | 1,390 states · RED | SingleSubmit |
+| MutW4PendingEarlyReturn | 778 states · RED | 778 states · RED | FirstInputResolves |
+| MutW4UnreadAsMissing | 1,606 states · RED | 1,606 states · RED | NoDuplicatePane |
+
+The isolated `LegacyLiveReplacement` entry retains A's pane in the total. The shortest `NoDuplicatePane` counterexample is `PlacedMissingRetire → Launch → Create` on B. `SingleSubmit`, `RetireOwnGeneration`, and `FirstInputResolves` hold. TLC reached 954 states.
+
+Removing the UserDefault witness guard in an isolated run produced `UserDefaultReplacementHeld` RED at `PlacedMissingRetire` (954 states). This models the startup-proof exception in `session_host/herdr/policy/permit.rs:176–189`. Listing failure and a witness change during the read still produce no confirmed Missing. PG tests cover the real snapshot, the expected field, stale CAS, and Retired after the first key.
