@@ -1,6 +1,7 @@
 //! A routine start through the real launch: the run row it plans reaches the owner as the
 //! admitted context, so a persistent routine stays persistent and a fresh one fresh.
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -44,7 +45,7 @@ async fn admitted_context(strategy: &str) -> Value {
         .execute(&pool)
         .await
         .unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry), 60);
     let start = executor.start_agent_run(
         &store,
         claimed,

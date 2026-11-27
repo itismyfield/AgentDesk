@@ -2000,6 +2000,7 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_ports.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── routine_reset.rs
 │   │   │   ├── runtime_resolve.rs
@@ -4424,6 +4425,7 @@ src/
 │   │   │   ├── start_deferral.rs
 │   │   │   └── surface.rs
 │   │   ├── discord_log/
+│   │   │   ├── bot_http_tests.rs
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
 │   │   │   └── presentation.rs
@@ -4450,6 +4452,7 @@ src/
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
+│   │   ├── discord_port.rs
 │   │   ├── execution_mode.rs
 │   │   ├── execution_mode_pg_tests.rs
 │   │   ├── failure_escalation_pg_tests.rs

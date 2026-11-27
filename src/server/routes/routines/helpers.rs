@@ -2,6 +2,9 @@ use axum::http::StatusCode;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult, ErrorCode};
+use crate::services::discord::health::routine_ports::{
+    build_routine_agent_executor, build_routine_discord_logger,
+};
 use crate::services::routines::{
     RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, RoutineSessionController,
     RoutineStore, is_migrated_launchd_script_ref, validate_routine_runtime_config,
@@ -91,7 +94,7 @@ pub(super) fn routine_agent_executor(state: &AppState) -> AppResult<RoutineAgent
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineAgentExecutor::new(
+    Ok(build_routine_agent_executor(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
         state.config.routines.agent_timeout_secs,
@@ -107,7 +110,7 @@ pub(super) fn routine_discord_logger(state: &AppState) -> AppResult<RoutineDisco
             "postgres pool unavailable; routines require postgresql",
         ));
     };
-    Ok(RoutineDiscordLogger::new_with_health_registry(
+    Ok(build_routine_discord_logger(
         std::sync::Arc::new(pool),
         state.health_registry.clone(),
     ))

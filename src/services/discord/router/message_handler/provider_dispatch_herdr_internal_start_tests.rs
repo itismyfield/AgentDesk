@@ -149,8 +149,9 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
 #[test]
 fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
     use crate::services::claude_tui::busy_inject::Screen;
+    use crate::services::discord::health::routine_ports::build_routine_agent_executor;
     use crate::services::discord::queue_io::input_owner::held_watch;
-    use crate::services::routines::{NewRoutine, RoutineAgentExecutor, RoutineStore};
+    use crate::services::routines::{NewRoutine, RoutineStore};
     use discord::router::message_handler::provider_dispatch::OwnerTurn;
 
     let fx = Fixture::new("routine-settlement-herdr-idle", None);
@@ -248,7 +249,7 @@ fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
             held_watch::Verdict::Keep
         );
 
-        let executor = RoutineAgentExecutor::new(pool, Some(registry), 60);
+        let executor = build_routine_agent_executor(pool, Some(registry), 60);
         let outcomes = executor.poll_agent_runs(&store, 10, false).await.unwrap();
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].status, "failed");

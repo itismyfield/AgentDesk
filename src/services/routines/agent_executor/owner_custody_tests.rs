@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::runtime_store::durable_probe;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 
@@ -65,7 +66,7 @@ async fn cutpoint(pending_owner: bool) {
         .unwrap();
     sqlx::query("INSERT INTO session_transcripts(turn_id,assistant_message) VALUES($1,'unrelated old completion')").bind(turn).execute(&pool).await.unwrap();
     sqlx::query("UPDATE routine_runs SET started_at=NOW()-INTERVAL '2 hours',next_retry_at=NOW()-INTERVAL '1 second',lease_expires_at=NOW()-INTERVAL '1 second' WHERE id=$1").bind(&claimed.run_id).execute(&pool).await.unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1);
     OWNER
         .scope(
             restarted,

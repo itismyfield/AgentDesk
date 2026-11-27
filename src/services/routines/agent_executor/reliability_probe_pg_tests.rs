@@ -1,7 +1,8 @@
 //! A fresh run's provider-session probe against PostgreSQL legacy session rows.
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::provider::ProviderKind;
+use crate::services::routines::agent_executor::routine_agent_session_name;
 use crate::services::routines::agent_executor::tests::running_run;
-use crate::services::routines::agent_executor::{RoutineAgentExecutor, routine_agent_session_name};
 use crate::services::routines::store::RunningAgentRoutineRun;
 use chrono::{Duration, Utc};
 use serde_json::{Value, json};
@@ -122,7 +123,7 @@ async fn fresh_probe_failure_stands_only_for_a_found_legacy_row_pg() {
     seed("qwen", TOKEN, current("qwen", TOKEN, "w2b qwen"), 6, None).await;
 
     let executor = |registry: Option<Arc<HealthRegistry>>| {
-        RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
+        build_routine_agent_executor(Arc::new(pool.clone()), registry, 60)
     };
     let registered = executor(Some(registry.clone()));
     let text = |n: u64| Some(json!(channel(n).to_string()));

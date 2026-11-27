@@ -22,7 +22,9 @@ impl RoutineAgentExecutor {
             next_due_at,
             execution_mode,
         } = start;
-        let Some(registry) = self.health_registry.as_deref() else {
+        let (Some(registry), Some(bot_http)) =
+            (self.health_registry.as_deref(), self.bot_http.as_deref())
+        else {
             return Err(anyhow!(
                 "routine agent action requires discord runtime health registry"
             ));
@@ -79,7 +81,7 @@ impl RoutineAgentExecutor {
             let routine_channel = self
                 .resolve_or_create_routine_thread(
                     store,
-                    registry,
+                    bot_http,
                     claimed,
                     agent_id,
                     provider.as_str(),

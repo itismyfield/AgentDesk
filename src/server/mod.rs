@@ -2372,9 +2372,11 @@ async fn routine_runtime_loop(
     routines_config: crate::config::RoutinesConfig,
     tick_interval_secs: u64,
 ) {
+    use crate::services::discord::health::routine_ports::{
+        build_routine_agent_executor, build_routine_discord_logger,
+    };
     use crate::services::routines::{
-        RoutineAction, RoutineAgentExecutor, RoutineDiscordLogger, RoutineStore,
-        after_startup_grace, poll_agent_turns, run_due_tick,
+        RoutineAction, RoutineStore, after_startup_grace, poll_agent_turns, run_due_tick,
     };
     let boot = tokio::time::Instant::now();
     let Some(tick_interval_secs) = std::num::NonZeroU64::new(tick_interval_secs) else {
@@ -2412,10 +2414,9 @@ async fn routine_runtime_loop(
         routines_config.max_checkpoint_bytes,
     );
     routine_script_audit::warn_once_unregistered(pg_pool.as_ref(), &routine_script_dirs).await;
-    let discord_logger =
-        RoutineDiscordLogger::new_with_health_registry(pg_pool.clone(), health_registry.clone());
+    let discord_logger = build_routine_discord_logger(pg_pool.clone(), health_registry.clone());
     let agent_executor =
-        RoutineAgentExecutor::new(pg_pool, health_registry, routines_config.agent_timeout_secs)
+        build_routine_agent_executor(pg_pool, health_registry, routines_config.agent_timeout_secs)
             .with_headless_fresh_agents(routines_config.headless_fresh_agents);
     match agent_executor.recover_stale_running_runs(&store).await {
         Ok(recovered) if !recovered.is_empty() => {

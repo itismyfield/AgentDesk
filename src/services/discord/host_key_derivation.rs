@@ -3,7 +3,6 @@
 
 use sqlx::PgPool;
 
-use super::health::HealthRegistry;
 use super::inflight::{KeyedTeardown, teardown_for_lookup};
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityConflictKind, SessionIdentityKind,
@@ -154,7 +153,7 @@ pub(super) async fn derive_channel_session_key(
 /// Whether a routine probe's failure on `tmux_name` may stand: the row behind a registered
 /// hash is a found legacy row and no marker or inflight row names another host.
 pub(crate) async fn routine_session_failure_admitted(
-    registry: Option<&HealthRegistry>,
+    registered_hashes: impl Future<Output = Vec<String>> + Send,
     pool: &PgPool,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -169,10 +168,7 @@ pub(crate) async fn routine_session_failure_admitted(
         );
         return false;
     };
-    let hashes = match registry {
-        Some(registry) => registry.registered_token_hashes(provider).await,
-        None => Vec::new(),
-    };
+    let hashes = registered_hashes.await;
     let lookup = derive_hosted_lookup(pool, &hashes, provider, channel_id, tmux_name).await;
     let teardown = teardown_for_lookup(
         lookup,

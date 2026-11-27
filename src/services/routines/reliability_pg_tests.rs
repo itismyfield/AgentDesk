@@ -7,12 +7,14 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::routine_ports::{
+    build_routine_agent_executor, build_routine_discord_logger,
+};
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 use crate::services::routines::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
 use crate::services::routines::store::{ClaimedRoutineRun, NewRoutine, RoutineStore};
 use crate::services::routines::{
-    RoutineAgentExecutor, RoutineDiscordLogger, RoutineScriptLoader, after_startup_grace,
-    run_due_tick, runtime::RoutineRunOutcome,
+    RoutineScriptLoader, after_startup_grace, run_due_tick, runtime::RoutineRunOutcome,
 };
 
 fn store(pool: &PgPool) -> RoutineStore {
@@ -96,7 +98,7 @@ async fn agent_start_before_provider_registers_defers_then_fails_after_window_pg
     let claimed = claim_boot_agent_run(&store).await;
     let run_id = claimed.run_id.clone();
     // A registry with no provider registered yet is the state right after a restart.
-    let executor = RoutineAgentExecutor::new(
+    let executor = build_routine_agent_executor(
         Arc::new(pool.clone()),
         Some(Arc::new(HealthRegistry::new())),
         60,
@@ -136,7 +138,7 @@ async fn dm_agent_start_before_runtime_is_ready_defers_then_fails_after_window_p
     // reports a runtime that is not ready.
     let registry = Arc::new(HealthRegistry::new());
     register_bot_auth_for_tests(&registry, "claude", 6551001, None, Vec::new(), false).await;
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry), 60);
 
     let outcome = executor
         .start_agent_run(
@@ -237,7 +239,7 @@ async fn logged_unicode_object_completion_and_next_due_run_persist_pg() {
     let temp = tempfile::tempdir().unwrap();
     let loader = RoutineScriptLoader::new().unwrap();
     let store = store(&pool);
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let dirs = [temp.path().to_path_buf()];
     for name in ["unicode-result", "next-result"] {
         let script_path = temp.path().join(format!("{name}.js"));
@@ -290,7 +292,7 @@ async fn consecutive_failure_alert_fires_once_per_streak_pg() {
         ))
         .await
         .unwrap();
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let past = Utc::now() - Duration::minutes(5);
     let alerts = || async {
         sqlx::query_scalar::<_, i64>(
@@ -386,7 +388,7 @@ async fn checkpoint_rejected_completion_counts_toward_the_failure_alert_pg() {
         64,
     );
     let routine = store.attach_routine(routine).await.unwrap();
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let past = Utc::now() - Duration::minutes(5);
     let make_due = || async {
         sqlx::query("UPDATE routines SET next_due_at = $2 WHERE id = $1")
@@ -517,7 +519,7 @@ async fn fresh_terminal_turn_error_ends_run_as_failure_before_timeout_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1800);
     let cancelled =
         started_agent_run(&pool, &store, "fresh-cancelled", "fresh", "discord:7001:1").await;
     quality_event(&pool, "discord:7001:1", "turn_error", "cancelled", 60).await;
@@ -578,7 +580,7 @@ async fn a_run_whose_turn_was_submitted_never_starts_a_second_turn_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1800);
     let headless = ExecutionDefinition {
         mode: RoutineExecutionMode::Headless,
         runner: serde_json::json!({"kind": "quickjs", "script_ref": "x.js"}),
@@ -655,7 +657,7 @@ async fn a_run_times_out_from_its_actual_start_not_from_its_claim_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1800);
     // Claimed ten minutes ago with a five minute budget, but started only now.
     let mut routine = new_routine("late-start", None, None);
     routine.timeout_secs = Some(300);
