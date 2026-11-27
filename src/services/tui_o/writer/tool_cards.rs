@@ -165,6 +165,7 @@ impl ToolCardRun {
             index: 0,
             payload,
             notice_origin: None,
+            reply: None,
         })]
     }
 

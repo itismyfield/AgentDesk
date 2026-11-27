@@ -7,6 +7,8 @@ const NAMESPACE: &str = "notice-owner-tests";
 
 #[path = "notice_cache_tests.rs"]
 mod cache_tests;
+#[path = "notice_owner_command_tests.rs"]
+mod command_tests;
 #[path = "notice_resume_tests.rs"]
 mod resume_tests;
 
