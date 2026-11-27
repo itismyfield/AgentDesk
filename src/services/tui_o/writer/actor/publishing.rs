@@ -277,7 +277,7 @@ where
         }
         // A wake can capture a new piece after the delivery phase. Drain it without another timer.
         if quiescent && position.debt != 0 {
-            next = None;
+            next = Some(Duration::ZERO);
         }
         quiescent = sources_resumed
             && restart_ready

@@ -182,7 +182,7 @@ async fn idle_tick_unchanged_source_skips_work_at_the_head_of_the_loop() {
     let (_harness, _, _, bindings, stop, task) = start_idle(838501);
     polls(2).await;
     let before = bindings.source_checks.load(Ordering::SeqCst);
-    assert!(before > 0, "startup reached the source observation path");
+    assert!(before > 2, "startup reached the source observation path");
     polls(3).await;
     assert_eq!(bindings.source_checks.load(Ordering::SeqCst), before);
     halt(stop, task).await;
@@ -265,4 +265,26 @@ fn idle_tick_spool_stamp_moves_only_when_capture_commits() {
     };
     store.append_spool(&batch, &capture.prefix_hash()).unwrap();
     assert_eq!(store.spool_generation(), generation + 1);
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_same_length_replacement_is_rejected_without_delivery() {
+    let (harness, path, _, _, _stop, task) = start_idle(838506);
+    idle_window().await;
+    let replacement = path.with_file_name("replacement.jsonl");
+    std::fs::copy(&path, &replacement).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&replacement)
+        .unwrap()
+        .set_modified(std::fs::metadata(&path).unwrap().modified().unwrap())
+        .unwrap();
+    std::fs::rename(replacement, path).unwrap();
+    polls(15).await;
+    assert!(
+        task.is_finished(),
+        "a replaced transcript must halt capture"
+    );
+    assert!(task.await.unwrap().is_some());
+    assert!(harness.port.posts().is_empty());
 }

@@ -144,7 +144,11 @@ impl Tick {
             () = self.listener.1.notified() => {},
             () = demand.0.wake.notified() => {},
             () = actor.transitions.notified() => {},
-            () = tokio::time::sleep(delay) => return true,
+            () = async {
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            } => return true,
         }
         self.stamp = None;
         self.interval = POLL_INTERVAL;

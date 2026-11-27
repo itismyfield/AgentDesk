@@ -52,7 +52,7 @@ relevant 99, sha256 약 300, pane_liveness 314+207, legacy-body-census-writer 73
 | ledger append/replay | `src/services/tui_o/store/mod.rs:483`; `src/services/tui_o/store/ledger.rs:447`, `:794`, `:839` | append 후 apply; complete unknown JSON variant는 damage 오류, truncate 대상 아님 |
 | notice format floor/handover | `src/services/tui_o/store/input_notice_floor.rs:13`, `:43`; `src/services/tui_o/writer/input_notices.rs:39` | `input_notice.floor=1`, migration_started durable 확인 뒤 relay→writer handover |
 | startup/incarnation deriver | `src/services/tui_o/writer/actor/fresh_resume.rs:24`, `:135` | rescope는 Codex만; Claude notice 만료 신호로 사용 불가. rebuild가 ledger를 지우지 않음 |
-| boot/주기 재진입 | `src/services/tui_o/writer/actor/publishing.rs:193`, `:250`; `src/services/tui_o/writer/actor.rs:623`, `:654` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
+| boot/주기 재진입 | `src/services/tui_o/writer/actor/publishing.rs:193`, `:250`; `src/services/tui_o/writer/actor.rs:623`, `:650` | 한 actor loop에 prepare 두 번; follow/capture/tend 뒤 새 evidence persist |
 | pending 열거·origin 재시도 | `src/services/tui_o/writer/actor/notice_work.rs:238`, `:256`, `:268` | Posted/Excluded 외 전부 clone; 미완성은 binding log 재조회 |
 | Batch owner snapshot | `src/services/tui_input/human_frame/history/notice_owner.rs:67`, `:80`, `:100`, `:132` | history 읽기, source별 census, origin별 후보; stable history/context/native fingerprint 재확인 |
 | candidate/blocked 생성 | `src/services/tui_input/human_frame/history/notice_owner.rs:176`, `:225`, `:264`, `:309` | source/owner/nonce/context 불일치 → hash별 registration_source_mismatch; unbound → unbound_pre_source |
