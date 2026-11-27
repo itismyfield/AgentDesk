@@ -12,7 +12,7 @@ mod runtime_validation;
 pub use runtime_settings::RuntimeSettingsConfig;
 /// Runtime-validation fixtures for the tests mounted in the root test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use runtime_validation::tests as runtime_validation_fixtures;
+pub(crate) use runtime_validation::test_support as runtime_validation_fixtures;
 
 mod agent_memory;
 pub use agent_memory::{AgentDef, SharedKnowledgeInjection};
@@ -2948,7 +2948,7 @@ pub(crate) use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_r
 /// that one guard drops, and the remaining restores then run unlocked; a sibling
 /// test that takes the mutex in that gap sees a half-restored environment, and
 /// the vars still to be restored name tempdirs this value has already deleted.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) struct PinnedRuntimeHost {
     pub(crate) root: tempfile::TempDir,
     pub(crate) claude_home: tempfile::TempDir,
@@ -2962,7 +2962,7 @@ pub(crate) struct PinnedRuntimeHost {
 /// runtime root here because it takes that mutex itself, and re-acquiring it on
 /// one thread panics by design — which is why the root's env key is spelled out
 /// below rather than reached through that helper.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[track_caller]
 pub(crate) fn pin_runtime_host_for_test() -> PinnedRuntimeHost {
     let env_lock = test_env_lock::acquire_shared_test_env_lock();

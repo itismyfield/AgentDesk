@@ -79,7 +79,7 @@ async fn issue_sync_preserves_metadata_on_label_change_and_removal_pg() {
     };
     let body = serde_json::from_value(json!({"repo": "sync/repo"})).unwrap();
     let (_, axum::Json(response)) =
-        crate::server::routes::auto_queue::generate(axum::extract::State(state), axum::Json(body))
+        crate::services::auto_queue::route::generate(axum::extract::State(state), axum::Json(body))
             .await
             .unwrap();
     assert_eq!(

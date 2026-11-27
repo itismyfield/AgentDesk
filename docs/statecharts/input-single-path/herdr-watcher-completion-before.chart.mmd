@@ -1,0 +1,119 @@
+---
+title: "A Claude Herdr answer is posted while its lease remains held"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Breaks NoSilentLoss
+    lg1: Path to the HeldEventuallyDelivered or NoSilentLoss bug
+    lg2: Repeats forever, so HeldEventuallyDelivered breaks
+  }
+  class lg0 breaks
+  class lg1 bugPath
+  class lg2 repeats
+  s0: Prelaunch with a queued input
+  s1: Host Busy, input queued, answer pending, terminal pending
+  s2: Host Busy, input queued, answer pending, terminal refused
+  s3: Host Busy, input queued, answer posted, terminal pending
+  s4: Host Idle, input queued, answer pending, terminal pending
+  s5: Host Busy, input queued, answer posted, terminal refused
+  s6: Host Idle, input queued, answer pending, terminal refused
+  s7: Host Idle, input held, answer pending, terminal pending
+  s8: Host Idle, input queued, answer posted, terminal pending
+  s9: Host Busy, input queued, answer posted, first strict probe passed
+  s10: Host Idle, input held, answer pending, terminal refused
+  s11: Host Idle, input queued, answer posted, terminal refused
+  s12: Host Idle, input held, answer posted, terminal pending
+  s13: Host Busy, input queued, deadline pulled
+  s14: Host Idle, input held, answer posted, terminal refused
+  s15: Host Idle, input queued, answer posted, first strict probe passed
+  s16: Host Busy, input queued, deadline extended 1,800 seconds, later proof possible
+  s17: Host Busy, input queued, deadline extended 1,800 seconds, still unproven
+  s18: Host Idle, input held, answer posted, first strict probe passed
+  s19: Host Idle, input queued, deadline pulled
+  s20: Far backstop proves terminal
+  s21: Host Busy, input queued, far check defers, still unproven
+  s22: Host Idle, input held, deadline pulled
+  s23: Host Idle, input queued, deadline extended 1,800 seconds, later proof possible
+  s24: Host Idle, input queued, deadline extended 1,800 seconds, still unproven
+  s25: Lease released before the Idle reading
+  s26: Host Idle, input held, deadline extended 1,800 seconds, later proof possible
+  s27: Host Idle, input held, deadline extended 1,800 seconds, still unproven
+  s28: Host Idle, input queued, far check defers, still unproven
+  s29: Lease released and owner woken
+  s30: Host Idle, input held, far check defers, still unproven
+  s31: Next input delivered
+  s32: Next answer posted
+  [*] --> s0
+  s0 --> s1: watcher attaches to the transcript
+  s1 --> s2: watcher checks the frame start
+  s1 --> s3: answer appears
+  s1 --> s4: host reports Idle
+  s2 --> s5: answer appears
+  s2 --> s6: host reports Idle
+  s3 --> s5: watcher checks the frame start
+  s3 --> s8: host reports Idle
+  s4 --> s6: watcher checks the frame start
+  s4 --> s7: owner keeps the queued input
+  s4 --> s8: answer appears
+  s5 --> s9: strict probe confirms terminal evidence
+  s5 --> s11: host reports Idle
+  s6 --> s10: owner keeps the queued input
+  s6 --> s11: answer appears
+  s7 --> s10: watcher checks the frame start
+  s7 --> s12: answer appears
+  s8 --> s11: watcher checks the frame start
+  s8 --> s12: owner keeps the queued input
+  s9 --> s13: strict probe confirms terminal evidence
+  s9 --> s15: host reports Idle
+  s10 --> s14: answer appears
+  s11 --> s14: owner keeps the queued input
+  s11 --> s15: strict probe confirms terminal evidence
+  s12 --> s14: watcher checks the frame start
+  s13 --> s16: the final strict check defers
+  s13 --> s17: the final strict check defers
+  s13 --> s19: host reports Idle
+  s14 --> s18: strict probe confirms terminal evidence
+  s15 --> s18: owner keeps the queued input
+  s15 --> s19: strict probe confirms terminal evidence
+  s16 --> s20: far deadline reaches its next check
+  s16 --> s23: host reports Idle
+  s17 --> s21: far deadline reaches its next check
+  s17 --> s24: host reports Idle
+  s18 --> s22: strict probe confirms terminal evidence
+  s19 --> s22: owner keeps the queued input
+  s19 --> s23: the final strict check defers
+  s19 --> s24: the final strict check defers
+  s20 --> s25: finalizer releases the matching lease
+  s21 --> s17: the deadline is extended again
+  s21 --> s28: host reports Idle
+  s22 --> s26: the final strict check defers
+  s22 --> s27: the final strict check defers
+  s23 --> s26: owner keeps the queued input
+  s23 --> s20: far deadline reaches its next check
+  s24 --> s27: owner keeps the queued input
+  s24 --> s28: far deadline reaches its next check
+  s25 --> s29: host reports Idle
+  s26 --> s20: far deadline reaches its next check
+  s27 --> s30: far deadline reaches its next check
+  s20 --> s29: finalizer releases the matching lease
+  s28 --> s24: the deadline is extended again
+  s28 --> s30: owner keeps the queued input
+  s29 --> s31: owner sends the next input
+  s30 --> s27: the deadline is extended again
+  s31 --> s32: next answer appears
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 bugPath
+  class s1 bugPath
+  class s4 bugPath
+  class s7 bugPath
+  class s8 bugPath
+  class s11 bugPath
+  class s12 bugPath
+  class s14 bugPath
+  class s18 bugPath
+  class s22 bugPath
+  class s27 breaks
+  class s27 bugPath
+  class s27 repeats
+  class s30 breaks
+  class s30 repeats

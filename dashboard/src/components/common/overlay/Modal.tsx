@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
+import { useI18n } from "../../../i18n";
 import { getOverlayAccessibleTitle } from "./accessibility";
 import { useReturnFocus } from "./useReturnFocus";
 
@@ -19,6 +20,7 @@ export interface ModalProps {
   size?: "sm" | "md" | "lg" | "xl";
   hideHeader?: boolean;
   ariaLabel?: string;
+  closeLabel?: string;
 }
 
 const SIZE_CLASS: Record<NonNullable<ModalProps["size"]>, string> = {
@@ -39,10 +41,14 @@ export function Modal({
   size = "md",
   hideHeader = false,
   ariaLabel,
+  closeLabel,
 }: ModalProps) {
+  const { t } = useI18n();
   const accessibleTitle = getOverlayAccessibleTitle(title, ariaLabel, "Modal");
   const hasDescription = Boolean(description?.trim());
   const returnFocus = useReturnFocus(open);
+  const resolvedCloseLabel =
+    closeLabel ?? t({ ko: "닫기", en: "Close", ja: "閉じる", zh: "关闭" });
 
   return (
     <Dialog.Root
@@ -53,7 +59,7 @@ export function Modal({
       modal
     >
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-[70] bg-black/45" />
+        <Dialog.Overlay className="fixed inset-0 z-[90] bg-black/45" />
         <Dialog.Content
           aria-label={accessibleTitle}
           onEscapeKeyDown={(event) => {
@@ -63,7 +69,7 @@ export function Modal({
             if (!closeOnBackdrop) event.preventDefault();
           }}
           onCloseAutoFocus={returnFocus}
-          className={`fixed left-1/2 top-1/2 z-[80] flex max-h-[85dvh] w-[calc(100vw-2rem)] ${SIZE_CLASS[size]} -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none`}
+          className={`fixed left-1/2 top-1/2 z-[100] flex max-h-[85dvh] w-[calc(100vw-2rem)] ${SIZE_CLASS[size]} -translate-x-1/2 -translate-y-1/2 flex-col rounded-lg border bg-[var(--th-card-bg,_var(--bg-2))] text-[var(--th-text,_var(--fg))] shadow-lg outline-none`}
           style={{ borderColor: "var(--th-border, rgba(148,163,184,0.18))" }}
         >
           {(hideHeader || !title) && (
@@ -89,9 +95,9 @@ export function Modal({
               <Dialog.Close asChild>
                 <button
                   type="button"
-                  className="flex h-11 w-11 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5"
+                  className="flex h-11 w-11 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-[var(--th-overlay-light)] hover:text-[var(--th-text)] transition-colors"
                   style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
-                  aria-label="Close"
+                  aria-label={resolvedCloseLabel}
                 >
                   <X size={14} />
                 </button>

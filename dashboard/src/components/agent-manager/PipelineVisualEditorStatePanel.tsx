@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { ActionMenu } from "../common/ActionMenu";
 import {
   BUTTON_NEUTRAL_STYLE,
@@ -42,6 +43,7 @@ export function PipelineStateMenu({ ctx, actions }: Props) {
 }
 
 export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) {
+  const uid = useId();
   const tr = ctx.tr;
   const selectedState = ctx.selectedState;
   const pipelineDraft = ctx.pipelineDraft;
@@ -50,9 +52,9 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
     <div className="space-y-3">
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="min-w-0">
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <span className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("상태 ID", "State ID")}
-          </label>
+          </span>
           <div
             className="rounded-xl border px-3 py-2 text-sm font-mono [overflow-wrap:anywhere]"
             style={{ ...PANEL_SOFT_STYLE, color: "var(--th-text-primary)" }}
@@ -61,10 +63,11 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
           </div>
         </div>
         <div className="min-w-0">
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <label htmlFor={`${uid}-label`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("레이블", "Label")}
           </label>
           <input
+            id={`${uid}-label`}
             value={selectedState.label}
             onChange={(event) => actions.updateState(selectedState.id, { label: event.target.value })}
             className={INPUT_CLASS}
@@ -73,7 +76,10 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
         </div>
       </div>
 
-      <label className="flex items-center gap-2 text-sm" style={{ color: "var(--th-text-primary)" }}>
+      <label
+        className="flex min-h-11 max-[899px]:min-h-11 pointer-coarse:min-h-11 items-center gap-2 text-sm"
+        style={{ color: "var(--th-text-primary)" }}
+      >
         <input
           type="checkbox"
           checked={!!selectedState.terminal}
@@ -84,10 +90,11 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
 
       <div className="grid gap-3">
         <div className="min-w-0">
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <label htmlFor={`${uid}-on-enter`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("들어올 때 실행할 훅 (on_enter)", "on_enter hooks")}
           </label>
           <textarea
+            id={`${uid}-on-enter`}
             rows={3}
             value={joinCommaSeparated(pipelineDraft.hooks[selectedState.id]?.on_enter)}
             onChange={(event) => actions.updateStateHooks(selectedState.id, "on_enter", event.target.value)}
@@ -97,10 +104,11 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
           />
         </div>
         <div className="min-w-0">
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <label htmlFor={`${uid}-on-exit`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("나갈 때 실행할 훅 (on_exit)", "on_exit hooks")}
           </label>
           <textarea
+            id={`${uid}-on-exit`}
             rows={3}
             value={joinCommaSeparated(pipelineDraft.hooks[selectedState.id]?.on_exit)}
             onChange={(event) => actions.updateStateHooks(selectedState.id, "on_exit", event.target.value)}
@@ -112,20 +120,31 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
       </div>
 
       <div className="flex flex-wrap gap-2">
-        <button onClick={() => actions.clearStateHooks(selectedState.id)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_NEUTRAL_STYLE}>
+        <button
+          type="button"
+          onClick={() => actions.clearStateHooks(selectedState.id)}
+          className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+          style={BUTTON_NEUTRAL_STYLE}
+        >
           {tr("훅 비우기", "Clear hooks")}
         </button>
-        <button onClick={() => actions.clearStateClock(selectedState.id)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_NEUTRAL_STYLE}>
+        <button
+          type="button"
+          onClick={() => actions.clearStateClock(selectedState.id)}
+          className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+          style={BUTTON_NEUTRAL_STYLE}
+        >
           {tr("클록 비우기", "Clear clock")}
         </button>
       </div>
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div>
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <label htmlFor={`${uid}-clock-set`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("클록 필드", "Clock field")}
           </label>
           <input
+            id={`${uid}-clock-set`}
             value={pipelineDraft.clocks[selectedState.id]?.set ?? ""}
             onChange={(event) => actions.updateStateClock(selectedState.id, { set: event.target.value })}
             className={INPUT_CLASS}
@@ -134,10 +153,11 @@ export default function PipelineVisualEditorStatePanel({ ctx, actions }: Props) 
           />
         </div>
         <div>
-          <label className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
+          <label htmlFor={`${uid}-clock-mode`} className="mb-1 block text-xs" style={MUTED_TEXT_STYLE}>
             {tr("클록 모드", "Clock mode")}
           </label>
           <input
+            id={`${uid}-clock-mode`}
             value={pipelineDraft.clocks[selectedState.id]?.mode ?? ""}
             onChange={(event) => actions.updateStateClock(selectedState.id, { mode: event.target.value || undefined })}
             className={INPUT_CLASS}

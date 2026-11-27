@@ -80,7 +80,7 @@ pub(super) fn pending_handover(
 
 /// A test's Pending turn handed to the owner hook on this thread: the snapshot `record` the turn
 /// read, the execution `attached` its attach returned, and the execution `target` the hook names.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn owned_pending_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     (record, attached, target): (&HostedExecution, &HostedExecution, &HostedExecution),
@@ -662,7 +662,7 @@ pub(super) fn observe(
     Ok(())
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(super) fn observe_cold_for_tests(
     turn: &HerdrTurn<'_>,
     attached: Attached,
@@ -683,7 +683,7 @@ fn c132_early_cancel_never_binds_or_announces_runtime() {
     regression_tests::c132_early_cancel_never_binds_or_announces_runtime();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod regression_tests {
     use super::*;
     pub(super) fn c132_early_cancel_never_binds_or_announces_runtime() {
@@ -801,7 +801,7 @@ pub(crate) mod regression_tests {
                 baseline_event_seq: None,
             },
         };
-        crate::services::claude_tui::readiness::tests::pre_source(logical, transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(logical, transcript);
         (
             owner,
             Attached {

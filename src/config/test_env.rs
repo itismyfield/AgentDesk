@@ -145,6 +145,16 @@ pub(crate) fn assert_test_config_write_within_root(root: &std::path::Path, path:
     );
 }
 
+/// Writes a default config with `agents` bindings into `root`'s config file.
+pub(crate) fn write_bindings_for_test(root: &std::path::Path, agents: serde_json::Value) {
+    let mut config = crate::config::Config::default();
+    config.agents = serde_json::from_value(agents).expect("test agent bindings");
+    let path = crate::config::config_path::config_path_in(root);
+    assert_test_config_write_within_root(root, &path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, serde_yaml::to_string(&config).unwrap()).unwrap();
+}
+
 #[cfg(test)]
 fn probe_root_config_isolation(prior_present: bool, owning: bool) {
     panic_probe::assert_restores_on_return_and_panic(

@@ -122,7 +122,7 @@ fn writer_state_with_busy(
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&session, &path);
     let token = Arc::new(CancelToken::new());
     let old_actor = Arc::downgrade(&token);
     token.bind_claude_tmux_session(&session);

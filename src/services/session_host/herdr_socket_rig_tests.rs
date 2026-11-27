@@ -19,7 +19,7 @@ use super::herdr::model::HerdrEndpoint;
 pub(crate) use super::herdr::model::{HerdrCall, HerdrRequest};
 use super::herdr::observe::{RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::ProcessOs;
-use super::herdr::pane_probe::tests::{FakeOs, context, env_naming};
+use super::herdr::pane_probe::test_support::{FakeOs, context, env_naming};
 use super::herdr::provenance::{ProcessStart, StartIdentity};
 use super::herdr::transport::{HerdrSocketConfig, HerdrSocketTransport};
 use super::herdr::wire::{LineJsonFraming, MAX_FRAME_BYTES};

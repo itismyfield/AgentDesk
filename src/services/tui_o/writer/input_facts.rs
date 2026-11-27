@@ -91,7 +91,7 @@ pub struct InputFacts {
     restart_stale: bool,
     physical_end_id: Option<String>,
     physical_snapshot: Option<Fingerprint>,
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     native_records: Option<Vec<native::Record>>,
 }
 
@@ -161,7 +161,7 @@ impl InputFacts {
             restart_stale: false,
             physical_end_id: None,
             physical_snapshot: None,
-            #[cfg(all(test, unix))]
+            #[cfg(all(any(test, feature = "test-support"), unix))]
             native_records: None,
         })
     }
@@ -459,7 +459,7 @@ impl InputFacts {
             let row = row_key(&value);
             let was_open = matches!(self.state, TurnState::Open { .. });
             let range = (record.start, record.end);
-            #[cfg(all(test, unix))]
+            #[cfg(all(any(test, feature = "test-support"), unix))]
             let event_start = self.events.len();
             for fact in classify(self.binding.provider, &value) {
                 self.saw_turn_evidence |= !matches!(fact, RecordFact::Prompt(false, _));
@@ -538,7 +538,7 @@ impl InputFacts {
             let open = matches!(self.state, TurnState::Open { .. });
             let provider = self.binding.provider;
             self.queued.read(provider, &value, open, open && !was_open);
-            #[cfg(all(test, unix))]
+            #[cfg(all(any(test, feature = "test-support"), unix))]
             if let Some(records) = &mut self.native_records
                 && (classify_queued_record(&value).is_some() || self.events.len() > event_start)
             {
@@ -572,7 +572,7 @@ impl InputFacts {
         })
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn observe_native(&mut self) -> Result<(), String> {
         if !matches!(&self.capture, Capture::Full(_))
             || self.capture.captured_through() != 0
@@ -585,7 +585,7 @@ impl InputFacts {
         Ok(())
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn native_evidence(
         &self,
         registrations: &[native::Registration],

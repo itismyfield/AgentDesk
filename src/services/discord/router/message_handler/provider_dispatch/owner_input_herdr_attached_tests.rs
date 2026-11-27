@@ -46,7 +46,7 @@ fn hand_over(
     let pool = unused_pool(owner);
     let turn = owner.claude_turn(&pool);
     let transcript = owner._dir.path().join("attached-sid.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(&owner.logical, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(&owner.logical, &transcript);
     let _entered = owner.runtime.enter();
     let session = ("attached-sid", transcript);
     crate::services::claude::herdr_turn::owned_pending_prompt_for_tests(&turn, executions, session)

@@ -439,7 +439,7 @@ pub(crate) fn install_ticket(
     true
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn ticket(channel: u64, pane: &str) -> Option<String> {
     let scope = Scope::new(channel, pane)?;
     REGISTRY
@@ -464,7 +464,7 @@ pub(crate) fn claim_for_tests(id: &AttemptId) -> Option<String> {
         .map(|ticket| ticket.0.clone())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_for_tests() {
     let mut registry = REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     registry.scopes.clear();

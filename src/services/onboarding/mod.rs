@@ -2867,7 +2867,7 @@ mod role_map_retirement_tests {
         let _root = crate::config::set_agentdesk_root_for_test(root.path());
         let fixture = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = fixture.connect_and_migrate().await;
-        crate::services::discord::agentdesk_config::write_bindings_for_test(
+        crate::config::test_env::write_bindings_for_test(
             root.path(),
             json!([{"id":"yaml-agent","name":"YAML Agent","provider":"codex","channels":{"codex":{"id":"73490002","name":"old-channel"}}}]),
         );

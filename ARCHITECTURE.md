@@ -166,7 +166,8 @@ src/
 │   │   ├── lifecycle.rs
 │   │   ├── lifecycle_tests.rs
 │   │   ├── login_test_support.rs
-│   │   └── run_identity_tests.rs
+│   │   ├── run_identity_tests.rs
+│   │   └── test_support.rs
 │   ├── agent_channels.rs
 │   ├── agent_memory.rs
 │   ├── channel_alias.rs
@@ -549,13 +550,15 @@ src/
 │   │   ├── exec_ops/
 │   │   │   ├── circuit_evidence_tests.rs
 │   │   │   ├── exec_allowlist_tests.rs
+│   │   │   ├── inflight_remove_tests.rs
 │   │   │   └── session_liveness_tests.rs
 │   │   ├── read_bridge/
 │   │   │   ├── contract_tests.rs
 │   │   │   └── epoch_tests.rs
 │   │   ├── timeouts_ops/
 │   │   │   ├── host_repair.rs
-│   │   │   └── host_repair_tests.rs
+│   │   │   ├── host_repair_tests.rs
+│   │   │   └── key_promotion_tests.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -627,12 +630,18 @@ src/
 │   ├── runtime_validation_tests.rs
 │   ├── settings_cli_tests.rs
 │   └── skill_sync_shipped_tree_tests.rs
+├── launch/
+│   ├── ke_engine_tests.rs
+│   ├── ke_turn_tests.rs
+│   └── ke_turn_unix_tests.rs
 ├── logging/
 │   ├── auto_queue.rs
 │   ├── auto_queue_tests.rs
 │   ├── intake_stage.rs
 │   ├── intake_timing.rs
 │   └── intake_timing_tests.rs
+├── reconcile/
+│   └── boot_lease_tests.rs
 ├── runtime_layout/
 │   ├── boot_id.rs
 │   ├── config_merge.rs
@@ -999,6 +1008,7 @@ src/
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   ├── verified_clear_probe_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── transactions/
 │   │   │   ├── completion.rs
@@ -1315,6 +1325,7 @@ src/
 │   │   │   ├── restored_reply_tests.rs
 │   │   │   ├── resume_record.rs
 │   │   │   ├── source.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── wait.rs
 │   │   │   ├── wait_cause_tests.rs
 │   │   │   └── watched.rs
@@ -1760,6 +1771,7 @@ src/
 │   │   │   ├── restart/
 │   │   │   │   ├── herdr.rs
 │   │   │   │   ├── host_hold_tests.rs
+│   │   │   │   ├── seed_successor_tests.rs
 │   │   │   │   └── seed_tests.rs
 │   │   │   ├── session/
 │   │   │   │   ├── autocomplete.rs
@@ -2029,6 +2041,9 @@ src/
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
 │   │   │   └── root_replaced.rs
+│   │   ├── host_key_derivation/
+│   │   │   ├── ke_session_tests.rs
+│   │   │   └── ke_tests.rs
 │   │   ├── host_liveness/
 │   │   │   ├── krx_discord_dl_tests.rs
 │   │   │   └── krx_discord_dl_unix_tests.rs
@@ -2731,6 +2746,7 @@ src/
 │   │   │   │   │   ├── owner_input_herdr_attached_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_busy_operation_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_pending_tests.rs
+│   │   │   │   │   ├── owner_input_herdr_seed_tests.rs
 │   │   │   │   │   ├── owner_input_herdr_tests.rs
 │   │   │   │   │   ├── owner_input_idle_tests.rs
 │   │   │   │   │   ├── owner_input_local_control_tests.rs
@@ -2754,6 +2770,7 @@ src/
 │   │   │   │   │   ├── replay_scope.rs
 │   │   │   │   │   ├── start_failure.rs
 │   │   │   │   │   ├── start_failure_missing_tests.rs
+│   │   │   │   │   ├── start_failure_seed_tests.rs
 │   │   │   │   │   ├── start_failure_state_tests.rs
 │   │   │   │   │   └── stream_json_turn.rs
 │   │   │   │   ├── provider_dispatch_codex_herdr_followup_tests/
@@ -2765,7 +2782,8 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_tests/
 │   │   │   │   │   ├── clear_execute_tests.rs
 │   │   │   │   │   ├── closing_tests.rs
-│   │   │   │   │   └── retry_wait_tests.rs
+│   │   │   │   │   ├── retry_wait_tests.rs
+│   │   │   │   │   └── seed_successor_tests.rs
 │   │   │   │   ├── provider_isolation/
 │   │   │   │   │   └── feature_settings.rs
 │   │   │   │   ├── root_replaced_recovery_tests/
@@ -3028,6 +3046,9 @@ src/
 │   │   ├── shared_state/
 │   │   │   ├── g7_host.rs
 │   │   │   └── g7_host_tests.rs
+│   │   ├── stall_recovery/
+│   │   │   ├── ke_queue_tests.rs
+│   │   │   └── ke_queue_unix_tests.rs
 │   │   ├── standby_relay/
 │   │   │   ├── scheduled_settle.rs
 │   │   │   └── scheduled_settle_tests.rs
@@ -3646,6 +3667,7 @@ src/
 │   │   │   │   ├── already_finalized.rs
 │   │   │   │   └── terminal_release.rs
 │   │   │   ├── episode/
+│   │   │   │   ├── claim_rejection.rs
 │   │   │   │   ├── row_retirement.rs
 │   │   │   │   └── row_retirement_tests.rs
 │   │   │   ├── finalize/
@@ -4004,6 +4026,7 @@ src/
 │   │   ├── turn_end_wip_warning.rs
 │   │   ├── turn_finalizer.rs
 │   │   ├── turn_lease.rs
+│   │   ├── turn_lease_observation_tests.rs
 │   │   ├── turn_lease_tests.rs
 │   │   ├── turn_teardown_clearance.rs
 │   │   ├── turn_teardown_clearance_tests.rs
@@ -4031,6 +4054,7 @@ src/
 │   │   ├── current_key.rs
 │   │   ├── force_kill.rs
 │   │   ├── herdr_kill.rs
+│   │   ├── herdr_probe_tests.rs
 │   │   ├── hook.rs
 │   │   ├── hosted_cleanup.rs
 │   │   ├── listing.rs
@@ -4174,7 +4198,8 @@ src/
 │   │   │   ├── db_retention/
 │   │   │   │   ├── image_retention.rs
 │   │   │   │   ├── queue_and_dispatch.rs
-│   │   │   │   └── record_caps.rs
+│   │   │   │   ├── record_caps.rs
+│   │   │   │   └── record_caps_reader_pg_tests.rs
 │   │   │   ├── db_retention.rs
 │   │   │   ├── hang_dump_cleanup.rs
 │   │   │   ├── memento_consolidation.rs
@@ -4223,6 +4248,8 @@ src/
 │   │   ├── session_notice.rs
 │   │   └── source_registry.rs
 │   ├── observability/
+│   │   ├── emit/
+│   │   │   └── test_support.rs
 │   │   ├── events/
 │   │   │   ├── capture_stress_tests.rs
 │   │   │   ├── capture_tests.rs
@@ -4356,6 +4383,7 @@ src/
 │   ├── queue/
 │   │   ├── cancel_effects.rs
 │   │   ├── cancel_effects_v2_tests.rs
+│   │   ├── force_purge_tests.rs
 │   │   ├── herdr_stop.rs
 │   │   └── http_force.rs
 │   ├── qwen/
@@ -4551,6 +4579,7 @@ src/
 │   │   │   ├── launch_host.rs
 │   │   │   ├── launch_host_real_tests.rs
 │   │   │   ├── launch_host_restore_evidence_tests.rs
+│   │   │   ├── launch_host_support.rs
 │   │   │   ├── launch_host_t19_real_tests.rs
 │   │   │   ├── launch_host_tests.rs
 │   │   │   ├── launch_policy_tests.rs
@@ -4560,6 +4589,7 @@ src/
 │   │   │   ├── model.rs
 │   │   │   ├── observe.rs
 │   │   │   ├── pane_probe.rs
+│   │   │   ├── pane_probe_support.rs
 │   │   │   ├── pane_probe_tests.rs
 │   │   │   ├── provenance.rs
 │   │   │   ├── provenance_tests.rs
@@ -4614,7 +4644,8 @@ src/
 │   │   ├── background.rs
 │   │   ├── background_tests.rs
 │   │   ├── catalog.rs
-│   │   └── errors.rs
+│   │   ├── errors.rs
+│   │   └── host_rebind_tests.rs
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs
@@ -4630,6 +4661,7 @@ src/
 │   │   ├── inflight_episode.rs
 │   │   ├── owner_boundary_tests.rs
 │   │   ├── policy_maintenance.rs
+│   │   ├── root_lookup_tests.rs
 │   │   └── test_barriers.rs
 │   ├── stream_json_cli/
 │   │   ├── codec/
@@ -4942,6 +4974,7 @@ src/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
 │   │   │   │   │   ├── terminal.rs
+│   │   │   │   │   ├── test_support.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── native.rs
 │   │   │   │   ├── observation_tests.rs
@@ -5292,6 +5325,8 @@ src/
 │   │   ├── idle_compaction_tests.rs
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
+│   │   ├── host_guard_tests.rs
+│   │   ├── queue_truth_tests.rs
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
 │   │   ├── checked_purge/
@@ -5427,6 +5462,7 @@ src/
 │   │   ├── quota.rs
 │   │   └── quota_tests.rs
 │   ├── agent_channels.rs
+│   ├── agent_channels_reload_pg_tests.rs
 │   ├── agent_identity.rs
 │   ├── agent_protocol.rs
 │   ├── analytics.rs
@@ -5518,6 +5554,7 @@ src/
 │   ├── scheduling.rs
 │   ├── service_error.rs
 │   ├── session_activity.rs
+│   ├── session_activity_heartbeat_tests.rs
 │   ├── session_backend.rs
 │   ├── session_evidence.rs
 │   ├── session_forwarding.rs
@@ -5640,7 +5677,9 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/kanban/` | High-level kanban orchestration, state machine facade, and shared test support. |
 | `src/krx_claude_tests/` | Test files moved out of KRX claude modules because they call root-crate items. |
 | `src/krx_config_tests/` | Test functions moved out of KRX config/services inline test modules because they call root-crate items. |
+| `src/launch/` | Test-only hosts that declare KE tests calling root-crate items, so they leave the KE crate. |
 | `src/logging/` | Shared tracing adapters and tests for structured correlation fields. |
+| `src/reconcile/` | Reconcile tests moved out of the inline module because they call root-crate items. |
 | `src/runtime_layout/` | Managed runtime layout, memory-path migration, shared prompt sync, and skill deployment. |
 | `src/server/` | Axum server boot, routes, workers, background loops, and WebSocket broadcast. |
 | `src/services/` | Core runtime services: provider runners, Discord bot, queueing, memory, and platform helpers. |

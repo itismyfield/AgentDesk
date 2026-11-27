@@ -18,7 +18,7 @@ pub(crate) use dispatch_cancel::cancel_dispatches_for_runs_on_pg_tx_with_meta;
 pub(crate) use dispatch_cancel::CancelTransitionMeta;
 // #5142 r5: the emit's test-only footprint, exported from the emit boundary so
 // the cleanup drain's ordering tests observe every emit rather than one wrapper.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use dispatch_cancel::emit_probe;
 pub use dispatch_cancel::{
     cancel_dispatch_and_reset_auto_queue_on_pg, cancel_dispatch_and_reset_auto_queue_on_pg_tx,

@@ -11,8 +11,8 @@ fn child(test: &str) -> bool {
     if std::env::var_os(MARKER).is_some() {
         return true;
     }
-    let (_temporary, root) = crate::config::test_instance::tests::fixture();
-    let output = crate::config::test_instance::tests::command(&root)
+    let (_temporary, root) = crate::config::test_instance::test_support::fixture();
+    let output = crate::config::test_instance::test_support::command(&root)
         .args([
             "--exact",
             test.strip_prefix("agentdesk::").unwrap(),

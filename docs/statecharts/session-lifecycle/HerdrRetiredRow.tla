@@ -10,6 +10,7 @@
 \* seen: a guarded save of the reader read its owned row as gone. FlushObserves TRUE (r5 fix 1) makes
 \* the tick's dirty flush release the writer too; ToolGuard TRUE (r5 fix 1) makes a released reader's
 \* tool frame record no tool mark or background child (stream_loop/tool_arms/session_activity.rs).
+\* For repeated live end settlement and restart eligibility, see HerdrRetiredRowNotice.
 EXTENDS Naturals
 CONSTANTS Path, Fence, FenceNonce, Cleanup, NewTurns, Restarts, ReaderStops, FlushObserves, ToolGuard
 VARIABLES exec, row, nonce, fresh, bridge, ended, refused, turns, restarts, pres, phase,

@@ -436,7 +436,7 @@ mod tests {
                 },
             )
         });
-        crate::test_env_panic_probe::checkpoint_values(&expected);
+        crate::config::test_env::panic_probe::checkpoint_values(&expected);
     }
 
     #[test]
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn connector_runtime_stubs_restores_env_after_panic_present() {
-        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        crate::config::test_env::panic_probe::assert_restores_on_return_and_panic(
             &CONNECTOR_ENV_KEYS,
             true,
             runtime_root_obsidian_stubs_are_discoverable_without_obsidian_env,
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn connector_runtime_stubs_restores_env_after_panic_absent() {
-        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        crate::config::test_env::panic_probe::assert_restores_on_return_and_panic(
             &CONNECTOR_ENV_KEYS,
             false,
             runtime_root_obsidian_stubs_are_discoverable_without_obsidian_env,
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn connector_skill_content_restores_env_after_panic_present() {
-        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        crate::config::test_env::panic_probe::assert_restores_on_return_and_panic(
             &CONNECTOR_ENV_KEYS,
             true,
             empty_obsidian_skill_stub_requires_real_skill_content,
@@ -624,7 +624,7 @@ mod tests {
 
     #[test]
     fn connector_skill_content_restores_env_after_panic_absent() {
-        crate::test_env_panic_probe::assert_restores_on_return_and_panic(
+        crate::config::test_env::panic_probe::assert_restores_on_return_and_panic(
             &CONNECTOR_ENV_KEYS,
             false,
             empty_obsidian_skill_stub_requires_real_skill_content,

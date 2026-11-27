@@ -17,7 +17,7 @@ use super::{
     record_raw_provider_transcript_len_watermark_if_observed,
 };
 
-pub(super) async fn kill_tmux_session_impl(
+pub(crate) async fn kill_tmux_session_impl(
     state: &AppState,
     headers: &HeaderMap,
     session_key: &str,

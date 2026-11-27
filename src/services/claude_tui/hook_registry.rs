@@ -399,7 +399,7 @@ impl HookRegistry {
     /// discarded. The unconditional drain remains exercised by the unit tests
     /// that pin the REQ-002/REQ-003 single-consumption + replay-counting
     /// semantics.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn claim_once(&self, key: RegistryKey) -> Vec<HookEvent> {
         let now = Instant::now();
         let mut keys = self.lock();
@@ -526,7 +526,7 @@ impl HookRegistry {
     /// Number of currently-buffered (unconsumed, unexpired) events for `key`,
     /// after sweeping expired entries. Test-only contract pin (production reads
     /// the aggregate via `snapshot`).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn buffered_len(&self, key: &RegistryKey) -> usize {
         let now = Instant::now();
         let mut keys = self.lock();

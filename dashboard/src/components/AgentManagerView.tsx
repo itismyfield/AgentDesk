@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef } from "react";
 import { Plus } from "lucide-react";
 import { useLocation, useNavigate, useSearchParams } from "react-router";
-import type { Agent, Department, DispatchedSession } from "../types";
+import type { Agent, DispatchedSession } from "../types";
 import type { UiLanguage } from "../i18n";
 import { PageFrame } from "../app/PageFrame";
 import { useWorkspace } from "../contexts/WorkspaceContext";
@@ -10,10 +10,8 @@ import { IconButton } from "../kit/free/icon-button-clean";
 import { SegmentedControl } from "../kit/free/segmented-control-clean";
 import { useIsMobile } from "./common/overlay/useBreakpoint";
 import AgentsTab from "./agent-manager/AgentsTab";
-import DepartmentsTab from "./agent-manager/DepartmentsTab";
 import AgentFormModal from "./agent-manager/AgentFormModal";
 import AgentSetupWizard from "./agent-manager/AgentSetupWizard";
-import DepartmentFormModal from "./agent-manager/DepartmentFormModal";
 import { isListedAgent, isStandIn } from "./agent-manager/agent-list-controls";
 import {
   type AgentManagerTab,
@@ -21,14 +19,12 @@ import {
 } from "./agent-manager/useAgentManagerController";
 
 const SkillCatalogView = lazy(() => import("./SkillCatalogView"));
-const TAB_KEYS: AgentManagerTab[] = ["agents", "departments", "skills"];
+const TAB_KEYS: AgentManagerTab[] = ["agents", "skills"];
 
 interface AgentManagerViewProps {
   agents: Agent[];
-  departments: Department[];
   language: UiLanguage;
   onAgentsChange: () => void;
-  onDepartmentsChange: () => void;
   /** Sessions not linked to an agent, listed read-only. */
   sessions?: DispatchedSession[];
   /** Keeps the shell's tab in step; the page itself follows `?tab=`, so links and the back button agree with it. */
@@ -37,14 +33,12 @@ interface AgentManagerViewProps {
   onAutoOpenConsumed?: () => void;
 }
 
-/** `/agents`: agents, departments and skills under one frame. The tab (`?tab=`) and the open agent (`?agent=`) live in
+/** `/agents`: agents and skills under one frame. The tab (`?tab=`) and the open agent (`?agent=`) live in
  * the URL, so links land on them and the back button closes a detail opened here. */
 export default function AgentManagerView({
   agents,
-  departments,
   language,
   onAgentsChange,
-  onDepartmentsChange,
   sessions,
   onTabChange,
   autoOpenCreate = false,
@@ -52,41 +46,21 @@ export default function AgentManagerView({
 }: AgentManagerViewProps) {
   const { sessions: workspaceSessions, sessionsFailed } = useWorkspace();
   const {
-    deptModal,
-    deptOrder,
-    deptOrderDirty,
-    deptTab,
-    draggingDeptId,
-    dragOverDeptId,
-    dragOverPosition,
     entries,
     form,
     agentModal,
-    handleCancelOrder,
     handleDeleteAgent,
-    handleDragEnd,
-    handleDragOver,
-    handleDragStart,
-    handleDrop,
-    handleMoveDept,
     handleSaveAgent,
-    handleSaveOrder,
     handleTabChange,
     includeTests,
     isKo,
     locale,
     openCreateAgent,
-    openCreateDept,
     openDuplicateAgent,
     openEditAgent,
-    openEditDept,
-    reorderFailed,
-    reorderSaving,
     saving,
     search,
     setAgentModal,
-    setDeptModal,
-    setDeptTab,
     setIncludeTests,
     setSearch,
     setSortMode,
@@ -99,10 +73,8 @@ export default function AgentManagerView({
     tr,
   } = useAgentManagerController({
     agents,
-    departments,
     language,
     onAgentsChange,
-    onDepartmentsChange,
     sessions: workspaceSessions,
     sessionsFailed,
     onTabChange,
@@ -163,7 +135,6 @@ export default function AgentManagerView({
 
   const listedCount = entries.filter((entry) => isListedAgent(entry.agent, includeTests)).length;
   const realEntries = entries.filter((entry) => !isStandIn(entry.agent));
-  const deptMembers = realEntries.filter((entry) => isListedAgent(entry.agent, includeTests));
   // Aborted sessions are finished work, not something to attach to an agent.
   const unlinkedSessions = sessions?.filter((session) => session.status !== "aborted");
   const header = (
@@ -209,9 +180,6 @@ export default function AgentManagerView({
             isKo={isKo}
             entries={entries}
             sortedEntries={sortedEntries}
-            departments={departments}
-            deptTab={deptTab}
-            setDeptTab={setDeptTab}
             search={search}
             setSearch={setSearch}
             statusFilter={statusFilter}
@@ -226,41 +194,16 @@ export default function AgentManagerView({
             onCreateAgent={openCreateAgent}
             onEditAgent={openEditAgent}
             onDuplicateAgent={openDuplicateAgent}
-            onEditDepartment={openEditDept}
             onDeleteAgent={handleDeleteAgent}
             onAgentUpdated={onAgentsChange}
             saving={saving}
           />
         </div>
-      ) : tab === "skills" ? (
+      ) : (
         <div id="agents-skills-tab-panel" role="tabpanel" aria-label={tr("스킬", "Skills")}>
           <Suspense fallback={null}>
             <SkillCatalogView tr={tr} locale={locale} roster={realEntries} onOpenAgent={openAgentFromSkills} />
           </Suspense>
-        </div>
-      ) : (
-        <div id="agents-departments-tab-panel" role="tabpanel" aria-label={tr("부서", "Departments")}>
-          <DepartmentsTab
-            tr={tr}
-            locale={locale}
-            members={deptMembers}
-            deptOrder={deptOrder}
-            deptOrderDirty={deptOrderDirty}
-            reorderSaving={reorderSaving}
-            reorderFailed={reorderFailed}
-            draggingDeptId={draggingDeptId}
-            dragOverDeptId={dragOverDeptId}
-            dragOverPosition={dragOverPosition}
-            onSaveOrder={handleSaveOrder}
-            onCancelOrder={handleCancelOrder}
-            onMoveDept={handleMoveDept}
-            onEditDept={openEditDept}
-            onCreateDept={openCreateDept}
-            onDragStart={handleDragStart}
-            onDragOver={handleDragOver}
-            onDrop={handleDrop}
-            onDragEnd={handleDragEnd}
-          />
         </div>
       )}
 
@@ -271,7 +214,6 @@ export default function AgentManagerView({
           locale={locale}
           tr={tr}
           form={form}
-          departments={departments}
           isEdit={!!agentModal.editAgent}
           agentId={agentModal.editAgent?.id}
           saving={saving}
@@ -284,7 +226,6 @@ export default function AgentManagerView({
         open={setupWizard.open}
         mode={setupWizard.mode}
         sourceAgent={setupWizard.sourceAgent}
-        departments={departments}
         locale={locale}
         tr={tr}
         onClose={() => setSetupWizard({ open: false, mode: "create", sourceAgent: null })}
@@ -293,21 +234,6 @@ export default function AgentManagerView({
           onAgentsChange();
         }}
       />
-
-      {/* Department modal */}
-      {deptModal.open && (
-        <DepartmentFormModal
-          locale={locale}
-          tr={tr}
-          department={deptModal.editDept}
-          memberCount={deptModal.editDept ? agents.filter((agent) => agent.department_id === deptModal.editDept?.id).length : 0}
-          onSave={() => {
-            setDeptModal({ open: false, editDept: null });
-            onDepartmentsChange();
-          }}
-          onClose={() => setDeptModal({ open: false, editDept: null })}
-        />
-      )}
     </PageFrame>
   );
 }

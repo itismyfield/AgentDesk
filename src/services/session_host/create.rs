@@ -148,17 +148,17 @@ impl CreateOutcome {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static IN_PORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 /// Whether this thread is inside the create port, for a fake host to tell a bypassing caller.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn create_in_effect() -> bool {
     IN_PORT.get()
 }
 
 pub(super) fn create(kind: HostKind, request: HostCreate<'_>) -> CreateOutcome {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let entered = IN_PORT.replace(true);
     let outcome = match (kind, request.0) {
         #[cfg(unix)]
@@ -177,7 +177,7 @@ pub(super) fn create(kind: HostKind, request: HostCreate<'_>) -> CreateOutcome {
         #[cfg(unix)]
         _ => CreateOutcome::mismatch(Evidence::Output(Err(KIND_MISMATCH.into()))),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     IN_PORT.set(entered);
     tracing::debug!(?kind, creation = ?outcome.creation, "host create effect");
     outcome

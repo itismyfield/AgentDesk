@@ -111,7 +111,6 @@ export default function App() {
   return (
     <WorkspaceProvider
       initialAgents={data.agents}
-      initialDepartments={data.departments}
       initialSessions={resolvedSessions}
       pushNotification={pushNotification}
       language={data.settings.language}

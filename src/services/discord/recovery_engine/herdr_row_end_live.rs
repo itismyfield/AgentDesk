@@ -75,10 +75,33 @@ pub(super) async fn end_live(
     if release_hold(&nonce) != HoldRelease::Released {
         return keep(&row, "retired, hold release incomplete");
     }
-    let text = interrupted_recovery_message(&row, "");
-    let outcome = relay_recovery_body_notice(&http, shared, provider, &row, &text).await;
-    if outcome != RecoveryRelayOutcome::Delivered {
-        return keep(&row, "retired, notice not delivered");
+    let notice_key = (nonce, row.save_generation);
+    let notices = || {
+        state
+            .recovery_notices
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    };
+    // The channel transition serializes delivery and recording across live ticks.
+    let noticed = notices().contains(&notice_key);
+    if !noticed {
+        let text = interrupted_recovery_message(&row, "");
+        // This marker owns no response anchor or delivery frontier.
+        let placeholder = inflight::opt_message_id(row.current_msg_id);
+        let outcome = relay_recovery_body_to_placeholder(
+            &http,
+            shared,
+            &row,
+            channel,
+            placeholder,
+            &text,
+            None,
+        )
+        .await;
+        if outcome != RecoveryRelayOutcome::Delivered {
+            return keep(&row, "retired, notice not delivered");
+        }
+        notices().insert(notice_key);
     }
     // Before the settlement wakes the reader, so its late active status finds the row ended.
     disconnect_ended(pool, &observation, &record).await;

@@ -90,14 +90,12 @@ export default function AppShell({
     useSettings();
   const {
     agents,
-    departments,
     sessions,
     setSessions,
     sessionsFailed,
     visibleDispatchedSessions,
     agentsWithDispatched,
     refreshAgents,
-    refreshDepartments,
   } = useWorkspace();
 
   const mainRef = useRef<HTMLElement>(null);
@@ -654,7 +652,6 @@ export default function AppShell({
                         agents,
                         agentsPageTab,
                         agentsWithDispatched,
-                        departments,
                         handleSettingsSave,
                         isKo,
                         isMobileViewport,
@@ -670,7 +667,6 @@ export default function AppShell({
                         wsConnected,
                         wsLastEventTs,
                         refreshAgents,
-                        refreshDepartments,
                       }}
                     />
                   </ShellWindowFocusContext.Provider>
@@ -709,7 +705,6 @@ export default function AppShell({
           agentInfoAgent,
           agents,
           closeAgentInfo,
-          departments,
           dismissNotification,
           focused,
           isKo,

@@ -201,7 +201,7 @@ pub(super) async fn confirm_claim(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn claim_pending_for_target(
     pool: &PgPool,
     target_instance_id: &str,
@@ -377,7 +377,7 @@ pub(crate) async fn mark_failed_post_accept(
 }
 
 /// Existing maintenance API; no production sweep is started here. Errors may follow partial commits.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn sweep_stale_pre_accept_claims(
     pool: &PgPool,
     stale_after_secs: i64,

@@ -395,7 +395,7 @@ pub(super) async fn run_terminal_relay_plan<'a>(
         // TUI-direct turn's row does not exist yet at snapshot time, so the old
         // wiring denied it authority permanently while the session-bound sink
         // skipped delivery believing the watcher owned it (nobody sent the body).
-        let (watcher_direct_fallback_authorized, soft_terminal_authority_denial) =
+        let (mut watcher_direct_fallback_authorized, mut soft_terminal_authority_denial) =
             watcher_soft_terminal_direct_send_authority(
                 startup_soft_terminal_authority,
                 inflight_before_relay.as_ref(),
@@ -410,6 +410,28 @@ pub(super) async fn run_terminal_relay_plan<'a>(
                     terminal_event_consumed_offset(current_offset, &all_data),
                 ),
             );
+        if soft_terminal_authority_denial
+            == Some(SoftTerminalAuthorityDenial::TurnStartOutsideFrame)
+            && let Some(row) = inflight_before_relay.as_ref()
+            && let Some(frame_file) = context.evidence_source
+            && let Some(execution) = startup_soft_terminal_authority.herdr_suffix_execution(
+                row,
+                output_path,
+                frame_file,
+                turn_data_start_offset..terminal_event_consumed_offset(current_offset, all_data),
+            )
+            && crate::services::discord::inflight::current_bound_nonce(
+                shared,
+                watcher_provider,
+                row,
+            )
+            .await
+            .as_deref()
+                == Some(execution)
+        {
+            watcher_direct_fallback_authorized = true;
+            soft_terminal_authority_denial = None;
+        }
         let watcher_direct_fallback_intended =
             watcher_direct_fallback_requested && watcher_direct_fallback_authorized;
         // #3041 P1-3 (Part b, §3.2): reconcile a non-`Delivered` ACK before re-send against the offset

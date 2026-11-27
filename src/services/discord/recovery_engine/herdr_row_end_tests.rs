@@ -7,6 +7,7 @@ use crate::services::provider::cancel_token_claude_interrupt::HERDR_SETTLEMENT_O
 
 #[path = "herdr_row_end_rig_tests.rs"]
 mod rig;
+pub(in crate::services::discord) use rig::settled_tasks;
 
 type Hook = Arc<dyn Fn() -> futures::future::BoxFuture<'static, ()> + Send + Sync>;
 

@@ -1,0 +1,6 @@
+resolver | src/config/test_instance/test_support.rs
+resolver | src/services/claude_tui/readiness/test_support.rs
+resolver | src/services/observability/emit/test_support.rs
+resolver | src/services/session_host/herdr/launch_host_support.rs
+resolver | src/services/session_host/herdr/pane_probe_support.rs
+resolver | src/services/tui_o/writer/input_facts/native/test_support.rs

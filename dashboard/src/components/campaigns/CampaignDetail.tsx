@@ -47,12 +47,21 @@ export default function CampaignDetail({ title, showTitle, chips, sentence, trac
   };
   return <div ref={dock.root} className="campaign-detail grid min-w-0 content-start gap-4" style={task ? dock.rootStyle : undefined}>
     {!focus && <header className="grid min-w-0 gap-1.5">
-      {(showTitle || chips || actions) && <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
-        {showTitle && <h2 className="campaign-detail-title min-w-0 !text-2xl !font-semibold tracking-tight text-[var(--fg)] [overflow-wrap:anywhere]">{title}</h2>}
-        {chips}
-        {actions && <div className="campaign-actions ml-auto">{actions}</div>}
-      </div>}
-      <p className="campaign-detail-status !text-sm text-[var(--fg)] [word-break:keep-all]">{sentence}</p>
+      {showTitle || chips ? (
+        <>
+          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2">
+            {showTitle && <h2 className="campaign-detail-title min-w-0 !text-2xl !font-semibold tracking-tight text-[var(--fg)] [overflow-wrap:anywhere]">{title}</h2>}
+            {chips}
+            {actions && <div className="campaign-actions ml-auto">{actions}</div>}
+          </div>
+          <p className="campaign-detail-status !text-sm text-[var(--fg)] [word-break:keep-all]">{sentence}</p>
+        </>
+      ) : (
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-x-3 gap-y-2">
+          <p className="campaign-detail-status m-0 min-w-[12rem] flex-1 !text-sm text-[var(--fg)] [word-break:keep-all]">{sentence}</p>
+          {actions && <div className="campaign-actions shrink-0">{actions}</div>}
+        </div>
+      )}
       {tracker}
       {showTitle && description}
       {notes}
