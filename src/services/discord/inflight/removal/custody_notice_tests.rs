@@ -755,6 +755,80 @@ async fn runtime_hygiene_custody_expires_inactive_non_direct_episodes() {
     assert!(!root.join("older-marker").exists());
 }
 
+thread_local! {
+    static OWNER_HANDOFF: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+pub(super) fn between_owner_probes() {
+    if let Some(handoff) = OWNER_HANDOFF.with(|slot| slot.take()) {
+        handoff();
+    }
+}
+
+fn old_retention_episode(root: &Path, channel: u64) -> PathBuf {
+    let dir = root.join(format!("episode-{channel}"));
+    fs::create_dir_all(&dir).unwrap();
+    let episode = json!({
+        "episode": {
+            "provider": CLAUDE.as_str(), "channel_id": channel,
+            "anchor_id": channel + 1, "anchorless": null,
+        },
+        "tui_direct": false,
+    });
+    fs::write(dir.join("episode.json"), episode.to_string()).unwrap();
+    age_tree(&dir, chrono::Utc::now().timestamp() - 8 * 24 * 60 * 60);
+    dir
+}
+
+#[tokio::test]
+async fn runtime_hygiene_owner_custody_keeps_unreadable_pending_start() {
+    let env = Env::new();
+    let root = custody(&env);
+    let live = old_retention_episode(&root, 61);
+    let unreadable = old_retention_episode(&root, 63);
+    let expired = old_retention_episode(&root, 65);
+    pending_start(61, "test-pending-session");
+    let pending = crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+    fs::create_dir(pending.join("claude_63_64.json")).unwrap();
+
+    assert_eq!(enqueue_custody_notices(&root, &CLAUDE, None).await, 0);
+    assert!(!expired.exists());
+    assert!(live.join("episode.json").is_file());
+    assert!(unreadable.join("episode.json").is_file());
+}
+
+#[tokio::test]
+async fn runtime_hygiene_owner_custody_keeps_episode_during_pending_to_inflight_handoff() {
+    let env = Env::new();
+    let root = custody(&env);
+    let channel = 67;
+    let episode = old_retention_episode(&root, channel);
+    pending_start(channel, "test-pending-session");
+    let pending = crate::services::discord::runtime_store::tui_direct_pending_start_root()
+        .unwrap()
+        .join("claude_67_68.json");
+    let handoff_path = pending.clone();
+    OWNER_HANDOFF.with(|slot| {
+        assert!(
+            slot.replace(Some(Box::new(move || {
+                crate::services::discord::inflight::save_inflight_state(&row(channel, None))
+                    .unwrap();
+                fs::remove_file(handoff_path).unwrap();
+            })))
+            .is_none()
+        );
+    });
+
+    assert_eq!(enqueue_custody_notices(&root, &CLAUDE, None).await, 0);
+    assert!(!pending.exists(), "handoff ran between the owner probes");
+    assert!(
+        crate::services::discord::inflight::load_inflight_state_read_only(&CLAUDE, channel)
+            .is_some()
+    );
+    assert!(episode.join("episode.json").is_file());
+}
+
 fn age_tree(path: &Path, timestamp: i64) {
     if path.is_dir() {
         for entry in fs::read_dir(path).unwrap().flatten() {

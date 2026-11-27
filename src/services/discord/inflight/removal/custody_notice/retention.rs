@@ -112,7 +112,10 @@ fn live_episode(provider: &ProviderKind, episode: &Value) -> bool {
         return true;
     };
     let anchor = episode["anchor_id"].as_u64();
-    match inflight::load_inflight_state_read_only_result(provider, channel) {
+    let row = inflight::load_inflight_state_read_only_result(provider, channel);
+    #[cfg(test)]
+    super::super::custody_notice_tests::between_owner_probes();
+    match row {
         Err(_) => return true,
         Ok(Some(row)) => {
             let same_episode = super::super::boot_custody::row_episode_key(provider, &row);

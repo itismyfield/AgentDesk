@@ -390,12 +390,16 @@ mod tests {
 
     fn write_pending_anchor(shared: &SharedData, channel_id: u64, message_id: u64) {
         let target = anchor_target(channel_id, message_id);
+        write_pending_target(shared, target);
+    }
+
+    fn write_pending_target(shared: &SharedData, target: TurnViewTarget) -> PathBuf {
         let record = PersistedTargetState {
             version: PERSISTED_STATE_VERSION,
             provider: shared.provider.as_str().to_string(),
             kind: target.kind.as_str().to_string(),
-            channel_id,
-            message_id,
+            channel_id: target.channel_id.get(),
+            message_id: target.message_id.get(),
             owner_generation: 7,
             owner_turn_id: "turn-orphan".to_string(),
             applied: TurnViewState::Pending.as_str().to_string(),
@@ -407,6 +411,7 @@ mod tests {
         let json = serde_json::to_string_pretty(&record).expect("serialize persisted anchor");
         crate::services::discord::runtime_store::atomic_write(&path, &json)
             .expect("write persisted anchor");
+        path
     }
 
     fn persisted_exists(channel_id: u64, message_id: u64) -> bool {
@@ -736,6 +741,74 @@ mod tests {
                 .iter()
                 .any(|op| op.target.message_id.get() == 152)
         );
+        drop(root);
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_owner_intake_keeps_uncertain_pending_and_abort_evidence() {
+        let root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let provider = shared.provider.as_str();
+        let pending =
+            crate::services::discord::runtime_store::tui_direct_pending_start_root().unwrap();
+        let abort =
+            crate::services::discord::runtime_store::tui_direct_abort_marker_root().unwrap();
+        fs::create_dir_all(&pending).unwrap();
+        fs::create_dir_all(&abort).unwrap();
+        let filenames = |channel, anchor| format!("{provider}_{channel}_{anchor}.json");
+        let valid = crate::services::discord::tui_direct_pending_start::TuiDirectPendingStart {
+            provider: provider.into(),
+            channel_id: 71,
+            anchor_message_id: 171,
+            ..Default::default()
+        };
+        fs::write(
+            pending.join(filenames(71, 171)),
+            serde_json::to_vec(&valid).unwrap(),
+        )
+        .unwrap();
+        fs::create_dir(pending.join(filenames(72, 172))).unwrap();
+        let malformed = abort.join(filenames(73, 173));
+        fs::write(&malformed, "{broken json").unwrap();
+        let mismatched = abort.join(filenames(74, 174));
+        fs::write(
+            &mismatched,
+            serde_json::json!({
+                "provider": provider, "channel_id": 74, "anchor_message_id": 175,
+                "tmux_session_name": "test-abort-session", "aborted_at_ms": 1,
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let paths: Vec<_> = (71..=75)
+            .map(|channel| {
+                let target = TurnViewTarget::intake_user_message(
+                    ChannelId::new(channel),
+                    MessageId::new(channel + 100),
+                );
+                let path = write_pending_target(&shared, target);
+                crate::services::discord::health::test_support::age_file(&path, 8 * 24 * 60 * 60);
+                path
+            })
+            .collect();
+
+        let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
+        assert_eq!(
+            fs::read_to_string(malformed.with_extension("json.bad")).unwrap(),
+            "{broken json"
+        );
+        assert!(mismatched.exists());
+        assert!(!paths[4].exists());
+        for (path, reason) in paths.iter().zip([
+            "valid pending-start",
+            "unreadable pending-start",
+            "quarantined abort marker",
+            "mismatched abort marker",
+        ]) {
+            assert!(path.exists(), "{reason} must block deletion");
+        }
+        assert_eq!(cleared, 1);
         drop(root);
     }
 

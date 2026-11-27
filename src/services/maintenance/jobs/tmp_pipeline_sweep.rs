@@ -545,6 +545,14 @@ mod tests {
         fs::write(&current, "{}").unwrap();
         set_mtime(&current, old);
 
+        let current_lock = current.with_extension("lock");
+        let producer_lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&current_lock)
+            .unwrap();
+        set_mtime(&current_lock, old);
+
         super::run(super::Config {
             tmp_root: temp.path().into(),
             ..super::Config::default_runtime()
@@ -552,9 +560,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(current.exists() && paths[5].exists() && locked.exists());
+        assert_eq!((current.exists(), current_lock.exists()), (true, true));
+        assert!(paths[5].exists() && locked.exists());
         assert!(paths[..5].iter().all(|path| !path.exists()));
-        drop((lock, guard));
+        drop((producer_lock, lock, guard));
     }
 
     fn prefixes() -> Vec<String> {
