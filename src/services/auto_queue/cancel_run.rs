@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 
 use crate::db::auto_queue::run_status::is_live_run_status;
+use crate::services::engine_runtime::health_port::{SlotRowGuard, SlotRuntimeHealth};
 
 #[cfg(test)]
 mod malformed_context_pg_tests;
@@ -28,7 +29,8 @@ pub(crate) async fn terminalize_selected_runs_on_pg_tx_for_test(
 impl AutoQueueService {
     pub(crate) async fn cancel_run_with_pg(
         &self,
-        health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+        row_guard: SlotRowGuard,
+        health_registry: Option<SlotRuntimeHealth>,
         pool: &PgPool,
         run_id: &str,
     ) -> ServiceResult<Value> {
@@ -49,6 +51,7 @@ impl AutoQueueService {
 
         match run_status.flatten() {
             Some(status) if is_live_run_status(&status) => cancel_selected_runs_with_pg(
+                row_guard,
                 health_registry,
                 pool,
                 &[run_id.to_string()],
@@ -77,10 +80,11 @@ impl AutoQueueService {
 
     pub(crate) async fn cancel_runs_with_pg(
         &self,
-        health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+        row_guard: SlotRowGuard,
+        health_registry: Option<SlotRuntimeHealth>,
         pool: &PgPool,
     ) -> ServiceResult<Value> {
-        cancel_with_pg(health_registry, pool)
+        cancel_with_pg(row_guard, health_registry, pool)
             .await
             .map_err(|error| {
                 ServiceError::internal(error)
@@ -320,7 +324,8 @@ async fn self_heal_orphan_dispatched_entries_without_slot_pg(
 }
 
 pub(crate) async fn cancel_and_release_runs_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     run_ids: &[String],
     reason: &str,
@@ -341,6 +346,7 @@ pub(crate) async fn cancel_and_release_runs_with_pg(
     // step that fails leaves that row behind for the replay sweep instead of
     // degrading into a warning string.
     let slot_cleanup = super::cleanup_tasks::drain_run_cleanup_task_by_id_pg(
+        row_guard,
         health_registry,
         pool,
         cancelled.cleanup_task_id,
@@ -469,7 +475,8 @@ async fn transition_entry_to_skipped_pg(
 }
 
 async fn terminalize_selected_runs_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
@@ -513,6 +520,7 @@ async fn terminalize_selected_runs_with_pg(
         .map_err(|error| format!("commit postgres run cancel transaction: {error}"))?;
 
     let drained = super::cleanup_tasks::drain_run_cleanup_task_by_id_pg(
+        row_guard,
         health_registry,
         pool,
         cleanup_task_id,
@@ -558,14 +566,21 @@ async fn terminalize_selected_runs_with_pg(
 }
 
 pub(crate) async fn cancel_selected_runs_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     target_run_ids: &[String],
     reason: &str,
 ) -> Result<Value, String> {
-    let (response, _rollback_candidate_card_ids) =
-        terminalize_selected_runs_with_pg(health_registry, pool, target_run_ids, reason, true)
-            .await?;
+    let (response, _rollback_candidate_card_ids) = terminalize_selected_runs_with_pg(
+        row_guard,
+        health_registry,
+        pool,
+        target_run_ids,
+        reason,
+        true,
+    )
+    .await?;
     // #5357: Some-generation card rollback candidates are queued in the same
     // transaction as the entry changes and are retried by the replay sweep if
     // the synchronous drain fails. NULL-generation candidates are instead
@@ -575,11 +590,13 @@ pub(crate) async fn cancel_selected_runs_with_pg(
 }
 
 pub(crate) async fn end_run_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     run_id: &str,
 ) -> Result<bool, String> {
     let (response, _) = terminalize_selected_runs_with_pg(
+        row_guard,
         health_registry,
         pool,
         &[run_id.to_string()],
@@ -634,13 +651,21 @@ pub(crate) async fn skip_dispatched_entries_for_runs_pg(
 }
 
 pub(crate) async fn cancel_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
 ) -> Result<Value, String> {
     let target_run_ids =
         load_run_ids_with_status_pg(pool, crate::db::auto_queue::run_status::LIVE_RUN_STATUSES)
             .await?;
-    cancel_selected_runs_with_pg(health_registry, pool, &target_run_ids, "auto_queue_cancel").await
+    cancel_selected_runs_with_pg(
+        row_guard,
+        health_registry,
+        pool,
+        &target_run_ids,
+        "auto_queue_cancel",
+    )
+    .await
 }
 
 // #4953: every test here needs a live PostgreSQL server, so the module name
@@ -813,6 +838,7 @@ mod pg_tests {
             .then(|| format!("entry-{shared_dispatch}-{foreign_run}"));
 
         let response = cancel_selected_runs_with_pg(
+            crate::services::discord::health::slot_row_host_refusal,
             None,
             &pool,
             std::slice::from_ref(&target_run),
@@ -953,6 +979,7 @@ mod pg_tests {
         let (run_id, entry_id, dispatch_id) = seed_cancel_fixture(&pool, "entrypoint").await;
 
         let response = cancel_selected_runs_with_pg(
+            crate::services::discord::health::slot_row_host_refusal,
             None,
             &pool,
             std::slice::from_ref(&run_id),

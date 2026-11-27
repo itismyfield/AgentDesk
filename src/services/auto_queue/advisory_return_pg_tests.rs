@@ -43,11 +43,16 @@ impl Operation {
             .map_err(|error| error.to_string()),
             Self::Activate => {
                 let config = crate::config::Config::default();
-                let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-                    .expect("create activate engine");
+                let engine = crate::engine::PolicyEngine::new_with_pg(
+                    &config,
+                    Some(pool.clone()),
+                    crate::services::discord::health::slot_row_host_refusal,
+                )
+                .expect("create activate engine");
                 activate_with_deps_pg(
                     &AutoQueueActivateDeps {
                         pg_pool: Some(pool),
+                        slot_row_guard: engine.slot_row_guard(),
                         engine,
                         config: Arc::new(config),
                         health_registry: None,

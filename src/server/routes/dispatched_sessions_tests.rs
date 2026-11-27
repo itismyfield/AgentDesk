@@ -920,7 +920,12 @@ async fn backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let revert = |card: String| {
         let (state, source) = (state.clone(), "test:host-guard");
@@ -1145,7 +1150,12 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let (shared, registry) = host::runtime(&pool).await;
     state.health_registry = Some(registry);
@@ -1519,7 +1529,12 @@ async fn backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg() {
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let (shared, registry) = host::runtime(&pool).await;
     state.health_registry = Some(registry);
@@ -1911,7 +1926,12 @@ async fn fenced_late_hook_skips_the_status_change_hook_pg() {
     let mut config = crate::config::Config::default();
     config.policies.dir = dir.path().to_path_buf();
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let read = "SELECT status || '/' || active_turn_nonce || '/'
                   || (last_heartbeat < NOW() - INTERVAL '30 minutes')::TEXT
                 FROM sessions WHERE session_key = $1";

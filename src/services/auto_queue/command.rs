@@ -1,12 +1,15 @@
 use super::*;
+use crate::services::engine_runtime::health_port::{SlotRowGuard, SlotRuntimeHealth};
 
 pub(super) async fn cancel_selected_runs_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &sqlx::PgPool,
     target_run_ids: &[String],
     reason: &str,
 ) -> Result<serde_json::Value, String> {
     crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+        row_guard,
         health_registry,
         pool,
         target_run_ids,
@@ -410,7 +413,8 @@ pub(super) async fn soft_pause_with_pg(pool: &sqlx::PgPool) -> Result<serde_json
 }
 
 pub(super) async fn force_pause_with_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &sqlx::PgPool,
 ) -> Result<serde_json::Value, String> {
     // #2048 F2: capture the run set AND flip them to `paused` in a single
@@ -460,6 +464,7 @@ pub(super) async fn force_pause_with_pg(
     let paused = pause_target_ids.len();
 
     let cleanup = crate::services::auto_queue::cancel_run::cancel_and_release_runs_with_pg(
+        row_guard,
         health_registry,
         pool,
         &pause_target_ids,
@@ -597,7 +602,14 @@ mod tests {
             .expect("hold first created run token");
 
         let pause_pool = pool.clone();
-        let pause = tokio::spawn(async move { force_pause_with_pg(None, &pause_pool).await });
+        let pause = tokio::spawn(async move {
+            force_pause_with_pg(
+                crate::services::discord::health::slot_row_host_refusal,
+                None,
+                &pause_pool,
+            )
+            .await
+        });
         poll_within(
             async || advisory_waiters_sample(&mut holder, 1).await,
             std::time::Duration::from_secs(5),

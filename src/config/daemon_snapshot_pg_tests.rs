@@ -41,7 +41,11 @@ fn assert_boot_snapshot() {
 }
 
 fn assert_policy_engine_failure(config: &Config, pool: &sqlx::PgPool) {
-    let error = match crate::engine::PolicyEngine::new_with_pg(config, Some(pool.clone())) {
+    let error = match crate::engine::PolicyEngine::new_with_pg(
+        config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    ) {
         Ok(_) => panic!("a policies path that names a file must fail engine startup"),
         Err(error) => error,
     };
@@ -56,7 +60,7 @@ fn assert_policy_engine_failure(config: &Config, pool: &sqlx::PgPool) {
 }
 
 async fn assert_http_startup_failure(config: &Config) {
-    let engine = crate::engine::PolicyEngine::new_with_pg(config, None).unwrap();
+    let engine = crate::engine::PolicyEngine::new(config).unwrap();
     let error = tokio::time::timeout(
         Duration::from_secs(5),
         crate::server::run(config.clone(), engine, None, None),

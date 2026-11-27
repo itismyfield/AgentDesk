@@ -55,8 +55,12 @@ async fn launch_server(state: crate::bootstrap::BootstrapState) -> Result<()> {
 }
 
 async fn serve(config: &crate::config::Config, pg_pool: Option<sqlx::PgPool>) -> Result<()> {
-    let engine = crate::engine::PolicyEngine::new_with_pg(config, pg_pool.clone())
-        .context("Failed to init policy engine")?;
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        config,
+        pg_pool.clone(),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .context("Failed to init policy engine")?;
 
     tracing::info!(
         "AgentDesk v{} starting on {}:{}",

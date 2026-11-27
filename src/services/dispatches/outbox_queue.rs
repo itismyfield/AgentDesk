@@ -18,6 +18,7 @@ use crate::db::dispatches::outbox::{
 };
 use crate::services::dispatches::discord_delivery::DispatchNotifyDeliveryResult;
 use crate::services::dispatches::outbox_claiming::claim_pending_dispatch_outbox_batch_pg;
+use crate::services::engine_runtime::health_port::SlotRowGuard;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -51,11 +52,15 @@ pub(crate) trait OutboxNotifier: Send + Sync {
 /// Production notifier that calls the real Discord functions.
 pub(crate) struct RealOutboxNotifier {
     pub(crate) pg_pool: Arc<PgPool>,
+    slot_row_guard: SlotRowGuard,
 }
 
 impl RealOutboxNotifier {
-    pub(crate) fn new(pg_pool: Arc<PgPool>) -> Self {
-        Self { pg_pool }
+    pub(crate) fn new(pg_pool: Arc<PgPool>, slot_row_guard: SlotRowGuard) -> Self {
+        Self {
+            pg_pool,
+            slot_row_guard,
+        }
     }
 }
 
@@ -69,6 +74,7 @@ impl OutboxNotifier for RealOutboxNotifier {
     ) -> Result<DispatchNotifyDeliveryResult, String> {
         crate::services::dispatches::discord_delivery::send_dispatch_to_discord_with_pg_result(
             Some(self.pg_pool.as_ref()),
+            self.slot_row_guard,
             &agent_id,
             &title,
             &card_id,
@@ -80,6 +86,7 @@ impl OutboxNotifier for RealOutboxNotifier {
     async fn handle_followup(&self, dispatch_id: String) -> Result<(), String> {
         crate::services::dispatches::outbox_route::handle_completed_dispatch_followups_with_pg(
             Some(self.pg_pool.as_ref()),
+            self.slot_row_guard,
             &dispatch_id,
         )
         .await
@@ -402,6 +409,7 @@ pub(crate) async fn process_outbox_batch_with_pg<N: OutboxNotifier>(
 /// All other code paths insert into the outbox table and return immediately.
 pub(crate) async fn dispatch_outbox_loop(
     pg_pool: Arc<PgPool>,
+    slot_row_guard: SlotRowGuard,
     claim_owner: String,
     cluster_runtime: crate::services::cluster::node_registry::ClusterRuntime,
     cluster_config: crate::config::ClusterConfig,
@@ -415,7 +423,7 @@ pub(crate) async fn dispatch_outbox_loop(
         "[dispatch-outbox] Worker started (adaptive backoff 500ms-5s)"
     );
 
-    let notifier = RealOutboxNotifier::new(pg_pool);
+    let notifier = RealOutboxNotifier::new(pg_pool, slot_row_guard);
     let mut pressure = pressure::OutboxPressure::new(Instant::now());
     let wake_interval =
         Duration::from_secs(cluster_config.dispatch_routing.wake_interval_secs.max(1));
