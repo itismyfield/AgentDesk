@@ -716,6 +716,45 @@ async fn custody_retention_requires_old_delivery_and_keeps_unknown_episodes_pg()
     finish(db, pool).await;
 }
 
+#[tokio::test]
+async fn runtime_hygiene_custody_expires_inactive_non_direct_episodes() {
+    let env = Env::new();
+    let root = custody(&env);
+    let live = row(41, None);
+    let retired = row(42, None);
+    env.seed(&live, 0);
+    for (state, name, direct) in [
+        (&live, "live", Some(false)),
+        (&retired, "retired", Some(false)),
+        (&retired, "older-marker", None),
+        (&retired, "recent", Some(false)),
+    ] {
+        let dir = root.join(name);
+        fs::create_dir_all(&dir).unwrap();
+        let mut marker = json!({
+            "episode": {
+                "provider": CLAUDE.as_str(),
+                "channel_id": state.channel_id,
+                "anchor_id": state.user_msg_id,
+                "anchorless": null,
+            },
+        });
+        if let Some(direct) = direct {
+            marker["tui_direct"] = json!(direct);
+        }
+        fs::write(dir.join("episode.json"), marker.to_string()).unwrap();
+        if name != "recent" {
+            age_tree(&dir, chrono::Utc::now().timestamp() - 8 * 24 * 60 * 60);
+        }
+    }
+
+    assert_eq!(enqueue_custody_notices(&root, &CLAUDE, None).await, 0);
+    assert!(root.join("live/episode.json").is_file());
+    assert!(root.join("recent/episode.json").is_file());
+    assert!(!root.join("retired").exists());
+    assert!(!root.join("older-marker").exists());
+}
+
 fn age_tree(path: &Path, timestamp: i64) {
     if path.is_dir() {
         for entry in fs::read_dir(path).unwrap().flatten() {

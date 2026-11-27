@@ -635,6 +635,80 @@ mod tests {
         assert!(hourglass_removed(&shared.turn_view_reconciler, 18_002));
     }
 
+    #[tokio::test]
+    async fn runtime_hygiene_intake_sweep_expires_orphans_and_keeps_live_targets() {
+        let root = scoped_runtime_root();
+        let shared = crate::services::discord::make_shared_data_for_tests();
+        let stale = 8 * 24 * 60 * 60;
+        let cases = [
+            (51, "pending", stale, false),
+            (52, "completed", stale, false),
+            (53, "queued", stale, false),
+            (54, "pending", stale, true),
+            (55, "pending", 60 * 60, false),
+        ];
+        let mut paths = Vec::new();
+        for (channel, applied, age, live) in cases {
+            let message = channel + 100;
+            let target = TurnViewTarget::intake_user_message(
+                ChannelId::new(channel),
+                MessageId::new(message),
+            );
+            let path = TurnViewReconciler::persisted_target_path(target).unwrap();
+            let record = PersistedTargetState {
+                version: PERSISTED_STATE_VERSION,
+                provider: shared.provider.as_str().into(),
+                kind: target.kind.as_str().into(),
+                channel_id: channel,
+                message_id: message,
+                owner_generation: 7,
+                owner_turn_id: "test-turn".into(),
+                applied: applied.into(),
+                identity_label: target.kind.identity_label().into(),
+                token_hash: Some(shared.token_hash.clone()),
+                start_attempt_id: None,
+            };
+            crate::services::discord::runtime_store::atomic_write(
+                &path,
+                &serde_json::to_string(&record).unwrap(),
+            )
+            .unwrap();
+            crate::services::discord::health::test_support::age_file(&path, age);
+            paths.push(path);
+            if live {
+                let state = crate::services::discord::inflight::InflightTurnState::new(
+                    shared.provider.clone(),
+                    channel,
+                    None,
+                    42,
+                    message,
+                    message + 1,
+                    "test prompt".into(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    0,
+                );
+                crate::services::discord::inflight::save_inflight_state(&state).unwrap();
+            }
+        }
+
+        let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
+        assert!(paths[3].exists() && paths[4].exists());
+        assert_eq!(cleared, 3);
+        assert!(paths[..3].iter().all(|path| !path.exists()));
+        assert!(hourglass_removed(&shared.turn_view_reconciler, 151));
+        assert!(
+            !shared
+                .turn_view_reconciler
+                .ops()
+                .iter()
+                .any(|op| op.target.message_id.get() == 152)
+        );
+        drop(root);
+    }
+
     /// A real inflight hold appearing during the target-lock wait preserves the anchor.
     #[tokio::test]
     async fn inflight_during_target_lock_wait_blocks_removal() {

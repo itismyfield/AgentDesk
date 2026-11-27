@@ -3414,6 +3414,39 @@ const DISK_WARN_BYTES: u64 = 30 * 1024 * 1024 * 1024;
 const DISK_FAIL_BYTES: u64 = 80 * 1024 * 1024 * 1024;
 const DISK_USAGE_EXCLUDED_ROOT_CHILDREN: &[&str] = &["workspaces", "worktrees"];
 
+#[cfg(test)]
+thread_local! {
+    static DISK_DIRECTORY_VISITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn disk_read_dir(path: &Path) -> std::io::Result<fs::ReadDir> {
+    #[cfg(test)]
+    DISK_DIRECTORY_VISITS.with(|visits| visits.set(visits.get() + 1));
+    fs::read_dir(path)
+}
+
+#[cfg(test)]
+#[test]
+fn runtime_hygiene_doctor_visits_each_directory_once() {
+    let temp = tempfile::tempdir().unwrap();
+    let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+    for (dir, size) in [("runtime/nested", 3), ("workspaces", 7)] {
+        let path = temp.path().join(dir);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("data"), vec![0; size]).unwrap();
+    }
+    DISK_DIRECTORY_VISITS.with(|visits| visits.set(0));
+
+    let evidence = check_disk_usage().evidence.unwrap();
+
+    assert_eq!(evidence["total_bytes"], 3);
+    assert_eq!(evidence["raw_total_bytes"], 10);
+    assert_eq!(evidence["top_children"][0]["name"], "workspaces");
+    assert_eq!(evidence["top_children"][0]["excluded_from_threshold"], true);
+    assert_eq!(DISK_DIRECTORY_VISITS.with(|visits| visits.get()), 4);
+    drop(guard);
+}
+
 fn recursive_dir_size(path: &Path) -> std::io::Result<u64> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.is_file() {
@@ -3424,7 +3457,7 @@ fn recursive_dir_size(path: &Path) -> std::io::Result<u64> {
     }
 
     let mut total = 0u64;
-    for entry in fs::read_dir(path)? {
+    for entry in disk_read_dir(path)? {
         let entry = entry?;
         total = total.saturating_add(recursive_dir_size(&entry.path()).unwrap_or(0));
     }
@@ -3449,7 +3482,7 @@ fn check_disk_usage() -> Check {
         Some(path) => match recursive_dir_size(&path) {
             Ok(raw_total) => {
                 let mut excluded_total = 0u64;
-                let mut children = fs::read_dir(&path)
+                let mut children = disk_read_dir(&path)
                     .ok()
                     .into_iter()
                     .flatten()

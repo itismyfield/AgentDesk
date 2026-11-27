@@ -849,6 +849,49 @@ mod catch_up_recovery_tests {
     }
 
     #[test]
+    fn runtime_hygiene_checkpoint_prunes_old_unlocked_sidecars() {
+        let temp = tempfile::tempdir().unwrap();
+        let old = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60),
+        );
+        let suffixes = ["txt", "txt.lock", "sweep.json", "sweep.json.lock"];
+        for channel in [21, 22, 23, 24] {
+            for suffix in suffixes {
+                let path = temp.path().join(format!("{channel}.{suffix}"));
+                std::fs::write(&path, "").unwrap();
+                if channel != 24 {
+                    filetime::set_file_mtime(&path, old).unwrap();
+                }
+            }
+        }
+        let orphan = temp.path().join("25.txt.lock");
+        std::fs::write(&orphan, "").unwrap();
+        filetime::set_file_mtime(&orphan, old).unwrap();
+        let locks = ["22.txt.lock", "23.sweep.json.lock"].map(|name| {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(temp.path().join(name))
+                .unwrap();
+            file.lock().unwrap();
+            file
+        });
+
+        prune_stale_checkpoint_files(temp.path(), Duration::from_secs(600));
+
+        for channel in [22, 23, 24] {
+            for suffix in suffixes {
+                assert!(temp.path().join(format!("{channel}.{suffix}")).exists());
+            }
+        }
+        for suffix in suffixes {
+            assert!(!temp.path().join(format!("21.{suffix}")).exists());
+        }
+        assert!(!orphan.exists());
+        drop(locks);
+    }
+
+    #[test]
     fn stale_checkpoint_prune_preserves_last_message_lock_sidecars() {
         let root = scoped_runtime_root();
         let provider = ProviderKind::Codex;

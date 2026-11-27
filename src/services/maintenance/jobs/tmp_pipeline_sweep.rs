@@ -418,6 +418,104 @@ mod tests {
     };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_hygiene_tmp_sweep_keeps_fresh_resources_and_live_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime.path());
+        let sockets = temp
+            .path()
+            .join(format!("tmux-{}", unsafe { libc::geteuid() }));
+        fs::create_dir(&sockets).unwrap();
+        fs::set_permissions(
+            &sockets,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let stale = sockets.join("cgb2-1");
+        let live = sockets.join("cgb2-2");
+        let fresh = sockets.join("cgb2-3");
+        drop(UnixListener::bind(&stale).unwrap());
+        let listener = UnixListener::bind(&live).unwrap();
+        drop(UnixListener::bind(&fresh).unwrap());
+        let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+        set_mtime(&stale, old);
+        set_mtime(&live, old);
+        let stale_dir = temp.path().join("cgb2-fixture");
+        let live_dir = temp.path().join("cgb2-live-fixture");
+        let fresh_dir = temp.path().join("cgb2-recent");
+        for dir in [&stale_dir, &live_dir] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("receiver.py"), "").unwrap();
+            set_mtime(dir.join("receiver.py"), old);
+        }
+        let nested = live_dir.join(sockets.file_name().unwrap());
+        fs::create_dir(&nested).unwrap();
+        fs::set_permissions(&nested, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let nested_socket = nested.join("cgb2-4");
+        let nested_listener = UnixListener::bind(&nested_socket).unwrap();
+        for path in [&stale_dir, &live_dir, &nested, &nested_socket] {
+            set_mtime(path, old);
+        }
+        fs::create_dir(&fresh_dir).unwrap();
+
+        super::run(super::Config {
+            tmp_root: temp.path().into(),
+            ..super::Config::default_runtime()
+        })
+        .await
+        .unwrap();
+
+        assert!(live.exists() && fresh.exists() && fresh_dir.exists() && nested_socket.exists());
+        assert!(!stale.exists() && !stale_dir.exists());
+        drop((listener, nested_listener, guard));
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_daily_maintenance_prunes_old_result_files() {
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let root = temp.path().join("runtime");
+        let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("dcserver.pid"), "42").unwrap();
+        let boot = crate::runtime_layout::boot_id::current_boot_id_at(temp.path()).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        let mut paths = Vec::new();
+        for name in [
+            "self_hosted_deploy/deploy-release-test.log",
+            "self_hosted_deploy/deploy-release-test.sh",
+            "review_passed/0123456",
+            "doctor/startup/41-1.json",
+            "doctor/startup/41-1.lock",
+            "review_passed/abcdef0",
+        ] {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "").unwrap();
+            if !name.ends_with("abcdef0") {
+                set_mtime(&path, old);
+            }
+            paths.push(path);
+        }
+        let current = root.join(format!("doctor/startup/{boot}.json"));
+        fs::write(&current, "{}").unwrap();
+        set_mtime(&current, old);
+
+        super::run(super::Config {
+            tmp_root: temp.path().into(),
+            ..super::Config::default_runtime()
+        })
+        .await
+        .unwrap();
+
+        assert!(current.exists() && paths[5].exists());
+        assert!(paths[..5].iter().all(|path| !path.exists()));
+        drop(guard);
+    }
+
     fn prefixes() -> Vec<String> {
         APPROVED_NAME_PREFIXES
             .iter()

@@ -384,6 +384,37 @@ mod receipt_tests {
     }
 
     #[tokio::test]
+    async fn runtime_hygiene_memento_sends_empty_consolidation_arguments() {
+        let app = axum::Router::new().route(
+            "/",
+            axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
+                if body["params"] == json!({"name":"memory_consolidate", "arguments":{}}) {
+                    axum::Json(json!({"result":{"content":[{"text":"{\"merged_count\":1}"}]}}))
+                } else {
+                    axum::Json(json!({"error":{"message":"unexpected consolidation arguments"}}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let runtime = RuntimeConfig {
+            endpoint: format!("http://{}", listener.local_addr().unwrap()),
+            access_key: "test-key".into(),
+            receipt_dir: temp.path().to_path_buf(),
+        };
+        let server = tokio::spawn(async { axum::serve(listener, app).await.unwrap() });
+        let response = call_memory_consolidate(
+            &reqwest::Client::new(),
+            &runtime,
+            "test-session",
+            "test-workspace",
+        )
+        .await;
+        server.abort();
+        assert_eq!(response.unwrap(), json!({"merged_count":1}));
+    }
+
+    #[tokio::test]
     async fn maintenance_receipt_failure_stops_before_dispatch() {
         let dir = tempfile::tempdir().unwrap();
         let receipt_dir = dir.path().join("file");
