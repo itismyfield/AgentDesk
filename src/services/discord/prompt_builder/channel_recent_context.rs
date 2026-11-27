@@ -358,42 +358,41 @@ mod tests {
 
     #[test]
     fn fresh_routine_severance_blocks_seed_without_changing_normal_new_session() {
-        assert!(
-            should_inject(
-                None,
-                false,
-                false,
-                3,
-                DispatchProfile::Full,
-                None,
-                Option::<&()>::None,
-            ),
-            "a normal new provider session must still inject recent context"
+        assert_eq!(
+            injection_disabled_reason(&InjectionGateInputs {
+                session_id: None,
+                force_fresh_provider_session: true,
+                session_was_cleared: false,
+                scheduled_snapshot: true,
+                recent_pairs: 3,
+                dispatch_profile: DispatchProfile::Full,
+                active_dispatch_id_for_prompt: None,
+                session_retry_context: Option::<&()>::None,
+            }),
+            Some("scheduled_snapshot_context"),
         );
-        assert!(
-            !should_inject(
-                None,
-                false,
-                true,
-                3,
-                DispatchProfile::Full,
-                None,
-                Option::<&()>::None,
-            ),
-            "/clear must seal the channel transcript continuity path"
-        );
-        assert!(
-            !should_inject(
-                None,
-                true,
-                false,
-                3,
-                DispatchProfile::Full,
-                None,
-                Option::<&()>::None,
-            ),
-            "/goal fresh and fresh routines must seal the channel transcript continuity path"
-        );
+        assert!(should_inject(
+            None,
+            false,
+            false,
+            3,
+            DispatchProfile::Full,
+            None,
+            Option::<&()>::None,
+        ));
+    }
+
+    #[test]
+    fn fresh_routine_severance_injects_recent_context() {
+        assert!(should_inject(
+            None,
+            true,
+            false,
+            3,
+            DispatchProfile::Full,
+            None,
+            Option::<&()>::None,
+        ));
     }
 
     #[test]

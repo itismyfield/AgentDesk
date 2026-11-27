@@ -153,6 +153,21 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
             "{provider:?}: no native source is available to record"
         );
 
+        let channel_key = channel.get().to_string();
+        for index in 0..4 {
+            sqlx::query(
+                "INSERT INTO session_transcripts
+                    (turn_id, channel_id, user_message, assistant_message, channel_context)
+                 VALUES ($1, $2, $3, 'synthetic answer', true)",
+            )
+            .bind(format!("clear-recent-{n}-{index}"))
+            .bind(&channel_key)
+            .bind(format!("synthetic question {index}"))
+            .execute(&pool)
+            .await
+            .expect("seed recent channel pairs");
+        }
+
         let reply = clear(&shared, &provider, channel).await;
 
         assert_eq!(reply, cleared(1), "{provider:?}");
@@ -180,6 +195,66 @@ async fn a_clear_ends_a_running_tmux_session_and_forgets_its_provider_session_pg
                 .unwrap()
                 .is_empty()
         );
+
+        use crate::services::discord::prompt_builder::DispatchProfile;
+        let load = |session, cleared, snapshot| {
+            crate::services::discord::load_channel_recent_context(
+                Some(&pool),
+                channel,
+                session,
+                false,
+                cleared,
+                snapshot,
+                DispatchProfile::Full,
+                None,
+                Option::<&()>::None,
+            )
+        };
+        sqlx::query(
+            "INSERT INTO session_transcripts
+                 (turn_id, channel_id, user_message, assistant_message, channel_context, created_at)
+             VALUES ($1, $2, 'late question', 'late answer', true, NOW() - INTERVAL '1 day')",
+        )
+        .bind(format!("clear-late-{n}"))
+        .bind(&channel_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        for cleared_in_memory in [true, false] {
+            let recent = load(None, cleared_in_memory, false)
+                .await
+                .expect("recent context after clear");
+            assert_eq!(recent.pair_count, 3, "{provider:?}");
+            assert_eq!(recent.audit_reason, "cleared;pairs=3;previous_session=true");
+            assert!(!recent.rendered_context.contains("synthetic question 0"));
+            assert!(recent.rendered_context.contains("synthetic question 3"));
+            assert!(!recent.rendered_context.contains("late question"));
+            assert!(
+                recent
+                    .rendered_context
+                    .contains(&format!("직전 세션 session_id={OLD_SESSION}"))
+            );
+            assert!(!recent.rendered_context.contains("grep"));
+        }
+        let boundary: serde_json::Value = sqlx::query_scalar(
+            "SELECT recent_context FROM channel_session_clear_boundaries WHERE channel_id = $1",
+        )
+        .bind(&channel_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary["previous_session"]["session_id"], OLD_SESSION);
+        assert_eq!(boundary["previous_session"]["provider"], provider.as_str());
+        assert!(boundary["previous_session"]["path"].is_null());
+        for (session, snapshot, reason) in [
+            (Some("resumed"), false, "resumed_session"),
+            (None, true, "scheduled_snapshot_context"),
+        ] {
+            let recent = load(session, true, snapshot).await.unwrap();
+            assert_eq!(recent.pair_count, 0);
+            assert!(recent.rendered_context.is_empty());
+            assert!(recent.audit_reason.starts_with(reason));
+        }
     }
     pool.close().await;
     db.drop().await;

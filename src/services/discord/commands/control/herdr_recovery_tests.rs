@@ -257,6 +257,26 @@ mod retired_selector {
             assert_eq!(herdr::row(&seeded.pool, &seeded.key).await, retired());
             assert!(seeded.take_clear_flag().await, "the clear set its flag");
             assert_eq!(seeded.selected().await, None, "the next input starts fresh");
+            let recent = crate::services::discord::load_channel_recent_context(
+                Some(&seeded.pool),
+                seeded.channel,
+                None,
+                false,
+                false,
+                false,
+                crate::services::discord::prompt_builder::DispatchProfile::Full,
+                None,
+                Option::<&()>::None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(recent.audit_reason, "cleared;pairs=0;previous_session=true");
+            assert!(
+                recent
+                    .rendered_context
+                    .contains(&format!("직전 세션 session_id={SELECTOR}"))
+            );
+            assert!(!report.reply().contains(SELECTOR));
             seeded.done().await;
         });
     }

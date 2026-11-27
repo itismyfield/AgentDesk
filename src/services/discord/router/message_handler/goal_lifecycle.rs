@@ -435,10 +435,40 @@ mod fresh_session_boundary_pg_tests {
             .execute(&pool)
             .await
             .unwrap();
+        sqlx::query(
+            "INSERT INTO session_transcripts
+                 (turn_id, channel_id, user_message, assistant_message, channel_context)
+             SELECT 'fresh-' || idx, $1, 'question ' || idx, 'answer ' || idx, true
+               FROM generate_series(1, 4) AS idx",
+        )
+        .bind(channel.get().to_string())
+        .execute(&pool)
+        .await
+        .unwrap();
         record_fresh_session_context_boundary(&shared, channel)
             .await
             .expect("the boundary lands once the store accepts it");
         assert_eq!(boundary_generation(&pool, channel).await, Some(1));
+        let recent = crate::services::discord::load_channel_recent_context(
+            Some(&pool),
+            channel,
+            None,
+            true,
+            false,
+            false,
+            crate::services::discord::prompt_builder::DispatchProfile::Full,
+            None,
+            Option::<&()>::None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(recent.pair_count, 3);
+        assert_eq!(
+            recent.audit_reason,
+            "context_severed;pairs=3;previous_session=false"
+        );
+        assert!(!recent.rendered_context.contains("question 1"));
+        assert!(recent.rendered_context.contains("question 4"));
         pool.close().await;
         db.drop().await;
     }
