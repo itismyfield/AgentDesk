@@ -9,6 +9,7 @@ import type { Agent, TaskDispatch } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { Cap, CardNote, Chip, Row, RowButton, RowLink, SectionCard } from "../common/KitPrimitives";
 import { buildTodoItems, todoStatus, type SourceState, type Tr } from "../home/homeModel";
+import { useAgentTurns } from "../home/useHomeData";
 import { buildAttention, type AttentionEntry } from "./agentsAttention";
 
 export interface AgentsAttention {
@@ -30,10 +31,15 @@ export function useAgentsAttention(agents: Agent[], tr: Tr, isKo: boolean): Agen
     );
     return () => { active = false; };
   }, []);
+  const workingIds = useMemo(
+    () => agents.filter((agent) => agent.status === "working" && !agent.id.startsWith("dispatched:")).map((agent) => agent.id),
+    [agents],
+  );
+  const turns = useAgentTurns(workingIds);
   const entries = useMemo(() => {
     const todo = buildTodoItems({ cards: kanbanCards, campaigns: null, tr, isKo });
-    return buildAttention({ agents, todo, failed: failed.rows, cardsRead: kanbanCardsState !== "error", tr, isKo });
-  }, [agents, kanbanCards, kanbanCardsState, failed.rows, tr, isKo]);
+    return buildAttention({ agents, todo, failed: failed.rows, turns, cardsRead: kanbanCardsState !== "error", tr, isKo });
+  }, [agents, kanbanCards, kanbanCardsState, failed.rows, turns, tr, isKo]);
   const cards: SourceState = kanbanCardsState === "error" ? "failed" : kanbanCardsState === "ready" ? "ok" : "loading";
   return { entries, cards, dispatches: failed.state, status: todoStatus(entries.length, [cards, failed.state]) };
 }
