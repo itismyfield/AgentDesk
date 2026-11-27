@@ -340,7 +340,7 @@ pub fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
 }
 
 /// Whether the boot host policy has been published.
-pub(crate) fn boot_policy_published() -> bool {
+pub fn boot_policy_published() -> bool {
     with_boot(|boot| boot.is_some())
 }
 

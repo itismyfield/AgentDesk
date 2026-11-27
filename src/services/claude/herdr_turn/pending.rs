@@ -120,7 +120,7 @@ pub(super) fn launch_refusal(turn: &HerdrTurn<'_>, runtime: &Handle, error: Stri
             .expected_native_session_id
             .as_deref()
             .unwrap_or_default(),
-        crate::services::turn_orchestrator::RetryWaitCause::PendingUnproven {
+        crate::domain::retry_wait::RetryCause::PendingUnproven {
             nonce: record.execution_nonce,
         },
         &error,

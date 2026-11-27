@@ -510,7 +510,7 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
 // unreadable or legacy row with a failed probe just warns): fenced, its process and tmux untouched.
 #[tokio::test]
 async fn a_held_herdr_threads_clear_ends_its_stored_row_not_a_guessed_tmux_pg() {
-    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+    use crate::db::dispatched_sessions::hosted_execution::{HostedState, test_support};
     use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (db, pool) = postgres().await;
@@ -523,12 +523,12 @@ async fn a_held_herdr_threads_clear_ends_its_stored_row_not_a_guessed_tmux_pg() 
         let _thread = force_relation_for_test(thread.get(), Relation::Child { parent });
         let name = format!("adk-clear-held-{n}-{}", uuid::Uuid::new_v4().simple());
         let managed = Managed::launch(&shared, &provider, (thread, &name)).await;
-        let mut owner = tests::owner(&thread.get().to_string());
+        let mut owner = test_support::owner(&thread.get().to_string());
         (owner.discord_token_hash, owner.logical_key) =
             (shared.token_hash.clone(), managed.tmux.clone());
         owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
         let raw = match n {
-            1 => Some(tests::wire(&tests::record(
+            1 => Some(test_support::wire(&test_support::record(
                 &owner,
                 "nonce-held",
                 HostedState::Pending,
