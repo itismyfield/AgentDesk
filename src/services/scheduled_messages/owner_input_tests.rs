@@ -21,7 +21,7 @@ thread_local! {
 }
 
 fn count_scheduled_wake(shared: &Arc<SharedData>, channel: ChannelId) {
-    assert!(shared.policy.engine.is_none());
+    assert!(!shared.has_policy_engine_for_tests());
     assert_eq!(channel.get(), 123456789);
     SCHEDULED_WAKES.with(|count| count.set(count.get() + 1));
 }
