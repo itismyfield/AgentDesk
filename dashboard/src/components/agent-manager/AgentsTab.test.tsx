@@ -56,7 +56,7 @@ const AGENTS: Agent[] = [
   { ...base, id: "agent-luna", name: "Luna Ops", name_ko: "루나", status: "idle", cli_provider: "claude" },
   { ...base, id: "agent-nova", name: "Nova Watch", name_ko: "노바", status: "idle", cli_provider: "claude", visual_status_code: "stuck-suspect" } as Agent,
 ];
-// The second session sits in a department without an agent: home counts it, the roster lists no row for it.
+// Unlinked sessions remain separate from the agent roster even if legacy department_id is set.
 const SESSIONS = [
   { id: "s1", linked_agent_id: "agent-luna", status: "idle", last_seen_at: 0 },
   { id: "s9", session_key: "s9", name: "adk-cc", department_id: "dev", linked_agent_id: null, status: "idle", last_seen_at: 0 },
@@ -67,18 +67,17 @@ function Harness({ sessionsFailed = false, agents = AGENTS }: { sessionsFailed?:
   const entries = classifyRoster(agents, sessionsFailed ? [] : SESSIONS, sessionsFailed);
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>("all");
-  const [deptTab, setDeptTab] = useState("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [includeTests, setIncludeTests] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
-  const sortedEntries = filterAndSortAgents(entries.filter((entry) => !isStandIn(entry.agent)), { deptTab, statusFilter, search, includeTests }, sortMode);
+  const sortedEntries = filterAndSortAgents(entries.filter((entry) => !isStandIn(entry.agent)), { statusFilter, search, includeTests }, sortMode);
   return (
     <AgentsTab
-      tr={tr} locale="en" isKo={false} entries={entries} sortedEntries={sortedEntries} departments={[]}
-      deptTab={deptTab} setDeptTab={setDeptTab} search={search} setSearch={setSearch}
+      tr={tr} locale="en" isKo={false} entries={entries} sortedEntries={sortedEntries}
+      search={search} setSearch={setSearch}
       statusFilter={statusFilter} setStatusFilter={setStatusFilter} sortMode={sortMode} setSortMode={setSortMode}
       includeTests={includeTests} setIncludeTests={setIncludeTests} selectedAgentId={selected} onSelectAgent={setSelected}
-      onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+      onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()}
       onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
     />
   );
@@ -131,14 +130,13 @@ describe("AgentsTab", () => {
     setViewport(false);
     act(() => root.render(<MemoryRouter><Harness /></MemoryRouter>));
     await flush();
-    expect(tab(/^All/).textContent).toContain("4");
+    expect(tab(/^All/).textContent).toContain("3");
     expect(tab(/^Working/).textContent).toContain("1");
-    expect(tab(/^Resting/).textContent).toContain("2");
+    expect(tab(/^Resting/).textContent).toContain("1");
     expect(document.querySelectorAll("[data-agent-item]")).toHaveLength(3);
     expect(tab(/^No session/).getAttribute("aria-selected")).toBe("false");
     expect(document.querySelector('[data-testid="agents-attention"]')!.textContent).toContain("Maybe stuck");
-    // The summary legend counts home's set too: Luna and the department-only session rest.
-    expect(document.querySelector('[data-testid="agents-summary"]')!.textContent).toContain("Resting 2");
+    expect(document.querySelector('[data-testid="agents-summary"]')!.textContent).toContain("Resting 1");
 
     act(() => tab(/^No session/).click());
     expect(tab(/^No session/).getAttribute("aria-selected")).toBe("true");
@@ -384,10 +382,6 @@ describe("provider summary, attention header, and active provider resolution", (
   it("hides retired department controls in AgentsTab/detail and formats raw Discord channel snowflakes cleanly", async () => {
     setViewport(false);
     const ko = (k: string) => k;
-    const dept: Department = {
-      id: "dept-infra", name: "Infra", name_ko: "인프라팀", icon: "🛠️", color: "#38bdf8",
-      description: null, prompt: null, sort_order: 0, created_at: 0,
-    };
     vi.mocked(api.getDiscordBindings).mockResolvedValueOnce([
       { agentId: "agent-ada", channelId: "1490145076658307999", counterModelChannelId: "1490145076658307888", source: "primary" },
     ]);
@@ -398,10 +392,10 @@ describe("provider summary, attention header, and active provider resolution", (
         <MemoryRouter>
           <AgentsTab
             tr={ko} locale="ko" isKo entries={entries} sortedEntries={entries.filter((e) => !isStandIn(e.agent))}
-            departments={[dept]} deptTab="all" setDeptTab={vi.fn()} search="" setSearch={vi.fn()}
+            search="" setSearch={vi.fn()}
             statusFilter="all" setStatusFilter={vi.fn()} sortMode="status" setSortMode={vi.fn()}
             includeTests={false} setIncludeTests={vi.fn()} selectedAgentId="agent-ada" onSelectAgent={vi.fn()}
-            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()}
             onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
           />
         </MemoryRouter>,
@@ -492,14 +486,14 @@ describe("provider summary, attention header, and active provider resolution", (
         <MemoryRouter>
           <AgentsTab
             tr={ko} locale="ko" isKo entries={entries} sortedEntries={entries.filter((e) => !isStandIn(e.agent))}
-            departments={[]} deptTab="all" setDeptTab={vi.fn()} search="" setSearch={vi.fn()}
+            search="" setSearch={vi.fn()}
             statusFilter="all" setStatusFilter={vi.fn()} sortMode="status" setSortMode={vi.fn()}
             includeTests={false} setIncludeTests={vi.fn()} selectedAgentId={null} onSelectAgent={vi.fn()}
-            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()} onEditDepartment={vi.fn()}
+            onCreateAgent={vi.fn()} onEditAgent={vi.fn()} onDuplicateAgent={vi.fn()}
             onDeleteAgent={vi.fn()} onAgentUpdated={vi.fn()} saving={false}
           />
           <AgentFormModal
-            isKo locale="ko" tr={ko} isEdit={false} saving={false} departments={[]}
+            isKo locale="ko" tr={ko} isEdit={false} saving={false}
             onSave={vi.fn()} onClose={vi.fn()}
             form={{
               name: "", name_ko: "", name_ja: "", name_zh: "", department_id: "",
