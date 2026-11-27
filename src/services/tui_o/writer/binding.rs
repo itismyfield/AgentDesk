@@ -75,6 +75,27 @@ pub struct BindingEvent {
     pub committed_at: DateTime<Utc>,
 }
 
+impl BindingEvent {
+    pub(crate) fn source_refresh(&self) -> Option<(&SourceId, &SourceId)> {
+        match &self.record {
+            BindingRecord::Bound {
+                old,
+                new: BindingTarget::Source(new),
+                cause: BindingCause::SameSessionVerified,
+                evidence,
+                ..
+            } if self.provider == ShadowProvider::Claude
+                && !self.tmux_session.is_empty()
+                && !self.execution_nonce.is_empty()
+                && matches!(evidence.hook_event.as_str(), "user_prompt_submit" | "stop") =>
+            {
+                Some((old.as_ref().unwrap_or(new), new))
+            }
+            _ => None,
+        }
+    }
+}
+
 pub trait BindingEvents: Send + Sync + 'static {
     /// The channel's events with a seq above `after`, in seq order.
     fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String>;

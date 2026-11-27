@@ -12,7 +12,10 @@ stateDiagram-v2
     [*] --> Stored
     Stored --> Stored: Hook from another execution
     Stored --> Committed: Own hook verifies and logs the source
-    Committed --> Applied: Matching session, path and inode carry frontier
+    Committed --> Staged: Matching session, path and inode carry frontier
+    Staged --> Committed: Restart discards staged files before intent
+    Staged --> Install: Intent is durable
+    Install --> Applied: Install all files or roll forward at restart
     Committed --> Applied: Compaction starts at the new file head
     Applied --> Proved: Capture and census use the applied binding
     Proved --> NoticeSettled: Owned notice is excluded
@@ -25,15 +28,19 @@ stateDiagram-v2
 | Own hook after volume renumber | Cursor and observations keep the old device. Native outcome and notice stay pending. | Apply the new identity at the retained offset and prefix. Native outcome and owned notice settle, then inflight clears. Existing output posts zero times. |
 | Compaction changes session and path | A source switch starts a separate frontier. | Capture begins at the new file's head. The model allows one new output post. |
 | Hook from another execution | Pane name mismatch must leave the binding alone. | The binding and cursor stay on the original file. This hook enables no settlement. |
+| Restart before durable intent | No cursor transfer. | Recovery keeps only the original key and cursor frontier. The next application can retry. |
+| Restart after durable intent | No cursor transfer. | Recovery installs only the new key before allowing reads. The checkpoint can still lag. The saved frontier produces zero re-posts. |
 
-TLC 1.7.4 ran four safety invariants and the `OwnedHookSettles` and
+TLC 1.7.4 ran five safety invariants and the `OwnedHookSettles` and
 `CompactSettles` liveness properties for both configs. The before config
-breaks only `OwnedHookSettles`. The after config passes all six rules.
-Weak fairness assumes hook intake, application, capture, observation,
+breaks only `OwnedHookSettles`. The after config passes all seven rules.
+Weak fairness assumes hook intake, staging, intent commit, application, capture, observation,
 notice settlement, outcome recording and inflight cleanup can each finish
 when enabled. One restart can discard an observed proof at any point.
 
-The model treats the cursor update and checkpoint as one atomic action.
-A production implementation must recover interrupted writes behind that
-boundary. The model abstracts inherited-row deduplication, storage layout
-and durable notice projection.
+Both key files can exist while an intent is committed. The model withholds
+observation during that phase and requires one matching key whenever
+publication is complete. A restart before intent commit discards staged
+files. A restart after commit rolls forward the source and frontier, then
+the writer can advance the checkpoint. The model abstracts inherited-row
+deduplication, storage layout and durable notice projection.

@@ -340,9 +340,19 @@ impl Names {
         if store.init().sources.is_empty() {
             return Ok(Some(0));
         }
-        let Some(seq) = binding_baseline(named, |source| store.cursor(source).is_some()) else {
+        let Some(mut seq) = binding_baseline(named, |source| store.cursor(source).is_some()) else {
             return Ok(None);
         };
+        if let Some(refresh) = raw.iter().find(|event| {
+            event.seq <= seq
+                && event.source_refresh().is_some_and(|(_, new)| {
+                    store
+                        .cursors()
+                        .any(|cursor| cursor.source != *new && same_file(&cursor.source, new))
+                })
+        }) {
+            seq = refresh.seq.saturating_sub(1);
+        }
         let source = raw
             .iter()
             .find(|event| event.seq == seq)

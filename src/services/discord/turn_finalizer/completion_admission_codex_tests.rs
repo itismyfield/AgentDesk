@@ -53,6 +53,7 @@ fn finished_turn() -> LedgerEntry {
         finalized_at: Some(Instant::now()),
         pending_policy_commit: None,
         exact_release_confirmed: false,
+        native_backstop_warned: false,
     }
 }
 

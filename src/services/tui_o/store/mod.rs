@@ -16,6 +16,7 @@ pub mod ledger;
 pub(crate) mod restart_end;
 pub(crate) mod restart_notice;
 pub mod rotation;
+mod source_refresh;
 pub mod spool;
 pub(crate) mod thread_children;
 pub(crate) mod tool_card_switch;
@@ -422,6 +423,8 @@ impl OStore {
     ) -> Result<Option<ChannelStore>, Halt> {
         #[cfg(test)]
         durable::fault::note_open(&self.channel_dir(channel));
+        let dir = self.channel_dir(channel);
+        let _publication = source_refresh::recover(&dir)?;
         let init = match self.read_init(channel)? {
             Some(init) => init,
             None if era.initial_channels.contains(&channel) => {
@@ -429,7 +432,6 @@ impl OStore {
             }
             None => return Ok(None),
         };
-        let dir = self.channel_dir(channel);
         for swept in [dir.clone(), dir.join(SPOOL_DIR), dir.join(CURSOR_DIR)] {
             durable::sweep_tmp(&swept).map_err(StoreError::from)?;
         }

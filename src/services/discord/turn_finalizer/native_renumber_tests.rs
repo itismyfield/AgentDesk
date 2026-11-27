@@ -20,7 +20,7 @@ fn repin(channel: u64, old: &SourceId, new: &SourceId) -> BindingEvent {
         record: BindingRecord::Bound {
             old: Some(old.clone()),
             new: BindingTarget::Source(new.clone()),
-            cause: BindingCause::Resume,
+            cause: BindingCause::SameSessionVerified,
             parent_hint: None,
             evidence: BindingEvidence {
                 hook_event: "user_prompt_submit".into(),

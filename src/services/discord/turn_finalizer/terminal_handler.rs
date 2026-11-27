@@ -578,6 +578,7 @@ pub(super) struct NativeCleanup {
     admission: NativeAdmission,
     row: Option<super::super::inflight::InflightTurnState>,
     started_before: std::time::Instant,
+    pub(super) source_fence: Option<native_supply::SourceFence>,
 }
 
 #[cfg(unix)]
@@ -611,6 +612,7 @@ impl NativeCleanup {
             admission,
             row,
             started_before,
+            source_fence: None,
         })
     }
 
@@ -693,12 +695,25 @@ impl NativeCleanup {
     ) -> Result<Settlement, String> {
         let evidence = &self.admission.evidence;
         let outcome = self.outcome()?;
-        history.record_native_outcome_at_stamp(
-            &evidence.namespace,
-            &evidence.ticket,
-            &outcome,
-            &self.admission.registrations_fingerprint,
-        )?;
+        let record = || {
+            history.record_native_outcome_at_stamp(
+                &evidence.namespace,
+                &evidence.ticket,
+                &outcome,
+                &self.admission.registrations_fingerprint,
+            )
+        };
+        match &self.source_fence {
+            Some(fence)
+                if history
+                    .native_settlement(&evidence.namespace, &evidence.ticket)?
+                    .outcome
+                    .is_none() =>
+            {
+                fence.commit(record)?
+            }
+            _ => record()?,
+        };
         let saved =
             prepare_saved_notice(history, &evidence.namespace, &evidence.ticket, shared).await?;
         if saved.outcome.as_ref() != Some(&outcome) {

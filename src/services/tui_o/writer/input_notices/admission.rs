@@ -221,13 +221,36 @@ fn cleared(
         .iter()
         .find(|event| event.seq == origin.binding_seq)
         .ok_or_else(|| withheld("input notice original binding missing"))?;
+    let attached = bound_source(events, original)?;
+    let checkpoint = store
+        .binding_checkpoint()
+        .map_err(|error| withheld(format!("input notice binding checkpoint: {error:?}")))?
+        .unwrap_or(0);
+    let current = events
+        .iter()
+        .rev()
+        .filter(|event| event.seq > original.seq)
+        .find_map(|event| {
+            let BindingTarget::Source(source) = &event.new else {
+                return None;
+            };
+            (event.cause == p5::BindingCause::SameSessionVerified
+                && event.tmux_session == origin.logical_session
+                && crate::services::tui_o::shadow::capture::same_file(source, attached))
+            .then_some((event.seq, source))
+        });
+    if let Some((seq, source)) = current
+        && (seq > checkpoint || source != &origin.record.source)
+    {
+        return Err(withheld("input notice source refresh pending"));
+    }
     if original.tmux_session != origin.logical_session
         || original.execution_nonce.as_deref() != Some(&origin.execution_nonce)
-        || bound_source(events, original)? != &origin.record.source
+        || (attached != &origin.record.source && current.is_none())
     {
         return Err(withheld("input notice original binding changed"));
     }
-    let mut lineage = vec![&origin.record.source];
+    let mut lineage = vec![attached, &origin.record.source];
     for event in events
         .iter()
         .filter(|event| event.seq > original.seq && event.tmux_session == origin.logical_session)

@@ -140,17 +140,25 @@ impl<B: BindingEvents> Sources<B> {
         record: &CapturedRecord,
     ) -> Result<super::super::input_notices::NoticeOrigin, String> {
         let events = self.bindings.binding_events_since(self.channel, 0)?;
+        let refreshed = events.iter().any(|event| {
+            self.checkpoint.is_some_and(|seq| event.seq <= seq)
+                && event.source_refresh().is_some_and(|(_, new)| new == source)
+        });
+        let attached = |bound: &SourceId| {
+            bound == source
+                || (refreshed && crate::services::tui_o::shadow::capture::same_file(bound, source))
+        };
         let matches_source = |event: &super::BindingEvent| match &event.record {
             BindingRecord::Bound {
                 new: BindingTarget::Source(bound),
                 ..
-            } => bound == source,
+            } => attached(bound),
             BindingRecord::Bound {
                 new: BindingTarget::Pending { .. },
                 ..
             } => events.iter().any(|resolved| {
                 matches!(&resolved.record, BindingRecord::Resolved { resolves_seq, source: bound }
-                    if *resolves_seq == event.seq && bound == source)
+                    if *resolves_seq == event.seq && attached(bound))
             }),
             _ => false,
         };

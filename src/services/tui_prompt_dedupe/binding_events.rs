@@ -183,6 +183,7 @@ impl<'a> Proposal<'a> {
 #[derive(Default)]
 struct PaneState {
     current: Option<SourceId>,
+    refreshed: Option<SourceId>,
     verified: bool,
     /// Commit time of the record that set `current`, which is when a verified one was pinned.
     pinned_at: Option<DateTime<Utc>>,
@@ -687,6 +688,9 @@ impl Writer {
         }
         let pane = self.panes.entry(record.tmux_session.clone()).or_default();
         if record.execution_nonce.is_some() {
+            if pane.nonce != record.execution_nonce {
+                pane.refreshed = None;
+            }
             pane.nonce = record.execution_nonce.clone();
         }
         let mut reclaimed = false;
@@ -708,6 +712,17 @@ impl Writer {
         }
         match &record.new {
             BindingTarget::Source(source) => {
+                if verified
+                    && record.cause == BindingCause::SameSessionVerified
+                    && matches!(
+                        record.evidence.hook_event.as_deref(),
+                        Some("user_prompt_submit" | "stop")
+                    )
+                {
+                    pane.refreshed = Some(source.clone());
+                } else if pane.current.as_ref() != Some(source) {
+                    pane.refreshed = None;
+                }
                 pane.current = Some(source.clone());
                 pane.verified = verified;
                 pane.pinned_at = Some(record.committed_at);
@@ -849,7 +864,12 @@ impl Writer {
         let pending = pane.pending.as_ref();
         let pending = pending.filter(|e| pending_matches(e, session, p.path));
         // A verified source is no change only once its record is pinned and no Pending waits on it.
-        let unsettled = matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some());
+        let refresh = matches!(
+            p.cause,
+            CauseSource::Hook(BindingCause::SameSessionVerified)
+        ) && pane.refreshed.as_ref() != pane.current.as_ref();
+        let unsettled =
+            matches!(mode, Plan::Verified(_)) && (!pane.verified || pending.is_some() || refresh);
         let (new, inherited) = if let Plan::ForcePending = mode {
             if pending.is_some() {
                 return Planned::Keep(Committed::Unchanged);

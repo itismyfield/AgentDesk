@@ -34,8 +34,9 @@ pub(crate) fn source(
     file: (u64, u64),
 ) -> Option<spool::Cursor> {
     let store = OStore::existing(root)?;
-    let init = store.read_init(channel).ok()??;
     let dir = store.channel_dir(channel);
+    let _publication = super::source_refresh::snapshot(&dir).ok()??;
+    let init = store.read_init(channel).ok()??;
     let mut sources: Vec<SourceId> = init.sources.into_iter().map(|s| s.source_id).collect();
     let boundary = dir.join(rotation::BOUNDARY_FILE);
     if boundary.exists() {
@@ -61,7 +62,9 @@ pub(crate) fn source(
 
 pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
     let store = OStore::existing(root)?;
-    std::fs::metadata(store.channel_dir(channel).join(LEDGER_FILE))
+    let dir = store.channel_dir(channel);
+    let _publication = super::source_refresh::snapshot(&dir).ok()??;
+    std::fs::metadata(dir.join(LEDGER_FILE))
         .ok()?
         .modified()
         .ok()
@@ -188,8 +191,10 @@ pub(crate) fn local(
         return None;
     }
     let store = OStore::existing(root)?;
+    let dir = store.channel_dir(channel);
+    let _publication = super::source_refresh::snapshot(&dir).ok()??;
     store.read_init(channel).ok()??;
-    let path = store.channel_dir(channel).join(LEDGER_FILE);
+    let path = dir.join(LEDGER_FILE);
     let mut file = File::open(&path).ok()?;
     let before = file.metadata().ok()?;
     let identity = crate::services::tui_o::shadow::capture::file_identity(&before);

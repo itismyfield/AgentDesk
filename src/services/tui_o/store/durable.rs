@@ -104,6 +104,16 @@ impl LockedFile {
         file.try_lock().map_err(io::Error::from)?;
         Ok(Self(file))
     }
+
+    pub(super) fn lock(file: File) -> io::Result<Self> {
+        file.lock()?;
+        Ok(Self(file))
+    }
+
+    pub(super) fn try_shared(file: File) -> io::Result<Self> {
+        file.try_lock_shared().map_err(io::Error::from)?;
+        Ok(Self(file))
+    }
 }
 
 impl Deref for LockedFile {
@@ -163,6 +173,8 @@ pub(crate) mod fault {
         CutSync,
         /// Recovering the channel's spool and cursors.
         SpoolRecovery,
+        RefreshBeforeIntent,
+        RefreshInstall,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

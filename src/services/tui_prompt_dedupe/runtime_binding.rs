@@ -4,7 +4,9 @@ mod adopt_skip;
 mod claude_source;
 #[cfg(test)]
 pub(crate) use claude_source::{AFTER_CHECK, BEFORE_AUTHORITY, after_check, before_authority};
-pub(crate) use claude_source::{Persisted, Record, reclaim_with_current_prompt};
+pub(crate) use claude_source::{
+    Persisted, Record, observe_current_claude_hook, reclaim_with_current_prompt,
+};
 mod binding_access;
 mod codex_cursor;
 pub(crate) use codex_cursor::exports::*;
@@ -750,6 +752,7 @@ fn adopt_continuation(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
+    refresh: bool,
     failure: &mut Option<BindingPersistError>,
     skip: &mut Option<AdoptSkip>,
     previous: &mut Option<String>,
@@ -814,7 +817,7 @@ fn adopt_continuation(
         hook,
         opened: &opened,
     };
-    if !judged.judge(failure, skip) {
+    if !judged.judge(failure, skip, refresh) {
         return None;
     }
     let new_output_path = candidate;
@@ -850,38 +853,12 @@ fn adopt_continuation(
     }
 
     let binding = state.runtime_by_tmux.get_mut(&tmux_session_name)?;
-    // #5188 (R1/R2): record the rotation BEFORE the fields are overwritten. The
-    // pre-rotation transcript and cursor are the only evidence of what may still
-    // be owed to Discord, and the adopted session id is what stops the
-    // launch-script rehydration pass from reverting this binding to the frozen
-    // file. Without this, adoption stayed a purely local mutation: the log said
-    // "adopted" while delivery kept reading a transcript that never grew again.
-    super::session_rotation::record_claude_session_rotation(
-        super::session_rotation::ClaudeSessionRotation {
-            tmux_session_name: tmux_session_name.clone(),
-            old_session_id: binding.value.session_id.clone(),
-            old_output_path: binding.value.output_path.clone(),
-            old_last_offset: binding.value.relay_last_offset(),
-            new_session_id: payload_session_id.to_string(),
-            new_output_path: new_output_path.clone(),
-            observed_drain_frontier: 0,
-            polls_without_drain_progress: 0,
-            selector_followed: false,
-            left_session_ids: Vec::new(),
-        },
+    *previous = claude_source::switch_transcript(
+        &tmux_session_name,
+        binding,
+        payload_session_id,
+        &new_output_path,
     );
-    binding.value.output_path = new_output_path.clone();
-    binding.value.relay_output_path = None;
-    *previous = binding
-        .value
-        .session_id
-        .replace(payload_session_id.to_string());
-    // Start conservatively at the new transcript head. Stable prompt-entry
-    // identities suppress replay; starting at EOF would silently skip the
-    // continuation boundary that taught us the new UUID.
-    binding.value.last_offset = 0;
-    binding.value.relay_last_offset = None;
-    binding.recorded_at = Instant::now();
     state.tmux_by_provider_session.insert(
         PromptKey::new("claude", payload_session_id),
         TimedValue {

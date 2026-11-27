@@ -31,7 +31,7 @@ enum Job {
     Boot(
         Box<super::super::native_prepare::RestoredInput>,
         Registry,
-        Option<(Outcome, String)>,
+        Option<(Outcome, String, SourceFence)>,
     ),
 }
 struct Port {
@@ -55,6 +55,26 @@ pub(in crate::services::discord) fn port(
         }),
     }
 }
+
+#[derive(Clone)]
+pub(super) struct SourceFence {
+    channel: u64,
+    bindings: Arc<dyn BindingEvents>,
+    origin: NoticeOrigin,
+}
+
+impl SourceFence {
+    pub(super) fn commit<T>(&self, write: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+        crate::services::tmux_common::with_tmux_source_authority(
+            &self.origin.logical_session,
+            |_| {
+                check_origin(self.bindings.as_ref(), self.channel, &self.origin)?;
+                write()
+            },
+        )
+    }
+}
+
 fn input_id(namespace: &str, ticket: &Ticket) -> Result<String, String> {
     serde_json::to_string(&(namespace, &ticket.key)).map_err(|e| e.to_string())
 }
@@ -74,40 +94,72 @@ impl Port {
             .map_err(|_| "native custody acknowledgement lost".into())
     }
     fn origin(&self, origin: &NoticeOrigin) -> Result<(), String> {
-        let events = self.bindings.binding_events_since(self.channel, 0)?;
-        let event = events
-            .iter()
-            .find(|e| e.seq == origin.binding_seq)
-            .ok_or("native binding missing")?;
-        let source = match &event.record {
-            BindingRecord::Bound {
-                new: BindingTarget::Source(source),
-                ..
-            } => Some(source),
-            BindingRecord::Bound {
-                new: BindingTarget::Pending { .. },
-                ..
-            } => events.iter().find_map(|e| match &e.record {
-                BindingRecord::Resolved {
-                    resolves_seq,
-                    source,
-                } if *resolves_seq == event.seq => Some(source),
-                _ => None,
-            }),
-            _ => None,
-        };
-        if event.channel_id != self.channel
-            || event.provider != crate::services::tui_o::shadow::ShadowProvider::Claude
-            || event.tmux_session != origin.logical_session
-            || event.execution_nonce != origin.execution_nonce
-            || origin.binding_seq == 0
-            || origin.execution_nonce.is_empty()
-            || source != Some(&origin.record.source)
-        {
-            return Err("native source binding superseded".into());
-        }
-        Ok(())
+        check_origin(self.bindings.as_ref(), self.channel, origin)
     }
+
+    fn fence(&self, origin: NoticeOrigin) -> SourceFence {
+        SourceFence {
+            channel: self.channel,
+            bindings: self.bindings.clone(),
+            origin,
+        }
+    }
+}
+
+fn check_origin(
+    bindings: &dyn BindingEvents,
+    channel: u64,
+    origin: &NoticeOrigin,
+) -> Result<(), String> {
+    let events = bindings.binding_events_since(channel, 0)?;
+    let event = events
+        .iter()
+        .find(|e| e.seq == origin.binding_seq)
+        .ok_or("native binding missing")?;
+    let source = match &event.record {
+        BindingRecord::Bound {
+            new: BindingTarget::Source(source),
+            ..
+        } => Some(source),
+        BindingRecord::Bound {
+            new: BindingTarget::Pending { .. },
+            ..
+        } => events.iter().find_map(|e| match &e.record {
+            BindingRecord::Resolved {
+                resolves_seq,
+                source,
+            } if *resolves_seq == event.seq => Some(source),
+            _ => None,
+        }),
+        _ => None,
+    };
+    if event.channel_id != channel
+        || event.provider != crate::services::tui_o::shadow::ShadowProvider::Claude
+        || event.tmux_session != origin.logical_session
+        || event.execution_nonce != origin.execution_nonce
+        || origin.binding_seq == 0
+        || origin.execution_nonce.is_empty()
+        || source != Some(&origin.record.source)
+    {
+        return Err("native source binding superseded".into());
+    }
+    if events
+        .iter()
+        .rev()
+        .filter(|row| row.seq > origin.binding_seq && row.tmux_session == origin.logical_session)
+        .find_map(|row| {
+            let (_, new) = row.source_refresh()?;
+            crate::services::tui_o::shadow::capture::same_file(new, &origin.record.source)
+                .then_some(new)
+        })
+        .is_some_and(|new| new != &origin.record.source)
+    {
+        return Err("native source refresh superseded the proof".into());
+    }
+    Ok(())
+}
+
+impl Port {
     async fn registrations(
         &self,
     ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
@@ -223,15 +275,18 @@ impl Port {
                     .and_then(Result::ok)
             })
             .ok_or("native receipt domain custody missing")?;
+        let fence = self.fence(origin);
         tokio::task::spawn_blocking(move || {
-            let (namespace, ticket) = receipt.identity();
-            let (kind, row, range, hash) = receipt.record();
-            history.try_native_receipt(
-                namespace,
-                ticket,
-                (kind, row, range, current.through, hash),
-                &current.registrations_fingerprint,
-            )
+            fence.commit(|| {
+                let (namespace, ticket) = receipt.identity();
+                let (kind, row, range, hash) = receipt.record();
+                history.try_native_receipt(
+                    namespace,
+                    ticket,
+                    (kind, row, range, current.through, hash),
+                    &current.registrations_fingerprint,
+                )
+            })
         })
         .await
         .map_err(|e| e.to_string())?
@@ -260,19 +315,21 @@ impl Port {
             }
             Job::Boot(input, history, proof) => {
                 let (namespace, ticket) = input.identity();
-                if let Some((outcome, fingerprint)) = proof
+                if let Some((outcome, fingerprint, fence)) = proof
                     && history
                         .native_settlement(namespace, ticket)?
                         .outcome
                         .is_none()
                 {
                     Self::durable(history.clone(), namespace.into(), ticket.clone()).await?;
-                    history.record_native_outcome_at_stamp(
-                        namespace,
-                        ticket,
-                        &outcome,
-                        &fingerprint,
-                    )?;
+                    fence.commit(|| {
+                        history.record_native_outcome_at_stamp(
+                            namespace,
+                            ticket,
+                            &outcome,
+                            &fingerprint,
+                        )
+                    })?;
                 }
                 input.settle_saved(&self.shared).await?
             }
@@ -353,7 +410,8 @@ impl Port {
                 )
                 .await?;
             }
-            history.record_native_barrier(proof)?;
+            self.fence(origin.clone())
+                .commit(|| history.record_native_barrier(proof))?;
         }
         if !idle {
             return Ok(());
@@ -451,7 +509,7 @@ impl Port {
             }
             let target = &ticket.source.as_ref().ok_or("native source absent")?.target;
             check_target(target, &origin)?;
-            let work = prepared
+            let mut work = prepared
                 .admit(
                     &observed,
                     &current,
@@ -461,6 +519,7 @@ impl Port {
                     &self.shared,
                 )
                 .await?;
+            work.source_fence = Some(self.fence(origin));
             let (ack, rx) = oneshot::channel();
             self.shared
                 .turn_finalizer
@@ -517,7 +576,11 @@ impl Port {
             Job::Boot(
                 Box::new(input),
                 history,
-                Some((outcome, observed.registrations_fingerprint.clone())),
+                Some((
+                    outcome,
+                    observed.registrations_fingerprint.clone(),
+                    self.fence(origin),
+                )),
             )
         };
         self.pending

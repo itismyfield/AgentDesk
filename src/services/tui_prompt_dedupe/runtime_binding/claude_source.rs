@@ -155,6 +155,7 @@ impl Candidate<'_> {
         &self,
         failure: &mut Option<BindingPersistError>,
         skip: &mut Option<AdoptSkip>,
+        refresh: bool,
     ) -> bool {
         let (tmux, payload, proposal) = (
             self.tmux_session,
@@ -162,6 +163,13 @@ impl Candidate<'_> {
             self.proposal.as_ref(),
         );
         let candidate = self.hook.transcript_path.as_deref().unwrap_or_default();
+        let current = refresh && self.bound.session_id.as_deref() == Some(payload);
+        let reassert = current && candidate == self.bound.output_path;
+        let refreshed = proposal.copied().filter(|_| reassert).map(|mut proposal| {
+            proposal.cause = CauseSource::Hook(BindingCause::SameSessionVerified);
+            proposal
+        });
+        let proposal = refreshed.as_ref().or(proposal);
         let unlogged = AdoptSkip::unlogged(proposal.is_none(), tmux, candidate);
         let persist_error = |error| BindingPersistError {
             tmux_session: tmux.to_owned(),
@@ -189,7 +197,7 @@ impl Candidate<'_> {
             return false;
         }
         *skip = Some(AdoptSkip::HistoryUnreadable);
-        let (checked, reclaimable) = match self.check() {
+        let (checked, reclaimable) = match self.check_path(current) {
             Err(error) => {
                 tracing::warn!(tmux, %error, "binding event log unreadable; hook retried");
                 return false;
@@ -197,6 +205,7 @@ impl Candidate<'_> {
             Ok(judged) => judged,
         };
         let source = match checked {
+            Checked::Bound(Some(source)) if reassert => source,
             Checked::Bound(pin) => {
                 *skip = unlogged;
                 if let (true, Some(pin), Some(p)) = (reclaimable, pin, proposal) {
@@ -346,6 +355,10 @@ impl Candidate<'_> {
     /// execution, and whether it may reclaim; `Err` when the log cannot be loaded. A pane without a
     /// channel has no history.
     fn check(&self) -> io::Result<(Checked, bool)> {
+        self.check_path(false)
+    }
+
+    fn check_path(&self, refresh: bool) -> io::Result<(Checked, bool)> {
         let (bound, payload) = (self.bound, self.payload_session_id);
         let candidate = self.hook.transcript_path.as_deref().unwrap_or_default();
         let bound_session = bound.session_id.clone().unwrap_or_default();
@@ -361,7 +374,9 @@ impl Candidate<'_> {
         };
         let (pin, pinned_at) = pinned.unzip();
         let pin = pin.filter(|pin| {
-            pin.session_id == bound_session && pin.path == Path::new(&bound.output_path)
+            pin.session_id == bound_session
+                && pin.path == Path::new(&bound.output_path)
+                && (!refresh || pin.path == Path::new(candidate))
         });
         let pinned_at = pinned_at.flatten();
         let source = ClaudeHookSource::from_signal(payload, self.hook, candidate.into());
@@ -410,6 +425,15 @@ pub(crate) fn reclaim_with_current_prompt(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     session_id: &str,
     hook: &HookSignal,
+) -> io::Result<bool> {
+    observe_current_claude_hook(authority, session_id, hook, false)
+}
+
+pub(crate) fn observe_current_claude_hook(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    session_id: &str,
+    hook: &HookSignal,
+    refresh: bool,
 ) -> io::Result<bool> {
     let session_id = session_id.trim();
     let payload_path = hook.transcript_path.as_deref().map(str::trim);
@@ -471,7 +495,73 @@ pub(crate) fn reclaim_with_current_prompt(
         opened: &opened,
     };
     candidate.promote_registered()?;
+    let source = if refresh {
+        match candidate.check_path(true)?.0 {
+            Checked::Verified(source) | Checked::Bound(Some(source)) => Some(source),
+            Checked::Recheck => {
+                return Err(io::Error::other("Claude transcript refresh unreadable"));
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    if let Some(source) = source {
+        #[cfg(test)]
+        after_check();
+        if !binding_events::codex::source_file_matches(&source) {
+            return Err(io::Error::other("Claude transcript changed during refresh"));
+        }
+        let mut proposal = candidate.proposal.expect("channel was checked");
+        let moved = source.path != output;
+        if !moved {
+            proposal.cause = CauseSource::Hook(BindingCause::SameSessionVerified);
+        }
+        if matches!(
+            binding_events::record_verified(&proposal, &source)?,
+            Committed::Anomaly | Committed::Recheck | Committed::Stale
+        ) {
+            return Err(io::Error::other("Claude transcript refresh was superseded"));
+        }
+        if moved {
+            let runtime = state
+                .runtime_by_tmux
+                .get_mut(&tmux)
+                .expect("pane was checked");
+            let _ = switch_transcript(&tmux, runtime, session_id, proposal.path);
+            authority.invalidate();
+            return Ok(false);
+        }
+    }
     Ok(candidate.reclaim())
+}
+
+pub(super) fn switch_transcript(
+    tmux: &str,
+    binding: &mut TimedValue<TuiRuntimeBinding>,
+    session: &str,
+    path: &str,
+) -> Option<String> {
+    super::super::session_rotation::record_claude_session_rotation(
+        super::super::session_rotation::ClaudeSessionRotation {
+            tmux_session_name: tmux.to_owned(),
+            old_session_id: binding.value.session_id.clone(),
+            old_output_path: binding.value.output_path.clone(),
+            old_last_offset: binding.value.relay_last_offset(),
+            new_session_id: session.to_owned(),
+            new_output_path: path.to_owned(),
+            observed_drain_frontier: 0,
+            polls_without_drain_progress: 0,
+            selector_followed: false,
+            left_session_ids: Vec::new(),
+        },
+    );
+    binding.value.output_path = path.to_owned();
+    binding.value.relay_output_path = None;
+    binding.value.last_offset = 0;
+    binding.value.relay_last_offset = None;
+    binding.recorded_at = Instant::now();
+    binding.value.session_id.replace(session.to_owned())
 }
 
 fn refused(rejection: SourceRejection) -> Checked {

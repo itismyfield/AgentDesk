@@ -35,15 +35,18 @@ async fn run_backstop_finalize(
         return;
     };
     if !generic_backstop_allowed(entry) {
-        tracing::debug!(
-            channel_id = ledger_key.channel_id.get(),
-            user_msg_id = ledger_key.user_msg_id,
-            generation = ledger_key.generation,
-            provider = provider.as_str(),
-            reason = "native_input",
-            event = "watcher_backstop_native_input_guard",
-            "generic backstop skipped for native input"
-        );
+        // Native settlement alone ends this turn; name the stuck entry once instead of every tick.
+        if !std::mem::replace(&mut entry.native_backstop_warned, true) {
+            tracing::warn!(
+                channel_id = ledger_key.channel_id.get(),
+                user_msg_id = ledger_key.user_msg_id,
+                generation = ledger_key.generation,
+                provider = provider.as_str(),
+                reason = "native_input",
+                event = "watcher_backstop_native_input_guard",
+                "generic backstop skipped for native input; only its native settlement can end the turn"
+            );
+        }
         return;
     }
     entry.phase = Phase::Finalizing;

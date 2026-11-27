@@ -72,7 +72,7 @@ pub(crate) fn adopt_claude_continuation_explained(
     payload_session_id: &str,
     hook: &HookSignal,
 ) -> Result<Explained, BindingPersistError> {
-    adopt_claude_continuation_moved(command_session_id, payload_session_id, hook)
+    adopt_claude_continuation_moved(command_session_id, payload_session_id, hook, false)
         .map(|(explained, _)| explained)
 }
 
@@ -82,12 +82,14 @@ pub(crate) fn adopt_claude_continuation_moved(
     command_session_id: &str,
     payload_session_id: &str,
     hook: &HookSignal,
+    refresh: bool,
 ) -> Result<(Explained, Option<String>), BindingPersistError> {
     let (mut failure, mut skip, mut previous) = (None, None, None);
     let adopted = adopt_continuation(
         command_session_id,
         payload_session_id,
         hook,
+        refresh,
         &mut failure,
         &mut skip,
         &mut previous,

@@ -100,6 +100,95 @@ fn execution_headers(pane: &ProducerPane, session: &str, path: &Path) -> axum::h
     headers
 }
 
+#[tokio::test(start_paused = true)]
+async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() {
+    use crate::services::claude_tui::source_verify::boot_time_for_tests;
+    use crate::services::tui_o::shadow::capture::renumber;
+    use crate::services::tui_o::store::{STORE_DIR_NAME, StoreError, fault};
+
+    for (step, committed) in [
+        (fault::Step::RefreshBeforeIntent, false),
+        (fault::Step::RefreshInstall, true),
+    ] {
+        let session = uuid::Uuid::new_v4().to_string();
+        let (harness, path) = launched(&session);
+        let pane = ProducerPane::launch(&session, &path);
+        let headers = execution_headers(&pane, &session, &path);
+        pane.http(
+            "SessionStart",
+            Some("startup"),
+            &session,
+            &session,
+            &path,
+            1,
+        );
+        let old = pane.history().current.unwrap().pin.unwrap();
+        let bindings = Arc::new(BindingLog);
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        append(&path, &row("old", "already posted"));
+        polls(4).await;
+        halt(stop, task).await;
+        let before = harness.channel().cursor(&old).unwrap().clone();
+        assert_eq!(harness.port.posts(), ["already posted"]);
+
+        let _boot = boot_time_for_tests(Some(Utc::now()));
+        let _device = renumber::shift(&path, 1 << 40);
+        let live = source_id_for(&session, &path).unwrap();
+        let dir = harness
+            ._runtime
+            .path()
+            .join(STORE_DIR_NAME)
+            .join(CHANNEL.to_string());
+        let failing = fault::plant(&dir, step, std::io::ErrorKind::StorageFull, Some(1));
+        let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        let payload = serde_json::json!({"session_id": session, "transcript_path": path});
+        assert!(
+            !observe_binding_hook(
+                "claude",
+                "Stop",
+                Some(&session),
+                Some(&session),
+                &payload,
+                &headers
+            )
+            .refused()
+        );
+        polls(4).await;
+        assert!(task.is_finished(), "{step:?} must interrupt publication");
+        assert!(task.await.unwrap().is_some());
+        drop(failing);
+
+        if committed {
+            assert!(
+                matches!(harness.store.peek_cursors(CHANNEL), Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+            assert!(
+                matches!(harness.store.peek_rotation(CHANNEL), Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
+            );
+        } else {
+            assert_eq!(
+                harness.store.peek_cursors(CHANNEL).unwrap(),
+                [before.clone()]
+            );
+        }
+        let store = harness.channel();
+        let mut cursor = before.clone();
+        cursor.source = if committed { live.clone() } else { old };
+        assert_eq!(store.cursors().collect::<Vec<_>>(), [&cursor]);
+        drop(store);
+
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
+        polls(4).await;
+        cursor.source = live;
+        assert_eq!(harness.channel().cursors().collect::<Vec<_>>(), [&cursor]);
+        assert_eq!(harness.port.posts(), ["already posted"]);
+        append(&path, &row("new", "after recovery"));
+        polls(4).await;
+        assert_eq!(harness.port.posts(), ["already posted", "after recovery"]);
+        halt(stop, task).await;
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {

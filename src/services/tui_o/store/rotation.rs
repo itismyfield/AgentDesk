@@ -462,7 +462,11 @@ impl OStore {
 
     /// The channel's rotation record read without opening the channel.
     pub fn peek_rotation(&self, channel: u64) -> Result<Rotation, StoreError> {
-        let read = durable::read_json(&self.channel_dir(channel).join(BOUNDARY_FILE))?;
+        let dir = self.channel_dir(channel);
+        let Some(_publication) = super::source_refresh::snapshot(&dir)? else {
+            return Ok(Rotation::default());
+        };
+        let read = durable::read_json(&dir.join(BOUNDARY_FILE))?;
         Ok(read.unwrap_or_default())
     }
 
@@ -484,7 +488,11 @@ impl OStore {
     /// The channel's stored cursors, read without opening the channel; an unreadable cursor is an
     /// error, never an absent one.
     pub fn peek_cursors(&self, channel: u64) -> Result<Vec<super::spool::Cursor>, StoreError> {
-        let dir = self.channel_dir(channel).join(super::CURSOR_DIR);
+        let dir = self.channel_dir(channel);
+        let Some(_publication) = super::source_refresh::snapshot(&dir)? else {
+            return Ok(Vec::new());
+        };
+        let dir = dir.join(super::CURSOR_DIR);
         let entries = match std::fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

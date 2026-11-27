@@ -211,11 +211,34 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
     }
 
     pub(super) fn persist_notice_evidence(&mut self) -> Vec<UnitKey> {
+        let refreshed = std::mem::take(&mut self.sources.refreshed);
+        let remap = |source: &mut SourceId| {
+            for (old, new) in &refreshed {
+                if source == old {
+                    source.clone_from(new);
+                }
+            }
+        };
+        if !refreshed.is_empty() {
+            for piece in self.owed.iter_mut().filter_map(|item| match item {
+                Derived::Piece(piece) => piece.notice_origin.as_mut(),
+                _ => None,
+            }) {
+                remap(&mut piece.record.source);
+            }
+            self.writer.notice_owners = Default::default();
+            self.writer.notice_cache = Default::default();
+            self.writer.notice_pending.clear();
+        }
         if !self.deriver.input_notices_enabled() || self.writer.is_stopped() {
             return Vec::new();
         }
         let mut fresh = Vec::new();
         for mut evidence in self.deriver.take_notice_evidence() {
+            remap(&mut evidence.record.source);
+            if let Some(origin) = &mut evidence.origin {
+                remap(&mut origin.record.source);
+            }
             if super::super::input_notices::evidence::before_migration_floor(
                 self.writer.store().ledger().input_notices(),
                 &evidence,

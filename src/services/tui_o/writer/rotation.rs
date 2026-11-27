@@ -58,6 +58,7 @@ mod current;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
 mod owe;
+mod source_refresh;
 use current::Current;
 pub(crate) mod provenance;
 #[path = "rotation/reader_count.rs"]
@@ -124,6 +125,7 @@ pub struct Sources<B> {
     /// The history needed to identify legacy hops has not been read successfully yet.
     legacy_hops_unread: bool,
     names: Names,
+    pub(super) refreshed: Vec<(SourceId, SourceId)>,
     /// Clear ends published for this channel, and whether they must be matched again.
     clear_notice: watch::Receiver<u64>,
     clear_due: bool,
@@ -300,6 +302,7 @@ impl<B: BindingEvents> Sources<B> {
             legacy_hops: HashMap::new(),
             legacy_hops_unread: false,
             names: Names::new(provider),
+            refreshed: Vec::new(),
             clear_notice: crate::services::tui_o::store::clear_end::subscribe(channel),
             clear_due: false,
             replayed: super::ReplaySummary::default(),
@@ -442,6 +445,7 @@ impl<B: BindingEvents> Sources<B> {
                 };
                 if let Some(new) = new {
                     let (old, parent) = (old.as_ref(), parent_hint.as_ref());
+                    self.refresh_binding(writer, event)?;
                     self.bind(writer, event, old, new, *cause, parent)?;
                 }
                 self.prove(writer, event)?;

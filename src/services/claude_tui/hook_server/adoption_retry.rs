@@ -11,13 +11,22 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 use crate::services::tui_prompt_dedupe::binding_events::HookSignal;
 use crate::services::tui_prompt_dedupe::{
     AdoptSkip, adopt_claude_continuation_moved, claude_rotation_blocks_adoption,
-    reclaim_with_current_prompt, resolve_tmux_session_name,
+    observe_current_claude_hook, resolve_tmux_session_name,
 };
 
 fn captured_nonce(envelope: Option<&HookBindingEnvelope>) -> Option<String> {
     match envelope.map(|e| &e.context) {
         Some(CapturedContext::Captured(context)) => Some(context.execution_nonce.clone()),
         _ => None,
+    }
+}
+
+fn captured_pane_matches(tmux: &str, envelope: Option<&HookBindingEnvelope>) -> bool {
+    match envelope.map(|envelope| &envelope.context) {
+        Some(CapturedContext::Captured(context)) => {
+            context.provider == "claude" && context.tmux_session == tmux
+        }
+        _ => true,
     }
 }
 
@@ -195,6 +204,9 @@ pub(crate) fn adopt_from_enveloped_hook(
     let tmux = observation_pane(command_session_id, envelope);
     // Adoption and artifact cutover share the pane authority so a retry cannot rewrite them late.
     with_tmux_source_authority(&tmux, |_| {
+        if !captured_pane_matches(&tmux, envelope) {
+            return AdoptionHttp::NotDurable(NotDurableReason::ExecutionChanged);
+        }
         if let Err(reason) = execution_current(&tmux, request.execution_nonce.as_deref()) {
             return AdoptionHttp::NotDurable(reason);
         }
@@ -253,14 +265,19 @@ pub(crate) fn observe_launch_hook(
 ) -> Result<(), NotDurableReason> {
     let tmux = observation_pane(session_id, envelope);
     with_tmux_source_authority(&tmux, |authority| {
+        if !captured_pane_matches(&tmux, envelope) {
+            return Err(NotDurableReason::ExecutionChanged);
+        }
         let nonce = captured_nonce(envelope);
         execution_current(&tmux, nonce.as_deref())?;
         // A termination that chose this execution takes no start of it any more.
         if nonce.is_some_and(|nonce| crate::services::session_host::execution_closing(&nonce)) {
             return Err(NotDurableReason::ExecutionChanged);
         }
+        let refresh =
+            nonce.is_some() && matches!(hook.event.as_str(), "user_prompt_submit" | "stop");
         let reclaimed =
-            reclaim_with_current_prompt(authority, session_id, hook).map_err(|error| {
+            observe_current_claude_hook(authority, session_id, hook, refresh).map_err(|error| {
                 tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
                 NotDurableReason::Append
             })?;
@@ -318,7 +335,14 @@ fn settle(tmux: &str, request: &DeferredAdoption, queued: bool) -> SettleOutcome
             queue: QueueStep::Pop,
         };
     }
-    match adopt_claude_continuation_moved(command_session_id, payload_session_id, &request.hook) {
+    let refresh = request.execution_nonce.is_some()
+        && matches!(request.hook.event.as_str(), "user_prompt_submit" | "stop");
+    match adopt_claude_continuation_moved(
+        command_session_id,
+        payload_session_id,
+        &request.hook,
+        refresh,
+    ) {
         Ok(((adopted, skip), left)) => {
             // An adopted source stays queued until its rotation settles and a recorded Pending until
             // its transcript is verified, so later hooks wait behind it; a later queued session replaces it.

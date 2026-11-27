@@ -120,6 +120,10 @@ pub(super) struct SourceSpool {
 }
 
 impl SourceSpool {
+    pub(super) fn segment_starts(&self) -> impl Iterator<Item = u64> + '_ {
+        self.segments.iter().map(|segment| segment.start)
+    }
+
     fn end(&self) -> u64 {
         self.segments
             .last()
