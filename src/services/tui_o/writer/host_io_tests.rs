@@ -14,6 +14,12 @@ pub(crate) async fn wait_metadata(
     super::fresh_input::wait_metadata(store, alarms, stopping).await
 }
 
+/// Lets a paused writer observe an unnotified change and run its delivery phase.
+#[cfg(test)]
+pub(crate) async fn wait_for_idle_poll() {
+    tokio::time::sleep(std::time::Duration::from_secs(15) + actor::POLL_INTERVAL).await;
+}
+
 #[derive(Default)]
 pub(crate) struct Posts {
     records: Mutex<Vec<(u64, SeenMessage)>>,

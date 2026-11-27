@@ -4,6 +4,7 @@
 use super::{
     actor,
     binding::{BindingEvents, ChannelBindingLog},
+    host::test_io::wait_for_idle_poll,
     owed::tests::owed_writer,
     *,
 };
@@ -375,7 +376,7 @@ async fn resume_older_native_header(delayed_descriptor: bool, prior_execution: b
     assert_eq!(f.fold().verified.unwrap().source.session_id, A);
     assert_eq!(f.current().session_id.as_deref(), Some(A));
     append(&f.path(A), &unit("a-resumed", "resumed A"));
-    polls().await;
+    wait_for_idle_poll().await;
     assert_eq!(port.posts(), vec!["initial A", "older B", "resumed A"]);
     assert_eq!(posted(&f.reopened(&store)), 3);
     stop.send(true).unwrap();
@@ -725,7 +726,7 @@ async fn source_read_late_missing_descriptor_hook_preserves_marker_proof_cursor(
         assert_eq!(f.fold(), before);
         assert_eq!(f.marker(), marker);
         assert_eq!(f.current(), current);
-        polls().await;
+        wait_for_idle_poll().await;
         assert_eq!(
             f.reopened(&store).cursor(&source).unwrap().captured_through,
             offset
@@ -733,7 +734,7 @@ async fn source_read_late_missing_descriptor_hook_preserves_marker_proof_cursor(
         assert!(f.fold().pending.is_empty());
     }
     append(&f.path(B), &unit("after-stale", "B continues"));
-    polls().await;
+    wait_for_idle_poll().await;
     assert_eq!(port.posts(), vec!["B continues"]);
     stop.send(true).unwrap();
     task.await.unwrap();
