@@ -75,6 +75,7 @@ pub(in crate::services::discord) struct DiscordMockState {
     /// Every message the mock minted, in id order, as `(reply_to, latest content)`.
     pub(super) messages: Arc<Mutex<MintedMessages>>,
     pub(super) channel_posts: Arc<Mutex<Vec<(u64, String)>>>,
+    message_edits: Arc<Mutex<Vec<(u64, String)>>>,
     /// Every message id a `DELETE` named, in order.
     deleted: Arc<Mutex<Vec<u64>>>,
     /// Messages a single-message `GET` answers until deleted; any other id stays unhandled.
@@ -116,6 +117,7 @@ impl DiscordMockState {
             release_held_history: Arc::new(Notify::new()),
             messages: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
             channel_posts: Arc::new(Mutex::new(Vec::new())),
+            message_edits: Arc::new(Mutex::new(Vec::new())),
             deleted: Arc::new(Mutex::new(Vec::new())),
             seeded: Arc::new(Mutex::new(std::collections::HashMap::new())),
             extra_channels: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -142,6 +144,28 @@ impl DiscordMockState {
 
     pub(in crate::services::discord) fn refuse_message_writes(&self, refuse: bool) {
         self.write_refusals.lock().expect("write refusals").0 = refuse;
+    }
+
+    pub(in crate::services::discord) fn post_count(&self, channel: u64, text: &str) -> usize {
+        self.channel_posts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, content)| *id == channel && content == text)
+            .count()
+    }
+
+    pub(in crate::services::discord) fn edit_count(
+        &self,
+        message: Option<u64>,
+        text: &str,
+    ) -> usize {
+        self.message_edits
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(id, content)| message.is_none_or(|message| *id == message) && content == text)
+            .count()
     }
 
     pub(in crate::services::discord) fn refused_texts(&self) -> Vec<String> {
@@ -640,6 +664,11 @@ async fn discord_rest(State(state): State<DiscordMockState>, request: Request<Bo
             state.release_held_edit.notified().await;
         }
         let edited = content.to_string();
+        state
+            .message_edits
+            .lock()
+            .unwrap()
+            .push((id, edited.clone()));
         state
             .messages
             .lock()

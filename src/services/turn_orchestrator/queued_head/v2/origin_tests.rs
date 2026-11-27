@@ -1,10 +1,10 @@
 // Windows has no directory fsync, so the queued V2 owner these tests adopt refuses every commit.
 #![cfg(unix)]
 
-use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::runtime_store::discord_pending_queue_root;
 use crate::services::turn_orchestrator::checked_purge::ExpectedQueue;
+use crate::services::turn_orchestrator::queued_head::v2::origin::*;
 use crate::services::turn_orchestrator::queued_head::v2_types::{
     AttemptIdentity, AttemptSource, PreparedPayload, TargetIdentity,
 };
@@ -128,7 +128,7 @@ async fn a_clear_removes_opaque_admissions_without_attempt_cancellation_debt() {
         .unwrap();
     assert!(matches!(
         admitted,
-        super::super::source_admission::Admitted::RetainedOpaque
+        crate::services::turn_orchestrator::queued_head::v2::source_admission::Admitted::RetainedOpaque
     ));
     let before = on_disk(&path);
     assert_eq!(before["retained_inputs"].as_array().unwrap().len(), 1);
@@ -432,7 +432,7 @@ async fn a_repeated_notice_never_owes_a_settled_refusal_again_pg() {
     let (registry, channel) = (ChannelMailboxRegistry::default(), 7_340_307);
     let (handle, path) = owner(&registry, channel).await;
     let id = ChannelId::new(channel);
-    let settle = || crate::services::discord::settle_v2_drops(Some(&pool), &handle, "claude", id);
+    let settle = || crate::services::queue::settle_v2_drops(Some(&pool), &handle, "claude", id);
     let confirmed = |message: u64| {
         let sql = "SELECT terminal_confirmed_at FROM turns WHERE turn_id = $1";
         let read = sqlx::query_scalar(sql).bind(format!("discord:{channel}:{message}"));

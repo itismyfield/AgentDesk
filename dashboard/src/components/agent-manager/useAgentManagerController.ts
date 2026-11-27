@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState, type DragEvent } from "react";
-import type { Agent, Department, DispatchedSession } from "../../types";
+import { useCallback, useMemo, useState } from "react";
+import type { Agent, DispatchedSession } from "../../types";
 import type { UiLanguage } from "../../i18n";
 import * as api from "../../api";
 import { BLANK } from "./constants";
@@ -14,14 +14,12 @@ import {
 
 export type { AgentSortMode };
 
-export type AgentManagerTab = "agents" | "departments" | "skills" | "dispatch";
+export type AgentManagerTab = "agents" | "skills" | "dispatch";
 
 interface UseAgentManagerControllerParams {
   agents: Agent[];
-  departments: Department[];
   language: UiLanguage;
   onAgentsChange: () => void;
-  onDepartmentsChange: () => void;
   /** Every workspace session; states come from them as on home. */
   sessions: DispatchedSession[];
   sessionsFailed: boolean;
@@ -31,10 +29,8 @@ interface UseAgentManagerControllerParams {
 
 export function useAgentManagerController({
   agents,
-  departments,
   language,
   onAgentsChange,
-  onDepartmentsChange,
   sessions,
   sessionsFailed,
   onTabChange,
@@ -46,7 +42,6 @@ export function useAgentManagerController({
     [isKo],
   );
 
-  const [deptTab, setDeptTab] = useState("all");
   const [statusFilter, setStatusFilter] = useState<AgentStatusFilter>("all");
   const [sortMode, setSortMode] = useState<AgentSortMode>("status");
   const [search, setSearch] = useState("");
@@ -62,46 +57,16 @@ export function useAgentManagerController({
     sourceAgent: Agent | null;
   }>({ open: false, mode: "create", sourceAgent: null });
   const [form, setForm] = useState<FormData>(BLANK);
-  const [deptModal, setDeptModal] = useState<{
-    open: boolean;
-    editDept: Department | null;
-  }>({ open: false, editDept: null });
-  // A local order of department ids over the server list; `dirty` until saved or cancelled.
-  const [localOrder, setLocalOrder] = useState<{ ids: string[]; dirty: boolean } | null>(null);
-  const [reorderSaving, setReorderSaving] = useState(false);
-  const [reorderFailed, setReorderFailed] = useState(false);
-  const [draggingDeptId, setDraggingDeptId] = useState<string | null>(null);
-  const [dragOverDeptId, setDragOverDeptId] = useState<string | null>(null);
-  const [dragOverPosition, setDragOverPosition] = useState<"before" | "after" | null>(null);
-  // A saved order holds until the refreshed list arrives, so the rows never jump back for a moment.
-  const [seenDepartments, setSeenDepartments] = useState(departments);
-  if (seenDepartments !== departments) {
-    setSeenDepartments(departments);
-    if (localOrder && !localOrder.dirty) setLocalOrder(null);
-  }
-  const deptOrder = useMemo(() => {
-    if (!localOrder) return departments;
-    const byId = new Map(departments.map((dept) => [dept.id, dept]));
-    const kept = localOrder.ids.flatMap((id) => byId.get(id) ?? []);
-    return [...kept, ...departments.filter((dept) => !localOrder.ids.includes(dept.id))];
-  }, [departments, localOrder]);
-  const deptOrderDirty = localOrder?.dirty ?? false;
-  const reorder = useCallback((ids: string[]) => {
-    setLocalOrder({ ids, dirty: true });
-    setReorderFailed(false);
-  }, []);
 
   const handleTabChange = useCallback((nextTab: AgentManagerTab) => {
     onTabChange?.(nextTab);
   }, [onTabChange]);
 
-  // Counts take home's stand-ins too; rows are real agents only.
   const entries = useMemo(() => classifyRoster(agents, sessions, sessionsFailed), [agents, sessions, sessionsFailed]);
   const sortedEntries = useMemo(() => {
-    const known = new Set(departments.map((department) => department.id));
     const rows = entries.filter((entry) => !isStandIn(entry.agent));
-    return filterAndSortAgents(rows, { deptTab, statusFilter, search, includeTests, departments: known }, sortMode);
-  }, [entries, departments, deptTab, includeTests, search, sortMode, statusFilter]);
+    return filterAndSortAgents(rows, { statusFilter, search, includeTests }, sortMode);
+  }, [entries, includeTests, search, sortMode, statusFilter]);
 
   const openCreateAgent = useCallback(() => {
     setSetupWizard({ open: true, mode: "create", sourceAgent: null });
@@ -114,7 +79,6 @@ export function useAgentManagerController({
       name_ko: target.name_ko ?? "",
       name_ja: target.name_ja ?? "",
       name_zh: target.name_zh ?? "",
-      department_id: target.department_id ?? "",
       cli_provider: target.cli_provider ?? "claude",
       avatar_emoji: target.avatar_emoji ?? "🤖",
       personality: target.personality ?? "",
@@ -160,7 +124,6 @@ export function useAgentManagerController({
         name_ko: values.name_ko.trim() || values.name.trim(),
         name_ja: values.name_ja.trim() || undefined,
         name_zh: values.name_zh.trim() || undefined,
-        department_id: values.department_id || null,
         cli_provider: values.cli_provider,
         avatar_emoji: values.avatar_emoji,
         personality: values.personality.trim() || null,
@@ -195,114 +158,22 @@ export function useAgentManagerController({
     }
   }, [onAgentsChange]);
 
-  const openCreateDept = useCallback(() => {
-    setDeptModal({ open: true, editDept: null });
-  }, []);
-
-  const openEditDept = useCallback((dept: Department) => {
-    setDeptModal({ open: true, editDept: dept });
-  }, []);
-
-  const handleMoveDept = useCallback((index: number, direction: -1 | 1) => {
-    const target = index + direction;
-    if (target < 0 || target >= deptOrder.length) return;
-    const ids = deptOrder.map((dept) => dept.id);
-    [ids[index], ids[target]] = [ids[target], ids[index]];
-    reorder(ids);
-  }, [deptOrder, reorder]);
-
-  // The server takes only `name` on PATCH /api/departments/{id}, so the order goes through its reorder route.
-  const handleSaveOrder = useCallback(async () => {
-    setReorderSaving(true);
-    setReorderFailed(false);
-    try {
-      await api.reorderDepartments(deptOrder.map((dept, index) => ({ id: dept.id, sort_order: index })));
-      setLocalOrder({ ids: deptOrder.map((dept) => dept.id), dirty: false });
-      onDepartmentsChange();
-    } catch (error) {
-      console.error("Order save failed:", error);
-      setReorderFailed(true);
-    } finally {
-      setReorderSaving(false);
-    }
-  }, [deptOrder, onDepartmentsChange]);
-
-  const handleCancelOrder = useCallback(() => {
-    setLocalOrder(null);
-    setReorderFailed(false);
-  }, []);
-
-  const handleDragStart = useCallback((deptId: string, event: DragEvent<HTMLElement>) => {
-    setDraggingDeptId(deptId);
-    event.dataTransfer.effectAllowed = "move";
-    // Firefox starts a drag only with some data set.
-    event.dataTransfer.setData("text/plain", deptId);
-  }, []);
-
-  const handleDragOver = useCallback((deptId: string, event: DragEvent<HTMLElement>) => {
-    event.preventDefault();
-    event.dataTransfer.dropEffect = "move";
-    const rect = event.currentTarget.getBoundingClientRect();
-    const midY = rect.top + rect.height / 2;
-    setDragOverDeptId(deptId);
-    setDragOverPosition(event.clientY < midY ? "before" : "after");
-  }, []);
-
-  const handleDrop = useCallback((targetId: string, event: DragEvent<HTMLElement>) => {
-    event.preventDefault();
-    if (draggingDeptId && draggingDeptId !== targetId) {
-      const ids = deptOrder.map((dept) => dept.id).filter((id) => id !== draggingDeptId);
-      const targetIndex = ids.indexOf(targetId);
-      ids.splice(dragOverPosition === "after" ? targetIndex + 1 : targetIndex, 0, draggingDeptId);
-      reorder(ids);
-    }
-    setDraggingDeptId(null);
-    setDragOverDeptId(null);
-    setDragOverPosition(null);
-  }, [deptOrder, draggingDeptId, dragOverPosition, reorder]);
-
-  const handleDragEnd = useCallback(() => {
-    setDraggingDeptId(null);
-    setDragOverDeptId(null);
-    setDragOverPosition(null);
-  }, []);
-
   return {
-    deptModal,
-    deptOrder,
-    deptOrderDirty,
-    deptTab,
-    draggingDeptId,
-    dragOverDeptId,
-    dragOverPosition,
     form,
     agentModal,
-    handleCancelOrder,
     handleDeleteAgent,
-    handleDragEnd,
-    handleDragOver,
-    handleDragStart,
-    handleDrop,
-    handleMoveDept,
     handleSaveAgent,
-    handleSaveOrder,
     handleTabChange,
     isKo,
     locale,
     entries,
     includeTests,
     openCreateAgent,
-    openCreateDept,
     openEditAgent,
-    openEditDept,
     openDuplicateAgent,
-    reorderFailed,
-    reorderSaving,
     saving,
     search,
     setAgentModal,
-    setDeptModal,
-    setDeptTab,
     setForm,
     setIncludeTests,
     setSearch,

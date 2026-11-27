@@ -5,7 +5,6 @@ import { useInRouterContext, useNavigate } from "react-router";
 import { X } from "lucide-react";
 import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
-import type { Department } from "../../types";
 import { Button } from "../../kit/free/button-clean";
 import { Checkbox } from "../../kit/free/checkbox-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
@@ -21,7 +20,6 @@ import type { FormData } from "./types";
 const agentFormSchema = z.object({
   name: z.string().trim().min(1, "required"),
   name_ko: z.string(), name_ja: z.string(), name_zh: z.string(),
-  department_id: z.string(),
   cli_provider: z.string().trim().min(1, "required"),
   avatar_emoji: z.string().trim().min(1, "required"),
   personality: z.string(), prompt_content: z.string(), auto_commit: z.boolean(),
@@ -34,7 +32,7 @@ export default function AgentFormModal({
   locale, tr, form, isEdit, agentId, saving, onSave, onClose,
 }: {
   isKo: boolean; locale: string; tr: (ko: string, en: string) => string;
-  form: FormData; departments: Department[]; isEdit: boolean; agentId?: string;
+  form: FormData; isEdit: boolean; agentId?: string;
   saving: boolean; onSave: (values: FormData) => void | Promise<void>; onClose: () => void;
 }) {
   const inRouter = useInRouterContext(), navigate = useNavigate();
@@ -57,7 +55,7 @@ export default function AgentFormModal({
   });
   const handleSave = handleSubmit(async (values) => {
     if (isEdit && hasMaskedPromptValue(values.prompt_content) && values.prompt_content !== form.prompt_content && !confirmMaskedSave) return;
-    await onSave({ ...values, cli_provider: values.cli_provider as FormData["cli_provider"] });
+    await onSave({ ...form, ...values, cli_provider: values.cli_provider as FormData["cli_provider"] });
   });
   const handleNavigateAudit = () => {
     if (isDirty) {

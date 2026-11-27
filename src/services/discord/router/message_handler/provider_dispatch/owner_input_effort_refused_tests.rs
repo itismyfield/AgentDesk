@@ -112,9 +112,10 @@ fn a_refused_effort_continuation_loses_every_body_copy_across_restart_pg() {
         Execution::LocalTui,
     );
     owner.origin = InputOrigin::EffortContinue;
-    crate::services::claude_tui::readiness::tests::daemon_restart(&rig.name);
-    let moved =
-        crate::services::claude_tui::readiness::tests::after_first_look(&rig.name, move || {
+    crate::services::claude_tui::readiness::test_support::daemon_restart(&rig.name);
+    let moved = crate::services::claude_tui::readiness::test_support::after_first_look(
+        &rig.name,
+        move || {
             writeln!(
                 fs::OpenOptions::new()
                     .append(true)
@@ -124,7 +125,8 @@ fn a_refused_effort_continuation_loses_every_body_copy_across_restart_pg() {
                 json!({"type":"ai-title"})
             )
             .unwrap();
-        });
+        },
+    );
     let claim = rig.claim(&front).unwrap();
     let result = rig.with_turn(&ProviderKind::Claude, Some(&rig.name), |turn, sender| {
         let (settled, _) = tokio::sync::oneshot::channel();
@@ -221,8 +223,8 @@ fn a_refused_effort_continuation_loses_every_body_copy_across_restart_pg() {
     // A fresh readiness fixture supplies the next person's evidence independently of the refusal.
     let transcript = rig.transcript();
     fs::write(&transcript, IDLE).unwrap();
-    crate::services::claude_tui::readiness::tests::daemon_restart(&rig.name);
-    crate::services::claude_tui::readiness::tests::pre_source(&rig.name, &transcript);
+    crate::services::claude_tui::readiness::test_support::daemon_restart(&rig.name);
+    crate::services::claude_tui::readiness::test_support::pre_source(&rig.name, &transcript);
     assert!(
         crate::services::claude_tui::readiness::observe(&rig.name, Some(&transcript)).is_some()
     );

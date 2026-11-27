@@ -4,12 +4,12 @@ use super::*;
 
 mod resume_companions;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use resume_companions::{
     after_companion_for_tests, corrupt_companion_candidate_for_tests,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn commit_claim(
     context: &BindingContext,
     claim: &Claim,

@@ -2,11 +2,12 @@
 // carries the `pg_` marker the PG test lane selects on.
 #[cfg(test)]
 mod pg_tests {
-    use super::super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::services::auto_queue::cancel_run::{
-        cancel_live_dispatches_for_runs_pg, cancel_selected_runs_with_pg, end_run_with_pg,
+        cancel_live_dispatches_for_runs_pg, cancel_selected_runs_with_pg,
+        clear_sessions_for_dispatches_pg, end_run_with_pg,
     };
+    use crate::services::auto_queue::cleanup_tasks::*;
     use sqlx::PgPool;
 
     const SLOT_THREAD_ID: &str = "7142";
@@ -2340,7 +2341,7 @@ mod pg_tests {
 
         let task_id = {
             let mut tx = pool.begin().await.expect("begin mixed-generation enqueue");
-            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+            let task_id = enqueue_run_cleanup_task_on_tx(
                 &mut tx,
                 &[],
                 &[],
@@ -2483,7 +2484,7 @@ mod pg_tests {
 
             let card_rollback_tasks =
                 vec![(card_id.to_string(), Some(dispatch_id_old.to_string()))];
-            let task_id = super::super::enqueue_run_cleanup_task_on_tx(
+            let task_id = enqueue_run_cleanup_task_on_tx(
                 &mut tx,
                 &[run_id.to_string()],
                 &[dispatch_id_old.to_string()],
@@ -2525,7 +2526,7 @@ mod pg_tests {
         assert_eq!(review_round_before, 1);
 
         // P1-A: Drain the cleanup task. Generation mismatch should cause skip.
-        super::super::drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+        drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
 
         // After drain: card should be UNCHANGED (skipped due to generation mismatch)
         let (status_after, review_round_after): (String, i64) =

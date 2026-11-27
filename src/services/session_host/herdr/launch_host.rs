@@ -52,7 +52,7 @@ pub(crate) struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     checker: Option<Arc<dyn super::policy::ConfigChecker>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
     prepared_existing: tokio::sync::Mutex<HashMap<HerdrLaunchEndpoint, PreparedPolicy>>,
@@ -215,7 +215,7 @@ impl SocketHerdrLaunchHost {
             endpoints,
             policy: ProofCache::default(),
             sources,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             checker: None,
             witnessed: Mutex::default(),
             prepared_existing: tokio::sync::Mutex::default(),
@@ -264,7 +264,7 @@ impl SocketHerdrLaunchHost {
         serde_json::Value,
     ) {
         let checker: &dyn super::policy::ConfigChecker = &LocalChecker;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let checker = self.checker.as_deref().unwrap_or(checker);
         let mut checked = self.policy.next_restart(source, checker).await;
         if let Ok(proof) = &checked {
@@ -446,13 +446,13 @@ impl SocketHerdrLaunchHost {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
         self.sources = vec![source];
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_policy_checker_for_test(
         mut self,
         checker: Arc<dyn super::policy::ConfigChecker>,
@@ -461,13 +461,13 @@ impl SocketHerdrLaunchHost {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_transport_for_test(mut self, transport: Arc<HerdrSocketTransport>) -> Self {
         self.endpoints[0].1 = transport;
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn poison_grants_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.grants.lock().unwrap();
@@ -475,7 +475,7 @@ impl SocketHerdrLaunchHost {
         }));
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
         self.witnessed.lock().unwrap().insert(
             HerdrLaunchEndpoint {
@@ -487,20 +487,20 @@ impl SocketHerdrLaunchHost {
             witness,
         );
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn poison_witnessed_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.witnessed.lock().unwrap();
             panic!("injected witnessed cache failure");
         }));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn poison_proof_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.policy.poison_for_test()
         }));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_prepared_for_test(
         mut self,
         prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
@@ -511,7 +511,7 @@ impl SocketHerdrLaunchHost {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
         self.grants = Mutex::new(GrantCache::restored(Ok(restored)));
         self
@@ -871,6 +871,11 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
         )
     }
 }
+
+/// The socket launch host the composed upper-crate scenarios script (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "launch_host_support.rs"]
+mod support;
 
 #[cfg(test)]
 #[path = "launch_host_tests.rs"]

@@ -6,9 +6,9 @@ use crate::services::cluster::intake_router_hook::owner_record::{
 use crate::services::cluster::intake_router_hook::*;
 
 /// Lets a test change shared state between the first observation and planning.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static BEFORE_PLAN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static ENTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
 /// `None` keeps the existing placement path: fallback off, out of scope, or an unadopted session.

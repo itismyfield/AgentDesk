@@ -328,7 +328,7 @@ pub(crate) fn best_effort_publish_logged(path: &Path, data: &str, context: Atomi
 }
 
 /// The plain `atomic_write` with the recovery-critical failure log, kept for test fixtures.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn critical_atomic_write(
     path: &Path,
     data: &str,
@@ -350,7 +350,7 @@ pub(crate) fn critical_atomic_write(
 
 /// Test-only view of every directory flush and injected step failure, scoped by target path so
 /// parallel tests in separate temp directories never see each other's events.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod flush_probe {
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Condvar, Mutex};

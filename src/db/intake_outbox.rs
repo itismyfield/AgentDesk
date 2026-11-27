@@ -248,7 +248,7 @@ pub(crate) enum FailedPreAcceptSweepOutcome {
 }
 
 pub(crate) mod pre_accept_sweep;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::services::cluster::pre_accept_sweep::sweep_failed_pre_accept_once;
 
 pub(crate) mod consent_handoff;
@@ -256,7 +256,7 @@ pub(crate) mod consent_projection;
 mod worker_status;
 #[cfg(test)]
 use worker_status::confirm_claim;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use worker_status::{claim_pending_for_target, sweep_stale_pre_accept_claims};
 pub(crate) use worker_status::{
     claim_pending_for_target_except, mark_accepted, mark_done, mark_failed_post_accept,

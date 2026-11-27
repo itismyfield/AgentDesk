@@ -139,7 +139,7 @@ impl UserReceipt {
                     if file.read_exact_at(&mut bytes, self.scanned).is_err() {
                         return Ok(None);
                     }
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     {
                         NATIVE_READ_BYTES.with(|total| total.set(total.get() + size as u64));
                     }
@@ -404,7 +404,7 @@ impl UserReceipt {
             let next = cursor.saturating_sub(4 * 1024);
             let start = end - (bytes.len() - next) as u64;
             file.read_exact_at(&mut bytes[next..cursor], start).ok()?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             NATIVE_READ_BYTES.with(|total| total.set(total.get() + (cursor - next) as u64));
             cursor = next;
             if bytes.last() != Some(&b'\n') {
@@ -518,9 +518,9 @@ impl UserReceipt {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! { static NATIVE_READ_BYTES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) }; }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn native_read_byte_total() -> u64 {
     NATIVE_READ_BYTES.with(std::cell::Cell::get)
 }

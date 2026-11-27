@@ -12,6 +12,8 @@ mod finalizer_identity;
 mod herdr_turn_evidence;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) mod herdr_turn_evidence_tests;
+#[cfg(unix)]
+pub(in crate::services::discord) use herdr_turn_evidence::current_bound_nonce;
 pub(in crate::services::discord) use herdr_turn_evidence::{
     herdr_fresh_idle_signal, herdr_turn_held, install_turn_start_sink,
 };

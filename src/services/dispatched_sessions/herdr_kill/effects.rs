@@ -150,8 +150,9 @@ async fn kill_steps(
 impl Released for HerdrKillEffects {
     fn released(mut self) -> BoxFuture<'static, Self> {
         async move {
-            #[cfg(test)]
-            crate::services::discord::herdr_terminate::run_before_released_probe().await;
+            #[cfg(any(test, feature = "test-support"))]
+            crate::services::dispatched_sessions::herdr_probe_tests::run_before_released_probe()
+                .await;
             let Some(Release {
                 state,
                 target,

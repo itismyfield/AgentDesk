@@ -162,7 +162,7 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
     channel_id: ChannelId,
     operation: &str,
 ) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if take_marker_removal_fault(channel_id) {
         tracing::warn!(
             operation,
@@ -186,10 +186,10 @@ pub(super) fn delete_pending_dispatch_marker_with_persistence(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static MARKER_REMOVAL_FAULTS: std::sync::Mutex<Vec<ChannelId>> = std::sync::Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn take_marker_removal_fault(channel: ChannelId) -> bool {
     let mut armed = MARKER_REMOVAL_FAULTS
         .lock()
@@ -198,7 +198,7 @@ fn take_marker_removal_fault(channel: ChannelId) -> bool {
     index.map(|index| armed.remove(index)).is_some()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl super::ChannelMailboxRegistry {
     /// Test-only: the channel's next settled-marker removal fails and leaves the marker on disk.
     pub(crate) fn fail_next_marker_settle(channel: ChannelId) {

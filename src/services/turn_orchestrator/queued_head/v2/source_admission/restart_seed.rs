@@ -168,6 +168,101 @@ impl Owner {
         self.seed_placed(at);
         Ok(true)
     }
+
+    /// Whether the current claim `number` still holds `front`, an unreserved greeting.
+    fn seed_claimed(&self, front: &Front, number: u64) -> bool {
+        number == self.claim_number
+            && self.claimed(front.1.message_id, front)
+            && self.snapshot.head_injection.is_none()
+            && self.seed_front()
+    }
+
+    /// Whether `key` is the live attempt of a restart greeting.
+    pub(crate) fn seed_attempt(&self, key: &AttemptRef) -> bool {
+        let head = self.snapshot.head_injection.as_ref();
+        head.is_some_and(|head| key.matches(head))
+            && self.snapshot.admission_binds.iter().any(|b| {
+                of_attempt(b, key)
+                    && ChannelMailboxHandle::restart_seed_input(
+                        b.context.as_ref().and_then(|c| c.execution.as_ref()),
+                    )
+            })
+    }
+
+    /// Records `nonce` on the greeting the claim launches, before its execution exists, so its
+    /// permit knows that execution as its own; a replaced claim or taken greeting records nothing.
+    pub(crate) fn record_seed_successor(
+        &mut self,
+        (front, number): (&Front, u64),
+        nonce: &str,
+    ) -> Result<(), String> {
+        if !self.seed_claimed(front, number) {
+            return Err(STALE_SEED.into());
+        }
+        let mut next = self.snapshot.clone();
+        for bind in &mut next.admission_binds {
+            let at_front = matches!(bind.at, BindAt::Queued { index: 0, .. });
+            let Some(execution) = bind.context.as_mut().and_then(|c| c.execution.as_mut()) else {
+                continue;
+            };
+            if at_front && ChannelMailboxHandle::restart_seed_input(Some(&*execution)) {
+                execution["metadata"]["restart_seed"]["successor_nonce"] = nonce.into();
+            }
+        }
+        self.commit(next)
+    }
+
+    /// Ends the greeting a Herdr user stop closed before any key: its item, binds and claim go
+    /// with a cancelled receipt in one commit. Any other authority changes nothing.
+    pub(crate) fn cancel_seed_not_sent(
+        &mut self,
+        authority: SeedStopAuthority,
+    ) -> Result<(), String> {
+        let mut next = self.snapshot.clone();
+        match authority {
+            SeedStopAuthority::Claimed { front, number } => {
+                if !self.seed_claimed(&front, number) {
+                    return Err(STALE_SEED.into());
+                }
+                next.owe_queued([0], TerminalOutcome::Cancelled, origin::now_ms());
+                next.items.remove(0);
+                next.unbind_item(0);
+            }
+            SeedStopAuthority::Reserved { attempt, proof } => {
+                if !self.seed_attempt(&attempt) || !proof.herdr_user_stop() {
+                    return Err(STALE_SEED.into());
+                }
+                proof.into_reason(&serde_json::to_value(&attempt).map_err(|e| e.to_string())?)?;
+                let head = next.head_injection.take().ok_or(STALE_SEED)?;
+                next.owe_attempt(&head, TerminalOutcome::Cancelled, origin::now_ms());
+                super::super::retained::remove_members(&mut next, &head)?;
+                (next.admission_binds).retain(|b| !of_attempt(b, &attempt));
+            }
+        }
+        self.commit(next)?;
+        self.revoke_front();
+        self.held = None;
+        Ok(())
+    }
+}
+
+const STALE_SEED: &str = "stale seed settlement";
+
+fn of_attempt(bind: &AdmissionBind, key: &AttemptRef) -> bool {
+    matches!(&bind.at, BindAt::Attempt { attempt, .. } if *attempt == key.attempt)
+}
+
+/// What lets a Herdr user stop end a greeting: the exact claim before its reserve, or the exact
+/// attempt with its not-sent proof after.
+pub(crate) enum SeedStopAuthority {
+    Claimed {
+        front: Front,
+        number: u64,
+    },
+    Reserved {
+        attempt: AttemptRef,
+        proof: crate::services::claude_tui::owner_input::NotSentProof,
+    },
 }
 
 impl ChannelMailboxHandle {

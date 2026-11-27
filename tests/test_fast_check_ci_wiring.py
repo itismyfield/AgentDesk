@@ -379,7 +379,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         # Same trusted-event routing as rust_build, on the separate lint runner.
         self.assertEqual(job["runs-on"], jobs["rust_build"]["runs-on"].replace("adk-wsl-rust", "adk-wsl-lint"))
         self.assertEqual(job["if"], _LINT_FILTER)
-        # Clippy over every target and feature is the compile `cargo check` used to repeat.
+        # Clippy compiles every target with the explicit CI feature set.
         self.assertEqual(
             [line.strip() for step in job["steps"] if step.get("name") not in RUNNER_MEMORY_OBSERVER_NAMES
              for line in str(step.get("run", "")).splitlines() if line.strip()],
@@ -390,7 +390,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "npm run test:policies",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
-                "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "cargo clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
                 "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 'python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref "$CLIPPY_BASE_REF"',
                 "sccache --show-stats || true",
@@ -917,7 +917,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
         observed = next(line.strip().split(" | tee ")[0] for line in lint_run.splitlines() if line.strip().startswith("cargo clippy "))
         self.assertEqual(observed.replace(" --message-format=json", ""), just_recipe_commands(justfile, "lint")[0])
         self.assertIn("set -o pipefail", lint_run)
-        self.assertNotIn("cargo clippy --workspace --all-targets --all-features -- -D warnings", lint_run)
+        self.assertNotIn("cargo clippy --workspace --all-targets --features adk-base/test-support -- -D warnings", lint_run)
         self.assertEqual(
             [
                 line.strip()
@@ -933,7 +933,7 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 "just fmt-check",
                 "set -o pipefail",
                 "mkdir -p target/clippy-observation",
-                "cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
+                "cargo clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl",
                 "${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}"
                 "python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1",
                 *non_lib,
