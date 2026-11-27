@@ -30,6 +30,8 @@ use crate::services::provider::ProviderKind;
 
 use super::*;
 
+mod intake;
+
 /// #4278: grace window before the orphan-`⏳` defense sweep may remove a
 /// persisted TUI-direct bot-anchor hourglass. A record younger than this is
 /// skipped so a legitimately slow-starting turn (whose inflight row has not
@@ -79,27 +81,38 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
     // covering the exact anchor, or a durable pending-start pinned to the
     // exact anchor (its deferring worker owns this ⏳'s lifecycle).
     let holds_before_removal = |channel_id: u64, anchor_message_id: u64| {
-        inflight::load_inflight_state_read_only(provider, channel_id).is_some()
-            || tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
-                .iter()
-                .any(|marker| marker.anchor_message_id == anchor_message_id)
+        !matches!(
+            inflight::load_inflight_state_read_only_result(provider, channel_id),
+            Ok(None)
+        ) || tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
+            .iter()
+            .any(|marker| marker.anchor_message_id == anchor_message_id)
             || tui_direct_pending_start::load_all().iter().any(|record| {
                 record.provider.eq_ignore_ascii_case(provider.as_str())
                     && record.channel_id == channel_id
                     && record.anchor_message_id == anchor_message_id
             })
     };
-    sweep_orphan_tui_anchors_with_probes(
+    let now = SystemTime::now();
+    let cleared = sweep_orphan_tui_anchors_with_probes(
         &shared.turn_view_reconciler,
         shared,
-        SystemTime::now(),
+        now,
         Duration::from_secs(ORPHAN_TUI_ANCHOR_MIN_AGE_SECS),
         &has_live_inflight,
         &has_valid_marker,
         &holds_before_removal,
         "orphan_tui_anchor_sweep",
     )
-    .await
+    .await;
+    cleared
+        + intake::sweep(
+            &shared.turn_view_reconciler,
+            shared,
+            now,
+            &holds_before_removal,
+        )
+        .await
 }
 
 /// A persisted `tui_direct_bot_anchor` target currently in the `⏳` (Pending)
@@ -694,10 +707,27 @@ mod tests {
             }
         }
 
+        let queue = crate::services::discord::runtime_store::discord_pending_queue_root()
+            .unwrap()
+            .join(shared.provider.as_str())
+            .join(&shared.token_hash)
+            .join("52.json");
+        fs::create_dir_all(queue.parent().unwrap()).unwrap();
+        fs::write(
+            &queue,
+            serde_json::json!({
+                "version": 2, "items": [], "head_injection": null,
+                "retained_inputs": [], "terminal_identities": [],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
         let cleared = sweep_orphan_tui_anchor_reactions(&shared, &shared.provider).await;
         assert!(paths[3].exists() && paths[4].exists());
         assert_eq!(cleared, 3);
         assert!(paths[..3].iter().all(|path| !path.exists()));
+        assert!(queue.exists());
         assert!(hourglass_removed(&shared.turn_view_reconciler, 151));
         assert!(
             !shared

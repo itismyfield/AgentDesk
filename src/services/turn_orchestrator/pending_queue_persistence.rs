@@ -18,7 +18,9 @@ pub(super) mod queued_recovery;
 mod snapshot_io;
 #[cfg(unix)]
 pub(crate) use queued_recovery::v2_channels;
-pub(crate) use queued_recovery::{load_pending_queues_checked, v2_held_sources};
+pub(crate) use queued_recovery::{
+    load_pending_queues_checked, queue_holds_source, v2_held_sources,
+};
 
 const STALE_PENDING_QUEUE_TMP_AGE: Duration = Duration::from_secs(60);
 

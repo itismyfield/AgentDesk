@@ -72,6 +72,7 @@ pub(in crate::services) struct CatchUpRetryState {
 }
 
 mod api;
+mod checkpoint_retention;
 mod classification;
 mod clock;
 pub(in crate::services::discord) mod consumed_commands;
@@ -84,6 +85,7 @@ mod phase2;
 mod phase2_sweep;
 pub(in crate::services::discord) mod retry_state;
 mod scan_progress;
+use checkpoint_retention::prune_stale_checkpoint_files;
 mod settled_frontier;
 mod settled_ledger_consult;
 
@@ -286,34 +288,6 @@ fn collect_catch_up_channel_candidates(
     }
 
     candidates
-}
-
-fn prune_stale_checkpoint_files(dir: &Path, max_checkpoint_age: std::time::Duration) -> usize {
-    let mut pruned = 0usize;
-    if let Ok(prune_entries) = fs::read_dir(dir) {
-        for entry in prune_entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("txt") {
-                continue;
-            }
-            let Ok(meta) = path.metadata() else {
-                continue;
-            };
-            if !meta.is_file() {
-                continue;
-            }
-            let Ok(modified) = meta.modified() else {
-                continue;
-            };
-            if modified.elapsed().unwrap_or_default() <= max_checkpoint_age {
-                continue;
-            }
-            if fs::remove_file(&path).is_ok() {
-                pruned += 1;
-            }
-        }
-    }
-    pruned
 }
 
 /// #1227: page size for catch-up REST fetch. Bumped from 10 → 50 because the
@@ -846,49 +820,6 @@ mod catch_up_recovery_tests {
             should_pace_before_scan(true),
             "subsequent scans must wait the pacing gap"
         );
-    }
-
-    #[test]
-    fn runtime_hygiene_checkpoint_prunes_old_unlocked_sidecars() {
-        let temp = tempfile::tempdir().unwrap();
-        let old = filetime::FileTime::from_system_time(
-            std::time::SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60),
-        );
-        let suffixes = ["txt", "txt.lock", "sweep.json", "sweep.json.lock"];
-        for channel in [21, 22, 23, 24] {
-            for suffix in suffixes {
-                let path = temp.path().join(format!("{channel}.{suffix}"));
-                std::fs::write(&path, "").unwrap();
-                if channel != 24 {
-                    filetime::set_file_mtime(&path, old).unwrap();
-                }
-            }
-        }
-        let orphan = temp.path().join("25.txt.lock");
-        std::fs::write(&orphan, "").unwrap();
-        filetime::set_file_mtime(&orphan, old).unwrap();
-        let locks = ["22.txt.lock", "23.sweep.json.lock"].map(|name| {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(temp.path().join(name))
-                .unwrap();
-            file.lock().unwrap();
-            file
-        });
-
-        prune_stale_checkpoint_files(temp.path(), Duration::from_secs(600));
-
-        for channel in [22, 23, 24] {
-            for suffix in suffixes {
-                assert!(temp.path().join(format!("{channel}.{suffix}")).exists());
-            }
-        }
-        for suffix in suffixes {
-            assert!(!temp.path().join(format!("21.{suffix}")).exists());
-        }
-        assert!(!orphan.exists());
-        drop(locks);
     }
 
     #[test]

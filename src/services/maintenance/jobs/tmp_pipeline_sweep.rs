@@ -11,6 +11,10 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 
+#[cfg(unix)]
+mod cgb2;
+mod runtime_results;
+
 use super::worktree_orphan_sweep::{
     collect_live_tmux_pane_paths, has_live_tmux_owner, remove_orphan_worktree,
 };
@@ -99,6 +103,19 @@ pub(crate) fn should_remove(candidate: bool, stale: bool, has_live_owner: bool) 
 /// Sweep stale, unowned pipeline directories from the direct children of
 /// `config.tmp_root`. A failed tmux query leaves every directory untouched.
 pub async fn run(config: Config) -> Result<()> {
+    let dry_run = config.dry_run;
+    #[cfg(unix)]
+    let tmp_root = config.tmp_root.clone();
+    tokio::task::spawn_blocking(move || {
+        if !dry_run && let Some(root) = crate::config::runtime_root() {
+            runtime_results::sweep(&root, SystemTime::now());
+        }
+        #[cfg(unix)]
+        if let Err(error) = cgb2::sweep(&tmp_root, dry_run) {
+            tracing::warn!(%error, "cgb2 retention stopped on filesystem error");
+        }
+    })
+    .await?;
     let report = run_inner(&config).await?;
     tracing::info!(
         target: "maintenance",
@@ -326,6 +343,15 @@ fn bounded_recursive_last_activity_with_limits(
     max_depth: usize,
     max_entries: usize,
 ) -> std::io::Result<ActivityWalk> {
+    bounded_recursive_last_activity_with_probe(dir, max_depth, max_entries, |_, _| true)
+}
+
+fn bounded_recursive_last_activity_with_probe(
+    dir: &Path,
+    max_depth: usize,
+    max_entries: usize,
+    may_remove: impl Fn(&Path, &std::fs::Metadata) -> bool,
+) -> std::io::Result<ActivityWalk> {
     let mut latest = std::fs::symlink_metadata(dir)?.modified()?;
     let mut pending = vec![(dir.to_path_buf(), 0usize)];
     let mut visited_entries = 0usize;
@@ -366,6 +392,12 @@ fn bounded_recursive_last_activity_with_limits(
                     continue;
                 }
             };
+            if !may_remove(&entry.path(), &metadata) {
+                return Ok(ActivityWalk {
+                    last_activity: SystemTime::now(),
+                    traversal_errors,
+                });
+            }
             let modified = match metadata.modified() {
                 Ok(modified) => modified,
                 Err(_) => {
@@ -476,7 +508,7 @@ mod tests {
 
     #[tokio::test]
     async fn runtime_hygiene_daily_maintenance_prunes_old_result_files() {
-        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("runtime");
         let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
         fs::create_dir_all(&root).unwrap();
@@ -500,6 +532,15 @@ mod tests {
             }
             paths.push(path);
         }
+        let locked = root.join("doctor/startup/43-1.lock");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&locked)
+            .unwrap();
+        lock.lock().unwrap();
+        set_mtime(&locked, old);
         let current = root.join(format!("doctor/startup/{boot}.json"));
         fs::write(&current, "{}").unwrap();
         set_mtime(&current, old);
@@ -511,9 +552,9 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(current.exists() && paths[5].exists());
+        assert!(current.exists() && paths[5].exists() && locked.exists());
         assert!(paths[..5].iter().all(|path| !path.exists()));
-        drop(guard);
+        drop((lock, guard));
     }
 
     fn prefixes() -> Vec<String> {
