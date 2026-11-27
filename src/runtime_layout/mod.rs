@@ -27,7 +27,7 @@ pub use paths::{
 };
 
 /// Source checkout root at build time, set by this crate's build script from its manifest location.
-pub(crate) const REPO_ROOT: &str = env!("ADK_REPO_ROOT");
+pub const REPO_ROOT: &str = env!("ADK_REPO_ROOT");
 
 pub const MEMORY_LAYOUT_VERSION: u32 = 2;
 const DEFAULT_MEMORY_BACKEND: &str = "auto";

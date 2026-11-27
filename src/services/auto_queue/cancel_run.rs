@@ -14,7 +14,7 @@ use terminalize_tx::{TerminalizeTxOutcome, terminalize_selected_runs_on_pg_tx};
 
 /// Runs the real terminalize body on the caller's transaction and leaves it uncommitted,
 /// so run-owner contention tests can hold a cancellation at its commit point.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn terminalize_selected_runs_on_pg_tx_for_test(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     target_run_ids: &[String],
