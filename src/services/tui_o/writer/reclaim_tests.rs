@@ -104,7 +104,7 @@ fn execution_headers(pane: &ProducerPane, session: &str, path: &Path) -> axum::h
 async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() {
     use crate::services::claude_tui::source_verify::boot_time_for_tests;
     use crate::services::tui_o::shadow::capture::renumber;
-    use crate::services::tui_o::store::{STORE_DIR_NAME, StoreError, fault};
+    use crate::services::tui_o::store::{CURSOR_DIR, STORE_DIR_NAME, StoreError, fault};
 
     for (step, committed) in [
         (fault::Step::RefreshBeforeIntent, false),
@@ -139,7 +139,9 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
             .path()
             .join(STORE_DIR_NAME)
             .join(CHANNEL.to_string());
-        let failing = fault::plant(&dir, step, std::io::ErrorKind::StorageFull, Some(1));
+        let cursor_dir = dir.join(CURSOR_DIR);
+        let fault_dir = if committed { &cursor_dir } else { &dir };
+        let failing = fault::plant(fault_dir, step, std::io::ErrorKind::StorageFull, Some(1));
         let (_stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
         let payload = serde_json::json!({"session_id": session, "transcript_path": path});
         assert!(
@@ -159,6 +161,7 @@ async fn hook_refresh_recovers_one_cursor_and_reposts_nothing_after_interrupt() 
         drop(failing);
 
         if committed {
+            assert_eq!(std::fs::read_dir(&cursor_dir).unwrap().count(), 2);
             assert!(
                 matches!(harness.store.peek_cursors(CHANNEL), Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
             );
