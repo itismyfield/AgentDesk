@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::queue_dispatch::busy_followup_retry::requeue_inflight_for_followup_retry;
 
 pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit_timeout(
     shared_owned: &Arc<SharedData>,
@@ -82,13 +83,9 @@ pub(in crate::services::discord) async fn requeue_claude_tui_followup_pre_submit
             "Claude TUI busy follow-up aggregate retry cap reached; preserving entry without kickoff"
         );
     }
-    let requeue_outcome = super::super::mailbox_requeue_inflight_for_followup_retry(
-        shared_owned,
-        provider,
-        channel_id,
-        inflight_state,
-    )
-    .await;
+    let requeue_outcome =
+        requeue_inflight_for_followup_retry(shared_owned, provider, channel_id, inflight_state)
+            .await;
     let requeue_refusal_reason = requeue_outcome.refusal_reason.map(|reason| reason.as_str());
     tracing::info!(
         provider = %provider.as_str(),

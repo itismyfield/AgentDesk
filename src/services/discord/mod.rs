@@ -841,7 +841,8 @@ mod queue_exit_feedback_reconciler_tests {
     }
 }
 
-pub(in crate::services::discord) use busy_followup_retry_store::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;
+#[cfg(test)]
+pub(in crate::services::discord) use queue_dispatch::busy_followup_retry::requeue_inflight_for_followup_retry as mailbox_requeue_inflight_for_followup_retry;
 
 #[cfg(test)]
 mod followup_retry_requeue_tests {
@@ -914,7 +915,12 @@ mod followup_retry_requeue_tests {
             .build()
             .unwrap();
         rt.block_on(async {
-            let shared = make_shared_data_for_tests();
+            let mut shared = make_shared_data_for_tests();
+            let generation = 91;
+            Arc::get_mut(&mut shared)
+                .unwrap()
+                .restart
+                .current_generation = generation;
             let provider = ProviderKind::Claude;
             let channel_id = ChannelId::new(3_752_001);
             let user_msg_id = MessageId::new(3_752_101);
@@ -936,6 +942,16 @@ mod followup_retry_requeue_tests {
             let intervention = &snapshot.intervention_queue[0];
             assert_eq!(intervention.author_id, UserId::new(42));
             assert_eq!(intervention.message_id, user_msg_id);
+            assert_eq!(intervention.queued_generation, generation);
+            let source_generations: Vec<_> = intervention
+                .source_message_queued_generations
+                .iter()
+                .map(|source| (source.message_id, source.queued_generation))
+                .collect();
+            assert_eq!(
+                source_generations,
+                vec![(user_msg_id, generation), (retry_user_msg_id, generation)]
+            );
             assert_eq!(
                 intervention.source_message_ids,
                 vec![user_msg_id, retry_user_msg_id],

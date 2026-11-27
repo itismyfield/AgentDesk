@@ -2339,6 +2339,7 @@ src/
 │   │   │   ├── session_anchors.rs
 │   │   │   └── system_prompt_audit.rs
 │   │   ├── queue_dispatch/
+│   │   │   ├── busy_followup_retry.rs
 │   │   │   ├── canary_workspace.rs
 │   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
@@ -2408,6 +2409,7 @@ src/
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
+│   │   │   ├── held_sources.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
