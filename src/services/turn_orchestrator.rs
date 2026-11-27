@@ -11,6 +11,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
+pub(crate) mod captured_ready_delivery;
 mod claim_observation;
 mod clear_channel;
 mod clear_fence;
@@ -1251,8 +1252,7 @@ impl ChannelMailboxRegistry {
 // reads and refuses every other arm; CommitCapturedReadyDelivery refuses closed actors in its own arm.
 enum ChannelMailboxMsg {
     CommitCapturedReadyDelivery {
-        commit: Box<crate::services::discord::CapturedReadyDeliveryCommit>,
-        reply: oneshot::Sender<Option<Box<crate::services::discord::CapturedReadyDeliveryCommit>>>,
+        commit: Box<dyn captured_ready_delivery::CapturedReadyDeliveryWrite>,
     },
     Snapshot {
         reply: oneshot::Sender<ChannelMailboxSnapshot>,
@@ -1798,11 +1798,8 @@ fn input_mailbox_step(
         return state;
     };
     match msg {
-        ChannelMailboxMsg::CommitCapturedReadyDelivery { commit, reply } => {
-            let committed = (!state.closed)
-                .then(|| commit.commit(state.cancel_token.as_ref()))
-                .flatten();
-            let _ = reply.send(committed.map(Box::new));
+        ChannelMailboxMsg::CommitCapturedReadyDelivery { commit } => {
+            captured_ready_delivery::commit(&state, commit);
         }
         ChannelMailboxMsg::Snapshot { reply } => {
             let _ = reply.send(state.snapshot());
