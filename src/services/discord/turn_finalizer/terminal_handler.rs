@@ -385,6 +385,7 @@ pub(super) struct NativePrepared {
     key: TurnKey,
     actor: Option<Arc<CancelToken>>,
     started_before: std::time::Instant,
+    prepared_row: Option<Arc<super::super::inflight::InflightTurnState>>,
     row_witness: Option<super::super::inflight::InflightTurnState>,
 }
 
@@ -412,9 +413,9 @@ impl NativePrepared {
         {
             return Err("native pre-key identity mismatch".into());
         }
-        match &ticket.owning_episode {
+        let prepared_row = match &ticket.owning_episode {
             None if actor.is_some() => return Err("native follower cannot borrow actor".into()),
-            None => {}
+            None => None,
             Some(episode) => {
                 let expected = actor.as_ref().ok_or("native primary actor missing")?;
                 let mailbox = shared
@@ -434,8 +435,14 @@ impl NativePrepared {
                 {
                     return Err("native pre-key actor mismatch".into());
                 }
+                super::super::inflight::load_inflight_state_read_only(
+                    &ProviderKind::Claude,
+                    key.channel_id.get(),
+                )
+                .filter(|row| NativeCleanup::matches_episode(row, key))
+                .map(Arc::new)
             }
-        }
+        };
         Ok(Self {
             history: history.clone(),
             namespace: namespace.into(),
@@ -443,6 +450,7 @@ impl NativePrepared {
             key,
             actor,
             started_before,
+            prepared_row,
             row_witness: None,
         })
     }
@@ -493,6 +501,8 @@ impl NativePrepared {
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         shared: &Arc<SharedData>,
     ) -> Result<NativeCleanup, String> {
+        use crate::services::tui_input::human_frame::history::v2::native::Disposition;
+
         let registrations: Vec<_> = history
             .native_classification_registrations()?
             .into_iter()
@@ -529,12 +539,19 @@ impl NativePrepared {
         if admission.evidence.namespace != self.namespace || admission.evidence.ticket != ticket {
             return Err("native candidate is not prepared input".into());
         }
-        let row = self.actor.as_ref().and_then(|_| {
-            super::super::inflight::load_inflight_state(
+        let row = if admission.cleanup.is_some() {
+            let current = super::super::inflight::load_inflight_state_read_only_result(
                 &ProviderKind::Claude,
                 self.key.channel_id.get(),
-            )
-        });
+            )?;
+            // An executed turn proves its own closer even if its projection has disappeared.
+            match (current, &admission.evidence.disposition) {
+                (None, Disposition::Executed) => self.prepared_row.as_deref().cloned(),
+                (current, _) => current,
+            }
+        } else {
+            None
+        };
         NativeCleanup::capture(admission, row, self.started_before)
     }
 }
@@ -614,16 +631,20 @@ impl NativeCleanup {
         })
     }
 
-    fn matches_row(
-        row: &super::super::inflight::InflightTurnState,
-        key: TurnKey,
-        source: &crate::services::tui_input::human_frame::history::v2::Source,
-    ) -> bool {
+    fn matches_episode(row: &super::super::inflight::InflightTurnState, key: TurnKey) -> bool {
         row.provider == "claude"
             && row.channel_id == key.channel_id.get()
             && row.effective_finalizer_turn_id() == key.user_msg_id
             && row.born_generation == key.generation
             && key.matches_episode_nonce(row.turn_nonce.as_deref())
+    }
+
+    fn matches_row(
+        row: &super::super::inflight::InflightTurnState,
+        key: TurnKey,
+        source: &crate::services::tui_input::human_frame::history::v2::Source,
+    ) -> bool {
+        Self::matches_episode(row, key)
             && row.session_id.as_deref() == Some(source.session_id.as_str())
             && row.output_path.as_deref() == source.transcript.to_str()
             && row.hosted_execution_nonce.as_deref() == source.target["execution_nonce"].as_str()
