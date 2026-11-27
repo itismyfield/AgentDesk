@@ -15,7 +15,7 @@ pub(super) fn pending_source(
     let adopted = record.location.is_none() && record.expected.is_none();
     let retained = "retired the missing execution; retained input needs its own disposition";
     if adopted {
-        match unplaced_resolved(turn, runtime, ports, nonce)? {
+        match unplaced_resolved(turn, runtime, ports, record)? {
             Resolution::Retired => return launched_source(turn, runtime, ports),
             Resolution::RetiredWithEvidence => return Err(retained.into()),
             _ => {}
@@ -33,7 +33,7 @@ pub(super) fn pending_source(
     let record = match record.location {
         Some(_) if record.expected.is_none() => {
             if let Err(gap) = never_attached::probe_again(turn, runtime, ports) {
-                match unplaced_resolved(turn, runtime, ports, nonce) {
+                match unplaced_resolved(turn, runtime, ports, record) {
                     Ok(Resolution::Retired) => return launched_source(turn, runtime, ports),
                     Ok(Resolution::RetiredWithEvidence) => return Err(retained.into()),
                     Ok(Resolution::Adopted) => {}
@@ -51,7 +51,8 @@ pub(super) fn pending_source(
     let logical = turn.owner.logical_key.as_str();
     if !start_logged(turn.channel_id, logical, nonce, &session_id) {
         if record.expected.is_some()
-            && unplaced_resolved(turn, runtime, ports, nonce) == Ok(Resolution::RetiredWithEvidence)
+            && unplaced_resolved(turn, runtime, ports, record)
+                == Ok(Resolution::RetiredWithEvidence)
         {
             return Err(retained.into());
         }
@@ -84,7 +85,7 @@ pub(super) fn pending_source(
         return Err(refused(cause, detail));
     }
     attach(turn, runtime, ports, nonce, &session_id).map_err(|error| {
-        if unplaced_resolved(turn, runtime, ports, nonce) == Ok(Resolution::RetiredWithEvidence) {
+        if unplaced_resolved(turn, runtime, ports, record) == Ok(Resolution::RetiredWithEvidence) {
             retained.into()
         } else {
             error
@@ -150,17 +151,22 @@ fn unplaced_resolved(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,
-    nonce: &str,
+    record: &HostedExecution,
 ) -> Result<Resolution, String> {
     let host = ports.launch_host().ok_or("herdr turn: no launch host")?;
     let target = Unplaced {
         pool: turn.pool,
         owner: &turn.owner,
-        nonce,
+        nonce: &record.execution_nonce,
         endpoint: &turn.endpoint,
         host,
         quiet: unplaced::quiet(),
         close_unrecorded: ports.owner_port().close_unrecorded,
     };
-    unplaced::resolve_for_turn(runtime, ports.unplaced_lease(&turn.owner), target)
+    unplaced::resolve_for_turn(
+        runtime,
+        ports.unplaced_lease(&turn.owner),
+        target,
+        record.location.is_some(),
+    )
 }

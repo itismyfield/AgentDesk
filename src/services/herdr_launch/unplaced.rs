@@ -349,16 +349,22 @@ async fn resolve(target: &Unplaced<'_>) -> Resolution {
     Resolution::Held("the channel's panes kept changing".into())
 }
 
-/// A turn's resolution of its row's unplaced Pending: `Adopted` or `Retired`, the lease released
-/// before the caller launches anew; Held refuses the turn.
+/// Resolves a Pending execution under its lease, releasing the lease before any relaunch.
+/// A refusal reports whether the turn's observed row named a pane.
 pub(crate) fn resolve_for_turn(
     runtime: &tokio::runtime::Handle,
     lease: Result<UnplacedLease, String>,
     target: Unplaced<'_>,
+    has_recorded_pane: bool,
 ) -> Result<Resolution, String> {
+    let placement = if has_recorded_pane {
+        ""
+    } else {
+        " has no recorded pane and"
+    };
     let held = |why: &str| {
         format!(
-            "herdr turn: pending execution {} is held: {why}",
+            "herdr turn: pending execution {}{placement} is held: {why}",
             target.nonce
         )
     };

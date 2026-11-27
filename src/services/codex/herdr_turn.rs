@@ -309,7 +309,7 @@ fn pending_launch(
             close_unrecorded: ports.owner_port().close_unrecorded,
         };
         let lease = ports.unplaced_lease(&turn.owner);
-        return match unplaced::resolve_for_turn(runtime, lease, target)? {
+        return match unplaced::resolve_for_turn(runtime, lease, target, false)? {
             Resolution::Retired => fresh_launch(turn, runtime, ports),
             _ => Ok(nonce.clone()),
         };
