@@ -1,7 +1,10 @@
 use super::*;
+#[cfg(test)]
 use crate::db::auto_queue::test_support::TestPostgresDb;
+#[cfg(test)]
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::intake_router_hook::owner_record::{custody, output};
+#[cfg(test)]
 use crate::services::tui_o::{cutover, ownership::GatewayOwnership};
 
 pub async fn admission(pool: &PgPool, provider: &str, channel: u64, target: &str) -> i64 {

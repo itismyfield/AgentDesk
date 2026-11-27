@@ -1509,8 +1509,11 @@ async fn record_entry_transition_on_pg(
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
+    #[cfg(test)]
     use super::*;
+    #[cfg(test)]
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    #[cfg(test)]
     use crate::test_support::wait::poll_within;
     use sqlx::{Connection, PgConnection, PgPool};
 

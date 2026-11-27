@@ -1,10 +1,15 @@
 use super::*;
+#[cfg(test)]
 use crate::db::auto_queue::test_support::TestPostgresDb;
+#[cfg(test)]
+use crate::services::cluster::intake_router_hook::owner_record::sweep_stale_pre_accept_claims_fenced;
 use crate::services::cluster::intake_router_hook::owner_record::{
-    OwnerIdentity, TransferOutcome, sweep_stale_pre_accept_claims_fenced, transfer_owner_in_tx,
+    OwnerIdentity, TransferOutcome, transfer_owner_in_tx,
 };
+#[cfg(test)]
 use serde_json::json;
 use sqlx::{Postgres, Transaction};
+#[cfg(test)]
 use std::time::Duration;
 
 pub async fn seed(pool: &PgPool, channel: &str, status: &str, stamp: bool) -> i64 {

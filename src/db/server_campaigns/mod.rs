@@ -7,9 +7,6 @@ use crate::domain::campaign::model::{
     NodeRuntime, Rejection, Run,
 };
 
-#[cfg(test)]
-use crate::domain::campaign::model::*;
-
 pub mod command_transaction;
 pub mod evidence_store;
 mod read;

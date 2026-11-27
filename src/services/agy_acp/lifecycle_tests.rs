@@ -1,10 +1,13 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
 #[cfg(test)]
 use super::actor::{self, Event};
+#[cfg(test)]
 use super::actor::{Deadlines, Handle, TurnRequest};
 #[cfg(test)]
 use super::rpc::Inbound;

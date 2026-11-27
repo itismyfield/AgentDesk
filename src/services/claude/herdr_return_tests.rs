@@ -9,7 +9,9 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::tmux_common::{self as tc, host_marker};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
-use crate::services::tui_prompt_dedupe::{herdr_listed_execution, install_herdr_execution};
+#[cfg(test)]
+use crate::services::tui_prompt_dedupe::herdr_listed_execution;
+use crate::services::tui_prompt_dedupe::install_herdr_execution;
 
 const CHANNEL: u64 = 7_504;
 const LOGICAL: &str = "AgentDesk-claude-return";

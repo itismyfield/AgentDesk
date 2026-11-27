@@ -216,9 +216,11 @@ impl Drop for Ingress {
     }
 }
 
+#[cfg(test)]
 #[path = "native_clear_fence_tests.rs"]
 mod native_clear_fence_tests;
 
+#[cfg(test)]
 #[path = "same_session_source_tests.rs"]
 mod same_session_source_tests;
 

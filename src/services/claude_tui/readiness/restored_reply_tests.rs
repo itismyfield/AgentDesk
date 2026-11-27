@@ -1,9 +1,13 @@
 #![cfg(unix)]
 use super::*;
+use crate::services::tui_prompt_dedupe::binding_events;
+#[cfg(test)]
 use crate::services::tui_prompt_dedupe::binding_events::{
-    self, BindingCause, CauseSource, HookSignal, Proposal, SourceId,
+    BindingCause, CauseSource, HookSignal, Proposal, SourceId,
 };
+#[cfg(test)]
 use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+#[cfg(test)]
 use std::os::unix::fs::MetadataExt;
 
 #[cfg(test)]

@@ -711,7 +711,7 @@ impl<B: BindingEvents> Sources<B> {
                 capture.verify_eof(snapshot.captured_through, &snapshot.prefix_hash)
             };
             let _ = send.send(verify());
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             done.store(true, std::sync::atomic::Ordering::Release);
         });
         #[cfg(test)]

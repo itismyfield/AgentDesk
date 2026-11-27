@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
+#[cfg(test)]
 use crate::services::herdr_launch::retired_hold::{RetiredHoldOutcome, release};
 
 #[derive(Default)]

@@ -1,6 +1,8 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::cluster::intake_router_hook::owner_record::{self, output};
+#[cfg(test)]
+use crate::services::cluster::intake_router_hook::owner_record;
+use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::tui_o::ownership::execution;
 
 pub struct Fixture {

@@ -1006,6 +1006,7 @@ mod tests {
 #[allow(clippy::expect_used)]
 pub mod clear_fence_pg_tests {
     use super::*;
+    #[cfg(test)]
     use std::sync::Arc;
 
     pub async fn create_pool() -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {

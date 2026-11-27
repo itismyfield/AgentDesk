@@ -812,6 +812,7 @@ fn seeded_runtime_config_map(
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
     use super::*;
+    #[cfg(test)]
     use serde_json::json;
 
     pub struct TestDatabase {

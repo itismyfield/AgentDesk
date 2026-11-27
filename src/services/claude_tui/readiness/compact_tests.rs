@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
+#[cfg(test)]
 use crate::services::claude_tui::readiness::compact::{Outcome, Pending};
 
 #[cfg(test)]

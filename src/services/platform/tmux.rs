@@ -1316,6 +1316,7 @@ mod etime_tests {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub mod timeout_tests {
+    #[cfg(test)]
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;

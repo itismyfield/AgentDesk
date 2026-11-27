@@ -1,6 +1,8 @@
+#[cfg(test)]
 use super::*;
 #[cfg(test)]
 use crate::config::session_hosts::test_instance_validation::validate_hosts;
+#[cfg(test)]
 use serde_json::json;
 
 #[cfg(test)]

@@ -50,8 +50,6 @@ pub(crate) fn revision(key: &str) -> Option<u64> {
 }
 
 mod source_pin {
-    use super::*;
-
     #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct SourcePin {
         pub(super) key: String,

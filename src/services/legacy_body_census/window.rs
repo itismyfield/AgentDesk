@@ -184,7 +184,7 @@ impl Window {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn valid_chain_for_test(
     headers: &std::collections::BTreeMap<String, Value>,
     anchor: &Value,

@@ -297,13 +297,13 @@ pub async fn with_projection_for_test<T>(
     TEST_PROJECTION.scope((cache, now), next).await
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) use history::{append_line_for_test, prepare_with_sync_for_test};
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub(crate) use manifest::packaged_for_test;
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) use manifest::{inspect_for_test, inspect_with_evidence_for_test};
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) use window::{Window, valid_chain_for_test};
 
 #[cfg(any(test, feature = "test-support"))]

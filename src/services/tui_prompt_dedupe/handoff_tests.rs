@@ -1,4 +1,4 @@
-use super::test_support::{BEFORE_COMMIT, BEFORE_PARK, Probe, install, on_owning_commit};
+use super::test_support::{BEFORE_COMMIT, BEFORE_PARK, Probe, install};
 use super::*;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;

@@ -1,7 +1,10 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::intake_outbox::{self, InsertPendingPayload};
+#[cfg(test)]
+use crate::db::intake_outbox;
+use crate::db::intake_outbox::InsertPendingPayload;
 use sqlx::{Executor, Postgres};
+#[cfg(test)]
 use std::time::Duration;
 
 pub fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
@@ -294,5 +297,6 @@ async fn receipt_transitions_old_writers_and_delivery_settlement_preserve_author
     finish(fixture, pool).await;
 }
 
+#[cfg(test)]
 #[path = "replay_disposition_tests/concurrency_tests.rs"]
 mod concurrency_tests;

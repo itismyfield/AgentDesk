@@ -366,6 +366,7 @@ where
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod tests {
+    #[cfg(test)]
     use super::*;
     const CAPTURE_46: &str = "      \u{001b}[38;5;114m✔ Update installed · Restart to update\u{001b}[39m\n\u{001b}[38;5;244m──────────────────────────────────────────────\n\u{001b}[38;5;246m❯ \u{001b}[39m\n\u{001b}[38;5;244m──────────────────────────────────────────────\n  \u{001b}[38;5;117m◆ Opus(X)\u{001b}[38;5;246m \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m \u{001b}[38;5;222m⚠️\u{001b}[38;5;246m \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m 7d: \u{001b}[38;5;151m16%\u{001b}[38;5;246m (6d1h) \u{001b}[2m│\u{001b}[0m\u{001b}[38;5;246m 7d-F: \u{001b}[38;5;151m1…\u{001b}[39m\n  \u{001b}[38;5;211m⏵⏵ bypass permissions on\u{001b}[38;5;246m · \u{001b}[38;5;44m2 shells\u{001b}[38;5;246m · \u{001b}[38;5;174m⧉\u{001b}[39m \u{001b}[38;5;246mse\u{001b}[39m\n";
     pub struct Server {
