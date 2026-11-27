@@ -404,7 +404,7 @@ async fn label_pane_reads(id: u64) {
     let context = json!({"origin":"headless","synthetic_label":label});
     let waits = super::super::super::super::start_waits;
     let read = waits(&rig.shared, rig.channel, &context).await;
-    let watched = matches!(read, super::super::super::super::Wait::Watch(_));
+    let watched = matches!(read, super::super::super::super::Wait::Watch(..));
     assert!(watched, "the label pane went on by the channel's session");
     bind(&pane, &rig.transcript, &sid);
     let read = waits(&rig.shared, rig.channel, &context).await;

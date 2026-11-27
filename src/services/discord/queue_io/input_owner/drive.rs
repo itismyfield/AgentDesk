@@ -106,7 +106,7 @@ async fn run(lane: Arc<Lane>, drive: Arc<Drive>) {
             );
             let result = tracing::Instrument::instrument((drive.handoff)(front), timing).await;
             if let Err(error) = &result {
-                tracing::info!(channel_id = drive.channel, %error, "owner front not delivered");
+                tracing::info!(channel_id = drive.channel, message_id = message, %error, "owner front not delivered");
             }
             // A front refused before any key for a reason a later look may clear waits for a real
             // wake (a turn boundary, new input, its pane's screen recovering) or its retry due.

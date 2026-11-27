@@ -699,12 +699,17 @@ input-single-path/HerdrInputHoldUnreadable.cfg	HerdrInputHold	-	HoldEventuallyRe
 input-single-path/HerdrRowlessMailboxAfter.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrRowlessMailboxBefore.cfg	HerdrRowlessMailbox	-	IdleFrontEventuallyDelivered
 input-single-path/HerdrRowlessMailboxBusy.cfg	HerdrRowlessMailbox	-	-
+input-single-path/HerdrRowlessMailboxCancelled.cfg	HerdrRowlessMailbox	-	-
+input-single-path/HerdrRowlessMailboxCancelledW5.cfg	HerdrRowlessMailbox	-	IdleFrontEventuallyDelivered
 input-single-path/HerdrRowlessMailboxCorrupt.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrRowlessMailboxForeignRow.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrRowlessMailboxNoActorGuard.cfg	HerdrRowlessMailbox	OnlyOwnActorReleased	-
+input-single-path/HerdrRowlessMailboxNoDispositionGuard.cfg	HerdrRowlessMailbox	UnprovenHeld	-
 input-single-path/HerdrRowlessMailboxSuccessor.cfg	HerdrRowlessMailbox	-	-
+input-single-path/HerdrRowlessMailboxTransferred.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrRowlessMailboxUnknown.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrRowlessMailboxUnpinned.cfg	HerdrRowlessMailbox	-	-
+input-single-path/HerdrRowlessMailboxWithdrawn.cfg	HerdrRowlessMailbox	-	-
 input-single-path/HerdrWatcherCompletionAfter.cfg	HerdrWatcherCompletion	-	-
 input-single-path/HerdrWatcherCompletionBefore.cfg	HerdrWatcherCompletion	NoSilentLoss	HeldEventuallyDelivered
 input-single-path/HerdrWatcherCompletionBoundaries.cfg	HerdrWatcherCompletion	-	-

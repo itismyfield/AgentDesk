@@ -2722,6 +2722,7 @@ src/
 │   │   │   │   │   │   │   │   └── activation_e2e_tests.rs
 │   │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   │   ├── busy_turn.rs
+│   │   │   │   │   │   ├── idle_wait.rs
 │   │   │   │   │   │   ├── native_input.rs
 │   │   │   │   │   │   ├── pending_attached.rs
 │   │   │   │   │   │   └── preclaim_wait.rs
@@ -3697,6 +3698,7 @@ src/
 │   │   │   ├── native_receipt_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
+│   │   │   ├── native_rowless_wait_tests.rs
 │   │   │   ├── native_supply.rs
 │   │   │   ├── native_terminal.rs
 │   │   │   ├── native_terminal_tests.rs

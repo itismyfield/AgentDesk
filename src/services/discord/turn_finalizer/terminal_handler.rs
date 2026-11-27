@@ -544,9 +544,11 @@ impl NativePrepared {
                 &ProviderKind::Claude,
                 self.key.channel_id.get(),
             )?;
-            // An executed turn proves its own closer even if its projection has disappeared.
+            // A proven execution or interruption carries its own closer after projection loss.
             match (current, &admission.evidence.disposition) {
-                (None, Disposition::Executed) => self.prepared_row.as_deref().cloned(),
+                (None, Disposition::Executed | Disposition::Cancelled) => {
+                    self.prepared_row.as_deref().cloned()
+                }
                 (current, _) => current,
             }
         } else {

@@ -1,22 +1,23 @@
 ---- MODULE HerdrRowlessMailbox ----
-CONSTANT Mode, Shape
-VARIABLE host, mailbox, row, pinned, proof, pending, sent, wrongRelease
-vars == <<host, mailbox, row, pinned, proof, pending, sent, wrongRelease>>
+CONSTANT Mode, Shape, Disposition
+VARIABLE host, mailbox, row, pinned, proof, proofActor, pending, sent, wrongRelease
+vars == <<host, mailbox, row, pinned, proof, proofActor, pending, sent, wrongRelease>>
 
 Init ==
     /\ host = "Busy"
-    /\ mailbox = "Own"
+    /\ mailbox = "A"
     /\ row = "Own"
     /\ pinned = FALSE
     /\ proof = "None"
+    /\ proofActor = "None"
     /\ pending = TRUE
     /\ sent = FALSE
     /\ wrongRelease = FALSE
 
 Register ==
     /\ proof = "None"
-    /\ host = "Busy"
     /\ proof' = "Registered"
+    /\ proofActor' = mailbox
     /\ pinned' = (Mode # "Before" /\ Shape # "Unpinned")
     /\ UNCHANGED <<host, mailbox, row, pending, sent, wrongRelease>>
 
@@ -26,42 +27,46 @@ RemoveProjection ==
     /\ row = "Own"
     /\ row' = IF Shape = "Corrupt" THEN "Unreadable"
               ELSE IF Shape = "ForeignRow" THEN "Foreign" ELSE "Missing"
-    /\ UNCHANGED <<host, mailbox, pinned, proof, pending, sent, wrongRelease>>
-
-Close ==
-    /\ proof = "Registered"
-    /\ row # "Own"
-    /\ host = "Busy"
-    /\ host' = "Idle"
-    /\ proof' = "Terminal"
-    /\ UNCHANGED <<mailbox, row, pinned, pending, sent, wrongRelease>>
-
-Unclear ==
-    /\ Shape = "Unknown"
-    /\ host = "Busy"
-    /\ row = "Missing"
-    /\ host' = "Unknown"
-    /\ UNCHANGED <<mailbox, row, pinned, proof, pending, sent, wrongRelease>>
+    /\ UNCHANGED <<host, mailbox, pinned, proof, proofActor, pending, sent, wrongRelease>>
 
 ReplaceActor ==
     /\ Shape = "Successor"
-    /\ proof = "Terminal"
-    /\ host = "Idle"
-    /\ mailbox = "Own"
-    /\ host' = "Busy"
-    /\ mailbox' = "Successor"
-    /\ UNCHANGED <<row, pinned, proof, pending, sent, wrongRelease>>
+    /\ proof = "Registered"
+    /\ row = "Missing"
+    /\ mailbox = "A"
+    /\ mailbox' = "B"
+    /\ UNCHANGED <<host, row, pinned, proof, proofActor, pending, sent, wrongRelease>>
+
+ObserveUnknown ==
+    /\ Shape = "Unknown"
+    /\ proof = "Registered"
+    /\ row = "Missing"
+    /\ host = "Busy"
+    /\ host' = "Unknown"
+    /\ UNCHANGED <<mailbox, row, pinned, proof, proofActor, pending, sent, wrongRelease>>
+
+Close ==
+    /\ Shape # "Unknown"
+    /\ proof = "Registered"
+    /\ row # "Own"
+    /\ (Shape # "Successor" \/ mailbox = "B")
+    /\ host' = IF mailbox = "B" THEN "Busy" ELSE "Idle"
+    /\ proof' = "Terminal"
+    /\ UNCHANGED <<mailbox, row, pinned, proofActor, pending, sent, wrongRelease>>
+
+OwnDisposition == Disposition \in {"Executed", "Cancelled"}
 
 Settle ==
     /\ proof = "Terminal"
     /\ row = "Missing"
     /\ pinned
-    /\ IF Shape = "Successor" THEN mailbox = "Successor" ELSE TRUE
-    /\ mailbox = "Own" \/ (Mode = "NoActorGuard" /\ mailbox = "Successor")
+    /\ (mailbox = proofActor \/ (Mode = "NoActorGuard" /\ mailbox # "None"))
+    /\ (Disposition = "Executed" \/ (Disposition = "Cancelled" /\ Mode # "W5")
+        \/ Mode = "NoDispositionGuard")
     /\ mailbox' = "None"
     /\ proof' = "Settled"
-    /\ wrongRelease' = (mailbox = "Successor")
-    /\ UNCHANGED <<host, row, pinned, pending, sent>>
+    /\ wrongRelease' = (mailbox # proofActor)
+    /\ UNCHANGED <<host, row, pinned, proofActor, pending, sent>>
 
 Send ==
     /\ pending
@@ -69,22 +74,31 @@ Send ==
     /\ host = "Idle"
     /\ sent' = TRUE
     /\ pending' = FALSE
-    /\ UNCHANGED <<host, mailbox, row, pinned, proof, wrongRelease>>
+    /\ UNCHANGED <<host, mailbox, row, pinned, proof, proofActor, wrongRelease>>
 
-Next == Register \/ RemoveProjection \/ Unclear \/ Close \/ ReplaceActor \/ Settle \/ Send
-Spec == Init /\ [][Next]_vars /\ WF_vars(Settle) /\ WF_vars(Send)
+Next == Register \/ RemoveProjection \/ ReplaceActor \/ ObserveUnknown \/ Close \/ Settle \/ Send
+Spec ==
+    /\ Init /\ [][Next]_vars
+    /\ WF_vars(Register) /\ WF_vars(RemoveProjection) /\ WF_vars(ReplaceActor)
+    /\ WF_vars(ObserveUnknown) /\ WF_vars(Close) /\ WF_vars(Settle) /\ WF_vars(Send)
+
 TypeOK ==
     /\ host \in {"Busy", "Idle", "Unknown"}
-    /\ mailbox \in {"Own", "Successor", "None"}
+    /\ mailbox \in {"A", "B", "None"}
     /\ row \in {"Own", "Missing", "Unreadable", "Foreign"}
     /\ proof \in {"None", "Registered", "Terminal", "Settled"}
+    /\ proofActor \in {"A", "B", "None"}
+    /\ Disposition \in {"Executed", "Cancelled", "WithdrawnNotExecuted", "TransferredUnverified"}
     /\ pinned \in BOOLEAN /\ pending \in BOOLEAN /\ sent \in BOOLEAN
     /\ wrongRelease \in BOOLEAN
+
 NoBusyMachineWrite == sent => host = "Idle"
 OnlyOwnActorReleased == ~wrongRelease
 UnprovenHeld ==
-    (host = "Unknown" \/ Shape \in {"Unpinned", "Corrupt", "ForeignRow", "Busy"}) =>
-        mailbox = "Own"
-IdleFrontEventuallyDelivered ==
-    (Shape = "Missing" /\ host = "Idle" /\ pending) ~> sent
+    (host = "Unknown" \/ Shape \in {"Unpinned", "Corrupt", "ForeignRow", "Busy"}
+     \/ ~OwnDisposition) => mailbox = "A"
+IdleFrontEventuallyDelivered == <>sent
+BusyEventuallyRegistered == <>(proof = "Registered")
+UnknownEventuallyObserved == <>(host = "Unknown")
+TerminalEventuallyObserved == <>(proof \in {"Terminal", "Settled"})
 ====

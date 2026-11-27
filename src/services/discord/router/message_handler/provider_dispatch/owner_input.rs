@@ -246,17 +246,14 @@ pub(in crate::services::discord) fn owner_drive(
                         .await
                 }
                 Ok(_) => {
-                    let active = match mailbox.has_active_turn().await {
-                        // Without a registry this read considers only a durable external holder.
-                        Ok(false) if !synthetic => Ok(
-                            crate::services::discord::health::external_turn_hold_for_start(
-                                None, &provider, channel,
-                            )
-                            .await
-                            .is_some(),
-                        ),
-                        active => active,
-                    };
+                    let active = idle_wait::active_turn(
+                        &mailbox,
+                        origin,
+                        &provider,
+                        channel,
+                        original.1.message_id,
+                    )
+                    .await;
                     match active {
                         // A routine, scheduled, HTTP or Decision start completes only on its own turn.
                         Ok(true) if !origin.joins_running_turn() => Err(START_WAITS.into()),
@@ -753,6 +750,7 @@ pub(in crate::services::discord) async fn recover(shared: &Shared, channel: Chan
     native_input::recover(shared, channel).await;
 }
 
+mod idle_wait;
 mod pending_attached;
 mod preclaim_wait;
 #[path = "owner_input_start_wait.rs"]
@@ -761,8 +759,11 @@ mod start_wait;
 /// Why a start waits unclaimed: a later event wakes it, or a read of its pane's native turn does.
 enum Wait {
     Go,
-    Event,
-    Watch(crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe),
+    Event(&'static str),
+    Watch(
+        &'static str,
+        crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe,
+    ),
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
@@ -770,7 +771,7 @@ enum Wait {
 async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     if !crate::services::discord::turn_finalizer::native_prepare::boot_ready(shared, channel).await
     {
-        return Wait::Event;
+        return Wait::Event("boot_ready");
     }
     use crate::services::discord::inflight::{TurnSource, load_inflight_state_read_only};
     use crate::services::discord::turn_presence::activity::{Activity, activity_now};
@@ -779,7 +780,7 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
     let row = load_inflight_state_read_only(provider, id)
         .is_some_and(|row| row.turn_source != TurnSource::Managed);
     if row || rest(provider, id) {
-        return Wait::Event;
+        return Wait::Event("row_or_rest");
     }
     let screen = match start_wait::observe(shared, channel, context).await {
         start_wait::Observed::Legacy => None,
@@ -792,19 +793,22 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
             return Wait::Go;
         }
         let (shared, context) = (shared.clone(), context.clone());
-        return Wait::Watch(Box::new(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                start_wait::observe(&shared, channel, &context)
-                    .await
-                    .native()
-                    .unwrap_or(Screen::Ready)
-            })
-        }));
+        return Wait::Watch(
+            "screen",
+            Box::new(move || {
+                tokio::runtime::Handle::current().block_on(async {
+                    start_wait::observe(&shared, channel, &context)
+                        .await
+                        .native()
+                        .unwrap_or(Screen::Ready)
+                })
+            }),
+        );
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
         if busy {
-            return Wait::Event;
+            return Wait::Event("transcript_busy");
         }
         // The activity read the channel's own pane; a start bound for another pane reads that one.
         return match start_target(shared, channel, context).await {
@@ -852,13 +856,16 @@ async fn start_target(
 /// wakes the drive, whose next look reads that pane.
 fn named_wait(shared: &Shared, channel: ChannelId, context: &Value) -> Wait {
     let (shared, context) = (shared.clone(), context.clone());
-    Wait::Watch(Box::new(move || {
-        let pane = super::super::headless_turn::owner_start_pane(&shared, channel, &context);
-        match tokio::runtime::Handle::current().block_on(pane) {
-            Ok(_) => Screen::Ready,
-            Err(_) => Screen::Unknown,
-        }
-    }))
+    Wait::Watch(
+        "unnamed_target",
+        Box::new(move || {
+            let pane = super::super::headless_turn::owner_start_pane(&shared, channel, &context);
+            match tokio::runtime::Handle::current().block_on(pane) {
+                Ok(_) => Screen::Ready,
+                Err(_) => Screen::Unknown,
+            }
+        }),
+    )
 }
 
 /// A start's read of its own pane: a running or unreadable native turn holds it with a watch of
@@ -867,7 +874,7 @@ fn native_wait(provider: &ProviderKind, target: NativeTarget) -> Wait {
     let provider = provider.clone();
     let read = move || native_read(&provider, &target);
     match read() {
-        Screen::Blocked | Screen::Unknown => Wait::Watch(Box::new(read)),
+        Screen::Blocked | Screen::Unknown => Wait::Watch("native_wait", Box::new(read)),
         Screen::Ready | Screen::Gone => Wait::Go,
     }
 }
@@ -971,13 +978,13 @@ async fn start_idle(
         Some(_) => Wait::Go,
         None => Wait::Go,
     };
-    if let Wait::Watch(read) = wait {
+    if let Wait::Watch(site, read) = wait {
         crate::services::discord::queue_io::input_owner::held_watch::arm(channel.get(), read);
         hold_start(&mailbox, channel, &front).await;
-        return Err(START_WAITS.into());
+        return Err(idle_wait::refusal(channel.get(), front.1.message_id, site));
     }
-    if let Wait::Event = wait {
-        return Err(START_WAITS.into());
+    if let Wait::Event(site) = wait {
+        return Err(idle_wait::refusal(channel.get(), front.1.message_id, site));
     }
     let (held, holder) = (front.clone(), mailbox.clone());
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
@@ -1239,8 +1246,10 @@ pub(super) fn execute_owned(
                 turn.channel_id,
                 probe,
             );
-            let _ = settled.send(Err(START_WAITS.into()));
-            return Err(START_WAITS.into());
+            let error =
+                idle_wait::refusal(turn.channel_id, claim.front().1.message_id, "late_screen");
+            let _ = settled.send(Err(error.clone()));
+            return Err(error);
         }
     }
     if late.clear_binding
@@ -1757,7 +1766,10 @@ fn run(
         // Every other create or idle pane belongs to a driver that does not hand it over yet.
         target::Route::Cold => return Err("NotSent(\"cold_launch_unowned\")".into()),
         target::Route::HerdrIdle => return Err("NotSent(\"idle_unowned\")".into()),
-        target::Route::Held(reason) => return Err(format!("NotSent({reason:?})")),
+        target::Route::Held(reason) => {
+            let message = front.as_ref().map(|claim| claim.front().1.message_id);
+            return Err(idle_wait::routed_refusal(turn.channel_id, message, reason));
+        }
     };
     let prepared = PreparedPayload {
         frame,

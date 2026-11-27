@@ -11,13 +11,18 @@ Code baseline `9243b528dd50f4ca4ae4e75442afdc8f6bc2227a`. The Rust reproduction 
 | `turn_finalizer/terminal_handler.rs:589–629,710–805` | Admission checks the bound source. A verified terminal settles only its own actor, acknowledges cleanup and publishes queue eligibility. Before the repair, an absent row prevented even admitting the terminal. |
 | `router/message_handler/provider_dispatch/owner_input.rs:249–262,770–820` | A machine front needs an empty mailbox and the existing start permit. |
 
-`NoBusyMachineWrite` forbids a machine write during Busy. `OnlyOwnActorReleased` forbids releasing a replacement token. `UnprovenHeld` covers a missing witness, unreadable or foreign row, and missing host proof. `IdleFrontEventuallyDelivered` requires an eligible front to advance after the original terminal has proven closure. Liveness assumes the host stays idle, normal finalizer/owner scheduling and successful receipt settlement.
+`NoBusyMachineWrite` forbids a machine write during Busy. `OnlyOwnActorReleased` forbids releasing a replacement token. Registration pins actor A and an exact terminal carries that actor independently of the live mailbox. The successor fixture installs B before A's late proof, so the same settlement transition evaluates the actor check for both actors.
 
-| Configuration | Expected state chart result |
+The model keeps the terminal dispositions separate. Executed and Cancelled can settle an absent projection with the prepared witness. Withdrawn and Transferred keep the original actor held in this projection. For an idle eligible front, `IdleFrontEventuallyDelivered` requires an eventual send. Each boundary config separately requires a registered Busy, observed Unknown, or reached terminal state, along with the safety rules. Fair scheduling models the existing owner wake and assumes successful receipt settlement.
+
+| Configuration | TLC result |
 | --- | --- |
-| Before | RED. The stopped host and absent projection leave the mailbox held. |
-| After | GREEN. The pinned episode settles and its queue-eligible event advances the front. |
-| Busy, Unknown, Corrupt, ForeignRow, Unpinned, Successor | GREEN. The unsupported actor releases are unreachable. |
-| NoActorGuard | RED. A late terminal releases a successor. |
+| Before | RED `IdleFrontEventuallyDelivered`. No pin survives the projection loss. |
+| After | GREEN. An Executed terminal releases its actor and the front sends. |
+| CancelledW5 | RED `IdleFrontEventuallyDelivered`. The pin exists and the disposition blocks settlement. |
+| Cancelled | GREEN. A proven interrupted terminal releases its actor and the front sends. |
+| Busy, Unknown, Corrupt, ForeignRow, Unpinned, Successor, Withdrawn, Transferred | GREEN. Each config reaches its boundary condition and preserves its held actor. |
+| NoActorGuard | RED `OnlyOwnActorReleased`. A's Cancelled proof releases B. |
+| NoDispositionGuard | RED `UnprovenHeld`. A transfer without own-run proof releases the actor. |
 
-This projection covers the same-process native primary path. It models the existing owner wake following settlement, and uses a closed, source-verified terminal as its readiness input. Restart custody, source changes, and drives woken before eligibility have separate code paths.
+TLC 1.7.4 matched all 14 expectations. The model covers same-process native primary settlement with the existing owner wake. Restart custody, source changes and PG receipt failure have separate paths.
