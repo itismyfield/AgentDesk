@@ -218,19 +218,43 @@ pub struct NewDelivery {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryRow {
+    #[cfg(any(test, feature = "test-support"))]
+    pub key: PieceKey,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) key: PieceKey,
     pub payload: String,
     pub payload_sha256: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub identity_version: i32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) identity_version: i32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub split_version: i32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) split_version: i32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub original_anchor: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) original_anchor: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub sender_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) sender_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub admitted_by: AdmittedBy,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) admitted_by: AdmittedBy,
     #[cfg(any(test, feature = "test-support"))]
     pub origin_serial: u64,
     #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) origin_serial: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub origin_node: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) origin_node: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub failure: Option<Failure>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) failure: Option<Failure>,
     pub conflict_sha256: Option<String>,
     pub revision: i64,

@@ -441,9 +441,9 @@ pub mod flush_probe {
     #[derive(Clone, Default)]
     pub struct Plan {
         /// Every attempt of these steps fails with `EIO`.
-        pub(crate) fail: Vec<Step>,
+        pub fail: Vec<Step>,
         /// Parent flushes wait here before running.
-        pub(crate) block: Option<Arc<Gate>>,
+        pub block: Option<Arc<Gate>>,
     }
 
     struct Entry {

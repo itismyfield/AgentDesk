@@ -322,7 +322,7 @@ fn persist_checkpoint(
     }
     let mut marker = linked_marker(authority, binding)?
         .ok_or_else(|| io::Error::other("Codex cursor marker unavailable"))?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     let previous_offset = marker
         .get("rollout_start_offset")
         .and_then(serde_json::Value::as_u64)

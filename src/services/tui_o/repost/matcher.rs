@@ -13,12 +13,30 @@ use crate::services::tui_o::repost::send::{RepostEnvelope, RepostIds};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObservedMessage {
     pub id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub channel_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) channel_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub author_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) author_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub content: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) content: String,
     /// Embeds of the kind a send attaches, with or without a footer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub rich_embeds: usize,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) rich_embeds: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub footers: Vec<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) footers: Vec<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub nonce: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) nonce: Option<String>,
 }
 

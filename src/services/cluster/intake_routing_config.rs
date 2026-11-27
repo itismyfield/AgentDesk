@@ -99,15 +99,42 @@ impl OwnerAuthorityChannelOptIn {
 pub struct EffectiveIntakeRoutingConfig {
     pub mode: IntakeRoutingMode,
     pub source: IntakeRoutingModeSource,
+    #[cfg(any(test, feature = "test-support"))]
+    pub yaml_enabled: bool,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) yaml_enabled: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub yaml_mode: ClusterIntakeRoutingMode,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) yaml_mode: ClusterIntakeRoutingMode,
+    #[cfg(any(test, feature = "test-support"))]
+    pub env_override: Option<&'static str>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) env_override: Option<&'static str>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub warnings: Vec<&'static str>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) warnings: Vec<&'static str>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub owner_authority_channel_ids: Vec<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) owner_authority_channel_ids: Vec<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub owner_authority_config_known: bool,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) owner_authority_config_known: bool,
     pub forward_pre_claim_timeout_secs: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub stale_claim_recovery_secs: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) stale_claim_recovery_secs: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub max_attempts_per_message: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) max_attempts_per_message: u32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub retry_authorization_secs: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) retry_authorization_secs: u64,
 }
 

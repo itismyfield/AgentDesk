@@ -15,3 +15,14 @@ pub fn initialize() -> &'static Boot {
         started_at_ms: chrono::Utc::now().timestamp_millis(),
     })
 }
+
+#[cfg(any(test, feature = "test-support"))]
+impl Boot {
+    pub fn for_test(id: String, started_at_ms: i64, monotonic: std::time::Instant) -> Self {
+        Self {
+            id,
+            started_at_ms,
+            monotonic,
+        }
+    }
+}

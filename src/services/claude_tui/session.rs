@@ -299,6 +299,9 @@ pub struct ClaudeTuiLaunchSettings<'a> {
 pub struct ClaudeTuiLaunchConfig {
     pub tmux_session_name: String,
     pub working_dir: PathBuf,
+    #[cfg(any(test, feature = "test-support"))]
+    pub claude_bin: ClaudeBinary,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) claude_bin: ClaudeBinary,
     pub agentdesk_exe: PathBuf,
     pub hook_endpoint: String,

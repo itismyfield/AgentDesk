@@ -86,18 +86,39 @@ fn parse<T: Copy>(all: &[T], name: fn(T) -> &'static str, raw: &str) -> Result<T
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttemptRow {
     pub slot: u8,
+    #[cfg(any(test, feature = "test-support"))]
+    pub kind: AttemptKind,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) kind: AttemptKind,
     pub result: Option<AttemptResult>,
 }
 
 pub struct GrantRequest<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub key: &'a PieceKey,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) key: &'a PieceKey,
     /// The row revision the caller's evidence was read at; any later change refuses the grant.
+    #[cfg(any(test, feature = "test-support"))]
+    pub expected_revision: i64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) expected_revision: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub intent: Intent,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) intent: Intent,
+    #[cfg(any(test, feature = "test-support"))]
+    pub owner: &'a str,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) owner: &'a str,
+    #[cfg(any(test, feature = "test-support"))]
+    pub run_id: &'a str,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) run_id: &'a str,
     /// How long the send may run; past it another holder may settle the slot as abandoned.
+    #[cfg(any(test, feature = "test-support"))]
+    pub ttl: Duration,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) ttl: Duration,
 }
 

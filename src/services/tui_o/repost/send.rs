@@ -135,9 +135,21 @@ impl RepostEnvelope {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreatedMessage {
+    #[cfg(any(test, feature = "test-support"))]
+    pub id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub author_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) author_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub content: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) content: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub footers: Vec<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) footers: Vec<String>,
 }
 

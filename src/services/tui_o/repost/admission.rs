@@ -27,7 +27,13 @@ pub struct OriginalAttempt {
     #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) serial: u64,
     pub key: PieceKey,
+    #[cfg(any(test, feature = "test-support"))]
+    pub payload: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) payload: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub anchor: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) anchor: u64,
 }
 

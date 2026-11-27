@@ -3,7 +3,7 @@
 
 #[derive(Clone)]
 pub struct CompletionBarrier {
-    pub(crate) point: &'static str,
+    pub point: &'static str,
     pub reached: std::sync::Arc<tokio::sync::Notify>,
     pub resume: std::sync::Arc<tokio::sync::Notify>,
 }

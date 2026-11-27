@@ -22,10 +22,25 @@ pub type DispatchOutboxRow = (
 pub struct DispatchOutboxClaimCandidate {
     pub id: i64,
     pub dispatch_id: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub action: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) action: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub agent_id: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) agent_id: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub card_id: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) card_id: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub title: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) title: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub retry_count: i64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) retry_count: i64,
     pub required_capabilities: Option<Value>,
 }

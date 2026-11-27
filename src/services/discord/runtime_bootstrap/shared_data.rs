@@ -468,13 +468,11 @@ mod tests {
         let original_size = pool.size();
         for configured in [None, Some(pool.clone())] {
             let policy = configured.as_ref().map(|_| {
-                let config = crate::config::Config {
-                    policies: crate::config::PoliciesConfig {
-                        dir: root.path().join("empty-policies"),
-                        hot_reload: false,
-                        ..crate::config::PoliciesConfig::default()
-                    },
-                    ..crate::config::Config::default()
+                let mut config = crate::config::Config::default();
+                config.policies = crate::config::PoliciesConfig {
+                    dir: root.path().join("empty-policies"),
+                    hot_reload: false,
+                    ..crate::config::PoliciesConfig::default()
                 };
                 crate::engine::PolicyEngine::new(&config).unwrap()
             });

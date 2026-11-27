@@ -233,11 +233,11 @@ async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
     )
     .unwrap();
     let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
-    let boot = Boot {
-        id: uuid::Uuid::new_v4().to_string(),
-        started_at_ms: chrono::Utc::now().timestamp_millis(),
-        monotonic: std::time::Instant::now(),
-    };
+    let boot = Boot::for_test(
+        uuid::Uuid::new_v4().to_string(),
+        chrono::Utc::now().timestamp_millis(),
+        std::time::Instant::now(),
+    );
     let snapshot = boot_journal_snapshot_for_test(root.path(), &boot).await;
     let written = header(root.path(), &boot);
     assert_eq!(written["doctor_boot_id"], doctor);
