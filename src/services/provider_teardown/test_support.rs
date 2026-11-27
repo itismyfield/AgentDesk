@@ -1,4 +1,3 @@
-use super::TeardownClearance;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
