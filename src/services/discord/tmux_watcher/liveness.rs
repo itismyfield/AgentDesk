@@ -232,6 +232,15 @@ mod tests {
     };
     use crate::services::provider::ProviderKind;
 
+    // Both reacquire callers need a streaming pane, which a Herdr snapshot never reads: no row.
+    #[test]
+    fn a_herdr_snapshot_never_reads_a_streaming_pane_so_no_reacquire_runs() {
+        use crate::services::discord::tmux::{HostSnapshot, WatchHost};
+        let herdr = HostSnapshot::new(WatchHost::Herdr);
+        let name = "AgentDesk-claude-herdr-reacquire";
+        assert!(!super::watcher_pane_actively_streaming(name, &herdr));
+    }
+
     #[test]
     fn rollover_skips_subagent_notification_then_sanitizes_edit_3818() {
         let current_portion = format!(
@@ -467,6 +476,20 @@ pub(in crate::services::discord) fn build_watcher_reacquire_inflight_state(
     state.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
     state.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::Watcher);
     state
+}
+
+/// Runs a watcher's inflight reacquire under the channel transition lease, never waiting for it; a
+/// recovery between its no-turn read and its CAS keeps this row out until the next tick.
+pub(in crate::services::discord) fn reacquire_under_transition(
+    shared: &crate::services::discord::SharedData,
+    channel_id: ChannelId,
+    reacquire: impl FnOnce() -> bool,
+) -> bool {
+    use crate::services::discord::session_transition::SessionTransitionLease;
+    match SessionTransitionLease::try_acquire(shared, channel_id) {
+        Ok(_lease) => reacquire(),
+        Err(_) => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
