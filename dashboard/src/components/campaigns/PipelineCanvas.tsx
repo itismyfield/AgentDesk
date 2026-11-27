@@ -1,4 +1,4 @@
-import { Bot, Box, CircleX, Flag, Hand, Hourglass, Lock, Maximize, MessageCircleQuestion, MousePointer2, Play, RotateCw, ShieldCheck, SquarePlus, Zap, type LucideIcon } from "lucide-react";
+import { AlertTriangle, Bot, Box, CircleX, Flag, Hand, Hourglass, Lock, Maximize, MessageCircleQuestion, MousePointer2, Play, Plus, RotateCw, ShieldCheck, SquarePlus, Zap, type LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { Background, BaseEdge, EdgeLabelRenderer, Handle, Position, ReactFlow, getBezierPath, type Edge, type EdgeProps, type Node, type NodeProps, type OnConnectEnd, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -23,6 +23,7 @@ export type StateNodeData = {
   badges: { text: string; start?: boolean; off?: boolean }[]; foot: [string, string] | null;
   /** While editing: a check error on this state, whether the draft added or changed it, and its '+ 전환' pin's label. */
   flagged?: boolean; mark?: string | null; add?: string | null;
+  bottleneck?: boolean; bottleneckLabel?: string | null;
 };
 /** A pin let go over empty canvas: where, and where its pin sits, in pixels from the canvas's top left. */
 export type PinDrop = { x: number; y: number; fx: number; fy: number };
@@ -37,16 +38,37 @@ function StateNode({ data, selected, isConnectable }: NodeProps) {
   // While editing, result pins start a line and the 진입 pin takes one.
   const entry = { type: "target", isConnectable, isConnectableStart: false } as const, out = { type: "source", isConnectable, isConnectableEnd: false } as const;
   const rows: (Pin | null)[] = [...node.pins, ...node.add ? [null] : []];
-  return <div className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${node.flagged ? "border-[var(--err)]" : selected ? "border-[var(--accent)]" : "border-[var(--line)]"} ${selected ? "shadow-[0_0_0_3px_var(--accent-soft)]" : node.flagged ? "shadow-[0_0_0_3px_var(--err-soft)]" : ""}`}
+  const hasTopBadges = node.badges.length > 0 || Boolean(node.bottleneck && node.bottleneckLabel);
+  const borderClass = node.flagged
+    ? "border-[var(--err)]"
+    : selected
+      ? "border-[var(--accent)]"
+      : node.bottleneck
+        ? "border-[color-mix(in_srgb,var(--warn)_60%,var(--line))]"
+        : "border-[var(--line)]";
+  const ringClass = selected
+    ? "shadow-[0_0_0_3px_var(--accent-soft)]"
+    : node.flagged
+      ? "shadow-[0_0_0_3px_var(--err-soft)]"
+      : "";
+  return <div data-bottleneck={node.bottleneck ? "true" : undefined} className={`relative grid rounded-[14px] border bg-[var(--th-card-bg)] text-xs text-[var(--fg-dim)] shadow-[var(--shadow-sm)] ${borderClass} ${ringClass}`}
     style={{ width: PIPE_WIDTH }}>
-    {node.badges.length > 0 && <div className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 gap-1.5">{node.badges.map((badge) => <span key={badge.text}
-      className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : badge.off ? "border-dashed border-[var(--line)] bg-[var(--bg-2)] text-[var(--fg-muted)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
-      {badge.start ? <Play aria-hidden className="size-3" /> : <Lock aria-hidden className="size-3" />}{badge.text}</span>)}</div>}
+    {hasTopBadges && <div className="absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 gap-1.5">
+      {node.badges.map((badge) => <span key={badge.text}
+        className={`flex h-[26px] items-center gap-1.5 rounded-full border px-2.5 font-semibold whitespace-nowrap ${badge.start ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-fg)]" : badge.off ? "border-dashed border-[var(--line)] bg-[var(--bg-2)] text-[var(--fg-muted)]" : "border-[color-mix(in_srgb,var(--warn)_45%,transparent)] bg-[var(--warn-soft)] text-[var(--warn)]"}`}>
+        {badge.start ? <Play aria-hidden className="size-3" /> : <Lock aria-hidden className="size-3" />}{badge.text}</span>)}
+      {node.bottleneck && node.bottleneckLabel && (
+        <span className="flex h-[26px] items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--warn)_50%,transparent)] bg-[var(--warn-soft)] px-2.5 font-semibold whitespace-nowrap text-[var(--warn)]">
+          <AlertTriangle aria-hidden className="size-3" />
+          {node.bottleneckLabel}
+        </span>
+      )}
+    </div>}
     {!node.main && <Handle {...entry} position={Position.Top} style={{ ...dot("var(--fg-dim)"), zIndex: 1 }} />}
     <div className="flex min-w-0 items-center gap-2 border-b border-[var(--line-soft)] px-3 pt-2.5 pb-2">
       <span className={`grid size-6 shrink-0 place-items-center rounded-[7px] bg-[var(--bg-3)] ${node.kind === "end_success" ? "text-[var(--ok)]" : node.kind === "end_failure" ? "text-[var(--err)]" : ""}`}><Icon aria-hidden className="size-3.5" /></span>
       <span className="grid min-w-0 flex-1"><strong title={node.title} className="truncate text-sm leading-5 font-semibold text-[var(--fg)]">{node.title}</strong><span className="truncate text-[var(--fg-muted)]">{node.kindLabel}{node.mark && <b className="font-semibold text-[var(--warn)]"> · {node.mark}</b>}</span></span>
-      {node.occupancy.map(({ text, held }) => <span key={text} className={`shrink-0 rounded-full px-1.5 leading-5 font-medium ${held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]"}`}>{text}</span>)}
+      {node.occupancy.map(({ text, held }) => <span key={text} className={`shrink-0 rounded-full px-1.5 leading-5 font-medium tabular-nums ${held ? "bg-[var(--warn-soft)] text-[var(--warn)]" : "bg-[var(--info-soft)] text-[var(--info)]"}`}>{text}</span>)}
     </div>
     <div className="grid content-start gap-1.5 px-3 py-2">{Array.from({ length: Math.max(1, rows.length) }, (_, row) => {
       const pin = rows[row];
@@ -72,12 +94,17 @@ function EventNode({ data }: NodeProps) {
   </div>;
 }
 
-type LineData = Pick<Line, "tone" | "lane" | "drop" | "retry"> & { dim: boolean };
+type LineData = Pick<Line, "tone" | "lane" | "drop" | "retry"> & {
+  dim: boolean;
+  canInsert?: boolean;
+  insertLabel?: string;
+  onInsert?: (button: HTMLElement) => void;
+};
 const TURN = 24, R = 10;
 /** A result line in its result's colour: a curve to the next column, a lane over the cards for a skip, under them for a
  * loop back, and a drop to the row below that runs along one shared lane. Width and badge keep their size zoomed out. */
 function PipelineLine({ id, sourceX: sx, sourceY: sy, targetX: tx, targetY: ty, sourcePosition, targetPosition, data }: EdgeProps) {
-  const { tone, lane, drop, retry, dim } = data as LineData;
+  const { tone, lane, drop, retry, dim, canInsert, insertLabel, onInsert } = data as LineData;
   const scale = useLegible();
   const [curve, midX, midY] = getBezierPath({ sourceX: sx, sourceY: sy, sourcePosition, targetX: tx, targetY: ty, targetPosition });
   const turn = sx + TURN, side = tx < turn ? -1 : 1;
@@ -88,9 +115,31 @@ function PipelineLine({ id, sourceX: sx, sourceY: sy, targetX: tx, targetY: ty, 
   const width = 2 * Math.min(scale, 2.5);
   return <>
     <BaseEdge id={id} path={path} style={{ stroke: TONE_COLORS[tone], strokeWidth: width, strokeLinecap: "round", strokeDasharray: tone === "event" ? `${3 * width} ${2.5 * width}` : undefined, opacity: dim ? 0.25 : 1 }} />
-    {retry !== undefined && <EdgeLabelRenderer>
-      <span className="pointer-events-none absolute flex items-center gap-0.5 rounded-full bg-[var(--warn-soft)] px-1.5 text-[11px] leading-[18px] font-semibold text-[var(--warn)] tabular-nums shadow-[0_0_0_3px_var(--bg)]"
-        style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`, opacity: dim ? 0.4 : 1 }}><RotateCw aria-hidden className="size-3" />{retry}</span>
+    {(retry !== undefined || canInsert) && <EdgeLabelRenderer>
+      <div
+        className="pointer-events-none absolute z-[2] flex items-center gap-1"
+        style={{ transform: `translate(-50%, -50%) translate(${x}px, ${y}px) scale(${scale})`, opacity: dim && !canInsert ? 0.4 : 1 }}
+      >
+        {retry !== undefined && (
+          <span className="pointer-events-none flex items-center gap-0.5 rounded-full bg-[var(--warn-soft)] px-1.5 text-[11px] leading-[18px] font-semibold text-[var(--warn)] tabular-nums shadow-[0_0_0_3px_var(--bg)]">
+            <RotateCw aria-hidden className="size-3" />{retry}
+          </span>
+        )}
+        {canInsert && (
+          <button
+            type="button"
+            data-testid={`insert-on-edge-${id}`}
+            aria-label={insertLabel}
+            onClick={(event) => {
+              event.stopPropagation();
+              onInsert?.(event.currentTarget);
+            }}
+            className="nodrag nopan pointer-events-auto relative !m-0 grid size-[22px] cursor-pointer place-items-center !rounded-full !border !border-[var(--line)] !bg-[var(--th-card-bg)] !p-0 text-[var(--fg-muted)] shadow-[0_0_0_3px_var(--bg)] transition-colors hover:!border-[var(--accent)] hover:!bg-[var(--accent-soft)] hover:!text-[var(--accent-fg)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] before:absolute before:-inset-3 before:content-['']"
+          >
+            <Plus aria-hidden className="size-3" />
+          </button>
+        )}
+      </div>
     </EdgeLabelRenderer>}
   </>;
 }
@@ -109,7 +158,13 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
   height?: string;
   defaultMinimapOpen?: boolean;
   /** `busy` (a save is out) holds the pins and the tools that change the draft. */
-  edit?: { busy: boolean; onLink: (from: string, pin: string, to: string) => void; onDrop: (from: string, pin: string, at: PinDrop) => void; onAdd: (button: HTMLElement) => void };
+  edit?: {
+    busy: boolean;
+    onLink: (from: string, pin: string, to: string) => void;
+    onDrop: (from: string, pin: string, at: PinDrop) => void;
+    onAdd: (button: HTMLElement) => void;
+    onInsertBetween?: (transitionId: string, button: HTMLElement) => void;
+  };
   checks?: ReactNode;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
@@ -125,8 +180,21 @@ export default function PipelineCanvas({ label, graph, nodeData, eventData, chos
     .sort((a, b) => Number(graph.off.includes(a.id)) - Number(graph.off.includes(b.id)) || a.position.x - b.position.x || a.position.y - b.position.y)
     .concat(graph.events.map((event) => ({ id: `event:${event.id}`, type: "pipelineEvent", position: graph.positions.get(`event:${event.id}`)!, data: eventData.get(event.id)!,
       draggable: false, selectable: false, focusable: false, initialWidth: PIPE_WIDTH, initialHeight: 56 }))), [graph, nodeData, eventData, chosen]);
-  const edges = useMemo(() => graph.lines.map((line): Edge => ({ id: line.id, source: line.source, sourceHandle: line.handle, target: line.target, type: "pipelineLine", selectable: false, focusable: false,
-    data: { tone: line.tone, lane: line.lane, drop: line.drop, retry: line.retry, dim: chosen !== null && line.source !== chosen && line.target !== chosen } satisfies LineData })), [graph, chosen]);
+  const edges = useMemo(() => graph.lines.map((line): Edge => {
+    const canInsert = !!edit && !edit.busy && !!edit.onInsertBetween && line.tone !== "event" && !line.id.endsWith(":then");
+    const sourceTitle = nodeData.get(line.source)?.title ?? line.source;
+    const targetTitle = nodeData.get(line.target)?.title ?? line.target;
+    return {
+      id: line.id, source: line.source, sourceHandle: line.handle, target: line.target, type: "pipelineLine", selectable: false, focusable: false,
+      data: {
+        tone: line.tone, lane: line.lane, drop: line.drop, retry: line.retry,
+        dim: chosen !== null && line.source !== chosen && line.target !== chosen,
+        canInsert,
+        insertLabel: canInsert ? tr(`${sourceTitle} → ${targetTitle} 사이에 상태 끼워 넣기`, `Insert state between ${sourceTitle} and ${targetTitle}`) : undefined,
+        onInsert: canInsert ? (btn) => edit.onInsertBetween!(line.id, btn) : undefined,
+      } satisfies LineData,
+    };
+  }), [graph, chosen, edit, nodeData, tr]);
   const canvas = useRef<HTMLDivElement>(null);
   const full = !!edit, moving = full && tool === "move";
   // The click that ends a pin's drag lands on the pane; it keeps the choice the drag made.

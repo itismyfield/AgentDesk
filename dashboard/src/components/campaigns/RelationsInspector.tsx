@@ -16,18 +16,19 @@ export type InspectorActions = {
 };
 
 /** What the docked column shows with nothing chosen; `open` is set for a changed task drawn in this scope. */
-export type ScopeOverview = { name: string; meta: string; changes: { id: string; name: string; fields: string; open?: () => void }[]; ties: number };
+export type ScopeOverview = { name: string; meta: string; depthSummary?: string; changes: { id: string; name: string; fields: string; open?: () => void }[]; ties: number };
 
 const ASIDE_CLASS = "min-h-0 flex-1 overflow-y-auto border-l border-[var(--line-soft)] bg-[var(--bg-1)]";
 
 /** The editor's right column: the chosen task's fields and dependency chips, the chosen line, or the scope's summary. */
-export default function RelationsInspector({ node, edge, lock, busy, nodes, cycles, errors, problems, overview, cycleText, act, tr }: {
+export default function RelationsInspector({ node, edge, lock, busy, nodes, cycles, errors, problems, overview, nodeSchedule, cycleText, act, tr }: {
   node: CampaignNode | null; edge: { source: string; target: string } | null;
   /** Why the chosen task (or the chosen line's dependent) cannot change, or null. */
   lock: string | null;
   /** A save is out: every control waits for its answer. */
   busy: boolean;
   nodes: ReadonlyMap<string, CampaignNode>; cycles: string[][]; errors: ReadonlySet<string>; problems: string[]; overview: ScopeOverview;
+  nodeSchedule?: string | null;
   cycleText: (path: string[]) => string; act: InspectorActions; tr: Tr;
 }) {
   const name = (id: string) => nodes.get(id) ? taskName(nodes.get(id)!) : id;
@@ -44,6 +45,7 @@ export default function RelationsInspector({ node, edge, lock, busy, nodes, cycl
       <Cap>{tr("편집 범위", "Scope")}</Cap>
       <h3 className="m-0 text-base text-[var(--fg)] [overflow-wrap:anywhere]">{overview.name}</h3>
       <Cap><Num>{overview.meta}</Num></Cap>
+      {overview.depthSummary && <Cap className="text-[var(--fg-dim)]"><Num>{overview.depthSummary}</Num></Cap>}
     </InspSection>
     <InspSection>
       <Eyebrow>{tr("검사", "Checks")}</Eyebrow>
@@ -70,6 +72,7 @@ export default function RelationsInspector({ node, edge, lock, busy, nodes, cycl
     <InspSection className="border-t-0 gap-1">
       <Cap><Num>{taskLabel(node)}</Num> · {node.group || tr("미분류", "Ungrouped")}</Cap>
       <h3 className="m-0 text-base text-[var(--fg)] [overflow-wrap:anywhere]">{node.title}</h3>
+      {nodeSchedule && <Cap className="font-medium text-[var(--fg-dim)]"><Num>{nodeSchedule}</Num></Cap>}
       {lockNote}
       <div><Button variant="ghost" size="sm" onClick={act.focus}>{tr("이 작업 주변만 보기", "Show only this task's neighbors")}</Button></div>
     </InspSection>
