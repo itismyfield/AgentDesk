@@ -165,7 +165,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
         prepared_legacy: Option<LegacyHops>,
     ) -> Result<(Snapshot, Common), String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let _authority_scope =
             super::transition::test_hooks::snapshot_authority_scope(authority.is_some());
         #[cfg(any(test, feature = "test-support"))]
