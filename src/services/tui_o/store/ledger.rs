@@ -829,13 +829,13 @@ fn replay(
                 return Ok((state, false));
             };
             if withdrawable(&state, &last.entry, unsent) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::Cut)?;
                 reader.get_ref().set_len(start)?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::CutSync)?;
                 reader.get_ref().sync_all()?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::note_withdrawn(path);
                 return Ok((state, true));
             }

@@ -314,7 +314,7 @@ pub async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::QueueEmpty);
     };
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::AfterClaim).await;
 
     // A marker can land while the claim transaction is in flight. Return only
@@ -433,7 +433,7 @@ pub async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::Held);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
 
     // Transition: claimed → accepted. If the sweep beat us to it,
@@ -472,7 +472,7 @@ pub async fn run_intake_worker_tick<S: IntakeHost>(
         return Ok(TickOutcome::Processed);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::Spawned).await;
     let result = execute_intake_turn_core(
         &row,
@@ -484,7 +484,7 @@ pub async fn run_intake_worker_tick<S: IntakeHost>(
         uploads,
     )
     .await;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDb).await;
     let outcome = match result {
         Ok(IntakeExecution::Executed) => {
@@ -527,7 +527,7 @@ pub async fn run_intake_worker_tick<S: IntakeHost>(
             Ok(TickOutcome::Processed)
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_executor::checkpoint(test_executor::Checkpoint::FinalDbDone).await;
     outcome
 }

@@ -391,7 +391,7 @@ impl OStore {
         if sealed {
             return Ok(());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::strike(&self.root.join(ERA_FILE), durable::fault::Step::Write)?;
         self.seal(&OEra {
             switch_at: init.at,
@@ -441,7 +441,7 @@ impl OStore {
         channel: u64,
         unsent: Option<&Unsent>,
     ) -> Result<Option<ChannelStore>, Halt> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::note_open(&self.channel_dir(channel));
         let init = match self.read_init(channel)? {
             Some(init) => init,
@@ -464,7 +464,7 @@ impl OStore {
                 "[tui_o] withdrew a prepared entry whose append failed before its POST"
             );
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::strike(&dir, durable::fault::Step::SpoolRecovery)
             .map_err(StoreError::from)?;
         let sources = spool::recover_sources(&dir, &init, &ledger)?;

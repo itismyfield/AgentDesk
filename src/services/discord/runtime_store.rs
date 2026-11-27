@@ -42,17 +42,17 @@ pub fn collect_pending_channels<T>(
 }
 
 pub fn agentdesk_root() -> Option<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         test_agentdesk_root()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     {
         crate::config::runtime_root()
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn test_agentdesk_root() -> Option<PathBuf> {
     if let Ok(override_root) = std::env::var("AGENTDESK_ROOT_DIR") {
         let trimmed = override_root.trim();
@@ -71,7 +71,7 @@ fn test_agentdesk_root() -> Option<PathBuf> {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn is_live_release_runtime_root(root: &Path) -> bool {
     dirs::home_dir().is_some_and(|home| root == home.join(".adk").join("release"))
 }

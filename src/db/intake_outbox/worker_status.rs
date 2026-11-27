@@ -127,7 +127,7 @@ pub async fn claim_pending_for_target_except(
             tx.commit().await?;
             return Ok(None);
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         crate::services::cluster::intake_worker::test_executor::claim_selected().await;
         let stamp = row.stamp();
         if let Some(claimed) = confirm_selected(&mut tx, &row, claim_owner).await? {

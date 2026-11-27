@@ -117,8 +117,8 @@ fn ordinary_getter_restores_creates_and_caches_host_spelling() {
     let binary = fixture
         .path()
         .join(format!("probe{}", std::env::consts::EXE_SUFFIX));
-    let production =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/services/platform/session_host_label.rs");
+    let production = Path::new(crate::runtime_layout::REPO_ROOT)
+        .join("src/services/platform/session_host_label.rs");
     std::fs::write(
         &source,
         PROBE.replace("__LABEL_SOURCE__", &format!("{production:?}")),

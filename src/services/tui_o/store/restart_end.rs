@@ -178,7 +178,7 @@ pub fn read(root: &Path, channel: u64) -> Result<Vec<RestartEnd>, String> {
 }
 
 fn confirm_durable(path: &Path) -> Result<(), String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::durable::fault::strike(path, super::durable::fault::Step::ReplaceDirSync)
         .map_err(|error| error.to_string())?;
     fsync_parent_dir(path).map_err(|error| error.to_string())

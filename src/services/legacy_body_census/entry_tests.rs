@@ -325,7 +325,7 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
         let script = "import json; from tests.test_nextest_ci import CensusEvidence; t=CensusEvidence(); t.setUp(); result=t.packaged_fixture(); t.doCleanups(); print(json.dumps(result))";
         let output = std::process::Command::new("python3")
             .args(["-c", script])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .current_dir(crate::runtime_layout::REPO_ROOT)
             .output()
             .unwrap();
         assert!(

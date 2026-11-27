@@ -313,7 +313,7 @@ pub fn stop_at_input_boundary(logical: &str, stop: bool) {
         stops.remove(logical);
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_input_boundary(token: Option<&CancelToken>) {
     if let Some(state) = token.and_then(CancelToken::herdr_interrupt_state)
         && BOUNDARY_STOPS

@@ -58,13 +58,13 @@ use crate::services::tui_prompt_dedupe::binding_events::{
     BindingCause, BindingTarget, SourceId, binding_events_since, subscribe_binding_events,
 };
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const COMPOSER_READY_WAIT: Duration = Duration::from_secs(15);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const COMPOSER_READY_WAIT: Duration = Duration::from_secs(2);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const SOURCE_WAIT: Duration = Duration::from_secs(60);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const SOURCE_WAIT: Duration = Duration::from_secs(3);
 
 /// One turn; `row` is the record the turn host read for the channel's sessions row.
@@ -746,7 +746,7 @@ fn followup_write(
             crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
         }
     })?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let start = || {
         let start = HerdrTurnStart::at_end_of(nonce, path, None);

@@ -228,7 +228,7 @@ impl AgySpool {
     }
 
     fn sync_segment(&self) -> io::Result<()> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         durable::fault::strike(&self.turn_dir, durable::fault::Step::AgySegmentSync)?;
         self.segment.sync_data()
     }

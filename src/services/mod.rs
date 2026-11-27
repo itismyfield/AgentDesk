@@ -68,7 +68,16 @@ pub(crate) mod message_outbox_recovery_support;
 #[cfg(test)]
 mod message_outbox_recovery_tests;
 pub use adk_runtime::services::monitoring_store;
+#[cfg(not(test))]
 pub use adk_runtime::services::observability;
+#[cfg(test)]
+pub mod observability {
+    pub use adk_runtime::services::observability::*;
+
+    mod test_support {
+        include!("observability/env_runtime_lock_tests.rs");
+    }
+}
 pub mod onboarding;
 pub use adk_runtime::services::opencode;
 pub(crate) use adk_runtime::services::org_catalog;

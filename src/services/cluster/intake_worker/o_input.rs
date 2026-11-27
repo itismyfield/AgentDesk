@@ -13,7 +13,7 @@ pub(super) async fn hold_off_o_gateway(
     phase: &'static str,
 ) -> Result<bool, sqlx::Error> {
     let selected = intake_route::selected_codex_input(provider, channel_id.get());
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if selected && phase == "final" {
         test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
     }

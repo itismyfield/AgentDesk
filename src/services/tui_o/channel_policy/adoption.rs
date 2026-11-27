@@ -183,7 +183,7 @@ impl Candidate {
         if let Some(scope) = &self.init_scope {
             return Ok(scope.clone());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let scope = crate::services::tui_o::cutover::boot_snapshot()
                 .map(|boot| boot.init_scope_view())
@@ -196,7 +196,7 @@ impl Candidate {
                 });
             Ok(scope)
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         {
             let _ = channel;
             Err("writer init has no boot policy view".into())

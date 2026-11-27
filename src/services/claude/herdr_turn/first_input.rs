@@ -272,7 +272,7 @@ fn write(
     };
     let (kept, failed) = (std::cell::Cell::new(false), std::cell::RefCell::new(None));
     let seen = std::cell::RefCell::new(None);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_start::test_input_boundary(cancel);
     let start = || {
         let mut start = HerdrTurnStart::at_end_of(&attached.nonce, path, Some(started_at));

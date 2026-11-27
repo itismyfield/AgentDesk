@@ -184,7 +184,7 @@ fn write(
             crate::services::claude_tui::owner_input::vetoed("hold_unavailable");
         }
     })?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::provider::herdr_before_start::test_input_boundary(cancel);
     let mut denied = false;
     let run = observed_input(

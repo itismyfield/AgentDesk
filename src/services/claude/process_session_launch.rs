@@ -97,7 +97,7 @@ pub fn execute_streaming_local_process(
 
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
         .map(std::path::PathBuf::from)
         .unwrap_or(exe);

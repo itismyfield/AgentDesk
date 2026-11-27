@@ -8,7 +8,7 @@ fn production_probe() -> &'static Path {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("probe.rs");
         let binary = dir.path().join(format!("probe{}", std::env::consts::EXE_SUFFIX));
-        let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config/runtime_root_guard.rs");
+        let module = Path::new(option_env!("ADK_REPO_ROOT").unwrap_or(env!("CARGO_MANIFEST_DIR"))).join("src/config/runtime_root_guard.rs");
         std::fs::write(&source, format!(
             "#[path = {module:?}] mod runtime_root_guard;\nfn home() -> Option<std::path::PathBuf> {{ std::env::var_os(\"HOME\").map(std::path::PathBuf::from) }}\nfn main() {{ let before = std::env::var_os(\"AGENTDESK_ROOT_DIR\"); let root = runtime_root_guard::resolve(home); assert_eq!(root, runtime_root_guard::resolve(home)); for thread in (0..4).map(|_| std::thread::spawn(|| runtime_root_guard::resolve(home))) {{ assert_eq!(root, thread.join().unwrap()); }} assert_eq!(before, std::env::var_os(\"AGENTDESK_ROOT_DIR\")); println!(\"{{}}\", root.unwrap().display()); }}\n"
         )).unwrap();

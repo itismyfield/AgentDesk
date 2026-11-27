@@ -39,7 +39,7 @@ impl Observations {
         }
         self.reads.entry(path.to_path_buf()).or_insert_with(|| {
             let context = read(path, nonce).ok();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             tests::point(tests::Stage::AfterRead, path);
             let after = file_stamp(path);
             let unavailable = context.is_none() || before.is_none() || after != before;
@@ -55,7 +55,7 @@ impl Observations {
         self.stamps
             .iter()
             .filter_map(|(path, before)| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 tests::point(tests::Stage::BeforeValidate, path);
                 if file_stamp(path) != *before {
                     Some(path.clone())
@@ -68,7 +68,7 @@ impl Observations {
 }
 
 fn read(_path: &Path, nonce: &str) -> Result<BindingContext, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     tests::read(_path);
     binding_context::execution_context("claude", nonce)
 }

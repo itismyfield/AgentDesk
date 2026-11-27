@@ -116,10 +116,10 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
     file.sync_all()
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     super::log_discord_inflight_atomic_replace(path);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::rename_fault::before(path, &tmp);
     let renamed = fs::rename(&tmp, path);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::rename_fault::after(path, &renamed);
     renamed.map_err(failed(PrePublishStage::Rename, "rename"))
 }

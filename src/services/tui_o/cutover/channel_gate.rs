@@ -502,11 +502,7 @@ fn decide_from(
     let evaluate = |snapshot: Option<&BootChannels>| {
         decide_with_snapshot(snapshot, channel_id, usage, origin, evidence, resolve_kind)
     };
-    #[cfg(test)]
-    let result = super::test_override::with_channels(evaluate);
-    #[cfg(not(test))]
-    let result = evaluate(channel_policy::boot());
-    result.map_err(|error| error.hold(channel_id))
+    super::test_override::with_channels(evaluate).map_err(|error| error.hold(channel_id))
 }
 
 impl IdentityError {

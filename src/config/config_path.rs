@@ -26,7 +26,11 @@ const EXPLICIT_ENV: &str = "AGENTDESK_CONFIG";
 /// the runtime root, the working directory, then `~/.adk/release`.
 pub fn resolved_config_path() -> PathBuf {
     // Test builds skip `~/.adk/release` as their runtime root does, so they never read the live config.
-    let home = if cfg!(test) { None } else { dirs::home_dir() };
+    let home = if cfg!(any(test, feature = "test-support")) {
+        None
+    } else {
+        dirs::home_dir()
+    };
     resolve_with(
         explicit_env(),
         super::runtime_root(),

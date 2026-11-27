@@ -37,7 +37,7 @@ fn tmp_path(path: &Path) -> PathBuf {
 
 /// `create_new` never opens, and so never truncates, an inode that is already published.
 fn write_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fault::strike(path, fault::Step::Write)?;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
@@ -71,14 +71,14 @@ pub(super) fn replace(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = tmp_path(path);
     write_synced(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fault::strike(path, fault::Step::ReplaceDirSync)?;
     fsync_parent_dir(path)
 }
 
 pub(super) fn append_synced(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut file = OpenOptions::new().append(true).open(path)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some((kept, error)) = fault::append(path, bytes) {
         file.write_all(kept)?;
         return Err(error);
