@@ -210,7 +210,7 @@ E행은 설계 기준 코드 좌표, N행은 새 지점이다(`NEW`). 기존 mes
 | E16 | 기존 src/services/discord/queue_io/input_owner/pump.rs:43 | 실제 reserve/physical writer 경계. 정상 대기 후 현재 session 다시 해석 |
 | E17 | 기존 src/services/turn_orchestrator/queued_head/v2.rs:229, :245 | original/ticket 한 snapshot. decision 실패만 exact original 제거 |
 | E18 | 기존 src/services/turn_orchestrator/queued_head/v2/attempt.rs:92 | 기존 MayHaveSent commit 경계. 요청 당시 nonce 검사 추가 없음, 시도 중 재시작은 재전송 금지 |
-| E19 | 기존 src/services/discord/health/turn_deliver/inject/first_input.rs:80 | 실제 production effect. PG single-write/closed 검사와 현 physical pin, 과거 request pin 아님 |
+| E19 | 기존 src/services/discord/queue_io/input_owner/cold.rs:10 | 실제 production effect. PG single-write/closed 검사와 현 physical pin, 과거 request pin 아님 |
 | E20 | 기존 src/services/turn_orchestrator/queued_head/v2/retained.rs:58 | 기존 retain_not_sent(:166)/requeueable(:283)는 decision 종료의 반례 근거. decision 전용 discard 분기 필요 |
 | E21 | 기존 src/services/discord/queue_io/input_owner/recovery.rs:8 | Boot의 requeue_known_not_sent(:23) 전에 decision terminal 제외/제거. 원래 입력 재큐잉 금지 |
 | E22 | 기존 src/services/discord/runtime_bootstrap/queued_recovery.rs:26 | 일반 큐 복원도 origin→PG 상태 확인. not_started/정상 busy 원본/unknown을 구별 |
