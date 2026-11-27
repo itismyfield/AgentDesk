@@ -6,10 +6,6 @@ use crate::services::tui_o::{
     shadow::capture::Fingerprint,
     store::{ChannelStore, wake::Listener},
 };
-use tokio::time::Instant;
-
-const IDLE: Duration = Duration::from_secs(5);
-const MAX_IDLE: Duration = Duration::from_secs(15);
 
 #[derive(PartialEq)]
 struct Stamp {
@@ -39,8 +35,6 @@ impl Stamp {
 
 pub(super) struct Tick {
     stamp: Option<Stamp>,
-    interval: Duration,
-    full: Instant,
     listener: Listener,
     binding: Option<watch::Receiver<u64>>,
     ownership: Option<watch::Receiver<GatewayOwnership>>,
@@ -53,35 +47,18 @@ impl Tick {
         let channel = actor.writer.channel();
         Self {
             stamp: None,
-            interval: POLL_INTERVAL,
-            full: Instant::now(),
             listener: Listener::new(channel),
             binding: Some(actor.bindings.subscribe(channel)),
             ownership: Some(actor.writer.gate.subscribe()),
         }
     }
 
-    pub(super) fn poll(&mut self, store: &ChannelStore, can_skip: bool) -> (bool, Duration) {
+    pub(super) fn needs_work(&mut self, store: &ChannelStore, can_skip: bool) -> bool {
         // Sample before work so a write racing with capture still differs on the next tick.
         let stamp = can_skip.then(|| Stamp::read(store)).flatten();
         let same = stamp.is_some() && stamp == self.stamp;
         self.stamp = stamp;
-        if same {
-            self.interval = if self.interval == POLL_INTERVAL {
-                IDLE
-            } else {
-                MAX_IDLE
-            };
-            let remaining = MAX_IDLE.saturating_sub(self.full.elapsed());
-            if !remaining.is_zero() {
-                return (false, self.interval.min(remaining));
-            }
-        } else {
-            self.interval = POLL_INTERVAL;
-        }
-        // Maintenance also sees state without a cheap stamp, such as retirement deadlines.
-        self.full = Instant::now();
-        (true, self.interval)
+        !same
     }
 
     pub(super) async fn wait<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents>(
@@ -103,7 +80,6 @@ impl Tick {
             () = changed(&mut self.ownership) => {},
             () = self.listener.notified() => {},
             () = demand.0.wake.notified() => {},
-            () = actor.transitions.notified() => {},
             () = async {
                 if !delay.is_zero() {
                     tokio::time::sleep(delay).await;
@@ -111,7 +87,6 @@ impl Tick {
             } => return true,
         }
         self.stamp = None;
-        self.interval = POLL_INTERVAL;
         true
     }
 }

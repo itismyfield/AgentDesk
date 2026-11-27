@@ -1037,9 +1037,7 @@ fn a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg() 
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
     use crate::services::tui_o::shadow::ShadowProvider;
     use crate::services::tui_o::writer::actor::POLL_INTERVAL;
-    use crate::services::tui_o::writer::host::{
-        HostParts, Readiness, start, test_io::wait_for_idle_poll,
-    };
+    use crate::services::tui_o::writer::host::{HostParts, Readiness, start};
     let herdr = &mut Herdr::new("o-resume");
     let (channel, logical) = (herdr.channel, herdr.logical().to_owned());
     // Legacy's pane started an empty session before O took the channel.
@@ -1131,7 +1129,7 @@ fn a_herdr_launch_then_a_writer_stop_posts_each_result_once_from_the_store_pg() 
     };
     polls(3);
     result("m1", "posted before the stop");
-    writer.block_on(wait_for_idle_poll());
+    polls(3);
     assert_eq!(
         posts.to(channel),
         ["posted before the stop"],

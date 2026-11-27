@@ -457,7 +457,7 @@ async fn source_read_trace(current_proof: bool) {
         )
         .unwrap();
     }
-    crate::services::tui_o::writer::host::test_io::wait_for_idle_poll().await;
+    tokio::time::sleep(POLL_INTERVAL * 4).await;
     assert_eq!(
         crate::services::tui_o::store::codex_provenance::SIDECAR_IO.with(std::cell::Cell::get),
         (0, 0)

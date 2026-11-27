@@ -158,7 +158,6 @@ fn a_restarted_o_writer_sends_owed_once_and_follows_a_hook_switch_without_legacy
         };
         rt.block_on(async { host::start(ShadowProvider::Claude, true, parts) })
     };
-    let idle_poll = || rt.block_on(host::test_io::wait_for_idle_poll());
     let posts = || io.posts.to(CHANNEL);
     let count = |text: &str| posts().iter().filter(|post| *post == text).count();
     let (a, b, c) = ("A sent", "B owed", "C switched");
@@ -166,7 +165,7 @@ fn a_restarted_o_writer_sends_owed_once_and_follows_a_hook_switch_without_legacy
     let tasks = start();
     polls(3);
     append(&a_path, &body("m1", a));
-    idle_poll();
+    polls(3);
     assert_eq!(posts(), [a], "A is sent before the restart");
 
     // B lands while the gate is lost, so it is still owed when dcserver restarts.
@@ -206,7 +205,7 @@ fn a_restarted_o_writer_sends_owed_once_and_follows_a_hook_switch_without_legacy
     assert_eq!(bound(), Some(race.b.clone()), "the hook moved the binding");
     polls(3);
     append(&b_path, &body("n1", c));
-    idle_poll();
+    polls(6);
     assert_eq!(count(c), 1, "[C:once] the switched source's body goes once");
     assert_eq!(posts(), [a, b, c], "every body once, in order");
 

@@ -101,14 +101,10 @@ where
         if actor.writer.is_stopped() || *stop.borrow() {
             break;
         }
-        let can_skip = quiescent && !owing.demand.wanted() && !actor.transitions.pending();
-        let (work, delay) = tick.poll(actor.writer.store(), can_skip);
-        next = Some(delay);
-        if !work {
-            continue;
-        }
+        next = Some(POLL_INTERVAL);
         match actor.rescope() {
             fresh_resume::Rescope::Changed => {
+                quiescent = false;
                 sources_resumed = false;
                 resumed.send_replace(false);
             }
@@ -126,6 +122,15 @@ where
         }
         if actor.writer.is_stopped() {
             break;
+        }
+        let can_skip = quiescent && !owing.demand.wanted() && !actor.transitions.pending();
+        if !tick.needs_work(actor.writer.store(), can_skip) {
+            actor.repost_if_ready().await;
+            #[cfg(unix)]
+            if let Some(port) = &_native {
+                port.inner.retry().await;
+            }
+            continue;
         }
         let restart_ready = match writer::restart_end::refresh(
             &mut actor.writer,
@@ -228,15 +233,7 @@ where
                 },
             );
         }
-        // Re-post runs in this same turn and only once nothing is owed, so it never sends beside
-        // a piece of this channel. It holds no exact permit, so a verified channel never runs it.
-        if actor.verified.is_none()
-            && actor.notice_only_owed()
-            && !actor.writer.has_local_retry()
-            && actor.delivery_allowed()
-        {
-            actor.writer.repost_turn().await;
-        }
+        actor.repost_if_ready().await;
         actor.collect_settled();
         let fresh = if restart_ready {
             actor.read_sources()
@@ -285,9 +282,22 @@ where
             && !position.unsealed
             && !actor.replay_deferred
             && actor.scope_hold.is_none()
-            && actor.sources.quiescent_for_rescope()
+            && actor.sources.quiescent_for_stamp()
             && !actor.deriver.has_pending_projection_probe()
             && !actor.transitions.pending();
     }
     actor.writer.stop_cause().cloned()
+}
+
+impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    async fn repost_if_ready(&mut self) {
+        // Re-post holds no exact permit, so a verified channel never runs it.
+        if self.verified.is_none()
+            && self.notice_only_owed()
+            && !self.writer.has_local_retry()
+            && self.delivery_allowed()
+        {
+            self.writer.repost_turn().await;
+        }
+    }
 }

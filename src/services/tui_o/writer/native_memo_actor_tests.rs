@@ -234,12 +234,18 @@ async fn idle_tick_durable_input_registration_wakes_the_waiting_actor() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_tick_transcript_only_change_spools_and_posts_within_fifteen_seconds() {
-    let (harness, path, source, _, stop, task) = start_idle(838504);
+    let (harness, path, source, bindings, stop, task) = start_idle(838504);
     polls(16).await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
     append(&path, &row("first", "first"));
     append(&path, &row("second", "second"));
-    polls(15).await;
+    polls(1).await;
+    assert!(
+        bindings.source_checks.load(Ordering::SeqCst) > before,
+        "the next one-second poll observes a transcript-only change"
+    );
+    polls(1).await;
     assert_eq!(harness.port.posts(), ["first", "second"]);
     polls(16).await;
     assert_eq!(harness.port.posts(), ["first", "second"]);
