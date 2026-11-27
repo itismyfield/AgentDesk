@@ -125,7 +125,12 @@ where
         }
         let can_skip = quiescent && !owing.demand.wanted() && !actor.transitions.pending();
         if !tick.needs_work(actor.writer.store(), can_skip) {
+            let serial = actor.writer.store().ledger().next_serial();
             actor.repost_if_ready().await;
+            if actor.writer.store().ledger().next_serial() != serial {
+                quiescent = false;
+                progress.publish(actor.progress());
+            }
             #[cfg(unix)]
             if let Some(port) = &_native {
                 port.inner.retry().await;
