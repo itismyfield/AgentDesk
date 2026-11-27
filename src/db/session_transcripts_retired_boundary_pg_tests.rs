@@ -140,3 +140,120 @@ async fn unresolved_retired_marker_preserves_general_clear_readers_and_turn_fenc
     db.drop().await;
     Ok(())
 }
+
+async fn context_boundary(pool: &PgPool, session_id: Option<&str>) -> Result<()> {
+    record_recent_context_boundary(
+        Some(pool),
+        CHANNEL,
+        &RecentContextBoundary {
+            kind: RecentContextBoundaryKind::Cleared,
+            previous_session: session_id.map(|id| PreviousProviderSession {
+                provider: "claude".into(),
+                session_id: id.into(),
+                path: None,
+            }),
+        },
+    )
+    .await
+}
+
+async fn prompt_boundary_session(pool: &PgPool) -> Result<Option<String>> {
+    let (_, boundary) = fetch_recent_channel_prompt_context(pool, CHANNEL, 3).await?;
+    Ok(boundary.and_then(|boundary| {
+        boundary
+            .previous_session
+            .map(|previous| previous.session_id)
+    }))
+}
+
+#[tokio::test]
+async fn recent_context_reclear_preserves_unconsumed_and_replaces_with_the_new_session_pg()
+-> Result<()> {
+    let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
+        "agentdesk_reclear_context",
+        "recent context re-clear",
+    )
+    .await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    assert!(persist_turn_db(Some(&pool), entry("session-a")).await?);
+    context_boundary(&pool, Some("session-a")).await?;
+    context_boundary(&pool, None).await?;
+    let after_reclear = prompt_boundary_session(&pool).await?;
+
+    let fence = capture_channel_clear_fence(Some(&pool), CHANNEL).await;
+    assert!(persist_turn_db_with_clear_fence(Some(&pool), entry("session-b"), Some(fence)).await?);
+    assert_eq!(prompt_boundary_session(&pool).await?, None);
+    context_boundary(&pool, Some("session-b")).await?;
+    let after_replacement = prompt_boundary_session(&pool).await?;
+
+    let fence = capture_channel_clear_fence(Some(&pool), CHANNEL).await;
+    assert!(
+        persist_turn_db_with_clear_fence(Some(&pool), entry("completed-b"), Some(fence)).await?
+    );
+    context_boundary(&pool, None).await?;
+    let after_consumed = prompt_boundary_session(&pool).await?;
+
+    pool.close().await;
+    db.drop().await;
+    assert_eq!(after_reclear.as_deref(), Some("session-a"));
+    assert_eq!(after_replacement.as_deref(), Some("session-b"));
+    assert_eq!(after_consumed, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn recent_context_consumes_on_first_visible_post_clear_completion_pg() -> Result<()> {
+    let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
+        "agentdesk_context_consumption",
+        "recent context consumption",
+    )
+    .await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    assert!(persist_turn_db(Some(&pool), entry("before")).await?);
+    context_boundary(&pool, Some("session-a")).await?;
+    let fence = capture_channel_clear_fence(Some(&pool), CHANNEL).await;
+
+    let assert_previous = |id| assert_eq!(id, Some("session-a".to_owned()));
+    assert_previous(prompt_boundary_session(&pool).await?);
+    assert!(
+        persist_turn_db_with_clear_fence(Some(&pool), entry("before"), Some(fence.clone())).await?
+    );
+    assert_previous(prompt_boundary_session(&pool).await?);
+    for channel_context in [false, true] {
+        assert!(
+            persist_turn_db_in_context(
+                Some(&pool),
+                entry("excluded"),
+                Some(fence.clone()),
+                channel_context,
+            )
+            .await?
+        );
+        assert_previous(prompt_boundary_session(&pool).await?);
+    }
+
+    pool.close().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    assert_previous(prompt_boundary_session(&pool).await?);
+    for _ in 0..2 {
+        assert!(
+            persist_turn_db_with_clear_fence(Some(&pool), entry("visible"), Some(fence.clone()))
+                .await?
+        );
+        let (pairs, boundary) = fetch_recent_channel_prompt_context(&pool, CHANNEL, 3).await?;
+        assert!(boundary.is_none());
+        assert_eq!(
+            pairs,
+            [ChannelTranscriptPair {
+                user_message: "fresh input".into(),
+                assistant_message: "fresh answer".into(),
+            }]
+        );
+    }
+    pool.close().await;
+    let pool = db.connect_and_migrate_with_max_connections(4).await;
+    assert_eq!(prompt_boundary_session(&pool).await?, None);
+    pool.close().await;
+    db.drop().await;
+    Ok(())
+}

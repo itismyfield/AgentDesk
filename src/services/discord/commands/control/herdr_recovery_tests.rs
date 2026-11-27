@@ -281,6 +281,61 @@ mod retired_selector {
         });
     }
 
+    #[test]
+    fn herdr_clear_uses_the_authoritative_selector_with_or_without_memory_pg() {
+        let path = concat!(
+            module_path!(),
+            "::herdr_clear_uses_the_authoritative_selector_with_or_without_memory_pg"
+        );
+        if !herdr::in_child(path, REPLACED) {
+            return;
+        }
+        let rig = herdr::P11TerminationRig::boot(REPLACED);
+        runtime(&rig).block_on(async {
+            let root = crate::config::TestRuntimeRootGuard::new();
+            let _claude = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+                "CLAUDE_CONFIG_DIR",
+                root.path(),
+            );
+            let mut observed = Vec::new();
+            let mut expected = Vec::new();
+            for (cache, raw_wins) in [(true, true), (false, true), (true, false), (false, false)] {
+                let seeded = seeded(&rig, REPLACED, herdr::HostedState::Bound).await;
+                let (legacy, raw) = super::super::super::clear_end_tests::selector_fixture(
+                    &seeded.pool,
+                    &seeded.key,
+                    root.path(),
+                    raw_wins,
+                )
+                .await;
+                let mut core = seeded.shared.core.lock().await;
+                let session = core.sessions.get_mut(&seeded.channel).unwrap();
+                session.session_id = cache.then(|| legacy.clone());
+                session.current_path = Some(root.path().display().to_string());
+                drop(core);
+                rig.restore_shell();
+                let report = seeded.clear().await;
+                assert_eq!(
+                    report.execution,
+                    Some(ExecutionCleanup::Retired),
+                    "{report:?}"
+                );
+                let (_, boundary) =
+                    crate::db::session_transcripts::fetch_recent_channel_prompt_context(
+                        &seeded.pool,
+                        &seeded.channel.get().to_string(),
+                        2,
+                    )
+                    .await
+                    .unwrap();
+                observed.push(boundary.unwrap().previous_session.unwrap().session_id);
+                expected.push(if raw_wins { raw } else { legacy });
+                seeded.done().await;
+            }
+            assert_eq!(observed, expected);
+        });
+    }
+
     // The conversation resets even when the old execution is still admitted and cleanup is held.
     #[test]
     fn held_clear_keeps_the_selector_and_says_so_pg() {

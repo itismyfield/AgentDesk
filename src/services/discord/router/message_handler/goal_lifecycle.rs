@@ -430,6 +430,77 @@ mod fresh_session_boundary_pg_tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn fresh_goal_after_clear_and_restart_keeps_the_unconsumed_session_pg() {
+        use crate::db::session_transcripts::{
+            PreviousProviderSession, RecentContextBoundary, RecentContextBoundaryKind,
+            record_recent_context_boundary,
+        };
+
+        let db = TestPostgresDb::create().await;
+        let pool = db.connect_and_migrate().await;
+        let channel = ChannelId::new(5_100_000_002);
+        let key = channel.get().to_string();
+        let prior = "synthetic-codex-session";
+        sqlx::query(
+            "INSERT INTO session_transcripts
+                 (turn_id, channel_id, user_message, assistant_message, channel_context)
+             VALUES ('before-clear', $1, 'synthetic question', 'synthetic answer', true)",
+        )
+        .bind(&key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        record_recent_context_boundary(
+            Some(&pool),
+            &key,
+            &RecentContextBoundary {
+                kind: RecentContextBoundaryKind::Cleared,
+                previous_session: Some(PreviousProviderSession {
+                    provider: "codex".into(),
+                    session_id: prior.into(),
+                    path: None,
+                }),
+            },
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let pool = db.connect_and_migrate().await;
+        let restarted =
+            crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+        record_fresh_session_context_boundary(
+            &restarted,
+            &ProviderKind::Codex,
+            channel,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        let recent = crate::services::discord::load_channel_recent_context(
+            Some(&pool),
+            channel,
+            None,
+            true,
+            false,
+            false,
+            crate::services::discord::prompt_builder::DispatchProfile::Full,
+            None,
+            Option::<&()>::None,
+        )
+        .await
+        .unwrap();
+        pool.close().await;
+        db.drop().await;
+        assert_eq!(recent.pair_count, 1);
+        assert_eq!(
+            recent.audit_reason,
+            "context_severed;pairs=1;previous_session=true"
+        );
+        assert!(recent.rendered_context.contains(prior));
+    }
+
     /// `/goal fresh` clears the provider session only after this boundary is durable, so a write
     /// that does not land must come back as an error the caller stops on.
     #[tokio::test]

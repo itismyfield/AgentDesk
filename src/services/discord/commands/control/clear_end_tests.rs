@@ -574,3 +574,131 @@ fn a_herdr_clear_ends_a_never_attached_pending_with_recorded_evidence_pg() {
         db.drop().await;
     });
 }
+
+pub(super) async fn selector_fixture(
+    pool: &sqlx::PgPool,
+    key: &str,
+    root: &std::path::Path,
+    raw_is_authoritative: bool,
+) -> (String, String) {
+    let legacy = uuid::Uuid::new_v4().to_string();
+    let raw = uuid::Uuid::new_v4().to_string();
+    let cwd = tempfile::tempdir_in(root).unwrap();
+    for (id, age) in [(&legacy, 86_400), (&raw, 5)] {
+        let file = crate::services::claude_tui::transcript_tail::claude_transcript_path(
+            cwd.path(),
+            id,
+            Some(root),
+        )
+        .unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, b"synthetic transcript\n").unwrap();
+        filetime::set_file_mtime(
+            &file,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(age),
+            ),
+        )
+        .unwrap();
+    }
+    sqlx::query(
+        "UPDATE sessions
+         SET claude_session_id = $2, raw_provider_session_id = $3, cwd = $4,
+             raw_provider_transcript_watermark_session_id = $3,
+             raw_provider_transcript_len_watermark = $5,
+             raw_provider_transcript_growth_proven = $6
+         WHERE session_key = $1",
+    )
+    .bind(key)
+    .bind(&legacy)
+    .bind(&raw)
+    .bind(cwd.path().to_str().unwrap())
+    .bind(if raw_is_authoritative { 1_i64 } else { 21_i64 })
+    .bind(raw_is_authoritative)
+    .execute(pool)
+    .await
+    .unwrap();
+    (legacy, raw)
+}
+
+#[tokio::test]
+async fn tmux_clear_uses_the_authoritative_selector_with_or_without_memory_pg() {
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let _claude = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
+        "CLAUDE_CONFIG_DIR",
+        root.path(),
+    );
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let provider = ProviderKind::Claude;
+    let mut observed = Vec::new();
+    let mut expected = Vec::new();
+    for (index, (cache, raw_wins)) in [(true, true), (false, true), (true, false), (false, false)]
+        .into_iter()
+        .enumerate()
+    {
+        let channel = ChannelId::new(1_479_671_305_341_100_070 + index as u64);
+        let name = format!("selector-authority-{index}");
+        let managed = Managed::start(&shared, &pool, &provider, (channel, &name)).await;
+        let (legacy, raw) = selector_fixture(&pool, &managed.key, root.path(), raw_wins).await;
+        let mut core = shared.core.lock().await;
+        let session = core.sessions.get_mut(&channel).unwrap();
+        session.session_id = cache.then(|| legacy.clone());
+        session.current_path = Some(root.path().display().to_string());
+        drop(core);
+        assert_eq!(clear(&shared, &provider, channel).await, cleared(0));
+        let (_, boundary) = crate::db::session_transcripts::fetch_recent_channel_prompt_context(
+            &pool,
+            &channel.get().to_string(),
+            2,
+        )
+        .await
+        .unwrap();
+        observed.push(boundary.unwrap().previous_session.unwrap().session_id);
+        expected.push(if raw_wins { raw } else { legacy });
+    }
+    pool.close().await;
+    db.drop().await;
+    assert_eq!(observed, expected);
+}
+
+#[tokio::test]
+async fn tmux_clear_reports_selector_read_failure_and_keeps_the_boundary_pg() {
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let (db, pool) = postgres().await;
+    let shared = make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let provider = ProviderKind::Claude;
+    let channel = ChannelId::new(1_479_671_305_341_100_079);
+    let managed = Managed::start(
+        &shared,
+        &pool,
+        &provider,
+        (channel, "selector-read-failure"),
+    )
+    .await;
+    sqlx::query("ALTER TABLE sessions RENAME COLUMN cwd TO unreadable_cwd")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let http = Arc::new(serenity::Http::new(""));
+    let report = clear_channel_session_state(&http, &shared, &provider, channel, "/clear")
+        .await
+        .unwrap();
+
+    let (_, boundary) = crate::db::session_transcripts::fetch_recent_channel_prompt_context(
+        &pool,
+        &channel.get().to_string(),
+        2,
+    )
+    .await
+    .unwrap();
+    assert!(boundary.unwrap().previous_session.is_none());
+    assert!(managed.ended());
+    pool.close().await;
+    db.drop().await;
+    assert!(
+        report.failed.contains(&"previous_provider_session"),
+        "{report:?}"
+    );
+}
