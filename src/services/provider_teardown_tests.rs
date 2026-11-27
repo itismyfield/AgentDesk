@@ -2,7 +2,7 @@
 
 use super::*;
 
-use test_support::{FakeTmux, cleared, refusals, take_exit_reason};
+use super::test_support::{FakeTmux, cleared, refusals, take_exit_reason};
 
 const NAME: &str = "adk-w2a-teardown-sink";
 
