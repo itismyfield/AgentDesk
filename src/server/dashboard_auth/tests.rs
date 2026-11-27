@@ -68,7 +68,7 @@ async fn dashboard_session_probe_and_ticket_route_require_real_credentials_for_r
     let config = config();
     let access = DashboardAccess::new(&config);
     let state = AppState {
-        engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
         pg_pool: None,
         broadcast_tx: crate::eventbus::new_broadcast(),

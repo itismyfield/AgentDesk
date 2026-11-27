@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::auto_queue::runtime::slot_runtime_health;
+use crate::services::engine_runtime::health_port::slot_runtime_health;
 use axum::extract::Extension;
 
 use crate::api_caller_observability::{
@@ -63,7 +63,10 @@ pub async fn reset_slot_thread(
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match crate::services::auto_queue::runtime::reset_slot_thread_bindings_pg(
-        pool, &agent_id, slot_index,
+        state.engine.slot_row_guard(),
+        pool,
+        &agent_id,
+        slot_index,
     )
     .await
     {
@@ -209,7 +212,12 @@ pub async fn pause(
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match if force {
-        force_pause_with_pg(slot_runtime_health(state.health_registry.clone()), pool).await
+        force_pause_with_pg(
+            state.engine.slot_row_guard(),
+            slot_runtime_health(state.health_registry.clone()),
+            pool,
+        )
+        .await
     } else {
         soft_pause_with_pg(pool).await
     } {
@@ -836,6 +844,7 @@ pub async fn cancel(
     {
         service
             .cancel_run_with_pg(
+                state.engine.slot_row_guard(),
                 slot_runtime_health(state.health_registry.clone()),
                 pool,
                 run_id,
@@ -843,7 +852,11 @@ pub async fn cancel(
             .await
     } else {
         service
-            .cancel_runs_with_pg(slot_runtime_health(state.health_registry.clone()), pool)
+            .cancel_runs_with_pg(
+                state.engine.slot_row_guard(),
+                slot_runtime_health(state.health_registry.clone()),
+                pool,
+            )
             .await
     };
     match result {

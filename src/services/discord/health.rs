@@ -26,6 +26,7 @@ mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 mod managed_reset_port;
+pub(crate) use managed_reset_port::slot_row_host_refusal;
 pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and

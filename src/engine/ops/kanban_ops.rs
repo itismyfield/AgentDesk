@@ -1229,8 +1229,12 @@ mod tests {
     }
 
     fn test_engine(pool: &sqlx::PgPool) -> PolicyEngine {
-        PolicyEngine::new_with_pg(&crate::config::Config::default(), Some(pool.clone()))
-            .expect("build test PolicyEngine")
+        PolicyEngine::new_with_pg(
+            &crate::config::Config::default(),
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .expect("build test PolicyEngine")
     }
 
     /// Run the reference intent path and reduce its `Result<TransitionResult>`

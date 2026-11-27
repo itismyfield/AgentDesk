@@ -24,6 +24,7 @@ use crate::services::dispatches::result_header::{
     build_review_decision_dispatch_header, build_work_completion_result_header,
     prepend_result_header,
 };
+use crate::services::engine_runtime::health_port::SlotRowGuard;
 use crate::services::git::GitCommand;
 
 #[derive(Clone, Debug)]
@@ -541,9 +542,10 @@ async fn archive_dispatch_thread(
 /// Callers of `finalize_dispatch` should spawn this after the sync call returns.
 pub(crate) async fn handle_completed_dispatch_followups_with_pg(
     pg_pool: Option<&PgPool>,
+    slot_row_guard: SlotRowGuard,
     dispatch_id: &str,
 ) -> Result<(), String> {
-    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned());
+    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned(), slot_row_guard);
     handle_completed_dispatch_followups_internal(
         pg_pool,
         dispatch_id,

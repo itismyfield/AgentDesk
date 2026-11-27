@@ -1,8 +1,8 @@
 use crate::config::TestEnvVarGuard;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::SharedData;
-use crate::services::discord::admin_host_guard::{self, ManagedReset};
-use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::admin_host_guard;
+use crate::services::discord::health::{HealthRegistry, slot_row_host_refusal};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe as dedupe;
@@ -246,14 +246,20 @@ async fn autoqueue_actual_reset_rechecks_pin_after_legacy_verdict_pg() {
         .bind(serde_json::json!({"0":fixture.channel.get().to_string()}).to_string()).execute(&pool).await.unwrap();
     let queue = fixture.queue_bytes(&shared);
     let pin = fixture.pin_after_legacy_verdict();
-    let cleared = super::clear_slot_threads_for_slot_pg(Some(registry), &pool, "agent-1", 0)
-        .await
-        .unwrap();
+    let cleared = super::clear_slot_threads_for_slot_pg(
+        slot_row_host_refusal,
+        Some(registry),
+        &pool,
+        "agent-1",
+        0,
+    )
+    .await
+    .unwrap();
     assert_eq!(cleared, 1, "actual preflight admitted the legacy session");
     let observed =
         super::slot_reset_host_pg_tests::runtime_clears_after_done(&[fixture.channel.get()]).await;
     assert!(
-        matches!(observed.as_slice(), [(channel, Some(ManagedReset::Refused(_)))] if *channel == fixture.channel.get()),
+        matches!(observed.as_slice(), [(channel, Err(_))] if *channel == fixture.channel.get()),
         "apply must refuse the newly pinned execution: {observed:?}"
     );
     assert_eq!(pin.load(Ordering::SeqCst), 1);

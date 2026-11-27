@@ -507,8 +507,12 @@ pub(crate) fn policy_engine(pool: &PgPool) -> crate::engine::PolicyEngine {
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .expect("create policy engine")
+    crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("create policy engine")
 }
 
 pub(crate) fn begin_grace(

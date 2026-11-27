@@ -266,7 +266,7 @@ mod tests {
             hot_reload: false,
             ..crate::config::PoliciesConfig::default()
         };
-        PolicyEngine::new_with_pg(&config, None).unwrap()
+        PolicyEngine::new(&config).unwrap()
     }
 
     // ── Registration check ───────────────────────────────────────────────
