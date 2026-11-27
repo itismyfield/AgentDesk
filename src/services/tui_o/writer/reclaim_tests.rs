@@ -11,6 +11,9 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
 use crate::services::claude_tui::hook_server::relay_receipts::RELAY_PUBLISHED_AT_HEADER;
 use crate::services::tui_o::store::rotation::Boundary;
 use crate::services::tui_o::writer::binding::BindingLog;
+use crate::services::tui_prompt_dedupe::binding_context::{
+    BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, PreparedIncarnation,
+};
 
 impl ProducerPane {
     /// Sends hook `event` through the receiver's binding judgment, published `secs` after launch.
@@ -68,6 +71,35 @@ fn launched(a: &str) -> (Harness, PathBuf) {
     (harness, bound_a.unwrap())
 }
 
+fn execution_headers(pane: &ProducerPane, session: &str, path: &Path) -> axum::http::HeaderMap {
+    let marker = crate::services::tmux_common::session_temp_path(pane.tmux, "spawn_nonce");
+    let execution_nonce = std::fs::read_to_string(marker).unwrap();
+    let prepared = PreparedIncarnation::create(BindingContext {
+        schema: 1,
+        provider: "claude".into(),
+        created_at: pane.base,
+        execution_nonce,
+        tmux_session: pane.tmux.into(),
+        channel_id: Some(CHANNEL),
+        owner_runtime_root: crate::services::tmux_common::current_tmux_owner_marker(),
+        host: None,
+        expected_native_session_id: Some(session.into()),
+        launch_mode: "fresh".into(),
+        provider_root: path.parent().and_then(Path::parent).map(Path::to_path_buf),
+        first_prompt_digest: None,
+        source_policy: None,
+        resume_start: None,
+    })
+    .unwrap();
+    let envelope = HookBindingEnvelope {
+        context: CapturedContext::Captured(prepared.context.into()),
+        observed: Default::default(),
+    };
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(BINDING_HEADER, envelope.encode().unwrap().parse().unwrap());
+    headers
+}
+
 #[cfg(unix)]
 #[tokio::test(start_paused = true)]
 async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
@@ -77,6 +109,7 @@ async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
         let session = uuid::Uuid::new_v4().to_string();
         let (harness, path) = launched(&session);
         let pane = ProducerPane::launch(&session, &path);
+        let headers = execution_headers(&pane, &session, &path);
         pane.http(
             "SessionStart",
             Some("startup"),
@@ -100,7 +133,16 @@ async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
         assert_ne!(stored.dev, live.dev);
         assert_eq!(stored.ino, live.ino);
         let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
-        pane.http(event, None, &session, &session, &path, 2);
+        let payload = serde_json::json!({"session_id": session, "transcript_path": path});
+        let ingress = observe_binding_hook(
+            "claude",
+            event,
+            Some(&session),
+            Some(&session),
+            &payload,
+            &headers,
+        );
+        assert!(!ingress.refused(), "{ingress:?}");
         polls(4).await;
         let pinned = pane.history().current.unwrap().pin.unwrap();
         assert_eq!(pinned, live, "{event} must refresh the verified pin");
