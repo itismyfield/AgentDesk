@@ -785,6 +785,14 @@ mod tests {
     }
 
     #[test]
+    fn removed_migrate_subcommand_is_rejected() {
+        let Err(error) = Cli::try_parse_from(["agentdesk", "migrate", "openclaw"]) else {
+            panic!("migrate must be rejected as an unknown subcommand");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidSubcommand);
+    }
+
+    #[test]
     fn clap_help_and_version_remain_successful_authoritative_outputs() {
         for flag in ["-h", "--help"] {
             let Err(error) = Cli::try_parse_from(["agentdesk", flag]) else {
