@@ -135,6 +135,7 @@ where
             if let Some(port) = &_native {
                 port.inner.retry().await;
             }
+            actor.publish_unsettled(&unsettled);
             continue;
         }
         let restart_ready = match writer::restart_end::refresh(
@@ -260,12 +261,8 @@ where
         if actor.writer.is_stopped() {
             break;
         }
-        // Only a Herdr-configured channel's clear reads it, so other channels skip the store read.
         let channel = actor.writer.channel();
-        let herdr = crate::services::session_host::thread_host::runs_herdr(channel);
-        if herdr {
-            unsettled.send_replace(actor.unsettled());
-        }
+        let herdr = actor.publish_unsettled(&unsettled);
         // A turn-mode carried turn closes on this read too, and a thread child's store retires on
         // it. Read only while a reader waits on it, so a channel nobody asks about adds no reads.
         if herdr
@@ -295,6 +292,15 @@ where
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
+    fn publish_unsettled(&mut self, unsettled: &Unsettled) -> bool {
+        // Herdr clear uses this projection even when no transcript bytes changed.
+        let herdr = crate::services::session_host::thread_host::runs_herdr(self.writer.channel());
+        if herdr {
+            unsettled.send_replace(self.unsettled());
+        }
+        herdr
+    }
+
     async fn repost_if_ready(&mut self) {
         // Re-post holds no exact permit, so a verified channel never runs it.
         if self.verified.is_none()
