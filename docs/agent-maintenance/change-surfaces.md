@@ -2448,7 +2448,6 @@ Measured giant paths (planning metadata remains manual):
 - `src/cli/client.rs`
 - `src/cli/dcserver.rs`
 - `src/cli/direct.rs`
-- `src/cli/doctor/orchestrator.rs`
 - `src/cli/init.rs`
 - `src/cli/migrate/apply.rs`
 - `src/cli/migrate/plan.rs`
