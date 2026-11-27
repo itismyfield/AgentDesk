@@ -170,18 +170,21 @@ export function WorkspaceProvider({
     [sessions],
   );
 
+  const contextValue = useMemo<WorkspaceContextValue>(
+    () => ({
+      agents: sessionAwareAgents,
+      sessions,
+      setSessions,
+      sessionsFailed,
+      visibleDispatchedSessions,
+      agentsWithDispatched: sessionAwareAgents,
+      refreshAgents,
+    }),
+    [sessionAwareAgents, sessions, sessionsFailed, visibleDispatchedSessions, refreshAgents],
+  );
+
   return (
-    <WorkspaceContext.Provider
-      value={{
-        agents: sessionAwareAgents,
-        sessions,
-        setSessions,
-        sessionsFailed,
-        visibleDispatchedSessions,
-        agentsWithDispatched: sessionAwareAgents,
-        refreshAgents,
-      }}
-    >
+    <WorkspaceContext.Provider value={contextValue}>
       {children}
     </WorkspaceContext.Provider>
   );

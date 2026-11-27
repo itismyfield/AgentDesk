@@ -2682,6 +2682,8 @@ src/
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── intake_turn/
 │   │   │   │   │   ├── owned_busy/
+│   │   │   │   │   │   ├── dead_bound.rs
+│   │   │   │   │   │   ├── dead_bound_tests.rs
 │   │   │   │   │   │   └── missing_watch.rs
 │   │   │   │   │   ├── race_loss/
 │   │   │   │   │   │   ├── mailbox_reaction.rs
@@ -2770,6 +2772,7 @@ src/
 │   │   │   │   │   ├── owner_input_settled_front_tests.rs
 │   │   │   │   │   ├── owner_input_single_marker_tests.rs
 │   │   │   │   │   ├── owner_input_start_wait.rs
+│   │   │   │   │   ├── owner_input_start_wait_tests.rs
 │   │   │   │   │   ├── owner_input_stop_gate_tests.rs
 │   │   │   │   │   ├── owner_input_tests.rs
 │   │   │   │   │   ├── owner_input_turn_mode_tests.rs
@@ -2836,6 +2839,7 @@ src/
 │   │   │   │   ├── provider_dispatch_herdr_busy_late_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_busy_running_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_clear_fence_tests.rs
+│   │   │   │   ├── provider_dispatch_herdr_dead_bound_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_exact_close_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_fresh_notice_tests.rs
 │   │   │   │   ├── provider_dispatch_herdr_http_start_tests.rs
@@ -4720,6 +4724,7 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── generation/
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── absorption.rs
 │   │   │   │   │   ├── census.rs
 │   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
@@ -4872,6 +4877,7 @@ src/
 │   │   │   │   │   ├── settlement.rs
 │   │   │   │   │   └── tests.rs
 │   │   │   │   ├── input_notices.rs
+│   │   │   │   ├── reply_to.rs
 │   │   │   │   ├── test_access.rs
 │   │   │   │   ├── tool_images.rs
 │   │   │   │   └── tool_images_tests.rs
@@ -4884,6 +4890,7 @@ src/
 │   │   │   │   └── retirement_tests.rs
 │   │   │   ├── agy_delivery.rs
 │   │   │   ├── agy_spool.rs
+│   │   │   ├── anchor_bindings.rs
 │   │   │   ├── cleanup_witness.rs
 │   │   │   ├── clear_end.rs
 │   │   │   ├── clear_end_tests.rs
@@ -4927,10 +4934,14 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── native_input.rs
+│   │   │   │   ├── notice_absorbed_tests.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
+│   │   │   │   ├── notice_owner_absorbed_tests.rs
+│   │   │   │   ├── notice_owner_command_order_tests.rs
+│   │   │   │   ├── notice_owner_command_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_settlement.rs
@@ -4962,6 +4973,7 @@ src/
 │   │   │   │   ├── probe_tests.rs
 │   │   │   │   └── scan.rs
 │   │   │   ├── deliver/
+│   │   │   │   ├── prepared.rs
 │   │   │   │   ├── test_access.rs
 │   │   │   │   └── usage_footer.rs
 │   │   │   ├── fresh_resume_tests/
@@ -4981,6 +4993,9 @@ src/
 │   │   │   │   └── transition.rs
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
+│   │   │   │   │   ├── projection/
+│   │   │   │   │   │   ├── membership.rs
+│   │   │   │   │   │   └── notice_absorption.rs
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
@@ -4995,6 +5010,7 @@ src/
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── input_notices/
+│   │   │   │   ├── absorption.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── evidence.rs
@@ -5151,6 +5167,9 @@ src/
 │   │   │   ├── repair_io_tests.rs
 │   │   │   ├── replay.rs
 │   │   │   ├── replay_metadata_tests.rs
+│   │   │   ├── reply_anchor.rs
+│   │   │   ├── reply_anchor_tests.rs
+│   │   │   ├── reply_repost_tests.rs
 │   │   │   ├── repost_turn_tests.rs
 │   │   │   ├── restart_end.rs
 │   │   │   ├── restart_end_repair_tests.rs

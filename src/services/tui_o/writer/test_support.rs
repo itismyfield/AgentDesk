@@ -93,6 +93,8 @@ pub struct FakePort {
     pub on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub delay: Mutex<Option<std::time::Duration>>,
+    pub(crate) reply_to: Mutex<Vec<Option<u64>>>,
+    pub(crate) joined: Mutex<Vec<u64>>,
 }
 
 impl FakePort {
@@ -117,6 +119,29 @@ impl FakePort {
 impl DiscordPort for FakePort {
     fn usage_footer_pool(&self) -> Option<&sqlx::PgPool> {
         self.usage_footer_pool.get()
+    }
+
+    fn post_unit_reply(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: UnitKind,
+        reply_to: Option<u64>,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        self.reply_to.lock().unwrap().push(reply_to);
+        self.post_unit(channel, content, origin, kind)
+    }
+
+    fn mark_joined(
+        &self,
+        _channel: u64,
+        message: u64,
+    ) -> impl Future<Output = ()> + Send + 'static {
+        self.joined.lock().unwrap().push(message);
+        std::future::ready(())
     }
 
     fn bot_id(&self) -> u64 {
@@ -451,6 +476,7 @@ pub fn piece(native_key: &str, payload: &str) -> Derived {
         index: 0,
         payload: payload.into(),
         notice_origin: None,
+        reply: None,
     })
 }
 

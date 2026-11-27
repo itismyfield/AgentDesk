@@ -7,6 +7,10 @@ use sha2::{Digest, Sha256};
 
 use crate::services::tui_o::shadow::{ShadowProvider, SourceId, SourceRange, UnitKey, UnitKind};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
+use crate::services::tui_prompt_dedupe::{
+    extract_claude_writer_input_with_entry_id, is_claude_absorbed_remove,
+    may_be_claude_queued_command,
+};
 pub(super) mod settlement;
 pub(crate) use settlement::policy_proven;
 pub use settlement::{Settled, Settlement};
@@ -84,10 +88,8 @@ impl NoticeEntry {
         };
         serde_json::from_slice(&evidence.raw_record)
             .ok()
-            .and_then(|raw: serde_json::Value| {
-                crate::services::tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(&raw)
-            })
-            .is_some_and(|(_, _, scheduled)| scheduled)
+            .and_then(|raw| extract_claude_writer_input_with_entry_id(&raw))
+            .is_some_and(|input| input.scheduled)
     }
 }
 
@@ -128,6 +130,24 @@ fn merge<T: PartialEq>(kept: &mut Option<T>, next: Option<T>) -> Result<(), Stri
 }
 
 impl NoticeEvidence {
+    pub(crate) fn is_absorbed_remove(&self) -> bool {
+        let token = b"\"absorbed_mid_turn\"";
+        self.raw_record
+            .windows(token.len())
+            .any(|window| window == token)
+            && serde_json::from_slice(&self.raw_record)
+                .is_ok_and(|raw: serde_json::Value| is_claude_absorbed_remove(&raw))
+    }
+
+    /// Receipts address the attachment row even when the notice uses the original input UUID.
+    pub(crate) fn command_row_uuid(&self) -> Option<String> {
+        if !may_be_claude_queued_command(&self.raw_record) {
+            return None;
+        }
+        let raw = serde_json::from_slice(&self.raw_record).ok()?;
+        extract_claude_writer_input_with_entry_id(&raw)?.command_row_uuid
+    }
+
     fn validate(&self) -> Result<(), String> {
         if self.record.start >= self.record.end
             || self.record.end - self.record.start != self.raw_record.len() as u64 + 1
@@ -154,14 +174,16 @@ impl NoticeEvidence {
         if self.prompt.is_some() || self.unit_key.is_some() {
             let raw = serde_json::from_slice(&self.raw_record)
                 .map_err(|_| "input notice classification record is invalid")?;
-            let (prompt, uuid, _) =
-                crate::services::tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(&raw)
-                    .ok_or("input notice classification evidence is not a native input")?;
-            if self.prompt.as_ref().is_some_and(|kept| kept != &prompt)
+            let input = extract_claude_writer_input_with_entry_id(&raw)
+                .ok_or("input notice classification evidence is not a native input")?;
+            if self
+                .prompt
+                .as_ref()
+                .is_some_and(|kept| kept != &input.prompt)
                 || self
                     .unit_key
                     .as_ref()
-                    .is_some_and(|key| Some(&key.native_key) != uuid.as_ref())
+                    .is_some_and(|key| Some(&key.native_key) != input.uuid.as_ref())
             {
                 return Err("input notice prompt or native key mismatches its raw record".into());
             }
