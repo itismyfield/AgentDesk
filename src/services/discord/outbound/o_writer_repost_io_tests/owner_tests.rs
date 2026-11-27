@@ -108,7 +108,7 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
     // A re-post reads the original's origin and reply through the trait it is generic over.
     let ledger = writer.store().ledger();
     let key = PieceKey::new(ledger.piece(0).unwrap().unit_key.clone(), 0).unwrap();
-    let stored = ledger.output_origin(0).cloned();
+    let stored = ledger.output_origin_for_test(0).cloned();
     assert!(stored.is_some());
     assert_eq!(RepostWriter::output_origin(&writer, &key), stored);
     assert_eq!(RepostWriter::reply_to(&writer, &key), Some(4242));

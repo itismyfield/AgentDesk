@@ -3,6 +3,11 @@
 use super::LedgerState;
 
 impl LedgerState {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reply_to_for_test(&self, serial: u64) -> Option<u64> {
+        self.reply_to(serial)
+    }
+
     pub(crate) fn reply_to(&self, serial: u64) -> Option<u64> {
         self.reply_tos.get(&serial).copied()
     }

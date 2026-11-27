@@ -186,7 +186,7 @@ pub(crate) async fn dispatch(
 async fn repost_reply_travels_as_the_message_reference() {
     let mock = Mock::start(vec![created(Some(MARKER))]).await;
     let mut envelope = envelope();
-    envelope.reply_to = Some(4242);
+    envelope.set_reply_to_for_test(Some(4242));
     let report = send_within(&mock.port(), &envelope, always(), Duration::from_secs(5)).await;
     assert_eq!((report.wire, report.counted), (1, 1));
     let requests = mock.requests();

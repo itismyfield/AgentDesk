@@ -147,7 +147,7 @@ async fn known_command_receipts_exclude_before_second_native_offer() {
     let mut actor = Actor::new_for_test(
         writer,
         UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
-            .with_input_notices(Projection::for_tests()),
+            .with_input_notices_for_test(Projection::for_tests()),
         Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone()).with_native_inputs(true),
         bindings,
     );

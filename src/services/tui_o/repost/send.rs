@@ -70,6 +70,11 @@ pub struct RepostEnvelope {
 
 impl RepostEnvelope {
     #[cfg(any(test, feature = "test-support"))]
+    pub fn set_reply_to_for_test(&mut self, reply_to: Option<u64>) {
+        self.reply_to = reply_to;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn original_for_test(channel: u64, content: String, ids: RepostIds) -> Self {
         Self::original(channel, content, ids)
     }
