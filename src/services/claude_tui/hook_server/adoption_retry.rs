@@ -271,7 +271,10 @@ pub(crate) fn observe_launch_hook(
         let nonce = captured_nonce(envelope);
         execution_current(&tmux, nonce.as_deref())?;
         // A termination that chose this execution takes no start of it any more.
-        if nonce.is_some_and(|nonce| crate::services::session_host::execution_closing(&nonce)) {
+        if nonce
+            .as_deref()
+            .is_some_and(crate::services::session_host::execution_closing)
+        {
             return Err(NotDurableReason::ExecutionChanged);
         }
         let refresh =
