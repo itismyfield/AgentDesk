@@ -212,6 +212,7 @@ impl Projection {
             index: 0,
             payload,
             notice_origin: Some(Box::new(origin)),
+            reply: None,
         }))
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod agy_delivery;
 pub mod agy_spool;
+pub(crate) mod anchor_bindings;
 pub mod cleanup_witness;
 pub mod clear_end;
 #[cfg(unix)]

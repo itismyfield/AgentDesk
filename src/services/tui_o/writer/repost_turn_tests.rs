@@ -13,7 +13,6 @@ use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::InitSource;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
-use crate::services::tui_o::writer::test_support::*;
 use crate::services::tui_o::writer::test_support::{
     BOT, CHANNEL, FakePort, Harness, Reply, Writer, ledger_path, outcome, piece, unit,
 };
@@ -27,6 +26,8 @@ use sha2::{Digest, Sha256};
 mod bo_post;
 #[path = "local_retry_repost_tests.rs"]
 mod local_retry;
+#[path = "reply_repost_tests.rs"]
+mod reply_repost;
 #[path = "scoped_repost_tests.rs"]
 mod scoped;
 #[path = "tool_result_repost_tests.rs"]
@@ -97,6 +98,8 @@ struct Io {
     outcome: Mutex<Option<WireOutcome>>,
     drop_count: Mutex<Option<Arc<AtomicUsize>>>,
     dropped_count: Arc<Mutex<Vec<usize>>>,
+    /// Every request body as it would leave.
+    bodies: Mutex<Vec<serde_json::Value>>,
 }
 
 struct ObserveRequestDrop(Option<Arc<AtomicUsize>>, Arc<Mutex<Vec<usize>>>);
@@ -177,6 +180,7 @@ impl BoundedTransport for Io {
         guard: AttemptGuard,
     ) -> impl Future<Output = WireOutcome> + Send + 'static {
         let body = serde_json::to_value(envelope.message()).unwrap();
+        self.bodies.lock().unwrap().push(body.clone());
         let footer = body["embeds"][0]["footer"]["text"]
             .as_str()
             .map(str::to_owned);
