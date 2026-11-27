@@ -463,7 +463,7 @@ pub mod flush_probe {
         }
 
         /// Successful `step`s for targets under `scope`, as the directories they ran on.
-        pub(crate) fn flushed(&self, step: Step) -> Vec<PathBuf> {
+        pub fn flushed(&self, step: Step) -> Vec<PathBuf> {
             self.events()
                 .into_iter()
                 .filter(|event| event.step == step && event.ok)
@@ -471,7 +471,7 @@ pub mod flush_probe {
                 .collect()
         }
 
-        pub(crate) fn count(&self, step: Step) -> usize {
+        pub fn count(&self, step: Step) -> usize {
             self.events().iter().filter(|e| e.step == step).count()
         }
     }

@@ -31,11 +31,11 @@ pub struct HerdrInterruptState {
 }
 
 /// Writes a recorded turn start to that turn's durable row; the Discord layer installs it.
-pub(crate) type TurnStartSink =
+pub type TurnStartSink =
     fn(&crate::db::dispatched_sessions::hosted_execution::HostedOwner, &str, &HerdrTurnStart);
 static TURN_START_SINK: std::sync::OnceLock<TurnStartSink> = std::sync::OnceLock::new();
 
-pub(crate) fn install_turn_start_sink(sink: TurnStartSink) {
+pub fn install_turn_start_sink(sink: TurnStartSink) {
     let _ = TURN_START_SINK.set(sink);
 }
 
@@ -759,7 +759,7 @@ impl CancelToken {
     }
 
     /// Record that a wrapper accepted this turn before JSONL confirms it.
-    pub(crate) fn mark_claude_interrupt_submit_pending(&self) {
+    pub fn mark_claude_interrupt_submit_pending(&self) {
         self.claude_interrupt_submit_pending
             .store(true, Ordering::Release);
     }

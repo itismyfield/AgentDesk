@@ -406,7 +406,7 @@ pub async fn prepare_retry_owner_on_pg_tx(
 
 /// Test seam: takes the retry owner locks in `tx`; the owner row itself stays private.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn prepare_retry_owner_on_pg_tx_for_test(
+pub async fn prepare_retry_owner_on_pg_tx_for_test(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     meta: &RetryDispatchMeta,
 ) -> Result<Option<()>, String> {

@@ -442,7 +442,7 @@ impl Registry {
         }
         Ok(())
     }
-    pub(crate) fn bind(&self, namespace: &str, key: &Value, source: &Source) -> Result<(), String> {
+    pub fn bind(&self, namespace: &str, key: &Value, source: &Source) -> Result<(), String> {
         source.validate(key)?;
         self.transaction(|state| {
             if let Some((registered, _)) = state.locate(namespace, key)
@@ -601,7 +601,7 @@ impl Registry {
         cache.refresh(&self.path, std::time::SystemTime::now(), read_stamp::fstat)?;
         apply(&mut cache)
     }
-    pub(crate) fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {
+    pub fn source(&self, namespace: &str, key: &Value) -> Result<Source, String> {
         self.inspect(|state| {
             state
                 .locate(namespace, key)

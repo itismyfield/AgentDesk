@@ -52,7 +52,7 @@ impl TestEnvVarGuard {
         Self::set_value_after_shared_test_env_lock("PATH", &joined)
     }
 
-    pub(crate) fn capture_after_shared_test_env_lock(key: &'static str) -> Self {
+    pub fn capture_after_shared_test_env_lock(key: &'static str) -> Self {
         Self {
             _lock: None,
             key,
@@ -97,7 +97,7 @@ impl TestRuntimeRootGuard {
         self._root.path()
     }
 
-    pub(crate) fn with_isolated_config() -> Self {
+    pub fn with_isolated_config() -> Self {
         let mut guard = Self::new();
         // Restore the config override before the root guard releases the environment lock.
         guard._config = Some(TestEnvVarGuard::remove_after_shared_test_env_lock(
@@ -143,7 +143,7 @@ pub fn assert_test_config_write_within_root(root: &std::path::Path, path: &std::
 }
 
 /// Writes a default config with `agents` bindings into `root`'s config file.
-pub(crate) fn write_bindings_for_test(root: &std::path::Path, agents: serde_json::Value) {
+pub fn write_bindings_for_test(root: &std::path::Path, agents: serde_json::Value) {
     let mut config = crate::config::Config::default();
     config.agents = serde_json::from_value(agents).expect("test agent bindings");
     let path = crate::config::config_path::config_path_in(root);

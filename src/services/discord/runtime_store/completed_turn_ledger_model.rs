@@ -60,7 +60,7 @@ impl CompletedTurnLedger {
 
     /// Commit time of each [`Self::settled_ids`] id: a direct id keeps its last-appended entry's
     /// time; an absorbed id takes its backing entry's, or the later of that and its own entry's.
-    pub(in crate::services::discord) fn settled_commit_ms(&self) -> HashMap<u64, u64> {
+    pub fn settled_commit_ms(&self) -> HashMap<u64, u64> {
         let mut commits: HashMap<u64, u64> = self
             .entries
             .iter()

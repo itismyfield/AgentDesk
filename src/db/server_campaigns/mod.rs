@@ -41,10 +41,10 @@ pub enum CommandOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandReply {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub outcome: CommandOutcome,
     pub response: ReceiptResponse,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub replayed: bool,
 }
 

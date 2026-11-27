@@ -55,6 +55,6 @@ pub fn relay_observed_prompt_injected_prompt_decision(
 
 /// Local-completing slash-control prompts skip synthetic turn ownership.
 #[cfg(test)]
-pub(in crate::services::discord) fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
+pub fn is_local_only_slash_command_prompt(prompt: &str) -> bool {
     classify_local_only_slash_control(prompt).is_some()
 }

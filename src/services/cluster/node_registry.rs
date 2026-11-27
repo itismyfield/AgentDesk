@@ -11,7 +11,7 @@ use crate::db::postgres::AdvisoryLockLease;
 use crate::services::cluster::dispatch_hooks::DispatchQueueHooks;
 use crate::services::cluster::session_routing::worker_api_base_url_from_capabilities;
 
-pub(crate) const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
+pub const CLUSTER_LEADER_ADVISORY_LOCK_ID: i64 = 7_801_100;
 
 pub use super::capability_routing::{
     CapabilityRouteCandidate, CapabilityRouteDecision, explain_capability_match,
@@ -55,8 +55,8 @@ impl ClusterRuntime {
     /// caller-provided `leader_active` flag. Lets tests flip leadership at will
     /// to exercise supervised workers across lease takeovers without standing
     /// up a real cluster. See `worker_registry::tests`.
-    #[cfg(test)]
-    pub(crate) fn for_test_with_leader(leader_active: Arc<AtomicBool>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_test_with_leader(leader_active: Arc<AtomicBool>) -> Self {
         Self {
             enabled: true,
             instance_id: "test-node".to_string(),

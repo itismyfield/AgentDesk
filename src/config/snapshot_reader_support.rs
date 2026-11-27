@@ -31,11 +31,11 @@ pub fn isolated(body: impl FnOnce()) {
 pub struct Fixture {
     _root_env: crate::config::TestEnvVarGuard,
     root: tempfile::TempDir,
-    pub(crate) path: PathBuf,
+    pub path: PathBuf,
 }
 
 impl Fixture {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let root_env = crate::config::set_agentdesk_root_for_test(root.path());
         let path = root.path().join("config/agentdesk.yaml");
@@ -52,7 +52,7 @@ impl Fixture {
         }
     }
 
-    pub(crate) fn root(&self) -> &Path {
+    pub fn root(&self) -> &Path {
         self.root.path()
     }
 
@@ -68,17 +68,17 @@ impl Fixture {
         std::fs::write(path, serde_yaml::to_string(&value).unwrap()).unwrap();
     }
 
-    pub(crate) fn write(&self, yaml: &str) {
+    pub fn write(&self, yaml: &str) {
         self.write_at(&self.path, yaml);
     }
 
-    pub(crate) fn install(&self, initial: &str, disk: &str) {
+    pub fn install(&self, initial: &str, disk: &str) {
         self.write(initial);
         crate::config_live_reload::install(load_from_path(&self.path).unwrap());
         self.write(disk);
     }
 
-    pub(crate) fn reload(&self) {
+    pub fn reload(&self) {
         assert!(matches!(
             crate::config_live_reload::reload_from_path(&self.path),
             crate::config_live_reload::ReloadOutcome::Applied { .. }

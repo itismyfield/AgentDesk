@@ -127,7 +127,7 @@ impl PgConnectFailure {
         }
     }
 
-    pub(crate) fn from_sqlx(context: &str, error: sqlx::Error) -> Self {
+    pub fn from_sqlx(context: &str, error: sqlx::Error) -> Self {
         let kind = match &error {
             sqlx::Error::PoolTimedOut => PgConnectFailureKind::PoolTimedOut,
             _ => PgConnectFailureKind::Other,

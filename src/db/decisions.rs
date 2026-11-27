@@ -4,12 +4,12 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-pub(crate) mod requests;
+pub mod requests;
 
 /// The input source only the Decision service uses; a request that names it proves nothing.
 pub const SOURCE: &str = "decision";
 /// The tag of every ticket an event's original is admitted under.
-pub(crate) const TICKET_TAG: &str = "dcsn";
+pub const TICKET_TAG: &str = "dcsn";
 
 /// The event an origin of the form `decision:<uuid>[:opinion:<message id>]` names.
 pub fn event_of_origin(origin: &str) -> Option<Uuid> {
@@ -163,16 +163,20 @@ fn holder() -> Option<&'static str> {
 
 /// One run of a node: its identity and its start on the database clock.
 #[derive(Clone, Debug)]
-pub(crate) struct Run {
+pub struct Run {
     holder: &'static str,
-    pub(crate) boot: chrono::DateTime<chrono::Utc>,
+    boot: chrono::DateTime<chrono::Utc>,
 }
 
 impl Run {
     /// This process's run as node `instance`, started at `boot`; the first name given stays.
-    pub(crate) fn of(instance: &str, boot: chrono::DateTime<chrono::Utc>) -> Self {
+    pub fn of(instance: &str, boot: chrono::DateTime<chrono::Utc>) -> Self {
         let holder = HOLDER.get_or_init(|| instance.to_string()).as_str();
         Self { holder, boot }
+    }
+
+    pub fn boot(&self) -> chrono::DateTime<chrono::Utc> {
+        self.boot
     }
 }
 
@@ -260,7 +264,7 @@ pub async fn close(pool: &PgPool, event_id: Uuid, reason: &str) -> Result<bool, 
 
 /// Moves a row only while its holder's run is over for `run`: the same node moved it before this
 /// start, or its node is no longer listed online. A live holder keeps its attempt.
-pub(crate) async fn end_abandoned(
+pub async fn end_abandoned(
     pool: &PgPool,
     event_id: Uuid,
     (from, to): (AttemptState, AttemptState),
@@ -350,7 +354,7 @@ pub async fn unsettled(
 
 /// The origin and channel of every event that reached its end among those reserved under
 /// `tickets`: what an owner still holding one of these originals has left to remove.
-pub(crate) async fn closed_under(
+pub async fn closed_under(
     pool: &PgPool,
     tickets: &[String],
 ) -> Result<Vec<(String, u64)>, sqlx::Error> {

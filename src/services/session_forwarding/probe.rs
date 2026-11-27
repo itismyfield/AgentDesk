@@ -203,15 +203,15 @@ async fn probe_target(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use super::trusted_target::TrustedForwardTarget as TrustedForwardTargetForTest;
+pub use super::trusted_target::TrustedForwardTarget as TrustedForwardTargetForTest;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn probe_for_test(context: &ForwardCallerContext, node: &Value) -> Value {
+pub async fn probe_for_test(context: &ForwardCallerContext, node: &Value) -> Value {
     probe(context, node).await
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn probe_target_for_test(
+pub async fn probe_target_for_test(
     context: &ForwardCallerContext,
     target: &super::TrustedForwardTarget,
 ) -> Result<(), &'static str> {

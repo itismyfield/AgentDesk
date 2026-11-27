@@ -43,12 +43,12 @@ pub const FAILURE_MARKER_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_FAILURE_MARKER
 pub const NON_WAIT_RELAY_WORKER_ENV: &str = "AGENTDESK_HOOK_RELAY_NON_WAIT_WORKER";
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn failure_marker_worker_env_for_test() -> &'static str {
+pub const fn failure_marker_worker_env_for_test() -> &'static str {
     FAILURE_MARKER_WORKER_ENV
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn non_wait_relay_worker_env_for_test() -> &'static str {
+pub const fn non_wait_relay_worker_env_for_test() -> &'static str {
     NON_WAIT_RELAY_WORKER_ENV
 }
 

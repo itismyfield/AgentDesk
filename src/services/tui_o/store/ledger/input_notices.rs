@@ -355,14 +355,14 @@ pub(in crate::services) fn record_id_for_test(record: &SourceRange) -> RecordId 
 
 #[cfg(any(test, feature = "test-support"))]
 impl NoticeEvidence {
-    pub(in crate::services) fn complete_for_test(&self) -> bool {
+    pub fn complete_for_test(&self) -> bool {
         self.complete()
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl MigrationSnapshot {
-    pub(in crate::services) fn contains_for_test(&self, record: &SourceRange) -> bool {
+    pub fn contains_for_test(&self, record: &SourceRange) -> bool {
         self.contains(record)
     }
 }

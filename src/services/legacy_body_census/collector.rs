@@ -258,7 +258,7 @@ fn evaluate_host(value: &mut Value, now: i64) {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Collector {
-    pub(crate) fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
+    pub fn fixture(&mut self, root: &Path, current: &str, now: i64) -> Value {
         let mut value = self.collect(root, current, now, None);
         let cut = value["boot_files"]
             .as_array()

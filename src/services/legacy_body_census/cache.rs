@@ -72,12 +72,12 @@ impl ProjectionCache {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fixture(root: &Path, current: &str, now: i64) -> std::sync::Arc<Self> {
+    pub fn fixture(root: &Path, current: &str, now: i64) -> std::sync::Arc<Self> {
         Self::fixture_at_age(root, current, now, 0)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fixture_at_age(
+    pub fn fixture_at_age(
         root: &Path,
         current: &str,
         now: i64,
@@ -94,7 +94,7 @@ impl ProjectionCache {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn block_for_test(&self, action: impl FnOnce()) {
+    pub fn block_for_test(&self, action: impl FnOnce()) {
         let _guard = self.value.write().unwrap();
         action();
     }

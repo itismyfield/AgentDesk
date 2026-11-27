@@ -36,7 +36,7 @@ pub struct OriginFixture {
     pub(crate) origin: PathBuf,
     pub(crate) seed: PathBuf,
     pub(crate) desk: PathBuf,
-    pub(crate) main_tip: String,
+    pub main_tip: String,
     pub(crate) default_tip: String,
 }
 
@@ -79,19 +79,19 @@ impl OriginFixture {
         }
     }
 
-    pub(crate) fn desk_dir(&self) -> &str {
+    pub fn desk_dir(&self) -> &str {
         self.desk.to_str().unwrap()
     }
 
     /// Commits on the seed's current branch and pushes it, returning the new tip.
-    pub(crate) fn push_new_commit(&self, message: &str) -> String {
+    pub fn push_new_commit(&self, message: &str) -> String {
         let tip = commit(&self.seed, message);
         git(&self.seed, &["push", "origin", "HEAD"]);
         tip
     }
 
     /// Makes every desk fetch from origin wait `seconds` before it starts transferring.
-    pub(crate) fn delay_desk_fetches(&self, seconds: u32) {
+    pub fn delay_desk_fetches(&self, seconds: u32) {
         let upload_pack = format!("sleep {seconds}; git-upload-pack");
         git(
             &self.desk,

@@ -713,7 +713,7 @@ pub struct NotSentProof {
 }
 impl NotSentProof {
     /// Whether a Herdr user stop, not a refusal, kept every key back.
-    pub(crate) fn herdr_user_stop(&self) -> bool {
+    pub fn herdr_user_stop(&self) -> bool {
         self.herdr_stop
     }
     #[cfg(unix)]

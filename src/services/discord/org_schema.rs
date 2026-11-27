@@ -237,7 +237,7 @@ fn launch_overlay_parts(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn configured_launch_profile_for_test(
+pub fn configured_launch_profile_for_test(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -247,7 +247,7 @@ pub(crate) fn configured_launch_profile_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launch_overlay_parts_for_test(
+pub fn launch_overlay_parts_for_test(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,

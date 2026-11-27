@@ -1246,7 +1246,7 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
+pub fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
     resume_session_id_from_context(context)
 }
 
@@ -1329,7 +1329,7 @@ pub async fn latest_entry_phase_codex_session_id_pg(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn load_entry_status_row_pg_for_test(
+pub async fn load_entry_status_row_pg_for_test(
     pool: &PgPool,
     entry_id: &str,
 ) -> Result<EntryStatusRow, String> {

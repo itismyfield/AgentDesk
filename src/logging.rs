@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::MakeWriter;
 
 pub mod auto_queue;
-pub(crate) mod intake_stage;
+pub mod intake_stage;
 pub mod intake_timing;
 
 const DEFAULT_DCSERVER_LOG_MAX_BYTES: u64 = 100 * 1024 * 1024;

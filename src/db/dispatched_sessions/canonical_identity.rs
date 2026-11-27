@@ -18,7 +18,7 @@ pub const ADVISORY_LOCK_NAMESPACE: i32 = 4913;
 
 /// Test seam: the advisory-lock namespace the identity fence takes.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn advisory_lock_namespace_for_test() -> i32 {
+pub const fn advisory_lock_namespace_for_test() -> i32 {
     ADVISORY_LOCK_NAMESPACE
 }
 

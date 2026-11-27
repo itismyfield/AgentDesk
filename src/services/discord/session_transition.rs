@@ -170,7 +170,7 @@ impl SessionTransitionLocks {
 
     /// Whether the registry still carries an entry for `channel_id`, live or dead.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn has_entry(&self, channel_id: ChannelId) -> bool {
+    pub fn has_entry(&self, channel_id: ChannelId) -> bool {
         self.0.contains_key(&channel_id)
     }
 }

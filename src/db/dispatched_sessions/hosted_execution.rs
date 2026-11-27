@@ -211,7 +211,7 @@ impl HostedObservation {
 
     /// Test seam: an observation as a row read would produce it, CAS value included.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_test(session_id: i64, raw: Option<Value>) -> Self {
+    pub fn for_test(session_id: i64, raw: Option<Value>) -> Self {
         let record = HostedRecord::decode(raw.as_ref());
         Self {
             session_id,

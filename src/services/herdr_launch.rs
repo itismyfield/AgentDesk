@@ -41,7 +41,7 @@ use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BindingContext, PreparedIncarnation, execution_context, stable_host_identity,
 };
-#[cfg(any(unix, test))]
+#[cfg(any(unix, test, feature = "test-support"))]
 pub use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
@@ -309,7 +309,7 @@ pub(crate) const fn host_kind_temp_ext_for_test() -> &'static str {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_ready_at_for_test(
+pub fn o_ready_at_for_test(
     runtime_root: Option<&Path>,
     channel: u64,
     kind: RuntimeHandoffKind,
@@ -318,7 +318,7 @@ pub(crate) fn o_ready_at_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn retire_unsent_for_test(
+pub async fn retire_unsent_for_test(
     pool: &PgPool,
     owner: &HostedOwner,
     nonce: &str,

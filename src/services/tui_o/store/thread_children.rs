@@ -102,7 +102,7 @@ impl OStore {
         self.init_channel(init, &Self::fixture_scope(&[init.channel]))
     }
 
-    pub(crate) fn init_fixture_channel_as(
+    pub fn init_fixture_channel_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,
@@ -110,7 +110,7 @@ impl OStore {
         self.init_channel_as(init, origin, &Self::fixture_scope(&[init.channel]))
     }
 
-    pub(crate) fn begin_fixture_era_as(
+    pub fn begin_fixture_era_as(
         &self,
         init: &Initialized,
         origin: InitOrigin,

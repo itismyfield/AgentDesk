@@ -347,7 +347,7 @@ pub async fn observe_channel_clear_fence_once(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn capture_channel_clear_fence_for_test(
+pub async fn capture_channel_clear_fence_for_test(
     pool: Option<&PgPool>,
     channel_id: &str,
 ) -> ChannelClearFence {

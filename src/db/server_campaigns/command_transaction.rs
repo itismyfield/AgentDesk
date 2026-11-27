@@ -92,7 +92,7 @@ pub async fn prepare<'a>(
         return Ok(Preparation::Replay {
             tx,
             reply: CommandReply {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 outcome: saved.try_get::<Json<CommandOutcome>, _>("outcome")?.0,
                 response: ReceiptResponse {
                     status: u16::try_from(saved.try_get::<i32, _>("response_status")?)
@@ -101,7 +101,7 @@ pub async fn prepare<'a>(
                         .try_get::<Json<serde_json::Value>, _>("response_body")?
                         .0,
                 },
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 replayed: true,
             },
         });
@@ -218,10 +218,10 @@ impl<'a> StagedCommand<'a> {
         Ok((
             tx,
             CommandReply {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 outcome,
                 response,
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 replayed: false,
             },
         ))

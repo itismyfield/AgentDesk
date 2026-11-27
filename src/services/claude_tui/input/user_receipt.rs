@@ -226,7 +226,7 @@ impl UserReceipt {
         ))
     }
 
-    pub(crate) fn before(session: &str, prompt: &str, sid: Option<&str>) -> Option<Self> {
+    pub fn before(session: &str, prompt: &str, sid: Option<&str>) -> Option<Self> {
         crate::services::tmux_common::with_tmux_source_authority(session, |authority| {
             let mut binding =
                 tui_prompt_dedupe::runtime_binding_for_tmux_session_under_source_authority(

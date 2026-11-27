@@ -52,7 +52,7 @@ impl InjectedPromptClass {
 
     /// Whether this injected class should keep the provider-output bridge tail.
     #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::services::discord) fn still_delivers_assistant_output(self) -> bool {
+    pub fn still_delivers_assistant_output(self) -> bool {
         !matches!(
             self,
             InjectedPromptClass::SystemContinuation
@@ -336,8 +336,8 @@ pub fn format_direct_prompt_notification(
     }
 }
 
-#[cfg(test)]
-pub(in crate::services::discord) fn format_subagent_notification_card(
+#[cfg(any(test, feature = "test-support"))]
+pub fn format_subagent_notification_card(
     tmux_session_name: &str,
     prompt: &str,
 ) -> String {

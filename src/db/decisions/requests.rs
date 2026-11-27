@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 /// One option of a request, in the order it was asked.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct OptionRow {
+pub struct OptionRow {
     pub label: String,
     pub key: Option<String>,
     pub detail: String,
@@ -14,7 +14,7 @@ pub(crate) struct OptionRow {
 }
 
 /// What an ask stores. The capability is only ever its hash here.
-pub(crate) struct NewRequest<'a> {
+pub struct NewRequest<'a> {
     pub agent_id: &'a str,
     pub logical_channel_id: u64,
     pub target_channel_id: u64,
@@ -28,7 +28,7 @@ pub(crate) struct NewRequest<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Stored {
+pub enum Stored {
     Created(Uuid),
     /// The same key, payload and capability asked before: that request.
     Same(Uuid),
@@ -37,7 +37,7 @@ pub(crate) enum Stored {
 }
 
 /// Stores the request and its options in one transaction, once per idempotency key.
-pub(crate) async fn create_once(
+pub async fn create_once(
     pool: &PgPool,
     new: &NewRequest<'_>,
 ) -> Result<Stored, sqlx::Error> {
@@ -107,7 +107,7 @@ pub(crate) async fn create_once(
 
 /// A stored request as its requester may read it: no capability and no hash of one.
 #[derive(Clone, Debug, serde::Serialize)]
-pub(crate) struct RequestRow {
+pub struct RequestRow {
     pub request_id: Uuid,
     pub agent_id: String,
     pub logical_channel_id: String,
@@ -122,7 +122,7 @@ pub(crate) struct RequestRow {
 
 /// The request only when `capability_sha256` is the hash it was asked under; a request of
 /// another requester reads exactly like one that does not exist.
-pub(crate) async fn load_owned(
+pub async fn load_owned(
     pool: &PgPool,
     request_id: Uuid,
     capability_sha256: &str,

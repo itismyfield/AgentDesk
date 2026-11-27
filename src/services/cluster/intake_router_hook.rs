@@ -38,7 +38,7 @@ mod edge_case_tests;
 mod execution_requirement_tests;
 pub mod o_input;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use o_input::{BEFORE_PLAN, ENTERED};
+pub use o_input::{BEFORE_PLAN, ENTERED};
 #[cfg(test)]
 mod o_route_tests;
 pub mod owner_record;

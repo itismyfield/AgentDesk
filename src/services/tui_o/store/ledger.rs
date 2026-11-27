@@ -22,7 +22,7 @@ pub mod input_notices;
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::{append_for_test, recover_for_test};
+pub use test_access::{append_for_test, recover_for_test};
 pub mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;

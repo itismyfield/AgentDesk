@@ -628,7 +628,7 @@ pub fn parse_phase_gate_context(context_json: Option<&str>) -> Option<ParsedPhas
 
 /// Test seam for the phase-gate tests mounted in the services test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn parse_phase_gate_context_for_test(
+pub fn parse_phase_gate_context_for_test(
     context_json: Option<&str>,
 ) -> Option<ParsedPhaseGateContext> {
     parse_phase_gate_context(context_json)

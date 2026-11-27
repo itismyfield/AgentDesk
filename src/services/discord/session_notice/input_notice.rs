@@ -14,8 +14,8 @@ pub fn input_notice_content(prompt: &str) -> Option<String> {
             .then(|| input_notice_line(prompt))
     })
 }
-#[cfg(test)]
-pub(crate) use input_notice_memo::RUNS as INPUT_NOTICE_RUNS;
+#[cfg(any(test, feature = "test-support"))]
+pub use input_notice_memo::RUNS as INPUT_NOTICE_RUNS;
 
 /// The same notice for a scheduled-task fire the writer read off its own row.
 pub(crate) fn scheduled_input_notice_content(prompt: &str) -> Option<String> {

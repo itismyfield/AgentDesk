@@ -106,7 +106,7 @@ impl<'de> Deserialize<'de> for Features {
 }
 
 impl DecisionGateConfig {
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         for deadline in [
             self.features.issue_duplicate.deadline_ms,
             self.features.host_assignment.deadline_ms,

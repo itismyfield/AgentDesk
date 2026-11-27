@@ -363,7 +363,7 @@ impl BootChannels {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_child_fixture(&self, init: &Initialized) {
+    pub fn record_child_fixture(&self, init: &Initialized) {
         self.children.record(self, init, Adoption::Committed);
     }
 
