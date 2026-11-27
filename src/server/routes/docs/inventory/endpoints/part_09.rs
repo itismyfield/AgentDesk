@@ -149,8 +149,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("auth_profile", body_param("string", true, "Catalog id, empty/default, or null to clear")),
         ])
         .with_example(
-            json!({"path": {"id": "1495040912361914398"}, "body": {"auth_profile": "work"}}),
-            json!({"ok": true, "channel_id": "1495040912361914398", "auth_profile": "work"}),
+            json!({"path": {"id": "example-id-19d-09"}, "body": {"auth_profile": "work"}}),
+            json!({"ok": true, "channel_id": "example-id-19d-09", "auth_profile": "work"}),
         ),
         ep(
             "POST",

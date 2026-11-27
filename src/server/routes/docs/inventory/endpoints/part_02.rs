@@ -51,15 +51,15 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"body": {"channel_id": "1486017489027469493", "provider": "claude", "expected_has_cancel_token": true, "purge": true}}),
+            json!({"body": {"channel_id": "example-id-19d-07", "provider": "claude", "expected_has_cancel_token": true, "purge": true}}),
             json!({"ok": true, "applied": true, "registry_entry_removed": true, "registry_purge_skipped_reason": null}),
         )
         .with_error_example(
             403,
-            json!({"body": {"channel_id": "1486017489027469493"}}),
+            json!({"body": {"channel_id": "example-id-19d-07"}}),
             json!({"ok": false, "error": "auth_token required for non-loopback host"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/doctor/stale-mailbox/repair -H 'Content-Type: application/json' -d '{\"channel_id\":1486017489027469493}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/doctor/stale-mailbox/repair -H 'Content-Type: application/json' -d '{\"channel_id\":example-id-19d-07}'"),
         ep(
             "POST",
             "/api/channels/{id}/relay-recovery",
@@ -89,7 +89,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "action": "clear_orphan_pending_token",
                     "reason": "mailbox holds a cancel token without bridge, watcher, or live tmux evidence",
                     "evidence": {"mailbox_has_cancel_token": true, "bridge_inflight_present": false, "watcher_attached": false},
-                    "affected": {"channel_id": "1486017489027469493", "provider": "codex"},
+                    "affected": {"channel_id": "example-id-19d-07", "provider": "codex"},
                     "auto_heal": {"eligible": true, "bounded": true, "max_attempts_per_window": 1, "window_secs": 600}
                 }
             }),
@@ -99,7 +99,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({"body": {"provider": "codex"}}),
             json!({"ok": false, "error": "auth_token required for non-loopback host"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/channels/1486017489027469493/relay-recovery -H 'Content-Type: application/json' -d '{\"provider\":\"codex\",\"apply\":false}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/channels/example-id-19d-07/relay-recovery -H 'Content-Type: application/json' -d '{\"provider\":\"codex\",\"apply\":false}'"),
         ep(
             "POST",
             "/api/discord/send",
@@ -138,15 +138,15 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"body": {"target": "channel:1473922824350601297", "content": "hello", "source": "operator", "bot": "notify"}}),
-            json!({"ok": true, "message_id": "1500000000000000000"}),
+            json!({"body": {"target": "channel:example-id-19d-03", "content": "hello", "source": "operator", "bot": "notify"}}),
+            json!({"ok": true, "message_id": "example-id-19d-10"}),
         )
         .with_error_example(
             400,
-            json!({"body": {"target": "channel:1473922824350601297"}}),
+            json!({"body": {"target": "channel:example-id-19d-03"}}),
             json!({"error": "content is required", "ok": false}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -H 'X-AgentDesk-Source: cli' -d '{\"target\":\"channel:1473922824350601297\",\"content\":\"hello\",\"source\":\"operator\",\"bot\":\"notify\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send -H 'Content-Type: application/json' -H 'X-AgentDesk-Source: cli' -d '{\"target\":\"channel:example-id-19d-03\",\"content\":\"hello\",\"source\":\"operator\",\"bot\":\"notify\"}'"),
         ep(
             "POST",
             "/api/discord/bot-tokens/reload",
@@ -235,7 +235,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"body": {"role_id": "project-agentdesk", "message": "deploy done", "mode": "announce"}}),
-            json!({"ok": true, "channel_id": "1473922824350601297", "message_id": "1500000000000000001"}),
+            json!({"ok": true, "channel_id": "example-id-19d-03", "message_id": "example-id-19d-11"}),
         )
         .with_error_example(
             404,
@@ -254,19 +254,19 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("message", body_param("string", true, "DM body")),
         ])
         .with_example(
-            json!({"body": {"user_id": "100000000000000000", "message": "heads-up"}}),
-            json!({"ok": true, "message_id": "1500000000000000002"}),
+            json!({"body": {"user_id": "example-id-18d-01", "message": "heads-up"}}),
+            json!({"ok": true, "message_id": "example-id-19d-12"}),
         )
         .with_error_example(
             400,
             json!({"body": {"message": "heads-up"}}),
             json!({"error": "user_id is required"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/discord/send-dm -H 'Content-Type: application/json' -d '{\"user_id\":\"100000000000000000\",\"message\":\"heads-up\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/discord/send-dm -H 'Content-Type: application/json' -d '{\"user_id\":\"example-id-18d-01\",\"message\":\"heads-up\"}'"),
         ep("GET", "/api/agents", "agents", "List all agents")
             .with_example(
                 json!({}),
-                json!({"agents": [{"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "1473922824350601297"}]}),
+                json!({"agents": [{"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "example-id-19d-03"}]}),
             )
             .with_error_example(
                 500,
@@ -281,8 +281,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ("discord_channel_id", body_param("string", false, "Primary Discord channel")),
             ])
             .with_example(
-                json!({"body": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "1473922824350601297"}}),
-                json!({"agent": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "1473922824350601297"}}),
+                json!({"body": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "example-id-19d-03"}}),
+                json!({"agent": {"id": "pm-planner", "name": "PM Planner", "discord_channel_id": "example-id-19d-03"}}),
             )
             .with_error_example(
                 409,
@@ -294,7 +294,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             .with_params([("id", path_param("Agent id"))])
             .with_example(
                 json!({"path": {"id": "project-agentdesk"}}),
-                json!({"agent": {"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "1473922824350601297"}}),
+                json!({"agent": {"id": "project-agentdesk", "name": "AgentDesk", "discord_channel_id": "example-id-19d-03"}}),
             )
             .with_error_example(
                 404,
@@ -338,7 +338,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("dry_run", body_param("boolean", false, "Preview setup mutations only").with_default(false)),
         ])
         .with_example(
-            json!({"path": {"id": "project-agentdesk"}, "body": {"new_agent_id": "project-agentdesk-copy", "channel_id": "1473922824350601297", "provider": "codex", "dry_run": true}}),
+            json!({"path": {"id": "project-agentdesk"}, "body": {"new_agent_id": "project-agentdesk-copy", "channel_id": "example-id-19d-03", "provider": "codex", "dry_run": true}}),
             json!({"ok": true, "duplicate": true, "source_agent_id": "project-agentdesk", "new_agent_id": "project-agentdesk-copy", "setup": {"dry_run": true}}),
         ),
         ep(
@@ -360,7 +360,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Persist onboarding resume draft",
         )
         .with_example(
-            json!({"body": {"version": 1, "step": 2, "selected_guild": "1490141479707086938", "agents": []}}),
+            json!({"body": {"version": 1, "step": 2, "selected_guild": "example-id-19d-08", "agents": []}}),
             json!({"ok": true, "available": true, "secret_policy": "redacted"}),
         ),
         ep(
@@ -381,7 +381,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({"body": {"token": "discord-bot-token"}}),
-            json!({"valid": true, "bot_id": "123456789012345678", "bot_name": "agentdesk-bot", "avatar": null}),
+            json!({"valid": true, "bot_id": "example-id-18d-02", "bot_name": "example-bot", "avatar": null}),
         ),
         ep(
             "GET",
@@ -397,7 +397,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({"body": {"token": "discord-bot-token"}}),
-            json!({"guilds": [{"id": "1490141479707086938", "name": "AgentDesk"}], "channels": [{"id": "1473922824350601297", "name": "agentdesk"}]}),
+            json!({"guilds": [{"id": "example-id-19d-08", "name": "AgentDesk"}], "channels": [{"id": "example-id-19d-03", "name": "agentdesk"}]}),
         ),
         ep(
             "POST",
@@ -406,7 +406,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Complete onboarding",
         )
         .with_example(
-            json!({"body": {"token": "discord-bot-token", "guild_id": "1490141479707086938", "provider": "codex", "channels": [{"channel_id": "1473922824350601297", "channel_name": "agentdesk", "role_id": "project-agentdesk"}]}}),
+            json!({"body": {"token": "discord-bot-token", "guild_id": "example-id-19d-08", "provider": "codex", "channels": [{"channel_id": "example-id-19d-03", "channel_name": "example-channel", "role_id": "project-agentdesk"}]}}),
             json!({"ok": true, "provider": "codex", "rerun_policy": "safe"}),
         ),
         ep(
@@ -468,7 +468,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({
                 "body": {
                     "agent_id": "project-agentdesk",
-                    "channel_id": "1473922824350601297",
+                    "channel_id": "example-id-19d-03",
                     "provider": "codex",
                     "prompt_template_path": "config/agents/_shared.prompt.md",
                     "skills": ["memory-read"],
@@ -485,10 +485,10 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_error_example(
             400,
-            json!({"body": {"agent_id": "x", "channel_id": "1473922824350601297", "provider": "unknown", "prompt_template_path": "config/agents/_shared.prompt.md"}}),
+            json!({"body": {"agent_id": "x", "channel_id": "example-id-19d-03", "provider": "unknown", "prompt_template_path": "config/agents/_shared.prompt.md"}}),
             json!({"error": "provider must be one of claude|codex|opencode|qwen"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/agents/setup -H 'Content-Type: application/json' -d '{\"agent_id\":\"project-agentdesk\",\"channel_id\":\"1473922824350601297\",\"provider\":\"codex\",\"prompt_template_path\":\"config/agents/_shared.prompt.md\",\"dry_run\":true}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/agents/setup -H 'Content-Type: application/json' -d '{\"agent_id\":\"project-agentdesk\",\"channel_id\":\"example-id-19d-03\",\"provider\":\"codex\",\"prompt_template_path\":\"config/agents/_shared.prompt.md\",\"dry_run\":true}'"),
         ep(
             "POST",
             "/api/agents/{id}/signal",
@@ -530,7 +530,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "message": "hello", "channel_kind": "cc", "prefix": true, "expect_reply": true}}),
-            json!({"to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "message_id": "1500000000000000002", "bot": "announce", "prefixed": true}),
+            json!({"to_agent_id": "adk-dashboard", "channel_id": "example-id-19d-03", "channel_kind": "cc", "message_id": "example-id-19d-12", "bot": "announce", "prefixed": true}),
         )
         .with_error_example(
             422,
@@ -585,12 +585,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "리뷰 코멘트 반영해서 PR 업데이트해줘", "channel_kind": "cc", "expect_reply": true, "source": "agent-relay"}}),
-            json!({"ok": true, "to_agent_id": "adk-dashboard", "channel_id": "1473922824350601297", "channel_kind": "cc", "turn_id": "discord:1473922824350601297:9100000000000000000", "status": "started"}),
+            json!({"ok": true, "to_agent_id": "adk-dashboard", "channel_id": "example-id-19d-03", "channel_kind": "cc", "turn_id": "discord:example-id-19d-03:example-id-19d-17", "status": "started"}),
         )
         .with_error_example(
             409,
             json!({"path": {"id": "adk-dashboard"}, "body": {"from_agent_id": "project-agentdesk", "prompt": "do it"}}),
-            json!({"error": "agent mailbox is busy for channel 1473922824350601297", "status": "conflict"}),
+            json!({"error": "agent mailbox is busy for channel example-id-19d-03", "status": "conflict"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/agents/adk-dashboard/handoff -H 'Content-Type: application/json' -d '{\"from_agent_id\":\"project-agentdesk\",\"prompt\":\"리뷰 반영해줘\",\"channel_kind\":\"cc\",\"expect_reply\":true}'"),
         ep(
@@ -628,7 +628,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "sessions": [
                     {
                         "id": 42,
-                        "session_key": "mac-mini:AgentDesk-codex-adk-cdx-t1485506232256168011",
+                        "session_key": "mac-mini:AgentDesk-example-channel-03-texample-id-19d-06",
                         "agent_id": "project-agentdesk",
                         "provider": "codex",
                         "status": "working",
@@ -637,14 +637,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                         "tokens": 0,
                         "cwd": null,
                         "last_heartbeat": "2026-04-27T12:34:56+00:00",
-                        "thread_channel_id": "1485506232256168011",
-                        "channel_id": "1485506232256168011",
-                        "thread_id": "1485506232256168011",
-                        "guild_id": "1490141479707086938",
-                        "channel_web_url": "https://discord.com/channels/1490141479707086938/1485506232256168011",
-                        "channel_deeplink_url": "discord://discord.com/channels/1490141479707086938/1485506232256168011",
-                        "deeplink_url": "https://discord.com/channels/1490141479707086938/1485506232256168011",
-                        "thread_deeplink_url": "discord://discord.com/channels/1490141479707086938/1485506232256168011",
+                        "thread_channel_id": "example-id-19d-06",
+                        "channel_id": "example-id-19d-06",
+                        "thread_id": "example-id-19d-06",
+                        "guild_id": "example-id-19d-08",
+                        "channel_web_url": "https://discord.com/channels/example-id-19d-08/example-id-19d-06",
+                        "channel_deeplink_url": "discord://discord.com/channels/example-id-19d-08/example-id-19d-06",
+                        "deeplink_url": "https://discord.com/channels/example-id-19d-08/example-id-19d-06",
+                        "thread_deeplink_url": "discord://discord.com/channels/example-id-19d-08/example-id-19d-06",
                         "kanban_card_id": null
                     }
                 ]

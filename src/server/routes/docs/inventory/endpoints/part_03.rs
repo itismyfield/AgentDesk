@@ -91,16 +91,16 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             }),
             json!({
                 "ok": true,
-                "turn_id": "discord:1473922824350601297:9100000000000000000",
+                "turn_id": "discord:example-id-19d-03:example-id-19d-17",
                 "status": "started"
             }),
         )
         .with_error_example(
             409,
             json!({"path": {"id": "family-counsel"}, "body": {"prompt": "do it"}}),
-            json!({"ok": false, "error": "agent mailbox is busy for channel 1473922824350601297", "status": "conflict"}),
+            json!({"ok": false, "error": "agent mailbox is busy for channel example-id-19d-03", "status": "conflict"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"343742347365974026\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/agents/family-counsel/turn/start -H 'Content-Type: application/json' -d '{\"prompt\":\"hello\",\"source\":\"system\",\"dm_user_id\":\"example-id-18d-15\"}'"),
         ep(
             "POST",
             "/api/agents/{id}/turn/deliver",
@@ -122,9 +122,9 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_example(
             json!({
                 "path": {"id": "family-counsel"},
-                "body": {"text": "좋아, 그렇게 진행해", "author_discord_user_id": "343742347365974026", "source": "imessage", "origin_id": "p:0/ABCD-1234"}
+                "body": {"text": "좋아, 그렇게 진행해", "author_discord_user_id": "example-id-18d-15", "source": "imessage", "origin_id": "p:0/ABCD-1234"}
             }),
-            json!({"ok": true, "delivery": "queued", "turn_id": "discord:1473922824350601297:9100000000000000042", "channel_id": "1473922824350601297", "reason": "turn_active"}),
+            json!({"ok": true, "delivery": "queued", "turn_id": "discord:example-id-19d-03:example-id-19d-18", "channel_id": "example-id-19d-03", "reason": "turn_active"}),
         )
         .with_error_example(
             403,
@@ -140,7 +140,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([("id", path_param("Agent id"))])
         .with_example(
             json!({"path": {"id": "family-counsel"}}),
-            json!({"ok": true, "turn_id": "discord:1473922824350601297:9100000000000000000", "status": "stopped"}),
+            json!({"ok": true, "turn_id": "discord:example-id-19d-03:example-id-19d-17", "status": "stopped"}),
         )
         .with_error_example(
             404,
@@ -166,7 +166,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({"path": {"id": "family-counsel"}, "query": {"origin_id": "p:0/ABCD-1234"}}),
-            json!({"ok": true, "contract": "input-result-v1", "origin_id": "p:0/ABCD-1234", "agent_id": "family-counsel", "channel_id": "1473922824350601297", "consumption": "consumed", "execution_id": "discord:1473922824350601297:9100000000000000042", "turn_id": "discord:1473922824350601297:9100000000000000042", "terminal": {"outcome": "completed", "confirmed_at": "2026-10-28T01:02:03+00:00", "final_answer_text": "The answer is 42.", "final_answer_boundary": {"turn_id": "discord:1473922824350601297:9100000000000000042", "result_event_index": 2}, "final_answer_source": "agy_terminal_result"}}),
+            json!({"ok": true, "contract": "input-result-v1", "origin_id": "p:0/ABCD-1234", "agent_id": "family-counsel", "channel_id": "example-id-19d-03", "consumption": "consumed", "execution_id": "discord:example-id-19d-03:example-id-19d-18", "turn_id": "discord:example-id-19d-03:example-id-19d-18", "terminal": {"outcome": "completed", "confirmed_at": "2026-10-28T01:02:03+00:00", "final_answer_text": "The answer is 42.", "final_answer_boundary": {"turn_id": "discord:example-id-19d-03:example-id-19d-18", "result_event_index": 2}, "final_answer_source": "agy_terminal_result"}}),
         )
         .with_error_example(
             404,

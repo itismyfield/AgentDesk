@@ -37,8 +37,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"header": {"X-AgentDesk-Decision-Owner": "<64 hex>"}, "body": {"agent_id": "family-counsel", "target": {"channel_id": "1473922824350601297"}, "ref": "deploy-window", "title": "오늘 배포할까요?", "context": "검증은 끝났고 트래픽이 낮습니다.", "options": [{"label": "진행", "detail": "지금 배포", "recommendation_percent": 70}, {"label": "보류", "detail": "내일 오전", "recommendation_percent": 30}]}}),
-            json!({"ok": true, "request_id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e", "created": true, "publication": "pending"}),
+            json!({"header": {"X-AgentDesk-Decision-Owner": "<64 hex>"}, "body": {"agent_id": "family-counsel", "target": {"channel_id": "example-id-19d-03"}, "ref": "deploy-window", "title": "오늘 배포할까요?", "context": "검증은 끝났고 트래픽이 낮습니다.", "options": [{"label": "진행", "detail": "지금 배포", "recommendation_percent": 70}, {"label": "보류", "detail": "내일 오전", "recommendation_percent": 30}]}}),
+            json!({"ok": true, "request_id": "00000000-0000-4000-8000-000000000002", "created": true, "publication": "pending"}),
         )
         .with_error_example(
             409,
@@ -59,12 +59,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}, "header": {"X-AgentDesk-Decision-Owner": "<64 hex>"}}),
-            json!({"ok": true, "request_id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e", "agent_id": "family-counsel", "logical_channel_id": "1473922824350601297", "target_channel_id": "1473922824350601297", "ref": "deploy-window", "title": "오늘 배포할까요?", "context": "검증은 끝났고 트래픽이 낮습니다.", "created_at": "2026-11-25T04:00:00Z", "options": [{"label": "진행", "key": null, "detail": "지금 배포", "recommendation_percent": 70}, {"label": "보류", "key": null, "detail": "내일 오전", "recommendation_percent": 30}], "publication": "pending"}),
+            json!({"path": {"id": "00000000-0000-4000-8000-000000000002"}, "header": {"X-AgentDesk-Decision-Owner": "<64 hex>"}}),
+            json!({"ok": true, "request_id": "00000000-0000-4000-8000-000000000002", "agent_id": "family-counsel", "logical_channel_id": "example-id-19d-03", "target_channel_id": "example-id-19d-03", "ref": "deploy-window", "title": "오늘 배포할까요?", "context": "검증은 끝났고 트래픽이 낮습니다.", "created_at": "2026-11-25T04:00:00Z", "options": [{"label": "진행", "key": null, "detail": "지금 배포", "recommendation_percent": 70}, {"label": "보류", "key": null, "detail": "내일 오전", "recommendation_percent": 30}], "publication": "pending"}),
         )
         .with_error_example(
             403,
-            json!({"path": {"id": "7b0c8a52-3f0e-4c57-9a4e-0d0a5b6c7d8e"}}),
+            json!({"path": {"id": "00000000-0000-4000-8000-000000000002"}}),
             json!({"ok": false, "error": "not_request_owner"}),
         ),
     ]

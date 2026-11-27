@@ -44,8 +44,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Session webhook",
         )
         .with_example(
-            json!({"body": {"session_key": "mac-mini:AgentDesk-codex-adk-cdx", "agent_id": "project-agentdesk", "status": "working", "provider": "codex", "dispatch_id": "dispatch-1"}}),
-            json!({"ok": true, "session_key": "mac-mini:AgentDesk-codex-adk-cdx"}),
+            json!({"body": {"session_key": "mac-mini:AgentDesk-example-channel-03", "agent_id": "project-agentdesk", "status": "working", "provider": "codex", "dispatch_id": "dispatch-1"}}),
+            json!({"ok": true, "session_key": "mac-mini:AgentDesk-example-channel-03"}),
         ),
         ep(
             "DELETE",
@@ -54,7 +54,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Delete session webhook state",
         )
         .with_example(
-            json!({"query": {"session_key": "mac-mini:AgentDesk-codex-adk-cdx", "provider": "codex"}}),
+            json!({"query": {"session_key": "mac-mini:AgentDesk-example-channel-03", "provider": "codex"}}),
             json!({"ok": true, "deleted": true}),
         ),
         ep(
@@ -64,7 +64,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Resolve Claude session id by session key",
         )
         .with_example(
-            json!({"query": {"session_key": "mac-mini:AgentDesk-claude-adk-cc", "provider": "claude"}}),
+            json!({"query": {"session_key": "mac-mini:AgentDesk-example-channel-01", "provider": "claude"}}),
             json!({"claude_session_id": "claude-session-1", "session_id": "claude-session-1", "raw_provider_session_id": "claude-session-1"}),
         ),
         ep(
@@ -84,7 +84,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Clear Claude session id by session key",
         )
         .with_example(
-            json!({"body": {"session_key": "mac-mini:AgentDesk-claude-adk-cc"}}),
+            json!({"body": {"session_key": "mac-mini:AgentDesk-example-channel-01"}}),
             json!({"cleared": 1}),
         ),
         ep(
@@ -94,8 +94,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Force-kill session and optionally retry. With the P11 terminate switch on, a Claude/Codex Herdr execution the session row owns is retired through the terminate service instead of the tmux kill; only then are the session disconnected and the dispatch failed or retried, and the reply adds `termination` with `lifecycle_path: herdr-terminate`.",
         )
         .with_example(
-            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {"retry": true, "reason": "stalled turn"}}),
-            json!({"ok": true, "session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc", "killed": true, "retry_created": true}),
+            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01"}, "body": {"retry": true, "reason": "stalled turn"}}),
+            json!({"ok": true, "session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01", "killed": true, "retry_created": true}),
         ),
         ep(
             "POST",
@@ -121,14 +121,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({
-                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"},
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01"},
                 "body": {"reason": "idle 6시간 초과 — 자동 정리"}
             }),
             json!({
                 "ok": true,
                 "tmux_killed": true,
                 "tmux_was_alive": true,
-                "tmux_session_name": "AgentDesk-claude-adk-cc",
+                "tmux_session_name": "AgentDesk-example-channel-01",
                 "session_row_preserved": true,
                 "active_dispatch_id": null
             }),
@@ -170,18 +170,18 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         ])
         .with_example(
             json!({
-                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"},
+                "path": {"session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01"},
                 "body": {
-                    "session_id": "acd0ea18-a5a9-4fa6-a29c-f7034cb06273",
+                    "session_id": "00000000-0000-4000-8000-000000000003",
                     "cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-050333"
                 }
             }),
             json!({
                 "ok": true,
-                "session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc",
-                "target_session_id": "acd0ea18-a5a9-4fa6-a29c-f7034cb06273",
+                "session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01",
+                "target_session_id": "00000000-0000-4000-8000-000000000003",
                 "target_cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-050333",
-                "previous_session_id": "11111111-1111-1111-1111-111111111111",
+                "previous_session_id": "00000000-0000-4000-8000-000000000001",
                 "previous_cwd": "/Users/itismyfield/.adk/release/worktrees/claude-adk-cc-20260723-054531",
                 "tmux_killed": true,
                 "lifecycle_path": "canonical",
@@ -191,12 +191,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_error_example(
             409,
-            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {}}),
+            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01"}, "body": {}}),
             json!({"error": "channel has an active turn or dispatch; stop it before resuming a previous session"}),
         )
         .with_error_example(
             404,
-            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-claude-adk-cc"}, "body": {}}),
+            json!({"path": {"session_key": "claude/hash123/mac-mini:AgentDesk-example-channel-01"}, "body": {}}),
             json!({"error": "no previous provider session found to resume; pass an explicit session_id"}),
         ),
         ep(
@@ -263,7 +263,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             json!({
                 "events": [{
                     "id": 862,
-                    "session_key": "mac-mini:AgentDesk-codex-adk-cdx",
+                    "session_key": "mac-mini:AgentDesk-example-channel-03",
                     "dispatch_id": "dispatch-1",
                     "killer_component": "tmux_watcher",
                     "reason_code": "dead_after_turn",
@@ -320,15 +320,15 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"id": "1473922824350601297"}, "query": {"limit": 5}}),
-            json!({"messages": [{"id": "1500000000000000000", "content": "hello", "author": {"id": "100", "username": "bot"}}]}),
+            json!({"path": {"id": "example-id-19d-03"}, "query": {"limit": 5}}),
+            json!({"messages": [{"id": "example-id-19d-10", "content": "hello", "author": {"id": "100", "username": "bot"}}]}),
         )
         .with_error_example(
             403,
-            json!({"path": {"id": "1473922824350601297"}}),
+            json!({"path": {"id": "example-id-19d-03"}}),
             json!({"error": "channel not in role-map"}),
         )
-        .with_curl("curl 'http://localhost:8787/api/discord/channels/1473922824350601297/messages?limit=5'"),
+        .with_curl("curl 'http://localhost:8787/api/discord/channels/example-id-19d-03/messages?limit=5'"),
         ep(
             "GET",
             "/api/discord/channels/{id}",
@@ -342,7 +342,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Register DM reply handler",
         )
         .with_example(
-            json!({"body": {"source_agent": "family-counsel", "user_id": "123456789012345678", "channel_id": "1473922824350601297", "ttl_seconds": 3600, "context": {"topic": "followup"}}}),
+            json!({"body": {"source_agent": "family-counsel", "user_id": "example-id-18d-02", "channel_id": "example-id-19d-03", "ttl_seconds": 3600, "context": {"topic": "followup"}}}),
             json!({"ok": true, "id": 42}),
         ),
         ep("GET", "/api/skills/catalog", "skills", "List skill catalog")
@@ -665,7 +665,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         .with_params([("id", path_param("Routine id"))])
         .with_example(
             json!({"path": {"id": "routine-1"}}),
-            json!({"outcome": {"run_id": "run-1", "routine_id": "routine-1", "action": "agent", "status": "running", "result_json": {"turn_id": "discord:1473922824350601297:9100000000000000000", "fresh_context_guaranteed": false}}, "discord_log": {"status": "ok"}}),
+            json!({"outcome": {"run_id": "run-1", "routine_id": "routine-1", "action": "agent", "status": "running", "result_json": {"turn_id": "discord:example-id-19d-03:example-id-19d-17", "fresh_context_guaranteed": false}}, "discord_log": {"status": "ok"}}),
         ),
         ep(
             "POST",

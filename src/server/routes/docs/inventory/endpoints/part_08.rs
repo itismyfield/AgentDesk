@@ -26,15 +26,15 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"channel_id": "1473922824350601297"}}),
+            json!({"path": {"channel_id": "example-id-19d-03"}}),
             json!({
                 "ok": true,
-                "channel_id": "1473922824350601297",
+                "channel_id": "example-id-19d-03",
                 "agent_id": "agent-cc",
                 "requested_provider": "claude",
                 "exact_channel_match": true,
-                "session_key": "claude:1473922824350601297:agentdesk-claude-channel-1473922824350601297",
-                "tmux_session": "agentdesk-claude-channel-1473922824350601297",
+                "session_key": "claude:example-id-19d-03:agentdesk-claude-channel-example-id-19d-03",
+                "tmux_session": "agentdesk-claude-channel-example-id-19d-03",
                 "tmux_killed": false,
                 "lifecycle_path": "canonical",
                 "queued_remaining": 0,
@@ -50,14 +50,14 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_error_example(
             404,
-            json!({"path": {"channel_id": "1473922824350601297"}}),
+            json!({"path": {"channel_id": "example-id-19d-03"}}),
             json!({
                 "error": "no active turn found for this channel",
                 "code": "queue",
-                "context": {"channel_id": "1473922824350601297"}
+                "context": {"channel_id": "example-id-19d-03"}
             }),
         )
-        .with_curl("curl -X POST 'http://localhost:8787/api/turns/1473922824350601297/cancel?force=false'"),
+        .with_curl("curl -X POST 'http://localhost:8787/api/turns/example-id-19d-03/cancel?force=false'"),
         ep(
             "POST",
             "/api/channels/{channel_id}/monitoring",
@@ -73,7 +73,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ),
         ])
         .with_example(
-            json!({"path": {"channel_id": "1473922824350601297"}, "body": {"key": "relay", "description": "Relay queue is healthy"}}),
+            json!({"path": {"channel_id": "example-id-19d-03"}, "body": {"key": "relay", "description": "Relay queue is healthy"}}),
             json!({"status": "ok", "active_count": 1}),
         ),
         ep(
@@ -84,7 +84,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_params([("channel_id", path_param("Discord channel ID"))])
         .with_example(
-            json!({"path": {"channel_id": "1473922824350601297"}}),
+            json!({"path": {"channel_id": "example-id-19d-03"}}),
             json!({"status": "ok", "active_count": 1, "entries": [{"key": "relay", "description": "Relay queue is healthy"}]}),
         ),
         ep(
@@ -98,7 +98,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("key", path_param("Monitoring entry key")),
         ])
         .with_example(
-            json!({"path": {"channel_id": "1473922824350601297", "key": "relay"}}),
+            json!({"path": {"channel_id": "example-id-19d-03", "key": "relay"}}),
             json!({"status": "ok", "active_count": 0}),
         ),
         ep("GET", "/api/analytics", "analytics", "Observability counters and structured events")
@@ -121,8 +121,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 ),
             ])
             .with_example(
-                json!({"query": {"provider": "codex", "channelId": "1473922824350601297", "eventType": "turn_started", "limit": 25}}),
-                json!({"counters": [{"provider": "codex", "channel_id": "1473922824350601297", "turns_total": 12}], "recent_events": [{"event_type": "turn_started", "provider": "codex"}]}),
+                json!({"query": {"provider": "codex", "channelId": "example-id-19d-03", "eventType": "turn_started", "limit": 25}}),
+                json!({"counters": [{"provider": "codex", "channel_id": "example-id-19d-03", "turns_total": 12}], "recent_events": [{"event_type": "turn_started", "provider": "codex"}]}),
             ),
         ep(
             "GET",
@@ -171,7 +171,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )])
         .with_example(
             json!({"query": {"recentLimit": 50}}),
-            json!({"counters": [{"channel_id": "1473922824350601297", "provider": "codex", "turns_total": 320, "errors_total": 3}], "recent_events": []}),
+            json!({"counters": [{"channel_id": "example-id-19d-03", "provider": "codex", "turns_total": 320, "errors_total": 3}], "recent_events": []}),
         )
         .with_error_example(
             400,
@@ -603,12 +603,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("reason", body_param("string", true, "Operator reason, logged with the result")),
         ])
         .with_example(
-            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef", "reason": "pane wedged"}}),
-            json!({"ok": true, "result": "retired", "detail": "retired", "session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef"}),
+            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-example-channel-02", "execution_nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001", "reason": "pane wedged"}}),
+            json!({"ok": true, "result": "retired", "detail": "retired", "session_key": "claude/<token-hash>/mac-mini:AgentDesk-example-channel-02", "execution_nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001"}),
         )
         .with_error_example(
             409,
-            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-claude-adk-dash-cc", "execution_nonce": "0123456789abcdef0123456789abcdef", "reason": "pane wedged"}}),
+            json!({"body": {"session_key": "claude/<token-hash>/mac-mini:AgentDesk-example-channel-02", "execution_nonce": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001", "reason": "pane wedged"}}),
             json!({"ok": false, "result": "disabled", "detail": "terminate disabled"}),
         )
         .with_curl("curl -X POST http://localhost:8787/api/herdr/terminate -H \"Authorization: Bearer $ADK_AUTH_TOKEN\" -H 'Content-Type: application/json' -d '{\"session_key\":\"<key>\",\"execution_nonce\":\"<nonce>\",\"reason\":\"pane wedged\"}'"),

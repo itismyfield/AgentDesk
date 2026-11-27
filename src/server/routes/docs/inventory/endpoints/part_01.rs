@@ -20,7 +20,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "release_source": {
                     "observation_status": "observed",
                     "generated_at": "2026-08-12T00:00:00Z",
-                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_repo_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0002",
                     "deployed_latest_postgres_migration": "0104_example.sql",
                     "deployed_repo_dirty": "false"
                 },
@@ -112,7 +112,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "observation_status": "partial",
                     "node_hostname": "mac-mini",
                     "generated_at": "2026-08-12T00:00:00Z",
-                    "deployed_repo_head": "0123456789abcdef0123456789abcdef01234567",
+                    "deployed_repo_head": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa0002",
                     "deployed_repo_dirty": "false",
                     "observation_failures": ["latest_postgres_migration_missing"]
                 },

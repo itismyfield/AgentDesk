@@ -1138,7 +1138,7 @@ mod tests {
             .as_ref()
             .expect("send docs must include an example")
             .request["body"];
-        assert_eq!(example_body["target"], "channel:1473922824350601297");
+        assert_eq!(example_body["target"], "channel:example-id-19d-03");
         assert_eq!(example_body["content"], "hello");
         assert_eq!(example_body["source"], "operator");
         assert!(

@@ -67,7 +67,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "node_id":"a", "gate":"start", "target":binding["target"],
                     "policy_hash":binding["policy_hash"], "evidence":{
                         "decision_ref":"release-start",
-                        "response_ref":"https://forum.example/decisions/release-start#response-2",
+                        "response_ref":"https://forum.example/decisions/example-response-id",
                         "response_at":"2026-11-19T00:00:02Z"
                     }
                 }

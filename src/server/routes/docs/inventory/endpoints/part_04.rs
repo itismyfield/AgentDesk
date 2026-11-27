@@ -428,12 +428,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                     "semantic_event_id": "dispatch:dispatch-1:notify",
                     "operation": "send",
                     "target_kind": "channel",
-                    "target_channel_id": "1500000000000000000",
+                    "target_channel_id": "example-id-19d-10",
                     "target_thread_id": null,
                     "status": "sent",
                     "attempt": 1,
-                    "message_id": "1500000000000000001",
-                    "messages_json": [{"channel_id": "1500000000000000000", "message_id": "1500000000000000001"}],
+                    "message_id": "example-id-19d-11",
+                    "messages_json": [{"channel_id": "example-id-19d-10", "message_id": "example-id-19d-11"}],
                     "fallback_kind": null,
                     "error": null,
                     "result_json": {"status": "success"},
@@ -538,7 +538,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Link dispatch to an existing Discord thread",
         )
         .with_example(
-            json!({"body": {"dispatch_id": "dispatch-1", "thread_id": "1500000000000000001", "channel_id": "1500000000000000000"}}),
+            json!({"body": {"dispatch_id": "dispatch-1", "thread_id": "example-id-19d-11", "channel_id": "example-id-19d-10"}}),
             json!({"ok": true, "card_id": "card-1"}),
         ),
         ep(
@@ -549,7 +549,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_example(
             json!({"query": {"dispatch_id": "dispatch-1"}}),
-            json!({"card_id": "card-1", "active_thread_id": "1500000000000000001", "dispatch_type": "implementation"}),
+            json!({"card_id": "card-1", "active_thread_id": "example-id-19d-11", "dispatch_type": "implementation"}),
         ),
         ep(
             "GET",
@@ -558,7 +558,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "Find pending dispatch bound to a thread",
         )
         .with_example(
-            json!({"query": {"thread_id": "1500000000000000001"}}),
+            json!({"query": {"thread_id": "example-id-19d-11"}}),
             json!({"dispatch_id": "dispatch-1"}),
         ),
         ep(

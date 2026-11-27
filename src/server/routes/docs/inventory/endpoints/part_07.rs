@@ -575,8 +575,8 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             "List queue entries for a Discord channel",
         )
         .with_example(
-            json!({"path": {"id": "1473922824350601297"}}),
-            json!({"channel_id": "1473922824350601297", "dispatches": [{"dispatch_id": "dispatch-1", "status": "pending", "title": "Implement feature"}]}),
+            json!({"path": {"id": "example-id-19d-03"}}),
+            json!({"channel_id": "example-id-19d-03", "dispatches": [{"dispatch_id": "dispatch-1", "status": "pending", "title": "Implement feature"}]}),
         ),
         ep(
             "GET",
@@ -605,12 +605,12 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         )
         .with_params([("id", path_param("Discord channel ID (numeric)"))])
         .with_example(
-            json!({"path": {"id": "523456789012345678"}}),
+            json!({"path": {"id": "100016"}}),
             json!({
                 "provider": "codex",
                 "attached": true,
-                "tmux_session": "agentdesk-codex-channel-523456789012345678",
-                "watcher_owner_channel_id": 523456789012345678_u64,
+                "tmux_session": "agentdesk-codex-channel-100016",
+                "watcher_owner_channel_id": 100016_u64,
                 "last_relay_offset": 2048,
                 "inflight_state_present": true,
                 "last_relay_ts_ms": 1_761_369_600_000_i64,

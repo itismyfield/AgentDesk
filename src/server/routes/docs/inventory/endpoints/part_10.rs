@@ -18,15 +18,15 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
             ("kind", body_param("string", true, "Incident kind: STUCK, ANOMALY, or REVIEW_LONG. STUCK/ANOMALY alerts wake the operations-channel agent; recovery and REVIEW_LONG notices remain informational.")),
         ])
         .with_example(
-            json!({"body": {"target": "channel:1479671298497183835", "content": "[auto-queue monitor] STUCK: #4448", "action_id": "0123456789abcdef0123456789abcdef", "action": "alert", "kind": "STUCK"}}),
-            json!({"ok": true, "enqueued": true, "action_id": "0123456789abcdef0123456789abcdef"}),
+            json!({"body": {"target": "channel:example-id-19d-04", "content": "[auto-queue monitor] STUCK: #4448", "action_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001", "action": "alert", "kind": "STUCK"}}),
+            json!({"ok": true, "enqueued": true, "action_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001"}),
         )
         .with_error_example(
             400,
             json!({"body": {"target": "channel:123", "content": "alert", "action_id": "bad", "action": "alert", "kind": "STUCK"}}),
             json!({"ok": false, "error": "action_id must be 32 lowercase hexadecimal characters"}),
         )
-        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/monitor-alerts -H 'Content-Type: application/json' -d '{\"target\":\"channel:1479671298497183835\",\"content\":\"[auto-queue monitor] STUCK: #4448\",\"action_id\":\"0123456789abcdef0123456789abcdef\",\"action\":\"alert\",\"kind\":\"STUCK\"}'"),
+        .with_curl("curl -X POST http://localhost:8787/api/message-outbox/monitor-alerts -H 'Content-Type: application/json' -d '{\"target\":\"channel:example-id-19d-04\",\"content\":\"[auto-queue monitor] STUCK: #4448\",\"action_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaa0001\",\"action\":\"alert\",\"kind\":\"STUCK\"}'"),
         ep(
             "GET",
             "/api/message-outbox/failed",
@@ -50,7 +50,7 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
                 "rows": [{
                     "id": 13651,
                     "status": "failed",
-                    "target": "channel:1479671301387059200",
+                    "target": "channel:example-id-19d-05",
                     "bot": "notify",
                     "retry_count": 5,
                     "error_snippet": "source not allowed for this caller",
