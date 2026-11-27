@@ -20,7 +20,7 @@ pub(crate) use headless_turn::{
 };
 pub use queue_cancel::FinishCancelledMailboxResult;
 pub(crate) use queue_cancel::QueueCancelPort;
-pub(crate) use resume_runtime::ResumeRuntimePort;
+pub(crate) use resume_runtime::{ResumePorts, ResumeRuntimePort};
 pub(crate) use routine_process::RoutineProcessPort;
 pub(crate) use slot_reset::{
     ManagedResetPort, SlotResetOutcome, SlotResetVerdict, SlotRowGuard, SlotRuntimeHealth,

@@ -1218,7 +1218,9 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
 /// refuses before the durable rebind; once a runtime takes the channel the same row resumes.
 #[test]
 fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
+    use crate::services::discord::health::resume_ports;
     use crate::services::discord::host_teardown_gate::test_support as host;
+    use crate::services::provider::ProviderKind;
     use crate::services::session_resume::{
         ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
         perform_resume_rebind,
@@ -1257,12 +1259,19 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
                 exec(&pool, sql, &[Some(key.as_str()), cwd]).await;
                 tmux.start(&name);
                 let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
-                let claude = Some(crate::services::provider::ProviderKind::Claude);
+                assert_eq!(
+                    registry
+                        .shared_for_provider_on_channel(&ProviderKind::Claude, channel)
+                        .await
+                        .is_some(),
+                    taken,
+                    "{condition:?}: runtime handle availability"
+                );
                 let resume = perform_resume_rebind(
                     &pool,
-                    Some(&registry),
+                    resume_ports(Some(&registry)),
                     &key,
-                    claude,
+                    Some(ProviderKind::Claude),
                     Some(channel),
                     &name,
                     &opts,
@@ -1307,12 +1316,11 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
         let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
         let configured = [(channel.get(), "mac-mini")];
         let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
-        let claude = Some(crate::services::provider::ProviderKind::Claude);
         let resume = perform_resume_rebind(
             &pool,
-            Some(&registry),
+            resume_ports(Some(&registry)),
             &key,
-            claude,
+            Some(ProviderKind::Claude),
             Some(channel),
             name,
             &opts,
@@ -1578,6 +1586,7 @@ async fn backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg() {
 /// durable rebind and touches neither session.
 #[test]
 fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
+    use crate::services::discord::health::resume_ports;
     use crate::services::discord::host_teardown_gate::test_support as host;
     use crate::services::session_resume::{
         ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
@@ -1624,7 +1633,7 @@ fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
                 let claude = Some(crate::services::provider::ProviderKind::Claude);
                 let resume = perform_resume_rebind(
                     &pool,
-                    Some(&registry),
+                    resume_ports(Some(&registry)),
                     &key,
                     claude,
                     Some(channel),

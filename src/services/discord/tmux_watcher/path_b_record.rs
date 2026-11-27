@@ -277,9 +277,9 @@ pub(in crate::services::discord) async fn finalize_dispatch(
     }
     let current_worktree_path = {
         let mut data = shared.core.lock().await;
-        data.sessions
-            .get_mut(&channel_id)
-            .and_then(|session| session.validated_path(channel_id.get()))
+        data.sessions.get_mut(&channel_id).and_then(|session| {
+            crate::services::discord::session_runtime::validated_path(session, channel_id.get())
+        })
     };
 
     // A paused lifecycle keeps dispatch work queued until terminal delivery is ready.

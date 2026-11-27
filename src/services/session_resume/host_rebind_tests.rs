@@ -1,7 +1,9 @@
 //! Resume rebind tests that drive ROOT health and DL shared data through the KE resume path.
 use std::sync::Arc;
 
-use crate::services::discord::health::{HealthRegistry, rebind_channel_provider_session};
+use crate::services::discord::health::{
+    HealthRegistry, rebind_channel_provider_session, resume_ports,
+};
 use crate::services::discord::host_teardown_gate::test_support::{
     channel_key, session_transition_lock, shared_on,
 };
@@ -28,7 +30,7 @@ async fn perform_resume_rebind(
         home.path().to_path_buf(),
         crate::services::session_resume::perform_resume_rebind(
             pool,
-            registry,
+            resume_ports(registry),
             session_key,
             provider,
             channel_id,
@@ -358,6 +360,39 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
     let held = session_transition_lock(&shared, channel_id)
         .lock_owned()
         .await;
+    #[cfg(unix)]
+    let queue_dir = tempfile::tempdir().expect("owner queue directory");
+    #[cfg(unix)]
+    let (owner, wake_probe, mut wakes) = {
+        use crate::services::discord::host_teardown_gate::test_support::ResumeOwnerWakeProbe;
+        use crate::services::turn_orchestrator::PendingQueueItem;
+        let owner = crate::services::discord::input_mailbox_for_test(&shared, channel_id.get());
+        owner
+            .v2_adopt(
+                queue_dir.path().join("owner.json"),
+                "claude/resume-test".into(),
+            )
+            .await
+            .expect("adopt the channel owner");
+        let waiting: PendingQueueItem = serde_json::from_value(serde_json::json!({
+            "author_id": 1, "message_id": 2, "queued_generation": 5,
+            "channel_id": channel_id.get(), "text": "waiting for resume",
+        }))
+        .unwrap();
+        assert!(
+            owner
+                .v2_request(move |slot| {
+                    slot.as_mut()
+                        .expect("installed owner")
+                        .enqueue_fixture(&waiting)
+                        .map_err(|error| format!("{error:?}"))
+                })
+                .await
+                .unwrap()
+        );
+        let (probe, events) = ResumeOwnerWakeProbe::install(&shared, channel_id, &owner);
+        (owner, probe, events)
+    };
     let resume_pool = pool.clone();
     let resume_registry = registry;
     let resume_target_cwd = target_cwd.clone();
@@ -382,6 +417,11 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
         !resume.is_finished(),
         "production resume must acquire the channel lock"
     );
+    #[cfg(unix)]
+    assert!(
+        wakes.try_recv().is_err(),
+        "no owner wake while the lock is held"
+    );
     drop(held);
 
     let resume_lock = session_transition_lock(&shared, channel_id);
@@ -400,6 +440,30 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
 
     let outcome = resume.await.unwrap().expect("production resume succeeds");
     assert!(outcome.in_memory_rebound);
+    #[cfg(unix)]
+    {
+        let (lock_released, same_owner) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), wakes.recv())
+                .await
+                .expect("production resume completion wakes the waiting owner")
+                .expect("the wake probe is installed");
+        assert!(
+            lock_released,
+            "the wake follows the transition lock release"
+        );
+        assert!(same_owner, "completion wakes the same mailbox actor");
+        let front = owner
+            .v2_request(|slot| {
+                let front = slot.as_ref().and_then(|owner| owner.front());
+                *slot = None;
+                Ok(front.map(|(_, item)| item.message_id))
+            })
+            .await
+            .unwrap();
+        assert_eq!(front, Some(2), "the same waiting input survives resume");
+        assert!(wakes.try_recv().is_err(), "one owner wake per resume");
+        drop(wake_probe);
+    }
     let transition = crate::services::discord::try_intake_runtime_transition_after_redirect(
         &shared,
         channel_id,
@@ -542,6 +606,32 @@ fn resume_refuses_what_the_host_guard_keeps_before_any_change_pg() {
                     .await;
             assert_eq!(mirrored, None, "{case:?}: no in-memory rebind");
         }
+
+        let hosted = Case::Stored(
+            crate::services::discord::host_teardown_gate::test_support::Stored::Hosted,
+        );
+        let (name, key) = seeded(21, hosted).await;
+        let before = durable_row(&pool, &key).await;
+        let refused = perform_resume_rebind(
+            &pool,
+            None,
+            &key,
+            Some(ProviderKind::Claude),
+            None,
+            &name,
+            &opts,
+        )
+        .await;
+        assert!(
+            matches!(
+                &refused,
+                Err(ResumeRebindError::HostUnsupported(reason))
+                    if reason == "the session is not a legacy tmux session"
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(durable_row(&pool, &key).await, before);
+        assert!(tmux.take_calls().is_empty());
 
         let legacy = Case::Stored(
             crate::services::discord::host_teardown_gate::test_support::Stored::Legacy,
