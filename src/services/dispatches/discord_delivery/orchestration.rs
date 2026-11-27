@@ -17,6 +17,7 @@ use crate::services::dispatches::outbox_route::{
     review_submission_hint, review_target_hint,
 };
 use crate::services::dispatches::result_header::prepend_review_result_header;
+use crate::services::engine_runtime::health_port::SlotRowGuard;
 use sqlx::PgPool;
 use std::sync::OnceLock;
 
@@ -291,13 +292,17 @@ async fn apply_dispatch_status_reaction_state(
 #[derive(Clone, Debug)]
 pub(crate) struct HttpDispatchTransport {
     announce_bot_token: Option<String>,
-    discord_api_base: String,
+    pub(super) discord_api_base: String,
     pub(super) thread_owner_user_id: Option<u64>,
     pg_pool: Option<PgPool>,
+    pub(super) slot_row_guard: SlotRowGuard,
 }
 
 impl HttpDispatchTransport {
-    pub(crate) fn from_runtime_with_pg(pg_pool: Option<PgPool>) -> Self {
+    pub(crate) fn from_runtime_with_pg(
+        pg_pool: Option<PgPool>,
+        slot_row_guard: SlotRowGuard,
+    ) -> Self {
         Self {
             announce_bot_token: crate::credential::read_bot_token(
                 crate::domain::bot_role::UtilityBotRole::Announce.alias(),
@@ -305,6 +310,7 @@ impl HttpDispatchTransport {
             discord_api_base: discord_api_base_url(),
             thread_owner_user_id: resolve_dispatch_thread_owner_user_id(),
             pg_pool,
+            slot_row_guard,
         }
     }
 }
@@ -339,9 +345,7 @@ impl DispatchTransport for HttpDispatchTransport {
                 &card_id,
                 &dispatch_id,
                 token,
-                &transport.discord_api_base,
-                transport.thread_owner_user_id,
-                transport.pg_pool.as_ref(),
+                &transport,
             )
             .await
         }
@@ -594,29 +598,30 @@ async fn latest_work_dispatch_thread_pg(
 
 pub(crate) async fn send_dispatch_to_discord_with_pg_result(
     pg_pool: Option<&PgPool>,
+    slot_row_guard: SlotRowGuard,
     agent_id: &str,
     title: &str,
     card_id: &str,
     dispatch_id: &str,
 ) -> Result<DispatchNotifyDeliveryResult, String> {
-    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned());
+    let transport = HttpDispatchTransport::from_runtime_with_pg(pg_pool.cloned(), slot_row_guard);
     send_dispatch_with_delivery_guard(pg_pool, agent_id, title, card_id, dispatch_id, &transport)
         .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn send_dispatch_to_discord_inner_with_context_pg(
     agent_id: &str,
     title: &str,
     card_id: &str,
     dispatch_id: &str,
     token: &str,
-    discord_api_base: &str,
-    thread_owner_user_id: Option<u64>,
-    pg_pool: Option<&PgPool>,
+    transport: &HttpDispatchTransport,
 ) -> Result<DispatchNotifyDeliveryResult, String> {
-    let pool =
-        pg_pool.ok_or_else(|| "dispatch metadata lookup requires postgres pool".to_string())?;
+    let pool = transport
+        .pg_pool()
+        .ok_or_else(|| "dispatch metadata lookup requires postgres pool".to_string())?;
+    let discord_api_base = transport.discord_api_base.as_str();
+    let thread_owner_user_id = transport.thread_owner_user_id;
 
     // Determine dispatch type + status before attempting Discord delivery.
     let DispatchDeliveryMetadata {
@@ -756,6 +761,7 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
         && binding.thread_id.is_some()
     {
         crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+            transport.slot_row_guard,
             pool,
             &binding.agent_id,
             binding.slot_index,
@@ -773,10 +779,9 @@ async fn send_dispatch_to_discord_inner_with_context_pg(
     }
     if let Some(binding) = slot_binding.clone() {
         if reset_stale_slot_thread_if_needed(
-            Some(pool),
+            transport,
             &client,
             token,
-            discord_api_base,
             dispatch_id,
             &binding,
             exclude_entry_id,

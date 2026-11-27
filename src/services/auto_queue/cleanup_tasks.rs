@@ -125,6 +125,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use super::AutoQueueLogContext;
 use super::cancel_run::{SlotCleanupResult, clear_sessions_for_dispatches_pg};
 use crate::dispatch::CancelTransitionMeta;
+use crate::services::engine_runtime::health_port::{SlotRowGuard, SlotRuntimeHealth};
 
 /// A slot this task released (or found already released) and therefore still
 /// owes a slot-thread clear for.
@@ -738,7 +739,8 @@ async fn slot_taken_by_foreign_run_pg(
 ///
 /// The caller must already hold the row's claim.
 pub(crate) async fn drain_run_cleanup_task_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     task: RunCleanupTask,
 ) -> RunCleanupDrainOutcome {
@@ -962,6 +964,7 @@ pub(crate) async fn drain_run_cleanup_task_pg(
             }
         }
         match super::runtime::clear_slot_threads_for_runs_pg(
+            row_guard,
             health_registry.clone(),
             pool,
             &slot.agent_id,
@@ -1061,12 +1064,13 @@ pub(crate) async fn drain_run_cleanup_task_pg(
 /// that exists but could not be claimed — someone else owns it, it is backing
 /// off, or it is dead-lettered — is reported as *not* completed.
 pub(crate) async fn drain_run_cleanup_task_by_id_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     task_id: i64,
 ) -> RunCleanupDrainOutcome {
     match claim_run_cleanup_task_pg(pool, task_id).await {
-        Ok(Some(task)) => drain_run_cleanup_task_pg(health_registry, pool, task).await,
+        Ok(Some(task)) => drain_run_cleanup_task_pg(row_guard, health_registry, pool, task).await,
         Ok(None) => match run_cleanup_task_exists_pg(pool, task_id).await {
             // Row gone: a concurrent drain already carried it to completion.
             Ok(false) => RunCleanupDrainOutcome {
@@ -1158,7 +1162,8 @@ impl RunCleanupReplayStats {
 /// work, because each step re-derives its own remaining work from the durable
 /// row rather than from anything the dead process held in memory.
 pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
-    health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
+    row_guard: SlotRowGuard,
+    health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
 ) -> Result<RunCleanupReplayStats, String> {
     let rows = claim_run_cleanup_task_batch_pg(pool).await?;
@@ -1206,7 +1211,8 @@ pub(crate) async fn replay_pending_run_cleanup_tasks_pg(
             }
         };
         stats.drained += 1;
-        let outcome = drain_run_cleanup_task_pg(health_registry.clone(), pool, task).await;
+        let outcome =
+            drain_run_cleanup_task_pg(row_guard, health_registry.clone(), pool, task).await;
         if outcome.completed {
             stats.completed += 1;
         }

@@ -217,7 +217,12 @@ fn owner_tick(pool: &PgPool, now_ms: i64, watch_sql: bool) -> i32 {
     let mut config = crate::config::Config::default();
     config.policies.dir = empty.path().to_path_buf();
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let bridge = crate::supervisor::BridgeHandle::new();
     bridge.attach_engine(&engine);
     let runtime = rquickjs::Runtime::new().unwrap();
@@ -717,7 +722,12 @@ async fn orphan_owner_actor_hook_flushes_deferred_confirmation_pg() {
     let mut config = crate::config::Config::default();
     config.policies.dir = dir.path().to_path_buf();
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_for_tick(&config, Some(pool.clone())).unwrap();
+    let engine = crate::engine::PolicyEngine::new_for_tick(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let hook = crate::engine::hooks::Hook::OnTick30s;
     engine.fire_hook(hook, serde_json::json!({})).unwrap();
     let audit_first: Vec<(String, String, Option<String>, String)> = sqlx::query_as(

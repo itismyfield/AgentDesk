@@ -467,6 +467,7 @@ pub(crate) async fn activate_with_deps_pg(
         let slot_key = (agent_id.clone(), allocation.slot_index);
         if clear_slot_session_before_dispatch && !cleared_slots.contains(&slot_key) {
             match crate::services::auto_queue::runtime::clear_slot_threads_for_slot_pg(
+                deps.slot_row_guard,
                 deps.health_registry.clone(),
                 pool,
                 &agent_id,
@@ -1800,10 +1801,15 @@ mod tests {
 
         fn activate_deps(pool: &PgPool) -> AutoQueueActivateDeps {
             let config = crate::config::Config::default();
-            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-                .expect("create activate policy engine");
+            let engine = crate::engine::PolicyEngine::new_with_pg(
+                &config,
+                Some(pool.clone()),
+                crate::services::discord::health::slot_row_host_refusal,
+            )
+            .expect("create activate policy engine");
             AutoQueueActivateDeps {
                 pg_pool: Some(pool.clone()),
+                slot_row_guard: engine.slot_row_guard(),
                 engine,
                 config: Arc::new(config),
                 health_registry: None,
@@ -2276,10 +2282,15 @@ mod tests {
 
         fn make_deps(pool: &PgPool) -> AutoQueueActivateDeps {
             let config = crate::config::Config::default();
-            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-                .expect("test policy engine");
+            let engine = crate::engine::PolicyEngine::new_with_pg(
+                &config,
+                Some(pool.clone()),
+                crate::services::discord::health::slot_row_host_refusal,
+            )
+            .expect("test policy engine");
             AutoQueueActivateDeps {
                 pg_pool: Some(pool.clone()),
+                slot_row_guard: engine.slot_row_guard(),
                 engine,
                 config: Arc::new(config),
                 health_registry: None,

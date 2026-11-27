@@ -3,8 +3,7 @@ use sqlx::PgPool;
 
 use crate::domain::lifecycle::STALE_TURN_GRACE;
 use crate::domain::session_identity::SessionIdentity;
-use crate::services::discord::relay_recovery::AxisBSite;
-use crate::services::engine_runtime::health_port::StaleSweepPort;
+use crate::services::engine_runtime::health_port::{AxisBSite, StaleSweepPort};
 use crate::services::provider::ProviderKind;
 
 /// The registry an automatic sweep asks for its destructive warrant, as a caller passes it in.
@@ -571,15 +570,7 @@ async fn destructive_warrant_bind(
                 .automatic_stale_sweep_warrants(session_key, provider, site)
                 .await
         }
-        None => {
-            crate::services::discord::relay_recovery::automatic_stale_sweep_warrants(
-                None,
-                session_key,
-                provider,
-                site,
-            )
-            .await
-        }
+        None => site.is_stale_sweep(),
     }
 }
 
