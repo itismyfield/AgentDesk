@@ -219,14 +219,13 @@ async fn idle_tick_durable_input_registration_wakes_the_waiting_actor() {
     use crate::services::tui_input::human_frame::history::v2::native_tests::Fixture;
 
     let channel = 838503;
-    let (harness, _, _, bindings, stop, task) = start_idle(channel);
+    let (_harness, _, _, bindings, stop, task) = start_idle(channel);
     idle_window().await;
     let before = bindings.source_checks.load(Ordering::SeqCst);
-    let _fixture = Fixture::at(
-        harness._runtime.path().join("test-frames.json"),
-        channel,
-        true,
-    );
+    {
+        let root = crate::config::TestRuntimeRootGuard::new();
+        Fixture::at(root.path().join("runtime/test-frames.json"), channel, true);
+    }
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     assert!(bindings.source_checks.load(Ordering::SeqCst) > before);
     halt(stop, task).await;
