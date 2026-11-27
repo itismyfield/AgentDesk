@@ -1,6 +1,7 @@
 //! Exact host observation for a queued start and its held-front watch.
 use super::{
-    ChannelId, ProviderKind, Screen, Shared, TurnHost, Value, claude_handoff, start_target,
+    ChannelId, NativeTarget, ProviderKind, Screen, Shared, TurnHost, Value, claude_handoff,
+    start_target,
 };
 
 pub(super) enum Observed {
@@ -94,6 +95,37 @@ pub(super) async fn observe(shared: &Shared, channel: ChannelId, context: &Value
         BusyState::Busy => Screen::Blocked,
         BusyState::Held | BusyState::Legacy => Screen::Unknown,
     })
+}
+
+pub(super) fn claude_native_read(target: &NativeTarget) -> Screen {
+    use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
+    let resolve = super::super::super::tui_followup::claude_followup_transcript;
+    let (dir, session_id) = (target.dir.as_deref(), target.session_id.as_deref());
+    let Some(path) = resolve(dir, session_id, Some(&target.tmux)) else {
+        return Screen::Unknown;
+    };
+    match observe_claude_jsonl_turn_state(&path) {
+        TuiTurnState::Idle => Screen::Ready,
+        TuiTurnState::Streaming | TuiTurnState::UserSubmitted => Screen::Blocked,
+        TuiTurnState::Unknown if target.host_evidence_only => {
+            if crate::services::claude_tui::readiness::observe(&target.tmux, Some(&path)).is_some()
+            {
+                Screen::Ready
+            } else {
+                Screen::Unknown
+            }
+        }
+        // Session markers with no tool waiting read idle once the composer would take a send.
+        TuiTurnState::Unknown => {
+            use crate::services::claude_tui::input::{
+                final_prompt_ready, prompt_readiness_snapshot,
+            };
+            match final_prompt_ready(&prompt_readiness_snapshot(&target.tmux)) {
+                true => Screen::Ready,
+                false => Screen::Unknown,
+            }
+        }
+    }
 }
 
 #[cfg(test)]

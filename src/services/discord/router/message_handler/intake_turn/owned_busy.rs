@@ -105,9 +105,27 @@ impl OwnerTurn {
         owner: Option<Self>,
         fresh: bool,
     ) -> Result<(Option<Self>, bool), ()> {
-        let Some(owner) = owner else {
+        let Some(mut owner) = owner else {
             return Ok((None, true));
         };
+        if *provider == ProviderKind::Claude
+            && !owner.origin.is_person()
+            && session.is_some_and(|session| !session.is_empty())
+        {
+            let host = crate::services::turn_host::for_observation(
+                shared.pg_pool.as_ref(),
+                provider,
+                channel.get(),
+                key,
+            )
+            .await;
+            if matches!(host, TurnHost::Tmux) {
+                // Dispatch reads this start's current execution before registering its phase.
+                owner.late.own_pane = true;
+                owner.late.host_evidence_only = true;
+                return Ok((Some(owner), false));
+            }
+        }
         if fresh || *provider != ProviderKind::Claude || !owner.origin.joins_running_turn() {
             return Ok((Some(owner), true));
         }
@@ -365,6 +383,7 @@ impl OwnerTurn {
             .as_deref()
             .filter(|session| {
                 *provider == ProviderKind::Claude
+                    && self.origin.is_person()
                     && claude_handoff::observe_busy(
                         channel.get(),
                         session,

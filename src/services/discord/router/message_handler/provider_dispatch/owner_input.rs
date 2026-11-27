@@ -571,6 +571,7 @@ pub(in crate::services::discord) struct OwnerTurn {
 pub(in crate::services::discord) struct LateRead {
     own_pane: bool,
     clear_binding: bool,
+    host_evidence_only: bool,
 }
 
 impl OwnerTurn {
@@ -591,6 +592,7 @@ impl OwnerTurn {
         self.late = LateRead {
             own_pane,
             clear_binding,
+            ..LateRead::default()
         };
     }
 
@@ -845,6 +847,7 @@ async fn start_target(
         dir,
         session_id: session_id.filter(|_| own_pane),
         own_pane,
+        host_evidence_only: false,
     }))
 }
 
@@ -878,12 +881,12 @@ struct NativeTarget {
     dir: Option<String>,
     session_id: Option<String>,
     own_pane: bool,
+    host_evidence_only: bool,
 }
 
 /// One read of a start's pane: gone (dead, absent or another account's), a running native turn, an
 /// idle one, or unknown when the pane or its transcript cannot be read.
 fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
-    use crate::services::tui_turn_state::{TuiTurnState, observe_claude_jsonl_turn_state};
     match crate::services::platform::tmux::pane_liveness(&target.tmux) {
         PaneLiveness::Live => {}
         PaneLiveness::DeadOrAbsent => return Screen::Gone,
@@ -896,25 +899,7 @@ fn native_read(provider: &ProviderKind, target: &NativeTarget) -> Screen {
     if *provider == ProviderKind::Codex {
         return codex_read(target);
     }
-    let resolve = super::super::tui_followup::claude_followup_transcript;
-    let (dir, session_id) = (target.dir.as_deref(), target.session_id.as_deref());
-    let Some(path) = resolve(dir, session_id, Some(&target.tmux)) else {
-        return Screen::Unknown;
-    };
-    match observe_claude_jsonl_turn_state(&path) {
-        TuiTurnState::Idle => Screen::Ready,
-        TuiTurnState::Streaming | TuiTurnState::UserSubmitted => Screen::Blocked,
-        // Session markers with no tool waiting read idle once the composer would take a send.
-        TuiTurnState::Unknown => {
-            use crate::services::claude_tui::input::{
-                final_prompt_ready, prompt_readiness_snapshot,
-            };
-            match final_prompt_ready(&prompt_readiness_snapshot(&target.tmux)) {
-                true => Screen::Ready,
-                false => Screen::Unknown,
-            }
-        }
-    }
+    start_wait::claude_native_read(target)
 }
 
 /// A live Codex pane is idle only once its bound rollout, its hooks and its process prove the
@@ -1228,6 +1213,7 @@ pub(super) fn execute_owned(
             dir: Some(turn.working_dir.to_string()).filter(|dir| !dir.is_empty()),
             session_id: (turn.session_id.filter(|_| late.own_pane)).map(str::to_string),
             own_pane: late.own_pane,
+            host_evidence_only: late.host_evidence_only,
         };
         let screen = native_read(turn.provider, &target);
         read = Some(screen == Screen::Ready);

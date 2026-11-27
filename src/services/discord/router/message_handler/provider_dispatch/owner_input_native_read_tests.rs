@@ -517,6 +517,7 @@ async fn a_late_hold_reads_unknown_until_its_attempt_unwinds() {
         dir: None,
         session_id: None,
         own_pane,
+        host_evidence_only: false,
     };
     let nonce = "late-held-attempt".to_string();
     let read = |mailbox: ChannelMailboxHandle| {

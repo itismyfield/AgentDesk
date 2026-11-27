@@ -99,7 +99,8 @@ fn a_refused_effort_continuation_loses_every_body_copy_across_restart_pg() {
                 tmux: rig.name.clone(),
                 dir: None,
                 session_id: None,
-                own_pane: true
+                own_pane: true,
+                host_evidence_only: false,
             }
         ),
         Wait::Go
