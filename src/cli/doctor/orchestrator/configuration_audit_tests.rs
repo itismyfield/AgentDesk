@@ -5,12 +5,11 @@ use std::collections::BTreeSet;
 fn prompt_fixture() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let repo = temp.path().join("workspaces/agentdesk");
-    let inventory = repo.join("src/server/routes/docs/inventory/endpoints");
+    let inventory = repo.join("docs/data");
     std::fs::create_dir_all(&inventory).unwrap();
-    std::fs::write(inventory.join("mod.rs"), "mod part_01;\n").unwrap();
     std::fs::write(
-        inventory.join("part_01.rs"),
-        "ep(\"POST\", \"/api/discord/send\", \"ops\", \"send\")\n",
+        inventory.join("api-endpoints.json"),
+        r#"[{"method":"POST","path":"/api/discord/send","category":"integrations","subcategory":"discord","description":"send"}]"#,
     )
     .unwrap();
     std::fs::create_dir_all(repo.join("scripts")).unwrap();
@@ -62,7 +61,16 @@ fn missing_unreadable_prompt_or_inventory_is_unavailable_instead_of_pass() {
     assert!(unreadable.status == CheckStatus::Warn);
     assert!(unreadable.detail.contains("inspection_unavailable"));
     std::fs::write(&prompt, "curl http://localhost:1234/api/discord/send").unwrap();
-    std::fs::remove_file(repo.join("src/server/routes/docs/inventory/endpoints/mod.rs")).unwrap();
+    let inventory = repo.join("docs/data/api-endpoints.json");
+    std::fs::write(&inventory, "[").unwrap();
+    let malformed_inventory = prompt_api_routes_check(&repo, &prompts);
+    assert!(malformed_inventory.status == CheckStatus::Warn);
+    assert!(
+        malformed_inventory
+            .detail
+            .contains("inspection_unavailable")
+    );
+    std::fs::remove_file(inventory).unwrap();
     let missing_inventory = prompt_api_routes_check(&repo, &prompts);
     assert!(missing_inventory.status == CheckStatus::Warn);
     assert!(missing_inventory.detail.contains("inspection_unavailable"));

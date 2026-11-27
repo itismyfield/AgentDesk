@@ -154,7 +154,7 @@ G의 수용에서는 키가 있는 격리 harness로 직접 REST **1 request**�
 
 **같은 착지/배포 창에 묶을 것.** I의 409 활성화와 저장소 밖 `create-issue` 스킬 갱신을 코디네이터가 같은 착지에 묶는다. 스킬 문장 메모: “409 duplicate_candidate는 API 장애가 아니다. 레거시 gh issue create 경로로 우회하지 않는다. 후보 확인 뒤 필요한 경우에만 allow_duplicate로 재요청한다. Off/NoAnswer는 기존 검색/자기 판단을 유지한다.” 닫힌 issue 확인도 유지한다. 스킬 갱신 전 409만 먼저 활성화하지 않는다. 본 레인은 저장소 밖 스킬을 수정하지 않는다.
 
-I에는 `issue_create_capabilities()`(`src/server/routes/github.rs:242`)와 API inventory(`src/server/routes/docs/inventory/endpoints/part_05.rs:10`)의 allow_duplicate/409 문서화, 문서 계약 시험(`src/server/routes/docs.rs:876`)도 포함한다. 이 변경과 스킬 갱신 증거를 하나의 활성화 체크리스트로 확인한다.
+I에는 `issue_create_capabilities()`(`src/server/routes/github.rs:242`)와 API inventory(`docs/data/api-endpoints.json`)의 allow_duplicate/409 문서화, 문서 계약 시험(`src/server/routes/docs.rs:876`)도 포함한다. 이 변경과 스킬 갱신 증거를 하나의 활성화 체크리스트로 확인한다.
 
 ### 2.2 S2b 설계 r9 델타 (#7438로 옮길 정본)
 
