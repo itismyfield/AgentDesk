@@ -437,6 +437,14 @@ fn drive_foundation_herdr_host_reads_do_not_touch_the_pane_or_readiness() {
         .open(&source.path)
         .unwrap();
     writeln!(file, "{reply}").unwrap();
+    assert_eq!(context.read_host(true).state_for_test(), BusyState::Busy);
+    writeln!(
+        file,
+        "{}",
+        json!({"type":"system", "subtype":"turn_duration", "sessionId":source.session_id,
+            "timestamp":chrono::Utc::now()})
+    )
+    .unwrap();
     drop(file);
     test_support::daemon_restart(LOGICAL);
     let revisions = test_support::revisions_for_session(LOGICAL);

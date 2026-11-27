@@ -54,18 +54,21 @@ impl ChannelMailboxHandle {
 
 #[tokio::test]
 async fn drive_foundation_snapshot_distinguishes_empty_unadopted_and_blocked() {
-    use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+    use crate::config::TestRuntimeRootGuard;
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_orchestrator::{
+        ChannelMailboxRegistry, pending_queue_persistence::pending_queue_file_path,
+    };
     use poise::serenity_prelude::ChannelId;
 
-    let root = tempfile::tempdir().unwrap();
+    let root = TestRuntimeRootGuard::new();
     let registry = ChannelMailboxRegistry::default();
     let channel = ChannelId::new(7_272_846);
     let handle = registry.handle(channel);
     assert!(handle.v2_work_snapshot().await.is_err());
-    handle
-        .v2_adopt(root.path().join("queue.json"), "fixture".into())
-        .await
-        .unwrap();
+    let path = pending_queue_file_path(&ProviderKind::Claude, "fixture", channel).unwrap();
+    assert!(path.starts_with(root.path()));
+    handle.v2_adopt(path, "fixture".into()).await.unwrap();
     let empty = handle.v2_work_snapshot().await.unwrap();
     assert_eq!((empty.items, empty.blocker, empty.due), (0, None, None));
     assert!(empty.front.is_none() && empty.head.is_none());
