@@ -10,7 +10,6 @@ import { Checkbox } from "../../kit/free/checkbox-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { Select } from "../../kit/free/select-clean";
-import { TextArea } from "../../kit/free/text-area-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import AgentPersona from "../AgentPersona";
 import EmojiPicker from "./EmojiPicker";
@@ -109,7 +108,7 @@ export default function AgentFormModal({
           </div>
         }
       >
-        <div className="grid min-w-0 grid-cols-1 gap-6 sm:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-6">
           <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-basic">
             <h3 id="agent-form-basic" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("기본 정보", "Basics")}</h3>
             <TextField id="agent-name" label={<>{tr("영문 이름", "Name")} <span className="text-(--err)">*</span></>} placeholder="DORO" data-autofocus error={errors.name ? tr("영문 이름을 적어 주세요.", "Enter a name.") : undefined} {...text("name")} />
@@ -129,11 +128,6 @@ export default function AgentFormModal({
                 options={providerCatalog.selectableIds.map((p) => ({ value: p, label: catalogLabel(providerCatalog.entries, p) }))}
               />
             </div>
-          </section>
-
-          <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-details">
-            <h3 id="agent-form-details" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("역할 · 성격", "Role & personality")}</h3>
-            <TextArea id="agent-personality" aria-label={tr("성격", "Personality")} placeholder={tr("전문 분야나 성격을 적어 주세요", "Expertise or personality")} minRows={7} maxRows={14} {...text("personality")} />
           </section>
 
           {isEdit && (
