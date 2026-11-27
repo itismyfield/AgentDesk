@@ -3,6 +3,18 @@
 
 use super::*;
 
+impl Projection {
+    pub fn receipts_for_test(&self, registrations: &[Registration]) -> Vec<MembershipReceipt> {
+        self.receipts(registrations)
+    }
+}
+
+impl Run {
+    pub fn native_id_for_test(&self) -> Option<&str> {
+        self.native_id.as_deref()
+    }
+}
+
 impl Evidence {
     pub fn completed_for_test(
         namespace: String,

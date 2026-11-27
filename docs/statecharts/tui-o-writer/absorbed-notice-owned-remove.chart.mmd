@@ -1,0 +1,53 @@
+---
+title: "Claude 턴 도중 사람 입력 공지"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: restart
+    lg1: posted
+    lg2: active
+  }
+  class lg0 yellow
+  class lg1 teal
+  class lg2 blue
+  s0: 권한 인계 전
+  s1: writer가 공지 권한을 인계받음
+  s2: 큐의 입력이 흡수되길 기다림
+  s3: 원본 행을 spool에 보존
+  s4: 입력 근거를 원장에 기록
+  s5: 원본 spool 재생 대기
+  s6: 등록 입력 실행이 정상 완료됨
+  s7: 흡수 소유 근거로 논리 ID를 원장에서 제외
+  s8: 재생 뒤에도 논리 ID의 제외를 유지
+  s9: 공지 부채 0으로 writer 은퇴 가능
+  [*] --> s0
+  s0 --> s1: 동결 구간을 원장에 기록
+  s1 --> s2: 아직 실행되지 않은 입력을 큐에 기록
+  s2 --> s3: 원본 파일의 완전한 행을 캡처
+  s3 --> s4: 원본 행에서 근거를 기록
+  s3 --> s5: 재시작 후 저장된 원본을 재생
+  s3 --> s6: 실행 경로가 턴 종료와 흡수를 확인
+  s4 --> s7: 정확한 흡수 근거를 논리 입력에 연결
+  s4 --> s6: 실행 경로가 턴 종료와 흡수를 확인
+  s4 --> s5: 재시작 후 저장된 원본을 재생
+  s5 --> s4: 원본 행에서 근거를 기록 or 원본 행을 확인
+  s6 --> s5: 재시작 후 저장된 원본을 재생
+  s4 --> s8: 정확한 흡수 근거를 논리 입력에 연결
+  s7 --> s5: 재시작 후 저장된 원본을 재생
+  s6 --> s7: 정확한 흡수 근거를 논리 입력에 연결
+  s5 --> s6: 원본 행에서 근거를 기록 or 원본 행을 확인
+  s6 --> s8: 정확한 흡수 근거를 논리 입력에 연결
+  s5 --> s8: 원본 행을 확인
+  s5 --> s7: 원본 행을 확인
+  s8 --> s9: 재생을 마친 writer의 최신 공지 부채를 확인
+  s7 --> s8: 원본 행을 확인
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 yellow
+  class s6 blue
+  class s7 teal
+  class s8 teal
+  class s9 teal
