@@ -769,10 +769,15 @@ def _declarations(repo_root, libraries, same_binary=False):
     """Unambiguous declaration key -> (binary, test ID); same_binary keys also hold every test attribute."""
     owners = defaultdict(set)
     declarations = defaultdict(list)
-    for binary, (_, inventory) in libraries.items():
+    for binary, (manifest_dir, inventory) in libraries.items():
+        features = default_features(manifest_dir)
         for file in inventory.modules:
             owners[file].add(binary)
         for name, sites in inventory.tests.items():
+            # A complementary non-test module declaration cannot declare a second lib test.
+            sites = [(site, cfg) for site, cfg in sites
+                     if any(all(cfg_holds(predicate, target, features) is not False for predicate in cfg)
+                            for target in PLATFORMS.values())]
             if len(sites) != 1:
                 continue
             site, cfg = sites[0]

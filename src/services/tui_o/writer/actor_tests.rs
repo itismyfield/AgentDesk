@@ -19,6 +19,10 @@ use super::*;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
+use crate::services::tui_o::writer::test_support::{
+    Actor, FakeBindings, append, bound, event, halt, polls, row, spawn, spawn_as, spawn_with,
+    startup_log, switched_over, switched_over_on, writer_over,
+};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;

@@ -132,7 +132,12 @@ pub(crate) mod tmux_turn_liveness;
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
-pub(crate) use adk_runtime::services::tui_o;
+pub(crate) mod tui_o {
+    pub(crate) use adk_runtime::services::tui_o::{
+        alarm, channel_policy, cutover, exact_episode, exact_pg, exact_submission, ownership,
+        repost, shadow, store, topology, turn_mode, writer,
+    };
+}
 pub(crate) use adk_runtime::services::tui_prompt_control;
 pub(crate) use adk_runtime::services::tui_prompt_dedupe;
 pub(crate) use adk_runtime::services::tui_turn_state;

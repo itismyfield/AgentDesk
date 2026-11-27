@@ -352,7 +352,7 @@ class WriterNamespaceWindowsTargetsTests(unittest.TestCase):
             compiled |= sources.platform_split(inventory, "windows", sources.default_features(manifest.parent))[0]
         names = re.findall(r"test\(=([^)]+)\)", lines[2])
         self.assertTrue(lines[2].startswith("nextest run --workspace --lib "), lines[2])
-        self.assertEqual((len(names), [name for name in names if name not in compiled]), (6, []))
+        self.assertEqual((len(names), [name for name in names if name not in compiled]), (7, []))
 
     def test_wrapper_selects_only_supported_path_interpreter(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
