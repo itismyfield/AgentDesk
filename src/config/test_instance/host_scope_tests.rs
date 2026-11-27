@@ -306,6 +306,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     exercise_owner_receipt(instance);
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 fn exercise_owner_receipt(instance: &'static TestInstance) {
     use crate::services::herdr_launch::HerdrLaunchEndpoint;

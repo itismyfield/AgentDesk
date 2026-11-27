@@ -267,6 +267,7 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(test)]
 fn running() -> Ports {
     let ports = Ports::default();
     ports.herdr.lock().unwrap().alive = true;

@@ -48,6 +48,7 @@ while IFS= read -r line; do
 done
 "#;
 
+#[cfg(test)]
 const QUICK: Deadlines = Deadlines {
     inactivity: Duration::from_secs(2),
     cancel: Duration::from_millis(300),
@@ -144,6 +145,7 @@ pub fn acp_turn(
     })
 }
 
+#[cfg(test)]
 fn run(
     handle: &Handle,
     launch: Launch,
@@ -177,6 +179,7 @@ fn run(
     )
 }
 
+#[cfg(test)]
 fn text(content: &str) -> String {
     format!(
         "{:?}",
@@ -605,6 +608,7 @@ impl Drop for Group {
     }
 }
 
+#[cfg(test)]
 fn write_record(dir: &Path, pid: u32, starttime: Option<u128>, lstart: Option<u128>) -> PathBuf {
     let path = dir.join(child::RECORD);
     let record = serde_json::json!({"pid": pid, "pgid": pid, "starttime": starttime, "macos_lstart_hash": lstart});

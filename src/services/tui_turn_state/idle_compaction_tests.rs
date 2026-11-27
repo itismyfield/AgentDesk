@@ -103,6 +103,7 @@ pub fn measured_compaction_tail(native: &str) -> Vec<Value> {
         .collect()
 }
 
+#[cfg(test)]
 fn observe(records: Vec<Value>) -> TuiTurnState {
     let file = tempfile::NamedTempFile::new().unwrap();
     let text = records

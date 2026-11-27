@@ -13,6 +13,7 @@ pub fn with_instance(test_name: &str, check: impl FnOnce()) {
     check();
 }
 
+#[cfg(test)]
 fn overlay(provider: ProviderKind) -> ProviderAuthOverlay {
     let id = format!("test-{}", provider.as_str());
     resolve(provider, Some(&id), None, &queries::provider_auth_catalog()).unwrap()
@@ -29,6 +30,7 @@ pub fn synthetic_login_shell(root: &Path) -> PathBuf {
     shell
 }
 
+#[cfg(test)]
 fn direct_launch(provider: ProviderKind) {
     use crate::config::TestEnvVarGuard as Guard;
     use crate::services::agent_protocol::StreamMessage;

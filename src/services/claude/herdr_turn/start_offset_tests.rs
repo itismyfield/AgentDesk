@@ -28,6 +28,7 @@ pub(crate) fn poll(path: &Path) {
     }
 }
 
+#[cfg(test)]
 fn token(
     path: &Path,
     at: Option<chrono::DateTime<chrono::Utc>>,
@@ -48,6 +49,7 @@ fn token(
     token
 }
 
+#[cfg(test)]
 fn stamp() -> chrono::DateTime<chrono::Utc> {
     chrono::DateTime::parse_from_rfc3339("2026-10-21T10:16:44.925000001Z")
         .unwrap()
@@ -70,6 +72,7 @@ fn timestamp_eligibility_is_inclusive_and_rejects_metadata_or_earlier_stamps() {
     }
 }
 
+#[cfg(test)]
 fn latch(path: &Path) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
     let (observed_tx, observed_rx) = std::sync::mpsc::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -83,6 +86,7 @@ fn latch(path: &Path) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender
     (observed_rx, release_tx)
 }
 
+#[cfg(test)]
 fn observed(rx: std::sync::mpsc::Receiver<()>) {
     rx.recv_timeout(std::time::Duration::from_secs(5))
         .expect("the reader observed no eligible complete record");

@@ -2,6 +2,7 @@ use super::*;
 use crate::services::claude_tui::input::submission::tests::{ScriptedTmux, view};
 use crate::services::claude_tui::readiness::compact::{Outcome, Pending};
 
+#[cfg(test)]
 fn poll(pending: &mut Pending, session: &str) -> Outcome {
     crate::services::claude_tui::composer_lock::with_composer_permit(session, |permit| {
         pending.poll(permit, |publish| publish())

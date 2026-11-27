@@ -80,10 +80,12 @@ pub async fn move_owner(pool: &PgPool, channel: &str, target: &str) {
     tx.commit().await.unwrap();
 }
 
+#[cfg(test)]
 const STATES: [&str; 8] = [
     "pending", "claimed", "accepted", "spawned", "claimed", "accepted", "spawned", "claimed",
 ];
 
+#[cfg(test)]
 async fn write(pool: &PgPool, id: i64, action: usize) -> Result<bool, sqlx::Error> {
     match action {
         0 => Ok(
@@ -207,6 +209,7 @@ async fn owner_fence_legacy_current_partial_and_target_matrix_pg() {
     pg.drop().await;
 }
 
+#[cfg(test)]
 async fn wait_for_lock(pool: &PgPool, holder: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -234,6 +237,7 @@ async fn owner_fence_sweep_transfer_wait_revalidates_in_repeatable_read_session_
     transfer_wait(&[8, 9]).await;
 }
 
+#[cfg(test)]
 async fn transfer_wait(actions: &[usize]) {
     let pg = TestPostgresDb::create().await;
     let pool = pg.connect_and_migrate().await;
@@ -512,6 +516,7 @@ async fn owner_fence_capacity_and_replay_projection_pg() {
     pg.drop().await;
 }
 
+#[cfg(test)]
 async fn occupancy(pool: &PgPool) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM node_execution_occupancy('fence-worker')")
         .fetch_one(pool)
