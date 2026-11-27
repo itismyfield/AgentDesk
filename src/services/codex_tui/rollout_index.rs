@@ -612,7 +612,7 @@ pub(crate) fn complete_indexed_rollouts(root: &Path) -> std::io::Result<Vec<Inde
     Ok(results)
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn strict_header_reader(file: std::fs::File, _path: &Path) -> std::fs::File {
     file
 }
@@ -629,7 +629,7 @@ pub fn fail_header_reads_for_tests(path: Option<PathBuf>) {
     FAILING_HEADER_READ.with(|slot| *slot.borrow_mut() = path);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn strict_header_reader(file: std::fs::File, path: &Path) -> Box<dyn std::io::Read> {
     struct FailingRead;
     impl std::io::Read for FailingRead {

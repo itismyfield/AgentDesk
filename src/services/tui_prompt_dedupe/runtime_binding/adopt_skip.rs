@@ -102,11 +102,12 @@ type HerdrExecutions = HashMap<String, (String, bool)>;
 static HERDR_EXECUTIONS: LazyLock<Mutex<HerdrExecutions>> = LazyLock::new(Default::default);
 // Until a Herdr pane is listed the hook path reads this flag and takes no lock; tests keep the flag
 // per thread but run the same atomic operations on it.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static LISTED: AtomicBool = AtomicBool::new(false);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static LISTED: AtomicBool = const { AtomicBool::new(false) };
+    #[cfg(test)]
     pub(crate) static HERDR_HOLD_LOOKUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 use std::sync::atomic::{
@@ -115,9 +116,9 @@ use std::sync::atomic::{
 };
 
 fn listed<R>(read: impl FnOnce(&AtomicBool) -> R) -> R {
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return read(&LISTED);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     LISTED.with(read)
 }
 

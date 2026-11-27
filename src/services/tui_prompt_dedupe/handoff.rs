@@ -543,13 +543,13 @@ pub fn codex_restore_has_custody(tmux: &str) -> std::io::Result<bool> {
     Ok(saved_handoff(tmux)?.is_some_and(|saved| !saved.reservation.parked.is_empty()))
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn durable_root() -> Option<std::path::PathBuf> {
     crate::config::runtime_root()
 }
 
 /// Tests mirror only under an explicit root that is not the live release runtime.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn durable_root() -> Option<std::path::PathBuf> {
     let root = std::path::PathBuf::from(std::env::var_os("AGENTDESK_ROOT_DIR")?);
     let live = dirs::home_dir().map(|home| home.join(".adk").join("release"));
