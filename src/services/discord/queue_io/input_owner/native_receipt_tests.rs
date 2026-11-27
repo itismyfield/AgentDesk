@@ -29,7 +29,7 @@ fn binding(session: &str, path: &std::path::Path) {
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(session, path);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, path);
 }
 fn ready() -> SpyGuard {
     SpyGuard::install(SpyState {
@@ -643,7 +643,7 @@ fn p2_new_pane_rearms_a_rejected_token_but_same_pane_cannot() {
         &incarnation.context.execution_nonce,
     )
     .unwrap();
-    crate::services::claude_tui::readiness::tests::pre_source(session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(session, &path);
     tmux.on_enter(&path, &user("own", "new-pane-a"));
     fresh(session, &path, "own", &token).unwrap();
     assert!(

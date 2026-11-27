@@ -100,7 +100,7 @@ impl ProofCache {
         result
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn poison_for_test(&self) {
         let _guard = self.state.lock().expect("test cache lock");
         panic!("injected cache failure");

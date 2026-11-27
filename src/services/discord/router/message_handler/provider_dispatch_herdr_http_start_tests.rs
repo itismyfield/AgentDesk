@@ -736,7 +736,7 @@ fn external_herdr_http_driver_rechecks_idle_after_its_new_reservation_pg() {
         }))).unwrap();
         if !owned || seen.swap(true, Ordering::SeqCst) { return; }
         let (path, native, reserved) = (path.clone(), native.clone(), reserved.clone());
-        crate::services::claude_tui::readiness::tests::clear_tests::after_next_reserve(move || {
+        crate::services::claude_tui::readiness::test_support::after_next_reserve(move || {
             append(&path, &[
                 json!({"type":"user","uuid":uuid(),"sessionId":native,"message":{"role":"user","content":"native turn wins"}}),
                 json!({"type":"assistant","uuid":uuid(),"sessionId":native,"message":{"id":uuid(),"role":"assistant","content":[{"type":"text","text":"working"}]}}),

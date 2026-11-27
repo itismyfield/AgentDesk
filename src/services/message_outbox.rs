@@ -599,7 +599,7 @@ async fn enqueue_outbox_pg_on_tx_with_ttl_origin(
     Ok(id)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn monitor_alert_rows_for_test(
     pool: &PgPool,
 ) -> Result<Vec<(String, String, String, String, String, String, bool)>, sqlx::Error> {

@@ -153,7 +153,7 @@ impl WatcherSoftTerminalAuthority {
     /// `data_start_offset <= turn_start_offset < current_offset`. That is the
     /// same expression `pinned_finalize_user_msg_id` and the watcher-yield
     /// guard (`tmux.rs` `watcher_should_yield_to_inflight_state`) already use,
-    /// so the three cannot disagree, and it survives a redrive rewind. It stays
+    /// and it survives a redrive rewind. It stays
     /// discriminating in both directions: a historical row that started BEFORE
     /// this frame and a newer follow-up row that starts AT/AFTER the consumed
     /// offset are both outside the range and refused.
@@ -186,6 +186,37 @@ impl WatcherSoftTerminalAuthority {
             return Err(SoftTerminalAuthorityDenial::TurnNonceMismatch);
         }
         Ok(())
+    }
+
+    pub(in crate::services::discord::tmux::tmux_watcher) fn herdr_suffix_execution<'a>(
+        &self,
+        row: &'a crate::services::discord::inflight::InflightTurnState,
+        output_path: &str,
+        frame_file: (u64, u64),
+        consumed: std::ops::Range<u64>,
+    ) -> Option<&'a str> {
+        use crate::services::agent_protocol::RuntimeHandoffKind;
+        use crate::services::discord::inflight::RelayOwnerKind;
+
+        // Claude prelaunch seeds zero without a path. The handoff cursor may already be at EOF.
+        let saved = row.herdr_turn_start.as_ref()?;
+        let nonce = Some(saved.turn_nonce.as_str());
+        let execution = saved.start.execution_nonce.as_str();
+        let frame_start = self.data_start_offset.max(consumed.start);
+        (row.runtime_kind == Some(RuntimeHandoffKind::ClaudeTui)
+            && row.effective_relay_owner_kind() == RelayOwnerKind::Watcher
+            && row.turn_start_offset == Some(0)
+            && self.data_start_offset > 0
+            && !saved.turn_nonce.is_empty()
+            && self.watcher_turn_nonce.as_deref() == nonce
+            && row.turn_nonce.as_deref() == nonce
+            && !execution.is_empty()
+            && row.hosted_execution_nonce.as_deref() == Some(execution)
+            && row.output_path.as_deref() == Some(output_path)
+            && saved.start.source == std::path::Path::new(output_path)
+            && saved.start.file == Some(frame_file)
+            && (frame_start..consumed.end).contains(&saved.start.offset))
+        .then_some(execution)
     }
 
     /// #5464 T5 C1 (#5071 AC1): the same six-conjunct decision, with the ONE
@@ -235,5 +266,98 @@ impl WatcherSoftTerminalAuthority {
             Err(SoftTerminalAuthorityDenial::NoInflightRow) if rowless_delivery_authority => Ok(()),
             other => other,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::inflight::{InflightTurnState, RelayOwnerKind};
+    use crate::services::provider::ProviderKind;
+
+    #[test]
+    fn i8432_herdr_suffix_requires_the_watcher_episode_file_and_byte_range() {
+        let session = "i8432-claude";
+        let path = "/fixture/claude.jsonl";
+        let mut row = InflightTurnState::new(
+            ProviderKind::Claude,
+            42,
+            None,
+            7,
+            8,
+            0,
+            "input".into(),
+            None,
+            Some(session.into()),
+            Some(path.into()),
+            None,
+            0,
+        );
+        row.runtime_kind = Some(RuntimeHandoffKind::ClaudeTui);
+        row.turn_nonce = Some("turn-a".into());
+        row.hosted_execution_nonce = Some("execution-a".into());
+        row.set_relay_owner_kind(RelayOwnerKind::Watcher);
+        row.herdr_turn_start = Some(
+            serde_json::from_value(serde_json::json!({
+                "turn_nonce": "turn-a",
+                "execution_nonce": "execution-a",
+                "source": path,
+                "file": [7, 8],
+                "offset": 100
+            }))
+            .unwrap(),
+        );
+        let binding = watcher_soft_terminal_has_turn_authority(None, session, 100, Some("turn-a"));
+        let alternate =
+            watcher_soft_terminal_has_turn_authority(None, session, 100, Some("turn-b"));
+
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            Some("execution-a")
+        );
+        assert_eq!(
+            alternate.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            None
+        );
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 9), 100..101),
+            None
+        );
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, "/fixture/other.jsonl", (7, 8), 100..101),
+            None
+        );
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..100),
+            None
+        );
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 101..102),
+            None
+        );
+        row.hosted_execution_nonce = Some("execution-b".into());
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            None
+        );
+        row.hosted_execution_nonce = Some("execution-a".into());
+        row.turn_nonce = Some("turn-b".into());
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            None
+        );
+        row.turn_nonce = Some("turn-a".into());
+        row.turn_start_offset = Some(101);
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            None
+        );
+        row.turn_start_offset = Some(0);
+        row.set_relay_owner_kind(RelayOwnerKind::StandbyRelay);
+        assert_eq!(
+            binding.herdr_suffix_execution(&row, path, (7, 8), 100..101),
+            None
+        );
     }
 }

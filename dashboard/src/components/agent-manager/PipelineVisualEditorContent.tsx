@@ -29,15 +29,26 @@ export default function PipelineVisualEditorContent({ ctx, actions }: Props) {
         >
           {!ctx.isFsmVariant && (
             <div className="flex flex-wrap items-center gap-2">
-              <button onClick={actions.addState} className="rounded-xl border px-3 py-1.5 text-xs font-medium" style={BUTTON_INFO_STYLE}>
+              <button
+                type="button"
+                onClick={actions.addState}
+                className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs font-medium"
+                style={BUTTON_INFO_STYLE}
+              >
                 + {tr("상태", "State")}
               </button>
-              <button onClick={actions.addTransition} className="rounded-xl border px-3 py-1.5 text-xs font-medium" style={BUTTON_ACCENT_STYLE}>
+              <button
+                type="button"
+                onClick={actions.addTransition}
+                className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs font-medium"
+                style={BUTTON_ACCENT_STYLE}
+              >
                 + {tr("전환", "Transition")}
               </button>
               <button
+                type="button"
                 onClick={() => actions.setSelection({ kind: "phase_gate" })}
-                className="rounded-xl border px-3 py-1.5 text-xs font-medium"
+                className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs font-medium"
                 style={BUTTON_WARN_STYLE}
               >
                 {tr("단계 관문", "Phase Gate")}

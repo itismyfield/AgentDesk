@@ -741,6 +741,11 @@ input-single-path/HerdrSyntheticStartRetireUnderTurn.cfg	HerdrSyntheticStart	NoA
 input-single-path/HerdrSyntheticStartTmuxBusy.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartTmuxDead.cfg	HerdrSyntheticStart	-	-
 input-single-path/HerdrSyntheticStartTmuxNoPresenceWake.cfg	HerdrSyntheticStart	NoDeadlock	OwnedStartDelivered,SyntheticSettles
+input-single-path/HerdrWatcherCompletionAfter.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionBefore.cfg	HerdrWatcherCompletion	NoSilentLoss	HeldEventuallyDelivered
+input-single-path/HerdrWatcherCompletionBoundaries.cfg	HerdrWatcherCompletion	-	-
+input-single-path/HerdrWatcherCompletionIgnoreIdentity.cfg	HerdrWatcherCompletion	ExactFrameAuthority	-
+input-single-path/HerdrWatcherCompletionRestart.cfg	HerdrWatcherCompletion	-	-
 input-single-path/I7651RestartAfter.cfg	I7651Restart	-	-
 input-single-path/I7651RestartBlindRetry.cfg	I7651Restart	ClosedNoticeWasDelivered,NoticeAtMostOnce	-
 input-single-path/I7651RestartDecisive.cfg	I7651Restart	-	-
@@ -1891,6 +1896,9 @@ session-lifecycle/HerdrRetiredRowNewTurnBefore.cfg	HerdrRetiredRow	LostReaderNev
 session-lifecycle/HerdrRetiredRowNewTurnFlushBefore.cfg	HerdrRetiredRow	LostReaderNeverWrites,NoRevival,EndedTurnNotSelectable,NewTurnRowNotOverwritten	-
 session-lifecycle/HerdrRetiredRowNewTurnToolBefore.cfg	HerdrRetiredRow	LostReaderNeverWrites,NewTurnRowNotOverwritten	RowSettles
 session-lifecycle/HerdrRetiredRowNoNonce.cfg	HerdrRetiredRow	LostReaderNeverWrites,NewTurnNotRefused,NoRevival,EndedTurnNotSelectable,NewTurnRowNotOverwritten	RowSettles
+session-lifecycle/HerdrRetiredRowNoticeCurrent.cfg	HerdrRetiredRowNotice	NoticeExactlyOnce	-
+session-lifecycle/HerdrRetiredRowNoticeNoRecord.cfg	HerdrRetiredRowNotice	NoticeExactlyOnce	-
+session-lifecycle/HerdrRetiredRowNoticeTarget.cfg	HerdrRetiredRowNotice	-	-
 session-lifecycle/HerdrRetiredRowRestart.cfg	HerdrRetiredRow	LostReaderNeverWrites,NoRevival,EndedTurnNotSelectable	-
 session-lifecycle/HerdrRootBefore.cfg	HerdrRootRecovery	-	ReplacedInputProgress
 session-lifecycle/HerdrRootFixed.cfg	HerdrRootRecovery	-	-

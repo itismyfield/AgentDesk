@@ -17,7 +17,7 @@ pub(crate) struct GrantRestoration {
 }
 
 impl GrantRestoration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_grants(grants: Vec<LaunchAdmissionGrant>) -> Self {
         let mut grouped: HashMap<HerdrLaunchEndpoint, Vec<LaunchAdmissionGrant>> = HashMap::new();
         for grant in grants {

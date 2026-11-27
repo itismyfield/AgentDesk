@@ -497,7 +497,7 @@ static PID_DISPATCH_BARRIERS: std::sync::Mutex<
     )>,
 > = std::sync::Mutex::new(None);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn with_executor_dispatch_seam(test: impl FnOnce()) {
     use std::sync::{Mutex, OnceLock};
 

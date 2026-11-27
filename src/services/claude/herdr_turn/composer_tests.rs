@@ -152,7 +152,7 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
             physical: None,
         };
         let path = attached.transcript.clone();
-        crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+        crate::services::claude_tui::readiness::test_support::pre_source(logical, &path);
         if name == "busy" {
             std::fs::write(
                 &path,
@@ -204,7 +204,7 @@ fn herdr_claude_entry_holds_draft_modal_busy_and_failed_capture_without_paste_or
         TuiInputAction::PasteBuffer("after human draft".into()),
         TuiInputAction::Enter,
     ];
-    crate::services::claude_tui::readiness::tests::pre_source(
+    crate::services::claude_tui::readiness::test_support::pre_source(
         logical,
         &root.path().join("same-transcript.jsonl"),
     );
@@ -247,7 +247,7 @@ fn herdr_claude_composer_waits_from_busy_to_ready_before_exactly_one_submit() {
         TuiInputAction::Enter,
     ];
     let path = root.path().join("live-turn.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(logical, &path);
     std::fs::write(
         &path,
         "{\"type\":\"assistant\",\"message\":{\"content\":\"running\"}}\n",
@@ -344,7 +344,7 @@ fn an_exit_is_never_sent_over_a_stashed_draft() {
                 let source = tempfile::tempdir().unwrap();
                 let logical = format!("stash-composer-{i}");
                 let path = source.path().join("turn.jsonl");
-                crate::services::claude_tui::readiness::tests::pre_source(&logical, &path);
+                crate::services::claude_tui::readiness::test_support::pre_source(&logical, &path);
                 when_idle(&logical, &path, capture, None, send)
             }
         };
@@ -371,7 +371,7 @@ fn herdr_ready_revalidates_a_source_changed_by_the_capture_before_any_key() {
         crate::services::herdr_admission::Admission::new(true, Some(root.path().join("no-stop"))),
     );
     let path = root.path().join("original.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(logical, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(logical, &path);
     let original = path.clone();
     std::fs::write(
         &path,
@@ -627,7 +627,7 @@ fn a_pane_that_outlived_the_restart_takes_one_input_only_on_an_idle_screen() {
                 relay_last_offset: None,
             },
         );
-        readiness::tests::daemon_restart(&logical);
+        readiness::test_support::daemon_restart(&logical);
         assert!(
             readiness::observe(&logical, Some(&path)).is_none(),
             "{name}: the shared observe keeps the restart floor"
@@ -765,7 +765,7 @@ fn a_held_first_input_names_its_wait_and_a_lost_older_source_settles() {
             std::fs::write(marker, value).unwrap();
         }
         let (_owner, target) = bound_target(&rig, &logical);
-        readiness::tests::daemon_restart(&logical);
+        readiness::test_support::daemon_restart(&logical);
         if bound {
             tui_prompt_dedupe::register_tmux_runtime_binding(
                 &logical,

@@ -1,7 +1,7 @@
 import { useId, useMemo, useRef, type KeyboardEvent } from "react";
 import { Pencil, Plus, Search, UsersRound, X } from "lucide-react";
 import { formatElapsedCompact } from "../../agent-insights";
-import type { Agent, Department, DispatchedSession } from "../../types";
+import type { Agent, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { isTestAgent } from "../../lib/agentHelpers";
 import { Button } from "../../kit/free/button-clean";
@@ -31,13 +31,10 @@ interface AgentsTabProps {
   tr: Translator;
   locale: string;
   isKo: boolean;
-  /** Every agent with its home state, plus home's department-only session stand-ins (counted, never listed). */
+  /** Every agent with its home state. */
   entries: HomeAgent[];
   /** The entries the filters keep, in list order. */
   sortedEntries: HomeAgent[];
-  departments: Department[];
-  deptTab: string;
-  setDeptTab: (deptId: string) => void;
   search: string;
   setSearch: (next: string) => void;
   statusFilter: AgentStatusFilter;
@@ -53,7 +50,6 @@ interface AgentsTabProps {
   onCreateAgent: () => void;
   onEditAgent: (agent: Agent) => void;
   onDuplicateAgent: (agent: Agent) => void;
-  onEditDepartment: (department: Department) => void;
   onDeleteAgent: (agentId: string) => void;
   onAgentUpdated: () => void;
   saving: boolean;
@@ -69,9 +65,6 @@ export default function AgentsTab({
   isKo,
   entries,
   sortedEntries,
-  departments,
-  deptTab,
-  setDeptTab,
   search,
   setSearch,
   statusFilter,
@@ -93,10 +86,8 @@ export default function AgentsTab({
   const isMobile = useIsMobile();
   const panelId = useId();
   const listRef = useRef<HTMLUListElement>(null);
-  // Home's counted set; the rows and everything about real agents leave the stand-ins out.
   const counted = useMemo(() => entries.filter((entry) => isListedAgent(entry.agent, includeTests)), [entries, includeTests]);
   const listed = useMemo(() => counted.filter((entry) => !isStandIn(entry.agent)), [counted]);
-  const standIns = counted.length - listed.length;
   const listedAgents = useMemo(() => listed.map((entry) => entry.agent), [listed]);
   const testAgentCount = entries.filter((entry) => isTestAgent(entry.agent)).length;
   const attention = useAgentsAttention(listedAgents, tr, isKo);
@@ -108,16 +99,14 @@ export default function AgentsTab({
   const bound = useMemo(() => (shared.bindings ? new Set(shared.bindings.map((binding) => binding.agentId)) : null), [shared.bindings]);
   // Phones show no tool line, so they read no turns either (as home).
   const turns = useAgentTurns(isMobile ? [] : listed.filter((entry) => entry.state === "working").map((entry) => entry.agent.id));
-  const departmentById = useMemo(() => new Map(departments.map((department) => [department.id, department])), [departments]);
-  const known = useMemo(() => new Set(departmentById.keys()), [departmentById]);
 
   // Tab counts follow the other filters, so each number is what that tab would show.
   const statusCounts = useMemo(() => {
-    const base = filterAgents(entries, { deptTab, statusFilter: "all", search, includeTests, departments: known });
+    const base = filterAgents(entries, { statusFilter: "all", search, includeTests });
     const counts: Record<string, number> = { all: base.length };
     for (const { state } of base) counts[state] = (counts[state] ?? 0) + 1;
     return counts;
-  }, [entries, deptTab, includeTests, search, known]);
+  }, [entries, includeTests, search]);
   const legend = AGENT_STATES.filter((state) => state !== "unknown" || statusCounts.unknown);
   // A picked tab stays while its count drops to zero, so the filter never hides behind a vanished tab.
   const statusKeys: AgentStatusFilter[] = ["all", ...AGENT_STATES.filter((state) => legend.includes(state) || state === statusFilter)];
@@ -125,7 +114,7 @@ export default function AgentsTab({
   const selectedEntry = entries.find((entry) => entry.agent.id === selectedAgentId);
   const selected = selectedEntry?.agent ?? null;
   const reasons = attention.entries.find((entry) => entry.agent.id === selectedAgentId)?.reasons ?? [];
-  const filtersActive = search.trim() !== "" || statusFilter !== "all" || deptTab !== "all";
+  const filtersActive = search.trim() !== "" || statusFilter !== "all";
 
   const lineOf = (entry: HomeAgent) => {
     const view = monitorView(turns.get(entry.agent.id), entry, tr);
@@ -205,7 +194,6 @@ export default function AgentsTab({
               onClick={() => {
                 setSearch("");
                 setStatusFilter("all");
-                setDeptTab("all");
               }}
             >
               {tr("조건 지우기", "Clear filters")}
@@ -220,7 +208,6 @@ export default function AgentsTab({
             <AgentRow
               entry={entry}
               line={lineOf(entry)}
-              department={entry.agent.department_id ? departmentById.get(entry.agent.department_id) : undefined}
               warn={needsCheck(entry.agent)}
               locale={locale}
               tr={tr}
@@ -260,11 +247,6 @@ export default function AgentsTab({
             testId="agents-roster"
           >
             <div className="@container flex min-w-0 flex-col gap-2 border-t border-(--line-soft) px-3 py-3 sm:px-4">
-              {standIns > 0 ? (
-                <Cap data-testid="agents-stand-ins">
-                  {tr(`수에는 에이전트에 연결되지 않은 세션 ${standIns}개도 들어 있어요(홈과 같은 기준).`, `Counts include ${standIns} sessions without a linked agent, as on home.`)}
-                </Cap>
-              ) : null}
               {attention.status === "empty" ? (
                 <Cap data-testid="agents-attention-empty">{tr("막히거나 실패한 에이전트가 없어요.", "No agent is stuck or failing.")}</Cap>
               ) : null}
@@ -283,7 +265,7 @@ export default function AgentsTab({
                 {isMobile ? null : (
                   <Select
                     aria-label={tr("에이전트 정렬", "Sort agents")}
-                    value={sortMode === "department" ? "status" : sortMode}
+                    value={sortMode}
                     onChange={(value) => setSortMode(value as AgentSortMode)}
                     className="min-w-0"
                     options={[
@@ -352,7 +334,6 @@ export default function AgentsTab({
                 isKo={isKo}
                 locale={locale}
                 tr={tr}
-                departments={departments}
                 onAgentUpdated={onAgentUpdated}
                 actions={detailActions(selected, true)}
                 shared={shared}
@@ -363,7 +344,6 @@ export default function AgentsTab({
               <AgentsSummaryPane
                 counted={counted}
                 entries={listed}
-                departments={departments}
                 locale={locale}
                 tr={tr}
                 isKo={isKo}
@@ -382,7 +362,6 @@ export default function AgentsTab({
           isKo={isKo}
           locale={locale}
           tr={tr}
-          departments={departments}
           onClose={() => onSelectAgent(null)}
           onAgentUpdated={onAgentUpdated}
           backLabel={tr("목록으로", "Back to list")}

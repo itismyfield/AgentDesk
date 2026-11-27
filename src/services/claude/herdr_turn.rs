@@ -5,9 +5,9 @@ mod first_input;
 mod handoff;
 pub(crate) mod hold_record;
 pub(crate) mod hold_resolve;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use first_input::owned_pending_prompt_for_tests;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::regression_tests::regression_attached;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use first_input::{
@@ -237,7 +237,7 @@ mod attached {
 }
 
 /// A test's attached Herdr execution handed to the owner hook on this thread, unobserved.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn owned_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
@@ -258,7 +258,7 @@ pub(crate) fn owned_prompt_for_tests(
     first_input::submit_owned(turn, hook, (lineage, None), attached, &sender).map(drop)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn observe_cold_prompt_for_tests(
     turn: &HerdrTurn<'_>,
     record: &HostedExecution,
@@ -856,7 +856,7 @@ impl HerdrTurnLines {
 }
 
 /// The typed frame the Herdr reader would send for `transcript` read from `start`, for admission tests.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn herdr_terminal_frame(
     transcript: &str,
     start: u64,
@@ -961,7 +961,7 @@ pub(crate) fn take_owner_bound_failure() -> bool {
     OWNER_BOUND_FAILURE.with(|flag| flag.replace(false))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use super::tui_session_launch::prepare_claude_herdr_launch as prepare_herdr_for_login_test;
 
 /// Admission is checked on every first-input effect, including already attached executions.

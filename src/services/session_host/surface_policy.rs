@@ -147,7 +147,7 @@ impl InitScope {
         self.kinds.get(&channel).copied()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn fixture(channels: &[u64]) -> Self {
         Self {
             bindings: channels.iter().copied().collect(),

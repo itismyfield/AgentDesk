@@ -17,7 +17,7 @@ use crate::services::discord::queue_io::input_owner::effect::{
     self, BusyClaude, BusyCodex, BusyCodexHerdr, Clock, CodexInput, Completion, PreparedPayload,
 };
 use crate::services::discord::queue_io::input_owner::origin::{Execution, InputOrigin};
-use crate::services::discord::queue_io::input_owner::{held_watch, pump, target};
+use crate::services::discord::queue_io::input_owner::{held_watch, pump, restart_seed, target};
 use crate::services::discord::router::intake_dispatch::WRITER_HELD;
 use crate::services::platform::tmux::PaneLiveness;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -1473,13 +1473,19 @@ fn take_owned(
     )?;
     if let Some(wanted) = handed_over(route, turn.provider.as_str()) {
         let owner = turn.tmux_session_name.map(str::to_owned);
+        let seed = (front.as_ref()).filter(|_| registration.origin == InputOrigin::RestartSeed);
+        let seed = seed.map(|claim| restart_seed::successor(&registration.mailbox, claim));
         let hook = created(
             registration,
             turn.prompt.into(),
             (wanted, owner),
             (front, reply),
         );
-        return Some(Taken::Launch(scope::install_launch(hook)));
+        let launch = scope::install_launch(hook);
+        if let Some(record) = seed {
+            scope::install_successor(record);
+        }
+        return Some(Taken::Launch(launch));
     }
     // An idle pane runs a new turn, so it holds the node's execution capacity until that AI turn
     // ends; a busy pane writes into the turn that already holds it.

@@ -18,7 +18,7 @@ import {
 
 interface Props {
   sessions: DispatchedSession[];
-  departments: Department[];
+  departments?: Department[];
   locale: string;
   tr: Translator;
   isKo: boolean;
@@ -26,7 +26,7 @@ interface Props {
 }
 
 /** Live sessions no agent owns, one row each; a row opens live output preview + server fields, and stale rows offer one-click reconciliation. */
-export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessionsChange }: Props) {
+export function SessionPanel({ sessions, locale, tr, isKo, onSessionsChange }: Props) {
   const baseId = useId();
   const [open, setOpen] = useState<string | null>(null);
   const [reconcilingKey, setReconcilingKey] = useState<string | null>(null);
@@ -72,8 +72,8 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
     <div data-testid="agents-sessions" className="flex min-w-0 flex-col gap-3">
       <Cap className="block">
         {tr(
-          "에이전트에 연결되지 않은 채 열려 있는 세션이에요. 세션을 에이전트나 부서에 붙이는 저장은 아직 지원하지 않으며, 행을 열면 실시간 출력을 확인하고 멈춘 턴을 바로 정리할 수 있어요.",
-          "Open sessions no agent owns. Saving an agent or department assignment is not supported yet; expand a row to preview live output or reconcile stale turns.",
+          "에이전트에 연결되지 않은 채 열려 있는 세션이에요. 세션을 에이전트에 붙이는 저장은 아직 지원하지 않으며, 행을 열면 실시간 출력을 확인하고 멈춘 턴을 바로 정리할 수 있어요.",
+          "Open sessions no agent owns. Saving an agent assignment is not supported yet; expand a row to preview live output or reconcile stale turns.",
         )}
       </Cap>
       <ul className="m-0 min-w-0 list-none overflow-hidden rounded-(--r-md) border border-(--line-soft) bg-(--bg-2) p-0">
@@ -114,7 +114,7 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
                 ) : null}
               </div>
               {note && note !== "ok" ? <Cap className="block bg-(--bg-1) px-3 py-1.5 text-(--warn) sm:px-4" role="status">{note}</Cap> : null}
-              {expanded ? <SessionInfoCard id={detailId} session={session} departments={departments} locale={locale} tr={tr} isKo={isKo} /> : null}
+              {expanded ? <SessionInfoCard id={detailId} session={session} locale={locale} tr={tr} isKo={isKo} /> : null}
             </li>
           );
         })}

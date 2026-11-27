@@ -21,7 +21,7 @@ pub(crate) fn execution_closing(nonce: &str) -> bool {
 }
 
 /// Test seam: leaves execution `nonce` shut, as a termination that sent its close does.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn shut_execution_for_test(nonce: &str) {
     let key = |part: &str| part.to_string();
     let fence = super::fence_at((

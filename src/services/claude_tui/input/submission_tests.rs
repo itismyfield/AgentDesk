@@ -199,7 +199,7 @@ fn events_in(file: &Path) -> Vec<String> {
 }
 
 fn request(session: &str) -> Request<'_> {
-    crate::services::claude_tui::readiness::tests::idle_fixture(session);
+    crate::services::claude_tui::readiness::test_support::idle_fixture(session);
     Request {
         session,
         prompt: PROMPT,
@@ -606,7 +606,7 @@ fn fresh_pane_waits_before_one_submission_on_listed_and_unlisted_channels() {
                     relay_last_offset: None,
                 },
             );
-            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+            crate::services::claude_tui::readiness::test_support::pre_source(&name, &transcript);
             let token = Arc::new(CancelToken::new());
             let (stop, stopped) = std::sync::mpsc::channel();
             let timer_token = token.clone();
@@ -775,7 +775,7 @@ esac
         "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
     )
     .unwrap();
-    crate::services::claude_tui::readiness::tests::pre_source("scripted-idle", &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source("scripted-idle", &transcript);
     let request = request("scripted-idle");
     let authority = Authority {
         admitted: Cell::new(true),
@@ -904,7 +904,7 @@ fn every_entry_on_an_unlisted_channel_takes_the_one_submission() {
         for managed in [false, true] {
             for (label, send) in entries {
                 let session = format!("one-path-{label}-{managed}-{n}");
-                crate::services::claude_tui::readiness::tests::idle_fixture(&session);
+                crate::services::claude_tui::readiness::test_support::idle_fixture(&session);
                 tmux.clear();
                 let spy = SpyGuard::install(SpyState {
                     captures: std::iter::repeat_n(Some(IDLE.to_string()), 64).collect(),
@@ -1040,7 +1040,10 @@ fn fresh_swallowed_enter_preserves_payload_and_never_retries() {
                 relay_last_offset: None,
             },
         );
-        crate::services::claude_tui::readiness::tests::pre_source(&name, &root.join("transcript"));
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            &name,
+            &root.join("transcript"),
+        );
         let send = || {
             crate::services::claude_tui::input::send_prompt_with_readiness(
                 &name,
@@ -1081,7 +1084,7 @@ mod first_key_gate;
 pub(crate) fn gated_warm_write(token: &Arc<CancelToken>, stop: bool) -> Vec<String> {
     use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
     let tmux = ScriptedTmux::new(&view("", false));
-    crate::services::claude_tui::readiness::tests::idle_fixture("gated-warm");
+    crate::services::claude_tui::readiness::test_support::idle_fixture("gated-warm");
     let stopper = stop.then(|| {
         let (held, go) = tmux.hold_first("capture-pane");
         let token = token.clone();

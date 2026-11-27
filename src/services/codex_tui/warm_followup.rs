@@ -4,7 +4,7 @@ mod submit;
 #[cfg(unix)]
 use submit::settle_submit;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use submit::{settle_submit_for_test, tests::install_clear_end};
+pub(crate) use submit::{settle_submit_for_test, test_support::install_clear_end};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};

@@ -339,14 +339,14 @@ impl InputTransport for HerdrInput<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static INJECTED: std::cell::RefCell<Option<Box<dyn InputTransport>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 fn with_transport<R>(operation: impl FnOnce(&mut dyn InputTransport) -> R) -> R {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(mut injected) = INJECTED.with(|slot| slot.borrow_mut().take()) {
         let result = operation(injected.as_mut());
         INJECTED.with(|slot| *slot.borrow_mut() = Some(injected));
@@ -838,13 +838,13 @@ pub(crate) fn classify(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use spy::{FakeDraftPane, watch_actions};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use spy::{SpyGuard, SpyState};
 
 /// Recording transport the Claude TUI input tests install in place of tmux.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;

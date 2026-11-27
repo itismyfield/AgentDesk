@@ -27,7 +27,7 @@ pub mod watcher_latency;
 mod emit;
 /// Emit-surface scenarios for the capture stress tests mounted in the services test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use emit::tests as emit_fixtures;
+pub(crate) use emit::test_support as emit_fixtures;
 mod helpers;
 mod pg_io;
 mod relay_signal_alert;
@@ -50,7 +50,7 @@ pub use emit::{
 // #3561 — operator relay-loss signal monitor. Driven by the hourly
 // `RelaySignalAlerterJob` maintenance job (see `server::maintenance`). #5993:
 // reports are WARN lines plus observability events, never Discord messages.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use relay_signal_alert::idle_cleanup_preserved_count;
 pub(crate) use relay_signal_alert::{
     record_idle_cleanup_preserved, report_relay_signal_threshold_crossings_pg,
@@ -466,7 +466,7 @@ pub fn init_observability(pg_pool: Option<PgPool>) {
     events::ensure_flusher();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_for_tests() {
     let runtime = runtime();
     runtime.counters.clear();
@@ -479,7 +479,7 @@ pub(crate) fn reset_for_tests() {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use test_support::{lock_env_then_runtime, test_runtime_lock};

@@ -112,7 +112,7 @@ impl HookEventKind {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub(crate) struct HookBroadcastProbe {
     pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
@@ -144,7 +144,7 @@ impl HookServerState {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
         let mut state = Self::new();
         state.claude_projects_root = Some(claude_projects_root);
@@ -211,7 +211,7 @@ pub fn subscribe_hook_events() -> broadcast::Receiver<HookEvent> {
 }
 
 /// Publishes `event` to the live hook subscribers as the receiver would.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn publish_hook_event_for_tests(event: HookEvent) {
     let _ = HOOK_SERVER_STATE.event_tx.send(event);
 }

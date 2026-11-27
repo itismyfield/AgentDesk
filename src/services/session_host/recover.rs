@@ -258,24 +258,24 @@ pub(crate) enum HostRecovery {
     Unknown(HerdrUnknown),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! { static IN_PORT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
 
 /// Whether this thread is inside the recover port, for a fake witness to tell a bypassing caller.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn recover_in_effect() -> bool {
     IN_PORT.get()
 }
 
 pub(super) fn recover(kind: HostKind, request: HostRecover<'_>) -> HostRecovery {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let entered = IN_PORT.replace(true);
     let recovery = match kind {
         HostKind::Herdr => read_herdr(request.record, request.witness),
         // Only a Herdr execution keeps a stored location to read again.
         HostKind::Tmux | HostKind::Process => HostRecovery::Unknown(HerdrUnknown::ProbeFailed),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     IN_PORT.set(entered);
     tracing::debug!(?kind, ?recovery, "host recover read");
     recovery

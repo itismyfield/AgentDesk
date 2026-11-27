@@ -139,7 +139,7 @@ pub(super) fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>, S
 
 /// Test builds: store writes under a directory fail as a full disk would, and recovery attempts
 /// and ledger withdrawals under it are recorded.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod fault {
     use std::io;
     use std::path::{Path, PathBuf};

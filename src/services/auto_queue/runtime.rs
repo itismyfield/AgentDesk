@@ -246,11 +246,9 @@ async fn clear_slot_threads_pg(
     let registry = health_registry.as_deref();
     let (safe_to_clear_thread_ids, verdicts) =
         filter_safe_slot_thread_reset_targets(pool, registry, &target).await?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     for channel in &safe_to_clear_thread_ids {
-        crate::services::discord::admin_host_guard::run_before_verified_clear_recheck_for_tests(
-            *channel,
-        );
+        verified_clear_probe_tests::run_before_verified_clear_recheck_for_tests(*channel);
     }
     let cleared = clear_slot_sessions_with_owner_pg(
         pool,
@@ -621,3 +619,7 @@ pub(crate) mod slot_reset_host_pg_tests;
 #[cfg(unix)]
 #[path = "runtime/verified_reset_pg_tests.rs"]
 pub(crate) mod verified_reset_pg_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "runtime/verified_clear_probe_tests.rs"]
+pub(crate) mod verified_clear_probe_tests;

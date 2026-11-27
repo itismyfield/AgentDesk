@@ -5,7 +5,7 @@ import { ToastOverlay, type Notification } from "../components/NotificationCente
 import { classifyAgents } from "../components/home/homeModel";
 import { useWorkspace } from "../contexts/WorkspaceContext";
 import type { UiLanguage } from "../i18n";
-import type { Agent, Department } from "../types";
+import type { Agent } from "../types";
 import { AppShortcutHelpModal } from "./AppShortcutHelpModal";
 import { AppTweaksPanel } from "./AppTweaksPanel";
 import { PRIMARY_ROUTES } from "./routes";
@@ -27,7 +27,6 @@ export interface AppShellOverlaysContext {
   agentInfoAgent: Agent | null;
   agents: Agent[];
   closeAgentInfo: () => void;
-  departments: Department[];
   dismissNotification: (id: string) => void;
   focused: boolean;
   isKo: boolean;
@@ -57,7 +56,6 @@ export default function AppShellOverlays({ ctx }: { ctx: AppShellOverlaysContext
     agentInfoAgent,
     agents,
     closeAgentInfo,
-    departments,
     dismissNotification,
     focused,
     isKo,
@@ -93,7 +91,6 @@ export default function AppShellOverlays({ ctx }: { ctx: AppShellOverlaysContext
             isKo={isKo}
             locale={locale}
             tr={tr}
-            departments={departments}
             onClose={closeAgentInfo}
             onAgentUpdated={refreshAgents}
           />
@@ -104,7 +101,6 @@ export default function AppShellOverlays({ ctx }: { ctx: AppShellOverlaysContext
         {showCommandPalette && (
           <CommandPalette
             agents={agents}
-            departments={departments}
             sessions={visibleDispatchedSessions}
             isKo={isKo}
             onSelectAgent={openDefaultAgentInfo}
@@ -112,7 +108,6 @@ export default function AppShellOverlays({ ctx }: { ctx: AppShellOverlaysContext
             onNotify={pushNotification}
             onClose={() => setShowCommandPalette(false)}
             routes={PALETTE_ROUTES}
-            departmentRouteId="/agents"
           />
         )}
       </Suspense>

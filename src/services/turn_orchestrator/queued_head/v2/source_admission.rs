@@ -1,6 +1,6 @@
 //! A caller keeps custody until its exact candidate is confirmed, including synthetic inputs.
 use super::*;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -760,7 +760,7 @@ impl Owner {
 }
 
 impl super::super::super::ChannelMailboxHandle {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn v2_admit(
         &self,
         custody: Arc<Mutex<Custody>>,
@@ -778,7 +778,7 @@ impl super::super::super::ChannelMailboxHandle {
 
     /// Admits `original` under the caller's ticket; repeat it with the same ticket after Pending
     /// or a restart. An invalid ticket refuses before the owner is asked.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn v2_admit_ticket(
         &self,
         original: PendingQueueItem,
@@ -841,13 +841,13 @@ impl super::super::super::ChannelMailboxHandle {
 
     /// Test fixture: reserves the queue head under `nonce` and arms it, as a pump does before its
     /// effect; an already reserved head is only armed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn v2_arm_head_for_tests(&self, nonce: &str) -> Result<(), String> {
         self.v2_reserve_head_for_tests(nonce, true).await
     }
 
     /// Test fixture: reserves the queue head under `nonce`, arming it when `arm` is set.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn v2_reserve_head_for_tests(
         &self,
         nonce: &str,
