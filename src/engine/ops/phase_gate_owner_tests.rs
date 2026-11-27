@@ -42,7 +42,7 @@ impl Policy {
         });
         let policy = load_single_policy(
             &context,
-            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/auto-queue.js"),
+            &std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies/auto-queue.js"),
         )
         .unwrap();
         Self {

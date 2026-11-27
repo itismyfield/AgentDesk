@@ -536,7 +536,8 @@ mod tests {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let mut config = crate::config::Config::default();
-        config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+        config.policies.dir =
+            std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies");
         config.policies.hot_reload = false;
         let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
             .expect("create policy engine");

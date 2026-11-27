@@ -56,7 +56,10 @@ async fn rerun_alone(test: &str) -> bool {
     if std::env::var_os(RERUN_ENV).is_some() {
         return false;
     }
-    let name = format!("{}::{test}", module_path!().split_once("::").unwrap().1);
+    let module = module_path!()
+        .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+        .unwrap();
+    let name = format!("{module}::{test}");
     let log = tempfile::NamedTempFile::new().unwrap();
     let mut child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &name, "--nocapture"])

@@ -313,7 +313,7 @@ mod tests {
             let mut config = config();
             config.discord.guild_id = existing.map(str::to_string);
             config.policies.dir =
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+                std::path::PathBuf::from(crate::runtime_layout::REPO_ROOT).join("policies");
             config.server.auth_token = Some("server-secret".to_string());
             std::fs::create_dir_all(crate::runtime_layout::config_dir(root)).unwrap();
             let path = onboarding::onboarding_config_path(root);

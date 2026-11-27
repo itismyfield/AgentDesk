@@ -156,7 +156,7 @@ fn cross_channel_tmux_claim_observability_distinguishes_thread_follow_up_4984() 
 fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     crate::pipeline::ensure_loaded();
     let mut config = Config::default();
-    config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.dir = PathBuf::from(crate::runtime_layout::REPO_ROOT).join("policies");
     config.policies.hot_reload = false;
     PolicyEngine::new_with_pg(&config, Some(pg_pool)).expect("create pg-backed policy engine")
 }
@@ -971,8 +971,9 @@ async fn boot_reconcile_pg_refires_missing_review_dispatch() {
     seed_agent_pg(&pool).await;
     seed_card_pg(&pool, "card-pg-review", "review").await;
 
-    let reviewed_commit = crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
-        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
+    let reviewed_commit =
+        crate::services::platform::git_head_commit(crate::runtime_layout::REPO_ROOT)
+            .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
     sqlx::query(
         "INSERT INTO task_dispatches (
             id,
@@ -1063,8 +1064,9 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
     .await
     .expect("seed auto queue run");
 
-    let reviewed_commit = crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR"))
-        .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
+    let reviewed_commit =
+        crate::services::platform::git_head_commit(crate::runtime_layout::REPO_ROOT)
+            .unwrap_or_else(|| "0000000000000000000000000000000000000000".to_string());
 
     for card_id in [
         "card-pg-drift-old",

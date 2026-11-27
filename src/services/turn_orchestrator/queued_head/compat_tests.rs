@@ -132,10 +132,9 @@ fn v2_clear_purge_drain_and_restore_preserve_originals_and_marker() {
 }
 
 fn shared_ownership_cases() -> Vec<(Value, Value)> {
-    let cases: Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
-    )))
+    let cases: Value = serde_json::from_str(include_str!(
+        "../../../../scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
+    ))
     .unwrap();
     let list = cases["cases"].as_array().unwrap();
     assert_eq!(list.len(), 26);

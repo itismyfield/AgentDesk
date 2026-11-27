@@ -1892,8 +1892,8 @@ mod tests {
     async fn policy_sql_prepares_against_migrated_schema_pg() {
         use self::policy_sql_schema_tests::{DYN_MARKER, extract_policy_sql};
 
-        let calls =
-            extract_policy_sql(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"));
+        let policies = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies");
+        let calls = extract_policy_sql(&policies);
         let test_db = TestDatabase::create().await;
         let pool = test_db.migrate().await;
         let mut conn = pool.acquire().await.expect("acquire probe connection");

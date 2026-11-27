@@ -12,7 +12,7 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
     let engine = test_engine_with_pg(policy_pool.clone());
     seed_agent_pg(&pool).await;
     let reviewed_commit =
-        crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR")).unwrap();
+        crate::services::platform::git_head_commit(crate::runtime_layout::REPO_ROOT).unwrap();
     for (name, dispatch_status, result, age) in [
         (
             "completed",
@@ -342,7 +342,8 @@ async fn auto_queue_dispatched_completion_tick_recovers_and_advances_pg() {
 
 async fn seed_completed_queue_work(pool: &sqlx::PgPool, name: &str, kind: &str, status: &str) {
     seed_card_pg(pool, name, status).await;
-    let commit = crate::services::platform::git_head_commit(env!("CARGO_MANIFEST_DIR")).unwrap();
+    let commit =
+        crate::services::platform::git_head_commit(crate::runtime_layout::REPO_ROOT).unwrap();
     sqlx::query(
         "INSERT INTO auto_queue_runs (id, agent_id, status) VALUES ($1, 'agent-1', 'active')",
     )

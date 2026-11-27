@@ -522,7 +522,7 @@ fn adk_phases_hand_their_files_to_the_real_helper_and_collect_the_planned_check(
     let target = temp.path().join("target");
     let logs = temp.path().join("logs");
     std::fs::create_dir_all(&scratch).unwrap();
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = Path::new(crate::runtime_layout::REPO_ROOT);
     let paths = AdkPhasePaths {
         checkout,
         target: &target,
@@ -797,7 +797,7 @@ fn universe_plan_with_real_helper(partial: bool) -> (VerificationRun, Verificati
     let target = temp.path().join("target");
     let logs = temp.path().join("logs");
     std::fs::create_dir_all(&scratch).unwrap();
-    let checkout = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let checkout = Path::new(crate::runtime_layout::REPO_ROOT);
     let paths = AdkPhasePaths {
         checkout,
         target: &target,

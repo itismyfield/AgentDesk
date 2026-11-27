@@ -1480,7 +1480,7 @@ fn reports_dynamic_pieces_and_unsupported_access() {
 
 #[test]
 fn every_policy_db_call_expands_to_concrete_sql() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies");
+    let root = Path::new(crate::runtime_layout::REPO_ROOT).join("policies");
     let calls = extract_policy_sql(&root);
     // Guard against SQL extraction regressions with a minimum call count.
     assert!(

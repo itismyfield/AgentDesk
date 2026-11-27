@@ -241,7 +241,7 @@ fn policy_pr_tracking_sources_have_no_tracking_writes() {
         assert!(legacy.is_match(&joins.replace_all(fixture, "")));
     }
     check(
-        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("policies"),
+        &std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies"),
         &writes,
         &joins,
         &legacy,

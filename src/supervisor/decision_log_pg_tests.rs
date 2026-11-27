@@ -9,7 +9,7 @@ const DISPATCH: &str = "dispatch-orphan-decision";
 
 fn policy_engine(pool: &PgPool) -> PolicyEngine {
     let mut config = crate::config::Config::default();
-    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.dir = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies");
     config.policies.hot_reload = false;
     PolicyEngine::new_with_pg(&config, Some(pool.clone())).expect("create policy engine")
 }

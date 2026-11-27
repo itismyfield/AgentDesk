@@ -132,7 +132,7 @@ async fn scope_direct_implementation_is_created_and_linked_despite_a_slow_origin
 
     let mut config = crate::config::Config::default();
     assert_eq!(config.policies.hook_timeout_ms, 5_000);
-    config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
+    config.policies.dir = std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("policies");
     config.policies.hot_reload = false;
     let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
         .expect("create policy engine");

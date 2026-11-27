@@ -95,7 +95,7 @@ async fn cancellation_waits_for_owned_child_and_captured_key_never_looks_up() {
 
 fn build_startup_probe(dir: &std::path::Path) -> std::path::PathBuf {
     let source = include_str!("../../../../tests/fixtures/decision_gate/startup_probe.rs")
-        .replace("__ROOT__", env!("CARGO_MANIFEST_DIR"));
+        .replace("__ROOT__", crate::runtime_layout::REPO_ROOT);
     let source_path = dir.join("probe.rs");
     std::fs::write(&source_path, source).unwrap();
     let binary = dir.join("probe");

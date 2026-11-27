@@ -139,10 +139,9 @@ fn settled_history_leaves_cleared_unconfirmed_recovery_idle_without_hiding_input
     fs::create_dir_all(&dir).unwrap();
     let channel = ChannelId::new(7_962_201);
     let path = dir.join(format!("{}.json", channel.get()));
-    let cases: serde_json::Value = serde_json::from_str(include_str!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
-    )))
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../scripts/e2e/tui_relay/tests/fixtures/queue_v2_cleared_unconfirmed_cases.json"
+    ))
     .unwrap();
     let mut base = cases["base"].clone();
     let source = base["admission_binds"][0]["at"]["attempt"]["source"].clone();
