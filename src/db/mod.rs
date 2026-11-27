@@ -54,6 +54,7 @@ pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;
 #[cfg(any(test, feature = "test-support"))]
+#[path = "test_support/status_check.rs"]
 pub mod status_check_test_support;
 pub(crate) mod timestamps;
 pub mod turns;
