@@ -69,6 +69,16 @@ impl NoticeState {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn terminal_for_test(
+        &self,
+        ledger: &LedgerState,
+        id: &RecordId,
+        evidence: &NoticeEvidence,
+    ) -> bool {
+        self.terminal(ledger, id, evidence)
+    }
+
     pub(crate) fn terminal(
         &self,
         ledger: &LedgerState,

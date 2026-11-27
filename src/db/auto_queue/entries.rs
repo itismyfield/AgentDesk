@@ -8,7 +8,7 @@ use super::runs::{
 };
 
 mod dispatch_failure;
-pub(crate) mod status_write;
+pub mod status_write;
 use status_write::{EntryStatusStage, EntryStatusWrite, StagedEntryStatus, run_finalize_due};
 
 pub const ENTRY_STATUS_PENDING: &str = "pending";
@@ -63,7 +63,7 @@ pub struct DispatchTerminalEntrySyncResult {
 // Defined in a private child so default builds name it only inside `entries`, as before.
 mod entry_status_row {
     #[derive(Debug, Clone)]
-    pub(crate) struct EntryStatusRow {
+    pub struct EntryStatusRow {
         pub(super) run_id: String,
         pub(super) card_id: String,
         pub(super) agent_id: String,
@@ -79,23 +79,23 @@ mod entry_status_row {
 #[cfg(not(any(test, feature = "test-support")))]
 use entry_status_row::EntryStatusRow;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use entry_status_row::EntryStatusRow;
+pub use entry_status_row::EntryStatusRow;
 
 #[cfg(any(test, feature = "test-support"))]
 impl EntryStatusRow {
-    pub(crate) fn status_for_test(&self) -> &str {
+    pub fn status_for_test(&self) -> &str {
         &self.status
     }
 
-    pub(crate) fn dispatch_id_for_test(&self) -> Option<&str> {
+    pub fn dispatch_id_for_test(&self) -> Option<&str> {
         self.dispatch_id.as_deref()
     }
 
-    pub(crate) fn slot_index_for_test(&self) -> Option<i64> {
+    pub fn slot_index_for_test(&self) -> Option<i64> {
         self.slot_index
     }
 
-    pub(crate) fn completed_at_for_test(&self) -> Option<&str> {
+    pub fn completed_at_for_test(&self) -> Option<&str> {
         self.completed_at.as_deref()
     }
 }
@@ -205,7 +205,7 @@ pub async fn reactivate_done_entry_on_pg(
 
 /// Keep done-entry reactivation symmetric across the dedicated reactivate and
 /// kanban-reopen paths after their run token has been acquired.
-pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
+pub async fn ensure_done_entry_run_live_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     entry_id: &str,
@@ -305,7 +305,7 @@ pub(crate) async fn ensure_done_entry_run_live_on_pg_tx(
 /// Lock and return the full entry identity used to accept a concurrent
 /// done-to-dispatched transition. Status alone is not sufficient: a different
 /// dispatch or slot is a competing owner, not an idempotent target state.
-pub(crate) async fn lock_entry_dispatch_identity_on_pg_tx(
+pub async fn lock_entry_dispatch_identity_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
 ) -> Result<(String, String, Option<String>, Option<i64>), String> {
@@ -441,7 +441,7 @@ pub async fn reconcile_failed_entry_done_on_pg(
 
 /// Pool-scoped entry status writer. A changed row comes back staged on its still-open tx so
 /// the service can attempt run completion there before committing.
-pub(crate) async fn stage_entry_status_on_pg(
+pub async fn stage_entry_status_on_pg(
     pool: &PgPool,
     entry_id: &str,
     new_status: &str,
@@ -808,7 +808,7 @@ pub(crate) async fn stage_entry_status_on_pg(
 /// that identity drifts it returns an error instead of looping. The caller
 /// composes this into a wider atomic operation, so observed state is already a
 /// stable snapshot inside the transaction.
-pub(crate) async fn write_entry_status_on_pg_tx(
+pub async fn write_entry_status_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     entry_id: &str,
     new_status: &str,
@@ -1042,7 +1042,7 @@ pub(crate) async fn write_entry_status_on_pg_tx(
 /// Acquire every run token before a caller-owned transaction writes any row.
 /// Sorting and deduplication keep multi-run attachment transactions on one
 /// advisory-lock order; the dispatched choke point re-enters these tokens.
-pub(crate) async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
+pub async fn acquire_dispatched_entry_run_tokens_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_ids: &[String],
 ) -> Result<(), String> {
@@ -1246,11 +1246,11 @@ fn normalized_optional_text(value: Option<&str>) -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
+pub fn resume_session_id_from_context_for_test(context: Option<&str>) -> Option<String> {
     resume_session_id_from_context(context)
 }
 
-pub(super) fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
+pub fn resume_session_id_from_context(context: Option<&str>) -> Option<String> {
     let context = context
         .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
         .filter(|value| value.is_object())?;
@@ -1329,7 +1329,7 @@ pub async fn latest_entry_phase_codex_session_id_pg(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn load_entry_status_row_pg_for_test(
+pub async fn load_entry_status_row_pg_for_test(
     pool: &PgPool,
     entry_id: &str,
 ) -> Result<EntryStatusRow, String> {
@@ -1507,14 +1507,17 @@ async fn record_entry_transition_on_pg(
     .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #[cfg(test)]
     use super::*;
+    #[cfg(test)]
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    #[cfg(test)]
     use crate::test_support::wait::poll_within;
     use sqlx::{Connection, PgConnection, PgPool};
 
-    pub(crate) async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
+    pub async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
              VALUES ('gate-agent', 'Gate Agent', 'claude', 'gate-channel')",
@@ -1549,7 +1552,7 @@ pub(crate) mod tests {
         .expect("seed gate entry");
     }
 
-    pub(crate) async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
+    pub async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
         sqlx::query(
             "INSERT INTO task_dispatches
                 (id, kanban_card_id, to_agent_id, dispatch_type, status)
@@ -1561,13 +1564,14 @@ pub(crate) mod tests {
         .expect("seed gate dispatch");
     }
 
-    pub(crate) async fn entry_status(pool: &PgPool) -> String {
+    pub async fn entry_status(pool: &PgPool) -> String {
         sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'gate-entry'")
             .fetch_one(pool)
             .await
             .expect("load gate entry status")
     }
 
+    #[cfg(test)]
     async fn run_status(pool: &PgPool) -> String {
         sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'gate-run'")
             .fetch_one(pool)
@@ -1575,7 +1579,7 @@ pub(crate) mod tests {
             .expect("load gate run status")
     }
 
-    pub(crate) async fn transition_count(pool: &PgPool) -> i64 {
+    pub async fn transition_count(pool: &PgPool) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*)::BIGINT
              FROM auto_queue_entry_transitions
@@ -1586,7 +1590,7 @@ pub(crate) mod tests {
         .expect("count gate entry transitions")
     }
 
-    pub(crate) async fn begin_run_token_holder(database_url: &str) -> PgConnection {
+    pub async fn begin_run_token_holder(database_url: &str) -> PgConnection {
         let mut conn = PgConnection::connect(database_url)
             .await
             .expect("connect run-token holder");
@@ -1601,7 +1605,7 @@ pub(crate) mod tests {
         conn
     }
 
-    pub(crate) async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
+    pub async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
         sqlx::query("SELECT pg_stat_clear_snapshot()")
             .execute(&mut *conn)
             .await

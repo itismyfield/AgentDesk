@@ -4,8 +4,8 @@ use super::session::source_observation::{
     CodexSourceMode, SourceLaunchPolicy, codex_source_mode_snapshot,
 };
 
-pub(crate) const CANARY_CHANNEL: u64 = 1_509_350_778_043_895_902;
-pub(crate) const CANARY_TMUX: &str = "AgentDesk-codex-adk-codex-tui-e2e";
+pub const CANARY_CHANNEL: u64 = 1_509_350_778_043_895_902;
+pub const CANARY_TMUX: &str = "AgentDesk-codex-adk-codex-tui-e2e";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LaunchTarget<'a> {
@@ -22,15 +22,12 @@ fn classify_target(tmux: &str, channel: Option<u64>) -> LaunchTarget<'_> {
     }
 }
 
-pub(crate) fn enabled_for(tmux: &str) -> bool {
+pub fn enabled_for(tmux: &str) -> bool {
     matches!(classify_target(tmux, None), LaunchTarget::DirectTmux { tmux, .. } if tmux == CANARY_TMUX)
         && codex_source_mode_snapshot() == CodexSourceMode::Verified
 }
 
-pub(crate) fn launch_policy(
-    tmux: &str,
-    channel: Option<u64>,
-) -> Result<&'static str, &'static str> {
+pub fn launch_policy(tmux: &str, channel: Option<u64>) -> Result<&'static str, &'static str> {
     launch_decision(codex_source_mode_snapshot(), classify_target(tmux, channel))
         .map(SourceLaunchPolicy::as_str)
 }

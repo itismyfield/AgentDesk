@@ -2333,9 +2333,9 @@ fn exact_retry_starts_only_through_its_continuation_pg() {
             for seen in [Seen::StdoutEof, Seen::Exited { waited: true }, Seen::StderrDrained] {
                 observation.record(seen);
             }
-            let evidence = observation.no_effect_evidence().unwrap();
+            let evidence = observation.no_effect_evidence_for_test().unwrap();
             let ack = write::classify_no_effect(&host.pool, attempt, &evidence).await;
-            let permit = RetryPermit::from_no_effect(ack.unwrap());
+            let permit = RetryPermit::from_no_effect_for_test(ack.unwrap());
             let next = permit.next_nonce().to_string();
             if lose_ack {
                 test_activation::lose_next_ack(channel.get());

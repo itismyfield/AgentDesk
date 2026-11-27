@@ -45,7 +45,7 @@ pub(crate) fn publish(caps: &mut serde_json::Map<String, Value>) {
     }
 }
 
-pub(crate) fn automatic_enabled() -> bool {
+pub fn automatic_enabled() -> bool {
     crate::config::snapshot()
         .map(|config| config.cluster.intake_routing.capacity_aware)
         .unwrap_or_default()
@@ -97,7 +97,7 @@ pub(crate) fn rank(nodes: &mut Vec<Value>, primary: Option<&str>) {
     }
 }
 
-pub(crate) struct ExecutionGuard {
+pub struct ExecutionGuard {
     stop: Option<oneshot::Sender<()>>,
     released: Option<oneshot::Receiver<()>>,
     runtime: tokio::runtime::Handle,
@@ -120,7 +120,7 @@ impl Drop for ExecutionGuard {
 }
 
 /// Called inside the provider's blocking task, before it starts any process.
-pub(crate) fn acquire(
+pub fn acquire(
     pool: Option<&PgPool>,
     provider: &str,
     channel: u64,

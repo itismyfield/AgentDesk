@@ -271,7 +271,9 @@ fn claude_takeover_herdr_end_outlives_the_next_execution_and_a_restart_pg() {
 }
 
 async fn herdr_end_outlives_the_row() {
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, pending, record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
+        owner, pending, record, wire,
+    };
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedCasOutcome, HostedLookup, HostedLookupKey, HostedState, install_pending_pg,
         load_hosted_execution_pg, retire_pg,

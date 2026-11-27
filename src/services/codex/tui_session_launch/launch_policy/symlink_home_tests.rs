@@ -24,7 +24,7 @@ fn adopt_under_symlinked_home(via_alias: bool) -> IngressOutcome {
     let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
     let _tmux = binding_context::tests::fake_tmux(root.path());
     let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
-    let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+    let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
@@ -65,8 +65,7 @@ fn adopt_under_symlinked_home(via_alias: bool) -> IngressOutcome {
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(&marker, &context.execution_nonce).unwrap();
     dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
-    let _fake =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+    let _fake = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     let home = if via_alias {
         alias
     } else {

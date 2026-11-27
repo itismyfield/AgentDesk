@@ -5,7 +5,7 @@ use super::*;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
 
-pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
+pub fn fixture() -> (tempfile::TempDir, PathBuf) {
     let temp = tempfile::Builder::new()
         .prefix("adk-i2-")
         .tempdir_in("/tmp")
@@ -83,7 +83,7 @@ pub(crate) fn fixture() -> (tempfile::TempDir, PathBuf) {
     (temp, root)
 }
 
-pub(crate) fn command(root: &Path) -> Command {
+pub fn command(root: &Path) -> Command {
     let manifest = read_json(&root.join("manifest.json")).unwrap();
     let config = read_json(&root.join("config/agentdesk.yaml")).unwrap();
     let env = environment::Environment::load(root, &manifest, &config).unwrap();
@@ -97,7 +97,7 @@ pub(crate) fn command(root: &Path) -> Command {
     command
 }
 
-pub(crate) fn assert_single_test_passed(output: &std::process::Output, selector: &str) {
+pub fn assert_single_test_passed(output: &std::process::Output, selector: &str) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let executed = format!("test {selector} ... ok");
@@ -120,7 +120,7 @@ pub(crate) fn write(path: &Path, value: &Value) {
 
 /// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI
 /// that appends `ADK_CHILD <first arg>` and its env for every launch.
-pub(crate) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, root, home) = super::login_test_support::claude_login_fixture(false);
     let login = home.join(".adk/dev/agy-login");
     let cli = home.join("agy-bin/agy");

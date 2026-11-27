@@ -9,22 +9,29 @@ use crate::services::tui_o::store::{ChannelStore, ledger::LedgerEntry};
 use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingEvent, BindingTarget};
 use crate::services::{session_host, tmux_common as tc};
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum NoticeRefusal {
-    Busy,
-    /// Neither the native receipt nor the prepared census proves ownership yet.
-    OwnershipPending,
-    Withheld(String),
-    Store(String),
-    Violation(String),
+mod refusal {
+    #[derive(Debug, PartialEq, Eq)]
+    pub enum NoticeRefusal {
+        Busy,
+        /// Neither the native receipt nor the prepared census proves ownership yet.
+        OwnershipPending,
+        Withheld(String),
+        Store(String),
+        Violation(String),
+    }
 }
 
-#[cfg(test)]
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use refusal::NoticeRefusal;
+#[cfg(any(test, feature = "test-support"))]
+pub use refusal::NoticeRefusal;
+
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static NOTICE_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    pub static NOTICE_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn count_notice_refusal(piece: &PieceWork) {
     if piece.unit_key.kind == UnitKind::InputNotice {
         NOTICE_CALLS.with(|c| {
@@ -38,6 +45,16 @@ fn withheld(reason: impl Into<String>) -> NoticeRefusal {
     NoticeRefusal::Withheld(reason.into())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn admit_notice_for_test<R>(
+    piece: &PieceWork,
+    store: &mut ChannelStore,
+    owners: Option<&history::notice_owner::Batch>,
+    start: impl FnOnce(&mut ChannelStore) -> R,
+) -> Result<R, NoticeRefusal> {
+    admit_notice(piece, store, owners, start)
+}
+
 pub(crate) fn admit_notice<R>(
     piece: &PieceWork,
     store: &mut ChannelStore,
@@ -47,7 +64,7 @@ pub(crate) fn admit_notice<R>(
     if piece.unit_key.kind != UnitKind::InputNotice {
         return Ok(start(store));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     NOTICE_CALLS.with(|c| {
         let (calls, logs) = c.get();
         c.set((calls + 1, logs));

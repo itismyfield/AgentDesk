@@ -20,7 +20,7 @@
 
 /// EXISTS vs NOT EXISTS wrapping for the slot-occupancy predicate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DispatchSlotPolarity {
+pub enum DispatchSlotPolarity {
     /// `EXISTS (...)` — true when an active dispatch occupies the slot.
     Exists,
     /// `NOT EXISTS (...)` — true when the slot is free of active dispatches.
@@ -65,7 +65,7 @@ fn dispatch_json_member_expr(column: &'static str, key: &'static str) -> String 
 /// `"$1"` / `"$2"`). `extra_clause`, when `Some`, is appended verbatim as an
 /// additional `AND (...)` filter inside the subquery (used to exclude a
 /// specific dispatch id, e.g. `"d.id != $3"`).
-pub(crate) fn active_dispatch_on_slot_predicate(
+pub fn active_dispatch_on_slot_predicate(
     agent_expr: &'static str,
     slot_expr: &'static str,
     polarity: DispatchSlotPolarity,

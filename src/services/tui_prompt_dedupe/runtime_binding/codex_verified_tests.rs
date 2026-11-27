@@ -33,7 +33,7 @@ fn digest(s: &str) -> String {
 }
 
 struct Fixture {
-    _fake_tmux: crate::services::provider_teardown::tests::test_support::FakeTmux,
+    _fake_tmux: crate::services::provider_teardown::test_support::FakeTmux,
     env: [TestEnvVarGuard; 2],
     root: tempfile::TempDir,
     context: BindingContext,
@@ -98,7 +98,7 @@ impl Fixture {
         fs::write(marker, &context.execution_nonce).unwrap();
         register_tmux_channel(&context.tmux_session, channel);
         codex_verified::set_permission_for_tests(&context, DeliveryPermission::Allowed);
-        let fake_tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+        let fake_tmux = crate::services::provider_teardown::test_support::FakeTmux::install(
             &context.tmux_session,
         );
         Self {
@@ -609,7 +609,7 @@ fn verified_source_less_equal_command_initial_ups_uses_exact_utf8() {
     let h = Fixture::new("fresh", None);
     h.header(ID, false);
     let outcome = h.send("user-prompt-submit", ID, json!(PROMPT), None);
-    assert!(!outcome.refused(), "{outcome:?}");
+    assert!(!outcome.refused_for_test(), "{outcome:?}");
     h.assert_proof();
     let before = h.fold();
     h.send("user-prompt-submit", ID, json!(PROMPT), None);
@@ -630,7 +630,7 @@ fn actual_initial_ups_missing_nonstring_mismatch_never_proves() {
         h.header(ID, false);
         let outcome = h.send("user-prompt-submit", ID, prompt, None);
         assert!(
-            !outcome.refused(),
+            !outcome.refused_for_test(),
             "ineligible UPS is durable Pending: {outcome:?}"
         );
         assert!(h.fold().verified.is_none());
@@ -654,7 +654,7 @@ fn actual_ups_fresh_qualification_cannot_be_replaced_by_matching_digest() {
 fn pending_ack_resolves_without_a_followup_hook() {
     let h = Fixture::new("fresh", None);
     let outcome = h.send("session-start", ID, Value::Null, None);
-    assert!(!outcome.refused(), "{outcome:?}");
+    assert!(!outcome.refused_for_test(), "{outcome:?}");
     assert_eq!(h.fold().pending.len(), 1);
     h.absent();
     h.header(ID, false);
@@ -787,7 +787,7 @@ fn append_failure_cannot_publish_proof_runtime_or_marker() {
         binding_events::APPEND_FAULT.with(|f| f.set(Some(phase)));
         let outcome = h.send("session-start", ID, Value::Null, None);
         binding_events::APPEND_FAULT.with(|f| f.set(None));
-        assert!(outcome.refused(), "{phase}: {outcome:?}");
+        assert!(outcome.refused_for_test(), "{phase}: {outcome:?}");
         assert!(h.fold().verified.is_none());
         h.absent();
     }
@@ -799,7 +799,7 @@ fn marker_failure_retains_durable_proof_and_retry_does_not_append() {
     h.header(ID, false);
     fs::create_dir_all(h.marker()).unwrap();
     let outcome = h.send("session-start", ID, Value::Null, None);
-    assert!(outcome.refused(), "{outcome:?}");
+    assert!(outcome.refused_for_test(), "{outcome:?}");
     assert!(h.fold().verified.is_some());
     assert!(h.raw().is_none());
     let before = h.fold();
@@ -858,7 +858,7 @@ fn concurrent_start_and_matching_ups_share_one_native_proof() {
                 let payload = json!({"session_id":ID,"transcript_path":path,"source":"startup","prompt":PROMPT});
                 barrier.wait();
                 let outcome = observe_binding_hook("codex",event,Some(ID),Some(ID),&payload,&headers);
-                assert!(!outcome.refused(),"{event}: {outcome:?}");
+                assert!(!outcome.refused_for_test(),"{event}: {outcome:?}");
                 codex_verified::clear_permissions_for_tests();
                 binding_events::set_test_root(None);
             });
@@ -1134,7 +1134,7 @@ fn actual_ingress_revalidates_incarnation_inside_the_log_commit() {
         fs::write(marker, "b".repeat(32)).unwrap();
     });
     let outcome = h.send("session-start", ID, Value::Null, None);
-    assert!(outcome.refused());
+    assert!(outcome.refused_for_test());
     assert!(h.fold().verified.is_none());
     assert!(h.fold().pending.is_empty());
     h.absent();
@@ -1201,7 +1201,10 @@ fn nonverified_incarnations_keep_legacy_publication_independent_of_process_mode(
             SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
             let result = h.send("user-prompt-submit", ID, json!(PROMPT), None);
             SOURCE_MODE_TEST.with(|m| m.set(None));
-            assert!(!result.refused(), "{policy:?}/{mode:?}: {result:?}");
+            assert!(
+                !result.refused_for_test(),
+                "{policy:?}/{mode:?}: {result:?}"
+            );
             register_tmux_runtime_binding(&h.context.tmux_session, h.binding());
             assert!(h.consumer().is_some());
             let log = fs::read_to_string(
@@ -1218,7 +1221,7 @@ fn nonverified_incarnations_keep_legacy_publication_independent_of_process_mode(
         }
     }
     assert_eq!(
-        CodexSourceMode::Verified.launch_policy(),
+        CodexSourceMode::Verified.launch_policy_for_test(),
         Err("SourceModeVerifiedNotLanded")
     );
 }
@@ -1234,7 +1237,10 @@ fn actual_commit_rechecks_open_file_identity_and_startup_recovers_bad_initial_up
             fs::rename(&path, path.with_extension("old")).unwrap();
             fs::write(path, bytes).unwrap();
         });
-        assert!(h.send("session-start", ID, Value::Null, None).refused());
+        assert!(
+            h.send("session-start", ID, Value::Null, None)
+                .refused_for_test()
+        );
         assert!(h.fold().verified.is_none());
         h.absent();
     }

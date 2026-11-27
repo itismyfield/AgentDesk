@@ -207,17 +207,19 @@ const RAW_TAIL: &str =
     r#"{"type":"system","subtype":"turn_duration","sessionId":"native","probe":"A"}"#;
 
 async fn ended_fixture(pool: &sqlx::PgPool, shared: &SharedData, rig: &HerdrRig, channel: u64) {
-    use crate::db::dispatched_sessions::hosted_execution::{HostedLocation, HostedState, tests};
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedLocation, HostedState, test_support,
+    };
     use crate::services::session_host::herdr_socket_rig_tests::{
         KEY, NODE, PANE, PROVIDER, SESSION,
     };
 
     let channel = channel.to_string();
-    let mut owner = tests::owner(&channel);
+    let mut owner = test_support::owner(&channel);
     owner.discord_token_hash.clone_from(&shared.token_hash);
     owner.logical_key = "fixture-pane".into();
     owner.owner_node = NODE.into();
-    let mut hosted = tests::record(&owner, NONCE, HostedState::Bound);
+    let mut hosted = test_support::record(&owner, NONCE, HostedState::Bound);
     hosted.location = Some(HostedLocation {
         host: "herdr".into(),
         execution_node: NODE.into(),

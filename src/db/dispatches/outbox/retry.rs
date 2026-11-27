@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use super::delivery::DispatchOutboxLeaseUpdateError;
 
 /// Reschedule an outbox row for retry with `backoff_secs` delay.
-pub(crate) async fn schedule_outbox_retry_pg(
+pub async fn schedule_outbox_retry_pg(
     pool: &PgPool,
     outbox_id: i64,
     error_message: &str,

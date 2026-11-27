@@ -390,7 +390,7 @@ struct LiveRow {
 }
 
 /// `(owner/repo, issue number)` for a GitHub issue link.
-pub(crate) fn issue_ref(raw: &str) -> Option<(String, i64)> {
+pub fn issue_ref(raw: &str) -> Option<(String, i64)> {
     let url = normalize_github_issue_url(raw)?;
     let number = url.rsplit('/').next()?.parse().ok()?;
     Some((normalize_github_repo_id(&url)?, number))

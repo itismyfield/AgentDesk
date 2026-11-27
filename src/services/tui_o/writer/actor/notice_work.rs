@@ -10,8 +10,8 @@ use crate::services::tui_o::store::ledger::input_notices::{
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
 use sha2::Digest;
 
-#[cfg(test)]
-thread_local! { pub(crate) static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
 
 fn notice(item: &Derived) -> Option<&PieceWork> {
     match item {
@@ -309,7 +309,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .iter()
             .filter(|(id, e)| changed.contains(*id) && !state.terminal(ledger, id, e))
             .map(|(_, e)| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 EVALUATIONS.with(|c| {
                     let (work, logs) = c.get();
                     c.set((work + 1, logs));
@@ -505,7 +505,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .insert(id.clone(), reason.into())
             .is_none()
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             EVALUATIONS.with(|c| {
                 let (work, logs) = c.get();
                 c.set((work, logs + 1));
@@ -584,27 +584,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 // Test seams for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    pub(in crate::services) fn persist_notice_evidence_for_test(&mut self) -> Vec<UnitKey> {
+    pub fn persist_notice_evidence_for_test(&mut self) -> Vec<UnitKey> {
         self.persist_notice_evidence()
     }
 
-    pub(in crate::services) async fn prepare_notices_for_test(&mut self, fresh: &[UnitKey]) {
+    pub async fn prepare_notices_for_test(&mut self, fresh: &[UnitKey]) {
         self.prepare_notices(fresh).await;
     }
 
-    pub(in crate::services) fn defer_notice_for_test(
-        &mut self,
-        id: (SourceId, u64, u64),
-        reason: &str,
-    ) {
+    pub fn defer_notice_for_test(&mut self, id: (SourceId, u64, u64), reason: &str) {
         self.defer_notice(id, reason);
     }
 
-    pub(in crate::services) fn notice_debt_extra_for_test(&mut self) -> usize {
+    pub fn notice_debt_extra_for_test(&mut self) -> usize {
         self.notice_debt_extra()
     }
 
-    pub(in crate::services) fn notice_raw_independent_for_test(&mut self) -> bool {
+    pub fn notice_raw_independent_for_test(&mut self) -> bool {
         self.notice_raw_independent()
     }
 }

@@ -83,13 +83,13 @@ fn wait_for_tmux_output(
 
 mod availability;
 mod instance_scope;
-pub(crate) use instance_scope::{input_command, validate_target};
-pub(crate) mod health_probe;
+pub use instance_scope::{input_command, validate_target};
+pub mod health_probe;
 pub(crate) mod session_identity;
-#[cfg(all(test, unix))]
-pub(crate) mod session_identity_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod session_identity_tests;
 #[cfg(unix)]
-pub(crate) mod session_inventory;
+pub mod session_inventory;
 
 pub use availability::{
     cached_unavailable_due_to_missing, invalidate_cache as invalidate_availability_cache,
@@ -107,7 +107,7 @@ pub fn version() -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SessionPresence {
+pub enum SessionPresence {
     Present,
     Missing,
     ProbeFailed,
@@ -137,7 +137,7 @@ pub(crate) fn classify_has_session_output(output: &Output) -> SessionPresence {
     }
 }
 
-pub(crate) fn session_presence(session_name: &str) -> SessionPresence {
+pub fn session_presence(session_name: &str) -> SessionPresence {
     if is_blank_session_name(session_name) {
         return SessionPresence::ProbeFailed;
     }
@@ -173,7 +173,7 @@ pub fn create_session(
     create_session_with_identity(session_name, working_dir, shell_command, &identity)
 }
 
-pub(crate) fn create_session_with_identity(
+pub fn create_session_with_identity(
     session_name: &str,
     working_dir: Option<&str>,
     shell_command: &str,
@@ -340,7 +340,7 @@ fn install_dead_marker_hooks(session_name: &str) {
 }
 
 fn log_kill_request(session_name: &str, reason: &str) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     kill_requests::record(session_name);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ✂ tmux kill requested: session={session_name} reason={reason}");
@@ -348,7 +348,7 @@ fn log_kill_request(session_name: &str, reason: &str) {
 
 /// Test-only record of every tmux kill this process requested, by session name.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod kill_requests {
+pub mod kill_requests {
     use std::sync::{LazyLock, Mutex};
 
     static REQUESTED: LazyLock<Mutex<Vec<String>>> = LazyLock::new(Mutex::default);
@@ -361,7 +361,7 @@ pub(crate) mod kill_requests {
     }
 
     /// How many kills were requested for exactly `session_name`.
-    pub(crate) fn count(session_name: &str) -> usize {
+    pub fn count(session_name: &str) -> usize {
         let requested = REQUESTED
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
@@ -1013,7 +1013,7 @@ impl From<bool> for PaneLiveness {
 mod liveness;
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use liveness::tests as liveness_tests;
+pub use liveness::tests as liveness_tests;
 
 /// Probe a session's pane liveness as a three-state answer (see [`PaneLiveness`]).
 pub fn pane_liveness(session_name: &str) -> PaneLiveness {
@@ -1314,18 +1314,24 @@ mod etime_tests {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(crate) mod timeout_tests {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod timeout_tests {
+    #[cfg(test)]
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    pub(crate) struct PathOverride {
+    pub struct PathOverride {
         _guard: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
     }
 
     impl PathOverride {
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn prepend_for_test(path: &std::path::Path) -> Self {
+            Self::prepend(path)
+        }
+
         pub(crate) fn prepend(path: &std::path::Path) -> Self {
             let guard = crate::config::shared_test_env_lock()
                 .lock()
@@ -1356,7 +1362,7 @@ pub(crate) mod timeout_tests {
         }
     }
 
-    pub(crate) fn write_fake_tmux(dir: &std::path::Path, body: &str) {
+    pub fn write_fake_tmux(dir: &std::path::Path, body: &str) {
         let path = dir.join("tmux");
         let mut file = std::fs::File::create(&path).expect("fake tmux");
         writeln!(file, "#!/bin/sh").expect("shebang");

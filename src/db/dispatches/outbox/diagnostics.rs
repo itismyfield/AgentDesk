@@ -2,9 +2,7 @@ use sqlx::{Postgres, Transaction};
 
 use super::model::DispatchOutboxClaimCandidate;
 
-pub(crate) fn wait_reason_from_routing_diagnostics(
-    diagnostics: &serde_json::Value,
-) -> Option<String> {
+pub fn wait_reason_from_routing_diagnostics(diagnostics: &serde_json::Value) -> Option<String> {
     if !diagnostics
         .get("selected")
         .map(serde_json::Value::is_null)
@@ -42,7 +40,7 @@ pub(crate) fn wait_reason_from_routing_diagnostics(
 }
 
 /// Records a skipped claim's diagnostics; an error has aborted `tx`, so the caller must drop it.
-pub(crate) async fn record_routing_diagnostics_pg(
+pub async fn record_routing_diagnostics_pg(
     tx: &mut Transaction<'_, Postgres>,
     candidate: &DispatchOutboxClaimCandidate,
     diagnostics: &serde_json::Value,
@@ -109,7 +107,7 @@ pub(crate) async fn record_routing_diagnostics_pg(
     Ok(())
 }
 
-pub(crate) async fn record_task_dispatch_routing_diagnostics_pg(
+pub async fn record_task_dispatch_routing_diagnostics_pg(
     tx: &mut Transaction<'_, Postgres>,
     dispatch_id: &str,
     diagnostics: &serde_json::Value,

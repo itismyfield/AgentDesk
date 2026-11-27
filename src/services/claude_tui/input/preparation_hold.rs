@@ -2,33 +2,38 @@
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum EffectPhase {
+pub enum EffectPhase {
     BeforePayload,
     PayloadUncertain,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PreparationHold {
-    pub(crate) target: String,
-    pub(crate) reason: &'static str,
-    pub(crate) phase: EffectPhase,
+pub struct PreparationHold {
+    pub target: String,
+    pub reason: &'static str,
+    pub phase: EffectPhase,
     pub(crate) detail: String,
     /// A modal refused the pane at the capture before any key; legacy callers read the reason.
-    pub(crate) modal: bool,
+    pub modal: bool,
     /// The readiness wait ended idle with nothing in flight: no look clears it, and its kind says
     /// whether the input is retained or refused for good.
-    pub(crate) unproven: Option<crate::services::claude_tui::readiness::Unproven>,
+    pub unproven: Option<crate::services::claude_tui::readiness::Unproven>,
 }
 
 impl PreparationHold {
-    pub(crate) const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
-    pub(crate) const OWNER_READINESS_DEADLINE: &str = "readiness_deadline";
+    pub const IDLE_EVIDENCE_PENDING: &str = "idle_evidence_pending";
+    pub const OWNER_READINESS_DEADLINE: &str = "readiness_deadline";
 
-    pub(crate) fn waits_for_idle_evidence(&self) -> bool {
+    pub fn waits_for_idle_evidence(&self) -> bool {
         self.may_requeue()
             && self.reason == Self::IDLE_EVIDENCE_PENDING
             && !self.modal
             && self.unproven.is_none()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn before_for_test(session: &str, reason: &'static str, detail: String) -> Self {
+        Self::before(session, reason, detail)
     }
 
     pub(crate) fn before(session: &str, reason: &'static str, detail: String) -> Self {
@@ -44,6 +49,11 @@ impl PreparationHold {
             modal: false,
             unproven: None,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn uncertain_for_test(session: &str, detail: String) -> Self {
+        Self::uncertain(session, detail)
     }
 
     pub(crate) fn uncertain(session: &str, detail: String) -> Self {
@@ -73,7 +83,7 @@ impl PreparationHold {
         }
     }
 
-    pub(crate) fn may_requeue(&self) -> bool {
+    pub fn may_requeue(&self) -> bool {
         self.phase == EffectPhase::BeforePayload
     }
 }

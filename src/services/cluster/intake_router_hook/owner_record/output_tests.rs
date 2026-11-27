@@ -17,7 +17,7 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     };
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .unwrap()
             .run(async { 1 })
@@ -29,7 +29,7 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
         pool: single,
         provider: "claude".into(),
     };
-    one.acquire(origin.channel_for_test(), "answer", Some(&artifact))
+    one.acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
         .await
         .unwrap()
         .run(async {})
@@ -41,7 +41,7 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     let generation: Artifact = serde_json::from_value(generation).unwrap();
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&generation))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&generation))
             .await
             .is_err()
     );
@@ -50,19 +50,19 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     let changed: Artifact = serde_json::from_value(changed).unwrap();
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&changed))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&changed))
             .await
             .is_err()
     );
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "changed", Some(&artifact))
+            .acquire_for_test(origin.channel_for_test(), "changed", Some(&artifact))
             .await
             .is_err()
     );
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", None)
+            .acquire_for_test(origin.channel_for_test(), "answer", None)
             .await
             .is_err()
     );
@@ -87,14 +87,14 @@ async fn output_origin_original_admission_survives_owner_return_and_rejects_old_
     );
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
     pool.close().await;
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
@@ -124,7 +124,7 @@ async fn output_origin_withheld_source_never_authorizes_fresh_effect_pg() {
     tx.commit().await.unwrap();
     assert!(
         scope
-            .acquire(origin.channel_for_test(), "answer", Some(&artifact))
+            .acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
             .await
             .is_err()
     );
@@ -139,7 +139,7 @@ async fn output_origin_owner_switch_waits_for_actual_effect_guard_pg() {
     };
     let artifact = origin.seal("answer");
     let hold = scope
-        .acquire(origin.channel_for_test(), "answer", Some(&artifact))
+        .acquire_for_test(origin.channel_for_test(), "answer", Some(&artifact))
         .await
         .unwrap();
     let count = Arc::new(AtomicUsize::new(0));
@@ -293,7 +293,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     .unwrap();
     let reopened = store.open_channel(&era, channel).unwrap().unwrap();
     assert_eq!(
-        reopened.ledger().output_origin(0),
+        reopened.ledger().output_origin_for_test(0),
         Some(&origin.seal("answer"))
     );
     let oldroot = tempfile::tempdir().unwrap();
@@ -337,7 +337,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
         .unwrap();
     drop(legacy);
     let legacy = oldstore.open_channel(&oldera, channel).unwrap().unwrap();
-    assert!(legacy.ledger().output_origin(0).is_none());
+    assert!(legacy.ledger().output_origin_for_test(0).is_none());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let posts = Arc::new(AtomicUsize::new(0));
@@ -368,7 +368,7 @@ async fn output_origin_o_request_keeps_guard_after_writer_waiter_aborts_pg() {
     gate.reacquired().unwrap();
     let mut writer = ChannelWriter::new(legacy, gate, port, Lease, Alarms);
     writer
-        .retry_local(chrono::Utc::now() + chrono::Duration::days(1))
+        .retry_local_for_test(chrono::Utc::now() + chrono::Duration::days(1))
         .await;
     assert_eq!(
         posts.load(Ordering::SeqCst),
@@ -393,12 +393,14 @@ async fn output_origin_database_failure_never_hides_local_denial_pg() {
         provider: "claude".into(),
     };
     assert!(matches!(
-        scope.acquire("7336952", "answer", Some(&artifact)).await,
+        scope
+            .acquire_for_test("7336952", "answer", Some(&artifact))
+            .await,
         Err(AcquireError::Database(_))
     ));
     for (channel, body) in [("7336953", "answer"), ("7336952", "changed")] {
         assert!(matches!(
-            scope.acquire(channel, body, Some(&artifact)).await,
+            scope.acquire_for_test(channel, body, Some(&artifact)).await,
             Err(AcquireError::Withheld(_))
         ));
     }
@@ -416,7 +418,9 @@ async fn output_origin_database_failure_never_hides_local_denial_pg() {
         let bad: Artifact = serde_json::from_value(bad).unwrap();
         assert!(
             matches!(
-                scope.acquire("7336952", "answer", Some(&bad)).await,
+                scope
+                    .acquire_for_test("7336952", "answer", Some(&bad))
+                    .await,
                 Err(AcquireError::Withheld(_))
             ),
             "malformed {field} must not turn into a database retry"

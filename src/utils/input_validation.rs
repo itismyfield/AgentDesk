@@ -1,7 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
 /// Agent IDs are also directory names; preserve the setup API's identifier rules.
-pub(crate) fn validate_agent_id(value: &str) -> Result<(), &'static str> {
+pub fn validate_agent_id(value: &str) -> Result<(), &'static str> {
     if !value.is_empty()
         && value
             .chars()
@@ -13,7 +13,7 @@ pub(crate) fn validate_agent_id(value: &str) -> Result<(), &'static str> {
     }
 }
 
-pub(crate) fn canonicalize_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
+pub fn canonicalize_under_root(root: &Path, candidate: &Path) -> Result<PathBuf, String> {
     let canonical_root = root
         .canonicalize()
         .map_err(|error| format!("resolve runtime root '{}': {error}", root.display()))?;
@@ -39,7 +39,7 @@ pub(crate) fn canonicalize_under_root(root: &Path, candidate: &Path) -> Result<P
     Ok(path)
 }
 
-pub(crate) fn normalize_lexical_path(path: &Path) -> Result<PathBuf, String> {
+pub fn normalize_lexical_path(path: &Path) -> Result<PathBuf, String> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
         match component {

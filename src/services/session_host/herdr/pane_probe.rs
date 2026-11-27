@@ -16,12 +16,12 @@ use crate::services::tui_prompt_dedupe::binding_context::context_names_execution
 pub(crate) const PROVIDER_WINDOW: Duration = Duration::from_secs(15);
 pub(crate) const PROVIDER_POLL: Duration = Duration::from_millis(200);
 /// A Linux start reads up to a second early.
-pub(crate) const START_SLACK: Duration = Duration::from_secs(1);
+pub const START_SLACK: Duration = Duration::from_secs(1);
 const CONTEXT_ENV: &str = "AGENTDESK_BINDING_CONTEXT=";
 
 /// Why a pane reading is not launch evidence; nothing is stored for any of them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EvidenceGap {
+pub enum EvidenceGap {
     UnknownEndpoint,
     /// The pane read failed or answered off-contract.
     ReadFailed(String),
@@ -72,7 +72,7 @@ pub(crate) type PaneProcesses = (
 );
 
 /// OS reads of another process; tests inject a fake.
-pub(crate) trait ProcessOs: Send + Sync {
+pub trait ProcessOs: Send + Sync {
     fn exists(&self, _pid: u32) -> Result<bool, RestoreUnverified> {
         Err(RestoreUnverified::ProcessUnreadable)
     }
@@ -89,7 +89,7 @@ pub(crate) trait ProcessOs: Send + Sync {
 
 /// Absence is separate evidence from failure to read a process start.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RecordedProcess {
+pub enum RecordedProcess {
     ExactAlive,
     ProvenAbsent,
     Replaced,
@@ -193,7 +193,7 @@ pub(crate) struct ProbeRequest<'a> {
 }
 
 /// The stored text of a process start; equal text is the same start.
-pub(crate) fn start_text(start: StartIdentity) -> String {
+pub fn start_text(start: StartIdentity) -> String {
     match start {
         StartIdentity::Darwin { seconds, micros } => format!("darwin:{seconds}.{micros:06}"),
         StartIdentity::LinuxTicks(ticks) => format!("linux-ticks:{ticks}"),
@@ -202,7 +202,7 @@ pub(crate) fn start_text(start: StartIdentity) -> String {
 
 /// What one reading of a pane runs, before anyone judges whose it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PaneOccupant {
+pub enum PaneOccupant {
     /// The root shell alone in the foreground.
     LoneShell {
         root: ProcessStamp,
@@ -431,7 +431,7 @@ fn check_environment(
 /// The fake OS and launch context the probe tests and the herdr socket rig share (KRX-TS).
 #[cfg(any(test, feature = "test-support"))]
 #[path = "pane_probe_support.rs"]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "pane_probe_tests.rs"]

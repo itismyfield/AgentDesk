@@ -12,7 +12,7 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
 mod mutation;
 pub(crate) mod projection;
 pub(crate) use mutation::DurableDenyRecorded;
-pub(crate) mod submit_floor;
+pub mod submit_floor;
 
 pub(crate) const CODEX_PROVENANCE_FILE: &str = "codex_provenance";
 const SCHEMA: u32 = 1;
@@ -29,7 +29,7 @@ pub(crate) struct CodexProvenance {
 
 /// A snapshot only this module's validation constructs; an origin is read from nothing else.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor::Schema2>);
+pub struct ValidatedCodexProvenance(CodexProvenance, Option<submit_floor::Schema2>);
 
 impl ValidatedCodexProvenance {
     pub(crate) fn spans(&self) -> &[CodexEpisodeSpan] {
@@ -57,7 +57,7 @@ impl ValidatedCodexProvenance {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Sidecar {
+pub enum Sidecar {
     Missing,
     Present(ValidatedCodexProvenance),
     Unavailable(&'static str),
@@ -70,7 +70,7 @@ thread_local! {
 }
 
 impl ChannelStore {
-    pub(crate) fn codex_provenance(&self) -> Sidecar {
+    pub fn codex_provenance(&self) -> Sidecar {
         #[cfg(test)]
         SIDECAR_IO.with(|io| io.set((io.get().0 + 1, io.get().1)));
         if let Some(read) = submit_floor::read(self) {

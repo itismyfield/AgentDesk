@@ -2,7 +2,7 @@ use crate::services::session_host::HostKey;
 use std::process::Output;
 
 /// Pane operations used by the hosted input adapters.
-pub(crate) trait InputTransport {
+pub trait InputTransport {
     fn send_literal(&mut self, session: &str, text: &str) -> Result<Output, String>;
     fn load_buffer(&mut self, buffer: &str, text: &str) -> Result<Output, String>;
     fn paste_buffer(&mut self, session: &str, buffer: &str, delete: bool)

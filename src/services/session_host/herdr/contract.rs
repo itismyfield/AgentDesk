@@ -18,16 +18,16 @@ pub(crate) const CAPTURE_MAX_LINES: u32 = 10_000;
 
 /// Why no typed reply came back. `AfterWrite` means the server may have acted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HerdrTransportError {
+pub enum HerdrTransportError {
     NotSent(String),
     AfterWrite(String),
 }
 
-pub(crate) type HerdrOutcome = Result<HerdrReply, HerdrTransportError>;
+pub type HerdrOutcome = Result<HerdrReply, HerdrTransportError>;
 
 /// One request per connection: Herdr answers one and closes, so the transport dials anew
 /// for each call, and every answer comes with the server that gave it.
-pub(crate) trait HerdrTransport: Send + Sync {
+pub trait HerdrTransport: Send + Sync {
     /// A read-only call and the server its connection reached, read on that connection so
     /// no later reading relabels the reply. A mutation is refused unsent.
     fn call(&self, call: &HerdrCall) -> (HerdrOutcome, Witnessed);
@@ -48,7 +48,7 @@ pub(crate) trait HerdrTransport: Send + Sync {
 /// The server behind one configured socket. Connections that reach the same socket, pid
 /// and start reach the same server; when or how often it was dialled is not part of it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct ServerWitness {
+pub struct ServerWitness {
     pub socket: PathBuf,
     pub pid: u32,
     pub start: StartIdentity,
@@ -57,7 +57,7 @@ pub(crate) struct ServerWitness {
 #[cfg(any(test, feature = "test-support"))]
 impl ServerWitness {
     /// A server for tests outside this module, which cannot build a start identity.
-    pub(crate) fn for_test(pid: u32) -> Self {
+    pub fn for_test(pid: u32) -> Self {
         Self {
             socket: "/tmp/herdr-test.sock".into(),
             pid,
@@ -70,12 +70,12 @@ impl ServerWitness {
 }
 
 /// The server one connection reached, or why it could not be named.
-pub(crate) type Witnessed = Result<ServerWitness, RestoreUnverified>;
+pub type Witnessed = Result<ServerWitness, RestoreUnverified>;
 
 /// What a ping on its own connection showed: that server, its wall-clock start, the
 /// version and protocol it reported and when the connection was made.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ServerHello {
+pub struct ServerHello {
     pub witness: ServerWitness,
     pub started: SystemTime,
     pub version: String,
@@ -302,14 +302,14 @@ pub(crate) fn mutation_result(
 
 /// A close ACK is not proof of physical exit; confirmation never grants a wider close.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CloseEffect {
+pub enum CloseEffect {
     Acknowledged,
     NotSent(String),
     Indeterminate(String),
     ConfirmationRequired,
 }
 
-pub(crate) fn close_result(call: &HerdrCall, outcome: HerdrOutcome) -> CloseEffect {
+pub fn close_result(call: &HerdrCall, outcome: HerdrOutcome) -> CloseEffect {
     match reply_result(call, outcome) {
         Ok(HerdrResult::Ok) => CloseEffect::Acknowledged,
         Err(Fault::Transport(HerdrTransportError::NotSent(message))) => {

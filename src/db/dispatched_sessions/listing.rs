@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
 #[derive(Debug, Clone)]
-pub(crate) struct DispatchedSessionSnapshot {
+pub struct DispatchedSessionSnapshot {
     pub id: i64,
     pub session_key: Option<String>,
     pub instance_id: Option<String>,
@@ -33,7 +33,7 @@ pub(crate) struct DispatchedSessionSnapshot {
     pub auto_queue_thread_group: Option<i64>,
 }
 
-pub(crate) async fn list_dispatched_session_snapshots_pg(
+pub async fn list_dispatched_session_snapshots_pg(
     pool: &PgPool,
     include_all: bool,
 ) -> Result<Vec<DispatchedSessionSnapshot>, String> {

@@ -13,7 +13,7 @@ use windows_sys::Win32::System::Threading::GetCurrentProcess;
 // non-inheritable handle even when TerminateProcess skips every destructor.
 static RUNTIME_JOB: OnceLock<Result<OwnedHandle, String>> = OnceLock::new();
 
-pub(crate) fn own_runtime_children() -> Result<(), String> {
+pub fn own_runtime_children() -> Result<(), String> {
     RUNTIME_JOB
         .get_or_init(|| create_runtime_job().map_err(|error| error.to_string()))
         .as_ref()

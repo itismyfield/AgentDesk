@@ -3,28 +3,28 @@ use std::sync::atomic::Ordering;
 use sqlx::PgPool;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PressureSnapshot {
-    pub(crate) pool_size: u32,
-    pub(crate) pool_idle: u32,
-    pub(crate) pool_max: u32,
-    pub(crate) effective_reserve: u32,
+pub struct PressureSnapshot {
+    pub pool_size: u32,
+    pub pool_idle: u32,
+    pub pool_max: u32,
+    pub effective_reserve: u32,
 }
 
 impl PressureSnapshot {
-    pub(crate) fn in_flight(self) -> u32 {
+    pub fn in_flight(self) -> u32 {
         self.pool_size.saturating_sub(self.pool_idle)
     }
 
-    pub(crate) fn background_budget(self) -> u32 {
+    pub fn background_budget(self) -> u32 {
         self.pool_max.saturating_sub(self.effective_reserve)
     }
 
-    pub(crate) fn should_yield(self) -> bool {
+    pub fn should_yield(self) -> bool {
         self.effective_reserve != 0 && self.in_flight() >= self.background_budget()
     }
 }
 
-pub(crate) fn pressure_snapshot(pool: &PgPool) -> PressureSnapshot {
+pub fn pressure_snapshot(pool: &PgPool) -> PressureSnapshot {
     PressureSnapshot {
         effective_reserve: super::FOREGROUND_RESERVE.load(Ordering::Acquire),
         pool_size: pool.size(),

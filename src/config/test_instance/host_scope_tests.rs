@@ -1,11 +1,15 @@
+#[cfg(test)]
 use super::*;
+#[cfg(test)]
 use crate::config::session_hosts::test_instance_validation::validate_hosts;
+#[cfg(test)]
 use serde_json::json;
 
+#[cfg(test)]
 use super::test_support::write;
-pub(crate) use super::test_support::{assert_single_test_passed, command, fixture};
+pub use super::test_support::{assert_single_test_passed, command, fixture};
 
-pub(crate) fn instance_child(test_name: &str, marker: &str) -> bool {
+pub fn instance_child(test_name: &str, marker: &str) -> bool {
     if std::env::var_os(marker).is_some() {
         return true;
     }
@@ -304,6 +308,7 @@ fn initialized_test_scope_names_sessions_and_refuses_herdr_runtime() {
     exercise_owner_receipt(instance);
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 fn exercise_owner_receipt(instance: &'static TestInstance) {
     use crate::services::herdr_launch::HerdrLaunchEndpoint;
