@@ -411,6 +411,30 @@ impl NativeSources {
     }
 }
 
+#[cfg(unix)]
+impl<B: BindingEvents> Sources<B> {
+    pub(in crate::services::tui_o::writer) fn notice_projection(
+        &self,
+        cursor: &crate::services::tui_o::store::spool::Cursor,
+        stamp: &crate::services::tui_o::shadow::capture::Fingerprint,
+    ) -> Option<&super::super::input_facts::native::Projection> {
+        let reader = self.readers.iter().find(|r| r.source == cursor.source)?;
+        let capture = reader.capture.as_ref()?;
+        let seed = self
+            .native
+            .as_ref()?
+            .seeds
+            .get(&cursor.source)?
+            .projection()
+            .ok()?;
+        (seed.through() == cursor.captured_through
+            && capture.captured_through() == cursor.captured_through
+            && capture.prefix_hash() == cursor.prefix_hash
+            && capture.fingerprint().ok().as_ref() == Some(stamp))
+        .then_some(seed)
+    }
+}
+
 impl<B: BindingEvents> Sources<B> {
     /// The reply anchors this channel's native sources settle, when native inputs are read.
     pub(crate) fn reply_anchors(&self) -> Option<super::super::reply_anchor::Anchors> {

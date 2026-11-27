@@ -47,6 +47,7 @@ impl Projection {
                     members.push((key.0, key.1, at));
                 }
             }),
+            None,
         )?;
         let mut runs: Vec<RunAnchor> = Vec::new();
         for edge in self.facts.iter().flat_map(|fact| &fact.boundaries) {

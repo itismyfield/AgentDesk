@@ -39,6 +39,28 @@ fn project(projection: &mut Projection, row: &CapturedRecord) -> Result<Option<P
 }
 
 #[test]
+fn queued_prompt_blocks_render_like_the_same_user_input() {
+    let text = |part| json!({"type": "text", "text": part});
+    for content in [
+        json!("one\ntwo"),
+        json!([text("one\ntwo")]),
+        json!([text("one"), text("two")]),
+        json!([text("one"), {"type": "image"}, text("two")]),
+    ] {
+        let user = native_input(&json!({"type":"user", "uuid":"input",
+            "message":{"content":content}}))
+        .unwrap();
+        let command = native_input(&json!({"type":"attachment", "uuid":"physical",
+            "attachment":{"type":"queued_command", "commandMode":"prompt",
+                "origin":{"kind":"human"}, "source_uuid":"input", "prompt":content}}))
+        .unwrap();
+        assert_eq!(command.prompt, user.prompt);
+        assert_eq!(command.uuid, user.uuid);
+        assert_eq!(command.command_row_uuid.as_deref(), Some("physical"));
+    }
+}
+
+#[test]
 fn native_uuid_separates_identical_inputs_and_rejects_changed_identity() {
     let mut projection = Projection::for_tests();
     let first = record("native-one", "계속");

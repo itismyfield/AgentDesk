@@ -4721,6 +4721,7 @@ src/
 │   │   │   │   │   │   └── tests.rs
 │   │   │   │   │   ├── generation/
 │   │   │   │   │   │   └── tests.rs
+│   │   │   │   │   ├── absorption.rs
 │   │   │   │   │   ├── census.rs
 │   │   │   │   │   ├── context_observation.rs
 │   │   │   │   │   └── generation.rs
@@ -4930,10 +4931,14 @@ src/
 │   │   │   │   ├── codex_submission.rs
 │   │   │   │   ├── fresh_resume.rs
 │   │   │   │   ├── native_input.rs
+│   │   │   │   ├── notice_absorbed_tests.rs
 │   │   │   │   ├── notice_activation_tests.rs
 │   │   │   │   ├── notice_cache_tests.rs
 │   │   │   │   ├── notice_context_tests.rs
 │   │   │   │   ├── notice_missing_tests.rs
+│   │   │   │   ├── notice_owner_absorbed_tests.rs
+│   │   │   │   ├── notice_owner_command_order_tests.rs
+│   │   │   │   ├── notice_owner_command_tests.rs
 │   │   │   │   ├── notice_owner_tests.rs
 │   │   │   │   ├── notice_resume_tests.rs
 │   │   │   │   ├── notice_settlement.rs
@@ -4986,7 +4991,8 @@ src/
 │   │   │   ├── input_facts/
 │   │   │   │   ├── native/
 │   │   │   │   │   ├── projection/
-│   │   │   │   │   │   └── membership.rs
+│   │   │   │   │   │   ├── membership.rs
+│   │   │   │   │   │   └── notice_absorption.rs
 │   │   │   │   │   ├── tests/
 │   │   │   │   │   │   └── terminal_tests.rs
 │   │   │   │   │   ├── receipt.rs
@@ -5001,6 +5007,7 @@ src/
 │   │   │   │   ├── resume_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── input_notices/
+│   │   │   │   ├── absorption.rs
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── evidence.rs
