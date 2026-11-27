@@ -132,7 +132,7 @@ impl BusyOperation {
     }
 
     pub fn submit(&self, request: &Request<'_>) -> BusyReport {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         observe(request.nonce);
         (self.submit)(request)
     }
@@ -294,7 +294,7 @@ impl Refused {
 static OBSERVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
     std::sync::LazyLock::new(Default::default);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn observe(nonce: &str) {
     let mut observed = OBSERVED.lock().unwrap_or_else(|error| error.into_inner());
     *observed.entry(nonce.into()).or_default() += 1;
