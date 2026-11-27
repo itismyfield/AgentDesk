@@ -30,11 +30,6 @@ impl LocalSnapshot {
         !unknown_runtime && version <= current_version && !native_runtime
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn state_for_test(&self) -> SnapshotIdentity<'_> {
-        self.state()
-    }
-
     pub(crate) fn state(&self) -> SnapshotIdentity<'_> {
         SnapshotIdentity {
             replay_receipt_id: self.identity.replay_receipt_id,
@@ -50,11 +45,6 @@ impl LocalSnapshot {
 
     pub(crate) fn instance(&self) -> &str {
         &self.instance
-    }
-
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn incarnation_for_test(&self) -> &str {
-        self.incarnation()
     }
 
     pub(crate) fn incarnation(&self) -> &str {

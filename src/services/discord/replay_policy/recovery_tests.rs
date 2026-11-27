@@ -493,10 +493,10 @@ async fn sealed_snapshot_retains_the_original_root_lock_after_loader_handle_drop
     let attempt = begin(&pool, &mut saved, &target, "previous-process").await;
     inflight::save_inflight_state_create_new(&saved).unwrap();
     let snapshot = LocalSnapshot::load(Some(&loader), &saved).unwrap();
-    assert_eq!(snapshot.state_for_test().user_text, saved.user_text);
-    assert_eq!(
-        snapshot.incarnation_for_test(),
-        crate::domain::process_incarnation::incarnation()
+    crate::services::discord::replay_policy::recovery::assert_snapshot_identity_for_test(
+        &snapshot,
+        &saved.user_text,
+        crate::domain::process_incarnation::incarnation(),
     );
     drop(loader);
     assert!(

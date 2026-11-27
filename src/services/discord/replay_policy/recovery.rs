@@ -47,3 +47,13 @@ impl LocalSnapshot {
         ))
     }
 }
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn assert_snapshot_identity_for_test(
+    snapshot: &LocalSnapshot,
+    user_text: &str,
+    incarnation: &str,
+) {
+    assert_eq!(snapshot.state().user_text, user_text);
+    assert_eq!(snapshot.incarnation(), incarnation);
+}
