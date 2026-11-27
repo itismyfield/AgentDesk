@@ -69,6 +69,11 @@ pub(crate) fn discord_input(prompt: &str) -> bool {
     tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn discord_input_for_test(prompt: &str) -> bool {
+    discord_input(prompt)
+}
+
 pub(crate) fn native_input(row: &serde_json::Value) -> Option<NativeInput> {
     tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)
 }

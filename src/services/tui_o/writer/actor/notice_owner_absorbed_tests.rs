@@ -64,7 +64,7 @@ fn arm_absorption(c: &Case, registry: &history::v2::Registry, id: u64, frame: &s
 
 fn append_parent_turn(c: &Case, id: &str) {
     let parent = "[User: parent (ID: 42)]\nIndependent parent turn";
-    assert!(crate::services::tui_o::writer::input_notices::discord_input(parent));
+    assert!(crate::services::tui_o::writer::input_notices::discord_input_for_test(parent));
     append(&c.path, &row(id, parent));
 }
 
