@@ -112,27 +112,23 @@ fn live_episode(provider: &ProviderKind, episode: &Value) -> bool {
         return true;
     };
     let anchor = episode["anchor_id"].as_u64();
-    let row = inflight::load_inflight_state_read_only_result(provider, channel);
+    // The worker saves inflight before removing pending-start.
+    let pending = tui_direct_pending_start::holds_for_retention(provider, channel, anchor);
     #[cfg(test)]
     super::super::custody_notice_tests::between_owner_probes();
-    match row {
-        Err(_) => return true,
+    if !matches!(pending, Ok(false)) {
+        return true;
+    }
+    match inflight::load_inflight_state_read_only_result(provider, channel) {
+        Err(_) => true,
         Ok(Some(row)) => {
             let same_episode = super::super::boot_custody::row_episode_key(provider, &row);
-            if same_episode == *episode
+            same_episode == *episode
                 || anchor.is_none_or(|anchor| anchor == row.user_msg_id && anchor == 0)
                 || (anchor == Some(row.user_msg_id) && episode["anchorless"].is_null())
-            {
-                return true;
-            }
         }
-        Ok(None) => {}
+        Ok(None) => false,
     }
-    tui_direct_pending_start::load_all().iter().any(|record| {
-        record.provider == provider.as_str()
-            && record.channel_id == channel
-            && anchor.is_none_or(|anchor| record.anchor_message_id == anchor)
-    })
 }
 
 #[cfg(test)]

@@ -60,9 +60,7 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
     provider: &ProviderKind,
 ) -> usize {
     use crate::services::discord::{inflight, tui_direct_abort_marker, tui_direct_pending_start};
-    // codex r1 #2: pass-local marker cache — ONE `load_all` store read per
-    // sweep pass feeds every candidate's verdict-time marker probe (the prior
-    // per-candidate `load_for_channel` re-read the whole store O(P×M) times).
+    // The pass cache can preserve a target early. Removal uses fresh checked reads.
     let marker_anchors: HashSet<(u64, u64)> = tui_direct_abort_marker::load_all()
         .into_iter()
         .filter(|marker| marker.provider.eq_ignore_ascii_case(provider.as_str()))
@@ -73,25 +71,22 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchor_reactions(
     let has_valid_marker = |channel_id: u64, anchor_message_id: u64| {
         marker_anchors.contains(&(channel_id, anchor_message_id))
     };
-    // codex r1 #1: removal-instant re-verification, evaluated FRESH inside the
-    // reconciler's target_lock right before the `⏳` removal (never from the
-    // pass cache — correctness beats cost here, and it only runs for actual
-    // removal candidates). Any of the three holds landing after the verdict
-    // aborts the removal: a live inflight row, an abort/deferred-claim marker
-    // covering the exact anchor, or a durable pending-start pinned to the
-    // exact anchor (its deferring worker owns this ⏳'s lifecycle).
+    // Recheck ownership at removal time under the target lock.
     let holds_before_removal = |channel_id: u64, anchor_message_id: u64| {
         !matches!(
+            tui_direct_pending_start::holds_for_retention(
+                provider,
+                channel_id,
+                Some(anchor_message_id)
+            ),
+            Ok(false)
+        ) || !matches!(
+            tui_direct_abort_marker::holds_for_retention(provider, channel_id, anchor_message_id),
+            Ok(false)
+        ) || !matches!(
             inflight::load_inflight_state_read_only_result(provider, channel_id),
             Ok(None)
-        ) || tui_direct_abort_marker::load_for_channel(provider.as_str(), channel_id)
-            .iter()
-            .any(|marker| marker.anchor_message_id == anchor_message_id)
-            || tui_direct_pending_start::load_all().iter().any(|record| {
-                record.provider.eq_ignore_ascii_case(provider.as_str())
-                    && record.channel_id == channel_id
-                    && record.anchor_message_id == anchor_message_id
-            })
+        )
     };
     let now = SystemTime::now();
     let cleared = sweep_orphan_tui_anchors_with_probes(
