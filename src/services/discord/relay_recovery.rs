@@ -44,6 +44,7 @@ use super::{
     mailbox_finish_turn, mailbox_snapshot, recovery, saturating_decrement_global_active,
     stall_recovery, turn_finalizer,
 };
+use crate::services::engine_runtime::health_port::AxisBSite;
 use crate::services::provider::ProviderKind;
 
 mod apply;
@@ -98,21 +99,6 @@ pub(crate) use idle_tmux::*;
 /// has already passed the independent death-evidence gate. A wall-clock rollback
 /// extends this protection because age uses `saturating_sub` below.
 const ORPHAN_PENDING_TOKEN_ADMISSION_GRACE: Duration = Duration::from_secs(30);
-
-// The site label itself is platform-neutral data: non-unix consumers (the
-// stale-turn reconciler entry points) name a site even though the evidence
-// machinery behind it is unix-only.
-#[cfg_attr(not(unix), allow(dead_code))]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AxisBSite {
-    ProbeAutoHealReattach,
-    WatchdogStaleIdle,
-    WatchdogExplicitBackground,
-    RelayDeadReattach,
-    ProbeAutoHeal,
-    PolicyTickStaleSweep,
-    BootReconcileSweep,
-}
 
 #[cfg(unix)]
 fn axis_b_site_for_apply(
@@ -327,42 +313,27 @@ async fn run_relay_recovery_at(
 }
 
 #[cfg(not(unix))]
-pub(crate) async fn automatic_stale_sweep_warrants(
-    registry: Option<&HealthRegistry>,
-    session_key: &str,
-    provider_name: &str,
+pub(super) async fn automatic_stale_sweep_warrants(
+    _registry: &HealthRegistry,
+    _session_key: &str,
+    _provider_name: &str,
     site: AxisBSite,
 ) -> bool {
-    // Non-unix builds have no tmux reachability evidence source, so every
-    // warrant operand is absent: the warrant abstains and the structural
-    // candidate is preserved (absence of evidence never manufactures a veto).
-    // The site taxonomy is closed on every platform, not only under unix.
-    let _ = (registry, session_key, provider_name);
-    matches!(
-        site,
-        AxisBSite::PolicyTickStaleSweep | AxisBSite::BootReconcileSweep
-    )
+    // Without tmux evidence, only the structural sweep-site check applies.
+    site.is_stale_sweep()
 }
 
 #[cfg(unix)]
-pub(crate) async fn automatic_stale_sweep_warrants(
-    registry: Option<&HealthRegistry>,
+pub(super) async fn automatic_stale_sweep_warrants(
+    registry: &HealthRegistry,
     session_key: &str,
     provider_name: &str,
     site: AxisBSite,
 ) -> bool {
+    if !site.is_stale_sweep() {
+        return false;
+    }
     let structural_candidate_apply = destructive_warrant::structural_candidate_apply(true);
-    // Closed taxonomy, like the apply path's `axis_b_warrant_site_unmapped` deny:
-    // a future sweep site must name its action here before it can reach a mutation.
-    let action = match site {
-        AxisBSite::PolicyTickStaleSweep | AxisBSite::BootReconcileSweep => {
-            RelayRecoveryActionKind::ClearStaleThreadProof
-        }
-        _ => return false,
-    };
-    let Some(registry) = registry else {
-        return structural_candidate_apply;
-    };
     let Some(identity) = super::session_identity::SessionIdentity::parse(session_key) else {
         return structural_candidate_apply;
     };
@@ -386,7 +357,7 @@ pub(crate) async fn automatic_stale_sweep_warrants(
     };
     let destructive_warrant_bind = destructive_warrant::destructive_warrant_bind(
         structural_candidate_apply,
-        action,
+        RelayRecoveryActionKind::ClearStaleThreadProof,
         &provider,
         Some(&snapshot),
         false,

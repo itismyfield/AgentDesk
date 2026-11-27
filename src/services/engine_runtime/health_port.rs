@@ -37,4 +37,4 @@ pub(crate) use queue_cancel::QueueCancelPort;
 pub(crate) use resume_runtime::ResumeRuntimePort;
 pub(crate) use routine_process::RoutineProcessPort;
 pub(crate) use slot_reset::SlotResetPort;
-pub(crate) use stale_sweep::{StaleSweepPort, stale_sweep_port};
+pub(crate) use stale_sweep::{AxisBSite, StaleSweepPort, stale_sweep_port};

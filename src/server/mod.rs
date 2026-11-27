@@ -534,7 +534,7 @@ async fn policy_tick_loop(
                 match crate::services::stale_turn_reconciler::reconcile_stale_turns_pg(
                     pool,
                     stale_sweep_port(health_registry.as_deref()),
-                    crate::services::discord::relay_recovery::AxisBSite::PolicyTickStaleSweep,
+                    crate::services::engine_runtime::health_port::AxisBSite::PolicyTickStaleSweep,
                     crate::services::discord::zombie_foreground_release::inflight_episode_lookup_for_tmux_name,
                 )
                 .await

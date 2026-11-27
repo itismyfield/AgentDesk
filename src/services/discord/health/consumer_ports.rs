@@ -10,11 +10,11 @@ use sqlx::PgPool;
 use super::{HeadlessAgentTurnReservation, HealthRegistry};
 use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard::ManagedResetVerdict;
-use crate::services::discord::relay_recovery::{self, AxisBSite};
+use crate::services::discord::relay_recovery;
 use crate::services::discord::zombie_foreground_release;
 use crate::services::discord::{host_defer_gate, host_teardown_gate};
 use crate::services::engine_runtime::health_port::{
-    AppHealth, AppHealthBinding, FinishCancelledMailboxResult, HeadlessDmTurnStart,
+    AppHealth, AppHealthBinding, AxisBSite, FinishCancelledMailboxResult, HeadlessDmTurnStart,
     HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort,
     ResumeRuntimePort, RoutineProcessPort, SlotResetPort, StaleSweepPort,
 };
@@ -90,7 +90,7 @@ impl StaleSweepPort<AxisBSite> for HealthRegistry {
         site: AxisBSite,
     ) -> BoxFuture<'a, bool> {
         Box::pin(relay_recovery::automatic_stale_sweep_warrants(
-            Some(self),
+            self,
             session_key,
             provider_name,
             site,
