@@ -679,7 +679,7 @@ fn p4_final_dispatch_refuses_a_changed_driver_scope_pg() {
         let host = Host::new(&[channel]).await;
         let _active = admission::test_activation::activate(channel.get());
         let input = admission::discord_input("claude", channel.get(), 7330411, [], "original");
-        let context = admission::ReplayAdmissionContext::production(&host.pool, "node-p4", admission::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
+        let context = admission::ReplayAdmissionContext::production(&host.pool, "node-p4", crate::domain::process_incarnation::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
         let projection = admission::PreparedEffectProjection {
             target: EffectTarget::ProviderStart { provider: "claude".into(), channel: channel.to_string() },
             input_hash: admission::input_hash("prepared"),
@@ -891,7 +891,7 @@ fn p5_exact_unsupported_scope_is_held_without_legacy_reregistration_pg() {
         let channel=ChannelId::new(7_330_518);let host=Host::new(&[channel]).await;
         let _active=crate::services::discord::router::replay_test_activation::activate(channel.get());
         let input=admission::discord_input("claude",channel.get(),7330518,[],"original");
-        let context=admission::ReplayAdmissionContext::production(&host.pool,"p5",admission::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
+        let context=admission::ReplayAdmissionContext::production(&host.pool,"p5",crate::domain::process_incarnation::incarnation()).for_scope(&channel.to_string(),"claude","legacy-prompt","owned_direct",false);
         let target=EffectTarget::ProviderStart{provider:"claude".into(),channel:channel.to_string()};
         let projection=|| admission::PreparedEffectProjection {target:target.clone(),input_hash:admission::input_hash("prepared"),binding:serde_json::json!({"driver_scope":"legacy-prompt","runtime_scope":"owned_direct"}),session_key:None};
         let start=admission::admit_start(&context,&input,projection(),None).await.unwrap();

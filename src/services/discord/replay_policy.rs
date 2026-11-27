@@ -14,12 +14,12 @@ pub(crate) mod recovery;
 pub(crate) mod row;
 
 use crate::db::replay_disposition::write::{self, ExactAttempt, NoEffectAck};
+#[cfg(test)]
+pub(crate) use crate::domain::process_incarnation::incarnation;
 use crate::services::provider::CancelToken;
 use live::{LiveAttempt, RawObservation, Verdict};
 use row::ReplayRow;
 use sqlx::PgPool;
-
-pub(crate) use crate::domain::process_incarnation::incarnation;
 
 #[derive(Debug)]
 pub(crate) enum ReplayDecision {

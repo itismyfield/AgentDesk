@@ -1,8 +1,9 @@
 //! Shared replay preflight and start preparation for every provider input effect.
 
 use crate::db::replay_disposition::receipt::{self, Disposition, ReceiptSnapshot};
-pub(crate) use crate::db::replay_disposition::write::CanonicalInput;
-use crate::db::replay_disposition::write::{self, BeginFrom, EffectProjection, WriteError};
+use crate::db::replay_disposition::write::{
+    self, BeginFrom, CanonicalInput, EffectProjection, WriteError,
+};
 use crate::services::discord::replay_policy::live::LiveAttempt;
 use crate::services::discord::replay_policy::permit::{
     EffectTarget, PermitRefusal, PreparedRetryStart, RetryPermit, StartPermit,
@@ -10,8 +11,6 @@ use crate::services::discord::replay_policy::permit::{
 use crate::services::provider::CancelToken;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
-
-pub(crate) use crate::services::discord::replay_policy::incarnation;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProducerMode {
@@ -205,7 +204,7 @@ impl ReplayStart {
     }
 }
 
-pub(crate) use crate::services::cluster::intake_turn::IntakeExecution;
+use crate::services::cluster::intake_turn::IntakeExecution;
 
 impl IntakeExecution {
     pub(crate) fn deferred(channel: poise::serenity_prelude::ChannelId) -> Self {

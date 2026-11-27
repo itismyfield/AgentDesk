@@ -10,7 +10,8 @@ use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
 pub(crate) use super::inject::test_hook as inject_hook;
 use super::inject::{self, InjectMode, test_hook};
-use super::{HumanInputDelivery, HumanInputRequest, deliver_human_input};
+use super::{HumanInputRequest, deliver_human_input};
+use crate::domain::human_input::{HumanInputDelivery, HumanInputError};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
 use crate::services::discord::health::HealthRegistry;
@@ -2021,7 +2022,7 @@ impl std::io::Write for LogSink {
 async fn deliver_logged(
     registry: &HealthRegistry,
     channel: u64,
-) -> (Result<HumanInputDelivery, super::HumanInputError>, String) {
+) -> (Result<HumanInputDelivery, HumanInputError>, String) {
     let request = HumanInputRequest {
         channel_id: ChannelId::new(channel),
         provider: ProviderKind::Claude,

@@ -5,7 +5,6 @@ use super::intake_queue_transaction::{
     IntakeQueueCommitSource, IntakeQueuePendingReactionPolicy, SoftInterventionCommitRequest,
     SoftInterventionSpec, commit_soft_intervention_transaction,
 };
-pub(crate) use crate::services::cluster::intake_router_hook::owner_record::input_start;
 
 mod busy_duplicate_notice;
 pub(super) mod busy_inject;

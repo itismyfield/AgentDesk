@@ -1,7 +1,8 @@
 //! Cancellation keeps provider body bytes; its terminal state belongs to the separate summary.
 
 use super::*;
-use crate::services::discord::{make_shared_data_for_tests, restart_mode::InflightRestartMode};
+use crate::domain::lifecycle::InflightRestartMode;
+use crate::services::discord::make_shared_data_for_tests;
 
 #[test]
 fn a_cancelled_partial_body_has_no_new_stopped_suffix_in_either_formatter_mode() {

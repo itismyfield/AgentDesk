@@ -2,9 +2,7 @@ use super::super::gateway::{
     DiscordGateway, HeadlessGateway, LiveDiscordTurnContext, send_intake_placeholder,
 };
 use super::super::*;
-pub(in crate::services::discord) use super::authorization::{
-    TurnKind, classify_turn_kind_from_author,
-};
+pub(in crate::services::discord) use super::authorization::classify_turn_kind_from_author;
 use super::dispatch_trigger::{
     dispatch_session_path_should_update, dispatch_should_recover_session_worktree,
     parse_dispatch_context_hints, resolve_dispatch_target_repo_dir,
@@ -33,6 +31,7 @@ use super::turn_start::{
     try_intake_runtime_transition_after_redirect,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
+use crate::services::cluster::intake_turn::TurnKind;
 #[cfg(unix)]
 use crate::services::discord::tmux_reaper::heal_stale_busy_mailbox;
 #[cfg(test)]

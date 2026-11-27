@@ -1,5 +1,6 @@
 //! The same committed begin and post-ACK reset for intake and headless starts.
 use super::*;
+use crate::domain::process_incarnation::incarnation;
 use crate::services::discord::replay_policy::RetryPermit;
 use crate::services::discord::router::intake_dispatch::replay_admission::ReplayAdmissionContext;
 use crate::services::provider_hosting::ProviderSessionDriver;
@@ -56,14 +57,13 @@ pub(in crate::services::discord::router::message_handler) async fn begin(
         .ok_or_else(|| StartStop::Deferred("no replay store; retry this request".into()))?;
     let instance =
         crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-    let ctx = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
-        .for_scope(
-            &input.channel,
-            provider.as_str(),
-            scope.driver.as_str(),
-            scope.runtime,
-            continuation.is_some(),
-        );
+    let ctx = ReplayAdmissionContext::production(pool, &instance, incarnation()).for_scope(
+        &input.channel,
+        provider.as_str(),
+        scope.driver.as_str(),
+        scope.runtime,
+        continuation.is_some(),
+    );
     if ctx.producers == admission::ProducerMode::Dormant {
         if continuation.is_some() {
             return Err(StartStop::Consumed);

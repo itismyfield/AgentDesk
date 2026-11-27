@@ -13,7 +13,7 @@ use crate::services::session_host::policy::consent::{
 };
 use poise::serenity_prelude as serenity;
 
-pub(super) use crate::services::session_host::policy::consent::boot_recovery::PROCESS as BOOT;
+use crate::services::session_host::policy::consent::boot_recovery::PROCESS as BOOT;
 /// Serializes replay and keeps each provider's channels whose boot queue merge is still held.
 static RECOVERY: tokio::sync::Mutex<BTreeSet<(String, u64)>> =
     tokio::sync::Mutex::const_new(BTreeSet::new());
