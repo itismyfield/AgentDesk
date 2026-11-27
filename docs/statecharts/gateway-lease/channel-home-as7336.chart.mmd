@@ -1,0 +1,77 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Designated
+    lg2: Gateway
+    lg3: Breaks NoRefusal or NoSilentLoss
+    lg4: Path to the NoRefusal or NoSilentLoss bug
+  }
+  class lg0 tan
+  class lg1 teal
+  class lg2 blue
+  class lg3 breaks
+  class lg4 bugPath
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s2: No owner row, the gateway serves (set to the designated node)
+  s3: No owner row, the gateway serves (no node set), turn runs on the gateway
+  s4: No owner row, the gateway serves (set to the designated node), an input waits at the gateway
+  s5: No owner row, the gateway serves (set to the designated node), turn runs on the gateway
+  s6: No owner row, the gateway serves (set to the designated node), an input is kept for the designated node
+  s7: No owner row, the gateway serves (set to the designated node), an input waits at the gateway, turn runs on the gateway
+  s8: Home is the designated node (set to the designated node), an input is handed to the designated node
+  s9: Home is the gateway (set to the designated node), an input is kept for the designated node, turn runs on the gateway (old session)
+  s10: Home is the designated node (set to the designated node), turn runs on the designated node
+  s11: Home is the gateway (set to the designated node), an input is kept for the designated node, idle session on the gateway [1 input lost]
+  s12: Home is the designated node (set to the designated node), an input waits at the gateway, turn runs on the designated node
+  s13: Home is the designated node (set to the designated node), an input waits at the gateway, turn runs on the designated node [refusal shown]
+  [*] --> s0
+  s0 --> s0: an operator edits one node's config file
+  s0 --> s1: you send a message
+  s0 --> s2: the hub copies its setting to the database
+  s1 --> s3: the gateway starts the turn itself
+  s2 --> s4: you send a message
+  s3 --> s5: the hub copies its setting to the database
+  s4 --> s6: the gateway puts the input into shared custody
+  s5 --> s7: you send a message
+  s6 --> s8: the input is handed to the node that owns the channel
+  s7 --> s9: the gateway puts the input into shared custody
+  s8 --> s8: a node reads the owner row again
+  s9 --> s11: the turn ends and its answer is withheld
+  s8 --> s10: the home starts the turn
+  s10 --> s12: you send a message
+  s12 --> s13: the gateway's writer check refuses before routing
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 tan
+  class s4 bugPath
+  class s5 tan
+  class s5 bugPath
+  class s6 tan
+  class s6 bugPath
+  class s7 tan
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 blue
+  class s9 bugPath
+  class s10 teal
+  class s10 bugPath
+  class s11 blue
+  class s11 breaks
+  class s11 bugPath
+  class s12 teal
+  class s12 bugPath
+  class s13 teal
+  class s13 breaks
+  class s13 bugPath

@@ -1,0 +1,65 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Designated
+    lg2: Moving
+    lg3: Breaks BusyTurnFinishes
+    lg4: Path to the BusyTurnFinishes bug
+  }
+  class lg0 tan
+  class lg1 teal
+  class lg2 pink
+  class lg3 breaks
+  class lg4 bugPath
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (set to the designated node)
+  s2: No owner row, the gateway serves (set to the designated node), an input waits at the gateway
+  s3: No owner row, the gateway serves (set to the designated node), an input is kept for the designated node
+  s4: Home is the designated node (set to the designated node), an input is handed to the designated node
+  s5: Home is the designated node (set to the designated node), turn runs on the designated node
+  s6: Home is the designated node (no node set), turn runs on the designated node
+  s7: Home is the designated node (no node set), an input waits at the gateway, turn runs on the designated node
+  s8: Home is the designated node (no node set), an input is kept for the gateway, turn runs on the designated node
+  s9: Home is the designated node (no node set), an input is kept for the gateway, old home asked to end, turn runs on the designated node
+  s10: Home is the designated node (no node set), an input is kept for the gateway, old home ended [busy turn cut]
+  [*] --> s0
+  s0 --> s0: an operator edits one node's config file
+  s0 --> s1: the hub copies its setting to the database
+  s1 --> s1: an operator edits one node's config file
+  s1 --> s2: you send a message
+  s2 --> s3: the gateway puts the input into shared custody
+  s3 --> s4: the input is handed to the node that owns the channel
+  s4 --> s4: a node reads the owner row again
+  s4 --> s5: the home starts the turn
+  s5 --> s6: the hub copies its setting to the database
+  s6 --> s7: you send a message
+  s7 --> s8: the gateway puts the input into shared custody
+  s8 --> s9: the old home is asked to end its session
+  s9 --> s10: the old home answers the request
+  classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 teal
+  class s4 bugPath
+  class s5 teal
+  class s5 bugPath
+  class s6 teal
+  class s6 bugPath
+  class s7 teal
+  class s7 bugPath
+  class s8 teal
+  class s8 bugPath
+  class s9 pink
+  class s9 bugPath
+  class s10 pink
+  class s10 breaks
+  class s10 bugPath

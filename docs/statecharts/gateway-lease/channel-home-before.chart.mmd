@@ -1,0 +1,60 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Breaks NoRefusal or NoSilentLoss in some cases
+    lg2: Path to the HomeFollowsDesignation or NoRefusal or NoSilentLoss bug
+    lg3: Repeats forever, so HomeFollowsDesignation breaks
+  }
+  class lg0 tan
+  class lg1 mayBreak
+  class lg2 bugPath
+  class lg3 repeats
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s2: No owner row, the gateway serves (set to the designated node)
+  s3: No owner row, the gateway serves (set to the designated node), an input waits at the gateway
+  s4: No owner row, the gateway serves (set to the designated node) [refusal shown, 1 input lost]
+  s5: No owner row, the gateway serves (no node set, designated node down), an input waits at the gateway
+  s6: No owner row, the gateway serves (set to the designated node), an input waits at the gateway [refusal shown, 1 input lost]
+  s7: No owner row, the gateway serves (set to the designated node) [refusal shown, 2 inputs lost]
+  s8: No owner row, the gateway serves (set to the designated node), an input waits at the gateway [refusal shown, 2 inputs lost]
+  s9: No owner row, the gateway serves (set to the designated node) [refusal shown, 3 inputs lost]
+  [*] --> s0
+  s0 --> s0: an operator edits one node's config file
+  s0 --> s1: you send a message
+  s0 --> s2: the hub copies its setting to the database
+  s1 --> s1: an operator edits one node's config file
+  s2 --> s3: you send a message
+  s1 --> s5: the designated node stops
+  s3 --> s4: the gateway refuses to place the channel on another node
+  s5 --> s1: the designated node boots and ends its session of an older owner
+  s1 --> s3: the hub copies its setting to the database
+  s4 --> s6: you send a message
+  s6 --> s7: the gateway refuses to place the channel on another node
+  s7 --> s8: you send a message
+  s8 --> s9: the gateway refuses to place the channel on another node
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 tan
+  class s4 mayBreak
+  class s4 bugPath
+  class s5 tan
+  class s5 bugPath
+  class s6 tan
+  class s6 bugPath
+  class s7 tan
+  class s7 bugPath
+  class s8 tan
+  class s8 bugPath
+  class s9 tan
+  class s9 repeats
