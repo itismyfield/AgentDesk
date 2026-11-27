@@ -21,7 +21,7 @@ ENTRIES = {}
 # Boot activation sites are pinned per function so unrelated edits elsewhere in a file pass;
 # "*" pins a whole file.
 PROTECTED = {
-    'src/cli/dcserver.rs': {'handle_dcserver': 'be9a356fa4a0da9eb04850920783f34ff3bcc4ba721aeda1cbda6eb3c94ea486'},
+    'src/cli/dcserver.rs': {'handle_dcserver': '82f69c4ead0a5e0706f13f2f51c36b6cbf81b11b0333157efd02d7ce0398a251'},
     'src/services/discord/runtime_bootstrap.rs': {'run_bot': 'b5cff0991553d7228d27258e263efc3684dae3d6d6facb4b45cfc39211d24cfc',
         'start_standby_runtime': 'fe2e996b7e5fa48866d44cf039ba3d975dd5fbd15fceac68309f5db2b1cd3b6d'},
     'src/services/discord/inflight/removal/boot_reaper.rs': {

@@ -319,8 +319,8 @@ pub fn force_presence_for_test(name: &str, presence: SessionPresence) {
 }
 
 /// How many forced probes of `name` ran.
-#[cfg(test)]
-pub(crate) fn forced_probes(name: &str) -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn forced_probes(name: &str) -> usize {
     FORCED_PRESENCE
         .lock()
         .unwrap()

@@ -562,7 +562,12 @@ mod request_body_tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool)).unwrap()
+        crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pg_pool),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .unwrap()
     }
 
     fn test_state_with_pg(pg_pool: sqlx::PgPool) -> AppState {

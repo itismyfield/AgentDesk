@@ -923,6 +923,7 @@ src/
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
+│   │   ├── outbox_slot_reset_pg_tests.rs
 │   │   ├── registry.rs
 │   │   └── status.rs
 │   ├── bind_security_diagnostics.rs
@@ -1832,6 +1833,9 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── exact_lease_tests.rs
 │   │   │   └── source_epoch_observer.rs
+│   │   ├── destructive_cancel_gate/
+│   │   │   └── tests/
+│   │   │       └── destructive_cancel_heartbeat_tests.rs
 │   │   ├── execution_identity/
 │   │   │   ├── herdr_agent_hint.rs
 │   │   │   ├── herdr_agent_hint_tests.rs

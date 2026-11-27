@@ -53,8 +53,12 @@ async fn seed(pool: &sqlx::PgPool) -> Campaign {
 }
 
 fn engine(pool: &sqlx::PgPool) -> PolicyEngine {
-    PolicyEngine::new_with_pg(&crate::config::Config::default(), Some(pool.clone()))
-        .expect("test engine")
+    PolicyEngine::new_with_pg(
+        &crate::config::Config::default(),
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("test engine")
 }
 
 async fn handoff(pool: &sqlx::PgPool, engine: &PolicyEngine, campaign: &Campaign) -> HandoffReport {

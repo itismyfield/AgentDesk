@@ -700,6 +700,7 @@ async fn cancel_rereads_dispatch_claimed_mid_cancel_pg() {
     let pool = fx.pool.clone();
     let writer = tokio::spawn(async move {
         crate::services::auto_queue::cancel_run::cancel_selected_runs_with_pg(
+            crate::services::discord::health::slot_row_host_refusal,
             None,
             &pool,
             &[TARGET.to_string()],
