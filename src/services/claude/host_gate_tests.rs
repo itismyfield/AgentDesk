@@ -459,14 +459,14 @@ fn test_instance_failed_presence_never_becomes_missing_on_an_absent_default_sock
     let _presence =
         InjectedPresenceGuard::set(HostSessionRef::tmux(NAME), HostPresence::ProbeFailed);
     assert_eq!(super::session_exists(NAME), Ok(false));
-    let (_temp, root) = crate::config::test_instance::tests::fixture();
+    let (_temp, root) = crate::config::test_instance::test_support::fixture();
     let filter = concat!(
         module_path!(),
         "::test_instance_failed_presence_never_becomes_missing_on_an_absent_default_socket"
     )
     .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
     .unwrap();
-    let output = crate::config::test_instance::tests::command(&root)
+    let output = crate::config::test_instance::test_support::command(&root)
         .args(["--exact", filter, "--nocapture"])
         .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
         .env("AGENTDESK_ROOT_DIR", &root)

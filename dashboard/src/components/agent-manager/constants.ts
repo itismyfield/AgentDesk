@@ -1,5 +1,5 @@
 import type { CliProvider } from "../../types";
-import type { DeptForm, FormData } from "./types";
+import type { FormData } from "./types";
 
 export const LEGACY_ONLY_PROVIDERS: CliProvider[] = [
   "copilot",
@@ -25,7 +25,7 @@ export const STATUS_DOT: Record<string, string> = {
 
 export const EMOJI_GROUPS: { label: string; labelEn: string; emojis: string[] }[] = [
   {
-    label: "부서/업무",
+    label: "업무",
     labelEn: "Work",
     emojis: ["📊", "💻", "🎨", "🔍", "🛡️", "⚙️", "📁", "🏢", "📋", "📈", "💼", "🗂️", "📌", "🎯", "🔧", "🧪"],
   },
@@ -57,28 +57,4 @@ export const BLANK: FormData = {
   personality: "",
   prompt_content: "",
   auto_commit: false,
-};
-
-export const DEPT_COLORS = [
-  "#3b82f6",
-  "#ef4444",
-  "#f59e0b",
-  "#10b981",
-  "#14b8a6",
-  "#f97316",
-  "#ec4899",
-  "#06b6d4",
-  "#6b7280",
-];
-
-export const DEPT_BLANK: DeptForm = {
-  id: "",
-  name: "",
-  name_ko: "",
-  name_ja: "",
-  name_zh: "",
-  icon: "📁",
-  color: "#3b82f6",
-  description: "",
-  prompt: "",
 };

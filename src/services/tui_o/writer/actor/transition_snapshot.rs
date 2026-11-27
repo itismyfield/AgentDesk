@@ -310,7 +310,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 /// The pinned source and history of the pane's execution, read only while its spawn nonce is
 /// still the one the request was checked against.
 pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_EXECUTION.with(|forced| forced.borrow().clone()) {
         return forced;
     }
@@ -352,13 +352,13 @@ pub(crate) fn execution_sources(
     Ok(held)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED_EXECUTION: std::cell::RefCell<Option<Execution>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Answers every execution read on this thread with `read` until dropped.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
     struct Restore(Option<Execution>);
     impl Drop for Restore {

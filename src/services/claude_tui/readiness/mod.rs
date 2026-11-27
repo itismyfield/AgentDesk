@@ -12,6 +12,9 @@ mod resume_record;
 mod source;
 #[cfg(unix)]
 pub(crate) use source::launch_start_hook;
+/// Ledger fixtures and the reservation hook upper-crate tests reuse (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_support;
 #[cfg(test)]
 #[path = "readiness_tests.rs"]
 pub(crate) mod tests;
@@ -432,8 +435,8 @@ pub(crate) fn reserve(proof: Proof) -> Option<Reservation> {
         clear: proof.clear,
     };
     drop(state);
-    #[cfg(all(test, unix))]
-    tests::clear_tests::after_reserve();
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    test_support::after_reserve();
     Some(reservation)
 }
 pub(crate) struct Reservation {

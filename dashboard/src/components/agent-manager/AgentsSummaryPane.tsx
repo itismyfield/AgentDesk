@@ -5,7 +5,7 @@ import { formatRelativeTime } from "../../app/shellFormatting";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { CompactBreakdown } from "../../kit/pro/compact-breakdown";
-import type { Department, DispatchedSession } from "../../types";
+import type { DispatchedSession } from "../../types";
 import AgentPersona from "../AgentPersona";
 import { Cap, Chip, RowButton, StatusDot, cn, type DotTone } from "../common/KitPrimitives";
 import { AGENT_STATES, agentStateLabel, type HomeAgent, type HomeAgentState } from "../home/homeModel";
@@ -25,7 +25,6 @@ import {
   sessionTitle,
 } from "../session-panel/SessionPanelModel";
 import { AgentOverlay } from "./AgentOverlay";
-import { NO_DEPARTMENT, departmentLabels, hasDepartment } from "./agent-list-controls";
 import type { Translator } from "./types";
 
 /** Collapses idle or closed subagent tool sessions (`toolu_*`) while keeping active turns visible. */
@@ -138,7 +137,7 @@ function AgentsUnlinkedSessionList({
               ) : null}
             </div>
             {note && note !== "ok" ? <Cap className="block bg-(--bg-1) px-3 py-1.5 text-(--warn) sm:px-4" role="status">{note}</Cap> : null}
-            {expanded ? <SessionInfoCard id={detailId} session={session} departments={[]} locale={locale} tr={tr} isKo={isKo} /> : null}
+            {expanded ? <SessionInfoCard id={detailId} session={session} locale={locale} tr={tr} isKo={isKo} /> : null}
           </li>
         );
       })}
@@ -229,16 +228,13 @@ export function AgentsUnlinkedSessions({
 const LEGEND_TONE: Record<HomeAgentState, DotTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
 
 /** Right pane while no agent is picked: state counts, unlinked sessions up top, and agent distribution by Provider. */
-export function AgentsSummaryPane({ counted, entries, departments, locale, tr, isKo, deptTab, onSelectDept, unlinkedSessions, onSessionsChange }: {
+export function AgentsSummaryPane({ counted, entries, locale, tr, isKo, unlinkedSessions, onSessionsChange }: {
   /** Home's counted set for the state counts; `entries` are the real agents. */
   counted: HomeAgent[];
   entries: HomeAgent[];
-  departments: Department[];
   locale: string;
   tr: Translator;
   isKo: boolean;
-  deptTab?: string;
-  onSelectDept?: (deptId: string) => void;
   unlinkedSessions: DispatchedSession[];
   onSessionsChange?: () => void;
 }) {
@@ -257,18 +253,6 @@ export function AgentsSummaryPane({ counted, entries, departments, locale, tr, i
         return { id, label: meta.label, value, color: meta.color };
       });
   }, [entries]);
-  const byDept = useMemo(() => {
-    if (!onSelectDept) return [];
-    const labels = departmentLabels(departments, locale);
-    const rows = departments.map((department) => ({
-      id: department.id,
-      label: labels.get(department.id) ?? department.name,
-      value: entries.filter((entry) => entry.agent.department_id === department.id).length,
-    }));
-    const known = new Set(departments.map((department) => department.id));
-    rows.push({ id: NO_DEPARTMENT, label: tr("미배정", "Unassigned"), value: entries.filter((entry) => !hasDepartment(entry.agent, known)).length });
-    return rows.filter((row) => row.value > 0).map((row) => ({ ...row, color: "var(--accent)" }));
-  }, [departments, entries, locale, onSelectDept, tr]);
 
   return (
     <div data-testid="agents-summary" className="flex min-w-0 flex-col gap-4">
@@ -285,26 +269,7 @@ export function AgentsSummaryPane({ counted, entries, departments, locale, tr, i
         </p>
       </section>
       <AgentsUnlinkedSessions sessions={unlinkedSessions} locale={locale} tr={tr} isKo={isKo} onSessionsChange={onSessionsChange} className="border-t border-(--line-soft) pt-3.5" />
-      {onSelectDept ? (
-        byDept.length ? (
-          <CompactBreakdown
-            items={byDept}
-            title={tr("부서별 인원", "Agents by department")}
-            totalLabel={tr("전체 에이전트", "All agents")}
-            format={(value) => Math.round(value).toLocaleString()}
-            onSelect={onSelectDept}
-            selectedId={!deptTab || deptTab === "all" ? null : deptTab}
-            hideFooter
-            labels={{
-              list: tr("부서별 인원과 비중", "Agents and share by department"),
-              row: (label, value, share) => tr(`${label}, ${value}명, 전체의 ${share}`, `${label}, ${value}, ${share} of all`),
-              summary: (total, amount) => `${total}: ${amount}`,
-              empty: tr("에이전트가 없어요.", "No agents yet."),
-              selectHint: tr("누르면 이 부서만 목록에 보여요.", "Shows only this department in the list."),
-            }}
-          />
-        ) : null
-      ) : byProvider.length ? (
+      {byProvider.length ? (
         <CompactBreakdown
           items={byProvider}
           title={tr("Provider별 에이전트 분포", "Agents by provider")}

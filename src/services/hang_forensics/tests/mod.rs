@@ -1,7 +1,8 @@
-use super::*;
+use crate::services::hang_forensics::*;
 use std::net::TcpListener;
 use std::sync::MutexGuard;
 use std::time::Duration;
+use std::time::Instant;
 
 fn exclusive() -> MutexGuard<'static, ()> {
     counter_test_lock()

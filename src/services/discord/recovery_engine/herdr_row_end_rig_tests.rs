@@ -630,7 +630,7 @@ impl Run {
     }
 }
 
-async fn settled_tasks() {
+pub(in crate::services::discord) async fn settled_tasks() {
     let idle = wait(Duration::from_secs(30), || {
         ENDING.lock().unwrap().is_empty()
     })

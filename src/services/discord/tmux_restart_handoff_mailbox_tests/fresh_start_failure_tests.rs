@@ -92,7 +92,7 @@ fn fail_fresh_turn(
     let _spy = SpyGuard::install(SpyState {
         captures: std::iter::repeat_n(Some(ready), 64).collect(),
         on_alive: Some(Box::new(
-            crate::services::claude_tui::readiness::tests::fresh_fixture,
+            crate::services::claude_tui::readiness::test_support::fresh_fixture,
         )),
         ..SpyState::default()
     });

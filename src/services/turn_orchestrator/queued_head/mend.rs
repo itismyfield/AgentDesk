@@ -71,7 +71,7 @@ pub(crate) struct UnknownHead {
     pub(crate) attempt: Option<HeadAttempt>,
 }
 
-type Gate = fn(ChannelId, Option<ChannelId>) -> bool;
+pub(crate) type Gate = fn(ChannelId, Option<ChannelId>) -> bool;
 /// The queued-head gate check the caller's runtime answers for a provider channel: its own
 /// readiness, then `Gate` on the channel and its parent.
 pub(crate) type GateCheck = fn(&ProviderKind, ChannelId, Option<ChannelId>, Gate) -> bool;
@@ -211,7 +211,3 @@ fn mend_msg(msg: MendMsg) -> ChannelMailboxMsg {
     let head = super::HeadMsg::Mend(msg);
     ChannelMailboxMsg::Injection(super::super::injected_inputs::InjectionMsg::Head(head))
 }
-
-#[cfg(all(test, unix))]
-#[path = "mend_tests.rs"]
-mod tests;

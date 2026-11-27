@@ -617,14 +617,14 @@ fn strict_header_reader(file: std::fs::File, _path: &Path) -> std::fs::File {
     file
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FAILING_HEADER_READ: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
 }
 
 /// Test seam: strict header reads of `path` still open the file, then every read fails.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn fail_header_reads_for_tests(path: Option<PathBuf>) {
     FAILING_HEADER_READ.with(|slot| *slot.borrow_mut() = path);
 }
@@ -706,7 +706,7 @@ fn store_root(
 /// Clear the entire cache. Test-only hook (REQ-004): lets tests force the cold
 /// path and prevents cross-test contamination from a shared process-lifetime
 /// cache. Compiled only under `cfg(test)`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn reset_cache_for_tests() {
     let mut state = lock_cache();
     state.roots.clear();
@@ -720,7 +720,7 @@ pub fn reset_cache_for_tests() {
 /// test's reset and its cache-state assertion. ALL test modules across this
 /// crate that exercise the index (here AND `session.rs`) must serialize through
 /// [`lock_cache_for_tests`].
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Acquire the shared cache test lock and reset the cache, returning the guard.
@@ -728,7 +728,7 @@ static CACHE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// isolated, freshly-reset process-global index (REQ-004 / TEST-004). Exposed
 /// (not module-private) so `session.rs` tests share the exact same lock instead
 /// of running unsynchronized against the same global state.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn lock_cache_for_tests() -> std::sync::MutexGuard<'static, ()> {
     let guard = CACHE_TEST_LOCK
         .lock()

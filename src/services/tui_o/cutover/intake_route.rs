@@ -5,7 +5,7 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
 
 mod input;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use input::{InputProbe, install_probe};
 pub(crate) use input::{
     for_claimed_input, for_input_placement, held_input_channels, selected_codex_input,

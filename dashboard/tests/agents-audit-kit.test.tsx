@@ -12,12 +12,11 @@ import { AgentInfoCardContent } from "../src/components/agent-manager/AgentInfoC
 import { turnMonitorSteps } from "../src/components/agent-manager/AgentInfoCardModel";
 import AgentPromptEditor, { hasMaskedPromptValue, parsePromptHeadings } from "../src/components/agent-manager/AgentPromptEditor";
 import { AgentsSummaryPane } from "../src/components/agent-manager/AgentsSummaryPane";
-import { departmentLabels } from "../src/components/agent-manager/agent-list-controls";
 import { useDiscordChannels } from "../src/components/agent-manager/useAgentDetailData";
 import { AnchorAuditDetail } from "../src/components/audit/AnchorAuditPanel";
 import { PromptAuditDetail } from "../src/components/audit/PromptAuditPanel";
 import { UnlinkedSessions } from "../src/components/session-panel/SessionPanel";
-import type { Agent, Department, DispatchedSession } from "../src/types";
+import type { Agent, DispatchedSession } from "../src/types";
 
 vi.mock("../src/api/httpClient", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/api/httpClient")>();
@@ -79,7 +78,7 @@ const ADA: Agent = {
   name: "Ada",
   name_ko: "아다",
   alias: "ada",
-  department_id: "dept-art-1",
+  department_id: null,
   cli_provider: "claude",
   avatar_emoji: "🤖",
   personality: null,
@@ -89,12 +88,6 @@ const ADA: Agent = {
   created_at: NOW - DAY,
   discord_channel_cc: "100",
 };
-
-const DUP_DEPTS: Department[] = [
-  { id: "dept-art-1", name: "Art Studio", name_ko: "아트팀", icon: "🎨", color: "#f97316", description: null, prompt: null, sort_order: 0, created_at: NOW },
-  { id: "dept-art-2", name: "아트팀", name_ko: "아트팀", icon: "🖌️", color: "#38bdf8", description: null, prompt: null, sort_order: 1, created_at: NOW },
-  { id: "dept-dev", name: "Engineering", name_ko: "개발팀", icon: "⚙️", color: "#22c55e", description: null, prompt: null, sort_order: 2, created_at: NOW },
-];
 
 let root: Root;
 let container: HTMLDivElement;
@@ -140,28 +133,20 @@ afterEach(() => {
 });
 
 describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prompt editor & audit kit", () => {
-  it("disambiguates duplicate Korean department names and rounds CompactBreakdown headcount to whole integers", async () => {
-    const labels = departmentLabels(DUP_DEPTS, "ko");
-    expect(labels.get("dept-art-1")).toBe("아트팀 (Art Studio)");
-    expect(labels.get("dept-art-2")).toBe("아트팀 (dept-art-2)");
-    expect(labels.get("dept-dev")).toBe("개발팀");
-
+  it("renders provider distribution in AgentsSummaryPane and rounds CompactBreakdown headcount to whole integers", async () => {
     const entries = [
-      { agent: { ...ADA, id: "a1", department_id: "dept-art-1" }, state: "working" as const, info: null, seenAt: null },
-      { agent: { ...ADA, id: "a2", department_id: "dept-art-1" }, state: "resting" as const, info: null, seenAt: null },
-      { agent: { ...ADA, id: "a3", department_id: "dept-art-2" }, state: "resting" as const, info: null, seenAt: null },
+      { agent: { ...ADA, id: "a1", cli_provider: "claude" as const }, state: "working" as const, info: null, seenAt: null },
+      { agent: { ...ADA, id: "a2", cli_provider: "claude" as const }, state: "resting" as const, info: null, seenAt: null },
+      { agent: { ...ADA, id: "a3", cli_provider: "codex" as const }, state: "resting" as const, info: null, seenAt: null },
     ];
     act(() => {
       root.render(
         <AgentsSummaryPane
           counted={entries}
           entries={entries}
-          departments={DUP_DEPTS}
           locale="ko"
           tr={ko}
           isKo
-          deptTab="all"
-          onSelectDept={vi.fn()}
           unlinkedSessions={[]}
         />,
       );
@@ -171,8 +156,9 @@ describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prom
       container.querySelectorAll(".aui-compact-breakdown-number, .aui-compact-breakdown-value, .aui-compact-breakdown-label"),
       (el) => el.textContent ?? "",
     ).join(" | ");
-    expect(cardText).toContain("아트팀 (Art Studio)");
-    expect(cardText).toContain("아트팀 (dept-art-2)");
+    expect(cardText).toContain("Claude");
+    expect(cardText).toContain("Codex");
+    expect(cardText).not.toContain("부서");
     expect(cardText).not.toMatch(/\d+\.\d+/);
   });
 
@@ -357,7 +343,6 @@ describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prom
             isKo
             locale="ko"
             tr={ko}
-            departments={DUP_DEPTS}
             turns={turns}
             onAgentUpdated={onUpdated}
           />
@@ -513,7 +498,6 @@ describe("Slice 2 — Agents summary, unlinked sessions, live turn control, prom
             isEdit
             agentId="agent-ada"
             saving={false}
-            departments={[]}
             onSave={onSave}
             onClose={onClose}
             form={{

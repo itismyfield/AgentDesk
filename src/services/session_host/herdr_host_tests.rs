@@ -846,17 +846,29 @@ fn cfg_args(args: &str) -> Vec<String> {
     parts
 }
 
-/// A `cfg` predicate that holds only in test builds: `test`, or `all(..)` with such an
-/// argument. `any(..)` and `not(..)` can hold without `test`, so they stay production.
+/// True when a `cfg` only holds in test builds: `test`, the dependents-only `test-support` feature, `all(..)`
+/// with one of them, or `any(..)` of only those; `not(..)` and any other `any(..)` stay production.
 fn cfg_requires_test(predicate: &str) -> bool {
     let predicate = predicate.trim();
-    let all = predicate
-        .strip_prefix("all")
+    let group = |name: &str| {
+        predicate
+            .strip_prefix(name)
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix('('))
+            .and_then(|rest| rest.strip_suffix(')'))
+    };
+    let feature = predicate
+        .strip_prefix("feature")
         .map(str::trim_start)
-        .and_then(|rest| rest.strip_prefix('('))
-        .and_then(|rest| rest.strip_suffix(')'));
+        .and_then(|rest| rest.strip_prefix('='))
+        .map(str::trim);
     predicate == "test"
-        || all.is_some_and(|args| cfg_args(args).iter().any(|a| cfg_requires_test(a)))
+        || feature == Some("\"test-support\"")
+        || group("all").is_some_and(|args| cfg_args(args).iter().any(|a| cfg_requires_test(a)))
+        || group("any").is_some_and(|args| {
+            let args = cfg_args(args);
+            !args.is_empty() && args.iter().all(|a| cfg_requires_test(a))
+        })
 }
 
 /// Index just past the `]` of the attribute opening at `i`; `None` if it never closes.

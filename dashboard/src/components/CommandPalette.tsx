@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
-import { CalendarClock, Folder, Hash, Layers, Play, Settings, Terminal } from "lucide-react";
+import { CalendarClock, Hash, Layers, Play, Settings, Terminal } from "lucide-react";
 import { getCampaigns, type Campaign } from "../api/campaigns";
 import { request } from "../api/httpClient";
 import type { RoutineRecord } from "../api/routines";
@@ -34,7 +34,7 @@ interface PaletteRoute {
 
 export interface CommandPaletteProps {
   agents: Agent[];
-  departments: Department[];
+  departments?: Department[];
   sessions?: DispatchedSession[];
   kanbanCards?: KanbanCard[];
   campaigns?: Campaign[];
@@ -93,7 +93,6 @@ const IDLE_PREVIEW_LIMIT = 8;
 
 export default function CommandPalette({
   agents,
-  departments,
   sessions = [],
   kanbanCards: suppliedCards,
   campaigns: suppliedCampaigns,
@@ -106,7 +105,6 @@ export default function CommandPalette({
   onNotify,
   onClose,
   routes,
-  departmentRouteId = "settings_organization",
 }: CommandPaletteProps) {
   const tr = (ko: string, en: string) => (isKo ? ko : en);
   const [query, setQuery] = useState("");
@@ -315,20 +313,14 @@ export default function CommandPalette({
         id: "agents",
         label: tr("에이전트", "Agents"),
         recommended: false,
-        commands: realAgents.map((agent) => {
-          const dept = departments.find((d) => d.id === agent.department_id);
-          const deptHint = dept
-            ? localeName(isKo ? "ko" : "en", dept)
-            : (isKo ? agent.department_name_ko : agent.department_name || agent.department_name_ko);
-          return {
-            id: agent.id,
-            label: agent.alias || localeName(isKo ? "ko" : "en", agent),
-            hint: searchTerms(deptHint, agent.status).join(" · ") || undefined,
-            icon: <AgentPersona agent={agent} size={24} />,
-            keywords: searchTerms(agent.id, agent.name, agent.name_ko, agent.alias, agent.avatar_emoji, agent.department_name, agent.department_name_ko, dept?.name, dept?.name_ko, agent.status),
-            onSelect: pick(() => onSelectAgent(agent)),
-          };
-        }),
+        commands: realAgents.map((agent) => ({
+          id: agent.id,
+          label: agent.alias || localeName(isKo ? "ko" : "en", agent),
+          hint: searchTerms(agent.cli_provider, agent.status).join(" · ") || undefined,
+          icon: <AgentPersona agent={agent} size={24} />,
+          keywords: searchTerms(agent.id, agent.name, agent.name_ko, agent.alias, agent.avatar_emoji, agent.cli_provider, agent.status),
+          onSelect: pick(() => onSelectAgent(agent)),
+        })),
       },
       {
         id: "sessions",
@@ -360,21 +352,8 @@ export default function CommandPalette({
         recommended: false,
         commands: limitIdle(settingCommands),
       },
-      {
-        id: "departments",
-        label: tr("부서", "Departments"),
-        recommended: false,
-        commands: departments.map((dept) => ({
-          id: dept.id,
-          label: localeName(isKo ? "ko" : "en", dept),
-          hint: typeof dept.agent_count === "number" ? tr(`에이전트 ${dept.agent_count}명`, `${dept.agent_count} agents`) : undefined,
-          icon: <Folder />,
-          keywords: searchTerms(dept.id, dept.name, dept.name_ko, dept.icon),
-          onSelect: pick(() => onNavigate(departmentRouteId)),
-        })),
-      },
     ].filter((group) => group.commands.length > 0);
-  }, [agents, cards, configEntries, departmentRouteId, departments, hasQuery, isKo, legacyCampaigns, routes, routines, serverCampaigns, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [agents, cards, configEntries, hasQuery, isKo, legacyCampaigns, routes, routines, serverCampaigns, sessions]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const labels: Partial<CommandMenuLabels> = {
     launch: tr("명령 팔레트 열기", "Open command palette"),

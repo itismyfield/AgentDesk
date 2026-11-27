@@ -71,7 +71,7 @@ pub struct TurnCancellationDetails {
 
 impl TurnCancellationDetails {
     #[allow(clippy::too_many_arguments)]
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new(
         reason: &str,
         surface: &str,

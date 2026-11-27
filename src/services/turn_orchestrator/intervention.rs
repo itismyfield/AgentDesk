@@ -45,13 +45,13 @@ pub(crate) struct Intervention {
     pub(crate) pending_uploads: PendingUploads,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SOURCE_CLOCK_SAMPLE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 impl Intervention {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn source_clock_sample_hook_for_tests(hook: impl FnOnce() + 'static) {
         SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
     }
@@ -97,7 +97,7 @@ impl Intervention {
     }
 
     pub(crate) fn source_message_queued_generations(&self) -> Vec<SourceMessageQueuedGeneration> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = SOURCE_CLOCK_SAMPLE_HOOK.with(|slot| slot.borrow_mut().take()) {
             hook();
         }

@@ -135,7 +135,10 @@ pub(in crate::services::discord) struct ReadRefusal {
 }
 
 impl ReadRefusal {
-    fn new(reason: UnavailableReason, detail: impl ToString) -> Self {
+    pub(in crate::services::discord) fn new(
+        reason: UnavailableReason,
+        detail: impl ToString,
+    ) -> Self {
         Self {
             reason,
             detail: detail.to_string(),
@@ -207,7 +210,7 @@ pub(crate) enum RetryClass {
 
 /// Unavailable over Parked over Ready, decided only after every read; the first refusal names
 /// the reason.
-fn classify_reads<'a>(
+pub(in crate::services::discord) fn classify_reads<'a>(
     reads: impl IntoIterator<Item = &'a SourceRead>,
     hold_preparation: bool,
 ) -> RetryClass {
@@ -259,6 +262,18 @@ impl CheckedInputView {
         Self::read_in(root.as_deref(), provider, channel_id, primary, sources)
     }
 
+    /// `read_in` for policy tests declared outside this module.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::services::discord) fn read_in_for_tests(
+        root: Option<&Path>,
+        provider: &ProviderKind,
+        channel_id: u64,
+        primary: u64,
+        sources: &[MessageId],
+    ) -> Self {
+        Self::read_in(root, provider, channel_id, primary, sources)
+    }
+
     fn read_in(
         root: Option<&Path>,
         provider: &ProviderKind,
@@ -308,7 +323,7 @@ impl CheckedInputView {
     }
 
     /// A fresh read of the same identity, for re-checking at claim time.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn reread(&self) -> Self {
         Self::read(&self.provider, self.channel_id, self.primary, &self.sources)
     }
@@ -420,7 +435,3 @@ impl BacklogLayers<'_> {
         )
     }
 }
-
-#[cfg(test)]
-#[path = "policy_tests.rs"]
-mod tests;

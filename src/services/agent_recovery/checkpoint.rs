@@ -612,7 +612,7 @@ pub async fn load_channel_states(pool: &PgPool) -> Result<Vec<ChannelState>, sql
     ).fetch_all(pool).await?.into_iter().map(RecoveryStateRow::decode).collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn load_checkpoint_events(
     pool: &sqlx::PgPool,
     channel_id: &str,

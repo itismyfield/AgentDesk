@@ -1461,7 +1461,7 @@ mod managed_root_recursion_tests {
         body(&repo, &worktrees_root, &managed_root, &wt)
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     fn exercise_managed_worktree_root() {
         with_managed_root_env(|repo, _, _, _| {

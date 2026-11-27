@@ -1,6 +1,8 @@
 //! Captured episode identity shared by normal finalize and operator recovery.
 use super::*;
 
+mod claim_rejection;
+use claim_rejection::ClaimRejection;
 mod row_retirement;
 use row_retirement::episode_row_miss;
 #[cfg(test)]
@@ -51,7 +53,7 @@ pub(in crate::services::discord) async fn claim_normal_episode(
     key: TurnKey,
     clear_inflight: bool,
     expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
-) -> Result<Option<CapturedFinish>, ()> {
+) -> Result<Option<CapturedFinish>, ClaimRejection> {
     claim_episode(shared, provider, key, clear_inflight, expected_actor, None).await
 }
 
@@ -64,7 +66,7 @@ pub(super) async fn claim_episode(
     clear_inflight: impl crate::services::discord::receipt_settle::ClaimClear,
     expected_actor: Option<Arc<crate::services::provider::CancelToken>>,
     drift: Option<RuntimeWitness<'_>>,
-) -> Result<Option<CapturedFinish>, ()> {
+) -> Result<Option<CapturedFinish>, ClaimRejection> {
     let (clear_inflight, receipt) = clear_inflight.split();
     if key.episode.is_none() {
         return Ok(None);
@@ -79,13 +81,24 @@ pub(super) async fn claim_episode(
         Some(mailbox) => Some(mailbox.snapshot().await),
         None => None,
     };
+    let observed_nonce = observed
+        .as_ref()
+        .and_then(|snapshot| snapshot.active_turn_nonce.as_deref());
+    let reject = |reason: ClaimRejection| {
+        let actor = captured_actor.as_ref().and_then(std::sync::Weak::upgrade);
+        let captured_nonce = drift
+            .and_then(|witness| witness.claim_snapshot)
+            .and_then(|snapshot| snapshot.turn_nonce.as_deref())
+            .or_else(|| actor.as_ref().and_then(|token| token.turn_nonce()));
+        reason.warn(provider, key, captured_nonce, observed_nonce);
+        Err(reason)
+    };
     if key.user_msg_id == 0
         || observed.as_ref().is_some_and(|snapshot| {
-            snapshot.cancel_token.is_some()
-                && !key.matches_episode_nonce(snapshot.active_turn_nonce.as_deref())
+            snapshot.cancel_token.is_some() && !key.matches_episode_nonce(observed_nonce)
         })
     {
-        return Err(());
+        return reject(ClaimRejection::IdentityMismatch);
     }
     let loaded = super::super::inflight::load_inflight_state(provider, key.channel_id.get());
     let row_miss = episode_row_miss(loaded.as_ref(), key);
@@ -111,7 +124,7 @@ pub(super) async fn claim_episode(
         }
     };
     if finish.removed_token.is_none() && finish.persistence_error.is_some() {
-        return Err(());
+        return reject(ClaimRejection::NativeControlCustodyDenied);
     }
     let drifted = loaded
         .as_ref()
@@ -130,7 +143,7 @@ pub(super) async fn claim_episode(
                 None,
             );
         }
-        return Err(());
+        return reject(ClaimRejection::ActorMiss);
     }
     // Same-episode ID misses retain the ordinary guarded-miss recovery owner.
     // Only the separately gated reconciler may release that residual anchor.

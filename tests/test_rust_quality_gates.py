@@ -11,7 +11,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 RUN = """set -o pipefail
 mkdir -p target/clippy-observation
-cargo clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
+cargo clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all | tee target/clippy-observation/diagnostics.jsonl
 ${{ runner.environment == 'self-hosted' && 'ADK_CARGO_SLOT_HELD=1 ' || '' }}python3 scripts/check_clippy_warning_count.py --input target/clippy-observation/diagnostics.jsonl --output target/clippy-observation/report.json --baseline scripts/clippy_warning_baseline.json --base-ref HEAD^1
 """
 PR_RUN = RUN.replace("--base-ref HEAD^1", '--base-ref "$CLIPPY_BASE_REF"')
@@ -86,7 +86,7 @@ class QualityWiringTest(unittest.TestCase):
                         (root / "version_held").unlink(missing_ok=True)
                         result = subprocess.run(["bash", "-e", "-c", script], cwd=root, env=env, capture_output=True, text=True)
                         self.assertEqual(result.returncode, expected, result.stderr)
-                        self.assertEqual((root / "argv").read_text().strip(), "clippy --workspace --all-targets --all-features --message-format=json -- -W clippy::all")
+                        self.assertEqual((root / "argv").read_text().strip(), "clippy --workspace --all-targets --features adk-base/test-support --message-format=json -- -W clippy::all")
                         if payload == "garbage" and rc == 0:
                             self.assertFalse(json.loads(report.read_text())["valid"])
                         # The Clippy build takes the WSL cargo slot; only the later version query skips it.

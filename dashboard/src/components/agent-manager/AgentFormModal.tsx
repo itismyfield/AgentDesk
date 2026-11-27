@@ -5,13 +5,11 @@ import { useInRouterContext, useNavigate } from "react-router";
 import { X } from "lucide-react";
 import { z } from "zod";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
-import type { Department } from "../../types";
 import { Button } from "../../kit/free/button-clean";
 import { Checkbox } from "../../kit/free/checkbox-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import { Select } from "../../kit/free/select-clean";
-import { TextArea } from "../../kit/free/text-area-clean";
 import { TextField } from "../../kit/free/text-field-clean";
 import AgentPersona from "../AgentPersona";
 import EmojiPicker from "./EmojiPicker";
@@ -22,7 +20,6 @@ import type { FormData } from "./types";
 const agentFormSchema = z.object({
   name: z.string().trim().min(1, "required"),
   name_ko: z.string(), name_ja: z.string(), name_zh: z.string(),
-  department_id: z.string(),
   cli_provider: z.string().trim().min(1, "required"),
   avatar_emoji: z.string().trim().min(1, "required"),
   personality: z.string(), prompt_content: z.string(), auto_commit: z.boolean(),
@@ -35,7 +32,7 @@ export default function AgentFormModal({
   locale, tr, form, isEdit, agentId, saving, onSave, onClose,
 }: {
   isKo: boolean; locale: string; tr: (ko: string, en: string) => string;
-  form: FormData; departments: Department[]; isEdit: boolean; agentId?: string;
+  form: FormData; isEdit: boolean; agentId?: string;
   saving: boolean; onSave: (values: FormData) => void | Promise<void>; onClose: () => void;
 }) {
   const inRouter = useInRouterContext(), navigate = useNavigate();
@@ -58,7 +55,7 @@ export default function AgentFormModal({
   });
   const handleSave = handleSubmit(async (values) => {
     if (isEdit && hasMaskedPromptValue(values.prompt_content) && values.prompt_content !== form.prompt_content && !confirmMaskedSave) return;
-    await onSave({ ...values, cli_provider: values.cli_provider as FormData["cli_provider"] });
+    await onSave({ ...form, ...values, cli_provider: values.cli_provider as FormData["cli_provider"] });
   });
   const handleNavigateAudit = () => {
     if (isDirty) {
@@ -111,7 +108,7 @@ export default function AgentFormModal({
           </div>
         }
       >
-        <div className="grid min-w-0 grid-cols-1 gap-6 sm:grid-cols-2">
+        <div className="flex min-w-0 flex-col gap-6">
           <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-basic">
             <h3 id="agent-form-basic" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("기본 정보", "Basics")}</h3>
             <TextField id="agent-name" label={<>{tr("영문 이름", "Name")} <span className="text-(--err)">*</span></>} placeholder="DORO" data-autofocus error={errors.name ? tr("영문 이름을 적어 주세요.", "Enter a name.") : undefined} {...text("name")} />
@@ -131,11 +128,6 @@ export default function AgentFormModal({
                 options={providerCatalog.selectableIds.map((p) => ({ value: p, label: catalogLabel(providerCatalog.entries, p) }))}
               />
             </div>
-          </section>
-
-          <section className="flex min-w-0 flex-col gap-4" aria-labelledby="agent-form-details">
-            <h3 id="agent-form-details" className="m-0 text-xs font-medium text-(--fg-muted)">{tr("역할 · 성격", "Role & personality")}</h3>
-            <TextArea id="agent-personality" aria-label={tr("성격", "Personality")} placeholder={tr("전문 분야나 성격을 적어 주세요", "Expertise or personality")} minRows={7} maxRows={14} {...text("personality")} />
           </section>
 
           {isEdit && (

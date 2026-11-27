@@ -298,6 +298,8 @@ pub(crate) fn claude_observed_input(
     let run = if let Some(state) = state {
         let mut input = state.submission.lock().unwrap_or_else(|e| e.into_inner());
         if !state.prepare_input(&mut input) {
+            // Only a Herdr user stop closes input before it begins.
+            crate::services::claude_tui::owner_input::herdr_input_closed();
             return Ok(HerdrInputRun::Closed);
         }
         crate::services::tui_o::exact_submission::begin_input()?;
@@ -331,10 +333,10 @@ pub(crate) fn claude_observed_input(
     Ok(HerdrInputRun::Ran(run))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static BOUNDARY_STOPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
     let mut stops = BOUNDARY_STOPS.lock().unwrap();
     if stop {

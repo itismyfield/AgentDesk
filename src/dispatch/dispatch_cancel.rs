@@ -114,7 +114,7 @@ pub(crate) struct CancelTransitionMeta {
 /// Keyed by dispatch id because the tests in this binary run concurrently and
 /// each fixture seeds a unique dispatch id; a bare counter would make every
 /// test race every other one.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod emit_probe {
     use std::sync::{Mutex, OnceLock};
 
@@ -147,7 +147,7 @@ pub(crate) mod emit_probe {
 impl CancelTransitionMeta {
     pub(crate) fn emit(&self) {
         // The only observable trace of this call; see [`emit_probe`].
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         emit_probe::record(&self.dispatch_id);
         crate::services::observability::emit_dispatch_result(
             &self.dispatch_id,

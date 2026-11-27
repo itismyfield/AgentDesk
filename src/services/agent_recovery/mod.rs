@@ -517,7 +517,7 @@ impl RecoveryRuntime {
 }
 
 mod durable;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use durable::observe_durable;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use durable::test_store;
@@ -544,7 +544,7 @@ pub fn peek_restore_packet(channel: &str) -> Option<String> {
         .cloned()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn stage_restore_packet_for_test(channel: &str, packet: &str) {
     durable::lock(&durable::coordinator().runtime)
         .pending_restore

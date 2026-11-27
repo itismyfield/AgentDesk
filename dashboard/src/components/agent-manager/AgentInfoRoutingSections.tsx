@@ -17,7 +17,6 @@ import {
   type DetailFold,
 } from "./AgentInfoCardSections";
 import { bindingSourceLabel, inferBindingSource, isTurnSession } from "./AgentInfoCardModel";
-import { ClampedText } from "./AgentInfoProfileSections";
 import type { Read } from "./useAgentDetailData";
 import {
   describeDiscordBinding,
@@ -217,12 +216,6 @@ export function AgentSourceSection({ agent, tr, fold, roleMap }: { agent: Agent;
             "When RoleMap exists, role_map is treated as the Discord source-of-truth.",
           )}
         </p>
-      ) : null}
-      {agent.personality ? (
-        <>
-          <Cap>{tr("성격", "Personality")}</Cap>
-          <ClampedText key={agent.id} text={agent.personality} tr={tr} />
-        </>
       ) : null}
     </AgentDetailSection>
   );

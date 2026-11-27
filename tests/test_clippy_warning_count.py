@@ -92,6 +92,60 @@ class WarningGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("baseline increase", report["error"])
 
+    def set_rollout_base(self, previous_command=None):
+        previous = self.data.copy()
+        previous["command"] = previous_command or previous["command_rollout_from"]
+        del previous["command_rollout_from"]
+        self.baseline.write_text(json.dumps(previous))
+        self.git("add", "scripts/clippy_warning_baseline.json")
+        self.git("commit", "-qm", "before rollout")
+        self.base = self.git("rev-parse", "HEAD")
+
+    def test_exact_command_rollout_allows_unchanged_or_lower_baseline(self):
+        self.set_rollout_base()
+        for count in (self.limit, self.limit - 1):
+            with self.subTest(count=count):
+                self.data["warnings"] = count
+                self.baseline.write_text(json.dumps(self.data))
+                result, report = self.run_gate(count)
+                self.assertEqual(result.returncode, 0, result.stdout)
+                self.assertEqual(report["gate"], "PASS")
+
+    def test_command_rollout_cannot_raise_baseline(self):
+        self.set_rollout_base()
+        self.data["warnings"] = self.limit + 1
+        self.baseline.write_text(json.dumps(self.data))
+        result, report = self.run_gate(self.limit + 1)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("baseline increase", report["error"])
+
+    def test_command_rollout_cannot_change_other_environment_fields(self):
+        self.set_rollout_base()
+        self.data["runner"] = self.env["RUNNER_OS"] = "Windows"
+        self.baseline.write_text(json.dumps(self.data))
+        result, report = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("environment change requires a separate rollout", report["error"])
+
+    def test_command_rollout_requires_exact_pair_and_declaration(self):
+        self.set_rollout_base()
+        undeclared = self.data.copy()
+        old = undeclared.pop("command_rollout_from")
+        wrong = old.replace("--all-targets", "--lib")
+        for data in (undeclared, dict(self.data, command_rollout_from=wrong)):
+            with self.subTest(data=data):
+                self.baseline.write_text(json.dumps(data))
+                result, report = self.run_gate()
+                self.assertEqual(result.returncode, 1, result.stdout)
+                self.assertIn("environment change requires a separate rollout", report["error"])
+
+        self.set_rollout_base(wrong)
+        self.data["command_rollout_from"] = wrong
+        self.baseline.write_text(json.dumps(self.data))
+        result, report = self.run_gate()
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("environment change requires a separate rollout", report["error"])
+
     def test_reviewed_decrease_and_initial_baseline_are_allowed(self):
         self.data["warnings"] = self.limit - 1
         self.baseline.write_text(json.dumps(self.data))

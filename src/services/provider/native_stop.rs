@@ -255,7 +255,7 @@ impl ReceiptSink {
                 .then(|| Instant::now() + Duration::from_secs(1));
         }
     }
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn retains_receipt(&self) -> bool {
         self.inner.lock().unwrap().receipt.is_some()
     }

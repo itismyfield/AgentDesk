@@ -73,7 +73,7 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_peer_reader(self, read_peer: PeerReader) -> Self {
         Self { read_peer, ..self }
     }

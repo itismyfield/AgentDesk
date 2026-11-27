@@ -4,7 +4,7 @@
 use super::*;
 
 pub(crate) fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (temp, previous) = tests::fixture();
+    let (temp, previous) = test_support::fixture();
     let home = temp.path().canonicalize().unwrap();
     let home = if quoted {
         home.join("login home 'active'")

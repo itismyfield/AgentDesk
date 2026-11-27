@@ -738,6 +738,25 @@ def platform_tests(repo_root, allow_missing_files=False):
     return found, sorted(missing), libraries
 
 
+TEST_SUPPORT_FORMS = (("any", "(", "test", "feature", "=", "test-support", ")"),
+                      ("any", "(", "feature", "=", "test-support", "test", ")"))
+
+
+def canonical_cfg(predicate):
+    """A cfg token tuple with each `any(test, feature = "test-support")` read as `test`.
+
+    Declaration keys compare lib test builds, where `test` holds, so both spellings compile the test alike."""
+    out, i = [], 0
+    while i < len(predicate):
+        if tuple(predicate[i:i + 7]) in TEST_SUPPORT_FORMS:
+            out.append("test")
+            i += 7
+            continue
+        out.append(predicate[i])
+        i += 1
+    return tuple(out)
+
+
 def _declarations(repo_root, libraries, same_binary=False):
     """Unambiguous declaration key -> (binary, test ID); same_binary keys also hold every test attribute."""
     owners = defaultdict(set)
@@ -749,6 +768,7 @@ def _declarations(repo_root, libraries, same_binary=False):
             if len(sites) != 1:
                 continue
             site, cfg = sites[0]
+            cfg = tuple(canonical_cfg(p) for p in cfg)
             filename = site.rsplit(":", 1)[0]
             key = (filename, name.rsplit("::", 1)[-1], cfg, tuple(inventory.ignores.get(site, ())))
             if same_binary:

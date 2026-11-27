@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useSyncExternalStore, type HTMLAttributes } from "react";
 import type { Node } from "@xyflow/react";
 import type { Campaign, CampaignNode, CampaignNodeLive } from "../../api/campaigns";
+import { GRAPH_DIM_OPACITY } from "../common/graph/GraphChrome";
+import type { CampaignCriticalPath } from "./campaignCriticalPath";
 import CampaignGroupInspector, { TaskInspector } from "./CampaignGroupInspector";
 import { buildCampaignGroupOverview, groupCycleText } from "./CampaignGroupOverview";
 import { NO_TIES, campaignRawEdges, routeEdges, type GraphViewSettings } from "./campaignGraphRouting";
@@ -58,10 +60,10 @@ export function buildGroupTasks(nodes: CampaignNode[], key: string, settings: Gr
 
 /** The opened group's task graph, read only: task cards, faint tails that open their own group with that task chosen,
  * and the chosen task's summary (or the group's) beside it. */
-export default function CampaignGroupTasks({ campaign, live, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, canvasHeight, tr }: {
+export default function CampaignGroupTasks({ campaign, live, group, chosen, onChoose, onGoto, onGotoGroup, onOpenTask, canvasHeight, criticalPath = null, tr }: {
   campaign: Campaign; live?: Record<string, CampaignNodeLive>; group: string; chosen: string | null; onChoose: (id: string | null) => void;
   /** Goes to a task's group with that task chosen. */
-  onGoto: (id: string) => void; onGotoGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; tr: Tr;
+  onGoto: (id: string) => void; onGotoGroup: (group: string) => void; onOpenTask: (id: string) => void; canvasHeight?: string; criticalPath?: CampaignCriticalPath | null; tr: Tr;
 }) {
   const scope = useMemo(() => editorViewScope(campaign.id, scopeKey({ kind: "group", key: group })), [campaign.id, group]);
   const raw = useSyncExternalStore((listener) => subscribeCampaignView(scope, listener), () => readStoredRaw(scope));
@@ -92,6 +94,8 @@ export default function CampaignGroupTasks({ campaign, live, group, chosen, onCh
         : tr(`선행 ${deps.length}`, `${deps.length} deps`)
       : tr(`수용조건 ${(node.acceptance ?? []).length}`, `${(node.acceptance ?? []).length} acceptance`);
     const isBlocked = taskView.attention && !taskView.gate && taskView.status !== "failed";
+    const sched = criticalPath?.nodes.get(node.id);
+    const isCrit = !!sched?.critical;
     const data: ViewTaskData = {
       title: campaignTaskTitle(node),
       code: taskLabel(node),
@@ -99,7 +103,7 @@ export default function CampaignGroupTasks({ campaign, live, group, chosen, onCh
       status: taskView.status,
       statusLabel: tr(...LABELS[taskView.status]),
       ...taskView.marker,
-      summary: [stageInfo, depInfo].filter(Boolean).join(" · "),
+      summary: [stageInfo, depInfo, sched && tr(`${sched.waveStart}차`, `W${sched.waveStart}`)].filter(Boolean).join(" · "),
       note: error
         ? { tone: "err", text: tr("순환 오류", "Cycle") }
         : taskView.status === "failed"
@@ -108,21 +112,33 @@ export default function CampaignGroupTasks({ campaign, live, group, chosen, onCh
             ? { tone: "warn", text: tr("막힘", "Blocked") }
             : null,
       locked: false, error, picked: false,
+      critical: isCrit,
+      slack: sched?.slack,
+      whatIfDelta: sched?.delta,
+      scheduleLabel: sched
+        ? sched.critical
+          ? tr("병목 · 여유 0", "Critical")
+          : tr(`여유 +${sched.slack}`, `Slack +${sched.slack}`)
+        : undefined,
     };
     return { id: node.id, type: "relationsTask", position: graph.positions.get(node.id)!, data, draggable: false, selected: node.id === chosen,
+      style: criticalPath && !isCrit ? { opacity: GRAPH_DIM_OPACITY } : undefined,
       domAttributes: { "data-task-id": node.id } as HTMLAttributes<HTMLDivElement>, ariaLabel: `${taskName(node)}, ${tr(...LABELS[taskView.status])}` };
   }), ...graph.tails.map((tail): Node => {
     const ends = { enters: graph.connections.some((line) => line.target === tail.id), leaves: graph.connections.some((line) => line.source === tail.id) };
+    const tailCrit = !!criticalPath?.criticalNodeIds.has(tail.node.id);
     const data: TailNodeData = { title: taskName(tail.node), cover: taskLabel(tail.node), group: label(campaignGroup(tail.node)), side: tail.side, ends };
     return { id: tail.id, type: "relationsTail", position: graph.positions.get(tail.id)!, data, draggable: false, selected: false,
+      style: criticalPath && !tailCrit ? { opacity: GRAPH_DIM_OPACITY } : undefined,
       ariaLabel: tr(`그룹 밖 작업 ${data.title}, ${data.group}`, `Task outside the group ${data.title}, ${data.group}`) };
-  })], [graph, byId, live, group, chosen, label, tr]);
+  })], [graph, byId, live, group, chosen, label, criticalPath, tr]);
   // The detail hands the focus back to what held it as it opened, so the card takes it first and closing returns there.
   const openDetail = (id: string) => { document.querySelector<HTMLElement>(`.react-flow__node[data-task-id="${CSS.escape(id)}"]`)?.focus({ preventScroll: true }); onOpenTask(id); };
   const pick = (id: string | null) => id?.startsWith("tail:") ? onGoto(id.slice(5)) : onChoose(id);
   const task = chosen === null ? undefined : graph.members.find((node) => node.id === chosen);
   return <RelationsViewCanvas key={group} label={tr(`그룹 ${label(group)}의 작업 관계`, `Task relations in ${label(group)}`)} nodes={graphNodes} lines={graph.connections} ties={graph.ties}
     cycles={graph.cycles} components={graph.components} cycleText={cycleText} lineLabel={lineLabel} height={canvasHeight}
+    criticalEdgeKeys={criticalPath?.criticalEdgeKeys} showCriticalLegend={!!criticalPath}
     onSelect={pick} onOpen={(id) => id.startsWith("tail:") ? pick(id) : onOpenTask(id)} tr={tr}
     inspector={task ? <TaskInspector node={task} nodes={campaign.nodes} live={live?.[task.id]} cycles={graph.cycles.filter((_, index) => graph.components[index].has(task.id)).map(cycleText)}
       onChoose={(id) => byId.get(id) && campaignGroup(byId.get(id)!) === group ? onChoose(id) : onGoto(id)} onOpenTask={openDetail} tr={tr} />
