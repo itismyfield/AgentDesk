@@ -99,7 +99,7 @@ fn judge_at(
         if kind != RuntimeHandoffKind::CodexTui {
             return super::writer_route(channel);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         probe(channel);
         if clear_relaunch::successor_unproved_for_channel(channel) {
             reason = "successor_unproved";
@@ -188,7 +188,7 @@ impl Drop for ProbeGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn probe(channel: u64) {
     let probe = {
         let mut slot = PROBE.lock().unwrap();
