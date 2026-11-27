@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use serde::Serialize;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 
 use super::rotation::transition::Watch;
 use super::transition_cleanup::scope::ScopeApproval;
@@ -216,12 +216,14 @@ pub(crate) struct TransitionPort {
     generation: u64,
     run: Arc<()>,
     send: mpsc::Sender<Envelope>,
+    wake: Arc<Notify>,
 }
 
 pub(crate) struct Receiver {
     generation: u64,
     run: Arc<()>,
     receive: mpsc::Receiver<Envelope>,
+    wake: Arc<Notify>,
     /// The writer's channel ownership gate.
     pub(super) gate: Arc<OwnershipGate>,
     pub(super) wall: Wall,
@@ -258,17 +260,20 @@ impl TransitionPort {
         stopping: watch::Receiver<bool>,
     ) -> (Self, Receiver) {
         let (run, (send, receive)) = (Arc::new(()), mpsc::channel(MAILBOX));
+        let wake = Arc::new(Notify::new());
         let port = Self {
             provider: None,
             suspension: Default::default(),
             generation,
             run: Arc::clone(&run),
             send,
+            wake: Arc::clone(&wake),
         };
         let receiver = Receiver {
             generation,
             run,
             receive,
+            wake,
             gate,
             wall,
             stopping,
@@ -315,6 +320,7 @@ impl TransitionPort {
         };
         let sent = self.send.send(envelope).await;
         sent.map_err(|_| "actor ended".to_owned())?;
+        self.wake.notify_one();
         let reply = answer
             .await
             .map_err(|_| "actor reply unavailable".to_owned())?;
@@ -336,6 +342,14 @@ impl Operation {
 }
 
 impl Receiver {
+    pub(super) fn pending(&self) -> bool {
+        !self.receive.is_empty()
+    }
+
+    pub(super) async fn notified(&self) {
+        self.wake.notified().await;
+    }
+
     /// The next envelope sent to this run; one sent to another run is answered as foreign.
     pub(super) fn try_next(&mut self) -> Result<Option<Envelope>, mpsc::error::TryRecvError> {
         let envelope = match self.receive.try_recv() {

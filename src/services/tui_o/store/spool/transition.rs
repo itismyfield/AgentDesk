@@ -59,6 +59,7 @@ impl ChannelStore {
             };
             write_cursor(&store.dir, &key, &cursor)?;
             spool.cursor = cursor;
+            store.spool_generation += 1;
             Ok(())
         })
     }

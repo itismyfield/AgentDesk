@@ -2071,6 +2071,9 @@ tui-o-writer/WriterParkedAliasFixed.cfg	WriterParkedAlias	-	-
 tui-o-writer/WriterParkedAliasMain.cfg	WriterParkedAlias	HaltRepeatZero,NoHaltForConfirmedOld	FirstReplyExactlyOnce
 tui-o-writer/WriterReboundBirth.cfg	WriterRebound	ActiveLossVisible,CurrentNeverHistorical,UnknownNeedsAbsence,ReadyAfterFollow,ParkedReboundHalts	-
 tui-o-writer/WriterReboundCurrent.cfg	WriterRebound	-	-
+tui-o-writer/WriterIdleBackoff.cfg	WriterIdle	-	-
+tui-o-writer/WriterIdleBefore.cfg	WriterIdle	IdlePromptWake	-
+tui-o-writer/WriterIdleNoMaxTimer.cfg	WriterIdle	-	IdleEventuallyProcesses
 tui-o-writer/WriterRestartEndCurrent.cfg	WriterWake	-	RestartExactEndEventuallyCloses
 tui-o-writer/WriterRestartEndCurrentNonce.cfg	WriterWake	-	RestartExactEndEventuallyCloses
 tui-o-writer/WriterRestartEndDropPrepared.cfg	WriterWake	RestartPreparedNotLost	-

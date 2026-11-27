@@ -121,6 +121,7 @@ pub(crate) fn append(runtime_root: &Path, record: ClearEnd) -> Result<Appended, 
         Err(error) => return Err(error.to_string()),
     };
     version_sender(channel).send_modify(|version| *version += 1);
+    crate::services::tui_o::writer::actor::idle::wake(channel);
     Ok(appended)
 }
 

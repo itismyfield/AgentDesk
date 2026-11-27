@@ -453,6 +453,7 @@ impl OStore {
             init,
             ledger,
             sources,
+            spool_generation: 0,
             segment_max,
             spool_cap,
             failed: None,
@@ -466,6 +467,7 @@ pub struct ChannelStore {
     init: Initialized,
     ledger: LedgerState,
     sources: BTreeMap<String, spool::SourceSpool>,
+    spool_generation: u64,
     segment_max: u64,
     spool_cap: u64,
     /// The kind of the first I/O error, which leaves the store refusing writes.

@@ -518,6 +518,7 @@ async fn receive_hook(
         event.original_context.as_ref(),
         relay_published,
     );
+    observation_ingress::wake_writer(activity_accepted, &event);
     if should_signal_prompt_ready(&event.provider, &event.kind) && !stop_flush_injected {
         // Wake any task currently awaiting prompt readiness. `notify_waiters`
         // is edge-triggered: signals fired with no current waiters are

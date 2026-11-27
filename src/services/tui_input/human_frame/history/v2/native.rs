@@ -811,16 +811,17 @@ impl Registry {
         check: impl FnOnce(&Snapshot) -> Result<(), String>,
         apply: impl FnOnce(&mut Registration) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.transaction_checked(check, |snapshot| {
+        let (result, channel) = self.transaction_checked(check, |snapshot| {
             let mut active = snapshot
                 .live
                 .iter_mut()
                 .map(|b| &mut b.registration)
                 .chain(snapshot.planned.iter_mut());
-            let result = if let Some(registration) =
+            let (result, channel) = if let Some(registration) =
                 active.find(|r| r.namespace == namespace && r.key == *key)
             {
-                apply(registration)?
+                let result = apply(registration)?;
+                (result, native_channel(registration))
             } else {
                 let passive = snapshot
                     .passive
@@ -831,19 +832,27 @@ impl Registry {
                             .is_some_and(|r| r.namespace == namespace && r.key == *key)
                     })
                     .ok_or("native registration missing")?;
-                let result = apply(
-                    passive
-                        .registration
-                        .as_mut()
-                        .ok_or("native registration missing")?,
-                )?;
+                let registration = passive
+                    .registration
+                    .as_mut()
+                    .ok_or("native registration missing")?;
+                let result = apply(registration)?;
+                let channel = native_channel(registration);
                 passive.encoded = None;
-                result
+                (result, channel)
             };
             snapshot.version = 3;
-            Ok(result)
-        })
+            Ok((result, channel))
+        })?;
+        if let Some(channel) = channel {
+            crate::services::tui_o::writer::actor::idle::wake(channel);
+        }
+        Ok(result)
     }
+}
+
+fn native_channel(registration: &Registration) -> Option<u64> {
+    Some(registration.native_settlement.as_ref()?.ticket.channel_id)
 }
 
 fn prepare_ticket(registration: &mut Registration, ticket: &Ticket) -> Result<(), String> {

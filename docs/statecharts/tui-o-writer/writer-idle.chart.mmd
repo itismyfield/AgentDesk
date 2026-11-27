@@ -1,0 +1,13 @@
+stateDiagram-v2
+    [*] --> Active
+    state "1초 대기" as Active
+    state "5초 대기" as Idle
+    state "최대 15초 대기" as DeepIdle
+    state "변화 처리" as Poll
+    Active --> Idle: 무변경
+    Idle --> DeepIdle: 무변경
+    DeepIdle --> DeepIdle: timer에서 점검, 무변경
+    Active --> Poll: 입력·hook·명령 또는 변화 감지
+    Idle --> Poll: 입력·hook·명령 또는 변화 감지
+    DeepIdle --> Poll: 입력·hook·명령 즉시, spool·transcript는 timer
+    Poll --> Active: 처리 후 계속

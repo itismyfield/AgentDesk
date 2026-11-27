@@ -234,8 +234,8 @@ async fn idle_tick_durable_input_registration_wakes_the_waiting_actor() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_tick_transcript_only_change_spools_and_posts_within_fifteen_seconds() {
-    let (harness, path, _, _, stop, task) = start_idle(838504);
-    polls(15).await;
+    let (harness, path, source, _, stop, task) = start_idle(838504);
+    polls(16).await;
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     append(&path, &row("first", "first"));
     append(&path, &row("second", "second"));
@@ -244,4 +244,25 @@ async fn idle_tick_transcript_only_change_spools_and_posts_within_fifteen_second
     polls(16).await;
     assert_eq!(harness.port.posts(), ["first", "second"]);
     halt(stop, task).await;
+    assert_eq!(
+        harness.channel().cursor(&source).unwrap().captured_through,
+        std::fs::metadata(path).unwrap().len()
+    );
+}
+
+#[test]
+fn idle_tick_spool_stamp_moves_only_when_capture_commits() {
+    let body = row("old", "already delivered");
+    let (harness, path, source) = switched_over_on(838505, &body);
+    let mut store = harness.channel();
+    let generation = store.spool_generation();
+    store.attach_source(&source).unwrap();
+    assert_eq!(store.spool_generation(), generation);
+    let mut capture = SourceCapture::open(source, body.len() as u64).unwrap();
+    append(&path, &row("new", "next output"));
+    let CaptureOutcome::Batch(batch) = capture.poll(MAX_READ_BYTES) else {
+        panic!("transcript append did not produce a batch");
+    };
+    store.append_spool(&batch, &capture.prefix_hash()).unwrap();
+    assert_eq!(store.spool_generation(), generation + 1);
 }
