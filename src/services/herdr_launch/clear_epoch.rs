@@ -145,8 +145,8 @@ impl Scope {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn check_epoch_for_test(self: &Arc<Self>) -> Result<Checked, String> {
-        Self::check_epoch(self)
+    pub fn effect_permit_for_test(self: &Arc<Self>) -> Result<EffectPermit, String> {
+        self.check_epoch()?.begin_effect()
     }
 
     pub(crate) fn check_epoch(self: &Arc<Self>) -> Result<Checked, String> {

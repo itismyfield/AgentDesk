@@ -192,11 +192,20 @@ pub(crate) use context::{Context, Source};
 #[cfg(any(test, feature = "test-support"))]
 pub use context::{Context, Source};
 
-pub(crate) struct Reading {
-    pub(super) state: BusyState,
-    pub(super) source: Option<Source>,
-    pub(super) idle_verified: bool,
+mod reading {
+    use super::{BusyState, Source};
+
+    pub struct Reading {
+        pub(in super::super) state: BusyState,
+        pub(in super::super) source: Option<Source>,
+        pub(in super::super) idle_verified: bool,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reading::Reading;
+#[cfg(any(test, feature = "test-support"))]
+pub use reading::Reading;
 
 #[cfg(any(test, feature = "test-support"))]
 impl Source {
@@ -259,11 +268,11 @@ impl Context {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Reading {
-    pub(crate) fn state_for_test(&self) -> BusyState {
+    pub fn state_for_test(&self) -> BusyState {
         self.state
     }
 
-    pub(crate) fn idle_verified_for_test(&self) -> bool {
+    pub fn idle_verified_for_test(&self) -> bool {
         self.idle_verified
     }
 }

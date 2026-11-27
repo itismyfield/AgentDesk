@@ -28,12 +28,7 @@ pub(super) fn create(
         runtime_root: server.dir.display().to_string(),
     };
     let launching = clear_epoch::Launching::for_launch(&owner).unwrap();
-    let permit = launching
-        .scope_for_test()
-        .check_epoch_for_test()
-        .unwrap()
-        .begin_effect()
-        .unwrap();
+    let permit = launching.scope_for_test().effect_permit_for_test().unwrap();
     let request = HerdrCreateRequest {
         endpoint,
         label: workspace_marker(&owner.logical_key, &nonce(provider)),
