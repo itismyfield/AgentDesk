@@ -21,6 +21,20 @@ impl TurnContext<'_> {
     }
 }
 
+pub(super) fn panel_history_count(
+    recent: Option<&ChannelRecentContextManifestInput>,
+    retry: Option<&super::super::turn_start::FormattedSessionRetryContext>,
+) -> Option<usize> {
+    recent
+        .map(|context| context.pair_count)
+        .filter(|&count| count > 0)
+        .or_else(|| {
+            retry
+                .map(|context| context.recovery_message_count())
+                .filter(|&count| count > 0)
+        })
+}
+
 pub(in crate::services::discord::router) use super::input_payload::render_input_chunks;
 
 #[cfg(test)]
@@ -84,11 +98,40 @@ mod tests {
     }
 
     #[test]
+    fn session_panel_counts_only_rendered_recent_pairs() {
+        use crate::services::discord::placeholder_live_events::PlaceholderLiveEvents;
+        use crate::services::observability::turn_lifecycle::SessionStrategyDetails;
+
+        let recent = ChannelRecentContextManifestInput {
+            rendered_context: "test context".into(),
+            pair_count: 2,
+            audit_reason: "cleared;pairs=2;previous_session=true".into(),
+            pair_context_offset: 0,
+        };
+        let displayed = panel_history_count(Some(&recent), None).unwrap();
+        let details =
+            SessionStrategyDetails::fresh_with_recovery("session_cleared_by_user", displayed);
+        let events = PlaceholderLiveEvents::default();
+        let channel = ChannelId::new(1);
+        assert!(events.set_session_panel_lifecycle_event(
+            channel,
+            None,
+            "session_fresh",
+            &serde_json::to_value(details).unwrap(),
+        ));
+        let banner = events
+            .claim_session_banner_line(channel, &ProviderKind::Claude)
+            .unwrap();
+        assert!(banner.contains("(최근 대화 2개를 읽어들였습니다)"));
+    }
+
+    #[test]
     fn reply_context_is_last_before_user_input_with_recent_and_knowledge() {
         let recent = ChannelRecentContextManifestInput {
             rendered_context: "[이전 대화 복원]\nrecent user and assistant".into(),
             pair_count: 1,
             audit_reason: "fresh_session;pairs=1".into(),
+            pair_context_offset: 0,
         };
         let reply = "[Reply context — replied-to message]\nAuthor: bot\nContent: answer\n[End of reply context — the user's reply follows]";
         let prompt = TurnContext {

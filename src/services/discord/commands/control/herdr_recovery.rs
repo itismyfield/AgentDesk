@@ -73,6 +73,7 @@ pub(super) async fn clear(
     if let Some(candidate) = candidate.as_ref() {
         root_replaced::remember_candidate(candidate);
     }
+    let mut previous = previous_session(pool, (row.session_id(), record), provider, channel).await;
     let (original, excluded) = original_execution(shared, provider, channel).await;
     let reason = original.err();
     discard_waiting(shared, provider, channel, Some(&logical), &excluded, report).await;
@@ -122,7 +123,7 @@ pub(super) async fn clear(
             )
             .await;
             if super::clear_teardown::note_retired_selector(cleared, report) {
-                commit_conversation_reset(shared, channel, report).await;
+                commit_conversation_reset(shared, channel, previous.take(), report).await;
             }
         } else {
             report.execution = Some(ExecutionCleanup::Pending(
@@ -173,7 +174,7 @@ pub(super) async fn clear(
         match fenced {
             Ok(true) => {
                 report.conversation_reset = true;
-                commit_conversation_reset(shared, channel, report).await;
+                commit_conversation_reset(shared, channel, previous, report).await;
             }
             Ok(false) => report.fail("provider_resume_fence", "clear execution row moved on"),
             Err(error) => report.fail("provider_resume_fence", &error),
@@ -187,14 +188,49 @@ pub(super) async fn clear(
     true
 }
 
+async fn previous_session(
+    pool: &sqlx::PgPool,
+    (row_id, record): (
+        i64,
+        &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
+    ),
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Option<crate::db::session_transcripts::PreviousProviderSession> {
+    let (id, cwd): (Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT COALESCE(NULLIF(BTRIM(raw_provider_session_id), ''),
+                         NULLIF(BTRIM(claude_session_id), '')), cwd
+           FROM sessions WHERE id = $1 AND hosted_execution->>'execution_nonce' = $2",
+    )
+    .bind(row_id)
+    .bind(&record.execution_nonce)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()?;
+    super::super::super::previous_provider_session::capture(
+        provider,
+        channel,
+        id.as_deref()?,
+        cwd.as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty())
+            .map(std::path::Path::new),
+        Some(&record.owner.logical_key),
+        Some(&record.execution_nonce),
+    )
+    .await
+}
+
 async fn commit_conversation_reset(
     shared: &Arc<SharedData>,
     channel: ChannelId,
+    previous: Option<crate::db::session_transcripts::PreviousProviderSession>,
     report: &mut ClearReport,
 ) {
     native::clear_session_memory(shared, channel).await;
     native::clear_process_reset_pending(shared, channel).await;
-    super::clear_teardown::write_boundary(shared, channel, report).await;
+    super::clear_teardown::write_boundary(shared, channel, previous, report).await;
 }
 
 async fn original_execution(

@@ -1,10 +1,9 @@
 mod discovery;
 mod handoff;
 mod options;
-#[cfg(test)]
-pub(crate) use discovery::find_rollout_by_session_id_under;
 pub(crate) use discovery::{
-    default_codex_home, observe_rollout_turn_state, rollout_file_matches_cwd,
+    default_codex_home, find_rollout_by_session_id_under, observe_rollout_turn_state,
+    rollout_file_matches_cwd,
 };
 pub use discovery::{default_codex_sessions_dir, find_rollout_by_session_id};
 use discovery::{latest_rollout_for_cwd_and_session_since, rollout_file_len, same_path};

@@ -196,13 +196,47 @@ pub(super) async fn consume_codex_goal_lifecycle_command(
 
 pub(super) async fn record_fresh_session_context_boundary(
     shared: &Arc<SharedData>,
+    provider: &ProviderKind,
     channel_id: ChannelId,
-) -> anyhow::Result<()> {
-    crate::db::session_transcripts::record_channel_clear_boundary(
+    selected: crate::services::discord::previous_provider_session::Selection<'_>,
+) -> anyhow::Result<crate::db::session_transcripts::RecentContextBoundary> {
+    let previous = crate::services::discord::previous_provider_session::for_channel(
+        shared, provider, channel_id, selected,
+    )
+    .await;
+    let boundary = crate::db::session_transcripts::RecentContextBoundary {
+        kind: crate::db::session_transcripts::RecentContextBoundaryKind::ContextSevered,
+        previous_session: previous,
+    };
+    crate::db::session_transcripts::record_recent_context_boundary(
         shared.pg_pool.as_ref(),
         &channel_id.get().to_string(),
+        &boundary,
     )
-    .await
+    .await?;
+    Ok(boundary)
+}
+
+pub(super) async fn record_start_context_boundary(
+    shared: &Arc<SharedData>,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    selected: crate::services::discord::previous_provider_session::Selection<'_>,
+    preceding: Option<crate::db::session_transcripts::RecentContextBoundary>,
+) -> anyhow::Result<()> {
+    match preceding {
+        Some(boundary) => {
+            crate::db::session_transcripts::record_recent_context_boundary(
+                shared.pg_pool.as_ref(),
+                &channel.get().to_string(),
+                &boundary,
+            )
+            .await
+        }
+        None => record_fresh_session_context_boundary(shared, provider, channel, selected)
+            .await
+            .map(drop),
+    }
 }
 
 #[cfg(test)]
@@ -403,9 +437,14 @@ mod fresh_session_boundary_pg_tests {
         let channel = ChannelId::new(5_100_000_001);
         let storeless = crate::services::discord::make_shared_data_for_tests();
         assert!(
-            record_fresh_session_context_boundary(&storeless, channel)
-                .await
-                .is_err(),
+            record_fresh_session_context_boundary(
+                &storeless,
+                &ProviderKind::Codex,
+                channel,
+                Default::default()
+            )
+            .await
+            .is_err(),
             "without PostgreSQL there is no durable boundary"
         );
 
@@ -422,9 +461,14 @@ mod fresh_session_boundary_pg_tests {
         ] {
             sqlx::query(statement).execute(&pool).await.unwrap();
         }
-        let error = record_fresh_session_context_boundary(&shared, channel)
-            .await
-            .expect_err("a rejected boundary write cannot report success");
+        let error = record_fresh_session_context_boundary(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            Default::default(),
+        )
+        .await
+        .expect_err("a rejected boundary write cannot report success");
         assert!(
             format!("{error:#}").contains("injected fresh boundary failure"),
             "{error:#}"
@@ -445,9 +489,14 @@ mod fresh_session_boundary_pg_tests {
         .execute(&pool)
         .await
         .unwrap();
-        record_fresh_session_context_boundary(&shared, channel)
-            .await
-            .expect("the boundary lands once the store accepts it");
+        record_fresh_session_context_boundary(
+            &shared,
+            &ProviderKind::Codex,
+            channel,
+            Default::default(),
+        )
+        .await
+        .expect("the boundary lands once the store accepts it");
         assert_eq!(boundary_generation(&pool, channel).await, Some(1));
         let recent = crate::services::discord::load_channel_recent_context(
             Some(&pool),

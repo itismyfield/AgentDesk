@@ -191,7 +191,7 @@ pub(super) fn channel_recent_context_manifest_layer(
     let content = input
         .map(|input| input.rendered_context.as_str())
         .unwrap_or("");
-    prompt_manifest_layer(
+    let mut layer = prompt_manifest_layer(
         CHANNEL_RECENT_CONTEXT_LAYER_NAME,
         CHANNEL_RECENT_CONTEXT_LAYER_SOURCE,
         Some(
@@ -201,7 +201,13 @@ pub(super) fn channel_recent_context_manifest_layer(
         ),
         PromptContentVisibility::UserDerived,
         content,
-    )
+    );
+    if let Some(input) = input.filter(|input| input.pair_context_offset > 0) {
+        let pairs = &content[input.pair_context_offset..];
+        layer.redacted_preview =
+            (!pairs.is_empty()).then(|| redacted_prompt_manifest_preview(pairs));
+    }
+    layer
 }
 
 pub(super) fn prompt_manifest_content_stats(content: &str) -> (i64, i64, String) {

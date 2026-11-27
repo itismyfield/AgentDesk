@@ -24,10 +24,44 @@ mod codex_end_tests;
 #[cfg(unix)]
 pub(super) mod resume_fence;
 
+pub(super) async fn tmux_name(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+) -> Option<String> {
+    shared
+        .core
+        .lock()
+        .await
+        .sessions
+        .get(&channel)
+        .and_then(|session| session.channel_name.as_deref())
+        .map(|name| provider.build_tmux_session_name(name))
+}
+
+pub(super) async fn write_channel_boundary(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: serenity::ChannelId,
+    (session_key, logical): (Option<&str>, Option<&str>),
+    report: &mut ClearReport,
+) {
+    use super::super::super::previous_provider_session::{self, Selection};
+    let selected = Selection {
+        session_key,
+        logical,
+        ..Selection::default()
+    };
+    let previous =
+        previous_provider_session::for_channel(shared, provider, channel, selected).await;
+    write_boundary(shared, channel, previous, report).await;
+}
+
 /// Advances the channel's transcript clear boundary, retried once.
 pub(super) async fn write_boundary(
     shared: &SharedData,
     channel_id: serenity::ChannelId,
+    previous_session: Option<session_transcripts::PreviousProviderSession>,
     report: &mut ClearReport,
 ) {
     let Some(pool) = shared.pg_pool.as_ref() else {
@@ -35,11 +69,11 @@ pub(super) async fn write_boundary(
         return;
     };
     let key = channel_id.get().to_string();
-    let key = key.as_str();
-    let write = move || async move {
-        let tx = session_transcripts::begin_channel_clear_boundary_tx(pool).await?;
-        session_transcripts::finish_channel_clear_boundary_tx(tx, key).await
+    let context = session_transcripts::RecentContextBoundary {
+        kind: session_transcripts::RecentContextBoundaryKind::Cleared,
+        previous_session,
     };
+    let write = || session_transcripts::record_recent_context_boundary(Some(pool), &key, &context);
     report.attempt("pg_boundary", write).await;
 }
 

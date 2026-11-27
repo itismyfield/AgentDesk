@@ -980,6 +980,11 @@
       "path": "migrations/postgres/0202_decision_requests.sql",
       "sha256": "549ed3a213b8fde84a299d652fa293034dca8b1b40087fe3031f39d3ae199a40",
       "version": 202
+    },
+    {
+      "path": "migrations/postgres/0203_channel_clear_recent_context.sql",
+      "sha256": "4af76469276b9b9913cf082bf0c9f64ceb6195fe1213331f19a35bd58bc36de9",
+      "version": 203
     }
   ],
   "version": 1

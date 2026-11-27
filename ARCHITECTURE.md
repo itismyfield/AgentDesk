@@ -374,6 +374,8 @@ src/
 │   │   └── write.rs
 │   ├── session_observability/
 │   │   └── background_ordering_pg_tests.rs
+│   ├── session_transcripts/
+│   │   └── channel_clear_boundary.rs
 │   ├── turns/
 │   │   ├── receipt_tests.rs
 │   │   └── timestamp_tests.rs
@@ -3922,6 +3924,7 @@ src/
 │   │   ├── placeholder_cleanup.rs
 │   │   ├── placeholder_controller.rs
 │   │   ├── placeholder_sweeper.rs
+│   │   ├── previous_provider_session.rs
 │   │   ├── queue_dispatch.rs
 │   │   ├── queue_exit.rs
 │   │   ├── queue_io.rs

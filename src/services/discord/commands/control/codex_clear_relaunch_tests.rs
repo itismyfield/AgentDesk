@@ -831,6 +831,31 @@ async fn clear_and_first_input_at_tick(
     .await
     .unwrap();
     assert_no_retirement_warning(&cleared);
+    let previous_path = fixture.old_source.path.canonicalize().unwrap();
+    let context = crate::services::discord::load_channel_recent_context(
+        fixture.shared.pg_pool.as_ref(),
+        channel,
+        None,
+        false,
+        false,
+        false,
+        crate::services::discord::prompt_builder::DispatchProfile::Full,
+        None,
+        Option::<&()>::None,
+    )
+    .await
+    .unwrap();
+    assert!(
+        context
+            .rendered_context
+            .contains("직전 세션 provider=codex")
+    );
+    assert!(
+        context
+            .rendered_context
+            .contains(&format!("{previous_path:?}"))
+    );
+    assert!(!cleared.reply().contains(previous_path.to_str().unwrap()));
     assert!(!fixture.alive.load(Ordering::SeqCst));
     let kills = fixture
         .fake

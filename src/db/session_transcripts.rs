@@ -2,27 +2,25 @@ use anyhow::{Result, anyhow};
 use poise::serenity_prelude::MessageId;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
+#[cfg(test)]
 use std::future::Future;
 
 use crate::db::session_agent_resolution::resolve_agent_id_for_session_pg;
 
-const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "SELECT transcript.user_message,
-            transcript.assistant_message,
-            transcript.created_at,
-            clear_boundary.cleared_at,
-            transcript.id,
-            clear_boundary.cleared_through_id
-     FROM session_transcripts AS transcript
-     LEFT JOIN channel_session_clear_boundaries AS clear_boundary
-       ON clear_boundary.channel_id = transcript.channel_id
-     WHERE transcript.channel_id = $1
-       AND transcript.channel_context
-       AND BTRIM(transcript.user_message) <> ''
-       AND BTRIM(transcript.assistant_message) <> ''
-       AND (clear_boundary.cleared_through_id IS NULL
-            OR transcript.id > clear_boundary.cleared_through_id)
-     ORDER BY transcript.created_at DESC, transcript.id DESC
-     LIMIT $2";
+mod channel_clear_boundary;
+
+#[cfg(test)]
+use channel_clear_boundary::FETCH_RECENT_CHANNEL_PAIRS_SQL;
+#[cfg(test)]
+use channel_clear_boundary::finish_channel_clear_boundary_tx;
+pub(crate) use channel_clear_boundary::{
+    PreviousProviderSession, RecentContextBoundary, RecentContextBoundaryKind,
+    fetch_recent_channel_prompt_context, record_recent_context_boundary,
+};
+#[cfg(test)]
+pub(crate) use channel_clear_boundary::{
+    begin_channel_clear_boundary_tx, record_channel_clear_boundary,
+};
 
 type ChannelTranscriptPairRow = (
     String,
@@ -89,96 +87,20 @@ pub(crate) fn discord_message_started_at_millis(message_id: Option<MessageId>) -
     message_id.map(|message_id| message_id.created_at().timestamp_millis())
 }
 
-pub(crate) async fn record_channel_clear_boundary(
-    pg_pool: Option<&PgPool>,
-    channel_id: &str,
-) -> Result<()> {
-    let pool = pg_pool
-        .ok_or_else(|| anyhow!("postgres pool is required to persist a channel clear boundary"))?;
-    let channel_id = channel_id.trim();
-    if channel_id.is_empty() {
-        return Err(anyhow!(
-            "channel clear boundary requires non-empty channel_id"
-        ));
-    }
-
-    let tx = begin_channel_clear_boundary_tx(pool).await?;
-    finish_channel_clear_boundary_tx(tx, channel_id).await
-}
-
-/// #5707 phase 1 of a boundary write: open the transaction, take no lock yet.
-/// The transaction's `NOW()` — the value that becomes `cleared_at` — is already
-/// frozen here, which is why it can be earlier than a transcript this clear
-/// ends up covering.
-pub(crate) async fn begin_channel_clear_boundary_tx(
-    pool: &PgPool,
-) -> Result<Transaction<'_, Postgres>> {
-    pool.begin()
-        .await
-        .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))
-}
-
-/// #5707 phase 2: take the channel lock, advance both durable markers, commit.
-/// `cleared_through_id` is `MAX(session_transcripts.id)` read after the lock, so
-/// it covers every transcript row serialized before this clear.
-pub(crate) async fn finish_channel_clear_boundary_tx(
-    mut tx: Transaction<'_, Postgres>,
-    channel_id: &str,
-) -> Result<()> {
-    let channel_id = channel_id.trim();
-    if channel_id.is_empty() {
-        return Err(anyhow!(
-            "channel clear boundary requires non-empty channel_id"
-        ));
-    }
-    lock_channel_transcript_clear_fence(&mut tx, channel_id)
-        .await
-        .map_err(|error| anyhow!("lock channel clear boundary failed: {error}"))?;
-    sqlx::query(
-        "INSERT INTO channel_session_clear_boundaries (
-             channel_id, cleared_at, cleared_through_id, clear_generation
-         )
-         SELECT $1, NOW(), COALESCE(MAX(id), 0), 1
-           FROM session_transcripts
-          WHERE channel_id = $1
-         ON CONFLICT (channel_id) DO UPDATE SET
-             cleared_at = GREATEST(
-                 channel_session_clear_boundaries.cleared_at,
-                 EXCLUDED.cleared_at
-             ),
-             cleared_through_id = GREATEST(
-                 channel_session_clear_boundaries.cleared_through_id,
-                 EXCLUDED.cleared_through_id
-             ),
-             clear_generation = channel_session_clear_boundaries.clear_generation + 1",
-    )
-    .bind(channel_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| anyhow!("record channel clear boundary failed: {error}"))?;
-    tx.commit()
-        .await
-        .map_err(|error| anyhow!("commit channel clear boundary failed: {error}"))?;
-
-    Ok(())
-}
-
+#[cfg(test)]
 pub(crate) async fn fetch_recent_channel_pairs(
     pool: &PgPool,
     channel_id: &str,
     limit: u64,
 ) -> Result<Vec<ChannelTranscriptPair>> {
-    fetch_recent_channel_pairs_from_rows(async {
-        sqlx::query_as::<_, ChannelTranscriptPairRow>(FETCH_RECENT_CHANNEL_PAIRS_SQL)
-            .bind(channel_id)
-            .bind(limit.min(i64::MAX as u64) as i64)
-            .fetch_all(pool)
-            .await
-            .map_err(|error| anyhow!("recent channel transcript lookup failed: {error}"))
-    })
-    .await
+    Ok(
+        channel_clear_boundary::fetch_recent_channel_context(pool, channel_id, limit, false)
+            .await?
+            .0,
+    )
 }
 
+#[cfg(test)]
 async fn fetch_recent_channel_pairs_from_rows<F>(rows: F) -> Result<Vec<ChannelTranscriptPair>>
 where
     F: Future<Output = Result<Vec<ChannelTranscriptPairRow>>>,

@@ -573,13 +573,7 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         );
         report.transition_busy = true;
     }
-    let tmux_name = {
-        let data = shared.core.lock().await;
-        data.sessions
-            .get(&channel_id)
-            .and_then(|s| s.channel_name.as_ref())
-            .map(|ch_name| provider.build_tmux_session_name(ch_name))
-    };
+    let tmux_name = clear_teardown::tmux_name(shared, provider, channel_id).await;
     #[cfg(unix)]
     if !clear_epoch.overlapped_startup()
         && herdr_recovery::clear(
@@ -613,7 +607,14 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         &mut report,
     )
     .await;
-    clear_teardown::write_boundary(shared, channel_id, &mut report).await;
+    clear_teardown::write_channel_boundary(
+        shared,
+        provider,
+        channel_id,
+        (explicit_session_key, tmux_name.as_deref()),
+        &mut report,
+    )
+    .await;
     native::clear_session_memory(shared, channel_id).await;
     native::clear_process_reset_pending(shared, channel_id).await;
     if !stop_released_turn(provider, cleared.removed_token, clear_source).await {

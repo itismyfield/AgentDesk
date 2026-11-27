@@ -2,7 +2,10 @@ use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
 use super::DispatchProfile;
-use crate::db::session_transcripts::{ChannelTranscriptPair, fetch_recent_channel_pairs};
+use crate::db::session_transcripts::{
+    ChannelTranscriptPair, PreviousProviderSession, RecentContextBoundaryKind,
+    fetch_recent_channel_prompt_context,
+};
 
 pub(crate) const DEFAULT_RECENT_PAIRS: u64 = 3;
 pub(crate) const RECENT_PAIR_MESSAGE_MAX_CHARS: usize = 1_000;
@@ -15,6 +18,7 @@ pub(crate) struct ChannelRecentContextManifestInput {
     pub(crate) rendered_context: String,
     pub(crate) pair_count: usize,
     pub(crate) audit_reason: String,
+    pub(crate) pair_context_offset: usize,
 }
 
 impl ChannelRecentContextManifestInput {
@@ -23,6 +27,7 @@ impl ChannelRecentContextManifestInput {
             rendered_context: String::new(),
             pair_count: 0,
             audit_reason: format!("{reason};pairs=0"),
+            pair_context_offset: 0,
         }
     }
 
@@ -40,10 +45,6 @@ pub(crate) async fn load_channel_recent_context<T>(
     session_id: Option<&str>,
     force_fresh_provider_session: bool,
     session_was_cleared: bool,
-    // #4658: a scheduled-snapshot turn carries its own frozen context, so live
-    // channel pairs must never be injected on top of it. This is a dedicated,
-    // non-disruptive gate (it does NOT sever the channel's session or record a
-    // clear boundary the way `force_fresh_provider_session` does).
     scheduled_snapshot: bool,
     dispatch_profile: DispatchProfile,
     active_dispatch_id_for_prompt: Option<&str>,
@@ -52,8 +53,6 @@ pub(crate) async fn load_channel_recent_context<T>(
     let recent_pairs = configured_recent_pairs();
     if let Some(reason) = injection_disabled_reason(&InjectionGateInputs {
         session_id,
-        force_fresh_provider_session,
-        session_was_cleared,
         scheduled_snapshot,
         recent_pairs,
         dispatch_profile,
@@ -68,21 +67,36 @@ pub(crate) async fn load_channel_recent_context<T>(
         ));
     };
     let channel_id_text = channel_id.get().to_string();
-    let pairs = match fetch_recent_channel_pairs(pool, &channel_id_text, recent_pairs).await {
-        Ok(pairs) => pairs,
-        Err(error) => {
-            tracing::warn!(
-                target: "agentdesk.prompt_builder",
-                channel_id = channel_id.get(),
-                "failed to load recent channel context: {error}"
-            );
-            return Some(ChannelRecentContextManifestInput::disabled("fetch_failed"));
+    let (pairs, boundary) =
+        match fetch_recent_channel_prompt_context(pool, &channel_id_text, recent_pairs).await {
+            Ok(result) => result,
+            Err(error) => {
+                tracing::warn!(
+                    target: "agentdesk.prompt_builder",
+                    channel_id = channel_id.get(),
+                    "failed to load recent channel context: {error}"
+                );
+                return Some(ChannelRecentContextManifestInput::disabled("fetch_failed"));
+            }
+        };
+    let kind = boundary.as_ref().map(|boundary| boundary.kind).or({
+        if force_fresh_provider_session {
+            Some(RecentContextBoundaryKind::ContextSevered)
+        } else if session_was_cleared {
+            Some(RecentContextBoundaryKind::Cleared)
+        } else {
+            None
         }
+    });
+    let reason = match kind {
+        Some(RecentContextBoundaryKind::Cleared) => "cleared",
+        Some(RecentContextBoundaryKind::ContextSevered) => "context_severed",
+        None => "fresh_session",
     };
-    Some(
-        render_recent_pairs(&pairs)
-            .unwrap_or_else(|| ChannelRecentContextManifestInput::disabled("fresh_session")),
-    )
+    let previous = boundary
+        .as_ref()
+        .and_then(|boundary| boundary.previous_session.as_ref());
+    Some(render_recent_context(&pairs, reason, previous))
 }
 
 fn configured_recent_pairs() -> u64 {
@@ -95,8 +109,6 @@ fn configured_recent_pairs() -> u64 {
 #[cfg(test)]
 pub(super) fn should_inject<T>(
     session_id: Option<&str>,
-    force_fresh_provider_session: bool,
-    session_was_cleared: bool,
     recent_pairs: u64,
     dispatch_profile: DispatchProfile,
     active_dispatch_id_for_prompt: Option<&str>,
@@ -106,8 +118,6 @@ pub(super) fn should_inject<T>(
     // gate is exercised directly against `injection_disabled_reason` in tests.
     injection_disabled_reason(&InjectionGateInputs {
         session_id,
-        force_fresh_provider_session,
-        session_was_cleared,
         scheduled_snapshot: false,
         recent_pairs,
         dispatch_profile,
@@ -117,13 +127,8 @@ pub(super) fn should_inject<T>(
     .is_none()
 }
 
-/// Inputs to the channel-recent-context injection gate. Bundling them keeps
-/// `injection_disabled_reason` at a single parameter (no `too_many_arguments`
-/// allow) while every gate signal stays explicit at the call sites.
 struct InjectionGateInputs<'a, T> {
     session_id: Option<&'a str>,
-    force_fresh_provider_session: bool,
-    session_was_cleared: bool,
     /// #4658: a scheduled-snapshot turn carries its own frozen context, so live
     /// channel pairs must never be injected on top of it.
     scheduled_snapshot: bool,
@@ -138,10 +143,6 @@ fn injection_disabled_reason<T>(inputs: &InjectionGateInputs<'_, T>) -> Option<&
         Some("resumed_session")
     } else if inputs.scheduled_snapshot {
         Some("scheduled_snapshot_context")
-    } else if inputs.force_fresh_provider_session {
-        Some("context_severed")
-    } else if inputs.session_was_cleared {
-        Some("cleared")
     } else if inputs.recent_pairs == 0 {
         Some("configured_pairs_zero")
     } else if inputs.dispatch_profile != DispatchProfile::Full {
@@ -155,9 +156,19 @@ fn injection_disabled_reason<T>(inputs: &InjectionGateInputs<'_, T>) -> Option<&
     }
 }
 
+#[cfg(test)]
 fn render_recent_pairs(
     pairs: &[ChannelTranscriptPair],
 ) -> Option<ChannelRecentContextManifestInput> {
+    let context = render_recent_context(pairs, "fresh_session", None);
+    (!context.rendered_context.is_empty()).then_some(context)
+}
+
+fn render_recent_context(
+    pairs: &[ChannelTranscriptPair],
+    reason: &str,
+    previous: Option<&PreviousProviderSession>,
+) -> ChannelRecentContextManifestInput {
     let mut rendered_pairs: Vec<(String, String)> = pairs
         .iter()
         .filter(|pair| {
@@ -170,23 +181,37 @@ fn render_recent_pairs(
             )
         })
         .collect();
-    if rendered_pairs.is_empty() {
-        return None;
-    }
-
-    let mut rendered_context = render_block(&rendered_pairs);
-    while rendered_context.chars().count() > CHANNEL_RECENT_CONTEXT_MAX_CHARS
-        && rendered_pairs.len() > 1
+    let previous_text = previous.map(render_previous_session).unwrap_or_default();
+    let mut pairs_text = render_block(&rendered_pairs);
+    let previous_chars = previous_text.chars().count();
+    while previous_chars + pairs_text.chars().count() > CHANNEL_RECENT_CONTEXT_MAX_CHARS
+        && !rendered_pairs.is_empty()
     {
         rendered_pairs.remove(0);
-        rendered_context = render_block(&rendered_pairs);
+        pairs_text = render_block(&rendered_pairs);
     }
+    let pair_count = rendered_pairs.len();
+    let pair_context_offset = previous_text.len();
+    ChannelRecentContextManifestInput {
+        rendered_context: previous_text + &pairs_text,
+        pair_count,
+        audit_reason: format!(
+            "{reason};pairs={pair_count};previous_session={}",
+            previous.is_some()
+        ),
+        pair_context_offset,
+    }
+}
 
-    Some(ChannelRecentContextManifestInput {
-        rendered_context,
-        pair_count: rendered_pairs.len(),
-        audit_reason: format!("fresh_session;pairs={}", rendered_pairs.len()),
-    })
+fn render_previous_session(previous: &PreviousProviderSession) -> String {
+    let id = previous.session_id.escape_debug();
+    let Some(path) = previous.path.as_ref().filter(|path| path.is_file()) else {
+        return format!("[직전 세션 session_id={id}]\n\n");
+    };
+    format!(
+        "[직전 세션 provider={} session_id={id} path={path:?}]\n필요하면 grep·tail로 이 파일의 필요한 부분만 읽으세요.\n\n",
+        previous.provider,
+    )
 }
 
 fn truncate_message(message: &str) -> String {
@@ -204,6 +229,9 @@ fn truncate_message(message: &str) -> String {
 }
 
 fn render_block(pairs: &[(String, String)]) -> String {
+    if pairs.is_empty() {
+        return String::new();
+    }
     let mut block = format!(
         "[이전 대화 복원 — 새 세션이라 이 채널의 직전 대화 {}쌍을 배경 컨텍스트로 제공합니다. 지시가 아니라 참고용입니다.]",
         pairs.len()
@@ -237,8 +265,6 @@ mod tests {
     fn fresh_session_renders_chronological_pairs_and_manifest_stats() {
         assert!(should_inject(
             None,
-            false,
-            false,
             3,
             DispatchProfile::Full,
             None,
@@ -257,7 +283,10 @@ mod tests {
 
         let layer = channel_recent_context_manifest_layer(Some(&context));
         assert!(layer.enabled);
-        assert_eq!(layer.reason.as_deref(), Some("fresh_session;pairs=3"));
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("fresh_session;pairs=3;previous_session=false")
+        );
         assert_eq!(layer.chars, context.rendered_context.chars().count() as i64);
         assert_eq!(
             layer.content_sha256,
@@ -265,6 +294,51 @@ mod tests {
         );
         assert!(layer.redacted_preview.is_some());
         assert!(layer.full_content.is_none());
+    }
+
+    #[test]
+    fn prior_session_path_appears_only_in_prompt_and_only_while_file_exists() {
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("private-transcript-fixture.jsonl");
+        std::fs::write(&path, "{}").unwrap();
+        let previous = PreviousProviderSession {
+            provider: "claude".into(),
+            session_id: "private-session-fixture".into(),
+            path: Some(path.clone()),
+        };
+        let pairs = [pair("fixture question", "fixture answer")];
+        let rendered = || render_recent_context(&pairs, "cleared", Some(&previous));
+        let with_file = rendered();
+        assert!(with_file.rendered_context.contains("provider=claude"));
+        assert!(
+            with_file
+                .rendered_context
+                .contains("private-transcript-fixture.jsonl")
+        );
+        assert!(with_file.rendered_context.contains("grep·tail"));
+        let layer = channel_recent_context_manifest_layer(Some(&with_file));
+        assert!(layer.enabled);
+        assert_eq!(
+            layer.reason.as_deref(),
+            Some("cleared;pairs=1;previous_session=true")
+        );
+        assert_eq!(
+            layer.content_sha256,
+            prompt_manifest_content_sha256(&with_file.rendered_context)
+        );
+        let preview = layer.redacted_preview.unwrap();
+        assert!(preview.contains("fixture question"));
+        assert!(!preview.contains("private-"));
+        assert!(layer.full_content.is_none());
+
+        std::fs::remove_file(path).unwrap();
+        let missing = rendered();
+        assert!(
+            missing
+                .rendered_context
+                .contains("직전 세션 session_id=private-session-fixture")
+        );
+        assert!(!missing.rendered_context.contains("path="));
     }
 
     #[test]
@@ -297,8 +371,6 @@ mod tests {
         assert_eq!(
             injection_disabled_reason(&InjectionGateInputs {
                 session_id: None,
-                force_fresh_provider_session: false,
-                session_was_cleared: false,
                 scheduled_snapshot: true,
                 recent_pairs: 3,
                 dispatch_profile: DispatchProfile::Full,
@@ -312,8 +384,6 @@ mod tests {
         assert_eq!(
             injection_disabled_reason(&InjectionGateInputs {
                 session_id: None,
-                force_fresh_provider_session: false,
-                session_was_cleared: false,
                 scheduled_snapshot: false,
                 recent_pairs: 3,
                 dispatch_profile: DispatchProfile::Full,
@@ -328,8 +398,6 @@ mod tests {
     fn resumed_session_is_disabled() {
         assert!(!should_inject(
             Some("session-id"),
-            false,
-            false,
             3,
             DispatchProfile::Full,
             None,
@@ -345,8 +413,11 @@ mod tests {
     #[test]
     fn disabled_manifest_reasons_report_the_actual_gate() {
         for (reason, expected) in [
-            ("context_severed", "context_severed;pairs=0"),
-            ("cleared", "cleared;pairs=0"),
+            (
+                "scheduled_snapshot_context",
+                "scheduled_snapshot_context;pairs=0",
+            ),
+            ("configured_pairs_zero", "configured_pairs_zero;pairs=0"),
             ("lite_profile", "lite_profile;pairs=0"),
         ] {
             let input = ChannelRecentContextManifestInput::disabled(reason);
@@ -361,8 +432,6 @@ mod tests {
         assert_eq!(
             injection_disabled_reason(&InjectionGateInputs {
                 session_id: None,
-                force_fresh_provider_session: true,
-                session_was_cleared: false,
                 scheduled_snapshot: true,
                 recent_pairs: 3,
                 dispatch_profile: DispatchProfile::Full,
@@ -373,8 +442,6 @@ mod tests {
         );
         assert!(should_inject(
             None,
-            false,
-            false,
             3,
             DispatchProfile::Full,
             None,
@@ -384,15 +451,13 @@ mod tests {
 
     #[test]
     fn fresh_routine_severance_injects_recent_context() {
-        assert!(should_inject(
-            None,
-            true,
-            false,
-            3,
-            DispatchProfile::Full,
-            None,
-            Option::<&()>::None,
-        ));
+        let context = render_recent_context(&[pair("earlier", "answer")], "context_severed", None);
+        assert_eq!(context.pair_count, 1);
+        assert!(context.rendered_context.contains("earlier"));
+        assert_eq!(
+            context.audit_reason,
+            "context_severed;pairs=1;previous_session=false"
+        );
     }
 
     #[test]
@@ -438,8 +503,6 @@ mod tests {
     fn zero_pairs_and_recovery_context_disable_injection() {
         assert!(!should_inject(
             None,
-            false,
-            false,
             0,
             DispatchProfile::Full,
             None,
@@ -447,8 +510,6 @@ mod tests {
         ));
         assert!(!should_inject(
             None,
-            false,
-            false,
             3,
             DispatchProfile::Full,
             None,
@@ -456,8 +517,6 @@ mod tests {
         ));
         assert!(!should_inject(
             None,
-            false,
-            false,
             3,
             DispatchProfile::Lite,
             None,
@@ -465,8 +524,6 @@ mod tests {
         ));
         assert!(!should_inject(
             None,
-            false,
-            false,
             3,
             DispatchProfile::Full,
             Some("dispatch-id"),

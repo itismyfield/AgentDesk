@@ -373,18 +373,27 @@ async fn start_reserved_headless_turn_admitted(
     let shares_channel_session = isolated_run.is_none();
     let routine_agent_identity_changed =
         shares_channel_session && replay_request.identity_changed().await;
-    if routine_agent_identity_changed {
-        if let Err(error) = crate::db::session_transcripts::record_channel_clear_boundary(
-            shared.pg_pool.as_ref(),
-            &channel_id.get().to_string(),
+    let identity_boundary = if routine_agent_identity_changed {
+        let saved = record_fresh_session_context_boundary(
+            shared,
+            &provider,
+            channel_id,
+            super::super::super::previous_provider_session::Selection {
+                session_id: session_id.as_deref(),
+                cwd: Some(std::path::Path::new(&current_path)),
+                ..Default::default()
+            },
         )
-        .await
-        {
-            unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
-            return Err(HeadlessTurnStartError::Internal(format!(
-                "failed to persist routine agent identity context boundary: {error}"
-            )));
-        }
+        .await;
+        let boundary = match saved {
+            Ok(boundary) => boundary,
+            Err(error) => {
+                unwind_unstarted_turn(shared, channel_id, &cancel_token).await;
+                return Err(HeadlessTurnStartError::Internal(format!(
+                    "failed to persist routine agent identity context boundary: {error}"
+                )));
+            }
+        };
         let mut data = shared.core.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
             session.channel_name = channel_name_hint.clone();
@@ -393,7 +402,10 @@ async fn start_reserved_headless_turn_admitted(
             memento_context_loaded = false;
             session_strategy_reason = "routine_agent_identity_changed";
         }
-    }
+        Some(boundary)
+    } else {
+        None
+    };
     if shares_channel_session {
         replay_request
             .isolate(
@@ -549,10 +561,26 @@ async fn start_reserved_headless_turn_admitted(
     // clear in-memory, DB, stale IDs, and live-TUI bindings; skip restoration;
     // and force a cold provider launch. Prompt rewriting remains goal-only.
     let force_fresh_provider_session = fresh_context_severance || routine_agent_identity_changed;
+    let prior_session_id = fresh_context_severance
+        .then(|| session_id.clone())
+        .flatten();
     let severance = persist_boundary_before_provider_clear(
         fresh_context_severance,
         force_fresh_provider_session,
-        || record_fresh_session_context_boundary(shared, channel_id),
+        || {
+            super::goal_lifecycle::record_start_context_boundary(
+                shared,
+                &provider,
+                channel_id,
+                super::super::super::previous_provider_session::Selection {
+                    session_key: adk_session_key.as_deref(),
+                    session_id: prior_session_id.as_deref(),
+                    cwd: Some(std::path::Path::new(&current_path)),
+                    logical: tmux_session_name.as_deref(),
+                },
+                identity_boundary,
+            )
+        },
         || {
             clear_codex_goal_start_provider_session(
                 shared,
@@ -720,10 +748,22 @@ async fn start_reserved_headless_turn_admitted(
     )
     .await;
     let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
-    let recovery_message_count = session_retry_context
-        .as_ref()
-        .map(|ctx| ctx.recovery_message_count())
-        .filter(|&count| count > 0);
+    let channel_recent_context = load_channel_recent_context(
+        shared.pg_pool.as_ref(),
+        channel_id,
+        session_id.as_deref(),
+        force_fresh_provider_session,
+        session_was_cleared,
+        turn_local_session,
+        dispatch_profile,
+        None,
+        session_retry_context.as_ref(),
+    )
+    .await;
+    let recovery_message_count = super::turn_context::panel_history_count(
+        channel_recent_context.as_ref(),
+        session_retry_context.as_ref(),
+    );
     emit_session_strategy_lifecycle(
         shared,
         channel_id,
@@ -744,18 +784,6 @@ async fn start_reserved_headless_turn_admitted(
 
     let memory_injection_plan =
         build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
-    let channel_recent_context = load_channel_recent_context(
-        shared.pg_pool.as_ref(),
-        channel_id,
-        session_id.as_deref(),
-        force_fresh_provider_session,
-        session_was_cleared,
-        turn_local_session,
-        dispatch_profile,
-        None,
-        session_retry_context.as_ref(),
-    )
-    .await;
     let materialized_uploads =
         match crate::services::cluster::attachment_transfer::materialize::prepare(
             &pending_uploads,

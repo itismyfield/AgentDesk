@@ -951,7 +951,15 @@ pub(super) async fn handle_text_message(
         let session_was_cleared = intake_runtime_transition.session_was_cleared(taken_cleared);
         let force_fresh_provider_session = matches!(turn_goal_kind, GoalCommandKind::FreshStart);
         if force_fresh_provider_session {
-            record_fresh_session_context_boundary(shared, channel_id).await?;
+            record_fresh_session_context_boundary(
+                shared, &provider, channel_id,
+                super::super::super::previous_provider_session::Selection {
+                    session_key: adk_session_key.as_deref(),
+                    session_id: session_id.as_deref(),
+                    cwd: Some(std::path::Path::new(&current_path)),
+                    logical: tmux_session_name.as_deref(),
+                },
+            ).await?;
             clear_codex_goal_start_provider_session(
                 shared,
                 channel_id,
@@ -1351,10 +1359,22 @@ pub(super) async fn handle_text_message(
         )
         .await;
         let cli_was_just_spawned = cli_just_spawned_for_emit(tmux_session_name.as_deref());
-        let recovery_message_count = session_retry_context
-            .as_ref()
-            .map(|ctx| ctx.recovery_message_count())
-            .filter(|&count| count > 0);
+        let channel_recent_context = load_channel_recent_context(
+            shared.pg_pool.as_ref(),
+            channel_id,
+            session_id.as_deref(),
+            force_fresh_provider_session,
+            session_was_cleared,
+            // #4658: intake (live user) turns are never scheduled-snapshot turns.
+            false,
+            dispatch_profile,
+            active_dispatch_id_for_prompt.as_deref(),
+            session_retry_context.as_ref(),
+        )
+        .await;
+        let recovery_message_count = super::turn_context::panel_history_count(
+            channel_recent_context.as_ref(), session_retry_context.as_ref(),
+        );
         emit_session_strategy_lifecycle(
             shared,
             channel_id,
@@ -1373,19 +1393,6 @@ pub(super) async fn handle_text_message(
         // Prepend pending file uploads
         let memory_injection_plan =
             build_memory_injection_plan(&provider, session_id.is_some(), dispatch_profile);
-        let channel_recent_context = load_channel_recent_context(
-            shared.pg_pool.as_ref(),
-            channel_id,
-            session_id.as_deref(),
-            force_fresh_provider_session,
-            session_was_cleared,
-            // #4658: intake (live user) turns are never scheduled-snapshot turns.
-            false,
-            dispatch_profile,
-            active_dispatch_id_for_prompt.as_deref(),
-            session_retry_context.as_ref(),
-        )
-        .await;
         let materialized_uploads = super::input_payload::prepare_uploads(
             &pending_uploads,
             shared.pg_pool.as_ref(),

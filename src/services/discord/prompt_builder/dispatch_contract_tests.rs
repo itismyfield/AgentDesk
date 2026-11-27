@@ -648,6 +648,7 @@ fn prompt_manifest_total_input_bytes_accounts_for_channel_recent_context() {
         rendered_context: "previous user: 비밀\nprevious assistant: acknowledged".to_string(),
         pair_count: 1,
         audit_reason: "fresh_session;pairs=1".to_string(),
+        pair_context_offset: 0,
     };
     let without_context = build_prompt_with_channel_recent_context(None);
     let with_context = build_prompt_with_channel_recent_context(Some(&context));
