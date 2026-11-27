@@ -11,7 +11,9 @@ use super::ProviderChannelStop;
 use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
 use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 use crate::services::discord::health::{self, HealthRegistry, PendingQueueSnapshot};
-use crate::services::discord::{SharedData, host_teardown_gate};
+use crate::services::discord::{
+    SharedData, clear_inflight_state, host_teardown_gate, record_turn_stop_tombstone,
+};
 use crate::services::engine_runtime::health_port::{
     PendingQueueView, RuntimeTurnStopResult, TurnStopJudgement, TurnStopPort,
 };
@@ -46,7 +48,8 @@ impl PendingQueueView for PendingQueueSnapshot {
     }
 }
 
-impl TurnStopPort<SharedData> for HealthRegistry {
+impl TurnStopPort for HealthRegistry {
+    type Shared = SharedData;
     type Judged = ProviderChannelStop;
     type Snapshot = PendingQueueSnapshot;
 
@@ -201,5 +204,21 @@ impl TurnStopPort<SharedData> for HealthRegistry {
 
     fn backfill_inflight_after_guard(provider: &ProviderKind, channel_id: ChannelId) {
         host_teardown_gate::backfill_inflight_after_guard(provider, channel_id)
+    }
+
+    fn record_stop_tombstone<'a>(
+        channel_id: ChannelId,
+        tmux_session_name: Option<&'a str>,
+        reason: &'a str,
+    ) -> BoxFuture<'a, ()> {
+        Box::pin(record_turn_stop_tombstone(
+            channel_id,
+            tmux_session_name,
+            reason,
+        ))
+    }
+
+    fn clear_inflight_by_channel(provider: &ProviderKind, channel_id: ChannelId) -> bool {
+        clear_inflight_state(provider, channel_id.get())
     }
 }
