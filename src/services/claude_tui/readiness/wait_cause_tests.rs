@@ -1,5 +1,6 @@
 //! A readiness wait that ends without a proof names its open cause; a source an older launch lost
 //! settles as retained instead of holding for good.
+#[cfg(test)]
 use super::*;
 
 #[cfg(test)]
