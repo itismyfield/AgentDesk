@@ -4034,8 +4034,6 @@ POST_DEPLOY_SMOKE_E35_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_E35_DEADLINE_S:-
 POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_CLAUDE_TURNS_DEADLINE_S:-120}"
 POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S="${AGENTDESK_POST_DEPLOY_SMOKE_CODEX_TURNS_DEADLINE_S:-150}"
 POST_DEPLOY_SMOKE_CREATE_ISSUE="${AGENTDESK_POST_DEPLOY_SMOKE_CREATE_ISSUE:-off}"
-POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
-POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
 POST_DEPLOY_SMOKE_TMP_DIR=""
 POST_DEPLOY_SMOKE_HEALTH_BODY=""
 POST_DEPLOY_SMOKE_HEALTH_DETAIL_BODY=""
@@ -4806,6 +4804,7 @@ PY
 
 _run_post_deploy_functional_smoke() {
     local failed=0 recovery_gap recovery_confirmed=false
+    local peer_deploy_failed="${1:-0}"
     _post_deploy_smoke_wedge_reset
     POST_DEPLOY_SMOKE_READY=false
     POST_DEPLOY_SMOKE_FAILURES=()
@@ -4813,6 +4812,10 @@ _run_post_deploy_functional_smoke() {
     POST_DEPLOY_SMOKE_RELAY_PATH=""
     POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 did not run"
     POST_DEPLOY_SMOKE_TURN_COVERAGE="not run: turn scenarios did not execute"
+    if [ "$peer_deploy_failed" = 1 ]; then
+        POST_DEPLOY_SMOKE_DURABLE_COVERAGE="unevaluable: E-35 skipped because peer deployment failed"
+        POST_DEPLOY_SMOKE_TURN_COVERAGE="E-1=skipped E-35=skipped E-50=skipped E-51=skipped: peer deployment failed"
+    fi
     mkdir -p "$ADK_REL/logs" || return 1
     : > "$POST_DEPLOY_SMOKE_EVIDENCE" || return 1
     POST_DEPLOY_SMOKE_TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agentdesk-post-deploy-smoke.XXXXXX") || return 1
@@ -4834,7 +4837,9 @@ _run_post_deploy_functional_smoke() {
     if ! _post_deploy_smoke_check_fail_closed_warn_rate; then
         failed=1
     fi
-    if [ "${POST_DEPLOY_SMOKE_SCOPE:-full}" = "api" ]; then
+    if [ "$peer_deploy_failed" = 1 ]; then
+        _post_deploy_smoke_note "relay ${POST_DEPLOY_SMOKE_TURN_COVERAGE}" || failed=1
+    elif [ "${POST_DEPLOY_SMOKE_SCOPE:-full}" = "api" ]; then
         POST_DEPLOY_SMOKE_DURABLE_COVERAGE="not evaluated: operator selected API smoke scope"
         POST_DEPLOY_SMOKE_TURN_COVERAGE="not evaluated: operator selected API smoke scope"
         _post_deploy_smoke_note "relay E-1/E-35/E-50/E-51=not evaluated: API smoke scope; no provider turns or Discord test messages" || failed=1
@@ -4947,57 +4952,66 @@ turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did n
     return 0
 }
 
-SMOKE_PHASE_STARTED="$SECONDS"
+_run_post_deploy_smoke_stage() {
+    local smoke_peer_failed="$1" smoke_phase_started="$SECONDS"
+    POST_DEPLOY_SMOKE_STAMP="$(date -u '+%Y%m%dT%H%M%SZ' 2>/dev/null || printf 'unknown')-$$"
+    POST_DEPLOY_SMOKE_EVIDENCE="$ADK_REL/logs/post-deploy-smoke-${POST_DEPLOY_SMOKE_STAMP}.log"
 # >>> BEGIN smoke-disposition region (#5244)
-echo "▸ Running post-deploy functional smoke (#4262)..."
-# INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
-# functional failure must degrade to a loud warning + channel alert + local
-# issue draft and let the script continue. It must NEVER roll back, exit 1,
-# poison the healthy deploy's exit code, or skip watchdog/PG-tunnel install,
-# _write_release_source_manifest, or _deploy_to_all_peers below.
-#
-# The smoke function runs from an `if` guard, suspending `set -e` within it;
-# each fallible step is nevertheless explicitly guarded or carries `|| return`.
-if _run_post_deploy_functional_smoke; then
-    if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
-        *) false ;;
-    esac
-    then
-    case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
-        "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
-            echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-        *)
-            echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
-            ;;
-    esac
+    echo "▸ Running post-deploy functional smoke (#4262)..."
+    # INVARIANT: the ENTIRE smoke block is fail-open. We are past DEPLOY_OK, so a
+    # functional failure must degrade to a loud warning + channel alert + local
+    # issue draft and let the script continue. It must NEVER roll back, exit 1,
+    # poison the healthy deploy's exit code, or skip watchdog/PG-tunnel install,
+    # _write_release_source_manifest, or peer verdict handling.
+    #
+    # The smoke function runs from an `if` guard, suspending `set -e` within it;
+    # each fallible step is nevertheless explicitly guarded or carries `|| return`.
+    if _run_post_deploy_functional_smoke "${smoke_peer_failed:-0}"; then
+        if case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_COVERAGE" in
+            "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE:$POST_DEPLOY_SMOKE_DURABLE_CLEAN_COVERAGE") true ;;
+            *) false ;;
+        esac
+        then
+            case "$POST_DEPLOY_SMOKE_WEDGE_COVERAGE" in
+                "$POST_DEPLOY_SMOKE_WEDGE_CLEAN_COVERAGE")
+                    echo "✓ Post-deploy functional smoke passed (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                    ;;
+                *)
+                    echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
+                    ;;
+            esac
             echo "  durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}"
             echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-    else
+        else
             echo "△ Post-deploy functional smoke completed with coverage gap (relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}; durable record coverage: ${POST_DEPLOY_SMOKE_DURABLE_COVERAGE}; evidence: $POST_DEPLOY_SMOKE_EVIDENCE)"
             echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        fi
+    else
+        echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
+        echo "  relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
+        echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
+        echo "  evidence: $POST_DEPLOY_SMOKE_EVIDENCE"
+        if [ -n "$POST_DEPLOY_SMOKE_TMP_DIR" ]; then
+            rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
+            POST_DEPLOY_SMOKE_TMP_DIR=""
+        fi
+        if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -eq 0 ]; then
+            POST_DEPLOY_SMOKE_FAILURES+=("smoke harness failed before recording a functional finding")
+        fi
+        _report_post_deploy_smoke_failure || true
     fi
-else
-    echo "⚠ POST-DEPLOY FUNCTIONAL SMOKE FAILED — deploy remains healthy (fail-open)"
-    echo "  relay wedge coverage: ${POST_DEPLOY_SMOKE_WEDGE_COVERAGE}"
-    echo "  turn scenarios: ${POST_DEPLOY_SMOKE_TURN_COVERAGE:-not run: turn scenarios did not execute}"
-    echo "  evidence: $POST_DEPLOY_SMOKE_EVIDENCE"
-    if [ -n "$POST_DEPLOY_SMOKE_TMP_DIR" ]; then
-        rm -rf "$POST_DEPLOY_SMOKE_TMP_DIR" 2>/dev/null || true
-        POST_DEPLOY_SMOKE_TMP_DIR=""
-    fi
-    if [ "${#POST_DEPLOY_SMOKE_FAILURES[@]}" -eq 0 ]; then
-        POST_DEPLOY_SMOKE_FAILURES+=("smoke harness failed before recording a functional finding")
-    fi
-    _report_post_deploy_smoke_failure || true
-fi
 # <<< END smoke-disposition region (#5244)
-echo "▸ [timing] phase=smoke seconds=$((SECONDS - SMOKE_PHASE_STARTED))"
+    echo "▸ [timing] phase=smoke seconds=$((SECONDS - smoke_phase_started))"
 
-# Continuous E2E companion: dormant without its machine-local config, and never a deploy failure.
-bash "$SCRIPT_DIR/e2e/continuous/after_deploy.sh" "$REPO" "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" \
-    "$POST_DEPLOY_SMOKE_STAMP" || true
+    # Continuous E2E companion: dormant without its machine-local config, and never a deploy failure.
+    bash "$SCRIPT_DIR/e2e/continuous/after_deploy.sh" "$REPO" "$(git -C "$REPO" rev-parse HEAD 2>/dev/null)" \
+        "$POST_DEPLOY_SMOKE_STAMP" || true
+}
+
+. "$SCRIPT_DIR/lib/deploy_smoke_order.sh"
+if ! _post_deploy_smoke_waits_for_peers; then
+    _run_post_deploy_smoke_stage "$SCHEMA_PEERS_FIRST_FAILED" || true
+fi
 
 # >>> BEGIN retired-relay-watchdog cleanup
 # Retire an old installation after a successful deploy; an absent job is a no-op.
@@ -5023,7 +5037,7 @@ _write_release_source_manifest
 # Ordering is the fix, not a smarter regex: while peers are being deployed this
 # transcript carries NO terminal marker, which is the truth — there is no verdict
 # yet. A refused peer exits non-zero and the EXIT trap prints DEPLOY FAILED instead.
-_finish_cluster_stage "$@" || exit 1
+_finish_cluster_stage_with_smoke "$@" || exit 1
 echo "▸ [timing] phase=deploy-total seconds=$((SECONDS - DEPLOY_RUN_STARTED))"
 
 echo "═══ Deploy Complete ═══"
