@@ -126,3 +126,122 @@ async fn a_cut_source_is_not_observed_on_the_poll_that_halts_its_actor() {
     assert!(task.is_finished(), "the cut halts the actor");
     assert_eq!(port.snapshots.load(Ordering::SeqCst), observed);
 }
+
+struct IdleBindings {
+    log: FakeBindings,
+    source_checks: AtomicUsize,
+}
+
+impl BindingEvents for IdleBindings {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        self.log.binding_events_since(channel, after)
+    }
+
+    fn subscribe(&self, channel: u64) -> watch::Receiver<u64> {
+        self.source_checks.fetch_add(1, Ordering::SeqCst);
+        self.log.subscribe(channel)
+    }
+}
+
+fn start_idle(
+    channel: u64,
+) -> (
+    Harness,
+    PathBuf,
+    SourceId,
+    Arc<IdleBindings>,
+    watch::Sender<bool>,
+    Actor,
+) {
+    let (harness, path, source) = switched_over_on(channel, &row("old", "already delivered"));
+    harness.gate.acquired();
+    let bindings = Arc::new(IdleBindings {
+        log: FakeBindings::new(),
+        source_checks: AtomicUsize::new(0),
+    });
+    let mut startup = bound(
+        1,
+        None,
+        BindingTarget::Source(source.clone()),
+        BindingCause::Startup,
+        None,
+    );
+    startup.channel_id = channel;
+    bindings.log.commit(startup);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    (harness, path, source, bindings, stop, task)
+}
+
+async fn idle_window() {
+    polls(10).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_unchanged_source_skips_work_at_the_head_of_the_loop() {
+    let (_harness, _, _, bindings, stop, task) = start_idle(838501);
+    polls(2).await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    assert!(before > 0, "startup reached the source observation path");
+    polls(3).await;
+    assert_eq!(bindings.source_checks.load(Ordering::SeqCst), before);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_hook_bind_wakes_and_posts_once_in_source_order() {
+    let channel = 838502;
+    let (harness, path, source, bindings, stop, task) = start_idle(channel);
+    idle_window().await;
+    append(&path, &row("tail", "old tail"));
+    let next = path.with_file_name("next.jsonl");
+    std::fs::write(&next, row("new", "new head")).unwrap();
+    let next = source_id_for("next", &next).unwrap();
+    let mut hop = bound(
+        2,
+        Some(&source),
+        BindingTarget::Source(next),
+        BindingCause::Clear,
+        Some(&source),
+    );
+    hop.channel_id = channel;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    bindings.log.commit(hop);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(bindings.source_checks.load(Ordering::SeqCst) > before);
+    polls(16).await;
+    assert_eq!(harness.port.posts(), ["old tail", "new head"]);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_durable_input_registration_wakes_the_waiting_actor() {
+    use crate::services::tui_input::human_frame::history::v2::native_tests::Fixture;
+
+    let channel = 838503;
+    let (harness, _, _, bindings, stop, task) = start_idle(channel);
+    idle_window().await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    let _fixture = Fixture::at(
+        harness._runtime.path().join("test-frames.json"),
+        channel,
+        true,
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(bindings.source_checks.load(Ordering::SeqCst) > before);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_transcript_only_change_spools_and_posts_within_fifteen_seconds() {
+    let (harness, path, _, _, stop, task) = start_idle(838504);
+    polls(15).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    append(&path, &row("first", "first"));
+    append(&path, &row("second", "second"));
+    polls(15).await;
+    assert_eq!(harness.port.posts(), ["first", "second"]);
+    polls(16).await;
+    assert_eq!(harness.port.posts(), ["first", "second"]);
+    halt(stop, task).await;
+}
