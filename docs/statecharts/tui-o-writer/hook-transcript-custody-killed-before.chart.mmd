@@ -1,0 +1,22 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: waiting
+    lg1: Path to the ChannelEventuallyReady bug
+    lg2: Repeats forever, so ChannelEventuallyReady breaks
+  }
+  class lg0 yellow
+  class lg1 bugPath
+  class lg2 repeats
+  s0: N1 종료됨, 종료 기록 전
+  s1: 후속 N2가 뜸, N1 종료 기록 없음
+  [*] --> s0
+  s0 --> s1: 후속 N2가 뜸
+  s1 --> s1: N2에 입력이 들어옴 or N2 턴이 채널 행을 차지함 or N2가 idle이 됨
+  class s0 yellow
+  class s0 bugPath
+  class s1 yellow
+  class s1 bugPath
+  class s1 repeats

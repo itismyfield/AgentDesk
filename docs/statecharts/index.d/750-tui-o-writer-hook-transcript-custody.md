@@ -1,0 +1,2 @@
+key: 750-tui-o-writer-hook-transcript-custody
+| `tui-o-writer` 재시작 뒤 원본 ticket 정산과 채널 boot gate (#8448 s3) | `bd0c385be24ca25a10725127dcd77eba1274d4fa` + design-3 | S2: N2의 idle이 N1 ticket을 정리하고(IdleDoesNotExpand), 장치 변경 뒤 저장 barrier가 부팅을 막고, N1이 턴 중간에 끝난 채널의 gate가 열리지 않음. design-2: 안전 규칙은 통과하나 gate가 영구히 닫힘(ChannelEventuallyReady) | Design GREEN: N1의 종료를 host 판독으로 기록하고, 종료 길이까지 확정한 원본 범위에 증거가 없을 때만 결과 없이 정산. 불변식 12개와 liveness 4개 통과, 변형 16개는 기대 RED. 25 cfg. [설계](tui-o-writer/hook-transcript-custody.design.md) · [보고서](tui-o-writer/hook-transcript-custody.report.md) |
