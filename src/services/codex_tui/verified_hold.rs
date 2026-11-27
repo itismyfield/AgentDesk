@@ -15,7 +15,7 @@ pub fn existing_incarnation(tmux: &str) -> bool {
 }
 
 pub(crate) fn wait_for_cancel(tmux: &str, cancel: Option<&Arc<CancelToken>>) -> Result<(), String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(sender) = HOLD_ENTERED_FOR_TESTS
         .lock()
         .unwrap_or_else(|error| error.into_inner())

@@ -714,7 +714,7 @@ impl<B: BindingEvents> Sources<B> {
             #[cfg(any(test, feature = "test-support"))]
             done.store(true, std::sync::atomic::Ordering::Release);
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.jobs_started += 1;
         }
