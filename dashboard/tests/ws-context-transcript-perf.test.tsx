@@ -131,6 +131,8 @@ describe("useDashboardSocket performance & replay contract", () => {
     expect(isNumericEventId("12345")).toBe(true);
     expect(isNumericEventId("")).toBe(false);
     expect(isNumericEventId("A:1")).toBe(false);
+    // Mutation guard: exact query parsing must never conflate since=10000 with since=1.
+    expect(new URL("ws://localhost:8791/ws?ticket=t-1&since=10000").searchParams.get("since")).not.toBe("1");
 
     const onEvent = vi.fn();
     const domEvents: WSEvent[] = [];
@@ -152,19 +154,20 @@ describe("useDashboardSocket performance & replay contract", () => {
 
       // Socket 1 receives id "10000" -> delivered once, cursor becomes "10000".
       const ws1 = MockWebSocket.instances[0]!;
+      expect(new URL(ws1.url).searchParams.get("since")).toBeNull();
       await act(async () => {
         ws1.emitOpen();
         ws1.emitMessage({ type: "kanban_card_updated", id: "10000", payload: { id: "before-restart" } });
       });
       expect(storage.getItem("adk:ws:last-event-id")).toBe("10000");
 
-      // Socket 1 closes -> Socket 2 reconnects with since=10000 against restarted server (ids reset to 1).
+      // Socket 1 closes -> Socket 2 reconnects with exact since=10000 against restarted server (ids reset to 1).
       await act(async () => {
         ws1.close();
         await vi.advanceTimersByTimeAsync(1_500);
       });
       const ws2 = MockWebSocket.instances[1]!;
-      expect(ws2.url).toContain("since=10000");
+      expect(new URL(ws2.url).searchParams.get("since")).toBe("10000");
 
       await act(async () => {
         ws2.emitOpen();
@@ -180,13 +183,13 @@ describe("useDashboardSocket performance & replay contract", () => {
       ]);
       expect(domEvents).toHaveLength(3);
 
-      // Socket 2 closes -> Socket 3 must reconnect with since=1 (cursor recovered to restarted server timeline).
+      // Socket 2 closes -> Socket 3 must reconnect with exact since=1 (cursor recovered to restarted server timeline).
       await act(async () => {
         ws2.close();
         await vi.advanceTimersByTimeAsync(1_500);
       });
       const ws3 = MockWebSocket.instances[2]!;
-      expect(ws3.url).toContain("since=1");
+      expect(new URL(ws3.url).searchParams.get("since")).toBe("1");
 
       // Also verify literal non-numeric A:1 -> reconnect -> B:1 and numeric 1 -> reconnect -> 1 both deliver.
       await act(async () => {
@@ -197,6 +200,7 @@ describe("useDashboardSocket performance & replay contract", () => {
         await vi.advanceTimersByTimeAsync(1_500);
       });
       const ws4 = MockWebSocket.instances[3]!;
+      expect(new URL(ws4.url).searchParams.get("since")).toBe("A:1");
       await act(async () => {
         ws4.emitOpen();
         ws4.emitMessage({ type: "kanban_card_updated", id: "B:1", payload: { id: "B:1" } });
@@ -213,7 +217,7 @@ describe("useDashboardSocket performance & replay contract", () => {
     }
   });
 
-  it("delivers out-of-order concurrent broadcast frames (102 -> 101) without regressing since cursor (P1-2)", async () => {
+  it("delivers out-of-order concurrent broadcast frames (102 -> 101) without regressing since cursor and bounds per-socket seen IDs at 1,024 (P1-2)", async () => {
     vi.useFakeTimers();
     const onEvent = vi.fn();
 
@@ -246,10 +250,37 @@ describe("useDashboardSocket performance & replay contract", () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
     const ws2 = MockWebSocket.instances[1]!;
-    expect(ws2.url).toContain("since=102");
+    expect(new URL(ws2.url).searchParams.get("since")).toBe("102");
+
+    // Eviction boundary (> 1,024 distinct IDs on a single socket): oldest ("1") evicts while recent ("2".."1025") still dedupe.
+    onEvent.mockClear();
+    await act(async () => {
+      ws2.emitOpen();
+      for (let id = 1; id <= 1_025; id += 1) {
+        ws2.emitMessage({ type: "kanban_card_updated", id: String(id), payload: { id: `b-${id}` } });
+      }
+    });
+    expect(onEvent).toHaveBeenCalledTimes(1_025);
+
+    await act(async () => {
+      // "2" and "1025" remain inside the 1,024 window -> dropped.
+      ws2.emitMessage({ type: "kanban_card_updated", id: "2", payload: { id: "b-2-dup" } });
+      ws2.emitMessage({ type: "kanban_card_updated", id: "1025", payload: { id: "b-1025-dup" } });
+    });
+    expect(onEvent).toHaveBeenCalledTimes(1_025);
+
+    await act(async () => {
+      // "1" was evicted when "1025" arrived -> accepted cleanly while since cursor stays at max "1025".
+      ws2.emitMessage({ type: "kanban_card_updated", id: "1", payload: { id: "b-1-post-evict" } });
+      ws2.close();
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(onEvent).toHaveBeenCalledTimes(1_026);
+    const ws3 = MockWebSocket.instances[2]!;
+    expect(new URL(ws3.url).searchParams.get("since")).toBe("1025");
   });
 
-  it("coalesces rapid bursts of WS messages and flushes pending event.id on pagehide, close, and cleanup (P2-1)", async () => {
+  it("coalesces rapid bursts of WS messages, flushes only persisted cursor on pagehide, and updates lastEventTs on restore/remount (P2-1)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
     const setItemSpy = vi.spyOn(storage, "setItem");
@@ -278,16 +309,17 @@ describe("useDashboardSocket performance & replay contract", () => {
     const rendersAfterOpen = renderCount;
 
     // First event updates lastEventTs & localStorage synchronously with zero delay.
+    const t1 = Date.now();
     await act(async () => {
       ws.emitMessage({ type: "kanban_card_updated", id: "1", payload: { id: "c-1" } });
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("1");
     expect(setItemSpy).toHaveBeenCalledTimes(1);
-    expect(observedLastTs).toBe(Date.now());
+    expect(observedLastTs).toBe(t1);
     const rendersAfterFirst = renderCount;
     expect(rendersAfterFirst).toBeGreaterThan(rendersAfterOpen);
 
-    // Send id "2" within < 1000ms (still pending in throttle window), then fire pagehide -> flushes "2" immediately!
+    // Send id "2" within < 1000ms (still pending in throttle window), then fire pagehide -> flushes only localStorage cursor!
     await act(async () => {
       vi.advanceTimersByTime(20);
       ws.emitMessage({ type: "kanban_card_updated", id: "2", payload: { id: "c-2" } });
@@ -299,13 +331,16 @@ describe("useDashboardSocket performance & replay contract", () => {
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("2");
     expect(setItemSpy).toHaveBeenCalledTimes(2);
+    expect(observedLastTs).toBe(t1);
+    expect(renderCount).toBe(rendersAfterFirst);
 
-    // Advance past 1s window, flush baseline, then verify 40-message burst coalescing.
+    // Advance past 1s window: next event updates lastEventTs cleanly after pagehide/restore.
     await act(async () => {
       vi.advanceTimersByTime(1_000);
       ws.emitMessage({ type: "kanban_card_updated", id: "3", payload: { id: "c-3" } });
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("3");
+    expect(observedLastTs).toBe(Date.now());
     expect(setItemSpy).toHaveBeenCalledTimes(3);
     const rendersBeforeBurst = renderCount;
 
@@ -338,12 +373,12 @@ describe("useDashboardSocket performance & replay contract", () => {
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("43");
 
-    // Reconnect and verify unmount cleanup also flushes pending burst id.
+    // Reconnect and verify unmount cleanup also flushes pending burst id, and remount updates lastEventTs on next event.
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_000);
     });
     const ws2 = MockWebSocket.instances[1]!;
-    expect(ws2.url).toContain("since=43");
+    expect(new URL(ws2.url).searchParams.get("since")).toBe("43");
 
     await act(async () => {
       ws2.emitOpen();
@@ -358,6 +393,23 @@ describe("useDashboardSocket performance & replay contract", () => {
       root.unmount();
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("45");
+
+    root = createRoot(container);
+    observedLastTs = null;
+    await act(async () => {
+      root.render(<Probe />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const ws3 = MockWebSocket.instances[2]!;
+    expect(new URL(ws3.url).searchParams.get("since")).toBe("45");
+    await act(async () => {
+      vi.advanceTimersByTime(2_000);
+      ws3.emitOpen();
+      ws3.emitMessage({ type: "kanban_card_updated", id: "46", payload: { id: "c-46" } });
+    });
+    expect(observedLastTs).toBe(Date.now());
   });
 
   it("applies jittered reconnect delay in [0.5 * base, 1.0 * base] and prevents duplicate timers", async () => {
@@ -591,6 +643,15 @@ describe("CopyWell preview cap, synchronous value switch & full copy", () => {
     });
     expect(writeText).toHaveBeenCalledExactlyOnceWith(valueB);
     expect(valueB).toHaveLength(35_000);
+
+    // Switching back A -> expand -> B -> A must present A collapsed again (never remembering stale expanded state).
+    await act(async () => {
+      root.render(<CopyWell title="Output" value={valueA} tr={tr} testId="large-well" />);
+    });
+    const revisitedPre = container.querySelector("pre")!;
+    expect(revisitedPre.textContent).toBe(`${valueA.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…`);
+    expect(revisitedPre.textContent).not.toContain("TAIL_A");
+    expect(container.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe("false");
   });
 });
 
@@ -692,7 +753,7 @@ describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
     events,
   });
 
-  it("pairs tool_use and tool_result identically across seeded randomized streams and scales linearly to N = 25,000 (P2-4)", () => {
+  it("pairs tool_use and tool_result identically across seeded randomized streams and distant N = 20,000 adversarial pairs (P2-4)", () => {
     const consecutiveEvents: SessionTranscriptEvent[] = [
       { kind: "tool_use", tool_name: "Bash", summary: "first", content: "", status: "running", is_error: false },
       { kind: "tool_use", tool_name: "Bash", summary: "second", content: "", status: "done", is_error: false },
@@ -758,35 +819,37 @@ describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
     expect(totalToolUsesGenerated).toBeGreaterThan(500);
     expect(totalToolResultsGenerated).toBeGreaterThan(500);
 
-    // Linear-time scaling check on N = 25,000 interleaved/alternating tool_use + tool_result events.
-    const largeEvents: SessionTranscriptEvent[] = [];
-    for (let block = 0; block < 2_500; block += 1) {
-      for (let k = 0; k < 5; k += 1) {
-        largeEvents.push({
-          kind: "tool_use",
-          tool_name: `Tool_${block}_${k}`,
-          summary: `in_${block}_${k}`,
-          content: "",
-          status: "done",
-          is_error: false,
-        });
-      }
-      for (let k = 4; k >= 0; k -= 1) {
-        largeEvents.push({
-          kind: "tool_result",
-          tool_name: k === 2 ? null : `Tool_${block}_${k}`,
-          summary: `out_${block}_${k}`,
-          content: "",
-          status: "done",
-          is_error: false,
-        });
-      }
+    // Adversarial distant-pair stream (N = 20,000): 10,000 distinct tool_use followed by 10,000 matching tool_result (~10^8 O(N^2) ops vs O(N)).
+    const distantEvents: SessionTranscriptEvent[] = [];
+    for (let i = 0; i < 10_000; i += 1) {
+      distantEvents.push({
+        kind: "tool_use",
+        tool_name: `tool_${i}`,
+        summary: `call_${i}`,
+        content: "",
+        status: "done",
+        is_error: false,
+      });
     }
-    expect(largeEvents).toHaveLength(25_000);
-    const start = performance.now();
-    const largeSummary = buildTurnToolSummary(makeTranscript(largeEvents), largeEvents, tr);
-    expect(performance.now() - start).toBeLessThan(1_500);
-    expect(largeSummary.calls).toHaveLength(12_501);
+    for (let i = 0; i < 10_000; i += 1) {
+      distantEvents.push({
+        kind: "tool_result",
+        tool_name: `tool_${i}`,
+        summary: `res_${i}`,
+        content: "",
+        status: i === 9_999 ? "pending" : "done",
+        is_error: i === 0,
+      });
+    }
+    expect(distantEvents).toHaveLength(20_000);
+    const distantStart = performance.now();
+    const distantSummary = buildTurnToolSummary(makeTranscript(distantEvents), distantEvents, tr);
+    const distantElapsed = performance.now() - distantStart;
+    expect(distantElapsed).toBeLessThan(150);
+    expect(distantSummary.calls).toHaveLength(10_000);
+    expect(distantSummary.tools).toHaveLength(10_000);
+    expect(distantSummary.calls[0]?.status).toBe("failed");
+    expect(distantSummary.calls[9_999]?.status).toBe("waiting");
   });
 
   it("matches real server card/dispatch WS event names and coalesces refreshSeed + WS bursts into one 350ms refresh (P2-2)", async () => {

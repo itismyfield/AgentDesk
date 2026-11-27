@@ -39,8 +39,13 @@ export const COPY_WELL_PREVIEW_LIMIT = 24_000;
 /** A monospace well capped at 240px that scrolls inside, with a 44px copy button that reports the real result. */
 export function CopyWell({ title, value, tr, testId }: { title: string; value: string; tr: (ko: string, en: string) => string; testId?: string }) {
   const [state, setState] = useState<"idle" | "done" | "error">("idle");
-  const [expandedForValue, setExpandedForValue] = useState<string | null>(null);
-  const expanded = expandedForValue === value;
+  const [prevValue, setPrevValue] = useState(value);
+  const [expanded, setExpanded] = useState(false);
+  if (prevValue !== value) {
+    setPrevValue(value);
+    if (expanded) setExpanded(false);
+  }
+  const effectiveExpanded = prevValue === value ? expanded : false;
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const copy = async () => {
@@ -54,7 +59,7 @@ export function CopyWell({ title, value, tr, testId }: { title: string; value: s
     timer.current = window.setTimeout(() => setState("idle"), 1800);
   };
   const isTruncatable = value.length > COPY_WELL_PREVIEW_LIMIT;
-  const renderedValue = isTruncatable && !expanded ? `${value.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…` : value;
+  const renderedValue = isTruncatable && !effectiveExpanded ? `${value.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…` : value;
   const label = state === "done" ? tr("복사됨", "Copied") : state === "error" ? tr("복사 실패", "Copy failed") : tr("복사", "Copy");
   return (
     <section className="flex min-w-0 flex-col gap-2" data-testid={testId}>
@@ -66,10 +71,10 @@ export function CopyWell({ title, value, tr, testId }: { title: string; value: s
                 variant="ghost"
                 size="sm"
                 className={KIT_TOUCH_BUTTON}
-                aria-expanded={expanded}
-                onClick={() => setExpandedForValue((prev) => (prev === value ? null : value))}
+                aria-expanded={effectiveExpanded}
+                onClick={() => setExpanded((prev) => !prev)}
               >
-                {expanded
+                {effectiveExpanded
                   ? tr("접기", "Collapse")
                   : tr(`전체 펼치기 (${value.length.toLocaleString()}자)`, `Show all (${value.length.toLocaleString()} chars)`)}
               </Button>
