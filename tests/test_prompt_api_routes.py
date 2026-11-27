@@ -196,6 +196,15 @@ class PromptRoutes(unittest.TestCase):
         self.assertFalse(any(route.fullmatch('/api/send') for route in routes))
         self.assertIn('.route("/discord/send",', (REPO / 'src/server/routes/domains/ops.rs').read_text())
 
+    def test_named_module_routes_are_recognized(self):
+        for path in ('/api/agents/fixture/execution-node',
+                     '/api/decisions/fixture',
+                     '/api/kakao/calendar/events/fixture'):
+            with self.subTest(path=path):
+                rc, output = self.run_check(f'curl http://localhost:1{path}', REPO)
+                self.assertEqual(rc, 0, output)
+                self.assertIn('candidate_urls=1 unknown_paths=0', output)
+
     def test_invalid_utf8_is_unavailable_even_with_a_legacy_locale(self):
         self.prompt.write_text('http://localhost:1/api/discord/send', encoding='utf-8')
         read_text = Path.read_text
