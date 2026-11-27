@@ -35,7 +35,7 @@ main에 이미 있는 canonical identity/alias·channel ID 기반 inflight 파�
 tmux에는 compact JSON **한 개 `AGENTDESK_IDENTITY` 세션 환경 변수**를 `new-session -e AGENTDESK_IDENTITY=<json>`으로 생성과 동시에 저장한다. owner_scope 해시·채널 ID는 비밀이 아니다. 예시는 fixture이며 운영 값이 아니다. layout 선택은 이 JSON에 의존하지 않는다.
 
 ```json
-{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"1479671298497183835","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
+{"v":1,"owner_scope":"<sha256(runtime-root|execution-node)>","provider":"claude","token_namespace":"<existing token_hash>","channel_id":"example-id-19d-04","parent_channel_id":null,"thread_id":null,"identity_kind":"discord_channel","name_kind":"channel","session_record_id":null,"logical_key":"<current primary key>","spawn_nonce":"<32hex>","display_name":"스마트홈-cc"}
 ```
 
 DB `identity_kind`는 현 `discord_channel`/`scheduled_snapshot`을 유지한다(`db/dispatched_sessions/canonical_identity.rs:4-27`). `name_kind`는 이름 입력/metadata의 분류이며 DB enum 확장이 아니다. row ID는 기존 launch/hook 순서상 optional이고, 기존 launch admission·binding context/nonce로 최초 소유를 입증한다.
@@ -744,20 +744,20 @@ $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀�
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348
 $7|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-pppppppppppppppppppppppppppppppp-11111111111111111111-aaaaaaaaaaaa-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-22222222222222222222
 stderr=
-$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}'
+$ tmux -L i8119-probe -f /dev/null set-option -t '$0' @agentdesk_identity '{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}'
 rc=0
 stdout=
 stderr=
 $ tmux -L i8119-probe -f /dev/null show-options -qv -t '$0' @agentdesk_identity
 rc=0
-stdout={"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+stdout={"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 stderr=
 $ tmux -L i8119-probe -f /dev/null list-sessions -F '#{session_id}|#{session_name}|#{session_name}|#{@agentdesk_identity}'
 rc=0
 stdout=$2|AgentDesk-claude-가가가가가가가가가가가가가가|AgentDesk-claude-가가가가가가가가가가가가가가|
 $3|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가|
 $4|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가-1570308839910412348|
-$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "1479671298497183835", "thread_id": null}
+$0|스마트홈-cc|스마트홈-cc|{"v": 1, "provider": "claude", "channel_id": "example-id-19d-04", "thread_id": null}
 $1|스마트홈-cc-1570308839910412348|스마트홈-cc-1570308839910412348|
 $5|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀|
 $6|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀𐐀-1570308839910412348|
