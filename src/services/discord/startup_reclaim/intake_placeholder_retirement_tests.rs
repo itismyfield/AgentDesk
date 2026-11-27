@@ -56,6 +56,8 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
     const MISMATCHED: u64 = 105;
     const UNOWNED: u64 = 106;
     const OTHER_ANCHOR: u64 = 107;
+    const ABORT_OWNER: u64 = 108;
+    const QUARANTINED_ABORT: u64 = 109;
     const NOW: i64 = 1_700_000_000;
 
     let root = crate::config::TestRuntimeRootGuard::new();
@@ -87,6 +89,27 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
         plan.protected_message_ids,
         HashSet::from([SNAPSHOT_OWNER, OTHER_ANCHOR])
     );
+    let abort_root = runtime_store::tui_direct_abort_marker_root().unwrap();
+    fs::create_dir_all(&abort_root).unwrap();
+    let abort_path =
+        |anchor| abort_root.join(format!("{}_{CHANNEL}_{anchor}.json", provider.as_str()));
+    let marker = serde_json::json!({
+        "provider": provider.as_str(),
+        "channel_id": CHANNEL,
+        "anchor_message_id": ABORT_OWNER,
+        "tmux_session_name": "test-session",
+        "aborted_at_ms": NOW as u64 * 1000,
+    });
+    fs::write(
+        abort_path(ABORT_OWNER),
+        serde_json::to_vec(&marker).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        abort_path(QUARANTINED_ABORT).with_extension("json.bad"),
+        "{invalid json",
+    )
+    .unwrap();
 
     let messages: Vec<_> = [
         SNAPSHOT_OWNER,
@@ -94,6 +117,8 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
         UNREADABLE,
         MALFORMED,
         MISMATCHED,
+        ABORT_OWNER,
+        QUARANTINED_ABORT,
         UNOWNED,
     ]
     .into_iter()
