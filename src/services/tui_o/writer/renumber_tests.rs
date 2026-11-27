@@ -54,8 +54,6 @@ async fn a_writer_restarted_after_the_volume_renumbered_continues_from_its_curso
     polls(12).await;
     assert_eq!(harness.port.posts(), ["first", "second", "third"]);
     assert_eq!(copies(&harness, &a), 1);
-    // The re-pin moves the one cursor onto the live identity; nothing is posted again.
-    assert!(harness.channel().cursors().any(|c| c.source == a1));
     assert!(harness.channel().rotation().unwrap().successors.is_empty());
     assert_eq!(harness.channel().binding_checkpoint().unwrap(), Some(2));
     assert_eq!(harness.alarms.taken(), []);

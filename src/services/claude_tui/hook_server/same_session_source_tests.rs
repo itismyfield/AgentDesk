@@ -98,6 +98,42 @@ fn same_session_hook_pins_registered_source_once_without_moving_binding() {
 }
 
 #[test]
+fn hook_refresh_rejects_a_different_execution_name() {
+    use crate::services::claude_tui::source_verify::boot_time_for_tests;
+    use crate::services::tui_o::shadow::capture::renumber;
+    let (_root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
+    let ingress = Ingress::new();
+    let (channel, session) = (658_109, uuid());
+    let (tmux, envelope) = execution(&ingress, channel, &session);
+    let binding = launch(&ingress, &tmux, channel, &session);
+    let payload = ingress.payload(&session, None);
+    observe(&session, "SessionStart", &payload, &envelope);
+    let pinned = pinned_source(channel, &tmux).unwrap().unwrap();
+    let before = events(channel);
+    let _boot = boot_time_for_tests(Some(chrono::Utc::now()));
+    let path = ingress.path(&session);
+    let _renumber = renumber::shift(&path, 1 << 40);
+    let mut foreign = envelope;
+    let CapturedContext::Captured(context) = &mut foreign.context else {
+        panic!("the fixture has a captured execution");
+    };
+    context.tmux_session = format!("other-{}", uuid());
+    let mut headers = HeaderMap::new();
+    headers.insert(BINDING_HEADER, foreign.encode().unwrap().parse().unwrap());
+    let _ = observe_binding_hook(
+        "claude",
+        "Stop",
+        Some(&session),
+        Some(&session),
+        &payload,
+        &headers,
+    );
+    assert_eq!(events(channel), before);
+    assert_eq!(pinned_source(channel, &tmux).unwrap(), Some(pinned));
+    assert_eq!(runtime_binding_for_tmux_session(&tmux), Some(binding));
+}
+
+#[test]
 fn same_session_hook_refuses_replaced_inode_and_foreign_first_record() {
     let (_root, _env) = crate::services::tui_prompt_dedupe::binding_context::tests::fixture();
     let ingress = Ingress::new();

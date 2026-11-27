@@ -23,7 +23,7 @@ fn repin(channel: u64, old: &SourceId, new: &SourceId) -> BindingEvent {
             cause: BindingCause::Resume,
             parent_hint: None,
             evidence: BindingEvidence {
-                hook_event: "UserPromptSubmit".into(),
+                hook_event: "user_prompt_submit".into(),
                 received_at: chrono::Utc::now(),
                 reclaims: false,
             },
@@ -32,15 +32,15 @@ fn repin(channel: u64, old: &SourceId, new: &SourceId) -> BindingEvent {
 }
 
 #[tokio::test]
-async fn native_8448_hook_repin_of_a_renumbered_source_settles_the_native_turn_pg() {
+async fn hook_refresh_applies_a_renumber_and_settles_the_native_turn_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use sha2::Digest;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    for (case, repinned) in [true, false].into_iter().enumerate() {
-        let channel = 84480001 + case as u64;
-        let path = runtime.path().join(format!("runtime/renumber-{case}.json"));
+    let channel = 723_841;
+    {
+        let path = runtime.path().join("runtime/renumber.json");
         let f = Fixture::at(path, channel, true);
         let own_end = supply_rows(&f, false, true);
         let s = f.ticket.source.as_ref().unwrap();
@@ -49,29 +49,53 @@ async fn native_8448_hook_repin_of_a_renumbered_source_settles_the_native_turn_p
         let shared = b2b_shared(Some(pool.clone()));
         let (key, actor) = b2b_active(&f, &shared).await;
         b2b_row(&f);
-        let root = runtime.path().join(format!("renumber-store-{case}"));
+        let root = runtime.path().join("renumber-store");
         let stored = s.file[0] ^ STORED;
         let mut capture = SupplyCapture::resume_at_dev(&f, &root, true, (own_end, prefix), stored);
         supply_register(&f, &shared, key, Some(actor)).await;
-        if repinned {
-            let id = |dev| SourceId {
-                session_id: s.session_id.clone(),
-                path: s.transcript.clone(),
-                dev,
-                ino: s.file[1],
-            };
-            let event = repin(channel, &id(stored), &id(s.file[0]));
-            capture.bindings.events.lock().unwrap().push(event);
-        }
         capture.poll(&shared).await;
+        assert!(
+            f.history
+                .native_settlement("native-fixture", &f.ticket)
+                .unwrap()
+                .outcome
+                .is_none()
+        );
+        let id = |dev| SourceId {
+            session_id: s.session_id.clone(),
+            path: s.transcript.clone(),
+            dev,
+            ino: s.file[1],
+        };
+        let old_cursor = capture.writer.store().cursor(&id(stored)).unwrap().clone();
+        let owed = capture.owed.len();
+        let event = repin(channel, &id(stored), &id(s.file[0]));
+        capture.bindings.events.lock().unwrap().push(event);
+        capture.bindings.notice.send_replace(2);
+        capture.poll(&shared).await;
+        assert_eq!(
+            capture.writer.store().binding_checkpoint().unwrap(),
+            Some(2)
+        );
         let settled = f.history.native_settlement("native-fixture", &f.ticket);
-        let outcome = settled.unwrap().outcome.map(|o| o.disposition);
-        assert_eq!(outcome, repinned.then_some(Disposition::Executed), "{case}");
+        let settled = settled.unwrap();
+        assert_eq!(
+            settled.outcome.map(|o| o.disposition),
+            Some(Disposition::Executed)
+        );
+        assert!(settled.cleanup_complete);
         let row = crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             channel,
         );
-        assert_eq!(row.is_none(), repinned, "{case}");
+        assert!(row.is_none());
+        let mut cursors = capture.writer.store().cursors();
+        let cursor = cursors.next().unwrap();
+        assert!(cursors.next().is_none());
+        assert_eq!(cursor.source, id(s.file[0]));
+        assert_eq!(cursor.captured_through, old_cursor.captured_through);
+        assert_eq!(cursor.prefix_hash, old_cursor.prefix_hash);
+        assert_eq!(capture.owed.len(), owed);
     }
     pool.close().await;
     db.drop().await;

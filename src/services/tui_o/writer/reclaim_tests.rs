@@ -68,6 +68,108 @@ fn launched(a: &str) -> (Harness, PathBuf) {
     (harness, bound_a.unwrap())
 }
 
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn hook_refresh_moves_the_cursor_to_the_live_device_without_repost() {
+    use crate::services::claude_tui::source_verify::boot_time_for_tests;
+    use crate::services::tui_o::shadow::capture::renumber;
+    for event in ["UserPromptSubmit", "Stop"] {
+        let session = uuid::Uuid::new_v4().to_string();
+        let (harness, path) = launched(&session);
+        let pane = ProducerPane::launch(&session, &path);
+        pane.http(
+            "SessionStart",
+            Some("startup"),
+            &session,
+            &session,
+            &path,
+            1,
+        );
+        let stored = pane.history().current.unwrap().pin.unwrap();
+        let bindings = Arc::new(BindingLog);
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        append(&path, &row("old", "before reboot"));
+        polls(4).await;
+        halt(stop, task).await;
+        assert_eq!(harness.port.posts(), ["before reboot"]);
+        let before = harness.channel().cursor(&stored).unwrap().clone();
+
+        let _boot = boot_time_for_tests(Some(Utc::now()));
+        let _renumber = renumber::shift(&path, 1 << 40);
+        let live = source_id_for(&session, &path).unwrap();
+        assert_ne!(stored.dev, live.dev);
+        assert_eq!(stored.ino, live.ino);
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+        pane.http(event, None, &session, &session, &path, 2);
+        polls(4).await;
+        let pinned = pane.history().current.unwrap().pin.unwrap();
+        assert_eq!(pinned, live, "{event} must refresh the verified pin");
+        let store = harness.channel();
+        let after = store.cursor(&live).expect("the live file owns the cursor");
+        assert_eq!(after.captured_through, before.captured_through);
+        assert_eq!(after.prefix_hash, before.prefix_hash);
+        assert_eq!(store.cursors().count(), 1);
+        drop(store);
+        assert_eq!(harness.port.posts(), ["before reboot"]);
+        append(&path, &row("new", "after reboot"));
+        polls(4).await;
+        assert_eq!(harness.port.posts(), ["before reboot", "after reboot"]);
+        halt(stop, task).await;
+
+        let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
+        polls(4).await;
+        assert_eq!(harness.port.posts(), ["before reboot", "after reboot"]);
+        halt(stop, task).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(start_paused = true)]
+async fn hook_refresh_compaction_starts_at_its_own_cursor_and_keeps_posts_unique() {
+    let [a, b] = [(); 2].map(|_| uuid::Uuid::new_v4().to_string());
+    let (harness, a_path) = launched(&a);
+    let pane = ProducerPane::launch(&a, &a_path);
+    pane.http("SessionStart", Some("startup"), &a, &a, &a_path, 1);
+    let a_source = source_id_for(&a, &a_path).unwrap();
+    let bindings = Arc::new(BindingLog);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    let inherited = row("first", "inherited output");
+    append(&a_path, &inherited);
+    polls(4).await;
+    assert_eq!(harness.port.posts(), ["inherited output"]);
+    let old_cursor = harness.channel().cursor(&a_source).unwrap().clone();
+
+    let b_path = a_path.with_file_name(format!("{b}.jsonl"));
+    let next = row("second", "compacted output");
+    let body = [session_row(&b), inherited, next].concat();
+    std::fs::write(&b_path, &body).unwrap();
+    pane.http("SessionStart", Some("compact"), &a, &b, &b_path, 2);
+    pane.http("Stop", None, &a, &b, &b_path, 3);
+    polls(4).await;
+    let new = source_id_for(&b, &b_path).unwrap();
+    assert_eq!(pane.history().current.unwrap().pin.unwrap(), new);
+    let store = harness.channel();
+    let cursor = store
+        .cursor(&new)
+        .expect("compaction attached its own file");
+    assert_eq!(cursor.captured_through, body.len() as u64);
+    assert_eq!(cursor.prefix_hash, hex::encode(Sha256::digest(&body)));
+    assert_eq!(store.cursor(&a_source).unwrap(), &old_cursor);
+    drop(store);
+    assert_eq!(
+        harness.port.posts(),
+        ["inherited output", "compacted output"]
+    );
+    halt(stop, task).await;
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings);
+    polls(4).await;
+    assert_eq!(
+        harness.port.posts(),
+        ["inherited output", "compacted output"]
+    );
+    halt(stop, task).await;
+}
+
 fn kind(event: &BindingEvent) -> String {
     match &event.record {
         BindingRecord::Bound {
