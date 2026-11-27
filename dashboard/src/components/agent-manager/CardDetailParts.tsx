@@ -34,11 +34,17 @@ export function PropList({ items, className = "" }: { items: Array<[string, Reac
   );
 }
 
+export const COPY_WELL_PREVIEW_LIMIT = 24_000;
+
 /** A monospace well capped at 240px that scrolls inside, with a 44px copy button that reports the real result. */
 export function CopyWell({ title, value, tr, testId }: { title: string; value: string; tr: (ko: string, en: string) => string; testId?: string }) {
   const [state, setState] = useState<"idle" | "done" | "error">("idle");
+  const [expanded, setExpanded] = useState(false);
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
+  useEffect(() => {
+    setExpanded(false);
+  }, [value]);
   const copy = async () => {
     try {
       await copyText(value);
@@ -49,15 +55,32 @@ export function CopyWell({ title, value, tr, testId }: { title: string; value: s
     window.clearTimeout(timer.current);
     timer.current = window.setTimeout(() => setState("idle"), 1800);
   };
+  const isTruncatable = value.length > COPY_WELL_PREVIEW_LIMIT;
+  const renderedValue = isTruncatable && !expanded ? `${value.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…` : value;
   const label = state === "done" ? tr("복사됨", "Copied") : state === "error" ? tr("복사 실패", "Copy failed") : tr("복사", "Copy");
   return (
     <section className="flex min-w-0 flex-col gap-2" data-testid={testId}>
       <DetailHeading
         aside={
-          <Button variant="ghost" size="sm" className={KIT_TOUCH_BUTTON} icon={state === "done" ? <Check /> : <Copy />}
-            aria-label={tr(`${title} 전체 복사`, `Copy all of ${title}`)} onClick={() => void copy()}>
-            {label}
-          </Button>
+          <div className="flex flex-wrap items-center gap-1">
+            {isTruncatable && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={KIT_TOUCH_BUTTON}
+                aria-expanded={expanded}
+                onClick={() => setExpanded((prev) => !prev)}
+              >
+                {expanded
+                  ? tr("접기", "Collapse")
+                  : tr(`전체 펼치기 (${value.length.toLocaleString()}자)`, `Show all (${value.length.toLocaleString()} chars)`)}
+              </Button>
+            )}
+            <Button variant="ghost" size="sm" className={KIT_TOUCH_BUTTON} icon={state === "done" ? <Check /> : <Copy />}
+              aria-label={tr(`${title} 전체 복사`, `Copy all of ${title}`)} onClick={() => void copy()}>
+              {label}
+            </Button>
+          </div>
         }
       >
         {title}
@@ -67,7 +90,7 @@ export function CopyWell({ title, value, tr, testId }: { title: string; value: s
         aria-label={tr(`${title} 내용`, `${title} content`)}
         className="m-0 max-h-60 min-h-11 overflow-auto overscroll-contain whitespace-pre-wrap break-words rounded-[10px] bg-surface-subtle px-3.5 py-3 font-mono text-xs leading-[18px] text-th-text-primary [overflow-wrap:anywhere]"
       >
-        {value}
+        {renderedValue}
       </pre>
       <span className="sr-only" role="status" aria-live="polite">{state === "idle" ? "" : label}</span>
     </section>

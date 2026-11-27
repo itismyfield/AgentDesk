@@ -99,23 +99,69 @@ export function buildTurnToolSummary(
 ): { tools: DeskTool[]; calls: DeskCall[] } {
   const parsed = parseTranscriptDate(transcript.created_at);
   const timePrefix = parsed ? parsed.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null;
-  const usedResults = new Set<number>();
-  const calls: DeskCall[] = [];
+  const n = events.length;
+  const pairedResultForUse = new Int32Array(n).fill(-1);
+  const usedResult = new Uint8Array(n);
+  const prevOpen = new Int32Array(n).fill(-1);
+  const nextOpen = new Int32Array(n).fill(-1);
+  let openHead = -1;
+  let openTail = -1;
+  const openByName = new Map<string | null | undefined, number>();
 
-  for (let i = 0; i < events.length; i += 1) {
+  const appendOpen = (idx: number) => {
+    prevOpen[idx] = openTail;
+    nextOpen[idx] = -1;
+    if (openTail !== -1) nextOpen[openTail] = idx;
+    else openHead = idx;
+    openTail = idx;
+  };
+
+  const removeOpen = (idx: number) => {
+    const p = prevOpen[idx];
+    const nx = nextOpen[idx];
+    if (p !== -1) nextOpen[p] = nx;
+    else openHead = nx;
+    if (nx !== -1) prevOpen[nx] = p;
+    else openTail = p;
+    prevOpen[idx] = -1;
+    nextOpen[idx] = -1;
+  };
+
+  // Single O(N) pass: each tool_use stays open until matched or superseded by a same-name tool_use.
+  for (let i = 0; i < n; i += 1) {
     const event = events[i];
     if (event.kind === "tool_use") {
-      let resultIndex: number | null = null;
-      for (let j = i + 1; j < events.length; j += 1) {
-        const candidate = events[j];
-        if (candidate.kind === "tool_use" && candidate.tool_name === event.tool_name) break;
-        if (candidate.kind === "tool_result" && !usedResults.has(j) && (!candidate.tool_name || !event.tool_name || candidate.tool_name === event.tool_name)) {
-          resultIndex = j;
-          usedResults.add(j);
-          break;
+      const prevIdx = openByName.get(event.tool_name);
+      if (prevIdx !== undefined) removeOpen(prevIdx);
+      openByName.set(event.tool_name, i);
+      appendOpen(i);
+    } else if (event.kind === "tool_result") {
+      let matchedIdx = -1;
+      if (!event.tool_name) {
+        matchedIdx = openHead;
+      } else {
+        for (const key of [event.tool_name, null, undefined, ""] as const) {
+          const candidateIdx = openByName.get(key);
+          if (candidateIdx !== undefined && (matchedIdx === -1 || candidateIdx < matchedIdx)) {
+            matchedIdx = candidateIdx;
+          }
         }
       }
-      const paired = resultIndex != null ? events[resultIndex] : null;
+      if (matchedIdx !== -1) {
+        pairedResultForUse[matchedIdx] = i;
+        usedResult[i] = 1;
+        openByName.delete(events[matchedIdx].tool_name);
+        removeOpen(matchedIdx);
+      }
+    }
+  }
+
+  const calls: DeskCall[] = [];
+  for (let i = 0; i < n; i += 1) {
+    const event = events[i];
+    if (event.kind === "tool_use") {
+      const resultIndex = pairedResultForUse[i];
+      const paired = resultIndex >= 0 ? events[resultIndex] : null;
       const name = event.tool_name || paired?.tool_name || tr("도구", "Tool");
       const input = (event.summary || event.content || paired?.summary || paired?.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
       calls.push({
@@ -126,7 +172,7 @@ export function buildTurnToolSummary(
         input,
         run: transcript.turn_id,
       });
-    } else if (event.kind === "tool_result" && !usedResults.has(i)) {
+    } else if (event.kind === "tool_result" && !usedResult[i]) {
       const name = event.tool_name || tr("도구", "Tool");
       const input = (event.summary || event.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
       calls.push({
@@ -268,6 +314,7 @@ export default function TurnTranscriptPanel({
 
   useEffect(() => {
     let cancelled = false;
+    let wsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
 
     async function refresh(silent = false) {
       const requestId = requestSeqRef.current + 1;
@@ -305,7 +352,11 @@ export default function TurnTranscriptPanel({
           ? shouldRefreshAgent(event, source.id)
           : shouldRefreshCard(event, source.id);
       if (shouldRefresh) {
-        void refresh(true);
+        if (wsRefreshTimer !== null) clearTimeout(wsRefreshTimer);
+        wsRefreshTimer = setTimeout(() => {
+          wsRefreshTimer = null;
+          if (!cancelled) void refresh(true);
+        }, 350);
       }
     };
 
@@ -313,6 +364,10 @@ export default function TurnTranscriptPanel({
     window.addEventListener("pcd-ws-event", handleWs as EventListener);
     return () => {
       cancelled = true;
+      if (wsRefreshTimer !== null) {
+        clearTimeout(wsRefreshTimer);
+        wsRefreshTimer = null;
+      }
       window.removeEventListener("pcd-ws-event", handleWs as EventListener);
     };
   }, [refreshNonce, source.id, source.limit, source.refreshSeed, source.type, tr]);
@@ -329,7 +384,7 @@ export default function TurnTranscriptPanel({
 
   const selectedTranscript =
     transcripts.find((item) => item.turn_id === selectedTurnId) ?? transcripts[0] ?? null;
-  const events = transcriptEvents(selectedTranscript);
+  const events = useMemo(() => transcriptEvents(selectedTranscript), [selectedTranscript]);
   const stepListRef = useRef<HTMLDivElement | null>(null);
   const stepVirtualizer = useVirtualizer({
     count: events.length,
@@ -339,11 +394,21 @@ export default function TurnTranscriptPanel({
   });
   const selectedEvent =
     activeEventIndex == null ? null : events[activeEventIndex] ?? null;
-  const toneCounts = TRANSCRIPT_TONES.reduce<Record<TranscriptTone, number>>(
-    (acc, tone) => ({ ...acc, [tone]: events.filter((event) => eventTone(event) === tone).length }),
-    { assistant: 0, thinking: 0, tool: 0, result: 0, error: 0 },
-  );
-  const toolCount = events.filter((event) => event.kind === "tool_use").length;
+  const { toneCounts, toolCount } = useMemo(() => {
+    const counts: Record<TranscriptTone, number> = {
+      assistant: 0,
+      thinking: 0,
+      tool: 0,
+      result: 0,
+      error: 0,
+    };
+    let tools = 0;
+    for (const event of events) {
+      counts[eventTone(event)] += 1;
+      if (event.kind === "tool_use") tools += 1;
+    }
+    return { toneCounts: counts, toolCount: tools };
+  }, [events]);
   const errorCount = toneCounts.error;
   const timing = useMemo(
     () => (selectedTranscript ? buildTurnTiming(selectedTranscript, events, tr) : null),
