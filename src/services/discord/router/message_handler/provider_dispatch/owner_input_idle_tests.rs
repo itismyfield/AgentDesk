@@ -1374,7 +1374,7 @@ impl Drop for RestoreObserverRegistry {
             .0
             .take()
             .unwrap_or_else(|| Arc::new(crate::services::discord::health::HealthRegistry::new()));
-        crate::engine::ops::turn_ops::set_global_health_registry(&restored);
+        crate::services::discord::health::runtime_registry::publish_runtime_registry(&restored);
     }
 }
 
@@ -1392,10 +1392,11 @@ struct AttachedOwner {
 
 impl AttachedOwner {
     fn new(name: &str, channel: u64, transcript: &str) -> Self {
-        let registry_restore =
-            RestoreObserverRegistry(crate::engine::ops::turn_ops::health_registry());
+        let registry_restore = RestoreObserverRegistry(
+            crate::services::discord::health::runtime_registry::runtime_registry(),
+        );
         let empty = Arc::new(crate::services::discord::health::HealthRegistry::new());
-        crate::engine::ops::turn_ops::set_global_health_registry(&empty);
+        crate::services::discord::health::runtime_registry::publish_runtime_registry(&empty);
         drop(empty);
         let mut rig = rig(name, channel, "normal", view("", false), transcript);
         let entered = rig.runtime.enter();
@@ -1629,8 +1630,10 @@ fn an_observer_attaching_after_idle_refusal_wakes_the_owner_once() {
 /// The common publication event reaches the registered runtime without the rehydrate fallback.
 #[test]
 fn a_published_observer_wakes_its_registered_owner_once() {
-    use crate::engine::ops::turn_ops::{health_registry, set_global_health_registry};
     use crate::services::discord::health::HealthRegistry;
+    use crate::services::discord::health::runtime_registry::{
+        publish_runtime_registry, runtime_registry,
+    };
 
     let _root = crate::config::TestRuntimeRootGuard::new();
     let owner = AttachedOwner::new("oi-attach-published", 7_676_605, IDLE);
@@ -1640,8 +1643,8 @@ fn a_published_observer_wakes_its_registered_owner_once() {
         .rig
         .runtime
         .block_on(registry.register("claude".into(), owner.shared.clone()));
-    let _restore = RestoreObserverRegistry(health_registry());
-    set_global_health_registry(&registry);
+    let _restore = RestoreObserverRegistry(runtime_registry());
+    publish_runtime_registry(&registry);
     owner.rig.wake(&owner.drive);
     assert_eq!(owner.serve(), Err("NotSent(\"idle_unobserved\")".into()));
     owner.settled();
@@ -1845,8 +1848,10 @@ fn a_hook_verifying_a_pending_observer_wakes_after_the_refused_token_finishes() 
 }
 
 fn pending_observer_becomes_readable(via_hook: bool) {
-    use crate::engine::ops::turn_ops::{health_registry, set_global_health_registry};
     use crate::services::discord::health::HealthRegistry;
+    use crate::services::discord::health::runtime_registry::{
+        publish_runtime_registry, runtime_registry,
+    };
     use crate::services::tui_prompt_dedupe::binding_events::{
         BindingTarget, CauseSource, HookSignal, PendingRecord, Proposal,
     };
@@ -1879,8 +1884,8 @@ fn pending_observer_becomes_readable(via_hook: bool) {
         .rig
         .runtime
         .block_on(registry.register("claude".into(), owner.shared.clone()));
-    let _restore = RestoreObserverRegistry(health_registry());
-    set_global_health_registry(&registry);
+    let _restore = RestoreObserverRegistry(runtime_registry());
+    publish_runtime_registry(&registry);
     let (session, path) = owner.launch_source();
     let command_session = if via_hook {
         let command = uuid::Uuid::new_v4().to_string();
@@ -2602,7 +2607,7 @@ fn short_native_busy_attachment(with_token: bool) {
             .rig
             .runtime
             .block_on(registry.register("claude".into(), owner.shared.clone()));
-        crate::engine::ops::turn_ops::set_global_health_registry(&registry);
+        crate::services::discord::health::runtime_registry::publish_runtime_registry(&registry);
     }
     let drive = owner.drive.clone();
     let (woke, owner_woken) = std::sync::mpsc::channel();

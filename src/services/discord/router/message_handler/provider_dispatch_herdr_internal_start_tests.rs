@@ -1,6 +1,8 @@
 //! A scheduled start under the channel's own key on a bound Herdr execution: it waits for that
 //! execution's idle, then runs once as its own turn.
 use super::*;
+use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
 use crate::test_support::wait::{WAIT_CAP, await_within};
 
 #[test]
@@ -63,16 +65,22 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
             "{unowned:?}"
         );
         let drives = OwnerTurn::drive_results(CHANNEL).len();
-        let execution = ChannelMailboxHandle::owner_input_execution("claude", CHANNEL, false);
-        let owned = intake
-            .mailbox
-            .owned_start(execution, (&turn, CHANNEL, INPUT));
+        let owned = owner_input_actor().owned_start(
+            &intake.mailbox,
+            "claude",
+            false,
+            (&turn, CHANNEL, INPUT),
+        );
         let owned = discord::OWNER_ADOPTS_FOR_TEST.scope(true, owned).await;
         let (original, namespace) = owned.unwrap().unwrap();
-        let input =
-            ChannelMailboxHandle::new_owner_input(&original, &namespace, "claude", context.clone());
-        assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
-        ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
+        let input = OwnerInput::new(&original, &namespace, "claude", context.clone());
+        assert!(
+            owner_input_actor()
+                .confirm_admission(&input, &intake.mailbox)
+                .await
+                .unwrap()
+        );
+        registry.wake_owner("claude", CHANNEL).await;
         let driven = async {
             while OwnerTurn::drive_results(CHANNEL).len() == drives {
                 tokio::task::yield_now().await;
@@ -89,7 +97,13 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
             held_watch::watch_observed(source_retry_drive(&intake), original.message_id);
         let look = await_within(looked, WAIT_CAP).await.unwrap();
         assert_eq!(look.verdict, held_watch::Verdict::Keep);
-        assert_eq!(input.start_rejection(&intake.mailbox).await.unwrap(), None);
+        assert_eq!(
+            owner_input_actor()
+                .start_rejection(&input, &intake.mailbox)
+                .await
+                .unwrap(),
+            None
+        );
         assert_eq!(fx.rig.sends().len(), before);
         assert_eq!(intake.mailbox.has_active_turn().await, Ok(false));
         append(
@@ -99,7 +113,13 @@ fn internal_herdr_channel_key_scheduled_start_waits_for_idle_and_runs_once_pg() 
         );
         // The native terminal alone lets it run: one input, one answer from O, no other driver.
         completed(&intake, 1).await;
-        assert_eq!(input.start_rejection(&intake.mailbox).await.unwrap(), None);
+        assert_eq!(
+            owner_input_actor()
+                .start_rejection(&input, &intake.mailbox)
+                .await
+                .unwrap(),
+            None
+        );
         assert_eq!(fx.rig.sends().len(), before + 2);
         assert!(
             fx.rig.sends()[before]["text"]
@@ -206,17 +226,18 @@ fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
             "channel_name_hint":fx.logical().strip_prefix("AgentDesk-claude-"),
             (ChannelMailboxHandle::ROUTINE_DELIVERY_DEADLINE):now.timestamp_millis()
         });
-        let execution = ChannelMailboxHandle::owner_input_execution("claude", CHANNEL, false);
-        let owned = intake
-            .mailbox
-            .owned_start(execution, (&turn, CHANNEL, INPUT));
+        let owned = owner_input_actor().owned_start(
+            &intake.mailbox,
+            "claude",
+            false,
+            (&turn, CHANNEL, INPUT),
+        );
         let (original, namespace) = discord::OWNER_ADOPTS_FOR_TEST
             .scope(true, owned)
             .await
             .unwrap()
             .unwrap();
-        let input =
-            ChannelMailboxHandle::new_owner_input(&original, &namespace, "claude", context.clone());
+        let input = OwnerInput::new(&original, &namespace, "claude", context.clone());
         let mut intent = context.clone();
         intent["owner_input"] = json!(input);
         assert!(
@@ -225,9 +246,14 @@ fn e0_herdr_channel_key_routine_withdraws_while_waiting_for_idle_pg() {
                 .await
                 .unwrap()
         );
-        assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
+        assert!(
+            owner_input_actor()
+                .confirm_admission(&input, &intake.mailbox)
+                .await
+                .unwrap()
+        );
         let drives = OwnerTurn::drive_results(CHANNEL).len();
-        ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
+        registry.wake_owner("claude", CHANNEL).await;
         await_within(
             async {
                 while OwnerTurn::drive_results(CHANNEL).len() == drives {

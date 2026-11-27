@@ -1,5 +1,6 @@
 //! Admission by a stable ticket: the caller fixes the ticket before recording its own intent, asks
 //! again with it after Pending or a restart, and looks it up without admitting.
+use crate::services::engine_runtime::health_port::owner_input::new_owner_input_ticket;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8,7 +9,7 @@ pub(crate) struct AdmissionTicket(String);
 impl AdmissionTicket {
     /// A fresh ticket, stored with the caller's intent before the owner is asked.
     pub(crate) fn new() -> Self {
-        Self(uuid::Uuid::new_v4().simple().to_string())
+        Self(new_owner_input_ticket())
     }
 
     /// The ticket a caller stored earlier; the owner refuses one it cannot use.

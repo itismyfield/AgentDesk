@@ -2,7 +2,7 @@
 //! admitted context, so a persistent routine stays persistent and a fresh one fresh.
 use super::*;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
-use crate::services::turn_orchestrator::ChannelMailboxHandle;
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 
 /// The context the owner holds for a routine of `strategy` that the launch handed it.
 async fn admitted_context(strategy: &str) -> Value {
@@ -65,7 +65,7 @@ async fn admitted_context(strategy: &str) -> Value {
         .unwrap();
     let stored = run.result_json.as_ref().unwrap();
     assert_eq!(stored["status"], "accepted", "{stored}");
-    let saved = ChannelMailboxHandle::restore_owner_input(stored["owner_input"].clone()).unwrap();
+    let saved = OwnerInput::restore(stored["owner_input"].clone()).unwrap();
     let original = serde_json::from_value(saved.original.clone()).unwrap();
     let context = handle.v2_admission_context(original, saved.ticket.clone());
     let context = context.await.unwrap().expect("admitted context");

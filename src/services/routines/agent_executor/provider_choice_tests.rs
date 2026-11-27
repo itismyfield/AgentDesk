@@ -3,13 +3,14 @@
 use super::agent_executor_owner_input::settled_generation;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::routines::agent_executor::owner_hook_tests::OWNER;
 use crate::services::routines::agent_executor::*;
 use crate::services::routines::provider_choice::ProviderChoice;
 use crate::services::routines::runtime::RoutineRunOutcome;
 use crate::services::routines::store::RoutineStore;
 use crate::services::routines::store::{NewRoutine, RoutinePatch};
-use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
+use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
@@ -134,7 +135,7 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
         .pop()
         .unwrap();
     let stored = run.result_json.unwrap();
-    let saved = ChannelMailboxHandle::restore_owner_input(stored["owner_input"].clone()).unwrap();
+    let saved = OwnerInput::restore(stored["owner_input"].clone()).unwrap();
     let original = serde_json::from_value(saved.original.clone()).unwrap();
     let context = handle
         .v2_admission_context(original, saved.ticket.clone())

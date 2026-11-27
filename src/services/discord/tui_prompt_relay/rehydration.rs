@@ -283,7 +283,7 @@ fn rehydrate_claude_tui_pane(
     let before =
         crate::services::tui_prompt_dedupe::runtime_binding_for_tmux_session(tmux_session_name);
     rehydrate_claude_tui_pane_inner(shared, tmux_session_name);
-    if crate::engine::ops::turn_ops::health_registry().is_some() {
+    if crate::services::discord::health::runtime_registry::runtime_registry().is_some() {
         return None;
     }
     wake_attached_observer(
@@ -337,7 +337,8 @@ pub(crate) fn observer_binding_published(
     }
     #[cfg(test)]
     let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
-    let Some(registry) = crate::engine::ops::turn_ops::health_registry() else {
+    let Some(registry) = crate::services::discord::health::runtime_registry::runtime_registry()
+    else {
         return;
     };
     let Ok(runtime) = tokio::runtime::Handle::try_current() else {
@@ -774,7 +775,7 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             last_offset = fresh.last_offset,
             "rehydrated Codex TUI direct relay binding from live rollout"
         );
-        if crate::engine::ops::turn_ops::health_registry().is_none() {
+        if crate::services::discord::health::runtime_registry::runtime_registry().is_none() {
             let _ = wake_attached_observer(
                 shared,
                 &ProviderKind::Codex,

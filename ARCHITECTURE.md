@@ -2006,6 +2006,7 @@ src/
 │   │   │   ├── relay_progress.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── routine_reset.rs
+│   │   │   ├── runtime_registry.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -4095,7 +4096,9 @@ src/
 │   │   ├── health_port/
 │   │   │   ├── app_health.rs
 │   │   │   ├── headless_turn.rs
+│   │   │   ├── owner_input.rs
 │   │   │   ├── queue_cancel.rs
+│   │   │   ├── registry.rs
 │   │   │   ├── resume_runtime.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── slot_reset.rs

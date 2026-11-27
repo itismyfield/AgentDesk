@@ -1,6 +1,8 @@
 //! External HTTP admission over the existing bound Herdr execution and real O writer.
 use super::*;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
+use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -840,19 +842,18 @@ fn internal_snapshot_start(flavor: &str) {
         assert!(!pane.1 && pane.0 != fx.logical(), "snapshot B differs from the Bound channel A");
         let hosted: Value = sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
             .bind(CHANNEL.to_string()).fetch_one(&fx.pool).await.unwrap();
-        let execution = ChannelMailboxHandle::owner_input_execution("claude", CHANNEL, false);
-        let (original, namespace) = discord::OWNER_ADOPTS_FOR_TEST.scope(true,
-            intake.mailbox.owned_start(execution, (&turn, CHANNEL, "frozen snapshot original B")))
-            .await.unwrap().unwrap();
-        let input = ChannelMailboxHandle::new_owner_input(&original, &namespace, "claude", context.clone());
-        assert!(input.confirm_admission(&intake.mailbox).await.unwrap());
         let registry = Arc::new(HealthRegistry::new());
+        let (original, namespace) = discord::OWNER_ADOPTS_FOR_TEST.scope(true,
+            owner_input_actor().owned_start(&intake.mailbox, "claude", false, (&turn, CHANNEL, "frozen snapshot original B")))
+            .await.unwrap().unwrap();
+        let input = OwnerInput::new(&original, &namespace, "claude", context.clone());
+        assert!(owner_input_actor().confirm_admission(&input, &intake.mailbox).await.unwrap());
         registry.register("claude".into(), intake.shared.clone()).await;
         registry.register_http("claude".into(), intake.shared.serenity_http_or_token_fallback().unwrap()).await;
-        ChannelMailboxHandle::owner_input_wake(&registry, "claude", CHANNEL).await;
+        registry.wake_owner("claude", CHANNEL).await;
         let rejected = tokio::time::timeout(LIMIT, async {
             loop {
-                if let Some(reason) = input.start_rejection(&intake.mailbox).await.unwrap() {
+                if let Some(reason) = owner_input_actor().start_rejection(&input, &intake.mailbox).await.unwrap() {
                     break reason;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;

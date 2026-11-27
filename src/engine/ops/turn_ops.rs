@@ -1,35 +1,13 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult};
 use sqlx::PgPool;
-use std::sync::{Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use crate::domain::agent_handoff::AgentHandoffChannelKind;
-use crate::services::engine_runtime::health_port::AppHealthRegistry;
+use crate::services::engine_runtime::health_port::{
+    RuntimeRegistryPort, published_runtime_registry,
+};
 
 pub(crate) mod handoff_port;
-use handoff_port::AgentHandoffPort;
-
-// ── Global registry handle ─────────────────────────────────────────────────
-//
-// The Discord runtime owns the registry. The JS host upgrades the weak handle
-// at dispatch time and reports unavailable if the registry has gone away.
-
-static GLOBAL_HEALTH_REGISTRY: Mutex<Option<Weak<AppHealthRegistry>>> = Mutex::new(None);
-
-/// Called once from dcserver setup (after both the engine and the registry
-/// exist) to wire the JS bridge to the live registry.
-pub fn set_global_health_registry(registry: &std::sync::Arc<AppHealthRegistry>) {
-    if let Ok(mut slot) = GLOBAL_HEALTH_REGISTRY.lock() {
-        *slot = Some(std::sync::Arc::downgrade(registry));
-    }
-}
-
-pub(crate) fn health_registry() -> Option<std::sync::Arc<AppHealthRegistry>> {
-    GLOBAL_HEALTH_REGISTRY
-        .lock()
-        .ok()?
-        .as_ref()
-        .and_then(Weak::upgrade)
-}
 
 // ── Main runtime handle ─────────────────────────────────────────────────────
 //
@@ -60,6 +38,15 @@ fn get_runtime_handle() -> Option<tokio::runtime::Handle> {
 // ── Host binding ───────────────────────────────────────────────────────────
 
 pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) -> JsResult<()> {
+    register_turn_ops_with(ctx, pg_pool, published_runtime_registry, get_runtime_handle)
+}
+
+fn register_turn_ops_with<'js>(
+    ctx: &Ctx<'js>,
+    pg_pool: Option<PgPool>,
+    registry: impl Fn() -> Option<Arc<dyn RuntimeRegistryPort>> + Send + 'static,
+    runtime: impl Fn() -> Option<tokio::runtime::Handle> + Send + 'static,
+) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let turn_obj = Object::new(ctx.clone())?;
 
@@ -81,7 +68,14 @@ pub(super) fn register_turn_ops<'js>(ctx: &Ctx<'js>, pg_pool: Option<PgPool>) ->
         Function::new(
             ctx.clone(),
             move |agent_id: String, prompt: String, options_json: String| -> String {
-                start_turn_raw(pg.as_ref(), &agent_id, &prompt, &options_json)
+                start_turn_raw(
+                    pg.as_ref(),
+                    &agent_id,
+                    &prompt,
+                    &options_json,
+                    &registry,
+                    &runtime,
+                )
             },
         )?,
     )?;
@@ -136,6 +130,8 @@ fn start_turn_raw(
     agent_id: &str,
     prompt: &str,
     options_json: &str,
+    registry: impl FnOnce() -> Option<Arc<dyn RuntimeRegistryPort>>,
+    runtime: impl FnOnce() -> Option<tokio::runtime::Handle>,
 ) -> String {
     let agent_id = agent_id.trim();
     if agent_id.is_empty() {
@@ -163,11 +159,11 @@ fn start_turn_raw(
         return err_json("postgres backend is unavailable", "unavailable");
     };
 
-    let Some(registry) = health_registry() else {
+    let Some(registry) = registry() else {
         return err_json("Discord not available (standalone mode)", "unavailable");
     };
 
-    let Some(runtime) = get_runtime_handle() else {
+    let Some(runtime) = runtime() else {
         return err_json("policy runtime handle unavailable", "unavailable");
     };
 
@@ -250,6 +246,10 @@ mod tests {
     use super::*;
     use crate::config::Config;
     use crate::engine::PolicyEngine;
+    use crate::services::discord::health::HealthRegistry;
+    use crate::services::discord::health::runtime_registry::{
+        RestoreRuntimeRegistry, RuntimeRegistrySlot, publish_runtime_registry,
+    };
 
     fn test_engine() -> PolicyEngine {
         let config = Config {
@@ -260,7 +260,7 @@ mod tests {
             },
             ..Config::default()
         };
-        PolicyEngine::new_with_pg(&config, None).unwrap()
+        PolicyEngine::new(&config).unwrap()
     }
 
     // ── Registration check ───────────────────────────────────────────────
@@ -285,33 +285,62 @@ mod tests {
 
     #[test]
     fn turn_start_returns_error_without_registry() {
-        let engine = test_engine();
-        // Without a registry the raw fn returns a JSON error object (does not
-        // panic and does not throw).
-        let result: String = engine
-            .eval_js(
-                r#"JSON.stringify(
-                    JSON.parse(
-                        agentdesk.turn.__startRaw("some-agent", "hello", "{}")
-                    )
-                )"#,
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _entered = runtime.enter();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .min_connections(0)
+            .connect_lazy("postgres://handoff-test@127.0.0.1:1/none")
+            .unwrap();
+        let slot = Arc::new(RuntimeRegistrySlot::default());
+        let lookup_slot = slot.clone();
+        let runtime_handle = runtime.handle().clone();
+        let js = rquickjs::Runtime::new().unwrap();
+        let ctx = rquickjs::Context::full(&js).unwrap();
+        ctx.with(|ctx| {
+            ctx.globals()
+                .set("agentdesk", Object::new(ctx.clone()).unwrap())
+                .unwrap();
+            register_turn_ops_with(
+                &ctx,
+                Some(pool),
+                move || lookup_slot.port(),
+                move || Some(runtime_handle.clone()),
             )
             .unwrap();
-        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(v["ok"], serde_json::json!(false));
-        // Must carry either "postgres" or "Discord not available" in the error.
-        let error = v["error"].as_str().unwrap_or("");
-        assert!(
-            error.contains("postgres") || error.contains("Discord"),
-            "unexpected error: {error}"
-        );
+        });
+        let assert_unavailable_without_spawn = || {
+            let before = runtime.metrics().num_alive_tasks();
+            let response = ctx.with(|ctx| {
+                ctx.eval::<String, _>(r#"agentdesk.turn.__startRaw("some-agent", "hello", "{}")"#)
+                    .unwrap()
+            });
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&response).unwrap(),
+                serde_json::json!({
+                    "ok": false,
+                    "status": "unavailable",
+                    "error": "Discord not available (standalone mode)"
+                })
+            );
+            assert_eq!(runtime.metrics().num_alive_tasks() - before, 0);
+        };
+        assert_unavailable_without_spawn();
+
+        let registry = Arc::new(HealthRegistry::new());
+        slot.publish(&registry);
+        assert!(Arc::ptr_eq(&slot.get().unwrap(), &registry));
+        drop(registry);
+        assert_unavailable_without_spawn();
     }
 
     // ── Argument validation ──────────────────────────────────────────────
 
     #[test]
     fn turn_start_raw_requires_agent_id() {
-        let result = start_turn_raw(None, "", "prompt", "{}");
+        let result = start_turn_raw(None, "", "prompt", "{}", || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], "agent_id is required");
@@ -319,7 +348,7 @@ mod tests {
 
     #[test]
     fn turn_start_raw_requires_prompt() {
-        let result = start_turn_raw(None, "some-agent", "  ", "{}");
+        let result = start_turn_raw(None, "some-agent", "  ", "{}", || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], "prompt is required");
@@ -328,22 +357,18 @@ mod tests {
     #[test]
     fn turn_start_raw_rejects_invalid_channel_kind() {
         let opts = r#"{"channel_kind":"invalid"}"#;
-        let result = start_turn_raw(None, "some-agent", "hello", opts);
+        let result = start_turn_raw(None, "some-agent", "hello", opts, || None, || None);
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["ok"], serde_json::json!(false));
         assert_eq!(v["error"], "channel_kind must be cc or cdx");
         assert_eq!(v["status"], "error");
     }
 
-    struct RestoreHandoffGlobals {
-        registry: Option<Weak<AppHealthRegistry>>,
-        runtime: Option<tokio::runtime::Handle>,
-    }
+    struct RestoreRuntimeHandle(Option<tokio::runtime::Handle>);
 
-    impl Drop for RestoreHandoffGlobals {
+    impl Drop for RestoreRuntimeHandle {
         fn drop(&mut self) {
-            *GLOBAL_HEALTH_REGISTRY.lock().unwrap() = self.registry.take();
-            *GLOBAL_RUNTIME_HANDLE.lock().unwrap() = self.runtime.take();
+            *GLOBAL_RUNTIME_HANDLE.lock().unwrap() = self.0.take();
         }
     }
 
@@ -379,12 +404,10 @@ mod tests {
             pool.close().await;
             pool
         });
-        let registry = std::sync::Arc::new(AppHealthRegistry::new());
-        let _restore = RestoreHandoffGlobals {
-            registry: GLOBAL_HEALTH_REGISTRY.lock().unwrap().clone(),
-            runtime: get_runtime_handle(),
-        };
-        set_global_health_registry(&registry);
+        let registry = Arc::new(HealthRegistry::new());
+        let _restore_registry = RestoreRuntimeRegistry::capture();
+        let _restore_runtime = RestoreRuntimeHandle(get_runtime_handle());
+        publish_runtime_registry(&registry);
         set_global_runtime_handle(runtime.handle().clone());
 
         let js = rquickjs::Runtime::new().unwrap();

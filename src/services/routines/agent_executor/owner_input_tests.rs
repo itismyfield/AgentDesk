@@ -1,5 +1,6 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::reserve_headless_agent_turn;
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::routines::agent_executor::owner_hook_tests::{
     LEGACY_TEARDOWNS, OWNER, ReservedStart, STARTS,
 };
@@ -47,6 +48,7 @@ async fn owner() -> (
     crate::services::turn_orchestrator::ChannelMailboxHandle,
     std::path::PathBuf,
 ) {
+    crate::services::discord::health::runtime_registry::install_owner_actor();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let handle = registry.handle(poise::serenity_prelude::ChannelId::new(7272));
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -174,7 +176,6 @@ async fn accepted_retry_fallback_does_not_complete_or_readmit_pg() {
 
 #[tokio::test]
 async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg() {
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (handle, path) = owner().await;
     let db = TestPostgresDb::create().await;
@@ -232,10 +233,8 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         .pop()
         .unwrap();
     assert_eq!(run.result_json.as_ref().unwrap()["status"], "input_pending");
-    let saved = ChannelMailboxHandle::restore_owner_input(
-        run.result_json.as_ref().unwrap()["owner_input"].clone(),
-    )
-    .unwrap();
+    let saved =
+        OwnerInput::restore(run.result_json.as_ref().unwrap()["owner_input"].clone()).unwrap();
     let turn = run.turn_id.clone().unwrap();
     let original = serde_json::from_value(saved.original.clone()).unwrap();
     let restarted = crate::services::turn_orchestrator::ChannelMailboxRegistry::default()

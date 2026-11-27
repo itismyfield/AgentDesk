@@ -140,6 +140,10 @@ impl RoutineAgentExecutor {
 
 pub(crate) mod custody {
     use super::*;
+    use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
+    use crate::services::engine_runtime::health_port::owner_input::{
+        OwnerInput, owner_input_actor,
+    };
     use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
     pub(in crate::services::routines::agent_executor) async fn handle(
@@ -155,7 +159,8 @@ pub(crate) mod custody {
             .health_registry
             .as_deref()
             .ok_or_else(|| anyhow!("owner runtime unavailable"))?;
-        ChannelMailboxHandle::owner_input_mailbox(registry, provider, channel)
+        registry
+            .owner_mailbox(provider, channel)
             .await
             .map_err(anyhow::Error::msg)
     }
@@ -175,9 +180,8 @@ pub(crate) mod custody {
             return Ok(None);
         };
         let process = start.execution_mode == execution::AgentExecutionMode::Process;
-        let execution = ChannelMailboxHandle::owner_input_execution(provider, channel, process);
-        let owned = handle
-            .owned_start(execution, (turn_id, channel, start.prompt))
+        let owned = owner_input_actor()
+            .owned_start(&handle, provider, process, (turn_id, channel, start.prompt))
             .await;
         let Some((original, namespace)) = owned.map_err(anyhow::Error::msg)? else {
             return Ok(None);
@@ -200,7 +204,7 @@ pub(crate) mod custody {
     /// The owner runs an accepted start once its drive looks at the queue.
     async fn wake(executor: &RoutineAgentExecutor, provider: &str, channel: u64) {
         if let Some(registry) = executor.health_registry.as_deref() {
-            ChannelMailboxHandle::owner_input_wake(registry, provider, channel).await;
+            registry.wake_owner(provider, channel).await;
         }
     }
 
@@ -235,17 +239,12 @@ pub(crate) mod custody {
                         .is_some_and(|bind| !bind.is_null())
                     && v["attempt_kind"].as_str() != Some(start.attempt_kind))
         }) {
-            let input = ChannelMailboxHandle::restore_owner_input(previous["owner_input"].clone())?;
+            let input = OwnerInput::restore(previous["owner_input"].clone())?;
             (previous, input)
         } else {
             let claimed = start.claimed;
             let result = planned;
-            let input = ChannelMailboxHandle::new_owner_input(
-                &original,
-                namespace,
-                &provider,
-                result.clone(),
-            );
+            let input = OwnerInput::new(&original, namespace, &provider, result.clone());
             let mut intent = result;
             intent["owner_input"] = serde_json::to_value(&input)?;
             if !store
@@ -261,7 +260,7 @@ pub(crate) mod custody {
             }
             (intent, input)
         };
-        let disposition = match input.confirm_admission(handle).await {
+        let disposition = match owner_input_actor().confirm_admission(&input, handle).await {
             Ok(true) => {
                 result["status"] = json!("accepted");
                 if let Err(error) = store
@@ -301,15 +300,15 @@ pub(crate) mod custody {
         let Some(raw) = result.get("owner_input") else {
             return Ok(false);
         };
-        let input = ChannelMailboxHandle::restore_owner_input(raw.clone())?;
+        let input = OwnerInput::restore(raw.clone())?;
         if input.context["run_id"] != run.run_id
             || input.context["turn_id"].as_str() != run.turn_id.as_deref()
         {
             return Err(anyhow!("routine owner run/turn mismatch"));
         }
         let handle = handle(executor, &input.provider, input.channel).await?;
-        if let Some(reason) = input
-            .start_rejection(&handle)
+        if let Some(reason) = owner_input_actor()
+            .start_rejection(&input, &handle)
             .await
             .map_err(anyhow::Error::msg)?
         {
@@ -320,16 +319,16 @@ pub(crate) mod custody {
         }
         // The observer connects to the owner's exact attempt first; a failed projection is
         // repaired under the same ticket on the next poll.
-        if let Some((attempt, source)) = input
-            .unbound_attempt(&handle)
+        if let Some(exact) = owner_input_actor()
+            .unbound_attempt(&input, &handle)
             .await
             .map_err(anyhow::Error::msg)?
         {
-            bind_observer(store, run, &handle, &attempt, source).await?;
+            bind_observer(store, run, &handle, &exact.attempt, exact.turn).await?;
             return Ok(false);
         }
-        let may_observe = input
-            .may_observe(&handle, result["status"] == "input_pending")
+        let may_observe = owner_input_actor()
+            .may_observe(&input, &handle, result["status"] == "input_pending")
             .await
             .map_err(anyhow::Error::msg)?;
         if result["status"] == "input_pending"
@@ -358,14 +357,17 @@ pub(crate) mod custody {
         executor: &RoutineAgentExecutor,
         run: &RunningAgentRoutineRun,
     ) -> Result<bool> {
-        let input = ChannelMailboxHandle::restore_owner_input(
+        let input = OwnerInput::restore(
             run.result_json
                 .as_ref()
                 .ok_or_else(|| anyhow!("missing input intent"))?["owner_input"]
                 .clone(),
         )?;
         let handle = handle(executor, &input.provider, input.channel).await?;
-        input.may_retry(&handle).await.map_err(anyhow::Error::msg)
+        owner_input_actor()
+            .may_retry(&input, &handle)
+            .await
+            .map_err(anyhow::Error::msg)
     }
 
     pub(crate) async fn bind_observer(
@@ -379,13 +381,13 @@ pub(crate) mod custody {
             .result_json
             .clone()
             .ok_or_else(|| anyhow!("missing input intent"))?;
-        let mut input = ChannelMailboxHandle::restore_owner_input(result["owner_input"].clone())?;
+        let mut input = OwnerInput::restore(result["owner_input"].clone())?;
         let turn_id = run
             .turn_id
             .as_deref()
             .ok_or_else(|| anyhow!("missing logical turn"))?;
-        input
-            .bind_observer(handle, attempt, source, turn_id)
+        owner_input_actor()
+            .bind_observer(&mut input, handle, attempt, source, turn_id)
             .await
             .map_err(anyhow::Error::msg)?;
         result["owner_input"] = serde_json::to_value(&input)?;
