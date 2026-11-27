@@ -19,6 +19,7 @@ pub mod rotation;
 pub mod spool;
 pub(crate) mod thread_children;
 pub(crate) mod tool_card_switch;
+pub(crate) mod wake;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;

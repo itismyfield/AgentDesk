@@ -364,7 +364,7 @@ fn publish(root: &Path, channel: u64, bytes: &[u8]) -> Result<Appended, String> 
         }
         Err(error) => return Err(error.to_string()),
     };
-    crate::services::tui_o::writer::actor::idle::wake(channel);
+    super::wake::wake(channel);
     Ok(appended)
 }
 

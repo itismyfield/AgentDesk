@@ -256,7 +256,7 @@ pub(crate) fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, Stri
             if let Err(error) = super::durable::create_once(&target, &bytes) {
                 if fs::read(&target).is_ok_and(|now| now == bytes) {
                     version_sender(witness.channel).send_modify(|version| *version += 1);
-                    crate::services::tui_o::writer::actor::idle::wake(witness.channel);
+                    super::wake::wake(witness.channel);
                     return Ok(Appended::PublishedUnsynced(error.to_string()));
                 }
                 return Err(error.to_string());
@@ -265,7 +265,7 @@ pub(crate) fn append(root: &Path, witness: &RestartEnd) -> Result<Appended, Stri
         Err(error) => return Err(error.to_string()),
     }
     version_sender(witness.channel).send_modify(|version| *version += 1);
-    crate::services::tui_o::writer::actor::idle::wake(witness.channel);
+    super::wake::wake(witness.channel);
     Ok(Appended::Durable)
 }
 

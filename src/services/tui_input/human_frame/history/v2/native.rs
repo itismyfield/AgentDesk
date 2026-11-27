@@ -845,7 +845,7 @@ impl Registry {
             Ok((result, channel))
         })?;
         if let Some(channel) = channel {
-            crate::services::tui_o::writer::actor::idle::wake(channel);
+            crate::services::tui_o::store::wake::wake(channel);
         }
         Ok(result)
     }

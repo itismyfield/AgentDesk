@@ -251,7 +251,7 @@ where
 }
 
 mod fresh_resume;
-pub(crate) mod idle;
+mod idle;
 mod notice_settlement;
 // Test builds open it to the notice tests mounted in the discord-layer test host.
 #[cfg(not(any(test, feature = "test-support")))]
