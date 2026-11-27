@@ -767,7 +767,7 @@ class BaseDiff(Fixture):
         self.assertEqual(diff["stale_justifications"], diff["landed_justifications"])
         self.assertEqual(diff["unjustified"], [])
 
-    def test_native_presence_or_incomplete_evidence_keeps_rows_errors(self):
+    def test_native_presence_or_incomplete_evidence_warns_without_classifying_rows_as_landed(self):
         self.plan_ok(["m::a"], workers=1, out="base")
         self.plan_ok(["m::a"], workers=1)
         sources = [source_losses(), source_losses(present={"macos": ["m::native"]}),
@@ -778,19 +778,19 @@ class BaseDiff(Fixture):
         for source in sources:
             with self.subTest(source=source):
                 rc, err = self.diff(SHA, rows=f"{BIN} m::native | removed | native row\n", source=source)
-                self.assertEqual(rc, 1, err)
-                self.assertIn(f"matches no loss against {SHA}: {BIN} m::native | removed", err)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"WARN justification row matches no loss against {SHA}: {BIN} m::native | removed", err)
                 self.assertEqual(json.loads((self.dir / "diff.json").read_text())["landed_justifications"], [])
 
-    def test_base_ignored_or_head_only_presence_keeps_rows_errors(self):
+    def test_base_ignored_or_head_only_presence_warns_without_classifying_rows_as_landed(self):
         self.plan_ok(["m::a"], ignored=["m::ignored"], workers=1, out="base")
         self.plan_ok(["m::a", "m::new"], ignored=["m::ignored"], workers=1)
         for name in ("m::ignored", "m::new"):
             with self.subTest(name=name):
                 rc, err = self.diff(SHA, rows=f"{BIN} {name} | removed | still here\n",
                                     source=source_losses(present={}))
-                self.assertEqual(rc, 1, err)
-                self.assertIn(f"matches no loss against {SHA}: {BIN} {name} | removed", err)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"WARN justification row matches no loss against {SHA}: {BIN} {name} | removed", err)
 
     def test_rows_matching_each_loss_exactly_pass(self):
         self.plan_ok(["m::a", "m::b", "m::c"], workers=1, out="base")
@@ -798,16 +798,68 @@ class BaseDiff(Fixture):
         rows = f"# intended\n{BIN} m::c | removed | merged into m::a\n{BIN} m::b | runnable->ignored | needs a GPU\n"
         self.assertEqual(self.diff(SHA, rows=rows), (0, ""))
 
-    def test_stale_or_wrong_kind_rows_fail(self):
+    def test_module_prefix_covers_only_a_wholly_removed_module(self):
+        self.plan_ok(["m::tests::first", "m::tests::nested::second", "m::tests_extra::keep"], workers=1, out="base")
+        self.plan_ok(["m::tests_extra::keep"], workers=1, member=["m::tests::first"])
+        row = f"{BIN} m::tests::* | removed | module retired\n"
+        source = {"by_binary": source_losses(present={"windows": [[BIN, "m::tests::first"]]},
+                                             removed={"windows": [[BIN, "m::tests::first"]]})}
+        self.assertEqual(self.diff(SHA, rows=row, source=source), (0, ""))
+        source["by_binary"]["removed"]["windows"].clear()
+        self.assertEqual(self.diff(SHA, rows=row.replace("module retired", "[platform=linux] module retired"),
+                                   source=source), (0, ""))
+        rc, err = self.diff(SHA, rows=row, source=source)
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"lost without a justification row: {BIN} m::tests::first | removed", err)
+        rc, err = self.diff(SHA, rows=row, source={"by_binary": source_losses()})
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"lost without a justification row: {BIN} m::tests::first | removed", err)
+
+    def test_module_prefix_leaves_partial_removals_unjustified(self):
+        self.plan_ok(["m::tests::gone", "m::tests::kept"], workers=1, out="base")
+        self.plan_ok([], ignored=["m::tests::kept"], workers=1, member=["m::ordinary"])
+        row = f"{BIN} m::tests::* | removed | [platform=linux] module retired\n"
+        rc, err = self.diff(SHA, rows=row, source={"by_binary": source_losses(present={})})
+        self.assertEqual(rc, 1, err)
+        self.assertIn(f"lost without a justification row: {BIN} m::tests::gone | removed", err)
+        diff = json.loads((self.dir / "diff.json").read_text())
+        self.assertIn(f"{BIN} m::tests::gone | removed", diff["unjustified"])
+        self.assertIn(f"{BIN} m::tests::kept | runnable->ignored", diff["unjustified"])
+
+    def test_unmatched_rows_warn_on_every_platform(self):
+        self.same_plans()
+        rows = f"{BIN} m::a | removed | still runnable\n" + "".join(
+            self.scoped_row(p) for p in ("linux", "macos", "windows"))
+        summary = self.dir / "summary.md"
+        with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": str(summary)}):
+            rc, err = self.diff(SHA, rows=rows, source=source_losses(present={}))
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(err.count("WARN justification row"), 4, err)
+            rc, err = self.diff(SHA, rows=f"{BIN} m::gone::* | removed | no longer relevant\n",
+                                source=source_losses(present={}))
+            self.assertEqual(rc, 0, err)
+            self.assertEqual(err.count("WARN justification row"), 1, err)
+        self.assertEqual(summary.read_text().count("WARN justification row"), 5)
+
+    def test_module_prefix_and_overlapping_test_row_are_duplicates(self):
+        prefix = f"{BIN} m::tests::* | removed | module retired\n"
+        individual = f"{BIN} m::tests::nested::gone | removed | [platform=windows] old test\n"
+        for rows in (prefix + individual, individual + prefix):
+            with self.subTest(rows=rows), self.assertRaisesRegex(nci.PlanError, "is listed twice"):
+                nci.load_justifications(self.write("justify.txt", rows))
+        scoped = prefix.replace("module retired", "[platform=linux] module retired")
+        self.assertEqual(len(nci.load_justifications(self.write("justify.txt", scoped + individual))), 2)
+
+    def test_stale_rows_warn_but_wrong_kind_leaves_the_loss_unjustified(self):
         self.plan_ok(["m::a", "m::b"], workers=1, out="base")
         self.plan_ok(["m::a"], workers=1)
-        cases = ((f"{BIN} m::b | removed | gone\n{BIN} m::a | removed | still here\n", f"{BIN} m::a | removed"),
-                 (f"{BIN} m::b | runnable->ignored | wrong kind\n", f"{BIN} m::b | runnable->ignored"))
-        for rows, stale in cases:
+        cases = ((f"{BIN} m::b | removed | gone\n{BIN} m::a | removed | still here\n", f"{BIN} m::a | removed", 0),
+                 (f"{BIN} m::b | runnable->ignored | wrong kind\n", f"{BIN} m::b | runnable->ignored", 1))
+        for rows, stale, status in cases:
             with self.subTest(rows=rows):
                 rc, err = self.diff(SHA, rows=rows, source=source_losses(present={}))
-                self.assertEqual(rc, 1)
-                self.assertIn(f"matches no loss against {SHA}: {stale}", err)
+                self.assertEqual(rc, status, err)
+                self.assertIn(f"WARN justification row matches no loss against {SHA}: {stale}", err)
         for rows in ("m::b | removed | no binary\n", f"{BIN} m::b | deleted | bad kind\n", f"{BIN} m::b | removed |\n",
                      f"{BIN} m::b | removed | a\n{BIN} m::b | removed | b\n"):
             with self.subTest(rows=rows):
@@ -839,8 +891,8 @@ class BaseDiff(Fixture):
         self.assertIn(f"{BIN} m::win | runnable->ignored", err)
         self.assertIn(f"matches no loss against {SHA}: {BIN} m::win | removed", err)
         rc, err = self.diff(SHA, rows=exact, source=source_losses())
-        self.assertEqual(rc, 1)
-        self.assertIn(f"matches no loss against {SHA}: {BIN} m::win | runnable->ignored", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn(f"WARN justification row matches no loss against {SHA}: {BIN} m::win | runnable->ignored", err)
 
     def test_pure_addition_passes(self):
         self.plan_ok(["m::a"], workers=1, out="base")
@@ -883,19 +935,21 @@ class BaseDiff(Fixture):
         for platform, other in (("linux", "macos"), ("macos", "windows"), ("windows", "macos")):
             with self.subTest(platform=platform):
                 source = source_losses(present={platform: ["m::native"], other: ["m::native"]})
-                self.assertEqual(self.diff(SHA, rows=self.scoped_row(platform), source=source)[0], 1)
+                rc, err = self.diff(SHA, rows=self.scoped_row(platform), source=source)
+                self.assertEqual(rc, 0, err)
+                self.assertIn(f"WARN justification row matches no loss against {SHA}", err)
         for source in (source_losses(present={"windows": ["m::native"], "macos": ["m::native"]}),
                        source_losses(), {**source_losses(present={}), "present_tests": {"macos": []}}):
             with self.subTest(source=source):
                 rc, err = self.diff(SHA, rows=self.scoped_row(), source=source)
-                self.assertEqual(rc, 1)
-                self.assertIn("matches no loss", err)
+                self.assertEqual(rc, 0, err)
+                self.assertIn("WARN justification row matches no loss", err)
 
     def test_platform_reason_is_stale_after_the_test_disappears_everywhere(self):
         self.same_plans()
         rc, err = self.diff(SHA, rows=self.scoped_row(), source=source_losses(present={}))
-        self.assertEqual(rc, 1)
-        self.assertIn("matches no loss", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN justification row matches no loss", err)
 
     def test_platform_history_uses_current_coverage_not_the_removed_baseline(self):
         self.plan_ok(["m::a", "m::native"], workers=1, out="base")
@@ -905,8 +959,8 @@ class BaseDiff(Fixture):
         source["removed"]["linux"] = ["m::native"]
         rows = self.scoped_row("linux") + self.scoped_row("windows")
         rc, err = self.diff(SHA, rows=rows, source=source)
-        self.assertEqual(rc, 1)
-        self.assertIn("matches no loss", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN justification row matches no loss", err)
         source["present_tests"]["macos"] = ["m::native"]
         self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
 
@@ -915,13 +969,13 @@ class BaseDiff(Fixture):
         source = source_losses(removed={"macos": ["m::native"]}, present={"macos": ["m::native"]})
         rows = self.scoped_row("macos") + self.scoped_row("windows")
         rc, err = self.diff(SHA, rows=rows, source=source)
-        self.assertEqual(rc, 1)
-        self.assertIn("matches no loss", err)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN justification row matches no loss", err)
         self.plan_ok(["m::a", "m::native"], workers=1)
         source["present_tests"]["linux"] = ["m::native"]
         self.assertEqual(self.diff(SHA, rows=rows, source=source), (0, ""))
 
-    def test_legacy_reason_rules_stay_unchanged(self):
+    def test_unscoped_reason_still_covers_native_losses_and_warns_when_stale(self):
         self.same_plans()
         row = f"{BIN} m::native | removed | legacy reason\n"
         source = source_losses(removed={"windows": ["m::native"]})
@@ -929,7 +983,9 @@ class BaseDiff(Fixture):
         rc, err = self.diff(SHA, rows=row, source=source_losses(present={}))
         self.assertEqual(rc, 0, err)
         self.assertIn("WARN justification row refers to a test absent", err)
-        self.assertEqual(self.diff(SHA, rows=row, source=source_losses(present={"macos": ["m::native"]}))[0], 1)
+        rc, err = self.diff(SHA, rows=row, source=source_losses(present={"macos": ["m::native"]}))
+        self.assertEqual(rc, 0, err)
+        self.assertIn("WARN justification row matches no loss", err)
         source = source_losses(present={})
         source["present_tests"]["linux"] = [False]
         self.assertEqual(self.diff(SHA, rows=row, source=source)[0], 0)
@@ -1027,7 +1083,7 @@ if [ "$2" = archive ]; then while [ "$1" != --archive-file ]; do shift; done; ec
         self.sp = subprocess
         self.repo = self.dir / "repo"
         for rel in ("scripts/ci/nextest_ci.py", "scripts/ci/nextest_required.py", "scripts/ci/rust_test_sources.py",
-                    "scripts/ci/pr_nextest.py",
+                    "scripts/ci/nextest_removal.py", "scripts/ci/pr_nextest.py",
                     "scripts/ci/nextest-base-diff.sh", ".config/nextest.toml",
                     "scripts/ci/nextest-native.sh", "scripts/ci/pg_test_classifier.py", "scripts/ci/nextest-retry-policy.toml"):
             (self.repo / rel).parent.mkdir(parents=True, exist_ok=True)

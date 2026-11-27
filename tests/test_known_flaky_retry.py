@@ -126,7 +126,7 @@ sys.stdout.write((p / file).read_text())
         scripts = self.path / "repo/scripts"
         (scripts / "ci").mkdir(parents=True, exist_ok=True)
         for name in ("ci/infra-failure-rerun.sh", "ci/real-failure-predicate.sh", "ci/pr_head_current.py",
-                     "ci/nextest_ci.py", "ci/nextest_required.py", "ci/pr_nextest.py"):
+                     "ci/nextest_ci.py", "ci/nextest_required.py", "ci/nextest_removal.py", "ci/pr_nextest.py"):
             (scripts / name).write_bytes((ROOT / "scripts" / name).read_bytes())
         # The worker died before uploading; the run's plan artifact still lets classify-worker decide.
         self.write("list.json", {"test-count": 1, "rust-suites": {"agentdesk": {
