@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, MessageId, UserId};
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::services::provider::cancel_token_claude_interrupt::StopCancel;
 use crate::services::provider::{CancelToken, ProviderKind};
