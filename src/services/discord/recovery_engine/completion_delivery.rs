@@ -11,6 +11,7 @@ use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::tui_o::cutover::{
     BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
 };
+use futures::future::BoxFuture;
 
 pub(super) const RECOVERY_NEUTRAL_NOTICE: &str = "ℹ️ 이전 실행은 종료됐거나 입력 가능한 상태지만, 이전 요청의 완료 여부는 확인하지 못했습니다. 요청을 자동으로 다시 실행하지는 않았습니다.";
 
@@ -306,24 +307,38 @@ async fn relay_process_thread_body(
     text: &str,
 ) -> Option<RecoveryRelayOutcome> {
     state.routine_presentation.process_thread.as_ref()?;
-    if !carries_body(state, text) {
-        return state
-            .restore_process_thread_scope(channel)
-            .await
-            .err()
-            .map(|_| RecoveryRelayOutcome::TransientFailure);
-    }
-    let delivered = match super::inflight::opt_channel_id(channel) {
-        Some(channel) => {
-            super::super::turn_bridge::recover_routine_process_body(shared, state, channel, text)
+    relay_pinned_process_thread_body(shared, state, channel, text).await
+}
+
+#[inline(never)]
+fn relay_pinned_process_thread_body<'a>(
+    shared: &'a Arc<SharedData>,
+    state: &'a super::inflight::InflightTurnState,
+    channel: u64,
+    text: &'a str,
+) -> BoxFuture<'a, Option<RecoveryRelayOutcome>> {
+    Box::pin(async move {
+        if !carries_body(state, text) {
+            return state
+                .restore_process_thread_scope(channel)
                 .await
+                .err()
+                .map(|_| RecoveryRelayOutcome::TransientFailure);
         }
-        None => false,
-    };
-    Some(if delivered {
-        RecoveryRelayOutcome::Delivered
-    } else {
-        RecoveryRelayOutcome::TransientFailure
+        let delivered = match super::inflight::opt_channel_id(channel) {
+            Some(channel) => {
+                super::super::turn_bridge::recover_routine_process_body(
+                    shared, state, channel, text,
+                )
+                .await
+            }
+            None => false,
+        };
+        Some(if delivered {
+            RecoveryRelayOutcome::Delivered
+        } else {
+            RecoveryRelayOutcome::TransientFailure
+        })
     })
 }
 
