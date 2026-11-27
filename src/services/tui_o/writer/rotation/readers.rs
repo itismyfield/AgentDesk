@@ -14,7 +14,7 @@ impl<B: BindingEvents> Sources<B> {
         self.resume_with_clock(writer, deriver, owed, SystemTime::now(), &SystemTime::now)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn resume_at<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,
         writer: &mut ChannelWriter<P, L, A>,
@@ -697,9 +697,9 @@ impl<B: BindingEvents> Sources<B> {
     ) {
         let (send, result) = mpsc::channel();
         let snapshot = cursor.clone();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let done = ready.clone();
         tokio::task::spawn_blocking(move || {
             let verify = || {
@@ -723,7 +723,7 @@ impl<B: BindingEvents> Sources<B> {
             fingerprint,
             observed_at,
             result,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             ready,
         });
     }

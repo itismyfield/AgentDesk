@@ -18,14 +18,14 @@ pub(crate) trait LifecycleStopPort: TurnStopPort<SharedData> {}
 impl<T: TurnStopPort<SharedData>> LifecycleStopPort for T {}
 
 const DIRECT_FALLBACK_PATH: &str = "direct-fallback";
-const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
+pub(crate) const HOST_GUARD_KEPT_PATH: &str = "host-guard-kept";
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static FORCE_KILL_PRESERVE_TMUX_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashSet<String>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn set_force_kill_preserve_tmux_for_test(tmux_session_name: &str, preserve: bool) {
     let mut sessions = FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
         .lock()
@@ -37,7 +37,7 @@ pub(crate) fn set_force_kill_preserve_tmux_for_test(tmux_session_name: &str, pre
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn force_kill_preserves_tmux_for_test(tmux_session_name: &str) -> bool {
     FORCE_KILL_PRESERVE_TMUX_FOR_TESTS
         .lock()
@@ -490,9 +490,9 @@ async fn stop_turn_with_policy<R: TurnStopPort<SharedData>>(
             record_tmux_exit_reason(kill_target, &format!("explicit cleanup via {reason}"));
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let preserve_for_test = force_kill_preserves_tmux_for_test(kill_target);
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let preserve_for_test = false;
         let killed_now = if preserve_for_test {
             false
@@ -639,7 +639,8 @@ pub(crate) fn cleanup_policy_observability_surface(
 
 #[cfg(test)]
 pub(crate) mod policy_observability_tests {
-    use crate::services::discord::{InflightRestartMode, TmuxCleanupPolicy};
+    use crate::domain::lifecycle::InflightRestartMode;
+    use crate::domain::tmux_cleanup::TmuxCleanupPolicy;
 
     #[test]
     fn cleanup_policy_observability_surface_matches_cancel_contract() {
@@ -722,55 +723,6 @@ pub(crate) mod policy_observability_tests {
     }
 
     #[tokio::test]
-    async fn queue_truth_lost_actor_is_not_a_measured_empty_queue() {
-        use super::*;
-        use crate::services::turn_orchestrator::{ChannelMailboxRegistry, QueuePersistenceContext};
-        let temp = tempfile::tempdir().unwrap();
-        let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
-        let shared = crate::services::discord::make_shared_data_for_tests();
-        let registry = crate::services::discord::health::HealthRegistry::new();
-        registry.register("claude".into(), shared.clone()).await;
-        let (mailboxes, token) = shared.queue_fixture_parts();
-        for (i, drop_reply) in [false, true].into_iter().enumerate() {
-            let channel = ChannelId::new(6038740 + i as u64);
-            let target = super::TurnLifecycleTarget {
-                provider: Some(ProviderKind::Claude),
-                channel_id: Some(channel),
-                tmux_name: String::new(),
-            };
-            let handle = mailboxes.handle(channel);
-            let item = ChannelMailboxRegistry::queued_for_test(42);
-            handle
-                .replace_queue(
-                    vec![item],
-                    QueuePersistenceContext::new(&ProviderKind::Claude, token, None),
-                )
-                .await;
-            let pre = super::pending_queue_pre_snapshot(Some(&registry), &target)
-                .await
-                .unwrap();
-            assert_eq!(pre.queue_depth, 1);
-            if drop_reply {
-                mailboxes.insert_reply_dropping_for_test(channel);
-            } else {
-                mailboxes.insert_unreachable_for_test(channel);
-            }
-            let post = super::pending_queue_post_snapshot(Some(&registry), &target).await;
-            mailboxes.remove_fixture_for_test(channel);
-            assert!(post.is_none());
-            assert_eq!(
-                super::compute_queue_preserved(
-                    TmuxCleanupPolicy::PreserveSession,
-                    Some(&pre),
-                    post.as_ref()
-                ),
-                None
-            );
-            assert!(super::dropped_queue_message_ids(Some(&pre), post.as_ref()).is_empty());
-        }
-    }
-
-    #[tokio::test]
     async fn queue_truth_disk_stat_error_is_unmeasured() {
         use super::*;
         let temp = tempfile::tempdir().unwrap();
@@ -798,108 +750,6 @@ pub(crate) mod policy_observability_tests {
         .unwrap();
         mailboxes.remove_fixture_for_test(channel);
         assert_eq!(observed.disk_present, None);
-    }
-
-    #[test]
-    fn compute_queue_preserved_detects_disk_and_memory_loss() {
-        use crate::services::discord::health::PendingQueueSnapshot;
-
-        let pre = PendingQueueSnapshot {
-            queue_depth: 1,
-            disk_present: Some(true),
-            disk_path: None,
-            message_ids: vec![9_001],
-        };
-        let post_loss = PendingQueueSnapshot {
-            queue_depth: 0,
-            disk_present: Some(false),
-            disk_path: None,
-            message_ids: Vec::new(),
-        };
-        let lost_memory = PendingQueueSnapshot {
-            queue_depth: 0,
-            ..pre.clone()
-        };
-        let policy = TmuxCleanupPolicy::PreserveSession;
-        assert_eq!(
-            super::compute_queue_preserved(policy, Some(&pre), Some(&post_loss)),
-            Some(false)
-        );
-        assert_eq!(
-            super::compute_queue_preserved(policy, Some(&pre), Some(&pre)),
-            Some(true)
-        );
-        assert_eq!(
-            super::compute_queue_preserved(policy, Some(&pre), Some(&lost_memory)),
-            Some(false)
-        );
-        let lost_disk = PendingQueueSnapshot {
-            queue_depth: 1,
-            ..post_loss.clone()
-        };
-        assert_eq!(
-            super::compute_queue_preserved(policy, Some(&pre), Some(&lost_disk)),
-            Some(false)
-        );
-        let empty = PendingQueueSnapshot {
-            disk_present: Some(false),
-            ..Default::default()
-        };
-        assert_eq!(
-            super::compute_queue_preserved(policy, Some(&empty), Some(&empty)),
-            Some(true)
-        );
-        for (pre, post) in [(None, None), (Some(&pre), None), (None, Some(&pre))] {
-            assert_eq!(super::compute_queue_preserved(policy, pre, post), None);
-        }
-    }
-
-    /// #5176: the cancel response must name the user instructions it destroyed.
-    /// Depth is not enough — a swapped queue keeps the same depth.
-    #[test]
-    fn dropped_queue_message_ids_names_the_lost_user_instructions() {
-        use crate::services::discord::health::PendingQueueSnapshot;
-
-        fn snapshot(message_ids: Vec<u64>) -> PendingQueueSnapshot {
-            PendingQueueSnapshot {
-                queue_depth: message_ids.len(),
-                disk_present: Some(!message_ids.is_empty()),
-                disk_path: None,
-                message_ids,
-            }
-        }
-
-        // The #5176 incident shape: queued_before=1, queued_remaining=0.
-        assert_eq!(
-            super::dropped_queue_message_ids(
-                Some(&snapshot(vec![9_001])),
-                Some(&snapshot(Vec::new())),
-            ),
-            vec![9_001]
-        );
-
-        // Same depth, different message: still a lost user instruction, and the
-        // reason a depth comparison alone cannot audit the lossless contract.
-        assert_eq!(
-            super::dropped_queue_message_ids(
-                Some(&snapshot(vec![9_001])),
-                Some(&snapshot(vec![9_002])),
-            ),
-            vec![9_001]
-        );
-
-        // Preservation, and growth, report nothing.
-        assert!(
-            super::dropped_queue_message_ids(
-                Some(&snapshot(vec![9_001])),
-                Some(&snapshot(vec![9_001, 9_002])),
-            )
-            .is_empty()
-        );
-
-        // An unobservable side is not evidence of a drop.
-        assert!(super::dropped_queue_message_ids(Some(&snapshot(vec![9_001])), None).is_empty());
-        assert!(super::dropped_queue_message_ids::<PendingQueueSnapshot>(None, None).is_empty());
     }
 }
 
@@ -1026,7 +876,7 @@ async fn resolve_tmux_session_observed<R: TurnStopPort<SharedData>>(
     resolved.await
 }
 
-async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
+pub(crate) async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
     health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
 ) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
@@ -1037,7 +887,7 @@ async fn pending_queue_pre_snapshot<R: TurnStopPort<SharedData>>(
     snapshot.await
 }
 
-async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
+pub(crate) async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
     health_registry: Option<&R>,
     target: &TurnLifecycleTarget,
 ) -> Option<<R as TurnStopPort<SharedData>>::Snapshot> {
@@ -1057,7 +907,10 @@ async fn pending_queue_post_snapshot<R: TurnStopPort<SharedData>>(
 ///
 /// Returns empty when either side is unobservable — an unknown queue is not
 /// evidence of a drop.
-fn dropped_queue_message_ids<Q: PendingQueueView>(pre: Option<&Q>, post: Option<&Q>) -> Vec<u64> {
+pub(crate) fn dropped_queue_message_ids<Q: PendingQueueView>(
+    pre: Option<&Q>,
+    post: Option<&Q>,
+) -> Vec<u64> {
     let (Some(pre), Some(post)) = (pre, post) else {
         return Vec::new();
     };
@@ -1069,7 +922,7 @@ fn dropped_queue_message_ids<Q: PendingQueueView>(pre: Option<&Q>, post: Option<
 }
 
 /// Preservation requires measured memory and disk state on both sides of the cancel.
-fn compute_queue_preserved<Q: PendingQueueView>(
+pub(crate) fn compute_queue_preserved<Q: PendingQueueView>(
     cleanup_policy: TmuxCleanupPolicy,
     pre: Option<&Q>,
     post: Option<&Q>,
@@ -1078,146 +931,4 @@ fn compute_queue_preserved<Q: PendingQueueView>(
     let (pre, post) = (pre?, post?);
     let (before, after) = (pre.disk_present()?, post.disk_present()?);
     Some((!before || after) && post.queue_depth() >= pre.queue_depth())
-}
-
-#[cfg(all(test, unix))]
-mod host_guard_tests {
-    use super::*;
-    use crate::services::discord::host_teardown_gate::test_support::{
-        Stored, busy_turn, channel_key, runtime, runtime_state, seed, stop_recorded, turn_kept,
-    };
-
-    // A force-kill the registry can key reads the stored rows before its tombstone, stop
-    // or kill; a missing row keeps main's name-only path, any other trace keeps the turn.
-    #[tokio::test]
-    async fn force_kill_stops_a_turn_only_after_the_host_guard_admits_it_pg() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let (shared, registry) = runtime(&pool).await;
-        for (n, stored) in Stored::ALL.into_iter().enumerate() {
-            let channel = ChannelId::new(1_479_671_301_387_059_800 + n as u64);
-            let name = format!("AgentDesk-claude-p4a-kill-{n}");
-            seed(
-                &pool,
-                &channel_key(&shared, &name),
-                &name,
-                channel.get(),
-                stored,
-            )
-            .await;
-            let token = busy_turn(&shared, channel, &name).await;
-            let target = TurnLifecycleTarget {
-                provider: Some(ProviderKind::Claude),
-                channel_id: Some(channel),
-                tmux_name: name.clone(),
-            };
-            let result = force_kill_turn(Some(&registry), &target, "p4a host guard", "p4a").await;
-            let admitted = matches!(stored, Stored::Legacy | Stored::Missing);
-            assert_eq!(
-                result.lifecycle_path != HOST_GUARD_KEPT_PATH,
-                admitted,
-                "{stored:?}"
-            );
-            assert_eq!(
-                !turn_kept(&shared, channel, &token).await,
-                admitted,
-                "{stored:?}"
-            );
-            assert_eq!(stop_recorded(channel), admitted, "{stored:?}");
-        }
-        pool.close().await;
-        db.drop().await;
-    }
-
-    // A kill runs only on the session its verdict approved: a runtime that took up another
-    // session between the verdict and the kill is left as it is.
-    #[tokio::test]
-    async fn force_kill_leaves_a_runtime_that_moved_on_after_its_verdict_pg() {
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-        let pool = db.connect_and_migrate().await;
-        let (shared, registry) = runtime(&pool).await;
-        let channel = ChannelId::new(1_479_671_301_387_059_900);
-        let name = "AgentDesk-claude-p4r-moved-a";
-        let key = channel_key(&shared, name);
-        seed(&pool, &key, name, channel.get(), Stored::Legacy).await;
-        let token = busy_turn(&shared, channel, name).await;
-        let target = TurnLifecycleTarget {
-            provider: Some(ProviderKind::Claude),
-            channel_id: Some(channel),
-            tmux_name: name.to_string(),
-        };
-        let verdict = force_kill_verdict(Some(&registry), &target, None).await;
-        assert!(!verdict.kept(), "the legacy session is admitted");
-        let moved = "AgentDesk-claude-p4r-moved-b";
-        crate::services::discord::register_resume_watcher_for_tests(&shared, channel, moved);
-        let before = runtime_state(&shared, channel).await;
-        let kill = force_kill_turn_with_verdict(Some(&registry), verdict, "moved on", "p4r");
-        assert_eq!(kill.await.lifecycle_path, HOST_GUARD_KEPT_PATH);
-        assert_eq!(runtime_state(&shared, channel).await, before);
-        assert!(turn_kept(&shared, channel, &token).await);
-        assert!(!stop_recorded(channel), "no stop is recorded");
-        pool.close().await;
-        db.drop().await;
-    }
-
-    // A kill carries out its verdict: a marker that turns Herdr after the verdict does not make
-    // the cleanup judge the host again, while a cleanup with no verdict still reads it.
-    #[test]
-    fn force_kill_follows_its_verdict_when_the_marker_changes_after_it_pg() {
-        use crate::services::provider::cancel_token_cleanup::executor::{
-            CleanupRequest, TmuxCleanupIntent, tmux_kill_dispatches_for_test,
-            with_executor_dispatch_seam,
-        };
-        // The runtime root (env lock) comes before the dispatch seam, as in the stop host tests.
-        let _root = crate::config::TestRuntimeRootGuard::new();
-        let mut executor = tokio::runtime::Builder::new_current_thread();
-        let executor = executor.enable_all().build().unwrap();
-        with_executor_dispatch_seam(|| {
-            executor.block_on(async {
-                let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
-                let pool = db.connect_and_migrate().await;
-                let (shared, registry) = runtime(&pool).await;
-                let channel = ChannelId::new(1_479_671_301_387_059_950);
-                let name = "AgentDesk-claude-p4r-marker-after";
-                let key = channel_key(&shared, name);
-                seed(&pool, &key, name, channel.get(), Stored::Legacy).await;
-                busy_turn(&shared, channel, name).await;
-                let target = TurnLifecycleTarget {
-                    provider: Some(ProviderKind::Claude),
-                    channel_id: Some(channel),
-                    tmux_name: name.to_string(),
-                };
-                let verdict = force_kill_verdict(Some(&registry), &target, None).await;
-                assert!(!verdict.kept(), "the legacy session is admitted");
-                let marker = crate::services::tmux_common::session_temp_path(name, "host_kind");
-                std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
-                std::fs::write(&marker, "herdr").unwrap();
-                let kills = tmux_kill_dispatches_for_test();
-                let kill = force_kill_turn_with_verdict(Some(&registry), verdict, "marker", "p4r");
-                assert!(!kill.await.host_guard_kept());
-                let dispatched = tmux_kill_dispatches_for_test() - kills;
-                assert_eq!(
-                    dispatched, 1,
-                    "the approved session is killed once, by its cleanup"
-                );
-                let other = crate::services::provider::CancelToken::new();
-                other.bind_unmanaged_session_name(name);
-                let outcome = other.request_cleanup(CleanupRequest {
-                    cancel_source: "no verdict".to_string(),
-                    intent: TmuxCleanupIntent::CleanupSession,
-                    termination_reason: Some("p4r"),
-                    hard_stop_target: None,
-                });
-                assert!(
-                    outcome.host_refused,
-                    "a cleanup with no verdict still reads the marker"
-                );
-                assert_eq!(tmux_kill_dispatches_for_test() - kills, 1);
-                pool.close().await;
-                db.drop().await;
-            })
-        });
-    }
 }

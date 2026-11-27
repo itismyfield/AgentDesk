@@ -278,7 +278,7 @@ impl Refused {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static OBSERVED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, usize>>> =
     std::sync::LazyLock::new(Default::default);
 
@@ -288,7 +288,7 @@ fn observe(nonce: &str) {
     *observed.entry(nonce.into()).or_default() += 1;
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn observed(nonce: &str) -> usize {
     OBSERVED
         .lock()

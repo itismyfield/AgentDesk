@@ -17,7 +17,7 @@ name = "agentdesk"
 path = "src/main.rs"
 
 [lints.rust]
-# M-KRX가 feature를 선언하기 전까지 켤 수 없는 값만 등록한다.
+# `test-support`는 아래 [features]가 선언한다(KRX-TS). 이 등록은 같은 값을 한 번 더 적을 뿐이다.
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("test-support"))'] }
 
 [lints.clippy]
@@ -40,8 +40,14 @@ result_large_err = "deny"
 too_many_arguments = "deny"
 type_complexity = "deny"
 
+[features]
+# Test-only items KE·DL·ROOT tests reach once KRX is its own crate (#7353 KRX-TS). Off by default; the
+# upper packages enable it as a dev-dependency only, so release builds never see it.
+test-support = ["dep:adk-test-support"]
+
 [dependencies]
 adk-base = { path = "crates/adk-base" }
+adk-test-support = { path = "crates/adk-test-support", optional = true }
 adk-store = { path = "crates/adk-store" }
 # HTTP server
 axum = { version = "0.8", features = ["ws", "macros"] }

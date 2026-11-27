@@ -147,7 +147,7 @@ pub(crate) async fn retry_leaf(
         .unwrap();
     let ticket = Arc::new(Mutex::new(None));
     let transcript = fixture.root.path().join("not-created.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(&session, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(&session, &transcript);
     let pane_name = session.clone();
     let submitted_ticket = ticket.clone();
     let leaf = move |frame: String| {

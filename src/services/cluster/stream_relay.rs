@@ -177,33 +177,33 @@ impl RelayMetrics {
             .map(|(_, outcome)| *outcome)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_delivered_sequence_for_test(&self, sequence: u64) {
         self.last_delivered_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_terminal_committed_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_committed_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
         self.record_terminal_outcome(sequence, DeliveryOutcome::Delivered);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_terminal_skipped_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_skipped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
         self.record_terminal_outcome(sequence, DeliveryOutcome::NotDelivered);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_dropped_sequence_for_test(&self, sequence: u64) {
         self.last_dropped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_sink_error_sequence_for_test(&self, sequence: u64) {
         self.last_sink_error_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);

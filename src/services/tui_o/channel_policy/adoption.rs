@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod body_check;
 
 use crate::services::tui_o::store::OStore;
@@ -146,7 +146,7 @@ pub(crate) struct Candidate {
     /// A thread child's verified relationship, set once and read by its first init.
     child: Arc<OnceLock<crate::services::session_host::surface_policy::VerifiedSurface>>,
     /// Test builds: set when a claim released a pending adoption, cleared once a sink saw a body.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     bodiless: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -204,7 +204,7 @@ impl Candidate {
             first_turn: tokio::sync::watch::channel(None).0,
             first_pauses: Arc::default(),
             child: Arc::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             bodiless: Arc::default(),
         }
     }
@@ -248,7 +248,7 @@ impl Candidate {
     }
 
     /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn mark_turn_admitted(
         &self,
         channel: u64,
@@ -323,7 +323,7 @@ impl Candidate {
             .unwrap_or_else(PoisonError::into_inner)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),
@@ -434,7 +434,7 @@ impl Candidate {
         let reason = state.claim_reason();
         if *state == Adoption::Pending {
             *state = Adoption::Released;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             body_check::note_release(self);
             tracing::info!(channel, "[tui_o] Legacy took the channel before O adoption");
         }

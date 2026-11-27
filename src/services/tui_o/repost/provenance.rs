@@ -163,7 +163,7 @@ pub(crate) struct ProvenanceLog {
     /// Set when an append failed part way: its bytes may sit at the tail, so nothing more is
     /// written until a reopen cuts them.
     poisoned: bool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fail_after: Option<usize>,
 }
 
@@ -183,7 +183,7 @@ impl ProvenanceLog {
             path: path.to_owned(),
             state,
             poisoned: false,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             fail_after: None,
         })
     }
@@ -213,7 +213,7 @@ impl ProvenanceLog {
 
     fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         let mut file = OpenOptions::new().append(true).open(&self.path)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(cut) = self.fail_after.take() {
             file.write_all(&bytes[..cut.min(bytes.len())])?;
             return Err(io::Error::other("injected write failure"));

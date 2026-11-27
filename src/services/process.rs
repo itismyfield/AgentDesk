@@ -299,7 +299,7 @@ impl ProcessIdentity {
     /// platforms (Linux/macOS) — without this hook, regression tests cannot
     /// distinguish "captured a real starttime" from "snapshot is empty and
     /// guard silently disabled".
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn raw_starttime(&self) -> Option<u128> {
         #[cfg(target_os = "macos")]
         {
@@ -312,7 +312,7 @@ impl ProcessIdentity {
     }
 
     /// Test-only synthetic constructor used to pin the mismatch-skip path.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn from_raw_for_test(starttime: Option<u128>) -> Self {
         Self {
             starttime,

@@ -122,7 +122,7 @@ pub(crate) fn claude_session_auth(
     Ok(own.map(|(_, profile)| profile.to_owned()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn write_tmux_runtime_kind_marker(
     tmux_session_name: &str,
     runtime_kind: crate::services::agent_protocol::RuntimeHandoffKind,

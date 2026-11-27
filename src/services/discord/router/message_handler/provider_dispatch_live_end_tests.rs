@@ -461,6 +461,106 @@ fn handoff(fx: &super::Fixture) -> (String, u64) {
     (binding.output_path, binding.last_offset)
 }
 
+struct RefuseLiveSettlement;
+
+impl crate::services::turn_orchestrator::policy_close::ControlCustody for RefuseLiveSettlement {
+    fn input(&self) -> &str {
+        "refuse-live-settlement"
+    }
+
+    fn owns(
+        &self,
+        _: ChannelId,
+        _: Option<&Arc<CancelToken>>,
+        _: Option<MessageId>,
+        _: Option<&str>,
+    ) -> bool {
+        true
+    }
+
+    fn admit(&self, _: bool) -> Result<(), String> {
+        Err("test custody refusal".into())
+    }
+}
+
+#[test]
+fn retired_live_tick_posts_the_notice_once_while_settlement_fails_pg() {
+    repeated_live_ticks(false, false);
+}
+
+#[test]
+fn retired_live_tick_posts_the_o_notice_once_without_a_placeholder_pg() {
+    repeated_live_ticks(true, false);
+}
+
+#[test]
+fn retired_live_tick_edits_the_o_placeholder_once_while_settlement_fails_pg() {
+    repeated_live_ticks(true, true);
+}
+
+fn repeated_live_ticks(o_owned: bool, anchored: bool) {
+    use crate::services::tui_o::cutover::test_override::force_channels;
+    use discord::recovery_engine::herdr_row_end::{row_end_pass, tests::settled_tasks};
+
+    let fx = super::Fixture::new("repeatedend", None);
+    let (_, _, seen) = claude_live_turn(&fx, |live, token| {
+        let mut row = live.row().unwrap();
+        if anchored {
+            live.mock.seed_message(PLACEHOLDER, "Processing");
+        } else {
+            row.current_msg_id = 0;
+            inflight::save_inflight_state(&row).unwrap();
+            assert_eq!(live.row().unwrap().current_msg_id, 0);
+        }
+        let o_channels = [(live.channel.get(), RuntimeHandoffKind::ClaudeTui)];
+        let _o = force_channels(if o_owned { &o_channels } else { &[] });
+        live.route();
+        kill(&fx);
+        let generation = live.row().unwrap().save_generation;
+        let settle_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let attempts = settle_attempts.clone();
+        let _hook = discord::recovery_engine::herdr_row_end::tests::on_while(
+            "live_before_settle",
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                Box::pin(async {})
+            },
+        );
+        live.rt.block_on(async {
+            let mailbox = live.shared.mailbox(live.channel);
+            assert!(
+                mailbox
+                    .install_control_custody(Arc::new(RefuseLiveSettlement))
+                    .await
+            );
+            for tick in 1..=3 {
+                row_end_pass(&live.shared, &live.provider).await;
+                settled_tasks().await;
+                assert_eq!(settle_attempts.load(Ordering::Relaxed), tick);
+                let active = mailbox.cancel_token().await.unwrap().unwrap();
+                assert!(Arc::ptr_eq(&active, token));
+                let fresh = live.row().unwrap();
+                assert_eq!(fresh.turn_nonce.as_deref(), token.turn_nonce());
+                if o_owned {
+                    assert_eq!(fresh.save_generation, generation);
+                }
+            }
+        });
+        let text = LiveEnd::notice();
+        let counts = (
+            live.mock.post_count(live.channel.get(), &text),
+            live.mock.edit_count(anchored.then_some(PLACEHOLDER), &text),
+        );
+        token.cancelled.store(true, Ordering::Release);
+        counts
+    });
+    assert_eq!(fx.row(), Some(HostedState::Retired));
+    assert_eq!(
+        seen.expect("the turn reached its prompt"),
+        if anchored { (0, 1) } else { (1, 0) }
+    );
+}
+
 /// A stale live Claude turn whose provider died mid-record: the queue guard and a refused notice keep
 /// it; the next pass settles it once, wakes the reader without a hand-off, starts the queued input.
 #[test]

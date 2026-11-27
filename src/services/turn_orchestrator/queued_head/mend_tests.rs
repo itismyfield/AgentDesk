@@ -1,8 +1,19 @@
 //! The actor consumes only the Unknown head it holds, unchanged, at the queue front and behind an
 //! open gate; a failed write leaves that head Unknown before the same queue.
-use super::*;
 use crate::services::discord::health::inject_hook;
+use crate::services::provider::ProviderKind;
+use crate::services::turn_orchestrator::pending_queue_persistence::pending_queue_file_path;
+use crate::services::turn_orchestrator::queued_head::mend::*;
+use crate::services::turn_orchestrator::queued_head::{
+    HeadOutcome, HeadSettle, QueueIdentity, QueuedHeadClaim,
+};
 use crate::services::turn_orchestrator::test_support::{fail_queue_saves, lock_test_env};
+use crate::services::turn_orchestrator::{
+    ChannelMailboxHandle, ChannelMailboxRegistry, Intervention, InterventionMode,
+    QueuePersistenceContext, SourceMessageQueuedGeneration,
+};
+use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use std::time::Instant;
 
 const TOKEN: &str = "queued-head-mend";
 

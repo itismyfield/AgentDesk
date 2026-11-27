@@ -26,9 +26,9 @@ mod commit;
 #[cfg(unix)]
 pub(crate) mod settled;
 mod terminal;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use commit::commit_claim;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
 pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
 pub(crate) use terminal::{SettledCompanions, terminal_pending_at_seq};

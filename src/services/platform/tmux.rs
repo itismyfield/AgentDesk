@@ -347,7 +347,7 @@ fn log_kill_request(session_name: &str, reason: &str) {
 }
 
 /// Test-only record of every tmux kill this process requested, by session name.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod kill_requests {
     use std::sync::{LazyLock, Mutex};
 

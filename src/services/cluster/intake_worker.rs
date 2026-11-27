@@ -957,6 +957,6 @@ mod dispatch_stamp_tests;
 #[path = "intake_worker/drain_tests.rs"]
 mod drain_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "intake_worker/test_executor.rs"]
 pub(crate) mod test_executor;

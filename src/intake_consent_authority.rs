@@ -10,7 +10,7 @@ impl BeforeEffects {
         &self.0
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_test(row: &IntakeOutboxRow) -> Self {
         Self(row.clone())
     }

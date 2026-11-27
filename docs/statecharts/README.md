@@ -90,6 +90,8 @@ The model abstracts the full raw wait into `output = held`; the real guard has a
 upper bound of about 65 seconds from the server `idle_in_transaction_session_timeout`.
 Routing/staging can still wait for that guard; admission here does not mean durable staging has completed.
 
+The [Claude Herdr watcher completion row](index.d/690-input-single-path-herdr-watcher-completion.md) checks held input delivery after the same-episode soft terminal, including strict deadline deferral, restart, and nonce and file boundaries.
+
 The Claude readiness refinement also checks terminal-free self-compact completion: [before](input-single-path/InputPathReadyCompactNoCompletion.cfg) breaks next-input liveness; [after](input-single-path/InputPathReadyCompactCompletion.cfg) satisfies it. Source, generation, reservation and Unknown-transfer guards remain caller obligations documented in [the readiness report](input-single-path/transcript-readiness.report.md).
 
 AwaitingClear's authenticated, one-use source retirement is refined in

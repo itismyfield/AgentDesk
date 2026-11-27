@@ -33,7 +33,7 @@ async fn status(pool: &PgPool, key: &str) -> String {
 
 fn episode(id: u64) -> InflightObservation {
     InflightObservation::Present(
-        crate::services::discord::zombie_foreground_release::InflightEpisodeIdentity {
+        crate::services::stale_turn_reconciler::InflightEpisodeIdentity {
             started_at: "2026-11-01 00:00:00".into(),
             user_msg_id: id,
             turn_nonce: Some(format!("turn-{id}")),

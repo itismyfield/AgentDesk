@@ -241,7 +241,7 @@ fn record_idle_cleanup_preserved_with(
 }
 
 /// `idle_cleanup_preserved` events recorded for `session_key` (tests only).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn idle_cleanup_preserved_count(session_key: &str) -> usize {
     super::events::recent(10_000)
         .into_iter()

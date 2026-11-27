@@ -163,5 +163,5 @@ pub(crate) fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
     rx.recv_timeout(EXIT_DRAIN).unwrap_or_default()
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) mod test_fixture;

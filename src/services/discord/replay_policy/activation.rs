@@ -133,14 +133,14 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static READS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u64>>> =
     LazyLock::new(Default::default);
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn record_read(key: &str) {
     *READS.lock().unwrap().entry(key.into()).or_default() += 1;
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reads(key: &str) -> u64 {
     *READS.lock().unwrap().get(key).unwrap_or(&0)
 }

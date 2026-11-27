@@ -17,6 +17,8 @@ mod clear_execute_tests;
 mod closing_tests;
 #[path = "provider_dispatch_herdr_tests/retry_wait_tests.rs"]
 mod retry_wait_tests;
+#[path = "provider_dispatch_herdr_tests/seed_successor_tests.rs"]
+mod seed_successor_tests;
 
 use super::*;
 use crate::config::{TestEnvVarGuard as Guard, TestRuntimeRootGuard};
@@ -245,6 +247,8 @@ struct Fixture {
     session: Mutex<Option<String>>,
     /// The account the channel's launches run under; the configured one when `None`.
     overlay: Mutex<Option<ProviderAuthOverlay>>,
+    /// The next turn's greeting successor record, asked on its executor thread.
+    successor: Mutex<Option<crate::services::claude_tui::owner_input::Successor>>,
     _home: (Guard, tempfile::TempDir, Guard),
     _root: TestRuntimeRootGuard,
 }
@@ -326,6 +330,7 @@ impl Fixture {
             dispatched: AtomicBool::new(false),
             session: Mutex::default(),
             overlay: Mutex::default(),
+            successor: Mutex::default(),
             _home: (env, home, bin),
             _root: root,
         }
@@ -363,7 +368,10 @@ impl Fixture {
             self.logical(),
             claude(&transcript, &session),
         );
-        crate::services::claude_tui::readiness::tests::pre_source(self.logical(), &transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            self.logical(),
+            &transcript,
+        );
         HostedExecution {
             schema: 1,
             state: HostedState::Bound,
@@ -592,9 +600,13 @@ impl Fixture {
                 ..Default::default()
             }
         });
+        let successor = self.successor.lock().unwrap().take();
         std::thread::scope(|scope| {
             let executor = scope.spawn(move || {
                 let _runtime = rt.enter();
+                if let Some(record) = successor {
+                    crate::services::claude_tui::owner_input::install_successor(record);
+                }
                 crate::services::tui_prompt_dedupe::binding_events::set_test_root(
                     log_root.as_deref(),
                 );

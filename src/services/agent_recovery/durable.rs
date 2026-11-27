@@ -370,7 +370,7 @@ fn apply_completion(
     Ok(event.map(|_| ()))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn observe_durable(input: ObserveInput) -> ObserveOutcome {
     observe_with_checkpoint_durable(input, None, None).await
 }

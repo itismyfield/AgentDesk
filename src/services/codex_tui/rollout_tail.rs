@@ -241,7 +241,7 @@ pub fn tail_rollout_file_from_offset<L: Into<PaneLiveness>>(
     .map(|result| result.0)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     rollout_path: &Path,
     start_offset: u64,

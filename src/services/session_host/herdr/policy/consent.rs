@@ -280,7 +280,7 @@ impl ConsentStore {
             .transpose()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, false)
     }
