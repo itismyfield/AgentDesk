@@ -122,7 +122,8 @@ async fn hook_refresh_settles_the_original_keyed_ticket_after_boot_pg() {
     let bytes = std::fs::read(&source.transcript).unwrap();
     let prefix = hex::encode(sha2::Sha256::digest(&bytes));
     let store = runtime.path().join("old-ticket-store");
-    let mut previous = SupplyCapture::resume_at(&f, &store, true, bytes.len() as u64, prefix.clone());
+    let mut previous =
+        SupplyCapture::resume_at(&f, &store, true, bytes.len() as u64, prefix.clone());
     let old = source_id_for(&source.session_id, &source.transcript).unwrap();
     assert_eq!([old.dev, old.ino], source.file);
     assert_eq!(
