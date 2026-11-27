@@ -15,6 +15,7 @@ stateDiagram-v2
     Committed --> Applied: Matching session, path and inode carry frontier
     Committed --> Applied: Compaction starts at the new file head
     Applied --> Proved: Capture and census use the applied binding
+    Proved --> NoticeSettled: Owned notice is excluded
     Proved --> Recorded: Exact file and binding sequence still match
     Recorded --> Cleared: Delete the matching inflight row
 ```
@@ -25,11 +26,12 @@ stateDiagram-v2
 | Compaction changes session and path | A source switch starts a separate frontier. | Capture begins at the new file's head. The model allows one new output post. |
 | Hook from another execution | Pane name mismatch must leave the binding alone. | The binding and cursor stay on the original file. This hook enables no settlement. |
 
-TLC 1.7.4 ran all four safety invariants and `OwnedHookSettles` for both
-configs. The before config breaks only `OwnedHookSettles`. The after config
-passes all five rules. Weak fairness assumes hook intake, application,
-capture, observation, settlement and inflight cleanup can each finish when
-enabled. One restart can discard an observed proof at any point.
+TLC 1.7.4 ran four safety invariants and the `OwnedHookSettles` and
+`CompactSettles` liveness properties for both configs. The before config
+breaks only `OwnedHookSettles`. The after config passes all six rules.
+Weak fairness assumes hook intake, application, capture, observation,
+notice settlement, outcome recording and inflight cleanup can each finish
+when enabled. One restart can discard an observed proof at any point.
 
 The model treats the cursor update and checkpoint as one atomic action.
 A production implementation must recover interrupted writes behind that

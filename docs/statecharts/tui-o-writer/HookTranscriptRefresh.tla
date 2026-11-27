@@ -59,23 +59,28 @@ Observe == /\ hook = "accepted" /\ cursor.source = Live /\ cursor.through > 0
 
 Exact == hook = "accepted" /\ proofSeq = seq /\ proof = binding /\ proof = Live
 Settle == /\ Exact /\ ~outcome
-          /\ outcome' = TRUE /\ notice' = "excluded"
+          /\ outcome' = TRUE
           /\ UNCHANGED <<scenario, hook, binding, seq, cursor, checkpoint,
-                         proof, proofSeq, inflight, posts, restarted>>
+                         proof, proofSeq, notice, inflight, posts, restarted>>
+SettleNotice == /\ Exact /\ notice = "pending" /\ notice' = "excluded"
+                /\ UNCHANGED <<scenario, hook, binding, seq, cursor, checkpoint,
+                               proof, proofSeq, outcome, inflight, posts, restarted>>
 Clear == /\ outcome /\ inflight /\ inflight' = FALSE
          /\ UNCHANGED <<scenario, hook, binding, seq, cursor, checkpoint,
                         proof, proofSeq, notice, outcome, posts, restarted>>
 
-Next == Hook \/ Apply \/ Restart \/ Capture \/ Observe \/ Settle \/ Clear
+Next == Hook \/ Apply \/ Restart \/ Capture \/ Observe \/ Settle \/ SettleNotice \/ Clear
 Spec == Init /\ [][Next]_vars
         /\ WF_vars(Hook) /\ WF_vars(Apply) /\ WF_vars(Capture)
-        /\ WF_vars(Observe) /\ WF_vars(Settle) /\ WF_vars(Clear)
+        /\ WF_vars(Observe) /\ WF_vars(Settle) /\ WF_vars(SettleNotice) /\ WF_vars(Clear)
 
 NoPrefixReplay == IF scenario = "compact" THEN posts <= 1 ELSE posts = 0
 CursorFrontier == IF cursor.source = Compacted
                   THEN <<cursor.through, cursor.prefix>> \in {<<0, "empty">>, <<9, "new-prefix">>}
                   ELSE <<cursor.through, cursor.prefix>> = <<Saved.through, Saved.prefix>>
 OwnNameOnly == scenario = "foreign" => binding = Old /\ cursor = Saved /\ ~outcome
-ClearAfterRecord == ~inflight => outcome /\ notice = "excluded"
+ClearAfterRecord == ~inflight => outcome
 OwnedHookSettles == (hook = "accepted") ~> (~inflight /\ notice = "excluded")
+CompactSettles == (scenario = "compact" /\ hook = "accepted")
+                  ~> (~inflight /\ notice = "excluded" /\ posts = 1)
 =============================================================================
