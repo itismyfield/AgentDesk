@@ -11,6 +11,8 @@ pub struct NativePort {
 pub struct Snapshot {
     pub generation: u64,
     pub registrations: Vec<super::super::input_facts::native::Registration>,
+    pub registry_revisions: Vec<u64>,
+    pub has_open_barrier: bool,
 }
 
 #[cfg(unix)]
@@ -22,6 +24,16 @@ pub trait EvidencePort: Send + Sync {
         &self,
         origin: super::super::input_notices::NoticeOrigin,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Snapshot, String>> + Send + '_>>;
+    /// Only a quiescent source may reuse its snapshot; effect rechecks still use `snapshot`.
+    fn snapshot_since<'a>(
+        &'a self,
+        origin: super::super::input_notices::NoticeOrigin,
+        _known: Option<&'a [u64]>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<Snapshot>, String>> + Send + 'a>,
+    > {
+        Box::pin(async move { self.snapshot(origin).await.map(Some) })
+    }
     fn offer(
         &self,
         observed: super::super::input_facts::native::Observation,
