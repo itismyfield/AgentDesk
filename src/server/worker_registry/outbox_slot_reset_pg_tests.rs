@@ -392,7 +392,14 @@ async fn check_outbox_reset(explicit: bool) {
     let WorkerHandle::Tokio { _handle: worker } = registry.running.pop().unwrap()._handle else {
         panic!("dispatch outbox must be a Tokio worker");
     };
+    tokio::time::pause();
     drop(registry);
+    // Drive the supervisor's shutdown poll and grace period on the test clock.
+    tokio::time::sleep(
+        Duration::from_secs(1) + crate::server::worker_recovery::WORKER_LOCAL_SHUTDOWN_GRACE,
+    )
+    .await;
+    tokio::time::resume();
     crate::test_support::wait::await_within(worker, Duration::from_secs(5))
         .await
         .unwrap();
