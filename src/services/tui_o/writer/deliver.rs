@@ -112,9 +112,9 @@ type Counts = Mutex<BTreeMap<u64, Arc<AtomicUsize>>>;
 
 /// POSTs started per channel in this process and not ended yet. A channel's
 /// writers share one count, so a POST that outlives its writer still counts. Tests keep one per thread.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static IN_FLIGHT: Counts = Mutex::new(BTreeMap::new());
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static IN_FLIGHT: Counts = const { Mutex::new(BTreeMap::new()) };
 }
@@ -122,9 +122,9 @@ thread_local! {
 fn with_in_flight<R>(use_counts: impl FnOnce(&mut BTreeMap<u64, Arc<AtomicUsize>>) -> R) -> R {
     let locked =
         |counts: &Counts| use_counts(&mut counts.lock().unwrap_or_else(PoisonError::into_inner));
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return locked(&IN_FLIGHT);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     IN_FLIGHT.with(locked)
 }
 

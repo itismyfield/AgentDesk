@@ -510,12 +510,12 @@ pub fn extra_accounts_root() -> Result<PathBuf, AuthProfileError> {
         return Ok(root);
     }
     // Test fixtures isolate managed homes through HOME, including on Windows.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::home_dir);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let home = dirs::home_dir();
     home.map(|home| home.join(".adk").join("profiles"))
         .ok_or(AuthProfileError::UserHomeUnavailable)

@@ -95,7 +95,7 @@ fn class_hashes(text: &str) -> Vec<String> {
 }
 
 fn path() -> Result<PathBuf, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         // Test subprocesses reopen their parent's temporary ledger to verify restart replay.
         if let Some(path) = std::env::var_os("ADK_TEST_FRAME_LEDGER_PATH") {
@@ -115,7 +115,7 @@ fn path() -> Result<PathBuf, String> {
         }
         return Ok(ROOT.with(|root| root.path().join("injected_frames.json")));
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     crate::config::runtime_root()
         .map(|root| root.join("runtime/injected_frames.json"))
         .ok_or_else(|| "frame ledger root unavailable".into())

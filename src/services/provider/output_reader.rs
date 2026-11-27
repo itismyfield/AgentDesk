@@ -1,6 +1,6 @@
 //! Shared output-file polling for provider streams.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::read_fault;
 use super::{
     CancelToken, ReadOutputResult, ReadyForInputIdleState, ReadyForInputIdleTracker,
@@ -139,9 +139,9 @@ where
             });
         }
 
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let read_result = read_fault::read(output_path, current_offset, || file.read(&mut buf));
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         let read_result = file.read(&mut buf);
         match read_result {
             Ok(0) => {

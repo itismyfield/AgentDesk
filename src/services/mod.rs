@@ -74,9 +74,8 @@ pub use adk_runtime::services::observability;
 pub mod observability {
     pub use adk_runtime::services::observability::*;
 
-    mod test_support {
-        include!("observability/env_runtime_lock_tests.rs");
-    }
+    #[path = "env_runtime_lock_tests.rs"]
+    mod test_support;
 }
 pub mod onboarding;
 pub use adk_runtime::services::opencode;

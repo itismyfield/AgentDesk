@@ -449,7 +449,7 @@ thread_local! {
     static REAL_PID_KILL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn real_pid_kill_enabled_for_test() -> bool {
     REAL_PID_KILL.with(std::cell::Cell::get)
 }
