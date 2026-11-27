@@ -64,7 +64,7 @@ impl Tick {
     pub(super) fn poll(&mut self, store: &ChannelStore, can_skip: bool) -> (bool, Duration) {
         // Sample before work so a write racing with capture still differs on the next tick.
         let stamp = can_skip.then(|| Stamp::read(store)).flatten();
-        let same = stamp.is_some() && stamp == self.stamp;
+        let same = false;
         self.stamp = stamp;
         if same {
             self.interval = if self.interval == POLL_INTERVAL {
@@ -99,9 +99,7 @@ impl Tick {
                 Some(request) => commands.as_ref().unwrap().apply(&mut actor.writer, request),
                 None => *commands = None,
             },
-            () = changed(&mut self.binding) => {},
             () = changed(&mut self.ownership) => {},
-            () = self.listener.notified() => {},
             () = demand.0.wake.notified() => {},
             () = actor.transitions.notified() => {},
             () = async {
