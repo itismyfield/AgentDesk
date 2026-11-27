@@ -47,5 +47,8 @@ async fn api_docs_response_bytes_match_snapshots() {
         )
         .unwrap();
     }
-    assert_eq!(snapshot, include_str!("testdata/responses.snap"));
+    assert_eq!(
+        snapshot,
+        include_str!("../../../../tests/fixtures/api_docs_responses.snap")
+    );
 }
