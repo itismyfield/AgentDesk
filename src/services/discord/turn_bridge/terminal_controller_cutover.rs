@@ -1037,6 +1037,7 @@ mod tests {
             bridge_short_replace_cutover, bridge_short_replace_cutover_decision,
             bridge_terminal_lease_range, deliver_short_replace_via_controller,
         };
+        use crate::services::discord::delivery_lease_cell::key::from_turn_key;
         use crate::services::discord::formatting::ReplaceLongMessageOutcome;
         use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
         use crate::services::discord::outbound::turn_output_controller as toc;
@@ -1075,7 +1076,7 @@ mod tests {
             TurnKey::new(ch(), 21, 0)
         }
         fn lease_key() -> DeliveryLeaseKey {
-            DeliveryLeaseKey::from_turn_key(turn())
+            from_turn_key(turn())
         }
 
         #[cfg(unix)]
@@ -1114,7 +1115,7 @@ mod tests {
             let mut inflight = crate::services::discord::inflight::InflightTurnState::new(ProviderKind::Codex, CH, None, 1, user, MSG, "prompt".into(), None, Some(tmux.into()), Some(canonical_rollout.display().to_string()), None, 0);
             inflight.started_at = "now".into(); inflight.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui); inflight.turn_nonce = Some(format!("nonce-{user}")); inflight.last_offset = 64; inflight.full_response = "answer".into(); inflight.watcher_owner_channel_id = Some(owner.get());
             crate::services::discord::inflight::save_inflight_state(&inflight).unwrap();
-            let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner, user, 1));
+            let key = from_turn_key(TurnKey::new(owner, user, 1));
             let acquire = BridgeDeliveryLease::acquire(shared, owner, key, 0, Some(64));
             (acquire, range, inflight, source)
         }

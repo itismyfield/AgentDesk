@@ -857,6 +857,7 @@ pub(in crate::services::discord) fn arm_finalize_panic_once_for_test() {
 #[cfg(test)]
 pub(super) mod tests {
     use super::*;
+    use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
     use std::sync::atomic::Ordering;
 
     fn key(ch: u64) -> TurnKey {
@@ -3210,6 +3211,7 @@ pub(super) mod tests {
         // → discord). `with_isolated_runtime_root` is in the parent `tests` mod.
         use super::super::super::make_shared_data_for_tests_with_storage;
         use super::with_isolated_runtime_root;
+        use crate::services::discord::delivery_lease_cell::key::from_turn_key;
         use crate::services::discord::{DeliveryLeaseCell, DeliveryLeaseKey};
         use crate::services::provider::ProviderKind;
         use serenity::model::id::ChannelId;
@@ -3220,7 +3222,7 @@ pub(super) mod tests {
         }
 
         fn lease_key(ch: ChannelId, user_msg_id: u64) -> DeliveryLeaseKey {
-            DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 0))
+            from_turn_key(TurnKey::new(ch, user_msg_id, 0))
         }
 
         /// Watcher/Delivered advances `confirmed_end_offset` to the leased `end`
@@ -4163,7 +4165,7 @@ pub(super) mod tests {
             );
             state.turn_start_offset = Some(0);
             super::super::inflight::save_inflight_state(&state).unwrap();
-            let lease_key = DeliveryLeaseKey::from_inflight_state_for_site(
+            let lease_key = from_inflight_state_for_site(
                 ch,
                 shared.restart.current_generation,
                 &state,

@@ -1,6 +1,7 @@
 //! Liveness checks for the watcher backstop's fast probe and expired deadline.
 
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 
 /// #3277 (Defect C) — proven-terminal FAST path for the watcher far-backstop.
 /// In the #3277 incident the handed-off turn was already PROVABLY complete
@@ -298,7 +299,7 @@ fn watcher_backstop_produced_terminal_end(
         .filter(|offset| *offset > 0);
 
     if let Some(state) = inflight_state {
-        let expected_key = DeliveryLeaseKey::from_inflight_state_for_site(
+        let expected_key = from_inflight_state_for_site(
             channel_id,
             shared.restart.current_generation,
             state,

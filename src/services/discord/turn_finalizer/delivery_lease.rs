@@ -89,6 +89,7 @@ pub(super) fn handle_release_delivery(
 #[cfg(test)]
 mod tests {
     use super::{handle_acquire_delivery, handle_commit_delivery, handle_release_delivery};
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::{
         DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
     };
@@ -164,9 +165,9 @@ mod tests {
         let ch = ChannelId::new(42);
         let with_a = DeliveryLeaseKey::new(ch, 9, 123, Some("started-a"), Some(1));
         let with_b = DeliveryLeaseKey::new(ch, 9, 123, Some("started-b"), Some(2));
-        let from_turn = DeliveryLeaseKey::from_turn_key(
-            crate::services::discord::turn_finalizer::TurnKey::new(ch, 123, 9),
-        );
+        let from_turn = from_turn_key(crate::services::discord::turn_finalizer::TurnKey::new(
+            ch, 123, 9,
+        ));
 
         assert_eq!(with_a, with_b);
         assert_eq!(with_a, from_turn);

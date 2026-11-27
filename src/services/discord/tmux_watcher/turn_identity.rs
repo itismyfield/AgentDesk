@@ -1,6 +1,7 @@
 //! #3038 S1 tmux watcher turn identity and explicit cleanup helpers.
 
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 
 /// #2427 D/A wires — emit an explicit-signal inflight cleanup attempt.
 ///
@@ -258,9 +259,7 @@ pub(in crate::services::discord) fn pinned_delivery_lease_key(
         state.tmux_session_name.as_deref().map(str::trim) == Some(tmux_session_name.trim())
             && state.turn_start_offset.unwrap_or(state.last_offset) < current_offset
     }) {
-        crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
-            channel_id, generation, state, "watcher",
-        )
+        from_inflight_state_for_site(channel_id, generation, state, "watcher")
     } else {
         crate::services::discord::DeliveryLeaseKey::new_for_site_with_fallback_offset(
             channel_id,

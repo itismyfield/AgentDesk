@@ -1,66 +1,6 @@
-use super::inflight;
-#[cfg(test)]
-use super::turn_finalizer;
-use poise::serenity_prelude::ChannelId;
-
-pub(in crate::services::discord) use crate::services::engine_runtime::relay_state::lease::DeliveryLeaseKey;
-
-impl DeliveryLeaseKey {
-    #[cfg(test)]
-    #[track_caller]
-    pub(in crate::services::discord) fn from_turn_key(turn: turn_finalizer::TurnKey) -> Self {
-        Self::from_turn_key_for_site(turn, "delivery_lease_key.turn")
-    }
-    #[cfg(test)]
-    #[track_caller]
-    pub(in crate::services::discord) fn from_turn_key_for_site(
-        turn: turn_finalizer::TurnKey,
-        site: &'static str,
-    ) -> Self {
-        Self::new_for_site(
-            turn.channel_id,
-            turn.generation,
-            turn.user_msg_id,
-            None,
-            None,
-            site,
-        )
-    }
-    #[cfg(test)]
-    #[track_caller]
-    pub(in crate::services::discord) fn from_inflight_state(
-        channel_id: ChannelId,
-        generation: u64,
-        state: &inflight::InflightTurnState,
-    ) -> Self {
-        Self::from_inflight_state_for_site(
-            channel_id,
-            generation,
-            state,
-            "delivery_lease_key.inflight",
-        )
-    }
-    #[track_caller]
-    pub(in crate::services::discord) fn from_inflight_state_for_site(
-        channel_id: ChannelId,
-        generation: u64,
-        state: &inflight::InflightTurnState,
-        site: &'static str,
-    ) -> Self {
-        Self::new_for_site(
-            channel_id,
-            generation,
-            state.user_msg_id,
-            Some(&state.started_at),
-            state.turn_start_offset,
-            site,
-        )
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::*;
+    use super::super::DeliveryLeaseKey;
+    use poise::serenity_prelude::ChannelId;
 
     fn fallback_key(channel: ChannelId, offset: u64, site: &'static str) -> DeliveryLeaseKey {
         DeliveryLeaseKey::new_for_site_with_fallback_offset(

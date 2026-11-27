@@ -20,6 +20,7 @@ pub(crate) mod decision_forums;
 pub(crate) mod decisions;
 pub(crate) mod delegation_card;
 mod delivery_lease_cell;
+#[cfg(test)]
 mod delivery_lease_key;
 mod destructive_cancel_gate;
 mod discord_io;
@@ -235,6 +236,7 @@ mod turn_view_reconciler;
 #[path = "watchers/lifecycle_decision.rs"]
 mod watcher_lifecycle_decision;
 pub(crate) mod zombie_foreground_release; // #5176 cancel/mailbox-release authority
+pub(in crate::services::discord) use crate::services::engine_runtime::relay_state::lease::DeliveryLeaseKey;
 pub(in crate::services::discord) use delivery_lease_cell::{
     DELIVERY_LEASE_DEADLINE_MS, DELIVERY_LEASE_HEARTBEAT_MS, DeliveryLeaseCell,
     DeliveryLeaseHeartbeat, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
@@ -244,14 +246,13 @@ pub(crate) use recovery_engine::CapturedReadyDeliveryCommit;
 pub(crate) use recovery_engine::herdr_reader::local_reconnect_health as herdr_reconnect_health;
 #[allow(unused_imports)]
 pub(in crate::services) use relay_coord::TmuxRelayCoord;
+pub(in crate::services::discord) use relay_health::{
+    RelayFrontierMutationGuard, RelayFrontierToken,
+};
 #[allow(unused_imports)]
 pub(in crate::services::discord) use tmux_watcher_registry::{
     TMUX_WATCHER_STALE_HEARTBEAT_MS, TmuxWatcherBinding, TmuxWatcherHandle, TmuxWatcherRegistry,
     TmuxWatcherRegistryGuard, lock_tmux_watcher_registry, tmux_watcher_now_ms,
-};
-pub(in crate::services::discord) use {
-    delivery_lease_key::DeliveryLeaseKey,
-    relay_health::{RelayFrontierMutationGuard, RelayFrontierToken},
 };
 // #3479 item-2: re-export the catch-up subsystem entry points referenced
 // outside the extracted cluster (`maybe_schedule_catch_up_retry_after_queue_drain`
@@ -1785,6 +1786,7 @@ mod queued_placeholder_cluster_characterization_tests {
     // Pinned inline in this `#[cfg(test)] mod` of the FROZEN (baseline 4944)
     // file => ZERO production LoC.
     mod a0_failure_signal_characterization_tests {
+        use super::super::delivery_lease_cell::key::from_turn_key;
         use super::super::turn_finalizer::TurnKey;
         use super::super::{
             DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
@@ -1792,7 +1794,7 @@ mod queued_placeholder_cluster_characterization_tests {
         use serenity::model::id::ChannelId;
 
         fn turn() -> DeliveryLeaseKey {
-            DeliveryLeaseKey::from_turn_key(TurnKey::new(ChannelId::new(7), 11, 0))
+            from_turn_key(TurnKey::new(ChannelId::new(7), 11, 0))
         }
 
         #[test]

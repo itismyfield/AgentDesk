@@ -6,6 +6,7 @@ use super::super::outbound::delivery_record as dr;
 #[cfg(unix)]
 use super::super::tmux::tmux_watcher::terminal_long_chunks as watcher_mutation;
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 
 // #3089 A5: `pub(super)` so the `terminal_controller_cutover` sibling reproduces
 // the legacy per-arm cleanup record (the controller's `post_send_finalize` no-ops
@@ -586,12 +587,7 @@ pub(super) fn bridge_delivery_lease_key_for_inflight(
     generation: u64,
     inflight: &crate::services::discord::inflight::InflightTurnState,
 ) -> crate::services::discord::DeliveryLeaseKey {
-    crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
-        watcher_owner_channel_id,
-        generation,
-        inflight,
-        "bridge",
-    )
+    from_inflight_state_for_site(watcher_owner_channel_id, generation, inflight, "bridge")
 }
 
 pub(super) fn bridge_delivery_lease_for_inflight(
@@ -1600,6 +1596,7 @@ mod tests {
     // `start_paused` keeps the heartbeat's `tokio::time::interval` from doing real
     // sleeps; the lease deadline reclaim is driven via explicit `now_ms` args.
     mod bridge_delivery_lease {
+        use crate::services::discord::delivery_lease_cell::key::from_turn_key;
         use crate::services::discord::turn_finalizer::TurnKey;
         use crate::services::discord::{
             DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
@@ -1621,7 +1618,7 @@ mod tests {
         }
 
         fn turn(user_msg_id: u64) -> DeliveryLeaseKey {
-            DeliveryLeaseKey::from_turn_key(TurnKey::new(channel(), user_msg_id, 1))
+            from_turn_key(TurnKey::new(channel(), user_msg_id, 1))
         }
 
         #[test]
@@ -1943,7 +1940,7 @@ mod tests {
             // leases on its own `channel_id` == owner).
             let owner_cell = shared.delivery_lease(owner_ch);
             let watcher = LeaseHolder::Watcher { instance_id: 70 };
-            let watcher_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner_ch, 99, 1));
+            let watcher_turn = from_turn_key(TurnKey::new(owner_ch, 99, 1));
             assert!(owner_cell.try_acquire(
                 watcher_turn,
                 watcher,
@@ -1954,7 +1951,7 @@ mod tests {
 
             // P1-a fix: the bridge acquires on `watcher_owner_channel_id` (the OWNER
             // channel) → SAME cell → B2-skip (contention detected, NOT both-deliver).
-            let bridge_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(owner_ch, 99, 1));
+            let bridge_turn = from_turn_key(TurnKey::new(owner_ch, 99, 1));
             assert!(
                 matches!(
                     BridgeDeliveryLease::acquire(&shared, owner_ch, bridge_turn, 0, Some(64)),
@@ -1966,7 +1963,7 @@ mod tests {
             // Regression contrast: keying on the unrelated DISPATCH channel hits a
             // DIFFERENT cell → the bridge would WRONGLY acquire (the pre-fix
             // duplicate). This documents WHY the bridge must use the owner channel.
-            let dispatch_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(dispatch_ch, 99, 1));
+            let dispatch_turn = from_turn_key(TurnKey::new(dispatch_ch, 99, 1));
             assert!(
                 matches!(
                     BridgeDeliveryLease::acquire(&shared, dispatch_ch, dispatch_turn, 0, Some(64)),
@@ -2242,10 +2239,9 @@ mod tests {
         use super::super::{BridgeDeliveryLease, BridgeLeaseAcquire};
         #[cfg(unix)]
         use super::super::{CodexRange, PinnedBridgeCommit, dr};
+        use crate::services::discord::delivery_lease_cell::key::from_turn_key;
         use crate::services::discord::turn_finalizer::TurnKey;
-        use crate::services::discord::{
-            DeliveryLeaseKey, LeaseOutcome, make_shared_data_for_tests,
-        };
+        use crate::services::discord::{LeaseOutcome, make_shared_data_for_tests};
         use crate::services::provider::ProviderKind;
         use poise::serenity_prelude::ChannelId;
 
@@ -2259,7 +2255,7 @@ mod tests {
             match BridgeDeliveryLease::acquire(
                 shared,
                 ch,
-                DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 1)),
+                from_turn_key(TurnKey::new(ch, user_msg_id, 1)),
                 0,
                 Some(64),
             ) {
@@ -2494,8 +2490,9 @@ mod relay_state_contract_refs {
 mod s2a1_bridge_tests {
     use super::*;
     use crate::services::cluster::stream_relay::source_read_proof::tests::seal;
+    use crate::services::discord::LeaseOutcome;
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::turn_finalizer::TurnKey;
-    use crate::services::discord::{DeliveryLeaseKey, LeaseOutcome};
 
     #[test]
     fn s2a1_bridge_optional_session_noop_movement_and_heartbeat_are_preserved() {
@@ -2558,7 +2555,7 @@ mod s2a1_bridge_tests {
             if outcome == LeaseOutcome::Delivered {
                 crate::services::cluster::stream_relay::source_read_proof::tests::exhaust_revision(&session);
             }
-                let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 11, 0));
+                let key = from_turn_key(TurnKey::new(channel, 11, 0));
                 let BridgeLeaseAcquire::Held(lease) =
                     BridgeDeliveryLease::acquire(&shared, channel, key, 100, Some(300))
                 else {

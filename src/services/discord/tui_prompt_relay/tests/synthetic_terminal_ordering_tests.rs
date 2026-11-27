@@ -1,5 +1,6 @@
 //! The actual synthetic adapter must retain A until terminal transport settles.
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 
 #[derive(Default)]
 pub(super) struct TerminalBarrier {
@@ -102,7 +103,7 @@ fn terminal_ordering_fixture(
             let row_path = crate::services::discord::inflight::inflight_state_path(
                 &crate::services::discord::inflight::inflight_runtime_root().unwrap(), &provider, channel.get());
             let lock_path = row_path.with_extension("json.lock");
-            let holder_key = crate::services::discord::DeliveryLeaseKey::from_inflight_state_for_site(
+            let holder_key = from_inflight_state_for_site(
                 channel, shared.restart.current_generation, &original_row, "bridge");
             let holder = crate::services::discord::LeaseHolder::Watcher { instance_id: 5833 };
             let cell = shared.delivery_lease(channel);

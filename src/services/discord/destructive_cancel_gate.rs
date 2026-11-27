@@ -9,6 +9,7 @@ use super::{DeliveryLeaseKey, SharedData, inflight, mailbox_snapshot};
 use destructive_cancel_capture::{CaptureProgressEvidence, fresh_watcher_heartbeat_blocks_rebind};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 use crate::services::provider::ProviderKind;
 
 #[cfg(not(test))]
@@ -105,7 +106,7 @@ impl DestructiveCancelProbeSnapshot {
             watcher_owner_channel,
             pin.tmux_session_name.as_deref(),
         );
-        let delivery_lease_key = DeliveryLeaseKey::from_inflight_state_for_site(
+        let delivery_lease_key = from_inflight_state_for_site(
             watcher_owner_channel,
             shared.restart.current_generation,
             state,

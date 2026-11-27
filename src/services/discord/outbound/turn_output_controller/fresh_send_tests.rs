@@ -5,13 +5,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use poise::serenity_prelude::{ChannelId, MessageId};
 
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_turn_key;
 use crate::services::discord::formatting::ReplaceLongMessageOutcome;
 use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
 use crate::services::discord::inflight::RelayOwnerKind;
 use crate::services::discord::outbound::delivery_record;
 use crate::services::discord::placeholder_controller::PlaceholderController;
 use crate::services::discord::turn_finalizer::TurnKey;
-use crate::services::discord::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseSnapshot};
+use crate::services::discord::{DeliveryLeaseCell, LeaseHolder, LeaseSnapshot};
 use crate::services::provider::ProviderKind;
 
 struct CountingGateway {
@@ -119,7 +120,7 @@ fn ctx<'a>(
     let turn = TurnKey::new(channel, 4046, 1);
     TurnOutputCtx {
         turn,
-        lease_key: Some(DeliveryLeaseKey::from_turn_key(turn)),
+        lease_key: Some(from_turn_key(turn)),
         owner: RelayOwnerKind::Watcher,
         holder: LeaseHolder::Sink,
         lease,
@@ -279,7 +280,7 @@ fn no_range_pseudo_range_lease_closes_concurrent_dedup_gap() {
     let controller = PlaceholderController::default();
     let gateway = CountingGateway::new();
     let turn = TurnKey::new(channel, 4046, 1);
-    let key = DeliveryLeaseKey::from_turn_key(turn);
+    let key = from_turn_key(turn);
     let expected = super::fresh_send::pseudo_range(4096, body);
     assert!(lease.try_acquire(
         key.clone(),

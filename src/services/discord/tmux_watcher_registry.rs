@@ -21,7 +21,8 @@ pub(in crate::services::discord) use session_binding::{
 };
 
 pub(in crate::services::discord) use fences::{
-    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, WatcherIdentityFence, capture_watcher_identity_fence,
+    execution_identity_mode,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use fences::{

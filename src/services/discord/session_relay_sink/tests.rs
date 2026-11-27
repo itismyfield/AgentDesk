@@ -3,6 +3,7 @@ use super::idle_jsonl::idle_jsonl_payload_contains_init_event;
 use super::*;
 use crate::services::agent_protocol::TaskNotificationKind;
 use crate::services::cluster::session_matcher::{MatchedChannel, expected_rollout_path_for};
+use crate::services::discord::delivery_lease_cell::key::from_turn_key;
 use crate::services::discord::inflight::{RelayOwnerKind, TurnSource};
 use crate::services::tui_prompt_dedupe::{ExternalInputRelayLease, ExternalInputRelayOwner};
 
@@ -1483,6 +1484,8 @@ fn idle_range_commit_requires_current_generation_and_persists_frontier() {
 
 #[test]
 fn same_id0_turn_frame_and_inflight_derive_equal_delivery_lease_key() {
+    use crate::services::discord::delivery_lease_cell::key::from_inflight_state;
+
     let temp = tempfile::TempDir::new().expect("temp runtime root");
     let _root = crate::config::set_agentdesk_root_for_test(temp.path());
 
@@ -1507,8 +1510,7 @@ fn same_id0_turn_frame_and_inflight_derive_equal_delivery_lease_key() {
 
     let frame_key =
         delivery_lease_key_for_frame(channel, generation, &delivery, Some(start_offset));
-    let inflight_key =
-        super::super::DeliveryLeaseKey::from_inflight_state(channel, generation, &inflight);
+    let inflight_key = from_inflight_state(channel, generation, &inflight);
 
     assert_eq!(
         frame_key, inflight_key,
@@ -1644,7 +1646,7 @@ async fn run_short_replace_controller(
         &gateway,
         toc::TurnOutputCtx {
             turn,
-            lease_key: Some(super::super::DeliveryLeaseKey::from_turn_key(turn)),
+            lease_key: Some(from_turn_key(turn)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: super::super::LeaseHolder::Sink,
             lease: &*cell,
@@ -2459,7 +2461,7 @@ fn controller_skips_empty_body_so_cutover_gate_keeps_it_legacy() {
         &gateway,
         toc::TurnOutputCtx {
             turn,
-            lease_key: Some(super::super::DeliveryLeaseKey::from_turn_key(turn)),
+            lease_key: Some(from_turn_key(turn)),
             owner: RelayOwnerKind::SessionBoundRelay,
             holder: super::super::LeaseHolder::Sink,
             lease: &*cell,
@@ -3672,6 +3674,7 @@ fn lease_guard_drop_clears_own_lease_and_is_inert_for_foreign_owner() {
 /// cell the watcher gate reads.
 mod inflight_sink_marker {
     use super::super::SinkDeliveryLeaseGuard;
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::turn_finalizer::TurnKey;
     use crate::services::discord::{
         DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot,
@@ -3683,7 +3686,7 @@ mod inflight_sink_marker {
     const END: u64 = 200;
 
     fn lease_key(ch: ChannelId) -> DeliveryLeaseKey {
-        DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, 5, 0))
+        from_turn_key(TurnKey::new(ch, 5, 0))
     }
 
     /// (a) SLOW SINK IN FLIGHT: acquiring the guard sets the cell to

@@ -3492,6 +3492,7 @@ mod delivery_lease_heartbeat {
         DeliveryLeaseHeartbeat, WATCHER_DELIVERY_LEASE_DEADLINE_MS,
         WATCHER_DELIVERY_LEASE_HEARTBEAT_MS,
     };
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::turn_finalizer::TurnKey;
     use crate::services::discord::{
         DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
@@ -3511,7 +3512,7 @@ mod delivery_lease_heartbeat {
     }
 
     fn lease_turn(ch: ChannelId, user_msg_id: u64) -> DeliveryLeaseKey {
-        DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, user_msg_id, 0))
+        from_turn_key(TurnKey::new(ch, user_msg_id, 0))
     }
 
     /// (a) A send that runs LONGER than the (short) deadline, but with the
@@ -3687,6 +3688,7 @@ mod watcher_short_replace_controller {
         WatcherShortReplaceLocals, WatcherShortReplaceResult, apply_watcher_short_replace_result,
         deliver_short_replace_via_controller, watcher_terminal_lease_range,
     };
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::formatting::ReplaceLongMessageOutcome;
     use crate::services::discord::gateway::{GatewayFuture, TurnGateway};
     use crate::services::discord::inflight::RelayOwnerKind;
@@ -3915,7 +3917,7 @@ mod watcher_short_replace_controller {
         TurnKey::new(ch(), 11, 0)
     }
     fn lease_key() -> DeliveryLeaseKey {
-        DeliveryLeaseKey::from_turn_key(turn())
+        from_turn_key(turn())
     }
     fn watcher() -> LeaseHolder {
         LeaseHolder::Watcher {
@@ -4454,9 +4456,7 @@ mod watcher_short_replace_controller {
                 &gw,
                 toc::TurnOutputCtx {
                     turn: turn(),
-                    lease_key: Some(crate::services::discord::DeliveryLeaseKey::from_turn_key(
-                        turn(),
-                    )),
+                    lease_key: Some(from_turn_key(turn())),
                     owner: RelayOwnerKind::Watcher,
                     holder: watcher(),
                     lease: &*cell,
@@ -5280,9 +5280,10 @@ pub(super) mod streaming_harness_tests;
 #[test]
 fn s2a1_actor_commit_entry_preserves_outcomes_and_invalidates_only_delivered_movement() {
     use crate::services::cluster::stream_relay::source_read_proof::tests::seal;
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::turn_finalizer::TurnFinalizer;
     use crate::services::discord::turn_finalizer::TurnKey;
-    use crate::services::discord::{DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
+    use crate::services::discord::{LeaseHolder, LeaseOutcome};
     let _host = crate::config::pin_runtime_host_for_test();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -5316,7 +5317,7 @@ fn s2a1_actor_commit_entry_preserves_outcomes_and_invalidates_only_delivered_mov
             );
             let actor = TurnFinalizer::spawn();
             let lease = shared.delivery_lease(channel);
-            let key = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 11, 0));
+            let key = from_turn_key(TurnKey::new(channel, 11, 0));
             let holder = LeaseHolder::Watcher { instance_id: 1 };
             assert!(lease.try_acquire(key.clone(), holder, 100, 300, 5_000));
             assert!(

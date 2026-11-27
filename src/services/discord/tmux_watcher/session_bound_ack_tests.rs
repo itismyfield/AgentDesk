@@ -447,6 +447,7 @@ mod inflight_sink_marker_gate {
         WatcherTerminalResendAction, watcher_terminal_resend_action,
         watcher_terminal_resend_action_gated,
     };
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::turn_finalizer::TurnKey;
     use crate::services::discord::{
         DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome, LeaseSnapshot, lease_now_ms,
@@ -460,7 +461,7 @@ mod inflight_sink_marker_gate {
     const NOW: u64 = 50_000;
 
     fn turn() -> DeliveryLeaseKey {
-        DeliveryLeaseKey::from_turn_key(TurnKey::new(ChannelId::new(7201), 9, 0))
+        from_turn_key(TurnKey::new(ChannelId::new(7201), 9, 0))
     }
 
     /// Unleased → behaves EXACTLY as the ungated reconciliation (SendFull when
@@ -626,7 +627,7 @@ mod inflight_sink_marker_gate {
     fn dead_sink_marker_reclaimed_then_resent_no_blackhole() {
         let ch = ChannelId::new(7202);
         let cell = DeliveryLeaseCell::new(ch);
-        let sink_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, 9, 0));
+        let sink_turn = from_turn_key(TurnKey::new(ch, 9, 0));
         let now = lease_now_ms();
         let deadline = now.saturating_add(10);
         // Sink set the marker then "died" (no heartbeat renews it).
@@ -644,7 +645,7 @@ mod inflight_sink_marker_gate {
         // replacement watcher re-acquires and re-delivers (no black-hole).
         assert!(cell.reclaim_if_expired(past));
         assert!(matches!(cell.read(), LeaseSnapshot::Unleased));
-        let watcher_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, 9, 0));
+        let watcher_turn = from_turn_key(TurnKey::new(ch, 9, 0));
         assert!(
             cell.try_acquire(
                 watcher_turn,
@@ -665,7 +666,7 @@ mod inflight_sink_marker_gate {
     fn reclaim_then_late_sink_commit_cannot_corrupt_lease() {
         let ch = ChannelId::new(7203);
         let cell = DeliveryLeaseCell::new(ch);
-        let sink_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(ch, 9, 0));
+        let sink_turn = from_turn_key(TurnKey::new(ch, 9, 0));
         let now = lease_now_ms();
         let deadline = now.saturating_add(10);
         assert!(cell.try_acquire(sink_turn.clone(), LeaseHolder::Sink, START, END, deadline));

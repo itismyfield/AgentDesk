@@ -1,6 +1,7 @@
 use super::*;
 use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::discord::SharedData;
+use crate::services::discord::delivery_lease_cell::key::from_turn_key;
 use crate::services::discord::formatting::rollback_transport_test_hook;
 use crate::services::discord::gateway::DiscordGateway;
 use crate::services::provider::ProviderKind;
@@ -190,7 +191,7 @@ async fn output_origin_real_gateway_seventy_paced_chunks_commit_pg() {
                 gateway.as_ref(),
                 TurnOutputCtx {
                     turn,
-                    lease_key: Some(DeliveryLeaseKey::from_turn_key(turn)),
+                    lease_key: Some(from_turn_key(turn)),
                     owner: RelayOwnerKind::Watcher,
                     holder: LeaseHolder::Watcher { instance_id: 1 },
                     lease: &lease,

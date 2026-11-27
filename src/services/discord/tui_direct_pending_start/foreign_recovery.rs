@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::discord::tmux_watcher_registry::{
-    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, capture_watcher_identity_fence, execution_identity_mode,
 };
 
 const STALE_FOREIGN_CANCEL_IDENTITY_SITE: &str = "tui_direct_stale_foreign_cancel";
@@ -108,7 +108,7 @@ pub(super) async fn submit_stale_foreign_inflight_cancel(
             watcher_cancel::pin_watcher_for_tmux_session(&shared.tmux_watchers, tmux_session)
         })
         .map(|pinned| {
-            let identity_fence = WatcherIdentityFence::capture(
+            let identity_fence = capture_watcher_identity_fence(
                 execution_identity_mode(),
                 STALE_FOREIGN_CANCEL_IDENTITY_SITE,
                 &pinned.tmux_session_name,

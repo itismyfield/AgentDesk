@@ -6,7 +6,7 @@ use super::super::{
     mailbox_finish_turn_if_matches_episode_started_before, schedule_deferred_idle_queue_kickoff,
 };
 use crate::services::discord::tmux_watcher_registry::{
-    TerminalDeliveryFence, WatcherIdentityFence, execution_identity_mode,
+    TerminalDeliveryFence, capture_watcher_identity_fence, execution_identity_mode,
 };
 
 /// #5071 T3-A1 observation label for the dead-frontier automatic watcher cancel.
@@ -333,7 +333,7 @@ async fn apply_relay_recovery_decision_admitted(
                             // closure above because the marker read is file I/O
                             // and must not run under the dashmap ref.
                             .map(|(tmux_session_name, output_path, cancel)| {
-                                let identity_fence = WatcherIdentityFence::capture(
+                                let identity_fence = capture_watcher_identity_fence(
                                     execution_identity_mode(),
                                     DEAD_FRONTIER_CANCEL_IDENTITY_SITE,
                                     &tmux_session_name,

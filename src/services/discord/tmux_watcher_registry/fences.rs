@@ -77,18 +77,16 @@ pub(in crate::services::discord) use crate::services::engine_runtime::relay_stat
     TerminalDeliveryFence, WatcherIdentityFence,
 };
 
-impl WatcherIdentityFence {
-    pub(in crate::services::discord) fn capture(
-        mode: ExecutionIdentityMode,
-        site: &'static str,
-        tmux_session_name: &str,
-    ) -> Self {
-        let captured_spawn_nonce = mode
-            .consults_spawn_nonce()
-            .then(|| capture_session_spawn_nonce(tmux_session_name))
-            .flatten();
-        Self::from_capture(mode, site, tmux_session_name, captured_spawn_nonce)
-    }
+pub(in crate::services::discord) fn capture_watcher_identity_fence(
+    mode: ExecutionIdentityMode,
+    site: &'static str,
+    tmux_session_name: &str,
+) -> WatcherIdentityFence {
+    let captured_spawn_nonce = mode
+        .consults_spawn_nonce()
+        .then(|| capture_session_spawn_nonce(tmux_session_name))
+        .flatten();
+    WatcherIdentityFence::from_capture(mode, site, tmux_session_name, captured_spawn_nonce)
 }
 
 pub(super) fn observe_identity(

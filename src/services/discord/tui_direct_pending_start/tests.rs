@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 
 /// The presence index (`PRESENT`) and the durable store root are PROCESS-WIDE
 /// statics. Any test that calls `persist` / `delete` / `reset_present_for_tests`
@@ -1431,7 +1432,7 @@ async fn stale_foreign_demote_under_delivery_lease(
     // The key the production fence re-reads against, derived exactly the way
     // `DestructiveCancelProbeSnapshot::from_pinned_state` derives it — from
     // the same inflight row this fixture just wrote.
-    let matched_key = super::super::DeliveryLeaseKey::from_inflight_state_for_site(
+    let matched_key = from_inflight_state_for_site(
         channel,
         shared.restart.current_generation,
         &state,

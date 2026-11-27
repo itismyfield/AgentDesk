@@ -6,6 +6,7 @@ use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
 
 use super::super::{formatting, recovery_paths};
 use super::RecoveryRelayOutcome;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 use crate::services::discord::inflight::{opt_channel_id, opt_message_id};
 use crate::services::discord::outbound::body_census::{BodyOffer, BodySource};
 use crate::services::discord::outbound::{delivery_frontier_probe, delivery_record};
@@ -253,7 +254,7 @@ impl RecoveryDeliveryContext {
             channel_id,
             record_channel_id,
             tmux_session_name: state.tmux_session_name.clone(),
-            lease_key: DeliveryLeaseKey::from_inflight_state_for_site(
+            lease_key: from_inflight_state_for_site(
                 channel_id,
                 delivery_generation,
                 state,

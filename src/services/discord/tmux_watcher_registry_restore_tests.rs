@@ -2,7 +2,7 @@ use super::{
     Arc, ChannelId, DeliveryLeaseCell, DeliveryLeaseKey, TmuxWatcherHandle, TmuxWatcherRegistry,
     tmux_watcher_now_ms,
 };
-use super::tmux_watcher_registry::TerminalDeliveryFence;
+use super::tmux_watcher_registry::{TerminalDeliveryFence, capture_watcher_identity_fence};
 
 /// #5071 relay-tail S4 r2 (P1-2 ②): the delivery conjunct is no longer optional
 /// on the fenced view, so every identity-fence test has to supply one. These
@@ -247,7 +247,6 @@ fn tmux_session_is_stale_does_not_fold_cancel_flag_into_heartbeat() {
 #[cfg(unix)]
 #[test]
 fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
-    use super::tmux_watcher_registry::WatcherIdentityFence;
     use crate::config::ExecutionIdentityMode;
 
     const SITE: &str = "t3a1_readmitted_row_declared_limit";
@@ -270,7 +269,7 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
     crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux).expect("spawn nonce");
 
     // The complete T3-R2 pin, captured the way the TUI call site captures it.
-    let fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Enforce, SITE, tmux)
+    let fence = capture_watcher_identity_fence(ExecutionIdentityMode::Enforce, SITE, tmux)
         .with_pinned_binding(owner, &pinned_output_path);
 
     // A -> B: a genuinely different row takes the session key — another owner,
@@ -286,7 +285,7 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
 
     // Control: the fence really is enforcing at this point. Pinning B's pointer
     // gets past `Arc::ptr_eq` and is then refused by the owner/output conjunct.
-    let control = WatcherIdentityFence::capture(ExecutionIdentityMode::Enforce, SITE, tmux)
+    let control = capture_watcher_identity_fence(ExecutionIdentityMode::Enforce, SITE, tmux)
         .with_pinned_binding(owner, &pinned_output_path);
     assert!(
         registry
@@ -324,8 +323,8 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
 // inside the registry lock — and `Legacy` threw both answers away. This drives a
 // whole Legacy decision over a session whose marker exists and is readable, and
 // asserts the read tally for that session never moves while the removal still
-// happens. Removing either short-circuit (`WatcherIdentityFence::capture` or the
-// top of `destruction_permitted_under_identity`) fails the tally assertion.
+// happens. The tally covers both `capture_watcher_identity_fence` and
+// `destruction_permitted_under_identity`.
 //
 // The `Enforce` half is the control: the same decision on a second session still
 // makes both reads and still permits, so the short-circuits did not silence the
@@ -336,7 +335,6 @@ fn value_cas_declared_non_guarantee_readmitted_identical_row_passes_enforce() {
 #[test]
 fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
     use super::tmux::execution_identity::spawn_nonce_reads_for;
-    use super::tmux_watcher_registry::WatcherIdentityFence;
     use crate::config::ExecutionIdentityMode;
 
     const SITE: &str = "t3a1_legacy_dead_io";
@@ -368,7 +366,7 @@ fn legacy_decision_reads_no_spawn_nonce_marker_and_still_removes() {
         crate::services::tmux_common::spawn_markers::write_spawn_nonce(tmux).expect("spawn nonce");
         let baseline = spawn_nonce_reads_for(tmux);
 
-        let fence = WatcherIdentityFence::capture(mode, SITE, tmux)
+        let fence = capture_watcher_identity_fence(mode, SITE, tmux)
             .with_pinned_binding(owner, &pinned_output_path);
         assert!(
             registry
@@ -489,9 +487,7 @@ fn channel_binding_output_path_follows_the_native_transcript_handoff() {
 // the acquirer wins immediately and still sees the row registered.
 #[test]
 fn delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire() {
-    use super::tmux_watcher_registry::{
-        WatcherIdentityFence, set_delivery_fence_permitted_hook_for_tests,
-    };
+    use super::tmux_watcher_registry::set_delivery_fence_permitted_hook_for_tests;
     use crate::config::ExecutionIdentityMode;
     use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -549,7 +545,7 @@ fn delivery_fence_judgment_and_destruction_are_atomic_against_a_racing_acquire()
 
     // `Legacy` reads no `.spawn_nonce` marker and pins no binding, so the
     // identity conjunct cannot be what decides this run.
-    let identity_fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Legacy, SITE, tmux);
+    let identity_fence = capture_watcher_identity_fence(ExecutionIdentityMode::Legacy, SITE, tmux);
     let delivery_fence =
         TerminalDeliveryFence::capture(Arc::clone(&lease), contended_key.clone(), SITE);
     let removed = registry
@@ -711,7 +707,6 @@ fn watcher_reservation_unpair_is_payload_free_and_outer_clear_is_once() {
 
 #[test]
 fn watcher_reservation_wrong_requester_fenced_removal_preserves_requester() {
-    use super::tmux_watcher_registry::WatcherIdentityFence;
     use crate::config::ExecutionIdentityMode;
 
     const SITE: &str = "s2a_wrong_requester_cell";
@@ -733,7 +728,7 @@ fn watcher_reservation_wrong_requester_fenced_removal_preserves_requester() {
     let requester_cancel = Arc::clone(&requester_handle.cancel);
     registry.insert(requester, requester_handle);
 
-    let fence = WatcherIdentityFence::capture(ExecutionIdentityMode::Legacy, SITE, owner_tmux);
+    let fence = capture_watcher_identity_fence(ExecutionIdentityMode::Legacy, SITE, owner_tmux);
     assert!(registry
         .under_identity_fence(fence)
         .with_terminal_delivery_fence(permissive_delivery_fence(requester, SITE))

@@ -1057,6 +1057,7 @@ where
 mod tests {
     use super::*;
     use crate::services::discord::LeaseSnapshot;
+    use crate::services::discord::delivery_lease_cell::key::from_turn_key;
     use crate::services::discord::formatting::{MonitorHandoffReason, ReplaceLongMessageOutcome};
     use crate::services::discord::gateway::GatewayFuture;
     use crate::services::discord::placeholder_controller::PlaceholderActiveInput;
@@ -1322,7 +1323,7 @@ mod tests {
     }
 
     fn lease_key(channel_id: ChannelId) -> DeliveryLeaseKey {
-        DeliveryLeaseKey::from_turn_key(turn_key(channel_id))
+        from_turn_key(turn_key(channel_id))
     }
 
     fn placeholder_key(channel_id: ChannelId, message_id: MessageId) -> PlaceholderKey {
@@ -2156,7 +2157,7 @@ mod tests {
             &gateway,
             TurnOutputCtx {
                 turn,
-                lease_key: Some(DeliveryLeaseKey::from_turn_key(turn)),
+                lease_key: Some(from_turn_key(turn)),
                 owner: RelayOwnerKind::SessionBoundRelay,
                 holder: LeaseHolder::Sink,
                 lease: lease.as_ref(),
@@ -2223,7 +2224,7 @@ mod tests {
         // Re-acquirable proof: the cell is genuinely free, not stranded leased.
         assert!(
             lease.try_acquire(
-                DeliveryLeaseKey::from_turn_key(turn),
+                from_turn_key(turn),
                 LeaseHolder::Sink,
                 0,
                 body.len() as u64,
@@ -3141,7 +3142,7 @@ mod tests {
     /// `try_acquire` LOSES — the precondition for both acquire-failure-mode
     /// tests. Returns the foreign holder/turn/range that owns the cell.
     fn occupy_lease_with_foreign_holder(lease: &RecordingLease, channel: ChannelId) {
-        let foreign_turn = DeliveryLeaseKey::from_turn_key(TurnKey::new(channel, 99, 1));
+        let foreign_turn = from_turn_key(TurnKey::new(channel, 99, 1));
         let ok = lease.try_acquire(
             foreign_turn,
             LeaseHolder::Watcher { instance_id: 7 },

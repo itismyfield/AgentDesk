@@ -1,5 +1,6 @@
 use super::super::relay_health::RelayStallClassifier;
 use super::*;
+use crate::services::discord::delivery_lease_cell::key::from_inflight_state_for_site;
 use crate::services::provider::{CancelToken, ProviderKind};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::sync::Arc;
@@ -939,7 +940,7 @@ fn live_turn_delivery_lease_key(
 ) -> super::super::DeliveryLeaseKey {
     let state = super::super::inflight::load_inflight_state(provider, channel.get())
         .expect("post-gate inflight row");
-    super::super::DeliveryLeaseKey::from_inflight_state_for_site(
+    from_inflight_state_for_site(
         channel,
         shared.restart.current_generation,
         &state,
