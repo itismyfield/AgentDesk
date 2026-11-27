@@ -3,7 +3,8 @@ use crate::services::campaign_execution::{
     control::test_support as domain,
     evidence_gate::{
         GateReason, StageAssessment, Verdict,
-        tests::{OUTPUT, actions, assess, collected, registered, seal},
+        test_support::{OUTPUT, seal},
+        tests::{actions, assess, collected, registered},
     },
     model::{ActionState, AttemptBinding, Role, Run, Stage},
     profile::{ReviewExtent, ReviewRange, TestOutcome},

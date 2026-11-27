@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use super::super::{control::test_support as domain, verification_run::test_support as a1};
 use crate::domain::campaign::{
+    candidate_seal::CandidateSeal,
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
     model::{Action, ActionState, AttemptBinding, Repository},
     profile::{ExecutedTest, TestOutcome},
@@ -13,6 +14,7 @@ use crate::domain::campaign::{
 };
 
 pub const REPO: &str = "github.com/itismyfield/AgentDesk";
+pub const OUTPUT: &str = "output-h1";
 
 pub fn workspace(head: &str) -> WorkspaceObservation {
     WorkspaceObservation {
@@ -36,6 +38,19 @@ pub fn claim(binding: &AttemptBinding, output: &str) -> EvidenceEnvelope {
         payload,
     };
     EvidenceEnvelope::from_tui(submission, binding, "pin", domain::now()).unwrap()
+}
+
+pub fn seal(binding: &AttemptBinding) -> CandidateSeal {
+    let claim = claim(binding, OUTPUT);
+    CandidateSeal::seal(
+        binding,
+        &claim,
+        REPO,
+        &workspace(OUTPUT),
+        "pin",
+        domain::now(),
+    )
+    .unwrap()
 }
 
 // Runs every fixed phase of a registered V whose subject is bound, then stores collect()'s result.

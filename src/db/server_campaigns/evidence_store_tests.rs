@@ -6,8 +6,7 @@ use crate::services::campaign_execution::{
     evidence::EvidenceEnvelope,
     evidence_gate::{
         GATE_RULE_VERSION,
-        test_support::{claim, workspace},
-        tests::{OUTPUT, seal},
+        test_support::{OUTPUT, claim, seal, workspace},
     },
 };
 use crate::services::krx_db_tests::server_campaigns_storage::Harness;

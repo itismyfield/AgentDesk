@@ -3,7 +3,8 @@ use crate::services::campaign_execution::{
     control::test_support as domain,
     evidence_gate::{
         GateReason,
-        tests::{OUTPUT, collected, seal},
+        test_support::{OUTPUT, seal},
+        tests::collected,
     },
     model::{AttemptOutcome, CampaignState, NodeRuntime, Role, Stage},
     profile::TestOutcome,

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use super::test_support::{REPO, a1_finish, claim, workspace};
+use super::test_support::{OUTPUT, REPO, a1_finish, claim, seal, workspace};
 use super::*;
 use crate::services::campaign_execution::{
     candidate_seal::CandidateSeal,
@@ -11,21 +11,7 @@ use crate::services::campaign_execution::{
     verification_run::{test_support as a1, *},
 };
 
-pub(crate) const OUTPUT: &str = "output-h1";
 const CHECK: &str = "targeted-tests";
-
-pub(crate) fn seal(binding: &AttemptBinding) -> CandidateSeal {
-    let claim = claim(binding, OUTPUT);
-    CandidateSeal::seal(
-        binding,
-        &claim,
-        REPO,
-        &workspace(OUTPUT),
-        "pin",
-        domain::now(),
-    )
-    .unwrap()
-}
 
 pub(crate) fn registered(binding: &AttemptBinding, cycle: u32) -> VerificationRun {
     let execution_id = execution_id(binding, cycle, CHECK);

@@ -3,8 +3,8 @@ use crate::services::campaign_execution::{
     adk_workspace::WorkspaceObservation,
     control::test_support as domain,
     evidence_gate::{
-        test_support::{REPO, claim, workspace},
-        tests::{OUTPUT, collected, plan, seal},
+        test_support::{OUTPUT, REPO, claim, seal, workspace},
+        tests::{collected, plan},
     },
     profile::{ContractError, TestOutcome},
     verification_run::VerificationCollection,
