@@ -270,6 +270,15 @@ impl Reader {
     }
 }
 
+#[cfg(unix)]
+struct QuietOffer {
+    origin: super::super::input_notices::NoticeOrigin,
+    binding_tail: u64,
+    capture: Fingerprint,
+    registry_revisions: Vec<u64>,
+    anchors_settled: bool,
+}
+
 #[derive(Default)]
 pub(super) struct NativeSources {
     #[cfg(unix)]
@@ -341,21 +350,21 @@ impl NativeSources {
         channel: u64,
         source: &SourceId,
         registrations: Vec<super::super::input_facts::native::Registration>,
-    ) {
+    ) -> bool {
         use super::super::input_facts::native::registrations_fingerprint;
         let Some(Ok(projection)) = self.seeds.get(source).map(|seed| seed.projection()) else {
-            return;
+            return false;
         };
         let registrations: Vec<_> = registrations
             .into_iter()
-            .filter(|r| r.ticket.channel_id == channel)
+            .filter(|r| r.ticket.channel_id == channel && !r.not_sent)
             .collect();
         let Ok(fingerprint) = registrations_fingerprint(&registrations) else {
-            return;
+            return false;
         };
         let key = (projection.through(), fingerprint);
         self.anchors
-            .settle(source, key, || projection.memberships(&registrations));
+            .settle(source, key, || projection.memberships(&registrations))
     }
 
     fn append(&mut self, source: &SourceId, record: &CapturedRecord) {
@@ -605,6 +614,21 @@ impl<B: BindingEvents> Sources<B> {
         None
     }
 
+    /// An unread or partial tail can become terminal evidence without advancing the seed.
+    #[cfg(unix)]
+    fn complete_native_capture(&self, source: &SourceId, through: u64) -> Option<Fingerprint> {
+        let reader = self.readers.iter().find(|r| &r.source == source)?;
+        let capture = reader
+            .capture
+            .as_ref()
+            .filter(|_| reader.pending.is_none())?;
+        let fingerprint = capture.fingerprint().ok()?;
+        (through == capture.captured_through()
+            && through == capture.read_through()
+            && through == fingerprint.len)
+            .then_some(fingerprint)
+    }
+
     #[cfg(unix)]
     pub async fn offer_native(&mut self, port: &super::super::actor::native_input::NativePort) {
         port.inner.retry().await;
@@ -628,12 +652,53 @@ impl<B: BindingEvents> Sources<B> {
                 end: through,
                 line: Vec::new(),
             };
-            let Ok(origin) = self.native_origin(&source, &record, None) else {
-                continue;
+            let binding_tail = *self.notice.borrow();
+            let capture = self.complete_native_capture(&source, through);
+            let quiet = self
+                .native
+                .as_ref()
+                .and_then(|native| native.seeds.get(&source))
+                .and_then(|seed| seed.quiet.as_ref())
+                .filter(|quiet| {
+                    quiet.origin.record.end == through
+                        && quiet.binding_tail == binding_tail
+                        && capture.as_ref() == Some(&quiet.capture)
+                });
+            let (origin, known) = match quiet {
+                Some(quiet) => (
+                    quiet.origin.clone(),
+                    Some(quiet.registry_revisions.as_slice()),
+                ),
+                None => {
+                    let Ok(origin) = self.native_origin(&source, &record, None) else {
+                        continue;
+                    };
+                    (origin, None)
+                }
             };
-            let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
-                continue;
+            let mut snapshot = match port.inner.snapshot_since(origin.clone(), known).await {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => {
+                    if quiet.is_some_and(|offer| offer.anchors_settled)
+                        && let Some(native) = self.native.as_ref()
+                    {
+                        native.anchors.refresh_settled(&source, through);
+                    }
+                    continue;
+                }
+                Err(_) => {
+                    if let Some(seed) = self
+                        .native
+                        .as_mut()
+                        .and_then(|native| native.seeds.get_mut(&source))
+                    {
+                        seed.quiet = None;
+                    }
+                    continue;
+                }
             };
+            let registry_revisions = std::mem::take(&mut snapshot.registry_revisions);
+            let has_open_barrier = snapshot.has_open_barrier;
             let Some(native) = self.native.as_ref() else {
                 continue;
             };
@@ -641,6 +706,33 @@ impl<B: BindingEvents> Sources<B> {
             let Ok((mut observed, mut barriers)) =
                 native.observe(self.channel, &source, &origin, snapshot, None)
             else {
+                continue;
+            };
+            if !has_open_barrier
+                && observed.receipts.is_empty()
+                && observed.evidence.is_empty()
+                && barriers.is_empty()
+                && let Some(capture) = capture
+                && binding_tail != u64::MAX
+            {
+                let anchors_settled = native.settle_anchors(self.channel, &source, kept);
+                let Some(seed) = self
+                    .native
+                    .as_mut()
+                    .and_then(|native| native.seeds.get_mut(&source))
+                else {
+                    continue;
+                };
+                seed.quiet = Some(QuietOffer {
+                    origin,
+                    binding_tail,
+                    capture,
+                    registry_revisions,
+                    anchors_settled,
+                });
+                continue;
+            }
+            let Some(native) = self.native.as_ref() else {
                 continue;
             };
             if let Some(receipt) = observed.receipts.first() {

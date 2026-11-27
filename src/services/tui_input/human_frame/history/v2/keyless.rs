@@ -12,10 +12,14 @@ pub(in super::super) fn update<T>(
     path: &Path,
     apply: impl FnOnce(&mut Store) -> Result<T, String>,
 ) -> Result<T, String> {
-    Registry::shared(path.to_path_buf()).locked(true, |ledger| match ledger {
-        Ledger::V1 => super::super::update_v1(path, apply),
-        Ledger::V2(state) => reconcile(state, apply),
-    })
+    Registry::shared(path.to_path_buf()).locked(
+        true,
+        |_| Ok(()),
+        |ledger| match ledger {
+            Ledger::V1 => super::super::update_v1(path, apply),
+            Ledger::V2(state) => reconcile(state, apply),
+        },
+    )
 }
 
 /// Applies `apply`'s change of the owned view to keyless slots, matched by (id, path); a keyed

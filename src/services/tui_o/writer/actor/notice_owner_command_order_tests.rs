@@ -60,6 +60,8 @@ impl EvidencePort for ReceiptPort {
             Ok(Snapshot {
                 generation: 1,
                 registrations: self.registry.native_classification_registrations()?,
+                registry_revisions: Vec::new(),
+                has_open_barrier: false,
             })
         })
     }
