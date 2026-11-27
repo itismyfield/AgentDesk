@@ -482,7 +482,7 @@ pub(crate) fn clear_for_tmux(tmux_session_name: &str) {
         .retain(|pane, _| pane.tmux_session_name != tmux_session_name);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn reset_for_test() {
     let mut guard = COMPACT_TRIGGER_STATE
         .lock()
@@ -537,12 +537,12 @@ pub(crate) fn submit_under_composer_lock_for_test<T>(
 
 /// The armed flag is process-global test state. Keep every stateful test
 /// serialized so one fixture cannot clear another under normal parallel runs.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()

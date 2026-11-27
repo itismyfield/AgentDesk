@@ -8,7 +8,7 @@ mod dump_tool;
 pub(crate) mod network;
 mod session_host_label;
 pub(crate) use session_host_label::session_host_label;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use session_host_label::with_session_host_label_path_for_test;
 pub mod shell;
 pub mod tmux;

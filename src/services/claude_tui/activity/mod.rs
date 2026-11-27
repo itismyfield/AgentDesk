@@ -290,12 +290,12 @@ pub(crate) fn cached_for_channel(channel: u64) -> Option<Snapshot> {
     snapshot.current().then_some(snapshot)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn poll_for_tests() {
     poll::tick();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn revision_for_tests(session: &str) -> Option<u64> {
     let source = Source::current(session)?;
     ledger().entries.get(&source).map(|entry| entry.revision)

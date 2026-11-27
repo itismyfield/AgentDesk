@@ -104,7 +104,7 @@ export function TaskInspector({ node, nodes, live, cycles, onChoose, onOpenTask,
       <Cap><Num>{taskLabel(node)}</Num> · {campaignGroup(node) || tr("미분류", "Ungrouped")}</Cap>
       <h3 className="m-0 text-base text-[var(--fg)] [overflow-wrap:anywhere]">{campaignTaskTitle(node)}</h3>
       <Cap className="[overflow-wrap:anywhere]">{[tr(...LABELS[taskView.status]), taskView.stage].filter(Boolean).join(" · ")}</Cap>
-      {issue && <a href={issue} target="_blank" rel="noreferrer" className="truncate text-xs text-[var(--accent-fg)]">{issue.replace(/^https?:\/\//, "")}</a>}
+      {issue && <a href={issue} target="_blank" rel="noreferrer" className="inline-flex items-center truncate text-xs text-[var(--accent-fg)] hover:underline max-[899px]:min-h-11 pointer-coarse:min-h-11">{issue.replace(/^https?:\/\//, "")}</a>}
       <div className="pt-2"><Button variant="primary" onClick={() => onOpenTask(node.id)}>{tr("작업 상세 열기", "Open task details")}</Button></div>
     </InspSection>
     {cycles.map((text) => <InspSection key={text} className="bg-[var(--err-soft)]"><strong className="flex items-center gap-1.5 text-sm text-[var(--err)]"><TriangleAlert aria-hidden className="size-4 shrink-0" />{text}</strong></InspSection>)}

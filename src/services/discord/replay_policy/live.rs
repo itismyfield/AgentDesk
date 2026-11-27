@@ -81,7 +81,7 @@ impl RawObservation {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_attempt(attempt: &ExactAttempt) -> Self {
         let mut observation = Self::new(attempt);
         observation.seal = seal::Seal::fixture();
@@ -92,7 +92,7 @@ impl RawObservation {
         self.seen.push(seen);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record(&mut self, seen: Seen) {
         self.append(seen);
     }
@@ -268,7 +268,7 @@ impl LiveAttempt {
         Some((attempt.take()?, observation))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record(&self, seen: Seen) {
         lock(&self.observation).seal = seal::Seal::fixture();
         self.record_fact(seen);

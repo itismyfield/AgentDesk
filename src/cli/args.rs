@@ -183,6 +183,8 @@ pub(crate) enum Commands {
     Activity(ActivityArgs),
     /// Herdr-hosted executions on this node: read-only status, and retire of an ended one
     Herdr(crate::cli::herdr::HerdrArgs),
+    /// Ask the operator to decide, and read a Decision request
+    Decision(crate::cli::decision::DecisionArgs),
 }
 
 /// Subcommands for `adk query` (issue #2651).
@@ -775,6 +777,7 @@ mod tests {
             "machine-compare",
             "activity",
             "herdr",
+            "decision",
             "help",
         ];
 

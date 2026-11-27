@@ -1,0 +1,15 @@
+stateDiagram-v2
+    [*] --> Bound
+    Bound --> Retired: Execution end confirmed
+    Retired --> Notice: Live row end tick
+    Retired --> Retired: A new save generation becomes eligible
+    Notice --> Retired: Delivery failed
+    Notice --> Settle: Notice acknowledged and recorded
+    Notice --> Settle: Receipt already recorded for this key
+    Settle --> Retired: Settlement failed
+    Settle --> Ended: Settlement succeeded
+    Retired --> PriorGeneration: Restart
+    Notice --> PriorGeneration: Restart
+    Settle --> PriorGeneration: Restart
+    Ended --> PriorGeneration: Restart
+    PriorGeneration --> Bound: New actor and nonce

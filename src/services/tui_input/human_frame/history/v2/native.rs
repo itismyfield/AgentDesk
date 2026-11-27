@@ -543,14 +543,14 @@ impl Registry {
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn prepare_native(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.native_transaction(namespace, &ticket.key, |registration| {
             prepare_ticket(registration, ticket)
         })
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_native_outcome(
         &self,
         namespace: &str,

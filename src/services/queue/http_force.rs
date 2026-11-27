@@ -62,8 +62,8 @@ pub(super) async fn herdr_force<R: HttpTerminate>(
         hosted,
     } = selected?;
     let registry = health_registry?;
-    #[cfg(test)]
-    crate::services::discord::herdr_terminate::run_before_selection_probe().await;
+    #[cfg(any(test, feature = "test-support"))]
+    crate::services::dispatched_sessions::herdr_probe_tests::run_before_selection_probe().await;
     let record = herdr_execution(hosted.as_ref(), &identity)?;
     let provider = ProviderKind::from_str(&record.owner.provider);
     let chosen = info.match_rank == 0

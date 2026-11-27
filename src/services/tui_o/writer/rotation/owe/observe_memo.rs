@@ -19,7 +19,7 @@ struct Key {
 struct Memo {
     kept: Option<(Key, Analyzed)>,
     /// Inputs reduced through this seed, for the cost tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     reduced: usize,
 }
 
@@ -78,7 +78,7 @@ impl Seed {
         {
             return analyzed.clone();
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             memo.reduced += 1;
         }
@@ -87,7 +87,7 @@ impl Seed {
         analyzed
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn reduced(&self) -> usize {
         self.memo.lock().unwrap_or_else(|e| e.into_inner()).reduced
     }

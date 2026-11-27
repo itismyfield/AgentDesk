@@ -494,7 +494,7 @@ fn process_info(shell: Value, foreground: Option<&[u32]>) -> Value {
 
 #[test]
 fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
-    use crate::services::session_host::herdr::pane_probe::tests::{
+    use crate::services::session_host::herdr::pane_probe::test_support::{
         FakeOs, NONCE, context, env_naming,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -536,7 +536,7 @@ fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
 // The probe reads the located pane on its own connections, each from the launch's server.
 #[test]
 fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
-    use crate::services::session_host::herdr::pane_probe::tests::{
+    use crate::services::session_host::herdr::pane_probe::test_support::{
         FakeOs, NONCE, context, env_naming,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -619,36 +619,6 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
 
 #[path = "launch_policy_tests.rs"]
 mod policy;
-
-// The composed Discord scenario keeps the production socket launch adapter and scripts only OS/peer reads.
-impl SocketHerdrLaunchHost {
-    pub(crate) fn socket_rig_for_test(endpoint: HerdrEndpoint, os: Box<dyn ProcessOs>) -> Self {
-        let mut host = Self::new(vec![endpoint], HerdrSocketConfig::default());
-        host.os = os;
-        host.read_restore = |transport, _| match transport.server_witness() {
-            Ok(witness) => RestoreResume::Off { witness },
-            Err(reason) => RestoreResume::Unverified(reason),
-        };
-        host.sources.clear();
-        let (endpoint, transport) = host.endpoints.pop().unwrap();
-        let transport = Arc::try_unwrap(transport)
-            .unwrap_or_else(|_| panic!("unshared fixture transport"))
-            .with_peer_reader(Box::new(|_| {
-                Ok((
-                    7,
-                    ProcessStart {
-                        identity: StartIdentity::Darwin {
-                            seconds: 1_000,
-                            micros: 0,
-                        },
-                        wall_clock: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                    },
-                ))
-            }));
-        host.endpoints.push((endpoint, Arc::new(transport)));
-        host
-    }
-}
 
 struct InstanceBootstrapped;
 
@@ -775,8 +745,8 @@ impl super::super::wire::HerdrFraming for WirePaneTarget {
 fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts() {
     use crate::config::test_instance;
     if !test_instance::requested() {
-        let (_temp, root) = test_instance::tests::fixture();
-        let output = crate::config::test_instance::tests::command(&root)
+        let (_temp, root) = test_instance::test_support::fixture();
+        let output = crate::config::test_instance::test_support::command(&root)
             .args(["--exact", concat!(module_path!(),
                 "::test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts")
                 .strip_prefix("agentdesk::").unwrap(), "--nocapture"])

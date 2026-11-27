@@ -197,21 +197,21 @@ pub(super) fn observe_session_host_with(
 
 /// One repair the policy decided from an `observeSessionHost` answer.
 #[derive(Debug, Deserialize)]
-pub(super) struct RepairRequest {
-    session_id: i64,
+pub(crate) struct RepairRequest {
+    pub(crate) session_id: i64,
     #[serde(default)]
-    active_dispatch_id: Option<String>,
+    pub(crate) active_dispatch_id: Option<String>,
     /// The listed row's `active_turn_nonce` (`null` for none); required so no caller skips it.
     #[serde(deserialize_with = "Option::deserialize")]
-    active_turn_nonce: Option<String>,
+    pub(crate) active_turn_nonce: Option<String>,
     /// The liveness the decision was made on: `live` or `dead`.
-    observed: String,
+    pub(crate) observed: String,
     #[serde(default)]
-    fail_dispatch: bool,
+    pub(crate) fail_dispatch: bool,
     #[serde(default)]
-    fail_reason: String,
+    pub(crate) fail_reason: String,
     #[serde(default)]
-    clear_active_dispatch_id: bool,
+    pub(crate) clear_active_dispatch_id: bool,
 }
 
 pub(super) fn repair_stale_session_raw(
@@ -251,7 +251,7 @@ fn not_repaired(deferral: Deferral) -> Value {
 
 /// Re-resolves row and host, then in one transaction fails the observed dispatch, re-checks
 /// the row, turn nonce and dispatch are unchanged and marks it idle; any change rolls it back.
-pub(super) async fn repair_stale_session_pg(
+pub(crate) async fn repair_stale_session_pg(
     pool: &PgPool,
     session_key: &str,
     request: RepairRequest,

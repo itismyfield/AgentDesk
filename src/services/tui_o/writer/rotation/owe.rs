@@ -410,7 +410,7 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     /// Inputs reduced by every native seed of this channel, for the cost tests.
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn native_reductions(&self) -> usize {
         let seeds = self.native.iter().flat_map(|native| native.seeds.values());
         seeds.map(observe_memo::Seed::reduced).sum()

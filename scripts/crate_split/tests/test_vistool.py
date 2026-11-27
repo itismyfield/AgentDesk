@@ -646,6 +646,9 @@ class LoopGuard(unittest.TestCase):
                 ok, line, manifest = vistool.vistool(repo, repo / "partition.json", "LOW", out_dir=Path(tmp) / "out",
                                                      apply=True, log=lambda *a, **k: None)
             status = subprocess.run(git[:3] + ["status", "--porcelain"], capture_output=True, text=True).stdout
+            listed = (manifest.get("test_cfg_list") or {}).get("file")
+            if listed:
+                manifest["test_cfg_items"] = json.loads((Path(tmp) / "out" / listed).read_text())["items"]
             return ok, line, calls, status, (Path(tmp) / "out" / "vistool-LOW.patch").exists(), manifest
 
     def test_unrepaired_lower_visibility_error_fails_closed(self):
@@ -744,6 +747,41 @@ class LoopGuard(unittest.TestCase):
         gone = leak("crate-private", "Gone", "src/core.rs", "pub(crate) struct Token;")
         ok, line, *_ = self.scripted([([gone], [])])
         self.assertEqual((ok, line.split(" crate=")[0]), (False, "VISTOOL_FAIL lower_probe_broken"))
+
+    def test_free_fn_in_a_nested_gated_mod_inherits_the_parent_gate(self):
+        # mkrxcfg-1 review P2-2: the fn has no gate of its own, only the `#[cfg(test)] mod` around it. Without
+        # restricted_defs' block-range check it would be a gate-free restricted namesake and go glob_hidden.
+        at = []
+
+        def gated(repo):
+            core = repo / "src/core.rs"
+            text = core.read_text() + "\n#[cfg(test)]\npub(crate) mod fixtures {\n    pub(crate) mod deep {\n" \
+                                      "        pub(crate) fn seeded() {}\n    }\n}\n"
+            core.write_text(text)
+            at.append(text.split("\n").index("        pub(crate) fn seeded() {}") + 1)
+
+        use = {"level": "error", "code": {"code": "E0425"}, "_test": True, "children": [],
+               "message": "cannot find function `seeded` in module `crate::core::fixtures::deep`",
+               "spans": [{"is_primary": True, "file_name": "src/app.rs", "line_start": 30, "line_end": 30}]}
+        ok, line, *_, manifest = self.scripted([([], [use])], gated)
+        self.assertTrue(ok and " test_cfg=1 " in line, (line, manifest["residue"]))
+        self.assertEqual([(e["name"], e["definition"]) for e in manifest["test_cfg_items"]],
+                         [("seeded", f"src/core.rs:{at[0]}")])
+
+    def test_parent_gate_kinds_decide_test_cfg_or_glob_hidden(self):
+        # Only a gate that holds under `test` alone hides the nested fn from a dependency build.
+        cases = [("#[cfg(test)]", "test_cfg"), ("#[cfg(all(test, unix))]", "test_cfg"),
+                 ("#[cfg(any(test, all(unix, test)))]", "test_cfg"), ("#[cfg(any(test, unix))]", "glob_hidden"),
+                 ("#[cfg(not(test))]", "glob_hidden"), ("#[cfg(any(not(test), unix))]", "glob_hidden"),
+                 ('#[cfg(any(test, feature = "test-support"))]', "glob_hidden"),
+                 ('#[cfg(all(any(test, feature = "test-support"), unix))]', "glob_hidden")]
+        layout = SimpleNamespace(x_files={"src/a.rs"}, test_only=set())
+        use = {"level": "error", "code": {"code": "E0425"}, "_test": True, "children": [], "spans": [],
+               "message": "cannot find function `seeded` in module `crate::a::fixtures`"}
+        for gate, want in cases:
+            src = [gate, "pub(crate) mod fixtures {", "    pub(crate) fn seeded() {}", "}"]
+            got = vistool.classify_residue(use, vistool.restricted_defs(layout, lambda rel: src))
+            self.assertEqual(got, want, gate)
 
 
 class TestCfgList(unittest.TestCase):

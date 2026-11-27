@@ -75,7 +75,8 @@ fn admit_and_finish_queued<'a>(
             Disposition::Admitted(admitted) => admitted,
             Disposition::Deferred
             | Disposition::RejectedNonPortableAttachment
-            | Disposition::ConsumedToHold => return QueuedRun::NotAdmitted,
+            | Disposition::ConsumedToHold
+            | Disposition::ClosedDecision => return QueuedRun::NotAdmitted,
             Disposition::RejectedRestore => return QueuedRun::RejectedRestore,
         };
         let after_admission = after_admission.await;

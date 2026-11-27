@@ -362,12 +362,12 @@ impl BootChannels {
             .clone()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn record_child_fixture(&self, init: &Initialized) {
         self.children.record(self, init, Adoption::Committed);
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     pub(crate) fn child_fixture_held(&self, channel: u64) -> Option<bool> {
         self.children
             .entries

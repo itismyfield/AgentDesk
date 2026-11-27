@@ -177,7 +177,7 @@ pub(crate) struct RunCleanupDrainOutcome {
 /// `a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg` because it never
 /// went through the wrapper. Every route to an emit is now counted, so the test
 /// name is true of the code rather than of one call site.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use crate::dispatch::emit_probe;
 
 /// What `record_task_failure_pg` managed to write.
@@ -221,7 +221,7 @@ const REPLAY_BATCH_LIMIT: i64 = 50;
 ///
 /// See [`MAX_BACKOFF_SECONDS`] for what this cap costs in wall clock: a cleanup
 /// step that keeps failing for roughly a quarter of an hour is parked for good.
-const MAX_CLEANUP_ATTEMPTS: i32 = 10;
+pub(crate) const MAX_CLEANUP_ATTEMPTS: i32 = 10;
 
 /// Upper bound on the exponential retry delay, in seconds.
 ///
@@ -238,11 +238,11 @@ const MAX_CLEANUP_ATTEMPTS: i32 = 10;
 /// Read that as the operational contract — *a cleanup step that keeps failing
 /// for ~15 minutes is parked permanently* — and note that the only thing which
 /// will say so afterwards is the `/api/health` `auto_queue_cleanup` backlog.
-const MAX_BACKOFF_SECONDS: i64 = 256;
+pub(crate) const MAX_BACKOFF_SECONDS: i64 = 256;
 
 /// How long a claim is honoured before another drainer may steal the row.
 /// A process that dies mid-drain must not strand its claim permanently.
-const CLAIM_LEASE_SECONDS: i64 = 300;
+pub(crate) const CLAIM_LEASE_SECONDS: i64 = 300;
 
 /// Identifies the claim holder in `claim_owner`. Only used for diagnostics —
 /// correctness comes from the `FOR UPDATE SKIP LOCKED` claim itself.
@@ -361,7 +361,7 @@ fn task_from_row(row: &sqlx::postgres::PgRow) -> Result<RunCleanupTask, String> 
 }
 
 /// Number of cleanup rows still owed. Tests use it to prove convergence.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn pending_run_cleanup_task_count_pg(pool: &PgPool) -> Result<i64, String> {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM auto_queue_run_cleanup_tasks")
         .fetch_one(pool)
@@ -1455,10 +1455,6 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "cleanup_tasks_pg_tests.rs"]
-mod cleanup_tasks_pg_tests;
 
 #[cfg(test)]
 #[path = "cleanup_tasks_ownership_pg_tests.rs"]

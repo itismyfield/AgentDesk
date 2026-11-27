@@ -3,6 +3,8 @@ import { ChevronDown, RotateCcw, X } from "lucide-react";
 import type { Department, DispatchedSession } from "../../types";
 import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
+import { computePromptCacheStatus, formatPromptCacheLabel } from "../../lib/agentObservability";
+import { useNow } from "../../lib/useNow";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import AgentPersona from "../AgentPersona";
@@ -12,13 +14,13 @@ import type { Translator } from "../agent-manager/types";
 import { SessionInfoCard } from "./SessionInfoCard";
 import {
   canCleanupStaleIdleSession, canReconcileStaleSession, cleanupStaleIdleSession, compareSessions,
-  isStaleIdleSession, reconcileStaleSessionTurn, sessionLastActivityTs, sessionPersona,
+  isLiveSessionStatus, isStaleIdleSession, reconcileStaleSessionTurn, sessionLastActivityTs, sessionPersona,
   sessionStateText, sessionSummaryCounts, sessionTitle,
 } from "./SessionPanelModel";
 
 interface Props {
   sessions: DispatchedSession[];
-  departments: Department[];
+  departments?: Department[];
   locale: string;
   tr: Translator;
   isKo: boolean;
@@ -26,8 +28,9 @@ interface Props {
 }
 
 /** Live sessions no agent owns, one row each; a row opens live output preview + server fields, and stale rows offer one-click reconciliation. */
-export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessionsChange }: Props) {
+export function SessionPanel({ sessions, locale, tr, isKo, onSessionsChange }: Props) {
   const baseId = useId();
+  const cacheNow = useNow(5_000);
   const [open, setOpen] = useState<string | null>(null);
   const [reconcilingKey, setReconcilingKey] = useState<string | null>(null);
   const [reconciledKeys, setReconciledKeys] = useState<Record<string, string>>({});
@@ -72,8 +75,8 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
     <div data-testid="agents-sessions" className="flex min-w-0 flex-col gap-3">
       <Cap className="block">
         {tr(
-          "에이전트에 연결되지 않은 채 열려 있는 세션이에요. 세션을 에이전트나 부서에 붙이는 저장은 아직 지원하지 않으며, 행을 열면 실시간 출력을 확인하고 멈춘 턴을 바로 정리할 수 있어요.",
-          "Open sessions no agent owns. Saving an agent or department assignment is not supported yet; expand a row to preview live output or reconcile stale turns.",
+          "에이전트에 연결되지 않은 채 열려 있는 세션이에요. 세션을 에이전트에 붙이는 저장은 아직 지원하지 않으며, 행을 열면 실시간 출력을 확인하고 멈춘 턴을 바로 정리할 수 있어요.",
+          "Open sessions no agent owns. Saving an agent assignment is not supported yet; expand a row to preview live output or reconcile stale turns.",
         )}
       </Cap>
       <ul className="m-0 min-w-0 list-none overflow-hidden rounded-(--r-md) border border-(--line-soft) bg-(--bg-2) p-0">
@@ -99,6 +102,16 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
                     <span className="block truncate text-sm leading-5 font-medium" title={session.session_key}>{title}</span>
                     <span className="block truncate text-xs leading-4 text-(--fg-muted)" title={line}>{line}</span>
                   </span>
+                  {(() => {
+                    const cache = isLiveSessionStatus(session.status)
+                      ? computePromptCacheStatus({ provider: session.provider, lastActivityMs: last, isWorking: session.status === "working" || session.status === "turn_active", nowMs: cacheNow })
+                      : null;
+                    return cache && cache.phase !== "cold" ? (
+                      <Chip tone={cache.phase === "expiring" ? "warn" : "info"} className="tabular-nums" data-testid={`session-cache-chip-${session.id}`}>
+                        {formatPromptCacheLabel(cache, tr)}
+                      </Chip>
+                    ) : null;
+                  })()}
                   {note === "ok" ? <Chip tone="ok">{tr("정리됨", "Reconciled")}</Chip> : stale ? <Chip tone="warn">{tr("7일 넘게 멈춤", "Idle 7+ days")}</Chip> : null}
                   <span className="hidden w-20 shrink-0 truncate text-right text-xs text-(--fg-dim) sm:block">{getProviderMeta(session.provider).label}</span>
                   <ChevronDown size={16} aria-hidden className={cn("shrink-0 text-(--fg-muted) transition-transform motion-reduce:transition-none", expanded && "rotate-180")} />
@@ -114,7 +127,7 @@ export function SessionPanel({ sessions, departments, locale, tr, isKo, onSessio
                 ) : null}
               </div>
               {note && note !== "ok" ? <Cap className="block bg-(--bg-1) px-3 py-1.5 text-(--warn) sm:px-4" role="status">{note}</Cap> : null}
-              {expanded ? <SessionInfoCard id={detailId} session={session} departments={departments} locale={locale} tr={tr} isKo={isKo} /> : null}
+              {expanded ? <SessionInfoCard id={detailId} session={session} locale={locale} tr={tr} isKo={isKo} /> : null}
             </li>
           );
         })}

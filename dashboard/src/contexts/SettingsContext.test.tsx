@@ -2,7 +2,7 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LANGUAGE_STORAGE_KEY, useI18n } from "../i18n";
 import { readLocalStorageValue } from "../lib/useLocalStorage";
 import type { CompanySettings, DashboardStats } from "../types";
@@ -12,7 +12,17 @@ vi.mock("../api/client", () => ({ getStats: vi.fn() }));
 
 import { getStats } from "../api/client";
 
-vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() { return values.size; },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => [...values.keys()][index] ?? null,
+    removeItem: (key) => { values.delete(key); },
+    setItem: (key, value) => { values.set(key, String(value)); },
+  };
+}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -23,10 +33,18 @@ function deferred<T>() {
 describe("settings stats refresh", () => {
   let container: HTMLDivElement;
   let root: Root;
+
+  beforeEach(() => {
+    const storage = memoryStorage();
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    vi.stubGlobal("localStorage", storage);
+    Object.defineProperty(window, "localStorage", { configurable: true, writable: true, value: storage });
+  });
+
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
-    window.localStorage.clear();
+    vi.unstubAllGlobals();
   });
 
   it("keeps the newer stats when an older refresh answers last", async () => {

@@ -60,7 +60,7 @@ pub(crate) mod herdr_terminate {
     pub(crate) use contract::{HerdrTerminateResult, OperatorTerminateWarrant, TerminateRefusal};
 
     impl<'a> OperatorTerminateWarrant<'a> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         pub(crate) fn issue(target: HerdrTarget) -> Self {
             Self {
                 target,

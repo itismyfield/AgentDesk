@@ -691,7 +691,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 #[path = "scoped_transition_tests.rs"]
 pub(super) mod scoped_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod test_hooks {
     //! Lets a test wait for the probe workers, count the snapshots, and look in just before a
     //! retirement is written.

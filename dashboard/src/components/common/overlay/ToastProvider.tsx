@@ -36,18 +36,11 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 const DEFAULT_DURATION_MS = 5000;
 const MAX_VISIBLE = 4;
 
-const VARIANT_COLORS: Record<ToastVariant, string> = {
-  info: "rgba(56,189,248,0.85)",
-  success: "rgba(52,211,153,0.85)",
-  warning: "rgba(251,191,36,0.85)",
-  error: "rgba(248,113,113,0.85)",
-};
-
-const VARIANT_BG: Record<ToastVariant, string> = {
-  info: "rgba(56,189,248,0.14)",
-  success: "rgba(52,211,153,0.14)",
-  warning: "rgba(251,191,36,0.14)",
-  error: "rgba(248,113,113,0.14)",
+const VARIANT_TONE: Record<ToastVariant, string> = {
+  info: "var(--info)",
+  success: "var(--ok)",
+  warning: "var(--warn)",
+  error: "var(--err)",
 };
 
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -117,9 +110,9 @@ function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
 
   return createPortal(
     <div
-      className="pointer-events-none fixed right-3 z-[100] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:right-4"
+      className="pointer-events-none fixed left-3 right-3 z-[110] flex max-w-sm flex-col gap-2 bottom-[calc(4.5rem+env(safe-area-inset-bottom))] sm:bottom-4 sm:left-auto sm:right-4"
       role="region"
-      aria-label={t({ ko: "알림", en: "Notifications" })}
+      aria-label={t({ ko: "알림", en: "Notifications", ja: "通知", zh: "通知" })}
       aria-live="polite"
     >
       {visible.map((toast) => {
@@ -130,26 +123,28 @@ function ToastViewport({ toasts, onDismiss }: ToastViewportProps) {
             role="status"
             className="pointer-events-auto flex items-start gap-2 rounded-xl border px-3 py-2 text-sm shadow-lg"
             style={{
-              borderColor: `${VARIANT_COLORS[variant]}55`,
-              background: `linear-gradient(135deg, ${VARIANT_BG[variant]}, color-mix(in srgb, var(--th-card-bg) 92%, transparent))`,
-              color: "var(--th-text)",
+              borderColor: "color-mix(in oklch, " + VARIANT_TONE[variant] + " 45%, var(--line))",
+              background:
+                "linear-gradient(135deg, color-mix(in oklch, " +
+                VARIANT_TONE[variant] +
+                " 14%, transparent), color-mix(in oklch, var(--bg-2) 94%, transparent))",
+              color: "var(--fg)",
             }}
           >
             <span
               className="mt-1 h-2.5 w-2.5 shrink-0 rounded-full"
-              style={{ background: VARIANT_COLORS[variant] }}
+              style={{ background: VARIANT_TONE[variant] }}
               aria-hidden="true"
             />
             <p className="min-w-0 flex-1 break-words text-xs leading-relaxed">{toast.message}</p>
             <button
               type="button"
               onClick={() => onDismiss(toast.id)}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted)] transition-opacity hover:opacity-100"
+              className="flex h-7 w-7 max-[899px]:h-11 max-[899px]:w-11 max-[899px]:-my-1.5 max-[899px]:-mr-1 pointer-coarse:h-11 pointer-coarse:w-11 pointer-coarse:-my-1.5 pointer-coarse:-mr-1 shrink-0 items-center justify-center rounded-lg border text-[var(--fg-muted)] hover:bg-[var(--th-overlay-light)] hover:text-[var(--fg)] transition-colors"
               style={{
-                background: "color-mix(in srgb, var(--th-card-bg) 88%, transparent)",
-                borderColor: "color-mix(in srgb, var(--th-border) 64%, transparent)",
+                borderColor: "color-mix(in oklch, var(--line) 64%, transparent)",
               }}
-              aria-label={t({ ko: "닫기", en: "Dismiss" })}
+              aria-label={t({ ko: "닫기", en: "Dismiss", ja: "閉じる", zh: "关闭" })}
             >
               <X size={12} />
             </button>

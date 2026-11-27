@@ -30,6 +30,8 @@ struct Scope {
     keyed: AtomicBool,
     /// A stop took the writer token's first-key gate, so no earlier refusal asks for a resend.
     stopped: AtomicBool,
+    /// A Herdr user stop closed the input before it began.
+    herdr_stop: AtomicBool,
     holder: crate::services::tui_input::writer_lease::Holder,
     /// A Herdr owner's physical writer `socket_path#pane_id`; `target.owner` stays the logical
     /// session history names.
@@ -51,6 +53,12 @@ pub(crate) fn record_preparation_watch(probe: PreparationWatch) {
             .preparation_watch
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(probe);
+    }
+}
+/// A Herdr user stop closed this attempt's input before any key; its proof names that cause.
+pub(crate) fn herdr_input_closed() {
+    if let Some(scope) = current() {
+        scope.herdr_stop.store(true, Ordering::SeqCst);
     }
 }
 pub(crate) fn key_attempted() -> Option<bool> {
@@ -443,6 +451,28 @@ pub(crate) fn install_launch(hook: LaunchHook) -> LaunchGuard {
     LAUNCH.with(|slot| *slot.borrow_mut() = Some(hook));
     LaunchGuard
 }
+
+/// Records the execution a restart greeting's launch is about to create, before its row or pane.
+#[cfg(unix)]
+pub(crate) type Successor = Box<dyn Fn(&str) -> Result<(), String> + Send>;
+#[cfg(unix)]
+thread_local! { static SUCCESSOR: RefCell<Option<Successor>> = const { RefCell::new(None) }; }
+
+/// Asks `record` on every launch of this thread until the launch guard drops.
+#[cfg(unix)]
+pub(crate) fn install_successor(record: Successor) {
+    SUCCESSOR.with(|slot| *slot.borrow_mut() = Some(record));
+}
+
+/// Records `nonce` as the successor of the greeting this thread launches; other launches pass.
+#[cfg(unix)]
+pub(crate) fn record_successor(nonce: &str) -> Result<(), String> {
+    SUCCESSOR.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map_or(Ok(()), |record| record(nonce))
+    })
+}
 #[cfg(unix)]
 pub(crate) struct LaunchGuard;
 #[cfg(unix)]
@@ -461,10 +491,11 @@ impl LaunchGuard {
 impl Drop for LaunchGuard {
     fn drop(&mut self) {
         LAUNCH.with(|slot| *slot.borrow_mut() = None);
+        SUCCESSOR.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn capture_scope<R>(
     provider: String,
     target: serde_json::Value,
@@ -516,6 +547,7 @@ pub(crate) fn capture_owner_scope<R>(
         known_before: AtomicBool::new(false),
         keyed: AtomicBool::new(false),
         stopped: AtomicBool::new(false),
+        herdr_stop: AtomicBool::new(false),
         holder: Default::default(),
         writer: Mutex::new(None),
         epoch: Mutex::new(None),
@@ -555,6 +587,7 @@ pub(crate) fn capture_owner_scope<R>(
                 .take()
                 .map(|probe| (scope.channel, probe)),
             attempt,
+            herdr_stop: scope.herdr_stop.load(Ordering::SeqCst),
             reason: scope
                 .refused
                 .lock()
@@ -567,7 +600,7 @@ pub(crate) fn capture_owner_scope<R>(
         });
     (result, proof)
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn with_scope<R>(
     provider: String,
     target: serde_json::Value,
@@ -678,9 +711,14 @@ pub(crate) struct NotSentProof {
     #[cfg(unix)]
     preparation_watch: Option<(u64, PreparationWatch)>,
     attempt: serde_json::Value,
+    herdr_stop: bool,
     reason: String,
 }
 impl NotSentProof {
+    /// Whether a Herdr user stop, not a refusal, kept every key back.
+    pub(crate) fn herdr_user_stop(&self) -> bool {
+        self.herdr_stop
+    }
     #[cfg(unix)]
     pub(crate) fn take_preparation_watch(&mut self) -> Option<(u64, PreparationWatch)> {
         self.preparation_watch.take()

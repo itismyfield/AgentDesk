@@ -567,7 +567,7 @@ where
 }
 
 // Test seams for the re-post turn tests mounted in the discord-layer test host.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Runner {
     pub(in crate::services) fn probes_mut(
         &mut self,
@@ -576,7 +576,7 @@ impl Runner {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     pub(in crate::services) fn runner_mut(&mut self) -> &mut Runner {
         &mut self.runner

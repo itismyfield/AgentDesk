@@ -1861,13 +1861,13 @@ pub(crate) mod first_input;
 #[cfg(unix)]
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn tmux_tui_turn_for_tests(
     working_dir: &str,
     session_id: Option<&str>,

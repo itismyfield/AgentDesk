@@ -1,6 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { useRef, type ReactNode } from "react";
+import { useI18n } from "../../../i18n";
 import { getOverlayAccessibleTitle } from "./accessibility";
 import { BottomSheet } from "./BottomSheet";
 import { DrawerDockContext, useDrawerDock } from "./DrawerDock";
@@ -21,6 +22,7 @@ export interface DrawerProps {
   closeOnBackdrop?: boolean;
   closeOnEsc?: boolean;
   ariaLabel?: string;
+  closeLabel?: string;
   closeButtonClassName?: string;
 }
 
@@ -34,8 +36,10 @@ export function Drawer({
   closeOnBackdrop = true,
   closeOnEsc = true,
   ariaLabel,
+  closeLabel,
   closeButtonClassName,
 }: DrawerProps) {
+  const { t } = useI18n();
   const isMobile = useIsMobile();
   const dock = useDrawerDock();
   const contentRef = useRef<HTMLDivElement>(null);
@@ -51,6 +55,7 @@ export function Drawer({
         closeOnBackdrop={closeOnBackdrop}
         closeOnEsc={closeOnEsc}
         ariaLabel={ariaLabel}
+        closeLabel={closeLabel}
         closeButtonClassName={closeButtonClassName}
       >
         {children}
@@ -71,9 +76,9 @@ export function Drawer({
           <Dialog.Close asChild>
             <button
               type="button"
-              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-white/5 ${closeButtonClassName ?? ""}`}
+              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border text-[var(--th-text-muted,_#94a3b8)] hover:bg-[var(--th-overlay-light)] hover:text-[var(--th-text)] transition-colors ${closeButtonClassName ?? ""}`}
               style={{ borderColor: "var(--th-border, rgba(148,163,184,0.16))" }}
-              aria-label="Close"
+              aria-label={closeLabel ?? t({ ko: "닫기", en: "Close", ja: "閉じる", zh: "关闭" })}
             >
               <X size={14} />
             </button>
@@ -113,7 +118,7 @@ export function Drawer({
             // Like a split view, opening keeps focus in the list; the pane follows it in tab order.
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={returnFocus}
-            className="flex h-full min-h-0 w-full flex-col bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] outline-none"
+            className="flex h-full min-h-0 w-full flex-col bg-[var(--th-card-bg,_var(--bg-2))] text-[var(--th-text,_var(--fg))] outline-none"
           >
             {/* Drawers opened from inside the pane overlay as usual. */}
             <DrawerDockContext.Provider value={null}>{frame}</DrawerDockContext.Provider>
@@ -142,7 +147,7 @@ export function Drawer({
             if (!closeOnBackdrop) event.preventDefault();
           }}
           onCloseAutoFocus={returnFocus}
-          className={`fixed inset-y-0 z-[80] flex flex-col bg-[var(--th-card-bg,_#0f172a)] text-[var(--th-text,_#e2e8f0)] shadow-lg outline-none ${side === "right" ? "right-0 border-l" : "left-0 border-r"}`}
+          className={`fixed inset-y-0 z-[80] flex flex-col bg-[var(--th-card-bg,_var(--bg-2))] text-[var(--th-text,_var(--fg))] shadow-lg outline-none ${side === "right" ? "right-0 border-l" : "left-0 border-r"}`}
           style={{
             width,
             borderColor: "var(--th-border, rgba(148,163,184,0.18))",

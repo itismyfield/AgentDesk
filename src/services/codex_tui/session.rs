@@ -442,7 +442,7 @@ fn install_binding_under_source_authority(
     (!required && !verified) || registered
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn advance_codex_tui_rollout_marker_start_offset(
     tmux_session_name: &str,
     rollout_path: &Path,

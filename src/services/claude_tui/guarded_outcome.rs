@@ -246,7 +246,7 @@ pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) 
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn fresh_source_for_tests() -> Option<String> {
     OWNER.with(|slot| {
         slot.borrow()

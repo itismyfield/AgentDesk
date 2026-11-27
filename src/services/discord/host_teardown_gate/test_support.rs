@@ -12,6 +12,15 @@ use crate::services::discord::{SharedData, inflight};
 use crate::services::provider::cancel_token_cleanup::authority::TmuxBinding;
 use crate::services::provider::{CancelToken, ProviderKind};
 
+/// The channel's session-transition lock, for moved tests outside `crate::services`.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn session_transition_lock(
+    shared: &SharedData,
+    channel: ChannelId,
+) -> Arc<tokio::sync::Mutex<()>> {
+    shared.session_transition_locks.lock(channel)
+}
+
 /// What the stored rows say about one tmux session before a teardown reads them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stored {

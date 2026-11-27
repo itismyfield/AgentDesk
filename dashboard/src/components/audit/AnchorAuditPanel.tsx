@@ -24,6 +24,9 @@ import { AuditRequestState } from "./AuditWorkspace";
 
 type Tr = (ko: string, en: string) => string;
 
+const formatAnchorScope = (scope: string | null | undefined, tr: Tr) =>
+  scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : scope;
+
 const PHONE_ANCHOR_LIMIT = 5;
 const AVATAR_STACK_LIMIT = 7;
 
@@ -132,7 +135,7 @@ function AnchorDetailSections({
         {(anchor.type || anchor.scope || marks.length > 0) ? (
           <div className="flex flex-wrap gap-1.5">
             {anchor.type ? <Chip tone="neutral">{anchor.type}</Chip> : null}
-            {anchor.scope ? <Chip tone="accent">{anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope}</Chip> : null}
+            {anchor.scope ? <Chip tone="accent">{formatAnchorScope(anchor.scope, tr)}</Chip> : null}
             {!phone ? marks : null}
           </div>
         ) : null}
@@ -210,7 +213,7 @@ function AnchorDetailSections({
       </InspSection>
 
       <InspSection>
-        <KeyValue label={tr("범위", "Scope")}>{(anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope) ?? tr("범위 없음", "No scope")}</KeyValue>
+        <KeyValue label={tr("범위", "Scope")}>{formatAnchorScope(anchor.scope, tr) ?? tr("범위 없음", "No scope")}</KeyValue>
         {anchor.id ? <KeyValue label="ID" valueClassName="font-mono">{anchor.id}</KeyValue> : null}
         {startedAt ? <KeyValue label={tr("세션 시작", "Session start")}>{formatTranscriptTimestamp(startedAt, isKo)}</KeyValue> : null}
         <div className="mt-1 flex flex-wrap gap-2">
@@ -229,7 +232,7 @@ function AnchorDetailSections({
 }
 
 /** One agent's Memento anchors: `Well` summary strip, filter chips, grouped `KitCard` rows and selected anchor inspector. */
-export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { agents: Agent[] }) {
+export function AnchorAuditDetail({ agents, onOpenPrompts, ...detail }: AuditDetailProps & { agents: Agent[]; onOpenPrompts?: () => void }) {
   const { agent, provider, phone, isKo, tr } = detail;
   const query = useQuery(anchorsQuery(agent.id, provider));
   const state = auditState(query.error, query.data?.source);
@@ -298,6 +301,11 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
         )}
         fetching={query.isFetching}
         onRefresh={retry}
+        actions={phone && onOpenPrompts ? (
+          <Button variant="secondary" size="sm" onClick={onOpenPrompts} data-testid="audit-open-prompts">
+            {tr("프롬프트 감사", "System prompts")}
+          </Button>
+        ) : undefined}
         stats={phone && state === "ready" ? [
           { value: anchors.length, label: tr("앵커", "anchors") },
           { value: totalChars, label: tr("자", "chars") },
@@ -329,7 +337,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
       {state !== "ready" ? (
         <AuditRequestState state={state} retrying={query.isFetching} onRetry={retry} tr={tr} />
       ) : (
-        <div className="flex min-w-0 flex-col gap-5 xl:flex-row xl:items-start">
+        <div className="flex min-w-0 flex-col gap-5 min-[1440px]:flex-row min-[1440px]:items-start">
           <div className="flex min-w-0 flex-1 flex-col gap-2.5">
             <FilterChipGroup<AnchorFilter>
               value={filter}
@@ -348,7 +356,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
               <KitCard>
                 {anchorGroups(visible).map((group) => {
                   const isGlobalScope = group.scope === "모든 에이전트";
-                  const scopeLabel = isGlobalScope ? tr("모든 에이전트", "All agents") : group.scope;
+                  const scopeLabel = formatAnchorScope(group.scope, tr);
                   return (
                     <section
                       key={group.scope ?? ""}
@@ -399,7 +407,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
                                   {marks.length > 0 ? (
                                     <span className="mt-1 flex flex-wrap gap-1">{marks}</span>
                                   ) : !grouped && anchor.scope ? (
-                                    <Cap className="mt-0.5 block truncate">{anchor.scope === "모든 에이전트" ? tr("모든 에이전트", "All agents") : anchor.scope}</Cap>
+                                    <Cap className="mt-0.5 block truncate">{formatAnchorScope(anchor.scope, tr)}</Cap>
                                   ) : null}
                                 </span>
                               ) : (
@@ -459,7 +467,7 @@ export function AnchorAuditDetail({ agents, ...detail }: AuditDetailProps & { ag
             <aside
               aria-label={tr("선택한 앵커", "Selected anchor")}
               data-testid="audit-anchor-inspector"
-              className="w-full xl:sticky xl:top-4 xl:max-h-[calc(100dvh-2rem)] xl:w-[320px] xl:shrink-0 xl:overflow-y-auto"
+              className="w-full min-[1440px]:sticky min-[1440px]:top-4 min-[1440px]:max-h-[calc(100dvh-2rem)] min-[1440px]:w-[320px] min-[1440px]:shrink-0 min-[1440px]:overflow-y-auto"
             >
               <KitCard>
                 <AnchorDetailSections

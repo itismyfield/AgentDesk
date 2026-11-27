@@ -389,8 +389,8 @@ export function getCardDwellBadge(
       label: tr("체류", "Dwell"),
       detail: formatAgeLabel(elapsed, tr),
       tone: "stale",
-      textColor: "#fca5a5",
-      backgroundColor: "rgba(239,68,68,0.18)",
+      textColor: "color-mix(in oklch, var(--err) 72%, var(--th-text-primary) 28%)",
+      backgroundColor: "color-mix(in oklch, var(--err) 15%, var(--th-card-bg) 85%)",
       borderColor: "rgba(239,68,68,0.38)",
     };
   }
@@ -399,8 +399,8 @@ export function getCardDwellBadge(
       label: tr("체류", "Dwell"),
       detail: formatAgeLabel(elapsed, tr),
       tone: "warm",
-      textColor: "#fde68a",
-      backgroundColor: "rgba(234,179,8,0.18)",
+      textColor: "var(--th-badge-amber-text)",
+      backgroundColor: "var(--th-badge-amber-bg)",
       borderColor: "rgba(234,179,8,0.34)",
     };
   }
@@ -408,8 +408,8 @@ export function getCardDwellBadge(
     label: tr("체류", "Dwell"),
     detail: formatAgeLabel(elapsed, tr),
     tone: "fresh",
-    textColor: "#86efac",
-    backgroundColor: "rgba(34,197,94,0.18)",
+    textColor: "var(--th-badge-emerald-text)",
+    backgroundColor: "var(--th-badge-emerald-bg)",
     borderColor: "rgba(34,197,94,0.32)",
   };
 }

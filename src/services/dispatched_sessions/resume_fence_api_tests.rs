@@ -32,12 +32,12 @@ async fn selector_get_hides_fenced_ids_and_returns_the_new_id_after_release_pg()
     config.policies.hot_reload = false;
     config.policies.dir = root.path().join("policies");
     std::fs::create_dir_all(&config.policies.dir).unwrap();
-    let broadcast_tx = crate::server::ws::new_broadcast();
+    let broadcast_tx = crate::eventbus::new_broadcast();
     let state = AppState {
         pg_pool: Some(pool.clone()),
         engine: crate::engine::PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
-        batch_buffer: crate::server::ws::spawn_batch_flusher(broadcast_tx.clone()),
+        batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast_tx.clone()),
         broadcast_tx,
         health_registry: None,
         cluster_instance_id: None,

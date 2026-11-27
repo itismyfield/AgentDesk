@@ -6,9 +6,9 @@ import type { FsmEdgeBinding, Selection } from "./pipeline-visual-editor-model";
 import type { PipelineVisualEditorProps } from "./pipeline-visual-editor-types";
 
 export const INPUT_CLASS =
-  "min-h-11 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none";
+  "min-h-11 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)] focus-visible:-outline-offset-1 max-[899px]:text-base pointer-coarse:text-base";
 export const TEXTAREA_CLASS =
-  "min-h-24 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none resize-y";
+  "min-h-24 w-full rounded-md border bg-transparent px-3 py-2 text-sm outline-none focus-visible:outline-2 focus-visible:outline-[var(--th-accent-primary)] focus-visible:-outline-offset-1 max-[899px]:text-base pointer-coarse:text-base resize-y";
 
 export const INPUT_STYLE = {
   borderColor: "color-mix(in srgb, var(--th-border) 72%, transparent)",
