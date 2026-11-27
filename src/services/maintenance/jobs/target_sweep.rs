@@ -12,6 +12,8 @@
 //!     we only run monthly, so the cost is negligible.
 
 use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{MutexGuard, mpsc};
 
 use anyhow::Result;
 
@@ -161,18 +163,13 @@ pub async fn collect_and_sweep(config: Config) -> Result<SweepReport> {
 /// Recursively sum file sizes under `dir`. Best-effort: fs errors are swallowed
 /// per-entry (we don't want a single permission-denied to abort the whole
 /// maintenance tick).
-#[cfg(test)]
-static MEASURE_THREAD_OBSERVER: std::sync::Mutex<
-    Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
-> = std::sync::Mutex::new(None);
+#[cfg(any(test, feature = "test-support"))]
+static MEASURE_THREAD_OBSERVER: std::sync::Mutex<Option<mpsc::Sender<std::thread::ThreadId>>> =
+    std::sync::Mutex::new(None);
 
 fn measure_dir_size(dir: &Path) -> Result<u64> {
-    #[cfg(test)]
-    if let Some(observer) = MEASURE_THREAD_OBSERVER
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .as_ref()
-    {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(observer) = measure_thread_observer().as_ref() {
         let _ = observer.send(std::thread::current().id());
     }
     let mut total = 0u64;
@@ -221,9 +218,16 @@ fn parse_cargo_sweep_output(stdout: &str) -> (u64, u64) {
     (removed_files, removed_bytes)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn measure_thread_observer() -> MutexGuard<'static, Option<mpsc::Sender<std::thread::ThreadId>>> {
+    MEASURE_THREAD_OBSERVER
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Config, collect_and_sweep, measure_thread_observer};
     use std::sync::mpsc;
 
     #[tokio::test(flavor = "current_thread")]
@@ -234,9 +238,7 @@ mod tests {
         std::fs::write(target.join("nested/artifact"), vec![0u8; 17]).unwrap();
         let runtime_thread = std::thread::current().id();
         let (sender, receiver) = mpsc::channel();
-        *MEASURE_THREAD_OBSERVER
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(sender);
+        *measure_thread_observer() = Some(sender);
 
         let report = collect_and_sweep(Config {
             workspace_root: root.path().to_path_buf(),
@@ -247,9 +249,7 @@ mod tests {
         .await
         .unwrap();
         let walk_thread = receiver.recv().unwrap();
-        *MEASURE_THREAD_OBSERVER
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
+        *measure_thread_observer() = None;
 
         assert_ne!(walk_thread, runtime_thread);
         assert!(report.target_exists);
