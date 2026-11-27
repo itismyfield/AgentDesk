@@ -698,9 +698,11 @@ fn c132_early_cancel_never_binds_or_announces_runtime() {
     regression_tests::c132_early_cancel_never_binds_or_announces_runtime();
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub mod regression_tests {
     use super::*;
+
+    #[cfg(test)]
     pub(super) fn c132_early_cancel_never_binds_or_announces_runtime() {
         use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, SESSION};
         let root = tempfile::tempdir().unwrap();

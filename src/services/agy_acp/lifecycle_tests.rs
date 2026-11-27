@@ -1,6 +1,7 @@
 use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
+#[cfg(test)]
 use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
@@ -12,7 +13,9 @@ use super::actor::{Deadlines, Handle, TurnRequest};
 #[cfg(test)]
 use super::rpc::Inbound;
 use super::*;
-use crate::services::process::{ProcessGroupProbe, ProcessIdentity, process_group_probe};
+use crate::services::process::ProcessGroupProbe;
+#[cfg(test)]
+use crate::services::process::{ProcessIdentity, process_group_probe};
 use crate::services::provider::CancelToken;
 #[cfg(test)]
 use crate::services::stream_json_cli::codec::{AgyCodec, StreamJsonCodec};

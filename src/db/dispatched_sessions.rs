@@ -671,13 +671,13 @@ pub async fn attach_retry_dispatch_on_pg_tx(
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod selector_cleanup_tests {
-    use super::{HookSessionUpsert, upsert_hook_session_pg};
     #[cfg(test)]
     use super::{
-        clear_session_id_by_key_pg, clear_stale_session_id_pg,
+        HookSessionUpsert, clear_session_id_by_key_pg, clear_stale_session_id_pg,
         disconnect_stale_fixed_session_by_key_pg, gc_stale_fixed_working_sessions_db_pg,
         load_provider_session_ids_pg, mark_raw_provider_transcript_growth_if_observed_pg,
         reconcile_orphaned_tmuxless_session_pg, update_raw_provider_transcript_len_watermark_pg,
+        upsert_hook_session_pg,
     };
 
     pub struct TestPostgresDb {

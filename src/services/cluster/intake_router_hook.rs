@@ -846,6 +846,7 @@ async fn agent_preferred_labels_for_channel(
 #[cfg(any(test, feature = "test-support"))]
 pub mod pg_tests {
     use super::*;
+    #[cfg(test)]
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
     pub fn ctx_for_channel<'a>(
