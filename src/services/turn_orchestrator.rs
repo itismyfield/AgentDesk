@@ -60,7 +60,6 @@ use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
     purge_active_source_from_queue, strip_source_message_id_from_intervention, take_unsettled,
 };
-#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use actor_lifetime::RecoveryDoneSignal;
 pub(crate) use claim_observation::ClaimObservation;
 #[cfg(any(test, feature = "test-support"))]
@@ -123,6 +122,7 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use queue_enqueue::enqueue_intervention;
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use queued_head::BindingIntent;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;

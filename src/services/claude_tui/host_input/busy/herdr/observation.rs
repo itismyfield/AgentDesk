@@ -31,12 +31,14 @@ impl Context {
         }
         crate::services::tmux_common::try_with_tmux_source_authority(&self.logical, |authority| {
             self.transcript(|| {
-                let (pin, history) = binding_events::published_claude_history(
+                let (_, history) = binding_events::published_claude_history(
                     self.channel,
                     &self.logical,
                     &self.nonce,
                 )?;
-                self.resolve_source(authority, pin, history)
+                let current = history.current.as_ref()?;
+                let pin = current.pin.clone()?;
+                self.resolve_source(authority, Some((pin, current.pinned_at)), history)
             })
         })
         .flatten()
