@@ -42,15 +42,3 @@ pub(crate) type SlotRowGuard = for<'a> fn(
     tmux_name: &'a str,
     caller: &'a str,
 ) -> BoxFuture<'a, Option<String>>;
-
-pub(crate) trait SlotResetPort {
-    /// Why the host guard refuses a teardown of this stored row, if it does.
-    fn row_host_refusal<'a>(
-        pool: &'a PgPool,
-        stored_provider: Option<&'a str>,
-        channel_id: Option<&'a str>,
-        session_key: &'a str,
-        tmux_name: &'a str,
-        caller: &'a str,
-    ) -> BoxFuture<'a, Option<String>>;
-}

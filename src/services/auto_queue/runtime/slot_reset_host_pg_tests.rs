@@ -28,7 +28,7 @@ pub(crate) async fn runtime_clears_after_done(
 }
 
 #[cfg(unix)]
-mod host {
+pub(crate) mod host {
     use std::os::unix::fs::PermissionsExt as _;
 
     use poise::serenity_prelude::ChannelId;
@@ -143,7 +143,7 @@ mod host {
         }
     }
 
-    async fn exec(pool: &PgPool, sql: &'static str, binds: &[Option<&str>]) {
+    pub(crate) async fn exec(pool: &PgPool, sql: &'static str, binds: &[Option<&str>]) {
         let query = binds
             .iter()
             .fold(sqlx::query(sql), |query, bind| query.bind(*bind));
@@ -156,19 +156,19 @@ mod host {
         query.fetch_all(pool).await.unwrap()
     }
 
-    async fn thread_rows(pool: &PgPool, thread: u64) -> Vec<String> {
+    pub(crate) async fn thread_rows(pool: &PgPool, thread: u64) -> Vec<String> {
         let sql =
             "SELECT to_jsonb(s)::text FROM sessions s WHERE thread_channel_id = $1 ORDER BY id";
         rows(pool, sql, &thread.to_string()).await
     }
 
-    async fn slot_map(pool: &PgPool, agent: &str) -> Vec<String> {
+    pub(crate) async fn slot_map(pool: &PgPool, agent: &str) -> Vec<String> {
         let sql = "SELECT thread_id_map::text FROM auto_queue_slots WHERE agent_id = $1";
         rows(pool, sql, agent).await
     }
 
     /// Slot 0 of a new `agent`, bound to `threads`.
-    async fn slot(pool: &PgPool, agent: &str, threads: &[u64]) {
+    pub(crate) async fn slot(pool: &PgPool, agent: &str, threads: &[u64]) {
         let sql = "INSERT INTO agents (id, name, provider) VALUES ($1, $1, 'claude')";
         exec(pool, sql, &[Some(agent)]).await;
         let map: serde_json::Map<_, _> = (threads.iter().enumerate())
@@ -181,7 +181,7 @@ mod host {
     }
 
     /// A `stored` row for `name` on `thread` with `status` and the raw `provider`; returns its key.
-    async fn thread_row(
+    pub(crate) async fn thread_row(
         pool: &PgPool,
         shared: &crate::services::discord::SharedData,
         (thread, name, stored): (u64, &str, Stored),
@@ -548,7 +548,7 @@ mod host {
             );
             let reset = super::super::reset_slot_thread_bindings_excluding_pg;
             assert_eq!(
-                reset(&pool, &agent, 0, None, None).await,
+                reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await,
                 Ok((0, 0, 0)),
                 "{ctx}"
             );
@@ -569,7 +569,7 @@ mod host {
             exec(&pool, sql, &[Some(&t4.to_string())]).await;
             let map = slot_map(&pool, &agent).await;
             assert_eq!(
-                reset(&pool, &agent, 0, None, None).await,
+                reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await,
                 Ok((0, 0, 0)),
                 "{ctx}"
             );
@@ -592,7 +592,7 @@ mod host {
             )
             .await;
             assert_eq!(
-                reset(&pool, &agent, 0, None, None).await,
+                reset(slot_row_host_refusal, &pool, &agent, 0, None, None).await,
                 Ok((0, 1, 1)),
                 "{ctx}"
             );
@@ -885,7 +885,7 @@ mod host {
 
         let reset = super::super::reset_slot_thread_bindings_excluding_pg;
         let kept = before(configured[0], "p9b1-slot-1").await;
-        let done = reset(&pool, "p9b1-slot-1", 0, None, None).await;
+        let done = reset(slot_row_host_refusal, &pool, "p9b1-slot-1", 0, None, None).await;
         assert_eq!(done, Ok((0, 0, 0)), "registry-less reset");
         assert_eq!(before(configured[0], "p9b1-slot-1").await, kept, "no write");
 
@@ -897,7 +897,7 @@ mod host {
         assert_eq!(before(configured[1], "p9b1-slot-2").await, kept, "no write");
 
         assert_eq!(
-            reset(&pool, "p9b1-slot-3", 0, None, None).await,
+            reset(slot_row_host_refusal, &pool, "p9b1-slot-3", 0, None, None).await,
             Ok((0, 1, 1))
         );
         assert_eq!(
@@ -955,12 +955,28 @@ mod host {
         }
         let reset = super::super::reset_slot_thread_bindings_excluding_pg;
         assert_eq!(
-            reset(&pool, "s1b-fix-slot-1", 0, None, None).await,
+            reset(
+                slot_row_host_refusal,
+                &pool,
+                "s1b-fix-slot-1",
+                0,
+                None,
+                None
+            )
+            .await,
             Ok((0, 0, 1))
         );
         assert_eq!(slot_map(&pool, "s1b-fix-slot-1").await, ["{}"], "rows gone");
         assert_eq!(
-            reset(&pool, "s1b-fix-slot-2", 0, None, None).await,
+            reset(
+                slot_row_host_refusal,
+                &pool,
+                "s1b-fix-slot-2",
+                0,
+                None,
+                None
+            )
+            .await,
             Ok((0, 1, 1))
         );
         assert_eq!(
@@ -969,7 +985,15 @@ mod host {
             "legacy key"
         );
         assert_eq!(
-            reset(&pool, "s1b-fix-slot-3", 0, None, None).await,
+            reset(
+                slot_row_host_refusal,
+                &pool,
+                "s1b-fix-slot-3",
+                0,
+                None,
+                None
+            )
+            .await,
             Ok((0, 0, 0))
         );
         let kept = format!("{{\"0\": \"{failed}\"}}");

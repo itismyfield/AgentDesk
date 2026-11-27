@@ -1451,7 +1451,12 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("seed pending review dispatch");
 
         let err = crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
-            &pool, "agent-1", 0, None, None,
+            crate::services::discord::health::slot_row_host_refusal,
+            &pool,
+            "agent-1",
+            0,
+            None,
+            None,
         )
         .await
         .expect_err("pending review dispatch must block slot reset before session attach");

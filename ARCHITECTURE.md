@@ -918,6 +918,7 @@ src/
 │   │   ├── peer_filter.rs
 │   │   └── tests.rs
 │   ├── worker_registry/
+│   │   ├── outbox_slot_reset_pg_tests.rs
 │   │   ├── registry.rs
 │   │   └── status.rs
 │   ├── bind_security_diagnostics.rs

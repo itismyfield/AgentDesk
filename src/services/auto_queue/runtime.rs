@@ -8,8 +8,7 @@ use crate::domain::session_identity::tmux_name_from_session_key;
 #[cfg(test)]
 use crate::services::engine_runtime::health_port::SlotResetOutcome;
 use crate::services::engine_runtime::health_port::{
-    AppHealthRegistry, ManagedResetPort, SlotResetPort, SlotResetVerdict, SlotRowGuard,
-    SlotRuntimeHealth,
+    ManagedResetPort, SlotResetVerdict, SlotRowGuard, SlotRuntimeHealth,
 };
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
@@ -351,15 +350,17 @@ pub async fn slot_has_active_dispatch_excluding_pg(
         })
 }
 
-pub async fn reset_slot_thread_bindings_pg(
+pub(crate) async fn reset_slot_thread_bindings_pg(
+    row_guard: SlotRowGuard,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
 ) -> Result<(usize, usize, usize), String> {
-    reset_slot_thread_bindings_excluding_pg(pool, agent_id, slot_index, None, None).await
+    reset_slot_thread_bindings_excluding_pg(row_guard, pool, agent_id, slot_index, None, None).await
 }
 
-pub async fn reset_slot_thread_bindings_excluding_pg(
+pub(crate) async fn reset_slot_thread_bindings_excluding_pg(
+    row_guard: SlotRowGuard,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
@@ -381,7 +382,6 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     }
 
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
-    let row_guard = <AppHealthRegistry as SlotResetPort>::row_host_refusal;
     let (safe_to_clear_thread_ids, _) =
         filter_safe_slot_thread_reset_targets(pool, row_guard, None, &target).await?;
     let archived_threads = archive_slot_threads(&safe_to_clear_thread_ids).await?;
@@ -431,9 +431,13 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
     };
     let client = reqwest::Client::new();
     let mut archived = 0usize;
+    #[cfg(not(test))]
+    let discord_api_base = "https://discord.com/api/v10";
+    #[cfg(test)]
+    let discord_api_base = crate::services::dispatches::discord_delivery::discord_api_base_url();
 
     for thread_channel_id in thread_channel_ids {
-        let thread_url = format!("https://discord.com/api/v10/channels/{thread_channel_id}");
+        let thread_url = format!("{discord_api_base}/channels/{thread_channel_id}");
         match client
             .patch(&thread_url)
             .header("Authorization", format!("Bot {}", token))

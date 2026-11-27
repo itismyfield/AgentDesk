@@ -1,5 +1,7 @@
 use sqlx::PgPool;
 
+use super::HttpDispatchTransport;
+
 pub(crate) use crate::domain::outbound::port::{
     DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
@@ -585,10 +587,9 @@ fn discord_thread_created_at(
 }
 
 pub(crate) async fn reset_stale_slot_thread_if_needed(
-    pg_pool: Option<&PgPool>,
+    transport: &HttpDispatchTransport,
     client: &reqwest::Client,
     token: &str,
-    discord_api_base: &str,
     dispatch_id: &str,
     slot_binding: &crate::db::dispatches::SlotThreadBinding,
     exclude_entry_id: Option<&str>,
@@ -597,7 +598,10 @@ pub(crate) async fn reset_stale_slot_thread_if_needed(
         return Ok(false);
     };
 
-    let thread_info_url = discord_api_url(discord_api_base, &format!("/channels/{thread_id}"));
+    let thread_info_url = discord_api_url(
+        &transport.discord_api_base,
+        &format!("/channels/{thread_id}"),
+    );
     let response = client
         .get(&thread_info_url)
         .header("Authorization", format!("Bot {}", token))
@@ -642,10 +646,11 @@ pub(crate) async fn reset_stale_slot_thread_if_needed(
         total_message_sent,
         age_limit_hit,
     );
-    let pool = pg_pool.ok_or_else(|| {
+    let pool = transport.pg_pool().ok_or_else(|| {
         format!("postgres pool required while resetting stale slot thread for {dispatch_id}")
     })?;
     crate::services::auto_queue::runtime::reset_slot_thread_bindings_excluding_pg(
+        transport.slot_row_guard,
         pool,
         &slot_binding.agent_id,
         slot_binding.slot_index,

@@ -63,7 +63,10 @@ pub async fn reset_slot_thread(
         return Err(auto_queue_tuple_error(pg_unavailable_response()));
     };
     match crate::services::auto_queue::runtime::reset_slot_thread_bindings_pg(
-        pool, &agent_id, slot_index,
+        state.engine.slot_row_guard(),
+        pool,
+        &agent_id,
+        slot_index,
     )
     .await
     {
