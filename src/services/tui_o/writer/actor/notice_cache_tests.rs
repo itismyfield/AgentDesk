@@ -178,7 +178,7 @@ async fn exact_receipt_settles_while_native_invalid_snapshot_stays_cached() {
         actor
             .writer_for_test()
             .notice_owners_for_test()
-            .decision(&origin, "stale", &frame),
+            .decision_for_test(&origin, "stale", &frame),
         Decision::Owned,
         "the exact proof precedes unavailable native census"
     );

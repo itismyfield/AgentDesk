@@ -302,7 +302,7 @@ fn home_now(gate: &OwnershipGate) -> Home {
 // Test seam for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    pub(in crate::services) fn obligations_for_test(&mut self) -> Result<Obligations, String> {
+    pub fn obligations_for_test(&mut self) -> Result<Obligations, String> {
         self.obligations()
     }
 }

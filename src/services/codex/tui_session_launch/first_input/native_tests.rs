@@ -172,7 +172,7 @@ esac
     let (result, candidate, nonce, snapshot) = join_within(worker, WAIT_CAP);
     result.unwrap();
     assert_eq!(
-        candidate.first_mark().is_some(),
+        candidate.first_mark_for_test().is_some(),
         provable,
         "a failed early proof must not be revived by post-tail publication"
     );
@@ -242,7 +242,7 @@ esac
     if !provable {
         let source =
             crate::services::tui_o::shadow::binding_reader::source_id_for(id, &path).unwrap();
-        assert!(candidate.first_proof(&source).is_err());
+        assert!(candidate.first_proof_for_test(&source).is_err());
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(None);
         return;

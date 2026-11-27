@@ -452,13 +452,13 @@ impl SocketHerdrLaunchHost {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
+    pub fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
         self.sources = vec![source];
         self
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_policy_checker_for_test(
+    pub fn with_policy_checker_for_test(
         mut self,
         checker: Arc<dyn super::policy::ConfigChecker>,
     ) -> Self {

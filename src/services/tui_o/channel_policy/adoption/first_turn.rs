@@ -227,6 +227,11 @@ impl Candidate {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_mark_for_test(&self) -> Option<TurnMark> {
+        self.first_mark()
+    }
+
     pub(crate) fn first_mark(&self) -> Option<TurnMark> {
         self.first_turn
             .borrow()
@@ -290,6 +295,11 @@ impl Candidate {
             }
         });
         drop(guard);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn first_proof_for_test(&self, source: &SourceId) -> Result<Option<FirstProof>, String> {
+        self.first_proof(source)
     }
 
     /// The caller holds the adoption lock, including when comparing this to an initial proof.

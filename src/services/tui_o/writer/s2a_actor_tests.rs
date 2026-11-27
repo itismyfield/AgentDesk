@@ -256,11 +256,11 @@ async fn s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit() 
     ready
         .with_prepared_reply(CHANNEL, current, |prepared| {
             assert_eq!(
-                prepared.floor_for_test().execution(),
+                prepared.floor_for_test().execution_for_test(),
                 floor.execution_for_test()
             );
             assert_eq!(
-                prepared.floor_for_test().checkpoint(),
+                prepared.floor_for_test().checkpoint_for_test(),
                 floor.checkpoint_for_test()
             );
             submits.fetch_add(1, Ordering::SeqCst);
