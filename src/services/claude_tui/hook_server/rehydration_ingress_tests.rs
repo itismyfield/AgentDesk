@@ -1121,3 +1121,122 @@ fn a_rehydrated_replacement_execution_uses_its_matching_launch_context_once() {
 
 #[path = "o_restart_preservation_tests.rs"]
 mod o_restart;
+
+#[test]
+fn hook_refresh_same_uuid_stop_retries_until_the_writer_can_apply_it() {
+    use crate::services::claude_tui::source_verify::boot_time_for_tests;
+    use crate::services::tui_o::{
+        ownership::OwnershipGate,
+        shadow::{ShadowProvider, binding_reader::source_id_for, capture::renumber},
+        store::{InitSource, Initialized, OStore, StoreConfig},
+        writer::{
+            binding::BindingLog,
+            deliver::ChannelWriter,
+            host::test_io::{Alarms, AnyLease, Posts},
+            pieces::UnitDeriver,
+            rotation::Sources,
+        },
+    };
+    use sha2::Digest;
+    let (root, _env) = dedupe::binding_context::tests::fixture();
+    let ingress = Ingress::new();
+    let _reset = Reset;
+    let race = RegistrationRace::new(root.path(), 7_557);
+    let channel = race.channel;
+    let path = PathBuf::from(race.payload["transcript_path"].as_str().unwrap())
+        .with_file_name(format!("{}.jsonl", race.a));
+    let restore = || {
+        assert!(dedupe::register_rehydrated_tmux_runtime_binding(
+            "claude",
+            &race.tmux,
+            channel,
+            claude(&path, &race.a)
+        ));
+        dedupe::register_provider_session("claude", &race.a, &race.tmux);
+    };
+    restore();
+    let payload = serde_json::json!({"session_id":race.a,"transcript_path":path});
+    assert_eq!(
+        ingress.claude_hook("SessionStart", &race.a, &payload, Some(&uuid())),
+        202
+    );
+    let old = source_id_for(&race.a, &path).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let prefix_hash = hex::encode(sha2::Sha256::digest(&bytes));
+    let store = OStore::open_if_enabled(&StoreConfig { enabled: true }, root.path())
+        .unwrap()
+        .unwrap();
+    let era = store
+        .begin_fixture_era(&[channel], chrono::Utc::now(), |channel| {
+            Ok(Initialized {
+                channel,
+                sources: vec![InitSource {
+                    source_id: old.clone(),
+                    delivery_start: bytes.len() as u64,
+                    prefix_hash: prefix_hash.clone(),
+                }],
+                initial_anchor: 100,
+                build_digest: "fixture".into(),
+                at: chrono::Utc::now(),
+                policy_parent: None,
+            })
+        })
+        .unwrap();
+    dedupe::reset_state_for_tests();
+    forget_channel_for_tests(channel);
+    crate::services::claude_tui::hook_server::observation_ingress::set_discovery_pending_for_tests(
+        true,
+    );
+    let _boot = boot_time_for_tests(Some(chrono::Utc::now()));
+    let _shift = renumber::shift(&path, 1 << 40);
+    let request = uuid();
+    let header = race.envelope().encode().unwrap();
+    let uri = format!("/hooks/claude/Stop?session_id={}", race.a);
+    let send = || {
+        ingress
+            .send_envelope(&uri, &payload, Some(&request), Some(&header))
+            .0
+    };
+    let seq = events(channel).len();
+    assert_eq!(send(), 425);
+    assert_eq!(events(channel).len(), seq);
+    restore();
+    assert_eq!(send(), 202);
+    assert_eq!(send(), 202);
+    let refreshed: Vec<_> = events(channel)
+        .into_iter()
+        .filter(|event| {
+            event.cause == BindingCause::SameSessionVerified
+                && event.evidence.hook_event.as_deref() == Some("stop")
+        })
+        .collect();
+    assert_eq!(refreshed.len(), 1);
+    let gate = Arc::new(OwnershipGate::default());
+    gate.acquired();
+    let mut writer = ChannelWriter::new(
+        store.open_channel(&era, channel).unwrap().unwrap(),
+        gate,
+        Arc::new(Posts::default()),
+        AnyLease,
+        Alarms::default(),
+    );
+    let mut sources = Sources::new(channel, ShadowProvider::Claude, Arc::new(BindingLog));
+    sources
+        .resume(
+            &mut writer,
+            &mut UnitDeriver::new(channel, ShadowProvider::Claude),
+            &mut std::collections::VecDeque::new(),
+        )
+        .unwrap();
+    sources.follow(&mut writer).unwrap();
+    let current = source_id_for(&race.a, &path).unwrap();
+    assert_eq!(
+        writer.store().binding_checkpoint().unwrap(),
+        Some(refreshed[0].seq)
+    );
+    assert_eq!(
+        writer.store().cursor(&current).unwrap().prefix_hash,
+        prefix_hash
+    );
+    assert!(writer.store().cursor(&old).is_none());
+}
