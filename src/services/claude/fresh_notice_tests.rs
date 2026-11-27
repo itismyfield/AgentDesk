@@ -1,6 +1,6 @@
 use super::super::*;
 use super::posted_for_tests;
-use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
+use crate::services::provider_teardown::test_support::{FakeTmux, cleared};
 
 const CHANNEL: u64 = 9_000_000_006_483;
 

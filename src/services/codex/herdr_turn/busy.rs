@@ -13,7 +13,7 @@ use crate::services::tui_input::human_frame::history;
 
 /// One paste and one Enter of `request`'s frame through `target`'s gate, under the composer lock
 /// of the logical session the history and ledger name.
-pub(crate) fn inject(target: &HerdrTarget, request: &Request<'_>, ledger: &dyn Ledger) -> Outcome {
+pub fn inject(target: &HerdrTarget, request: &Request<'_>, ledger: &dyn Ledger) -> Outcome {
     let text = frame(
         request.source,
         request.author,

@@ -115,14 +115,14 @@ esac
             "tui_o":{"writer":{"channels":[channel],"late_adopt":true}}})).unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(&config, |_, _| {
+            .seeded_for_test(&config, |_, _| {
                 Ok(std::collections::BTreeMap::from([(
                     channel,
                     Adoption::Pending,
                 )]))
             })
             .unwrap();
-        let candidate = boot.output_candidate(channel).unwrap();
+        let candidate = boot.output_candidate_for_test(channel).unwrap();
         let boot_guard = crate::services::tui_o::cutover::test_override::force_boot(boot);
         let token = std::sync::Arc::new(CancelToken::new());
         let nonce = token.turn_nonce().unwrap().to_owned();
@@ -172,7 +172,7 @@ esac
     let (result, candidate, nonce, snapshot) = join_within(worker, WAIT_CAP);
     result.unwrap();
     assert_eq!(
-        candidate.first_mark().is_some(),
+        candidate.first_mark_for_test().is_some(),
         provable,
         "a failed early proof must not be revived by post-tail publication"
     );
@@ -242,7 +242,7 @@ esac
     if !provable {
         let source =
             crate::services::tui_o::shadow::binding_reader::source_id_for(id, &path).unwrap();
-        assert!(candidate.first_proof(&source).is_err());
+        assert!(candidate.first_proof_for_test(&source).is_err());
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(None);
         return;

@@ -64,7 +64,7 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
     .await
     .unwrap();
     assert_eq!(persistent, duplicate, "retry must reuse the durable row");
-    let ttl = enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
+    let ttl = enqueue_outbox_pg_on_tx_with_ttl_and_attachment_for_test(
         &mut tx,
         message("ttl"),
         300,
@@ -74,7 +74,7 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
     .unwrap()
     .unwrap();
     assert!(
-        enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
+        enqueue_outbox_pg_on_tx_with_ttl_and_attachment_for_test(
             &mut tx,
             message("ttl"),
             300,
@@ -119,10 +119,14 @@ async fn image_outbox_paths_preserve_retry_restart_and_dedupe_pg() {
         "competing image producers must reuse the existing UNIQUE dedupe winner"
     );
 
-    let staged =
-        stage_outbox_pg_with_ttl_and_attachment(&pool, message("staged"), 300, Some(image()))
-            .await
-            .unwrap();
+    let staged = stage_outbox_pg_with_ttl_and_attachment_for_test(
+        &pool,
+        message("staged"),
+        300,
+        Some(image()),
+    )
+    .await
+    .unwrap();
     assert!(activate_staged_outbox_pg(&pool, staged).await.unwrap());
     let mut tx = pool.begin().await.unwrap();
     enqueue_outbox_pg_on_tx_with_attachment(&mut tx, message("plain"), Some(image()))

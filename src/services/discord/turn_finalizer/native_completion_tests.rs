@@ -8,7 +8,7 @@ use crate::services::scheduled_messages::turn_completion::{
     ScheduledTurnOutcome, tests::launch_agent_delivery,
 };
 use crate::services::tui_input::human_frame::history::v2::native::{Outcome, Settlement};
-use crate::services::tui_o::writer::input_facts::native::{Evidence, Run};
+use crate::services::tui_o::writer::input_facts::native::Evidence;
 use serde_json::json;
 use sqlx::PgPool;
 use std::future::Future;
@@ -128,21 +128,14 @@ fn proof(f: &Fixture, body: Option<&str>, disposition: Disposition) -> Evidence 
     );
     let end = text.len() as u64;
     std::fs::write(&f.ticket.source.as_ref().unwrap().transcript, text).unwrap();
-    Evidence {
-        namespace: NS.into(),
-        ticket: f.ticket.clone(),
-        run: Some(Run {
-            start,
-            native_id: None,
-        }),
-        range: (opening_end, end),
-        membership_range: Some((0, opening_end)),
-        membership_row: Some("own".into()),
-        closer_range: Some((closer_start, end)),
+    Evidence::completed_for_test(
+        NS.into(),
+        f.ticket.clone(),
+        start,
+        (opening_end, closer_start, end),
+        "own".into(),
         disposition,
-        supersedes: None,
-        raw: None,
-    }
+    )
 }
 
 fn durable(f: &Fixture, evidence: &Evidence) -> Settlement {

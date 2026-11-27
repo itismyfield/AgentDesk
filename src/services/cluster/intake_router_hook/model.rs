@@ -5,7 +5,7 @@ use crate::db::intake_outbox_status::IntakeOutboxStatus;
 
 /// Evidence used to choose the execution node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRoutingBasis {
+pub enum IntakeRoutingBasis {
     LiveForeignOwner,
     NodeOverride,
     AgentDefault,
@@ -13,14 +13,14 @@ pub(crate) enum IntakeRoutingBasis {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResolvedSessionOwner {
+pub enum ResolvedSessionOwner {
     NoOwner,
     LiveLocal,
     LiveForeign,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeRouterDecision {
+pub enum IntakeRouterDecision {
     /// No forwarding happened (Disabled mode, a confirmed ownerless channel
     /// with no usable preference, or an availability fallback after that
     /// ownerless state was proven). The caller MUST run the turn locally.
@@ -60,7 +60,7 @@ pub(crate) enum IntakeRouterDecision {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ObservedIntakeOutcome {
+pub enum ObservedIntakeOutcome {
     WouldKeepLocalExistingOwner,
     WouldForwardLiveForeignOwner {
         target_instance_id: String,
@@ -84,7 +84,7 @@ pub(crate) enum ObservedIntakeOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IntakeBlockedReason {
+pub enum IntakeBlockedReason {
     OwnerLookupFailed { detail: String },
     StaleSessionOwners { instance_ids: Vec<String> },
     ConflictingLiveSessionOwners { instance_ids: Vec<String> },
@@ -97,7 +97,7 @@ pub(crate) enum IntakeBlockedReason {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum RanLocalReason {
+pub enum RanLocalReason {
     /// Mode is `Disabled` (Phase 1-4 default).
     HookDisabled,
     /// Agent opted out (`preferred_intake_node_labels` empty).
@@ -129,7 +129,7 @@ pub(crate) enum RanLocalReason {
 
 /// Per-channel input and execution policy passed by the intake gate.
 #[derive(Clone, Debug)]
-pub(crate) struct IntakeRouterContext<'a> {
+pub struct IntakeRouterContext<'a> {
     pub mode: IntakeRoutingMode,
     pub leader_instance_id: &'a str,
     /// Worker claims use the forwarding bot's provider, never `agents.provider`,

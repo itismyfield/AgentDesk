@@ -7,7 +7,7 @@ use sqlx::{Postgres, Transaction};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Plan {
+pub struct Plan {
     pub version: u8,
     pub home: String,
     pub target: String,
@@ -40,7 +40,7 @@ pub(crate) fn build(observation: &snapshot::Shared) -> Result<Option<Plan>, sqlx
 }
 
 /// Planning is per held row; only promotion keeps the oldest-first order.
-pub(crate) async fn save_on_tx(
+pub async fn save_on_tx(
     tx: &mut Transaction<'_, Postgres>,
     id: &OwnerIdentity,
     delivery: i64,
@@ -93,8 +93,8 @@ pub(crate) async fn read_on_tx(
 }
 
 /// Lets a test change shared state from another connection right after a stale refresh.
-#[cfg(test)]
-pub(crate) static AFTER_REFRESH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(any(test, feature = "test-support"))]
+pub static AFTER_REFRESH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The home proof a fallback channel last planned with; `None` marks custody fallback never planned.
 pub(crate) async fn channel_proof(
@@ -137,12 +137,12 @@ pub(crate) async fn replan_held(
                 0,
             )
             .await?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let hook = AFTER_REFRESH
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(sql) = hook {
                 sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
             }

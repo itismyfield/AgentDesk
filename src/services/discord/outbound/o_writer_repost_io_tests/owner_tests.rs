@@ -37,8 +37,11 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
         provider: "claude".into(),
     };
     let port = mock.port().with_owner_scope(Some(scope.clone()));
-    let mut envelope =
-        RepostEnvelope::additional(73369490, "x".into(), RepostIds::for_piece(MARKER).unwrap());
+    let mut envelope = RepostEnvelope::additional_for_test(
+        73369490,
+        "x".into(),
+        RepostIds::for_piece(MARKER).unwrap(),
+    );
     envelope.output_origin = Some(origin.seal("x"));
     let good = send_within(&port, &envelope, always(), Duration::from_secs(5)).await;
     assert!(matches!(good.outcome, WireOutcome::Created(_)));
@@ -105,7 +108,7 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
     // A re-post reads the original's origin and reply through the trait it is generic over.
     let ledger = writer.store().ledger();
     let key = PieceKey::new(ledger.piece(0).unwrap().unit_key.clone(), 0).unwrap();
-    let stored = ledger.output_origin(0).cloned();
+    let stored = ledger.output_origin_for_test(0).cloned();
     assert!(stored.is_some());
     assert_eq!(RepostWriter::output_origin(&writer, &key), stored);
     assert_eq!(RepostWriter::reply_to(&writer, &key), Some(4242));

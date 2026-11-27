@@ -74,13 +74,13 @@ pub fn last_posted(channel: u64) -> Option<u64> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
+pub fn note_posted_for_tests(channel: u64, msg_id: u64) {
     note_posted(channel, msg_id);
 }
 
 /// What a process restart does to the in-memory position; the guard keeps other restarts out.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
+pub fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
     static RESTARTS: Mutex<()> = Mutex::new(());
     let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
     LAST_POSTED
@@ -114,9 +114,9 @@ type Counts = Mutex<BTreeMap<u64, Arc<AtomicUsize>>>;
 
 /// POSTs started per channel in this process and not ended yet. A channel's
 /// writers share one count, so a POST that outlives its writer still counts. Tests keep one per thread.
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static IN_FLIGHT: Counts = Mutex::new(BTreeMap::new());
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static IN_FLIGHT: Counts = const { Mutex::new(BTreeMap::new()) };
 }
@@ -124,9 +124,9 @@ thread_local! {
 fn with_in_flight<R>(use_counts: impl FnOnce(&mut BTreeMap<u64, Arc<AtomicUsize>>) -> R) -> R {
     let locked =
         |counts: &Counts| use_counts(&mut counts.lock().unwrap_or_else(PoisonError::into_inner));
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return locked(&IN_FLIGHT);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     IN_FLIGHT.with(locked)
 }
 
@@ -259,7 +259,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::new`], judging the recovered refusals with the shared receipts read before start.
-    pub(crate) fn with_receipts(
+    pub fn with_receipts(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,
@@ -314,7 +314,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// As [`Self::with_receipts`] over the receipts `repost` reads first, then gives it the turn.
-    pub(crate) async fn hosted(
+    pub async fn hosted(
         store: ChannelStore,
         gate: Arc<OwnershipGate>,
         port: Arc<P>,
@@ -330,12 +330,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Gives the writer its re-post turn, if its host has one.
-    pub(crate) fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
+    pub fn with_repost(mut self, hook: Option<Box<dyn RepostHook<Self>>>) -> Self {
         self.repost = hook;
         self
     }
 
-    pub(crate) fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
+    pub fn with_repost_stop(mut self, stop: watch::Receiver<bool>) -> Self {
         self.repost_stops.push(stop);
         self
     }
@@ -345,7 +345,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Outstanding ordinary pieces pin retired cursors; re-post turns have nothing owed.
-    pub(crate) fn delivery_allowed(&self, owing: bool) -> bool {
+    pub fn delivery_allowed(&self, owing: bool) -> bool {
         source_delivery_allowed(
             self.channel,
             self.store
@@ -358,7 +358,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::services) fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
+    pub fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
         let channel = self.channel;
         self.posts
             .get_or_insert_with(|| {
@@ -651,7 +651,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             }
             Some(Err(Refusal::Withheld(reason))) => {
                 self.defer_notice_delivery(piece);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::input_notices::admission::count_notice_refusal(piece);
                 tracing::info!(channel, reason, unit_key = ?piece.unit_key,
                     "[tui_o] verified piece withheld before Prepared");

@@ -2,14 +2,14 @@
 //! It stays beside the writer because `runs.rs` calls it under `cfg(test)`.
 
 #[derive(Clone)]
-pub(crate) struct CompletionBarrier {
-    pub(crate) point: &'static str,
-    pub(crate) reached: std::sync::Arc<tokio::sync::Notify>,
-    pub(crate) resume: std::sync::Arc<tokio::sync::Notify>,
+pub struct CompletionBarrier {
+    pub point: &'static str,
+    pub reached: std::sync::Arc<tokio::sync::Notify>,
+    pub resume: std::sync::Arc<tokio::sync::Notify>,
 }
 
 tokio::task_local! {
-    pub(crate) static COMPLETION_BARRIER: CompletionBarrier;
+    pub static COMPLETION_BARRIER: CompletionBarrier;
 }
 
 pub(super) async fn pause_completion_at(point: &str) {

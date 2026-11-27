@@ -18,25 +18,23 @@ struct DispatchedAuditProjection {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DispatchedAuditRow {
-    pub(crate) id: i64,
-    pub(crate) channel_id: String,
-    pub(crate) user_msg_id: String,
-    pub(crate) attempt_no: i32,
-    pub(crate) parent_outbox_id: Option<i64>,
-    pub(crate) dispatched_at: Option<DateTime<Utc>>,
-    pub(crate) claim_owner: Option<String>,
-    pub(crate) provider: String,
-    pub(crate) provider_nonempty: bool,
+pub struct DispatchedAuditRow {
+    pub id: i64,
+    pub channel_id: String,
+    pub user_msg_id: String,
+    pub attempt_no: i32,
+    pub parent_outbox_id: Option<i64>,
+    pub dispatched_at: Option<DateTime<Utc>>,
+    pub claim_owner: Option<String>,
+    pub provider: String,
+    pub provider_nonempty: bool,
 }
 
 /// Lists every dispatched row without an explicit multi-statement transaction,
 /// row lock, or advisory lock. Each SELECT runs in an implicit transaction and
 /// takes an ACCESS SHARE relation lock; it is compatible with DML but can delay
 /// ACCESS EXCLUSIVE DDL for the duration of the query.
-pub(crate) async fn list_dispatched_audit(
-    pool: &PgPool,
-) -> Result<Vec<DispatchedAuditRow>, sqlx::Error> {
+pub async fn list_dispatched_audit(pool: &PgPool) -> Result<Vec<DispatchedAuditRow>, sqlx::Error> {
     let rows: Vec<DispatchedAuditProjection> = sqlx::query_as(
         "SELECT id, channel_id, user_msg_id, attempt_no, parent_outbox_id,
                 dispatched_at, claim_owner, provider

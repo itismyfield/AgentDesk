@@ -4,23 +4,23 @@
 #[cfg(all(test, unix))]
 mod inject_tests;
 mod rollout;
-pub(crate) mod screen;
+pub mod screen;
 
 use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-pub(crate) use crate::services::claude_tui::busy_inject::Pane;
+pub use crate::services::claude_tui::busy_inject::Pane;
 use crate::services::claude_tui::busy_inject::{MAX_INPUT_BYTES, at_offsets, frame};
 use crate::services::claude_tui::owner_input;
-pub(crate) use rollout::{
+pub use rollout::{
     NativeEnd, TurnVerdict, read_latest_turn, read_native_end, read_turn, read_turn_detail,
     submitted,
 };
 
 /// Why nothing reached the pane; the caller may queue the input instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Veto {
+pub enum Veto {
     InvalidInput,
     LockContended,
     PaneUnavailable,
@@ -47,20 +47,20 @@ pub(crate) enum Veto {
 
 /// A paste was attempted, so the input may sit in the composer or be submitted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Unconfirmed {
+pub enum Unconfirmed {
     PasteFailed,
     EnterFailed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Outcome {
+pub enum Outcome {
     NotSent(Veto),
     /// The paste and one Enter succeeded locally; the rollout is diagnostic only.
     Injected,
     Unconfirmed(Unconfirmed),
 }
 
-pub(crate) struct Timing {
+pub struct Timing {
     pub lock_retries: &'static [Duration],
     pub settle: Duration,
     /// Receipt collection runs separately and never delays the next input.
@@ -68,7 +68,7 @@ pub(crate) struct Timing {
     pub confirm_poll: Duration,
 }
 
-pub(crate) const TIMING: Timing = Timing {
+pub const TIMING: Timing = Timing {
     lock_retries: &[
         Duration::ZERO,
         Duration::from_millis(80),
@@ -79,7 +79,7 @@ pub(crate) const TIMING: Timing = Timing {
     confirm_poll: Duration::from_millis(250),
 };
 
-pub(crate) struct Request<'a> {
+pub struct Request<'a> {
     pub session: &'a str,
     pub rollout: &'a Path,
     pub source: &'a str,
@@ -93,7 +93,7 @@ pub(crate) struct Request<'a> {
 }
 
 /// Where the observers learn that a nonce is ours before its record can reach them.
-pub(crate) trait Ledger {
+pub trait Ledger {
     /// Records the nonce before the paste; false refuses the paste.
     fn register(&self) -> bool;
     /// Drops the record of a paste that never ran.
@@ -106,12 +106,7 @@ pub(crate) trait Ledger {
 }
 
 /// Tries the composer lock a bounded number of times, then injects under it.
-pub(crate) fn inject(
-    pane: &Pane,
-    request: &Request<'_>,
-    ledger: &dyn Ledger,
-    timing: &Timing,
-) -> Outcome {
+pub fn inject(pane: &Pane, request: &Request<'_>, ledger: &dyn Ledger, timing: &Timing) -> Outcome {
     let text = frame(
         request.source,
         request.author,
@@ -165,12 +160,12 @@ struct ComposerProof {
     capture: String,
 }
 
-pub(crate) fn owned_composer_capture(pane: &Pane) -> Result<String, Veto> {
+pub fn owned_composer_capture(pane: &Pane) -> Result<String, Veto> {
     composer_proof(pane, true).map(|proof| proof.capture)
 }
 
 /// An owner pins identity and rejects copy mode atomically with each payload key.
-pub(crate) fn key(
+pub fn key(
     pane: &Pane,
     input: crate::services::session_host::PinnedInput<'_>,
 ) -> crate::services::claude_tui::busy_inject::stash::Key {
@@ -466,7 +461,7 @@ pub(crate) fn observe_native_record(
     Some(receipt)
 }
 
-pub(crate) fn observe_native_file(
+pub fn observe_native_file(
     file: &std::fs::File,
     start: u64,
     json: &serde_json::Value,

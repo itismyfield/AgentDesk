@@ -16,7 +16,7 @@ Nothing here runs cargo.
 
 import argparse
 from bisect import bisect_right
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 import hashlib
 import json
@@ -36,11 +36,14 @@ IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # cfg_attr payload attributes that change which files compile or which fns are tests.
 GATING_CFG_ATTR = {"path", "test", "cfg"}
 MANIFEST_DIR_INCLUDE = ("concat", "!", "(", "env", "!", "(", "CARGO_MANIFEST_DIR", ")")
+# adk-runtime's build.rs sets ADK_REPO_ROOT to the checkout root for sources shared from the root `src/`.
+REPO_ROOT_INCLUDE = ("concat", "!", "(", "env", "!", "(", "ADK_REPO_ROOT", ")")
 # Test-only `.join()`/`.recv()` calls must go through these capped helpers; a call nested in one is bounded.
 BOUNDED_CALLS = {"timeout", "timeout_at", "join_within", "recv_within", "await_within"}
 UNBOUNDED_WAITS = {"join": "thread join", "recv": "channel recv"}
 WAIT_HELPER = "src/test_support/wait.rs"
 WAIT_ALLOWLIST = "scripts/ci/test_wait_allowlist.txt"
+RELOCATIONS = "scripts/ci/rust_test_relocations.txt"
 # sha256 of the approved first allowlist (sorted rows, one per line): a base without the file accepts only it.
 INITIAL_ALLOWLIST_SHA256 = "e4dc90257fd137fc9c276e2385d5288073dd9b1350fb187e9657d26f60e7c09d"
 WAIT_CALL = re.compile(r"\b(?:join|recv)\b")
@@ -307,14 +310,15 @@ class Inventory:
     source_tokens: dict = field(default_factory=dict)
 
 
-def _include_target(tokens, index, source, manifest_dir):
+def _include_target(tokens, index, source, manifest_dir, repo_root):
     """Path an `include!(...)` at tokens[index] names, None for a non-literal form."""
     args = [t for t in tokens[index + 3:index + 5 + len(MANIFEST_DIR_INCLUDE)]
             if t.kind != "punct" or t.value != ","][:len(MANIFEST_DIR_INCLUDE) + 1]
     if tokens[index + 3].kind == "string":
         return source.parent / tokens[index + 3].value
-    if tuple(t.value for t in args[:-1]) == MANIFEST_DIR_INCLUDE and args[-1].kind == "string":
-        return manifest_dir / args[-1].value.lstrip("/")
+    prefix = tuple(t.value for t in args[:-1])
+    if args[-1].kind == "string" and prefix in (MANIFEST_DIR_INCLUDE, REPO_ROOT_INCLUDE):
+        return (manifest_dir if prefix == MANIFEST_DIR_INCLUDE else repo_root) / args[-1].value.lstrip("/")
     return None
 
 
@@ -458,7 +462,7 @@ def walk(root, repo_root, inventory=None, *, production=False, manifest_dir=None
                     pending_path, pending_test, pending_cfgs, pending_texts = None, False, (), ()
             elif token.kind == "ident" and token.value == "include" and index + 3 < len(tokens) \
                     and tokens[index + 1].value == "!" and tokens[index + 2].value == "(":
-                target = _include_target(tokens, index, source, manifest_dir)
+                target = _include_target(tokens, index, source, manifest_dir, repo_root)
                 if target is None:
                     inv.unreadable.append(f"{site} include! with a non-literal path")
                 elif not target.is_file():
@@ -660,10 +664,14 @@ def platform_split(inventory, target_os, features):
     return compiled, excluded, unknown
 
 
-def compiled_lib_tests(repo_root, platform="linux"):
-    """Lib test IDs a plain `cargo test --lib` compiles on one platform, read from the sources alone."""
-    inventory = walk(repo_root / "src/lib.rs", repo_root)
-    return platform_split(inventory, PLATFORMS[platform], default_features(repo_root))[0]
+def compiled_lib_tests(repo_root, platform="linux", package=None):
+    """Lib test IDs `cargo test --lib` (or `-p package`) compiles on one platform, read from the sources alone."""
+    manifest_dir, root = repo_root, repo_root / "src/lib.rs"
+    if package is not None:
+        manifest, root = workspace_lib_roots(repo_root)[package]
+        manifest_dir = manifest.parent
+    inventory = walk(root, repo_root, manifest_dir=manifest_dir)
+    return platform_split(inventory, PLATFORMS[platform], default_features(manifest_dir))[0]
 
 
 def listed_lib_cases(path):
@@ -761,22 +769,60 @@ def _declarations(repo_root, libraries, same_binary=False):
     """Unambiguous declaration key -> (binary, test ID); same_binary keys also hold every test attribute."""
     owners = defaultdict(set)
     declarations = defaultdict(list)
-    for binary, (_, inventory) in libraries.items():
+    for binary, (manifest_dir, inventory) in libraries.items():
+        features = default_features(manifest_dir)
         for file in inventory.modules:
             owners[file].add(binary)
         for name, sites in inventory.tests.items():
+            # A complementary non-test module declaration cannot declare a second lib test.
+            sites = [(site, cfg) for site, cfg in sites
+                     if any(all(cfg_holds(predicate, target, features) is not False for predicate in cfg)
+                            for target in PLATFORMS.values())]
             if len(sites) != 1:
                 continue
             site, cfg = sites[0]
-            cfg = tuple(canonical_cfg(p) for p in cfg)
+            # A cfg chain is a conjunction: order and repeats do not change when the test compiles.
+            cfg = tuple(sorted({canonical_cfg(p) for p in cfg}))
             filename = site.rsplit(":", 1)[0]
             key = (filename, name.rsplit("::", 1)[-1], cfg, tuple(inventory.ignores.get(site, ())))
             if same_binary:
-                # A cfg chain is a conjunction: order and repeats do not change when the test compiles.
-                key = (*key[:2], tuple(sorted(set(cfg))), key[3], inventory.attrs.get(site, ()))
+                key = (*key, inventory.attrs.get(site, ()))
             declarations[key].append((binary, name))
     return {key: ids[0] for key, ids in declarations.items()
             if len(ids) == 1 and owners[(repo_root / key[0]).resolve()] == {ids[0][0]}}
+
+
+def explicit_relocations(head_root):
+    """RELOCATIONS rows as ((binary, file, ID) before, (binary, file, ID) after)."""
+    path = head_root / RELOCATIONS
+    rows = []
+    for number, line in enumerate(path.read_text("utf-8").splitlines() if path.is_file() else (), 1):
+        words = line.split("#", 1)[0].split()
+        if words and len(words) != 6:
+            raise ValueError(f"{RELOCATIONS}:{number}: expected 6 fields, found {len(words)}")
+        if words:
+            rows.append((tuple(words[:3]), tuple(words[3:])))
+    if len({before[0::2] for before, _ in rows}) != len(rows) or len({after[0::2] for _, after in rows}) != len(rows):
+        raise ValueError(f"{RELOCATIONS}: a test ID appears in more than one row")
+    return rows
+
+
+def _explicit_moves(head_root, base_libs, head_libs):
+    """Listed moves whose two sides each declare the test once, at the listed file, with equal name, cfg,
+    ignore and test attributes."""
+    moves = {}
+    for before, after in explicit_relocations(head_root):
+        declared = []
+        for libs, (binary, filename, name) in ((base_libs, before), (head_libs, after)):
+            inventory = libs[binary][1] if binary in libs else Inventory()
+            sites = inventory.tests.get(name, ())
+            if len(sites) == 1 and sites[0][0].rsplit(":", 1)[0] == filename:
+                site, cfg = sites[0]
+                declared.append((name.rsplit("::", 1)[-1], tuple(sorted({canonical_cfg(p) for p in cfg})),
+                                 tuple(inventory.ignores.get(site, ())), inventory.attrs.get(site, ())))
+        if len(declared) == 2 and declared[0] == declared[1]:
+            moves[before[0::2]] = (after[0::2], (before[1], declared[0][0], after[1]))
+    return moves
 
 
 def _source_losses(base_root, head_root, base, head, base_libs, head_libs):
@@ -788,6 +834,11 @@ def _source_losses(base_root, head_root, base, head, base_libs, head_libs):
     before, after = _declarations(base_root, base_libs, True), _declarations(head_root, head_libs, True)
     moves.update((origin, (after[key], key)) for key, origin in before.items()
                  if key in after and origin[0] == after[key][0])
+    # A move that also changes the file counts only when RELOCATIONS names both sides.
+    moves.update(_explicit_moves(head_root, base_libs, head_libs))
+    # Two origins claiming one head test would hide a deletion, so neither counts.
+    targets = Counter(target for target, _ in moves.values())
+    moves = {origin: move for origin, move in moves.items() if targets[move[0]] == 1}
     by_binary = {key: {} for key in ("removed", "runnable_to_ignored", "present_tests")}
     relocated = {}
     for platform in PLATFORMS:

@@ -39,7 +39,7 @@ fn record(name: &str, state: LoopState) {
 }
 
 /// Spawns a process-lifetime loop; its end, by return or by panic, is logged and kept for health.
-pub(crate) fn spawn_resident<F>(name: impl Into<String>, future: F) -> tokio::task::JoinHandle<()>
+pub fn spawn_resident<F>(name: impl Into<String>, future: F) -> tokio::task::JoinHandle<()>
 where
     F: Future<Output = ()> + Send + 'static,
 {
@@ -68,7 +68,7 @@ pub(crate) fn snapshot() -> Vec<ResidentLoop> {
 }
 
 /// Health detail: how many loops run, and each loop that no longer does.
-pub(crate) fn health_json() -> serde_json::Value {
+pub fn health_json() -> serde_json::Value {
     let loops = snapshot();
     let running = loops
         .iter()

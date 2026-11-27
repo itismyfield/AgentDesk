@@ -30,8 +30,11 @@ async fn repost_replies_to_the_original_anchor_pg() {
     let started = dispatch::start(&mut writer, permit, lease, &*io).await;
     started.finish(&mut writer, &pool).await.unwrap();
     let ledger = writer.store().ledger();
-    let (serial, _) = ledger.latest_piece(key.unit(), 0).unwrap();
-    assert_eq!((serial, ledger.reply_to(serial)), (1, Some(ANCHOR)));
+    let (serial, _) = ledger.latest_piece(key.unit_for_test(), 0).unwrap();
+    assert_eq!(
+        (serial, ledger.reply_to_for_test(serial)),
+        (1, Some(ANCHOR))
+    );
     let bodies = io.bodies.lock().unwrap().clone();
     assert_eq!(bodies.len(), 1);
     let reference = &bodies[0]["message_reference"];

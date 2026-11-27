@@ -31,7 +31,7 @@ fn boot(config: &crate::config::Config, channel: u64) -> cutover::test_override:
     cutover::test_override::force_boot(
         BootChannels::validate(config)
             .unwrap()
-            .seeded(config, |selected, _| {
+            .seeded_for_test(config, |selected, _| {
                 Ok(crate::services::tui_o::channel_policy::stored(
                     Some(&root),
                     &selected

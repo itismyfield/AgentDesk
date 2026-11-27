@@ -11,8 +11,7 @@ mod cluster_intake_worker_owner_fence_pg;
 mod cluster_intake_worker_replay_hold;
 #[path = "services/cluster/intake_router_hook/owner_record/event_tests.rs"]
 mod cluster_owner_record_event;
-#[path = "services/legacy_body_census/entry_tests.rs"]
-mod legacy_body_census;
+mod legacy_body_census_entry_tests;
 #[path = "services/session_forwarding/probe/tests.rs"]
 mod session_forwarding_probe;
 

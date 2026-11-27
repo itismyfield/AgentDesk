@@ -263,13 +263,13 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
                 !observation.complete_for_test(),
                 "missing physical barrier cannot be complete"
             );
-            assert!(observation.no_effect_evidence().is_none());
+            assert!(observation.no_effect_evidence_for_test().is_none());
             assert!(matches!(
                 finished.try_recv(),
                 Err(mpsc::TryRecvError::Empty)
             ));
         }
-        phases.push(json!({"gate":gate,"facts":format!("{observation:?}"),"no_effect":observation.no_effect_evidence().is_some()}));
+        phases.push(json!({"gate":gate,"facts":format!("{observation:?}"),"no_effect":observation.no_effect_evidence_for_test().is_some()}));
     }
     finished
         .recv_timeout(Duration::from_secs(20))
@@ -287,10 +287,10 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
     }
     println!(
         "P2_OBSERVER_RESULT {}",
-        json!({"runtime":provider,"mode":mode,"order":order,"starts":case.starts().len(),"messages":c,"facts":format!("{observed:?}"),"no_effect":observed.no_effect_evidence().is_some(),"phases":phases})
+        json!({"runtime":provider,"mode":mode,"order":order,"starts":case.starts().len(),"messages":c,"facts":format!("{observed:?}"),"no_effect":observed.no_effect_evidence_for_test().is_some(),"phases":phases})
     );
     assert_eq!(
-        observed.no_effect_evidence().is_some(),
+        observed.no_effect_evidence_for_test().is_some(),
         mode == "quiet",
         "quiet completed direct runtime must provide evidence"
     );
@@ -396,7 +396,7 @@ fn p2_only_owned_direct_runtimes_can_activate() {
                     && driver == D::LegacyPrompt
                     && runtime.is_none();
                 assert_eq!(
-                    seal::can_activate(provider.clone(), driver, runtime),
+                    can_activate_for_test(provider.clone(), driver, runtime),
                     expected,
                     "{provider:?}/{driver:?}/{runtime:?}"
                 );
@@ -412,38 +412,59 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
     for label in ["finish", "drop", "duplicate", "timeout"] {
         let live = live(&pool, "codex", label).await;
         let tok = token(&live);
-        let tap = RawTap::for_codex(Some(&tok));
+        let tap = RawTap::for_codex_for_test(Some(&tok));
         for fact in [
             Seen::StdoutEof,
             Seen::Exited { waited: true },
             Seen::StderrDrained,
         ] {
-            tap.see(fact);
+            tap.see_for_test(fact);
         }
         assert!(
-            live.observation_for_test().no_effect_evidence().is_none(),
+            live.observation_for_test()
+                .no_effect_evidence_for_test()
+                .is_none(),
             "physical facts cannot replace owner close"
         );
         match label {
             "finish" => {
-                tap.finish(true, Seen::StderrDrained);
-                assert!(live.observation_for_test().no_effect_evidence().is_some());
+                tap.finish_for_test(true, Seen::StderrDrained);
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_some()
+                );
             }
             "duplicate" => {
-                let duplicate = RawTap::for_codex(Some(&tok));
-                assert!(!duplicate.active());
-                tap.finish(true, Seen::StderrDrained);
-                assert!(live.observation_for_test().no_effect_evidence().is_none());
+                let duplicate = RawTap::for_codex_for_test(Some(&tok));
+                assert!(!duplicate.active_for_test());
+                tap.finish_for_test(true, Seen::StderrDrained);
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_none()
+                );
             }
             "timeout" => {
-                let (_, observed) = live.take_for_decision(Duration::ZERO).await.unwrap();
-                assert!(observed.no_effect_evidence().is_none());
-                tap.finish(true, Seen::StderrDrained);
-                assert!(live.take_for_decision(Duration::ZERO).await.is_none());
+                let (_, observed) = live
+                    .take_for_decision_for_test(Duration::ZERO)
+                    .await
+                    .unwrap();
+                assert!(observed.no_effect_evidence_for_test().is_none());
+                tap.finish_for_test(true, Seen::StderrDrained);
+                assert!(
+                    live.take_for_decision_for_test(Duration::ZERO)
+                        .await
+                        .is_none()
+                );
             }
             _ => {
                 drop(tap);
-                assert!(live.observation_for_test().no_effect_evidence().is_none());
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_none()
+                );
             }
         }
     }
@@ -522,7 +543,7 @@ async fn p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg() {
         "actual tool must be observed before the normalized callback"
     );
     assert!(facts.seen_for_test().contains(&Seen::Broken));
-    assert!(facts.no_effect_evidence().is_none());
+    assert!(facts.no_effect_evidence_for_test().is_none());
     pool.close().await;
     db.drop().await;
 }
@@ -666,7 +687,7 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
         .await
         .unwrap()
         .into_parts();
-        assert!(attempt.retry_of().is_some());
+        assert!(attempt.retry_of_for_test().is_some());
         let next = Arc::new(LiveAttempt::new(attempt));
         let next_token = token(&next);
         let next_state = inflight(&next);
@@ -762,7 +783,7 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
         assert!(
             observed
                 .observation_for_test()
-                .no_effect_evidence()
+                .no_effect_evidence_for_test()
                 .is_none()
         );
         if before {
@@ -849,10 +870,13 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
     let pool = db.connect_and_migrate_with_max_connections(4).await;
     let live = live(&pool, "claude", "file-phrase").await;
     let tok = token(&live);
-    let tap = RawTap::for_file(Some(&tok));
-    tap.file_activity();
-    tap.finish(true, Seen::StderrDrained);
-    assert!(!live.stale(), "assistant text is not a bridge Error");
+    let tap = RawTap::for_file_for_test(Some(&tok));
+    tap.file_activity_for_test();
+    tap.finish_for_test(true, Seen::StderrDrained);
+    assert!(
+        !live.stale_for_test(),
+        "assistant text is not a bridge Error"
+    );
     assert!(
         !crate::services::discord::replay_policy::ordinary_outcome(
             Some(&pool),
@@ -861,7 +885,7 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
         )
         .await
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }
@@ -934,7 +958,7 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
         )
         .await
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }
@@ -947,7 +971,7 @@ async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
     let tok = token(&live);
     let state = inflight(&live);
     live.record(Seen::Broken);
-    live.mark_stale();
+    live.mark_stale_for_test();
     assert!(
         !crate::services::discord::replay_policy::error_is_ordinary(
             Some(&pool),
@@ -967,7 +991,7 @@ async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
         stored, "withheld",
         "unmatched stale cannot stay unclassified"
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }

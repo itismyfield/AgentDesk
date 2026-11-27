@@ -144,7 +144,7 @@ pub mod native_input;
 mod state {
     use super::*;
 
-    pub(in crate::services) struct Actor<P, L, A, B> {
+    pub struct Actor<P, L, A, B> {
         pub(super) replay_deferred: bool,
         pub(super) writer: ChannelWriter<P, L, A>,
         pub(super) deriver: UnitDeriver,
@@ -165,7 +165,7 @@ mod state {
 #[cfg(not(any(test, feature = "test-support")))]
 use state::Actor;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use state::Actor;
+pub use state::Actor;
 
 #[derive(Default)]
 struct Waiting {
@@ -449,7 +449,7 @@ where
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -495,7 +495,7 @@ where
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn run_channel_at<P, L, A, B>(
+pub async fn run_channel_at<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -526,22 +526,22 @@ mod notice_settlement;
 #[cfg(not(any(test, feature = "test-support")))]
 mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) mod notice_work;
-#[cfg(test)]
-pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
+pub mod notice_work;
+#[cfg(any(test, feature = "test-support"))]
+pub use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
-pub(crate) mod codex_retention;
+pub mod codex_retention;
 mod transition;
 mod transition_snapshot;
 // Test seams for the actor tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::WAIT_LIMIT_FOR_TEST;
+pub use test_access::WAIT_LIMIT_FOR_TEST;
 
-pub(crate) mod codex_submission;
+pub mod codex_submission;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     fn project_operator_resumes(&mut self) {
@@ -943,16 +943,14 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
-#[cfg(all(test, unix))]
-pub(crate) use transition::scoped_tests::{
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition::test_hooks as transition_hooks;
+pub use transition::test_hooks as transition_hooks;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use transition_snapshot::{
-    execution_read, execution_sources, force_execution_for_tests,
-};
+pub use transition_snapshot::{execution_read, execution_sources, force_execution_for_tests};
 
 #[cfg(test)]
 mod test_support {

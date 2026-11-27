@@ -9,7 +9,7 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use crate::services::tui_o::writer::pieces::{Derived, PieceWork};
-use crate::services::tui_o::writer::tests::*;
+use crate::services::tui_o::writer::test_support::*;
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::Ordering;
@@ -259,7 +259,7 @@ async fn original_retry_and_approved_notice_share_clear_first_without_preparing_
         let before = writer.store().ledger().next_serial();
         let step = if mode == "retry" {
             writer
-                .retry_local(Utc::now() + chrono::Duration::days(1))
+                .retry_local_for_test(Utc::now() + chrono::Duration::days(1))
                 .await
         } else {
             writer.deliver(&Derived::Piece(item.clone())).await

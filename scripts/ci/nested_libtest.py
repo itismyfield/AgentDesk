@@ -199,14 +199,21 @@ def names_child(compact: str, text: str, name: str) -> bool:
 
 def check(root: Path, path: Path | None = None) -> list[str]:
     children = declarations(root, path)
-    inventory = sources.walk(root / "src/lib.rs", root)
-    linux = sources.platform_split(inventory, "linux", sources.default_features(root))[0]
+    libraries = []
+    for manifest, lib_root in sources.workspace_lib_roots(root).values():
+        inventory = sources.walk(lib_root, root, manifest_dir=manifest.parent)
+        libraries.append((inventory, sources.platform_split(
+            inventory, "linux", sources.default_features(manifest.parent))[0]))
     errors = []
     calls, declared = source_calls(root), {}
     for child in children:
         name, source = child["id"], root / child["source"]
         bounds, _ = functions(source.read_text())
-        if child["source"] not in {site.rsplit(":", 1)[0] for site, _ in inventory.tests.get(name, ())}:
+        # A child runs in its parent's test binary, so both are read from the lib that declares the child.
+        owners = [lib for lib in libraries
+                  if child["source"] in {site.rsplit(":", 1)[0] for site, _ in lib[0].tests.get(name, ())}]
+        inventory, linux = owners[0] if len(owners) == 1 else libraries[0]
+        if len(owners) != 1:
             errors.append(f"child inventory source differs from declaration: {name}")
         definitions = [item for item in bounds.values() if item["function"] == name.rsplit("::", 1)[1]]
         if len(definitions) != 1:

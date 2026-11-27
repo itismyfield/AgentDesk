@@ -71,7 +71,7 @@ impl QueueService {
         Self { pg_pool }
     }
 
-    pub async fn cancel_dispatch<R: CancelRegistry>(
+    pub(crate) async fn cancel_dispatch<R: CancelRegistry>(
         &self,
         health_registry: Option<&Arc<R>>,
         dispatch_id: &str,
@@ -351,7 +351,7 @@ impl QueueService {
 
     /// Cancels `channel_id`'s turn: `force` hard-kills it or, with terminate on, retires its Herdr
     /// execution; otherwise session and queue stay, and a live Herdr turn takes `/stop`.
-    pub async fn cancel_turn<R: CancelRegistry>(
+    pub(crate) async fn cancel_turn<R: CancelRegistry>(
         &self,
         health_registry: Option<&Arc<R>>,
         channel_id: &str,

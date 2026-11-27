@@ -5,7 +5,7 @@ use crate::config::session_hosts::approval_store::{
 };
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLocation, HostedRecord, HostedState,
-    tests::{owner, record},
+    test_support::{owner, record},
 };
 use crate::services::session_host::ServerWitness;
 use crate::services::session_host::policy::consent::{

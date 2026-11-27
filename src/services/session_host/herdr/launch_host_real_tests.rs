@@ -157,9 +157,9 @@ impl RealServer {
     }
 
     fn endpoint(&self) -> HerdrEndpoint {
-        HerdrEndpoint::new("mac-mini", "real", &self.dir.join("h.sock"), "adk")
+        HerdrEndpoint::new_for_test("mac-mini", "real", &self.dir.join("h.sock"), "adk")
             .unwrap()
-            .with_herdr_home(&self.dir.join("home"))
+            .with_herdr_home_for_test(&self.dir.join("home"))
             .unwrap()
     }
 
@@ -257,7 +257,7 @@ fn off(host: &SocketHerdrLaunchHost, server: &RealServer) -> ServerWitness {
     let reading = host.restore_resume(&server.launch_endpoint());
     reading
         .clone()
-        .admitted_witness()
+        .admitted_witness_for_test()
         .unwrap_or_else(|| panic!("E7 {reading:?}"))
 }
 
@@ -337,9 +337,9 @@ fn herdr_real_server_launch_input_bytes_and_refusals() {
     );
     let pane = created(host.create(&create_request(&server, off(&host, &server), command)));
     wait_for(&dir.join("kl.ready"), "keylog raw mode");
-    let input = HerdrHost::new(
+    let input = HerdrHost::new_for_test(
         server.endpoint(),
-        HerdrSocketTransport::new(
+        HerdrSocketTransport::new_for_test(
             &server.endpoint(),
             HerdrSocketConfig::default(),
             LineJsonFraming,
@@ -350,11 +350,11 @@ fn herdr_real_server_launch_input_bytes_and_refusals() {
     assert_eq!(input.send_keys(target, &keys), Ok(HostMutation::Confirmed));
     assert_eq!(input.interrupt(target), Ok(HostMutation::Confirmed));
     assert_eq!(
-        input.send_paste(target, "첫줄\n둘째줄 ✓"),
+        input.send_paste_for_test(target, "첫줄\n둘째줄 ✓"),
         Ok(HostMutation::Confirmed)
     );
     assert_eq!(
-        input.send_line(target, "/clear"),
+        input.send_line_for_test(target, "/clear"),
         Ok(HostMutation::Confirmed)
     );
     assert_eq!(

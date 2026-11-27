@@ -1,0 +1,23 @@
+---
+title: "8422: 죽은 Bound 실행과 synthetic start (rev2)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Path to the OwnedStartDelivered or SyntheticSettles bug
+    lg1: Repeats forever, so OwnedStartDelivered or SyntheticSettles breaks
+  }
+  class lg0 bugPath
+  class lg1 repeats
+  s0: start front 도착(claim 전)
+  s1: 죽은 Bound에 held_watch 보류
+  s2: retire 뒤 재판정 대기
+  s3: claim 됨
+  s4: 새 실행(Cold)으로 전달
+  [*] --> s0
+  s0 --> s1: start_waits 판정
+  s0 --> s2: 운영자 terminate(retired wake)
+  s1 --> s2: 운영자 terminate(retired wake)
+  s2 --> s3: start_waits 판정
+  s3 --> s4: claim 뒤 실행
+  class s0 bugPath
+  class s1 repeats

@@ -3,7 +3,7 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::domain::automation_contract::PIPELINE_STAGE_ID;
 
-pub(crate) use crate::db::automation_candidate_card_program::load_card_program_for_update_in_tx;
+pub use crate::db::automation_candidate_card_program::load_card_program_for_update_in_tx;
 pub use crate::db::automation_candidate_card_program::{
     approve_candidate_card_pg, load_active_card_program_pg, load_card_program_pg,
 };

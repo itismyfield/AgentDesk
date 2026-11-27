@@ -1,15 +1,22 @@
 use super::*;
+#[cfg(test)]
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
-pub(crate) struct Rig {
-    pub(crate) dir: tempfile::TempDir,
+pub struct Rig {
+    pub dir: tempfile::TempDir,
     _path: crate::config::TestEnvVarGuard,
     _root: crate::config::TestEnvVarGuard,
 }
 
+impl Default for Rig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rig {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("tmux");
         let binary = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
@@ -35,7 +42,7 @@ impl Rig {
         }
     }
 
-    pub(crate) fn raw(&self, args: &[&str]) -> Output {
+    pub fn raw(&self, args: &[&str]) -> Output {
         Command::new(self.dir.path().join("tmux"))
             .env_remove("AGENTDESK_IDENTITY")
             .args(args)
@@ -43,6 +50,7 @@ impl Rig {
             .unwrap()
     }
 
+    #[cfg(test)]
     fn snapshot(&self, name: &str) -> (Vec<u8>, Vec<u8>) {
         let target = exact_target(name);
         (
@@ -152,7 +160,7 @@ fn identity_marker_is_present_at_creation_and_unset_is_refused() {
 }
 
 /// Existing scripted panes explicitly carry management evidence at their process boundary.
-pub(crate) fn managed_fixture_program(program: std::path::PathBuf) -> std::path::PathBuf {
+pub fn managed_fixture_program(program: std::path::PathBuf) -> std::path::PathBuf {
     let program = crate::services::platform::binary_resolver::runtime_command(program)
         .unwrap()
         .get_program()
@@ -169,7 +177,7 @@ pub(crate) fn managed_fixture_program(program: std::path::PathBuf) -> std::path:
 }
 
 /// Keeps a PATH-first stub's entry path while supplying its managed-session evidence.
-pub(crate) fn mark_fixture_program(program: std::path::PathBuf) {
+pub fn mark_fixture_program(program: std::path::PathBuf) {
     let stub = program.with_file_name(format!("tmux-stub-{}", uuid::Uuid::new_v4()));
     std::fs::rename(&program, &stub).unwrap();
     let wrapper = managed_fixture_program(stub);

@@ -23,7 +23,7 @@ mod reply_to;
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::{append_for_test, recover_for_test};
+pub use test_access::{append_for_test, recover_for_test};
 pub mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;
@@ -260,6 +260,14 @@ impl LedgerState {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn output_origin_for_test(
+        &self,
+        serial: u64,
+    ) -> Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        self.output_origin(serial)
+    }
+
     pub(crate) fn output_origin(
         &self,
         serial: u64,
@@ -445,6 +453,11 @@ impl LedgerState {
     /// The start an operator resolved for a pending source; the first entry stands.
     pub fn boundary_resolved(&self, source: &SourceId) -> Option<u64> {
         self.resolved.get(source).map(|(from, _)| *from)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn boundary_evidence_for_test(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
+        self.boundary_evidence(source)
     }
 
     pub(crate) fn boundary_evidence(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
@@ -678,11 +691,7 @@ pub(super) fn create_empty(path: &Path) -> Result<(), StoreError> {
     Ok(fsync_parent_dir(path)?)
 }
 
-pub(super) fn append(
-    path: &Path,
-    at: DateTime<Utc>,
-    entry: &LedgerEntry,
-) -> Result<(), StoreError> {
+pub fn append(path: &Path, at: DateTime<Utc>, entry: &LedgerEntry) -> Result<(), StoreError> {
     Ok(super::durable::append_synced(path, &line(at, entry)?)?)
 }
 
@@ -776,7 +785,7 @@ impl Unsent {
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
-pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+pub fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 
@@ -828,13 +837,13 @@ fn replay(
                 return Ok((state, false));
             };
             if withdrawable(&state, &last.entry, unsent) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::Cut)?;
                 reader.get_ref().set_len(start)?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::CutSync)?;
                 reader.get_ref().sync_all()?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::note_withdrawn(path);
                 return Ok((state, true));
             }

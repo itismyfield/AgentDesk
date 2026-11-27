@@ -9,7 +9,7 @@ use std::{
 pub(crate) mod issuer;
 
 #[derive(Clone, Debug)]
-pub(crate) struct OwnedRuntimeRoot {
+pub struct OwnedRuntimeRoot {
     root: PathBuf,
     _lock: Arc<File>,
 }
