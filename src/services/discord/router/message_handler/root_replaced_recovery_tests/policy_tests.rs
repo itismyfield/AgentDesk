@@ -116,7 +116,7 @@ impl PolicyCase {
             herdr_session: configured.herdr_session,
         };
         let witness = |pid| ServerWitness {
-            socket: endpoint.socket_path().into(),
+            socket: endpoint.socket_path_for_test().into(),
             pid,
             start: crate::services::session_host::StartIdentity::Darwin {
                 seconds: 1_000,
@@ -124,7 +124,8 @@ impl PolicyCase {
             },
         };
         let policy =
-            tempfile::NamedTempFile::new_in(endpoint.socket_path().parent().unwrap()).unwrap();
+            tempfile::NamedTempFile::new_in(endpoint.socket_path_for_test().parent().unwrap())
+                .unwrap();
         std::fs::write(policy.path(), "[session]\nresume_agents_on_restore=false\n").unwrap();
         let source = Arc::new(Source {
             peer: PeerSnapshot {
@@ -202,7 +203,7 @@ impl PolicyCase {
                 "a new dcserver starts with no startup proof"
             );
             assert_eq!(
-                evidence.grant.map(|g| g.encode().unwrap()),
+                evidence.grant.map(|g| g.encode_for_test().unwrap()),
                 this.original_grant
             );
         }
@@ -296,7 +297,7 @@ fn reader_produces_current_policy(tag: &str, granted: Option<u32>) {
         "only the production observation produces startup proof"
     );
     assert_eq!(
-        evidence.grant.map(|g| g.encode().unwrap()),
+        evidence.grant.map(|g| g.encode_for_test().unwrap()),
         case.original_grant,
         "observing W1 never rewrites N1's historical W0 grant"
     );
@@ -382,7 +383,7 @@ fn rr_policy_transient_producer_peer_failure_retries_on_next_reader_pass_pg() {
     let evidence = case.evidence();
     assert!(evidence.startup.is_some());
     assert_eq!(
-        evidence.grant.map(|g| g.encode().unwrap()),
+        evidence.grant.map(|g| g.encode_for_test().unwrap()),
         case.original_grant,
     );
 }
@@ -436,7 +437,7 @@ fn rr_policy_exact_current_grant_survives_invalid_config_without_observation_pg(
     assert_eq!(case.source.reads.load(Ordering::SeqCst), 0);
     assert_eq!(case.case.effects(), before);
     assert_eq!(
-        case.evidence().grant.map(|g| g.encode().unwrap()),
+        case.evidence().grant.map(|g| g.encode_for_test().unwrap()),
         case.original_grant,
     );
 }

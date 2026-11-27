@@ -195,7 +195,7 @@ fn run(case: Case) {
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
     let attempt = json!({"nonce":"clear-held-1","provider":"claude",
         "target":{"host":"herdr","owner":logical,"root":rig.socket().display().to_string(),"execution_nonce":NONCE},
-        "source":{"kind":"pre_source","expected_session_id":attached.session_id_for_test_for_test(),
+        "source":{"kind":"pre_source","expected_session_id":attached.session_id_for_test(),
             "expected_transcript":source.path,"binding_watermark":null}});
     runtime
         .block_on(mailbox.v2_cold_fixture(
@@ -225,7 +225,7 @@ fn run(case: Case) {
                 );
                 if !matches!(case, Case::Capture) {
                     let pane = attached
-                        .target_for_test_for_test()
+                        .target_for_test()
                         .capture_ansi(-80)
                         .expect("owned draft capture exists");
                     assert!(!readiness::empty_draft(&pane));

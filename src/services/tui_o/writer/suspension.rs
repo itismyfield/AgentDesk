@@ -94,11 +94,7 @@ impl Suspension {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::services) fn extend(
-        &self,
-        nonce: String,
-        sources: impl IntoIterator<Item = SourceId>,
-    ) {
+    pub fn extend(&self, nonce: String, sources: impl IntoIterator<Item = SourceId>) {
         let mut scope = self.0.lock().unwrap_or_else(PoisonError::into_inner);
         scope
             .keys

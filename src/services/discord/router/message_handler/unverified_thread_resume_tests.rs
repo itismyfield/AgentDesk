@@ -45,7 +45,7 @@ pub(in crate::services::discord) fn thread_child(
     let surface = serde_json::from_value(surface).unwrap();
     boot.reserve_boot_children(&[(thread, parent)]);
     let surface = VerifiedSurface::from_discord_for_test(&surface, ClaudeTui).unwrap();
-    assert!(boot.resolve_child(thread, surface, false));
+    assert!(boot.resolve_child_for_test(thread, surface, false));
     test_override::force_boot(boot)
 }
 

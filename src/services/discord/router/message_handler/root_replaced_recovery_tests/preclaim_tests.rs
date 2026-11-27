@@ -616,7 +616,9 @@ fn rr_preclaim_first_ingress_before_reader_recovers_and_submits_the_same_q_pg() 
     assert_eq!(case.case.cleanups(), 1);
     assert!(case.evidence().startup.is_some());
     assert_eq!(
-        case.evidence().grant.map(|grant| grant.encode().unwrap()),
+        case.evidence()
+            .grant
+            .map(|grant| grant.encode_for_test().unwrap()),
         case.original_grant
     );
     let HostedRecord::Known(record) = case.case.fx.record() else {

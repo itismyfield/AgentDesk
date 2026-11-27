@@ -32,15 +32,15 @@ pub const PROMPT: &str = "read verified source";
 
 pub struct Fixture {
     pub(super) fake: crate::services::provider_teardown::test_support::FakeTmux,
-    pub(crate) context: BindingContext,
-    pub(crate) root: tempfile::TempDir,
+    pub context: BindingContext,
+    pub root: tempfile::TempDir,
     _env: [TestEnvVarGuard; 2],
     _dedupe: std::sync::MutexGuard<'static, ()>,
     _shared: crate::config::test_env_lock::SharedTestEnvLockGuard,
 }
 
 impl Fixture {
-    pub(crate) fn new(verified: bool) -> Self {
+    pub fn new(verified: bool) -> Self {
         let shared = crate::config::test_env_lock::acquire_shared_test_env_lock();
         Self::with_env_lock(verified, shared)
     }
@@ -102,7 +102,7 @@ impl Fixture {
             _shared: shared,
         }
     }
-    pub(crate) fn path(&self, id: &str) -> PathBuf {
+    pub fn path(&self, id: &str) -> PathBuf {
         self.context
             .provider_root
             .as_ref()
@@ -112,7 +112,7 @@ impl Fixture {
     pub(super) fn header(&self, id: &str) {
         self.header_at(id, self.time(1));
     }
-    pub(crate) fn header_at(&self, id: &str, time: DateTime<Utc>) {
+    pub fn header_at(&self, id: &str, time: DateTime<Utc>) {
         let time = time.to_rfc3339();
         let meta = json!({"type":"session_meta", "timestamp":time, "payload":{"id":id,"timestamp":time,"cwd":self.root.path(),"source":"cli","originator":"codex_cli_rs"}});
         fs::write(self.path(id), format!("{meta}\n")).unwrap();
@@ -145,7 +145,7 @@ impl Fixture {
     pub(super) fn time(&self, n: i64) -> DateTime<Utc> {
         self.context.created_at + Duration::seconds(n)
     }
-    pub(crate) fn log_bytes(&self) -> Vec<u8> {
+    pub fn log_bytes(&self) -> Vec<u8> {
         fs::read(
             self.root
                 .path()
@@ -175,7 +175,7 @@ impl Fixture {
         assert!(self.fold().verified.is_none());
         previous
     }
-    pub(crate) fn fold(&self) -> binding_events::codex::Fold {
+    pub fn fold(&self) -> binding_events::codex::Fold {
         binding_events::codex::read_ownership(&self.context).unwrap()
     }
     pub(super) fn current(&self) -> dedupe::TuiRuntimeBinding {
@@ -189,7 +189,7 @@ impl Fixture {
         ))
         .unwrap()
     }
-    pub(crate) fn log(&self) -> ChannelBindingLog {
+    pub fn log(&self) -> ChannelBindingLog {
         ChannelBindingLog::new(self.context.channel_id.unwrap(), ShadowProvider::Codex)
     }
     pub(super) fn store(&self) -> (OStore, ChannelStore) {
@@ -218,7 +218,7 @@ impl Fixture {
         let opened = store.open_channel(&era, channel).unwrap().unwrap();
         (store, opened)
     }
-    pub(crate) fn reopened(&self, store: &OStore) -> ChannelStore {
+    pub fn reopened(&self, store: &OStore) -> ChannelStore {
         store
             .open_channel(
                 &store.read_era().unwrap().unwrap(),

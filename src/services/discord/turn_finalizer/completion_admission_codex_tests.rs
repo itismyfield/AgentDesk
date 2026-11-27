@@ -125,7 +125,7 @@ fn taken_over(restarted: bool) -> test_override::ChannelsGuard {
     let boot = boot.seeded_for_test(&config, seeded).unwrap();
     let candidate = boot.candidate(CHANNEL).unwrap();
     assert_eq!(candidate.late_adopt_origin(), !restarted);
-    *candidate.lock() = Adoption::Committed;
+    *candidate.lock_for_test() = Adoption::Committed;
     test_override::force_boot(boot)
 }
 

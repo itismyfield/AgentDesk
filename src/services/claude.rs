@@ -1864,7 +1864,7 @@ mod fresh_lifecycle;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub use fresh_lifecycle::fresh_hold_for_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
+pub use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]

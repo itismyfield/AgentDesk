@@ -106,8 +106,8 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
     let result = ready.with_closed_reply_for_test(CHANNEL, delayed, |closed| {
         issued.fetch_add(1, Ordering::SeqCst);
         admission::issue_for_tests(
-            closed.span().execution.clone(),
-            closed.span().episode.clone(),
+            closed.span_for_test().execution.clone(),
+            closed.span_for_test().episode.clone(),
             &token,
         )
     });
@@ -128,8 +128,8 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
         .with_closed_reply_for_test(CHANNEL, current, |closed| {
             issued.fetch_add(1, Ordering::SeqCst);
             admission::issue_for_tests(
-                closed.span().execution.clone(),
-                closed.span().episode.clone(),
+                closed.span_for_test().execution.clone(),
+                closed.span_for_test().episode.clone(),
                 &token,
             )
         })
@@ -255,8 +255,14 @@ async fn s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit() 
         .unwrap();
     ready
         .with_prepared_reply(CHANNEL, current, |prepared| {
-            assert_eq!(prepared.floor().execution(), floor.execution_for_test());
-            assert_eq!(prepared.floor().checkpoint(), floor.checkpoint_for_test());
+            assert_eq!(
+                prepared.floor_for_test().execution(),
+                floor.execution_for_test()
+            );
+            assert_eq!(
+                prepared.floor_for_test().checkpoint(),
+                floor.checkpoint_for_test()
+            );
             submits.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();

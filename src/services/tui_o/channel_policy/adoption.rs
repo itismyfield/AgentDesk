@@ -358,6 +358,11 @@ impl Candidate {
         *self.lock()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn claim_for_test(&self, channel: u64) -> bool {
+        self.claim(channel)
+    }
+
     /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
     /// released first. A placement is not a Legacy send, so it is not counted.
     pub(in crate::services) fn claim(&self, channel: u64) -> bool {

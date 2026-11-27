@@ -136,17 +136,17 @@ impl RawObservation {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn seen_for_test(&self) -> &[Seen] {
+    pub fn seen_for_test(&self) -> &[Seen] {
         &self.seen
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn complete_for_test(&self) -> bool {
+    pub fn complete_for_test(&self) -> bool {
         self.complete()
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn active_for_test(&self) -> bool {
+    pub fn active_for_test(&self) -> bool {
         self.active()
     }
 

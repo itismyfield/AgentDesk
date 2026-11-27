@@ -22,7 +22,7 @@ pub(crate) fn at(seconds: u64) -> ProcessStart {
 /// Parents by pid; starts and environments in order per pid, the last one repeating. A pid
 /// with no environments of its own reads `environ`.
 pub struct FakeOs {
-    pub(crate) parents: HashMap<u32, u32>,
+    pub parents: HashMap<u32, u32>,
     pub(crate) starts: Mutex<HashMap<u32, VecDeque<ProcessStart>>>,
     pub environ: Result<Vec<String>, RestoreUnverified>,
     pub(crate) environs: Mutex<HashMap<u32, VecDeque<Vec<String>>>>,

@@ -30,7 +30,7 @@ pub(super) fn create(
     let launching = clear_epoch::Launching::for_launch(&owner).unwrap();
     let permit = launching
         .scope_for_test()
-        .check_epoch()
+        .check_epoch_for_test()
         .unwrap()
         .begin_effect()
         .unwrap();

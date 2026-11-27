@@ -144,7 +144,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     "actual Claude Herdr submit requires owner scope"
                 );
                 use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
-                let mut preparation = HerdrInput::new(attached.target_for_test_for_test());
+                let mut preparation = HerdrInput::new_for_test(attached.target_for_test());
                 InputTransport::load_buffer(&mut preparation, "memory-only", "not submitted")
                     .unwrap();
                 drop(preparation);

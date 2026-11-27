@@ -229,35 +229,27 @@ impl Context {
         }
     }
 
-    pub(crate) fn output_ready_for_test(&self) -> fn(u64) -> bool {
+    pub fn output_ready_for_test(&self) -> fn(u64) -> bool {
         self.output_ready
     }
 
-    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+    pub fn target_for_test(&self) -> &HerdrTarget {
         &self.target
     }
 
-    pub(crate) fn writer_for_test(&self) -> &str {
+    pub fn writer_for_test(&self) -> &str {
         &self.writer
     }
 
-    pub(crate) fn attempt_target_for_test(&self) -> &serde_json::Value {
+    pub fn attempt_target_for_test(&self) -> &serde_json::Value {
         &self.attempt_target
     }
 
-    pub(crate) fn read_for_test(&self) -> Reading {
+    pub fn read_for_test(&self) -> Reading {
         self.read()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn current_source_for_test_for_test(
-        &self,
-        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
-    ) -> Option<Source> {
-        self.current_source_for_test(authority)
-    }
-
-    pub(crate) fn current_source_for_test(
+    pub fn current_source_for_test(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> Option<Source> {

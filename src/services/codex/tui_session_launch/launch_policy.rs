@@ -164,21 +164,11 @@ impl CodexTuiLaunchScript {
         &self.prepared
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn script_path_for_test_for_test(&self) -> &str {
-        self.script_path_for_test()
-    }
-
-    pub(crate) fn script_path_for_test(&self) -> &str {
+    pub fn script_path_for_test(&self) -> &str {
         &self.script_path
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn owner_path_for_test_for_test(&self) -> &str {
-        self.owner_path_for_test()
-    }
-
-    pub(crate) fn owner_path_for_test(&self) -> &str {
+    pub fn owner_path_for_test(&self) -> &str {
         &self.owner_path
     }
 }

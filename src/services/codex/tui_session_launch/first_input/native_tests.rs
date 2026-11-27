@@ -122,7 +122,7 @@ esac
                 )]))
             })
             .unwrap();
-        let candidate = boot.output_candidate(channel).unwrap();
+        let candidate = boot.output_candidate_for_test(channel).unwrap();
         let boot_guard = crate::services::tui_o::cutover::test_override::force_boot(boot);
         let token = std::sync::Arc::new(CancelToken::new());
         let nonce = token.turn_nonce().unwrap().to_owned();

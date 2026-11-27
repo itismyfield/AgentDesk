@@ -354,7 +354,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(in crate::services) fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
+    pub fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
         let channel = self.channel;
         self.posts
             .get_or_insert_with(|| {

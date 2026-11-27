@@ -442,10 +442,10 @@ fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> H
     let configured = endpoint(&rig.server)
         .with_mode_for_test(crate::config::session_hosts::EndpointMode::UserDefault);
     let launch = crate::services::herdr_launch::HerdrLaunchEndpoint {
-        execution_node: configured.execution_node().into(),
-        config_key: configured.config_key().into(),
+        execution_node: configured.execution_node_for_test().into(),
+        config_key: configured.config_key_for_test().into(),
         socket_addr: rig.server.path.to_string_lossy().into_owned(),
-        herdr_session: configured.herdr_session().into(),
+        herdr_session: configured.herdr_session_for_test().into(),
     };
     let server = |pid| ServerWitness {
         socket: rig.server.path.clone(),

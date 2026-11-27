@@ -49,30 +49,15 @@ impl Attached {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn nonce_for_test_for_test(&self) -> &str {
-        self.nonce_for_test()
-    }
-
-    pub(crate) fn nonce_for_test(&self) -> &str {
+    pub fn nonce_for_test(&self) -> &str {
         &self.nonce
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn session_id_for_test_for_test(&self) -> &str {
-        self.session_id_for_test()
-    }
-
-    pub(crate) fn session_id_for_test(&self) -> &str {
+    pub fn session_id_for_test(&self) -> &str {
         &self.session_id
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn target_for_test_for_test(&self) -> &HerdrTarget {
-        self.target_for_test()
-    }
-
-    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+    pub fn target_for_test(&self) -> &HerdrTarget {
         &self.target
     }
 }

@@ -294,8 +294,8 @@ mod own_turn_cursor {
         /// The read is over: the turn ended or another began, or what followed the input was not it.
         pub(super) over: bool,
         /// Bytes the last poll read.
-        #[cfg(test)]
-        pub(crate) polled: u64,
+        #[cfg(any(test, feature = "test-support"))]
+        pub polled: u64,
     }
 }
 
@@ -313,7 +313,7 @@ impl OwnTurnCursor {
         let kept = self.partial.len();
         file.seek(std::io::SeekFrom::Start(consumed + kept as u64))?;
         file.take(budget).read_to_end(&mut self.partial)?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             self.polled = (self.partial.len() - kept) as u64;
         }

@@ -517,7 +517,7 @@ impl SocketHerdrLaunchHost {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
+    pub fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
         self.grants = Mutex::new(GrantCache::restored(Ok(restored)));
         self
     }
@@ -533,7 +533,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: replaces the process table and the provider window the pane probe reads.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_process_os_for_test(&mut self, os: Box<dyn ProcessOs>, window: Duration) {
+    pub fn set_process_os_for_test(&mut self, os: Box<dyn ProcessOs>, window: Duration) {
         self.os = os;
         self.provider_window = window;
     }
@@ -546,9 +546,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: takes the last endpoint and its transport out of this host.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn pop_endpoint_for_test(
-        &mut self,
-    ) -> Option<(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
+    pub fn pop_endpoint_for_test(&mut self) -> Option<(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
         self.endpoints.pop()
     }
 

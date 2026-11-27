@@ -165,12 +165,7 @@ impl BusyObservation {
         self.context.as_deref()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn admits_for_test_for_test(&self, request: &Request<'_>) -> bool {
-        self.admits_for_test(request)
-    }
-
-    pub(crate) fn admits_for_test(&self, request: &Request<'_>) -> bool {
+    pub fn admits_for_test(&self, request: &Request<'_>) -> bool {
         self.admits(request)
     }
 }

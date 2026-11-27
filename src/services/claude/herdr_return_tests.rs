@@ -24,7 +24,7 @@ pub struct Side {
     reads: usize,
     pub exits: usize,
     /// A flag the `/exit` that ends it writes, as its host sees the end.
-    pub(crate) ends: Option<PathBuf>,
+    pub ends: Option<PathBuf>,
 }
 
 struct View(Arc<Mutex<Side>>);

@@ -77,6 +77,11 @@ impl SourcePin {
         Some(Self { key, revision })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_current_for_test(&self) -> bool {
+        self.is_current()
+    }
+
     pub(crate) fn is_current(&self) -> bool {
         #[cfg(test)]
         let _held = RevisionsHeld::enter();
@@ -245,7 +250,7 @@ pub struct PrefixSeal {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl PrefixSeal {
-    pub(crate) fn is_current(&self) -> bool {
+    pub fn is_current(&self) -> bool {
         #[cfg(unix)]
         {
             use sha2::{Digest, Sha256};

@@ -426,7 +426,7 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
     let temporary = tempfile::tempdir().unwrap();
     let grant_root = temporary.path().join("grants");
     let grant = admitted(&rig, NONCE, SERVER).grant.unwrap();
-    let launch_endpoint = grant.endpoint().clone();
+    let launch_endpoint = grant.endpoint_for_test().clone();
     let store = FileGrantStore::new_for_test(Some(grant_root.clone()));
     store.save(grant.clone()).await.unwrap();
     drop(store);
@@ -487,7 +487,7 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
         "restored_grant_memory_reaches_input_gate_contract"
     );
     assert_eq!(
-        target.send_text("restored grant input").unwrap(),
+        target.send_text_for_test("restored grant input").unwrap(),
         HostMutation::Confirmed,
         "restored_grant_memory_confirms_input_contract"
     );
@@ -544,7 +544,9 @@ fn policy_remembered_grant_after_boot_failure_reaches_only_exact_nonce_input() {
         "remembered_grant_after_boot_failure_allows_input_contract"
     );
     assert_eq!(
-        target.send_text("remembered durable grant").unwrap(),
+        target
+            .send_text_for_test("remembered durable grant")
+            .unwrap(),
         HostMutation::Confirmed,
         "remembered_grant_after_boot_failure_confirms_input_contract"
     );

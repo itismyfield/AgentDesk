@@ -565,7 +565,7 @@ pub fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
 }
 /// An in-memory binding log with the channel's seq notice.
 pub struct FakeBindings {
-    pub(crate) events: Mutex<Vec<BindingEvent>>,
+    pub events: Mutex<Vec<BindingEvent>>,
     pub(super) notice: watch::Sender<u64>,
     /// Set while every read of the log fails with this error.
     pub(super) failing: Mutex<Option<String>>,

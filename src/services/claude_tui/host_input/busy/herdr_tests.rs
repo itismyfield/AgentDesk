@@ -118,7 +118,7 @@ fn pane_with_context(rig: &HerdrRig, context: &std::path::Path) {
 
 fn current(context: &Context) -> Option<Source> {
     crate::services::tmux_common::with_tmux_source_authority(LOGICAL, |authority| {
-        context.current_source_for_test_for_test(authority)
+        context.current_source_for_test(authority)
     })
 }
 

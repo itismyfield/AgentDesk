@@ -193,7 +193,7 @@ pub struct Fault {
 #[cfg(any(test, feature = "test-support"))]
 impl Fault {
     /// Test seam: keeps the receipts of the notice this fault moves under `root`.
-    pub(crate) fn set_notice_receipt_root_for_test(&mut self, root: &std::path::Path) {
+    pub fn set_notice_receipt_root_for_test(&mut self, root: &std::path::Path) {
         if let Some(notice) = self.notice.as_mut() {
             notice.root = Some(root.to_path_buf());
         }

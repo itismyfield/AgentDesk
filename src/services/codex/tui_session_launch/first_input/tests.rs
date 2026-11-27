@@ -56,8 +56,8 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             &overlay,
         )
         .unwrap();
-        let script_path = launch.script_path_for_test_for_test().to_owned();
-        let owner_path = launch.owner_path_for_test_for_test().to_owned();
+        let script_path = launch.script_path_for_test().to_owned();
+        let owner_path = launch.owner_path_for_test().to_owned();
         let script = std::fs::read_to_string(&script_path).unwrap();
         assert_eq!(
             script.matches(shell_escape(prompt).as_str()).count(),
@@ -131,10 +131,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                 !root.path().join("home/sessions").exists(),
                 "no rollout is needed for physical create"
             );
-            assert_eq!(
-                submitted.prepared_for_test_for_test().context.provider,
-                "codex"
-            );
+            assert_eq!(submitted.prepared_for_test().context.provider, "codex");
             let calls = std::fs::read_to_string(root.path().join("tmux.calls")).unwrap();
             assert_eq!(
                 calls
@@ -201,7 +198,7 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
                     .unwrap();
                 scope::assert_child_environment(output, &instance.root, "native-capture");
             };
-            run(launch.script_path_for_test_for_test());
+            run(launch.script_path_for_test());
             let argv = std::fs::read_to_string(instance.root.join("codex.argv")).unwrap();
             assert_eq!(argv.lines().last(), Some(prompt));
             let runtime = tokio::runtime::Builder::new_current_thread()

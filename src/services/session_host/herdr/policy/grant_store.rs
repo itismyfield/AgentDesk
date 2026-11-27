@@ -14,8 +14,15 @@ mod grant_restoration {
 
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct GrantRestoration {
+        #[cfg(any(test, feature = "test-support"))]
+        pub by_endpoint:
+            HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) by_endpoint:
             HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
+        #[cfg(any(test, feature = "test-support"))]
+        pub unknown_failure: bool,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) unknown_failure: bool,
     }
 }

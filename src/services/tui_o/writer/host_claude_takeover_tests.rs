@@ -558,8 +558,8 @@ async fn reserved_child_preserves_old_source_offer_but_holds_reused_turn_nonce_o
             generation: 1,
         }),
     };
-    assert!(candidate.release_child_run(CH, run.clone()));
-    assert!(candidate.retry_child_at_boundary(&run, 1));
+    assert!(candidate.release_child_run_for_test(CH, run.clone()));
+    assert!(candidate.retry_child_at_boundary_for_test(&run, 1));
     let launch = PreparedIncarnation::prepare_pinned(
         "claude",
         &f.binds.tmux,

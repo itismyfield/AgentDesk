@@ -129,7 +129,7 @@ pub fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec
 }
 
 impl Chain {
-    pub(crate) fn hops(&self) -> u64 {
+    pub fn hops(&self) -> u64 {
         self.sources.len() as u64 - 1
     }
 
@@ -203,7 +203,7 @@ impl Chain {
     }
 
     /// An Apply of `request` under the digest its Inspect gives, or one no scope has.
-    pub(crate) fn apply(&self, request: Request) -> Operation {
+    pub fn apply(&self, request: Request) -> Operation {
         let digest = self
             .digest(&request)
             .unwrap_or_else(|| ScopeDigest::parse(UNSCOPED).unwrap());
@@ -211,12 +211,12 @@ impl Chain {
     }
 
     /// The pane's execution holds only the current source.
-    pub(crate) fn current(&self) -> impl Drop {
+    pub fn current(&self) -> impl Drop {
         let current = self.sources.last().unwrap();
         force_execution_for_tests(Ok(execution(current, Utc::now())))
     }
 
-    pub(crate) fn cursor(&self, n: usize) -> Cursor {
+    pub fn cursor(&self, n: usize) -> Cursor {
         self.harness
             .channel()
             .cursor(&self.sources[n])
@@ -224,21 +224,21 @@ impl Chain {
             .unwrap()
     }
 
-    pub(crate) fn key(&self, n: usize) -> String {
+    pub fn key(&self, n: usize) -> String {
         source_key(&self.sources[n])
     }
 
-    pub(crate) fn dir(&self) -> PathBuf {
+    pub fn dir(&self) -> PathBuf {
         let runtime = self.paths[0].parent().unwrap();
         runtime.join("o_store").join(CHANNEL.to_string())
     }
 
-    pub(crate) fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
+    pub fn cursor_file(&self, n: usize) -> Option<Vec<u8>> {
         let name = format!("{}.json", self.key(n));
         std::fs::read(self.dir().join(CURSOR_DIR).join(name)).ok()
     }
 
-    pub(crate) fn audit(&self, n: usize) -> Option<String> {
+    pub fn audit(&self, n: usize) -> Option<String> {
         let cursor = self.cursor(n);
         cursor.transition_cleanup.map(|audit| audit.job_id)
     }
@@ -276,12 +276,12 @@ pub fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, 
 }
 
 pub struct Run {
-    pub(crate) port: TransitionPort,
-    pub(crate) stop: watch::Sender<bool>,
+    pub port: TransitionPort,
+    pub stop: watch::Sender<bool>,
     /// The host's stop, which the actor's own stop follows only later.
-    pub(crate) host: watch::Sender<bool>,
-    pub(crate) task: Actor,
-    pub(crate) unsettled: watch::Receiver<Option<usize>>,
+    pub host: watch::Sender<bool>,
+    pub task: Actor,
+    pub unsettled: watch::Receiver<Option<usize>>,
 }
 
 pub fn run(chain: &Chain) -> Run {

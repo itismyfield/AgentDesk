@@ -90,6 +90,11 @@ pub(crate) use prepared::Prepared;
 pub use prepared::Prepared;
 
 impl Prepared {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn floor_for_test(&self) -> &NativeFloor {
+        self.floor()
+    }
+
     pub(crate) fn floor(&self) -> &NativeFloor {
         &self.floor
     }
@@ -111,6 +116,11 @@ pub(crate) use closed::Closed;
 pub use closed::Closed;
 
 impl Closed {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn span_for_test(&self) -> &CodexEpisodeSpan {
+        self.span()
+    }
+
     pub(crate) fn span(&self) -> &CodexEpisodeSpan {
         self.durable.span()
     }

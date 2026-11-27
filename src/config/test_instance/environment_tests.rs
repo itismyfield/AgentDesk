@@ -1696,7 +1696,7 @@ fn instance_owner_paste_uses_logical_outer_target_and_preserves_pinned_action() 
                             std::time::Duration::from_secs(2),
                             SubmitPayload::Pinned { input, codex },
                         )
-                        .into_key();
+                        .into_key_for_test();
                     assert!(
                         if matches!(mode.as_str(), "operating" | "opt-in") {
                             matches!(result, KeyOutcome::Applied)

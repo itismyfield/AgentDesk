@@ -45,8 +45,14 @@ mod tmux_host {
     #[derive(Debug, Deserialize, PartialEq)]
     #[serde(deny_unknown_fields)]
     pub struct TmuxHost {
+        #[cfg(any(test, feature = "test-support"))]
+        pub socket: PathBuf,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) socket: PathBuf,
         pub(crate) tmpdir: PathBuf,
+        #[cfg(any(test, feature = "test-support"))]
+        pub prefix: String,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) prefix: String,
     }
 }
@@ -62,9 +68,18 @@ mod herdr_host {
     #[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
     #[serde(deny_unknown_fields)]
     pub struct HerdrHost {
+        #[cfg(any(test, feature = "test-support"))]
+        pub socket: PathBuf,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) socket: PathBuf,
         pub(crate) home: PathBuf,
+        #[cfg(any(test, feature = "test-support"))]
+        pub session: String,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) session: String,
+        #[cfg(any(test, feature = "test-support"))]
+        pub endpoint_key: String,
+        #[cfg(not(any(test, feature = "test-support")))]
         pub(crate) endpoint_key: String,
     }
 }

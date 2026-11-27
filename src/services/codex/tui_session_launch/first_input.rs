@@ -56,12 +56,7 @@ impl Submitted {
         }
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn prepared_for_test_for_test(&self) -> &PreparedIncarnation {
-        self.prepared_for_test()
-    }
-
-    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+    pub fn prepared_for_test(&self) -> &PreparedIncarnation {
         &self.prepared
     }
 }

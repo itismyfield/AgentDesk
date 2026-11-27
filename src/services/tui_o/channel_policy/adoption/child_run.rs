@@ -126,6 +126,11 @@ impl Candidate {
         tracing::info!(channel, "[tui_o] existing child run stays with Legacy");
         true
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retry_child_at_boundary_for_test(&self, expected: &LegacyRun, seq: u64) -> bool {
+        self.retry_child_at_boundary(expected, seq)
+    }
+
     /// Keep every Legacy send fenced while replacing only this run's adoption floor.
     pub(crate) fn retry_child_at_boundary(&self, expected: &LegacyRun, seq: u64) -> bool {
         let mut state = self.lock();

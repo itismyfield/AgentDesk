@@ -263,13 +263,13 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
                 !observation.complete_for_test(),
                 "missing physical barrier cannot be complete"
             );
-            assert!(observation.no_effect_evidence().is_none());
+            assert!(observation.no_effect_evidence_for_test().is_none());
             assert!(matches!(
                 finished.try_recv(),
                 Err(mpsc::TryRecvError::Empty)
             ));
         }
-        phases.push(json!({"gate":gate,"facts":format!("{observation:?}"),"no_effect":observation.no_effect_evidence().is_some()}));
+        phases.push(json!({"gate":gate,"facts":format!("{observation:?}"),"no_effect":observation.no_effect_evidence_for_test().is_some()}));
     }
     finished
         .recv_timeout(Duration::from_secs(20))
@@ -287,10 +287,10 @@ fn direct(host: &Host, provider: &'static str, mode: &str, order: &[&str], live:
     }
     println!(
         "P2_OBSERVER_RESULT {}",
-        json!({"runtime":provider,"mode":mode,"order":order,"starts":case.starts().len(),"messages":c,"facts":format!("{observed:?}"),"no_effect":observed.no_effect_evidence().is_some(),"phases":phases})
+        json!({"runtime":provider,"mode":mode,"order":order,"starts":case.starts().len(),"messages":c,"facts":format!("{observed:?}"),"no_effect":observed.no_effect_evidence_for_test().is_some(),"phases":phases})
     );
     assert_eq!(
-        observed.no_effect_evidence().is_some(),
+        observed.no_effect_evidence_for_test().is_some(),
         mode == "quiet",
         "quiet completed direct runtime must provide evidence"
     );
@@ -421,26 +421,36 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
             tap.see_for_test(fact);
         }
         assert!(
-            live.observation_for_test().no_effect_evidence().is_none(),
+            live.observation_for_test()
+                .no_effect_evidence_for_test()
+                .is_none(),
             "physical facts cannot replace owner close"
         );
         match label {
             "finish" => {
                 tap.finish_for_test(true, Seen::StderrDrained);
-                assert!(live.observation_for_test().no_effect_evidence().is_some());
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_some()
+                );
             }
             "duplicate" => {
                 let duplicate = RawTap::for_codex_for_test(Some(&tok));
                 assert!(!duplicate.active_for_test());
                 tap.finish_for_test(true, Seen::StderrDrained);
-                assert!(live.observation_for_test().no_effect_evidence().is_none());
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_none()
+                );
             }
             "timeout" => {
                 let (_, observed) = live
                     .take_for_decision_for_test(Duration::ZERO)
                     .await
                     .unwrap();
-                assert!(observed.no_effect_evidence().is_none());
+                assert!(observed.no_effect_evidence_for_test().is_none());
                 tap.finish_for_test(true, Seen::StderrDrained);
                 assert!(
                     live.take_for_decision_for_test(Duration::ZERO)
@@ -450,7 +460,11 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
             }
             _ => {
                 drop(tap);
-                assert!(live.observation_for_test().no_effect_evidence().is_none());
+                assert!(
+                    live.observation_for_test()
+                        .no_effect_evidence_for_test()
+                        .is_none()
+                );
             }
         }
     }
@@ -529,7 +543,7 @@ async fn p2_file_reader_cannot_mint_no_effect_after_wrapper_exit_pg() {
         "actual tool must be observed before the normalized callback"
     );
     assert!(facts.seen_for_test().contains(&Seen::Broken));
-    assert!(facts.no_effect_evidence().is_none());
+    assert!(facts.no_effect_evidence_for_test().is_none());
     pool.close().await;
     db.drop().await;
 }
@@ -769,7 +783,7 @@ async fn p2_first_output_on_either_side_of_terminal_wait_is_held_pg() {
         assert!(
             observed
                 .observation_for_test()
-                .no_effect_evidence()
+                .no_effect_evidence_for_test()
                 .is_none()
         );
         if before {

@@ -32,12 +32,12 @@ pub(super) fn child_boot(
         "id": CHANNEL.to_string(), "parent_id": PARENT.to_string(), "type": 11, "name": "fixture"
     }))
     .unwrap();
-    assert!(boot.resolve_child(
+    assert!(boot.resolve_child_for_test(
         CHANNEL,
         VerifiedSurface::from_discord_for_test(&thread, ClaudeTui).unwrap(),
         false
     ));
-    let candidate = boot.output_candidate(CHANNEL).unwrap();
+    let candidate = boot.output_candidate_for_test(CHANNEL).unwrap();
     crate::config_live_reload::install(config);
     (test_override::force_boot(boot), candidate)
 }

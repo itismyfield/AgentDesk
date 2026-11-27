@@ -209,7 +209,7 @@ async fn transcript_cursor_and_placement_do_not_restart_delivery_clocks() {
         );
         stalled.legacy.at(stalled.len());
         for _ in 0..5 {
-            assert!(!candidate().claim(CHANNEL));
+            assert!(!candidate().claim_for_test(CHANNEL));
         }
         assert_eq!(candidate().sends(), (0, 0));
     }

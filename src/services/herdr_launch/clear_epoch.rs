@@ -144,6 +144,11 @@ impl Scope {
         }))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn check_epoch_for_test(self: &Arc<Self>) -> Result<Checked, String> {
+        Self::check_epoch(self)
+    }
+
     pub(crate) fn check_epoch(self: &Arc<Self>) -> Result<Checked, String> {
         let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
         self.allowed(&state)?;
@@ -158,6 +163,11 @@ impl Scope {
             return Err("herdr clear changed the launch epoch".into());
         }
         Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finish_start_for_test(&self) {
+        self.finish_start()
     }
 
     pub(crate) fn finish_start(&self) {

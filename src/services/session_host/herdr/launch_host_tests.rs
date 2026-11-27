@@ -88,7 +88,7 @@ pub struct Server {
     /// The pid of the process accepting connections, as the peer reader reports it.
     serving: Arc<AtomicU32>,
     /// Every connection in accept order: the method it carried, if any, and its bytes.
-    pub(crate) conns: Arc<Mutex<Vec<Conn>>>,
+    pub conns: Arc<Mutex<Vec<Conn>>>,
     /// The result every ping gets.
     pong: Arc<Mutex<Value>>,
     stop: Arc<AtomicBool>,
@@ -182,7 +182,7 @@ fn answer(
 }
 
 impl Server {
-    pub(crate) fn methods(&self) -> Vec<String> {
+    pub fn methods(&self) -> Vec<String> {
         let conns = self.conns.lock().unwrap();
         let method = |request: &Value| request["method"].as_str().unwrap_or("?").to_string();
         conns

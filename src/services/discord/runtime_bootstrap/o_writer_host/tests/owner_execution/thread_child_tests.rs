@@ -148,7 +148,7 @@ async fn thread_child_execution_view_is_its_own_permit_over_its_one_adoption_pg(
         .candidate
         .lock_for_test() = Adoption::Held;
     assert_eq!(view.candidate.peek(), Adoption::Held);
-    *view.candidate.lock() = Adoption::Committed;
+    *view.candidate.lock_for_test() = Adoption::Committed;
     // The refresh step observes the child too: a failed read pauses it, a good one resumes it.
     let refresh = super::super::super::super::owner_execution::refresh;
     refresh(&ProviderKind::Claude, Some(&closed_pool().await)).await;

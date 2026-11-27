@@ -230,6 +230,11 @@ impl SubmitOutcome {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn into_key_for_test(self) -> KeyOutcome {
+        self.into_key()
+    }
+
     pub(crate) fn into_key(self) -> KeyOutcome {
         match self.evidence {
             Evidence::Key(key) => key,

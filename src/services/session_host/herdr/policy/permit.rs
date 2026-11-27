@@ -50,6 +50,11 @@ impl CreatePermit {
         self.proof.revalidate(source)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn grant_for_test(&self, nonce: &str) -> LaunchAdmissionGrant {
+        self.grant(nonce)
+    }
+
     pub(crate) fn grant(&self, nonce: &str) -> LaunchAdmissionGrant {
         LaunchAdmissionGrant {
             endpoint: self.endpoint.clone(),
