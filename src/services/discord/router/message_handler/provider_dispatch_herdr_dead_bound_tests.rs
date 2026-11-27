@@ -1,6 +1,6 @@
 //! A wake-watch resume on a Bound Herdr execution through the actual idle start: a proven-ended one
 //! is retired before any write, an unrecoverable one refused Failed, a live or held one kept.
-use super::missing_input::{recording_runtime, seed_resume_cursor};
+use super::missing_input::{append_terminal, recording_runtime, seed_resume_cursor};
 use super::*;
 use crate::services::discord::queue_io::input_owner::admission::admit_with_context;
 use crate::services::discord::queue_io::input_owner::held_watch;
@@ -514,8 +514,29 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
             "the fresh pane takes the resume",
         ))
         .unwrap();
-    fx.finished.store(false, Ordering::SeqCst);
-    fx.answer_after(&started, before + 1);
+    let sends = fx.rig.sends();
+    let prompt = sends[before + 1]["text"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches("\u{1b}[200~")
+        .trim_end_matches("\u{1b}[201~");
+    let now = chrono::Utc::now().to_rfc3339();
+    append(
+        &started.path,
+        &[
+            json!({"type":"user","uuid":uuid(),"sessionId":started.session,"timestamp":now,
+            "message":{"role":"user","content":prompt}}),
+        ],
+    );
+    assert_eq!(
+        started.hook(
+            &fx,
+            "UserPromptSubmit",
+            &json!({"session_id":started.session,"transcript_path":started.path,"prompt":prompt}),
+        ),
+        202
+    );
+    append_terminal(&started, &uuid());
     while let Ok(event) = events.try_recv() {
         crate::services::claude_tui::hook_server::publish_hook_event_for_tests(event);
     }
@@ -529,7 +550,7 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
             LIMIT,
             "the delivered resume settles",
         ))
-        .unwrap();
+        .unwrap_or_else(|error| panic!("{error}, {}", intake.writer_state()));
     let sends = fx.rig.sends();
     assert_eq!(sends.len(), before + 3, "{sends:?}");
     assert!(sends[before + 1]["text"].as_str().unwrap().contains(INPUT));
