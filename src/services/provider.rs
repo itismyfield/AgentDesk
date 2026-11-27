@@ -2,36 +2,36 @@ use crate::services::provider::cancel_token_cleanup::target::CapturedProcess;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
-pub(crate) mod cancel_token_claude_interrupt;
-pub(crate) mod cancel_token_cleanup;
+pub mod cancel_token_claude_interrupt;
+pub mod cancel_token_cleanup;
 mod cancel_token_codex_owed;
 mod cancel_watchdog;
 pub(crate) mod channel_rules;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "provider/reaping_tests.rs"]
 mod child_reaping_tests;
-pub(crate) mod herdr_before_start;
-pub(crate) mod native_stop;
+pub mod herdr_before_start;
+pub mod native_stop;
 mod output_reader;
 mod registry;
-pub(crate) mod restart_report_env;
+pub mod restart_report_env;
 mod runtime;
-pub(crate) mod session_probe;
-pub(crate) mod session_prompt;
-pub(crate) mod session_source;
-pub(crate) use output_reader::herdr_provider_terminal_only;
+pub mod session_probe;
+pub mod session_prompt;
+pub mod session_source;
+pub use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod read_fault;
+pub mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
     ProviderCatalogEntry, ProviderExecutionAdapter, ProviderReadinessAdapter,
     ProviderRegistryEntry, StreamJsonDialectId, intern_provider_id, provider_registry,
     public_provider_catalog, supported_provider_ids,
 };
-pub(crate) use session_probe::SessionProbe;
+pub use session_probe::SessionProbe;
 
-pub(crate) use crate::domain::provider::LegacyDispatchKind;
+pub use crate::domain::provider::LegacyDispatchKind;
 pub use crate::domain::provider::naming::tmux_env_suffix;
 pub use crate::domain::provider::{ProviderCapabilities, ProviderDefaultBehavior, ProviderKind};
 pub use runtime::{ProviderRuntimeExt, ProviderRuntimeProbe};
@@ -230,7 +230,7 @@ pub struct CancelToken {
     #[allow(dead_code)]
     pub ssh_cancel: Mutex<Option<std::sync::Arc<AtomicBool>>>,
     /// Tmux binding for cleanup on cancel.
-    pub(crate) tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
+    pub tmux_binding: Mutex<Option<cancel_token_cleanup::authority::TmuxBinding>>,
     /// Normal turn-completion cleanup marker. The Discord bridge may flip
     /// `cancelled` after a terminal frame only to release lingering token
     /// observers; provider cancel watchdogs must not treat that as a live
@@ -255,11 +255,18 @@ pub struct CancelToken {
     replay_attempt: std::sync::OnceLock<
         std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
     >,
-    pub(crate) native_stop: native_stop::State,
+    pub native_stop: native_stop::State,
     /// Lifecycle-aware restart/handoff mode for inflight preservation.
     pub restart_mode: AtomicU8,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
+    pub pid_kill_claim: AtomicU8,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Independent destructive claims prevent a PID-only cleanup from suppressing tmux cleanup.
     pub(crate) pid_kill_claim: AtomicU8,
+    #[cfg(any(test, feature = "test-support"))]
+    pub name_kill_claim: AtomicU8,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) name_kill_claim: AtomicU8,
     /// Set when a destructive cleanup is admitted: the turn's process must end, not only stop.
     termination_requested: AtomicBool,
@@ -308,14 +315,14 @@ impl CancelToken {
         }
     }
 
-    pub(crate) fn replay_attempt(
+    pub fn replay_attempt(
         &self,
     ) -> Option<&std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>> {
         self.replay_attempt.get()
     }
 
     /// Binds the attempt whose start permit this turn's executor spent; at most once per token.
-    pub(crate) fn attach_replay_attempt(
+    pub fn attach_replay_attempt(
         &self,
         live: std::sync::Arc<crate::services::discord::replay_policy::live::LiveAttempt>,
     ) -> bool {
@@ -334,21 +341,21 @@ impl CancelToken {
         self.completion_cleanup.load(Ordering::Acquire)
     }
 
-    pub(crate) fn store_child_pid(&self, pid: u32) {
+    pub fn store_child_pid(&self, pid: u32) {
         let captured = CapturedProcess::capture(pid);
         let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
         *child = Some(captured);
     }
 
-    pub(crate) fn child_pid_value(&self) -> Option<u32> {
+    pub fn child_pid_value(&self) -> Option<u32> {
         self.child_pid
             .lock()
             .ok()
             .and_then(|guard| guard.as_ref().map(|process| process.pid))
     }
 
-    pub(crate) fn captured_child_process(&self) -> Option<CapturedProcess> {
+    pub fn captured_child_process(&self) -> Option<CapturedProcess> {
         self.child_pid.lock().ok().and_then(|guard| guard.clone())
     }
 
@@ -381,7 +388,7 @@ impl CancelToken {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn store_child_process_for_test(&self, process: CapturedProcess) {
+    pub fn store_child_process_for_test(&self, process: CapturedProcess) {
         let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         self.child_pid_generation.fetch_add(1, Ordering::Relaxed);
         *child = Some(process);
@@ -409,7 +416,7 @@ impl CancelToken {
         *self.child_pid.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    pub(crate) fn store_child_pid_if_empty(&self, pid: u32) {
+    pub fn store_child_pid_if_empty(&self, pid: u32) {
         let captured = CapturedProcess::capture(pid);
         let mut child_pid = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         if child_pid.is_none() {
@@ -517,7 +524,7 @@ impl CancelToken {
         admitted
     }
 
-    pub(crate) fn publish_cancel(&self, source: impl Into<String>) {
+    pub fn publish_cancel(&self, source: impl Into<String>) {
         let _publication = self
             .cancellation_publication
             .lock()
@@ -659,10 +666,7 @@ pub fn tmux_followup_fallback_after_read_error(
     })
 }
 
-pub(crate) fn tmux_capture_indicates_ready_for_input(
-    capture: &str,
-    provider: &ProviderKind,
-) -> bool {
+pub fn tmux_capture_indicates_ready_for_input(capture: &str, provider: &ProviderKind) -> bool {
     if let ProviderKind::Unsupported(_) = provider {
         return crate::services::tmux_common::tmux_capture_indicates_generic_ready_banner(capture)
             || tmux_capture_contains_wrapper_ready_marker(capture, provider);
@@ -811,7 +815,7 @@ still running";
     }
 }
 
-pub(crate) fn fallback_capture_ready_for_input(
+pub fn fallback_capture_ready_for_input(
     capture: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
@@ -831,7 +835,7 @@ pub(crate) fn fallback_capture_ready_for_input(
 }
 
 #[cfg(unix)]
-pub(crate) fn tmux_session_fallback_ready_for_input(
+pub fn tmux_session_fallback_ready_for_input(
     tmux_session_name: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
@@ -841,7 +845,7 @@ pub(crate) fn tmux_session_fallback_ready_for_input(
 }
 
 #[cfg(not(unix))]
-pub(crate) fn tmux_session_fallback_ready_for_input(
+pub fn tmux_session_fallback_ready_for_input(
     _tmux_session_name: &str,
     provider: &ProviderKind,
     runtime_kind: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
@@ -857,14 +861,14 @@ const READY_FOR_INPUT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::f
 const READY_FOR_INPUT_IDLE_MIN_PROBES: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ReadyForInputIdleState {
+pub enum ReadyForInputIdleState {
     None,
     FreshIdle,
     PostWorkIdleTimeout,
 }
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ReadyForInputIdleTracker {
+pub struct ReadyForInputIdleTracker {
     first_ready_at: Option<std::time::Instant>,
     consecutive_ready_probes: u32,
     recovery_primed: bool,
@@ -878,12 +882,12 @@ impl ReadyForInputIdleTracker {
         }
     }
 
-    pub(crate) fn record_output(&mut self) {
+    pub fn record_output(&mut self) {
         self.recovery_primed = false;
         self.reset();
     }
 
-    pub(crate) fn observe_idle_state(
+    pub fn observe_idle_state(
         &mut self,
         output_ever_grew: bool,
         ready_for_input: bool,

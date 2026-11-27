@@ -1,15 +1,15 @@
 use sqlx::PgPool;
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct ProviderSessionIds {
-    pub(crate) resolved_session_key: String,
-    pub(crate) claude_session_id: Option<String>,
-    pub(crate) raw_provider_session_id: Option<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) cache_entry_age_secs: Option<i64>,
-    pub(crate) raw_provider_transcript_len_watermark: Option<i64>,
-    pub(crate) raw_provider_transcript_watermark_session_id: Option<String>,
-    pub(crate) raw_provider_transcript_growth_proven: bool,
+pub struct ProviderSessionIds {
+    pub resolved_session_key: String,
+    pub claude_session_id: Option<String>,
+    pub raw_provider_session_id: Option<String>,
+    pub cwd: Option<String>,
+    pub cache_entry_age_secs: Option<i64>,
+    pub raw_provider_transcript_len_watermark: Option<i64>,
+    pub raw_provider_transcript_watermark_session_id: Option<String>,
+    pub raw_provider_transcript_growth_proven: bool,
 }
 
 macro_rules! selector_query {
@@ -27,7 +27,7 @@ macro_rules! selector_query {
     };
 }
 
-pub(crate) async fn load_provider_session_ids_pg(
+pub async fn load_provider_session_ids_pg(
     pool: &PgPool,
     session_key: &str,
     provider: Option<&str>,

@@ -39,7 +39,7 @@ pub(crate) fn idle_fixture(session: &str) {
 
 /// Runs `act` once the wait on `session` made its first look. That look creates the ledger entry
 /// after the wait kept its Stamp, so `act` lands inside the wait without a hook in the wait.
-pub(crate) fn after_first_look(
+pub fn after_first_look(
     session: &str,
     act: impl FnOnce() + Send + 'static,
 ) -> std::thread::JoinHandle<()> {
@@ -55,21 +55,26 @@ pub(crate) fn after_first_look(
     })
 }
 
+/// A resume accepted before start records existed: its restart finds no record to restore from.
+pub fn lose_resume_record(nonce: &str) {
+    fs::remove_file(resume_record::record_path(nonce).unwrap()).unwrap();
+}
+
 /// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
-pub(crate) fn daemon_restart(session: &str) {
+pub fn daemon_restart(session: &str) {
     let mut state = ledger();
     state.entries.retain(|source, _| source.session != session);
     state.starts.retain(|(started, _), _| started != session);
 }
 
 #[cfg(unix)]
-pub(crate) fn fresh_fixture(session: &str) {
+pub fn fresh_fixture(session: &str) {
     if let Some(path) = super::super::guarded_outcome::fresh_source_for_tests() {
         pre_source(session, Path::new(&path));
     }
 }
 
-pub(crate) fn pre_source(session: &str, path: &Path) {
+pub fn pre_source(session: &str, path: &Path) {
     let source = Source::current(session, Some(path)).unwrap_or_else(|| Source {
         session: session.into(),
         nonce: source::nonce(session).flatten(),
@@ -87,14 +92,14 @@ pub(crate) fn pre_source(session: &str, path: &Path) {
 }
 
 // A process restart forgets volatile readiness without deleting durable hook evidence.
-pub(crate) fn forget_session(session: &str) {
+pub fn forget_session(session: &str) {
     let mut state = ledger();
     state.entries.retain(|source, _| source.session != session);
     state.starts.retain(|(logical, _), _| logical != session);
 }
 
 // Reproduce the interval after durable certification and before volatile Start publication.
-pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
+pub fn restore_bound_start(session: &str, at: DateTime<Utc>) {
     let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
     let nonce = source::nonce(session).flatten().unwrap();
     let bound = Source {
@@ -108,7 +113,7 @@ pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
     state.starts.insert((session.into(), nonce), (at, bound));
 }
 
-pub(crate) fn retained_sources(session: &str) -> usize {
+pub fn retained_sources(session: &str) -> usize {
     let nonce = source::nonce(session).flatten();
     ledger()
         .entries
@@ -133,6 +138,6 @@ pub(crate) fn after_reserve() {
 }
 
 #[cfg(unix)]
-pub(crate) fn after_next_reserve(callback: impl FnOnce() + 'static) {
+pub fn after_next_reserve(callback: impl FnOnce() + 'static) {
     AFTER_RESERVE.with(|slot| *slot.borrow_mut() = Some(Box::new(callback)));
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Keep transition cleanup requests inside the automatic sweep and require the old operator route
-to stay removed. Test files and `#[cfg(test)]` items are left out; `request_as` stays in the port.
+to stay removed. Test files and test-gated items are left out; `request_as` stays in the port.
 The actor may apply a sweep job internally without constructing or sending another operation.
 """
 import functools
@@ -8,7 +8,7 @@ import re
 import sys
 from pathlib import Path
 
-from check_o_shadow_write_zero import TOKEN, blank, brace_end
+from check_o_shadow_write_zero import TOKEN, blank, test_gate_spans
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = "src/services/tui_o/writer/transition_port.rs"
@@ -18,8 +18,6 @@ HOST = "src/services/tui_o/writer/host/transition.rs"
 WRITER = "src/services/tui_o/writer/"
 # Outside the writer only the automatic sweep and its checked context name the port's module.
 IMPORTERS = {AUTOMATIC, "src/services/discord/health/o_transition.rs"}
-CFG_TEST = re.compile(r"#\[cfg\((?:test|all\(test[^\]]*)\)\]")
-ATTR = re.compile(r"\s*#\[[^\]]*\]")
 BUILT = re.compile(r"Operation::(Inspect|Apply|AutomaticApply)\s*\(")
 READINESS = re.compile(r"tui_o::writer::host\b[^;]*\b(?:Readiness|process_readiness)\b")
 # A port send in either call form: a method call, or a path to the method however it is named.
@@ -38,17 +36,12 @@ def paren_end(code, start):
 
 @functools.lru_cache(maxsize=None)
 def production(source):
-    """`source` with comments, literals and `#[cfg(test)]` items blanked; empty for a test file."""
+    """Return the source with comments, literals and test-gated items blanked."""
     code = TOKEN.sub(lambda m: blank(m.group(0)), source)
-    if re.match(r"\s*#!\[cfg\((?:test|all\(test)", code):
-        return ""
-    for gate in reversed(list(CFG_TEST.finditer(code))):
-        start = gate.end()
-        while attr := ATTR.match(code, start):
-            start = attr.end()
-        brace, semi = code.find("{", start), code.find(";", start)
-        end = brace_end(code, brace) + 1 if brace != -1 and (semi == -1 or brace < semi) else semi + 1
-        code = code[:gate.start()] + blank(code[gate.start():end]) + code[end:]
+    if "cfg" not in code:
+        return code
+    for start, end in reversed(list(test_gate_spans(code, source))):
+        code = code[:start] + blank(code[start:end]) + code[end:]
     return code
 
 

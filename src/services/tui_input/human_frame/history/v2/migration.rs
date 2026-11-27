@@ -6,28 +6,30 @@ use super::*;
 pub(super) const MISSING: &str = "{\"entries\":[]}";
 
 /// One parse of the file: a V2 snapshot as written, or a V1 store as passive evidence.
-pub(super) fn restore(raw: &str) -> Result<Snapshot, String> {
-    match decode(raw)? {
-        Decoded::Legacy(store) => Ok(Snapshot {
-            version: 2,
-            passive: store
-                .entries
-                .into_iter()
-                .map(|entry| Passive {
-                    registration: None,
-                    state: if entry.events.is_empty() {
-                        "retained"
-                    } else {
-                        "settled"
-                    }
-                    .into(),
-                    entry: Some(entry),
-                    encoded: None,
-                })
-                .collect(),
-            ..Default::default()
-        }),
-        Decoded::V2(snapshot) => Ok(snapshot),
+impl Decoded {
+    pub(super) fn into_snapshot(self) -> Snapshot {
+        match self {
+            Self::Legacy(store) => Snapshot {
+                version: 2,
+                passive: store
+                    .entries
+                    .into_iter()
+                    .map(|entry| Passive {
+                        registration: None,
+                        state: if entry.events.is_empty() {
+                            "retained"
+                        } else {
+                            "settled"
+                        }
+                        .into(),
+                        entry: Some(entry),
+                        encoded: None,
+                    })
+                    .collect(),
+                ..Default::default()
+            },
+            Self::V2(snapshot) => snapshot,
+        }
     }
 }
 

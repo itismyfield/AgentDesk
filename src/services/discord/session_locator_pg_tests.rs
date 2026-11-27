@@ -5,7 +5,7 @@ use crate::services::discord::{
     health::HealthRegistry,
     herdr_terminate::{test_queue, test_turn},
 };
-use crate::services::platform::tmux::session_inventory::tests::ChannelNamespace;
+use crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace;
 use crate::services::tui_prompt_dedupe::binding_context::{BindingContext, PreparedIncarnation};
 use std::{
     process::{Command, Output},
@@ -572,10 +572,11 @@ async fn key_promotion_live_and_foreign_namespace_keep_primary_and_execution_pg(
     let failed_probe = rig.root.path().join("failed-inventory");
     std::fs::write(&failed_probe, "#!/bin/sh\nexit 2\n").unwrap();
     std::fs::set_permissions(&failed_probe, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let failed = crate::services::platform::tmux::session_inventory::tests::ChannelCommand::new(
-        rig.channel.get(),
-        failed_probe,
-    );
+    let failed =
+        crate::services::platform::tmux::session_inventory::test_support::ChannelCommand::new(
+            rig.channel.get(),
+            failed_probe,
+        );
     assert_eq!(
         channel_key(
             &rig.shared,

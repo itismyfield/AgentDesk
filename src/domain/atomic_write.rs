@@ -85,10 +85,10 @@ impl PreparedWrite<'_> {
     pub fn publish(self) -> Result<Published, NotPublished> {
         #[cfg(test)]
         tests::inject(self.target, Stage::Rename).map_err(|error| Stage::Rename.failed(error))?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         rename_fault::before(self.target, &self.temp);
         let renamed = fs::rename(&self.temp, self.target);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         rename_fault::after(self.target, &renamed);
         renamed
             .map(|()| Published)

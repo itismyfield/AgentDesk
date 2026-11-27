@@ -11,15 +11,14 @@ mod channel_clear_boundary;
 
 #[cfg(test)]
 use channel_clear_boundary::FETCH_RECENT_CHANNEL_PAIRS_SQL;
-#[cfg(test)]
-use channel_clear_boundary::finish_channel_clear_boundary_tx;
-pub(crate) use channel_clear_boundary::{
+pub use channel_clear_boundary::{
     PreviousProviderSession, RecentContextBoundary, RecentContextBoundaryKind,
     fetch_recent_channel_prompt_context, record_recent_context_boundary,
 };
-#[cfg(test)]
-pub(crate) use channel_clear_boundary::{
-    begin_channel_clear_boundary_tx, record_channel_clear_boundary,
+#[cfg(any(test, feature = "test-support"))]
+pub use channel_clear_boundary::{
+    begin_channel_clear_boundary_tx, finish_channel_clear_boundary_tx,
+    record_channel_clear_boundary,
 };
 
 type ChannelTranscriptPairRow = (
@@ -78,17 +77,17 @@ pub struct PersistSessionTranscript<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelTranscriptPair {
-    pub(crate) user_message: String,
-    pub(crate) assistant_message: String,
+pub struct ChannelTranscriptPair {
+    pub user_message: String,
+    pub assistant_message: String,
 }
 
-pub(crate) fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {
+pub fn discord_message_started_at_millis(message_id: Option<MessageId>) -> Option<i64> {
     message_id.map(|message_id| message_id.created_at().timestamp_millis())
 }
 
-#[cfg(test)]
-pub(crate) async fn fetch_recent_channel_pairs(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn fetch_recent_channel_pairs(
     pool: &PgPool,
     channel_id: &str,
     limit: u64,
@@ -142,7 +141,7 @@ const FETCH_CHANNEL_PAIRS_UP_TO_FRONTIER_SQL: &str = "SELECT transcript.user_mes
 /// The last `session_transcripts.id` for a channel, or 0 when it has none.
 /// Runs on a caller-owned transaction so the frontier is consistent with a
 /// subsequent [`fetch_channel_pairs_up_to_frontier_tx`] read.
-pub(crate) async fn fetch_channel_frontier_tx(
+pub async fn fetch_channel_frontier_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     channel_id: &str,
 ) -> Result<i64> {
@@ -158,7 +157,7 @@ pub(crate) async fn fetch_channel_frontier_tx(
 
 /// Recent channel pairs at or before `frontier`, clear-boundary filtered and
 /// returned oldest-first (same ordering contract as `fetch_recent_channel_pairs`).
-pub(crate) async fn fetch_channel_pairs_up_to_frontier_tx(
+pub async fn fetch_channel_pairs_up_to_frontier_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     channel_id: &str,
     frontier: i64,
@@ -207,7 +206,7 @@ fn channel_pairs_after_clear_boundary(
         .collect()
 }
 
-pub(crate) fn chronological_channel_pairs_from_desc(
+pub fn chronological_channel_pairs_from_desc(
     mut pairs: Vec<ChannelTranscriptPair>,
 ) -> Vec<ChannelTranscriptPair> {
     pairs.reverse();
@@ -233,7 +232,7 @@ struct PreparedSessionTranscript {
 /// Fixed first observation bound to its exact channel; -1 permanently means failure.
 /// A fence captured for one channel must never authorize another channel.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ChannelClearFence {
+pub struct ChannelClearFence {
     channel_id: String,
     generation: i64,
 }
@@ -261,7 +260,7 @@ async fn channel_clear_fence_tx<'a>(
 
 /// First observation is immutable, including a failed observation.
 /// The caller owns the slot; later captures cannot replace its channel or generation.
-pub(crate) async fn observe_channel_clear_fence_once(
+pub async fn observe_channel_clear_fence_once(
     slot: &tokio::sync::OnceCell<ChannelClearFence>,
     pool: Option<&PgPool>,
     channel_id: &str,
@@ -271,7 +270,7 @@ pub(crate) async fn observe_channel_clear_fence_once(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn capture_channel_clear_fence_for_test(
+pub async fn capture_channel_clear_fence_for_test(
     pool: Option<&PgPool>,
     channel_id: &str,
 ) -> ChannelClearFence {
@@ -294,7 +293,7 @@ async fn capture_channel_clear_fence(pool: Option<&PgPool>, channel_id: &str) ->
 
 /// DM / thread-creation fallback may have no thread, but exact channel ownership
 /// is always required; accepting NULL does not authorize a different channel.
-pub(crate) async fn routine_attempt_owns_turn_pg(
+pub async fn routine_attempt_owns_turn_pg(
     pool: Option<&PgPool>,
     turn_id: &str,
     channel_id: &str,
@@ -309,7 +308,7 @@ pub(crate) async fn routine_attempt_owns_turn_pg(
 }
 
 /// Whether routine run `run_id` was claimed as headless; `None` when no such run exists.
-pub(crate) async fn routine_run_claimed_headless_pg(
+pub async fn routine_run_claimed_headless_pg(
     pool: &PgPool,
     run_id: &str,
 ) -> sqlx::Result<Option<bool>> {
@@ -329,6 +328,15 @@ pub async fn persist_turn_db(
     persist_turn_db_with_clear_fence(pg_pool, entry, None).await
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn persist_turn_db_with_clear_fence_for_test(
+    pg_pool: Option<&PgPool>,
+    entry: PersistSessionTranscript<'_>,
+    fence: Option<ChannelClearFence>,
+) -> Result<bool> {
+    persist_turn_db_with_clear_fence(pg_pool, entry, fence).await
+}
+
 pub(crate) async fn persist_turn_db_with_clear_fence(
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,
@@ -339,7 +347,7 @@ pub(crate) async fn persist_turn_db_with_clear_fence(
 
 /// `channel_context` false stores the turn as completion evidence that its channel's
 /// recent-context and snapshot reads never return; a stored exclusion is never lifted.
-pub(crate) async fn persist_turn_db_in_context(
+pub async fn persist_turn_db_in_context(
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,
     fence: Option<ChannelClearFence>,
@@ -917,14 +925,14 @@ mod tests {
 }
 
 // Test-only PostgreSQL setup and assertions intentionally fail fast.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::expect_used)]
-pub(crate) mod clear_fence_pg_tests {
+pub mod clear_fence_pg_tests {
     use super::*;
+    #[cfg(test)]
     use std::sync::Arc;
 
-    pub(crate) async fn create_pool()
-    -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
+    pub async fn create_pool() -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
         let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_transcript_clear_fence_4533",
             "session transcript clear fence",
@@ -1033,7 +1041,7 @@ pub(crate) mod clear_fence_pg_tests {
         db.drop().await;
     }
 
-    pub(crate) fn entry<'a>(
+    pub fn entry<'a>(
         turn_id: &'a str,
         channel_id: &'a str,
         turn_started_at_millis: i64,
@@ -1053,6 +1061,7 @@ pub(crate) mod clear_fence_pg_tests {
         }
     }
 
+    #[cfg(test)]
     fn bridge_owned_entry<'a>(
         turn_id: &'a str,
         channel_id: &'a str,
@@ -1063,15 +1072,13 @@ pub(crate) mod clear_fence_pg_tests {
         entry
     }
 
-    pub(crate) async fn channel_pairs(
-        pool: &PgPool,
-        channel_id: &str,
-    ) -> Vec<ChannelTranscriptPair> {
+    pub async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
             .expect("fetch recent pairs") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
     }
 
+    #[cfg(test)]
     /// `(clear_generation, cleared_through_id)` for a channel's boundary row.
     async fn boundary_markers(pool: &PgPool, channel_id: &str) -> (i64, i64) {
         sqlx::query_as::<_, (i64, i64)>(

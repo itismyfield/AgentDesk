@@ -166,7 +166,7 @@ fn usage_completion(recreated: bool) {
     assert_eq!(tmux.sends(), ["/compact", "Enter"]);
     assert!(!r.ready());
     if recreated {
-        claude_compact_trigger::clear_for_tmux(&r.session);
+        claude_compact_trigger::clear_for_tmux_for_test(&r.session);
         let before = fs::read_to_string(tmux.directory().join("argv"))
             .unwrap()
             .matches("capture-pane")
@@ -203,5 +203,5 @@ fn usage_completion(recreated: bool) {
             ["/compact", "Enter", "load", "paste", "Enter"]
         );
     }
-    claude_compact_trigger::clear_for_tmux(&r.session);
+    claude_compact_trigger::clear_for_tmux_for_test(&r.session);
 }

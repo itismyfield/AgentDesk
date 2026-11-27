@@ -92,6 +92,14 @@ class DeadCodeAdmissionTest(unittest.TestCase):
         self.assertTrue(ratchet.admission_problems(self.root, base, {"src/a.rs": 2}, {"src/a.rs": 2}))
         self.assertEqual(ratchet.admission_problems(self.root, base, {"src/a.rs": 1}, {}), [])
 
+    def test_total_relocation_covered_by_a_decrease_is_admitted(self):
+        moved = {"src/a.rs": 1, "src/b.rs": 1}
+        self.assertEqual(ratchet.admission_problems(self.root, self.base, moved, {"src/a.rs": 1}), [])
+
+    def test_relocation_that_grows_the_total_fails(self):
+        grown = {"src/a.rs": 1, "src/b.rs": 2}
+        self.assertTrue(ratchet.admission_problems(self.root, self.base, grown, {"src/a.rs": 1}))
+
     def test_scope_growth_stale_and_inflation_fail_through_main(self):
         self.write_baselines({"src/a.rs": 2}, {"src/a.rs": 1})
         source = self.root / "src/a.rs"

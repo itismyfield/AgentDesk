@@ -27,7 +27,7 @@ mod details {
     use super::ReplaySummary;
 
     #[derive(Clone, Debug, Default)]
-    pub(crate) struct Details {
+    pub struct Details {
         pub records: u64,
         pub done: u64,
         pub prepared: u64,
@@ -40,7 +40,7 @@ mod details {
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) use details::Details;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use details::Details;
+pub use details::Details;
 
 impl Trace {
     pub(super) fn new(
@@ -234,7 +234,7 @@ impl Drop for Phase {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
-pub(crate) struct Event {
+pub struct Event {
     pub channel: u64,
     pub stage: &'static str,
     pub status: &'static str,
@@ -247,11 +247,11 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn capture() {
+pub fn capture() {
     EVENTS.with_borrow_mut(|events| *events = Some(Vec::new()));
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn events() -> Vec<Event> {
+pub fn events() -> Vec<Event> {
     EVENTS.with_borrow(|events| events.clone().unwrap_or_default())
 }

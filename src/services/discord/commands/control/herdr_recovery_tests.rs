@@ -519,8 +519,8 @@ mod retired_selector {
             let startup =
                 crate::services::herdr_launch::clear_epoch::Launching::for_launch(&record.owner)
                     .unwrap();
-            let scope = startup.scope();
-            let permit = scope.check_epoch().unwrap().begin_effect().unwrap();
+            let scope = startup.scope_for_test();
+            let permit = scope.effect_permit_for_test().unwrap();
             crate::services::tui_prompt_dedupe::admit_herdr_execution(
                 &record.owner.logical_key,
                 &record.execution_nonce,
@@ -543,7 +543,7 @@ mod retired_selector {
             );
             assert_eq!(
                 target
-                    .send_keys(&[crate::services::session_host::HostKey::Enter])
+                    .send_keys_for_test(&[crate::services::session_host::HostKey::Enter])
                     .unwrap(),
                 crate::services::session_host::HostMutation::Confirmed
             );
@@ -553,7 +553,7 @@ mod retired_selector {
             );
             let end_check = rig.pause_end_check();
             drop(permit);
-            scope.finish_start();
+            scope.finish_start_for_test();
             drop(scope);
             drop(startup);
             tokio::time::timeout(std::time::Duration::from_secs(10), end_check.arrived)

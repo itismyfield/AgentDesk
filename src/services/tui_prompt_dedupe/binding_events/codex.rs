@@ -7,7 +7,7 @@ use crate::services::codex_tui::session::source_observation::VerifiedCodexHookSo
 use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 
 // Provider workers inherit only a fixture's explicit test root, never the live runtime root.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn events_dir() -> io::Result<Option<PathBuf>> {
     Ok(super::events_dir()?.or_else(|| {
         std::env::var_os("AGENTDESK_TEST_CODEX_BINDING_ROOT")
@@ -15,22 +15,22 @@ fn events_dir() -> io::Result<Option<PathBuf>> {
     }))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn log_path(channel: u64) -> io::Result<Option<PathBuf>> {
     Ok(events_dir()?.map(|root| root.join(format!("{channel}.log"))))
 }
 
 mod observation;
-pub(crate) use observation::observe_channel;
+pub use observation::observe_channel;
 mod commit;
 #[cfg(unix)]
-pub(crate) mod settled;
+pub mod settled;
 mod terminal;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use commit::commit_claim;
+pub use commit::commit_claim;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
-pub(crate) use commit::{commit_claim_published, commit_executed_resume_published};
+pub use commit::{after_companion_for_tests, corrupt_companion_candidate_for_tests};
+pub use commit::{commit_claim_published, commit_executed_resume_published};
 pub(crate) use terminal::{SettledCompanions, terminal_pending_at_seq};
 
 fn history(channel: u64, tmux: &str, nonce: &str) -> io::Result<Vec<BindingEvent>> {
@@ -94,7 +94,7 @@ pub(crate) fn superseded(context: &BindingContext, session: &str) -> io::Result<
 }
 
 /// The hook-recorded current source when the claimed source is one it already retired.
-pub(crate) fn source_ahead(
+pub fn source_ahead(
     channel: u64,
     tmux: &str,
     nonce: &str,
@@ -116,7 +116,7 @@ pub(crate) fn source_ahead(
 }
 
 /// Whether the recorded source's file is still the one the hook verified.
-pub(crate) fn source_file_matches(source: &SourceId) -> bool {
+pub fn source_file_matches(source: &SourceId) -> bool {
     fs::metadata(&source.path).is_ok_and(|meta| file_identity(&meta) == (source.dev, source.ino))
 }
 
@@ -219,7 +219,7 @@ impl Writer {
 /// Additive launch evidence; Claude's `verified` flag is not Codex ownership.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Ownership {
+pub struct Ownership {
     pub schema: u32,
     pub seq: u64,
     pub context: BindingContext,
@@ -237,7 +237,7 @@ pub(crate) struct Ownership {
 /// Canonical equivalence checked at append time, bound to both recorded descriptors.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct CanonicalWitness {
+pub struct CanonicalWitness {
     pub observation_seq: u64,
     pub observed: SourceId,
     pub source: SourceId,
@@ -245,7 +245,7 @@ pub(crate) struct CanonicalWitness {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
-pub(crate) enum ClaimEvidence {
+pub enum ClaimEvidence {
     NativeHook {
         event: String,
         source: Option<String>,
@@ -258,7 +258,7 @@ pub(crate) enum ClaimEvidence {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Claim {
+pub struct Claim {
     pub session_id: String,
     pub path: Option<PathBuf>,
     pub evidence: ClaimEvidence,
@@ -319,21 +319,21 @@ impl Claim {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ClaimRecord {
+pub struct ClaimRecord {
     pub seq: u64,
     pub published_at: Option<DateTime<Utc>>,
     pub claim: Claim,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct VerifiedProof {
+pub struct VerifiedProof {
     pub seq: u64,
     pub source: SourceId,
     pub ownership: Ownership,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Fold {
+pub struct Fold {
     pub legacy_unverified: Vec<BindingEvent>,
     pub pending: Vec<ClaimRecord>,
     // Consumers must refuse `conflicted` before using the retained proof.
@@ -342,7 +342,7 @@ pub(crate) struct Fold {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Decision {
+pub enum Decision {
     Pending,
     Verified(SourceId),
     Rejected(String),
@@ -613,16 +613,13 @@ fn fold_records(context: &BindingContext, records: &[Logged]) -> io::Result<Fold
     Ok(fold)
 }
 
-pub(crate) fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
+pub fn read_ownership(context: &BindingContext) -> io::Result<Fold> {
     let channel = ownership_context(context)?;
     let _logs = lock_logs();
     fold_records(context, &ownership_records(channel)?)
 }
 
-pub(crate) fn proof_at_seq(
-    context: &BindingContext,
-    seq: u64,
-) -> io::Result<Option<VerifiedProof>> {
+pub fn proof_at_seq(context: &BindingContext, seq: u64) -> io::Result<Option<VerifiedProof>> {
     let channel = ownership_context(context)?;
     let _logs = lock_logs();
     Ok(ownership_records(channel)?.into_iter().find_map(|logged| {
@@ -643,7 +640,7 @@ pub(crate) fn proof_at_seq(
     }))
 }
 
-pub(crate) fn latest_ownership(
+pub fn latest_ownership(
     channel: u64,
     tmux: &str,
 ) -> io::Result<Option<(u64, String, DateTime<Utc>)>> {
@@ -664,7 +661,7 @@ pub(crate) fn latest_ownership(
         }))
 }
 
-pub(crate) fn context_for_nonce(
+pub fn context_for_nonce(
     channel: u64,
     tmux: &str,
     nonce: Option<&str>,

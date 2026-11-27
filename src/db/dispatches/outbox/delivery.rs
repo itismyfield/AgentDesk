@@ -7,7 +7,7 @@ use sqlx::{PgPool, Row as SqlxRow};
 // build sees them as dead. See #3312.
 #[allow(dead_code)]
 #[derive(Debug)]
-pub(crate) enum DispatchOutboxLeaseUpdateError {
+pub enum DispatchOutboxLeaseUpdateError {
     Db(sqlx::Error),
     StaleLeaseLost {
         outbox_id: i64,
@@ -17,7 +17,7 @@ pub(crate) enum DispatchOutboxLeaseUpdateError {
 }
 
 /// Execution actions stop on a replay hold; terminal status suppresses only the original notify.
-pub(crate) async fn dispatch_notify_delivery_suppressed_pg(
+pub async fn dispatch_notify_delivery_suppressed_pg(
     pool: &PgPool,
     dispatch_id: &str,
     action: &str,
@@ -41,10 +41,7 @@ pub(crate) async fn dispatch_notify_delivery_suppressed_pg(
     })
 }
 
-pub(crate) async fn mark_dispatch_dispatched_pg(
-    pool: &PgPool,
-    dispatch_id: &str,
-) -> Result<(), String> {
+pub async fn mark_dispatch_dispatched_pg(pool: &PgPool, dispatch_id: &str) -> Result<(), String> {
     let current = sqlx::query(
         "SELECT status, kanban_card_id, dispatch_type
            FROM task_dispatches
@@ -133,7 +130,7 @@ pub(crate) async fn mark_dispatch_dispatched_pg(
 
 /// Mark an outbox row as `done` and clear claim state. Used both by the
 /// notify-suppressed early-exit and by the success branch of the worker.
-pub(crate) async fn mark_outbox_done_pg(
+pub async fn mark_outbox_done_pg(
     pool: &PgPool,
     outbox_id: i64,
     delivery_status: &str,
@@ -190,7 +187,7 @@ pub(crate) async fn mark_outbox_done_pg(
 /// Mark an outbox row as permanently `failed` after the retry budget is
 /// exhausted.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn mark_outbox_failed_pg(
+pub async fn mark_outbox_failed_pg(
     pool: &PgPool,
     outbox_id: i64,
     error_message: &str,

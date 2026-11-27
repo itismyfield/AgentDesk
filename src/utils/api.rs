@@ -11,7 +11,7 @@ pub(crate) fn clamp_limit(limit: Option<usize>, default: usize, max: usize) -> u
     limit.unwrap_or(default).clamp(1, max)
 }
 
-pub(crate) fn clamp_api_limit(limit: Option<usize>) -> usize {
+pub fn clamp_api_limit(limit: Option<usize>) -> usize {
     clamp_limit(limit, 50, 2_000)
 }
 
@@ -19,7 +19,7 @@ pub(crate) fn error_response(status: StatusCode, error: impl Display) -> ApiJson
     (status, Json(json!({ "error": error.to_string() })))
 }
 
-pub(crate) fn bad_request(error: impl Display) -> ApiJsonResponse {
+pub fn bad_request(error: impl Display) -> ApiJsonResponse {
     error_response(StatusCode::BAD_REQUEST, error)
 }
 

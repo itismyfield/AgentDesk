@@ -5,7 +5,7 @@ use crate::services::discord::codex_absence::*;
 use crate::services::discord::save_actual_episode_for_tests;
 use crate::services::provider::CancelToken;
 use crate::services::provider_hosting::{TEST_CONFIG_LOCK, install_provider_hosting_config};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 use std::sync::Arc;
@@ -62,20 +62,20 @@ fn with_scope(run: impl FnOnce(&std::path::Path)) {
 fn readiness_observation_refuses_new_rows_and_read_errors_without_repair() {
     with_scope(|root| {
         let observed = readiness(CHANNEL, TMUX).expect("confirmed missing row");
-        assert!(observed.recheck(CHANNEL, TMUX));
-        assert!(!observed.matches_token(&Arc::new(CancelToken::new())));
+        assert!(observed.recheck_for_test(CHANNEL, TMUX));
+        assert!(!observed.matches_token_for_test(&Arc::new(CancelToken::new())));
         let token = Arc::new(CancelToken::new());
         let path = save_actual_episode_for_tests(CHANNEL, TMUX, 30, &token);
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
         assert!(readiness(CHANNEL, TMUX).is_none());
         std::fs::write(&path, b"{broken row").unwrap();
         let bytes = std::fs::read(&path).unwrap();
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
         assert!(readiness(CHANNEL, TMUX).is_none());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
         assert!(readiness(CHANNEL, TMUX).is_none());
         assert!(path.is_dir(), "read error must not repair the row path");
         assert!(!root.join("runtime/sessions").exists());
@@ -103,14 +103,14 @@ fn exact_self_observation_rechecks_row_nonce_and_cancellation_without_actor_wait
                 .await
                 .expect("exact active episode")
         });
-        assert!(observed.matches_token(&token));
-        assert!(observed.recheck(CHANNEL, TMUX));
-        assert!(!observed.recheck(CHANNEL + 1, TMUX));
-        assert!(!observed.recheck(CHANNEL, "another-target"));
+        assert!(observed.matches_token_for_test(&token));
+        assert!(observed.recheck_for_test(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL + 1, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, "another-target"));
         let duplicate = Arc::new(CancelToken::from_persisted_turn_nonce(
             token.turn_nonce().map(str::to_owned),
         ));
-        assert!(!observed.matches_token(&duplicate));
+        assert!(!observed.matches_token_for_test(&duplicate));
         let original = std::fs::read(&path).unwrap();
         for (field, value) in [
             ("turn_nonce", serde_json::json!("replacement")),
@@ -122,13 +122,16 @@ fn exact_self_observation_rechecks_row_nonce_and_cancellation_without_actor_wait
             row[field] = value;
             let bytes = serde_json::to_vec(&row).unwrap();
             std::fs::write(&path, &bytes).unwrap();
-            assert!(!observed.recheck(CHANNEL, TMUX), "accepted changed {field}");
+            assert!(
+                !observed.recheck_for_test(CHANNEL, TMUX),
+                "accepted changed {field}"
+            );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         std::fs::write(&path, original).unwrap();
-        assert!(observed.recheck(CHANNEL, TMUX));
+        assert!(observed.recheck_for_test(CHANNEL, TMUX));
         token.cancelled.store(true, Ordering::Release);
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
     });
 }
 
@@ -185,16 +188,16 @@ fn full_snapshot_refuses_foreign_arc_actor_and_unreadable_rows() {
             );
             assert!(observe_turn(CHANNEL, TMUX, &token).await.is_none());
             assert!(observe_turn(CHANNEL, TMUX, &duplicate).await.is_some());
-            assert!(!observed.matches_token(&duplicate));
+            assert!(!observed.matches_token_for_test(&duplicate));
             std::fs::write(&path, b"{unreadable row").unwrap();
             let bytes = std::fs::read(&path).unwrap();
             assert!(observe_turn(CHANNEL, TMUX, &duplicate).await.is_none());
-            assert!(!observed.recheck(CHANNEL, TMUX));
+            assert!(!observed.recheck_for_test(CHANNEL, TMUX));
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             std::fs::remove_file(&path).unwrap();
             std::fs::create_dir(&path).unwrap();
             assert!(observe_turn(CHANNEL, TMUX, &duplicate).await.is_none());
-            assert!(!observed.recheck(CHANNEL, TMUX));
+            assert!(!observed.recheck_for_test(CHANNEL, TMUX));
             assert!(path.is_dir());
         });
     });
@@ -208,7 +211,7 @@ fn observations_refuse_legacy_driver_and_missing_target_identity() {
         let observed = readiness(CHANNEL, TMUX).unwrap();
         install_provider_hosting_config(&Config::default());
         assert!(readiness(CHANNEL, TMUX).is_none());
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
     });
 }
 
@@ -216,16 +219,16 @@ fn observations_refuse_legacy_driver_and_missing_target_identity() {
 fn observations_refuse_process_fallback_when_tmux_becomes_unavailable() {
     with_scope(|_| {
         let observed = readiness(CHANNEL, TMUX).expect("available direct TUI scope");
-        assert!(observed.recheck(CHANNEL, TMUX));
+        assert!(observed.recheck_for_test(CHANNEL, TMUX));
         let unavailable = FakeTmux::install(TMUX);
         crate::services::platform::tmux::invalidate_availability_cache();
         assert!(!crate::services::claude::is_tmux_available());
         assert!(readiness(CHANNEL, TMUX).is_none());
-        assert!(!observed.recheck(CHANNEL, TMUX));
+        assert!(!observed.recheck_for_test(CHANNEL, TMUX));
         unavailable.enable_fixture_launch();
         crate::services::platform::tmux::invalidate_availability_cache();
         assert!(crate::services::claude::is_tmux_available());
         assert!(readiness(CHANNEL, TMUX).is_some());
-        assert!(observed.recheck(CHANNEL, TMUX));
+        assert!(observed.recheck_for_test(CHANNEL, TMUX));
     });
 }

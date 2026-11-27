@@ -1,17 +1,20 @@
 use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::db::intake_outbox::{self, InsertPendingPayload};
+#[cfg(test)]
+use crate::db::intake_outbox;
+use crate::db::intake_outbox::InsertPendingPayload;
 use sqlx::{Executor, Postgres};
+#[cfg(test)]
 use std::time::Duration;
 
-pub(crate) fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
+pub fn is_replay_fence_refusal(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
         .and_then(|error| error.constraint())
         == Some("replay_disposition_fence")
 }
 
-pub(crate) async fn setup() -> (TestPostgresDb, PgPool) {
+pub async fn setup() -> (TestPostgresDb, PgPool) {
     let fixture = TestPostgresDb::create().await;
     let pool = fixture.connect_and_migrate_with_max_connections(4).await;
     let version: String = sqlx::query_scalar("SELECT version()")
@@ -22,12 +25,12 @@ pub(crate) async fn setup() -> (TestPostgresDb, PgPool) {
     (fixture, pool)
 }
 
-pub(crate) async fn finish(fixture: TestPostgresDb, pool: PgPool) {
+pub async fn finish(fixture: TestPostgresDb, pool: PgPool) {
     pool.close().await;
     fixture.drop().await;
 }
 
-pub(crate) async fn receipt_on<'e, E: Executor<'e, Database = Postgres>>(
+pub async fn receipt_on<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,
     channel: &str,
     provider: &str,
@@ -57,7 +60,7 @@ pub(crate) async fn receipt_on<'e, E: Executor<'e, Database = Postgres>>(
     .await
 }
 
-pub(crate) async fn legacy_on<'e, E: Executor<'e, Database = Postgres>>(
+pub async fn legacy_on<'e, E: Executor<'e, Database = Postgres>>(
     executor: E,
     channel: &str,
     provider: &str,
@@ -79,12 +82,12 @@ pub(crate) async fn legacy_on<'e, E: Executor<'e, Database = Postgres>>(
     .await
 }
 
-pub(crate) fn assert_fenced<T: std::fmt::Debug>(result: Result<T, sqlx::Error>, operation: &str) {
+pub fn assert_fenced<T: std::fmt::Debug>(result: Result<T, sqlx::Error>, operation: &str) {
     let error = result.expect_err(operation);
     assert!(is_replay_fence_refusal(&error), "{operation}: {error}");
 }
 
-pub(crate) async fn dispatch(pool: &PgPool, id: &str, receipt: i64, card: Option<&str>) {
+pub async fn dispatch(pool: &PgPool, id: &str, receipt: i64, card: Option<&str>) {
     sqlx::query(
         "INSERT INTO task_dispatches (id, status, replay_receipt_id, kanban_card_id,
                                      result, claim_owner, claimed_at, claim_expires_at)
@@ -99,7 +102,7 @@ pub(crate) async fn dispatch(pool: &PgPool, id: &str, receipt: i64, card: Option
     .expect("seed dispatch projection");
 }
 
-pub(crate) fn payload(channel: &str, message: &str) -> InsertPendingPayload {
+pub fn payload(channel: &str, message: &str) -> InsertPendingPayload {
     InsertPendingPayload {
         target_instance_id: "worker-a".into(),
         forwarded_by_instance_id: "leader".into(),
@@ -294,5 +297,6 @@ async fn receipt_transitions_old_writers_and_delivery_settlement_preserve_author
     finish(fixture, pool).await;
 }
 
+#[cfg(test)]
 #[path = "replay_disposition_tests/concurrency_tests.rs"]
 mod concurrency_tests;

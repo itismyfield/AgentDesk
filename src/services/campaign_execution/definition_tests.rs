@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::campaign::definition::graph_changed;
 use serde_json::{Value, json};
 
 fn input() -> DefinitionInput {

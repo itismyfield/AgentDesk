@@ -3,7 +3,7 @@ use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::Step;
 use crate::services::tui_o::writer::local_retry::{self, LOCAL_RETRY_DELAY};
 use crate::services::tui_o::writer::pieces::Derived;
-use crate::services::tui_o::writer::tests::*;
+use crate::services::tui_o::writer::test_support::*;
 use chrono::Utc;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -80,7 +80,7 @@ async fn local_retry_real_deliver_consumes_once_and_children_never_receive_a_bud
         let when = due(&mut writer);
         assert_eq!(
             writer
-                .retry_local(when - chrono::Duration::nanoseconds(1))
+                .retry_local_for_test(when - chrono::Duration::nanoseconds(1))
                 .await,
             Step::LeaseBusy
         );
@@ -89,7 +89,7 @@ async fn local_retry_real_deliver_consumes_once_and_children_never_receive_a_bud
             writer.deliver(&piece("later", "later")).await,
             Step::LeaseBusy
         );
-        assert_eq!(writer.retry_local(when).await, Step::Done);
+        assert_eq!(writer.retry_local_for_test(when).await, Step::Done);
         let expected = match child {
             Reply::Created => PieceOutcome::Posted(1001),
             Reply::Unsent => PieceOutcome::NotFound,
@@ -103,7 +103,9 @@ async fn local_retry_real_deliver_consumes_once_and_children_never_receive_a_bud
             drop(writer);
             writer = harness.writer();
             assert_eq!(
-                writer.retry_local(when + chrono::Duration::days(1)).await,
+                writer
+                    .retry_local_for_test(when + chrono::Duration::days(1))
+                    .await,
                 Step::Done
             );
             assert_eq!(writer.deliver(&item).await, Step::Done);
@@ -113,7 +115,7 @@ async fn local_retry_real_deliver_consumes_once_and_children_never_receive_a_bud
                 "only one additional POST across restarts"
             );
             assert_eq!(writer.store().ledger().next_serial(), 2);
-            assert!(!writer.has_local_retry());
+            assert!(!writer.has_local_retry_for_test());
         }
         assert_eq!(
             harness.port.posts(),
@@ -131,26 +133,26 @@ async fn local_retry_gate_lease_and_stop_hold_before_prepared_and_resume_on_rest
     let mut writer = harness.writer().with_repost_stop(stopped);
     let when = due(&mut writer);
     harness.lease.busy.store(true, Ordering::SeqCst);
-    assert_eq!(writer.retry_local(when).await, Step::LeaseBusy);
+    assert_eq!(writer.retry_local_for_test(when).await, Step::LeaseBusy);
     harness.lease.busy.store(false, Ordering::SeqCst);
     let gate = Arc::clone(&harness.gate);
     *harness.lease.on_acquire.lock().unwrap() = Some(Box::new(move || gate.uncertain()));
-    assert_eq!(writer.retry_local(when).await, Step::NoGateway);
+    assert_eq!(writer.retry_local_for_test(when).await, Step::NoGateway);
     *harness.lease.on_acquire.lock().unwrap() = None;
     harness.gate.acquired();
     let stop_on_lease = stop.clone();
     *harness.lease.on_acquire.lock().unwrap() = Some(Box::new(move || {
         stop_on_lease.send_replace(true);
     }));
-    assert_eq!(writer.retry_local(when).await, Step::LeaseBusy);
+    assert_eq!(writer.retry_local_for_test(when).await, Step::LeaseBusy);
     assert_eq!(writer.store().ledger().next_serial(), 1);
     assert!(harness.port.posts().is_empty());
     *harness.lease.on_acquire.lock().unwrap() = None;
     drop(writer);
     let mut restarted = harness.writer();
-    assert_eq!(restarted.retry_local(when).await, Step::Done);
+    assert_eq!(restarted.retry_local_for_test(when).await, Step::Done);
     assert_eq!(harness.port.posts(), ["원장 본문 ```x```"]);
-    assert!(!restarted.has_local_retry());
+    assert!(!restarted.has_local_retry_for_test());
 }
 
 #[tokio::test(start_paused = true)]
@@ -173,11 +175,11 @@ async fn local_retry_open_child_and_old_not_found_cannot_create_another_post() {
             let mut writer = harness.writer();
             assert_eq!(
                 writer
-                    .retry_local(Utc::now() + chrono::Duration::days(1))
+                    .retry_local_for_test(Utc::now() + chrono::Duration::days(1))
                     .await,
                 Step::Done
             );
-            assert!(!writer.has_local_retry());
+            assert!(!writer.has_local_retry_for_test());
             assert!(harness.port.posts().is_empty());
         }
     }
@@ -201,7 +203,7 @@ async fn local_retry_attempt_is_durable_before_the_child_request_is_created() {
     }));
     let mut writer = harness.writer();
     let when = due(&mut writer);
-    assert_eq!(writer.retry_local(when).await, Step::Done);
+    assert_eq!(writer.retry_local_for_test(when).await, Step::Done);
     assert_eq!(harness.port.posts(), ["원장 본문 ```x```"]);
 }
 
@@ -226,13 +228,13 @@ async fn local_retry_unreadable_root_or_child_has_no_further_post() {
         if !unreadable_root {
             let when = due(&mut writer);
             harness.port.unreadable.store(true, Ordering::SeqCst);
-            assert_eq!(writer.retry_local(when).await, Step::Done);
+            assert_eq!(writer.retry_local_for_test(when).await, Step::Done);
             assert!(matches!(
                 writer.store().ledger().piece(1).unwrap().outcome,
                 Some(PieceOutcome::Unresolved(_))
             ));
         }
-        assert!(!writer.has_local_retry());
+        assert!(!writer.has_local_retry_for_test());
         assert_eq!(
             harness.port.posts().len(),
             if unreadable_root { 1 } else { 2 }
@@ -354,10 +356,10 @@ async fn local_retry_budget_follows_explicit_owner_even_with_a_hook_present() {
             );
             if owner == OriginalGate::SendLocal {
                 let when = due(&mut writer);
-                assert_eq!(writer.retry_local(when).await, Step::Done);
+                assert_eq!(writer.retry_local_for_test(when).await, Step::Done);
                 assert_eq!(harness.port.posts(), ["payload", "payload"]);
             } else {
-                assert!(!writer.has_local_retry());
+                assert!(!writer.has_local_retry_for_test());
             }
         }
     }
@@ -397,7 +399,7 @@ async fn input_notice_origin_survives_prepared_restart_and_local_retry() {
         pending.piece, item,
         "retry must use the complete original provenance"
     );
-    assert_eq!(writer.retry_local(pending.due).await, Step::Done);
+    assert_eq!(writer.retry_local_for_test(pending.due).await, Step::Done);
     drop(writer);
     let store = harness.channel();
     assert_eq!(store.ledger().piece(1).unwrap().notice_origin, Some(origin));
@@ -454,7 +456,7 @@ async fn a_retry_debt_below_the_migration_floor_is_excluded_and_never_posted() {
 
     let mut writer = harness.writer();
     let pending = local_retry::pending(writer.store().ledger()).expect("saved retry debt");
-    assert_eq!(writer.retry_local(pending.due).await, Step::Done);
+    assert_eq!(writer.retry_local_for_test(pending.due).await, Step::Done);
     assert!(
         harness.port.posts().is_empty(),
         "the past input is never posted"
@@ -478,6 +480,6 @@ async fn a_retry_debt_below_the_migration_floor_is_excluded_and_never_posted() {
     drop(writer);
     let mut writer = harness.writer();
     assert!(local_retry::pending(writer.store().ledger()).is_none());
-    assert_eq!(writer.retry_local(Utc::now()).await, Step::Done);
+    assert_eq!(writer.retry_local_for_test(Utc::now()).await, Step::Done);
     assert_eq!(harness.port.posts(), [fresh.payload]);
 }

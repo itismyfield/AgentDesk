@@ -2,7 +2,7 @@ use super::*;
 #[cfg(test)]
 use std::cell::RefCell;
 
-pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Result<Output, String> {
+pub fn output(code: i32, stdout: &str, stderr: &str) -> Result<Output, String> {
     #[cfg(unix)]
     use std::os::unix::process::ExitStatusExt;
     #[cfg(windows)]
@@ -17,11 +17,7 @@ pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Result<Output, St
     })
 }
 
-pub(crate) fn probe(
-    name: &str,
-    budget: Duration,
-    replies: Vec<Result<Output, String>>,
-) -> PaneLiveness {
+pub fn probe(name: &str, budget: Duration, replies: Vec<Result<Output, String>>) -> PaneLiveness {
     let mut replies = replies.into_iter();
     let result = pane_liveness_within_using(
         name,

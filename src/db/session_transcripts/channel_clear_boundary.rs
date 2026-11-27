@@ -12,25 +12,25 @@ use super::{
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum RecentContextBoundaryKind {
+pub enum RecentContextBoundaryKind {
     Cleared,
     ContextSevered,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct PreviousProviderSession {
-    pub(crate) provider: String,
-    pub(crate) session_id: String,
-    pub(crate) path: Option<PathBuf>,
+pub struct PreviousProviderSession {
+    pub provider: String,
+    pub session_id: String,
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct RecentContextBoundary {
-    pub(crate) kind: RecentContextBoundaryKind,
-    pub(crate) previous_session: Option<PreviousProviderSession>,
+pub struct RecentContextBoundary {
+    pub kind: RecentContextBoundaryKind,
+    pub previous_session: Option<PreviousProviderSession>,
 }
 
-pub(crate) async fn record_recent_context_boundary(
+pub async fn record_recent_context_boundary(
     pool: Option<&PgPool>,
     channel_id: &str,
     context: &RecentContextBoundary,
@@ -38,11 +38,8 @@ pub(crate) async fn record_recent_context_boundary(
     record_boundary(pool, channel_id, Some(context)).await
 }
 
-#[cfg(test)]
-pub(crate) async fn record_channel_clear_boundary(
-    pool: Option<&PgPool>,
-    channel_id: &str,
-) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub async fn record_channel_clear_boundary(pool: Option<&PgPool>, channel_id: &str) -> Result<()> {
     record_boundary(pool, channel_id, None).await
 }
 
@@ -57,16 +54,14 @@ async fn record_boundary(
     finish_boundary(tx, channel_id, context).await
 }
 
-pub(crate) async fn begin_channel_clear_boundary_tx(
-    pool: &PgPool,
-) -> Result<Transaction<'_, Postgres>> {
+pub async fn begin_channel_clear_boundary_tx(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
     pool.begin()
         .await
         .map_err(|error| anyhow!("begin channel clear boundary transaction failed: {error}"))
 }
 
-#[cfg(test)]
-pub(super) async fn finish_channel_clear_boundary_tx(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn finish_channel_clear_boundary_tx(
     tx: Transaction<'_, Postgres>,
     channel_id: &str,
 ) -> Result<()> {
@@ -168,7 +163,7 @@ pub(super) const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = concat!(
     ORDER BY pair.created_at DESC, pair.id DESC"
 );
 
-pub(crate) async fn fetch_recent_channel_prompt_context(
+pub async fn fetch_recent_channel_prompt_context(
     pool: &PgPool,
     channel_id: &str,
     limit: u64,

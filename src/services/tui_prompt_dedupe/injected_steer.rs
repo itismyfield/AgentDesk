@@ -49,7 +49,7 @@ fn marker(nonce: &str) -> String {
 }
 
 /// Projection of durable retention: frees capacity without inventing a native observation.
-pub(crate) fn retain_injected_steer(provider: &str, session: &str, nonce: &str) {
+pub fn retain_injected_steer(provider: &str, session: &str, nonce: &str) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some(ledger) = state
         .injected_steer_by_tmux
@@ -62,7 +62,7 @@ pub(crate) fn retain_injected_steer(provider: &str, session: &str, nonce: &str) 
 
 /// Records an injected input before its paste; false when the session already holds the maximum
 /// of unsettled inputs or the nonce, so the caller does not paste.
-pub(crate) fn register_injected_steer(
+pub fn register_injected_steer(
     provider: &str,
     tmux_session_name: &str,
     nonce: &str,
@@ -98,7 +98,7 @@ pub(crate) fn register_injected_steer(
 }
 
 /// Drops only an unsettled memory projection; durable admission and receipts stay unchanged.
-pub(crate) fn withdraw_injected_steer(provider: &str, tmux_session_name: &str, nonce: &str) {
+pub fn withdraw_injected_steer(provider: &str, tmux_session_name: &str, nonce: &str) {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let key = PromptKey::new(provider, tmux_session_name);
     let Some(ledger) = state.injected_steer_by_tmux.get_mut(&key) else {

@@ -1,12 +1,14 @@
 use super::*;
+#[cfg(test)]
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::session_host::ServerWitness;
 use crate::services::session_host::policy::consent::{
     ConsentKey, ConsentStore, IntentRef, Preview, Question,
 };
+#[cfg(test)]
 use sha2::{Digest, Sha256};
 
-pub(crate) async fn setup(
+pub async fn setup(
     pool: &PgPool,
     channel: &str,
 ) -> (
@@ -258,7 +260,7 @@ async fn consent_handoff_requires_exact_payload_source_and_live_owner_pg() {
     db.drop().await;
 }
 
-pub(crate) async fn hold_before_effects(
+pub async fn hold_before_effects(
     pool: &PgPool,
     row: &IntakeOutboxRow,
     store: &ConsentStore,

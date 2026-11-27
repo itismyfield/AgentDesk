@@ -1,0 +1,3 @@
+resolver | src/services/provider_teardown/test_support.rs
+resolver | src/services/tui_o/writer/source_read_support.rs
+resolver | src/services/tui_prompt_dedupe/binding_context/test_support.rs

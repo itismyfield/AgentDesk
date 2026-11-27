@@ -1,8 +1,17 @@
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { Bot, Brain, ChevronDown, CircleAlert, Copy, CornerDownRight, RefreshCw, Wrench, type LucideIcon } from "lucide-react";
+import { Bot, Brain, ChevronDown, ChevronUp, CircleAlert, Copy, CornerDownRight, RefreshCw, Search, Wrench, X, type LucideIcon } from "lucide-react";
 import { formatElapsedCompact } from "../../agent-insights";
 import * as api from "../../api";
+import {
+  analyzeReplyInvitation,
+  classifyTranscriptStop,
+  detectTurnLoop,
+  formatLoopSummary,
+  formatStopBadgeLabel,
+  searchTranscriptEvents,
+  stepsFromTranscriptEvents,
+} from "../../lib/agentObservability";
 import { Badge } from "../../kit/free/badge-clean";
 import { Button } from "../../kit/free/button-clean";
 import { AgentTiming, type TimingActor, type TimingKind, type TimingSpan } from "../../kit/pro/agent-timing";
@@ -251,6 +260,8 @@ export default function TurnTranscriptPanel({
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [activeEventIndex, setActiveEventIndex] = useState<number | null>(null);
   const [showToolCalls, setShowToolCalls] = useState(false);
+  const [stepQuery, setStepQuery] = useState("");
+  const [matchCursor, setMatchCursor] = useState(0);
   const requestSeqRef = useRef(0);
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
@@ -342,12 +353,52 @@ export default function TurnTranscriptPanel({
     () => (selectedTranscript ? buildTurnToolSummary(selectedTranscript, events, tr) : { tools: [], calls: [] }),
     [selectedTranscript, events, tr],
   );
+  const selectedStop = useMemo(
+    () => (selectedTranscript ? classifyTranscriptStop(selectedTranscript, tr) : null),
+    [selectedTranscript, tr],
+  );
+  const selectedLoop = useMemo(
+    () => detectTurnLoop(stepsFromTranscriptEvents(events)),
+    [events],
+  );
+  const selectedReply = useMemo(() => {
+    if (!selectedTranscript || selectedStop) return null;
+    const replyText =
+      selectedTranscript.assistant_message?.trim() ||
+      [...events].reverse().find((ev) => ev.kind === "assistant" && ev.content?.trim())?.content?.trim() ||
+      "";
+    return analyzeReplyInvitation(replyText);
+  }, [selectedTranscript, selectedStop, events]);
+  const matchedIndices = useMemo(
+    () => searchTranscriptEvents(events, stepQuery),
+    [events, stepQuery],
+  );
+  const matchedSet = useMemo(() => new Set(matchedIndices), [matchedIndices]);
+
+  const jumpToMatch = (nextCursor: number) => {
+    if (matchedIndices.length === 0) return;
+    const wrapped = ((nextCursor % matchedIndices.length) + matchedIndices.length) % matchedIndices.length;
+    const targetIdx = matchedIndices[wrapped]!;
+    setMatchCursor(wrapped);
+    setActiveEventIndex(targetIdx);
+    (stepVirtualizer as { scrollToIndex?: (index: number, opts?: { align?: string }) => void }).scrollToIndex?.(targetIdx, { align: "center" });
+  };
 
   useEffect(() => {
     setActiveEventIndex(events.length > 0 ? 0 : null);
+    setMatchCursor(0);
     // A newly chosen turn starts its steps from the top.
     stepListRef.current?.scrollTo({ top: 0 });
   }, [selectedTranscript?.turn_id]);
+
+  useEffect(() => {
+    setMatchCursor(0);
+    if (matchedIndices.length > 0) {
+      const firstIdx = matchedIndices[0]!;
+      setActiveEventIndex(firstIdx);
+      (stepVirtualizer as { scrollToIndex?: (index: number, opts?: { align?: string }) => void }).scrollToIndex?.(firstIdx, { align: "center" });
+    }
+  }, [stepQuery, selectedTranscript?.turn_id]);
 
   useEffect(() => {
     setActiveEventIndex((prev) => normalizeActiveEventIndex(prev, events.length));
@@ -472,9 +523,26 @@ export default function TurnTranscriptPanel({
                     </p>
                   </div>
                 </div>
-                <Badge size="md" tone={errorCount > 0 ? "danger" : "success"} dot>
-                  {errorCount > 0 ? tr(`오류 ${errorCount}`, `${errorCount} errors`) : tr("완료", "Completed")}
-                </Badge>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {selectedStop ? (
+                    <Badge size="md" tone={selectedStop.kind === "quota" ? "warning" : "neutral"} dot>
+                      {formatStopBadgeLabel(selectedStop, tr)}
+                    </Badge>
+                  ) : null}
+                  {selectedLoop ? (
+                    <Badge size="md" tone={selectedLoop.pattern === "contract" ? "danger" : "warning"} dot>
+                      {tr("루프 감지", "Loop detected")}
+                    </Badge>
+                  ) : null}
+                  {selectedReply?.asksUser ? (
+                    <Badge size="md" tone="warning" dot>
+                      {selectedReply.nudge === "go-ahead" ? tr("진행 확인 대기", "Needs go-ahead") : tr("답변 대기", "Awaiting reply")}
+                    </Badge>
+                  ) : null}
+                  <Badge size="md" tone={errorCount > 0 ? "danger" : "success"} dot>
+                    {errorCount > 0 ? tr(`오류 ${errorCount}`, `${errorCount} errors`) : tr("완료", "Completed")}
+                  </Badge>
+                </div>
               </div>
               <dl className="m-0 grid grid-cols-4 gap-2.5 @max-[40rem]/run:grid-cols-2" data-testid="turn-transcript-summary">
                 {([
@@ -489,6 +557,43 @@ export default function TurnTranscriptPanel({
                   </div>
                 ))}
               </dl>
+
+              {(selectedStop || selectedLoop || selectedReply) ? (
+                <div data-testid="turn-transcript-diagnostics" className="flex min-w-0 flex-col gap-1.5 rounded-xl bg-surface-subtle px-3.5 py-2.5 text-xs shadow-[inset_0_0_0_0.5px_var(--th-border-subtle)]">
+                  {selectedStop ? (
+                    <p className="m-0 text-th-text-primary">
+                      <strong className="font-semibold">{formatStopBadgeLabel(selectedStop, tr)}</strong>
+                      {" — "}
+                      {selectedStop.kind === "quota"
+                        ? tr("프로바이더 사용량 한도로 멈췄어요.", "Stopped due to provider usage limits.")
+                        : selectedStop.kind === "silent"
+                          ? tr("출력이나 도구 실행 없이 종료된 빈 턴이에요.", "Ended with no output or tool calls.")
+                          : tr("도구 호출 직후 마무리 응답 없이 끝난 턴이에요.", "Ended after a tool call without a closing reply.")}
+                    </p>
+                  ) : null}
+                  {selectedLoop ? (
+                    <p className="m-0 text-th-text-primary">
+                      <strong className="font-semibold">{tr("반복 패턴", "Loop pattern")}</strong>
+                      {" — "}
+                      {formatLoopSummary(selectedLoop, tr)}
+                    </p>
+                  ) : null}
+                  {selectedReply ? (
+                    <p className="m-0 text-th-text-primary [overflow-wrap:anywhere]">
+                      <strong className="font-semibold">
+                        {selectedReply.nudge === "go-ahead"
+                          ? tr("진행 확인 질문", "Go-ahead question")
+                          : selectedReply.asksUser
+                            ? tr("사용자 질문", "Question for you")
+                            : tr("예고된 다음 단계", "Announced next step")}
+                      </strong>
+                      {": “"}
+                      {selectedReply.quote}
+                      {"”"}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
 
               {prompt && <CopyWell title={tr("사용자 요청", "Prompt")} value={prompt} tr={tr} testId="turn-transcript-prompt" />}
 
@@ -585,6 +690,63 @@ export default function TurnTranscriptPanel({
                   {tr("실행 단계", "Steps")}
                   {selectedEvent && <span className="ml-2 font-normal text-th-text-muted">{activeEventIndex! + 1}/{events.length}</span>}
                 </DetailHeading>
+                {events.length > 0 && (
+                  <div className="flex min-w-0 flex-wrap items-center gap-2 py-1" data-testid="turn-transcript-search">
+                    <div className="relative flex min-w-[12rem] flex-1 items-center">
+                      <Search size={14} aria-hidden className="pointer-events-none absolute left-2.5 text-th-text-muted" />
+                      <input
+                        type="search"
+                        value={stepQuery}
+                        onChange={(e) => setStepQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" && matchedIndices.length > 0) {
+                            e.preventDefault();
+                            jumpToMatch(e.shiftKey ? matchCursor - 1 : matchCursor + 1);
+                          }
+                        }}
+                        placeholder={tr("단계·명령어·출력 검색…", "Find in steps, commands, output…")}
+                        aria-label={tr("실행 단계 검색", "Search steps")}
+                        data-testid="turn-transcript-search-input"
+                        className="min-h-11 w-full rounded-lg border border-th-border-subtle bg-th-card-bg pr-8 pl-8 text-xs text-th-text-primary placeholder:text-th-text-muted focus:outline-2 focus:outline-offset-0 focus:outline-(--accent) sm:min-h-8"
+                      />
+                      {stepQuery ? (
+                        <button
+                          type="button"
+                          aria-label={tr("검색어 지우기", "Clear search")}
+                          onClick={() => setStepQuery("")}
+                          className="absolute right-1.5 grid h-7 w-7 place-items-center rounded text-th-text-muted hover:bg-surface-light hover:text-th-text-primary"
+                        >
+                          <X size={13} />
+                        </button>
+                      ) : null}
+                    </div>
+                    {stepQuery.trim() ? (
+                      <div className="flex shrink-0 items-center gap-1 text-xs text-th-text-secondary tabular-nums" data-testid="turn-transcript-search-nav">
+                        <span className="px-1.5">
+                          {matchedIndices.length > 0 ? `${matchCursor + 1} / ${matchedIndices.length}` : tr("0건", "0 matches")}
+                        </span>
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className={KIT_TOUCH_BUTTON}
+                          icon={<ChevronUp size={14} />}
+                          disabled={matchedIndices.length <= 1}
+                          aria-label={tr("이전 검색 결과", "Previous match")}
+                          onClick={() => jumpToMatch(matchCursor - 1)}
+                        />
+                        <Button
+                          variant="secondary"
+                          size="sm"
+                          className={KIT_TOUCH_BUTTON}
+                          icon={<ChevronDown size={14} />}
+                          disabled={matchedIndices.length <= 1}
+                          aria-label={tr("다음 검색 결과", "Next match")}
+                          onClick={() => jumpToMatch(matchCursor + 1)}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                )}
                 {events.length === 0 ? (
                   <p className="m-0 py-3 text-sm text-th-text-muted">
                     {tr("이 턴에는 구조화 이벤트가 없습니다.", "No structured events for this turn.")}
@@ -609,7 +771,8 @@ export default function TurnTranscriptPanel({
                             <button type="button" data-step={index} aria-current={active ? "true" : undefined}
                               aria-label={`${index + 1}. ${name}${preview ? `, ${preview}` : ""}`}
                               onClick={() => setActiveEventIndex(index)}
-                              className={`${ROW_GRID} min-h-11 w-full items-center gap-y-1 rounded-lg px-2.5 py-1 text-left transition-colors hover:bg-surface-light focus-visible:-outline-offset-2 ${active ? "bg-surface-medium" : ""}`}>
+                              data-matched={matchedSet.has(index) ? "true" : undefined}
+                              className={`${ROW_GRID} min-h-11 w-full items-center gap-y-1 rounded-lg px-2.5 py-1 text-left transition-colors hover:bg-surface-light focus-visible:-outline-offset-2 ${active ? "bg-surface-medium" : matchedSet.has(index) ? "bg-[color-mix(in_oklch,var(--warn)_14%,transparent)]" : ""}`}>
                               <span className="flex min-w-0 items-center gap-2 text-[13px] leading-5">
                                 <ToneTile tone={tone} />
                                 <span className="min-w-0 truncate">

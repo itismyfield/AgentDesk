@@ -12,7 +12,7 @@ use super::rollout_files_under;
 /// `tmux_common::classify_watcher_jsonl_owner` recognises a provider-owned file
 /// anywhere under the home rather than only under `sessions/` — Codex keeps
 /// other state there too, and none of it is AgentDesk's to rewrite.
-pub(crate) fn default_codex_home() -> Option<PathBuf> {
+pub fn default_codex_home() -> Option<PathBuf> {
     if crate::config::test_instance::requested() {
         return crate::config::test_instance::environment::provider_home("codex")
             .ok()
@@ -28,13 +28,13 @@ pub fn default_codex_sessions_dir() -> Option<PathBuf> {
     default_codex_home().map(|home| home.join("sessions"))
 }
 
-pub(crate) fn observe_rollout_turn_state(
+pub fn observe_rollout_turn_state(
     rollout_path: &Path,
 ) -> crate::services::tui_turn_state::TuiTurnState {
     crate::services::tui_turn_state::observe_codex_jsonl_turn_state(rollout_path)
 }
 
-pub(crate) fn rollout_file_matches_cwd(rollout_path: &Path, cwd: &Path) -> bool {
+pub fn rollout_file_matches_cwd(rollout_path: &Path, cwd: &Path) -> bool {
     let canonical_cwd = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     rollout_session_cwd_matches(rollout_path, &canonical_cwd)
 }
@@ -51,10 +51,7 @@ pub fn find_rollout_by_session_id(session_id: &str) -> Option<PathBuf> {
     find_rollout_by_session_id_under(&sessions_dir, session_id)
 }
 
-pub(crate) fn find_rollout_by_session_id_under(
-    sessions_dir: &Path,
-    session_id: &str,
-) -> Option<PathBuf> {
+pub fn find_rollout_by_session_id_under(sessions_dir: &Path, session_id: &str) -> Option<PathBuf> {
     if !test_sessions_directory_admitted(sessions_dir) {
         return None;
     }

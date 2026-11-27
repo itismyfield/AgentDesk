@@ -10,7 +10,7 @@ pub(super) fn pending_source(
     ports: &dyn HerdrTurnPorts,
     record: &HostedExecution,
 ) -> Result<Attached, String> {
-    use crate::services::turn_orchestrator::RetryWaitCause as Cause;
+    use crate::domain::retry_wait::RetryCause as Cause;
     let nonce = &record.execution_nonce;
     let adopted = record.location.is_none() && record.expected.is_none();
     if adopted && unplaced_resolved(turn, runtime, ports, nonce)? == Resolution::Retired {

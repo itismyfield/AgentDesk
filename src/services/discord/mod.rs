@@ -12,7 +12,7 @@ pub(crate) mod herdr_terminate;
 pub(crate) mod session_locator;
 // #3479 item-2: restart-gap message recovery extracted to its catch-up sibling.
 mod catch_up;
-pub(crate) mod codex_absence;
+pub(crate) use adk_runtime::services::discord::codex_absence;
 mod commands;
 mod compact_turn_authority;
 mod completion_footer_metadata;
@@ -56,7 +56,7 @@ mod metrics;
 mod model_catalog;
 mod model_picker_interaction;
 pub(crate) mod monitoring_status;
-pub(crate) mod org_schema;
+pub(crate) use adk_runtime::services::discord::org_schema;
 pub(crate) mod org_writer;
 pub(crate) mod outbound;
 mod placeholder_cleanup;
@@ -80,7 +80,7 @@ mod relay_coord;
 mod relay_health;
 pub(crate) mod relay_recovery;
 mod replace_outcome_policy;
-pub(crate) mod response_sanitizer;
+pub(crate) use adk_runtime::services::discord::response_sanitizer;
 // #3983 item4: one-shot top session banner emit + dual-path (sink/watcher) de-dup.
 mod session_banner;
 #[cfg(unix)]
@@ -118,7 +118,7 @@ mod turn_presence;
 mod turn_teardown_clearance;
 // #1446 stall-deadlock recovery: shared post-clear bookkeeping for the THREAD-GUARD
 // + stall-watchdog cleanup paths so neither leaks `global_active` / cancel tokens.
-pub mod runtime_store;
+pub use adk_runtime::services::discord::runtime_store;
 // #3646 OBSERVATION-ONLY: pure payload builders + owner-split derivation for the
 // relay flight recorder's two-signal owner separation and the three terminal
 // lifecycle events. No relay/cleanup behaviour lives here.
@@ -128,7 +128,7 @@ pub(crate) mod session_identity;
 mod session_idle_cleanup;
 mod session_runtime;
 mod session_status_hook;
-pub(super) mod session_transition;
+pub(super) use adk_runtime::services::discord::session_transition;
 pub(crate) mod settings;
 pub(crate) mod shared_memory;
 // #3038 S1/S2: extracted SharedData field clusters (named sub-structs + their
@@ -140,7 +140,7 @@ mod startup_reclaim;
 mod status_panel_orphan_store;
 mod status_panel_singleton_store;
 // #4891 Task #26 Slice 1: dormant pure proofs; no production caller or authority.
-pub(crate) mod session_notice;
+pub(crate) use adk_runtime::services::discord::session_notice;
 pub(crate) mod session_notice_delivery;
 mod status_panel_transition_v2;
 pub(in crate::services::discord) mod streaming_finalizer;
@@ -215,6 +215,8 @@ pub(crate) use tui_direct_pending_start::turn_retirement::claude::{
     confirmed_now as claude_takeover_confirmed_now, tests::seed_takeover as seed_claude_takeover,
 };
 mod tui_prompt_relay;
+pub(crate) use adk_runtime::services::discord::replay_policy;
+use adk_runtime::services::discord::tui_task_card;
 #[cfg(test)]
 pub(crate) use session_notice::input_notice::INPUT_NOTICE_RUNS;
 #[cfg(test)]
@@ -226,8 +228,6 @@ pub(crate) use tmux::commit_codex_watcher_restore_for_tests;
 pub(crate) use tmux::commit_codex_watcher_restore_to_empty_registry_for_tests;
 #[cfg(all(test, unix))]
 pub(crate) use tui_prompt_relay::run_codex_rehydrate_pass_for_tests;
-pub(crate) mod replay_policy;
-mod tui_task_card;
 mod turn_bridge;
 #[allow(clippy::too_many_arguments)]
 mod turn_finalizer;

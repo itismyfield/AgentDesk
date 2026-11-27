@@ -157,7 +157,7 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
             fresh_generation,
             threshold
         ));
-        clear_for_tmux(pane.tmux_session_name_for_test());
+        clear_for_tmux_for_test(pane.tmux_session_name_for_test());
     }
 }
 

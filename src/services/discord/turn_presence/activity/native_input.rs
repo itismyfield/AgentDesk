@@ -34,7 +34,7 @@ impl Reader {
     ) -> Result<Option<Observation>, String> {
         let registrations: Vec<_> = self
             .history
-            .native_evidence_registrations()?
+            .native_evidence_registrations_for_test()?
             .into_iter()
             .filter(|r| r.matches(&self.binding))
             .collect();

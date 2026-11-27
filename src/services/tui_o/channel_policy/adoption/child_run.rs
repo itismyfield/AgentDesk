@@ -3,11 +3,14 @@ use super::*;
 use crate::services::tui_o::writer::{adoption::LegacyTurnIdentity, binding::BindingEvent};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LegacyRun {
-    pub(crate) binding: BindingEvent,
-    pub(crate) turn: Option<LegacyTurnIdentity>,
+pub struct LegacyRun {
+    pub binding: BindingEvent,
+    pub turn: Option<LegacyTurnIdentity>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub observed_end: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) observed_end: u64,
-    pub(crate) delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
+    pub delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
 }
 #[derive(Debug)]
 pub(super) struct RunState {
@@ -36,7 +39,7 @@ impl Candidate {
             .owed
             .clone()
     }
-    pub(crate) fn child_boundary_epoch(&self) -> u64 {
+    pub fn child_boundary_epoch(&self) -> u64 {
         self.child_run
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -50,14 +53,14 @@ impl Candidate {
             .subscribe()
     }
 
-    pub(crate) fn legacy_run(&self) -> Option<LegacyRun> {
+    pub fn legacy_run(&self) -> Option<LegacyRun> {
         self.child_run
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .run
             .clone()
     }
-    pub(crate) fn child_parked(&self) -> bool {
+    pub fn child_parked(&self) -> bool {
         self.child_parked_in(self.peek())
     }
     pub(crate) fn child_parked_in(&self, state: Adoption) -> bool {
@@ -72,6 +75,11 @@ impl Candidate {
             .unwrap_or_else(PoisonError::into_inner)
             .boundary
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_child_run_for_test(&self, channel: u64, run: LegacyRun) -> bool {
+        self.release_child_run(channel, run)
+    }
+
     /// Only a source-bound refusal under the parent's boot kind grants this exception.
     pub(crate) fn release_child_run(&self, channel: u64, run: LegacyRun) -> bool {
         use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};
@@ -121,6 +129,11 @@ impl Candidate {
         tracing::info!(channel, "[tui_o] existing child run stays with Legacy");
         true
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retry_child_at_boundary_for_test(&self, expected: &LegacyRun, seq: u64) -> bool {
+        self.retry_child_at_boundary(expected, seq)
+    }
+
     /// Keep every Legacy send fenced while replacing only this run's adoption floor.
     pub(crate) fn retry_child_at_boundary(&self, expected: &LegacyRun, seq: u64) -> bool {
         let mut state = self.lock();

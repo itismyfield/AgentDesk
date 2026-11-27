@@ -7,7 +7,7 @@ use crate::db::dispatched_session_canonical_identity::{
 };
 use crate::db::dispatched_sessions::HookSessionUpsert;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::db::dispatched_sessions::hosted_execution::tests::{
+use crate::db::dispatched_sessions::hosted_execution::test_support::{
     TOKEN, future_schema, owner, pending, record, wire,
 };
 use crate::services::session_host::HostedRuntimeLocator;

@@ -2,14 +2,12 @@
 use super::*;
 use sqlx::{Postgres, Transaction};
 
-pub(crate) struct ExecutionGuard {
+pub struct ExecutionGuard {
     _transaction: Transaction<'static, Postgres>,
 }
 
 /// Distinct from admission's lock so a reconciler can reserve the new mailbox.
-pub(crate) async fn try_execution(
-    channel: &str,
-) -> Result<Option<ExecutionGuard>, RecoveryStoreError> {
+pub async fn try_execution(channel: &str) -> Result<Option<ExecutionGuard>, RecoveryStoreError> {
     let mut tx = coordinator().pool()?.begin().await?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(1893, hashtext($1))")
         .bind(channel)
@@ -17,23 +15,21 @@ pub(crate) async fn try_execution(
         .await?;
     Ok(acquired.then_some(ExecutionGuard { _transaction: tx }))
 }
-pub(crate) enum OperationPlan {
+pub enum OperationPlan {
     Fallback(FallbackSpawnPlan),
     Restore(RestorePlan),
 }
-pub(crate) struct PendingOperation {
+pub struct PendingOperation {
     pub lease: RecoveryLease,
     pub owner_provider: ProviderKind,
     pub fallback_provider: ProviderKind,
     pub plan: OperationPlan,
 }
-pub(crate) async fn recovery_state(
-    channel: &str,
-) -> Result<Option<ChannelState>, RecoveryStoreError> {
+pub async fn recovery_state(channel: &str) -> Result<Option<ChannelState>, RecoveryStoreError> {
     coordinator().refresh(channel).await?;
     Ok(lock(&coordinator().runtime).states.get(channel).cloned())
 }
-pub(crate) fn active_channels(provider: &ProviderKind) -> Vec<String> {
+pub fn active_channels(provider: &ProviderKind) -> Vec<String> {
     let runtime = lock(&coordinator().runtime);
     runtime
         .states
@@ -48,13 +44,13 @@ pub(crate) fn active_channels(provider: &ProviderKind) -> Vec<String> {
         .map(|state| state.channel_id.clone())
         .collect()
 }
-pub(crate) fn owner_provider(channel: &str) -> Option<ProviderKind> {
+pub fn owner_provider(channel: &str) -> Option<ProviderKind> {
     let runtime = lock(&coordinator().runtime);
     let binding = runtime.binding_for_channel(channel)?;
     binding.policy.as_ref().filter(|policy| policy.enabled)?;
     Some(binding.owner_provider)
 }
-pub(crate) async fn pending_operation(
+pub async fn pending_operation(
     channel: &str,
 ) -> Result<Option<PendingOperation>, RecoveryStoreError> {
     coordinator().refresh(channel).await?;
@@ -100,9 +96,7 @@ pub(crate) async fn pending_operation(
         plan,
     }))
 }
-pub(crate) async fn acknowledge_start_durable(
-    lease: &RecoveryLease,
-) -> Result<(), RecoveryStoreError> {
+pub async fn acknowledge_start_durable(lease: &RecoveryLease) -> Result<(), RecoveryStoreError> {
     coordinator()
         .transition(&lease.channel_id, |runtime| {
             runtime.acknowledge_start(lease)
@@ -110,7 +104,7 @@ pub(crate) async fn acknowledge_start_durable(
         .await?;
     Ok(())
 }
-pub(crate) async fn retry_interrupted_durable(channel: &str) -> Result<(), RecoveryStoreError> {
+pub async fn retry_interrupted_durable(channel: &str) -> Result<(), RecoveryStoreError> {
     coordinator()
         .transition(channel, |runtime| runtime.retry_interrupted_launch(channel))
         .await?;

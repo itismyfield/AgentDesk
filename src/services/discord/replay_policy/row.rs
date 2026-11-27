@@ -3,7 +3,7 @@
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
 
-pub(crate) trait ReplayRow: Sync {
+pub trait ReplayRow: Sync {
     fn provider(&self) -> &str;
     fn channel_id(&self) -> u64;
     fn user_msg_id(&self) -> u64;

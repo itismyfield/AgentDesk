@@ -237,7 +237,7 @@ async fn f6_admitted_work_suppresses_original_and_fresh_work_dispatches_pg() {
             ProvenanceLog::open(&sidecar(&harness))
                 .unwrap()
                 .state()
-                .intent(0)
+                .intent_for_test(0)
                 .is_some()
         );
         let started = start(

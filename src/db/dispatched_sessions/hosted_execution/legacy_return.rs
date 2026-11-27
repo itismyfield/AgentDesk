@@ -2,6 +2,17 @@
 use super::*;
 use crate::services::session_host::legacy_return::RetiredEnd;
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn return_legacy_pg_for_test(
+    pool: &PgPool,
+    observed: &HostedObservation,
+    owner: &HostedOwner,
+    old_nonce: &str,
+    ended: &RetiredEnd,
+) -> Result<HostedCasOutcome, HostedTransitionError> {
+    return_legacy_pg(pool, observed, owner, old_nonce, ended).await
+}
+
 /// The caller must keep dcserver stopped and publish the tmux marker only after this commits.
 /// The archive is one slot for this row's lifetime; a later incarnation does not overwrite it.
 pub(crate) async fn return_legacy_pg(

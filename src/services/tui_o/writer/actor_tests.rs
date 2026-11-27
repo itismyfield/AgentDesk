@@ -10,175 +10,22 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 #[path = "tool_card_actor_tests.rs"]
 mod tool_cards;
-use super::super::actor::{POLL_INTERVAL, run_channel, spawn_if_enabled};
+use super::super::actor::{POLL_INTERVAL, spawn_if_enabled};
 use super::super::binding::{
-    BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
+    BindingCause, BindingEvent, BindingEvents, BindingRecord, BindingTarget,
 };
 use super::super::round_trip::{RoundTrip, cases, round_trip};
 use super::*;
-use crate::services::claude_tui::hook_server::HookEventKind;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::shadow::capture::SourceCapture;
 use crate::services::tui_o::shadow::{CaptureOutcome, CaptureSource, MAX_READ_BYTES, SourceId};
+use crate::services::tui_o::writer::test_support::{
+    Actor, FakeBindings, append, bound, event, halt, polls, row, spawn, spawn_as, spawn_with,
+    startup_log, switched_over, switched_over_on, writer_over,
+};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
-pub(crate) fn row(id: &str, text: &str) -> Vec<u8> {
-    let row = serde_json::json!({
-        "type": "assistant", "uuid": format!("u-{id}"), "apiBlockIndex": 0,
-        "message": {"id": id, "content": [{"type": "text", "text": text}]},
-    });
-    let mut line = serde_json::to_vec(&row).unwrap();
-    line.push(b'\n');
-    line
-}
-pub(crate) fn append(path: &Path, bytes: &[u8]) {
-    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-    file.write_all(bytes).unwrap();
-}
-/// A harness whose channel was switched over a transcript already holding `body`.
-pub(crate) fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
-    switched_over_on(CHANNEL, body)
-}
-pub(crate) fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
-    let mut bound = None;
-    let harness = Harness::build_channel(channel, |runtime| {
-        let path = runtime.join("t.jsonl");
-        std::fs::write(&path, body).unwrap();
-        let source_id = source_id_for("s1", &path).unwrap();
-        bound = Some((path, source_id.clone()));
-        let (delivery_start, prefix_hash) = (body.len() as u64, hex::encode(Sha256::digest(body)));
-        vec![InitSource {
-            source_id,
-            delivery_start,
-            prefix_hash,
-        }]
-    });
-    let (path, source) = bound.unwrap();
-    (harness, path, source)
-}
-pub(crate) async fn polls(count: u32) {
-    tokio::time::sleep(POLL_INTERVAL * count).await;
-}
-/// A spawned actor; it returns why it stopped.
-pub(crate) type Actor = tokio::task::JoinHandle<Option<super::super::deliver::StopCause>>;
-pub(crate) fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
-    spawn_as(writer, ShadowProvider::Claude)
-}
-pub(crate) fn spawn_as(
-    mut writer: Writer,
-    provider: ShadowProvider,
-) -> (watch::Sender<bool>, Actor) {
-    let bindings = startup_log(&mut writer);
-    spawn_with(writer, provider, bindings)
-}
-pub(crate) fn spawn_with(
-    writer: Writer,
-    provider: ShadowProvider,
-    bindings: Arc<impl BindingEvents>,
-) -> (watch::Sender<bool>, Actor) {
-    let (stop, stopped) = watch::channel(false);
-    let resumed = watch::channel(false).0;
-    let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
-    (stop, task)
-}
-pub(crate) fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
-    BindingEvent {
-        seq,
-        channel_id: CHANNEL,
-        provider: ShadowProvider::Claude,
-        tmux_session: "tmux".into(),
-        execution_nonce: "nonce".into(),
-        record,
-        committed_at,
-    }
-}
-pub(crate) fn bound(
-    seq: u64,
-    old: Option<&SourceId>,
-    new: BindingTarget,
-    cause: BindingCause,
-    parent_hint: Option<&SourceId>,
-) -> BindingEvent {
-    let evidence = BindingEvidence {
-        hook_event: HookEventKind::SessionStart.as_str().into(),
-        received_at: Utc::now(),
-        reclaims: false,
-    };
-    let record = BindingRecord::Bound {
-        old: old.cloned(),
-        new,
-        cause,
-        parent_hint: parent_hint.cloned(),
-        evidence,
-    };
-    event(seq, record, Utc::now())
-}
-/// A binding log whose startup binds name every source the channel was switched over.
-pub(crate) fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
-    let bindings = Arc::new(FakeBindings::new());
-    let sources: Vec<SourceId> = writer.store().cursors().map(|c| c.source.clone()).collect();
-    for (seq, source) in (1..).zip(sources) {
-        let target = BindingTarget::Source(source);
-        bindings.commit(bound(seq, None, target, BindingCause::Startup, None));
-    }
-    bindings
-}
-/// An in-memory binding log with the channel's seq notice.
-pub(crate) struct FakeBindings {
-    pub(crate) events: Mutex<Vec<BindingEvent>>,
-    notice: watch::Sender<u64>,
-    /// Set while every read of the log fails with this error.
-    failing: Mutex<Option<String>>,
-}
-impl FakeBindings {
-    pub(crate) fn new() -> Self {
-        let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
-        let failing = Mutex::new(None);
-        Self {
-            events,
-            notice,
-            failing,
-        }
-    }
-    pub(crate) fn fail(&self, error: Option<&str>) {
-        *self.failing.lock().unwrap() = error.map(str::to_string);
-    }
-    /// Commits `event` and moves the notice to its seq.
-    pub(crate) fn commit(&self, event: BindingEvent) {
-        let seq = event.seq;
-        self.events.lock().unwrap().push(event);
-        self.notice.send_replace(seq);
-    }
-}
-
-impl BindingEvents for FakeBindings {
-    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
-        if let Some(error) = self.failing.lock().unwrap().clone() {
-            return Err(error);
-        }
-        let events = self.events.lock().unwrap();
-        let mine = events
-            .iter()
-            .filter(|e| e.channel_id == channel && e.seq > after);
-        Ok(mine.cloned().collect())
-    }
-
-    fn subscribe(&self, _channel: u64) -> watch::Receiver<u64> {
-        self.notice.subscribe()
-    }
-}
-
-pub(crate) fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
-    let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
-    let lease = Arc::clone(&harness.lease);
-    ChannelWriter::new(store, gate, port, lease, harness.alarms.clone())
-}
-
-pub(crate) async fn halt(stop: watch::Sender<bool>, task: Actor) {
-    stop.send(true).unwrap();
-    task.await.unwrap();
-}
 
 #[tokio::test(start_paused = true)]
 async fn the_actor_posts_each_unit_after_the_switch_once_even_across_a_restart() {

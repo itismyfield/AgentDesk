@@ -3,9 +3,9 @@
 mod hold_notice;
 mod settle;
 mod start;
-pub(crate) use hold_notice::recover_hold_notice;
+pub use hold_notice::recover_hold_notice;
 pub(crate) use hold_notice::withhold_and_notify;
-pub(crate) use start::{
+pub use start::{
     BeginAck, BeginFrom, CanonicalInput, EffectProjection, begin, bind_session,
     ensure_same_request, register_or_reuse, register_or_reuse_on_tx,
 };
@@ -15,7 +15,7 @@ use sqlx::PgPool;
 
 /// Why a transition produced no acknowledgement.
 #[derive(Debug)]
-pub(crate) enum WriteError {
+pub enum WriteError {
     /// The receipt is not in the state this exact attempt expects; nothing changed.
     CasMiss,
     /// A replay fence refused the change; nothing changed.
@@ -49,7 +49,7 @@ pub(super) fn refused(error: sqlx::Error) -> WriteError {
 
 /// One started attempt: its receipt, episode nonce, owning incarnation and the nonce it retried.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct ExactAttempt {
+pub struct ExactAttempt {
     receipt_id: i64,
     nonce: String,
     incarnation: String,
@@ -57,12 +57,17 @@ pub(crate) struct ExactAttempt {
 }
 
 impl ExactAttempt {
-    pub(crate) fn receipt_id(&self) -> i64 {
+    pub fn receipt_id(&self) -> i64 {
         self.receipt_id
     }
 
-    pub(crate) fn nonce(&self) -> &str {
+    pub fn nonce(&self) -> &str {
         &self.nonce
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retry_of_for_test(&self) -> Option<&str> {
+        self.retry_of()
     }
 
     pub(crate) fn retry_of(&self) -> Option<&str> {
@@ -86,7 +91,7 @@ async fn settle(
 }
 
 /// Classifies the attempt as an ordinary terminal; only then may ordinary completion or retry run.
-pub(crate) async fn classify_normal(
+pub async fn classify_normal(
     pool: &PgPool,
     attempt: &ExactAttempt,
     terminal: &TerminalEvidence,
@@ -98,7 +103,7 @@ pub(crate) async fn classify_normal(
 }
 
 /// The committed no-effect classification of one nonce; the permit layer turns it into a `RetryPermit`.
-pub(crate) struct NoEffectAck {
+pub struct NoEffectAck {
     receipt_id: i64,
     previous_nonce: String,
     proof: HoldProof,
@@ -111,7 +116,7 @@ impl NoEffectAck {
     }
 }
 
-pub(crate) async fn classify_no_effect(
+pub async fn classify_no_effect(
     pool: &PgPool,
     attempt: ExactAttempt,
     evidence: &NoEffectEvidence,
@@ -130,7 +135,7 @@ pub(crate) async fn classify_no_effect(
 
 /// Holds the attempt with its reason and preserved result; the receipt keeps blocking either way.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn withhold(
+pub async fn withhold(
     pool: &PgPool,
     attempt: &ExactAttempt,
     reason: &str,
@@ -141,7 +146,7 @@ pub(crate) async fn withhold(
 
 /// A copy of custody for settlement only; it cannot construct a start permit.
 #[derive(Debug, Clone)]
-pub(crate) struct HoldProof {
+pub struct HoldProof {
     id: i64,
     nonce: String,
     owner: String,
@@ -201,7 +206,7 @@ impl std::fmt::Debug for NoEffectAck {
 }
 
 /// Preserves one receipt while its delivery loses ownership; the caller holds the channel lock.
-pub(crate) async fn withhold_owner_loss_on_tx(
+pub async fn withhold_owner_loss_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     receipt_id: i64,
 ) -> Result<(), sqlx::Error> {

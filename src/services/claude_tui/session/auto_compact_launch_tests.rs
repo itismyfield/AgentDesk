@@ -217,8 +217,8 @@ fn configured_window_is_clamped_only_when_generating_a_launch() {
 
 #[test]
 fn snapshot_launch_script_keeps_published_compact_window() {
-    crate::config::snapshot_reader_tests::isolated(|| {
-        let fixture = crate::config::snapshot_reader_tests::Fixture::new();
+    crate::config::snapshot_reader_support::isolated(|| {
+        let fixture = crate::config::snapshot_reader_support::Fixture::new();
         fixture.install(
             "server: {}\nruntime: {context_compact_window_claude: 700000}",
             "server: {}\nruntime: {context_compact_window_claude: 350000}",
@@ -237,8 +237,8 @@ fn snapshot_launch_script_keeps_published_compact_window() {
 
 #[test]
 fn snapshot_launch_script_preserves_unset_provider_setting() {
-    crate::config::snapshot_reader_tests::isolated(|| {
-        let fixture = crate::config::snapshot_reader_tests::Fixture::new();
+    crate::config::snapshot_reader_support::isolated(|| {
+        let fixture = crate::config::snapshot_reader_support::Fixture::new();
         fixture.install(
             "server: {}",
             "server: {}\nruntime: {context_compact_window_claude: 350000}",

@@ -112,12 +112,12 @@ impl Source {
 #[cfg(unix)]
 mod clear;
 #[cfg(unix)]
-pub(crate) use clear::adopt as adopt_awaiting_clear;
+pub use clear::adopt as adopt_awaiting_clear;
 #[cfg(unix)]
 pub(super) use clear::note as note_clear;
 
-#[cfg(all(test, unix))]
-pub(crate) use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use clear::AFTER_PUBLICATION as CLEAR_AFTER_PUBLICATION;
 
 #[cfg(unix)]
 pub(crate) use clear::wakeable as clear_wakeable;
