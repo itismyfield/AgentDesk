@@ -1,7 +1,7 @@
 //! Runs one channel's capture and delivery phases in spool order.
 
-use super::super as writer;
 use super::*;
+use crate::services::tui_o::writer;
 
 /// [`run_projecting`] that also publishes what the channel still owes, beside its count.
 pub(super) async fn run_publishing<P, L, A, B>(
