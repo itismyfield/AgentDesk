@@ -12,6 +12,9 @@ pub(crate) use listing::{DispatchedSessionSnapshot, list_dispatched_session_snap
 mod force_kill;
 #[path = "dispatched_sessions/hosted_execution.rs"]
 pub(crate) mod hosted_execution;
+#[path = "dispatched_sessions/provider_session_selector.rs"]
+mod provider_session_selector;
+pub(crate) use provider_session_selector::{ProviderSessionIds, load_provider_session_ids_pg};
 #[path = "dispatched_sessions/provider_resume_fence.rs"]
 pub(crate) mod provider_resume_fence;
 #[cfg(unix)]
@@ -1860,17 +1863,6 @@ pub(crate) struct DeleteSessionResult {
     pub(crate) deleted: u64,
 }
 
-pub(crate) struct ProviderSessionIds {
-    pub(crate) resolved_session_key: String,
-    pub(crate) claude_session_id: Option<String>,
-    pub(crate) raw_provider_session_id: Option<String>,
-    pub(crate) cwd: Option<String>,
-    pub(crate) cache_entry_age_secs: Option<i64>,
-    pub(crate) raw_provider_transcript_len_watermark: Option<i64>,
-    pub(crate) raw_provider_transcript_watermark_session_id: Option<String>,
-    pub(crate) raw_provider_transcript_growth_proven: bool,
-}
-
 pub(crate) struct UpdateSessionParams<'a> {
     pub(crate) status: Option<&'a str>,
     pub(crate) active_dispatch_id: Option<&'a str>,
@@ -1930,67 +1922,6 @@ pub(crate) async fn apply_session_delete_pg(
         session_id,
         deleted,
     })
-}
-
-pub(crate) async fn load_provider_session_ids_pg(
-    pool: &PgPool,
-    session_key: &str,
-    provider: Option<&str>,
-) -> Result<Option<ProviderSessionIds>, String> {
-    let resolved_session_key =
-        resolve_session_locator_pg(pool, session_key, "provider-session").await?;
-    let Some(resolved_session_key) = resolved_session_key else {
-        return Ok(None);
-    };
-    let result = if let Some(provider) = provider {
-        sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id, cwd,
-                    EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
-                        AS cache_entry_age_secs,
-                    raw_provider_transcript_len_watermark,
-                    raw_provider_transcript_watermark_session_id,
-                    raw_provider_transcript_growth_proven
-             FROM sessions
-             WHERE session_key = $1 AND provider = $2",
-        )
-        .bind(&resolved_session_key)
-        .bind(provider)
-        .fetch_optional(pool)
-        .await
-    } else {
-        sqlx::query(
-            "SELECT claude_session_id, raw_provider_session_id, cwd,
-                    EXTRACT(EPOCH FROM (NOW() - COALESCE(claude_session_id_recorded_at, created_at)))::BIGINT
-                        AS cache_entry_age_secs,
-                    raw_provider_transcript_len_watermark,
-                    raw_provider_transcript_watermark_session_id,
-                    raw_provider_transcript_growth_proven
-             FROM sessions
-             WHERE session_key = $1",
-        )
-        .bind(&resolved_session_key)
-        .fetch_optional(pool)
-        .await
-    };
-
-    let row = result.map_err(|error| format!("{error}"))?;
-    row.map(|row| {
-        Ok(ProviderSessionIds {
-            resolved_session_key: resolved_session_key.clone(),
-            claude_session_id: row.try_get("claude_session_id")?,
-            raw_provider_session_id: row.try_get("raw_provider_session_id")?,
-            cwd: row.try_get("cwd")?,
-            cache_entry_age_secs: row.try_get("cache_entry_age_secs")?,
-            raw_provider_transcript_len_watermark: row
-                .try_get("raw_provider_transcript_len_watermark")?,
-            raw_provider_transcript_watermark_session_id: row
-                .try_get("raw_provider_transcript_watermark_session_id")?,
-            raw_provider_transcript_growth_proven: row
-                .try_get("raw_provider_transcript_growth_proven")?,
-        })
-    })
-    .transpose()
-    .map_err(|error: sqlx::Error| format!("{error}"))
 }
 
 pub(crate) async fn update_raw_provider_transcript_len_watermark_pg(

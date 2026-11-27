@@ -261,6 +261,7 @@ src/
 │   │   ├── key_promotion_pg_tests.rs
 │   │   ├── listing.rs
 │   │   ├── provider_resume_fence.rs
+│   │   ├── provider_session_selector.rs
 │   │   ├── rebind_override.rs
 │   │   ├── retired_status_fence.rs
 │   │   ├── rotation_selector.rs
@@ -4639,6 +4640,8 @@ src/
 │   │   ├── catalog.rs
 │   │   ├── errors.rs
 │   │   └── host_rebind_tests.rs
+│   ├── session_selector_validity/
+│   │   └── transcript.rs
 │   ├── settings/
 │   │   ├── resolve/
 │   │   │   └── tests.rs

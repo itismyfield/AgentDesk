@@ -200,10 +200,22 @@ pub(super) async fn record_fresh_session_context_boundary(
     channel_id: ChannelId,
     selected: crate::services::discord::previous_provider_session::Selection<'_>,
 ) -> anyhow::Result<crate::db::session_transcripts::RecentContextBoundary> {
-    let previous = crate::services::discord::previous_provider_session::for_channel(
+    let previous = match crate::services::discord::previous_provider_session::for_channel(
         shared, provider, channel_id, selected,
     )
-    .await;
+    .await
+    {
+        Ok(previous) => previous,
+        Err(error) => {
+            tracing::warn!(
+                channel_id = channel_id.get(),
+                provider = provider.as_str(),
+                error = %error,
+                "previous provider session lookup failed while recording a context boundary"
+            );
+            None
+        }
+    };
     let boundary = crate::db::session_transcripts::RecentContextBoundary {
         kind: crate::db::session_transcripts::RecentContextBoundaryKind::ContextSevered,
         previous_session: previous,

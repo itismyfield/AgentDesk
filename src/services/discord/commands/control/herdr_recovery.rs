@@ -73,10 +73,17 @@ pub(super) async fn clear(
     if let Some(candidate) = candidate.as_ref() {
         root_replaced::remember_candidate(candidate);
     }
-    let mut previous = previous_session(pool, (row.session_id(), record), provider, channel).await;
+    let previous = previous_session(pool, &row, record, provider, channel).await;
     let (original, excluded) = original_execution(shared, provider, channel).await;
     let reason = original.err();
     discard_waiting(shared, provider, channel, Some(&logical), &excluded, report).await;
+    let mut previous = match previous {
+        Ok(previous) => previous,
+        Err(error) => {
+            report.note_previous_provider_session_error(&error);
+            None
+        }
+    };
     let lease = guard
         .and_then(|guard| SessionTransitionLease::borrow(shared.as_ref(), channel, guard).ok());
     let result = if let Some(reason) = reason {
@@ -190,36 +197,20 @@ pub(super) async fn clear(
 
 async fn previous_session(
     pool: &sqlx::PgPool,
-    (row_id, record): (
-        i64,
-        &crate::db::dispatched_sessions::hosted_execution::HostedExecution,
-    ),
+    row: &hosted_execution::HostedObservation,
+    record: &hosted_execution::HostedExecution,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Option<crate::db::session_transcripts::PreviousProviderSession> {
-    let (id, cwd): (Option<String>, Option<String>) = sqlx::query_as(
-        "SELECT COALESCE(NULLIF(BTRIM(raw_provider_session_id), ''),
-                         NULLIF(BTRIM(claude_session_id), '')), cwd
-           FROM sessions WHERE id = $1 AND hosted_execution->>'execution_nonce' = $2",
-    )
-    .bind(row_id)
-    .bind(&record.execution_nonce)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()?;
-    super::super::super::previous_provider_session::capture(
-        provider,
-        channel,
-        id.as_deref()?,
-        cwd.as_deref()
-            .map(str::trim)
-            .filter(|cwd| !cwd.is_empty())
-            .map(std::path::Path::new),
-        Some(&record.owner.logical_key),
-        Some(&record.execution_nonce),
-    )
-    .await
+) -> Result<Option<crate::db::session_transcripts::PreviousProviderSession>, String> {
+    use super::super::super::previous_provider_session::{Selection, load_capture};
+    let ids = row.provider_session_ids(pool).await?;
+    load_capture(ids, Selection::default())
+        .previous(
+            provider,
+            channel,
+            Some((&record.owner.logical_key, &record.execution_nonce)),
+        )
+        .await
 }
 
 async fn commit_conversation_reset(

@@ -607,11 +607,14 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         &mut report,
     )
     .await;
+    let resolved_session_key =
+        resolve_session_key_for_clear(http, shared, channel_id, provider).await;
+    let session_key = choose_clear_session_key(explicit_session_key, resolved_session_key);
     clear_teardown::write_channel_boundary(
         shared,
         provider,
         channel_id,
-        (explicit_session_key, tmux_name.as_deref()),
+        (session_key.as_deref(), tmux_name.as_deref()),
         &mut report,
     )
     .await;
@@ -621,9 +624,6 @@ pub(in crate::services::discord) async fn clear_channel_session_state_with_sessi
         report.stop_unconfirmed = true;
     }
 
-    let resolved_session_key =
-        resolve_session_key_for_clear(http, shared, channel_id, provider).await;
-    let session_key = choose_clear_session_key(explicit_session_key, resolved_session_key);
     match session_key.as_deref() {
         Some(session_key) => {
             clear_teardown::forget_selector(shared, session_key, &mut report).await;

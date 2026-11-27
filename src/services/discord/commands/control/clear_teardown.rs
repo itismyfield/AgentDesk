@@ -53,7 +53,13 @@ pub(super) async fn write_channel_boundary(
         ..Selection::default()
     };
     let previous =
-        previous_provider_session::for_channel(shared, provider, channel, selected).await;
+        match previous_provider_session::for_clear_key(shared, provider, channel, selected).await {
+            Ok(previous) => previous,
+            Err(error) => {
+                report.note_previous_provider_session_error(&error);
+                None
+            }
+        };
     write_boundary(shared, channel, previous, report).await;
 }
 

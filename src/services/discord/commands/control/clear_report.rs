@@ -9,6 +9,8 @@ use poise::serenity_prelude::MessageId;
 use super::super::SESSION_CLEARED_RESPONSE;
 use crate::services::turn_orchestrator::ClearChannelResult;
 
+const PREVIOUS_SESSION_LOOKUP: &str = "previous_provider_session";
+const PREVIOUS_SESSION_UNCONFIRMED: &str = "직전 세션 식별값을 확인하지 못했어요.";
 const RETRY_FAILED: &str = "일부 저장을 한 번 재시도했지만 완료하지 못했어요. 재시작 후 버린 메시지나 이전 세션이 복원될 수 있어요.";
 const RETRY_LANDED: &str = "일부 저장이 처음에 실패했지만 재시도로 완료했어요.";
 const HERDR_CLEANUP_UNCONFIRMED: &str =
@@ -34,7 +36,7 @@ pub(in crate::services::discord) struct ClearReport {
     pub(super) conversation_reset: bool,
     /// Writes whose retry landed.
     pub(super) retried: Vec<&'static str>,
-    /// Writes that never landed; a restart may restore what they would have removed.
+    /// Clear steps that failed after committing the reset in memory.
     pub(super) failed: Vec<&'static str>,
     /// The session transition stayed held past its wait, so the clear went ahead without it.
     pub(super) transition_busy: bool,
@@ -51,7 +53,14 @@ impl ClearReport {
             .failed
             .contains(&"queue_read_only")
             .then_some(QUEUE_READ_ONLY);
-        let other_failed = self.failed.iter().any(|what| *what != "queue_read_only");
+        let previous_session = self
+            .failed
+            .contains(&PREVIOUS_SESSION_LOOKUP)
+            .then_some(PREVIOUS_SESSION_UNCONFIRMED);
+        let other_failed = self
+            .failed
+            .iter()
+            .any(|what| *what != "queue_read_only" && *what != PREVIOUS_SESSION_LOOKUP);
         let saved = match (!other_failed, self.retried.is_empty()) {
             (false, _) if self.execution.is_some() => Some(HERDR_CLEANUP_UNCONFIRMED),
             (false, _) => Some(RETRY_FAILED),
@@ -65,7 +74,7 @@ impl ClearReport {
         let busy = self.transition_busy.then_some(busy_message);
         let stop = self.stop_unconfirmed.then_some(STOP_UNCONFIRMED);
         let end = self.end_unconfirmed.then_some(END_UNCONFIRMED);
-        let causes: Vec<&str> = [kept, saved, busy, stop, end]
+        let causes: Vec<&str> = [kept, saved, busy, stop, end, previous_session]
             .into_iter()
             .flatten()
             .collect();
@@ -220,6 +229,11 @@ impl ClearReport {
     }
 
     /// A write the clear skipped or could not land; logged under `what`.
+    pub(super) fn note_previous_provider_session_error(&mut self, error: &str) {
+        tracing::warn!(%error, "clear could not look up the previous provider session");
+        self.failed.push(PREVIOUS_SESSION_LOOKUP);
+    }
+
     pub(super) fn fail(&mut self, what: &'static str, error: &str) {
         tracing::error!(what, %error, "clear write not landed; a restart may restore discarded state");
         self.failed.push(what);

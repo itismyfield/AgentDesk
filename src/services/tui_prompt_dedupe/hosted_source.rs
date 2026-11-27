@@ -98,6 +98,24 @@ pub(crate) fn capture_in_context(
     )
 }
 
+pub(crate) fn capture_session_in_context(
+    context: &BindingContext,
+    native_session: &str,
+) -> Option<HostedSourcePin> {
+    let channel = context.channel_id?;
+    let provider = &context.provider;
+    let logical = &context.tmux_session;
+    context_matches(provider, logical, channel, context).then_some(())?;
+    capture_native(
+        provider,
+        logical,
+        channel,
+        None,
+        Some(native_session),
+        Some(&context.execution_nonce),
+    )
+}
+
 fn context_matches(provider: &str, logical: &str, channel: u64, context: &BindingContext) -> bool {
     context.provider == provider
         && context.tmux_session == logical

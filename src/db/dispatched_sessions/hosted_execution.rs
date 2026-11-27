@@ -213,6 +213,23 @@ impl HostedObservation {
         self.session_id
     }
 
+    #[cfg(unix)]
+    pub(crate) async fn provider_session_ids(
+        &self,
+        pool: &PgPool,
+    ) -> Result<Option<super::ProviderSessionIds>, String> {
+        let (Some(raw), HostedRecord::Known(record)) = (&self.raw, &self.record) else {
+            return Ok(None);
+        };
+        super::provider_session_selector::load_for_hosted_execution_pg(
+            pool,
+            self.session_id,
+            raw,
+            &record.owner,
+        )
+        .await
+    }
+
     /// Test seam: an observation as a row read would produce it, CAS value included.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_test(session_id: i64, raw: Option<Value>) -> Self {

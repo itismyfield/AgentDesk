@@ -2,11 +2,12 @@ use std::path::{Path, PathBuf};
 
 use poise::serenity_prelude::ChannelId;
 
-use super::{SharedData, adk_session, session_locator};
+use super::{SharedData, session_locator};
+use crate::db::dispatched_sessions::{ProviderSessionIds, load_provider_session_ids_pg};
 use crate::db::session_transcripts::PreviousProviderSession;
-use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::provider::ProviderKind;
-use crate::services::tui_prompt_dedupe::{binding_context, runtime_binding_for_tmux_session};
+use crate::services::session_selector_validity::transcript::selected_provider_session;
+use crate::services::tui_prompt_dedupe::{binding_context, hosted_source};
 
 #[derive(Default)]
 pub(super) struct Selection<'a> {
@@ -21,77 +22,157 @@ pub(super) async fn for_channel(
     provider: &ProviderKind,
     channel: ChannelId,
     selected: Selection<'_>,
-) -> Option<PreviousProviderSession> {
-    let pool = shared.pg_pool.as_ref()?;
-    let (cached, cwd, logical) = {
-        let core = shared.core.lock().await;
-        let session = core.sessions.get(&channel);
-        (
-            session.and_then(|s| s.session_id.clone()),
-            session.and_then(|s| s.current_path.as_deref().map(PathBuf::from)),
-            session
-                .and_then(|s| s.channel_name.as_deref())
-                .map(|name| provider.build_tmux_session_name(name)),
-        )
+) -> Result<Option<PreviousProviderSession>, String> {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return Ok(None);
     };
-    let logical = selected.logical.or(logical.as_deref());
-    let selected_id = selected.session_id.or(cached.as_deref()).and_then(nonempty);
-    let cwd = selected.cwd.or(cwd.as_deref());
-    if let (Some(id), Some(cwd)) = (selected_id, cwd) {
-        return capture(provider, channel, id, Some(cwd), logical, None).await;
-    }
-
     let key = match selected.session_key.and_then(nonempty) {
         Some(key) => Some(key.to_owned()),
-        None => session_locator::current_row(pool, &shared.token_hash, provider, channel.get())
-            .await
-            .ok()
-            .flatten()
-            .map(|(_, key)| key)
-            .or_else(|| {
-                logical.map(|name| {
-                    adk_session::build_namespaced_session_key(&shared.token_hash, provider, name)
-                })
-            }),
+        None => {
+            match session_locator::current_row(pool, &shared.token_hash, provider, channel.get())
+                .await?
+            {
+                Some((_, key)) => Some(key),
+                None => {
+                    let logical = match selected.logical {
+                        Some(logical) => Some(logical.to_owned()),
+                        None => channel_logical_name(&*shared.core.lock().await, provider, channel),
+                    };
+                    logical.map(|name| {
+                        super::adk_session::build_namespaced_session_key(
+                            &shared.token_hash,
+                            provider,
+                            &name,
+                        )
+                    })
+                }
+            }
+        }
     };
-    let stored = match key {
-        Some(key) => crate::db::dispatched_sessions::load_provider_session_ids_pg(
-            pool,
-            &key,
-            Some(provider.as_str()),
-        )
-        .await
-        .ok()
-        .flatten(),
+    let selected = Selection {
+        session_key: key.as_deref(),
+        ..selected
+    };
+    for_clear_key(shared, provider, channel, selected).await
+}
+
+pub(super) async fn for_clear_key(
+    shared: &SharedData,
+    provider: &ProviderKind,
+    channel: ChannelId,
+    selected: Selection<'_>,
+) -> Result<Option<PreviousProviderSession>, String> {
+    let Some(pool) = shared.pg_pool.as_ref() else {
+        return Ok(None);
+    };
+    let stored = match selected.session_key {
+        Some(key) => load_provider_session_ids_pg(pool, key, Some(provider.as_str())).await?,
         None => None,
     };
-    let id = selected_id.or_else(|| {
-        let row = stored.as_ref()?;
-        row.raw_provider_session_id
-            .as_deref()
-            .and_then(nonempty)
-            .or_else(|| row.claude_session_id.as_deref().and_then(nonempty))
-    })?;
-    let cwd = cwd.or_else(|| {
-        stored
-            .as_ref()?
-            .cwd
-            .as_deref()
-            .and_then(nonempty)
-            .map(Path::new)
-    });
+    let core = shared.core.lock().await;
+    let session = core.sessions.get(&channel);
+    let memory = session.and_then(|s| s.session_id.as_deref());
+    let cwd = session
+        .and_then(|s| s.current_path.as_deref())
+        .map(Path::new);
+    let logical = channel_logical_name(&core, provider, channel);
+    let fallback = Selection {
+        session_key: None,
+        session_id: selected.session_id.or(memory),
+        cwd: selected.cwd.or(cwd),
+        logical: selected.logical.or(logical.as_deref()),
+    };
+    let capture = load_capture(stored, fallback);
+    drop(core);
+    capture.previous(provider, channel, None).await
+}
+
+fn channel_logical_name(
+    core: &super::CoreState,
+    provider: &ProviderKind,
+    channel: ChannelId,
+) -> Option<String> {
+    core.sessions
+        .get(&channel)
+        .and_then(|session| session.channel_name.as_deref())
+        .map(|name| provider.build_tmux_session_name(name))
+}
+
+pub(super) fn load_capture(stored: Option<ProviderSessionIds>, fallback: Selection<'_>) -> Capture {
     let stored_logical = stored.as_ref().and_then(|row| {
         super::session_identity::tmux_name_from_session_key(&row.resolved_session_key)
     });
-    capture(
-        provider,
-        channel,
-        id,
-        cwd,
-        logical.or(stored_logical.as_deref()),
-        None,
-    )
-    .await
+    Capture {
+        stored,
+        fallback_id: fallback.session_id.and_then(nonempty).map(str::to_owned),
+        fallback_cwd: fallback.cwd.map(Path::to_path_buf),
+        logical: stored_logical.or_else(|| fallback.logical.map(str::to_owned)),
+    }
+}
+
+pub(super) struct Capture {
+    stored: Option<ProviderSessionIds>,
+    fallback_id: Option<String>,
+    fallback_cwd: Option<PathBuf>,
+    logical: Option<String>,
+}
+
+impl Capture {
+    pub(super) async fn previous(
+        mut self,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        hosted_execution: Option<(&str, &str)>,
+    ) -> Result<Option<PreviousProviderSession>, String> {
+        let provider = provider.clone();
+        let nonce = hosted_execution.map(|(logical, nonce)| {
+            self.logical = Some(logical.to_owned());
+            nonce.to_owned()
+        });
+        tokio::task::spawn_blocking(move || self.select(&provider, channel, nonce.as_deref()))
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    fn select(
+        self,
+        provider: &ProviderKind,
+        channel: ChannelId,
+        execution_nonce: Option<&str>,
+    ) -> Option<PreviousProviderSession> {
+        let context = self
+            .logical
+            .as_deref()
+            .and_then(|logical| execution_context(provider, channel, logical, execution_nonce));
+        let root = context
+            .as_ref()
+            .and_then(|context| context.provider_root.as_deref());
+        // Compare transcript activity independently of whether this execution can resume.
+        let id = self
+            .stored
+            .as_ref()
+            .and_then(|ids| {
+                selected_provider_session(Some(provider.as_str()), ids, root.and_then(Path::parent))
+            })
+            .or(self.fallback_id.as_deref())?;
+        let cwd = self
+            .stored
+            .as_ref()
+            .and_then(|ids| ids.cwd.as_deref())
+            .and_then(nonempty)
+            .map(Path::new)
+            .or(self.fallback_cwd.as_deref());
+        let path = context
+            .as_ref()
+            .and_then(|context| hosted_source::capture_session_in_context(context, id))
+            .and_then(|pin| original_file(provider, id, &pin.source.path))
+            .or_else(|| resolve_path(provider, id, cwd, root));
+        Some(PreviousProviderSession {
+            provider: provider.as_str().to_owned(),
+            session_id: id.to_owned(),
+            path,
+        })
+    }
 }
 
 fn nonempty(value: &str) -> Option<&str> {
@@ -99,77 +180,36 @@ fn nonempty(value: &str) -> Option<&str> {
     (!value.is_empty()).then_some(value)
 }
 
-pub(super) async fn capture(
+fn execution_context(
     provider: &ProviderKind,
     channel: ChannelId,
-    id: &str,
-    cwd: Option<&Path>,
-    logical: Option<&str>,
+    logical: &str,
     nonce: Option<&str>,
-) -> Option<PreviousProviderSession> {
-    let id = nonempty(id)?.to_owned();
-    let mut previous = PreviousProviderSession {
-        provider: provider.as_str().to_owned(),
-        session_id: id.clone(),
-        path: None,
-    };
-    if uuid::Uuid::parse_str(&id).is_ok() {
-        let (provider, cwd, logical, nonce) = (
-            provider.clone(),
-            cwd.map(Path::to_path_buf),
-            logical.map(str::to_owned),
-            nonce.map(str::to_owned),
-        );
-        previous.path = tokio::task::spawn_blocking(move || {
-            let root = logical.as_deref().and_then(|name| {
-                let nonce =
-                    nonce.or_else(|| match binding_context::observe_spawn_nonce_marker(name) {
-                        binding_context::SpawnNonceMarker::Known(nonce) => Some(nonce),
-                        _ => None,
-                    })?;
-                let context = binding_context::execution_context(provider.as_str(), &nonce).ok()?;
-                (context.channel_id == Some(channel.get()) && context.tmux_session == name)
-                    .then_some(context.provider_root)
-                    .flatten()
-            });
-            resolve_path(
-                &provider,
-                &id,
-                cwd.as_deref(),
-                logical.as_deref(),
-                root.as_deref(),
-            )
-        })
-        .await
-        .ok()
-        .flatten();
-    }
-    Some(previous)
+) -> Option<binding_context::BindingContext> {
+    use crate::services::tmux_common;
+    tmux_common::with_tmux_source_authority(logical, |_| {
+        let nonce = match nonce {
+            Some(nonce) => nonce.to_owned(),
+            None => match binding_context::observe_spawn_nonce_marker(logical) {
+                binding_context::SpawnNonceMarker::Known(nonce) => nonce,
+                _ => return None,
+            },
+        };
+        let context = binding_context::execution_context(provider.as_str(), &nonce).ok()?;
+        (context.channel_id == Some(channel.get())
+            && context.tmux_session == logical
+            && context.owner_runtime_root == tmux_common::current_tmux_owner_marker())
+        .then_some(context)
+    })
 }
 
 fn resolve_path(
     provider: &ProviderKind,
     id: &str,
     cwd: Option<&Path>,
-    logical: Option<&str>,
     root: Option<&Path>,
 ) -> Option<PathBuf> {
-    let kind = match provider {
-        ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
-        ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
-        _ => return None,
-    };
-    let bound = logical
-        .and_then(runtime_binding_for_tmux_session)
-        .filter(|binding| {
-            binding.runtime_kind == kind && binding.session_id.as_deref() == Some(id)
-        });
-    if let Some(path) =
-        bound.and_then(|binding| original_file(provider, id, Path::new(&binding.output_path)))
-    {
-        return Some(path);
-    }
-
+    uuid::Uuid::parse_str(id).ok()?;
     let path = match provider {
         ProviderKind::Claude => {
             crate::services::claude_tui::transcript_tail::claude_transcript_path(
@@ -255,14 +295,11 @@ mod tests {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, content).unwrap();
             assert_eq!(
-                resolve_path(&provider, &id, Some(&cwd), None, Some(root)),
+                resolve_path(&provider, &id, Some(&cwd), Some(root)),
                 Some(path.canonicalize().unwrap()),
             );
             std::fs::remove_file(path).unwrap();
-            assert_eq!(
-                resolve_path(&provider, &id, Some(&cwd), None, Some(root)),
-                None
-            );
+            assert_eq!(resolve_path(&provider, &id, Some(&cwd), Some(root)), None);
         }
     }
 }

@@ -73,6 +73,17 @@ pub(super) async fn finish_channel_clear_boundary_tx(
     finish_boundary(tx, channel_id, None).await
 }
 
+macro_rules! unconsumed_boundary {
+    () => {
+        "NOT EXISTS (
+             SELECT 1 FROM session_transcripts AS later
+             WHERE later.channel_id = clear_boundary.channel_id AND later.channel_context
+               AND later.id > clear_boundary.cleared_through_id
+               AND later.created_at > clear_boundary.cleared_at
+         )"
+    };
+}
+
 async fn finish_boundary(
     mut tx: Transaction<'_, Postgres>,
     channel_id: &str,
@@ -87,8 +98,8 @@ async fn finish_boundary(
     lock_channel_transcript_clear_fence(&mut tx, channel_id)
         .await
         .map_err(|error| anyhow!("lock channel clear boundary failed: {error}"))?;
-    sqlx::query(
-        "INSERT INTO channel_session_clear_boundaries (
+    sqlx::query(concat!(
+        "INSERT INTO channel_session_clear_boundaries AS clear_boundary (
              channel_id, cleared_at, cleared_through_id, clear_generation, recent_context
          )
          SELECT $1, NOW(), COALESCE(MAX(id), 0), 1, $2
@@ -96,16 +107,25 @@ async fn finish_boundary(
           WHERE channel_id = $1
          ON CONFLICT (channel_id) DO UPDATE SET
              cleared_at = GREATEST(
-                 channel_session_clear_boundaries.cleared_at,
+                 clear_boundary.cleared_at,
                  EXCLUDED.cleared_at
              ),
              cleared_through_id = GREATEST(
-                 channel_session_clear_boundaries.cleared_through_id,
+                 clear_boundary.cleared_through_id,
                  EXCLUDED.cleared_through_id
              ),
-             clear_generation = channel_session_clear_boundaries.clear_generation + 1,
-             recent_context = EXCLUDED.recent_context",
-    )
+             clear_generation = clear_boundary.clear_generation + 1,
+             recent_context = CASE
+                 WHEN EXCLUDED.recent_context IS NOT NULL
+                   AND EXCLUDED.recent_context->>'previous_session' IS NULL
+                   AND clear_boundary.recent_context->>'previous_session' IS NOT NULL
+                   AND ",
+        unconsumed_boundary!(),
+        " THEN jsonb_set(EXCLUDED.recent_context, '{previous_session}',
+                         clear_boundary.recent_context->'previous_session')
+                 ELSE EXCLUDED.recent_context
+             END"
+    ))
     .bind(channel_id)
     .bind(context.map(Json))
     .execute(&mut *tx)
@@ -118,15 +138,13 @@ async fn finish_boundary(
 }
 
 // Both halves of the read use the same committed boundary generation and transcript snapshot.
-pub(super) const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "
+pub(super) const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = concat!(
+    "
     WITH scope AS (
         SELECT clear_boundary.cleared_at, clear_boundary.cleared_through_id,
-               CASE WHEN $3 AND clear_boundary.recent_context IS NOT NULL AND NOT EXISTS (
-                   SELECT 1 FROM session_transcripts AS later
-                   WHERE later.channel_id = $1 AND later.channel_context
-                     AND later.id > clear_boundary.cleared_through_id
-                     AND later.created_at > clear_boundary.cleared_at
-               ) THEN clear_boundary.recent_context END AS recent_context
+               CASE WHEN $3 AND clear_boundary.recent_context IS NOT NULL AND ",
+    unconsumed_boundary!(),
+    " THEN clear_boundary.recent_context END AS recent_context
         FROM (VALUES ($1::text)) AS channel(id)
         LEFT JOIN channel_session_clear_boundaries AS clear_boundary
           ON clear_boundary.channel_id = channel.id
@@ -147,7 +165,8 @@ pub(super) const FETCH_RECENT_CHANNEL_PAIRS_SQL: &str = "
         ORDER BY transcript.created_at DESC, transcript.id DESC
         LIMIT $2
     ) AS pair ON TRUE
-    ORDER BY pair.created_at DESC, pair.id DESC";
+    ORDER BY pair.created_at DESC, pair.id DESC"
+);
 
 pub(crate) async fn fetch_recent_channel_prompt_context(
     pool: &PgPool,

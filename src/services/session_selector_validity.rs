@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
+pub(crate) mod transcript;
+
 const RECENT_MISSING_CACHED_TRANSCRIPT_GRACE_SECS: i64 = 60;
 const SELECTOR_OBSERVATION_RETENTION_SECS: u64 = 6 * 60 * 60;
 
