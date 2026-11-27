@@ -166,13 +166,12 @@ pub(in crate::services::discord) fn terminal_envelope_present(
 
 fn fresh_watcher_heartbeat_should_block(
     shared: &SharedData,
+    provider: &ProviderKind,
     watcher_owner_channel: ChannelId,
     snapshot: &DestructiveCancelProbeSnapshot,
     watcher_output_path: &str,
 ) -> bool {
-    let output_len_now = std::fs::metadata(watcher_output_path)
-        .ok()
-        .map(|metadata| metadata.len());
+    let output_metadata = std::fs::metadata(watcher_output_path).ok();
     let output_len_at_snapshot = snapshot
         .output_path
         .as_deref()
@@ -181,8 +180,8 @@ fn fresh_watcher_heartbeat_should_block(
     fresh_watcher_heartbeat_blocks_rebind(
         CaptureProgressEvidence {
             output_len_at_snapshot,
-            output_len_now,
-            output_mtime_age_secs: output_mtime_age_secs(watcher_output_path),
+            output_len_now: output_metadata.as_ref().map(std::fs::Metadata::len),
+            output_mtime_age_secs: output_metadata.as_ref().and_then(output_mtime_age_secs),
             relay_frontier_at_snapshot: snapshot.relay_frontier,
             relay_frontier_now: relay_frontier_for_current_generation(
                 shared,
@@ -191,11 +190,12 @@ fn fresh_watcher_heartbeat_should_block(
             ),
         },
         crate::services::tui_turn_state::STALE_USER_SUBMITTED_RECLAIM_SECS,
+        || terminal_envelope_present(provider, snapshot),
     )
 }
 
-fn output_mtime_age_secs(output_path: &str) -> Option<i64> {
-    let modified = std::fs::metadata(output_path).ok()?.modified().ok()?;
+fn output_mtime_age_secs(metadata: &std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
     i64::try_from(
         std::time::SystemTime::now()
             .duration_since(modified)
@@ -242,9 +242,8 @@ pub(in crate::services::discord) async fn evaluate(
         return DestructiveCancelGate::Denied("missing_finalizer_turn_id");
     }
 
-    // Fresh watcher heartbeat wins before terminal-envelope evidence. A live
-    // watcher is the safer owner for a just-finished turn; if it disappears, the
-    // next gate pass can still accept the terminal envelope.
+    // Give a live watcher time to finish delivering before testing whether
+    // the capture and pane have stopped.
     let watcher_heartbeat_stale = if let Some(tmux_session) =
         snapshot.pin.tmux_session_name.as_deref()
     {
@@ -253,6 +252,7 @@ pub(in crate::services::discord) async fn evaluate(
                 if let Some(output_path) = shared.tmux_watchers.watcher_output_path(tmux_session) {
                     if fresh_watcher_heartbeat_should_block(
                         shared,
+                        provider,
                         watcher_owner_channel,
                         snapshot,
                         &output_path,
@@ -270,6 +270,7 @@ pub(in crate::services::discord) async fn evaluate(
         if !watcher_heartbeat_stale
             && fresh_watcher_heartbeat_should_block(
                 shared,
+                provider,
                 watcher_owner_channel,
                 snapshot,
                 &watcher.output_path,
@@ -410,6 +411,10 @@ fn relay_frontier_high_water(previous: Option<u64>, current: Option<u64>) -> Opt
 mod tests {
     use super::*;
     use crate::services::agent_protocol::RuntimeHandoffKind;
+
+    #[cfg(unix)]
+    #[path = "destructive_cancel_heartbeat_tests.rs"]
+    mod heartbeat;
 
     struct EnvReset(Option<std::ffi::OsString>);
 

@@ -29,3 +29,12 @@ This product includes software derived from the following projects:
   agentdesk-ui-kit, adapted from affectUI at commit
   f83f008bd855433e02caf584853dcd551e0d2ec6. Each file keeps its
   attribution header and change summary.
+
+- Agent Observatory (https://github.com/zhjiang22/paseo-plugins/tree/main/agent-observatory)
+  Copyright (c) 2026 Agent Observatory contributors
+  Licensed under the MIT License
+  Turn loop heuristics, stop-reason and quota reset parsing, reply
+  invitation detection, timeline search, and prompt cache countdown
+  models in dashboard/src/lib/agentObservability.ts are adapted from
+  Agent Observatory (MIT) and paseo-cache-clock (Copyright (c) 2026
+  Xiaohang Yu, MIT).

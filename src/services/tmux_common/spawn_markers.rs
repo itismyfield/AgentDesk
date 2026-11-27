@@ -48,7 +48,7 @@ static GENERATION_STAMP_BEFORE_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampBeforeCreateHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn run_generation_stamp_before_create_hook_for_tests() {
     let hook = GENERATION_STAMP_BEFORE_CREATE_HOOK
         .lock()
@@ -70,7 +70,7 @@ static GENERATION_STAMP_AFTER_CREATE_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<GenerationStampAfterCreateHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn run_generation_stamp_after_create_hook_for_tests(tmp_path: &str) {
     let hook = GENERATION_STAMP_AFTER_CREATE_HOOK
         .lock()
@@ -233,7 +233,7 @@ fn stamp_session_generation_marker_under_source_authority(
     // serializes this session's marker writers.
     let previous_mtime_ns = read_generation_file_mtime_ns(tmux_session_name);
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     run_generation_stamp_before_create_hook_for_tests();
 
     let stamp = || -> std::io::Result<i64> {
@@ -242,7 +242,7 @@ fn stamp_session_generation_marker_under_source_authority(
             .create_new(true)
             .open(&tmp_path)?;
         file.write_all(generation.to_string().as_bytes())?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         run_generation_stamp_after_create_hook_for_tests(&tmp_path);
         let mut modified_ns = generation_marker_mtime_ns(&file)?;
         if previous_mtime_ns != 0 && modified_ns <= previous_mtime_ns {
@@ -276,7 +276,7 @@ static SPAWN_MARKERS_AFTER_GENERATION_HOOK: std::sync::LazyLock<
     std::sync::Mutex<Option<SpawnMarkersAfterGenerationHook>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn run_spawn_markers_after_generation_hook_for_tests() {
     let hook = SPAWN_MARKERS_AFTER_GENERATION_HOOK
         .lock()
@@ -299,7 +299,7 @@ pub fn stamp_spawn_markers(
         }
         let _ =
             stamp_session_generation_marker_under_source_authority(authority, tmux_session_name);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         run_spawn_markers_after_generation_hook_for_tests();
         let nonce = prepared
             .map(|p| p.context.execution_nonce.clone())

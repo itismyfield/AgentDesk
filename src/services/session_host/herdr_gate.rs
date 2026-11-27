@@ -588,7 +588,7 @@ impl HerdrTarget {
         {
             return CloseEffect::NotSent("herdr_terminate_disabled".into());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.0.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             super::herdr::policy::permit::EVENTS.with(|events| events.borrow_mut().push("Close"));
         }
@@ -1121,7 +1121,7 @@ impl PaneGate {
         witness: &ServerWitness,
         window: Duration,
     ) -> Result<(), HerdrGateRefusal> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             super::herdr::policy::permit::EVENTS
                 .with(|events| events.borrow_mut().push("exact_identity_probe"));
@@ -1161,7 +1161,7 @@ impl PaneGate {
             return Ok(refused("herdr_judgment_request_mismatch"));
         }
         let call = self.call(request);
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.endpoint.mode() == crate::config::session_hosts::EndpointMode::UserDefault {
             super::herdr::policy::permit::EVENTS.with(|events| {
                 events.borrow_mut().push(match judged.mutation {

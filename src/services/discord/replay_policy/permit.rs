@@ -112,6 +112,16 @@ impl StartPermit {
         }
         Ok(effect(self.attempt, self.binding, self.input_hash))
     }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn consume_projected_for_test<R>(
+        self,
+        target: &EffectTarget,
+        input_hash: &str,
+        effect: impl FnOnce(ExactAttempt, serde_json::Value, String) -> R,
+    ) -> Result<R, PermitRefusal> {
+        self.consume_projected(target, input_hash, effect)
+    }
 }
 
 /// Fresh launch values bound to the permit of an acknowledged exact retry.
