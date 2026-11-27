@@ -83,6 +83,11 @@ impl RecoveryDoneSignal {
         self.latched.store(false, Ordering::Release);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(super) fn is_latched_for_tests(&self) -> bool {
+        self.latched.load(Ordering::Acquire)
+    }
+
     /// Wait for completion, including a mark that arrived before subscription.
     pub(crate) async fn wait(&self) {
         if self.latched.load(Ordering::Acquire) {

@@ -121,7 +121,7 @@ fn preserve_discards_waiting_inputs_without_releasing_the_actual_active_turn() {
             .is_err(),
             "Preserve must not publish turn completion"
         );
-        assert!(!handle.recovery_done.latched.load(Ordering::Acquire));
+        assert!(!handle.recovery_done.is_latched_for_tests());
         assert!(
             load_channel_pending_queue_checked(&ProviderKind::Claude, "clear-preserve", channel)
                 .unwrap()
