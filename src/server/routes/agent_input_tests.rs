@@ -13,7 +13,7 @@ fn state(root: &std::path::Path) -> AppState {
     config.data.dir = root.join("data");
     std::fs::create_dir_all(&config.policies.dir).unwrap();
     AppState {
-        engine: PolicyEngine::new_with_pg(&config, None).unwrap(),
+        engine: PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
         pg_pool: None,
         broadcast_tx: crate::eventbus::new_broadcast(),

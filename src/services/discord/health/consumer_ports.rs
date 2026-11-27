@@ -7,12 +7,11 @@ use futures::future::BoxFuture;
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
-use super::{HeadlessAgentTurnReservation, HealthRegistry};
+use super::{HeadlessAgentTurnReservation, HealthRegistry, slot_row_host_refusal};
 use crate::services::discord::SharedData;
-use crate::services::discord::admin_host_guard::ManagedResetVerdict;
+use crate::services::discord::host_defer_gate;
 use crate::services::discord::relay_recovery;
 use crate::services::discord::zombie_foreground_release;
-use crate::services::discord::{host_defer_gate, host_teardown_gate};
 use crate::services::engine_runtime::health_port::{
     AppHealth, AppHealthBinding, AxisBSite, FinishCancelledMailboxResult, HeadlessDmTurnStart,
     HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort,
@@ -280,12 +279,6 @@ impl ResumeRuntimePort for HealthRegistry {
 }
 
 impl SlotResetPort for HealthRegistry {
-    type Verdict = ManagedResetVerdict;
-
-    fn verdict_refusal(verdict: &ManagedResetVerdict) -> Option<&str> {
-        verdict.refusal()
-    }
-
     fn row_host_refusal<'a>(
         pool: &'a PgPool,
         stored_provider: Option<&'a str>,
@@ -294,13 +287,13 @@ impl SlotResetPort for HealthRegistry {
         tmux_name: &'a str,
         caller: &'a str,
     ) -> BoxFuture<'a, Option<String>> {
-        Box::pin(host_teardown_gate::row_host_refusal(
+        slot_row_host_refusal(
             pool,
             stored_provider,
             channel_id,
             session_key,
             tmux_name,
             caller,
-        ))
+        )
     }
 }

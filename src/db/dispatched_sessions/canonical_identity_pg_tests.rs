@@ -1153,8 +1153,12 @@ async fn canonical_identity_backlog_transition_rolls_back_on_divergent_alias_pg(
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .expect("create backlog transition policy engine");
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("create backlog transition policy engine");
     let broadcast_tx = crate::eventbus::new_broadcast();
     let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
     let state = crate::app_state::AppState {
@@ -1279,8 +1283,12 @@ async fn canonical_identity_backlog_transition_rolls_back_on_session_clear_db_fa
     let mut config = crate::config::Config::default();
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .expect("create clear-failure transition policy engine");
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("create clear-failure transition policy engine");
     let broadcast_tx = crate::eventbus::new_broadcast();
     let batch_buffer = crate::eventbus::spawn_batch_flusher(broadcast_tx.clone());
     let state = crate::app_state::AppState {

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use axum::http::StatusCode;
 use sqlx::{PgPool, Row as SqlxRow};
 
@@ -7,8 +5,11 @@ use crate::db::auto_queue::slot_predicate::{
     DispatchSlotPolarity, active_dispatch_on_slot_predicate,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
+#[cfg(test)]
+use crate::services::engine_runtime::health_port::SlotResetOutcome;
 use crate::services::engine_runtime::health_port::{
-    AppHealthRegistry, ManagedResetPort, SlotResetPort,
+    AppHealthRegistry, ManagedResetPort, SlotResetPort, SlotResetVerdict, SlotRowGuard,
+    SlotRuntimeHealth,
 };
 
 const SLOT_THREAD_RESET_SESSION_INFO: &str = "Slot thread reset";
@@ -202,40 +203,37 @@ async fn clear_slot_sessions_with_owner_pg(
     .map_err(|error| format!("clear postgres slot sessions for {thread_count} thread(s): {error}"))
 }
 
-/// The managed-reset verdict of the registry the application carries.
-type ManagedResetVerdict = <AppHealthRegistry as SlotResetPort>::Verdict;
-
-/// The one runtime capability a slot clear takes from the health registry: a reset verdict.
-pub(crate) type SlotRuntimeHealth = Arc<dyn ManagedResetPort<ManagedResetVerdict>>;
-
-/// The registry as the slot-clear port, so callers in KE never name the registry type.
-pub(crate) fn slot_runtime_health<R>(registry: Option<Arc<R>>) -> Option<SlotRuntimeHealth>
-where
-    R: ManagedResetPort<ManagedResetVerdict> + 'static,
-{
-    registry.map(|registry| registry as SlotRuntimeHealth)
-}
-
 pub async fn clear_slot_threads_for_slot_pg(
+    row_guard: SlotRowGuard,
     health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
 ) -> Result<usize, String> {
-    clear_slot_threads_pg(health_registry, pool, agent_id, slot_index, None).await
+    clear_slot_threads_pg(row_guard, health_registry, pool, agent_id, slot_index, None).await
 }
 
 pub(super) async fn clear_slot_threads_for_runs_pg(
+    row_guard: SlotRowGuard,
     health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
     slot_index: i64,
     run_ids: &[String],
 ) -> Result<usize, String> {
-    clear_slot_threads_pg(health_registry, pool, agent_id, slot_index, Some(run_ids)).await
+    clear_slot_threads_pg(
+        row_guard,
+        health_registry,
+        pool,
+        agent_id,
+        slot_index,
+        Some(run_ids),
+    )
+    .await
 }
 
 async fn clear_slot_threads_pg(
+    row_guard: SlotRowGuard,
     health_registry: Option<SlotRuntimeHealth>,
     pool: &PgPool,
     agent_id: &str,
@@ -245,7 +243,7 @@ async fn clear_slot_threads_pg(
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
     let registry = health_registry.as_deref();
     let (safe_to_clear_thread_ids, verdicts) =
-        filter_safe_slot_thread_reset_targets(pool, registry, &target).await?;
+        filter_safe_slot_thread_reset_targets(pool, row_guard, registry, &target).await?;
     #[cfg(any(test, feature = "test-support"))]
     for channel in &safe_to_clear_thread_ids {
         verified_clear_probe_tests::run_before_verified_clear_recheck_for_tests(*channel);
@@ -281,7 +279,7 @@ async fn clear_slot_threads_pg(
                 RUNTIME_CLEARS
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
-                    .push((thread, Some(reset)));
+                    .push((thread, reset));
                 #[cfg(not(test))]
                 let _ = (thread, reset);
             }
@@ -383,8 +381,9 @@ pub async fn reset_slot_thread_bindings_excluding_pg(
     }
 
     let target = build_slot_clear_target_pg(pool, agent_id, slot_index).await?;
+    let row_guard = <AppHealthRegistry as SlotResetPort>::row_host_refusal;
     let (safe_to_clear_thread_ids, _) =
-        filter_safe_slot_thread_reset_targets(pool, None, &target).await?;
+        filter_safe_slot_thread_reset_targets(pool, row_guard, None, &target).await?;
     let archived_threads = archive_slot_threads(&safe_to_clear_thread_ids).await?;
     let cleared_sessions = clear_slot_sessions_pg(pool, &safe_to_clear_thread_ids).await?;
     let cleared_bindings = if safe_to_clear_thread_ids.len() == target.thread_channel_ids.len() {
@@ -481,9 +480,10 @@ async fn archive_slot_threads(thread_channel_ids: &[u64]) -> Result<usize, Strin
 /// check only reads and finishes before the caller's first write.
 async fn filter_safe_slot_thread_reset_targets(
     pool: &PgPool,
-    registry: Option<&dyn ManagedResetPort<ManagedResetVerdict>>,
+    row_guard: SlotRowGuard,
+    registry: Option<&dyn ManagedResetPort>,
     target: &SlotClearTarget,
-) -> Result<(Vec<u64>, Vec<ManagedResetVerdict>), String> {
+) -> Result<(Vec<u64>, Vec<Box<dyn SlotResetVerdict>>), String> {
     let (mut safe_to_reset, mut verdicts) = (Vec::new(), Vec::new());
     for thread_channel_id in &target.thread_channel_ids {
         let thread_id = thread_channel_id.to_string();
@@ -496,7 +496,7 @@ async fn filter_safe_slot_thread_reset_targets(
         let host_of = crate::services::session_host::host_decision::host_decision_for_rows;
         let host = match host_of(pool, *thread_channel_id).await.tmux_refusal() {
             Some(reason) => Some(reason),
-            None => slot_thread_host_refusal(pool, &thread_id, selected).await,
+            None => slot_thread_host_refusal(pool, row_guard, &thread_id, selected).await,
         };
         if let Some(reason) = host {
             tracing::warn!(
@@ -516,8 +516,7 @@ async fn filter_safe_slot_thread_reset_targets(
             }
             _ => None,
         };
-        let refusal = <AppHealthRegistry as SlotResetPort>::verdict_refusal;
-        if let Some(reason) = verdict.as_ref().and_then(refusal) {
+        if let Some(reason) = verdict.as_ref().and_then(|verdict| verdict.refusal()) {
             tracing::warn!(
                 "[auto-queue] skipping slot thread reset for {thread_channel_id}: {reason}"
             );
@@ -552,6 +551,7 @@ async fn filter_safe_slot_thread_reset_targets(
 /// clear is chosen from must each be a confirmed legacy tmux session.
 async fn slot_thread_host_refusal(
     pool: &PgPool,
+    row_guard: SlotRowGuard,
     thread_id: &str,
     selected: Option<&SlotThreadRow>,
 ) -> Option<String> {
@@ -584,8 +584,7 @@ async fn slot_thread_host_refusal(
             return Some(format!("`{key}` names no tmux session"));
         };
         let (provider, caller) = (provider.as_deref(), "auto_queue_slot_reset");
-        let row_host_refusal = <AppHealthRegistry as SlotResetPort>::row_host_refusal;
-        let refused = row_host_refusal(pool, provider, Some(thread_id), &key, &name, caller).await;
+        let refused = row_guard(pool, provider, Some(thread_id), &key, &name, caller).await;
         if refused.is_some() {
             return refused;
         }
@@ -595,12 +594,8 @@ async fn slot_thread_host_refusal(
 
 /// Each spawned slot-thread runtime clear, in order, for the tests that wait on it.
 #[cfg(test)]
-pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<
-    Vec<(
-        u64,
-        Option<crate::services::discord::admin_host_guard::ManagedReset>,
-    )>,
-> = std::sync::Mutex::new(Vec::new());
+pub(crate) static RUNTIME_CLEARS: std::sync::Mutex<Vec<(u64, SlotResetOutcome)>> =
+    std::sync::Mutex::new(Vec::new());
 
 /// The slot's thread ids once each spawned runtime-clear loop has finished.
 #[cfg(test)]

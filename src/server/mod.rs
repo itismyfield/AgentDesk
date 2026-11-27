@@ -332,6 +332,7 @@ pub(crate) async fn run(
         Some(pool) => Some(crate::engine::PolicyEngine::new_with_pg(
             &config,
             Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
         )?),
         None => None,
     };
@@ -556,7 +557,10 @@ async fn policy_tick_loop(
                 // Resume post-commit cleanup a previous process left owed; this is how a
                 // restarted process converges residual provider sessions and slot tokens.
                 match crate::services::auto_queue::cleanup_tasks::replay_pending_run_cleanup_tasks_pg(
-                    crate::services::auto_queue::runtime::slot_runtime_health(health_registry.clone()),
+                    engine.slot_row_guard(),
+                    crate::services::engine_runtime::health_port::slot_runtime_health(
+                        health_registry.clone(),
+                    ),
                     pool,
                 )
                 .await

@@ -901,9 +901,14 @@ mod dispatch_terminal_sync_pg_tests {
         .expect("seed end phase gate");
 
         assert!(
-            crate::services::auto_queue::cancel_run::end_run_with_pg(None, &pool, "run-1")
-                .await
-                .expect("end original run")
+            crate::services::auto_queue::cancel_run::end_run_with_pg(
+                crate::services::discord::health::slot_row_host_refusal,
+                None,
+                &pool,
+                "run-1"
+            )
+            .await
+            .expect("end original run")
         );
         let dispatch_status: String = sqlx::query_scalar(
             "SELECT status FROM task_dispatches WHERE id = 'dispatch-live-after-end'",

@@ -210,6 +210,7 @@ async fn public_cancel_ignores_unrelated_malformed_context_pg() {
         seed_run_beside_unrelated_malformed_dispatches(&pool, "cancel").await;
 
     let result = cancel_selected_runs_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
         None,
         &pool,
         std::slice::from_ref(&run_id),
@@ -245,7 +246,13 @@ async fn public_end_ignores_unrelated_malformed_context_pg() {
     let (run_id, _dispatch_id, unrelated) =
         seed_run_beside_unrelated_malformed_dispatches(&pool, "end").await;
 
-    let result = end_run_with_pg(None, &pool, &run_id).await;
+    let result = end_run_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
+        None,
+        &pool,
+        &run_id,
+    )
+    .await;
     let durable_run_status = run_status(&pool, &run_id).await;
     let ended = result.unwrap_or_else(|error| {
         panic!("end returned Err with run status {durable_run_status}: {error}")
@@ -309,6 +316,7 @@ async fn public_cancel_counts_surviving_associated_dispatch_pg() {
     .expect("seed foreign gate");
 
     let response = cancel_selected_runs_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
         None,
         &pool,
         std::slice::from_ref(&run_id),
@@ -369,6 +377,7 @@ async fn public_cancel_census_failure_rolls_back_pg() {
     .expect("install census sentinel");
 
     let result = cancel_selected_runs_with_pg(
+        crate::services::discord::health::slot_row_host_refusal,
         None,
         &pool,
         std::slice::from_ref(&run_id),

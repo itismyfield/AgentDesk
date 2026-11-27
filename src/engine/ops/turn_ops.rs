@@ -268,7 +268,7 @@ mod tests {
             },
             ..Config::default()
         };
-        PolicyEngine::new_with_pg(&config, None).unwrap()
+        PolicyEngine::new(&config).unwrap()
     }
 
     // ── Registration check ───────────────────────────────────────────────

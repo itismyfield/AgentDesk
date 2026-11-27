@@ -165,6 +165,7 @@ impl SupervisedWorkerRegistry {
                         match PolicyEngine::new_for_tick(
                             &tick_config,
                             Some(tick_pg_pool.as_ref().clone()),
+                            crate::services::discord::health::slot_row_host_refusal,
                         ) {
                             Ok(tick_engine) => {
                                 rt.block_on(super::super::policy_tick_loop(

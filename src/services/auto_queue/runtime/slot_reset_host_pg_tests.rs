@@ -1,11 +1,11 @@
 //! Slot resets skip every thread with a row that is not a confirmed legacy tmux session.
 
-use crate::services::discord::admin_host_guard::ManagedReset;
+use crate::services::engine_runtime::health_port::SlotResetOutcome;
 
 /// The runtime clears recorded for `slot_threads` once their spawned loop signalled it finished.
 pub(crate) async fn runtime_clears_after_done(
     slot_threads: &[u64],
-) -> Vec<(u64, Option<ManagedReset>)> {
+) -> Vec<(u64, SlotResetOutcome)> {
     let done = || {
         let runs = super::RUNTIME_CLEARS_DONE.lock();
         let runs = runs.unwrap_or_else(|poison| poison.into_inner());
@@ -37,7 +37,7 @@ mod host {
     use super::runtime_clears_after_done;
     use crate::config::TestEnvVarGuard;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::services::discord::admin_host_guard::ManagedReset;
+    use crate::services::discord::health::slot_row_host_refusal;
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, inflight_needing_backfill, mailbox_turn_active,
         nameless_turn, running_session, runtime, runtime_state, seed, shared_on,
@@ -202,6 +202,194 @@ mod host {
         key
     }
 
+    mod activation_bridge {
+        use super::*;
+        use crate::engine::{PolicyEngine, hooks::Hook};
+        use crate::services::session_host::host_decision::{
+            force_presence_for_test, forced_probes, host_decision_for_rows,
+        };
+
+        const ACTIVATE: &str = "agentdesk.autoQueue.activate({run_id: 'slot-guard-run'})";
+
+        async fn check_slot_clear(deferred: bool) {
+            let root = crate::config::TestRuntimeRootGuard::new();
+            let db = TestPostgresDb::create().await;
+            let pool = db.connect_and_migrate_with_max_connections(8).await;
+            let shared = crate::services::discord::make_shared_data_for_tests();
+            exec(
+                &pool,
+                "INSERT INTO auto_queue_runs (id, repo, status, max_concurrent_threads, thread_group_count)
+                 VALUES ('slot-guard-run', 'slot-guard-repo', 'active', 3, 3)",
+                &[],
+            )
+            .await;
+            let id = 1_480_000_000_007_000 + u64::from(deferred) * 10;
+            let (hosted, legacy, unknown) = (id + 1, id + 2, id + 3);
+            let raw_provider = "unrecognized-provider";
+            for (group, agent, thread, stored, provider) in [
+                ("0", "bridge-hosted", hosted, Stored::Hosted, "claude"),
+                ("1", "bridge-legacy", legacy, Stored::Legacy, "claude"),
+                ("2", "bridge-unknown", unknown, Stored::Legacy, raw_provider),
+            ] {
+                slot(&pool, agent, &[thread]).await;
+                let name = format!("AgentDesk-claude-{agent}-{id}");
+                let key = thread_row(
+                    &pool,
+                    &shared,
+                    (thread, &name, stored),
+                    "idle",
+                    Some(provider),
+                )
+                .await;
+                exec(
+                    &pool,
+                    "UPDATE sessions SET claude_session_id = 'prior-session', tokens = 19
+                     WHERE session_key = $1",
+                    &[Some(&key)],
+                )
+                .await;
+                exec(
+                    &pool,
+                    "INSERT INTO kanban_cards (id, title, status, assigned_agent_id, repo_id)
+                     VALUES ($1, $1, 'in_progress', $1, 'slot-guard-repo')",
+                    &[Some(agent)],
+                )
+                .await;
+                exec(
+                    &pool,
+                    "INSERT INTO auto_queue_entries
+                        (id, run_id, kanban_card_id, agent_id, status, thread_group, batch_phase)
+                     VALUES ($1, 'slot-guard-run', $1, $1, 'pending', $2::text::bigint, 0)",
+                    &[Some(agent), Some(group)],
+                )
+                .await;
+            }
+
+            let unknown_name = format!("AgentDesk-claude-bridge-unknown-{id}");
+            let unknown_key = channel_key(&shared, &unknown_name);
+            {
+                use crate::services::platform::tmux::SessionPresence;
+                use crate::services::session_host::surface_policy::{
+                    Relation, force_relation_for_test,
+                };
+                let _host = crate::config::session_hosts::force_for_test(
+                    Some("mac-mini"),
+                    &[(id, "mac-mini")],
+                );
+                let _relation = force_relation_for_test(unknown, Relation::Child { parent: id });
+                force_presence_for_test(&unknown_name, SessionPresence::Missing);
+                assert!(
+                    host_decision_for_rows(&pool, unknown)
+                        .await
+                        .tmux_refusal()
+                        .is_none()
+                );
+                assert_eq!(
+                    forced_probes(&unknown_name),
+                    1,
+                    "the key identified the provider"
+                );
+            }
+            assert!(
+                host_decision_for_rows(&pool, unknown)
+                    .await
+                    .tmux_refusal()
+                    .is_none()
+            );
+            let refused = crate::services::discord::host_teardown_gate::row_host_refusal(
+                &pool,
+                Some(raw_provider),
+                Some(&unknown.to_string()),
+                &unknown_key,
+                &unknown_name,
+                "auto_queue_slot_reset",
+            )
+            .await;
+            assert!(refused.is_some_and(|reason| reason.contains("provider unknown")));
+            let (before_hosted, before_unknown) = (
+                thread_rows(&pool, hosted).await,
+                thread_rows(&pool, unknown).await,
+            );
+
+            let mut config = crate::config::Config::default();
+            config.policies.dir = root.path().join("policies");
+            config.policies.hot_reload = false;
+            std::fs::create_dir(&config.policies.dir).unwrap();
+            std::fs::write(
+                config.policies.dir.join("slot-guard.js"),
+                format!(
+                    "agentdesk.registerPolicy({{ name: 'slot-guard', onTick: function() {{
+                        globalThis.activationDeferred = {ACTIVATE}.deferred;
+                    }} }});"
+                ),
+            )
+            .unwrap();
+            let engine =
+                PolicyEngine::new_with_pg(&config, Some(pool.clone()), slot_row_host_refusal)
+                    .expect("assemble policy engine");
+            if deferred {
+                engine
+                    .fire_hook(Hook::OnTick, serde_json::json!({}))
+                    .unwrap();
+                assert!(
+                    engine
+                        .eval_js::<bool>("globalThis.activationDeferred === true")
+                        .unwrap()
+                );
+            } else {
+                let js = format!(
+                    "const result = {ACTIVATE}; Array.isArray(result.dispatched) && !result.deferred"
+                );
+                assert!(engine.eval_js::<bool>(&js).unwrap());
+            }
+            assert_eq!(
+                rows(
+                    &pool,
+                    "SELECT agent_id FROM auto_queue_slots
+                            WHERE assigned_run_id = $1 ORDER BY agent_id",
+                    "slot-guard-run"
+                )
+                .await,
+                ["bridge-hosted", "bridge-legacy", "bridge-unknown"],
+            );
+            assert_eq!(
+                thread_rows(&pool, unknown).await,
+                before_unknown,
+                "the row guard keeps the unknown provider",
+            );
+            assert_eq!(
+                thread_rows(&pool, hosted).await,
+                before_hosted,
+                "hosted row kept"
+            );
+            assert_eq!(
+                rows(
+                    &pool,
+                    "SELECT (claude_session_id IS NULL AND tokens = 0
+                             AND session_info = 'Slot thread reset')::text
+                     FROM sessions WHERE thread_channel_id = $1",
+                    &legacy.to_string(),
+                )
+                .await,
+                ["true"],
+                "legacy slot cleared before dispatch",
+            );
+            drop(engine);
+            pool.close().await;
+            db.drop().await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn js_activate_clears_legacy_slot_and_keeps_guarded_rows_pg() {
+            check_slot_clear(false).await;
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn drained_activate_intent_clears_legacy_slot_and_keeps_guarded_rows_pg() {
+            check_slot_clear(true).await;
+        }
+    }
+
     /// Both entries, under three tmux conditions, reset a thread only when every row it idles and
     /// its runtime-clear row are legacy; the runtime has no pool, so only the filter decides.
     #[tokio::test(flavor = "current_thread")]
@@ -294,9 +482,15 @@ mod host {
             }
             let _ = tmux.take_calls();
             let clear = super::super::clear_slot_threads_for_slot_pg;
-            let cleared = clear(Some(registry.clone()), &pool, &agent, 0)
-                .await
-                .unwrap();
+            let cleared = clear(
+                slot_row_host_refusal,
+                Some(registry.clone()),
+                &pool,
+                &agent,
+                0,
+            )
+            .await
+            .unwrap();
             assert_eq!(cleared, 1, "{ctx}: only T1's row is idled");
             for (thread, before) in kept.into_iter().zip(&before) {
                 assert_eq!(
@@ -306,8 +500,7 @@ mod host {
                 );
             }
             let clears = runtime_clears_after_done(&[t1, t2, t2b, t3]).await;
-            let only_t1 =
-                matches!(clears.as_slice(), [(t, Some(ManagedReset::Applied(_)))] if *t == t1);
+            let only_t1 = matches!(clears.as_slice(), [(t, Ok(_))] if *t == t1);
             assert!(only_t1, "{ctx}: {clears:?}");
             assert!(
                 !mailbox_turn_active(&shared, ChannelId::new(t1)).await,
@@ -471,7 +664,14 @@ mod host {
             let _ = tmux.take_calls();
 
             let clear = super::super::clear_slot_threads_for_slot_pg;
-            let cleared = clear(Some(registry.clone()), &pool, &agent, 0).await;
+            let cleared = clear(
+                slot_row_host_refusal,
+                Some(registry.clone()),
+                &pool,
+                &agent,
+                0,
+            )
+            .await;
             // Before the spawned clear runs, D's runtime switches to another session's name.
             running_session(&shared, &pool, channel(td), &name(6), false, None).await;
             let slot_threads = [ta, tb, tc, td];
@@ -516,9 +716,9 @@ mod host {
                 calls.iter().all(|call| call.contains(&name(1))),
                 "{ctx}: {calls:?}"
             );
-            let applied = Some(ManagedReset::Applied(Some(name(1))));
+            let applied = Ok(Some(name(1)));
             assert!(
-                matches!(clears.as_slice(), [(a, a_reset), (d, Some(ManagedReset::Refused(_)))]
+                matches!(clears.as_slice(), [(a, a_reset), (d, Err(_))]
                     if *a == ta && *a_reset == applied && *d == td),
                 "{ctx}: {clears:?}"
             );
@@ -592,7 +792,14 @@ mod host {
             let _ = tmux.take_calls();
 
             let clear = super::super::clear_slot_threads_for_slot_pg;
-            let cleared = clear(Some(registry.clone()), &pool, &agent, 0).await;
+            let cleared = clear(
+                slot_row_host_refusal,
+                Some(registry.clone()),
+                &pool,
+                &agent,
+                0,
+            )
+            .await;
             // Before the spawned clear runs, E's marker turns Herdr; its verdict was taken already.
             let marker = crate::services::tmux_common::session_temp_path(&e_name, "host_kind");
             std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
@@ -633,7 +840,7 @@ mod host {
                     name(n)
                 );
             }
-            let applied = Some(ManagedReset::Applied(Some(e_name.clone())));
+            let applied = Ok(Some(e_name.clone()));
             assert!(
                 matches!(clears.as_slice(), [(e, reset)] if *e == te && *reset == applied),
                 "{ctx}: {clears:?}"
@@ -685,7 +892,7 @@ mod host {
         let empty = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
         let kept = before(configured[1], "p9b1-slot-2").await;
         let clear = super::super::clear_slot_threads_for_slot_pg;
-        let cleared = clear(Some(empty), &pool, "p9b1-slot-2", 0).await;
+        let cleared = clear(slot_row_host_refusal, Some(empty), &pool, "p9b1-slot-2", 0).await;
         assert_eq!(cleared, Ok(0), "no runtime verdict");
         assert_eq!(before(configured[1], "p9b1-slot-2").await, kept, "no write");
 
