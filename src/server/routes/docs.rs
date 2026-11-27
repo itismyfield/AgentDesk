@@ -12,6 +12,9 @@ mod guides;
 mod inventory;
 mod taxonomy;
 
+#[cfg(test)]
+mod snapshot_tests;
+
 use guides::{api_friction_markers_body, card_lifecycle_ops_body, guide_index};
 use inventory::{EndpointDoc, all_endpoints};
 use taxonomy::{
