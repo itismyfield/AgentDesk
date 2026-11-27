@@ -177,6 +177,7 @@ fn evidence_item(
     settlement.validate(registration)?;
     let open = settlement.outcome.is_none() && !settlement.cleanup_complete;
     Ok(native::EvidenceRegistration {
+        devices: Vec::new(),
         namespace: registration.namespace.clone(),
         candidate: open && !settlement.extra.contains_key("foreign_prompt_barrier"),
         barrier: match open {

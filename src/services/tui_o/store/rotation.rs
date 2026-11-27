@@ -165,9 +165,18 @@ pub struct Rotation {
     pub links: BTreeMap<String, SourceLink>,
     /// The source each old one was rotated to; binding a source again clears its entry.
     pub successors: BTreeMap<String, Successor>,
+    /// Devices linked by a prefix-verified rekey, indexed by the installed source key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) devices: BTreeMap<String, Vec<u64>>,
 }
 
 impl Rotation {
+    pub(crate) fn devices(&self, source: &SourceId) -> &[u64] {
+        self.devices
+            .get(&source_key(source))
+            .map_or(&[], Vec::as_slice)
+    }
+
     pub fn link(&self, source: &SourceId) -> Option<&SourceLink> {
         self.links.get(&source_key(source))
     }

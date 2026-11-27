@@ -335,6 +335,7 @@ pub(super) async fn handle_policy_close(
 struct NativeAdmission {
     evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
     registrations_fingerprint: String,
+    devices: Vec<u64>,
     cleanup: Option<(TurnKey, Arc<CancelToken>)>,
 }
 
@@ -370,6 +371,7 @@ impl NativeAdmission {
         Ok(Self {
             evidence,
             registrations_fingerprint: observed.registrations_fingerprint.clone(),
+            devices: observed.devices.clone(),
             cleanup,
         })
     }
@@ -498,7 +500,9 @@ impl NativePrepared {
             .into_iter()
             .filter(|r| {
                 r.ticket.channel_id == observed.binding.channel_id
-                    && (r.ticket.source.is_none() || r.matches(&observed.binding))
+                    && (r.ticket.source.is_none()
+                        || r.ticket
+                            .matches_binding(&observed.binding, &observed.devices))
             })
             .collect();
         let fingerprint =
@@ -696,11 +700,14 @@ impl NativeCleanup {
         let evidence = &self.admission.evidence;
         let outcome = self.outcome()?;
         let record = || {
-            history.record_native_outcome_at_stamp(
+            history.record_scoped_native_outcome_at_stamp(
                 &evidence.namespace,
                 &evidence.ticket,
                 &outcome,
-                &self.admission.registrations_fingerprint,
+                (
+                    &self.admission.registrations_fingerprint,
+                    &self.admission.devices,
+                ),
             )
         };
         match &self.source_fence {

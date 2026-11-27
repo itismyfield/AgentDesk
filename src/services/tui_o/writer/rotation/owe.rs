@@ -349,7 +349,7 @@ impl NativeSources {
 
     fn observe(
         &self,
-        channel: u64,
+        (channel, devices): (u64, &[u64]),
         source: &SourceId,
         origin: &super::super::input_notices::NoticeOrigin,
         snapshot: super::super::actor::native_input::Snapshot,
@@ -372,6 +372,10 @@ impl NativeSources {
         let registrations: Vec<_> = snapshot
             .registrations
             .into_iter()
+            .map(|mut registration| {
+                registration.devices.extend_from_slice(devices);
+                registration
+            })
             .filter(|r| {
                 r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
             })
@@ -380,6 +384,7 @@ impl NativeSources {
         Ok((
             Observation {
                 binding,
+                devices: devices.to_vec(),
                 generation: snapshot.generation,
                 binding_seq: origin.binding_seq,
                 revision: self.revision,
@@ -529,7 +534,8 @@ impl<B: BindingEvents> Sources<B> {
         let native = self.native.as_ref()?;
         let origin = self.native_origin(source, record, None).ok()?;
         let snapshot = port.inner.snapshot(origin).await.ok()?;
-        for ticket in snapshot.registrations {
+        for mut ticket in snapshot.registrations {
+            ticket.devices.clone_from(&observed.devices);
             let receipted = ticket.candidate && !ticket.receipts.is_empty();
             let Some(held) = ticket.ticket.source.clone().filter(|_| receipted) else {
                 continue;
@@ -553,7 +559,13 @@ impl<B: BindingEvents> Sources<B> {
                 }
             };
             let snapshot = port.inner.snapshot(origin.clone()).await.ok()?;
-            let closed = native.observe(self.channel, source, &origin, snapshot, Some(&raw));
+            let closed = native.observe(
+                (self.channel, &observed.devices),
+                source,
+                &origin,
+                snapshot,
+                Some(&raw),
+            );
             return closed.ok().map(|(closed, _)| (closed, raw));
         }
         None
@@ -572,6 +584,8 @@ impl<B: BindingEvents> Sources<B> {
             .map(|r| r.source.clone())
             .collect();
         for source in sources {
+            let devices = self.rotation.devices(&source).to_vec();
+            let scope = (self.channel, devices.as_slice());
             let Some(native) = &mut self.native else {
                 return;
             };
@@ -595,7 +609,7 @@ impl<B: BindingEvents> Sources<B> {
                 continue;
             };
             let Ok((mut observed, mut barriers)) =
-                native.observe(self.channel, &source, &origin, snapshot, None)
+                native.observe(scope, &source, &origin, snapshot, None)
             else {
                 continue;
             };
@@ -612,8 +626,7 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
-                let Ok((current, _)) =
-                    native.observe(self.channel, &source, &origin, snapshot, None)
+                let Ok((current, _)) = native.observe(scope, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };
@@ -629,8 +642,7 @@ impl<B: BindingEvents> Sources<B> {
                 let Ok(snapshot) = port.inner.snapshot(origin.clone()).await else {
                     continue;
                 };
-                let Ok(fresh) = native.observe(self.channel, &source, &origin, snapshot, None)
-                else {
+                let Ok(fresh) = native.observe(scope, &source, &origin, snapshot, None) else {
                     continue;
                 };
                 (observed, barriers) = fresh;
@@ -649,7 +661,7 @@ impl<B: BindingEvents> Sources<B> {
                     continue;
                 };
                 let Ok((mut current, mut current_barriers)) =
-                    native.observe(self.channel, &source, &origin, snapshot, None)
+                    native.observe(scope, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };
@@ -701,8 +713,7 @@ impl<B: BindingEvents> Sources<B> {
                 let raw = raw
                     .as_ref()
                     .and_then(|(_, raw)| self.reuse_raw_witness(&source, raw));
-                let Ok((current, _)) =
-                    native.observe(self.channel, &source, &origin, snapshot, raw)
+                let Ok((current, _)) = native.observe(scope, &source, &origin, snapshot, raw)
                 else {
                     break;
                 };
@@ -735,8 +746,7 @@ impl<B: BindingEvents> Sources<B> {
                 let Some(native) = &self.native else {
                     continue;
                 };
-                let Ok((mut current, _)) =
-                    native.observe(self.channel, &source, &origin, snapshot, None)
+                let Ok((mut current, _)) = native.observe(scope, &source, &origin, snapshot, None)
                 else {
                     continue;
                 };

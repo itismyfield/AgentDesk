@@ -192,6 +192,11 @@ fn remap_rotation(
     if let Some(successor) = rotation.successors.remove(&keys.old) {
         rotation.successors.insert(keys.new.clone(), successor);
     }
+    let mut devices = rotation.devices.remove(&keys.old).unwrap_or_default();
+    devices.extend([old.dev, new.dev]);
+    devices.sort_unstable();
+    devices.dedup();
+    rotation.devices.insert(keys.new.clone(), devices);
     rotation
 }
 

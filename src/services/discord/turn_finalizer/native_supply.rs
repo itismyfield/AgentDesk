@@ -31,7 +31,7 @@ enum Job {
     Boot(
         Box<super::super::native_prepare::RestoredInput>,
         Registry,
-        Option<(Outcome, String, SourceFence)>,
+        Option<(Outcome, String, Vec<u64>, SourceFence)>,
     ),
 }
 struct Port {
@@ -207,6 +207,7 @@ impl Port {
         let admission = NativeAdmission {
             evidence,
             registrations_fingerprint: String::new(),
+            devices: Vec::new(),
             cleanup,
         };
         let work =
@@ -249,17 +250,7 @@ impl Port {
             .as_ref()
             .ok_or("native receipt source missing")?;
         check_target(&source.target, &origin)?;
-        if !(crate::services::tui_o::writer::input_facts::native::Registration {
-            namespace: namespace.into(),
-            ticket: ticket.clone(),
-            frame_hash: String::new(),
-            exact_frame_hash: String::new(),
-            receipts: Vec::new(),
-            candidate: false,
-            barrier: None,
-        })
-        .matches(&current.binding)
-        {
+        if !ticket.matches_binding(&current.binding, &current.devices) {
             return Err("native receipt source differs".into());
         }
         let (live, boot) = self.custody().await?;
@@ -280,11 +271,11 @@ impl Port {
             fence.commit(|| {
                 let (namespace, ticket) = receipt.identity();
                 let (kind, row, range, hash) = receipt.record();
-                history.try_native_receipt(
+                history.try_scoped_native_receipt(
                     namespace,
                     ticket,
                     (kind, row, range, current.through, hash),
-                    &current.registrations_fingerprint,
+                    (&current.registrations_fingerprint, &current.devices),
                 )
             })
         })
@@ -315,7 +306,7 @@ impl Port {
             }
             Job::Boot(input, history, proof) => {
                 let (namespace, ticket) = input.identity();
-                if let Some((outcome, fingerprint, fence)) = proof
+                if let Some((outcome, fingerprint, devices, fence)) = proof
                     && history
                         .native_settlement(namespace, ticket)?
                         .outcome
@@ -323,11 +314,11 @@ impl Port {
                 {
                     Self::durable(history.clone(), namespace.into(), ticket.clone()).await?;
                     fence.commit(|| {
-                        history.record_native_outcome_at_stamp(
+                        history.record_scoped_native_outcome_at_stamp(
                             namespace,
                             ticket,
                             &outcome,
-                            &fingerprint,
+                            (&fingerprint, &devices),
                         )
                     })?;
                 }
@@ -371,16 +362,9 @@ impl Port {
                 .as_ref()
                 .ok_or("abstain source missing")?;
             check_target(&source.target, &origin)?;
-            if !(crate::services::tui_o::writer::input_facts::native::Registration {
-                namespace: proof.namespace.clone(),
-                ticket: proof.ticket.clone(),
-                frame_hash: String::new(),
-                exact_frame_hash: String::new(),
-                receipts: Vec::new(),
-                candidate: false,
-                barrier: None,
-            })
-            .matches(&current.binding)
+            if !proof
+                .ticket
+                .matches_binding(&current.binding, &current.devices)
                 || proof.through != current.through
             {
                 return Err("abstain source mismatch".into());
@@ -411,7 +395,7 @@ impl Port {
                 .await?;
             }
             self.fence(origin.clone())
-                .commit(|| history.record_native_barrier(proof))?;
+                .commit(|| history.record_scoped_native_barrier(proof, &current.devices))?;
         }
         if !idle {
             return Ok(());
@@ -579,6 +563,7 @@ impl Port {
                 Some((
                     outcome,
                     observed.registrations_fingerprint.clone(),
+                    observed.devices.clone(),
                     self.fence(origin),
                 )),
             )
@@ -784,6 +769,7 @@ pub(super) fn source_evidence(
         || observed.revision != current.revision
         || observed.through != current.through
         || observed.registrations_fingerprint != current.registrations_fingerprint
+        || observed.devices != current.devices
         || observed.terminal != current.terminal
     {
         return Err("native observation superseded".into());
@@ -798,14 +784,11 @@ pub(super) fn source_evidence(
         .as_ref()
         .ok_or("native source missing")?;
     source.validate(&evidence.ticket.key)?;
-    if observed.binding.provider != crate::services::tui_o::shadow::ShadowProvider::Claude
+    if !evidence
+        .ticket
+        .matches_binding(&observed.binding, &observed.devices)
         || source.target != *current_target
         || evidence.namespace.is_empty()
-        || evidence.ticket.channel_id != observed.binding.channel_id
-        || source.provider != "claude"
-        || source.session_id != observed.binding.source.session_id
-        || source.transcript != observed.binding.source.path
-        || source.file != [observed.binding.source.dev, observed.binding.source.ino]
         || evidence.range.0 < source.offset
         || evidence.range.0 >= evidence.range.1
         || !crate::services::tui_o::writer::input_facts::native::terminal::within(

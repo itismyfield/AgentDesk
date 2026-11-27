@@ -86,20 +86,31 @@ fn body(value: &Value) -> Option<String> {
 
 #[cfg(unix)]
 pub(crate) use crate::services::tui_input::human_frame::history::v2::native::{
-    EvidenceRegistration as Registration, registrations_fingerprint,
+    EvidenceRegistration as Registration, registrations_fingerprint, same_registered_file,
 };
 
 #[cfg(unix)]
 impl Registration {
     pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
+        self.ticket.matches_binding(binding, &self.devices)
+    }
+}
+
+#[cfg(unix)]
+impl Ticket {
+    pub(crate) fn matches_binding(&self, binding: &SourceBinding, devices: &[u64]) -> bool {
         binding.provider == super::ShadowProvider::Claude
-            && self.ticket.channel_id == binding.channel_id
-            && self.ticket.source.as_ref().is_some_and(|s| {
+            && self.channel_id == binding.channel_id
+            && self.source.as_ref().is_some_and(|s| {
                 s.provider == "claude"
                     && s.session_id == binding.source.session_id
                     && s.transcript == binding.source.path
-                    && s.file == [binding.source.dev, binding.source.ino]
-                    && s.target == self.ticket.key["attempt"]["target"]
+                    && same_registered_file(
+                        s.file,
+                        [binding.source.dev, binding.source.ino],
+                        devices,
+                    )
+                    && s.target == self.key["attempt"]["target"]
                     && s.target["execution_nonce"]
                         .as_str()
                         .is_some_and(|n| !n.is_empty())
@@ -117,6 +128,7 @@ pub(crate) struct Observation {
     pub(crate) revision: u64,
     pub(crate) through: u64,
     pub(crate) registrations_fingerprint: String,
+    pub(crate) devices: Vec<u64>,
     /// A verified raw EOF closer at `through`; it never moves `through` itself.
     pub(crate) terminal: Option<terminal::RawWitness>,
     pub(crate) evidence: Vec<Evidence>,

@@ -290,6 +290,7 @@ impl RawCapture {
             .unwrap()
             .clone();
         let observed = Observation {
+            devices: Vec::new(),
             binding,
             generation: snapshot.generation,
             binding_seq: origin.binding_seq,
@@ -336,6 +337,7 @@ impl RawCapture {
             .unwrap();
         assert_eq!(analysis.evidence.len(), 1, "one original at this EOF");
         Observation {
+            devices: Vec::new(),
             evidence: analysis.evidence,
             terminal: Some(raw),
             ..self.observed.clone()

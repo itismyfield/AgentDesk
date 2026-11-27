@@ -18,6 +18,8 @@ pub(crate) struct EvidenceRegistration {
     pub(crate) ticket: Ticket,
     pub(crate) frame_hash: String,
     #[serde(skip)]
+    pub(crate) devices: Vec<u64>,
+    #[serde(skip)]
     pub(crate) exact_frame_hash: String,
     pub(crate) receipts: Vec<String>,
     #[serde(skip)]
@@ -25,6 +27,32 @@ pub(crate) struct EvidenceRegistration {
     /// The unsettled registration's stored barrier, read-only input to a supersession candidate.
     #[serde(skip)]
     pub(crate) barrier: Option<barrier::Barrier>,
+}
+
+#[cfg(unix)]
+pub(crate) fn same_registered_file(a: [u64; 2], b: [u64; 2], devices: &[u64]) -> bool {
+    a[1] == b[1] && (a[0] == b[0] || (devices.contains(&a[0]) && devices.contains(&b[0])))
+}
+
+#[cfg(unix)]
+fn scoped_registrations(
+    state: &Snapshot,
+    ticket: &Ticket,
+    devices: &[u64],
+) -> Result<Vec<EvidenceRegistration>, String> {
+    let source = ticket.source.as_ref().ok_or("native source missing")?;
+    Ok(evidence_registrations(state, true)?
+        .into_iter()
+        .filter(|r| {
+            r.ticket.channel_id == ticket.channel_id
+                && r.ticket.source.as_ref().is_none_or(|s| {
+                    s.provider == source.provider
+                        && s.session_id == source.session_id
+                        && s.transcript == source.transcript
+                        && same_registered_file(s.file, source.file, devices)
+                })
+        })
+        .collect())
 }
 
 #[cfg(unix)]
@@ -544,12 +572,24 @@ impl Registry {
     }
 
     #[cfg(unix)]
+    #[cfg(test)]
     pub(crate) fn record_native_outcome_at_stamp(
         &self,
         namespace: &str,
         ticket: &Ticket,
         outcome: &Outcome,
         expected: &str,
+    ) -> Result<bool, String> {
+        self.record_scoped_native_outcome_at_stamp(namespace, ticket, outcome, (expected, &[]))
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn record_scoped_native_outcome_at_stamp(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+        outcome: &Outcome,
+        (expected, devices): (&str, &[u64]),
     ) -> Result<bool, String> {
         self.native_transaction_checked(
             namespace,
@@ -570,19 +610,7 @@ impl Registry {
                 if current.outcome.as_ref() == Some(outcome) {
                     return Ok(());
                 }
-                let source = ticket.source.as_ref().ok_or("native source missing")?;
-                let registrations: Vec<_> = evidence_registrations(snapshot, true)?
-                    .into_iter()
-                    .filter(|r| {
-                        r.ticket.channel_id == ticket.channel_id
-                            && r.ticket.source.as_ref().is_none_or(|s| {
-                                s.provider == source.provider
-                                    && s.session_id == source.session_id
-                                    && s.transcript == source.transcript
-                                    && s.file == source.file
-                            })
-                    })
-                    .collect();
+                let registrations = scoped_registrations(snapshot, ticket, devices)?;
                 let fingerprint = registrations_fingerprint(&registrations)?;
                 if fingerprint != expected {
                     return Err("native registrations superseded".into());

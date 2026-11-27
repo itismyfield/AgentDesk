@@ -200,12 +200,20 @@ pub(crate) fn observe_binding_hook(
     {
         // A prompt of the launch session may still supersede a Pending it outlived; no switch.
         let prompt = HookEventKind::from_path(event) == HookEventKind::UserPromptSubmit;
-        if provider == "claude"
-            && let Err(reason) =
-                adoption_retry::observe_launch_hook(command, &hook, envelope.as_ref(), prompt)
-                    .and_then(|()| resume_start::record(payload_session, &hook, envelope.as_ref()))
-        {
-            return IngressOutcome::NotDurable(reason);
+        if provider == "claude" {
+            match adoption_retry::observe_launch_hook(command, &hook, envelope.as_ref(), prompt) {
+                Ok(Some(skip)) if managed_here(envelope.as_ref()) => {
+                    return classify_skip(skip, command, envelope.as_ref(), true);
+                }
+                Ok(_) => {
+                    if let Err(reason) =
+                        resume_start::record(payload_session, &hook, envelope.as_ref())
+                    {
+                        return IngressOutcome::NotDurable(reason);
+                    }
+                }
+                Err(reason) => return IngressOutcome::NotDurable(reason),
+            }
         }
         return IngressOutcome::Proceed(ProceedReason::NoSessionSwitch);
     }
@@ -234,7 +242,7 @@ pub(crate) fn observe_binding_hook(
     ) {
         AdoptionHttp::Durable(kind) => IngressOutcome::Durable(kind),
         AdoptionHttp::NotDurable(reason) => IngressOutcome::NotDurable(reason),
-        AdoptionHttp::Skipped(skip) => classify_skip(skip, command, envelope.as_ref()),
+        AdoptionHttp::Skipped(skip) => classify_skip(skip, command, envelope.as_ref(), false),
     }
 }
 
@@ -242,6 +250,7 @@ fn classify_skip(
     skip: AdoptSkip,
     command_session_id: &str,
     envelope: Option<&crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope>,
+    managed_refresh: bool,
 ) -> IngressOutcome {
     use IngressOutcome::{NotApplicable, Unavailable};
     match skip {
@@ -252,7 +261,9 @@ fn classify_skip(
             Unavailable(UnavailableReason::PaneRegistrationFailed)
         }
         AdoptSkip::UnmappedCommandSession
-            if !discovery_done() || (!discovery_clock().0 && managed_here(envelope)) =>
+            if managed_refresh
+                || !discovery_done()
+                || (!discovery_clock().0 && managed_here(envelope)) =>
         {
             Unavailable(UnavailableReason::RestoreNotReady)
         }

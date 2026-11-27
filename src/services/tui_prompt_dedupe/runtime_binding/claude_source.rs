@@ -445,7 +445,7 @@ pub(crate) fn reclaim_with_current_prompt(
     session_id: &str,
     hook: &HookSignal,
 ) -> io::Result<bool> {
-    observe_current_claude_hook(authority, session_id, hook, false)
+    observe_current_claude_hook(authority, session_id, hook, false, &mut None)
 }
 
 pub(crate) fn observe_current_claude_hook(
@@ -453,6 +453,7 @@ pub(crate) fn observe_current_claude_hook(
     session_id: &str,
     hook: &HookSignal,
     refresh: bool,
+    skip: &mut Option<AdoptSkip>,
 ) -> io::Result<bool> {
     let session_id = session_id.trim();
     let payload_path = hook.transcript_path.as_deref().map(str::trim);
@@ -465,11 +466,11 @@ pub(crate) fn observe_current_claude_hook(
     let opened = source_verify::observe_transcript(&payload_path);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
-    let mut skip = None;
     let key = PromptKey::new("claude", session_id);
-    let Some((tmux, binding)) = AdoptSkip::bound_pane(&state, &key, &mut skip) else {
+    let Some((tmux, binding)) = AdoptSkip::bound_pane(&state, &key, skip) else {
         return Ok(false);
     };
+    *skip = None;
     if tmux != authority.session() {
         return Ok(false);
     }
@@ -491,6 +492,7 @@ pub(crate) fn observe_current_claude_hook(
     };
     let channel_id = state.channel_by_tmux.get(&tmux).map(|e| e.value);
     let Some(channel_id) = channel_id.filter(|id| *id != 0) else {
+        *skip = Some(AdoptSkip::ChannelNotRestored);
         return Ok(false);
     };
     let proposal = Proposal {

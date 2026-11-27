@@ -1911,7 +1911,7 @@ async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does()
                 link,
             )]
             .into(),
-            successors: Default::default(),
+            ..Rotation::default()
         };
         std::fs::write(&boundary, serde_json::to_vec(&rotation).unwrap()).unwrap();
         let source = |file| delivery_evidence::source(&f.root, channel, &f.source.path, file);

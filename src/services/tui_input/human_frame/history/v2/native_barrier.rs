@@ -108,7 +108,16 @@ impl Settlement {
 }
 
 impl Registry {
+    #[cfg(test)]
     pub(crate) fn record_native_barrier(&self, proof: &Barrier) -> Result<bool, String> {
+        self.record_scoped_native_barrier(proof, &[])
+    }
+
+    pub(crate) fn record_scoped_native_barrier(
+        &self,
+        proof: &Barrier,
+        devices: &[u64],
+    ) -> Result<bool, String> {
         proof.validate(&proof.namespace, &proof.ticket)?;
         self.native_transaction_checked(
             &proof.namespace,
@@ -139,18 +148,7 @@ impl Registry {
                     .source
                     .as_ref()
                     .ok_or("barrier source missing")?;
-                let registrations: Vec<_> = evidence_registrations(snapshot, true)?
-                    .into_iter()
-                    .filter(|r| {
-                        r.ticket.channel_id == proof.ticket.channel_id
-                            && r.ticket.source.as_ref().is_none_or(|s| {
-                                s.provider == source.provider
-                                    && s.session_id == source.session_id
-                                    && s.transcript == source.transcript
-                                    && s.file == source.file
-                            })
-                    })
-                    .collect();
+                let registrations = scoped_registrations(snapshot, &proof.ticket, devices)?;
                 if registrations_fingerprint(&registrations)? != proof.registrations_fingerprint
                     || !registrations.iter().any(|r| {
                         r.namespace == proof.namespace

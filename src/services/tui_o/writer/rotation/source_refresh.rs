@@ -1,5 +1,26 @@
 use super::*;
 
+impl BindingEvent {
+    pub(crate) fn source_refresh(&self) -> Option<(&SourceId, &SourceId)> {
+        match &self.record {
+            BindingRecord::Bound {
+                old,
+                new: BindingTarget::Source(new),
+                cause: BindingCause::SameSessionVerified,
+                evidence,
+                ..
+            } if self.provider == ShadowProvider::Claude
+                && !self.tmux_session.is_empty()
+                && !self.execution_nonce.is_empty()
+                && matches!(evidence.hook_event.as_str(), "user_prompt_submit" | "stop") =>
+            {
+                Some((old.as_ref().unwrap_or(new), new))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl<B: BindingEvents> Sources<B> {
     pub(super) fn refresh_binding<P: DiscordPort, L: DeliveryLease, A: AlarmSink>(
         &mut self,

@@ -31,12 +31,20 @@ stateDiagram-v2
 | Restart before durable intent | No cursor transfer. | Recovery keeps only the original key and cursor frontier. The next application can retry. |
 | Restart after durable intent | No cursor transfer. | Recovery installs only the new key before allowing reads. The checkpoint can still lag. The saved frontier produces zero re-posts. |
 
-TLC 1.7.4 ran five safety invariants and the `OwnedHookSettles` and
-`CompactSettles` liveness properties for both configs. The before config
-breaks only `OwnedHookSettles`. The after config passes all seven rules.
-Weak fairness assumes hook intake, staging, intent commit, application, capture, observation,
-notice settlement, outcome recording and inflight cleanup can each finish
-when enabled. One restart can discard an observed proof at any point.
+TLC 1.7.4 ran three configs. `Before` disables the original refresh and
+breaks `OwnedHookSettles`. `ReviewBefore` keeps refresh enabled and breaks
+`OldTicketSettles` and `BootStopApplied`. `After` passes all six safety
+invariants and all four liveness properties.
+
+| Review case | ReviewBefore | After |
+| --- | --- | --- |
+| Keyed ticket survives boot with the old dev | Settlement stays pending after the current cursor is installed. | Prefix-proven lineage admits the original ticket. It records one outcome and the matching inflight row clears. Existing output is posted zero times. |
+| Same UUID Stop arrives before pane recovery | The receiver consumes the Stop and never applies its refresh. | The receiver keeps the request retryable. After restoration the same request applies the refresh. |
+
+Weak fairness assumes hook intake, pane restoration, staging, intent commit,
+application, capture, observation, notice settlement, outcome recording and
+inflight cleanup can each finish when enabled. One restart can discard an
+observed proof at any point.
 
 Both key files can exist while an intent is committed. The model withholds
 observation during that phase and requires one matching key whenever

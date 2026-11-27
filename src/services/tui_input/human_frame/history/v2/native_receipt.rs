@@ -1,12 +1,23 @@
 //! Membership confirms delivery only; terminal evidence still needs its separate result CAS.
 use super::*;
 impl Registry {
+    #[cfg(test)]
     pub(crate) fn try_native_receipt(
         &self,
         namespace: &str,
         ticket: &Ticket,
-        (kind, row, range, through, observed_hash): (&str, &str, (u64, u64), u64, &str),
+        receipt: (&str, &str, (u64, u64), u64, &str),
         expected: &str,
+    ) -> Result<(), String> {
+        self.try_scoped_native_receipt(namespace, ticket, receipt, (expected, &[]))
+    }
+
+    pub(crate) fn try_scoped_native_receipt(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+        (kind, row, range, through, observed_hash): (&str, &str, (u64, u64), u64, &str),
+        (expected, devices): (&str, &[u64]),
     ) -> Result<(), String> {
         let source = ticket
             .source
@@ -46,25 +57,14 @@ impl Registry {
             {
                 return Err("native receipt entry changed".into());
             }
-            let registrations: Vec<_> = evidence_registrations(state, true)?
-                .into_iter()
-                .filter(|r| {
-                    r.ticket.channel_id == ticket.channel_id
-                        && r.ticket.source.as_ref().is_none_or(|s| {
-                            s.provider == source.provider
-                                && s.session_id == source.session_id
-                                && s.transcript == source.transcript
-                                && s.file == source.file
-                        })
-                })
-                .collect();
+            let registrations = scoped_registrations(state, ticket, devices)?;
             if registrations_fingerprint(&registrations)? != expected {
                 return Err("native receipt registrations superseded".into());
             }
             let event_key = format!("{kind}:{row}");
             if let Some((owner, existing)) = state.entries().find(|(_, e)| {
                 e.path == entry.path
-                    && e.file == entry.file
+                    && same_registered_file(e.file, entry.file, devices)
                     && e.events.iter().any(|event| event.key == event_key)
             }) {
                 return if owner.is_some_and(|r| r.namespace == namespace && r.key == ticket.key)

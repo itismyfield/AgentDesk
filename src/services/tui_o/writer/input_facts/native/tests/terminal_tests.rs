@@ -260,6 +260,7 @@ fn native_8148_terminal_raw_eof_closes_only_the_open_run_at_the_capture_cursor()
         let mut evidence = evidence.clone();
         evidence.raw = Some(raw.clone());
         let observed = Observation {
+            devices: Vec::new(),
             binding: f.binding.clone(),
             generation: 1,
             binding_seq: 1,

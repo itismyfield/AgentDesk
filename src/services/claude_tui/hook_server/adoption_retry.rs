@@ -262,7 +262,7 @@ pub(crate) fn observe_launch_hook(
     hook: &HookSignal,
     envelope: Option<&HookBindingEnvelope>,
     reclaim: bool,
-) -> Result<(), NotDurableReason> {
+) -> Result<Option<AdoptSkip>, NotDurableReason> {
     let tmux = observation_pane(session_id, envelope);
     with_tmux_source_authority(&tmux, |authority| {
         if !captured_pane_matches(&tmux, envelope) {
@@ -279,18 +279,23 @@ pub(crate) fn observe_launch_hook(
         }
         let refresh =
             nonce.is_some() && matches!(hook.event.as_str(), "user_prompt_submit" | "stop");
-        let reclaimed =
-            observe_current_claude_hook(authority, session_id, hook, refresh).map_err(|error| {
-                tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
-                NotDurableReason::Append
-            })?;
+        let mut skip = None;
+        let reclaimed = observe_current_claude_hook(
+            authority, session_id, hook, refresh, &mut skip,
+        )
+        .map_err(|error| {
+            tracing::warn!(tmux, %error, "Claude launch source verification not persisted");
+            NotDurableReason::Append
+        })?;
         if reclaim
             && reclaimed
             && front(&tmux).is_some_and(|f| f.pending && f.payload_session_id != session_id)
         {
             pop_front(&tmux);
         }
-        Ok(())
+        let managed = matches!(envelope.map(|e| &e.context),
+            Some(CapturedContext::Captured(ctx)) if ctx.channel_id.is_some());
+        Ok(skip.filter(|_| refresh && managed))
     })
 }
 

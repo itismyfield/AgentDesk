@@ -101,6 +101,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 namespace,
                 ticket,
                 frame_hash,
+                devices,
                 exact_frame_hash,
                 receipts,
                 candidate,
@@ -114,6 +115,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 receipts,
                 candidate,
                 barrier,
+                devices,
             )
         })
         .collect();
