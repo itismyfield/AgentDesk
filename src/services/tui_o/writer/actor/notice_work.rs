@@ -401,6 +401,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 payload,
                 index: 0,
                 notice_origin: Some(origin),
+                reply: None,
             };
             let owners = std::mem::take(&mut self.writer.notice_owners);
             let admission = admit_notice(&piece, self.writer.store(), Some(&owners), |_| ());
