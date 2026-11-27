@@ -578,7 +578,8 @@ fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {
                 (shared.token_hash.clone(), node.clone());
             owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
             let mut bound = tests::record(&owner, "nonce-effort", HostedState::Bound);
-            bound.expected.as_mut().unwrap().binding_provider = owner.provider.clone();
+            // A Bound record is read only when its process evidence names the owner's provider.
+            bound.expected.as_mut().unwrap().binding_provider = "codex".into();
             let at = bound.location.as_mut().unwrap();
             (at.execution_node, at.endpoint_config_key) =
                 (node.clone(), format!("{node}-endpoint"));
