@@ -354,6 +354,7 @@ export interface DispatchedSession {
   name: string | null;
   department_id: string | null;
   linked_agent_id: string | null;
+  agent_id?: string | null;
   provider: CliProvider;
   model: string | null;
   status: DispatchedSessionStatus;
@@ -367,6 +368,7 @@ export interface DispatchedSession {
   department_name_ko?: string | null;
   department_color?: string | null;
   thread_channel_id?: string | null;
+  resolved_thread_channel_id?: string | null;
   guild_id?: string | null;
   channel_web_url?: string | null;
   channel_deeplink_url?: string | null;
