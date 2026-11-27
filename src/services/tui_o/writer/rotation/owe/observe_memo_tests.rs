@@ -226,7 +226,7 @@ fn a_reopened_or_replaced_source_never_answers_from_an_older_memo() {
             registrations: f.history.native_classification_registrations().unwrap(),
         };
         let native = native.as_ref().unwrap();
-        let observed = native.observe(channel, source, &origin, snapshot, None);
+        let observed = native.observe((channel, &[]), source, &origin, snapshot, None);
         (observed.unwrap().0.evidence, native.seeds[source].reduced())
     };
     let old = f.binding.source.clone();
