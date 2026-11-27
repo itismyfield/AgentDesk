@@ -1,12 +1,12 @@
 //! A fresh routine's actual starter receipt, through ownership publication and reset/start.
 use super::super::review_tests::Rig;
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::router::message_handler::{
     CLAUDE_LEGACY_PROBE, INPUT_EFFECT_PROBE, InputEffectProbe,
 };
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE;
-use crate::services::routines::RoutineAgentExecutor;
 use crate::services::routines::store::{NewRoutine, NextDueAtUpdate, RoutineStore};
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -256,7 +256,7 @@ async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
         })
         .await
         .unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry.clone()), 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry.clone()), 60);
     let mut receipt = String::new();
     let mut tmux_name = String::new();
     let mut old_run = String::new();

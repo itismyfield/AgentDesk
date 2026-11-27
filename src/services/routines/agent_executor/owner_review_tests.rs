@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::engine_runtime::health_port::owner_input::{OwnerInput, owner_input_actor};
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, ChannelMailboxRegistry};
 
 async fn accepted_fixture() -> (
@@ -35,7 +36,7 @@ async fn accepted_fixture() -> (
         .await
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 60);
     OWNER
         .scope(
             handle.clone(),

@@ -2,6 +2,7 @@
 //! another provider's, and a mid-run PATCH that waits for the next claim.
 use super::agent_executor_owner_input::settled_generation;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::health::{HealthRegistry, register_bot_auth_for_tests};
 use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::routines::agent_executor::owner_hook_tests::OWNER;
@@ -115,7 +116,7 @@ async fn a_chosen_provider_and_model_reach_the_launch_on_that_providers_channel_
         .execute(&pool)
         .await
         .unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry), 60);
     let run = executor.start_agent_run(
         &store,
         claimed,
@@ -160,7 +161,7 @@ async fn a_provider_the_agent_has_no_channel_for_fails_the_run_instead_of_runnin
         .execute(&pool)
         .await
         .unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), Some(registry), 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), Some(registry), 60);
     let outcome = start(&executor, &store, &id).await;
     assert_eq!(outcome.status, "failed", "{outcome:?}");
     let error = outcome.error.unwrap_or_default();
@@ -174,7 +175,7 @@ async fn a_patch_applies_from_the_next_claim_and_an_unset_choice_keeps_the_prima
     let pc = ("pc", "claude", None, Some("7270"), Some("7271"));
     let (db, pool, store) =
         setup(&[pc, ("other", "claude", None, Some("7280"), Some("7281"))]).await;
-    let executor = RoutineAgentExecutor::new(
+    let executor = build_routine_agent_executor(
         Arc::new(pool.clone()),
         Some(Arc::new(HealthRegistry::new())),
         60,
@@ -234,7 +235,7 @@ async fn a_patch_applies_from_the_next_claim_and_an_unset_choice_keeps_the_prima
 async fn a_fresh_routine_on_a_provider_without_process_turns_starts_a_channel_session_pg() {
     let (db, pool, store) = setup(&[("ag", "antigravity", Some("7290"), None, None)]).await;
     let registry = Some(Arc::new(HealthRegistry::new()));
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), registry, 60)
         .with_headless_fresh_agents(true);
     let id = attach(&store, "ag", "fresh", ProviderChoice::default()).await;
     let outcome = start(&executor, &store, &id).await;

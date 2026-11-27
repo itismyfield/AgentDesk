@@ -6,11 +6,11 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 
-use super::RoutineDiscordLogger;
 use super::execution_mode::{ExecutionDefinition, RoutineExecutionMode};
 use super::runtime::RoutineRunOutcome;
 use super::store::{NewRoutine, RoutinePatch, RoutineStore};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::discord::health::routine_ports::build_routine_discord_logger;
 
 fn store(pool: &PgPool) -> RoutineStore {
     RoutineStore::new_with_timezone_and_checkpoint_limit(
@@ -119,7 +119,7 @@ const INCIDENT: &str = "routine_failure_incident";
 async fn headless_streak_notifies_n_times_then_one_incident_then_merged_notices_pg() {
     let (db, pool, store) = setup().await;
     let id = headless(&store, "quiet", 3).await;
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
 
     // Two pollers closing the same run store one failure and one event.
     let first = claim(&store).await;
@@ -240,7 +240,7 @@ async fn thread_mode_runs_reserve_no_headless_events_and_headless_stalls_go_prim
         .await
         .unwrap();
     let paused = store.get_routine(&id).await.unwrap().expect("routine");
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let status = logger.log_stale_paused(&store, &paused, 7200, 86_400).await;
     assert_eq!(status.status, "ok", "{status:?}");
     assert_eq!(
@@ -259,7 +259,7 @@ async fn thread_mode_runs_reserve_no_headless_events_and_headless_stalls_go_prim
 async fn a_headless_routine_logs_no_lifecycle_event_and_no_census_verdict_pg() {
     use super::RoutineLifecycleEvent;
     let (db, pool, store) = setup().await;
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let census = super::legacy_body_census::SCRIPT_REF;
     let definition = ExecutionDefinition {
         mode: RoutineExecutionMode::Headless,
@@ -361,7 +361,7 @@ async fn a_headless_routine_logs_no_lifecycle_event_and_no_census_verdict_pg() {
 #[tokio::test(flavor = "current_thread")]
 async fn a_headless_run_recovered_after_a_restart_posts_nothing_in_a_saved_thread_pg() {
     let (db, pool, store) = setup().await;
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let definition = ExecutionDefinition {
         mode: RoutineExecutionMode::Headless,
         runner: json!({"kind": "quickjs", "script_ref": "nightly.js"}),
@@ -424,7 +424,7 @@ async fn every_notice_of_a_run_its_thread_failed_goes_to_the_primary_channel_pg(
     std::fs::write(token, "fixture-token").unwrap();
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let (db, pool, store) = setup().await;
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     let census = super::legacy_body_census::SCRIPT_REF;
 
     // The routine kept a thread. Its run ends for each way a thread can fail, or (control) for

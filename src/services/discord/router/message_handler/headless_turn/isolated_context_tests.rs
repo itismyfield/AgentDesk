@@ -2,6 +2,7 @@
 //! channel's session, clear boundary and session row stay as they were from start to turn end.
 use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard::tests::{ModeTmux, Recorder, Tmux, api_child};
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::health::{
     HealthRegistry, reserve_headless_agent_turn,
     start_reserved_headless_agent_turn_with_owner_channel,
@@ -525,7 +526,7 @@ async fn routine_claim_with(
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
     assert_eq!(claimed.routine_id, routine_id);
     let registry = Some(fixture.registry.clone());
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), registry, 60)
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), registry, 60)
         .with_headless_fresh_agents(true);
     (store, executor, claimed, routine_id)
 }

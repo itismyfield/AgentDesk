@@ -275,16 +275,10 @@ impl RoutineAgentExecutor {
                 PaneLiveness::Live | PaneLiveness::ProbeError => return None,
             };
         let channel_id = recorded_channel_id(result_json.get("channel_id"));
-        crate::services::discord::host_key_derivation::routine_session_failure_admitted(
-            self.health_registry.as_deref(),
-            &self.pool,
-            &provider,
-            channel_id,
-            &session_name,
-            observed,
-        )
-        .await
-        .then_some(message)
+        self.failure_admission
+            .admit(&self.pool, &provider, channel_id, &session_name, observed)
+            .await
+            .then_some(message)
     }
 }
 
