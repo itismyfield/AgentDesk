@@ -3,6 +3,8 @@ import { ChevronDown, RotateCcw, X } from "lucide-react";
 import type { Department, DispatchedSession } from "../../types";
 import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
+import { computePromptCacheStatus, formatPromptCacheLabel } from "../../lib/agentObservability";
+import { useNow } from "../../lib/useNow";
 import { Button } from "../../kit/free/button-clean";
 import { IconButton } from "../../kit/free/icon-button-clean";
 import AgentPersona from "../AgentPersona";
@@ -12,7 +14,7 @@ import type { Translator } from "../agent-manager/types";
 import { SessionInfoCard } from "./SessionInfoCard";
 import {
   canCleanupStaleIdleSession, canReconcileStaleSession, cleanupStaleIdleSession, compareSessions,
-  isStaleIdleSession, reconcileStaleSessionTurn, sessionLastActivityTs, sessionPersona,
+  isLiveSessionStatus, isStaleIdleSession, reconcileStaleSessionTurn, sessionLastActivityTs, sessionPersona,
   sessionStateText, sessionSummaryCounts, sessionTitle,
 } from "./SessionPanelModel";
 
@@ -28,6 +30,7 @@ interface Props {
 /** Live sessions no agent owns, one row each; a row opens live output preview + server fields, and stale rows offer one-click reconciliation. */
 export function SessionPanel({ sessions, locale, tr, isKo, onSessionsChange }: Props) {
   const baseId = useId();
+  const cacheNow = useNow(5_000);
   const [open, setOpen] = useState<string | null>(null);
   const [reconcilingKey, setReconcilingKey] = useState<string | null>(null);
   const [reconciledKeys, setReconciledKeys] = useState<Record<string, string>>({});
@@ -99,6 +102,16 @@ export function SessionPanel({ sessions, locale, tr, isKo, onSessionsChange }: P
                     <span className="block truncate text-sm leading-5 font-medium" title={session.session_key}>{title}</span>
                     <span className="block truncate text-xs leading-4 text-(--fg-muted)" title={line}>{line}</span>
                   </span>
+                  {(() => {
+                    const cache = isLiveSessionStatus(session.status)
+                      ? computePromptCacheStatus({ provider: session.provider, lastActivityMs: last, isWorking: session.status === "working" || session.status === "turn_active", nowMs: cacheNow })
+                      : null;
+                    return cache && cache.phase !== "cold" ? (
+                      <Chip tone={cache.phase === "expiring" ? "warn" : "info"} className="tabular-nums" data-testid={`session-cache-chip-${session.id}`}>
+                        {formatPromptCacheLabel(cache, tr)}
+                      </Chip>
+                    ) : null;
+                  })()}
                   {note === "ok" ? <Chip tone="ok">{tr("정리됨", "Reconciled")}</Chip> : stale ? <Chip tone="warn">{tr("7일 넘게 멈춤", "Idle 7+ days")}</Chip> : null}
                   <span className="hidden w-20 shrink-0 truncate text-right text-xs text-(--fg-dim) sm:block">{getProviderMeta(session.provider).label}</span>
                   <ChevronDown size={16} aria-hidden className={cn("shrink-0 text-(--fg-muted) transition-transform motion-reduce:transition-none", expanded && "rotate-180")} />

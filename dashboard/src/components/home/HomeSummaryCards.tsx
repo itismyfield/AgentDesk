@@ -3,6 +3,7 @@ import { useCallback, useId, useMemo, useState, type CSSProperties } from "react
 import { useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorLabels } from "../../kit/pro/agent-monitor";
+import { formatLoopSummary } from "../../lib/agentObservability";
 import { useNow } from "../../lib/useNow";
 import type { Agent } from "../../types";
 import AgentPersona, { type PersonaState } from "../AgentPersona";
@@ -11,9 +12,9 @@ import {
 } from "../common/KitPrimitives";
 import { formatClock } from "../dashboard/routineModel";
 import {
-  AGENT_STATES, CAMPAIGNS_PATH, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, monitorView,
+  AGENT_STATES, CAMPAIGNS_PATH, QUEUE_PATH, agentLine, agentName, agentStateLabel, buildSystemRows, describeHealthReasons, entryPromptCacheChip, monitorView,
   systemNeedsAttention, todoHeaderLink, todoStatus, unlinkedMonitorView,
-  type HomeAgent, type HomeAgentState, type HomeHealth, type HomeMementoStatus, type HomeTone, type MonitorView,
+  type HomeAgent, type HomeAgentState, type HomeHealth, type HomeMementoStatus, type HomeTone, type HomeTurn, type MonitorView,
   type SourceState, type TodoItem, type Tr, type TriageAlert,
 } from "./homeModel";
 import { loadHealthDetailOnDemand, loadHomeHealth, loadHomeMemento, useAgentTurns, usePolled, type HomeCampaigns, type Loaded } from "./useHomeData";
@@ -375,8 +376,9 @@ const PERSONA: Record<HomeAgentState, PersonaState> = { working: "working", back
 const LEGEND_TONE: Record<HomeAgentState, HomeTone> = { working: "ok", background: "warn", resting: "neutral", noSession: "neutral", unknown: "neutral" };
 const DESKTOP_SHOWN = 7;
 
-function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo: boolean; onOpen: (entry: HomeAgent) => void }) {
+function AgentCell({ entry, tr, isKo, now, onOpen }: { entry: HomeAgent; tr: Tr; isKo: boolean; now: number; onOpen: (entry: HomeAgent) => void }) {
   const line = agentLine(entry, tr, isKo);
+  const cacheChip = entryPromptCacheChip(entry, tr, now);
   return (
     <RowButton className="min-h-14 gap-2.5 py-2.5 sm:py-3" onClick={() => onOpen(entry)}>
       <span aria-hidden className="flex"><AgentPersona agent={entry.agent} state={PERSONA[entry.state]} size={32} /></span>
@@ -384,6 +386,11 @@ function AgentCell({ entry, tr, isKo, onOpen }: { entry: HomeAgent; tr: Tr; isKo
         <span className="block truncate text-sm leading-5 font-medium">{agentName(entry.agent, isKo)}</span>
         <Cap className="mt-0.5 block truncate" title={line}>{line}</Cap>
       </span>
+      {cacheChip ? (
+        <Chip tone={cacheChip.expiring ? "warn" : "info"} className="shrink-0 tabular-nums" data-testid={`home-agent-cache-${entry.agent.id}`}>
+          {cacheChip.label}
+        </Chip>
+      ) : null}
     </RowButton>
   );
 }
@@ -422,7 +429,7 @@ function AgentMonitors({
       {items.map(({ entry, view }) => {
         const canCancel = Boolean(onStopTurn && !entry.agent.id.startsWith("dispatched:"));
         return (
-          <li key={entry.agent.id} className="min-w-0" data-testid={`home-agent-monitor-${entry.agent.id}`}>
+          <li key={entry.agent.id} className="flex min-w-0 flex-col gap-1.5" data-testid={`home-agent-monitor-${entry.agent.id}`}>
             <AgentMonitor
               status="running"
               defaultFolded={isMobile}
@@ -436,6 +443,14 @@ function AgentMonitors({
               labels={labels}
               style={{ width: "100%" }}
             />
+            {view.loop ? (
+              <div data-testid={`home-agent-loop-${entry.agent.id}`} className="flex min-w-0 items-center gap-2 rounded-(--r-sm) bg-(--bg-1) px-2.5 py-1.5 text-xs">
+                <Chip tone={view.loop.pattern === "contract" ? "err" : "warn"}>{tr("루프 의심", "Looping")}</Chip>
+                <span className="min-w-0 truncate text-(--fg-dim)" title={formatLoopSummary(view.loop, tr)}>
+                  {formatLoopSummary(view.loop, tr)}
+                </span>
+              </div>
+            ) : null}
           </li>
         );
       })}
@@ -446,6 +461,7 @@ function AgentMonitors({
 /** Agents + unlinked lanes, ordered working -> background/stalled -> recent activity, with mobile folded monitors and turn stop. */
 export function HomeAgentsCard({
   entries: everyone,
+  turns: externalTurns,
   isMobile,
   tr,
   isKo,
@@ -453,6 +469,7 @@ export function HomeAgentsCard({
   onStopAgentTurn,
 }: {
   entries: HomeAgent[];
+  turns?: Map<string, HomeTurn>;
   isMobile: boolean;
   tr: Tr;
   isKo: boolean;
@@ -461,11 +478,13 @@ export function HomeAgentsCard({
 }) {
   const navigate = useNavigate();
   const [expanded, setExpanded] = useState(false);
+  const cellNow = useNow(15_000);
   const workingAgentIds = useMemo(
     () => everyone.filter((entry) => entry.state === "working" && !entry.agent.id.startsWith("dispatched:")).map((entry) => entry.agent.id),
     [everyone],
   );
-  const turns = useAgentTurns(workingAgentIds);
+  const internalTurns = useAgentTurns(externalTurns ? [] : workingAgentIds);
+  const turns = externalTurns ?? internalTurns;
   const monitors = useMemo(
     () => everyone.flatMap((entry) => {
       const view = entry.unlinkedSession
@@ -534,7 +553,7 @@ export function HomeAgentsCard({
           ) : null}
           {shown.map((entry) => (
             <li key={entry.agent.id} className="border-b border-[var(--line-soft)] last:border-b-0">
-              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={handleOpenEntry} />
+              <AgentCell entry={entry} tr={tr} isKo={isKo} now={cellNow} onOpen={handleOpenEntry} />
             </li>
           ))}
           {folds ? (
@@ -554,7 +573,7 @@ export function HomeAgentsCard({
         <ul className="m-0 -mr-px -mb-px grid list-none grid-cols-4 border-t border-[var(--line-soft)] p-0">
           {shown.map((entry) => (
             <li key={entry.agent.id} className="min-w-0 border-r border-b border-[var(--line-soft)]">
-              <AgentCell entry={entry} tr={tr} isKo={isKo} onOpen={handleOpenEntry} />
+              <AgentCell entry={entry} tr={tr} isKo={isKo} now={cellNow} onOpen={handleOpenEntry} />
             </li>
           ))}
           {folds ? (
