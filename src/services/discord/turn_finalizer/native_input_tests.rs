@@ -3064,6 +3064,17 @@ impl SupplyCapture {
         through: u64,
         prefix_hash: String,
     ) -> Self {
+        let dev = f.ticket.source.as_ref().unwrap().file[0];
+        Self::resume_at_dev(f, root, enabled, (through, prefix_hash), dev)
+    }
+    /// Binds the fixture transcript under `dev`, as a writer that stored it before a renumber.
+    fn resume_at_dev(
+        f: &Fixture,
+        root: &std::path::Path,
+        enabled: bool,
+        (through, prefix_hash): (u64, String),
+        dev: u64,
+    ) -> Self {
         use crate::services::tui_o::{
             store::{InitSource, Initialized, OStore, StoreConfig},
             writer::{
@@ -3077,7 +3088,7 @@ impl SupplyCapture {
         let source = SourceId {
             session_id: s.session_id.clone(),
             path: s.transcript.clone(),
-            dev: s.file[0],
+            dev,
             ino: s.file[1],
         };
         let channel = f.ticket.channel_id;
@@ -5686,3 +5697,6 @@ mod native_receipt_tests;
 
 #[path = "native_memo_port_tests.rs"]
 mod memo_port;
+
+#[path = "native_renumber_tests.rs"]
+mod renumber;
