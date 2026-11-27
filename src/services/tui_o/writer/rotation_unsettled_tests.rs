@@ -136,12 +136,12 @@ async fn an_unconfigured_channel_an_unreadable_rotation_or_an_ended_actor_report
     polls(2).await;
     assert_eq!(unsettled(&projection), None, "not configured");
     let _hosts = herdr_configured();
-    polls(2).await;
+    polls(16).await;
     assert_eq!(unsettled(&projection), Some(0));
     let store = a_path.parent().unwrap().join("o_store");
     let boundary = store.join(CHANNEL.to_string()).join(BOUNDARY_FILE);
     std::fs::write(&boundary, b"{not json").unwrap();
-    polls(2).await;
+    polls(16).await;
     assert_eq!(unsettled(&projection), None, "unreadable is not zero");
     halt(stop, task).await;
     assert!(

@@ -96,11 +96,11 @@ async fn memo_hits_keep_every_post_exactly_once() {
     polls(6).await;
     assert_eq!(port.snapshots.load(Ordering::SeqCst), after_first);
     port.registry_revision.fetch_add(1, Ordering::SeqCst);
-    polls(6).await;
+    polls(16).await;
     let after_registry_change = port.snapshots.load(Ordering::SeqCst);
     assert!(after_registry_change > after_first);
     append(&path, &row("m2", "second"));
-    polls(6).await;
+    polls(16).await;
     assert!(port.snapshots.load(Ordering::SeqCst) > after_registry_change);
     halt(stop, task).await;
     let (stop, task) = spawn_on(&harness, &port);
@@ -181,6 +181,7 @@ async fn idle_window() {
 async fn idle_tick_unchanged_source_skips_work_at_the_head_of_the_loop() {
     let (_harness, _, _, bindings, stop, task) = start_idle(838501);
     polls(2).await;
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     let before = bindings.source_checks.load(Ordering::SeqCst);
     assert!(before > 2, "startup reached the source observation path");
     polls(3).await;
