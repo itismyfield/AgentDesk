@@ -92,7 +92,7 @@ pub async fn enqueue_draft_notice(
 
 // Test seams for the draft-notice test mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn draft_notice_event_for_test(
+pub fn draft_notice_event_for_test(
     channel: u64,
     original: Option<(u64, u64)>,
 ) -> Option<String> {
@@ -100,7 +100,7 @@ pub(crate) fn draft_notice_event_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn enqueue_draft_notice_for_test(
+pub async fn enqueue_draft_notice_for_test(
     pool: &sqlx::PgPool,
     channel: u64,
     event: &str,

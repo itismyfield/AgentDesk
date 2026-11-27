@@ -8,8 +8,8 @@ mod project_trust;
 pub use launch_policy::prepare_codex_herdr_launch;
 #[cfg(unix)]
 pub(super) use launch_policy::{
-    preflight_codex_tui_turn_with_policy, prepare_codex_herdr_launch,
-    prepare_codex_tui_incarnation_with_policy, tui_preflight_with_policy,
+    preflight_codex_tui_turn_with_policy, prepare_codex_tui_incarnation_with_policy,
+    tui_preflight_with_policy,
 };
 #[cfg(unix)]
 pub use launch_policy::{successor_hooks_ready, validate_herdr_fresh_argv};

@@ -667,7 +667,7 @@ fn session_started(
             return Err(missing());
         }
         if left.is_zero() {
-            let cause = crate::services::turn_orchestrator::RetryWaitCause::OwnLaunchTimeout {
+            let cause = crate::domain::retry_wait::RetryCause::OwnLaunchTimeout {
                 nonce: nonce.to_owned(),
             };
             return Err(cause.refusal(&missing()));

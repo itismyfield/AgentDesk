@@ -225,7 +225,7 @@ pub fn startup_for_test(witness: ServerWitness) -> super::StartupProof {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn proof_for_test(witness: ServerWitness) -> NextRestartProof {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");

@@ -34,8 +34,6 @@ use crate::services::tui_prompt_dedupe::codex_verified::provenance::dormant::Owe
 mod notice_migration;
 #[path = "input_notices/retry.rs"]
 mod notice_retry;
-#[cfg(any(test, feature = "test-support"))]
-mod test_access;
 mod usage_footer;
 // Test seams for the writer tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]

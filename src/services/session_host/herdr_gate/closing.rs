@@ -7,7 +7,7 @@ use super::execution_fences;
 
 /// Whether a termination shut execution `nonce`'s fence; the mark outlives the fence's targets
 /// and is lost only with the process.
-pub(crate) fn execution_closing(nonce: &str) -> bool {
+pub fn execution_closing(nonce: &str) -> bool {
     let fences: Vec<_> = execution_fences()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)

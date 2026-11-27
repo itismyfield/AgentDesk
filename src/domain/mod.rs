@@ -22,6 +22,7 @@ pub mod process_incarnation;
 pub use adk_base::domain::provider;
 pub use adk_base::domain::provider_auth_profile;
 pub mod replay_evidence;
+pub mod retry_wait;
 pub use adk_base::domain::session_identity;
 pub mod tmux_cleanup;
 pub use adk_base::domain::tool_text;

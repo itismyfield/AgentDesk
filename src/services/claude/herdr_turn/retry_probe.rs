@@ -9,7 +9,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedOwner, HostedRecord, HostedState,
 };
 use crate::services::claude_tui::busy_inject::Screen;
-use crate::services::turn_orchestrator::RetryWaitCause as Cause;
+use crate::domain::retry_wait::RetryCause as Cause;
 
 /// One read of the cause a retry wait holds on.
 pub(crate) type CauseRead = Box<dyn FnMut() -> Screen + Send>;
