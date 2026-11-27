@@ -1,6 +1,6 @@
 ------------------------ MODULE HookTranscriptRefresh ------------------------
 EXTENDS Naturals
-CONSTANTS Refresh, KeepTicket, RetryStop
+CONSTANTS Refresh, KeepTicket, RetryStop, RequireRegisteredPin
 VARIABLES scenario, hook, binding, seq, cursor, checkpoint, proof, proofSeq,
           notice, outcome, inflight, posts, restarted, intent, diskKeys, ready
 vars == <<scenario, hook, binding, seq, cursor, checkpoint, proof, proofSeq,
@@ -16,7 +16,10 @@ SameFile(a, b) == a.session = b.session /\ a.path = b.path /\ a.ino = b.ino
 Start(source) == [source |-> source, through |-> 0, prefix |-> "empty"]
 Saved == [source |-> Old, through |-> 17, prefix |-> "old-prefix"]
 
-Init == /\ scenario \in {"renumber", "compact", "foreign", "oldTicket", "bootStop"}
+Unregistered == {"noRegisteredStat", "replacedRegisteredInode"}
+FirstPinCases == Unregistered \cup {"foreignFirstRecord", "registeredFirstPin"}
+
+Init == /\ scenario \in (FirstPinCases \cup {"renumber", "compact", "foreign", "oldTicket", "bootStop"})
         /\ hook = "waiting" /\ binding = Old /\ seq = 1
         /\ cursor = Saved /\ checkpoint = 1
         /\ proof = Old /\ proofSeq = 1
@@ -27,11 +30,13 @@ Init == /\ scenario \in {"renumber", "compact", "foreign", "oldTicket", "bootSto
 
 \* The pane name and incarnation have been checked before this durable log append.
 Hook == /\ hook \in {"waiting", "retry"}
-        /\ hook' = CASE scenario = "foreign" -> "rejected"
+        /\ hook' = CASE scenario \in {"foreign", "foreignFirstRecord"} -> "rejected"
+                       [] scenario \in Unregistered /\ RequireRegisteredPin -> "rejected"
                        [] ready -> "accepted"
                        [] RetryStop -> "retry"
                        [] OTHER -> "lost"
-        /\ binding' = IF hook' = "accepted" /\ (scenario = "compact" \/ Refresh)
+        /\ binding' = IF hook' = "accepted" /\ scenario \notin FirstPinCases
+                           /\ (scenario = "compact" \/ Refresh)
                         THEN Candidate ELSE binding
         /\ seq' = IF binding' = binding THEN seq ELSE seq + 1
         /\ UNCHANGED <<scenario, cursor, checkpoint, proof, proofSeq,
@@ -117,4 +122,6 @@ CompactSettles == (scenario = "compact" /\ hook = "accepted")
                   ~> (~inflight /\ notice = "excluded" /\ posts = 1)
 OldTicketSettles == (scenario = "oldTicket" /\ checkpoint = 2) ~> (~inflight /\ outcome = 1)
 BootStopApplied == (scenario = "bootStop" /\ ready) ~> (cursor.source = Renumbered /\ checkpoint = 2)
+FirstPinIsVerified == scenario \in (Unregistered \cup {"foreignFirstRecord"}) => hook # "accepted"
+RegisteredPinAppears == (scenario = "registeredFirstPin") ~> (hook = "accepted")
 =============================================================================

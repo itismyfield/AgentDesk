@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Episode, Intent};
+use crate::services::tui_o::writer::binding::BindingEvents;
 use crate::services::turn_orchestrator::BindingIntent;
 use serde_json::json;
 
@@ -903,6 +904,28 @@ async fn actual_o_recovery(boot: bool) {
     db.drop().await;
 }
 
+struct FixtureBindingLog {
+    root: std::path::PathBuf,
+    inner: ChannelBindingLog,
+}
+
+impl BindingEvents for FixtureBindingLog {
+    fn binding_events_since(&self, channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
+        let _root = BindingRoot::enter(Some(&self.root));
+        self.inner.binding_events_since(channel, after)
+    }
+
+    fn binding_history(&self, channel: u64) -> Result<Vec<BindingEvent>, String> {
+        let _root = BindingRoot::enter(Some(&self.root));
+        self.inner.binding_history(channel)
+    }
+
+    fn subscribe(&self, channel: u64) -> tokio::sync::watch::Receiver<u64> {
+        let _root = BindingRoot::enter(Some(&self.root));
+        self.inner.subscribe(channel)
+    }
+}
+
 async fn finish_with_o(f: &Fixture, shared: &Arc<SharedData>) {
     use crate::services::discord::inflight;
     use crate::services::tui_o::{
@@ -945,10 +968,10 @@ async fn finish_with_o(f: &Fixture, shared: &Arc<SharedData>) {
         AnyLease,
         Alarms::default(),
     );
-    let bindings = Arc::new(ChannelBindingLog::new(
-        f.ticket.channel_id,
-        ShadowProvider::Claude,
-    ));
+    let bindings = Arc::new(FixtureBindingLog {
+        root: f._root.path().to_path_buf(),
+        inner: ChannelBindingLog::new(f.ticket.channel_id, ShadowProvider::Claude),
+    });
     let mut sources = Sources::new(
         f.ticket.channel_id,
         ShadowProvider::Claude,

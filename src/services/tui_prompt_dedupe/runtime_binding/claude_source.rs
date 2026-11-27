@@ -516,7 +516,11 @@ pub(crate) fn observe_current_claude_hook(
         opened: &opened,
     };
     candidate.promote_registered()?;
-    let source = if refresh {
+    // A refresh starts from a verified source; registration supplies the first pin.
+    let source = if refresh
+        && binding_events::pinned_source(channel_id, &tmux)?
+            .is_some_and(|pin| pin.session_id == session_id && pin.path == output)
+    {
         match candidate.check_path(true)?.0 {
             Checked::Verified(source) | Checked::Bound(Some(source)) => Some(source),
             Checked::Recheck => {

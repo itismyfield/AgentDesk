@@ -1974,6 +1974,7 @@ tui-o-turn-mode/CodexTakeoverRetryAll.cfg	CodexTakeover	NoEarlyConfirmation	-
 tui-o-writer/HookTranscriptRefreshAfter.cfg	HookTranscriptRefresh	-	-
 tui-o-writer/HookTranscriptRefreshBefore.cfg	HookTranscriptRefresh	-	OwnedHookSettles
 tui-o-writer/HookTranscriptRefreshReviewBefore.cfg	HookTranscriptRefresh	-	BootStopApplied,OldTicketSettles
+tui-o-writer/HookTranscriptRefreshUnregisteredBefore.cfg	HookTranscriptRefresh	FirstPinIsVerified	-
 tui-o-writer/NoticeEvidenceAfterDirect.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterOwned.cfg	NoticeEvidence	-	-
 tui-o-writer/NoticeEvidenceAfterPolicy.cfg	NoticeEvidence	-	-

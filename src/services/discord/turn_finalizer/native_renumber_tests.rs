@@ -1,11 +1,11 @@
-//! A transcript whose volume renumbered after the writer stored it: the hook's re-pin of the same
-//! file moves the writer onto the live identity, and only then does the native turn settle.
+//! Re-pinning a writer source keeps its captured prefix across a synthetic device change.
+//! The native history continues to stat the fixture file on its actual device.
 use super::*;
 use crate::services::tui_o::writer::binding::{
     BindingCause, BindingEvent, BindingEvidence, BindingRecord, BindingTarget,
 };
 
-/// The dev the writer stored before the renumber; the live stat names the fixture's own.
+/// Separates the fixture’s stored or reported writer device from the OS device.
 const STORED: u64 = 1 << 40;
 
 /// The re-pin a same-session hook logs once its stat finds the pinned file under a new dev.
@@ -101,6 +101,7 @@ async fn hook_refresh_applies_a_renumber_and_settles_the_native_turn_pg() {
     db.drop().await;
 }
 
+/// Restarts the application with the same execution nonce and a writer-only stat shift.
 #[tokio::test]
 async fn hook_refresh_settles_the_original_keyed_ticket_after_boot_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
