@@ -10,7 +10,10 @@ import { useKanban } from "../../contexts/KanbanContext";
 import { Button } from "../../kit/free/button-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { TextField } from "../../kit/free/text-field-clean";
+import { computePromptCacheStatus } from "../../lib/agentObservability";
+import { useNow } from "../../lib/useNow";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
+import { coerceTimestampMs } from "./kanban-utils";
 import { buildTodoItems, monitorView, type HomeAgentState, type HomeTurn } from "../home/homeModel";
 import { useAgentTurns } from "../home/useHomeData";
 import type { Translator } from "./types";
@@ -228,6 +231,16 @@ export function AgentInfoCardContent({
   const rawMonitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
   const activeProvider = resolveActiveAgentProvider(agent, workingSessions, rawMonitor?.role ?? liveTurn?.provider);
   const monitor = rawMonitor ? { ...rawMonitor, role: activeProvider } : null;
+  const cacheNow = useNow(activeProvider === "claude" ? 5_000 : 60_000);
+  const promptCache = useMemo(() => {
+    const latestSessionMs = live
+      .map((s) => coerceTimestampMs(s.last_seen_at) ?? coerceTimestampMs(s.connected_at))
+      .filter((t): t is number => t !== null && t > 0)
+      .reduce<number | null>((acc, cur) => (acc === null || cur > acc ? cur : acc), null);
+    const turnUpdatedMs = coerceTimestampMs(liveTurn?.updated_at);
+    const lastActivityMs = turnUpdatedMs && latestSessionMs ? Math.max(turnUpdatedMs, latestSessionMs) : turnUpdatedMs ?? latestSessionMs;
+    return computePromptCacheStatus({ provider: activeProvider, lastActivityMs, isWorking: working, nowMs: cacheNow });
+  }, [activeProvider, live, liveTurn?.updated_at, working, cacheNow]);
   const monitorSteps = useMemo(() => turnMonitorSteps(liveTurn, tr), [liveTurn, tr]);
   const confirmStopTurn = async () => {
     setStoppingTurn(true);
@@ -315,6 +328,7 @@ export function AgentInfoCardContent({
         summary={summary}
         monitor={monitor}
         steps={monitorSteps}
+        promptCache={promptCache}
         onOpenLog={openTurns}
         onStopTurn={working ? () => setConfirmStopOpen(true) : undefined}
         stoppingTurn={stoppingTurn}

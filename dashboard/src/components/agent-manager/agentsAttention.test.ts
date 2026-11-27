@@ -53,4 +53,38 @@ describe("buildAttention", () => {
     const rows = buildAttention({ agents: [agent("nova")], todo: [todo("card:c3", null)], failed: failures, cardsRead: true, tr, isKo: true });
     expect(rows.map(({ agent: { id }, reasons }) => [id, reasons.map((reason) => reason.chip)])).toEqual([["nova", ["판단 필요"]]]);
   });
+
+  it("surfaces a looping turn in attention reasons before stuck fallback", () => {
+    vi.useFakeTimers({ now: NOW });
+    const turns = new Map([
+      [
+        "ada",
+        {
+          status: "working",
+          started_at: "2026-11-23T11:55:00Z",
+          updated_at: "2026-11-23T11:59:00Z",
+          provider: "claude",
+          current_tool_line: "Read src/lib.rs",
+          tool_events: Array.from({ length: 4 }, () => ({
+            kind: "tool",
+            status: "success",
+            tool_name: "Read",
+            summary: "src/lib.rs",
+          })),
+        },
+      ],
+    ]);
+    const rows = buildAttention({
+      agents: [agent("ada", { visual_status_code: "stuck-suspect" })],
+      todo: [],
+      failed: [],
+      turns,
+      cardsRead: true,
+      tr,
+      isKo: true,
+    });
+    expect(rows).toHaveLength(1);
+    expect(rows[0].reasons[0].chip).toBe("루프 의심");
+    expect(rows[0].reasons[0].detail).toContain("Read 동일 호출이 4회");
+  });
 });
