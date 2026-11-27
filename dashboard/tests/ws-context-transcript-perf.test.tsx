@@ -8,6 +8,7 @@ import { getDashboardSocketTicket } from "../src/api/dashboardAuth";
 import * as apiClient from "../src/api/client";
 import { isNumericEventId, useDashboardSocket } from "../src/app/useDashboardSocket";
 import { COPY_WELL_PREVIEW_LIMIT, CopyWell } from "../src/components/agent-manager/CardDetailParts";
+import { shouldRefreshCard } from "../src/components/agent-manager/TurnTranscriptModel";
 import TurnTranscriptPanel, { buildTurnToolSummary } from "../src/components/agent-manager/TurnTranscriptPanel";
 import { KanbanProvider, useKanban } from "../src/contexts/KanbanContext";
 import { SettingsProvider, useSettings } from "../src/contexts/SettingsContext";
@@ -125,12 +126,12 @@ describe("useDashboardSocket performance & replay contract", () => {
     vi.useRealTimers();
   });
 
-  it("deduplicates older and duplicate numeric event.id frames and resets live id on credential change", async () => {
+  it("resets cursor across server restarts while deduplicating exact per-socket event.id frames (P1-1)", async () => {
+    vi.useFakeTimers();
     expect(isNumericEventId("12345")).toBe(true);
     expect(isNumericEventId("")).toBe(false);
-    expect(isNumericEventId("evt-1")).toBe(false);
+    expect(isNumericEventId("A:1")).toBe(false);
 
-    storage.setItem("adk:ws:last-event-id", "100");
     const onEvent = vi.fn();
     const domEvents: WSEvent[] = [];
     const onDomWs = (e: Event) => domEvents.push((e as CustomEvent<WSEvent>).detail);
@@ -149,29 +150,59 @@ describe("useDashboardSocket performance & replay contract", () => {
         await Promise.resolve();
       });
 
-      expect(MockWebSocket.instances).toHaveLength(1);
-      const ws = MockWebSocket.instances[0]!;
-      expect(ws.url).toContain("since=100");
+      // Socket 1 receives id "10000" -> delivered once, cursor becomes "10000".
+      const ws1 = MockWebSocket.instances[0]!;
+      await act(async () => {
+        ws1.emitOpen();
+        ws1.emitMessage({ type: "kanban_card_updated", id: "10000", payload: { id: "before-restart" } });
+      });
+      expect(storage.getItem("adk:ws:last-event-id")).toBe("10000");
+
+      // Socket 1 closes -> Socket 2 reconnects with since=10000 against restarted server (ids reset to 1).
+      await act(async () => {
+        ws1.close();
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      const ws2 = MockWebSocket.instances[1]!;
+      expect(ws2.url).toContain("since=10000");
 
       await act(async () => {
-        ws.emitOpen();
-        ws.emitMessage({ type: "connected" });
-        ws.emitMessage({ type: "kanban_card_updated", id: "99", payload: { id: "c-old" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "100", payload: { id: "c-dup-seed" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "101", payload: { id: "c-fresh" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "101", payload: { id: "c-replay-dup" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "9007199254740993", payload: { id: "c-big-1" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "9007199254740993", payload: { id: "c-big-dup" } });
-        ws.emitMessage({ type: "kanban_card_updated", id: "9007199254740994", payload: { id: "c-big-2" } });
+        ws2.emitOpen();
+        ws2.emitMessage({ type: "connected" });
+        ws2.emitMessage({ type: "kanban_card_updated", id: "1", payload: { id: "after-restart-1" } });
+        ws2.emitMessage({ type: "kanban_card_updated", id: "1", payload: { id: "after-restart-dup" } });
       });
 
       expect(onEvent.mock.calls.map(([ev]) => [ev.type, (ev.payload as { id?: string } | null)?.id ?? null])).toEqual([
+        ["kanban_card_updated", "before-restart"],
         ["connected", null],
-        ["kanban_card_updated", "c-fresh"],
-        ["kanban_card_updated", "c-big-1"],
-        ["kanban_card_updated", "c-big-2"],
+        ["kanban_card_updated", "after-restart-1"],
       ]);
-      expect(domEvents).toHaveLength(4);
+      expect(domEvents).toHaveLength(3);
+
+      // Socket 2 closes -> Socket 3 must reconnect with since=1 (cursor recovered to restarted server timeline).
+      await act(async () => {
+        ws2.close();
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      const ws3 = MockWebSocket.instances[2]!;
+      expect(ws3.url).toContain("since=1");
+
+      // Also verify literal non-numeric A:1 -> reconnect -> B:1 and numeric 1 -> reconnect -> 1 both deliver.
+      await act(async () => {
+        ws3.emitOpen();
+        ws3.emitMessage({ type: "kanban_card_updated", id: "A:1", payload: { id: "A:1" } });
+        ws3.emitMessage({ type: "kanban_card_updated", id: "A:1", payload: { id: "A:1-dup" } });
+        ws3.close();
+        await vi.advanceTimersByTimeAsync(1_500);
+      });
+      const ws4 = MockWebSocket.instances[3]!;
+      await act(async () => {
+        ws4.emitOpen();
+        ws4.emitMessage({ type: "kanban_card_updated", id: "B:1", payload: { id: "B:1" } });
+      });
+
+      expect(onEvent.mock.calls.slice(-2).map(([ev]) => (ev.payload as { id?: string }).id)).toEqual(["A:1", "B:1"]);
 
       await act(async () => {
         beginAuthentication("next-token");
@@ -182,7 +213,43 @@ describe("useDashboardSocket performance & replay contract", () => {
     }
   });
 
-  it("coalesces rapid bursts of WS messages and flushes pending event.id on close and cleanup", async () => {
+  it("delivers out-of-order concurrent broadcast frames (102 -> 101) without regressing since cursor (P1-2)", async () => {
+    vi.useFakeTimers();
+    const onEvent = vi.fn();
+
+    function Probe() {
+      useDashboardSocket(onEvent);
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<Probe />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const ws1 = MockWebSocket.instances[0]!;
+    await act(async () => {
+      ws1.emitOpen();
+      ws1.emitMessage({ type: "kanban_card_updated", id: "102", payload: { id: "card-102" } });
+      ws1.emitMessage({ type: "kanban_card_updated", id: "101", payload: { id: "card-101" } });
+      // Duplicates of both on the same socket must be ignored.
+      ws1.emitMessage({ type: "kanban_card_updated", id: "102", payload: { id: "card-102-dup" } });
+      ws1.emitMessage({ type: "kanban_card_updated", id: "101", payload: { id: "card-101-dup" } });
+    });
+
+    expect(onEvent.mock.calls.map(([ev]) => (ev.payload as { id?: string }).id)).toEqual(["card-102", "card-101"]);
+
+    await act(async () => {
+      ws1.close();
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    const ws2 = MockWebSocket.instances[1]!;
+    expect(ws2.url).toContain("since=102");
+  });
+
+  it("coalesces rapid bursts of WS messages and flushes pending event.id on pagehide, close, and cleanup (P2-1)", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-11-27T12:00:00Z"));
     const setItemSpy = vi.spyOn(storage, "setItem");
@@ -220,23 +287,43 @@ describe("useDashboardSocket performance & replay contract", () => {
     const rendersAfterFirst = renderCount;
     expect(rendersAfterFirst).toBeGreaterThan(rendersAfterOpen);
 
-    // Rapid burst of 40 messages within 40ms must NOT spam localStorage or re-render per frame.
+    // Send id "2" within < 1000ms (still pending in throttle window), then fire pagehide -> flushes "2" immediately!
+    await act(async () => {
+      vi.advanceTimersByTime(20);
+      ws.emitMessage({ type: "kanban_card_updated", id: "2", payload: { id: "c-2" } });
+    });
+    expect(storage.getItem("adk:ws:last-event-id")).toBe("1");
+
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    expect(storage.getItem("adk:ws:last-event-id")).toBe("2");
+    expect(setItemSpy).toHaveBeenCalledTimes(2);
+
+    // Advance past 1s window, flush baseline, then verify 40-message burst coalescing.
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+      ws.emitMessage({ type: "kanban_card_updated", id: "3", payload: { id: "c-3" } });
+    });
+    expect(storage.getItem("adk:ws:last-event-id")).toBe("3");
+    expect(setItemSpy).toHaveBeenCalledTimes(3);
+    const rendersBeforeBurst = renderCount;
+
     await act(async () => {
       vi.advanceTimersByTime(40);
-      for (let id = 2; id <= 41; id += 1) {
+      for (let id = 4; id <= 41; id += 1) {
         ws.emitMessage({ type: "kanban_card_updated", id: String(id), payload: { id: `c-${id}` } });
       }
     });
     expect(onEvent).toHaveBeenCalledTimes(41);
-    expect(setItemSpy).toHaveBeenCalledTimes(1);
-    expect(renderCount).toBe(rendersAfterFirst);
+    expect(setItemSpy).toHaveBeenCalledTimes(3);
+    expect(renderCount).toBe(rendersBeforeBurst);
 
-    // Trailing timer flushes once at the 1s boundary.
     await act(async () => {
       vi.advanceTimersByTime(960);
     });
     expect(storage.getItem("adk:ws:last-event-id")).toBe("41");
-    expect(setItemSpy).toHaveBeenCalledTimes(2);
+    expect(setItemSpy).toHaveBeenCalledTimes(4);
 
     // Burst followed by socket close flushes newest id immediately before reconnect.
     await act(async () => {
@@ -276,7 +363,6 @@ describe("useDashboardSocket performance & replay contract", () => {
   it("applies jittered reconnect delay in [0.5 * base, 1.0 * base] and prevents duplicate timers", async () => {
     vi.useFakeTimers();
     const randomSpy = vi.spyOn(Math, "random");
-    // Retry 0 (base 1000ms): random = 0 -> 500ms (0.5 * base)
     randomSpy.mockReturnValueOnce(0);
 
     function Probe() {
@@ -303,7 +389,6 @@ describe("useDashboardSocket performance & replay contract", () => {
     });
     expect(MockWebSocket.instances).toHaveLength(1);
 
-    // Next attempt fails ticket fetch; retry 1 (base 2000ms): random = 1 -> 2000ms (1.0 * base).
     vi.mocked(getDashboardSocketTicket).mockRejectedValueOnce(new Error("unavailable"));
     randomSpy.mockReturnValueOnce(1);
 
@@ -323,7 +408,6 @@ describe("useDashboardSocket performance & replay contract", () => {
     });
     expect(MockWebSocket.instances).toHaveLength(2);
 
-    // Duplicate close/error callbacks must clear the previous timer rather than stacking parallel reconnects.
     const ws2 = MockWebSocket.instances[1]!;
     randomSpy.mockReturnValue(0.5);
     await act(async () => {
@@ -426,7 +510,7 @@ describe("Provider context value memoization", () => {
   });
 });
 
-describe("CopyWell preview cap & full copy", () => {
+describe("CopyWell preview cap, synchronous value switch & full copy", () => {
   let container: HTMLDivElement;
   let root: Root;
   const writeText = vi.fn<(_text: string) => Promise<void>>();
@@ -449,63 +533,81 @@ describe("CopyWell preview cap & full copy", () => {
     vi.unstubAllGlobals();
   });
 
-  it("truncates pre above COPY_WELL_PREVIEW_LIMIT, toggles expand/collapse, and copies full untruncated value", async () => {
-    const fullValue = `${"x".repeat(COPY_WELL_PREVIEW_LIMIT + 600)}TAIL_MARKER`;
+  it("truncates pre above COPY_WELL_PREVIEW_LIMIT, collapses synchronously on value switch without full-DOM flash, and copies full value (P2-3)", async () => {
+    const valueA = `${"a".repeat(30_000 - 6)}TAIL_A`;
+    const valueB = `${"b".repeat(35_000 - 6)}TAIL_B`;
 
     await act(async () => {
-      root.render(<CopyWell title="Output" value={fullValue} tr={tr} testId="large-well" />);
+      root.render(<CopyWell title="Output" value={valueA} tr={tr} testId="large-well" />);
     });
 
     const pre = container.querySelector("pre")!;
-    expect(pre.textContent).toBe(`${fullValue.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…`);
-    expect(pre.textContent).not.toContain("TAIL_MARKER");
+    expect(pre.textContent).toBe(`${valueA.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…`);
+    expect(pre.textContent).not.toContain("TAIL_A");
 
-    // Copy while collapsed must copy the entire untruncated string.
+    // Copy while collapsed must copy the entire untruncated valueA.
     const copyBtn = container.querySelector<HTMLButtonElement>('button[aria-label="Copy all of Output"]')!;
     await act(async () => {
       copyBtn.click();
     });
-    expect(writeText).toHaveBeenCalledExactlyOnceWith(fullValue);
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(valueA);
 
+    // Expand valueA so all 30,000 chars are rendered.
     const toggleBtn = container.querySelector<HTMLButtonElement>("button[aria-expanded]")!;
     expect(toggleBtn.getAttribute("aria-expanded")).toBe("false");
-    expect(toggleBtn.textContent).toContain(`Show all (${fullValue.length.toLocaleString()} chars)`);
-
     await act(async () => {
       toggleBtn.click();
     });
     expect(toggleBtn.getAttribute("aria-expanded")).toBe("true");
-    expect(toggleBtn.textContent).toBe("Collapse");
-    expect(pre.textContent).toBe(fullValue);
-    expect(pre.textContent).toContain("TAIL_MARKER");
+    expect(pre.textContent).toHaveLength(30_000);
+    expect(pre.textContent).toContain("TAIL_A");
 
-    await act(async () => {
-      toggleBtn.click();
+    // Observe every DOM mutation when switching from expanded valueA (30K) to valueB (35K).
+    const observedLengths: number[] = [];
+    const observer = new MutationObserver(() => {
+      observedLengths.push(container.querySelector("pre")?.textContent?.length ?? 0);
     });
-    expect(toggleBtn.getAttribute("aria-expanded")).toBe("false");
-    expect(pre.textContent).toBe(`${fullValue.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…`);
+    observer.observe(container, { childList: true, characterData: true, subtree: true });
 
-    // Expand again, then change value prop -> must reset expanded to false.
-    await act(async () => {
-      toggleBtn.click();
-    });
-    expect(toggleBtn.getAttribute("aria-expanded")).toBe("true");
+    try {
+      await act(async () => {
+        root.render(<CopyWell title="Output" value={valueB} tr={tr} testId="large-well" />);
+      });
+    } finally {
+      observer.disconnect();
+    }
 
-    const nextValue = `${"y".repeat(COPY_WELL_PREVIEW_LIMIT + 100)}NEXT_TAIL`;
-    await act(async () => {
-      root.render(<CopyWell title="Output" value={nextValue} tr={tr} testId="large-well" />);
-    });
-    expect(container.querySelector("pre")?.textContent).not.toContain("NEXT_TAIL");
+    const finalPre = container.querySelector("pre")!;
+    expect(finalPre.textContent!.length).toBeLessThanOrEqual(COPY_WELL_PREVIEW_LIMIT + 5);
+    expect(finalPre.textContent).toBe(`${valueB.slice(0, COPY_WELL_PREVIEW_LIMIT)}\n…`);
+    for (const len of observedLengths) {
+      expect(len).toBeLessThanOrEqual(COPY_WELL_PREVIEW_LIMIT + 5);
+    }
     expect(container.querySelector("button[aria-expanded]")?.getAttribute("aria-expanded")).toBe("false");
+
+    writeText.mockClear();
+    await act(async () => {
+      container.querySelector<HTMLButtonElement>('button[aria-label="Copy all of Output"]')!.click();
+    });
+    expect(writeText).toHaveBeenCalledExactlyOnceWith(valueB);
+    expect(valueB).toHaveLength(35_000);
   });
 });
+
+function resolveOracleStatus(event: SessionTranscriptEvent, result?: SessionTranscriptEvent | null) {
+  const raw = `${event.status ?? ""} ${result?.status ?? ""}`.toLowerCase();
+  if (event.is_error || result?.is_error || event.kind === "error" || /fail|error|err|reject|denied|timeout/.test(raw)) return "failed";
+  if (/wait|ask|pending|approval|confirm|queued/.test(raw)) return "waiting";
+  if (/run|active|in_progress|progress|working/.test(raw)) return "running";
+  return "done";
+}
 
 function oracleBuildTurnToolSummary(
   transcript: SessionTranscript,
   events: SessionTranscriptEvent[],
 ) {
   const usedResults = new Set<number>();
-  const paired: Array<{ kind: "use"; i: number; j: number | null } | { kind: "result"; i: number }> = [];
+  const calls: Array<{ id: string; toolId: string; status: string; input: string; run: string }> = [];
   for (let i = 0; i < events.length; i += 1) {
     const event = events[i]!;
     if (event.kind === "tool_use") {
@@ -523,27 +625,32 @@ function oracleBuildTurnToolSummary(
           break;
         }
       }
-      paired.push({ kind: "use", i, j: resultIndex });
+      const paired = resultIndex != null ? events[resultIndex]! : null;
+      const name = event.tool_name || paired?.tool_name || "Tool";
+      const input = (event.summary || event.content || paired?.summary || paired?.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
+      calls.push({
+        id: `${transcript.turn_id}-call-${calls.length + 1}`,
+        toolId: name,
+        status: resolveOracleStatus(event, paired),
+        input,
+        run: transcript.turn_id,
+      });
     } else if (event.kind === "tool_result" && !usedResults.has(i)) {
-      paired.push({ kind: "result", i });
+      const name = event.tool_name || "Tool";
+      const input = (event.summary || event.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
+      calls.push({
+        id: `${transcript.turn_id}-call-${calls.length + 1}`,
+        toolId: name,
+        status: resolveOracleStatus(event),
+        input,
+        run: transcript.turn_id,
+      });
     }
   }
-  return paired.map((entry) => {
-    if (entry.kind === "use") {
-      const ev = events[entry.i]!;
-      const res = entry.j != null ? events[entry.j]! : null;
-      const toolId = ev.tool_name || res?.tool_name || "Tool";
-      const input = (ev.summary || ev.content || res?.summary || res?.content || "—").replace(/\s+/g, " ").trim().slice(0, 140);
-      return { id: `${transcript.turn_id}-call`, toolId, input, hasError: Boolean(ev.is_error || res?.is_error) };
-    }
-    const ev = events[entry.i]!;
-    return {
-      id: `${transcript.turn_id}-call`,
-      toolId: ev.tool_name || "Tool",
-      input: (ev.summary || ev.content || "—").replace(/\s+/g, " ").trim().slice(0, 140),
-      hasError: Boolean(ev.is_error),
-    };
-  });
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(call.toolId, (counts.get(call.toolId) ?? 0) + 1);
+  const tools = Array.from(counts, ([name, count]) => ({ id: name, name, calls: count, connected: true }));
+  return { tools, calls };
 }
 
 describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
@@ -585,7 +692,7 @@ describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
     events,
   });
 
-  it("pairs consecutive same-name and interleaved tool calls identically to the reference contract in O(N) time", () => {
+  it("pairs tool_use and tool_result identically across seeded randomized streams and scales linearly to N = 25,000 (P2-4)", () => {
     const consecutiveEvents: SessionTranscriptEvent[] = [
       { kind: "tool_use", tool_name: "Bash", summary: "first", content: "", status: "running", is_error: false },
       { kind: "tool_use", tool_name: "Bash", summary: "second", content: "", status: "done", is_error: false },
@@ -598,61 +705,105 @@ describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
       { toolId: "Bash", input: "second", status: "failed" },
       { toolId: "Bash", input: "orphan result", status: "done" },
     ]);
-    expect(summary.tools).toEqual([{ id: "Bash", name: "Bash", calls: 3, connected: true }]);
 
-    // Deterministic fuzz parity across 80 mixed sequences (named, unnamed, interleaved, errors).
-    let seed = 0x12345678;
-    const nextRand = () => {
-      seed = (seed * 1664525 + 1013904223) >>> 0;
-      return seed;
+    // Xorshift32 PRNG avoids low-bit LCG alternation so all event kinds & tool names mix uniformly.
+    let state = 0x9e3779b9;
+    const nextU32 = () => {
+      state ^= state << 13;
+      state ^= state >>> 17;
+      state ^= state << 5;
+      return state >>> 0;
     };
-    const toolPool = ["Bash", "Read", "Write", null, ""];
-    const kindPool: SessionTranscriptEvent["kind"][] = ["tool_use", "tool_result", "assistant", "thinking"];
 
-    for (let trial = 0; trial < 80; trial += 1) {
-      const len = 1 + (nextRand() % 30);
+    const toolPool = ["Bash", "Read", "Write", null, ""];
+    const kindPool: SessionTranscriptEvent["kind"][] = [
+      "tool_use",
+      "tool_use",
+      "tool_result",
+      "tool_result",
+      "assistant",
+      "thinking",
+    ];
+    const statusPool = ["done", "running", "pending", "error", null];
+    let totalToolUsesGenerated = 0;
+    let totalToolResultsGenerated = 0;
+
+    for (let trial = 0; trial < 100; trial += 1) {
+      const len = 15 + (nextU32() % 40);
       const seq: SessionTranscriptEvent[] = Array.from({ length: len }, (_, idx) => {
-        const kind = kindPool[nextRand() % kindPool.length]!;
-        const toolName = kind === "tool_use" || kind === "tool_result" ? toolPool[nextRand() % toolPool.length]! : null;
-        const isError = (nextRand() & 7) === 0;
+        const kind = kindPool[nextU32() % kindPool.length]!;
+        if (kind === "tool_use") totalToolUsesGenerated += 1;
+        if (kind === "tool_result") totalToolResultsGenerated += 1;
+        const toolName = kind === "tool_use" || kind === "tool_result" ? toolPool[nextU32() % toolPool.length]! : null;
+        const isError = (nextU32() % 7) === 0;
+        const status = statusPool[nextU32() % statusPool.length]!;
         return {
           kind,
           tool_name: toolName,
-          summary: (nextRand() & 1) === 0 ? `sum-${idx}` : null,
+          summary: (nextU32() & 1) === 0 ? `sum-${idx}` : null,
           content: `body-${idx}`,
-          status: isError ? "error" : "done",
+          status,
           is_error: isError,
         };
       });
       const tx = makeTranscript(seq);
       const actual = buildTurnToolSummary(tx, seq, tr);
       const expected = oracleBuildTurnToolSummary(tx, seq);
+      expect(actual.tools).toEqual(expected.tools);
       expect(
-        actual.calls.map((c) => ({
-          id: `${tx.turn_id}-call`,
-          toolId: c.toolId,
-          input: c.input,
-          hasError: c.status === "failed",
-        })),
-      ).toEqual(expected);
+        actual.calls.map(({ id, toolId, status, input, run }) => ({ id, toolId, status, input, run })),
+      ).toEqual(expected.calls);
     }
 
-    // Linear-time scale check on 4,000 tool events with distinct names.
+    expect(totalToolUsesGenerated).toBeGreaterThan(500);
+    expect(totalToolResultsGenerated).toBeGreaterThan(500);
+
+    // Linear-time scaling check on N = 25,000 interleaved/alternating tool_use + tool_result events.
     const largeEvents: SessionTranscriptEvent[] = [];
-    for (let i = 0; i < 2_000; i += 1) {
-      largeEvents.push({ kind: "tool_use", tool_name: `Tool_${i}`, summary: `in_${i}`, content: "", status: "done", is_error: false });
+    for (let block = 0; block < 2_500; block += 1) {
+      for (let k = 0; k < 5; k += 1) {
+        largeEvents.push({
+          kind: "tool_use",
+          tool_name: `Tool_${block}_${k}`,
+          summary: `in_${block}_${k}`,
+          content: "",
+          status: "done",
+          is_error: false,
+        });
+      }
+      for (let k = 4; k >= 0; k -= 1) {
+        largeEvents.push({
+          kind: "tool_result",
+          tool_name: k === 2 ? null : `Tool_${block}_${k}`,
+          summary: `out_${block}_${k}`,
+          content: "",
+          status: "done",
+          is_error: false,
+        });
+      }
     }
-    for (let i = 1_999; i >= 0; i -= 1) {
-      largeEvents.push({ kind: "tool_result", tool_name: `Tool_${i}`, summary: `out_${i}`, content: "", status: "done", is_error: false });
-    }
+    expect(largeEvents).toHaveLength(25_000);
     const start = performance.now();
     const largeSummary = buildTurnToolSummary(makeTranscript(largeEvents), largeEvents, tr);
-    expect(performance.now() - start).toBeLessThan(500);
-    expect(largeSummary.calls).toHaveLength(2_000);
-    expect(largeSummary.tools).toHaveLength(2_000);
+    expect(performance.now() - start).toBeLessThan(1_500);
+    expect(largeSummary.calls).toHaveLength(12_501);
   });
 
-  it("debounces rapid pcd-ws-event bursts into a single 350ms refresh and cancels pending refresh on unmount", async () => {
+  it("matches real server card/dispatch WS event names and coalesces refreshSeed + WS bursts into one 350ms refresh (P2-2)", async () => {
+    const mkWsEvent = (type: string, payload: Record<string, unknown>) =>
+      new CustomEvent("pcd-ws-event", { detail: { type, payload } });
+
+    expect(shouldRefreshCard(mkWsEvent("kanban_card_created", { id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("kanban_card_updated", { id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("task_dispatch_created", { kanban_card_id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("task_dispatch_updated", { kanban_card_id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("kanban_card_new", { id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("kanban_card_update", { id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("dispatch_new", { kanban_card_id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("dispatch_update", { kanban_card_id: "card-1" }), "card-1")).toBe(true);
+    expect(shouldRefreshCard(mkWsEvent("kanban_card_updated", { id: "card-2" }), "card-1")).toBe(false);
+    expect(shouldRefreshCard(mkWsEvent("task_dispatch_updated", { kanban_card_id: "card-2" }), "card-1")).toBe(false);
+
     vi.useFakeTimers();
     getCardTranscripts.mockResolvedValue([
       makeTranscript([
@@ -662,29 +813,57 @@ describe("TurnTranscriptPanel & buildTurnToolSummary performance", () => {
     ]);
 
     await act(async () => {
-      root.render(<TurnTranscriptPanel source={{ type: "card", id: "card-1" }} tr={tr} isKo={false} />);
+      root.render(
+        <TurnTranscriptPanel
+          source={{ type: "card", id: "card-1", refreshSeed: "d1:t1" }}
+          tr={tr}
+          isKo={false}
+        />,
+      );
     });
     expect(getCardTranscripts).toHaveBeenCalledTimes(1);
 
-    // Emit 6 matching WS updates spaced 60ms apart + unrelated card updates.
-    for (let i = 0; i < 6; i += 1) {
-      await act(async () => {
-        window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: { type: "dispatch_update", payload: { kanban_card_id: "card-1" } } }));
-        window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: { type: "kanban_card_update", payload: { id: "other-card" } } }));
-        vi.advanceTimersByTime(60);
-      });
-    }
-    // 60ms < 350ms since the most recent matching event -> still not refreshed yet.
+    // Rapidly mutate refreshSeed AND dispatch real server kanban_card_updated + task_dispatch_updated events.
+    await act(async () => {
+      vi.advanceTimersByTime(50);
+      window.dispatchEvent(mkWsEvent("kanban_card_updated", { id: "card-1" }));
+      root.render(
+        <TurnTranscriptPanel
+          source={{ type: "card", id: "card-1", refreshSeed: "d1:t2" }}
+          tr={tr}
+          isKo={false}
+        />,
+      );
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(50);
+      window.dispatchEvent(mkWsEvent("task_dispatch_updated", { kanban_card_id: "card-1" }));
+      root.render(
+        <TurnTranscriptPanel
+          source={{ type: "card", id: "card-1", refreshSeed: "d1:t3" }}
+          tr={tr}
+          isKo={false}
+        />,
+      );
+    });
+
+    // Neither refreshSeed updates nor WS events should have fired a second fetch before 350ms, nor flashed loading state.
+    expect(getCardTranscripts).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('[role="status"][aria-label="Loading..."]')).toBeNull();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(349);
+    });
     expect(getCardTranscripts).toHaveBeenCalledTimes(1);
 
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(290);
+      await vi.advanceTimersByTimeAsync(1);
     });
     expect(getCardTranscripts).toHaveBeenCalledTimes(2);
 
-    // Schedule another refresh, then unmount before 350ms -> must not fire after unmount.
+    // Schedule another refresh via WS + refreshSeed, then unmount before 350ms -> must not fire after unmount.
     await act(async () => {
-      window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: { type: "kanban_card_update", payload: { id: "card-1" } } }));
+      window.dispatchEvent(mkWsEvent("kanban_card_updated", { id: "card-1" }));
       vi.advanceTimersByTime(100);
     });
     await act(async () => {

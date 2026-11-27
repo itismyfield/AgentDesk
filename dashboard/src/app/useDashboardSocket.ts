@@ -42,6 +42,7 @@ const LAST_EVENT_ID_STORAGE_KEY = "adk:ws:last-event-id";
 const RECONNECT_INITIAL_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
 const EVENT_META_FLUSH_INTERVAL_MS = 1_000;
+const MAX_SEEN_EVENT_IDS_PER_SOCKET = 1_024;
 
 export function isNumericEventId(id: string): boolean {
   return /^\d+$/.test(id);
@@ -92,6 +93,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
     let lastFlushAt: number | null = null;
     let pendingTs: number | null = null;
     let hasPendingEventId = false;
+    let resetSocketState: (() => void) | null = null;
 
     // Seed from localStorage so the very first connection after a full reload
     // can still replay events the server still has in its history window.
@@ -152,6 +154,7 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       pendingTs = null;
       hasPendingEventId = false;
       lastEventIdRef.current = null;
+      resetSocketState?.();
       try { window.localStorage.removeItem(LAST_EVENT_ID_STORAGE_KEY); } catch { /* storage is optional */ }
     });
 
@@ -187,6 +190,13 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       const url = `${proto}//${location.host}/ws?${params}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
+      // Per-socket dedupe & cursor state so server restarts or out-of-order sends never drop unique events.
+      const seenEventIds = new Set<string>();
+      let maxSocketNumericId: bigint | null = null;
+      resetSocketState = () => {
+        seenEventIds.clear();
+        maxSocketNumericId = null;
+      };
 
       ws.onopen = () => {
         wsRetryRef.current = 0;
@@ -198,17 +208,26 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
         try {
           const event = normalizeDashboardSocketEvent(JSON.parse(ev.data));
           if (!event) return;
-          // Server subscribes before replay_since, so dedupe overlapping numeric envelope ids.
-          if (
-            event.id &&
-            isNumericEventId(event.id) &&
-            lastEventIdRef.current &&
-            isNumericEventId(lastEventIdRef.current) &&
-            BigInt(event.id) <= BigInt(lastEventIdRef.current)
-          ) {
-            return;
+          let nextCursorId: string | undefined;
+          if (event.id && event.id.length > 0) {
+            const numericId = isNumericEventId(event.id) ? BigInt(event.id) : null;
+            const dedupeKey = numericId !== null ? numericId.toString() : event.id;
+            if (seenEventIds.has(dedupeKey)) return;
+            if (seenEventIds.size >= MAX_SEEN_EVENT_IDS_PER_SOCKET) {
+              const oldest = seenEventIds.values().next().value;
+              if (oldest !== undefined) seenEventIds.delete(oldest);
+            }
+            seenEventIds.add(dedupeKey);
+            if (numericId !== null) {
+              if (maxSocketNumericId === null || numericId > maxSocketNumericId) {
+                maxSocketNumericId = numericId;
+                nextCursorId = dedupeKey;
+              }
+            } else {
+              nextCursorId = event.id;
+            }
           }
-          recordEventMeta(event.id);
+          recordEventMeta(nextCursorId);
           onEventRef.current(event);
           window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: event }));
         } catch {
@@ -245,9 +264,11 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       }
       wsRef.current?.close();
     };
+    window.addEventListener("pagehide", flushPersistedEventId);
     auth.signal.addEventListener("abort", shutdown);
     return () => {
       unsubscribeCredential();
+      window.removeEventListener("pagehide", flushPersistedEventId);
       auth.signal.removeEventListener("abort", shutdown);
       shutdown();
     };

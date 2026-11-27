@@ -39,12 +39,10 @@ export const COPY_WELL_PREVIEW_LIMIT = 24_000;
 /** A monospace well capped at 240px that scrolls inside, with a 44px copy button that reports the real result. */
 export function CopyWell({ title, value, tr, testId }: { title: string; value: string; tr: (ko: string, en: string) => string; testId?: string }) {
   const [state, setState] = useState<"idle" | "done" | "error">("idle");
-  const [expanded, setExpanded] = useState(false);
+  const [expandedForValue, setExpandedForValue] = useState<string | null>(null);
+  const expanded = expandedForValue === value;
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
-  useEffect(() => {
-    setExpanded(false);
-  }, [value]);
   const copy = async () => {
     try {
       await copyText(value);
@@ -69,7 +67,7 @@ export function CopyWell({ title, value, tr, testId }: { title: string; value: s
                 size="sm"
                 className={KIT_TOUCH_BUTTON}
                 aria-expanded={expanded}
-                onClick={() => setExpanded((prev) => !prev)}
+                onClick={() => setExpandedForValue((prev) => (prev === value ? null : value))}
               >
                 {expanded
                   ? tr("접기", "Collapse")

@@ -312,6 +312,9 @@ export default function TurnTranscriptPanel({
   const copyTimer = useRef(0);
   useEffect(() => () => window.clearTimeout(copyTimer.current), []);
 
+  const scheduleSilentRefreshRef = useRef<() => void>(() => {});
+  const prevRefreshSeedRef = useRef<{ targetKey: string; seed: string | number | null | undefined } | null>(null);
+
   useEffect(() => {
     let cancelled = false;
     let wsRefreshTimer: ReturnType<typeof setTimeout> | null = null;
@@ -346,17 +349,23 @@ export default function TurnTranscriptPanel({
       }
     }
 
+    const scheduleSilentRefresh = () => {
+      if (cancelled) return;
+      if (wsRefreshTimer !== null) clearTimeout(wsRefreshTimer);
+      wsRefreshTimer = setTimeout(() => {
+        wsRefreshTimer = null;
+        if (!cancelled) void refresh(true);
+      }, 350);
+    };
+    scheduleSilentRefreshRef.current = scheduleSilentRefresh;
+
     const handleWs = (event: Event) => {
       const shouldRefresh =
         source.type === "agent"
           ? shouldRefreshAgent(event, source.id)
           : shouldRefreshCard(event, source.id);
       if (shouldRefresh) {
-        if (wsRefreshTimer !== null) clearTimeout(wsRefreshTimer);
-        wsRefreshTimer = setTimeout(() => {
-          wsRefreshTimer = null;
-          if (!cancelled) void refresh(true);
-        }, 350);
+        scheduleSilentRefresh();
       }
     };
 
@@ -364,13 +373,27 @@ export default function TurnTranscriptPanel({
     window.addEventListener("pcd-ws-event", handleWs as EventListener);
     return () => {
       cancelled = true;
+      scheduleSilentRefreshRef.current = () => {};
       if (wsRefreshTimer !== null) {
         clearTimeout(wsRefreshTimer);
         wsRefreshTimer = null;
       }
       window.removeEventListener("pcd-ws-event", handleWs as EventListener);
     };
-  }, [refreshNonce, source.id, source.limit, source.refreshSeed, source.type, tr]);
+  }, [refreshNonce, source.id, source.limit, source.type, tr]);
+
+  useEffect(() => {
+    const targetKey = `${source.type}:${source.id}:${source.limit ?? ""}`;
+    const prev = prevRefreshSeedRef.current;
+    if (!prev || prev.targetKey !== targetKey) {
+      prevRefreshSeedRef.current = { targetKey, seed: source.refreshSeed };
+      return;
+    }
+    if (source.refreshSeed !== prev.seed) {
+      prev.seed = source.refreshSeed;
+      scheduleSilentRefreshRef.current();
+    }
+  }, [source.type, source.id, source.limit, source.refreshSeed]);
 
   useEffect(() => {
     if (transcripts.length === 0) {
