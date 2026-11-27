@@ -1,4 +1,4 @@
-import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Spline, Undo2, X } from "lucide-react";
+import { ArrowLeft, Cable, LayoutGrid, MousePointer2, Plus, Route, Spline, Undo2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { Background, MarkerType, ReactFlow, getViewportForBounds, type Edge, type Node, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
@@ -11,6 +11,7 @@ import { IconButton } from "../../kit/free/icon-button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { Select } from "../../kit/free/select-clean";
 import { GRAPH_DIM_OPACITY, GraphMiniMap, computeConnectedSubgraph } from "../common/graph/GraphChrome";
+import { computeCampaignCriticalPath } from "./campaignCriticalPath";
 import { campaignRawEdges, rawEdgeId, type RawEdgeKey } from "./campaignGraphRouting";
 import { campaignTaskTitle, groupCampaignNodes } from "./campaignModel";
 import { LEDGER_STATUS_LABELS } from "./campaignOverviewModel";
@@ -122,6 +123,11 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const inScope = new Set(ids);
   const positions = useMemo(() => layoutTasks(arranged ?? base.nodes, ids), [arranged, base, ids]);
   const cycles = useMemo(() => findCycles(nodes), [nodes]);
+  const baseCritical = useMemo(() => computeCampaignCriticalPath(base.nodes, { mode: "structural" }), [base.nodes]);
+  const draftCritical = useMemo(() => computeCampaignCriticalPath(nodes, { mode: "structural" }), [nodes]);
+  const [showCritical, setShowCritical] = useState(false);
+  const criticalActive = showCritical && cycles.length === 0;
+  const depthDelta = draftCritical.totalDuration - baseCritical.totalDuration;
   const counts = editCounts(edits);
   const changed = counts.dependencies + counts.title + counts.issue_url;
   // Ties are saved per scope in this browser, apart from the ledger; a draft holds the scopes touched so far.
@@ -298,7 +304,8 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     const looped = cycles.some((path) => path.includes(id));
     const bad = invalid.some((entry) => entry.id === id);
     const lock = lockOf(id);
-    const dimmed = activeNodeId !== null && !connected.has(id);
+    const sched = criticalActive ? draftCritical.nodes.get(id) : undefined;
+    const dimmed = activeNodeId !== null ? !connected.has(id) : criticalActive ? !sched?.critical : false;
     const data: TaskNodeData = {
       title: campaignTaskTitle(node),
       code: taskLabel(node),
@@ -309,6 +316,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
       summary: [tr(`수용조건 ${node.acceptance.length}`, `${node.acceptance.length} acceptance`), outside > 0 && tr(`범위 밖 선행 ${outside}`, `${outside} outside the scope`)].filter(Boolean).join(" · "),
       note: looped ? { tone: "err", text: tr("순환 오류", "Cycle") } : bad ? { tone: "err", text: tr("입력 오류", "Invalid field") } : lock ? { tone: "lock", text: lock } : node.status === "blocked" ? { tone: "warn", text: tr("막힘", "Blocked") } : null,
       locked: lock !== null, error: looped || bad, picked: from === id,
+      critical: sched?.critical,
+      slack: sched?.slack,
+      scheduleLabel: sched ? (sched.critical ? tr("병목 · 여유 0", "Critical") : tr(`여유 +${sched.slack}`, `Slack +${sched.slack}`)) : undefined,
     };
     return {
       id, type: "relationsTask", position: positions.get(id) ?? { x: 0, y: 0 }, measured: measured[id], data, draggable: false, deletable: false,
@@ -321,24 +331,27 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
   const tieById = new Map(tieView.ties.map((tie) => [tie.id, tie]));
   const through = new Map<string, RawEdgeKey[]>();
   const edges: Edge[] = ids.flatMap((id) => byId.get(id)!.dependencies.filter((dep) => inScope.has(dep)).flatMap((dep) => {
-    const via = (routeOf.get(rawEdgeId([dep, id])) ?? []).filter((tie) => tieById.has(tie));
+    const rawKey = rawEdgeId([dep, id]);
+    const via = (routeOf.get(rawKey) ?? []).filter((tie) => tieById.has(tie));
     via.forEach((tie) => through.set(tie, [...through.get(tie) ?? [], [dep, id]]));
     const path = cycleEdges.get(`${dep}->${id}`);
+    const isCritEdge = criticalActive && !path && draftCritical.criticalEdgeKeys.has(rawKey);
     const edgeConnected = activeNodeId === null || (connected.has(dep) && connected.has(id));
     const chosen = tool !== "tie" && selection?.kind === "edge" && selection.source === dep && selection.target === id;
-    const lit = chosen || (tool === "tie" && bundle.includes(rawEdgeId([dep, id]))) || (chosenTie !== null && via.includes(chosenTie)) || (activeNodeId !== null && edgeConnected && !path);
+    const lit = chosen || (tool === "tie" && bundle.includes(rawKey)) || (chosenTie !== null && via.includes(chosenTie)) || (activeNodeId !== null && edgeConnected && !path);
+    const edgeDimmed = !chosen && (activeNodeId !== null ? !edgeConnected : criticalActive ? !isCritEdge : false);
     const first = path && !labelled.has(path);
     if (path) labelled.add(path);
     const chain = [dep, ...via.map((tie) => TIE + tie), id];
-    const stroke = path ? "var(--err)" : lit ? "var(--info)" : "var(--fg-muted)";
+    const stroke = path ? "var(--err)" : isCritEdge ? "var(--accent)" : lit ? "var(--info)" : "var(--fg-muted)";
     return chain.slice(1).map((target, index) => {
       const last = index === chain.length - 2;
       return {
         id: index ? `${dep}->${id}#${index}` : `${dep}->${id}`, source: chain[index], target, data: { dep, id } satisfies Line, selected: chosen, deletable: lockOf(id) === null,
         ariaLabel: tr(`선행 ${label(dep)} → ${label(id)}`, `Dependency ${label(dep)} → ${label(id)}`),
         style: {
-          ...(path ? { stroke: "var(--err)", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke, strokeWidth: lit ? 2.25 : 1.75 }),
-          ...(!edgeConnected ? { opacity: GRAPH_DIM_OPACITY } : {}),
+          ...(path ? { stroke: "var(--err)", strokeWidth: 2, strokeDasharray: "6 4" } : { stroke, strokeWidth: isCritEdge ? 2.35 : lit ? 2.25 : 1.75 }),
+          ...(edgeDimmed ? { opacity: GRAPH_DIM_OPACITY } : {}),
         },
         ...(last ? { markerEnd: { type: MarkerType.ArrowClosed, color: stroke, width: 14, height: 14 } } : {}),
         ...(first && !index ? { label: cycleText(path), labelStyle: { fill: "var(--err)", fontSize: 12 }, labelBgStyle: { fill: "var(--th-card-bg)" }, labelBgPadding: [6, 3] as [number, number], labelBgBorderRadius: 6 } : {}),
@@ -369,7 +382,9 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     style: { stroke: "var(--fg-muted)", strokeDasharray: "4 4" },
   })));
   for (const [tieId, lines] of through) {
-    const tieActive = activeNodeId === null || lines.some(([dep, id]) => connected.has(dep) && connected.has(id));
+    const tieActive = activeNodeId !== null
+      ? lines.some(([dep, id]) => connected.has(dep) && connected.has(id))
+      : !criticalActive || lines.some(([dep, id]) => draftCritical.criticalEdgeKeys.has(rawEdgeId([dep, id])));
     const menu: TieMenu | null = tieId !== activeTie || drag ? null : {
       labels: { menu: tr("케이블타이 메뉴", "Cable tie menu"), remove: tr("타이 풀기", "Untie"), detach: tr("선 하나만 빼기", "Take one line out"), preview: tr("원래 선 미리 보기", "Preview original lines") },
       strands: lines.map(([dep, id]) => ({ key: rawEdgeId([dep, id]), label: `${label(dep)} → ${label(id)}` })), previewing,
@@ -449,16 +464,35 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
     const view = flow.current.getViewport();
     if (hidden > 0) void flow.current.setViewport({ ...view, x: view.x - hidden }, { duration: 200 });
   }, [selection, wide]);
+  const depthBadgeText =
+    depthDelta === 0
+      ? tr(`직렬 깊이 ${draftCritical.totalDuration}단계`, `Serial depth ${draftCritical.totalDuration}`)
+      : depthDelta > 0
+        ? tr(
+            `직렬 깊이 ${baseCritical.totalDuration} → ${draftCritical.totalDuration}단계 (+${depthDelta})`,
+            `Depth ${baseCritical.totalDuration} → ${draftCritical.totalDuration} (+${depthDelta})`,
+          )
+        : tr(
+            `직렬 깊이 ${baseCritical.totalDuration} → ${draftCritical.totalDuration}단계 (${depthDelta})`,
+            `Depth ${baseCritical.totalDuration} → ${draftCritical.totalDuration} (${depthDelta})`,
+          );
+  const chosenSched = chosen && cycles.length === 0 ? draftCritical.nodes.get(chosen.id) : undefined;
+  const nodeSchedule = chosenSched
+    ? chosenSched.critical
+      ? tr(`${chosenSched.waveStart}차 · 병목 (여유 0)`, `Wave ${chosenSched.waveStart} · Critical (0 slack)`)
+      : tr(`${chosenSched.waveStart}차 · 여유 +${chosenSched.slack}단계`, `Wave ${chosenSched.waveStart} · Slack +${chosenSched.slack}`)
+    : null;
   // With nothing chosen the docked column sums up the scope: its tasks, the checks and every unsaved change.
   const overview: ScopeOverview = {
     name: scope.kind === "group" ? tr(`그룹 · ${scope.key || "미분류"}`, `Group · ${scope.key || "Ungrouped"}`) : tr(`작업 주변 · ${label(scope.id)} · ${scope.depth}단계`, `Around ${label(scope.id)} · ${scope.depth} step${scope.depth > 1 ? "s" : ""}`),
     meta: tr(`작업 ${ids.length}개 · 완료 ${done}`, `${ids.length} tasks · ${done} done`),
+    depthSummary: cycles.length === 0 ? tr(`${depthBadgeText} · 핵심 작업 ${draftCritical.criticalNodeIds.size}개`, `${depthBadgeText} · ${draftCritical.criticalNodeIds.size} critical`) : undefined,
     changes: Object.entries(edits).map(([id, fields]) => ({ id, name: byId.get(id) ? taskName(byId.get(id)!) : id,
       fields: (Object.keys(fields) as EditField[]).map((field) => tr(...FIELD[field])).join(" · "), open: inScope.has(id) ? () => setSelection({ kind: "node", id }) : undefined })),
     ties: tieCount,
   };
   const inspector = <RelationsInspector node={chosen} edge={selection?.kind === "edge" ? selection : null} lock={selection ? lockOf(selection.kind === "node" ? selection.id : selection.target) : null}
-    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} overview={overview} cycleText={cycleText} busy={saving} tr={tr}
+    nodes={byId} cycles={cycles} errors={new Set(invalid.filter((entry) => entry.id === chosen?.id).map((entry) => entry.field))} problems={problems} overview={overview} nodeSchedule={nodeSchedule} cycleText={cycleText} busy={saving} tr={tr}
     act={{
       field: (field, value) => chosen && setText(chosen.id, field, value),
       add: (dependency) => chosen && link(dependency, chosen.id),
@@ -499,6 +533,16 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
         options={[{ value: "relations", label: tr("작업 관계", "Task relations") }, { value: "pipeline", label: tr("파이프라인", "Pipeline"), badge: tr("준비 중", "Coming later"), disabled: true }]} /></div>
       <div className="ml-auto flex flex-wrap items-center gap-2">
         <KitBadge size="md" tone={errors ? "danger" : "success"}>{errors ? tr(`오류 ${errors}`, `${errors} errors`) : tr("검사 통과", "Checks pass")}</KitBadge>
+        {cycles.length === 0 && (
+          <KitBadge
+            size="md"
+            data-testid="editor-depth-badge"
+            className="tabular-nums"
+            tone={depthDelta > 0 ? "warning" : depthDelta < 0 ? "success" : "neutral"}
+          >
+            {depthBadgeText}
+          </KitBadge>
+        )}
         {dirty && <KitBadge size="md" tone="warning">{tr(`저장 안 됨 · ${summary}`, `Unsaved · ${summary}`)}</KitBadge>}
         <Button variant="secondary" size="lg" icon={<Undo2 aria-hidden className="size-4" />} disabled={!undo.length || saving} onClick={stepBack}>{tr("되돌리기", "Undo")}</Button>
         <Button variant="primary" size="lg" loading={saving} disabled={!dirty || errors > 0}
@@ -570,12 +614,13 @@ export default function CampaignRelationsEditor({ campaign, scope, onScope, onEx
           {tool === "tie" && <span role="status" className="text-xs text-[var(--fg)]">{chosenLines.length ? tr(`선 ${chosenLines.length}개를 골랐어요.`, `${chosenLines.length} lines chosen.`) : tr("묶을 선을 누르세요. 선 하나는 두 번 눌러도 그 자리에 묶여요.", "Choose the lines to tie. Double-click one line to tie it where it is.")}</span>}
           {tool === "tie" && chosenLines.length > 0 && <Button variant="primary" size="sm" disabled={saving} onClick={tieBundle}>{tr("묶기", "Tie")}<kbd className="ml-1.5 rounded border border-current/40 px-1 font-mono text-[11px]">B</kbd></Button>}
         </div>
-        <RelationsLegend data-editor-chrome="legend" className="max-w-[calc(50%-9rem)]" tr={tr} />
+        <RelationsLegend data-editor-chrome="legend" className="max-w-[calc(50%-9rem)]" showCritical={criticalActive} tr={tr} />
         <div data-editor-chrome="tools" role="toolbar" aria-label={tr("편집 도구", "Editing tools")} className={`${FLOAT} bottom-4 left-1/2 flex -translate-x-1/2 gap-0.5 p-1`}>
           <IconButton icon={<MousePointer2 aria-hidden />} className={TOOL} label={tr("선택", "Select")} pressed={tool === "select"} onClick={() => { setTool("select"); setFrom(null); setBundle([]); }} />
           <IconButton icon={<Plus aria-hidden />} className={TOOL} label={tr("작업 추가 · 준비 중", "Add a task · coming later")} disabled />
           <IconButton icon={<Spline aria-hidden />} className={TOOL} label={tr("잇기", "Connect")} pressed={tool === "connect"} onClick={() => { setTool("connect"); setBundle([]); }} />
           <IconButton icon={<Cable aria-hidden />} className={TOOL} label={tr("케이블타이", "Cable ties")} pressed={tool === "tie"} onClick={() => { setTool("tie"); setFrom(null); setBundle([]); }} />
+          <IconButton data-testid="editor-toggle-critical" icon={<Route aria-hidden />} className={TOOL} label={tr("크리티컬 패스 표시", "Highlight critical path")} pressed={showCritical} disabled={cycles.length > 0} onClick={() => setShowCritical((v) => !v)} />
           <IconButton icon={<LayoutGrid aria-hidden />} className={TOOL} label={tr("정렬", "Arrange")} onClick={() => setArranged(nodes)} />
         </div>
         <ZoomTools data-editor-chrome="zoom" role="group" aria-label={tr("보기 크기", "Zoom")} flow={flow} fit={FIT} fitLabel={tr("전체 보기", "Show every task")}

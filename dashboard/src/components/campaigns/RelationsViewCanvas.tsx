@@ -2,7 +2,7 @@ import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from "r
 import { Background, MarkerType, ReactFlow, type Edge, type Node, type NodeProps, type ReactFlowInstance } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { GRAPH_DIM_OPACITY, GraphMiniMap, computeConnectedSubgraph } from "../common/graph/GraphChrome";
-import type { CableTie, DisplayEdge } from "./campaignGraphRouting";
+import { rawEdgeId, type CableTie, type DisplayEdge } from "./campaignGraphRouting";
 import type { Tr } from "./campaignPresentation";
 import { RelationsLegend, RelationsLine, ZoomTools, useLegible, type LineData } from "./RelationsCanvasChrome";
 import { RelationsGroupNode, RelationsTailNode, RelationsTieNode, ViewTaskNode, type TieNodeData } from "./RelationsTaskNode";
@@ -31,9 +31,10 @@ const MINIMAP_STYLE: CSSProperties = {
 };
 
 /** The read-only canvas both relations views share: causal chain highlighting, arrowheads, and toggleable minimap. */
-export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles, components, cycleText, lineLabel, onSelect, onOpen, height, inspector, tr }: {
+export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles, components, cycleText, lineLabel, onSelect, onOpen, height, criticalEdgeKeys, showCriticalLegend, inspector, tr }: {
   label: string; nodes: Node[]; lines: ViewLine[]; ties: CableTie[]; cycles: string[][]; components: Set<string>[]; cycleText: (path: string[]) => string;
-  lineLabel: (line: ViewLine) => string; onSelect: (id: string | null) => void; onOpen?: (id: string) => void; height?: string; inspector: ReactNode; tr: Tr;
+  lineLabel: (line: ViewLine) => string; onSelect: (id: string | null) => void; onOpen?: (id: string) => void; height?: string;
+  criticalEdgeKeys?: ReadonlySet<string>; showCriticalLegend?: boolean; inspector: ReactNode; tr: Tr;
 }) {
   const flow = useRef<ReactFlowInstance | null>(null);
   const [showMiniMap, setShowMiniMap] = useState(false);
@@ -52,12 +53,14 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
     const order = ({ id, position: { x, y } }: Node) => linked.has(id) ? [0, x, y] : [1, y, x];
     const graphNodes = [...nodes]
       .sort((a, b) => { const [p, q] = [order(a), order(b)]; return p[0] - q[0] || p[1] - q[1] || p[2] - q[2]; })
-      .map((node) => (activeId !== null && !connected.has(node.id)
-        ? { ...node, style: { ...node.style, opacity: GRAPH_DIM_OPACITY } }
+      .map((node) => (activeId !== null
+        ? (!connected.has(node.id) ? { ...node, style: { ...node.style, opacity: GRAPH_DIM_OPACITY } } : { ...node, style: node.style ? { ...node.style, opacity: undefined } : undefined })
         : node));
     for (const tie of ties) {
       const count = lines.filter((line) => line.via.includes(tie.id)).reduce((sum, line) => sum + line.count, 0);
-      const tieActive = activeId === null || lines.some((line) => line.via.includes(tie.id) && connected.has(line.source) && connected.has(line.target));
+      const tieActive = activeId !== null
+        ? lines.some((line) => line.via.includes(tie.id) && connected.has(line.source) && connected.has(line.target))
+        : !criticalEdgeKeys || lines.some((line) => line.via.includes(tie.id) && line.edges.some((edge) => criticalEdgeKeys.has(rawEdgeId(edge))));
       graphNodes.push({
         id: tieNodeId(tie.id), type: "relationsTie", position: tie.position, draggable: false, selectable: false, focusable: false,
         style: tieActive ? undefined : { opacity: GRAPH_DIM_OPACITY },
@@ -78,26 +81,29 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
     });
     const edges = lines.flatMap((line): Edge[] => {
       const error = components.some((part) => within(part)(line));
+      const isCritical = !!criticalEdgeKeys && line.edges.some((edge) => criticalEdgeKeys.has(rawEdgeId(edge)));
       const lineConnected = activeId === null || (connected.has(line.source) && connected.has(line.target));
       const lineActive = activeId !== null && lineConnected;
+      const lineDim = activeId !== null ? !lineConnected : criticalEdgeKeys ? !isCritical : false;
+      const lineCrit = !error && isCritical;
       const chain = [line.source, ...line.via.map(tieNodeId), line.target];
       return chain.slice(1).map((target, index) => {
         const last = index === chain.length - 2;
         const data: LineData & { edges: DisplayEdge["edges"] } = {
-          error, faint: line.faint, dim: !lineConnected, active: lineActive, edges: line.edges, loopY: line.loopY,
+          error, faint: line.faint, dim: lineDim, active: lineActive, critical: lineCrit, edges: line.edges, loopY: line.loopY,
           ...(last ? { count: line.count, cycle: named.get(line.id) } : {}),
         };
         return {
           id: chain.length > 2 ? `${line.id}#${index}` : line.id, source: chain[index], target, type: "relationsLine", data, selectable: false, focusable: false,
           ...(last ? {
             ariaLabel: lineLabel(line),
-            markerEnd: { type: MarkerType.ArrowClosed, color: error ? "var(--err)" : lineActive ? "var(--info)" : "var(--fg-muted)", width: 14, height: 14 },
+            markerEnd: { type: MarkerType.ArrowClosed, color: error ? "var(--err)" : lineCrit ? "var(--accent)" : lineActive ? "var(--info)" : "var(--fg-muted)", width: 14, height: 14 },
           } : {}),
         };
       });
     });
     return { graphNodes: graphNodes.map((node) => sizes.current.has(node.id) ? { ...node, measured: sizes.current.get(node.id) } : node), edges };
-  }, [nodes, lines, ties, cycles, components, cycleText, lineLabel, tr, activeId, connected]);
+  }, [nodes, lines, ties, cycles, components, cycleText, lineLabel, tr, activeId, connected, criticalEdgeKeys]);
 
   return <section aria-label={label} style={{ "--relations-height": height ?? CANVAS_HEIGHT } as CSSProperties}
     className="grid min-w-0 min-[1280px]:h-[var(--relations-height)] min-[1280px]:grid-cols-[minmax(0,1fr)_18rem] min-[1280px]:grid-rows-[minmax(0,1fr)]">
@@ -118,7 +124,7 @@ export default function RelationsViewCanvas({ label, nodes, lines, ties, cycles,
         <Background gap={20} size={1.6} color="var(--line)" />
         <GraphMiniMap open={showMiniMap} ready={flowReady} ariaLabel={tr("관계도 미니맵", "Relations minimap")} chosenId={selectedId} style={MINIMAP_STYLE} />
       </ReactFlow>
-      <RelationsLegend className="max-w-[calc(100%-12rem)]" tr={tr} />
+      <RelationsLegend className="max-w-[calc(100%-12rem)]" showCritical={showCriticalLegend} tr={tr} />
       <ZoomTools role="toolbar" aria-label={tr("보기 도구", "View tools")} flow={flow} fit={FIT} fitLabel={tr("화면 맞춤", "Fit to screen")}
         className="max-sm:right-3 max-sm:bottom-3" minimap={{ open: showMiniMap, onToggle: () => setShowMiniMap((v) => !v) }} tr={tr} />
     </div>
