@@ -1,4 +1,5 @@
-//! A read-only Missing watch can only ask the owner to judge the same front again.
+//! A read-only Ended watch can only ask the owner to judge the same front again: a pane that is
+//! missing or left to its recorded root shell, with no turn token and no inflight row, wakes it.
 use super::*;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
@@ -6,7 +7,7 @@ use crate::db::dispatched_session_canonical_identity::{
 use crate::db::dispatched_sessions::hosted_execution::{
     self, HostedLookup, HostedLookupKey, HostedRecord, HostedState,
 };
-use crate::services::session_host::{PaneReading, herdr_endpoints};
+use crate::services::session_host::herdr_endpoints;
 
 pub(in crate::services::discord) fn guard(
     pool: Option<&sqlx::PgPool>,
@@ -25,6 +26,8 @@ pub(in crate::services::discord) fn guard(
         return None;
     }
     let view = herdr_endpoints().view(record)?;
+    let channel = record.owner.channel_id.parse::<u64>().ok()?;
+    let ended = record.clone();
     let expected = front?.clone();
     let pool = pool.cloned();
     Some(Box::new(move |mut read| {
@@ -40,13 +43,19 @@ pub(in crate::services::discord) fn guard(
                 Ok(false) => return Screen::Gone,
                 Err(_) => return Screen::Unknown,
             }
-            if !matches!(view.read_execution(), PaneReading::Missing) {
+            let reading = view.read_execution();
+            if !view.ended(&ended, &reading) {
                 return read();
             }
             match futures::executor::block_on(mailbox.has_active_turn()) {
                 Ok(true) => return Screen::Gone,
                 Ok(false) => {}
                 Err(_) => return Screen::Unknown,
+            }
+            // Only an exactly absent row lets the owner judge again; the recovery reads it too.
+            let inflight = crate::services::discord::inflight::load_inflight_state_read_only_result;
+            if !matches!(inflight(&ProviderKind::Claude, channel), Ok(None)) {
+                return Screen::Unknown;
             }
             if let Some(pool) = pool.as_ref() {
                 let HostedRecord::Known(record) = &row.record else {

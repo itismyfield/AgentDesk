@@ -45,6 +45,7 @@ fn body_piece(id: &str, text: &str) -> Derived {
         payload: text.into(),
         output_origin: None,
         notice_origin: None,
+        reply: None,
     })
 }
 

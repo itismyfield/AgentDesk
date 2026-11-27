@@ -145,8 +145,8 @@ fn history_is_read_until_it_settles_and_then_not_again() {
     cache.refresh(&path, later(), fstat).unwrap();
     for _ in 0..100 {
         cache.refresh(&path, written, fstat).unwrap();
-        assert_eq!(cache.evidence(true).unwrap().len(), 1);
-        assert_eq!(cache.evidence(false).unwrap().len(), 1);
+        assert_eq!(cache.evidence(true, None).unwrap().len(), 1);
+        assert_eq!(cache.evidence(false, None).unwrap().len(), 1);
         assert!(cache.state().is_some());
     }
     assert_eq!((cache.reads, cache.derived), (4, 2));
@@ -174,7 +174,7 @@ fn every_change_under_a_kept_stamp_is_read_again() {
     let (_runtime, dir) = scratch();
     for (at, (case, namespace, change)) in cases.into_iter().enumerate() {
         let (path, mut cache, raw) = kept(dir.path(), 83850010 + at as u64);
-        assert_eq!(cache.evidence(true).unwrap()[0].namespace, NS);
+        assert_eq!(cache.evidence(true, None).unwrap()[0].namespace, NS);
         let new = raw.replace(NS, namespace);
         tick_past(&path);
         change(&path, &new);
@@ -185,7 +185,7 @@ fn every_change_under_a_kept_stamp_is_read_again() {
             "{case}"
         );
         assert_eq!(
-            cache.evidence(true).unwrap()[0].namespace,
+            cache.evidence(true, None).unwrap()[0].namespace,
             namespace,
             "{case}"
         );
@@ -311,8 +311,9 @@ fn kept_views_equal_fresh_results_in_both_modes_and_orders() {
     let open = Fixture::at(path.clone(), 83850009, true);
     let spell = |seen: Result<Vec<EvidenceRegistration>, String>| {
         seen.map(|seen| {
-            let all =
-                |r: &EvidenceRegistration| json!([r, r.exact_frame_hash, r.candidate, r.barrier]);
+            let all = |r: &EvidenceRegistration| {
+                json!([r, r.exact_frame_hash, r.candidate, r.not_sent, r.barrier])
+            };
             seen.iter().map(all).collect::<Vec<_>>()
         })
     };
@@ -338,4 +339,190 @@ fn kept_views_equal_fresh_results_in_both_modes_and_orders() {
     check(None);
     std::fs::remove_file(&barred.ticket.source.as_ref().unwrap().transcript).unwrap();
     check(None);
+}
+
+#[test]
+fn not_sent_is_classified_without_opening_a_native_candidate() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let f = Fixture::at(path.clone(), 83850050, true);
+    f.history.try_native_not_sent(NS, &f.ticket).unwrap();
+    let restarted = Registry::at(path);
+    assert!(
+        restarted
+            .native_evidence_registrations()
+            .unwrap()
+            .is_empty()
+    );
+    let classified = restarted.native_classification_registrations().unwrap();
+    assert_eq!(classified.len(), 1);
+    assert!(!classified[0].candidate && classified[0].barrier.is_none());
+    assert!(restarted.note_native_any_key(NS, &f.ticket).is_err());
+}
+
+#[test]
+fn rejected_native_check_keeps_a_twelve_megabyte_history_warm() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let f = Fixture::at(path.clone(), 83850051, true);
+    let mut synthetic = f.history.json().unwrap();
+    synthetic["live"][0]["registration"]["native_settlement"]["fixture_padding"] =
+        json!("a".repeat(12_000_000));
+    std::fs::write(&path, synthetic.to_string()).unwrap();
+    let history = Registry::at(path.clone());
+    history
+        .cached
+        .lock()
+        .unwrap()
+        .refresh(&path, later(), fstat)
+        .unwrap();
+    let reads = || history.cached.lock().unwrap().reads;
+    let before = reads();
+    let error = history
+        .record_native_outcome_at_stamp(
+            NS,
+            &f.ticket,
+            &Fixture::outcome(Disposition::WithdrawnNotExecuted),
+            "stale",
+        )
+        .unwrap_err();
+    assert_eq!(error, "native registrations superseded");
+    assert!(
+        history
+            .native_settlement(NS, &f.ticket)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    let bytes = std::fs::metadata(&path).unwrap().len();
+    let tick_reads = reads() - before;
+    eprintln!("synthetic history bytes={bytes} tick_reads={tick_reads}");
+    assert_eq!(tick_reads, 0);
+}
+
+#[test]
+fn rejected_native_receipt_keeps_a_twelve_megabyte_history_warm() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let f = Fixture::at(path.clone(), 83850055, true);
+    f.history.note_native_any_key(NS, &f.ticket).unwrap();
+    let mut synthetic = f.history.json().unwrap();
+    synthetic["live"][0]["registration"]["native_settlement"]["fixture_padding"] =
+        json!("a".repeat(12_000_000));
+    let raw = synthetic.to_string();
+    std::fs::write(&path, &raw).unwrap();
+
+    let history = Registry::at(path.clone());
+    history
+        .cached
+        .lock()
+        .unwrap()
+        .refresh(&path, later(), fstat)
+        .unwrap();
+    let cache_stamp = || {
+        let cache = history.cached.lock().unwrap();
+        (
+            cache.reads,
+            cache.derived,
+            cache.revision().unwrap(),
+            cache.kept.as_ref().unwrap().stamp.clone(),
+        )
+    };
+    let view = history.native_classification_registrations().unwrap();
+    assert!(view[0].receipts.is_empty());
+    let before = cache_stamp();
+    assert!(before.3.is_some());
+
+    let frame_hash = hash(FRAME);
+    let receipt = ("user", "membership", (0, 4), 4, frame_hash.as_str());
+    assert_eq!(
+        history
+            .try_native_receipt(NS, &f.ticket, receipt, "stale")
+            .unwrap_err(),
+        "native receipt registrations superseded"
+    );
+    assert!(
+        history.native_classification_registrations().unwrap()[0]
+            .receipts
+            .is_empty()
+    );
+    assert_eq!(cache_stamp(), before);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), raw);
+    eprintln!(
+        "synthetic receipt history bytes={} tick_reads={}",
+        raw.len(),
+        cache_stamp().0 - before.0
+    );
+
+    let expected = native::registrations_fingerprint(&view).unwrap();
+    history
+        .try_native_receipt(NS, &f.ticket, receipt, &expected)
+        .unwrap();
+    assert_eq!(
+        history.native_classification_registrations().unwrap()[0].receipts,
+        ["membership"]
+    );
+    assert_ne!(cache_stamp().2, before.2);
+}
+
+#[test]
+fn native_durability_read_refreshes_the_cache_after_external_replacement() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let f = Fixture::at(path.clone(), 83850052, true);
+    let mut cache = f.history.cached.lock().unwrap();
+    cache.refresh(&path, later(), fstat).unwrap();
+    let raw = cache.raw().unwrap().replace(NS, "native-fixturX");
+    let before = cache.reads;
+    drop(cache);
+    let saved = f.history.try_native_settlement(NS, &f.ticket).unwrap();
+    assert!(saved.outcome.is_none());
+    assert_eq!(f.history.cached.lock().unwrap().reads, before);
+    swapped(&path, &raw, false);
+    assert_eq!(
+        f.history.try_native_settlement(NS, &f.ticket).unwrap_err(),
+        "native registration missing"
+    );
+    assert_eq!(f.history.cached.lock().unwrap().reads, before + 1);
+}
+
+#[test]
+fn channel_views_derive_only_the_requested_channel_and_track_new_bytes() {
+    let (_runtime, dir) = scratch();
+    let path = dir.path().join("frames.json");
+    let first = Fixture::at(path.clone(), 83850053, true);
+    let second = Fixture::at(path.clone(), 83850054, true);
+    let history = Registry::at(path.clone());
+    history
+        .cached
+        .lock()
+        .unwrap()
+        .refresh(&path, later(), fstat)
+        .unwrap();
+    let initial = history.native_classification_revision().unwrap();
+    history.transaction(|_| Ok(())).unwrap();
+    assert_eq!(history.native_classification_revision().unwrap(), initial);
+    assert_eq!(history.cached.lock().unwrap().reads, 1);
+    let view = history
+        .native_classification_for_channel(second.ticket.channel_id)
+        .unwrap();
+    assert_eq!(view.registrations.len(), 1);
+    assert_eq!(view.registrations[0].ticket, second.ticket);
+    assert_eq!(history.cached.lock().unwrap().derived, 1);
+    assert_eq!(
+        history.native_classification_revision().unwrap(),
+        view.revision
+    );
+    first
+        .history
+        .try_native_not_sent(NS, &first.ticket)
+        .unwrap();
+    let changed = history.native_classification_revision().unwrap();
+    assert_ne!(changed, view.revision);
+    let first_channel = history
+        .native_classification_for_channel(first.ticket.channel_id)
+        .unwrap();
+    assert_eq!(first_channel.revision, changed);
+    assert!(!first_channel.registrations[0].candidate);
+    assert_eq!(history.cached.lock().unwrap().derived, 2);
 }

@@ -41,6 +41,13 @@ const LAST_EVENT_ID_STORAGE_KEY = "adk:ws:last-event-id";
 // Back off from one second to thirty seconds while the server is unavailable.
 const RECONNECT_INITIAL_DELAY_MS = 1_000;
 const RECONNECT_MAX_DELAY_MS = 30_000;
+const EVENT_META_FLUSH_INTERVAL_MS = 1_000;
+const MAX_SEEN_EVENT_IDS_PER_SOCKET = 1_024;
+
+export function isNumericEventId(id: string): boolean {
+  return /^\d+$/.test(id);
+}
+
 onCredentialChange(() => {
   try { window.localStorage.removeItem(LAST_EVENT_ID_STORAGE_KEY); } catch { /* storage is optional */ }
 });
@@ -82,16 +89,88 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
     let destroyed = false;
     const auth = credentialScope();
     const ticketRequest = new AbortController();
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    let lastFlushAt: number | null = null;
+    let pendingTs: number | null = null;
+    let hasPendingEventId = false;
+    let resetSocketState: (() => void) | null = null;
 
     // Seed from localStorage so the very first connection after a full reload
     // can still replay events the server still has in its history window.
     lastEventIdRef.current = readPersistedLastEventId();
 
+    function clearFlushTimer() {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+    }
+
+    function flushPersistedEventId() {
+      clearFlushTimer();
+      pendingTs = null;
+      if (hasPendingEventId && lastEventIdRef.current !== null && !auth.signal.aborted) {
+        writePersistedLastEventId(lastEventIdRef.current);
+        hasPendingEventId = false;
+      }
+    }
+
+    function flushEventMeta(now: number) {
+      clearFlushTimer();
+      lastFlushAt = now;
+      if (pendingTs !== null && !destroyed && !auth.signal.aborted) {
+        setLastEventTs(pendingTs);
+      }
+      pendingTs = null;
+      if (hasPendingEventId && lastEventIdRef.current !== null && !auth.signal.aborted) {
+        writePersistedLastEventId(lastEventIdRef.current);
+        hasPendingEventId = false;
+      }
+    }
+
+    function recordEventMeta(eventId: string | undefined) {
+      const now = Date.now();
+      pendingTs = now;
+      if (eventId) {
+        lastEventIdRef.current = eventId;
+        hasPendingEventId = true;
+      }
+      const elapsed = lastFlushAt === null ? EVENT_META_FLUSH_INTERVAL_MS : now - lastFlushAt;
+      if (elapsed >= EVENT_META_FLUSH_INTERVAL_MS) {
+        flushEventMeta(now);
+        return;
+      }
+      if (flushTimer === null) {
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          if (destroyed || auth.signal.aborted) return;
+          flushEventMeta(Date.now());
+        }, EVENT_META_FLUSH_INTERVAL_MS - elapsed);
+      }
+    }
+
+    const unsubscribeCredential = onCredentialChange(() => {
+      clearFlushTimer();
+      pendingTs = null;
+      hasPendingEventId = false;
+      lastEventIdRef.current = null;
+      resetSocketState?.();
+      try { window.localStorage.removeItem(LAST_EVENT_ID_STORAGE_KEY); } catch { /* storage is optional */ }
+    });
+
     function scheduleReconnect() {
       if (destroyed || auth.signal.aborted) return;
-      const delay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** wsRetryRef.current, RECONNECT_MAX_DELAY_MS);
+      if (wsTimerRef.current !== null) {
+        clearTimeout(wsTimerRef.current);
+        wsTimerRef.current = null;
+      }
+      const baseDelay = Math.min(RECONNECT_INITIAL_DELAY_MS * 2 ** wsRetryRef.current, RECONNECT_MAX_DELAY_MS);
+      const delay = Math.round(baseDelay * (0.5 + Math.random() * 0.5));
       wsRetryRef.current += 1;
-      wsTimerRef.current = setTimeout(() => { void connect(); }, delay);
+      wsTimerRef.current = setTimeout(() => {
+        wsTimerRef.current = null;
+        void connect();
+      }, delay);
     }
 
     async function connect() {
@@ -111,6 +190,13 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       const url = `${proto}//${location.host}/ws?${params}`;
       const ws = new WebSocket(url);
       wsRef.current = ws;
+      // Per-socket dedupe & cursor state so server restarts or out-of-order sends never drop unique events.
+      const seenEventIds = new Set<string>();
+      let maxSocketNumericId: bigint | null = null;
+      resetSocketState = () => {
+        seenEventIds.clear();
+        maxSocketNumericId = null;
+      };
 
       ws.onopen = () => {
         wsRetryRef.current = 0;
@@ -122,11 +208,26 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
         try {
           const event = normalizeDashboardSocketEvent(JSON.parse(ev.data));
           if (!event) return;
-          if (event.id) {
-            lastEventIdRef.current = event.id;
-            writePersistedLastEventId(event.id);
+          let nextCursorId: string | undefined;
+          if (event.id && event.id.length > 0) {
+            const numericId = isNumericEventId(event.id) ? BigInt(event.id) : null;
+            const dedupeKey = numericId !== null ? numericId.toString() : event.id;
+            if (seenEventIds.has(dedupeKey)) return;
+            if (seenEventIds.size >= MAX_SEEN_EVENT_IDS_PER_SOCKET) {
+              const oldest = seenEventIds.values().next().value;
+              if (oldest !== undefined) seenEventIds.delete(oldest);
+            }
+            seenEventIds.add(dedupeKey);
+            if (numericId !== null) {
+              if (maxSocketNumericId === null || numericId > maxSocketNumericId) {
+                maxSocketNumericId = numericId;
+                nextCursorId = dedupeKey;
+              }
+            } else {
+              nextCursorId = event.id;
+            }
           }
-          setLastEventTs(Date.now());
+          recordEventMeta(nextCursorId);
           onEventRef.current(event);
           window.dispatchEvent(new CustomEvent("pcd-ws-event", { detail: event }));
         } catch {
@@ -135,7 +236,12 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
       };
 
       ws.onclose = () => {
-        setWsConnected(false);
+        if (!destroyed && !auth.signal.aborted && pendingTs !== null) {
+          flushEventMeta(Date.now());
+        } else {
+          flushPersistedEventId();
+        }
+        if (!destroyed) setWsConnected(false);
         wsRef.current = null;
         if (destroyed) return;
         scheduleReconnect();
@@ -151,11 +257,18 @@ export function useDashboardSocket(onEvent: (event: WSEvent) => void) {
     const shutdown = () => {
       destroyed = true;
       ticketRequest.abort();
-      if (wsTimerRef.current) clearTimeout(wsTimerRef.current);
+      flushPersistedEventId();
+      if (wsTimerRef.current !== null) {
+        clearTimeout(wsTimerRef.current);
+        wsTimerRef.current = null;
+      }
       wsRef.current?.close();
     };
+    window.addEventListener("pagehide", flushPersistedEventId);
     auth.signal.addEventListener("abort", shutdown);
     return () => {
+      unsubscribeCredential();
+      window.removeEventListener("pagehide", flushPersistedEventId);
       auth.signal.removeEventListener("abort", shutdown);
       shutdown();
     };
