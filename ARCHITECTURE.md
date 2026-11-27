@@ -249,14 +249,14 @@ src/
 │   │   ├── hosted_execution/
 │   │   │   ├── http_force.rs
 │   │   │   ├── legacy_return.rs
-│   │   │   └── legacy_return_tests.rs
+│   │   │   ├── legacy_return_tests.rs
+│   │   │   └── test_support.rs
 │   │   ├── provider_resume_fence/
 │   │   │   └── tests.rs
 │   │   ├── canonical_identity.rs
 │   │   ├── canonical_identity_pg_tests.rs
 │   │   ├── force_kill.rs
 │   │   ├── hosted_execution.rs
-│   │   ├── hosted_execution_support.rs
 │   │   ├── hosted_execution_tests.rs
 │   │   ├── key_promotion.rs
 │   │   ├── key_promotion_pg_tests.rs
@@ -539,6 +539,7 @@ src/
 │   ├── provider.rs
 │   ├── provider_auth_profile.rs
 │   ├── replay_evidence.rs
+│   ├── retry_wait.rs
 │   ├── session_identity.rs
 │   ├── tmux_cleanup.rs
 │   ├── tool_summary.rs
