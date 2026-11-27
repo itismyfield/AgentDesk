@@ -168,6 +168,92 @@ async fn native_8148_terminal_raw_eof_waits_for_the_execution_end_pg() {
     db.drop().await;
 }
 
+#[tokio::test]
+async fn herdr_native_terminal_releases_the_rowless_mailbox_and_wakes_the_owner_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::{
+        inflight::{self, GuardedClearOutcome, InflightTurnIdentity},
+        turn_completion_events::{TurnCompletionEvent, subscribe_turn_completion_events},
+    };
+
+    let runtime = crate::config::TestRuntimeRootGuard::new();
+    let db = TestPostgresDb::create().await;
+    let pool = db.connect_and_migrate().await;
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    let channel = 84570001;
+    let target = serde_json::json!({"host":"herdr","owner":"fixture-pane","execution_nonce":NONCE,"root":rig.socket()});
+    let f = Fixture::at_target(
+        runtime.path().join("runtime/injected_frames.json"),
+        channel,
+        true,
+        target,
+    );
+    let path = &f.ticket.source.as_ref().unwrap().transcript;
+    fs::write(path, format!("{OWN_ROW}\n")).unwrap();
+    let shared = b2b_shared(Some(pool.clone()));
+    let (key, actor) = b2b_active(&f, &shared).await;
+    let row = b2b_row(&f);
+    supply_register(&f, &shared, key, Some(actor.clone())).await;
+    barrier_receipt(&f);
+    let mut events = subscribe_turn_completion_events(&shared);
+    let mailbox = shared.mailbox(key.channel_id);
+    let settlement = || {
+        f.history
+            .native_settlement("native-fixture", &f.ticket)
+            .unwrap()
+    };
+    let read_row =
+        || inflight::load_inflight_state_read_only_result(&ProviderKind::Claude, channel);
+    assert_eq!(
+        inflight::clear_inflight_state_for_captured_episode(
+            &ProviderKind::Claude,
+            channel,
+            &InflightTurnIdentity::from_state(&row),
+            row.turn_nonce.as_deref(),
+        ),
+        GuardedClearOutcome::Cleared
+    );
+    assert!(read_row().unwrap().is_none());
+    let mut capture = SupplyCapture::new(&f, &runtime.path().join("store"), true);
+    capture.poll(&shared).await;
+    assert!(mailbox.has_active_turn().await.unwrap());
+    assert!(settlement().outcome.is_none());
+    assert_eq!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    );
+
+    writeln!(
+        fs::OpenOptions::new().append(true).open(path).unwrap(),
+        "{RAW_TAIL}"
+    )
+    .unwrap();
+    capture.poll(&shared).await;
+    assert!(
+        !mailbox.has_active_turn().await.unwrap(),
+        "the native terminal must release its original actor after the projection disappears"
+    );
+    let settled = settlement();
+    assert_eq!(settled.outcome.unwrap().disposition, Disposition::Executed);
+    assert!(settled.cleanup_complete && read_row().unwrap().is_none());
+    assert_eq!(
+        events.try_recv(),
+        Ok(TurnCompletionEvent::for_turn(
+            key.channel_id,
+            key.user_msg_id
+        )),
+        "the queue owner must receive its existing eligible edge"
+    );
+    capture.poll(&shared).await;
+    assert_eq!(
+        events.try_recv(),
+        Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+    );
+    pool.close().await;
+    db.drop().await;
+}
+
 /// A raw closer witness for `[through, len)` of the fixture transcript.
 fn witness(f: &Fixture, (through, len): (u64, u64), nonce: &str, stamp: String) -> RawWitness {
     let source = f.ticket.source.as_ref().unwrap();
