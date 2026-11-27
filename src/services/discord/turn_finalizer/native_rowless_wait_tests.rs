@@ -241,6 +241,70 @@ async fn herdr_rowless_wait_aborted_and_watcher_complete_in_either_order_pg() {
     .await;
 }
 
+#[tokio::test]
+async fn owner_start_wait_site_handoff_describes_the_active_token() {
+    #[derive(Clone, Default)]
+    struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let shared = b2b_shared(None);
+    let channel = ChannelId::new(845_706_106);
+    let mailbox = shared.mailbox(channel);
+    let token = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
+        "held-episode".into(),
+    )));
+    mailbox
+        .restore_active_turn(
+            token,
+            serenity::model::id::UserId::new(7),
+            serenity::model::id::MessageId::new(42),
+        )
+        .await;
+    let (drive, front, deliveries) = machine_front(&shared, channel, root.path()).await;
+
+    let log = Log::default();
+    let writer = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || writer.clone())
+        .finish();
+    crate::logging::test_capture::pin_callsite_interest();
+    {
+        let _log = tracing::subscriber::set_default(subscriber);
+        assert_eq!(
+            (drive.handoff)(front).await,
+            Err("NotSent(\"synthetic_waits_idle\")".into())
+        );
+    }
+    assert_eq!(deliveries.load(Ordering::SeqCst), 0);
+    let bytes = log.0.lock().unwrap();
+    let log = std::str::from_utf8(&bytes).unwrap();
+    let event = log
+        .lines()
+        .find(|line| line.contains("owner start waits for idle"))
+        .expect("the held handoff emits its diagnosing decision");
+    for field in [
+        "site=\"active_turn\"",
+        "user_msg_id=Some(42)",
+        "nonce=Some(\"held-episode\")",
+        "kind=Some(UserOrAgent)",
+        "started_at=Some(",
+    ] {
+        assert!(event.contains(field), "missing {field}: {event}");
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Held {
     Corrupt,
