@@ -23,7 +23,12 @@ use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE,
 use crate::test_support::wait::{WAIT_CAP, await_within, join_within, recv_within};
 
 const CHANNEL: u64 = 7_940_001;
-const NATIVE: &str = "79400000-0000-4000-8000-000000000001";
+/// The pane's native session, unique per test process: its statusline record lives in a
+/// directory every test process shares, so a fixed id would read another test's record.
+fn native() -> &'static str {
+    static NATIVE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NATIVE.get_or_init(|| uuid::Uuid::new_v4().to_string())
+}
 const READY: &str = "────────────────────────────────────────────────────────────\n❯\u{a0}\n────────────────────────────────────────────────────────────\n  ⏵⏵ bypass permissions on (shift+tab to cycle)";
 const OVERLAY: &str =
     "Effort\n  low    medium    high    xhigh    max\n←/→ to adjust · Enter to confirm";
@@ -57,7 +62,7 @@ impl Fixture {
         {
             let mut core = shared.core.lock().await;
             let session = core.sessions.get_mut(&ChannelId::new(CHANNEL)).unwrap();
-            session.session_id = Some(NATIVE.into());
+            session.session_id = Some(native().into());
             session.current_path = Some("/work".into());
         }
         shared.settings.write().await.agent = Some("settings-agent".into());
@@ -108,11 +113,11 @@ impl Fixture {
             &logical,
         );
         sqlx::query("INSERT INTO sessions (session_key,provider,status,identity_kind,discord_token_hash,channel_id,cwd,agent_id,claude_session_id,hosted_execution) VALUES ($1,'claude','idle','discord_channel',$2,$3,'/work','settings-agent',$4,$5)")
-            .bind(key).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(NATIVE).bind(serde_json::to_value(&bound).unwrap()).execute(&pool).await.unwrap();
+            .bind(key).bind(&shared.token_hash).bind(CHANNEL.to_string()).bind(native()).bind(serde_json::to_value(&bound).unwrap()).execute(&pool).await.unwrap();
         rig.answer("pane.get", json!({"type":"pane_info","pane":{"pane_id":PANE,"workspace_id":"w1","tab_id":"w1:1","revision":1,"cwd":"/work","foreground_cwd":"/work"}}));
         rig.answer("pane.read", screen(READY));
         rig.answer_after_send("pane.read", screen(OVERLAY));
-        let record = statusline::record_path(&statusline::record_dir(), NATIVE);
+        let record = statusline::record_path(&statusline::record_dir(), native());
         let _ = std::fs::remove_file(&record);
         Self {
             shared,
@@ -242,7 +247,7 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
         let fx = Fixture::new(&rig).await;
         fx.record_on_confirm(
             &rig,
-            json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}),
+            json!({"session_id":native(),"written_at":"fresh","effort":{"level":"high"}}),
         );
         let notice = fx.command().await;
         let reads: Vec<Value> = rig
@@ -298,11 +303,11 @@ fn herdr_effort_applies_and_reports_only_fresh_matching_level_pg() {
         );
         rig.answer("pane.read", screen(READY));
         rig.answer_after_send("pane.read", screen("  Effort   low ─ medium ─ [high] ─ xhigh ─ max\n  ←/→ to adjust · Enter to confirm · Esc to cancel"));
-        fx.record_on_confirm(&rig, json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
+        fx.record_on_confirm(&rig, json!({"session_id":native(),"written_at":"fresh","effort":{"level":"high"}}));
         assert!(fx.command().await.contains("적용했습니다"), "decorated known layout");
         rig.answer("pane.read", screen(READY));
         rig.answer_after_send("pane.read", screen(OVERLAY_2_1_319));
-        fx.record_on_confirm(&rig, json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
+        fx.record_on_confirm(&rig, json!({"session_id":native(),"written_at":"fresh","effort":{"level":"high"}}));
         let notice = fx.command().await;
         assert!(notice.contains("적용했습니다"), "Claude Code 2.1.319 layout: {notice}");
         std::fs::remove_file(&fx.record).unwrap();
@@ -335,10 +340,10 @@ fn herdr_effort_mismatch_or_stale_record_never_reports_success_pg() {
     let _hosts = crate::config::session_hosts::force_for_test(Some(NODE), &[(CHANNEL, NODE)]);
     let _hosting = hosting();
     for record in [
-        Some(json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"low"}})),
-        Some(json!({"session_id":NATIVE,"written_at":0.0,"effort":{"level":"high"}})),
+        Some(json!({"session_id":native(),"written_at":"fresh","effort":{"level":"low"}})),
+        Some(json!({"session_id":native(),"written_at":0.0,"effort":{"level":"high"}})),
         Some(json!({"session_id":"other","written_at":"fresh","effort":{"level":"high"}})),
-        Some(json!({"session_id":NATIVE,"written_at":"fresh"})),
+        Some(json!({"session_id":native(),"written_at":"fresh"})),
         None,
     ] {
         let rig = HerdrRig::start();
@@ -496,10 +501,10 @@ fn herdr_effort_waits_for_overlay_before_navigation_pg() {
             assert_eq!(rig.sends().len(),2,"only /effort and Enter precede overlay");
             assert!(!command.is_finished(),"closed-only is not confirmation");
             if appears {
-                fx.record_on_confirm(&rig,json!({"session_id":NATIVE,"written_at":"fresh","effort":{"level":"high"}}));
+                fx.record_on_confirm(&rig,json!({"session_id":native(),"written_at":"fresh","effort":{"level":"high"}}));
                 // The opening Enter was already sent before this hook was installed.
                 let path = fx.record.clone();
-                rig.on_send(move |p| {if p["keys"] == json!(["enter"]) {std::fs::create_dir_all(path.parent().unwrap()).unwrap();std::fs::write(&path,json!({"session_id":NATIVE,"written_at":now(),"effort":{"level":"high"}}).to_string()).unwrap();}});
+                rig.on_send(move |p| {if p["keys"] == json!(["enter"]) {std::fs::create_dir_all(path.parent().unwrap()).unwrap();std::fs::write(&path,json!({"session_id":native(),"written_at":now(),"effort":{"level":"high"}}).to_string()).unwrap();}});
                 rig.answer("pane.read",screen(OVERLAY));
             }
             let notice = await_within(command,WAIT_CAP).await.unwrap();
@@ -623,7 +628,7 @@ impl Fixture {
             self.shared.core.lock().await.sessions[&ChannelId::new(runtime)]
                 .session_id
                 .as_deref(),
-            Some(NATIVE)
+            Some(native())
         );
         let bound: Value =
             sqlx::query_scalar("SELECT hosted_execution FROM sessions WHERE channel_id=$1")
@@ -690,9 +695,9 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
                         rig,
                         CHANNEL,
                         CHANNEL,
-                        Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":enabled})),
+                        Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":enabled})),
                         Some(
-                            json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":!enabled}),
+                            json!({"session_id":native(),"written_at":"fresh","fast_mode":!enabled}),
                         ),
                     )
                     .await;
@@ -717,8 +722,8 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
             let changed = fx
                 .run_fast(
                     rig,
-                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
-                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":true})),
+                    Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":false})),
+                    Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":true})),
                     async move {
                         super::super::config::update_channel_fast_mode(
                             &shared,
@@ -743,7 +748,7 @@ fn herdr_fast_toggles_native_once_without_reset_pg() {
                     rig,
                     CHANNEL,
                     CHANNEL,
-                    Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                    Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":false})),
                     None,
                 )
                 .await;
@@ -774,10 +779,10 @@ fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
                 .channel_fast_modes
                 .insert(CHANNEL.to_string(), true);
             for after in [
-                Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
-                Some(json!({"session_id":NATIVE,"written_at":0.0,"fast_mode":true})),
+                Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":false})),
+                Some(json!({"session_id":native(),"written_at":0.0,"fast_mode":true})),
                 Some(json!({"session_id":"other","written_at":"fresh","fast_mode":true})),
-                Some(json!({"session_id":NATIVE,"written_at":"fresh"})),
+                Some(json!({"session_id":native(),"written_at":"fresh"})),
                 None,
             ] {
                 let _ = std::fs::remove_file(&fx.record);
@@ -787,7 +792,7 @@ fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
                         rig,
                         CHANNEL,
                         CHANNEL,
-                        Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
+                        Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":false})),
                         after,
                     )
                     .await;
@@ -801,9 +806,9 @@ fn herdr_fast_mismatch_never_reports_success_or_retries_toggle_pg() {
                 fx.assert_fast_preserved(rig, keys, CHANNEL, true).await;
             }
             for before in [
-                Some(json!({"session_id":NATIVE,"written_at":0.0,"fast_mode":false})),
+                Some(json!({"session_id":native(),"written_at":0.0,"fast_mode":false})),
                 Some(json!({"session_id":"other","written_at":"fresh","fast_mode":false})),
-                Some(json!({"session_id":NATIVE,"written_at":"fresh"})),
+                Some(json!({"session_id":native(),"written_at":"fresh"})),
                 None,
             ] {
                 let _ = std::fs::remove_file(&fx.record);
@@ -854,12 +859,12 @@ fn herdr_fast_overlay_toggles_only_from_its_shown_state_and_closes_on_failure_pg
                     toggled |= p["text"] == " ";
                     if confirms && toggled && p["keys"] == json!(["enter"]) {
                         let fresh =
-                            json!({"session_id":NATIVE,"written_at":now(),"fast_mode":true});
+                            json!({"session_id":native(),"written_at":now(),"fast_mode":true});
                         std::fs::write(&path, fresh.to_string()).unwrap();
                     }
                 });
                 let (sent, shared) = (rig.sends().len(), fx.shared.clone());
-                let before = json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false});
+                let before = json!({"session_id":native(),"written_at":"fresh","fast_mode":false});
                 let notice = fx
                     .run_with_before(rig, Some(before), async move {
                         let parent = async { ChannelId::new(CHANNEL) };
@@ -906,7 +911,7 @@ fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
         {
             let mut core = fx.shared.core.lock().await;
             let session = core.sessions.get_mut(&ChannelId::new(thread)).unwrap();
-            session.session_id = Some(NATIVE.into());
+            session.session_id = Some(native().into());
             session.current_path = Some("/work".into());
         }
         fx.logical = ProviderKind::Claude.build_tmux_session_name("herdr-thread-fast");
@@ -931,8 +936,8 @@ fn herdr_thread_fast_targets_runtime_pane_without_parent_reset_pg() {
             .bind(&fx.shared.token_hash).bind(CHANNEL.to_string()).bind("parent-native").bind(serde_json::to_value(&parent).unwrap()).execute(pool).await.unwrap();
         fx.shared.settings.write().await.channel_fast_modes.insert(CHANNEL.to_string(), true);
         let notice = fx.fast(rig, thread, CHANNEL,
-            Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":false})),
-            Some(json!({"session_id":NATIVE,"written_at":"fresh","fast_mode":true}))).await;
+            Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":false})),
+            Some(json!({"session_id":native(),"written_at":"fresh","fast_mode":true}))).await;
         assert!(notice.contains("fast mode를 `true`로 적용했습니다"), "{notice}");
         assert_eq!(rig.sends().len(),2);
         assert!(rig.sends().iter().all(|p|p["pane_id"]==PANE), "parent pane receives zero keys");
@@ -1037,7 +1042,7 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
                 row: None,
                 prompt,
                 working_dir: "/work",
-                session_id: Some(NATIVE),
+                session_id: Some(native()),
                 force_fresh: false,
                 system_prompt: None,
                 model: None,
@@ -1048,7 +1053,7 @@ fn herdr_first_input_and_effort_never_submit_mixed_content_pg() {
                 &turn,
                 &record,
                 (
-                    NATIVE,
+                    native(),
                     crate::config::runtime_root()
                         .unwrap()
                         .join("not-created.jsonl"),
