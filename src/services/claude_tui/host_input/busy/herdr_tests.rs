@@ -424,7 +424,7 @@ fn drive_foundation_herdr_host_reads_do_not_touch_the_pane_or_readiness() {
     let before_reads = captures();
     let revisions = test_support::revisions_for_session(LOGICAL);
     for _ in 0..5 {
-        assert_eq!(context.read_host().state_for_test(), BusyState::Busy);
+        assert_eq!(context.read_host(true).state_for_test(), BusyState::Busy);
     }
     assert_eq!(captures(), before_reads);
     assert_eq!(test_support::revisions_for_session(LOGICAL), revisions);
@@ -441,7 +441,7 @@ fn drive_foundation_herdr_host_reads_do_not_touch_the_pane_or_readiness() {
     test_support::daemon_restart(LOGICAL);
     let revisions = test_support::revisions_for_session(LOGICAL);
     for _ in 0..5 {
-        let evidence = context.read_host();
+        let evidence = context.read_host(true);
         assert_eq!(evidence.state_for_test(), BusyState::Idle);
         assert!(!evidence.idle_verified_for_test());
     }

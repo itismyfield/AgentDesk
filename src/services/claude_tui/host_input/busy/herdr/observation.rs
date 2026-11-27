@@ -25,8 +25,8 @@ impl Context {
     }
 
     #[cfg(test)]
-    pub(crate) fn read_host(&self) -> Reading {
-        if !self.target.execution_alive() || !(self.output_ready)(self.channel) {
+    pub(crate) fn read_host(&self, output_ready: bool) -> Reading {
+        if !output_ready || !self.target.execution_alive() {
             return Reading::held();
         }
         crate::services::tmux_common::try_with_tmux_source_authority(&self.logical, |authority| {

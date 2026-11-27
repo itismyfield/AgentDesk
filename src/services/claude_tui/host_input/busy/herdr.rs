@@ -313,15 +313,11 @@ pub(crate) fn observe(
     (target, writer, attempt_target): (HerdrTarget, String, serde_json::Value),
     output_ready: fn(u64) -> bool,
 ) -> BusyObservation {
-    let context = Arc::new(Context {
-        channel,
-        logical: logical.into(),
-        nonce: nonce.into(),
+    let context = Arc::new(Context::new(
+        (channel, logical, nonce),
+        (target, writer, attempt_target),
         output_ready,
-        target,
-        writer,
-        attempt_target,
-    });
+    ));
     let read = context.read();
     BusyObservation {
         context: Some(context),
@@ -331,6 +327,22 @@ pub(crate) fn observe(
 }
 
 impl Context {
+    fn new(
+        (channel, logical, nonce): (u64, &str, &str),
+        (target, writer, attempt_target): (HerdrTarget, String, serde_json::Value),
+        output_ready: fn(u64) -> bool,
+    ) -> Self {
+        Self {
+            channel,
+            logical: logical.into(),
+            nonce: nonce.into(),
+            output_ready,
+            target,
+            writer,
+            attempt_target,
+        }
+    }
+
     fn current_source(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,

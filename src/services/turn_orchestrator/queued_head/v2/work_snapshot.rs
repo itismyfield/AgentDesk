@@ -13,6 +13,8 @@ struct WorkSnapshot {
     actor: ActorEpoch,
     items: usize,
     blocker: Option<Blocker>,
+    front: Option<Front>,
+    head: Option<AttemptRef>,
     due: Option<u64>,
 }
 
@@ -22,6 +24,8 @@ impl ChannelMailboxHandle {
         self.v2_request(move |slot| {
             let owner = slot.as_ref().ok_or("V2 not adopted")?;
             let items = owner.snapshot.items.len();
+            let front = owner.front();
+            let head = owner.active_attempt().ok();
             let blocker = if owner.snapshot.head_injection.is_some() {
                 Some(Blocker::Head)
             } else if items == 0 {
@@ -29,9 +33,9 @@ impl ChannelMailboxHandle {
             } else if owner.starts.closing.is_some() {
                 Some(Blocker::Closing)
             } else {
-                match owner.front() {
+                match front.as_ref() {
                     None => Some(Blocker::Effort),
-                    Some(front) if owner.retry_waiting(&front) => Some(Blocker::Retry),
+                    Some(front) if owner.retry_waiting(front) => Some(Blocker::Retry),
                     Some(_) => None,
                 }
             };
@@ -39,6 +43,8 @@ impl ChannelMailboxHandle {
                 actor,
                 items,
                 blocker,
+                front,
+                head,
                 due: owner.settle_due(),
             })
         })
@@ -62,6 +68,7 @@ async fn drive_foundation_snapshot_distinguishes_empty_unadopted_and_blocked() {
         .unwrap();
     let empty = handle.v2_work_snapshot().await.unwrap();
     assert_eq!((empty.items, empty.blocker, empty.due), (0, None, None));
+    assert!(empty.front.is_none() && empty.head.is_none());
 
     handle
         .v2_request(move |slot| {
@@ -86,6 +93,8 @@ async fn drive_foundation_snapshot_distinguishes_empty_unadopted_and_blocked() {
         .expect("the exact grant entered its wait");
     let blocked = handle.v2_work_snapshot().await.unwrap();
     assert_eq!(blocked.actor, empty.actor);
+    assert!(blocked.head.is_none());
+    assert_eq!(blocked.front.unwrap().1.queued_generation, 1);
     assert_eq!(
         (blocked.items, blocked.blocker, blocked.due),
         (1, Some(Blocker::Retry), Some(31_000))
