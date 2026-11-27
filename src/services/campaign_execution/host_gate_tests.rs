@@ -15,7 +15,7 @@ use crate::services::campaign_execution::model::{
     ActionObservation, ActionState, AttemptBinding, CampaignState, Command, PhaseFact,
     RejectionCode,
 };
-use crate::services::campaign_execution::stage_fsm::tests::{
+use crate::services::campaign_execution::stage_fsm::test_support::{
     assigned, begin, execution, review_of, run_v, seal_of,
 };
 use crate::services::campaign_execution::verification_run::{

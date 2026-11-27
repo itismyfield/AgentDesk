@@ -14,7 +14,7 @@ use crate::services::campaign_execution::{
     pipeline_rules::MinimalPipelineScope,
     profile::Observation,
     runtime_profile::tests::{rule_files, witness},
-    stage_fsm::tests as fsm,
+    stage_fsm::test_support as fsm,
     verification_run::PhaseOutput,
     verification_spec::ADK_NON_PG,
 };

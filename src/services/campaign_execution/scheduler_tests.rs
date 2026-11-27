@@ -2,7 +2,7 @@ use super::*;
 use crate::services::campaign_execution::{
     control::{decide, test_support as domain},
     lifecycle::tests as life,
-    stage_fsm::tests as fsm,
+    stage_fsm::test_support as fsm,
 };
 
 fn key(action: &NextAction) -> StepKey {

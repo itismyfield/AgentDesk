@@ -2,7 +2,7 @@ use super::*;
 use crate::services::campaign_execution::{
     control::{decide as command, test_support as domain},
     review_dispatch::WebGptReply,
-    stage_fsm::tests as fsm,
+    stage_fsm::test_support as fsm,
 };
 
 fn fixture() -> (CampaignState, String, ReviewRequest) {

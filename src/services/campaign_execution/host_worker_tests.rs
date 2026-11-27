@@ -6,7 +6,7 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::campaign_execution::control::test_support as domain;
 #[cfg(unix)]
-use crate::services::campaign_execution::stage_fsm::tests as fsm;
+use crate::services::campaign_execution::stage_fsm::test_support as fsm;
 
 fn identity(boot: u128) -> HostGate {
     host_identity::from_observation(
@@ -463,7 +463,7 @@ async fn m4_regression_a_late_launch_keeps_the_finish_fence_at_the_same_version_
 async fn a_retained_phase_result_is_committed_once_and_then_acknowledged_pg() {
     use crate::services::campaign_execution::{
         evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
-        evidence_gate::tests::{REPO, workspace},
+        evidence_gate::test_support::{REPO, workspace},
         verification_run::{PhaseOutput, ProcessIdentity, test_support as a1},
     };
 

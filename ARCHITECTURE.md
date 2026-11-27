@@ -1105,6 +1105,7 @@ src/
 │   │   ├── effect_envelope.rs
 │   │   ├── evidence.rs
 │   │   ├── evidence_gate.rs
+│   │   ├── evidence_gate_test_support.rs
 │   │   ├── evidence_gate_tests.rs
 │   │   ├── evidence_tests.rs
 │   │   ├── execution_pin.rs
@@ -1149,6 +1150,7 @@ src/
 │   │   ├── scheduler.rs
 │   │   ├── scheduler_tests.rs
 │   │   ├── stage_fsm.rs
+│   │   ├── stage_fsm_test_support.rs
 │   │   ├── stage_fsm_tests.rs
 │   │   ├── verification_commands.rs
 │   │   ├── verification_driver.rs

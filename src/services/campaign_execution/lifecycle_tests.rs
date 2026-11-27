@@ -5,7 +5,7 @@ use crate::services::campaign_execution::{
     control::{decide, test_support as domain},
     definition,
     evidence_gate::StageAssessment,
-    stage_fsm::tests as fsm,
+    stage_fsm::test_support as fsm,
 };
 
 pub(crate) fn step(state: &CampaignState, command: Command) -> CampaignState {
