@@ -91,6 +91,11 @@ pub(super) async fn effort_save_notice(
     };
     // A Herdr Codex pane restarts on its own thread; a Herdr Claude pane takes the level in place.
     let herdr = super::config::herdr_now(shared, provider, channel_id).await;
+    // The host is read again here, so a Codex thread that turned Herdr since the check is refused.
+    let thread_codex = super::config::herdr_codex_thread_refusal(provider, channel_id, herdr);
+    if let Some(reason) = thread_codex {
+        return format!("effort를 바꾸지 않았습니다: {reason}");
+    }
     #[cfg(unix)]
     if super::config::herdr_codex(provider, channel_id, herdr) {
         let restart = super::effort_restart::herdr_notice;
