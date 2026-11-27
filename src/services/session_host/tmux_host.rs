@@ -215,7 +215,7 @@ impl InteractiveSessionHost for TmuxHost {
     }
 
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(injected) = super::test_support::injected_presence(session) {
             return injected;
         }
@@ -227,7 +227,7 @@ impl InteractiveSessionHost for TmuxHost {
 
     // Same probe as the sync `tmux_diagnostics::tmux_session_pane_liveness`.
     fn liveness(&self, session: HostSessionRef<'_>) -> HostLiveness {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(injected) = super::test_support::injected_liveness(session) {
             return injected;
         }

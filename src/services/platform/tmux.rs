@@ -340,7 +340,7 @@ fn install_dead_marker_hooks(session_name: &str) {
 }
 
 fn log_kill_request(session_name: &str, reason: &str) {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     kill_requests::record(session_name);
     let ts = chrono::Local::now().format("%H:%M:%S");
     tracing::info!("  [{ts}] ✂ tmux kill requested: session={session_name} reason={reason}");

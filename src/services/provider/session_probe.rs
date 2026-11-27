@@ -217,7 +217,7 @@ pub(crate) fn observe_session_liveness(target: &SessionProbeTarget) -> SessionOb
 }
 
 fn observe_host_liveness(session: HostSessionRef<'_>) -> SessionLiveness {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(injected) = crate::services::session_host::test_support::injected_liveness(session)
     {
         return injected.into();

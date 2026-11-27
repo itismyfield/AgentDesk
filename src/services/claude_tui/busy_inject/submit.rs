@@ -59,7 +59,7 @@ fn report(
     timing: &Timing,
     policy: Policy,
 ) -> Report {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     if !stash_tests::USE_PRODUCTION_CHANNELS.get() {
         return inject_gated_with(
             pane,
