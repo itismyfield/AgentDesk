@@ -2376,6 +2376,7 @@ src/
 │   │   │   │   ├── claude_handoff.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
+│   │   │   │   ├── cold.rs
 │   │   │   │   ├── drive.rs
 │   │   │   │   ├── drive_tests.rs
 │   │   │   │   ├── effect.rs
