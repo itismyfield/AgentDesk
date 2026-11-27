@@ -3,10 +3,10 @@ use sqlx::{PgPool, Row};
 
 use crate::domain::outbound::port::DispatchMessagePostError;
 use crate::domain::outbound::{
-    DeliveryResult, DiscordOutboundClient, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent,
-    OutboundTargetKey, first_raw_message_id,
+    DeliveryResult, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent, OutboundTargetKey,
+    first_raw_message_id,
 };
-use crate::services::discord::outbound::HttpOutboundClient;
+use crate::services::dispatches::http_outbound::HttpOutbound;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IssueAnnouncementDeliveryError {
@@ -365,7 +365,7 @@ async fn send_issue_announcement_message(
     correlation_id: &str,
     event_id: &str,
 ) -> Result<String, IssueAnnouncementDeliveryError> {
-    let client = HttpOutboundClient::new(
+    let client = HttpOutbound::new(
         reqwest::Client::new(),
         token.to_string(),
         crate::services::dispatches::discord_delivery::discord_api_base_url(),
@@ -446,7 +446,7 @@ mod tests {
             extract::State,
             http::{StatusCode, header::RETRY_AFTER},
             response::{IntoResponse, Response},
-            routing::post,
+            routing::{patch, post},
         };
         use serde_json::{Value, json};
         use std::sync::{Arc, Mutex};
@@ -472,10 +472,20 @@ mod tests {
             }
         }
 
+        crate::services::discord::outbound::install_engine_ports();
         let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let payloads = Arc::new(Mutex::new(Vec::<Value>::new()));
         let app = Router::new()
             .route("/channels/123/messages", post(receive))
+            .route(
+                "/channels/123/messages/9001",
+                patch(|| async {
+                    (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"code": 10008, "message": "Unknown Message"})),
+                    )
+                }),
+            )
             .with_state(payloads.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -497,8 +507,35 @@ mod tests {
         )
         .await
         .unwrap();
+        let duplicate_id = send_issue_announcement_message(
+            "test-token",
+            "123",
+            None,
+            &content,
+            &correlation,
+            "created",
+        )
+        .await
+        .unwrap();
+        let edit_error = send_issue_announcement_message(
+            "test-token",
+            "123",
+            Some(&id),
+            &content,
+            &correlation,
+            "completed",
+        )
+        .await
+        .unwrap_err();
         server.abort();
         assert_eq!(id, "9001");
+        assert_eq!(duplicate_id, id);
+        assert_eq!(edit_error.http_status, Some(StatusCode::NOT_FOUND));
+        assert_eq!(edit_error.discord_error_code, Some(10008));
+        assert_eq!(
+            edit_error.to_string(),
+            r#"Discord edit failed for message 9001: 404 Not Found {"code":10008,"message":"Unknown Message"}"#
+        );
         let payloads = payloads.lock().unwrap();
         assert_eq!(payloads.len(), 2);
         for payload in payloads.iter() {

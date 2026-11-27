@@ -148,19 +148,9 @@ fn parse_dispatch_message_target(dispatch_context: Option<&str>) -> Option<Dispa
 /// file actually exists on disk.
 const COMMAND_BOT_PENDING_FALLBACK_NAMES: &[&str] = &["claude", "codex", "command", "command_2"];
 
-/// #1445: enumerate tokens of currently-launchable command bots — i.e.
-/// bots whose `discord.bots.<name>.provider` is set (these are the bots
-/// that add the `⏳` pending marker at turn start). `load_discord_bot_launch_configs`
-/// already filters by agent-channel mapping and deduplicates by token, so
-/// each returned entry represents a distinct command-bot identity. We
-/// supplement with on-disk credential files for the canonical fallback
-/// names so the cleanup still works when the YAML omits inline tokens.
+/// Include file-backed command bots so terminal cleanup can clear their markers.
 fn collect_command_bot_pending_tokens() -> Vec<String> {
-    let mut tokens: Vec<String> =
-        crate::services::discord::settings::load_discord_bot_launch_configs()
-            .into_iter()
-            .map(|launch| launch.token)
-            .collect();
+    let mut tokens = super::super::command_bot_launch::tokens();
     for name in COMMAND_BOT_PENDING_FALLBACK_NAMES {
         let Some(token) = crate::credential::read_bot_token(name) else {
             continue;

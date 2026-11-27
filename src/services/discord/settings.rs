@@ -53,6 +53,15 @@ pub(super) use validation::{
 };
 pub(super) use write::save_bot_settings;
 
+pub(crate) fn install_dispatch_ports() {
+    crate::services::dispatches::command_bot_launch::install(|| {
+        load_discord_bot_launch_configs()
+            .into_iter()
+            .map(|launch| launch.token)
+            .collect()
+    });
+}
+
 fn json_u64(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()

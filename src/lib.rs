@@ -270,6 +270,7 @@ pub fn run_from_args() -> Result<()> {
     services::discord::install_codex_absence_reader();
     services::discord::install_engine_probes();
     services::discord::outbound::install_engine_ports();
+    services::discord::settings::install_dispatch_ports();
     // A failure-marker handoff restarts this executable as a short-lived writer.
     // Dispatch it before Clap so no public/hidden CLI surface is needed and the
     // writer can outlive the one-shot hook relay process that launched it.
