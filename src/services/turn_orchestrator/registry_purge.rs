@@ -78,26 +78,8 @@ pub(super) fn close_if_idle_verdict(state: &mut ChannelMailboxState) -> Result<(
     Ok(())
 }
 
-fn close_if_idle_observed_verdict(
-    state: &mut ChannelMailboxState,
-    expected_claim: Option<ClaimObservation>,
-) -> Result<(), &'static str> {
-    if expected_claim.is_some_and(|observed| state.claim_log.observation() != observed) {
-        return Err("claim_changed");
-    }
-    close_if_idle_verdict(state)
-}
-
-pub(super) fn answer_close_if_idle(state: &mut ChannelMailboxState, msg: ChannelMailboxMsg) {
-    let ChannelMailboxMsg::CloseIfIdle {
-        expected_claim,
-        reply,
-    } = msg
-    else {
-        unreachable!("only CloseIfIdle reaches its reply handler");
-    };
-    let _ = reply.send(close_if_idle_observed_verdict(state, expected_claim));
-}
+mod idle_verdict;
+pub(super) use idle_verdict::answer_close_if_idle;
 
 /// Tombstone gate run before the actor's arm match: a closed actor passes reads and a receipt-only
 /// policy reconcile, refuses the rest (`None` skips the match) and never retries a policy close.

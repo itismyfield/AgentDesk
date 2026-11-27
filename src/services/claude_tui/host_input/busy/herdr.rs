@@ -1,4 +1,6 @@
 //! The existing bound Herdr transaction, with no fallback to another host.
+mod observation;
+
 use super::{BusyObservation, BusyOutcome, BusyReport, BusyState};
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude_tui::busy_inject::{self, Request, Screen, Veto};
@@ -24,23 +26,43 @@ pub(super) struct Adapter {
     pub(super) observation: Option<BusyObservation>,
 }
 
+struct Prepared {
+    frame: String,
+    offset: u64,
+    park: bool,
+}
+
+fn withdrawn(request: &Request<'_>) -> BusyReport {
+    history::withdraw(request.nonce, request.transcript);
+    BusyReport::refused("owner_refused".into())
+}
+
 impl Adapter {
     pub(super) fn submit(&self, request: &Request<'_>) -> BusyReport {
+        match self.prepare(request) {
+            Ok(prepared) => self.send(request, prepared),
+            Err(refusal) => refusal,
+        }
+    }
+
+    fn prepare(&self, request: &Request<'_>) -> Result<Prepared, BusyReport> {
         let Some(writer) = self.writer.as_deref() else {
-            return BusyReport::refused("owner Herdr input without a writer".into());
+            return Err(BusyReport::refused(
+                "owner Herdr input without a writer".into(),
+            ));
         };
         if let Err(reason) = owner_input::bind_writer(writer) {
-            return BusyReport::refused(reason);
+            return Err(BusyReport::refused(reason));
         }
         let Some(capture) = self.target.capture_ansi(-80) else {
-            return BusyReport::not_sent(
+            return Err(BusyReport::not_sent(
                 Veto::PaneUnavailable,
                 self.observation.as_ref().map(BusyObservation::probe),
-            );
+            ));
         };
         if busy_inject::modal(&capture) {
             if let Some(observation) = self.observation.as_ref() {
-                return BusyReport::not_sent(Veto::Modal, Some(observation.probe()));
+                return Err(BusyReport::not_sent(Veto::Modal, Some(observation.probe())));
             }
             let target = self.target.clone();
             let probe = move || match target.capture_ansi(-80) {
@@ -48,13 +70,13 @@ impl Adapter {
                 Some(_) => Screen::Blocked,
                 None => Screen::Unknown,
             };
-            return BusyReport::not_sent(Veto::Modal, Some(Box::new(probe)));
+            return Err(BusyReport::not_sent(Veto::Modal, Some(Box::new(probe))));
         }
         let Ok(offset) = std::fs::metadata(request.transcript).map(|meta| meta.len()) else {
-            return BusyReport::not_sent(
+            return Err(BusyReport::not_sent(
                 Veto::TranscriptUnavailable,
                 self.observation.as_ref().map(BusyObservation::probe),
-            );
+            ));
         };
         let frame = busy_inject::frame(
             request.source,
@@ -65,14 +87,10 @@ impl Adapter {
         );
         let who = ("claude", request.session, request.nonce, request.author);
         if history::register(who, request.transcript, offset, &frame).is_err() {
-            return BusyReport::not_sent(Veto::LoadFailed, None);
+            return Err(BusyReport::not_sent(Veto::LoadFailed, None));
         }
-        let withdrawn = || {
-            history::withdraw(request.nonce, request.transcript);
-            BusyReport::refused("owner_refused".into())
-        };
         if owner_input::ready_payload().is_err() {
-            return withdrawn();
+            return Err(withdrawn(request));
         }
         let park = busy_inject::draft_sighting(&capture) == DraftSighting::PersonDraft;
         if let Some(observation) = self.observation.as_ref()
@@ -80,8 +98,21 @@ impl Adapter {
         {
             history::withdraw(request.nonce, request.transcript);
             owner_input::first_key_held("busy_source_unavailable");
-            return observation.held();
+            return Err(observation.held());
         }
+        Ok(Prepared {
+            frame,
+            offset,
+            park,
+        })
+    }
+
+    fn send(&self, request: &Request<'_>, prepared: Prepared) -> BusyReport {
+        let Prepared {
+            frame,
+            offset,
+            park,
+        } = prepared;
         if park {
             owner_input::keyed();
             let parked = (self.target.pin(HerdrMutation::Input).ok()).and_then(|()| {
@@ -100,7 +131,7 @@ impl Adapter {
         if owner_input::start_payload().is_err() {
             return match park {
                 true => BusyReport::outcome(BusyOutcome::Failed("stash_failed")),
-                false => withdrawn(),
+                false => withdrawn(request),
             };
         }
         if let Some(observation) = self.observation.as_ref()
@@ -300,102 +331,6 @@ pub(crate) fn observe(
 }
 
 impl Context {
-    pub(super) fn read(&self) -> Reading {
-        if !self.target.execution_alive() {
-            return Reading::held();
-        }
-        if self.cleared() || self.idle_ready() {
-            return Reading::idle();
-        }
-        if !(self.output_ready)(self.channel)
-            || !matches!(self.target.capture_ansi(-80), Some(capture) if !busy_inject::modal(&capture))
-        {
-            return Reading::held();
-        }
-        crate::services::tmux_common::try_with_tmux_source_authority(&self.logical, |authority| {
-            // A clear delegates before a new file exists; no pane socket is read under this lock.
-            if self.cleared() {
-                return Some(Reading::idle());
-            }
-            let source = self.current_source(authority)?;
-            let state = crate::services::tui_turn_state::observe_claude_jsonl_running_turn_state(
-                &source.id.path,
-            );
-            if self
-                .current_source(authority)
-                .is_none_or(|again| again.id != source.id)
-            {
-                return None;
-            }
-            let state = match state {
-                crate::services::tui_turn_state::TuiTurnState::Idle => BusyState::Idle,
-                state if state.is_busy() => BusyState::Busy,
-                _ => BusyState::Held,
-            };
-            Some(Reading {
-                state,
-                source: Some(source),
-                idle_verified: false,
-            })
-        })
-        .flatten()
-        .unwrap_or_else(Reading::held)
-    }
-
-    // This only delegates; the Idle driver reserves and checks again before its first key.
-    fn idle_ready(&self) -> bool {
-        use crate::services::claude_tui::readiness;
-        use crate::services::tui_prompt_dedupe::binding_context::{
-            SpawnNonceMarker, observe_spawn_nonce_marker,
-        };
-        let current = || {
-            self.target.execution_alive()
-                && matches!(observe_spawn_nonce_marker(&self.logical),
-                    SpawnNonceMarker::Known(nonce) if nonce == self.nonce)
-        };
-        if !current() {
-            return false;
-        }
-        let Some(binding) = tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.logical)
-            .filter(|binding| binding.runtime_kind == RuntimeHandoffKind::ClaudeTui)
-        else {
-            return false;
-        };
-        let path = Some(std::path::Path::new(&binding.output_path));
-        let Some(proof) = readiness::observe(&self.logical, path)
-            .or_else(|| readiness::observe_restored_reply(&self.logical, path))
-        else {
-            return false;
-        };
-        if proof.restart()
-            && !self
-                .target
-                .capture_ansi(-80)
-                .as_deref()
-                .is_some_and(crate::services::claude::herdr_turn::composer::restored_screen_idle)
-        {
-            return false;
-        }
-        let Some(reservation) = readiness::reserve(proof) else {
-            return false;
-        };
-        let valid = reservation.current()
-            && current()
-            && tui_prompt_dedupe::runtime_binding_for_tmux_session(&self.logical).is_some_and(
-                |present| {
-                    present.runtime_kind == binding.runtime_kind
-                        && present.output_path == binding.output_path
-                },
-            );
-        reservation.not_sent();
-        valid
-    }
-
-    fn cleared(&self) -> bool {
-        crate::services::claude::herdr_turn::awaited_clear(self.channel, &self.logical, &self.nonce)
-            .is_some()
-    }
-
     fn current_source(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
@@ -403,6 +338,15 @@ impl Context {
         let (pin, history) =
             binding_events::claude_history_at(self.channel, &self.logical, Some(&self.nonce))
                 .ok()?;
+        self.resolve_source(authority, pin, history)
+    }
+
+    fn resolve_source(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+        pin: Option<binding_events::PinnedAt>,
+        history: source_verify::SourceHistory,
+    ) -> Option<Source> {
         let (pin, pinned_at) = pin?;
         let current = history
             .current

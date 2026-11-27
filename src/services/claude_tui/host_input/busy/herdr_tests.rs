@@ -391,3 +391,68 @@ fn an_idle_relay_does_not_delegate_a_busy_input_source() {
 
 #[path = "idle_compaction_tests.rs"]
 mod idle_compaction_tests;
+
+#[test]
+fn drive_foundation_herdr_host_reads_do_not_touch_the_pane_or_readiness() {
+    use crate::services::claude_tui::readiness::test_support;
+    use crate::services::tui_turn_state::idle_compaction_tests::end_turn;
+
+    let fx = BindingFixture::new();
+    test_support::forget_session(LOGICAL);
+    let source = live_source(&fx);
+    let rig = HerdrRig::start();
+    let _registry = rig.registry_on_this_thread();
+    pane(&rig);
+    let observation = observe_busy(CHANNEL, LOGICAL, &host(&rig), "observation-fixture");
+    let host = observation.context_for_test().unwrap();
+    let context = Context::for_test(
+        CHANNEL,
+        LOGICAL.into(),
+        N1.into(),
+        |_| true,
+        host.target_for_test().clone(),
+        host.writer_for_test().into(),
+        host.attempt_target_for_test().clone(),
+    );
+
+    let captures = || {
+        rig.requests()
+            .iter()
+            .filter(|call| call["method"] == "pane.read")
+            .count()
+    };
+    let before_reads = captures();
+    let revisions = test_support::revisions_for_session(LOGICAL);
+    for _ in 0..5 {
+        assert_eq!(context.read_host().state_for_test(), BusyState::Busy);
+    }
+    assert_eq!(captures(), before_reads);
+    assert_eq!(test_support::revisions_for_session(LOGICAL), revisions);
+
+    let mut reply = end_turn();
+    reply["sessionId"] = json!(source.session_id);
+    reply["timestamp"] = json!(chrono::Utc::now());
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&source.path)
+        .unwrap();
+    writeln!(file, "{reply}").unwrap();
+    drop(file);
+    test_support::daemon_restart(LOGICAL);
+    let revisions = test_support::revisions_for_session(LOGICAL);
+    for _ in 0..5 {
+        let evidence = context.read_host();
+        assert_eq!(evidence.state_for_test(), BusyState::Idle);
+        assert!(!evidence.idle_verified_for_test());
+    }
+    assert_eq!(captures(), before_reads);
+    assert_eq!(test_support::revisions_for_session(LOGICAL), revisions);
+    assert!(rig.sends().is_empty());
+
+    context.read_for_test();
+    assert!(
+        captures() > before_reads,
+        "the TUI facade still inspects its pane"
+    );
+    test_support::forget_session(LOGICAL);
+}

@@ -169,3 +169,88 @@ async fn same_target_attempts_run_one_at_a_time_and_other_targets_overlap() {
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drive_foundation_records_reserve_receipt_and_effect_order() {
+    use crate::services::claude_tui::owner_input;
+    use crate::services::tui_input::human_frame::history::v2::Registry;
+
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    for (channel, submit_keys) in [(7_272_486, true), (7_272_487, false)] {
+        let (mailbox, ticket, item) = admitted(&registry, channel, "ordered").await;
+        let sequence = |mailbox: ChannelMailboxHandle| async move {
+            mailbox
+                .v2_request(|slot| Ok(slot.as_ref().unwrap().cancel_sequence_for_tests()))
+                .await
+                .unwrap()
+        };
+        let baseline = sequence(mailbox.clone()).await;
+        let nonce = format!("order-{submit_keys}");
+        let traces = Arc::new(Mutex::new(Vec::new()));
+        let (record, mailbox_copy, expected) = (traces.clone(), mailbox.clone(), nonce.clone());
+        let (t, i) = (ticket.clone(), item.clone());
+        let leaf: Leaf = Box::new(move |_| {
+            let runtime = tokio::runtime::Handle::current();
+            assert_eq!(
+                runtime.block_on(sequence(mailbox_copy.clone())),
+                baseline + 2
+            );
+            let bind = runtime.block_on(exact_turn(&mailbox_copy, &t, &i)).unwrap();
+            assert!(matches!(bind, TurnBind::Armed(turn) if turn.attempt == expected));
+            let mut calls = record.lock().unwrap();
+            calls.push("reserve and arm");
+            let receipt = Registry::runtime().unwrap().json().unwrap();
+            let planned = receipt["planned"].as_array().unwrap();
+            assert_eq!(
+                planned
+                    .iter()
+                    .filter(|r| r["key"]["attempt"]["nonce"].as_str() == Some(expected.as_str()))
+                    .count(),
+                1
+            );
+            calls.push("receipt preparation");
+            if submit_keys {
+                owner_input::ready_payload().unwrap();
+                owner_input::start_payload()?;
+                owner_input::keyed();
+                calls.push("key");
+                Ok(Completion::Submitted)
+            } else {
+                owner_input::vetoed("Modal");
+                calls.push("hold");
+                Ok(Completion::Held("Modal".into()))
+            }
+        });
+
+        let result = submit(
+            &mailbox,
+            prepared(&nonce, "ordered-writer", "ordered", &[]),
+            clock(),
+            leaf,
+        )
+        .await
+        .unwrap();
+        assert!(head(&mailbox).await.is_null());
+        let bind = exact_turn(&mailbox, &ticket, &item).await.unwrap();
+        if submit_keys {
+            assert_eq!(result, Completion::Submitted);
+            assert_eq!(sequence(mailbox.clone()).await, baseline + 4);
+            assert!(matches!(bind, TurnBind::Settled(_)));
+            traces.lock().unwrap().push("settle");
+            assert_eq!(
+                *traces.lock().unwrap(),
+                ["reserve and arm", "receipt preparation", "key", "settle"]
+            );
+        } else {
+            assert_eq!(result, Completion::NotSent("Modal".into()));
+            assert_eq!(sequence(mailbox.clone()).await, baseline + 3);
+            assert_eq!(bind, TurnBind::NotArmed);
+            traces.lock().unwrap().push("rollback");
+            assert_eq!(
+                *traces.lock().unwrap(),
+                ["reserve and arm", "receipt preparation", "hold", "rollback"]
+            );
+        }
+    }
+}

@@ -26,6 +26,8 @@ pub(crate) mod routine_settlement;
 pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
+#[cfg(all(test, unix))]
+mod work_snapshot;
 pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;
 #[cfg(any(test, feature = "test-support"))]

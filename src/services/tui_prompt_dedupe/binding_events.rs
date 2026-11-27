@@ -524,20 +524,15 @@ pub(crate) fn claude_history_at(
 ) -> io::Result<(Option<PinnedAt>, SourceHistory)> {
     let mut found = (None, SourceHistory::default());
     commit_with(channel_id, |writer| {
-        let pane = writer.panes.get(tmux_session);
-        let pin = pane.filter(|pane| pane.verified).and_then(|pane| {
-            let pinned_at = pane.pinned_at;
-            Some((pane.current.clone()?, pinned_at))
-        });
-        let history = match pane {
-            Some(pane) => pane.claude.history(nonce, writer.tainted),
-            None => claude_fold::ClaudeFold::default().history(nonce, writer.tainted),
-        };
-        found = (pin, history);
+        found = writer.claude_pane_history(tmux_session, nonce);
         Planned::Keep(Committed::Unchanged)
     })?;
     Ok(found)
 }
+
+mod observation;
+#[cfg(test)]
+pub(crate) use observation::published_claude_history;
 
 fn commit(proposal: &Proposal, mode: Plan) -> io::Result<Committed> {
     commit_with(proposal.channel_id, |writer| writer.plan(proposal, mode))

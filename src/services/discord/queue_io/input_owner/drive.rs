@@ -10,6 +10,9 @@ use std::time::Duration;
 
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
+#[cfg(test)]
+mod hold_episode;
+
 /// The owner's granted front: its slot's ticket and the original.
 pub(crate) type Front = (Option<String>, PendingQueueItem);
 /// The right to reserve one front with the originals merged behind it when it was claimed, spent

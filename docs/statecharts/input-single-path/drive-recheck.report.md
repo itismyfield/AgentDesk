@@ -44,3 +44,9 @@ TLC 1.7.4, 8 cfg, 16 TLC 실행과 cfg별 공정성 검사 8건. Before 4건은 
 python3 scripts/ci/statecharts_tlc.py --base c7ad3ff2e1f550c4a050067d4c0131257bf668a6 \
   --jar ~/.cache/tla2tools/tla2tools.jar --jobs 2
 ```
+
+## 조각 A의 타이머 생명주기 모델
+
+[InputDriveLifecycle](InputDriveLifecycle.tla)은 조각 B에서 검증할 행동을 별도 명세에 둔다. 수락과 복원은 owner의 실행 요청을 만들고, 단일 runner가 timer를 재무장한다. clear와 retire는 그 timer를 취소한다. 새 owner의 요청은 옛 runner의 종료와 늦은 결과에도 유지된다.
+
+[현재 cfg](InputDriveLifecycleDormant.cfg)는 `Enabled = FALSE`로 시작 상태만 확인한다. 기존 여덟 cfg는 기존 투영을 확인한다. 시작·복원·빈 큐 종료·후속 owner 인계는 조각 B에서 활성 전이, liveness 및 해당 연결 제거 뮤턴트로 검증한다.

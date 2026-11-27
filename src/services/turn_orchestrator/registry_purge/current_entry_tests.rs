@@ -212,6 +212,7 @@ fn observed_close_preserves_every_live_work_gate() {
                 expected_claim: Some(observed),
                 reply,
             },
+            &super::super::RecoveryDoneSignal::new(),
         );
         assert_eq!(response.try_recv().unwrap(), Err(reason));
         assert!(!state.closed, "{reason} must leave the actor open");

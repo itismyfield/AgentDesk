@@ -154,8 +154,9 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
     ] {
         let dir = drafted_pane(DRAFT, chip);
         let session = format!("owned-draft-{at}");
-        let raised = Arc::new(std::sync::Mutex::new(0));
+        let raised = Arc::new(std::sync::Mutex::new(Vec::new()));
         let counted = raised.clone();
+        let applied_at_notice = dir.path().join("applied");
         let nonce = busy_inject::fresh_nonce();
         let leaf = BusyClaude {
             probe_guard: None,
@@ -178,13 +179,20 @@ fn an_owned_paste_beside_an_unparkable_draft_notices_its_original_once() {
             name: "ann".into(),
             nonce: nonce.clone(),
             text: "owned question".into(),
-            draft_notice: Some(Box::new(move || *counted.lock().unwrap() += 1)),
+            draft_notice: Some(Box::new(move || {
+                counted
+                    .lock()
+                    .unwrap()
+                    .push(std::fs::read_to_string(applied_at_notice).unwrap());
+            })),
         }
         .leaf();
         let frame = busy_inject::frame("discord", "200", "ann", &nonce, "owned question");
         assert_eq!(leaf(frame).unwrap(), Completion::Submitted, "{chip:?}");
         let applied = std::fs::read_to_string(dir.path().join("applied")).unwrap();
         assert_eq!(applied.lines().collect::<Vec<_>>(), keys, "{chip:?}");
-        assert_eq!(*raised.lock().unwrap(), notices, "{chip:?}");
+        let raised = raised.lock().unwrap();
+        assert_eq!(raised.len(), notices, "{chip:?}");
+        assert!(raised.iter().all(|at_post| at_post == &applied), "{chip:?}");
     }
 }

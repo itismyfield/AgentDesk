@@ -11,6 +11,7 @@ use crate::services::provider::{CancelToken, ProviderKind};
 
 // #3293: non-creating registry lookup + operator-gated idle-entry purge.
 mod active_source_dedup;
+mod actor_lifetime;
 mod claim_observation;
 mod clear_channel;
 mod clear_fence;
@@ -59,6 +60,8 @@ use active_source_dedup::{
     intervention_has_active_source, intervention_sources_all_match_active,
     purge_active_source_from_queue, strip_source_message_id_from_intervention, take_unsettled,
 };
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub(crate) use actor_lifetime::RecoveryDoneSignal;
 pub(crate) use claim_observation::ClaimObservation;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use claim_observation::RECENT_CLAIMS_CAP;
@@ -120,7 +123,6 @@ use queue_cancellation::{
 use queue_enqueue::enqueue_behind;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use queue_enqueue::enqueue_intervention;
-#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use queued_head::BindingIntent;
 #[cfg(unix)]
 pub(crate) use queued_head::HandoffHeld;
@@ -1089,67 +1091,6 @@ impl ChannelMailboxHandle {
     }
 }
 
-/// #2443 — deterministic "recovery finished" signal per channel.
-///
-/// Pairs a `tokio::sync::Notify` with a one-shot `latched` flag so a
-/// `recovery_done` event raised before a watcher subscribes is still
-/// observable. Without the latch, `Notify::notify_waiters` would lose the
-/// signal whenever recovery completes BEFORE the watcher reaches its
-/// `notified()` await, re-introducing exactly the race the 60s timeout was
-/// papering over. The latch flips on the first `mark_done` call and
-/// `wait()` short-circuits on subsequent observers — recovery sessions are
-/// monotonic per channel within the lifetime of this signal.
-///
-/// Callers reset the latch when a *new* recovery begins (so the next watcher
-/// wave doesn't see a stale "already done"). `reset()` is idempotent.
-pub(crate) struct RecoveryDoneSignal {
-    notify: Notify,
-    latched: std::sync::atomic::AtomicBool,
-}
-
-impl RecoveryDoneSignal {
-    fn new() -> Self {
-        Self {
-            notify: Notify::new(),
-            latched: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-
-    /// Mark recovery as finished. Wakes all current waiters and latches the
-    /// signal so subsequent `wait()` calls return immediately until `reset()`.
-    pub(crate) fn mark_done(&self) {
-        self.latched.store(true, Ordering::Release);
-        self.notify.notify_waiters();
-    }
-
-    /// Reset the latch so the next recovery cycle starts clean. Should be
-    /// called at recovery kickoff so an old "done" flag does not satisfy a
-    /// watcher waiting for the new run.
-    pub(crate) fn reset(&self) {
-        self.latched.store(false, Ordering::Release);
-    }
-
-    /// Wait until `mark_done` is observed. Returns immediately if the latch
-    /// is already set (race-free for observers that subscribe after the
-    /// notification fires).
-    pub(crate) async fn wait(&self) {
-        if self.latched.load(Ordering::Acquire) {
-            return;
-        }
-        // Subscribe BEFORE the second check to close the
-        // observe-then-subscribe window. `Notify::notified()` returns a
-        // future that registers a waiter on first poll; recheck the flag
-        // afterwards in case `mark_done` ran between the load and the
-        // subscribe.
-        let notified = self.notify.notified();
-        tokio::pin!(notified);
-        if self.latched.load(Ordering::Acquire) {
-            return;
-        }
-        notified.await;
-    }
-}
-
 static GLOBAL_RECOVERY_DONE_SIGNALS: LazyLock<
     dashmap::DashMap<ChannelId, Arc<RecoveryDoneSignal>>,
 > = LazyLock::new(dashmap::DashMap::new);
@@ -1772,7 +1713,9 @@ fn spawn_channel_mailbox(
 ) -> ChannelMailboxHandle {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let own_recovery_done = recovery_done.clone();
+    let retirement = actor_lifetime::RetireOnDrop(recovery_done.clone());
     tokio::spawn(async move {
+        let _retirement = retirement;
         let mut state = ChannelMailboxState::spawned(channel_id, fence);
         while let Some(msg) = rx.recv().await {
             state = input_mailbox_step(state, channel_id, msg, &own_recovery_done);
@@ -2646,7 +2589,7 @@ fn input_mailbox_step(
             let _ = reply.send(());
         }
         msg @ ChannelMailboxMsg::CloseIfIdle { .. } => {
-            registry_purge::answer_close_if_idle(&mut state, msg)
+            registry_purge::answer_close_if_idle(&mut state, msg, own_recovery_done)
         }
         ChannelMailboxMsg::Injection(msg) => injected_inputs::step(&mut state, channel_id, msg),
     }

@@ -136,3 +136,15 @@ pub(crate) fn after_reserve() {
 pub(crate) fn after_next_reserve(callback: impl FnOnce() + 'static) {
     AFTER_RESERVE.with(|slot| *slot.borrow_mut() = Some(Box::new(callback)));
 }
+
+#[cfg(test)]
+pub(crate) fn revisions_for_session(session: &str) -> Vec<u64> {
+    let mut revisions: Vec<_> = super::ledger()
+        .entries
+        .iter()
+        .filter(|(source, _)| source.session == session)
+        .map(|(_, entry)| entry.revision)
+        .collect();
+    revisions.sort_unstable();
+    revisions
+}

@@ -61,6 +61,16 @@ async fn submit_with_attribution(
 ) -> Result<Completion, String> {
     let lane = lane(TargetKey::of(&prepared.attempt)?);
     let _writer = lane.lock().await;
+    reserve(mailbox, claim, prepared, attribution).await?;
+    effect::run(mailbox, clock, leaf).await
+}
+
+async fn reserve(
+    mailbox: &ChannelMailboxHandle,
+    claim: Option<FrontClaim>,
+    prepared: PreparedPayload,
+    attribution: serde_json::Value,
+) -> Result<(), String> {
     let PreparedPayload {
         frame,
         sources: _,
@@ -93,8 +103,7 @@ async fn submit_with_attribution(
             Ok(())
         })
         .await
-        .map_err(effect::unsent)?;
-    effect::run(mailbox, clock, leaf).await
+        .map_err(effect::unsent)
 }
 
 pub(crate) async fn submit_native_front(
