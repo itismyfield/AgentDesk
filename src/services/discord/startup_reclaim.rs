@@ -327,6 +327,16 @@ async fn reclaim_orphan_placeholders(
             );
             continue;
         }
+        if !matches!(
+            super::tui_direct_pending_start::holds_for_retention(
+                provider,
+                channel_id,
+                Some(msg.id.get())
+            ),
+            Ok(false)
+        ) {
+            continue;
+        }
         attempted += 1;
         let result = channel.delete_message(http, msg.id).await;
         crate::services::observability::emit_relay_delete_result(
