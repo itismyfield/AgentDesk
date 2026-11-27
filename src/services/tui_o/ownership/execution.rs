@@ -222,5 +222,5 @@ pub fn validate_local(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests;

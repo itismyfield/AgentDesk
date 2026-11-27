@@ -855,7 +855,7 @@ pub mod tests {
             }
         }
 
-        pub(crate) async fn connect(&self) -> sqlx::PgPool {
+        pub async fn connect(&self) -> sqlx::PgPool {
             let pool = crate::db::postgres::connect_test_pool(
                 &self.database_url,
                 "settings runtime-config pg tests",

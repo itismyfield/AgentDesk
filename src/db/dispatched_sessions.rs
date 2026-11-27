@@ -687,7 +687,7 @@ pub mod selector_cleanup_tests {
     }
 
     impl TestPostgresDb {
-        pub(crate) async fn create() -> Self {
+        pub async fn create() -> Self {
             let lifecycle = crate::db::postgres::lock_test_lifecycle();
             let base = crate::db::postgres::postgres_test_database_url_base()
                 .expect("POSTGRES_TEST_DATABASE_URL_BASE required for selector cleanup tests"); // agentdesk-audit: allow-unwrap — test-only fixture constructor requires an explicitly configured shared base
@@ -717,7 +717,7 @@ pub mod selector_cleanup_tests {
             }
         }
 
-        pub(crate) async fn connect_and_migrate(&self) -> sqlx::PgPool {
+        pub async fn connect_and_migrate(&self) -> sqlx::PgPool {
             crate::db::postgres::connect_test_pool_and_migrate(
                 &self.database_url,
                 "selector cleanup tests",
@@ -726,7 +726,7 @@ pub mod selector_cleanup_tests {
             .expect("apply selector cleanup postgres migrations") // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
         }
 
-        pub(crate) async fn drop(self) {
+        pub async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,

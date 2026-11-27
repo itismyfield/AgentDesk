@@ -4,7 +4,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::cluster::intake_router_hook::owner_record::{custody, output};
 use crate::services::tui_o::{cutover, ownership::GatewayOwnership};
 
-pub(crate) async fn admission(pool: &PgPool, provider: &str, channel: u64, target: &str) -> i64 {
+pub async fn admission(pool: &PgPool, provider: &str, channel: u64, target: &str) -> i64 {
     sqlx::query("INSERT INTO agents(id,name,provider) VALUES('custody-agent','owner fixture',$1) ON CONFLICT(id) DO NOTHING")
         .bind(provider).execute(pool).await.unwrap();
     let mut payload = output::tests::payload(&channel.to_string(), "90100", "gateway");
