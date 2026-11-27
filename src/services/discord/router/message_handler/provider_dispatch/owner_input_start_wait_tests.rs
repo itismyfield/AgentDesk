@@ -64,6 +64,9 @@ async fn a_bound_execution_reads_alive_only_while_its_provider_runs_in_its_pane(
     use crate::services::session_host::herdr_socket_rig_tests::{
         HerdrRig, KEY, NODE, PANE, PROVIDER, SESSION, SHELL,
     };
+    use crate::services::tui_prompt_dedupe::binding_context::{
+        BindingContext, PreparedIncarnation,
+    };
     use crate::services::turn_host::HerdrTurnPlan;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = ChannelId::new(8_422_102);
@@ -71,7 +74,11 @@ async fn a_bound_execution_reads_alive_only_while_its_provider_runs_in_its_pane(
     let nonce = "0123456789abcdef0123456789abcdef";
     let rig = HerdrRig::start();
     let _registry = rig.registry_on_this_thread();
-    rig.run_provider(&rig.context(nonce), false);
+    let mut context: BindingContext =
+        serde_json::from_slice(&std::fs::read(rig.context(nonce)).unwrap()).unwrap();
+    context.provider = "codex".into();
+    let context = PreparedIncarnation::create(context).unwrap();
+    rig.run_provider(&context.path, false);
     rig.show_panes(&[PANE]);
     rig.foreground(&[PROVIDER]);
     let marker = crate::services::tmux_common::session_temp_path(logical, "host_kind");
@@ -85,6 +92,8 @@ async fn a_bound_execution_reads_alive_only_while_its_provider_runs_in_its_pane(
         owner_node: NODE.into(),
         runtime_root: crate::config::runtime_root().unwrap().display().to_string(),
     };
+    let mut expected = rig.expected(nonce);
+    expected.binding_provider.clone_from(&owner.provider);
     let record = HostedExecution {
         schema: 1,
         state: HostedState::Bound,
@@ -97,7 +106,7 @@ async fn a_bound_execution_reads_alive_only_while_its_provider_runs_in_its_pane(
             named_session: SESSION.into(),
             pane_id: PANE.into(),
         }),
-        expected: Some(rig.expected(nonce)),
+        expected: Some(expected),
         source_ref: SourceRef {
             runtime_root: owner.runtime_root.clone(),
             channel: owner.channel_id.clone(),

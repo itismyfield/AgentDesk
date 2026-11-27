@@ -1,6 +1,6 @@
 //! A wake-watch resume on a Bound Herdr execution through the actual idle start: a proven-ended one
 //! is retired before any write, an unrecoverable one refused Failed, a live or held one kept.
-use super::missing_input::recording_runtime;
+use super::missing_input::{recording_runtime, seed_resume_cursor};
 use super::*;
 use crate::services::discord::queue_io::input_owner::admission::admit_with_context;
 use crate::services::discord::queue_io::input_owner::held_watch;
@@ -125,9 +125,10 @@ fn synthetic_case(
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();
     let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let original_runtime;
     let mut intake = Intake::new(&fx, &started);
     let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
-    let original_runtime = recording_runtime(&mut intake, &fx, false);
+    original_runtime = recording_runtime(&mut intake, &fx, false);
     show(&fx, pane);
     if foreign {
         fx.rt.block_on(async {
@@ -139,6 +140,7 @@ fn synthetic_case(
         });
     }
     let result = intake.runtime.block_on(async {
+        let _rest = test_rest::install(intake._api.http.clone());
         if matches!(holds, Holds::Token) {
             let token = Arc::new(CancelToken::new());
             let holder = MessageId::new(MESSAGE - 1);
@@ -378,9 +380,11 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
     let _registry = fx.rig.registry_on_this_thread();
     let _admission = open_admission();
     let _gate = discord::router::intake_gate::busy_inject::test_support::open_gate(CHANNEL);
+    let original_runtime;
     let mut intake = Intake::new(&fx, &previous);
     let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
-    let original_runtime = recording_runtime(&mut intake, &fx, true);
+    original_runtime = recording_runtime(&mut intake, &fx, true);
+    seed_resume_cursor(fx._root.path(), &previous);
     let _hook = crate::services::claude_tui::hook_server::publish_hook_endpoint(
         "http://127.0.0.1:1".into(),
     );
@@ -484,11 +488,16 @@ fn a_dead_bound_wake_watch_start_launches_fresh_and_delivers_once_pg() {
         path,
         envelope,
     };
+    let source = if started.session == previous.session {
+        "resume"
+    } else {
+        "startup"
+    };
     assert_eq!(
         started.hook(
             &fx,
             "SessionStart",
-            &json!({"session_id":started.session,"transcript_path":started.path,"source":"startup"})
+            &json!({"session_id":started.session,"transcript_path":started.path,"source":source})
         ),
         202
     );

@@ -140,15 +140,35 @@ fn live_rollout(screen: Screen, bound: bool, alive: bool) -> Screen {
 
 /// Whether the host's Bound execution still runs at its exact endpoint; an unread one does not.
 async fn execution_alive(host: &TurnHost) -> bool {
+    use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+    use crate::services::session_host::{PaneProvider, PaneReading, herdr_endpoints};
+
     let TurnHost::Herdr(plan) = host else {
         return false;
     };
-    let Some((target, _, _)) = claude_handoff::bound_herdr(plan) else {
+    let Some(HostedRecord::Known(record)) = plan.row.as_ref().map(|row| &row.record) else {
         return false;
     };
-    tokio::task::spawn_blocking(move || target.execution_alive())
-        .await
-        .unwrap_or(false)
+    let Some(expected) = record
+        .expected
+        .as_ref()
+        .filter(|_| record.state == HostedState::Bound)
+    else {
+        return false;
+    };
+    let Some(view) = herdr_endpoints().view(record) else {
+        return false;
+    };
+    let expected = expected.clone();
+    tokio::task::spawn_blocking(move || {
+        matches!(
+            view.read_execution(),
+            PaneReading::Present { root, provider: PaneProvider::Execution(provider) }
+                if root == expected.root && provider == expected.provider_process
+        )
+    })
+    .await
+    .unwrap_or(false)
 }
 
 /// How a start that read its channel's execution waits: Ready goes on, a refusal is settled after
