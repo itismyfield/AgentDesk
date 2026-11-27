@@ -192,6 +192,7 @@ fn text(content: &str) -> String {
     )
 }
 
+#[cfg(test)]
 fn done(result: &str, session: Option<&str>) -> String {
     let session_id = session.map(str::to_owned);
     format!(
@@ -575,12 +576,14 @@ fn an_earlier_child_exit_never_removes_the_next_child_record() {
     assert!(!lost, "the live child keeps its record");
 }
 
+#[cfg(test)]
 /// The leader, and a guard that ends its group when the test scope ends, also on a panic.
 struct Orphan {
     child: std::process::Child,
     _group: Group,
 }
 
+#[cfg(test)]
 impl Orphan {
     /// A process group whose leader runs `script`; the leader is reaped on its own thread.
     fn start(script: &str) -> (u32, ProcessIdentity, Self) {
@@ -599,8 +602,10 @@ impl Orphan {
     }
 }
 
+#[cfg(test)]
 struct Group(u32);
 
+#[cfg(test)]
 impl Drop for Group {
     /// dash's `sh -c` keeps `sleep` as a child holding the test's output. A live group's number
     /// is never reissued, so it is still this one.

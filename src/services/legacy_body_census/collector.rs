@@ -272,7 +272,7 @@ impl Collector {
         value
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub(crate) fn collect_for_test(
         &mut self,
         root: &Path,

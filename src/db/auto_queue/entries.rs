@@ -1571,6 +1571,7 @@ pub mod tests {
             .expect("load gate entry status")
     }
 
+    #[cfg(test)]
     async fn run_status(pool: &PgPool) -> String {
         sqlx::query_scalar("SELECT status FROM auto_queue_runs WHERE id = 'gate-run'")
             .fetch_one(pool)

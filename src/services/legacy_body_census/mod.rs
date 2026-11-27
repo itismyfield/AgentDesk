@@ -306,7 +306,7 @@ pub(crate) use manifest::{inspect_for_test, inspect_with_evidence_for_test};
 #[cfg(test)]
 pub(crate) use window::{Window, valid_chain_for_test};
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl State {
     pub(crate) fn new_for_test(
         boot: &crate::services::process_boot::Boot,
@@ -324,12 +324,12 @@ impl State {
     }
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn invalidate_for_test(state: &Shared, reason: &str) {
     invalidate(state, reason);
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl Journal {
     pub(crate) fn spawn_for_test(
         root: Option<PathBuf>,

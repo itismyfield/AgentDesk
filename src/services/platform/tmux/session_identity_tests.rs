@@ -44,6 +44,7 @@ impl Rig {
             .unwrap()
     }
 
+    #[cfg(test)]
     fn snapshot(&self, name: &str) -> (Vec<u8>, Vec<u8>) {
         let target = exact_target(name);
         (

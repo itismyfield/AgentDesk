@@ -153,7 +153,7 @@ pub(super) fn valid_chain(
     true
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 impl Window {
     pub(crate) fn new_for_test(boot_id: String) -> Self {
         Self::new(boot_id)

@@ -1138,6 +1138,7 @@ pub mod clear_fence_pg_tests {
         }
     }
 
+    #[cfg(test)]
     fn bridge_owned_entry<'a>(
         turn_id: &'a str,
         channel_id: &'a str,
@@ -1154,6 +1155,7 @@ pub mod clear_fence_pg_tests {
             .expect("fetch recent pairs") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module
     }
 
+    #[cfg(test)]
     /// `(clear_generation, cleared_through_id)` for a channel's boundary row.
     async fn boundary_markers(pool: &PgPool, channel_id: &str) -> (i64, i64) {
         sqlx::query_as::<_, (i64, i64)>(

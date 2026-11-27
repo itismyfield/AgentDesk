@@ -887,6 +887,7 @@ pub mod tests {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn upsert_test_kv(pool: &sqlx::PgPool, key: &str, value: &str) {
         sqlx::query(
             "INSERT INTO kv_meta (key, value, expires_at)
@@ -900,12 +901,14 @@ pub mod tests {
         .unwrap_or_else(|error| panic!("upsert test kv_meta {key}: {error}"));
     }
 
+    #[cfg(test)]
     async fn seed_runtime_scalar_mirrors(pool: &sqlx::PgPool) {
         for key in runtime_config_keys() {
             upsert_test_kv(pool, key, &format!("legacy-{key}")).await;
         }
     }
 
+    #[cfg(test)]
     async fn assert_runtime_blob_and_no_mirrors(pool: &sqlx::PgPool, expected: &Value) {
         let blob = sqlx::query_scalar::<_, String>(
             "SELECT value FROM kv_meta WHERE key = 'runtime-config'",

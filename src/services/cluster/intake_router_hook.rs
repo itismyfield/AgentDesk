@@ -878,6 +878,7 @@ pub mod pg_tests {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_agent_with_preference(
         pool: &PgPool,
         agent_id: &str,
@@ -897,6 +898,7 @@ pub mod pg_tests {
         .expect("seed agent");
     }
 
+    #[cfg(test)]
     async fn seed_worker_node(
         pool: &PgPool,
         instance_id: &str,
@@ -919,6 +921,7 @@ pub mod pg_tests {
         .await;
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_worker_node_with_capabilities(
         pool: &PgPool,
         instance_id: &str,
@@ -940,6 +943,7 @@ pub mod pg_tests {
         .expect("seed worker_nodes");
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_session_owner(
         pool: &PgPool,
         session_key: &str,
@@ -2564,6 +2568,7 @@ pub mod pg_tests {
         pg_db.drop().await;
     }
 
+    #[cfg(test)]
     async fn seed_open_route(pool: &PgPool, channel_id: &str, target_instance_id: &str) {
         sqlx::query(
             "INSERT INTO intake_outbox (
@@ -2580,6 +2585,7 @@ pub mod pg_tests {
         .expect("seed open route");
     }
 
+    #[cfg(test)]
     async fn open_route_owner_telemetry_case(
         channel_id: &str,
         owner_instance_id: Option<&str>,

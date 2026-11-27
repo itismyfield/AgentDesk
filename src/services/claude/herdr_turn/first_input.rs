@@ -698,7 +698,7 @@ fn c132_early_cancel_never_binds_or_announces_runtime() {
     regression_tests::c132_early_cancel_never_binds_or_announces_runtime();
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub mod regression_tests {
     use super::*;
     pub(super) fn c132_early_cancel_never_binds_or_announces_runtime() {

@@ -658,11 +658,13 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
     }
 }
 
+#[cfg(test)]
 /// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
 /// duration. `stops` are `(command, stdout)` pairs sharing the summary's tool use id.
 fn ended_turn(r: &Rig, answered: DateTime<Utc>, stops: &[(String, &str)], summary: Value) {
     ended_turn_as(r, answered, stops, summary, &|_, id| json!(id));
 }
+#[cfg(test)]
 /// `link` maps each Stop output's index and the summary's tool use id to the output's id; null drops it.
 fn ended_turn_as(
     r: &Rig,
@@ -690,15 +692,18 @@ fn ended_turn_as(
     summary["timestamp"] = json!(Utc::now());
     r.append(summary);
 }
+#[cfg(test)]
 fn relay(r: &Rig) -> String {
     let native = r.ctx.expected_native_session_id.as_deref().unwrap();
     format!(
         "/bin/agentdesk claude-hook-relay --endpoint http://127.0.0.1:8791 --provider claude --event Stop --session-id {native}"
     )
 }
+#[cfg(test)]
 fn quiet_summary() -> Value {
     json!({"hookCount":3,"hookErrors":[],"hookAdditionalContext":[],"preventedContinuation":false,"stopReason":"","hasOutput":true})
 }
+#[cfg(test)]
 const QUIET: &str = "{\"suppressOutput\":true}\n";
 
 // After a restart only this run's turn closed by the relay's quiet Stop its summary names stands in
@@ -815,6 +820,7 @@ fn an_idle_session_closed_before_a_restart_takes_its_first_input_once() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+#[cfg(test)]
 /// A Claude relaunched with `--resume` over `history`: its accepted SessionStart, then the resume's
 /// own metadata.
 fn resumed_over(history: &dyn Fn(&Rig)) -> Rig {
@@ -825,6 +831,7 @@ fn resumed_over(history: &dyn Fn(&Rig)) -> Rig {
     r.append(json!({"type":"tools-used"}));
     r
 }
+#[cfg(test)]
 fn old_history(r: &Rig, rows: &[Value]) {
     let old = Utc::now() - chrono::Duration::hours(1);
     for row in rows {
@@ -833,6 +840,7 @@ fn old_history(r: &Rig, rows: &[Value]) {
         r.append(row);
     }
 }
+#[cfg(test)]
 fn finished(r: &Rig) {
     old_history(
         r,
@@ -842,6 +850,7 @@ fn finished(r: &Rig) {
         ],
     );
 }
+#[cfg(test)]
 fn cut_short(r: &Rig) {
     old_history(
         r,
@@ -851,13 +860,16 @@ fn cut_short(r: &Rig) {
         ],
     );
 }
+#[cfg(test)]
 fn permission_marked(r: &Rig) {
     cut_short(r);
     r.append(json!({"type":"permission-mode","permissionMode":"bypassPermissions"}));
 }
+#[cfg(test)]
 fn typed(r: &Rig) {
     r.append(json!({"type":"user","timestamp":Utc::now(),"message":{"role":"user","content":"typed in the pane"}}));
 }
+#[cfg(test)]
 fn marked(r: &Rig) {
     r.append(json!({"type":"permission-mode","permissionMode":"default"}));
 }
@@ -1245,6 +1257,7 @@ fn permission_mode_is_a_barrier_until_later_completion_not_a_permanent_veto() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|b| b.set(None));
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))

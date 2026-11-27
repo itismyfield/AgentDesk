@@ -788,6 +788,7 @@ pub mod selector_cleanup_tests {
         );
     }
 
+    #[cfg(test)]
     async fn upsert_claude_selector_session(
         pool: &sqlx::PgPool,
         session_key: &str,

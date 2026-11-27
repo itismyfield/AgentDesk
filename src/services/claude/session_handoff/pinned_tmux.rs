@@ -393,6 +393,7 @@ pub mod tests {
             assert!(out.status.success(), "private tmux command failed");
             String::from_utf8(out.stdout).unwrap()
         }
+        #[cfg(test)]
         fn start(&self) {
             self.start_named("i8077-close-test");
         }

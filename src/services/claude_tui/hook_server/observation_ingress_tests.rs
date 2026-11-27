@@ -38,6 +38,7 @@ use crate::services::tui_prompt_dedupe::{
     runtime_binding_for_tmux_session,
 };
 
+#[cfg(test)]
 /// How long a wait for something that must happen polls before failing: a hang detector, not a
 /// bound of the contract, so a slow runner only makes a broken build fail later.
 const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
@@ -253,6 +254,7 @@ pub fn pending_lines(channel: u64, session: &str) -> usize {
     events(channel).iter().filter(|e| is_pending(e)).count()
 }
 
+#[cfg(test)]
 fn session_lines(channel: u64, session: &str) -> Vec<u64> {
     let names = |e: &BindingEvent| match &e.new {
         BindingTarget::Source(source) | BindingTarget::Resolved { source, .. } => {
@@ -276,6 +278,7 @@ pub fn drain(rx: &mut tokio::sync::broadcast::Receiver<HookEvent>) -> usize {
     std::iter::from_fn(|| rx.try_recv().ok()).count()
 }
 
+#[cfg(test)]
 fn check_refused_until_durable(fault: &'static str) {
     let ingress = Ingress::new();
     let (channel, tmux) = (7_400, "ingress-fault");
