@@ -20,8 +20,6 @@ pub use channel_gate::{
 #[cfg(all(test, unix))]
 mod channel_lookup_tests;
 #[cfg(all(test, unix))]
-mod child_funnel_tests;
-#[cfg(all(test, unix))]
 mod thread_child_record_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub use channel_gate::{
@@ -590,7 +588,7 @@ pub mod test_override {
 
     /// Re-runs the funnel test at crate path `name` with its O channels as thread children.
     #[cfg(unix)]
-    pub(crate) fn funnel_as_child(name: &str) {
+    pub fn funnel_as_child(name: &str) {
         let marks = tempfile::NamedTempFile::new().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", name, "--nocapture"])

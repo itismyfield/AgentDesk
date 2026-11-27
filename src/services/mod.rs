@@ -133,8 +133,13 @@ pub mod tmux_wrapper;
 pub mod tool_output_guard;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 pub(crate) mod tui_o {
+    pub(crate) mod cutover {
+        pub(crate) use adk_runtime::services::tui_o::cutover::*;
+        #[cfg(all(test, unix))]
+        mod child_funnel_tests;
+    }
     pub(crate) use adk_runtime::services::tui_o::{
-        alarm, channel_policy, cutover, exact_episode, exact_pg, exact_submission, ownership,
+        alarm, channel_policy, exact_episode, exact_pg, exact_submission, ownership,
         repost, shadow, store, topology, turn_mode, writer,
     };
 }

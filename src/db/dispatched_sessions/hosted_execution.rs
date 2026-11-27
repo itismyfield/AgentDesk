@@ -805,7 +805,6 @@ pub(crate) async fn delete_locked_session_pg(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "hosted_execution_support.rs"]
 pub mod test_support;
 
 #[cfg(test)]
