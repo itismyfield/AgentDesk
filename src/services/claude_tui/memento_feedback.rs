@@ -209,7 +209,7 @@ impl PendingMementoFeedbackTracker {
         state.completed.remove(session_id);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn pending_count(&self, session_id: &str) -> usize {
         let state = self.inner.read().unwrap_or_else(|error| error.into_inner());
         state
@@ -403,7 +403,7 @@ impl PendingSessionSearches {
         self.ids.is_empty() && self.unknown.is_empty()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn len(&self) -> usize {
         self.ids.len() + self.unknown.len()
     }

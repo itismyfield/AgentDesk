@@ -180,6 +180,7 @@ async fn a_bulk_update_of_plain_rows_takes_no_source_locks_pg() {
     finish(fixture, pool).await;
 }
 
+#[cfg(test)]
 async fn wait_for_lock(pool: &PgPool, pid: i32) {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

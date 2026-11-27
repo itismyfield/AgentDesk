@@ -16,7 +16,7 @@ pub(super) fn retry_delay(repeats: u32) -> Duration {
 }
 
 pub(crate) fn fingerprint(path: &Path) -> Option<Fingerprint> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::context_observation::tests::stat(path);
     Fingerprint::of(&std::fs::metadata(path).ok()?).ok()
 }

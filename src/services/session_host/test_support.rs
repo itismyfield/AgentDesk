@@ -19,7 +19,7 @@ fn injected() -> MutexGuard<'static, Injected> {
 }
 
 /// Force (or clear, with `None`) the liveness answer for one hosted session.
-pub(crate) fn inject_liveness(session: HostSessionRef<'_>, liveness: Option<HostLiveness>) {
+pub fn inject_liveness(session: HostSessionRef<'_>, liveness: Option<HostLiveness>) {
     let key = (session.kind, session.name.to_string());
     match liveness {
         Some(value) => injected().insert(key, value),
@@ -36,13 +36,13 @@ pub(crate) fn injected_liveness(session: HostSessionRef<'_>) -> Option<HostLiven
 
 /// RAII form of [`inject_liveness`]; clears on drop, including on unwind.
 #[must_use = "the injected answer is cleared when this guard is dropped"]
-pub(crate) struct InjectedLivenessGuard {
+pub struct InjectedLivenessGuard {
     kind: HostKind,
     name: String,
 }
 
 impl InjectedLivenessGuard {
-    pub(crate) fn set(session: HostSessionRef<'_>, liveness: HostLiveness) -> Self {
+    pub fn set(session: HostSessionRef<'_>, liveness: HostLiveness) -> Self {
         inject_liveness(session, Some(liveness));
         Self {
             kind: session.kind,
@@ -73,12 +73,12 @@ pub(crate) fn injected_presence(session: HostSessionRef<'_>) -> Option<HostPrese
 
 /// Forces the presence answer for one hosted session until dropped, including on unwind.
 #[must_use = "the injected answer is cleared when this guard is dropped"]
-pub(crate) struct InjectedPresenceGuard {
+pub struct InjectedPresenceGuard {
     key: (HostKind, String),
 }
 
 impl InjectedPresenceGuard {
-    pub(crate) fn set(session: HostSessionRef<'_>, presence: HostPresence) -> Self {
+    pub fn set(session: HostSessionRef<'_>, presence: HostPresence) -> Self {
         let key = (session.kind, session.name.to_string());
         let mut injected = INJECTED_PRESENCE
             .lock()

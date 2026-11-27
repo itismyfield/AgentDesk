@@ -13,7 +13,7 @@ struct Entry {
 
 static SETUPS: LazyLock<Mutex<HashMap<u64, Entry>>> = LazyLock::new(Default::default);
 
-pub(crate) struct ResetGuard {
+pub struct ResetGuard {
     channel: u64,
     owner: Arc<()>,
 }
@@ -35,7 +35,7 @@ impl Drop for ResetGuard {
     }
 }
 
-pub(crate) fn install(channel: u64, setup: Setup) -> ResetGuard {
+pub fn install(channel: u64, setup: Setup) -> ResetGuard {
     let owner = Arc::new(());
     let mut setups = SETUPS.lock().unwrap_or_else(|error| error.into_inner());
     assert!(
@@ -52,7 +52,7 @@ pub(crate) fn install(channel: u64, setup: Setup) -> ResetGuard {
     ResetGuard { channel, owner }
 }
 
-pub(crate) fn enter(channel: u64, prompt: &str) -> Option<Box<dyn Any>> {
+pub fn enter(channel: u64, prompt: &str) -> Option<Box<dyn Any>> {
     let setup = SETUPS
         .lock()
         .unwrap_or_else(|error| error.into_inner())

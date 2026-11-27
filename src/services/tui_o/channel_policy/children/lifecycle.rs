@@ -96,7 +96,7 @@ impl BootChannels {
     }
 
     /// `output_channels` without dormant children: what hosting and the owner refresh visit.
-    pub(crate) fn proactive_channels(&self) -> std::collections::BTreeSet<u64> {
+    pub fn proactive_channels(&self) -> std::collections::BTreeSet<u64> {
         let mut channels = self.output_channels();
         channels.retain(|channel| !self.child_dormant(*channel));
         channels

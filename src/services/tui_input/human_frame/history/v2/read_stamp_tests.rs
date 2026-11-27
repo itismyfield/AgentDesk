@@ -1,5 +1,5 @@
 use super::super::native::{Disposition, EvidenceRegistration, barrier::Barrier};
-use super::super::native_tests::Fixture;
+use super::super::native_support::Fixture;
 use super::*;
 use std::io::Write;
 

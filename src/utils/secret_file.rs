@@ -3,7 +3,7 @@ use std::io::{self, Write};
 use std::path::Path;
 
 #[cfg(unix)]
-pub(crate) mod private_directory;
+pub mod private_directory;
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -38,17 +38,17 @@ fn ensure_secret_parent(path: &Path) -> io::Result<()> {
 /// Write a file that stores credential material without inheriting a permissive
 /// process umask. On Unix, parent directories are owner-only and files are
 /// created or rewritten as 0600.
-pub(crate) fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
+pub fn write_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io::Result<()> {
     write_secret_file_with_policy(path, contents, SecretFilePolicy::Replace)
 }
 
-pub(crate) enum SecretFilePolicy {
+pub enum SecretFilePolicy {
     Replace,
     #[cfg(unix)]
     FreshPrivate,
 }
 
-pub(crate) fn write_secret_file_with_policy(
+pub fn write_secret_file_with_policy(
     path: &Path,
     contents: impl AsRef<[u8]>,
     policy: SecretFilePolicy,
@@ -122,7 +122,7 @@ pub(crate) fn replace_secret_file(path: &Path, contents: impl AsRef<[u8]>) -> io
 /// Write owner-only secret material without changing the parent directory mode.
 /// Use this for root-level artifacts where hardening the containing runtime
 /// directory would have a broader operational effect than intended.
-pub(crate) fn write_secret_file_preserving_parent_mode(
+pub fn write_secret_file_preserving_parent_mode(
     path: &Path,
     contents: impl AsRef<[u8]>,
 ) -> io::Result<()> {
@@ -163,7 +163,7 @@ mod fresh_tests;
 /// are refused so a read-side audit cannot chmod an arbitrary target. The
 /// warning is path- and label-only; secret contents are never read or logged by
 /// this helper.
-pub(crate) fn audit_or_harden_secret_file(path: &Path, label: &str) -> bool {
+pub fn audit_or_harden_secret_file(path: &Path, label: &str) -> bool {
     #[cfg(unix)]
     {
         let Ok(metadata) = fs::symlink_metadata(path) else {

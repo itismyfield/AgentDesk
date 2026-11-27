@@ -199,9 +199,8 @@ async fn live_case(mut body: String, tool: bool, control: &str) {
         DRIVER_CHANNEL_ID,
     )
     .await;
-    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
-        DRIVER_TMUX_SESSION,
-    );
+    let fake =
+        crate::services::provider_teardown::test_support::FakeTmux::install(DRIVER_TMUX_SESSION);
     fake.enable_fixture_launch();
     inflight::clear_inflight_state(&ProviderKind::Claude, DRIVER_CHANNEL_ID);
     driver.inflight.provider = "codex".into();
@@ -258,8 +257,11 @@ async fn live_case(mut body: String, tool: bool, control: &str) {
         },
     );
     let (posted, ledger) =
-        crate::services::tui_o::writer::tests::post_codex_records_for_test(DRIVER_CHANNEL_ID, &raw)
-            .await;
+        crate::services::tui_o::writer::test_support::post_codex_records_for_test(
+            DRIVER_CHANNEL_ID,
+            &raw,
+        )
+        .await;
     assert!(!posted.is_empty());
     assert!(ledger.contains("posted"));
     assert!(ledger.contains("#turn_end"));

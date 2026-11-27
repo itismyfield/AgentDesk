@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::*;
 use crate::config::session_hosts::force_for_test as force_hosts;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 use crate::services::herdr_admission::{Admission, force_for_test as force_admission};
 
 const CHANNEL: u64 = 1_490_141_479_707_086_938;

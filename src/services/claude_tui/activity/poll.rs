@@ -2,6 +2,7 @@
 use super::{Source, ledger};
 use chrono::Utc;
 use std::sync::Condvar;
+#[cfg(any(test, not(feature = "test-support")))]
 use std::time::Duration;
 
 pub(super) fn tick() {
@@ -11,6 +12,7 @@ pub(super) fn tick() {
 }
 
 pub(super) static CHANGED: Condvar = Condvar::new();
+#[cfg(any(test, not(feature = "test-support")))]
 const READ_EVERY: Duration = Duration::from_secs(1);
 fn visit_sources(mut read: impl FnMut(&str)) {
     let sources: Vec<Source> = ledger().entries.keys().cloned().collect();
@@ -18,7 +20,7 @@ fn visit_sources(mut read: impl FnMut(&str)) {
         read(&source.session);
     }
 }
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(super) fn start() {
     static STARTED: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
     let mut started = STARTED.lock().unwrap_or_else(|e| e.into_inner());
@@ -38,7 +40,7 @@ pub(super) fn start() {
         });
     *started = worker.is_ok();
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn start() {}
 
 #[cfg(test)]

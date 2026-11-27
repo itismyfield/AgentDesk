@@ -2,7 +2,7 @@ use std::sync::Mutex;
 
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedExecution;
-use crate::db::dispatched_sessions::hosted_execution::tests::{location, owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{location, owner, record};
 use crate::services::discord::tmux::execution_identity::herdr_observation::{
     HerdrMismatch, HerdrUnknown,
 };
@@ -236,7 +236,7 @@ fn herdr_restart_reconcile_follows_the_restore_table() {
 #[cfg(unix)]
 #[tokio::test]
 async fn herdr_restart_reconcile_reads_the_row_and_changes_nothing_pg() {
-    use crate::db::dispatched_sessions::hosted_execution::tests::{TOKEN, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{TOKEN, wire};
     use crate::services::discord::host_defer_gate::tests::ScriptedTmux;
     use crate::services::provider::ProviderKind;
     let _root = crate::config::TestRuntimeRootGuard::new();

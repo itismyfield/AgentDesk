@@ -1356,9 +1356,9 @@ mod tests {
         for (channel, _, candidate) in boot_ownership() {
             let candidate = candidate.expect("selected channel on the home");
             if channel == owned {
-                assert!(candidate.confirm_store());
+                assert!(candidate.confirm_store_for_test());
             } else {
-                candidate.release(channel);
+                candidate.release_for_test(channel);
             }
         }
 
@@ -1422,7 +1422,11 @@ mod tests {
         let _boot = test_override::force_candidates(&[(owned, RuntimeHandoffKind::ClaudeTui)]);
         for (channel, _, candidate) in boot_ownership() {
             if channel == owned {
-                assert!(candidate.expect("selected channel").confirm_store());
+                assert!(
+                    candidate
+                        .expect("selected channel")
+                        .confirm_store_for_test()
+                );
             }
         }
 

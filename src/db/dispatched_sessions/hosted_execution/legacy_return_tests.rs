@@ -1,6 +1,6 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_sessions::hosted_execution::legacy_return::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::db::dispatched_sessions::hosted_execution::*;
 use crate::services::dispatched_sessions::hosted_cleanup::cleanup_disconnected_sessions_pg as delete_disconnected_sessions_pg;
 use crate::services::session_host::legacy_return::tests::{ended, provider_alive};
@@ -41,7 +41,7 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     let (db, pool, observed, r) = setup().await;
     let before = snapshot(&pool, observed.session_id()).await;
     assert_eq!(
-        return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
+        return_legacy_pg_for_test(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
             .await
             .unwrap(),
         HostedCasOutcome::Written
@@ -119,14 +119,15 @@ async fn legacy_return_exact_retired_pg_preserves_identity_and_survives_gc() {
     .unwrap();
     assert_eq!(alias, observed.session_id());
     assert_eq!(
-        return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
+        return_legacy_pg_for_test(&pool, &observed, &r.owner, &r.execution_nonce, &ended(&r))
             .await
             .unwrap(),
         HostedCasOutcome::Stale
     );
     assert_eq!(snapshot(&pool, observed.session_id()).await, after);
     let legacy = HostedObservation::for_test(observed.session_id(), None);
-    let next = crate::db::dispatched_sessions::hosted_execution::tests::pending(&r.owner, "n-new");
+    let next =
+        crate::db::dispatched_sessions::hosted_execution::test_support::pending(&r.owner, "n-new");
     assert_eq!(
         install_pending_pg(&pool, &legacy, next).await.unwrap(),
         HostedCasOutcome::Written
@@ -152,13 +153,13 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
     let mut other = r.owner.clone();
     other.logical_key = "other".into();
     assert_eq!(
-        return_legacy_pg(&pool, &observed, &other, &r.execution_nonce, &proof)
+        return_legacy_pg_for_test(&pool, &observed, &other, &r.execution_nonce, &proof)
             .await
             .unwrap_err(),
         HostedTransitionError::OwnerMismatch
     );
     assert_eq!(
-        return_legacy_pg(&pool, &observed, &r.owner, "new-nonce", &proof)
+        return_legacy_pg_for_test(&pool, &observed, &r.owner, "new-nonce", &proof)
             .await
             .unwrap_err(),
         HostedTransitionError::NonceMismatch
@@ -166,7 +167,7 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
     let mut other_record = r.clone();
     other_record.source_ref.baseline_event_seq = Some(7);
     assert_eq!(
-        return_legacy_pg(
+        return_legacy_pg_for_test(
             &pool,
             &observed,
             &r.owner,
@@ -184,7 +185,7 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
     ] {
         let obs = HostedObservation::for_test(observed.session_id(), Some(raw.clone()));
         assert!(
-            return_legacy_pg(&pool, &obs, &r.owner, &r.execution_nonce, &proof)
+            return_legacy_pg_for_test(&pool, &obs, &r.owner, &r.execution_nonce, &proof)
                 .await
                 .is_err()
         );
@@ -210,7 +211,7 @@ async fn legacy_return_rejects_changed_inputs_and_live_unknown_records_pg() {
         tx.commit().await.unwrap();
         let changed = snapshot(&pool, observed.session_id()).await;
         assert_eq!(
-            return_legacy_pg(&pool, &observed, &r.owner, &r.execution_nonce, &proof)
+            return_legacy_pg_for_test(&pool, &observed, &r.owner, &r.execution_nonce, &proof)
                 .await
                 .unwrap(),
             HostedCasOutcome::Stale,
@@ -231,7 +232,7 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE id = $1")
         .bind(observed.session_id())
         .bind(wire(
-            &crate::db::dispatched_sessions::hosted_execution::tests::pending(
+            &crate::db::dispatched_sessions::hosted_execution::test_support::pending(
                 &r.owner,
                 "concurrent",
             ),
@@ -243,7 +244,7 @@ async fn legacy_return_cas_waits_for_concurrent_incarnation_pg() {
     let worker_obs = observed.clone();
     let worker_r = r.clone();
     let worker = tokio::spawn(async move {
-        return_legacy_pg(
+        return_legacy_pg_for_test(
             &worker_pool,
             &worker_obs,
             &worker_r.owner,
@@ -284,7 +285,7 @@ async fn legacy_return_heartbeat_is_measured_after_row_lock_pg() {
     let worker_pool = pool.clone();
     let worker_obs = observed.clone();
     let worker = tokio::spawn(async move {
-        return_legacy_pg(
+        return_legacy_pg_for_test(
             &worker_pool,
             &worker_obs,
             &r.owner,

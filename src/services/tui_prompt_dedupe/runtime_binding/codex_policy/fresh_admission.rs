@@ -6,16 +6,16 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{file_identity, same_file};
 use crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static OWNERSHIP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
-pub(crate) fn fresh_scope_ownership_calls_for_tests() -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn fresh_scope_ownership_calls_for_tests() -> usize {
     OWNERSHIP_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
 #[derive(Debug)]
-pub(crate) enum FreshReason {
+pub enum FreshReason {
     ExplicitClear(Captured),
     ExactAbsence(Captured),
 }
@@ -37,7 +37,7 @@ fn input_target(channel: u64) -> Option<String> {
 }
 
 /// A cheap rejection only; full proof and identity checks stay under source authority.
-pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> bool {
+pub fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };
@@ -46,10 +46,7 @@ pub(crate) fn fresh_scope_pending(channel: u64, last_nonce: Option<&str>) -> boo
 }
 
 /// Selection restoration observes its exact marker while the existing source authority is held.
-pub(crate) fn with_current_scope_nonce<T>(
-    channel: u64,
-    inspect: impl FnOnce(Option<&str>) -> T,
-) -> T {
+pub fn with_current_scope_nonce<T>(channel: u64, inspect: impl FnOnce(Option<&str>) -> T) -> T {
     let Some(tmux) = input_target(channel) else {
         return inspect(None);
     };
@@ -63,7 +60,7 @@ pub(crate) fn with_current_scope_nonce<T>(
     })
 }
 
-pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
+pub fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     let tmux = input_target(channel)?;
     let observation = crate::services::discord::codex_absence::readiness(channel, &tmux)?;
     #[cfg(unix)]
@@ -78,7 +75,7 @@ pub(crate) fn input_reason_for_channel(channel: u64) -> Option<FreshReason> {
     (reason.captured().context.channel_id == Some(channel)).then_some(reason)
 }
 
-pub(crate) fn input_hold_reason_for_channel(channel: u64) -> &'static str {
+pub fn input_hold_reason_for_channel(channel: u64) -> &'static str {
     let Some(tmux) = input_target(channel) else {
         return "fresh_evidence_missing";
     };
@@ -110,7 +107,7 @@ fn input_reason(
     absent_open::capture_under(authority, observation).map(FreshReason::ExactAbsence)
 }
 
-pub(crate) fn successor_unproved_for_channel(channel: u64) -> bool {
+pub fn successor_unproved_for_channel(channel: u64) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };
@@ -125,7 +122,7 @@ pub(crate) fn successor_unproved_for_channel(channel: u64) -> bool {
     })
 }
 
-pub(crate) fn fresh_scope_eligible(channel: u64) -> bool {
+pub fn fresh_scope_eligible(channel: u64) -> bool {
     let Some(tmux) = input_target(channel) else {
         return false;
     };
@@ -202,10 +199,10 @@ fn no_alias(denied: &[SourceId], current: &SourceId) -> bool {
     })
 }
 
-pub(crate) const FRESH_SCOPE_BUSY: &str = "source_busy";
+pub const FRESH_SCOPE_BUSY: &str = "source_busy";
 
 /// Installs only selection data under the existing authority; resume keeps its normal gates.
-pub(crate) fn with_fresh_scope(
+pub fn with_fresh_scope(
     channel: u64,
     last_nonce: Option<&str>,
     sources: &[SourceId],
@@ -230,7 +227,7 @@ pub(crate) fn with_fresh_scope(
         {
             return Ok(false);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         OWNERSHIP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if !binding_events::codex::latest_ownership(channel, &tmux)
             .is_ok_and(|pin| pin.is_some_and(|(_, current, _)| current == nonce))

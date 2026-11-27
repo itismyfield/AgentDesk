@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 const INITIAL: &str = "memory: {backend: memento, file: {sak_path: snapshot/sak}}";
 const DISK: &str = "memory: {backend: file, file: {sak_path: disk/sak}}";

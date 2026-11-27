@@ -3,19 +3,19 @@
 use crate::services::session_host::{HerdrGateRefusal, HerdrTarget};
 
 /// Explicit operator intent bound to one gate; a cancel warrant cannot convert into it.
-pub(crate) struct OperatorTerminateWarrant<'a> {
+pub struct OperatorTerminateWarrant<'a> {
     pub(super) target: HerdrTarget,
     pub(super) fence: Option<&'a crate::services::session_host::TerminationFence>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TerminateRefusal {
+pub enum TerminateRefusal {
     Disabled,
     Gate(HerdrGateRefusal),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum HerdrTerminateResult {
+pub enum HerdrTerminateResult {
     Refused(TerminateRefusal),
     Acknowledged,
     NotSent(String),

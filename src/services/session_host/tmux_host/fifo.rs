@@ -9,7 +9,7 @@ use crate::services::session_host::submit::{
 use crate::services::session_host::{HostMutation, HostRefusal, InteractiveSessionHost};
 
 impl TmuxHost {
-    pub(crate) fn submit_wrapper_frame(
+    pub fn submit_wrapper_frame(
         &self,
         path: &str,
         frame: WrapperFrame<'_>,

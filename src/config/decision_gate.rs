@@ -106,7 +106,7 @@ impl<'de> Deserialize<'de> for Features {
 }
 
 impl DecisionGateConfig {
-    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+    pub fn validate(&self) -> anyhow::Result<()> {
         for deadline in [
             self.features.issue_duplicate.deadline_ms,
             self.features.host_assignment.deadline_ms,
@@ -131,7 +131,7 @@ impl DecisionGateConfig {
     }
 }
 
-pub(crate) fn normalize_repository(raw: &str) -> Option<String> {
+pub fn normalize_repository(raw: &str) -> Option<String> {
     let value = raw.trim().to_ascii_lowercase();
     let value = match value.as_str() {
         "adk" => "itismyfield/agentdesk",

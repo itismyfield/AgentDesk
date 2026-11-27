@@ -470,7 +470,7 @@ async fn ba_actual_budget_not_found_retry_holds_before_due_then_posted_allows_re
                     .replies
                     .lock()
                     .unwrap()
-                    .push_back(crate::services::tui_o::writer::tests::Reply::Unsent);
+                    .push_back(crate::services::tui_o::writer::test_support::Reply::Unsent);
             },
         )
         .await;

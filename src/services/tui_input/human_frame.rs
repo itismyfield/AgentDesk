@@ -1,7 +1,7 @@
 //! Injected input uses the idle user header plus its attempt's nonce, ` · <nonce>]`; the durable
 //! ledger identifies injected frames, tagged or untagged.
 
-pub(crate) mod history;
+pub mod history;
 
 const USER: &str = "[User: ";
 /// The schema marker with whitespace removed, as wrapped composer rows still show it.
@@ -9,11 +9,11 @@ const SCHEMA_FOLDED: &str = "·📱v1mode=inject";
 
 /// The fields of one durable-owned user header, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Header<'a> {
-    pub(crate) name: &'a str,
-    pub(crate) author: &'a str,
+pub struct Header<'a> {
+    pub name: &'a str,
+    pub author: &'a str,
     /// Empty for a header written without an attempt tag.
-    pub(crate) nonce: &'a str,
+    pub nonce: &'a str,
 }
 
 /// The name the idle `[User: …]` header shows: whitespace collapsed, brackets and braces made
@@ -39,7 +39,7 @@ pub(crate) fn author_name(name: &str, id: impl std::fmt::Display) -> String {
 
 /// The name Discord shows for a person: the server nickname, else the global display name, else
 /// the username.
-pub(crate) fn display_name<'a>(
+pub fn display_name<'a>(
     nick: Option<&'a str>,
     global_name: Option<&'a str>,
     username: &'a str,
@@ -51,7 +51,7 @@ pub(crate) fn display_name<'a>(
         .unwrap_or(username)
 }
 
-pub(crate) fn idle(name: &str, author: &str, body: &str) -> String {
+pub fn idle(name: &str, author: &str, body: &str) -> String {
     framed(name, author, "", body)
 }
 
@@ -99,13 +99,7 @@ pub fn preserved_decision_body(
 
 /// The idle frame tagged with the attempt's nonce, so two attempts of one text differ; a nonce
 /// not shaped like `fresh_nonce`'s adds no tag.
-pub(crate) fn plain_inject(
-    _source: &str,
-    author: &str,
-    name: &str,
-    nonce: &str,
-    body: &str,
-) -> String {
+pub fn plain_inject(_source: &str, author: &str, name: &str, nonce: &str, body: &str) -> String {
     let tag = if is_nonce(nonce) {
         format!(" · {nonce}")
     } else {
@@ -119,7 +113,7 @@ fn is_nonce(text: &str) -> bool {
 }
 
 /// A plain header's inside without its attempt tag, and the tag, empty when there is none.
-pub(crate) fn untagged(inner: &str) -> (&str, &str) {
+pub fn untagged(inner: &str) -> (&str, &str) {
     match inner.rsplit_once(" · ") {
         Some((who, nonce)) if who.ends_with(')') && is_nonce(nonce) => (who, nonce),
         _ => (inner, ""),
@@ -128,7 +122,7 @@ pub(crate) fn untagged(inner: &str) -> (&str, &str) {
 
 /// A durable-owned plain user header, tagged or not, with the bytes after its closing bracket.
 /// Metadata is read from the right, so a name that looks like it never supplies it.
-pub(crate) fn parse(text: &str) -> Option<(Header<'_>, &str)> {
+pub fn parse(text: &str) -> Option<(Header<'_>, &str)> {
     let rest = text.strip_prefix(USER)?;
     let close = rest.find(']')?;
     let (inner, after) = (&rest[..close], &rest[close + 1..]);

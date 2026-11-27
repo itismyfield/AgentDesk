@@ -28,15 +28,18 @@ async fn clear_waits_for_pane_projection_after_authorized_create_pg() {
     let (resume, resumed) = std::sync::mpsc::channel();
     let mut release = Release(Some(resume));
     let resumed = Mutex::new(resumed);
-    let _watch =
-        clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Projecting, move || {
+    let _watch = clear_epoch::test_support::watch(
+        &owner,
+        clear_epoch::test_support::Point::Projecting,
+        move || {
             projecting.send(()).unwrap();
             resumed
                 .lock()
                 .unwrap()
                 .recv_timeout(wait)
                 .expect("projection barrier is released");
-        });
+        },
+    );
     let host = Arc::new(FakeHost::created("projected-pane"));
     let task_host = host.clone();
     let task_pool = pool.clone();

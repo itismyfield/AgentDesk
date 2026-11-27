@@ -4,14 +4,14 @@ use std::process::Command;
 
 use crate::config::test_instance;
 
-pub(crate) fn input_command(command: &mut Command, args: &[&str]) -> io::Result<()> {
+pub fn input_command(command: &mut Command, args: &[&str]) -> io::Result<()> {
     test_instance::configure_tmux_command(command)?;
     validate_args(args.iter().map(OsStr::new))?;
     command.arg("-u").args(args);
     Ok(())
 }
 
-pub(crate) fn validate_target(target: &str) -> io::Result<()> {
+pub fn validate_target(target: &str) -> io::Result<()> {
     if test_instance::current()
         .map_err(io::Error::other)?
         .is_none()

@@ -93,13 +93,13 @@ fn pending() -> io::Result<Pending> {
 }
 
 /// Dropping this owner closes its pipes and schedules a wait, without killing the child.
-pub(crate) struct ReapingChild {
+pub struct ReapingChild {
     child: Option<Child>,
     pending: Pending,
     cancel: Option<CancelRegistration>,
 }
 
-pub(crate) trait CommandReapExt {
+pub trait CommandReapExt {
     fn spawn_reaping(&mut self) -> io::Result<ReapingChild>;
 }
 
@@ -142,7 +142,7 @@ impl ReapingChild {
         drop(self.child.take());
     }
 
-    pub(crate) fn track_cancel_token(&mut self, token: Option<&Arc<CancelToken>>) {
+    pub fn track_cancel_token(&mut self, token: Option<&Arc<CancelToken>>) {
         self.cancel = token.map(|token| CancelRegistration {
             token: Arc::downgrade(token),
             generation: token.child_reap_generation(),

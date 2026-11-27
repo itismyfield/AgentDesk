@@ -15,11 +15,11 @@ fn injected_rows(rows: &[String], session: Option<&str>) -> bool {
 }
 
 /// How a protected pane's draft reads in one capture.
-pub(crate) fn draft_sighting(capture: &str) -> DraftSighting {
+pub fn draft_sighting(capture: &str) -> DraftSighting {
     draft_sighting_for(capture, None)
 }
 
-pub(crate) fn draft_sighting_in_session(session: &str, capture: &str) -> DraftSighting {
+pub fn draft_sighting_in_session(session: &str, capture: &str) -> DraftSighting {
     draft_sighting_for(capture, Some(session))
 }
 
@@ -53,7 +53,7 @@ pub(crate) fn draft_unproven(capture: &str) -> bool {
 
 /// Whose text the composer holds before an automatic key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ComposerOwner {
+pub enum ComposerOwner {
     /// Nothing typed: an empty `❯` or a faint placeholder.
     Empty,
     /// A Discord prompt AgentDesk typed (`[User: …]`) that never left the composer.
@@ -63,11 +63,11 @@ pub(crate) enum ComposerOwner {
     Unread,
 }
 
-pub(crate) fn composer_owner(capture: &str) -> ComposerOwner {
+pub fn composer_owner(capture: &str) -> ComposerOwner {
     composer_owner_for(capture, None)
 }
 
-pub(crate) fn composer_owner_in_session(session: &str, capture: &str) -> ComposerOwner {
+pub fn composer_owner_in_session(session: &str, capture: &str) -> ComposerOwner {
     composer_owner_for(capture, Some(session))
 }
 

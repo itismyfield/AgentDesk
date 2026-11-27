@@ -1,7 +1,8 @@
 import { formatRelativeTime } from "../../app/shellFormatting";
 import type { Agent, TaskDispatch } from "../../types";
 import { queueLocationQuery } from "../campaigns/campaignQueueModel";
-import type { HomeTone, TodoItem, Tr } from "../home/homeModel";
+import { detectTurnLoop, formatLoopSummary, stepsFromLiveTurnEvents } from "../../lib/agentObservability";
+import type { HomeTone, HomeTurn, TodoItem, Tr } from "../home/homeModel";
 import { coerceTimestampMs } from "./kanban-utils";
 
 /** One reason an agent needs a person, with the queue link of the card behind it (none for a stuck turn). */
@@ -25,10 +26,11 @@ const join = (...parts: Array<string | null | undefined>) => parts.filter(Boolea
  * home's to-do list (decisions and failures), and failed dispatches from the last day. A failed dispatch with a card
  * counts only while the cards are unread: once read, the card is on the to-do list if it still needs a person, and the
  * open-card list (done cards excluded) shows it moved on or closed otherwise. */
-export function buildAttention({ agents, todo, failed, cardsRead, tr, isKo, now = Date.now() }: {
+export function buildAttention({ agents, todo, failed, turns, cardsRead, tr, isKo, now = Date.now() }: {
   agents: Agent[];
   todo: TodoItem[];
   failed: TaskDispatch[];
+  turns?: ReadonlyMap<string, HomeTurn>;
   /** The open-card list loaded (or is loading); false after it failed. */
   cardsRead: boolean;
   tr: Tr;
@@ -41,6 +43,17 @@ export function buildAttention({ agents, todo, failed, cardsRead, tr, isKo, now 
     if (agentId && known.has(agentId)) byAgent.set(agentId, [...(byAgent.get(agentId) ?? []), reason]);
   };
   for (const agent of agents) {
+    const loop = detectTurnLoop(stepsFromLiveTurnEvents(turns?.get(agent.id)?.tool_events));
+    if (loop) {
+      add(agent.id, {
+        key: `loop:${agent.id}:${loop.key}`,
+        tone: loop.pattern === "contract" ? "err" : "warn",
+        chip: tr("루프 의심", "Looping"),
+        detail: formatLoopSummary(loop, tr),
+        to: null,
+      });
+      continue;
+    }
     if ((agent as Agent & { visual_status_code?: string }).visual_status_code !== "stuck-suspect") continue;
     add(agent.id, {
       key: `stuck:${agent.id}`,

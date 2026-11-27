@@ -4,28 +4,28 @@
 pub mod activation;
 pub mod actor;
 pub mod adoption;
-pub(crate) mod agy_delivery;
+pub mod agy_delivery;
 pub mod binding;
-pub(crate) mod boot;
+pub mod boot;
 pub mod codex_adoption;
-pub(crate) mod codex_snapshot;
+pub mod codex_snapshot;
 pub mod confirm;
 mod deferred;
 pub mod deliver;
 pub mod host;
 pub mod input_facts;
-pub(crate) mod input_notices;
-pub(crate) mod late_adopt;
-pub(crate) mod local_retry;
-pub(crate) mod owed;
+pub mod input_notices;
+pub mod late_adopt;
+pub mod local_retry;
+pub mod owed;
 pub mod pieces;
 pub mod progress;
 // Test builds open it to the replay tests mounted in the discord-layer test host.
 #[cfg(not(any(test, feature = "test-support")))]
 mod replay;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) mod replay;
-pub(crate) mod restart_end;
+pub mod replay;
+pub mod restart_end;
 pub(crate) mod restart_notice;
 pub use replay::ReplaySummary;
 pub mod resume;
@@ -314,13 +314,18 @@ pub(crate) use renumbered::claude_cursor_continues;
 #[cfg(not(any(test, feature = "test-support")))]
 mod transition_cleanup;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod transition_cleanup;
+pub mod transition_cleanup;
 /// Only the periodic retention sweep sends production cleanup requests.
-pub(crate) mod transition_port;
+pub mod transition_port;
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 #[path = "writer_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod source_read_support;
 
 #[cfg(test)]
 pub(crate) mod source_read_tests;

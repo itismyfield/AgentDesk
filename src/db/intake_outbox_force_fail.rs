@@ -6,7 +6,7 @@ use sqlx::PgPool;
 
 /// Reasons `force_fail_and_retry_as_new` may refuse to operate.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ForceFailError {
+pub enum ForceFailError {
     #[error("intake_outbox row id={0} does not exist")]
     NotFound(i64),
     #[error(
@@ -52,7 +52,7 @@ pub(crate) fn force_fail_provider_ready(provider: &str) -> bool {
 /// an UPDATE or child INSERT. Direct SQL can still bypass typed writers, and
 /// there is no attempt ceiling or typestate proof for every transition.
 /// Pinned PG coverage remains in `intake_outbox::postgres_tests` to keep IDs.
-pub(crate) async fn force_fail_and_retry_as_new(
+pub async fn force_fail_and_retry_as_new(
     pool: &PgPool,
     stuck_id: i64,
     operator_reason: &str,

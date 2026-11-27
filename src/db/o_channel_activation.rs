@@ -1,7 +1,7 @@
 //! Read-only rows that keep a channel out of its first O activation: open intake routes and
 //! sessions owned by another node.
 
-pub(crate) mod owner;
+pub mod owner;
 
 use super::intake_outbox_open_status::INTAKE_OUTBOX_OPEN_STATUSES_SQL;
 use sqlx::{AssertSqlSafe, PgConnection, PgPool, Postgres, Transaction};
@@ -13,7 +13,7 @@ pub struct IntakeFence {
 
 impl IntakeFence {
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn empty_for_test() -> Self {
+    pub fn empty_for_test() -> Self {
         Self { _transaction: None }
     }
 
@@ -26,14 +26,14 @@ impl IntakeFence {
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(crate) struct ActivationRows {
-    pub(crate) open_intake: i64,
-    pub(crate) foreign_sessions: i64,
+pub struct ActivationRows {
+    pub open_intake: i64,
+    pub foreign_sessions: i64,
 }
 
 /// Counts the channel's open intake rows and its live sessions owned by any instance other than
 /// `local_instance`, using the owner predicate the intake router resolves owners with.
-pub(crate) async fn activation_rows(
+pub async fn activation_rows(
     pool: &PgPool,
     channel_id: &str,
     local_instance: &str,
@@ -92,7 +92,7 @@ async fn read_activation_rows(
 }
 
 /// SHARE conflicts with every intake DML path, including writes made by another node.
-pub(crate) async fn fenced_activation_rows(
+pub async fn fenced_activation_rows(
     pool: &PgPool,
     channel_id: &str,
     local_instance: &str,

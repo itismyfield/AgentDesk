@@ -31,7 +31,8 @@ fn resumed_pending_after_boot_reads_only_seed_reply_pg() {
     assert_eq!(posts.iter().filter(|text| text.trim() == "답").count(), 1);
     fx.rig.provider_seen(&context_of(&old_nonce), false);
     let start =
-        ResumeStart::capture("restart-command".into(), CHANNEL, &source, o.store()).unwrap();
+        ResumeStart::capture_for_test("restart-command".into(), CHANNEL, &source, o.store())
+            .unwrap();
     assert_eq!(o.captured_through(&source), Some(start.offset));
     let mut context = execution_context("codex", &old_nonce).unwrap();
     let nonce = uuid::Uuid::new_v4().simple().to_string();

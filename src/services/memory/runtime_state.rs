@@ -11,7 +11,7 @@ const FAILURE_THRESHOLD: u8 = 3;
 const BACKOFF_DURATION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ExternalMemoryBackendState {
+pub struct ExternalMemoryBackendState {
     pub configured: bool,
     pub active: bool,
     pub consecutive_failures: u8,
@@ -60,7 +60,7 @@ impl ExternalMemoryBackendState {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct MemoryBackendRuntimeSnapshot {
+pub struct MemoryBackendRuntimeSnapshot {
     pub memento: ExternalMemoryBackendState,
 }
 
@@ -259,21 +259,21 @@ pub(crate) fn snapshot() -> MemoryBackendRuntimeSnapshot {
     }
 }
 
-pub(crate) fn backend_state(kind: MemoryBackendKind) -> Option<ExternalMemoryBackendState> {
+pub fn backend_state(kind: MemoryBackendKind) -> Option<ExternalMemoryBackendState> {
     match kind {
         MemoryBackendKind::File => None,
         MemoryBackendKind::Memento => Some(snapshot().memento),
     }
 }
 
-pub(crate) fn backend_is_active(kind: MemoryBackendKind) -> bool {
+pub fn backend_is_active(kind: MemoryBackendKind) -> bool {
     match kind {
         MemoryBackendKind::File => true,
         MemoryBackendKind::Memento => snapshot().memento.active,
     }
 }
 
-pub(crate) async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntimeSnapshot {
+pub async fn refresh_backend_health(reason: &str) -> MemoryBackendRuntimeSnapshot {
     // #2049 Finding 14: capture `configured` at the start of the refresh so
     // we can detect a config change that landed between the probe and the
     // apply, and avoid resurrecting a dropped backend with a stale probe.

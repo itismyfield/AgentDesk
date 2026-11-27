@@ -25,7 +25,7 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 };
 
 /// How long after a launch's last client work, or this process's start, before it is judged.
-pub(crate) const UNPLACED_QUIET: Duration = Duration::from_secs(60);
+pub const UNPLACED_QUIET: Duration = Duration::from_secs(60);
 const ENDED_KEPT: Duration = Duration::from_secs(3_600);
 /// Reads after one round of orphan closes and one residue removal; neither is ever repeated.
 const PASSES: usize = 3;
@@ -94,7 +94,7 @@ fn quiet_since(
 
 /// One pane of a workspace whose label names the channel, and what runs in it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelPane {
+pub struct ChannelPane {
     pub pane_id: String,
     pub label: String,
     /// Its workspace holds this pane alone in one tab.
@@ -104,7 +104,7 @@ pub(crate) struct ChannelPane {
 
 /// The shell a lost create left, read on `witness`'s server.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Residue {
+pub struct Residue {
     pub pane_id: String,
     pub label: String,
     pub root: ProcessStamp,
@@ -222,7 +222,7 @@ pub(crate) fn judge(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Resolution {
+pub enum Resolution {
     /// The row now records the launch's pane and provider.
     Adopted,
     /// The row is Retired, by this resolution or an earlier one; a fresh launch may follow.
@@ -233,7 +233,7 @@ pub(crate) enum Resolution {
 }
 
 /// One unplaced Pending and where its launch went.
-pub(crate) struct Unplaced<'a> {
+pub struct Unplaced<'a> {
     pub pool: &'a PgPool,
     pub owner: &'a HostedOwner,
     pub nonce: &'a str,
@@ -246,7 +246,7 @@ pub(crate) struct Unplaced<'a> {
 }
 
 /// Resolves the Pending while `lease` holds its channel; every write is a CAS on what was read.
-pub(crate) async fn resolve_unplaced(lease: &UnplacedLease, target: &Unplaced<'_>) -> Resolution {
+pub async fn resolve_unplaced(lease: &UnplacedLease, target: &Unplaced<'_>) -> Resolution {
     let resolution = if lease.covers(target.owner) {
         resolve(target).await
     } else {
@@ -370,17 +370,17 @@ pub(crate) fn resolve_for_turn(
 }
 
 /// The quiet a turn or pass waits out; a test on this thread may shorten it.
-pub(crate) fn quiet() -> Duration {
-    #[cfg(test)]
+pub fn quiet() -> Duration {
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(quiet) = QUIET.with(std::cell::Cell::get) {
         return quiet;
     }
     UNPLACED_QUIET
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static QUIET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub static QUIET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 /// `Ok(true)` while the row is still `nonce`'s Pending with no pane; `Ok(false)` once it is retired.

@@ -147,7 +147,7 @@ pub(super) fn live_pane(tmux_session_name: &str, session_exists: bool) -> Result
 
 /// Transcript-poll callbacks: the legacy tmux probe for a local tmux session; for another
 /// or unknown host the poll never reads dead and takes readiness from the transcript alone.
-pub(crate) fn host_poll_probe(
+pub fn host_poll_probe(
     tmux_session_name: Option<&str>,
     provider: ProviderKind,
     runtime_kind: Option<RuntimeHandoffKind>,

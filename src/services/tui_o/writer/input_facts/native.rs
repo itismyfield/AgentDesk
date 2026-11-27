@@ -13,12 +13,12 @@ use serde_json::Value;
 #[cfg(unix)]
 mod receipt;
 #[cfg(unix)]
-pub(crate) mod terminal;
+pub mod terminal;
 #[cfg(unix)]
 pub(crate) use receipt::MembershipReceipt;
 
 /// What one record says about the queue.
-pub(crate) enum QueueRecord {
+pub enum QueueRecord {
     Enqueue(String),
     /// Removed without running (`remove` other than mid-turn absorption).
     Withdraw(String),
@@ -38,7 +38,7 @@ pub(crate) enum QueueRecord {
     Prompt(String),
 }
 
-pub(crate) fn classify(value: &Value) -> Option<QueueRecord> {
+pub fn classify(value: &Value) -> Option<QueueRecord> {
     let text = |key: &str| value.get(key).and_then(body);
     match value["type"].as_str()? {
         "queue-operation" => match value["operation"].as_str()? {
@@ -85,13 +85,13 @@ fn body(value: &Value) -> Option<String> {
 }
 
 #[cfg(unix)]
-pub(crate) use crate::services::tui_input::human_frame::history::v2::native::{
+pub use crate::services::tui_input::human_frame::history::v2::native::{
     EvidenceRegistration as Registration, registrations_fingerprint,
 };
 
 #[cfg(unix)]
 impl Registration {
-    pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
+    pub fn matches(&self, binding: &SourceBinding) -> bool {
         binding.provider == super::ShadowProvider::Claude
             && self.ticket.channel_id == binding.channel_id
             && self.ticket.source.as_ref().is_some_and(|s| {
@@ -110,17 +110,17 @@ impl Registration {
 /// A candidate batch is read-only; its stamp is rechecked before any future actor mutation.
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub(crate) struct Observation {
-    pub(crate) binding: SourceBinding,
-    pub(crate) generation: u64,
-    pub(crate) binding_seq: u64,
-    pub(crate) revision: u64,
-    pub(crate) through: u64,
-    pub(crate) registrations_fingerprint: String,
+pub struct Observation {
+    pub binding: SourceBinding,
+    pub generation: u64,
+    pub binding_seq: u64,
+    pub revision: u64,
+    pub through: u64,
+    pub registrations_fingerprint: String,
     /// A verified raw EOF closer at `through`; it never moves `through` itself.
-    pub(crate) terminal: Option<terminal::RawWitness>,
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) receipts: Vec<MembershipReceipt>,
+    pub terminal: Option<terminal::RawWitness>,
+    pub evidence: Vec<Evidence>,
+    pub receipts: Vec<MembershipReceipt>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -132,35 +132,35 @@ pub(super) struct Record {
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Run {
-    pub(crate) start: u64,
+pub struct Run {
+    pub start: u64,
     pub(crate) native_id: Option<String>,
 }
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Evidence {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) run: Option<Run>,
-    pub(crate) range: (u64, u64),
-    pub(crate) membership_range: Option<(u64, u64)>,
-    pub(crate) membership_row: Option<String>,
-    pub(crate) closer_range: Option<(u64, u64)>,
-    pub(crate) disposition: Disposition,
+pub struct Evidence {
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub run: Option<Run>,
+    pub range: (u64, u64),
+    pub membership_range: Option<(u64, u64)>,
+    pub membership_row: Option<String>,
+    pub closer_range: Option<(u64, u64)>,
+    pub disposition: Disposition,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) supersedes: Option<terminal::Supersession>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) raw: Option<terminal::RawWitness>,
+    pub raw: Option<terminal::RawWitness>,
 }
 
 #[cfg(unix)]
-pub(crate) use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
+pub use crate::services::tui_input::human_frame::history::v2::native::barrier::Barrier;
 #[cfg(unix)]
 #[derive(Default, Debug, PartialEq, Eq)]
-pub(crate) struct Analysis {
-    pub(crate) evidence: Vec<Evidence>,
-    pub(crate) barriers: Vec<Barrier>,
+pub struct Analysis {
+    pub evidence: Vec<Evidence>,
+    pub barriers: Vec<Barrier>,
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -174,7 +174,7 @@ mod test_support;
 pub(crate) mod tests;
 
 #[cfg(unix)]
-pub(crate) type Projection = projection::Projection;
+pub type Projection = projection::Projection;
 
 #[cfg(unix)]
 mod projection {
@@ -220,7 +220,7 @@ mod projection {
         interrupt: Option<Vec<String>>,
     }
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
-    pub(crate) struct Projection {
+    pub struct Projection {
         binding: SourceBinding,
         facts: Vec<Fact>,
         tracker: TurnTracker,
@@ -234,7 +234,7 @@ mod projection {
     }
     impl Projection {
         /// Only the existing reopen hash pass can publish an authenticated seed.
-        pub(crate) fn reopen(
+        pub fn reopen(
             binding: SourceBinding,
             through: u64,
             hash: &str,
@@ -270,11 +270,11 @@ mod projection {
         ) -> Result<Vec<Evidence>, String> {
             self.analyze(registrations).map(|a| a.evidence)
         }
-        pub(crate) fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
+        pub fn analyze(&self, registrations: &[Registration]) -> Result<Analysis, String> {
             self.analyze_closed(registrations, None)
         }
         /// `raw` adds one closing edge after the last complete record; it is never a record.
-        pub(crate) fn analyze_closed(
+        pub fn analyze_closed(
             &self,
             registrations: &[Registration],
             raw: Option<&terminal::RawWitness>,
@@ -342,7 +342,7 @@ mod projection {
             })
             .collect()
         }
-        pub(crate) fn idle(&self) -> bool {
+        pub fn idle(&self) -> bool {
             self.state == super::super::TurnState::Idle
         }
         pub(crate) fn append(

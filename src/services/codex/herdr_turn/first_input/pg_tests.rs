@@ -195,8 +195,10 @@ fn run_case(case: Case) {
                     bootstrap: false,
                 };
                 let _launching =
-                    crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)
-                        .unwrap();
+                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(
+                        &turn.owner,
+                    )
+                    .unwrap();
                 let _clear = (case == Case::ClearBefore).then(|| {
                     crate::services::herdr_launch::clear_epoch::begin_clear(
                         &turn.owner.provider,
@@ -208,9 +210,9 @@ fn run_case(case: Case) {
                 let _check = (case == Case::ClearChecked).then(|| {
                     let saved = saved_clear.clone();
                     let owner = turn.owner.clone();
-                    crate::services::herdr_launch::clear_epoch::tests::watch(
+                    crate::services::herdr_launch::clear_epoch::test_support::watch(
                         &turn.owner,
-                        crate::services::herdr_launch::clear_epoch::tests::Point::Checked,
+                        crate::services::herdr_launch::clear_epoch::test_support::Point::Checked,
                         move || {
                             *saved.lock().unwrap() =
                                 Some(crate::services::herdr_launch::clear_epoch::begin_clear(

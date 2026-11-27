@@ -38,7 +38,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
     assert!(validate_send_source_for(SOURCE, SendCallerClass::Dashboard).is_err());
     let mut tx = f.pool.begin().await.unwrap();
     assert!(
-        reserve_on_tx(&mut tx, &id, 0, description())
+        reserve_on_tx_for_test(&mut tx, &id, 0, description())
             .await
             .unwrap()
             .is_none()
@@ -60,7 +60,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
                 new_generation: generation + 1
             }
         );
-        let event = reserve_on_tx(&mut tx, &id, generation + 1, description())
+        let event = reserve_on_tx_for_test(&mut tx, &id, generation + 1, description())
             .await
             .unwrap()
             .unwrap();
@@ -88,7 +88,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
             .await
             .unwrap();
         let mut tx = f.pool.begin().await.unwrap();
-        let recovered = reserve_on_tx(&mut tx, &id, 3, description())
+        let recovered = reserve_on_tx_for_test(&mut tx, &id, 3, description())
             .await
             .unwrap()
             .unwrap();
@@ -103,7 +103,7 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
     changed.home = "mac-b";
     changed.home_label = "changed after commit";
     changed.bot = "other";
-    let historical = reserve_on_tx(&mut tx, &id, 1, changed)
+    let historical = reserve_on_tx_for_test(&mut tx, &id, 1, changed)
         .await
         .unwrap()
         .unwrap();
@@ -124,7 +124,11 @@ async fn routing_event_real_outbox_history_and_failed_pointer_reuse_pg() {
         .await
         .unwrap();
     let mut tx = f.pool.begin().await.unwrap();
-    assert!(reserve_on_tx(&mut tx, &id, 1, description()).await.is_err());
+    assert!(
+        reserve_on_tx_for_test(&mut tx, &id, 1, description())
+            .await
+            .is_err()
+    );
     tx.rollback().await.unwrap();
     f.finish().await;
 }
@@ -140,7 +144,7 @@ async fn routing_event_transaction_rollback_and_first_peer_notification_pg() {
         .await
         .unwrap();
     assert!(
-        reserve_on_tx(&mut tx, &id, 1, description())
+        reserve_on_tx_for_test(&mut tx, &id, 1, description())
             .await
             .unwrap()
             .is_some()
@@ -162,7 +166,7 @@ async fn routing_event_transaction_rollback_and_first_peer_notification_pg() {
     let first = OwnerIdentity::new("codex", "73369303");
     acquire(&f, &first, "mac-b").await;
     let mut tx = f.pool.begin().await.unwrap();
-    let notice = reserve_on_tx(&mut tx, &first, 0, description())
+    let notice = reserve_on_tx_for_test(&mut tx, &first, 0, description())
         .await
         .unwrap()
         .unwrap();
@@ -181,7 +185,7 @@ async fn routing_event_transaction_rollback_and_first_peer_notification_pg() {
         .await
         .unwrap();
     assert!(
-        reserve_on_tx(&mut tx, &first, 1, description())
+        reserve_on_tx_for_test(&mut tx, &first, 1, description())
             .await
             .unwrap()
             .is_none(),
@@ -250,7 +254,7 @@ async fn switched(
     if to == "mac-a" {
         described.target_label = "device A";
     }
-    let reserved = reserve_on_tx(&mut tx, id, generation + 1, described)
+    let reserved = reserve_on_tx_for_test(&mut tx, id, generation + 1, described)
         .await
         .unwrap()
         .unwrap();
@@ -393,7 +397,7 @@ async fn routing_notice_posting_resume_keeps_nonce_and_stale_attempt_is_uncertai
         "uncertain stays without a blind repost"
     );
     let mut tx = f.pool.begin().await.unwrap();
-    let kept = reserve_on_tx(&mut tx, &id, 2, description())
+    let kept = reserve_on_tx_for_test(&mut tx, &id, 2, description())
         .await
         .unwrap()
         .unwrap();

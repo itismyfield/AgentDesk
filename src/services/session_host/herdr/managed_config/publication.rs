@@ -6,7 +6,7 @@ use super::super::observe::RestoreUnverified;
 use super::{invalid, open_regular, publish, synced_temp, unchanged};
 use crate::domain::file_sync::fsync_parent_dir;
 
-pub(crate) const STATE_FILE: &str = ".agentdesk-config-state";
+pub const STATE_FILE: &str = ".agentdesk-config-state";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum State {
