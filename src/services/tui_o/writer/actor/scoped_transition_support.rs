@@ -1,6 +1,8 @@
 //! Drives a real transition actor through a scope-waiting job and a local-retry retention for
 //! tests here and in dependent crates.
 
+#![cfg(all(any(test, feature = "test-support"), unix))]
+
 use super::*;
 use crate::services::tui_o::writer::actor::fresh_resume::Rescope;
 use crate::services::tui_o::writer::transition_port::TransitionPort;

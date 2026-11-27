@@ -19,7 +19,7 @@ pub const MAX_PARTIAL_BYTES: usize = 16 * 1024 * 1024;
 pub fn file_identity(meta: &Metadata) -> (u64, u64) {
     use std::os::unix::fs::MetadataExt;
     let (dev, ino) = (meta.dev(), meta.ino());
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let dev = renumber::dev(dev, ino);
     (dev, ino)
 }

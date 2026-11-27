@@ -1,6 +1,8 @@
 //! Transition fixtures: a channel switched over a chain of unproven hops, the actor run over its
 //! mailbox, and the requests and answers a test drives through it.
 
+#![cfg(any(test, feature = "test-support"))]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

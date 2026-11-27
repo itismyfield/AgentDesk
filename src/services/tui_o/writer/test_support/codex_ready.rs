@@ -1,6 +1,8 @@
 //! Codex-ready fixtures: the production binding-log actor behind a ready transition port, with
 //! a Codex observation ready, blocked or carrying a retained backlog.
 
+#![cfg(any(test, feature = "test-support"))]
+
 use std::time::SystemTime;
 
 use super::transition::*;
