@@ -1,9 +1,7 @@
 use super::*;
 
-pub(in crate::services::discord) use crate::domain::tool_text::{ALL_TOOLS, canonical_tool_name};
-pub(crate) use crate::domain::tool_text::{
-    normalize_allowed_tools, redact_sensitive_for_placeholder,
-};
+use crate::domain::tool_text::ALL_TOOLS;
+use crate::domain::tool_text::redact_sensitive_for_placeholder;
 
 /// Claude Code built-in slash commands
 pub(in crate::services::discord) const BUILTIN_SKILLS: &[(&str, &str)] = &[
@@ -608,7 +606,8 @@ pub(in crate::services::discord) fn format_for_discord_with_status_panel(
 
 #[cfg(test)]
 mod assignment_redaction_tests {
-    use super::{format_tool_input, redact_sensitive_for_placeholder};
+    use super::format_tool_input;
+    use crate::domain::tool_text::redact_sensitive_for_placeholder;
 
     #[test]
     fn summaries_mask_quoted_and_spaced_assignments_before_display() {

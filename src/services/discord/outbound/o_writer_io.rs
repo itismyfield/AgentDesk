@@ -145,7 +145,9 @@ impl DiscordPort for GatewayPort {
         async move {
             let message = super::notification_policy::scoped_message(channel)
                 .content(content)
-                .allowed_mentions(super::super::http::relay_allowed_mentions());
+                .allowed_mentions(
+                    crate::services::message_outbox::mentions::relay_allowed_mentions(),
+                );
             let message = match &agy {
                 Some(correlation) => correlation.attach(message),
                 None => message,

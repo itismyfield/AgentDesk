@@ -5,10 +5,8 @@ use super::Intervention;
 use super::QueueExitKind;
 use super::SharedData;
 use super::parse_dispatch_id;
-pub(crate) use crate::domain::outbound::alert_origin::{
-    prepend_inline_operational_alert_origin, prepend_operational_alert_origin,
-    strip_operational_alert_origin,
-};
+
+use crate::domain::outbound::alert_origin::strip_operational_alert_origin;
 
 const MONITOR_AUTO_TURN_ORIGIN_LITERAL: &str = "[origin=monitor_auto_turn]";
 
@@ -308,9 +306,8 @@ mod dispatch_turn_gate_tests {
 
 #[cfg(test)]
 mod allowed_turn_sender_tests {
-    use super::{
-        has_non_turn_provenance, is_allowed_turn_sender, prepend_operational_alert_origin,
-    };
+    use super::{has_non_turn_provenance, is_allowed_turn_sender};
+    use crate::domain::outbound::alert_origin::prepend_operational_alert_origin;
 
     const ANNOUNCE_ID: u64 = 1001;
     const OTHER_BOT_ID: u64 = 2002;
@@ -369,7 +366,8 @@ mod allowed_turn_sender_tests {
             "inline operational alert must be rejected by the real intake loop guard"
         );
         assert!(has_non_turn_provenance(&inline));
-        let (stripped, marked) = super::strip_operational_alert_origin(&inline);
+        let (stripped, marked) =
+            crate::domain::outbound::alert_origin::strip_operational_alert_origin(&inline);
         assert!(marked);
         assert_eq!(stripped, inline_body);
         assert!(!is_allowed_turn_sender(

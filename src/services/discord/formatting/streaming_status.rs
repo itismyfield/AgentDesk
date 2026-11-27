@@ -21,9 +21,7 @@ pub(super) fn char_count(s: &str) -> usize {
     s.chars().count()
 }
 
-pub(in crate::services::discord) use crate::domain::message_split::{
-    byte_index_at_discord_message_units, discord_message_units,
-};
+use crate::domain::message_split::{byte_index_at_discord_message_units, discord_message_units};
 
 pub(in crate::services::discord) fn streaming_split_boundary(
     text: &str,

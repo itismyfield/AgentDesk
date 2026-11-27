@@ -30,7 +30,10 @@ mod worker_entry;
 #[cfg(all(test, unix))]
 mod replay_start_tests;
 
-pub(crate) use worker_entry::{IntakeRequest, execute_intake_turn_core, start_exact_retry};
+pub(crate) use {
+    self::worker_entry::{execute_intake_turn_core, start_exact_retry},
+    crate::services::cluster::intake_turn::IntakeRequest,
+};
 
 mod context;
 pub(in crate::services::discord) use context::IntakeDeps;

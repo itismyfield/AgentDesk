@@ -13,9 +13,7 @@ use super::outbound::{
     OutboundDeduper, shared_outbound_deduper,
 };
 use super::{SharedData, health, rate_limit_wait};
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
-};
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use crate::services::monitoring_store::{MonitoringEntry, MonitoringStore};
 
 const RENDER_DEBOUNCE: StdDuration = StdDuration::from_millis(300);

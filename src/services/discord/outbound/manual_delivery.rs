@@ -12,6 +12,8 @@ use sqlx::PgPool;
 
 use crate::db::session_transcripts::{PersistSessionTranscript, persist_turn_db};
 pub(super) use crate::domain::outbound::key::ManualOutboundDeliveryId;
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
+use crate::domain::outbound::result::{DeliveryResult, FallbackUsed};
 use crate::services::discord::bot_role::UtilityBotRole;
 use crate::services::discord::formatting::{build_long_message_attachment, split_message};
 use crate::services::discord::http::dispatch_channel_message;
@@ -20,13 +22,9 @@ use crate::services::discord::outbound::delivery::{
 };
 use crate::services::discord::outbound::message::{DiscordOutboundMessage, OutboundTarget};
 use crate::services::discord::outbound::policy::DiscordOutboundPolicy;
-use crate::services::discord::outbound::result::{DeliveryResult, FallbackUsed};
 use crate::services::discord::outbound::{
     DISCORD_HARD_LIMIT_CHARS, DISCORD_SAFE_LIMIT_CHARS, DiscordOutboundClient, OutboundDedupClaim,
     OutboundDedupReservation, OutboundDedupWait, OutboundDeduper,
-};
-use crate::services::dispatches::discord_delivery::{
-    DispatchMessagePostError, DispatchMessagePostErrorKind,
 };
 
 #[cfg(test)]

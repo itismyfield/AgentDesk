@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::kanban_cards::entry_transactions;
 
 /// DELETE /api/kanban-cards/:id
 pub async fn delete_card(

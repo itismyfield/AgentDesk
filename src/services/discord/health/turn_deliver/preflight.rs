@@ -1,6 +1,7 @@
 //! Deterministic host refusals precede origin custody and any input effect.
 
-use super::{HumanInputError, ProviderKind, SharedData};
+use super::{ProviderKind, SharedData};
+use crate::domain::human_input::HumanInputError;
 use poise::serenity_prelude::ChannelId;
 use std::sync::Arc;
 

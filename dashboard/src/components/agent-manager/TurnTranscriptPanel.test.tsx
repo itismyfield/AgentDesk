@@ -131,3 +131,41 @@ it("renders AgentTiming spans and toggles AgentToolCalls summary when tool event
   await act(async () => secondTurn.click());
   expect(byTestId("turn-transcript-tool-calls-section")).toBeNull();
 });
+
+it("shows quota/reply diagnostics and filters steps via in-memory search", async () => {
+  const diagTranscripts = [
+    transcript("turn-ask", "2026-11-27T05:00:00Z", 45_000, {
+      provider: "claude",
+      assistant_message: "Verification succeeded. Shall I merge the pull request?",
+      events: [
+        { kind: "tool_use", tool_name: "Read", summary: "src/config.rs", content: "src/config.rs", status: "done", is_error: false },
+        { kind: "tool_result", tool_name: "Read", summary: null, content: "port = 8791", status: "done", is_error: false },
+        { kind: "assistant", tool_name: null, summary: null, content: "Verification succeeded. Shall I merge the pull request?", status: "done", is_error: false },
+      ],
+    }),
+    transcript("turn-quota", "2026-11-27T04:00:00Z", 10_000, {
+      provider: "claude",
+      assistant_message: "You've hit your limit · resets 5pm (Asia/Seoul)",
+      events: [],
+    }),
+  ];
+  getCardTranscripts.mockResolvedValueOnce(diagTranscripts);
+  await act(async () => root.render(<TurnTranscriptPanel source={{ type: "card", id: "card-1" }} tr={tr} isKo={false} />));
+
+  expect(byTestId("turn-transcript-diagnostics")?.textContent).toContain("Shall I merge the pull request?");
+  const searchInput = byTestId("turn-transcript-search-input") as HTMLInputElement;
+  expect(searchInput).not.toBeNull();
+
+  await act(async () => {
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    setter?.call(searchInput, "8791");
+    searchInput.dispatchEvent(new Event("input", { bubbles: true }));
+    searchInput.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  expect(byTestId("turn-transcript-search-nav")?.textContent).toContain("1 / 1");
+  expect(byTestId("turn-transcript-step-body")?.textContent).toContain("8791");
+
+  const turns = [...container.querySelectorAll<HTMLButtonElement>("[data-turn]")];
+  await act(async () => turns[1]!.click());
+  expect(byTestId("turn-transcript-diagnostics")?.textContent).toContain("Quota hit");
+});

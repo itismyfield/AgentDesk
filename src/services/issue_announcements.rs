@@ -1,12 +1,12 @@
 use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
 
+use crate::domain::outbound::port::DispatchMessagePostError;
 use crate::domain::outbound::{
     DeliveryResult, DiscordOutboundClient, DiscordOutboundPolicy, OutboundDelivery, OutboundIntent,
     OutboundTargetKey, first_raw_message_id,
 };
 use crate::services::discord::outbound::HttpOutboundClient;
-use crate::services::dispatches::discord_delivery::DispatchMessagePostError;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct IssueAnnouncementDeliveryError {

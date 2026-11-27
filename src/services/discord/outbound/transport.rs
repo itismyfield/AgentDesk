@@ -33,7 +33,7 @@ pub(crate) async fn post_serenity_message_with_nonce(
         .content(content)
         .nonce(serenity::model::channel::Nonce::String(nonce.to_string()))
         .enforce_nonce(enforce_nonce)
-        .allowed_mentions(crate::services::discord::http::relay_allowed_mentions());
+        .allowed_mentions(crate::services::message_outbox::mentions::relay_allowed_mentions());
     if let Some((reference_channel, reference_message)) = reference {
         message = message.reference_message(
             serenity::MessageReference::from((reference_channel, reference_message))

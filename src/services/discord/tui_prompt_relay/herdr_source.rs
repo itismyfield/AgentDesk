@@ -8,9 +8,7 @@ use std::path::Path;
 
 use sqlx::PgPool;
 
-use super::super::recovery_engine::host_reconcile::{
-    HerdrEndpointId, HerdrExecutionReader, HerdrPaneReading, HostReconcile, reconcile_hosted,
-};
+use super::super::recovery_engine::host_reconcile::{HostReconcile, reconcile_hosted};
 use super::launch_script::claude_tui_rehydrated_binding;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind,
@@ -20,7 +18,8 @@ use crate::db::dispatched_sessions::hosted_execution::{
     bind_pg, load_hosted_execution_pg,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
-use crate::services::discord::tmux::execution_identity::herdr_observation::HerdrExecutionMatch;
+use crate::services::session_host::HerdrExecutionMatch;
+use crate::services::session_host::{HerdrEndpointId, HerdrExecutionReader, HerdrPaneReading};
 use crate::services::tmux_common::with_tmux_source_authority;
 use crate::services::tui_prompt_dedupe::binding_events::{
     self, BindingEvent, BindingTarget, SourceId,

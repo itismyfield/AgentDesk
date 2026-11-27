@@ -116,6 +116,8 @@ pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
 pub(crate) use super::turn_presence::supervisor::{
     restart_operator_notice_for_test, send_operator_notices_on_this_thread,
 };
+#[cfg(test)]
+pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 #[allow(unused_imports)]
@@ -144,8 +146,6 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     register_inject_runtime_for_provider, send_meanwhile, start_without_gateway,
 };
-#[cfg(test)]
-pub use turn_deliver::{ExternalHold, HumanInputDelivery, HumanInputError};
 pub use turn_deliver::{HumanInputRequest, deliver_human_input, external_turn_hold_for_start};
 pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
 pub(crate) use turn_deliver::{deliver_with_reply, preflight_human_input};

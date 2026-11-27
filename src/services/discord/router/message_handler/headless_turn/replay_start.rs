@@ -2,6 +2,7 @@
 use super::super::provider_dispatch::replay_scope;
 use super::*;
 use crate::db::replay_disposition::write::CanonicalInput;
+use crate::domain::process_incarnation::incarnation;
 use crate::services::cluster::attachment_transfer::uploads::PendingUploads;
 use crate::services::discord::gateway::{DiscordGateway, HeadlessExactGateway, TurnGateway};
 use crate::services::discord::replay_policy::permit::EffectTarget;
@@ -312,14 +313,13 @@ impl Request<'_> {
             .ok_or_else(|| StartStop::Deferred("no replay store".into()))?;
         let instance =
             crate::services::cluster::node_registry::resolve_self_instance_id_without_config();
-        let context = ReplayAdmissionContext::production(pool, &instance, admission::incarnation())
-            .for_scope(
-                &channel,
-                self.provider.as_str(),
-                scope.driver.as_str(),
-                scope.runtime,
-                false,
-            );
+        let context = ReplayAdmissionContext::production(pool, &instance, incarnation()).for_scope(
+            &channel,
+            self.provider.as_str(),
+            scope.driver.as_str(),
+            scope.runtime,
+            false,
+        );
         match admission::preflight_source(&context, &self.input()).await {
             ReplayPreflight::Admit(_) | ReplayPreflight::LegacyUnprotected => Ok(()),
             ReplayPreflight::ConsumeProtected(_) => Err(StartStop::Consumed),
@@ -359,7 +359,7 @@ impl Request<'_> {
                     false,
                 ));
             };
-            let ctx = ReplayAdmissionContext::production(pool, "", admission::incarnation());
+            let ctx = ReplayAdmissionContext::production(pool, "", incarnation());
             return admission::admit_start(
                 &ctx,
                 &self.input(),
