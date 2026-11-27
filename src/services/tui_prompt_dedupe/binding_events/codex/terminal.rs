@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// Redundant observations closed by exact typed rejection and a matching resolved anchor.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SettledCompanions(BTreeSet<u64>);
+pub struct SettledCompanions(BTreeSet<u64>);
 
 impl SettledCompanions {
     pub(crate) fn contains(&self, seq: u64) -> bool {

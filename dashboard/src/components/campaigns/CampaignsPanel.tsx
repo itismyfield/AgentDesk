@@ -370,7 +370,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
     >{tr("삭제", "Delete")}</Button>}
     sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
     tracker={<CampaignBatchTracker campaign={campaign} tasks={legacyTasks} onOpenTask={setNode} tr={tr} />}
-    notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
+    notes={<>
+      {editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
+      {campaign.status === "active" && <Cap className="hidden max-[899px]:block pointer-coarse:block">{tr("진행 중에는 일시정지·취소 후 삭제할 수 있어요.", "Pause or cancel before deleting.")}</Cap>}
+    </>}
     description={campaign.description && <details className="group min-w-0 text-xs text-[var(--fg-muted)]">
       <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] px-1 hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
         <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr("캠페인 설명", "Campaign description")}
@@ -409,6 +412,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       </>}
       notes={<>
         {detail?.error && <WidgetState kind="stale" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.")} />}
+        {!edit.enabled && edit.reason && <Cap className="hidden max-[899px]:block pointer-coarse:block">{rejectionText(edit.reason, tr)}</Cap>}
         {renderForm(editKey(id), !edit.enabled)}
         {!phone && commands}
       </>}

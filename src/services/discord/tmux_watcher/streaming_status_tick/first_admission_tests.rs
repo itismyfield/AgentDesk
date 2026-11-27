@@ -20,7 +20,7 @@ fn a_streaming_tick_waits_only_for_its_captured_turn_and_source() {
                 "tui_o":{"writer":{"channels":[channel], "late_adopt":true}}})).unwrap();
             let boot = BootChannels::validate(&config)
                 .unwrap()
-                .seeded(&config, |_, _| {
+                .seeded_for_test(&config, |_, _| {
                     Ok(std::collections::BTreeMap::from([(
                         channel,
                         Adoption::Pending,

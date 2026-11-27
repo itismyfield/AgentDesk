@@ -50,7 +50,7 @@ pub fn tmux_session_pane_liveness(
 /// Force (or clear, with `None`) the pane-liveness answer for one session name.
 /// Stored as an injected tmux host observation, so typed probes see it too.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_pane_liveness_override_for_tests(
+pub fn set_pane_liveness_override_for_tests(
     tmux_session_name: &str,
     liveness: Option<crate::services::platform::tmux::PaneLiveness>,
 ) {
@@ -73,13 +73,13 @@ pub(crate) fn set_pane_liveness_override_for_tests(
 /// not of this helper. The guard clears on unwind.
 #[cfg(any(test, feature = "test-support"))]
 #[must_use = "the override is cleared when this guard is dropped"]
-pub(crate) struct PaneLivenessOverrideGuard {
+pub struct PaneLivenessOverrideGuard {
     tmux_session_name: String,
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl PaneLivenessOverrideGuard {
-    pub(crate) fn set(
+    pub fn set(
         tmux_session_name: &str,
         liveness: crate::services::platform::tmux::PaneLiveness,
     ) -> Self {
@@ -90,14 +90,14 @@ impl PaneLivenessOverrideGuard {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for PaneLivenessOverrideGuard {
     fn drop(&mut self) {
         set_pane_liveness_override_for_tests(&self.tmux_session_name, None);
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn pane_liveness_override_for_tests(
     tmux_session_name: &str,
 ) -> Option<crate::services::platform::tmux::PaneLiveness> {
@@ -117,7 +117,7 @@ fn pane_liveness_override_for_tests(
 pub async fn probe_tmux_session_pane_liveness(
     tmux_session_name: &str,
 ) -> crate::services::platform::tmux::PaneLiveness {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = pane_liveness_override_for_tests(tmux_session_name) {
         return forced;
     }

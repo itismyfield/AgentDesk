@@ -232,7 +232,7 @@ fn visible_thinking_realtime_idle_and_rewind_recovery_post_once() {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut idle = crate::services::claude::herdr_turn::HerdrTurnLines::default();
         for line in tail.lines() {
-            assert!(idle.process(line, &tx));
+            assert!(idle.process_for_test(line, &tx));
         }
         let herdr_bodies: Vec<_> = rx
             .try_iter()
@@ -298,7 +298,7 @@ fn opened(f: &Fixture, from: u64) {
     assert_eq!(link.boundary, Boundary::Owed { from });
     assert_eq!(link.parent, Some(f.a()));
     assert!(
-        store.ledger().boundary_evidence(&f.b()).is_some(),
+        store.ledger().boundary_evidence_for_test(&f.b()).is_some(),
         "resolution must survive reopening"
     );
     assert!(store.apply_resolved_boundaries().unwrap().is_empty());

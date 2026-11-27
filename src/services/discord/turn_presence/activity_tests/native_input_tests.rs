@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::tui_input::human_frame::history::v2::{Registry, native_tests::Fixture};
+use crate::services::tui_input::human_frame::history::v2::{Registry, native_support::Fixture};
 
 #[test]
 fn native_8148_b2_worker_effect_poll_and_rebuild_share_stamped_candidates() {

@@ -236,7 +236,7 @@ async fn selected_profile_usage_reaches_the_legacy_summary_without_a_quota_query
         Outcome::Completed,
         Some(1000),
     );
-    let delivered = quota::tests::with_locked_quota_cache(|| {
+    let delivered = quota::with_locked_quota_cache(|| {
         post_live(&gateway, &ProviderKind::Codex, summary).now_or_never()
     });
     assert!(

@@ -35,13 +35,17 @@ async fn clear_after_launch_check_before_create_authorization_sends_nothing_pg()
     let clear = Arc::new(Mutex::new(None));
     let saved = clear.clone();
     let key = owner.clone();
-    let _watch = clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Checked, move || {
-        *saved.lock().unwrap() = Some(clear_epoch::begin_clear(
-            &key.provider,
-            &key.discord_token_hash,
-            key.channel_id.parse().unwrap(),
-        ));
-    });
+    let _watch = clear_epoch::test_support::watch(
+        &owner,
+        clear_epoch::test_support::Point::Checked,
+        move || {
+            *saved.lock().unwrap() = Some(clear_epoch::begin_clear(
+                &key.provider,
+                &key.discord_token_hash,
+                key.channel_id.parse().unwrap(),
+            ));
+        },
+    );
     let host = Arc::new(FakeHost::created("never-created"));
     let result = launch_herdr_session(&pool, launch(Some(endpoint())), command, host.clone()).await;
     assert!(result.is_err());
@@ -63,15 +67,18 @@ async fn authorized_create_after_clear_still_blocks_clear_until_projection_pg() 
     let (authorized, observed) = std::sync::mpsc::channel();
     let (release, resumed) = std::sync::mpsc::channel();
     let resumed = Mutex::new(resumed);
-    let _watch =
-        clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Authorized, move || {
+    let _watch = clear_epoch::test_support::watch(
+        &owner,
+        clear_epoch::test_support::Point::Authorized,
+        move || {
             authorized.send(()).unwrap();
             resumed
                 .lock()
                 .unwrap()
                 .recv_timeout(std::time::Duration::from_secs(10))
                 .unwrap();
-        });
+        },
+    );
     let host = Arc::new(FakeHost::created("authorized-pane"));
     let task_host = host.clone();
     let task_pool = pool.clone();

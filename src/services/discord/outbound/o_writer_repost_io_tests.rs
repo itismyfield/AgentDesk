@@ -166,7 +166,7 @@ async fn read_request(socket: &mut TcpStream) -> Option<(String, Vec<u8>)> {
 
 fn envelope() -> RepostEnvelope {
     let ids = RepostIds::for_piece(MARKER).unwrap();
-    RepostEnvelope::additional(CHANNEL, "본문 ```code```".into(), ids)
+    RepostEnvelope::additional_for_test(CHANNEL, "본문 ```code```".into(), ids)
 }
 
 pub(crate) fn always() -> Arc<dyn Fn() -> bool + Send + Sync> {
@@ -425,8 +425,8 @@ async fn repost_sends_keep_one_nonce_and_marker_outside_the_content() {
     ])
     .await;
     let port = mock.port();
-    let additional = RepostEnvelope::additional(CHANNEL, content.clone(), ids.clone());
-    let original = RepostEnvelope::original(CHANNEL, content.clone(), ids.clone());
+    let additional = RepostEnvelope::additional_for_test(CHANNEL, content.clone(), ids.clone());
+    let original = RepostEnvelope::original_for_test(CHANNEL, content.clone(), ids.clone());
     let mut created_messages = Vec::new();
     for envelope in [&additional, &additional, &original] {
         let report = send_within(&port, envelope, always(), Duration::from_secs(10)).await;
@@ -472,9 +472,9 @@ async fn repost_sends_keep_one_nonce_and_marker_outside_the_content() {
         expected
     );
 
-    assert!(additional.carries_marker(&created_messages[0]));
-    assert!(!additional.carries_marker(&created_messages[2]));
-    assert!(original.carries_marker(&created_messages[2]));
+    assert!(additional.carries_marker_for_test(&created_messages[0]));
+    assert!(!additional.carries_marker_for_test(&created_messages[2]));
+    assert!(original.carries_marker_for_test(&created_messages[2]));
 }
 
 /// Marks whether the request future is still alive.
@@ -576,7 +576,7 @@ async fn f1r_a_handed_over_request_carries_its_guard_and_counts_like_send_within
     let calls = Arc::default();
     let (request, counts) = hand_over(&mock.port(), &envelope(), counted_live(&calls, true));
     assert_eq!(
-        summary(&counts.report(WireOutcome::TimedOut)),
+        summary(&counts.report_for_test(WireOutcome::TimedOut)),
         ("timed_out", 0, 0, 0)
     );
     assert_eq!(
@@ -590,7 +590,7 @@ async fn f1r_a_handed_over_request_carries_its_guard_and_counts_like_send_within
     let first = std::future::poll_fn(|cx| std::task::Poll::Ready(request.as_mut().poll(cx))).await;
     assert!(first.is_pending());
     let outcome = tokio::spawn(request).await.unwrap();
-    let handed = counts.report(outcome);
+    let handed = counts.report_for_test(outcome);
     assert_eq!(summary(&handed), ("created", 2, 1, 1));
     assert_eq!(mock.requests().len(), 2);
 
@@ -611,7 +611,7 @@ async fn f1r_an_unpolled_request_dropped_sends_and_counts_nothing() {
     drop(request);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(
-        summary(&counts.report(WireOutcome::Unsent("dropped".into()))),
+        summary(&counts.report_for_test(WireOutcome::Unsent("dropped".into()))),
         ("unsent", 0, 0, 0)
     );
     assert_eq!(
@@ -622,7 +622,10 @@ async fn f1r_an_unpolled_request_dropped_sends_and_counts_nothing() {
     // A withdrawn guard stops the polled request before it leaves.
     let (request, counts) = hand_over(&mock.port(), &envelope(), counted_live(&calls, false));
     let outcome = request.await;
-    assert_eq!(summary(&counts.report(outcome)), ("unsent", 0, 0, 0));
+    assert_eq!(
+        summary(&counts.report_for_test(outcome)),
+        ("unsent", 0, 0, 0)
+    );
     assert_eq!(
         (mock.requests().len(), calls.load(Ordering::SeqCst)),
         (0, 1)

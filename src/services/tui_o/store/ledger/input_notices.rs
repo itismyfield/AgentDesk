@@ -349,30 +349,27 @@ impl NoticeState {
 
 // Test seams for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) fn record_id_for_test(record: &SourceRange) -> RecordId {
+pub fn record_id_for_test(record: &SourceRange) -> RecordId {
     record_id(record)
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl NoticeEvidence {
-    pub(in crate::services) fn complete_for_test(&self) -> bool {
+    pub fn complete_for_test(&self) -> bool {
         self.complete()
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl MigrationSnapshot {
-    pub(in crate::services) fn contains_for_test(&self, record: &SourceRange) -> bool {
+    pub fn contains_for_test(&self, record: &SourceRange) -> bool {
         self.contains(record)
     }
 }
 
 #[cfg(any(test, feature = "test-support"))]
 impl NoticeState {
-    pub(in crate::services) fn apply_for_test(
-        &mut self,
-        entry: NoticeEntry,
-    ) -> Result<Option<UnitKey>, String> {
+    pub fn apply_for_test(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
         self.apply(entry)
     }
 }

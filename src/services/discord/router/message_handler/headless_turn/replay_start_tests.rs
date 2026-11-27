@@ -898,7 +898,7 @@ fn p5_exact_unsupported_scope_is_held_without_legacy_reregistration_pg() {
         let token=CancelToken::new();start.spend(&target,"prepared",&token).unwrap();
         let live=token.replay_attempt().unwrap();
         for fact in [Seen::StdoutEof,Seen::Exited{waited:true},Seen::StderrDrained] {live.record(fact);}
-        let (attempt,seen)=live.take_for_decision(Duration::from_millis(50)).await.unwrap();
+        let (attempt,seen)=live.take_for_decision_for_test(Duration::from_millis(50)).await.unwrap();
         let ReplayDecision::AllowStartupRetry(permit)=replay_policy::decide_stale(&host.pool,Some(attempt),&seen,None).await else {panic!("exact permit");};
         let unstarted=permit.abandonment();
         let mut state=InflightTurnState::new(ProviderKind::Claude,channel.get(),None,7,7330518,7331518,"original".into(),None,None,None,None,0);

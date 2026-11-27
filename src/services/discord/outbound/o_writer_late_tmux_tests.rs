@@ -258,8 +258,8 @@ fn late_adopt_real_private_tmux_live_absent_error_and_snapshot_recheck() {
     assert!(snapshot.recheck(&legacy, &events, channel).is_ok());
 
     crate::services::tmux_common::with_tmux_source_authority(&session, |_| {
-        let candidate = crate::services::tui_o::channel_policy::Candidate::reserved_late();
-        let _adoption = candidate.lock();
+        let candidate = crate::services::tui_o::channel_policy::Candidate::reserved_late_for_test();
+        let _adoption = candidate.lock_for_test();
         let started = Instant::now();
         let refused = snapshot.recheck(&legacy, &events, channel).unwrap_err();
         assert_eq!(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedExecution, HostedLocation, tests::record,
+    HostedExecution, HostedLocation, test_support::record,
 };
 use crate::services::discord::turn_presence::activity::tests::{
     bind_turn_mode_transcript, settled_reason,

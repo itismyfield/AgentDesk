@@ -12,7 +12,7 @@ fn tool_key(name: &str) -> String {
         .to_ascii_lowercase()
 }
 
-pub(crate) fn class(name: &str) -> String {
+pub fn class(name: &str) -> String {
     let key = tool_key(name);
     if key.starts_with("mcp__") {
         return "MCP".into();
@@ -501,7 +501,7 @@ fn sanitized(raw: &str) -> Option<String> {
 
 /// Existing generated sections already escape Markdown; retain that structure
 /// while applying the same credential and mention boundary to every line.
-pub(crate) fn safe_section(raw: &str) -> Option<String> {
+pub fn safe_section(raw: &str) -> Option<String> {
     for line in raw.lines() {
         if credential_executable_line(line) {
             return None;
@@ -522,7 +522,7 @@ pub(crate) fn safe_section(raw: &str) -> Option<String> {
     Some(masked.replace('@', "@\u{200b}"))
 }
 
-pub(crate) fn text(raw: &str, limit: usize) -> Option<String> {
+pub fn text(raw: &str, limit: usize) -> Option<String> {
     text_masked(&sanitized(raw)?, limit)
 }
 
@@ -819,7 +819,7 @@ fn patch_summary(input: &str, cwd: Option<&str>) -> Option<String> {
     Some(format!("{path} (+{added} −{removed})"))
 }
 
-pub(crate) fn description_text(description: &str, reject_credentials: bool) -> Option<String> {
+pub fn description_text(description: &str, reject_credentials: bool) -> Option<String> {
     if description.lines().any(credential_executable_line) {
         return None;
     }
@@ -830,7 +830,7 @@ pub(crate) fn description_text(description: &str, reject_credentials: bool) -> O
     text_masked(&masked, 60)
 }
 
-pub(crate) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
+pub fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> Option<String> {
     if input.len() > 262_144 {
         return None;
     }
@@ -894,7 +894,7 @@ pub(crate) fn safe_tool_summary(name: &str, input: &str, cwd: Option<&str>) -> O
     }
 }
 
-pub(crate) fn tool_input_value(input: &str) -> Value {
+pub fn tool_input_value(input: &str) -> Value {
     match serde_json::from_str::<Value>(input).unwrap_or(Value::Null) {
         Value::String(raw) => serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)),
         value => value,

@@ -12,8 +12,8 @@ use crate::services::tui_o::shadow::ShadowProvider;
 use crate::services::tui_o::store::{InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_o::writer::actor;
 use crate::services::tui_o::writer::binding::{BindingEvents, ChannelBindingLog};
-use crate::services::tui_o::writer::owed::tests::owed_writer;
-use crate::services::tui_o::writer::source_read_tests::*;
+use crate::services::tui_o::writer::owed::test_support::owed_writer;
+use crate::services::tui_o::writer::source_read_support::*;
 use crate::services::tui_o::writer::*;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BINDING_HEADER, BindingContext, CapturedContext, HookBindingEnvelope, ObservedHookProcess,
@@ -67,7 +67,7 @@ impl Cold {
             "TMPDIR", &parent,
         )];
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let endpoint = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let endpoint = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
@@ -213,7 +213,7 @@ async fn deliver(
     initial: &[u8],
 ) -> (
     OStore,
-    Arc<owed::tests::Port>,
+    Arc<owed::test_support::Port>,
     watch::Sender<bool>,
     tokio::task::JoinHandle<Option<crate::services::tui_o::writer::deliver::StopCause>>,
 ) {
@@ -530,7 +530,7 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
     let mut opened = f.reopened(&store);
     opened.set_binding_checkpoint(0).unwrap();
     let alarms = CompanionAlarms::default();
-    let port = Arc::new(owed::tests::Port::default());
+    let port = Arc::new(owed::test_support::Port::default());
     let gate = Arc::new(crate::services::tui_o::ownership::OwnershipGate::default());
     gate.acquired();
     let spawn = |opened, stopped| {
@@ -538,7 +538,7 @@ async fn resume_companion_live_era_advances_past_exact_terminals_and_restarts_wi
             opened,
             Arc::clone(&gate),
             Arc::clone(&port),
-            owed::tests::Lease,
+            owed::test_support::Lease,
             alarms.clone(),
         );
         let (_commands, receiver) = actor::codex_submission::Port::new(1);

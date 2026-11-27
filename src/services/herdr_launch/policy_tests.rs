@@ -36,7 +36,7 @@ impl LaunchGrantStore for Grants {
         let pending_committed = matches!(decoded(stored(&self.pool).await), HostedRecord::Known(row)
             if row.state == HostedState::Pending && row.location.is_none()
                 && row.expected.is_none()
-                && grant.witness_for(&endpoint(), &row.execution_nonce).is_ok());
+                && grant.witness_for_for_test(&endpoint(), &row.execution_nonce).is_ok());
         self.events.lock().unwrap().extend([
             if pending_committed {
                 "pending_cas"
@@ -52,8 +52,8 @@ impl LaunchGrantStore for Grants {
             let mut witness = ServerWitness::for_test(1);
             witness.socket = "/different/socket".into();
             let invalid = crate::services::session_host::policy::permit::grant_for_test(
-                grant.endpoint(),
-                grant.nonce(),
+                grant.endpoint_for_test(),
+                grant.nonce_for_test(),
                 witness,
             );
             return store.save(invalid).await;
@@ -295,7 +295,7 @@ async fn user_default_pending_retry_reads_grant_and_current_witness_without_recr
         } else if refusal == "other_nonce" {
             *host.grants.saved.lock().unwrap() = Some(
                 create_for_test(endpoint(), host.witness.lock().unwrap().clone())
-                    .grant("another-execution"),
+                    .grant_for_test("another-execution"),
             );
         }
         let prepared = AtomicUsize::new(0);
@@ -455,7 +455,7 @@ async fn legacy_launch_fresh_and_pending_keep_e7_order_and_never_require_policy_
     let directory = temporary.path().join("grants");
     let mut fixture = PolicyHost::new(&pool, EndpointMode::LegacyDedicated);
     fixture.grants.invalid_file_store = Some(
-        crate::services::session_host::policy::grant_store::FileGrantStore::new(Some(
+        crate::services::session_host::policy::grant_store::FileGrantStore::new_for_test(Some(
             directory.clone(),
         )),
     );
@@ -632,7 +632,7 @@ async fn user_default_file_grant_roundtrip_failure_is_unavailable_and_never_crea
     let directory = temporary.path().join("grants");
     let mut fixture = PolicyHost::new(&pool, EndpointMode::UserDefault);
     fixture.grants.invalid_file_store = Some(
-        crate::services::session_host::policy::grant_store::FileGrantStore::new(Some(
+        crate::services::session_host::policy::grant_store::FileGrantStore::new_for_test(Some(
             directory.clone(),
         )),
     );

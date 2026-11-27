@@ -42,7 +42,7 @@ async fn sa2_own_clear_and_midturn_clear_pg() {
         let mut item = entry("discord:200:9001", "200", 0); // Synthetic snowflake predates own clear.
         item.assistant_message = response;
         assert!(
-            persist_turn_db_with_clear_fence(Some(&pool), item, Some(fence.clone()))
+            persist_turn_db_with_clear_fence_for_test(Some(&pool), item, Some(fence.clone()))
                 .await
                 .expect("own insert")
         );
@@ -58,7 +58,7 @@ async fn sa2_own_clear_and_midturn_clear_pg() {
             .await
             .expect("midturn clear");
         assert!(
-            !persist_turn_db_with_clear_fence(
+            !persist_turn_db_with_clear_fence_for_test(
                 Some(&pool),
                 entry("stale", "200", i64::MAX),
                 Some(fence)

@@ -4,6 +4,7 @@ import EmojiPickerReact, {
   Theme,
   type EmojiClickData,
 } from "emoji-picker-react";
+import { useI18n } from "../../i18n";
 
 interface EmojiPickerLibraryPanelProps {
   height: number;
@@ -18,6 +19,7 @@ export default function EmojiPickerLibraryPanel({
   width,
   value,
 }: EmojiPickerLibraryPanelProps) {
+  const { t } = useI18n();
   const containerRef = useRef<HTMLDivElement>(null);
   const [theme, setTheme] = useState(() => document.documentElement.dataset.theme === "light" ? Theme.LIGHT : Theme.DARK);
 
@@ -61,7 +63,11 @@ export default function EmojiPickerLibraryPanel({
   }, [value]);
 
   return (
-    <div ref={containerRef} className="[&_button]:min-h-11 [&_button]:min-w-11 [&_.epr-category-nav]:flex-wrap [&_.epr-category-nav]:gap-1 [&_.epr-cat-btn]:shrink-0" style={{ width: `min(${width}px, calc(100vw - 2rem))` }}>
+    <div
+      ref={containerRef}
+      className="[&_button]:min-h-11 [&_button]:min-w-11 [&_.epr-category-nav]:flex-wrap [&_.epr-category-nav]:gap-1 [&_.epr-cat-btn]:shrink-0 max-[899px]:[&_input.epr-search]:text-base pointer-coarse:[&_input.epr-search]:text-base"
+      style={{ width: `min(${width}px, calc(100vw - 2rem))` }}
+    >
       <EmojiPickerReact
         autoFocusSearch
         emojiStyle={EmojiStyle.NATIVE}
@@ -69,8 +75,18 @@ export default function EmojiPickerLibraryPanel({
         lazyLoadEmojis
         onEmojiClick={handleEmojiClick}
         previewConfig={{ showPreview: false }}
-        searchClearButtonLabel="Clear emoji search"
-        searchPlaceholder="Search emoji"
+        searchClearButtonLabel={t({
+          ko: "이모지 검색 지우기",
+          en: "Clear emoji search",
+          ja: "絵文字検索をクリア",
+          zh: "清除表情搜索",
+        })}
+        searchPlaceholder={t({
+          ko: "이모지 검색",
+          en: "Search emoji",
+          ja: "絵文字を検索",
+          zh: "搜索表情",
+        })}
         skinTonesDisabled={false}
         theme={theme}
         width="100%"

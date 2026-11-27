@@ -42,7 +42,8 @@ mod skill;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachment_admission};
+pub(in crate::services::discord::router) use attachment::prepare_admitted_live_attachments;
+pub(crate) use attachment::resolve_attachment_admission;
 pub(in crate::services::discord) use boot_custody::{WRITER_HELD, writer_boot_held};
 use notice::notify_blocked_intake;
 pub(in crate::services::discord::router) use queued::hand_back_race_lost;

@@ -7,10 +7,7 @@ use crate::domain::campaign::model::{
     NodeRuntime, Rejection, Run,
 };
 
-#[cfg(test)]
-use crate::domain::campaign::model::*;
-
-pub(crate) mod command_transaction;
+pub mod command_transaction;
 pub mod evidence_store;
 mod read;
 mod write;
@@ -41,10 +38,10 @@ pub enum CommandOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandReply {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub outcome: CommandOutcome,
     pub response: ReceiptResponse,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub replayed: bool,
 }
 
@@ -64,7 +61,7 @@ fn evidence_error(error: evidence_store::EvidenceStoreError) -> StoreError {
 
 /// Test seam: persists one decision through the private campaign writer.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn persist_for_test(
+pub async fn persist_for_test(
     tx: &mut Transaction<'_, Postgres>,
     previous: Option<&CampaignState>,
     decision: &Decision,

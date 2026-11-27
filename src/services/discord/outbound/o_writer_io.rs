@@ -486,12 +486,12 @@ mod tests {
         };
         let origin = OwedOrigin { span, range: 0..4 };
         admission::set_ready_for_tests(channel, true);
-        assert_eq!(record.admit(&origin, || ()), Ok(()));
+        assert_eq!(record.admit_for_test(&origin, || ()), Ok(()));
         let leases = ChannelLeases {
             cell_for: Box::new(move |_| Arc::new(DeliveryLeaseCell::new(ChannelId::new(channel)))),
         };
         leases.writer_unavailable(channel);
-        assert_eq!(record.admit(&origin, || ()), Err("o_unavailable"));
+        assert_eq!(record.admit_for_test(&origin, || ()), Err("o_unavailable"));
         admission::set_ready_for_tests(channel, false);
         admission::forget_channel_for_tests(channel);
     }

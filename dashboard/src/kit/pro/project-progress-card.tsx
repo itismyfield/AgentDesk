@@ -2,7 +2,7 @@
 // Clean-room implementation derived from public Arc UI project-board overview specification (2026-11-26).
 // Provides an embedded completion ring, 4-cell live KPI strip, and interactive group/milestone progress track. No upstream Pro source code was used.
 
-import { useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
+import { useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { ChevronDown, ChevronRight, X } from 'lucide-react';
 
 export type ProjectProgressHealth = 'on-track' | 'at-risk' | 'paused';
@@ -144,6 +144,7 @@ export function ProjectProgressCard({
   const L: ProjectProgressLabels = { ...defaultProjectProgressLabels, ...labelOverrides };
   const [internalGroupId, setInternalGroupId] = useState<string | null>(defaultSelectedGroupId);
   const [expandedAll, setExpandedAll] = useState(false);
+  const radioRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const selectedGroupId = controlledGroupId !== undefined ? controlledGroupId : internalGroupId;
   const selectGroup = (next: string | null) => {
@@ -160,14 +161,24 @@ export function ProjectProgressCard({
   const limit = Math.max(1, maxPreviewGroups);
   const visibleGroups = expandedAll ? groups : groups.slice(0, limit);
   const hasMoreGroups = groups.length > limit;
+  const activeRadioIdx = visibleGroups.findIndex((g) => g.id === selectedGroupId);
 
   const handleGroupKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!visibleGroups.length || !['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp'].includes(e.key)) return;
+    if (!visibleGroups.length || !['ArrowRight', 'ArrowDown', 'ArrowLeft', 'ArrowUp', 'Home', 'End'].includes(e.key)) return;
     e.preventDefault();
-    const curIdx = visibleGroups.findIndex((g) => g.id === selectedGroupId);
-    const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
-    const nextIdx = curIdx < 0 ? (delta > 0 ? 0 : visibleGroups.length - 1) : (curIdx + delta + visibleGroups.length) % visibleGroups.length;
-    if (visibleGroups[nextIdx]) selectGroup(visibleGroups[nextIdx].id);
+    const focusedIdx = radioRefs.current.indexOf(document.activeElement as HTMLButtonElement);
+    const curIdx = activeRadioIdx >= 0 ? activeRadioIdx : focusedIdx;
+    let nextIdx = 0;
+    if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = visibleGroups.length - 1;
+    else {
+      const delta = e.key === 'ArrowRight' || e.key === 'ArrowDown' ? 1 : -1;
+      nextIdx = curIdx < 0 ? (delta > 0 ? 0 : visibleGroups.length - 1) : (curIdx + delta + visibleGroups.length) % visibleGroups.length;
+    }
+    if (visibleGroups[nextIdx]) {
+      selectGroup(visibleGroups[nextIdx].id);
+      radioRefs.current[nextIdx]?.focus();
+    }
   };
 
   return (
@@ -220,15 +231,16 @@ export function ProjectProgressCard({
           </div>
 
           <div className="aui-project-progress-track" role="radiogroup" aria-label={L.groupsAria} onKeyDown={handleGroupKeyDown}>
-            {visibleGroups.map((gr) => {
+            {visibleGroups.map((gr, idx) => {
               const gPct = gr.total > 0 ? Math.round((gr.done / gr.total) * 100) : 0;
               const isDone = gr.total > 0 && gr.done >= gr.total;
               const hasAtt = (gr.attention ?? 0) > 0;
               const hasRun = (gr.running ?? 0) > 0;
               const checked = selectedGroupId === gr.id;
+              const tabStop = activeRadioIdx >= 0 ? idx === activeRadioIdx : idx === 0;
               const barColor = hasAtt ? 'var(--pp-warn)' : isDone ? 'var(--pp-ok)' : hasRun ? 'var(--pp-info)' : 'var(--pp-fg-muted)';
               return (
-                <button key={gr.id} type="button" role="radio" aria-checked={checked} data-group-card={gr.id} className="aui-project-progress-card" onClick={() => selectGroup(checked ? null : gr.id)}>
+                <button key={gr.id} ref={(el) => { radioRefs.current[idx] = el; }} type="button" role="radio" aria-checked={checked} tabIndex={tabStop ? 0 : -1} data-group-card={gr.id} className="aui-project-progress-card" onClick={() => selectGroup(checked ? null : gr.id)}>
                   <span className="aui-project-progress-line" aria-hidden="true"><div style={{ width: `${gPct}%`, background: barColor }} /></span>
                   <strong className="aui-project-progress-name" title={gr.name}>{gr.name}</strong>
                   <span className="aui-project-progress-card-meta">

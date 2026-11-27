@@ -151,3 +151,48 @@ export function retryText(graph: PipelineGraph, transition: PipelineTransition, 
   const after = stateName(graph.states.get(then), then, tr);
   return transition.from === transition.to ? tr(`제자리에서 ${max}회 더, 그다음 ${after}`, `${max} more here, then ${after}`) : tr(`${max}회까지, 그다음 ${after}`, `Up to ${max} times, then ${after}`);
 }
+
+export interface PipelineBottleneckState {
+  stateId: string;
+  here: number;
+  held: number;
+  total: number;
+  gated: boolean;
+  score: number;
+}
+
+export interface PipelineFlowDiagnostics {
+  bottleneck: PipelineBottleneckState | null;
+  totalActive: number;
+  totalHeld: number;
+  retryTransitionCount: number;
+}
+
+export function analyzePipelineBottlenecks(graph: PipelineGraph): PipelineFlowDiagnostics {
+  const retryTransitionCount = graph.lines.filter((line) => line.tone === "retry").length;
+  if (!graph.occupancy) {
+    return { bottleneck: null, totalActive: 0, totalHeld: 0, retryTransitionCount };
+  }
+  let totalActive = 0;
+  let totalHeld = 0;
+  let bottleneck: PipelineBottleneckState | null = null;
+  for (const state of graph.states.values()) {
+    if (state.kind.startsWith("end_")) continue;
+    const { here = 0, held = 0 } = graph.occupancy.get(state.id) ?? {};
+    const total = here + held;
+    totalActive += total;
+    totalHeld += held;
+    if (total <= 0) continue;
+    const gates = [
+      ...(graph.gates.get(state.id) ?? []),
+      ...(graph.pins.get(state.id) ?? []).flatMap((p) => (!p.exhausted && p.transition.gate ? [p.transition.gate] : [])),
+      ...(state.executor?.parameters?.effect_gates ?? []),
+    ];
+    const hasUnapprovedGate = gates.some((gate) => !graph.approvals || !graph.approvals[gate]);
+    const score = here + held * 2 + (hasUnapprovedGate ? 1.5 : 0);
+    if (!bottleneck || score > bottleneck.score) {
+      bottleneck = { stateId: state.id, here, held, total, gated: hasUnapprovedGate, score };
+    }
+  }
+  return { bottleneck, totalActive, totalHeld, retryTransitionCount };
+}

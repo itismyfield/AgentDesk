@@ -37,13 +37,19 @@ export default function PipelineVisualEditorStagePanel({ ctx, actions }: Props) 
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button onClick={actions.addStage} className="rounded-xl border px-3 py-1.5 text-xs font-medium" style={BUTTON_INFO_STYLE}>
+          <button
+            type="button"
+            onClick={actions.addStage}
+            className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs font-medium"
+            style={BUTTON_INFO_STYLE}
+          >
             + {tr("스테이지", "Stage")}
           </button>
           <button
+            type="button"
             onClick={() => void actions.handleClearStages()}
             disabled={ctx.saving || (ctx.stageDrafts.length === 0 && ctx.allRepoStages.length === 0)}
-            className="rounded-xl border px-3 py-1.5 text-xs"
+            className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
             style={{
               ...BUTTON_DANGER_STYLE,
               opacity: ctx.saving || (ctx.stageDrafts.length === 0 && ctx.allRepoStages.length === 0) ? 0.45 : 1,
@@ -86,6 +92,7 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
           {index + 1}
         </span>
         <input
+          aria-label={tr(`스테이지 ${index + 1} 이름`, `Stage ${index + 1} name`)}
           value={stage.stage_name}
           onChange={(event) => actions.updateStage(index, { stage_name: event.target.value })}
           className={INPUT_CLASS}
@@ -127,16 +134,31 @@ function StageCard({ ctx, actions, stage, index }: Props & { stage: StageDraft; 
 
       <div className="flex flex-wrap gap-2">
         {index > 0 && (
-          <button onClick={() => actions.moveStage(index, -1)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_NEUTRAL_STYLE}>
+          <button
+            type="button"
+            onClick={() => actions.moveStage(index, -1)}
+            className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+            style={BUTTON_NEUTRAL_STYLE}
+          >
             ↑ {tr("앞으로", "Earlier")}
           </button>
         )}
         {index < ctx.stageDrafts.length - 1 && (
-          <button onClick={() => actions.moveStage(index, 1)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_NEUTRAL_STYLE}>
+          <button
+            type="button"
+            onClick={() => actions.moveStage(index, 1)}
+            className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+            style={BUTTON_NEUTRAL_STYLE}
+          >
             ↓ {tr("뒤로", "Later")}
           </button>
         )}
-        <button onClick={() => actions.removeStage(index)} className="rounded-xl border px-3 py-1.5 text-xs" style={BUTTON_DANGER_STYLE}>
+        <button
+          type="button"
+          onClick={() => actions.removeStage(index)}
+          className="inline-flex items-center justify-center max-[899px]:min-h-11 pointer-coarse:min-h-11 rounded-xl border px-3 py-1.5 text-xs"
+          style={BUTTON_DANGER_STYLE}
+        >
           {tr("삭제", "Delete")}
         </button>
       </div>

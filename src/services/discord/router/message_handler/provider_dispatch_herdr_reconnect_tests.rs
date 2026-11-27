@@ -165,7 +165,7 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     .unwrap();
     let text = path.display().to_string();
     let payload = json!({"source": "clear", "session_id": cleared, "transcript_path": text});
-    let hook = HookSignal::from_payload("session_start", &payload);
+    let hook = HookSignal::from_payload_for_test("session_start", &payload);
     let proposal = Proposal {
         channel_id: CHANNEL,
         provider: "claude",

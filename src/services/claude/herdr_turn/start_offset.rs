@@ -45,7 +45,7 @@ pub(super) fn wait(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(format!("Failed to open turn transcript: {error}")),
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         test_hooks::poll(path);
         pause(deadline)?;
     };
@@ -78,7 +78,7 @@ pub(super) fn wait(
         {
             return Err("Output file rotated before a turn timestamp record".into());
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         test_hooks::poll(path);
         if ended((offset, identity)).is_some() {
             return Ok(None);
@@ -95,6 +95,6 @@ fn pause(deadline: Instant) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "start_offset_tests.rs"]
-pub(crate) mod test_hooks;
+pub mod test_hooks;

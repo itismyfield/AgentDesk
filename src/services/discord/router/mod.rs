@@ -18,6 +18,7 @@ pub(crate) use crate::services::cluster::intake_turn::IntakeExecution;
 pub(crate) use crate::services::cluster::intake_turn::TurnKind;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::IntakeAdmission;
+pub(crate) use intake_dispatch::replay_admission::deferred_execution;
 pub(in crate::services::discord) use ports::ROUTER_PORTS;
 pub(in crate::services::discord) use transition_wake::SessionTransitionCompletion;
 #[cfg(unix)]
@@ -26,6 +27,7 @@ pub(in crate::services::discord) fn replay_producers_dormant(channel: &str) -> b
     intake_dispatch::replay_admission::dormant_start(channel).is_some()
 }
 
+use intake_dispatch::prepare_admitted_live_attachments;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use intake_dispatch::replay_admission::test_activation as replay_test_activation;
 pub(crate) use intake_dispatch::{
@@ -33,7 +35,7 @@ pub(crate) use intake_dispatch::{
     admit_text_intake, checkpoint_waits_for_admission, dispatch_live_text_intake,
     dispatch_skill_intake, dispatch_text_intake, finish_admitted_queued_intake,
     finish_admitted_text_intake, finish_nonlocal_attachment_admission, live_checkpoint_waits,
-    prepare_admitted_live_attachments, resolve_attachment_admission, start_owner_front,
+    resolve_attachment_admission, start_owner_front,
 };
 #[cfg(test)]
 pub(in crate::services::discord) use intake_gate::busy_inject::test_support as busy_inject_support;

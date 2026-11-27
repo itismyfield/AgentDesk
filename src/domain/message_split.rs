@@ -1,9 +1,9 @@
 mod literal_code_block;
-pub(crate) mod semantic_boundaries;
-pub(crate) use literal_code_block::bounded_raw_code_block_notice;
+pub mod semantic_boundaries;
+pub use literal_code_block::bounded_raw_code_block_notice;
 use std::ops::Range;
 
-pub(crate) const DISCORD_MSG_LIMIT: usize = 2000;
+pub const DISCORD_MSG_LIMIT: usize = 2000;
 /// Plain-text budget after the shared splitter reserves its repair margin.
 pub(crate) const PLAIN_MESSAGE_SPLIT_LIMIT: usize = DISCORD_MSG_LIMIT - 10;
 
@@ -23,11 +23,11 @@ pub(crate) const PLAIN_MESSAGE_SPLIT_LIMIT: usize = DISCORD_MSG_LIMIT - 10;
 /// Discord guarantee or a repository-wide invariant: `markdown_preview`
 /// uses scalar count while collecting candidate lines before its final
 /// unit-based clamp.
-pub(crate) fn discord_message_units(s: &str) -> usize {
+pub fn discord_message_units(s: &str) -> usize {
     s.encode_utf16().count()
 }
 
-pub(crate) fn byte_index_at_discord_message_units(s: &str, max_units: usize) -> usize {
+pub fn byte_index_at_discord_message_units(s: &str, max_units: usize) -> usize {
     let mut units = 0;
     for (index, character) in s.char_indices() {
         let next_units = units + character.len_utf16();
@@ -49,7 +49,7 @@ pub(crate) fn byte_index_at_discord_message_units(s: &str, max_units: usize) -> 
 /// This is the tracepoint referenced by issue #1043 to diagnose any case where
 /// the tail of a long agent message fails to reach Discord (e.g. option block
 /// A/B/C sections disappearing near the 2000-char boundary).
-pub(crate) fn split_message(text: &str) -> Vec<String> {
+pub fn split_message(text: &str) -> Vec<String> {
     split(text, false)
         .into_iter()
         .map(|(text, _)| text)
@@ -229,7 +229,7 @@ fn split(text: &str, preserve_newline: bool) -> Vec<(String, Range<usize>)> {
 /// The predicate uses the hard limit. [`split_message`] retains its smaller
 /// effective limit so code-fence repair has room; callers that invoke the
 /// chunker unconditionally can therefore split a hard-limit-fitting message.
-pub(crate) fn needs_multiple_messages(text: &str) -> bool {
+pub fn needs_multiple_messages(text: &str) -> bool {
     discord_message_units(text) > DISCORD_MSG_LIMIT
 }
 

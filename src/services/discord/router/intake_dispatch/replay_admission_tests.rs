@@ -1,7 +1,7 @@
 use super::replay_admission::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::replay_disposition::write::{
-    self, BeginFrom, CanonicalInput, EffectProjection, ExactAttempt, WriteError,
+    self, BeginFrom, CanonicalInput, EffectProjection, WriteError,
 };
 use crate::services::discord::replay_policy::live::{RawObservation, Seen};
 use crate::services::discord::replay_policy::permit::{
@@ -271,28 +271,6 @@ async fn busy_projection_concurrent_begin_once_pg() {
     fixture.drop().await;
 }
 
-// This compatibility probe keeps the binding test executable before projected spending exists.
-trait LegacyProjectedSpend {
-    fn consume_projected<R>(
-        self,
-        target: &EffectTarget,
-        hash: &str,
-        effect: impl FnOnce(ExactAttempt, serde_json::Value, String) -> R,
-    ) -> Result<R, PermitRefusal>;
-}
-impl LegacyProjectedSpend for StartPermit {
-    fn consume_projected<R>(
-        self,
-        target: &EffectTarget,
-        hash: &str,
-        effect: impl FnOnce(ExactAttempt, serde_json::Value, String) -> R,
-    ) -> Result<R, PermitRefusal> {
-        self.consume(target, hash, |attempt| {
-            effect(attempt, serde_json::Value::Null, hash.to_owned())
-        })
-    }
-}
-
 #[tokio::test]
 async fn busy_projection_is_sealed_into_permit_pg() {
     let (fixture, pool) = setup().await;
@@ -307,7 +285,7 @@ async fn busy_projection_is_sealed_into_permit_pg() {
         .await
         .unwrap();
     let (attempt, binding, sealed_hash) = permit
-        .consume_projected(&target, &hash, |attempt, binding, hash| {
+        .consume_projected_for_test(&target, &hash, |attempt, binding, hash| {
             (attempt, binding, hash)
         })
         .unwrap();
@@ -340,7 +318,7 @@ async fn busy_projection_is_sealed_into_permit_pg() {
     .await
     .unwrap();
     let control_result: Result<(), PermitRefusal> =
-        LegacyProjectedSpend::consume_projected(permit, &target, "wrong-hash", |_, _, _| {
+        permit.consume_projected_for_test(&target, "wrong-hash", |_, _, _| {
             panic!("probe bypassed the real permit")
         });
     assert_eq!(control_result, Err(PermitRefusal::InputMismatch));
@@ -875,7 +853,10 @@ async fn exact_retry_reenters_only_through_its_own_continuation_pg() {
     )
     .await
     .expect("exact retry permit");
-    assert_eq!(permit.attempt().retry_of(), Some(previous.as_str()));
+    assert_eq!(
+        permit.attempt().retry_of_for_test(),
+        Some(previous.as_str())
+    );
     let next = permit.attempt().nonce().to_string();
     let session: (Option<String>, String) = sqlx::query_as(
         "SELECT claude_session_id, replay_episode_nonce FROM sessions WHERE session_key = 'retry-session'",
@@ -1017,8 +998,11 @@ async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
             &token,
         )
         .unwrap();
-    let tap = RawTap::for_token(Some(&token));
-    assert!(!tap.active(), "off cannot claim an observation seal");
+    let tap = RawTap::for_token_for_test(Some(&token));
+    assert!(
+        !tap.active_for_test(),
+        "off cannot claim an observation seal"
+    );
     for seen in [
         Seen::Activity(Activity::Output),
         Seen::Broken,
@@ -1026,7 +1010,7 @@ async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
         Seen::Exited { waited: true },
         Seen::StderrDrained,
     ] {
-        tap.see(seen);
+        tap.see_for_test(seen);
     }
     assert!(
         token.replay_attempt().is_none(),
@@ -1148,7 +1132,7 @@ async fn p5_off_completed_key_is_consumed_pg() {
     ] {
         seen.record(fact);
     }
-    write::classify_normal(&pool, &attempt, &seen.terminal_evidence().unwrap())
+    write::classify_normal(&pool, &attempt, &seen.terminal_evidence_for_test().unwrap())
         .await
         .unwrap();
     let off = ReplayAdmissionContext::production(&pool, "new-node", "new-incarnation");
@@ -1222,8 +1206,10 @@ async fn p5_scoped_admission_cannot_produce_for_unsupported_runtimes_pg() {
                     .unwrap();
                 assert!(token.replay_attempt().is_none());
                 assert!(
-                    !crate::services::discord::replay_policy::live::RawTap::for_token(Some(&token))
-                        .active()
+                    !crate::services::discord::replay_policy::live::RawTap::for_token_for_test(
+                        Some(&token)
+                    )
+                    .active_for_test()
                 );
             }
         }

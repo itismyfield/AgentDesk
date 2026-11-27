@@ -3,7 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("../api/client", () => ({
   getSession: vi.fn(),
   getAgents: vi.fn(),
-  getDepartments: vi.fn(),
   getSettings: vi.fn(),
   getDispatchedSessions: vi.fn(),
   getStats: vi.fn(),
@@ -23,7 +22,6 @@ describe("fetchDashboardBootstrap", () => {
 
   it("loads shell essentials without a duplicate getSession round-trip or blocking on stats/sessions", async () => {
     vi.mocked(api.getAgents).mockResolvedValue([]);
-    vi.mocked(api.getDepartments).mockResolvedValue([]);
     vi.mocked(api.getSettings).mockResolvedValue({ language: "ko", theme: "dark" } as never);
 
     const data = await fetchDashboardBootstrap();
@@ -32,7 +30,6 @@ describe("fetchDashboardBootstrap", () => {
     expect(api.getDispatchedSessions).not.toHaveBeenCalled();
     expect(api.getStats).not.toHaveBeenCalled();
     expect(data.agents).toEqual([]);
-    expect(data.departments).toEqual([]);
     expect(data.settings.language).toBe("ko");
   });
 

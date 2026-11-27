@@ -54,7 +54,10 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
                 crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
             }
             if !stop_first {
-                assert!(sink.writer_first_key(), "{case}: the writer keys first");
+                assert!(
+                    sink.writer_first_key_for_test(),
+                    "{case}: the writer keys first"
+                );
                 append(
                     &path,
                     serde_json::json!({"type":"system","subtype":"turn_duration"}),
@@ -72,7 +75,10 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
                         "{case}: main cancels"
                     );
                     assert!(cancelled, "{case}");
-                    assert!(!sink.writer_first_key(), "{case}: the writer sends no key");
+                    assert!(
+                        !sink.writer_first_key_for_test(),
+                        "{case}: the writer sends no key"
+                    );
                 }
                 false => {
                     assert!(
@@ -110,10 +116,10 @@ fn an_applied_input_is_pinned_within_the_stop_budget_before_the_stop_judges() {
             let (token, path) = unpinned_generating_turn(&fx, &session);
             let sink = token.native_stop.receipt_sink();
             sink.arm_first_key();
-            assert!(sink.writer_first_key());
+            assert!(sink.writer_first_key_for_test());
             let receipt = UserReceipt::before(&session, "go", Some("fixture-sid")).unwrap();
-            sink.receipt(receipt);
-            sink.finished(&InputRun::Applied);
+            sink.receipt_for_test(receipt);
+            sink.finished_for_test(&InputRun::Applied);
             start(&shared, channel, &token).await;
             native_inflight_row(channel, &token, &session);
             let lands = match case {

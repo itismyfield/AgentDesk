@@ -16,7 +16,7 @@ struct Observed {
 }
 static OBSERVED: OnceLock<Mutex<Observed>> = OnceLock::new();
 
-pub(crate) fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
+pub fn checker(socket: &Path, stdout: &[u8], stderr: &[u8]) {
     if let Ok(mut observed) = OBSERVED.get_or_init(Mutex::default).lock() {
         let capped = |bytes| {
             String::from_utf8_lossy(bytes)
@@ -47,7 +47,7 @@ pub(crate) fn server(socket: &Path, version: &str, protocol: u32) {
 
 /// Keeps the last observation for health and doctor and returns it, so every surface shows the
 /// same reason and action.
-pub(crate) fn record(
+pub fn record(
     socket: &Path,
     cache: &ProofCache,
     result: &Result<NextRestartProof, Unverified>,
@@ -146,7 +146,7 @@ pub(crate) fn record(
 /// One next-restart check of `socket` with a fresh cache, and whether a server answers there and
 /// could be started, as a dry run; it writes no config or file and starts no server.
 #[cfg(unix)]
-pub(crate) async fn probe(
+pub async fn probe(
     socket: &Path,
     env: super::super::autostart::Environment,
 ) -> Result<Value, String> {
@@ -160,7 +160,7 @@ pub(crate) async fn probe(
     Ok(value)
 }
 
-pub(crate) fn snapshot(socket: &Path) -> Value {
+pub fn snapshot(socket: &Path) -> Value {
     let Ok(observed) = OBSERVED.get_or_init(Mutex::default).lock() else {
         return json!({"next_restart_ready": false, "startup_proof": "unknown", "reason": "policy_cache_unavailable"});
     };
@@ -198,7 +198,7 @@ fn checker_excerpt(checker: &Value) -> String {
         .collect()
 }
 
-pub(crate) fn doctor_evidence(config: &crate::config::Config) -> Value {
+pub fn doctor_evidence(config: &crate::config::Config) -> Value {
     use crate::config::session_hosts::{EndpointMode, with_boot};
     if !config
         .session_hosts

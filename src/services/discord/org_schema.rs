@@ -14,7 +14,7 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 use crate::services::org_catalog::OrgSchema;
 use crate::services::org_catalog::configured_auth_profile;
 
-pub(in crate::services) use crate::services::org_catalog::parse_org_schema;
+pub use crate::services::org_catalog::parse_org_schema;
 
 pub(crate) fn load_org_schema() -> Option<OrgSchema> {
     crate::services::org_catalog::load_runtime_document_at(org_schema_path().as_deref())
@@ -44,7 +44,7 @@ fn list_profile_bindings_from_schema(
     )
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::provider_auth_profile::queries::provider_auth_catalog;
+pub use crate::services::provider_auth_profile::queries::provider_auth_catalog;
 
 fn fallback_profile_available(
     provider: &ProviderKind,
@@ -63,7 +63,7 @@ fn fallback_profile_available(
 }
 
 /// Called only after the bridge has checked the current turn identity.
-pub(crate) fn advance_auth_profile(
+pub fn advance_auth_profile(
     provider: &ProviderKind,
     channel: u64,
     request: u64,
@@ -95,7 +95,7 @@ pub(crate) fn advance_auth_profile(
     ))
 }
 
-pub(crate) fn spawn_auth_overlay(
+pub fn spawn_auth_overlay(
     provider: ProviderKind,
     channel_id: Option<u64>,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
@@ -176,7 +176,7 @@ fn configured_launch_profile(
 
 /// The account a launch for the channel and agent would take, read without the fallback router a
 /// launch updates; `None` when a fallback policy may choose another account at launch.
-pub(crate) fn configured_launch_overlay(
+pub fn configured_launch_overlay(
     provider: ProviderKind,
     channel_id: u64,
     agent_id: Option<&str>,
@@ -237,7 +237,7 @@ fn launch_overlay_parts(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn configured_launch_profile_for_test(
+pub fn configured_launch_profile_for_test(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -247,7 +247,7 @@ pub(crate) fn configured_launch_profile_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launch_overlay_parts_for_test(
+pub fn launch_overlay_parts_for_test(
     schema: Option<&crate::services::org_catalog::AuthCatalogSnapshot>,
     provider: &ProviderKind,
     channel_id: Option<u64>,
@@ -320,7 +320,7 @@ fn spawn_auth_overlay_for_context(
     crate::services::turn_summary_line::quota::record_launch(channel_id, overlay)
 }
 
-pub(crate) fn overlay_from_tmux_session(
+pub fn overlay_from_tmux_session(
     provider: ProviderKind,
     session_name: &str,
 ) -> Result<crate::services::provider_auth_profile::ProviderAuthOverlay, String> {
@@ -344,7 +344,7 @@ pub(crate) fn overlay_from_tmux_session(
 
 /// Home the next launch reads, without touching the fallback router or quota record. Intake picks the
 /// agent per message, so a home is promised only when every agent the launch could carry yields it.
-pub(crate) fn predicted_launch_home(
+pub fn predicted_launch_home(
     provider: ProviderKind,
     channel_id: Option<u64>,
     session_name: &str,
@@ -405,7 +405,7 @@ pub(crate) fn predicted_launch_home(
     }
 }
 
-pub(crate) fn api_agent_identity(
+pub fn api_agent_identity(
     agent_id: &str,
     db_provider: Option<&str>,
     db_name: Option<&str>,
@@ -440,7 +440,7 @@ pub(crate) fn api_agent_identity(
     agent_identity::identity_json(&identity)
 }
 
-pub(crate) fn org_schema_exists() -> bool {
+pub fn org_schema_exists() -> bool {
     org_schema_path().map(|p| p.exists()).unwrap_or(false)
 }
 
@@ -459,7 +459,7 @@ pub(super) fn resolve_role_binding(
     crate::services::channel_roles::config_projection::org_role_binding(channel_id, channel_name)
 }
 
-pub(super) fn load_shared_prompt_path() -> Option<String> {
+pub fn load_shared_prompt_path() -> Option<String> {
     let schema = load_org_schema()?;
     // Explicit shared_prompt > auto-derived from prompts_root/agents/_shared.prompt.md
     schema
@@ -478,7 +478,7 @@ pub(super) fn load_shared_prompt_path() -> Option<String> {
         })
 }
 
-pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
+pub fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding> {
     let Some(schema) = load_org_schema() else {
         return Vec::new();
     };
@@ -519,7 +519,7 @@ pub(super) fn list_registered_channel_bindings() -> Vec<RegisteredChannelBinding
 }
 
 /// Look up the provider for a channel name suffix from org schema suffix_map.
-pub(super) fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind> {
+pub fn lookup_suffix_provider(channel_name: &str) -> Option<ProviderKind> {
     let schema = load_org_schema()?;
     let suffix_map = schema.suffix_map.as_ref()?;
     for (suffix, provider_str) in suffix_map {

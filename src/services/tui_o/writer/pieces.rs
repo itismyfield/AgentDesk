@@ -97,6 +97,11 @@ impl UnitDeriver {
         self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_input_notices_for_test(self, notices: super::input_notices::Projection) -> Self {
+        self.with_input_notices(notices)
+    }
+
     pub(crate) fn with_input_notices(mut self, notices: super::input_notices::Projection) -> Self {
         self.notices = notices;
         self

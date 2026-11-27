@@ -48,13 +48,13 @@ async fn exact_metadata_pg_restore_and_terminal_port_stub() {
         episode: records[0].episode,
     };
     assert_eq!(
-        guard_terminal_in_tx(&mut connection, &target, TerminalIntent::BodyDone)
+        guard_terminal_in_tx_for_test(&mut connection, &target, TerminalIntent::BodyDone)
             .await
             .unwrap(),
         TerminalDisposition::Deferred
     );
     assert_eq!(
-        guard_terminal_in_tx(&mut connection, &target, TerminalIntent::Delete)
+        guard_terminal_in_tx_for_test(&mut connection, &target, TerminalIntent::Delete)
             .await
             .unwrap(),
         TerminalDisposition::Deferred

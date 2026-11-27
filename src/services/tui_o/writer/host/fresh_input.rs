@@ -3,7 +3,7 @@
 use super::*;
 use std::time::Duration;
 
-pub(crate) fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
+pub fn initial_fresh_refusal(channel: u64) -> Option<&'static str> {
     let readiness = process_readiness();
     let live = locked(&readiness.live);
     let Some(live) = live.get(&channel) else {

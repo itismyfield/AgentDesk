@@ -27,7 +27,7 @@ use crate::services::herdr_launch::{
 };
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::session_host::{EvidenceGap, HerdrTarget, RestoreResume, ServerWitness};
-use crate::services::tui_o::writer::tests::codex_herdr_drive::{O_CHANNEL, ODrive};
+use crate::services::tui_o::writer::test_support::{O_CHANNEL, ODrive};
 use crate::services::tui_prompt_dedupe::binding_context::HookBindingEnvelope;
 use crate::services::tui_prompt_dedupe::binding_events::{
     BindingTarget, SourceId, binding_events_since,
@@ -171,7 +171,7 @@ struct Fixture {
 impl Fixture {
     fn new(tag: &str, help: &str) -> Self {
         let root = TestRuntimeRootGuard::new();
-        let endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
@@ -1575,7 +1575,7 @@ fn bootstrap_launch_refuses_before_pending_when_its_target_reappears_pg() {
     const RETIRED: &str = "0123456789abcdef0123456789abcdef";
     let fx = Fixture::admitted("bootstrap-recheck");
     fx.bootstrap.store(true, Ordering::SeqCst);
-    let mut retired = crate::db::dispatched_sessions::hosted_execution::tests::record(
+    let mut retired = crate::db::dispatched_sessions::hosted_execution::test_support::record(
         &fx.owner,
         RETIRED,
         HostedState::Retired,

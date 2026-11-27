@@ -26,7 +26,7 @@ pub(crate) async fn terminalize_selected_runs_on_pg_tx_for_test(
 }
 
 impl AutoQueueService {
-    pub async fn cancel_run_with_pg(
+    pub(crate) async fn cancel_run_with_pg(
         &self,
         health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
         pool: &PgPool,
@@ -75,7 +75,7 @@ impl AutoQueueService {
         }
     }
 
-    pub async fn cancel_runs_with_pg(
+    pub(crate) async fn cancel_runs_with_pg(
         &self,
         health_registry: Option<crate::services::auto_queue::runtime::SlotRuntimeHealth>,
         pool: &PgPool,

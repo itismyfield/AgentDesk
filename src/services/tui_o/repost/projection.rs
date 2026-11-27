@@ -15,7 +15,7 @@ use crate::services::tui_o::store::ledger::{LedgerState, PieceDisposition, Piece
 type Stored = (String, String, String, i64);
 
 #[derive(Default)]
-pub(crate) enum ReceiptOverlay {
+pub enum ReceiptOverlay {
     /// No re-post hook is installed; the local ledger decides alone.
     #[default]
     Disabled,
@@ -124,7 +124,7 @@ async fn receipted(
 
 /// Receipt ids are candidates, including receipts found only by a later shared probe.
 #[cfg(unix)]
-pub(crate) async fn delivery_candidates(
+pub async fn delivery_candidates(
     pool: &PgPool,
     key: &super::o_piece_delivery::PieceKey,
     sender: u64,

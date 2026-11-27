@@ -308,7 +308,7 @@ async fn archived_takeover_confirms_after_restart_and_releases_its_queued_input_
         "agents":[{"id":"w","name":"W","channels":{"codex":{"id":channel.to_string(),"runtime":"tui"}}}],
         "tui_o":{"writer":{"channels":[channel]},"turn":{"channels":[channel]}}})).unwrap();
     let boot = channel_policy::BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(&config, |channels, _| {
+    let boot = boot.seeded_for_test(&config, |channels, _| {
         Ok(channel_policy::stored(Some(_root.path()), channels))
     }).unwrap();
     let _boot = cutover::test_override::force_boot(boot);

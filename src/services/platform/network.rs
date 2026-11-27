@@ -2,7 +2,7 @@
 use std::io;
 use tokio::net::TcpListener;
 
-pub(crate) async fn bind_tcp_listener(address: &str) -> io::Result<TcpListener> {
+pub async fn bind_tcp_listener(address: &str) -> io::Result<TcpListener> {
     #[cfg(not(windows))]
     {
         TcpListener::bind(address).await

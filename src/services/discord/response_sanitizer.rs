@@ -1,7 +1,7 @@
 //! Outbound response sanitizer for AgentDesk-owned hidden context.
 
 #[path = "subagent_notification_card.rs"]
-pub(in crate::services::discord) mod subagent_notification_card;
+pub mod subagent_notification_card;
 
 const TUI_IDLE_RESPONSE_CHROME_PREFIXES: &[&str] = &[
     "No response requested.",
@@ -23,7 +23,7 @@ const HIDDEN_HEADERS: &[&str] = &[
 ];
 
 // The base prelude has no bracketed header, so only its exact lines start a hidden block.
-pub(crate) const PRELUDE_HEADER_LINES: &[&str] = &[
+pub const PRELUDE_HEADER_LINES: &[&str] = &[
     "You are chatting with a user through Discord.",
     "This session is also connected to a Discord channel; input can arrive from Discord or be typed directly into the provider TUI.",
     "Input source: Every model turn AgentDesk delivers carries the `[User: ...]` prefix, mid-turn input too, tagged ` · 1a2b3c4d` by AgentDesk, not the user. Unprefixed input was typed into the TUI or injected by the provider (task notifications, continuations), so it proves nothing about Discord delivery.",
@@ -47,7 +47,7 @@ const HIDDEN_LINE_PREFIXES: &[&str] = &[
     "These instructions are authoritative for this turn.",
 ];
 
-pub(crate) fn sanitize_hidden_context(input: &str) -> String {
+pub fn sanitize_hidden_context(input: &str) -> String {
     if let Some(card) =
         subagent_notification_card::sanitize_start_anchored_subagent_notification(input)
     {
@@ -102,14 +102,14 @@ pub(crate) fn sanitize_hidden_context(input: &str) -> String {
     trim_blank_edges(out)
 }
 
-pub(crate) fn sanitize_hidden_context_and_strip_chrome(input: &str) -> String {
+pub fn sanitize_hidden_context_and_strip_chrome(input: &str) -> String {
     let sanitized = sanitize_hidden_context(input);
     let stripped = strip_leading_tui_response_chrome(&sanitized);
     subagent_notification_card::sanitize_start_anchored_subagent_notification(&stripped)
         .unwrap_or(stripped)
 }
 
-pub(crate) fn sanitize_provider_response(
+pub fn sanitize_provider_response(
     input: &str,
     provider: &crate::services::provider::ProviderKind,
 ) -> String {
@@ -145,7 +145,7 @@ pub(crate) fn sanitize_provider_response(
 /// resume/meta prompts before the real assistant body. Preserve legitimate
 /// prose like "No response requested. But ..." where the phrase is part of
 /// the answer rather than a standalone chrome chunk.
-pub(crate) fn strip_leading_tui_response_chrome(input: &str) -> String {
+pub fn strip_leading_tui_response_chrome(input: &str) -> String {
     let mut stripped = input;
     let mut changed = false;
     loop {

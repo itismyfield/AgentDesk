@@ -7,12 +7,12 @@ use crate::services::message_outbox::{
 use serde::{Deserialize, Serialize};
 use sqlx::{Postgres, Transaction};
 
-pub(crate) const SOURCE: &str = "routing_transition";
+pub const SOURCE: &str = "routing_transition";
 /// Notices post as the notify utility bot, which carries non-turn provenance.
 pub(crate) const BOT: &str = "notify";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Event {
+pub struct Event {
     pub generation: i64,
     pub from: String,
     pub to: String,
@@ -25,13 +25,41 @@ pub(crate) struct Event {
     pub bot: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeliveryState {
-    Pending,
-    Posting,
-    Sent,
-    Uncertain,
+mod reservation {
+    use super::Event;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DeliveryState {
+        Pending,
+        Posting,
+        Sent,
+        Uncertain,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Reservation {
+        pub outbox_id: i64,
+        pub event: Event,
+        pub state: DeliveryState,
+        pub post_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub message_id: Option<String>,
+    }
+
+    pub struct Description<'a> {
+        pub home: &'a str,
+        pub home_label: &'a str,
+        pub target_label: &'a str,
+        pub new_session: bool,
+        pub home_changed: bool,
+        pub bot: &'a str,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reservation::{DeliveryState, Description, Reservation};
+#[cfg(any(test, feature = "test-support"))]
+pub use reservation::{DeliveryState, Description, Reservation};
+
 impl DeliveryState {
     fn read(state: Option<&str>) -> Result<Self, sqlx::Error> {
         match state {
@@ -42,15 +70,6 @@ impl DeliveryState {
             _ => Err(invalid("unknown notice delivery state")),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Reservation {
-    pub outbox_id: i64,
-    pub event: Event,
-    pub state: DeliveryState,
-    pub post_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub message_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -64,16 +83,18 @@ struct StoredNotice {
     routing_notice_message_id: Option<String>,
 }
 
-pub(crate) struct Description<'a> {
-    pub home: &'a str,
-    pub home_label: &'a str,
-    pub target_label: &'a str,
-    pub new_session: bool,
-    pub home_changed: bool,
-    pub bot: &'a str,
-}
 fn invalid(error: impl ToString) -> sqlx::Error {
     sqlx::Error::Protocol(error.to_string())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn reserve_on_tx_for_test(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    generation: i64,
+    description: Description<'_>,
+) -> Result<Option<Reservation>, sqlx::Error> {
+    reserve_on_tx(tx, id, generation, description).await
 }
 
 /// The caller commits this together with owner CAS and admission, or rolls all three back.
@@ -200,11 +221,11 @@ pub(crate) async fn reserve_on_tx(
 /// Discord honours an enforced nonce only briefly; an older Posting attempt is never reposted.
 const NONCE_RETRY_SECONDS: f64 = 120.0;
 /// A dead worker's routing claim and a failed POST both come back inside that window.
-pub(crate) const RECLAIM_SECONDS: i64 = 45;
-pub(crate) const RETRY_SECONDS: i64 = 15;
+pub const RECLAIM_SECONDS: i64 = 45;
+pub const RETRY_SECONDS: i64 = 15;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Step {
+pub enum Step {
     Post(Box<Event>),
     Sent(String),
     Uncertain,
@@ -221,7 +242,7 @@ struct Cursor {
 }
 
 /// The claimed outbox row posts only through its owner pointer; Posting is durable before the POST.
-pub(crate) async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<Step, sqlx::Error> {
+pub async fn begin_post(pool: &sqlx::PgPool, outbox_id: i64) -> Result<Step, sqlx::Error> {
     let owner: Option<(String, String)> = sqlx::query_as(
         "SELECT provider,raw_channel_id FROM intake_session_owners WHERE routing_notice_outbox_id=$1",
     )
@@ -280,7 +301,7 @@ async fn set_state(
 }
 
 /// Only the stored nonce's own POST may settle the cursor, and only with a real receipt.
-pub(crate) async fn record_sent(
+pub async fn record_sent(
     pool: &sqlx::PgPool,
     outbox_id: i64,
     nonce: &str,

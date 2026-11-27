@@ -10,31 +10,34 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceRecord};
 
 impl<P, L, A> ChannelWriter<P, L, A> {
-    pub(in crate::services) fn notice_owners_for_test(&self) -> &Batch {
+    pub fn notice_owners_for_test(&self) -> &Batch {
         &self.notice_owners
     }
 
-    pub(in crate::services) fn notice_pending_for_test(
-        &self,
-    ) -> &HashMap<(SourceId, u64, u64), String> {
+    pub fn notice_pending_for_test(&self) -> &HashMap<(SourceId, u64, u64), String> {
         &self.notice_pending
     }
 
-    pub(in crate::services) fn boot_done_for_test(&self) -> u64 {
+    pub fn boot_done_for_test(&self) -> u64 {
         self.boot.done()
     }
 
-    pub(in crate::services) fn suspension_for_test(&self) -> &Suspension {
-        &self.suspension
+    pub fn suspension_for_test(&self) -> Suspension {
+        self.suspension.clone()
     }
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
-    pub(in crate::services) fn resume_pieces_for_test(&self) -> Vec<(u64, PieceRecord)> {
+    pub fn resume_pieces_for_test(&self) -> Vec<(u64, PieceRecord)> {
         self.resume_pieces()
     }
 
-    pub(in crate::services) fn record_for_test(&mut self, entry: LedgerEntry) -> Result<(), Step> {
+    pub fn record_for_test(&mut self, entry: LedgerEntry) -> Result<(), Step> {
         self.record(entry)
+    }
+
+    /// One re-post turn, as the actor runs it after a poll.
+    pub async fn repost_turn_for_test(&mut self) {
+        self.repost_turn().await;
     }
 }

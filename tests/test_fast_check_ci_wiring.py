@@ -17,6 +17,8 @@ import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PR_WORKFLOW = REPO_ROOT / ".github/workflows/ci-pr.yml"
+# PG15 exact-proof ids file -> the workspace package whose lib binary runs it (None: the root package).
+PG15_LANES = {"scripts/ci/pg15_required_ids.txt": None, "scripts/ci/pg15_required_runtime_ids.txt": "adk-runtime"}
 # The gate pin as the workflow holds it; fixtures that edit the gate swap this value for the edited hash.
 CI_RUNNER_HARDENING_SHA256 = re.search(
     r"pin scripts/check-ci-runner-hardening\.sh ([0-9a-f]{64})", PR_WORKFLOW.read_text(encoding="utf-8")
@@ -559,15 +561,21 @@ class FastCheckCiWiringTests(unittest.TestCase):
             "ADK_LIB_TEST_ARTIFACT": "${{ runner.temp }}/lib-test-artifact",
             "BASH_ENV": "/dev/null",
         })
-        words = proof["run"].split()
-        lane, command = words[: words.index("--")], words[words.index("--") + 1 :]
-        self.assertEqual(lane[:2], ["python3", "scripts/run_test_lane.py"])
-        self.assertEqual(lane[lane.index("--expected-ids") + 1], "scripts/ci/pg15_required_ids.txt")
-        self.assertIn("--require-artifact", command)
-        self.assertNotIn("--test-threads=1", command)
-        exact = command[command.index("--exact") + 1 :]
-        ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
-        self.assertEqual(exact, ids)
+        lanes = {}
+        for line in proof["run"].splitlines():
+            words = line.split()
+            lane, command = words[: words.index("--")], words[words.index("--") + 1 :]
+            self.assertEqual(lane[:2], ["python3", "scripts/run_test_lane.py"])
+            self.assertIn("--require-artifact", command)
+            self.assertNotIn("--test-threads=1", command)
+            cargo = command[command.index("cargo") : command.index("--exact")]
+            lanes[lane[lane.index("--expected-ids") + 1]] = (cargo, command[command.index("--exact") + 1 :])
+        # Each lib binary gets its own lane, since run_test_lane checks one libtest summary.
+        self.assertEqual({path: cargo for path, (cargo, _) in lanes.items()}, {
+            path: ["cargo", "test", *(["-p", package] if package else []), "--lib", "--"]
+            for path, package in PG15_LANES.items()})
+        for path, (_, exact) in lanes.items():
+            self.assertEqual(exact, (REPO_ROOT / path).read_text(encoding="utf-8").split())
 
     def test_pg15_imports_the_current_run_archive_without_a_build(self) -> None:
         jobs = yaml.safe_load(PR_WORKFLOW.read_text())["jobs"]
@@ -607,13 +615,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
                 self.assertEqual((Path(temp) / "limit").read_text(), "2\n")
 
     def test_pg15_required_ids_are_inventoried_and_never_ledgered(self) -> None:
-        ids = (REPO_ROOT / "scripts/ci/pg15_required_ids.txt").read_text(encoding="utf-8").split()
-        self.assertTrue(ids)
-        self.assertEqual(len(ids), len(set(ids)))
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import rust_test_sources
-        inventoried = rust_test_sources.compiled_lib_tests(REPO_ROOT)
-        self.assertEqual([test_id for test_id in ids if test_id not in inventoried], [])
+        ids = []
+        for path, package in PG15_LANES.items():
+            lane = (REPO_ROOT / path).read_text(encoding="utf-8").split()
+            self.assertTrue(lane, path)
+            inventoried = rust_test_sources.compiled_lib_tests(REPO_ROOT, package=package)
+            self.assertEqual([test_id for test_id in lane if test_id not in inventoried], [], path)
+            ids += lane
+        self.assertEqual(len(ids), len(set(ids)))
         ledger = (REPO_ROOT / "scripts/known_test_failures.txt").read_text(encoding="utf-8")
         patterns = [line.split("|")[1].strip() for line in ledger.splitlines()
                     if line.strip() and not line.lstrip().startswith("#") and "|" in line]
@@ -894,10 +905,16 @@ class FastCheckCiWiringTests(unittest.TestCase):
         sys.path.insert(0, str(REPO_ROOT / "scripts/ci"))
         import rust_test_sources
         ids = (REPO_ROOT / "scripts/ci/herdr_loaded_image_macos_ids.txt").read_text(encoding="utf-8").split()
-        macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos")
+        # The documented Mac command runs one package; the list must match that package's inventory.
+        docs = (REPO_ROOT / "docs/ci/rust-quality-gates.md").read_text(encoding="utf-8")
+        package = re.search(r"--expected-ids scripts/ci/herdr_loaded_image_macos_ids\.txt -- .*?cargo test -p (\S+) --lib",
+                            docs)[1]
+        macos = rust_test_sources.compiled_lib_tests(REPO_ROOT, "macos", package)
+        linux = set().union(*(rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux", name)
+                              for name in rust_test_sources.workspace_lib_roots(REPO_ROOT)))
         self.assertEqual(len(ids), len(set(ids)))
         self.assertEqual(set(ids), {t for t in macos if "herdr_loaded_image_macos_" in t})
-        self.assertFalse(set(ids) & rust_test_sources.compiled_lib_tests(REPO_ROOT, "linux"))
+        self.assertFalse(set(ids) & linux)
 
     def test_main_and_nightly_retain_non_pg_test_coverage(self) -> None:
         justfile = (REPO_ROOT / "justfile").read_text(encoding="utf-8")
@@ -2407,7 +2424,7 @@ puts Digest::SHA256.hexdigest(JSON.generate(canonical))
             "save-if": (source.replace("${{ github.ref == 'refs/heads/main' }}", "${{ github.event_name == 'pull_request' }}"),
                         None, "rust-cache must save the shared key from main only"),
             "env drift": (source.replace('      CARGO_PROFILE_TEST_DEBUG: "0"\n    steps:', "    steps:", 1), None, "env must equal check_fast_cross_os"),
-            "runs tests": (source.replace("cargo test --lib --no-run", "cargo test --lib"), None, "without running tests"),
+            "runs tests": (source.replace("cargo test --workspace --lib --no-run", "cargo test --workspace --lib"), None, "without running tests"),
             "sccache disabled": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', '  SCCACHE_GHA_ENABLED: "false"\n', 1), None, "sccache must write"),
             "sccache read-only": (source.replace("  SCCACHE_GHA_RW_MODE: READ_WRITE\n", "  SCCACHE_GHA_RW_MODE: READ_ONLY\n", 1), None, "sccache must write"),
             "sccache enable unset": (source.replace('  SCCACHE_GHA_ENABLED: "true"\n', "", 1), None, "sccache must write"),

@@ -852,7 +852,8 @@ async fn launch_and_attach_successor(
 }
 
 fn successor_stamps(nonce: &str, provider: &str) -> ExpectedExecution {
-    let mut stamps = crate::db::dispatched_sessions::hosted_execution::tests::expected(nonce, 300);
+    let mut stamps =
+        crate::db::dispatched_sessions::hosted_execution::test_support::expected(nonce, 300);
     stamps.binding_provider = provider.into();
     stamps
 }

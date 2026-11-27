@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { NO_DEPARTMENT, classifyRoster, filterAgents, filterAndSortAgents, isStandIn, sortAgents } from "./agent-list-controls";
+import { classifyRoster, filterAgents, filterAndSortAgents, isStandIn, sortAgents } from "./agent-list-controls";
 import type { Agent, DispatchedSession } from "../../types";
 import type { HomeAgent } from "../home/homeModel";
 
@@ -9,29 +9,22 @@ const entry = (state: HomeAgent["state"], overrides: Partial<Agent>): HomeAgent 
   info: null,
   seenAt: null,
   agent: {
-    id: "a1", name: "Alpha", name_ko: "알파", department_id: "dev", avatar_emoji: "🤖", personality: null,
+    id: "a1", name: "Alpha", name_ko: "알파", department_id: null, avatar_emoji: "🤖", personality: null,
     status: "idle", stats_tasks_done: 0, stats_tokens: 0, created_at: 0, ...overrides,
   } as Agent,
 });
 
 const entries: HomeAgent[] = [
-  entry("resting", { id: "a", name: "Alpha", name_ko: "알파", department_name_ko: "개발", agentdesk_working_count: 5, stats_tasks_done: 10, created_at: 1700000000 }),
-  entry("working", { id: "b", name: "Beta", name_ko: "베타", department_id: "design", department_name_ko: "디자인", status: "working", stats_tasks_done: 50, created_at: 1700000200 }),
-  entry("noSession", { id: "c", name: "Charlie", name_ko: "찰리", alias: "CC", department_id: null }),
+  entry("resting", { id: "a", name: "Alpha", name_ko: "알파", agentdesk_working_count: 5, stats_tasks_done: 10, created_at: 1700000000 }),
+  entry("working", { id: "b", name: "Beta", name_ko: "베타", status: "working", stats_tasks_done: 50, created_at: 1700000200 }),
+  entry("noSession", { id: "c", name: "Charlie", name_ko: "찰리", alias: "CC" }),
   entry("background", { id: "d-e2e", name: "Delta", name_ko: "델타" }),
   entry("working", { id: "f-e2e", name: "Foxtrot", name_ko: "폭스", status: "working" }),
 ];
 const ids = (rows: HomeAgent[]) => rows.map((row) => row.agent.id);
-const all = { deptTab: "all", statusFilter: "all", search: "" } as const;
+const all = { statusFilter: "all", search: "" } as const;
 
 describe("filterAgents", () => {
-  it("filters by department, including agents without one", () => {
-    expect(ids(filterAgents(entries, { ...all, deptTab: "design" }))).toEqual(["b"]);
-    expect(ids(filterAgents(entries, { ...all, deptTab: NO_DEPARTMENT }))).toEqual(["c"]);
-    // A department id that no longer exists counts as unassigned.
-    expect(ids(filterAgents(entries, { ...all, deptTab: NO_DEPARTMENT, departments: new Set(["design"]) }))).toEqual(["a", "c", "f-e2e"]);
-  });
-
   it("filters by home state and hides idle test agents unless asked, as home does", () => {
     expect(ids(filterAgents(entries, { ...all, statusFilter: "working" }))).toEqual(["b", "f-e2e"]);
     expect(ids(filterAgents(entries, all))).toEqual(["a", "b", "c", "f-e2e"]);
@@ -45,11 +38,10 @@ describe("filterAgents", () => {
 });
 
 describe("classifyRoster", () => {
-  it("counts a department-only session as home does, as a stand-in without a row", () => {
+  it("does not synthesize agent stand-ins from unlinked sessions even if legacy department_id is present", () => {
     const sessions = [{ id: "s9", session_key: "s9", name: "adk-cc", department_id: "dev", linked_agent_id: null, status: "idle" }] as DispatchedSession[];
     const roster = classifyRoster([entries[2].agent], sessions, false);
     expect(roster.map(({ agent, state }) => [agent.id, state, isStandIn(agent)])).toEqual([
-      ["dispatched:s9", "resting", true],
       ["c", "noSession", false],
     ]);
   });
@@ -60,13 +52,12 @@ describe("sortAgents", () => {
     expect(ids(sortAgents(entries, "status"))).toEqual(["b", "f-e2e", "d-e2e", "a", "c"]);
   });
 
-  it("sorts by activity, department and creation", () => {
+  it("sorts by activity and creation", () => {
     expect(ids(sortAgents(entries.slice(0, 3), "activity"))).toEqual(["b", "a", "c"]);
-    expect(ids(sortAgents(entries.slice(0, 3), "department"))).toEqual(["c", "a", "b"]);
     expect(ids(sortAgents(entries.slice(0, 3), "created"))).toEqual(["b", "a", "c"]);
   });
 
   it("composes filtering and sorting", () => {
-    expect(ids(filterAndSortAgents(entries, { ...all, deptTab: "dev" }, "name"))).toEqual(["a", "f-e2e"]);
+    expect(ids(filterAndSortAgents(entries, { ...all, statusFilter: "working" }, "name"))).toEqual(["b", "f-e2e"]);
   });
 });

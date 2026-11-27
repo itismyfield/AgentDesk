@@ -18,7 +18,7 @@ pub(crate) const MIN_HERDR_VERSION: [u64; 3] = [0, 9, 3];
 
 /// The one server gate for the user-default peer and E7: our protocol and a stable
 /// `MAJOR.MINOR.PATCH` release at or above the minimum. Pre-release or unreadable versions fail.
-pub(crate) fn supported_herdr_server(version: &str, protocol: u32) -> bool {
+pub fn supported_herdr_server(version: &str, protocol: u32) -> bool {
     protocol == HERDR_PROTOCOL && stable_release(version).is_some_and(|v| v >= MIN_HERDR_VERSION)
 }
 
@@ -41,7 +41,7 @@ fn endpoint_missing() -> HostError {
 
 /// Where Herdr panes live. Every field is explicit; there is no default socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HerdrEndpoint {
+pub struct HerdrEndpoint {
     execution_node: String,
     config_key: String,
     socket_path: PathBuf,
@@ -52,6 +52,16 @@ pub(crate) struct HerdrEndpoint {
 }
 
 impl HerdrEndpoint {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        execution_node: &str,
+        config_key: &str,
+        socket_path: &Path,
+        herdr_session: &str,
+    ) -> Result<Self, HostError> {
+        Self::new(execution_node, config_key, socket_path, herdr_session)
+    }
+
     pub(crate) fn new(
         execution_node: &str,
         config_key: &str,
@@ -76,6 +86,11 @@ impl HerdrEndpoint {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_herdr_home_for_test(self, herdr_home: &Path) -> Result<Self, HostError> {
+        self.with_herdr_home(herdr_home)
+    }
+
     /// The bootstrap home whose `config.toml` and `xdg/` the server must have been started with.
     pub(crate) fn with_herdr_home(self, herdr_home: &Path) -> Result<Self, HostError> {
         if !herdr_home.is_absolute() {
@@ -87,6 +102,11 @@ impl HerdrEndpoint {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_mode_for_test(self, mode: EndpointMode) -> Self {
+        self.with_mode(mode)
+    }
+
     pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
         Self { mode, ..self }
     }
@@ -95,8 +115,18 @@ impl HerdrEndpoint {
         self.mode
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn execution_node_for_test(&self) -> &str {
+        self.execution_node()
+    }
+
     pub(crate) fn execution_node(&self) -> &str {
         &self.execution_node
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn config_key_for_test(&self) -> &str {
+        self.config_key()
     }
 
     pub(crate) fn config_key(&self) -> &str {
@@ -107,8 +137,18 @@ impl HerdrEndpoint {
         self.herdr_home.as_deref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn socket_path_for_test(&self) -> &Path {
+        self.socket_path()
+    }
+
     pub(crate) fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_session_for_test(&self) -> &str {
+        self.herdr_session()
     }
 
     pub(crate) fn herdr_session(&self) -> &str {
@@ -185,7 +225,7 @@ impl HerdrObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HerdrReadSource {
+pub enum HerdrReadSource {
     Visible,
     Recent,
     RecentUnwrapped,
@@ -195,13 +235,13 @@ pub(crate) enum HerdrReadSource {
 /// A `pane.read` rendering other than Herdr's default `text`; only `Ansi` keeps SGR styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum HerdrReadFormat {
+pub enum HerdrReadFormat {
     Ansi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "method", content = "params")]
-pub(crate) enum HerdrRequest {
+pub enum HerdrRequest {
     #[serde(rename = "ping")]
     Ping {},
     #[serde(rename = "session.snapshot")]
@@ -244,6 +284,11 @@ pub(crate) enum HerdrRequest {
 }
 
 impl HerdrRequest {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_read_only_for_test(&self) -> bool {
+        self.is_read_only()
+    }
+
     /// Only these may be resent: a retry cannot deliver input twice. Anything not
     /// listed, including a request added later, counts as a mutation.
     pub(crate) fn is_read_only(&self) -> bool {
@@ -259,14 +304,14 @@ impl HerdrRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct HerdrCall {
+pub struct HerdrCall {
     pub id: String,
     #[serde(flatten)]
     pub request: HerdrRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrPane {
+pub struct HerdrPane {
     pub pane_id: String,
     pub workspace_id: String,
     pub tab_id: String,
@@ -276,7 +321,7 @@ pub(crate) struct HerdrPane {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrSnapshot {
+pub struct HerdrSnapshot {
     pub version: String,
     pub protocol: u32,
     pub panes: Vec<HerdrPane>,
@@ -286,7 +331,7 @@ pub(crate) struct HerdrSnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrWorkspace {
+pub struct HerdrWorkspace {
     pub workspace_id: String,
     pub label: String,
     pub pane_count: u32,
@@ -294,7 +339,7 @@ pub(crate) struct HerdrWorkspace {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrProcessInfo {
+pub struct HerdrProcessInfo {
     pub pane_id: String,
     pub shell_pid: Option<u32>,
     pub foreground_process_group_id: Option<u32>,
@@ -304,13 +349,13 @@ pub(crate) struct HerdrProcessInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrForegroundProcess {
+pub struct HerdrForegroundProcess {
     pub pid: u32,
     pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrRead {
+pub struct HerdrRead {
     pub pane_id: String,
     pub source: HerdrReadSource,
     pub text: String,
@@ -320,7 +365,7 @@ pub(crate) struct HerdrRead {
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(crate) enum HerdrResult {
+pub enum HerdrResult {
     Pong {
         version: String,
         protocol: u32,
@@ -346,7 +391,7 @@ pub(crate) enum HerdrResult {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub(crate) struct HerdrErrorBody {
+pub struct HerdrErrorBody {
     pub code: String,
     pub message: String,
 }
@@ -361,7 +406,7 @@ struct RawReply {
 /// One correlated reply: exactly one of `result` / `error`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(try_from = "RawReply")]
-pub(crate) struct HerdrReply {
+pub struct HerdrReply {
     pub id: String,
     pub body: Result<HerdrResult, HerdrErrorBody>,
 }

@@ -755,9 +755,9 @@ fn live_mailbox_crash_at_receipt_release_wake_or_ack_replays_one_original_payloa
                     )
                     .unwrap()
                     .into_consent();
-                let accepted = store.decide(&pending, 1, true, 101).unwrap();
+                let accepted = store.decide_for_test(&pending, 1, true, 101).unwrap();
                 let applied = store
-                    .record_apply(
+                    .record_apply_for_test(
                         &accepted,
                         ApplyResult {
                             before: Some([1; 32]),

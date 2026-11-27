@@ -9,8 +9,8 @@ use chrono::{DateTime, Utc};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-thread_local! { pub(crate) static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static AFTER_PUBLICATION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Certified {
@@ -327,7 +327,7 @@ pub(in crate::services::claude_tui::readiness) fn release(
 }
 
 /// Adoption publishes only local pre-source evidence; the runtime binding and cursors stay old.
-pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
+pub fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
     tmux_common::with_tmux_source_authority(session, |authority| {
         if resolved(authority, epoch, path) {
             return true;
@@ -344,7 +344,7 @@ pub(crate) fn adopt(session: &str, epoch: &str, path: &Path) -> bool {
         {
             return false;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(hook) = AFTER_PUBLICATION.with_borrow_mut(Option::take) {
             hook();
         }
