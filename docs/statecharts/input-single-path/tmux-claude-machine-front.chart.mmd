@@ -1,0 +1,8 @@
+stateDiagram-v2
+    [*] --> Front
+    Front --> Held: host reports Busy or Unknown
+    Held --> Front: existing wake
+    Front --> Ready: host reports Idle
+    Ready --> Held: host evidence changes before first key
+    Ready --> Delivered: current host authorizes first key
+    Delivered --> [*]

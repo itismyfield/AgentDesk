@@ -1370,6 +1370,10 @@ input-single-path/ThreadResumeRecord.cfg	ThreadIngress	RVerifiedMeansObserved	-
 input-single-path/ThreadResumeRecordLegacy.cfg	ThreadIngress	RVerifiedMeansObserved	RPersonServed
 input-single-path/ThreadResumeRecordLegacyLive.cfg	ThreadIngress	-	RPersonServed
 input-single-path/ThreadResumeSilentFail.cfg	ThreadIngress	RNoSilentFailure	RPersonServed
+input-single-path/TmuxClaudeMachineFrontBefore.cfg	TmuxClaudeMachineFront	-	IdleFrontEventuallyDelivered
+input-single-path/TmuxClaudeMachineFrontFixed.cfg	TmuxClaudeMachineFront	-	-
+input-single-path/TmuxClaudeMachineFrontNoFirstKeyGuard.cfg	TmuxClaudeMachineFront	NoMachineWriteWhileBusy	-
+input-single-path/TmuxClaudeMachineFrontNoWake.cfg	TmuxClaudeMachineFront	-	IdleFrontEventuallyDelivered
 input-single-path/WatcherRetryReceiptBefore.cfg	WatcherRetryReceipt	NoFailedAfterRetrySuccess	-
 input-single-path/WatcherRetryReceiptFixed.cfg	WatcherRetryReceipt	-	-
 input-single-path/WatcherRetryReceiptFixedCarryLost.cfg	WatcherRetryReceipt	NoFailedAfterRetrySuccess	-
