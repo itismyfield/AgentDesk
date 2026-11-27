@@ -1,5 +1,6 @@
 //! Successful claims for scanner retirement, independent of injection and delivery journals.
-use super::super::{is_synthetic_headless_message_id_raw, runtime_store};
+use super::super::runtime_store;
+use super::super::synthetic_headless_message_id::is_synthetic_headless_message_id_raw;
 use crate::services::provider::ProviderKind;
 use poise::serenity_prelude::{ChannelId, MessageId};
 use serde::{Deserialize, Serialize};
