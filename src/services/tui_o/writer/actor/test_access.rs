@@ -1,6 +1,9 @@
 //! Test-only entry points to the actor's private state, for tests outside this crate layer.
 
 use super::*;
+use crate::services::tui_o::shadow::{CapturedRecord, SourceId};
+use crate::services::tui_o::store::ledger::input_notices::NoticeEvidence;
+use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub const WAIT_LIMIT_FOR_TEST: Duration = WAIT_LIMIT;
 
@@ -44,6 +47,30 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 
     pub fn deriver_mut_for_test(&mut self) -> &mut UnitDeriver {
         &mut self.deriver
+    }
+
+    pub fn notice_origin_for_test(
+        &self,
+        source: &SourceId,
+        record: &CapturedRecord,
+    ) -> Result<NoticeOrigin, String> {
+        self.sources.notice_origin(source, record)
+    }
+
+    pub fn derive_scoped_for_test(
+        &mut self,
+        record: &CapturedRecord,
+        source: &SourceId,
+        version: u32,
+        origin: Result<NoticeOrigin, String>,
+        logical_session: impl Fn() -> Option<String>,
+    ) -> Vec<Derived> {
+        self.deriver
+            .derive_scoped(record, source, version, origin, logical_session)
+    }
+
+    pub fn take_notice_evidence_for_test(&mut self) -> Vec<NoticeEvidence> {
+        self.deriver.take_notice_evidence()
     }
 
     pub fn owed_for_test(&self) -> &VecDeque<Derived> {

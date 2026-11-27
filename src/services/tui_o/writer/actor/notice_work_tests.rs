@@ -218,18 +218,15 @@ fn rerender_fixture(
         end: bytes.len() as u64,
         line: bytes[..bytes.len() - 1].to_vec(),
     };
-    let origin = actor
-        .sources_for_test()
-        .notice_origin(&source, &record)
-        .unwrap();
-    actor.deriver_mut_for_test().derive_scoped(
+    let origin = actor.notice_origin_for_test(&source, &record).unwrap();
+    actor.derive_scoped_for_test(
         &record,
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin),
         || None,
     );
-    let mut pending = actor.deriver_mut_for_test().take_notice_evidence();
+    let mut pending = actor.take_notice_evidence_for_test();
     assert_eq!(pending.len(), 1);
     let evidence = pending.pop().unwrap();
     assert_ne!(evidence.payload.as_deref(), Some(OLD_NOTICE_PAYLOAD));
@@ -317,7 +314,7 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
     for _ in 0..2 {
         *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
             .with_input_notices_for_test(Projection::for_tests());
-        let derived = actor.deriver_mut_for_test().derive_scoped(
+        let derived = actor.derive_scoped_for_test(
             &crate::services::tui_o::shadow::CapturedRecord {
                 start: next.record.start,
                 end: next.record.end,
@@ -375,7 +372,7 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
             }),
         })
         .unwrap();
-    actor.deriver_mut_for_test().derive_scoped(
+    actor.derive_scoped_for_test(
         &crate::services::tui_o::shadow::CapturedRecord {
             start: next.record.start,
             end: next.record.end,
