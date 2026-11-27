@@ -261,6 +261,7 @@ fn native_8148_terminal_raw_eof_closes_only_the_open_run_at_the_capture_cursor()
         evidence.raw = Some(raw.clone());
         let observed = Observation {
             binding: f.binding.clone(),
+            proven: None,
             generation: 1,
             binding_seq: 1,
             revision: 1,

@@ -74,6 +74,8 @@ pub(super) struct LedgerEntry {
     /// Set only when this episode's own token was released by its exact nonce: a normal terminal
     /// that removed it, or this key's policy close whose tail finished.
     pub(super) exact_release_confirmed: bool,
+    /// The generic backstop already warned that native custody keeps it from ending this turn.
+    pub(super) native_backstop_warned: bool,
 }
 
 impl LedgerEntry {
@@ -113,6 +115,7 @@ impl LedgerEntry {
             finalized_at: None,
             pending_policy_commit: None,
             exact_release_confirmed: false,
+            native_backstop_warned: false,
         }
     }
 }

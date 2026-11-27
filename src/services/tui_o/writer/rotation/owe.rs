@@ -365,13 +365,15 @@ impl NativeSources {
             .registrations
             .into_iter()
             .filter(|r| {
-                r.ticket.channel_id == channel && (r.ticket.source.is_none() || r.matches(&binding))
+                r.ticket.channel_id == channel
+                    && (r.ticket.source.is_none() || r.matches(&binding, projection.proven()))
             })
             .collect();
         let (evidence, barriers, receipts) = seed.analyzed(&registrations, raw)?;
         Ok((
             Observation {
                 binding,
+                proven: projection.proven(),
                 generation: snapshot.generation,
                 binding_seq: origin.binding_seq,
                 revision: self.revision,
@@ -526,7 +528,7 @@ impl<B: BindingEvents> Sources<B> {
             let Some(held) = ticket.ticket.source.clone().filter(|_| receipted) else {
                 continue;
             };
-            if !ticket.matches(&observed.binding) {
+            if !ticket.matches(&observed.binding, observed.proven) {
                 continue;
             }
             let Ok(origin) = self.native_origin(source, record, Some(&held.target)) else {

@@ -206,7 +206,7 @@ impl Port {
             candidate: false,
             barrier: None,
         })
-        .matches(&current.binding)
+        .matches(&current.binding, current.proven)
         {
             return Err("native receipt source differs".into());
         }
@@ -323,7 +323,7 @@ impl Port {
                 candidate: false,
                 barrier: None,
             })
-            .matches(&current.binding)
+            .matches(&current.binding, current.proven)
                 || proof.through != current.through
             {
                 return Err("abstain source mismatch".into());
@@ -742,7 +742,11 @@ pub(super) fn source_evidence(
         || source.provider != "claude"
         || source.session_id != observed.binding.source.session_id
         || source.transcript != observed.binding.source.path
-        || source.file != [observed.binding.source.dev, observed.binding.source.ino]
+        || !crate::services::tui_o::shadow::capture::names_source_file(
+            &observed.binding.source,
+            observed.proven,
+            source.file,
+        )
         || evidence.range.0 < source.offset
         || evidence.range.0 >= evidence.range.1
         || !crate::services::tui_o::writer::input_facts::native::terminal::within(

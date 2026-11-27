@@ -1,6 +1,6 @@
 //! Notice attribution is historical and source-bound; it grants no input or stop authority.
 use super::*;
-use crate::services::tui_o::shadow::capture::Fingerprint;
+use crate::services::tui_o::shadow::capture::{Fingerprint, names_source_file};
 use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
@@ -209,13 +209,16 @@ impl Batch {
                     (through, stamp, rows)
                 });
             let mut executions = HashMap::new();
+            // Rows exist only when the census bytes matched the cursor prefix.
+            let proven = rows.as_ref().and(native_stamp.as_ref());
+            let proven = proven.map(|fp| (fp.dev, fp.ino));
             let attributed = snapshot
                 .as_ref()
                 .ok()
                 .and_then(|v| {
                     candidates(
                         v,
-                        origin,
+                        (origin, proven),
                         store.init().channel,
                         &mut executions,
                         &mut observations,
@@ -348,7 +351,7 @@ type Blocked = Vec<(String, &'static str)>;
 
 fn candidates(
     parsed: &compat::Parsed,
-    origin: &NoticeOrigin,
+    (origin, proven): (&NoticeOrigin, Option<(u64, u64)>),
     channel: u64,
     executions: &mut Contexts,
     observations: &mut context_observation::Observations,
@@ -359,7 +362,7 @@ fn candidates(
         e.provider == "claude"
             && e.session == origin.logical_session
             && e.path == source.path
-            && e.file == [source.dev, source.ino]
+            && names_source_file(source, proven, e.file)
     };
     if !compat::envelope(value)? {
         let store: Store = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
@@ -414,7 +417,7 @@ fn candidates(
             }
         }
         // Keyless evidence (migrated V1 or a non-scoped writer) has no execution nonce to invent.
-        if registration.is_null() || historical_match(registration, entry, origin)? {
+        if registration.is_null() || historical_match(registration, entry, (origin, proven))? {
             let mut entry = entry.clone();
             // Pair by full registration identity; a nonce can recur in another key or namespace.
             entry.id = if registration.is_null() {
@@ -527,7 +530,7 @@ fn resumed_execution(
 fn historical_match(
     registration: &serde_json::Value,
     entry: &Entry,
-    origin: &NoticeOrigin,
+    (origin, proven): (&NoticeOrigin, Option<(u64, u64)>),
 ) -> Result<bool, String> {
     let source = &origin.record.source;
     let bound: v2::Source =
@@ -563,7 +566,7 @@ fn historical_match(
         && bound.target == key["attempt"]["target"]
         && bound.session_id == source.session_id
         && bound.transcript == source.path
-        && bound.file == [source.dev, source.ino]
+        && names_source_file(source, proven, bound.file)
         && bound.offset == entry.offset
         && key["attempt"]["nonce"].as_str() == Some(entry.id.as_str())
         && registration["frame"]["class_hash"].as_str() == Some(entry.class_hash.as_str())

@@ -80,7 +80,7 @@ pub(super) fn read(value: &Value, line: &[u8], range: (u64, u64)) -> Option<Fact
     })
 }
 pub(super) fn candidates(
-    binding: &SourceBinding,
+    (binding, proven): (&SourceBinding, Option<(u64, u64)>),
     facts: &[&Fact],
     registrations: &[Registration],
 ) -> Vec<MembershipReceipt> {
@@ -118,7 +118,7 @@ pub(super) fn candidates(
                                 r.receipts.contains(&known.row) && known.kind == fact.kind
                             })))
                     && (r.ticket.source.is_none()
-                        || (r.matches(binding)
+                        || (r.matches(binding, proven)
                             && r.ticket
                                 .source
                                 .as_ref()
@@ -126,7 +126,7 @@ pub(super) fn candidates(
             })
             .collect();
         let [owner] = owners.as_slice() else { continue };
-        if !owner.matches(binding) {
+        if !owner.matches(binding, proven) {
             continue;
         }
         let offset = owner.ticket.source.as_ref().map_or(u64::MAX, |s| s.offset);
@@ -294,20 +294,27 @@ mod tests {
             let line = serde_json::to_vec(&row).unwrap();
             let fact = read(&row, &line, (0, line.len() as u64 + 1));
             let facts: Vec<_> = fact.iter().collect();
-            assert_eq!(candidates(&binding, &facts, &regs).len(), count, "{row}");
+            assert_eq!(
+                candidates((&binding, None), &facts, &regs).len(),
+                count,
+                "{row}"
+            );
             if let Some(mut second) = read(&row, &line, (1, line.len() as u64 + 2)) {
                 second.range.0 += 1;
-                assert!(candidates(&binding, &[fact.as_ref().unwrap(), &second], &regs).is_empty());
+                assert!(
+                    candidates((&binding, None), &[fact.as_ref().unwrap(), &second], &regs)
+                        .is_empty()
+                );
             }
         }
         let mut unresolved = regs.clone();
         unresolved[0].ticket.source = None;
         let row = json!({"type":"user","uuid":"own","message":{"content":"한국어 원본 입력"}});
         let fact = read(&row, b"row", (0, 4)).unwrap();
-        assert!(candidates(&binding, &[&fact], &unresolved).is_empty());
+        assert!(candidates((&binding, None), &[&fact], &unresolved).is_empty());
         unresolved.extend(regs);
         unresolved.reverse();
-        assert!(candidates(&binding, &[&fact], &unresolved).is_empty());
+        assert!(candidates((&binding, None), &[&fact], &unresolved).is_empty());
     }
     #[test]
     fn native_8148_receipt_duplicate_prompts_and_fifo_do_not_choose_the_first_row() {
@@ -326,7 +333,7 @@ mod tests {
             (4, 8),
         )
         .unwrap();
-        assert!(candidates(&binding, &[&first, &second], &regs).is_empty());
+        assert!(candidates((&binding, None), &[&first, &second], &regs).is_empty());
         let q1 = read(
             &json!({"type":"queue-operation","operation":"enqueue","content":text}),
             b"queue",
@@ -339,8 +346,11 @@ mod tests {
             (6, 12),
         )
         .unwrap();
-        assert!(candidates(&binding, &[&q1, &q2, &second], &regs).is_empty());
-        assert_eq!(candidates(&binding, &[&q1, &second], &regs).len(), 1);
+        assert!(candidates((&binding, None), &[&q1, &q2, &second], &regs).is_empty());
+        assert_eq!(
+            candidates((&binding, None), &[&q1, &second], &regs).len(),
+            1
+        );
         for removed in [false, true] {
             let mut rows =
                 vec![json!({"type":"queue-operation","operation":"enqueue","content":text})];
@@ -386,10 +396,13 @@ mod tests {
             (8, 13),
         )
         .unwrap();
-        assert_eq!(candidates(&binding, &[&command, &user], &regs).len(), 2);
+        assert_eq!(
+            candidates((&binding, None), &[&command, &user], &regs).len(),
+            2
+        );
         regs[0].receipts.push("command".into());
         regs[0].candidate = false;
-        let next = candidates(&binding, &[&command, &user], &regs);
+        let next = candidates((&binding, None), &[&command, &user], &regs);
         assert_eq!(next.len(), 1);
         assert_eq!(next[0].row, "user");
         let rows = [
@@ -448,7 +461,7 @@ mod tests {
             (13, 18),
         )
         .unwrap();
-        assert!(candidates(&binding, &[&command, &user, &late], &regs).is_empty());
+        assert!(candidates((&binding, None), &[&command, &user, &late], &regs).is_empty());
     }
     #[test]
     fn native_8148_receipt_full_ticket_hash_stamp_key_and_fingerprint_compatibility() {

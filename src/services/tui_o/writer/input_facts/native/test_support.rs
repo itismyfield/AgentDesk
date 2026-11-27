@@ -60,7 +60,7 @@ pub(crate) fn analyze_batch(
     }
     let registered: Vec<_> = registrations
         .iter()
-        .filter(|r| r.candidate && r.matches(binding))
+        .filter(|r| r.candidate && r.matches(binding, None))
         .collect();
     let mut inputs: Vec<Input> = vec![];
     let mut run: Option<Run> = None;
@@ -83,7 +83,7 @@ pub(crate) fn analyze_batch(
                 {
                     match terminal::foreign_prompt(
                         registrations,
-                        binding,
+                        (binding, None),
                         registered[i],
                         (owned.range, owned.row.as_deref()),
                         (

@@ -291,6 +291,7 @@ impl RawCapture {
             .clone();
         let observed = Observation {
             binding,
+            proven: None,
             generation: snapshot.generation,
             binding_seq: origin.binding_seq,
             revision: 1,

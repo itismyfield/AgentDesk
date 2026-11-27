@@ -152,7 +152,7 @@ impl Port {
             || observed.binding_seq != origin.binding_seq
             || observed.generation != self.shared.restart.current_generation
             || observed.through != tail.through
-            || !ticket.matches(&observed.binding)
+            || !ticket.matches(&observed.binding, observed.proven)
         {
             return Err("native terminal stamp superseded".into());
         }

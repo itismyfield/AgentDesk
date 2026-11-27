@@ -498,7 +498,7 @@ impl NativePrepared {
             .into_iter()
             .filter(|r| {
                 r.ticket.channel_id == observed.binding.channel_id
-                    && (r.ticket.source.is_none() || r.matches(&observed.binding))
+                    && (r.ticket.source.is_none() || r.matches(&observed.binding, observed.proven))
             })
             .collect();
         let fingerprint =

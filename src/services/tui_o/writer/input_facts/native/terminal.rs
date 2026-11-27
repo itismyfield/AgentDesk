@@ -55,7 +55,7 @@ pub(super) fn seal(registration: &Registration, mut evidence: Evidence) -> Optio
 // Receipt identities outlive execution candidacy; unresolved ownership blocks a final decision.
 pub(super) fn foreign_prompt(
     registrations: &[Registration],
-    binding: &SourceBinding,
+    (binding, proven): (&SourceBinding, Option<(u64, u64)>),
     owner: &Registration,
     (membership, member_row): ((u64, u64), Option<&str>),
     (range, row, hashes): ((u64, u64), Option<&str>, &[String]),
@@ -69,7 +69,7 @@ pub(super) fn foreign_prompt(
         r.ticket.channel_id == binding.channel_id && r.ticket.key["attempt"]["target"] == *target
     };
     if registrations.iter().filter(same_execution).any(|r| {
-        r.matches(binding)
+        r.matches(binding, proven)
             && r.receipts.iter().any(|known| known == row)
             && hashes.contains(&r.frame_hash)
     }) {

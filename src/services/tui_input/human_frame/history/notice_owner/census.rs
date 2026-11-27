@@ -79,9 +79,9 @@ struct Scanned {
     resume: Option<Resume>,
 }
 
+/// The live stat of `source`'s file, a renumbered dev included; only rows its prefix proved answer.
 pub(super) fn fingerprint(source: &SourceId) -> Option<Fingerprint> {
-    let fp = Fingerprint::of(&std::fs::metadata(&source.path).ok()?).ok()?;
-    (fp.dev == source.dev && fp.ino == source.ino).then_some(fp)
+    Fingerprint::path(source).ok()
 }
 
 impl Cache {

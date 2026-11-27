@@ -100,6 +100,15 @@ impl Fingerprint {
     }
 }
 
+/// Whether `file` names `source`'s file: its stored identity, or `proven`, the live identity of a
+/// renumbered source whose bytes a reopen matched to the stored prefix.
+pub fn names_source_file(source: &SourceId, proven: Option<(u64, u64)>, file: [u64; 2]) -> bool {
+    let named = (file[0], file[1]);
+    named == (source.dev, source.ino)
+        || proven
+            .is_some_and(|live| live == named && file_match(source, live) == FileMatch::Renumbered)
+}
+
 /// Whether two sources name one file, the volume's dev aside.
 pub fn same_file(a: &SourceId, b: &SourceId) -> bool {
     (&a.session_id, &a.path, a.ino) == (&b.session_id, &b.path, b.ino)
@@ -146,6 +155,8 @@ pub struct SourceCapture {
     file: File,
     /// The open file's own identity; a renumbered source keeps its stored dev, this the live one.
     opened: (u64, u64),
+    /// A reopen matched the bytes before its cursor to the stored prefix hash.
+    prefix_checked: bool,
     captured_through: u64,
     prefix: Sha256,
     /// Bytes after `captured_through` still waiting for their newline.
@@ -261,13 +272,14 @@ impl SourceCapture {
             return Err(invalid(detail));
         }
         let renumbered = dev != source.dev;
-        let opened = Self::opened_with_prefix(source, file, &meta, through, &mut consumer)?;
+        let mut opened = Self::opened_with_prefix(source, file, &meta, through, &mut consumer)?;
         if opened.prefix_hash() != prefix_hash {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "source bytes before the cursor changed",
             ));
         }
+        opened.prefix_checked = true;
         if renumbered {
             let (path, old_dev) = (opened.source.path.display(), opened.source.dev);
             tracing::info!(%path, old_dev, new_dev = dev, "[tui_o] source volume renumbered");
@@ -292,6 +304,7 @@ impl SourceCapture {
             source,
             file,
             opened: file_identity(meta),
+            prefix_checked: false,
             captured_through: start,
             prefix,
             partial: Vec::new(),
@@ -302,6 +315,11 @@ impl SourceCapture {
 
     pub fn captured_through(&self) -> u64 {
         self.captured_through
+    }
+
+    /// The live identity, only once a reopen proved the stored bytes are this file's.
+    pub fn proven_identity(&self) -> Option<(u64, u64)> {
+        self.prefix_checked.then_some(self.opened)
     }
 
     /// Bytes read so far, including a buffered line still missing its newline.

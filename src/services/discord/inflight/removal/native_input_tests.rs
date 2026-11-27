@@ -426,7 +426,7 @@ fn boot_saved(
         .native_evidence_registrations()
         .unwrap()
         .into_iter()
-        .filter(|r| r.matches(&binding))
+        .filter(|r| r.matches(&binding, None))
         .collect();
     let proof = facts.native_evidence(&registrations).unwrap().remove(0);
     let outcome = native::Outcome {

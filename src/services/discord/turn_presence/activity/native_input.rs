@@ -36,7 +36,7 @@ impl Reader {
             .history
             .native_evidence_registrations()?
             .into_iter()
-            .filter(|r| r.matches(&self.binding))
+            .filter(|r| r.matches(&self.binding, None))
             .collect();
         if registrations.is_empty() {
             self.facts = None;
@@ -56,6 +56,7 @@ impl Reader {
         Ok(Some(Observation {
             receipts: Vec::new(),
             binding: self.binding.clone(),
+            proven: None,
             generation: 1,
             binding_seq: 0,
             revision: self.revision,

@@ -9,6 +9,8 @@ use super::{ShadowProvider, SourceBinding};
 use crate::services::tui_input::human_frame::history::v2::native::frame_hashes;
 #[cfg(unix)]
 use crate::services::tui_input::human_frame::history::v2::native::{Disposition, Ticket};
+#[cfg(unix)]
+use crate::services::tui_o::shadow::capture::names_source_file;
 use serde_json::Value;
 #[cfg(unix)]
 mod receipt;
@@ -91,14 +93,15 @@ pub(crate) use crate::services::tui_input::human_frame::history::v2::native::{
 
 #[cfg(unix)]
 impl Registration {
-    pub(crate) fn matches(&self, binding: &SourceBinding) -> bool {
+    /// `proven` is the live identity a prefix-checked reopen gave the bound source, if any.
+    pub(crate) fn matches(&self, binding: &SourceBinding, proven: Option<(u64, u64)>) -> bool {
         binding.provider == super::ShadowProvider::Claude
             && self.ticket.channel_id == binding.channel_id
             && self.ticket.source.as_ref().is_some_and(|s| {
                 s.provider == "claude"
                     && s.session_id == binding.source.session_id
                     && s.transcript == binding.source.path
-                    && s.file == [binding.source.dev, binding.source.ino]
+                    && names_source_file(&binding.source, proven, s.file)
                     && s.target == self.ticket.key["attempt"]["target"]
                     && s.target["execution_nonce"]
                         .as_str()
@@ -112,6 +115,8 @@ impl Registration {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct Observation {
     pub(crate) binding: SourceBinding,
+    /// The bound source's live identity a prefix-checked reopen proved, if any.
+    pub(crate) proven: Option<(u64, u64)>,
     pub(crate) generation: u64,
     pub(crate) binding_seq: u64,
     pub(crate) revision: u64,
@@ -222,6 +227,7 @@ mod projection {
     /// Source-owned input hashes and native ranges, without output bodies or raw JSON records.
     pub(crate) struct Projection {
         binding: SourceBinding,
+        proven: Option<(u64, u64)>,
         facts: Vec<Fact>,
         tracker: TurnTracker,
         state: super::super::TurnState,
@@ -242,6 +248,7 @@ mod projection {
             let decoder = Decoder {
                 projection: Self {
                     binding: binding.clone(),
+                    proven: None,
                     facts: Vec::new(),
                     tracker: TurnTracker::starting_at(0),
                     state: super::super::TurnState::Unknown,
@@ -250,8 +257,9 @@ mod projection {
                 partial: Vec::new(),
                 error: None,
             };
-            let (capture, decoder) =
+            let (capture, mut decoder) =
                 SourceCapture::reopen_with_prefix(binding.source.clone(), through, hash, decoder)?;
+            decoder.projection.proven = capture.proven_identity();
             let result = if let Some(error) = decoder.error {
                 Err(error)
             } else if !decoder.partial.is_empty() || decoder.projection.through != through {
@@ -294,7 +302,8 @@ mod projection {
                 interrupt: None,
             });
             let facts = (self.facts.as_slice(), closer.as_ref());
-            let mut analysis = reduce(&self.binding, facts, registrations, self.through, None)?;
+            let bound = (&self.binding, self.proven);
+            let mut analysis = reduce(bound, facts, registrations, self.through, None)?;
             if let Some(raw) = raw {
                 terminal::attach(&mut analysis.evidence, raw);
             }
@@ -302,7 +311,7 @@ mod projection {
         }
         pub(crate) fn receipts(&self, registrations: &[Registration]) -> Vec<MembershipReceipt> {
             receipt::candidates(
-                &self.binding,
+                (&self.binding, self.proven),
                 &self
                     .facts
                     .iter()
@@ -326,7 +335,7 @@ mod projection {
                 }
                 let mut matched = false;
                 reduce(
-                    &self.binding,
+                    (&self.binding, self.proven),
                     (&self.facts, None),
                     &scoped,
                     self.through,
@@ -361,6 +370,9 @@ mod projection {
         }
         pub(crate) fn through(&self) -> u64 {
             self.through
+        }
+        pub(crate) fn proven(&self) -> Option<(u64, u64)> {
+            self.proven
         }
         fn read(&mut self, line: &[u8]) -> Result<(), String> {
             let range = (self.through, self.through + line.len() as u64 + 1);
@@ -523,7 +535,7 @@ mod projection {
     type MembershipRecorder<'a> = &'a mut dyn FnMut(&Registration, (u64, u64), Option<&str>);
 
     fn reduce(
-        binding: &SourceBinding,
+        (binding, proven): (&SourceBinding, Option<(u64, u64)>),
         (records, closer): (&[Fact], Option<&Fact>),
         registrations: &[Registration],
         through: u64,
@@ -539,7 +551,7 @@ mod projection {
         let registered: Vec<_> = registrations
             .iter()
             .filter(|r| {
-                (r.candidate || terminal::superseding(r, &interrupts)) && r.matches(binding)
+                (r.candidate || terminal::superseding(r, &interrupts)) && r.matches(binding, proven)
             })
             .collect();
         let mut inputs: Vec<Input> = vec![];
@@ -562,7 +574,7 @@ mod projection {
                     {
                         match terminal::foreign_prompt(
                             registrations,
-                            binding,
+                            (binding, proven),
                             registered[i],
                             (owned.range, owned.row.as_deref()),
                             (record.range, record.row.as_deref(), hashes),
