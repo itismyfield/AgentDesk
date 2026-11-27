@@ -53,5 +53,7 @@ pub mod session_evidence;
 pub mod session_observability;
 pub mod session_status;
 pub mod session_transcripts;
+#[cfg(any(test, feature = "test-support"))]
+pub mod status_check_test_support;
 pub(crate) mod timestamps;
 pub mod turns;
