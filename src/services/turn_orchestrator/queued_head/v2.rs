@@ -27,6 +27,7 @@ pub(crate) mod source_admission;
 mod sources;
 pub(crate) mod start_failure;
 #[cfg(all(test, unix))]
+#[path = "v2/work_snapshot_tests.rs"]
 mod work_snapshot;
 pub(crate) use super::v2_types::AttemptRef;
 pub(crate) use commit::Fault;

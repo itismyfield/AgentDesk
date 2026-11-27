@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::services::turn_orchestrator::{ChannelMailboxHandle, PendingQueueItem};
 
 #[cfg(test)]
+#[path = "drive/hold_episode_tests.rs"]
 mod hold_episode;
 
 /// The owner's granted front: its slot's ticket and the original.
