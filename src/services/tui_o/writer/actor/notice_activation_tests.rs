@@ -1,4 +1,7 @@
 use super::*;
+
+#[path = "notice_absorbed_tests.rs"]
+mod absorbed;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
 
@@ -105,6 +108,148 @@ fn debt_candidates(
     let key = input_key(id);
     let (record, _) = (state.evidence.iter()).find(|(_, e)| e.unit_key.as_ref() == Some(&key))?;
     Some(state.unresolved.get(record)?.candidates.clone())
+}
+
+fn append_value(path: &std::path::Path, value: serde_json::Value) {
+    append(path, format!("{value}\n").as_bytes());
+}
+
+fn queued_command(
+    physical_uuid: &str,
+    source_uuid: &str,
+    prompt: &str,
+    mode: &str,
+    origin: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "type": "attachment",
+        "uuid": physical_uuid,
+        "sessionId": "native",
+        "renderedRole": "system",
+        "isSidechain": false,
+        "attachment": {
+            "type": "queued_command",
+            "commandMode": mode,
+            "origin": {"kind": origin},
+            "humanTurn": true,
+            "source_uuid": source_uuid,
+            "delivery_id": format!("delivery-{physical_uuid}"),
+            "prompt": prompt
+        }
+    })
+}
+
+async fn capture_and_deliver(actor: &mut Host) {
+    let fresh = actor.read_sources_for_test();
+    actor.prepare_notices_for_test(&fresh).await;
+    let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
+    actor.deliver_owed_for_test(&progress).await;
+    assert!(!actor.writer_for_test().is_stopped());
+}
+
+#[tokio::test(start_paused = true)]
+async fn absorbed_human_command_posts_one_writer_notice_across_restart() {
+    let _turns = TURNS.lock().await;
+    // The hand-off check reads the migration record under the process runtime root.
+    let guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = guard.path();
+    let path = runtime.join("native.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let (o, _binding) = begin(runtime, &path, "absorbed-notice-pane");
+    let port = Arc::new(Port::default());
+    let _confirmed = TestConfirmation::new(CHANNEL);
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    start_migration(&mut actor);
+    resume(&mut actor);
+    assert!(crate::services::tui_o::writer::input_notices::writer_posts(
+        CHANNEL,
+        ShadowProvider::Claude
+    ));
+
+    let prompt = "질문 하나 더";
+    let command = queued_command("attachment-id", "input-id", prompt, "prompt", "human");
+    assert!(!command.to_string().contains("\"user\""));
+    append_value(
+        &path,
+        serde_json::json!({
+            "type": "queue-operation", "operation": "enqueue", "content": prompt
+        }),
+    );
+    capture_and_deliver(&mut actor).await;
+    assert!(port.posts.lock().unwrap().is_empty());
+
+    append_value(&path, command);
+    capture_and_deliver(&mut actor).await;
+    assert_eq!(*port.posts.lock().unwrap(), [notice(prompt)]);
+    assert_eq!(notice_evidence(&mut actor, &input_key("input-id")), 1);
+
+    drop(actor);
+    let mut restarted = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    resume(&mut restarted);
+    capture_and_deliver(&mut restarted).await;
+    assert_eq!(*port.posts.lock().unwrap(), [notice(prompt)]);
+    let key = input_key("input-id");
+    let ledger = restarted.writer_mut_for_test().store().ledger();
+    let (_, saved) = ledger.latest_piece(&key, 0).expect("notice was prepared");
+    assert!(matches!(
+        saved.outcome,
+        Some(crate::services::tui_o::store::ledger::PieceOutcome::Posted(
+            _
+        ))
+    ));
+    assert!(ledger.violation().is_none());
+}
+
+#[tokio::test(start_paused = true)]
+async fn queued_command_and_user_with_the_same_input_id_share_one_notice() {
+    let _turns = TURNS.lock().await;
+    let _guard = crate::config::TestRuntimeRootGuard::new();
+    let runtime = tempfile::tempdir().unwrap();
+    let path = runtime.path().join("native.jsonl");
+    std::fs::write(&path, b"").unwrap();
+    let (o, _binding) = begin(runtime.path(), &path, "dual-notice-pane");
+    let port = Arc::new(Port::default());
+    let mut actor = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    start_migration(&mut actor);
+    resume(&mut actor);
+
+    let prompt = "같은 문장";
+    append(&path, &row("idle-first", prompt));
+    capture_and_deliver(&mut actor).await;
+    append_value(
+        &path,
+        queued_command("attachment-one", "idle-first", prompt, "prompt", "human"),
+    );
+
+    append_value(
+        &path,
+        queued_command("attachment-two", "command-first", prompt, "prompt", "human"),
+    );
+    capture_and_deliver(&mut actor).await;
+    append(&path, &row("command-first", prompt));
+    for (uuid, mode, origin) in [
+        ("notification", "task-notification", "human"),
+        ("machine", "prompt", "system"),
+    ] {
+        append_value(
+            &path,
+            queued_command(uuid, uuid, "excluded text", mode, origin),
+        );
+    }
+    capture_and_deliver(&mut actor).await;
+    assert_eq!(
+        *port.posts.lock().unwrap(),
+        [notice(prompt), notice(prompt)]
+    );
+    for id in ["idle-first", "command-first"] {
+        assert_eq!(notice_evidence(&mut actor, &input_key(id)), 1);
+    }
+
+    drop(actor);
+    let mut restarted = host(&o, port.clone(), Alarms::default(), u64::MAX);
+    resume(&mut restarted);
+    capture_and_deliver(&mut restarted).await;
+    assert_eq!(port.posts.lock().unwrap().len(), 2);
 }
 
 #[tokio::test(start_paused = true)]

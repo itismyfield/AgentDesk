@@ -27,13 +27,13 @@ const RETRY_BACKOFF_MAX: Duration = Duration::from_secs(30);
 const READER_RETENTION_GRACE: Duration = Duration::from_secs(2 * 3600);
 
 /// Sends one alarm line to the operator channel.
-pub(crate) trait AlarmNotifier: Send + Sync {
+pub trait AlarmNotifier: Send + Sync {
     fn notify(&self, alert_channel: u64, alarm: AlarmNotification, attempt: NotificationAttempt);
 }
 
 /// History and current health conditions are independent of operator enqueue attempts.
 #[derive(Default)]
-pub(crate) struct AlarmHealth {
+pub struct AlarmHealth {
     raised: Mutex<BTreeSet<String>>,
     notifications: Mutex<HashMap<String, NotificationState>>,
     active: Mutex<BTreeSet<String>>,
@@ -50,7 +50,7 @@ enum NotificationState {
     Existing,
 }
 
-pub(crate) struct AlarmNotification {
+pub struct AlarmNotification {
     channel: u64,
     kind: &'static str,
     incident: Option<String>,
@@ -58,7 +58,7 @@ pub(crate) struct AlarmNotification {
 }
 
 /// Holds one incident's slot through retries; cancellation releases it without reporting success.
-pub(crate) struct NotificationAttempt {
+pub struct NotificationAttempt {
     health: Arc<AlarmHealth>,
     reason: String,
     finished: bool,
@@ -172,7 +172,7 @@ impl AlarmHealth {
     }
 
     /// Conditions in force at `now`; NotFound frequency is re-counted against the window here.
-    pub(crate) fn current_at(&self, now: Instant) -> Vec<String> {
+    pub fn current_at(&self, now: Instant) -> Vec<String> {
         let mut current = locked(&self.active).clone();
         locked(&self.not_found).retain(|channel, hits| {
             hits.retain(|hit| within_window(*hit, now));
@@ -194,12 +194,12 @@ impl AlarmHealth {
 static PROCESS_HEALTH: LazyLock<Arc<AlarmHealth>> = LazyLock::new(Arc::default);
 
 /// Alarm conditions in force for this process's health snapshot, as `tui_o:<kind>:<channel>`.
-pub(crate) fn health_reasons() -> Vec<String> {
+pub fn health_reasons() -> Vec<String> {
     PROCESS_HEALTH.current_at(Instant::now())
 }
 
 /// The channel's writer posted again under an owned gateway, so its pause is over.
-pub(crate) fn gateway_resumed(channel: u64) {
+pub fn gateway_resumed(channel: u64) {
     PROCESS_HEALTH.resume_gateway(channel);
 }
 
@@ -239,14 +239,14 @@ const PAUSED_NO_GATEWAY: &str = "paused_no_gateway";
 const WAITING_TOO_LONG: &str = "waiting_too_long";
 
 /// Routes each writer incident once; NotFound only alarms past its frequency.
-pub(crate) struct AlarmRouter {
+pub struct AlarmRouter {
     alert_channel: Option<u64>,
     notifier: Option<Arc<dyn AlarmNotifier>>,
     health: Arc<AlarmHealth>,
 }
 
 impl AlarmRouter {
-    pub(crate) fn new(
+    pub fn new(
         alert_channel: Option<u64>,
         notifier: Option<Arc<dyn AlarmNotifier>>,
         health: Arc<AlarmHealth>,
@@ -259,10 +259,15 @@ impl AlarmRouter {
     }
 
     /// Router for this process: `tui_o.alert_channel_id` via the notify bot's outbox when a pool exists.
-    pub(crate) fn for_process(config: Option<&TuiOConfig>, pool: Option<PgPool>) -> Self {
+    pub fn for_process(config: Option<&TuiOConfig>, pool: Option<PgPool>) -> Self {
         let notifier = pool.map(|pool| Arc::new(OutboxNotifier { pool }) as Arc<dyn AlarmNotifier>);
         let alert_channel = config.and_then(|config| config.alert_channel_id);
         Self::new(alert_channel, notifier, PROCESS_HEALTH.clone())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raise_at_for_test(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
+        self.raise_at(channel, alarm, now)
     }
 
     pub(crate) fn raise_at(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
@@ -894,6 +899,7 @@ mod postgres_tests {
             index: 0,
             payload: "body must remain unposted".into(),
             notice_origin: None,
+            reply: None,
         });
         // Keep PG I/O from auto-advancing the paused clock; only the test advances retry time.
         tokio::time::pause();

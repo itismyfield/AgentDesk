@@ -9,7 +9,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum SubmissionError {
+pub enum SubmissionError {
     Legacy(String),
     Guarded(InputRun),
     Held(PreparationHold),
@@ -28,7 +28,7 @@ impl SubmissionError {
             stopped => Err(Self::Guarded(stopped)),
         }
     }
-    pub(crate) fn into_legacy(self) -> String {
+    pub fn into_legacy(self) -> String {
         match self {
             Self::Legacy(error) => error,
             Self::Guarded(run) => {
@@ -43,7 +43,7 @@ impl SubmissionError {
     }
 }
 
-pub(crate) trait Owner: Send + Sync {
+pub trait Owner: Send + Sync {
     fn started(&self);
     fn finished(&self, run: &InputRun);
     fn preparation_held(&self, _hold: &PreparationHold) {}
@@ -56,7 +56,7 @@ pub(crate) trait Owner: Send + Sync {
 
 /// Seals the attempt's transcript window before the provider releases its turn lock.
 #[cfg(unix)]
-pub(crate) struct ReceiptEnd {
+pub struct ReceiptEnd {
     owner: Option<Arc<dyn Owner>>,
     session: String,
 }
@@ -69,7 +69,7 @@ impl Drop for ReceiptEnd {
     }
 }
 #[cfg(unix)]
-pub(crate) fn seal_on_exit(session: &str) -> ReceiptEnd {
+pub fn seal_on_exit(session: &str) -> ReceiptEnd {
     ReceiptEnd {
         owner: OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone())),
         session: session.into(),
@@ -88,7 +88,7 @@ thread_local! {
     static RECEIPT_SINK: RefCell<Option<Arc<crate::services::provider::native_stop::ReceiptSink>>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnce() -> R) -> R {
+pub fn with_receipt_sink<R>(cancel: Option<&CancelToken>, run: impl FnOnce() -> R) -> R {
     struct Restore(Option<Arc<crate::services::provider::native_stop::ReceiptSink>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -116,16 +116,16 @@ impl Drop for Restore {
     }
 }
 
-pub(crate) fn with_owner<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> R {
+pub fn with_owner<R>(owner: Option<Arc<dyn Owner>>, run: impl FnOnce() -> R) -> R {
     scoped(owner, run).0
 }
 #[cfg(unix)]
-pub(crate) fn capture<R>(run: impl FnOnce() -> R) -> (R, Option<InputRun>) {
+pub fn capture<R>(run: impl FnOnce() -> R) -> (R, Option<InputRun>) {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     let (result, scope) = scoped(owner, run);
     (result, scope.result)
 }
-pub(crate) fn capture_preparation(
+pub fn capture_preparation(
     run: impl FnOnce() -> Result<(), SubmissionError>,
 ) -> Result<(), SubmissionError> {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
@@ -204,7 +204,7 @@ pub(crate) fn set_receipt_session_id(sid: &str) {
         }
     });
 }
-pub(crate) fn receipt(session: &str, prompt: &str) {
+pub fn receipt(session: &str, prompt: &str) {
     let (owner, sid, fresh_path) = OWNER.with(|slot| {
         let scope = slot.borrow();
         (
@@ -236,7 +236,7 @@ pub(crate) fn receipt(session: &str, prompt: &str) {
 }
 
 #[cfg(unix)]
-pub(crate) fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
+pub fn fresh_receipt(session: &str, prompt: &str, path: &str, sid: &str) {
     set_fresh_receipt_source(path, sid);
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner
@@ -264,13 +264,13 @@ pub(crate) fn set_fresh_receipt_source(path: &str, sid: &str) {
         }
     });
 }
-pub(crate) fn begin() {
+pub fn begin() {
     let owner = OWNER.with(|slot| slot.borrow().as_ref().and_then(|scope| scope.owner.clone()));
     if let Some(owner) = owner {
         owner.started();
     }
 }
-pub(crate) fn finish(run: &InputRun) {
+pub fn finish(run: &InputRun) {
     if let Some(sink) = RECEIPT_SINK.with(|slot| slot.borrow().clone()) {
         sink.finished(run);
     }

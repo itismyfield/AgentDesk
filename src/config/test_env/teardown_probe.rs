@@ -19,7 +19,7 @@ pub(crate) fn before_restore(key: &str) {
 }
 
 /// Observe the point immediately before the root guard restores and unlocks its environment.
-pub(crate) fn on_before_restore(callback: impl FnOnce() + 'static) -> impl Drop {
+pub fn on_before_restore(callback: impl FnOnce() + 'static) -> impl Drop {
     struct Restore(Option<Box<dyn FnOnce()>>);
     impl Drop for Restore {
         fn drop(&mut self) {
@@ -64,7 +64,7 @@ impl Drop for ReapChild {
     }
 }
 
-pub(crate) fn assert_isolated<F, G>(test_name: &'static str, factory: F, root_was_present: bool)
+pub fn assert_isolated<F, G>(test_name: &'static str, factory: F, root_was_present: bool)
 where
     F: FnOnce() -> G + Send,
 {
@@ -75,7 +75,7 @@ where
     );
 }
 
-pub(crate) fn assert_restores_after_return(
+pub fn assert_restores_after_return(
     test_name: &'static str,
     root_was_present: bool,
     exercise: impl FnOnce(),
@@ -96,11 +96,7 @@ pub(crate) fn assert_restores_after_return(
     );
 }
 
-pub(crate) fn assert_scope_isolated(
-    present: bool,
-    temporary_root: bool,
-    exercise: impl FnOnce() + Send,
-) {
+pub fn assert_scope_isolated(present: bool, temporary_root: bool, exercise: impl FnOnce() + Send) {
     let thread = std::thread::current();
     run_isolated(thread.name().unwrap(), present, || {
         exercise_teardown(exercise, true, temporary_root)

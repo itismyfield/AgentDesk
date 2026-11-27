@@ -119,10 +119,10 @@ async fn restored_ended_retired_launch_retries_backoff_then_retains_and_notifies
     let message = 8_146_011;
     let logical = "handoff-launch-retry";
     let key = format!("claude/{}/test-node:{logical}", shared.token_hash);
-    let mut owner = hosted::tests::owner(&channel.get().to_string());
+    let mut owner = hosted::test_support::owner(&channel.get().to_string());
     owner.discord_token_hash = shared.token_hash.clone();
     owner.logical_key = logical.into();
-    let record = hosted::tests::record(&owner, "retired-nonce", HostedState::Retired);
+    let record = hosted::test_support::record(&owner, "retired-nonce", HostedState::Retired);
     sqlx::query("INSERT INTO sessions (session_key,provider,status,identity_kind,discord_token_hash,channel_id,hosted_execution) VALUES ($1,'claude','idle','discord_channel',$2,$3,$4)")
         .bind(&key).bind(&shared.token_hash).bind(channel.to_string()).bind(serde_json::to_value(record).unwrap()).execute(&pool).await.unwrap();
     let hosted::HostedLookup::Found(row) =

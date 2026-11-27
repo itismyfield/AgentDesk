@@ -195,7 +195,7 @@ fn claude_submission_modal(plain: &str) -> bool {
 }
 
 // Clear a proven composer body while preserving its borders for footer evidence.
-pub(crate) fn submission_busy(provider: ShadowProvider, plain: &str) -> bool {
+pub fn submission_busy(provider: ShadowProvider, plain: &str) -> bool {
     if provider == ShadowProvider::Codex {
         return crate::services::codex_tui::input::submission_busy_in_pane(plain);
     }

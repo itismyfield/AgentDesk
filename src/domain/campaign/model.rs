@@ -390,7 +390,7 @@ pub struct CampaignState {
 }
 
 impl CampaignState {
-    pub(crate) fn legacy_execution_revision(&self) -> u64 {
+    pub fn legacy_execution_revision(&self) -> u64 {
         self.definition
             .legacy_execution_revision(self.definition_revision)
     }

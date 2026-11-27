@@ -30,7 +30,7 @@ thread_local! {
     static ACTIVE: RefCell<Option<Arc<Capture>>> = const { RefCell::new(None) };
 }
 
-pub(crate) fn arm(
+pub fn arm(
     token: &CancelToken,
     pool: Option<PgPool>,
     provider: &ProviderKind,
@@ -50,19 +50,19 @@ pub(crate) fn arm(
     }
 }
 
-pub(crate) struct Scope {
+pub struct Scope {
     capture: Option<Arc<Capture>>,
     previous: Option<Arc<Capture>>,
 }
 
 impl Scope {
-    pub(crate) fn enter(token: &CancelToken) -> Self {
+    pub fn enter(token: &CancelToken) -> Self {
         let capture = token.prompt_capture.get().cloned();
         let previous = ACTIVE.replace(capture.clone());
         Self { capture, previous }
     }
 
-    pub(crate) fn success(&self) {
+    pub fn success(&self) {
         if let Some(capture) = &self.capture {
             capture
                 .state
@@ -92,7 +92,7 @@ pub(crate) fn record(prompt: Option<&str>, resume: bool) {
     });
 }
 
-pub(crate) fn claude_args(args: &[String]) {
+pub fn claude_args(args: &[String]) {
     record(
         args.windows(2)
             .find(|p| p[0] == "--append-system-prompt")
@@ -108,7 +108,7 @@ pub(crate) fn codex_options(options: &crate::services::codex::CodexLaunchOptions
     );
 }
 
-pub(crate) fn observe(token: &CancelToken, session: &str) {
+pub fn observe(token: &CancelToken, session: &str) {
     if let Some(capture) = token.prompt_capture.get() {
         capture
             .state
@@ -119,7 +119,7 @@ pub(crate) fn observe(token: &CancelToken, session: &str) {
     }
 }
 
-pub(crate) fn observed_binding(token: &CancelToken) -> Option<(ProviderKind, String)> {
+pub fn observed_binding(token: &CancelToken) -> Option<(ProviderKind, String)> {
     let capture = token.prompt_capture.get()?;
     let session = capture
         .state

@@ -3,44 +3,6 @@ use crate::services::tui_o::store::fault::{self, Keep, Step as At};
 
 const SUMMARY_MARK: &str = "turn_summary_open";
 
-fn captured(value: serde_json::Value) -> CapturedRecord {
-    let line = serde_json::to_vec(&value).unwrap();
-    CapturedRecord {
-        start: 0,
-        end: line.len() as u64 + 1,
-        line,
-    }
-}
-
-fn timestamp(second: u8) -> String {
-    format!("2026-10-19T00:00:{second:02}Z")
-}
-
-fn prompt(id: &str, second: u8) -> CapturedRecord {
-    captured(serde_json::json!({
-        "type":"user", "uuid":format!("prompt-{id}"), "timestamp":timestamp(second),
-        "message":{"content":"request"},
-    }))
-}
-
-fn body(id: &str, second: u8) -> CapturedRecord {
-    captured(serde_json::json!({
-        "type":"assistant", "uuid":format!("uuid-{id}"), "apiBlockIndex":0,
-        "timestamp":timestamp(second), "message":{"id":id, "usage":{"input_tokens":100},
-            "content":[{"type":"text", "text":format!("answer {id}")}]},
-    }))
-}
-
-fn idle(second: u8) -> CapturedRecord {
-    captured(serde_json::json!({
-        "type":"system", "subtype":"stop_hook_summary", "timestamp":timestamp(second),
-    }))
-}
-
-fn records(id: &str, second: u8) -> [CapturedRecord; 3] {
-    [prompt(id, second), body(id, second + 1), idle(second + 10)]
-}
-
 fn mark_key(id: &str) -> UnitKey {
     UnitKey {
         native_key: format!("{id}:0#turn"),
@@ -78,12 +40,6 @@ fn summary(items: &[Derived]) -> PieceWork {
         .collect::<Vec<_>>();
     assert_eq!(summaries.len(), 1, "{items:?}");
     summaries.into_iter().next().unwrap()
-}
-
-async fn deliver_all(writer: &mut Writer, items: &[Derived]) {
-    for item in items {
-        assert_eq!(writer.deliver(item).await, Step::Done, "{item:?}");
-    }
 }
 
 async fn replay(writer: &mut Writer, records: &[CapturedRecord]) -> Vec<Derived> {
@@ -457,68 +413,6 @@ async fn prepared_old_footer_reconciles_using_its_saved_bytes_after_format_chang
         .unwrap();
     assert_eq!(saved.payload, prepared.payload);
     assert!(matches!(saved.outcome, Some(PieceOutcome::Posted(_))));
-}
-
-pub(crate) struct FooterWriter {
-    harness: Harness,
-    writer: Writer,
-}
-
-impl FooterWriter {
-    pub(crate) fn new(channel: u64, pool: sqlx::PgPool) -> Self {
-        let harness = Harness::build_channel(channel, |_| Vec::new());
-        harness.gate.acquired();
-        harness.port.usage_footer_pool.set(pool).unwrap();
-        let writer = harness.writer();
-        Self { harness, writer }
-    }
-
-    pub(crate) fn root(&self) -> &std::path::Path {
-        self.harness._runtime.path()
-    }
-
-    pub(crate) fn restart(&mut self) {
-        self.writer = self.harness.writer();
-    }
-
-    pub(crate) async fn turn(&mut self, id: &str) -> String {
-        use crate::services::claude_tui::hook_bundle::statusline::{record_dir, record_path};
-
-        let session = uuid::Uuid::new_v4().to_string();
-        let now = Utc::now();
-        let root = record_dir();
-        std::fs::create_dir_all(&root).unwrap();
-        let path = record_path(&root, &session);
-        std::fs::write(
-            &path,
-            serde_json::json!({"session_id":session, "rate_limits":{
-                "five_hour":{"used_percentage":24,"resets_at": now.timestamp()+18000}
-            }})
-            .to_string(),
-        )
-        .unwrap();
-        let ledger = self.writer.store().ledger();
-        let mut derive = UnitDeriver::new(self.harness.channel_id, ShadowProvider::Claude)
-            .with_turn_summary(pieces::SummaryInputs {
-                turn_marks: ledger.summary_turn_marks(),
-                disposed: ledger.disposed_unit_hashes(),
-                context_window: None,
-            });
-        let [prompt, body, terminal] = records(id, 0).map(|record| {
-            let mut value: serde_json::Value = serde_json::from_slice(&record.line).unwrap();
-            value["sessionId"] = serde_json::json!(session);
-            captured(value)
-        });
-        let before = self.harness.port.posts().len();
-        for record in [prompt, body, terminal] {
-            deliver_all(&mut self.writer, &derive.derive(&record)).await;
-        }
-        let posts = self.harness.port.posts();
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(posts.len(), before + 2, "{posts:?}");
-        assert_eq!(posts[before], format!("answer {id}"));
-        posts[before + 1].clone()
-    }
 }
 
 #[tokio::test(start_paused = true)]

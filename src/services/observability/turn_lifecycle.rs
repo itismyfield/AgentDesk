@@ -222,6 +222,11 @@ impl TurnEvent {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn details_json_for_test(&self) -> Value {
+        self.details_json()
+    }
+
     pub(crate) fn details_json(&self) -> Value {
         match self {
             Self::SessionResumeFailedWithRecovery(details) => {

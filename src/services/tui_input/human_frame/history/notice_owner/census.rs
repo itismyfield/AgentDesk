@@ -8,7 +8,7 @@ use std::fs::File;
 use std::io::{BufRead, Read, Seek, SeekFrom};
 use std::sync::Arc;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "census/census_tests.rs"]
 pub(super) mod tests;
 
@@ -189,19 +189,19 @@ fn scan(
     before: &Fingerprint,
     resume: Option<Resume>,
 ) -> Result<Scanned, Transient> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     CENSUS_READS.with(|count| count.set(count.get() + 1));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     tests::point(tests::Stage::Open, &source.path).map_err(|_| Transient(None))?;
     let file = File::open(&source.path).map_err(|_| Transient(None))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     tests::point(tests::Stage::Metadata, &source.path).map_err(|_| Transient(None))?;
     let opened = Fingerprint::of(&file.metadata().map_err(|_| Transient(None))?)
         .map_err(|_| Transient(None))?;
     if opened != *before || opened.len < through {
         return Err(Transient(None));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     tests::point(tests::Stage::Read, &source.path).map_err(|_| Transient(None))?;
     let start = resume
         .filter(|point| point.extends(before, through) && point.guard_holds(&file))
@@ -226,7 +226,7 @@ fn scan(
             resume: None,
         },
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     tests::point(tests::Stage::AfterScan, &source.path).map_err(|_| Transient(None))?;
     let after = Fingerprint::of(&file.metadata().map_err(|_| Transient(None))?)
         .map_err(|_| Transient(None))?;
@@ -302,18 +302,9 @@ fn rows(
             && value["isMeta"] != true
             && !crate::services::tui_o::shadow::identity::record_is_compact_summary(&value)
         {
-            match &value["message"]["content"] {
-                serde_json::Value::String(text) => Some(text.clone()),
-                serde_json::Value::Array(blocks) => blocks
-                    .iter()
-                    .map(|b| (b["type"] == "text").then(|| b["text"].as_str()))
-                    .collect::<Option<Option<Vec<_>>>>()
-                    .flatten()
-                    .map(|v| v.join("\n")),
-                _ => None,
-            }
+            exact_text(&value["message"]["content"])
         } else if value["type"] == "attachment" && value["attachment"]["type"] == "queued_command" {
-            value["attachment"]["prompt"].as_str().map(str::to_owned)
+            exact_text(&value["attachment"]["prompt"])
         } else {
             None
         };
@@ -333,4 +324,16 @@ fn rows(
         return Err(Transient(None));
     }
     Ok(Some(progress))
+}
+
+fn exact_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| (b["type"] == "text").then_some(b["text"].as_str()?))
+            .collect::<Option<Vec<_>>>()
+            .map(|texts| texts.join("\n")),
+        _ => None,
+    }
 }

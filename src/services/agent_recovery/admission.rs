@@ -11,11 +11,11 @@ tokio::task_local! {
     static TURN_IDENTITY: (ProviderKind, Option<String>);
 }
 
-pub(crate) async fn with_recovery_start<F: Future>(lease: RecoveryLease, future: F) -> F::Output {
+pub async fn with_recovery_start<F: Future>(lease: RecoveryLease, future: F) -> F::Output {
     RECOVERY_START.scope(lease, future).await
 }
 
-pub(crate) async fn with_turn_identity<F: Future>(
+pub async fn with_turn_identity<F: Future>(
     provider: ProviderKind,
     agent: Option<String>,
     future: F,
@@ -24,7 +24,7 @@ pub(crate) async fn with_turn_identity<F: Future>(
 }
 
 /// Held through actual mailbox/token reservation, not just the routing check.
-pub(crate) struct AdmissionGuard {
+pub struct AdmissionGuard {
     _transaction: Option<Transaction<'static, Postgres>>,
 }
 
@@ -58,7 +58,7 @@ fn allows(
     ) && permit.is_some_and(|permit| permit == &RecoveryLease::from_state(state))
 }
 
-pub(crate) async fn admit(
+pub async fn admit(
     channel: &str,
     default_provider: &ProviderKind,
 ) -> Result<AdmissionGuard, String> {

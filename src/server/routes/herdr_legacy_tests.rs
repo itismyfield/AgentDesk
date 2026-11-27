@@ -16,7 +16,7 @@ use super::dispatched_sessions::{
     force_kill_session, kill_tmux_session,
 };
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::db::dispatched_sessions::hosted_execution::tests::{
+use crate::db::dispatched_sessions::hosted_execution::test_support::{
     TOKEN, future_schema, owner, record, wire,
 };
 use crate::services::discord::herdr_terminate::{

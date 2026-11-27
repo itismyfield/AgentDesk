@@ -67,7 +67,7 @@ pub async fn startup_reseed_with_warmup_pool(
 }
 
 /// Single-node and hub configurations own shared reseeding, including pre-seed config audit.
-pub(crate) fn shared_config_sync_enabled(config: &Config) -> bool {
+pub fn shared_config_sync_enabled(config: &Config) -> bool {
     !config.cluster.enabled || config.cluster.role == ClusterRole::Hub
 }
 

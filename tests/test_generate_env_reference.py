@@ -155,6 +155,11 @@ class SourceTreeStabilityTests(unittest.TestCase):
         for name in ("ADK_TEST_ITEM", "ADK_TEST_HELPER", "ADK_TEST_CONST", "ADK_TEST_STATIC", "ADK_TEST_SUPPORT"):
             self.assertNotIn(name, output)
 
+    def test_file_under_test_only_parent_mod_does_not_enter_production_reference(self) -> None:
+        self.write("src/lib.rs", '#[cfg(any(test, feature = "test-support"))]\nmod fixture;\n')
+        self.write("src/fixture.rs", 'fn f() { let _ = std::env::var("ADK_TEST_CHILD"); }\n')
+        self.assertNotIn("ADK_TEST_CHILD", self.render())
+
     def test_named_helper_argument_records_the_reader_file(self) -> None:
         self.write("src/names.rs", 'pub const FLAG_ENV: &str = "AGENTDESK_DYNAMIC";')
         self.write("src/consumer.rs", 'fn read() -> bool { crate::utils::env_flag(FLAG_ENV, false) }')

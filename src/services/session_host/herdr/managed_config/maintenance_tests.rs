@@ -525,7 +525,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
             for fault in &mut faults {
                 fault.set_notice_receipt_root_for_test(&receipts);
             }
-            notify(faults, observe_operator_notice)
+            notify_for_test(faults, observe_operator_notice)
         };
         tick(&restart).await;
         assert_eq!(record("episode").cause, Some(RESTART));
@@ -560,7 +560,7 @@ fn an_unverifiable_server_keeps_the_restart_cause_and_its_one_notice_until_a_fre
         forget_record_for_test("episode");
         let posted = OperatorNotice {
             root: Some(receipts.clone()),
-            ..OperatorNotice::herdr_home("episode-node", &home, 7_189_041)
+            ..OperatorNotice::herdr_home_for_test("episode-node", &home, 7_189_041)
         };
         assert!(restart_operator_notice_for_test(&posted));
         tick(&unverified).await;
@@ -599,7 +599,7 @@ fn a_home_with_no_mapped_channel_keeps_its_notice_pending() {
     let restart = RestoreResume::Unverified(RestoreUnverified::ConfigChangedSinceStart);
     paused().block_on(async {
         for _ in 0..3 {
-            notify(
+            notify_for_test(
                 pass_with_for_test(&boot, &f.personal, &|_| Some(restart.clone())),
                 observe_operator_notice,
             )

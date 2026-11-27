@@ -1,4 +1,4 @@
-pub(crate) mod host_terminate;
+pub mod host_terminate;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -197,7 +197,7 @@ pub fn record_termination_for_tmux(
 }
 
 /// [`record_termination_for_tmux`] for a session the host guard admitted.
-pub(crate) fn record_termination_for_cleared(
+pub fn record_termination_for_cleared(
     session: &crate::services::session_host::ClearedHostSession,
     dispatch_id: Option<&str>,
     killer_component: &str,

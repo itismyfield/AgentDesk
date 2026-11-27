@@ -258,6 +258,7 @@ fn request_inflight_abandon_matching_in_root(
 /// #3859 zero-id variant — mirrors [`clear_inflight_state_if_matches_zero_owned`]
 /// guards, then enqueues an abandon-request (if the row anchors a finalizable
 /// placeholder) and deletes the row.
+#[cfg(test)]
 pub(crate) fn request_inflight_abandon_if_matches_zero_owned(
     provider: &ProviderKind,
     channel_id: u64,

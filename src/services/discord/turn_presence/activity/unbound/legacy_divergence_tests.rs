@@ -3,7 +3,7 @@ use super::*;
 use crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg;
 use crate::db::dispatched_sessions::HookSessionUpsert;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
-use crate::services::platform::tmux::session_inventory::tests::ChannelCommand;
+use crate::services::platform::tmux::session_inventory::test_support::ChannelCommand;
 use std::path::PathBuf;
 
 pub(super) struct LegacyFixture {

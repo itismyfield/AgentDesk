@@ -8,33 +8,33 @@
 //! `preferred_intake_node_labels` and the live `worker_nodes` snapshot.
 //! Phase 3 will add the worker-side polling loop in a sibling submodule.
 
-pub(crate) mod agent_execution_node;
-pub(crate) mod attachment_transfer;
-pub(crate) mod capability_routing;
-pub(crate) mod dispatch_hooks;
-pub(crate) mod execution_capacity;
-pub(crate) mod execution_requirements;
+pub mod agent_execution_node;
+pub mod attachment_transfer;
+pub mod capability_routing;
+pub mod dispatch_hooks;
+pub mod execution_capacity;
+pub mod execution_requirements;
 #[cfg(test)]
 pub(crate) mod input_fallback;
-pub(crate) mod input_fallback_config;
+pub mod input_fallback_config;
 #[cfg(test)]
 pub(crate) mod intake_preflight;
-pub(crate) mod intake_router_hook;
+pub mod intake_router_hook;
 pub(crate) mod intake_routing;
-pub(crate) mod intake_routing_config;
-pub(crate) mod intake_routing_telemetry;
-pub(crate) mod intake_turn;
-pub(crate) mod intake_worker;
-pub(crate) mod intake_worker_capabilities;
-pub(crate) mod machine_resources;
+pub mod intake_routing_config;
+pub mod intake_routing_telemetry;
+pub mod intake_turn;
+pub mod intake_worker;
+pub mod intake_worker_capabilities;
+pub mod machine_resources;
 /// Runner-node registry + capability routing infrastructure. Relocated from
 /// `server::cluster` (#3037 bucket 3): it is pure cluster coordination
 /// (config + db + serde) with no route/axum dependency, so it belongs beside
 /// the rest of the cluster services. `server::cluster` re-exports it for the
 /// route layer.
-pub(crate) mod node_registry;
+pub mod node_registry;
 pub(crate) mod pre_accept_sweep;
-pub(crate) mod readiness;
+pub mod readiness;
 pub mod registry_adapter_sink;
 pub mod relay_producer_registry;
 pub mod session_discovery;
@@ -43,7 +43,7 @@ pub mod session_registry;
 /// Session owner routing helpers. Relocated from
 /// `server::cluster_session_routing` (#3037 bucket 3); `server::cluster_session_routing`
 /// re-exports it for the route layer.
-pub(crate) mod session_routing;
+pub mod session_routing;
 pub mod stream_relay;
 pub mod watcher_supervisor;
 

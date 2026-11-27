@@ -75,7 +75,7 @@ impl TmuxHost {
         )
     }
 
-    pub(crate) fn platform_input(
+    pub fn platform_input(
         &self,
         session: &str,
         source: InputSource,
@@ -106,6 +106,17 @@ impl TmuxHost {
             InputSource::Inherited,
             payload,
         )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn actor_input_for_test(
+        &self,
+        program: &Path,
+        session: &str,
+        budget: Duration,
+        payload: SubmitPayload<'_>,
+    ) -> SubmitOutcome {
+        self.actor_input(program, session, budget, payload)
     }
 
     pub(crate) fn actor_input(

@@ -4,7 +4,7 @@ use super::cancel_token_claude_interrupt::{HerdrInterruptState, HerdrSubmission,
 use std::sync::atomic::Ordering;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum InputPhase {
+pub enum InputPhase {
     BeforeInput,
     Attempting,
     FinishedNoAttempt,
@@ -15,23 +15,26 @@ pub(crate) enum InputPhase {
 
 /// The negative evidence a close rested on: no attempt began, or a typed attempt left it untouched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CloseBasis {
+pub enum CloseBasis {
     NoAttempt,
     Untouched,
 }
 
-pub(crate) struct HerdrInputState {
-    pub(crate) submission: HerdrSubmission,
+pub struct HerdrInputState {
+    pub submission: HerdrSubmission,
+    #[cfg(any(test, feature = "test-support"))]
+    pub phase: InputPhase,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) phase: InputPhase,
     pub(crate) exit: Option<ExitDecision>,
     /// Recorded by the close itself, so a later seal still names its evidence.
     pub(crate) closed_from: Option<CloseBasis>,
     /// The execution nonce this input went to, recorded under this lock before any write.
-    pub(crate) execution: Option<String>,
+    pub execution: Option<String>,
     /// The executor returned an error: no reader is left to read this turn's terminal.
     pub(crate) failed: bool,
     /// The row pass logged once that the execution ended while its source read nothing.
-    pub(crate) source_unknown_logged: bool,
+    pub source_unknown_logged: bool,
 }
 
 impl Default for HerdrInputState {
@@ -49,7 +52,7 @@ impl Default for HerdrInputState {
 }
 
 /// A Closed result never invokes the host input runner.
-pub(crate) enum InputRun<T> {
+pub enum InputRun<T> {
     Ran(T),
     Closed,
 }
@@ -95,13 +98,13 @@ impl HerdrInterruptState {
     }
 
     /// Nonblocking diagnostic: contention is not proof that nothing was written.
-    pub(crate) fn closed_probe(&self) -> Option<bool> {
+    pub fn closed_probe(&self) -> Option<bool> {
         self.submission.try_lock().ok().map(|input| {
             input.phase == InputPhase::Closed && input.submission == HerdrSubmission::Unsubmitted
         })
     }
 
-    pub(crate) fn prepare_input(&self, input: &mut HerdrInputState) -> bool {
+    pub fn prepare_input(&self, input: &mut HerdrInputState) -> bool {
         if self.close_before_start(input) {
             return false;
         }
@@ -112,7 +115,7 @@ impl HerdrInterruptState {
         true
     }
 
-    pub(crate) fn finish_input(
+    pub fn finish_input(
         &self,
         input: &mut HerdrInputState,
         submission: HerdrSubmission,
@@ -128,7 +131,7 @@ impl HerdrInterruptState {
 }
 
 /// Runs only on the blocking executor thread, after all Result exits converge; `failed` is an `Err`.
-pub(crate) fn finish_execution(token: Option<&CancelToken>, failed: bool) {
+pub fn finish_execution(token: Option<&CancelToken>, failed: bool) {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available()
         && crate::services::tui_o::exact_submission::logical_key().is_none()
     {
@@ -158,7 +161,7 @@ pub(crate) fn observed_execution(
     result
 }
 
-pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
+pub fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, String> {
     if !super::cancel_token_claude_interrupt::herdr_stop_settlement_available() {
         return Ok(false);
     }
@@ -173,32 +176,28 @@ pub(crate) fn prelaunch_closed(token: Option<&CancelToken>) -> Result<bool, Stri
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BeforeStartProof {
-    pub(crate) owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
-    pub(crate) turn_nonce: String,
-    pub(crate) generation: u64,
-    pub(crate) basis: CloseBasis,
+pub struct BeforeStartProof {
+    pub owner: crate::db::dispatched_sessions::hosted_execution::HostedOwner,
+    pub turn_nonce: String,
+    pub generation: u64,
+    pub basis: CloseBasis,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ExitDecision {
+pub enum ExitDecision {
     Normal,
     Hold,
     PolicyClose(BeforeStartProof),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs inside a seal after its one stop observation, where a concurrent stop can land.
-    pub(crate) static EXIT_OBSERVED: std::cell::Cell<Option<fn(&HerdrInterruptState)>> =
+    pub static EXIT_OBSERVED: std::cell::Cell<Option<fn(&HerdrInterruptState)>> =
         const { std::cell::Cell::new(None) };
 }
 
-pub(crate) fn seal_exit(
-    token: &CancelToken,
-    cancelled: bool,
-    terminal_admitted: bool,
-) -> ExitDecision {
+pub fn seal_exit(token: &CancelToken, cancelled: bool, terminal_admitted: bool) -> ExitDecision {
     use super::cancel_token_claude_interrupt::herdr_stop_settlement_available;
     let exception = !herdr_stop_settlement_available() || cancelled || terminal_admitted;
     if exception {
@@ -222,7 +221,7 @@ pub(crate) fn seal_exit(
         )
         && state.close_observed(&mut input, stop)
         && token.turn_nonce().is_some();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(hook) = EXIT_OBSERVED.with(std::cell::Cell::get) {
         hook(&state);
     }
@@ -253,7 +252,7 @@ fn ended_untouched_locked(input: &HerdrInputState) -> bool {
 
 /// Whether this token's Herdr input ended Unsubmitted and FinishedUntouched.
 #[cfg(unix)]
-pub(crate) fn ended_untouched(token: &CancelToken) -> bool {
+pub fn ended_untouched(token: &CancelToken) -> bool {
     token.herdr_interrupt_state().is_some_and(|state| {
         ended_untouched_locked(&state.submission.lock().unwrap_or_else(|e| e.into_inner()))
     })
@@ -262,7 +261,7 @@ pub(crate) fn ended_untouched(token: &CancelToken) -> bool {
 /// Seals a normal exit for an attempt that ended before its first key with no stop taken, so its
 /// row can be rewound: a stop taken after this is late. False changes nothing.
 #[cfg(unix)]
-pub(crate) fn seal_untouched_exit(token: &CancelToken) -> bool {
+pub fn seal_untouched_exit(token: &CancelToken) -> bool {
     let Some(state) = token.herdr_interrupt_state() else {
         return false;
     };
@@ -276,7 +275,7 @@ pub(crate) fn seal_untouched_exit(token: &CancelToken) -> bool {
     untouched
 }
 
-pub(crate) fn claude_observed_input(
+pub fn claude_observed_input(
     cancel: Option<&super::CancelToken>,
     start: impl FnOnce() -> crate::services::provider::cancel_token_claude_interrupt::HerdrTurnStart,
     write: impl FnOnce() -> crate::services::claude_tui::host_input::InputRun,
@@ -337,7 +336,7 @@ pub(crate) fn claude_observed_input(
 static BOUNDARY_STOPS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
     std::sync::LazyLock::new(Default::default);
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
+pub fn stop_at_input_boundary(logical: &str, stop: bool) {
     let mut stops = BOUNDARY_STOPS.lock().unwrap();
     if stop {
         stops.insert(logical.into());
@@ -345,7 +344,7 @@ pub(crate) fn stop_at_input_boundary(logical: &str, stop: bool) {
         stops.remove(logical);
     }
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_input_boundary(token: Option<&CancelToken>) {
     if let Some(state) = token.and_then(CancelToken::herdr_interrupt_state)
         && BOUNDARY_STOPS

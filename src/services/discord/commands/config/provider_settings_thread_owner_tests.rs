@@ -1,7 +1,7 @@
 //! A thread's settings owner is its own execution's node, never its parent's policy alone.
 
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests::record};
+use crate::db::dispatched_sessions::hosted_execution::{HostedState, test_support::record};
 use crate::services::platform::tmux::SessionPresence;
 use crate::services::session_host::host_decision::force_presence_for_test;
 use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
@@ -53,7 +53,7 @@ async fn a_threads_settings_owner_follows_its_own_execution_pg() {
         .expect("a live local tmux thread is not the parent's node's");
 
     let mut owner =
-        crate::db::dispatched_sessions::hosted_execution::tests::owner(&thread.to_string());
+        crate::db::dispatched_sessions::hosted_execution::test_support::owner(&thread.to_string());
     owner.discord_token_hash = shared.token_hash.clone();
     owner.logical_key = TMUX.into();
     owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();

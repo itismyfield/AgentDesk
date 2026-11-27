@@ -569,7 +569,7 @@ async fn late_adopt_binding_unsafe_channel_does_not_block_other_channels_new_bod
     let config: crate::config::Config = serde_json::from_value(value).unwrap();
     let snapshot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |channels, _| {
+        .seeded_for_test(&config, |channels, _| {
             Ok(crate::services::tui_o::channel_policy::stored(
                 Some(f.harness._runtime.path()),
                 channels,
@@ -676,7 +676,7 @@ async fn late_adopt_binding_two_simultaneous_sources_each_commit_and_post_new_on
     let config: crate::config::Config = serde_json::from_value(value).unwrap();
     let snapshot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |channels, _| {
+        .seeded_for_test(&config, |channels, _| {
             Ok(crate::services::tui_o::channel_policy::stored(
                 Some(f.harness._runtime.path()),
                 channels,

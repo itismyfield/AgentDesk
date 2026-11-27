@@ -1,6 +1,6 @@
 use super::*;
 
-pub(crate) fn fixture() -> Vec<EpisodeMetadata> {
+pub fn fixture() -> Vec<EpisodeMetadata> {
     let episode = Uuid::from_u128(1);
     let source = SourceIdentity {
         incarnation: Uuid::from_u128(2),

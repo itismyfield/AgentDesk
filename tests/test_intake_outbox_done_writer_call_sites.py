@@ -52,7 +52,7 @@ class SourceContractTests(unittest.TestCase):
 
     def test_allowlisted_symbol_is_imported_by_its_owner_function_file(self):
         worker = (ROOT / "src/services/cluster/intake_worker.rs").read_text(encoding="utf-8")
-        self.assertIn("pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(", worker)
+        self.assertIn("pub async fn run_intake_worker_tick<S: IntakeHost>(", worker)
         self.assertIn("mark_done(pool, row.id, claim_owner)", worker)
 
 
@@ -391,7 +391,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         worker = self.WORKER.read_text(encoding="utf-8")
         owner = self.OWNER.read_text(encoding="utf-8")
 
-        tick = self.item(worker, "pub(crate) async fn run_intake_worker_tick<S: IntakeHost>(")
+        tick = self.item(worker, "pub async fn run_intake_worker_tick<S: IntakeHost>(")
         self.assertIn("cancelled: &(dyn Fn() -> bool + Sync),", tick)
         self.assertEqual(
             self.CHECKPOINT.findall(tick),
@@ -409,7 +409,7 @@ class TransportLegacyInventoryTests(unittest.TestCase):
         self.assertNotIn(".restart.", tick)
 
         loop_body = self.item(
-            worker, "pub(crate) async fn run_intake_worker_loop<S: IntakeHost>("
+            worker, "pub async fn run_intake_worker_loop<S: IntakeHost>("
         )
         self.assertNotIn("cancel: Arc<AtomicBool>", loop_body)
         self.assertIn("let cancelled = shared.shutdown_probe();", loop_body)

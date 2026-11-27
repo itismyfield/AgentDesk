@@ -10,25 +10,25 @@ const UNIT_TESTS_SHA256: &str = "9e6c2c36b6885e2b54f6e91a16d60d98e86359ded13ac0a
 const UNIT_OUTPUTS_SHA256: &str =
     "91e599c5c234c990365f2c6698d58db0b43ccbd581d0bb27a30b5ca4900ef382";
 const FUNCTIONS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
+    env!("ADK_REPO_ROOT"),
     "/tests/fixtures/herdr_writer/upstream_functions.rs"
 ));
 const UNIT_TESTS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
+    env!("ADK_REPO_ROOT"),
     "/tests/fixtures/herdr_writer/upstream_unit_tests.txt"
 ));
 const UNIT_OUTPUTS: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
+    env!("ADK_REPO_ROOT"),
     "/tests/fixtures/herdr_writer/upstream_unit_outputs.json"
 ));
 const PROVENANCE: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
+    env!("ADK_REPO_ROOT"),
     "/tests/fixtures/herdr_writer/provenance.json"
 ));
 
 mod pinned {
     include!(concat!(
-        env!("CARGO_MANIFEST_DIR"),
+        env!("ADK_REPO_ROOT"),
         "/tests/fixtures/herdr_writer/upstream_functions.rs"
     ));
 

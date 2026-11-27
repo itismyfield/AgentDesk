@@ -1,4 +1,4 @@
-//! A publishing actor observes its native source on every poll; the memo changes no post.
+//! A publishing actor skips quiescent native offers without changing which records it posts.
 use super::*;
 use crate::services::tui_o::writer::actor::native_input::{
     EvidencePort, NativePort, Snapshot, spawn_native,
@@ -11,16 +11,34 @@ type Held<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send 
 
 /// A port with no registrations that counts the snapshots the actor asks for.
 #[derive(Default)]
-struct Unregistered(AtomicUsize);
+struct Unregistered {
+    snapshots: AtomicUsize,
+    registry_revision: std::sync::atomic::AtomicU64,
+}
 impl EvidencePort for Unregistered {
     fn snapshot(&self, _: NoticeOrigin) -> Held<'_, Result<Snapshot, String>> {
-        self.0.fetch_add(1, Ordering::SeqCst);
+        self.snapshots.fetch_add(1, Ordering::SeqCst);
+        let revision = self.registry_revision.load(Ordering::SeqCst);
         let (generation, registrations) = (1, Vec::new());
         Box::pin(async move {
             Ok(Snapshot {
                 generation,
                 registrations,
+                registry_revisions: vec![revision],
+                has_open_barrier: false,
             })
+        })
+    }
+    fn snapshot_since<'a>(
+        &'a self,
+        origin: NoticeOrigin,
+        known: Option<&'a [u64]>,
+    ) -> Held<'a, Result<Option<Snapshot>, String>> {
+        Box::pin(async move {
+            if known == Some(&[self.registry_revision.load(Ordering::SeqCst)]) {
+                return Ok(None);
+            }
+            self.snapshot(origin).await.map(Some)
         })
     }
     fn offer(
@@ -74,15 +92,21 @@ async fn memo_hits_keep_every_post_exactly_once() {
     let (stop, task) = spawn_on(&harness, &port);
     append(&path, &row("m1", "first"));
     polls(6).await;
+    let after_first = port.snapshots.load(Ordering::SeqCst);
+    polls(6).await;
+    assert_eq!(port.snapshots.load(Ordering::SeqCst), after_first);
+    port.registry_revision.fetch_add(1, Ordering::SeqCst);
+    polls(6).await;
+    let after_registry_change = port.snapshots.load(Ordering::SeqCst);
+    assert!(after_registry_change > after_first);
     append(&path, &row("m2", "second"));
     polls(6).await;
+    assert!(port.snapshots.load(Ordering::SeqCst) > after_registry_change);
     halt(stop, task).await;
     let (stop, task) = spawn_on(&harness, &port);
     append(&path, &row("m3", "third"));
     polls(6).await;
     halt(stop, task).await;
-    // Three records changed the source; every other poll observed an input already reduced.
-    assert!(port.0.load(Ordering::SeqCst) > 9);
     assert_eq!(harness.port.posts(), ["first", "second", "third"]);
     assert_eq!(harness.alarms.taken(), []);
 }
@@ -95,10 +119,10 @@ async fn a_cut_source_is_not_observed_on_the_poll_that_halts_its_actor() {
     let (_stop, task) = spawn_on(&harness, &port);
     append(&path, &row("m1", "first"));
     polls(6).await;
-    let observed = port.0.load(Ordering::SeqCst);
+    let observed = port.snapshots.load(Ordering::SeqCst);
     let file = std::fs::File::options().write(true).open(&path).unwrap();
     file.set_len(1).unwrap();
     polls(3).await;
     assert!(task.is_finished(), "the cut halts the actor");
-    assert_eq!(port.0.load(Ordering::SeqCst), observed);
+    assert_eq!(port.snapshots.load(Ordering::SeqCst), observed);
 }

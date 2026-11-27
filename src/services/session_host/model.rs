@@ -1,17 +1,17 @@
 use crate::services::platform::tmux::{PaneLiveness, SessionPresence};
 
-pub(crate) use crate::domain::host_observation::HostKind;
+pub use crate::domain::host_observation::HostKind;
 
 /// Key a host finds a session by. The tmux name doubles as the process-registry
 /// key; a Herdr ref holds only the pane id, its endpoint lives on the host.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct HostSessionRef<'a> {
+pub struct HostSessionRef<'a> {
     pub kind: HostKind,
     pub name: &'a str,
 }
 
 impl<'a> HostSessionRef<'a> {
-    pub(crate) fn tmux(name: &'a str) -> Self {
+    pub fn tmux(name: &'a str) -> Self {
         Self {
             kind: HostKind::Tmux,
             name,
@@ -25,7 +25,7 @@ impl<'a> HostSessionRef<'a> {
         }
     }
 
-    pub(crate) fn herdr_pane(pane_id: &'a str) -> Self {
+    pub fn herdr_pane(pane_id: &'a str) -> Self {
         Self {
             kind: HostKind::Herdr,
             name: pane_id,
@@ -33,7 +33,7 @@ impl<'a> HostSessionRef<'a> {
     }
 
     /// The name for a tmux/process-registry lookup; a Herdr pane id is never one.
-    pub(crate) fn legacy_name(self) -> Result<&'a str, HostError> {
+    pub fn legacy_name(self) -> Result<&'a str, HostError> {
         match self.kind {
             HostKind::Tmux | HostKind::Process => Ok(self.name),
             HostKind::Herdr => Err(HostError::Unsupported(HostKind::Herdr, "legacy_name")),
@@ -43,7 +43,7 @@ impl<'a> HostSessionRef<'a> {
 
 /// One-to-one with `platform::tmux::SessionPresence`; no reverse mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostPresence {
+pub enum HostPresence {
     Present,
     Missing,
     ProbeFailed,
@@ -51,7 +51,7 @@ pub(crate) enum HostPresence {
 
 /// One-to-one with `platform::tmux::PaneLiveness`; no reverse mapping.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostLiveness {
+pub enum HostLiveness {
     Live,
     DeadOrAbsent,
     ProbeError,
@@ -79,7 +79,7 @@ impl From<PaneLiveness> for HostLiveness {
 
 /// Keys the input executor may send; each host adapter owns its own key names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostKey {
+pub enum HostKey {
     Enter,
     Escape,
     CtrlU,
@@ -92,7 +92,7 @@ pub(crate) enum HostKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostRefusal {
+pub enum HostRefusal {
     Unsupported { kind: HostKind, op: &'static str },
     TargetMissing,
     Precondition(String),
@@ -101,14 +101,14 @@ pub(crate) enum HostRefusal {
 /// Outcome of a mutating call. `Indeterminate` means some input may have been
 /// delivered; multi-step callers and socket hosts after a write produce it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostMutation {
+pub enum HostMutation {
     Confirmed,
     Refused(HostRefusal),
     Indeterminate(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum HostError {
+pub enum HostError {
     Transport(String),
     Timeout,
     Unsupported(HostKind, &'static str),
@@ -122,7 +122,7 @@ pub(crate) enum HostError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub(crate) struct HostCapabilities {
+pub struct HostCapabilities {
     pub send_text: bool,
     pub send_keys: bool,
     pub interrupt: bool,
@@ -132,7 +132,7 @@ pub(crate) struct HostCapabilities {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostKindSource {
+pub enum HostKindSource {
     DurableRuntimeKind,
     RuntimeKindMarker,
     ProcessRegistry,
@@ -140,7 +140,7 @@ pub(crate) enum HostKindSource {
 
 /// `Unknown` and `Conflict` must never admit a destroy, recreate or finalize path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HostKindResolution {
+pub enum HostKindResolution {
     Known {
         kind: HostKind,
         source: HostKindSource,
@@ -155,7 +155,7 @@ pub(crate) enum HostKindResolution {
 /// Where a session is hosted. It carries no execution or provider-source identity
 /// (nonce, generation, provider session); those stay with their own owners.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct HostedRuntimeLocator {
+pub struct HostedRuntimeLocator {
     pub execution_node: Option<String>,
     pub host_kind: HostKind,
     pub host_session_id: String,

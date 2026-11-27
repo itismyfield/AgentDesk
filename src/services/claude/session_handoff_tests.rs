@@ -248,7 +248,7 @@ fn a_tmux_without_a_server_socket_has_ended_and_an_unread_one_stays_unobserved()
     use crate::services::session_host::{HostPresence, HostSessionRef};
     const NAME: &str = "adk-handoff-no-server";
     let _root = TestRuntimeRootGuard::new();
-    let tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install(NAME);
+    let tmux = crate::services::provider_teardown::test_support::FakeTmux::install(NAME);
     let sockets = tempfile::tempdir().unwrap();
     let set = TestEnvVarGuard::set_path_after_shared_test_env_lock;
     let _tmpdir = set("TMUX_TMPDIR", sockets.path());

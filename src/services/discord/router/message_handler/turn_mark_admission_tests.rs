@@ -18,7 +18,7 @@ fn reserved(channel: u64) -> BootChannels {
     .unwrap();
     BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |_, _| {
+        .seeded_for_test(&config, |_, _| {
             Ok(BTreeMap::from([(channel, Adoption::Pending)]))
         })
         .unwrap()

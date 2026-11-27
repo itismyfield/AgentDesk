@@ -31,7 +31,7 @@ pub(crate) fn local_eligible(channel: u64) -> Result<String, &'static str> {
 
 /// Read again under the launch fence before the Pending row: a pane, process or marker of
 /// `logical` that appeared since the turn was judged refuses the launch.
-pub(crate) fn vacant_recheck(logical: &str) -> Result<(), String> {
+pub fn vacant_recheck(logical: &str) -> Result<(), String> {
     tc::with_tmux_source_authority(logical, |authority| vacancy(authority.session()))
         .map_err(|reason| format!("herdr bootstrap: target not vacant ({reason})"))
 }
