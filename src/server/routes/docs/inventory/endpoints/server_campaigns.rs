@@ -47,6 +47,22 @@ pub(super) fn endpoints() -> Vec<EndpointDoc> {
         }
     });
     let mut endpoints = vec![
+        ep(
+            "GET",
+            "/api/human-waits",
+            "campaigns",
+            "List human waits for all open server campaigns without query parameters or detail reads. Rows are ordered by campaign_id, then node_id. human_status is decision_required, awaiting_approval, awaiting_deploy or awaiting_start. wait_started_at is the RFC 3339 opening time of the current bound gate through the campaign snapshot's event sequence, or null when unavailable. A successful empty result is {waits:[]}. Requires dashboard authentication and uses Cache-Control: no-store. PostgreSQL unavailable is 503 and other read errors are 500.",
+        )
+        .with_example(json!({}), json!({"waits": [{
+            "source": "server",
+            "campaign_id": "release",
+            "node_id": "a",
+            "title": "Verify release",
+            "campaign_title": "Release",
+            "issue_url": "https://github.com/itismyfield/AgentDesk/issues/7438",
+            "human_status": "awaiting_approval",
+            "wait_started_at": "2026-11-19T00:00:00Z"
+        }]})),
         ep("GET", "/api/server-campaigns", "campaigns", "List server campaigns as {campaigns:[{definition,view}]}. Definition is the input document; view includes campaign_id, revision, server as_of, execution_readiness=unavailable and the same nodes[].runtime schema as the detail endpoint. Uses existing authentication; PostgreSQL absence is 503, never an empty fallback.")
             .with_params([("limit",query_param("integer",false,"1..100; default 100.")),("offset",query_param("integer",false,"Nonnegative; default 0. Unknown query fields return 400.")),("view",query_param("string",false,"full (default) or summary. summary drops definition.nodes and view.nodes/sessions/unreconciled_actions and adds view.node_total, view.node_counts (by disposition), view.session_count, view.unreconciled_action_count; read nodes from GET /api/server-campaigns/{id}."))])
             .with_example(json!({}),json!({"campaigns":[campaign]})),
