@@ -1274,6 +1274,8 @@ src/
 │   │   │   └── same_session_source_tests.rs
 │   │   ├── host_input/
 │   │   │   ├── busy/
+│   │   │   │   ├── herdr/
+│   │   │   │   │   └── observation.rs
 │   │   │   │   ├── herdr.rs
 │   │   │   │   ├── herdr_tests.rs
 │   │   │   │   ├── idle_compaction_tests.rs
@@ -2354,6 +2356,8 @@ src/
 │   │   │   │   │       ├── actual_close_tests.rs
 │   │   │   │   │       ├── custody_tests.rs
 │   │   │   │   │       └── left_herdr_tests.rs
+│   │   │   │   ├── drive/
+│   │   │   │   │   └── hold_episode_tests.rs
 │   │   │   │   ├── drive_tests/
 │   │   │   │   │   ├── claimed_followers_tests.rs
 │   │   │   │   │   └── retry_wait_tests.rs
@@ -5385,7 +5389,8 @@ src/
 │   │   │   │   ├── sources.rs
 │   │   │   │   ├── start_failure.rs
 │   │   │   │   ├── start_failure_tests.rs
-│   │   │   │   └── unit_tests.rs
+│   │   │   │   ├── unit_tests.rs
+│   │   │   │   └── work_snapshot_tests.rs
 │   │   │   ├── v2_types/
 │   │   │   │   ├── cold_source.rs
 │   │   │   │   ├── effort_restart.rs
@@ -5400,8 +5405,10 @@ src/
 │   │   │   └── v2_types.rs
 │   │   ├── registry_purge/
 │   │   │   ├── closed_gate_tests.rs
-│   │   │   └── current_entry_tests.rs
+│   │   │   ├── current_entry_tests.rs
+│   │   │   └── idle_verdict.rs
 │   │   ├── active_source_dedup.rs
+│   │   ├── actor_lifetime.rs
 │   │   ├── checked_purge.rs
 │   │   ├── claim_observation.rs
 │   │   ├── clear_channel.rs
