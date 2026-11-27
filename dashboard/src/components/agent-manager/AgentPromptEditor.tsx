@@ -151,7 +151,7 @@ export default function AgentPromptEditor({
 
       <div id={panelId} role="tabpanel" className="min-w-0">
         {mode === "edit" ? (
-          <textarea ref={textareaRef} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} style={{ minHeight }} className="w-full resize-y rounded-(--r-md) border border-(--line) bg-(--bg-1) px-3 py-2.5 font-mono text-base leading-5 text-(--fg) outline-none focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-(--accent) sm:text-xs" />
+          <textarea ref={textareaRef} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} style={{ minHeight }} className="w-full resize-y rounded-(--r-md) border border-(--line) bg-(--bg-1) px-3 py-2.5 font-mono text-base leading-5 text-(--fg) outline-none focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-(--accent) sm:pointer-fine:text-xs" />
         ) : (
           <div data-testid="prompt-inline-diff" className="min-w-0">
             <InlineDiff

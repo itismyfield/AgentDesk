@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { RefreshCw } from "lucide-react";
 import type { Department, DispatchedSession } from "../../types";
-import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import { formatRelativeTime } from "../../app/shellFormatting";
 import { Button } from "../../kit/free/button-clean";
@@ -21,8 +20,8 @@ export function inferSessionContextLimit(model: string | null | undefined): numb
 }
 
 /** What the server sends about one unlinked session, under its row: state, Provider, summary, signals, key and live output preview. */
-export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo }: {
-  id: string; session: DispatchedSession; departments: Department[]; locale: string; tr: Translator; isKo: boolean;
+export function SessionInfoCard({ id, session: s, tr, isKo }: {
+  id: string; session: DispatchedSession; departments?: Department[]; locale?: string; tr: Translator; isKo: boolean;
 }) {
   const [output, setOutput] = useState<SessionOutputSnapshot | null | undefined>(undefined);
   const [loadingOutput, setLoadingOutput] = useState(false);
@@ -41,7 +40,6 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
     return () => ctrl.abort();
   }, [loadOutput]);
 
-  const department = departments.find((entry) => entry.id === s.department_id);
   const lastSeen = normalizeTimestamp(s.last_seen_at), connected = normalizeTimestamp(s.connected_at);
   const at = (time: number) => new Date(time).toLocaleString(isKo ? "ko-KR" : "en-US");
   const providerLabel = getProviderMeta(s.provider).label;
@@ -52,7 +50,6 @@ export function SessionInfoCard({ id, session: s, departments, locale, tr, isKo 
     [tr("세션 요약", "Summary"), s.session_info, "whitespace-pre-line"],
     [tr("마지막 신호", "Last signal"), lastSeen && `${formatRelativeTime(lastSeen, isKo)} · ${at(lastSeen)}`],
     [tr("접속", "Connected"), connected && at(connected)],
-    [tr("부서", "Department"), department && localeName(locale, department)],
     [tr("세션 ID", "Session ID"), s.id, "font-mono"],
     [tr("세션 키", "Session key"), s.session_key, "font-mono text-xs break-all"],
   ] satisfies Array<[string, ReactNode, string?]>).filter(([, value]) => value);

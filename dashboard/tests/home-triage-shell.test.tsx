@@ -354,7 +354,7 @@ describe("Slice 1 — Home 3-second triage, unlinked sessions, activity sort, an
 describe("Slice 1 — TopBar RunningNow, Responsive Shell, inert, Mobile Stats tab, and CommandPalette", () => {
   it("promotes stats to mobile primary tabs and defines the 900px-1120px tablet rail query (including 1032px)", () => {
     expect(MOBILE_PRIMARY_ROUTE_IDS).toEqual(["home", "campaigns", "agents", "stats"]);
-    expect(TABLET_RAIL_MEDIA_QUERY).toBe("(min-width: 900px) and (max-width: 1120px)");
+    expect(TABLET_RAIL_MEDIA_QUERY).toBe("(min-width: 900px) and (max-width: 1279px)");
   });
 
   it("renders AppSidebar as a 64px icon-only rail when collapsed and marks PageFrame header inert during full-window focus", async () => {

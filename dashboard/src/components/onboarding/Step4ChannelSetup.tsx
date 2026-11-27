@@ -104,8 +104,8 @@ export function Step4ChannelSetup({
       )}
 
       {guilds.length === 0 && (
-        <div className="rounded-lg p-4 text-sm" style={{ backgroundColor: "rgba(251,191,36,0.08)", border: "1px solid rgba(251,191,36,0.2)" }}>
-          <div style={{ color: "var(--th-badge-amber-text)" }}>
+        <div className="rounded-lg border border-[color-mix(in_oklch,var(--warn)_38%,var(--line))] bg-[var(--warn-soft)] p-4 text-sm text-[var(--warn-fg)]">
+          <div>
             {tr(
               "통신 봇이 어떤 서버에도 초대되지 않았거나 토큰 검증이 끝나지 않았습니다. 실제 채널 생성 보장을 위해 Step 1로 돌아가 봇 초대부터 완료하세요.",
               "The communication bot is not invited to any server yet, or token validation is incomplete. Go back to Step 1 and finish the invite before continuing.",
@@ -163,7 +163,7 @@ export function Step4ChannelSetup({
                   )}
                   value={assignment.channelName || assignment.recommendedName}
                   readOnly
-                  className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
+                  className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border"
                   style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                   placeholder={assignment.recommendedName}
                 />

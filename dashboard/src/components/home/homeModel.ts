@@ -188,7 +188,7 @@ export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], s
     .sort(compareHomeAgents);
 }
 
-/** Full home roster: real agents plus active or stalled unlinked sessions (and department stand-ins). */
+/** Full home roster: real agents plus active or stalled unlinked sessions. */
 export function buildHomeAgents(
   agents: Agent[],
   sessions: DispatchedSession[],
@@ -200,7 +200,7 @@ export function buildHomeAgents(
     .filter((session) => {
       if (session.linked_agent_id || session.status === "disconnected") return false;
       const activeOrWaiting = TURN_STATUSES.has(session.status) || session.status === "awaiting_bg" || session.status === "awaiting_user";
-      return activeOrWaiting || isStaleUnlinkedSession(session, now) || Boolean(session.department_id);
+      return activeOrWaiting || isStaleUnlinkedSession(session, now);
     })
     .map((session) => {
       const title = unlinkedSessionTitle(session);
@@ -209,7 +209,7 @@ export function buildHomeAgents(
         id: `dispatched:${session.id}`,
         name: title,
         name_ko: title,
-        department_id: session.department_id,
+        department_id: null,
         cli_provider: session.provider,
         avatar_emoji: session.avatar_emoji || "📡",
         personality: null,
@@ -219,9 +219,6 @@ export function buildHomeAgents(
         stats_tokens: session.tokens || 0,
         created_at: session.connected_at,
         session_info: session.session_info,
-        department_name: session.department_name,
-        department_name_ko: session.department_name_ko,
-        department_color: session.department_color,
       };
     });
 
