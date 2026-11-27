@@ -109,15 +109,9 @@ fn finish(dir: &Path) -> Result<(), StoreError> {
         fsync_parent_dir(&stage)?;
     }
     for (previous, _) in intent.paths(dir).filter(|(old, new)| old != new) {
-        match fs::remove_file(&previous) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        fsync_parent_dir(&previous)?;
+        durable::unlink_synced(&previous, true)?;
     }
-    fs::remove_file(&path)?;
-    Ok(fsync_parent_dir(&path)?)
+    Ok(durable::unlink_synced(&path, false)?)
 }
 
 fn replace_source(value: &mut Value, old: &Value, new: &Value) -> bool {

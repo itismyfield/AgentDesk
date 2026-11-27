@@ -3695,6 +3695,7 @@ src/
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
 │   │   │   ├── native_receipt_tests.rs
+│   │   │   ├── native_renumber_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
 │   │   │   ├── native_supply.rs
@@ -4886,6 +4887,7 @@ src/
 │   │   │   ├── restart_notice.rs
 │   │   │   ├── rotation.rs
 │   │   │   ├── rotation_tests.rs
+│   │   │   ├── source_refresh.rs
 │   │   │   ├── spool.rs
 │   │   │   ├── spool_transition_tests.rs
 │   │   │   ├── thread_children.rs
@@ -5016,6 +5018,7 @@ src/
 │   │   │   │   ├── retained_capture.rs
 │   │   │   │   ├── scoped.rs
 │   │   │   │   ├── scoped_tests.rs
+│   │   │   │   ├── source_refresh.rs
 │   │   │   │   ├── transition.rs
 │   │   │   │   └── transition_tests.rs
 │   │   │   ├── tool_images/

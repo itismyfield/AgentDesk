@@ -50,11 +50,19 @@ pub(super) fn sweep_tmp(dir: &Path) -> io::Result<()> {
         let path = entry?.path();
         let name = path.file_name().and_then(|name| name.to_str());
         if name.is_some_and(|name| name.ends_with(TMP_SUFFIX)) && path.is_file() {
-            fs::remove_file(&path)?;
-            fsync_parent_dir(&path)?;
+            unlink_synced(&path, false)?;
         }
     }
     Ok(())
+}
+
+pub(super) fn unlink_synced(path: &Path, allow_missing: bool) -> io::Result<()> {
+    if let Err(error) = fs::remove_file(path)
+        && !(allow_missing && error.kind() == io::ErrorKind::NotFound)
+    {
+        return Err(error);
+    }
+    fsync_parent_dir(path)
 }
 
 /// Publishes `bytes` at `path` once; the link fails if it exists, and a crash leaves it absent or whole.
