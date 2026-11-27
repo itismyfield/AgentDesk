@@ -933,22 +933,32 @@ src/
 │   │   ├── registry.rs
 │   │   └── status.rs
 │   ├── bind_security_diagnostics.rs
+│   ├── claude_oauth_usage_tests.rs
 │   ├── cluster.rs
 │   ├── cluster_session_routing.rs
+│   ├── control_plane_auth_tests.rs
 │   ├── cron_catalog.rs
 │   ├── dashboard_auth.rs
 │   ├── dashboard_provision.rs
 │   ├── database_fixture_invariant_tests.rs
+│   ├── github_sync.rs
 │   ├── issue_specs.rs
+│   ├── message_outbox_drain.rs
+│   ├── message_outbox_retry_tests.rs
 │   ├── mod.rs
 │   ├── multinode_regression.rs
 │   ├── outbox_actionable_delivery.rs
 │   ├── outbox_delivery_alert.rs
 │   ├── outbox_worker.rs
+│   ├── policy_tick.rs
 │   ├── policy_tick_logging.rs
+│   ├── policy_tick_schedule_tests.rs
+│   ├── rate_limit_fetch.rs
+│   ├── rate_limit_header_tests.rs
 │   ├── rate_limit_profiles.rs
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
+│   ├── routine_runtime.rs
 │   ├── routine_script_audit.rs
 │   ├── startup_preflight.rs
 │   ├── state.rs

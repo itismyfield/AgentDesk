@@ -1,6 +1,6 @@
 # Outbox 진입점 전수표
 
-좌표 기준 `92c480f00afc91d795607e4d15bf992d99a4f8c4` (S13 완료, 2026-11-12). 검색 모집단·원시 로그·정적 일치 행 수는 설계 기준 `5c3ed37cddc80036fa8a274419b0219f49926704`의 집계를 유지한다. 운영 설정·운영 DB는 열지 않았다. 함수·cfg(test)·입력/tx는 해당 소스와 대조했으며 숫자는 호출/실행 횟수가 아니다.
+좌표 기준 `92c480f00afc91d795607e4d15bf992d99a4f8c4` (S13 완료, 2026-11-12). 검색 모집단·원시 로그·정적 일치 행 수는 설계 기준 `5c3ed37cddc80036fa8a274419b0219f49926704`의 집계를 유지한다. 운영 설정·운영 DB는 열지 않았다. 함수·cfg(test)·입력/tx는 해당 소스와 대조했으며 숫자는 호출/실행 횟수가 아니다. 서버 시험 fixture 5행의 좌표는 현재 코드 기준이다.
 
 ## 검색 모집단
 
@@ -297,11 +297,11 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/db/o_channel_activation_fence_tests.rs:53`|dto.git-grep.txt|`message`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/db/status_check_migration_tests.rs:148`|i7353-d1314-calls.txt|`base_row`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/db/status_check_migration_tests.rs:150`|dto.git-grep.txt|`base_row`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1782`|i7353-d1314-inserts.txt|`old_owner_completion_after_stale_reclaim_is_noop_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1853`|i7353-d1314-calls.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1855`|dto.git-grep.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1941`|extra-calls.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/server/mod.rs:1943`|dto.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:727`|i7353-d1314-inserts.txt|`old_owner_completion_after_stale_reclaim_is_noop_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:789`|i7353-d1314-calls.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:791`|dto.git-grep.txt|`stall_alert_dm_row_drains_with_provider_bot_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:869`|extra-calls.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/server/mod.rs:871`|dto.git-grep.txt|`drain_fences_superseded_circuit_row_before_delivery_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/server/outbox_worker.rs:133`|i7353-d1314-calls.txt|`output_origin_stampless_current_owner_outbox_pg`|src/server/outbox_worker.rs:132|
 |`src/server/outbox_worker.rs:135`|dto.git-grep.txt|`output_origin_stampless_current_owner_outbox_pg`|src/server/outbox_worker.rs:132|
 |`src/server/outbox_worker/attachment_pg_tests.rs:28`|dto.git-grep.txt|`message`|fixture가 pool API에 위임; fixture 자체 관측 없음|
