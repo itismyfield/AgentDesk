@@ -4077,6 +4077,7 @@ src/
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
 │   │   ├── cluster_hooks.rs
+│   │   ├── command_bot_launch.rs
 │   │   ├── dtos.rs
 │   │   ├── http_outbound.rs
 │   │   ├── mod.rs
