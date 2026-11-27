@@ -269,7 +269,7 @@ impl Fixture {
         }
     }
 
-    async fn seed_outbox(&self, agent: &str, explicit: bool) {
+    async fn seed_outbox(&self, agent: &str, explicit: bool) -> String {
         let pool = &self.pool;
         let branch = if explicit { "explicit" } else { "stale" };
         let dispatch_id = format!("slot-reset-{branch}-{agent}");
@@ -305,6 +305,7 @@ impl Fixture {
             &[Some(&dispatch_id), Some(agent)],
         )
         .await;
+        dispatch_id
     }
 }
 
@@ -333,6 +334,7 @@ async fn check_outbox_reset(explicit: bool) {
     let pool = &fixture.pool;
     exec(pool, "INSERT INTO auto_queue_runs (id, repo, status) VALUES ('guard-run', 'guard-repo', 'active')", &[]).await;
     let mut before = Vec::new();
+    let mut expected_actions = Vec::new();
     let mut cases = CASES.to_vec();
     if !explicit {
         cases.extend([
@@ -354,7 +356,9 @@ async fn check_outbox_reset(explicit: bool) {
             _ => 1,
         };
         fixture.seed_slot(case, parent, messages, age).await;
-        fixture.seed_outbox(agent, explicit).await;
+        let dispatch_id = fixture.seed_outbox(agent, explicit).await;
+        expected_actions.push((dispatch_id.clone(), "notify".to_owned()));
+        expected_actions.push((dispatch_id, "status_reaction".to_owned()));
         before.push((agent, parent, thread_rows(pool, parent + 1).await));
     }
 
@@ -372,13 +376,18 @@ async fn check_outbox_reset(explicit: bool) {
     registry.start_worker(spec, None).unwrap();
     let outcomes = crate::test_support::wait::poll_within(
         async || {
-            let rows = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
-                "SELECT dispatch_id, status, delivery_status, error FROM dispatch_outbox ORDER BY id",
-            )
-            .fetch_all(pool)
-            .await
-            .map_err(|error| error.to_string())?;
-            if rows.iter().all(|(_, status, _, error)| status == "done" || error.is_some()) {
+            let rows =
+                sqlx::query_as::<_, (String, String, String, Option<String>, Option<String>)>(
+                    "SELECT dispatch_id, action, status, delivery_status, error
+                     FROM dispatch_outbox ORDER BY id",
+                )
+                .fetch_all(pool)
+                .await
+                .map_err(|error| error.to_string())?;
+            let has_error = rows.iter().any(|(.., error)| error.is_some());
+            let all_done = rows.len() >= expected_actions.len()
+                && rows.iter().all(|(_, _, status, ..)| status == "done");
+            if all_done || has_error {
                 Ok(rows)
             } else {
                 Err(format!("{rows:?}"))
@@ -403,13 +412,18 @@ async fn check_outbox_reset(explicit: bool) {
     crate::test_support::wait::await_within(worker, Duration::from_secs(5))
         .await
         .unwrap();
-    assert_eq!(outcomes.len(), before.len());
-    assert!(
-        outcomes.iter().all(|(_, status, delivery, error)| {
-            status == "done" && delivery.as_deref() == Some("success") && error.is_none()
-        }),
-        "{outcomes:?}"
-    );
+    let mut actual_actions = Vec::new();
+    for (dispatch_id, action, status, delivery, error) in outcomes {
+        assert_eq!(
+            (status.as_str(), delivery.as_deref(), error.as_deref()),
+            ("done", Some("success"), None),
+            "{dispatch_id} {action}",
+        );
+        actual_actions.push((dispatch_id, action));
+    }
+    actual_actions.sort_unstable();
+    expected_actions.sort_unstable();
+    assert_eq!(actual_actions, expected_actions);
 
     let mut expected_guard_threads = Vec::new();
     for (agent, parent, original) in before {
