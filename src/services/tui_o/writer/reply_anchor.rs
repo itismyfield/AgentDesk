@@ -109,14 +109,14 @@ impl Anchors {
         source: &SourceId,
         key: (u64, String),
         runs: impl FnOnce() -> Result<Vec<RunAnchor>, String>,
-    ) {
+    ) -> bool {
         if let Some(view) = self.state().views.get_mut(source)
             && view.key.as_ref() == Some(&key)
         {
             view.at = Instant::now();
-            return;
+            return true;
         }
-        let Ok(runs) = runs() else { return };
+        let Ok(runs) = runs() else { return false };
         let view = View {
             settled: key.0,
             at: Instant::now(),
@@ -124,6 +124,17 @@ impl Anchors {
             key: Some(key),
         };
         self.state().views.insert(source.clone(), view);
+        true
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn refresh_settled(&self, source: &SourceId, through: u64) {
+        if let Some(view) = self.state().views.get_mut(source)
+            && view.settled == through
+            && view.key.is_some()
+        {
+            view.at = Instant::now();
+        }
     }
 
     /// Durable bindings, read back at start; a later line for the same run wins.
