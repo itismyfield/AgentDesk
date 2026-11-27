@@ -1,0 +1,8 @@
+resolver | src/config/snapshot_reader_support.rs
+resolver | src/db/dispatched_sessions/hosted_execution/test_support.rs
+resolver | src/services/platform/tmux/session_inventory/test_support.rs
+resolver | src/services/tui_input/human_frame/history/v2/native_support.rs
+resolver | src/services/tui_o/writer/actor/scoped_transition_support.rs
+resolver | src/services/tui_o/writer/test_support.rs
+resolver | src/services/tui_o/writer/test_support/codex_ready.rs
+resolver | src/services/tui_o/writer/test_support/transition.rs

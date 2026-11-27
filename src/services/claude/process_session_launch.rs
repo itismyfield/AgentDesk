@@ -4,7 +4,7 @@ use super::*;
 
 /// Execute Claude via ProcessBackend (direct child process, no tmux).
 /// Used when tmux is not available or on Windows.
-pub(crate) fn execute_streaming_local_process(
+pub fn execute_streaming_local_process(
     args: &[String],
     prompt: &str,
     working_dir: &str,

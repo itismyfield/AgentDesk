@@ -1,17 +1,17 @@
 //! Move-only effect permits: a start exists only behind a committed begin, and a permit runs one effect.
 
-pub(crate) use super::RetryPermit;
+pub use super::RetryPermit;
 use crate::db::replay_disposition::write::{BeginAck, ExactAttempt};
 
 /// Where a permitted first input lands: a new provider start, or an existing busy pane.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum EffectTarget {
+pub enum EffectTarget {
     ProviderStart {
         provider: String,
         channel: String,
     },
     /// The busy-pane injection path, which is not connected yet.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BusyPane {
         owner: String,
         pane: String,
@@ -20,12 +20,12 @@ pub(crate) enum EffectTarget {
 
 impl EffectTarget {
     /// The stored projection key; a permit for one target never matches another.
-    pub(crate) fn key(&self) -> String {
+    pub fn key(&self) -> String {
         match self {
             Self::ProviderStart { provider, channel } => {
                 serde_json::json!(["provider_start", provider, channel])
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::BusyPane { owner, pane } => serde_json::json!(["busy_pane", owner, pane]),
         }
         .to_string()
@@ -33,7 +33,7 @@ impl EffectTarget {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum PermitRefusal {
+pub enum PermitRefusal {
     TargetMismatch,
     InputMismatch,
     NotARetry,
@@ -43,7 +43,7 @@ pub(crate) enum PermitRefusal {
 
 /// The one right to make the first provider input of an acknowledged attempt.
 #[derive(Debug)]
-pub(crate) struct StartPermit {
+pub struct StartPermit {
     attempt: ExactAttempt,
     target_key: String,
     input_hash: String,
@@ -52,7 +52,7 @@ pub(crate) struct StartPermit {
 
 impl StartPermit {
     /// Seals a committed begin for the target its projection named.
-    pub(crate) fn seal(ack: BeginAck, target: &EffectTarget) -> Result<Self, PermitRefusal> {
+    pub fn seal(ack: BeginAck, target: &EffectTarget) -> Result<Self, PermitRefusal> {
         let binding = ack.binding().clone();
         let (attempt, target_key, input_hash) = ack.into_parts();
         if target_key != target.key() {
@@ -66,15 +66,15 @@ impl StartPermit {
         })
     }
 
-    pub(crate) fn hold_proof(&self) -> crate::db::replay_disposition::write::HoldProof {
+    pub fn hold_proof(&self) -> crate::db::replay_disposition::write::HoldProof {
         self.attempt.hold_proof()
     }
 
-    pub(crate) fn attempt(&self) -> &ExactAttempt {
+    pub fn attempt(&self) -> &ExactAttempt {
         &self.attempt
     }
 
-    pub(crate) fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
+    pub fn matches_start_scope(&self, driver: &str, runtime: &str) -> bool {
         driver == "legacy-prompt"
             && [("driver_scope", driver), ("runtime_scope", runtime)]
                 .iter()
@@ -86,7 +86,7 @@ impl StartPermit {
     }
 
     /// Spends the permit on its own target and prepared input; a mismatch drops it without the effect.
-    pub(crate) fn consume<R>(
+    pub fn consume<R>(
         self,
         target: &EffectTarget,
         input_hash: &str,
@@ -116,13 +116,13 @@ impl StartPermit {
 
 /// Fresh launch values bound to the permit of an acknowledged exact retry.
 #[derive(Debug)]
-pub(crate) struct PreparedRetryStart<P> {
+pub struct PreparedRetryStart<P> {
     prepared: P,
     permit: StartPermit,
 }
 
 impl<P> PreparedRetryStart<P> {
-    pub(crate) fn new(prepared: P, permit: StartPermit) -> Result<Self, PermitRefusal> {
+    pub fn new(prepared: P, permit: StartPermit) -> Result<Self, PermitRefusal> {
         if permit.attempt.retry_of().is_none() {
             return Err(PermitRefusal::NotARetry);
         }
@@ -130,11 +130,7 @@ impl<P> PreparedRetryStart<P> {
     }
 
     /// Runs the approved local reset, then moves the same values and permit into the provider call.
-    pub(crate) fn launch<R>(
-        self,
-        reset: impl FnOnce(&P),
-        start: impl FnOnce(P, StartPermit) -> R,
-    ) -> R {
+    pub fn launch<R>(self, reset: impl FnOnce(&P), start: impl FnOnce(P, StartPermit) -> R) -> R {
         reset(&self.prepared);
         start(self.prepared, self.permit)
     }

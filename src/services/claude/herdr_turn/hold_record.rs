@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum SendOutcome {
+pub enum SendOutcome {
     /// The write has not recorded its result: the paste and the Enter may have gone.
     InFlight,
     EnterRefused,
@@ -18,7 +18,7 @@ pub(crate) enum SendOutcome {
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum UnsentProof {
+pub enum UnsentProof {
     None,
     SendOutcome,
     ExactTextSeen,
@@ -33,12 +33,21 @@ pub(crate) enum CleanupPhase {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
-pub(crate) struct HoldRecord {
+pub struct HoldRecord {
     pub(crate) schema: u8,
+    #[cfg(any(test, feature = "test-support"))]
+    pub recorded_at: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) recorded_at: String,
     pub(crate) provider: String,
     pub(crate) logical_key: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub execution_nonce: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) execution_nonce: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub hold_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) hold_id: String,
     pub(crate) frame_sha256: String,
     pub(crate) screen_exact: bool,
@@ -46,9 +55,19 @@ pub(crate) struct HoldRecord {
     pub(crate) file: Option<(u64, u64)>,
     pub(crate) offset_before: u64,
     pub(crate) started_at: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub send_outcome: SendOutcome,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) send_outcome: SendOutcome,
+    #[cfg(any(test, feature = "test-support"))]
+    /// When the final outcome was recorded; the windows run from it, else from `recorded_at`.
+    pub outcome_at: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// When the final outcome was recorded; the windows run from it, else from `recorded_at`.
     pub(crate) outcome_at: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub unsent_proof: UnsentProof,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) unsent_proof: UnsentProof,
     pub(crate) cleanup_phase: CleanupPhase,
     pub(crate) cleanup_at: Option<String>,
@@ -61,7 +80,7 @@ pub(crate) struct HoldRecord {
 
 /// A hold as read: a pre-deploy v1 file holds only a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Held {
+pub enum Held {
     V1 { hold_id: String },
     V2(Box<HoldRecord>),
 }
@@ -80,7 +99,7 @@ pub(crate) fn screen_exact(frame: &str) -> bool {
 }
 
 /// `None` when execution `nonce` holds nothing; a v1 hold's identity is its file content.
-pub(crate) fn read(nonce: &str) -> Result<Option<Held>, String> {
+pub fn read(nonce: &str) -> Result<Option<Held>, String> {
     let text = match std::fs::read(hold_path(nonce)?) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -99,7 +118,7 @@ pub(crate) fn read(nonce: &str) -> Result<Option<Held>, String> {
 }
 
 /// Temp file, sync, rename, directory sync: a crash leaves the old or the new record whole.
-pub(crate) fn write(record: &HoldRecord) -> Result<PathBuf, String> {
+pub fn write(record: &HoldRecord) -> Result<PathBuf, String> {
     use std::io::Write;
     let path = hold_path(&record.execution_nonce)?;
     let dir = path.parent().unwrap_or(Path::new("."));
@@ -143,7 +162,7 @@ pub(crate) fn ensure_absent_durable(nonce: &str) -> Result<(), String> {
 }
 
 /// The status fields of execution `nonce`'s v2 hold; no path or input text. A v1 hold has none.
-pub(crate) fn summary(nonce: &str) -> Option<serde_json::Value> {
+pub fn summary(nonce: &str) -> Option<serde_json::Value> {
     let Ok(Some(Held::V2(record))) = read(nonce) else {
         return None;
     };

@@ -1,14 +1,14 @@
 mod command_streaming;
 mod effort;
 use crate::services::process::reaping::CommandReapExt;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
-pub(crate) use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
+pub use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]
 mod absence_launch;
-#[cfg(all(test, unix))]
-pub(crate) mod actual_submit_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod actual_submit_tests;
 #[cfg(unix)]
 use crate::services::codex_tui::verified_hold;
 mod process_session_launch;
@@ -25,23 +25,23 @@ use followup_reader::send_followup_to_tmux;
 #[cfg(all(test, unix))]
 mod herdr_guard_tests;
 #[cfg(unix)]
-pub(crate) mod herdr_turn;
+pub mod herdr_turn;
 #[cfg(unix)]
 mod launch_script;
 #[cfg(unix)]
 use launch_script::CodexTuiLaunchScript;
-mod tui_session_launch;
+pub mod tui_session_launch;
 use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
+pub use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
-pub(crate) use tui_session_launch::validate_herdr_fresh_argv;
+pub use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::{
+pub use tui_session_launch::{
     CodexHerdrLaunchable,
     first_input::{Create, Observe, Submitted, create_for_test, observe_for_test},
     launch_policy::{
@@ -50,7 +50,7 @@ pub(crate) use tui_session_launch::{
     },
 };
 #[cfg(unix)]
-pub(crate) use tui_session_launch::{
+pub use tui_session_launch::{
     CodexTuiLaunchRefused, emit_codex_tui_post_tail_handoff, successor_hooks_ready, tui_preflight,
     verified_warm_preflight,
 };
@@ -100,8 +100,8 @@ use crate::services::{
 const TMUX_PROMPT_B64_PREFIX: &str = "__AGENTDESK_B64__:";
 const TMUX_PROMPT_B64_CHUNK_PREFIX: &str = "__AGENTDESK_B64_CHUNK__:";
 const TMUX_PROMPT_B64_CHUNK_SIZE: usize = 700;
-pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
-pub(crate) const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
+pub const CODEX_BACKGROUND_TASK_NOTIFICATION_ID: &str = "codex-background-event";
+pub const CODEX_BACKGROUND_TASK_NOTIFICATION_STATUS: &str = "completed";
 
 #[cfg(unix)]
 type CodexTuiSessionTurnLock = Arc<Mutex<()>>;
@@ -164,11 +164,14 @@ fn log_codex_runtime_kind(entrypoint: &'static str, runtime_kind: CodexRuntimeKi
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CodexLaunchOptions {
+pub struct CodexLaunchOptions {
     pub(crate) prompt: String,
     pub(crate) developer_instructions: Option<String>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) model: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub reasoning_effort: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) compact_token_limit: Option<u64>,
     pub(crate) readonly_mode: bool,
@@ -179,60 +182,60 @@ pub(crate) struct CodexLaunchOptions {
 }
 
 impl CodexLaunchOptions {
-    pub(crate) fn new(prompt: &str) -> Self {
+    pub fn new(prompt: &str) -> Self {
         Self {
             prompt: prompt.to_string(),
             ..Self::default()
         }
     }
 
-    pub(crate) fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
+    pub fn with_resume_session_id(mut self, value: Option<&str>) -> Self {
         self.resume_session_id =
             clean_nonempty(value).filter(|session_id| is_valid_session_id(session_id));
         self
     }
 
-    pub(crate) fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
+    pub fn with_developer_instructions(mut self, value: Option<&str>) -> Self {
         self.developer_instructions = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_model(mut self, value: Option<&str>) -> Self {
+    pub fn with_model(mut self, value: Option<&str>) -> Self {
         self.model = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
+    pub fn with_reasoning_effort(mut self, value: Option<&str>) -> Self {
         self.reasoning_effort = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
+    pub fn with_compact_token_limit(mut self, value: Option<u64>) -> Self {
         self.compact_token_limit = value.filter(|limit| *limit > 0);
         self
     }
 
-    pub(crate) fn with_readonly_mode(mut self, value: bool) -> Self {
+    pub fn with_readonly_mode(mut self, value: bool) -> Self {
         self.readonly_mode = value;
         self
     }
 
-    pub(crate) fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_fast_mode_enabled(mut self, value: Option<bool>) -> Self {
         self.fast_mode_enabled = value;
         self
     }
 
-    pub(crate) fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
+    pub fn with_goals_enabled(mut self, value: Option<bool>) -> Self {
         self.goals_enabled = value;
         self
     }
 
-    pub(crate) fn with_cwd(mut self, value: Option<&str>) -> Self {
+    pub fn with_cwd(mut self, value: Option<&str>) -> Self {
         self.cwd = clean_nonempty(value);
         self
     }
 
-    pub(crate) fn with_add_dirs(mut self, values: &[&str]) -> Self {
+    pub fn with_add_dirs(mut self, values: &[&str]) -> Self {
         self.add_dirs = values
             .iter()
             .filter_map(|value| clean_nonempty(Some(value)))
@@ -255,12 +258,12 @@ pub fn resolve_codex_path() -> Option<String> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
-pub(crate) use crate::services::codex_tui::session::source_observation::{
+pub use crate::services::codex_tui::session::source_observation::SOURCE_MODE_TEST;
+pub use crate::services::codex_tui::session::source_observation::{
     CodexSourceMode, codex_source_mode_snapshot,
 };
 
-fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
+pub fn resolve_codex_binary() -> crate::services::platform::BinaryResolution {
     let probe = crate::services::platform::probe_provider_binary_version("codex");
     log_codex_binary_probe(&probe);
     probe.resolution
@@ -490,13 +493,13 @@ fn base_tui_args(
     build_codex_tui_args(&options)
 }
 
-pub(crate) fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn build_codex_tui_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = codex_tui_option_args(options);
     args.extend(["--".to_string(), options.prompt.to_string()]);
     args
 }
 
-pub(crate) fn build_codex_exec_args(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn build_codex_exec_args(options: &CodexLaunchOptions) -> Vec<String> {
     let mut args = Vec::new();
     append_codex_common_launch_args(&mut args, options);
     args.push("exec".to_string());
@@ -1129,7 +1132,7 @@ pub fn execute_command_streaming(
     )
 }
 
-pub(crate) fn compose_codex_developer_instructions(
+pub fn compose_codex_developer_instructions(
     system_prompt: Option<&str>,
     _allowed_tools: Option<&[String]>,
 ) -> Option<String> {
@@ -1405,10 +1408,10 @@ fn resolve_codex_tui_tail_result(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs once between a ready composer and the RuntimeReady recheck.
-    pub(crate) static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]
@@ -1849,7 +1852,7 @@ fn codex_mcp_result(result: &Value) -> (String, bool) {
     (codex_mcp_payload_content(payload), is_error)
 }
 
-pub(crate) fn codex_background_event_summary(json: &Value) -> Option<&str> {
+pub fn codex_background_event_summary(json: &Value) -> Option<&str> {
     if json.get("type").and_then(Value::as_str) != Some("background_event") {
         return None;
     }
@@ -2674,11 +2677,10 @@ mod verified_admission_tests {
         let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let fake =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        let fake = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         let binary = root.path().join("codex");
         let _binary = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
         let marker = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "spawn_nonce");
@@ -2846,8 +2848,7 @@ mod verified_admission_tests {
     #[test]
     fn verified_existing_ingress_holds_before_auth_lookup_cleanup_or_launch() {
         verified(|tmux, root| {
-            let fake =
-                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+            let fake = crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2930,8 +2931,7 @@ mod verified_admission_tests {
     #[test]
     fn verified_startup_dialog_error_returns_reason_without_teardown() {
         verified(|tmux, _| {
-            let fake =
-                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+            let fake = crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2962,9 +2962,7 @@ mod verified_admission_tests {
         verified(|tmux, _| {
             for alive in [false, true] {
                 let fake =
-                    crate::services::provider_teardown::tests::test_support::FakeTmux::install(
-                        tmux,
-                    );
+                    crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
                 let _liveness = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
                     tmux,
                     if alive {
@@ -3001,11 +2999,7 @@ mod verified_admission_tests {
                     !calls.iter().any(|call| call.starts_with("kill-session")),
                     "{calls:?}"
                 );
-                assert!(
-                    !crate::services::provider_teardown::tests::test_support::take_exit_reason(
-                        tmux
-                    )
-                );
+                assert!(!crate::services::provider_teardown::test_support::take_exit_reason(tmux));
             }
         });
     }

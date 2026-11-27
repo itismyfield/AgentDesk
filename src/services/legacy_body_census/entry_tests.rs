@@ -403,8 +403,7 @@ fn manifest_coverage_and_hash_follow_the_same_embedded_bytes() {
 fn journal_initialization_is_pinned_before_recovery_and_drain() {
     let source = |path: &str, compiled: &str| {
         assert!(!compiled.is_empty());
-        std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path))
-            .unwrap()
+        std::fs::read_to_string(std::path::Path::new(env!("ADK_REPO_ROOT")).join(path)).unwrap()
     };
     let lib = source("src/lib.rs", include_str!("../../lib.rs"));
     let entry = lib.split("pub fn run_from_args()").nth(1).unwrap();
@@ -496,114 +495,6 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
             .unwrap()
             < drain.find("drain_message_outbox_batch_once(").unwrap()
     );
-}
-
-#[tokio::test]
-async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("runtime")).unwrap();
-    std::fs::write(
-        root.path().join("runtime/dcserver.pid"),
-        std::process::id().to_string(),
-    )
-    .unwrap();
-    let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
-    let boot = boot();
-    let journal = Journal::open(
-        root.path(),
-        &boot,
-        None,
-        Duration::from_secs(2),
-        Arc::new(|| {}),
-    )
-    .await;
-    let written = header(root.path(), &boot);
-    assert_eq!(written["doctor_boot_id"], doctor);
-    assert_ne!(written["doctor_boot_id"], written["boot_id"]);
-    assert_eq!(journal.snapshot()["journal_ready"], true);
-}
-
-#[tokio::test]
-async fn unsampled_boot_child() {
-    assert!(uuid::Uuid::parse_str(&process_boot::initialize().id).is_ok());
-    let Ok(root) = std::env::var("ADK_I7651_CHILD_ROOT") else {
-        return;
-    };
-    let root = std::path::Path::new(&root);
-    std::fs::create_dir_all(root.join("runtime")).unwrap();
-    std::fs::write(
-        root.join("runtime/dcserver.pid"),
-        std::process::id().to_string(),
-    )
-    .unwrap();
-    assert!(crate::config::snapshot().is_none());
-    start();
-    let config: crate::config::Config =
-        serde_json::from_value(json!({"server":{},"cluster":{"instance_id":"test-node"}})).unwrap();
-    crate::bootstrap::prepare_and_install_boot_snapshots(&config, None)
-        .await
-        .unwrap();
-    ensure_ready().await;
-    let written = header(root, process_boot::initialize());
-    assert_eq!(written["host"], "test-node");
-    assert!(
-        !health_json()["reasons"]
-            .as_array()
-            .unwrap()
-            .contains(&json!("HOST_IDENTITY_UNKNOWN"))
-    );
-    std::process::exit(0);
-}
-
-#[test]
-fn two_processes_keep_unsampled_crash_boots_and_their_incarnations() {
-    let root = tempfile::tempdir().unwrap();
-    for _ in 0..2 {
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                concat!(module_path!(), "::unsampled_boot_child").trim_start_matches("agentdesk::"),
-                "--nocapture",
-            ])
-            .env("ADK_I7651_CHILD_ROOT", root.path())
-            .env("AGENTDESK_ROOT_DIR", root.path())
-            .output()
-            .unwrap();
-        assert!(
-            String::from_utf8_lossy(&child.stdout).contains("running 1 test"),
-            "child filter selected no test: {}",
-            String::from_utf8_lossy(&child.stdout)
-        );
-        assert!(
-            child.status.success(),
-            "{}",
-            String::from_utf8_lossy(&child.stderr)
-        );
-    }
-    let headers: Vec<Value> = std::fs::read_dir(root.path().join("legacy_body_census"))
-        .unwrap()
-        .map(Result::unwrap)
-        .filter(|entry| entry.path().extension().is_some_and(|e| e == "jsonl"))
-        .map(|entry| {
-            let raw = std::fs::read_to_string(entry.path()).unwrap();
-            serde_json::from_str(raw.lines().next().unwrap()).unwrap()
-        })
-        .collect();
-    assert_eq!(headers.len(), 2);
-    assert_ne!(headers[0]["boot_id"], headers[1]["boot_id"]);
-    let head: Value = serde_json::from_slice(
-        &std::fs::read(root.path().join("legacy_body_census/HEAD")).unwrap(),
-    )
-    .unwrap();
-    let current = headers
-        .iter()
-        .find(|header| header["boot_id"] == head["boot_id"])
-        .unwrap();
-    let predecessor = headers
-        .iter()
-        .find(|header| header["boot_id"] != head["boot_id"])
-        .unwrap();
-    assert_eq!(current["predecessor_boot_id"], predecessor["boot_id"]);
 }
 
 #[test]

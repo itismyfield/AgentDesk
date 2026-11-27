@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 #[test]
 fn snapshot_kanban_diagnostic_uses_published_manager_channel() {

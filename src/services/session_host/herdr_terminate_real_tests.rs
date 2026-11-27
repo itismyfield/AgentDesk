@@ -74,7 +74,7 @@ fn now() -> String {
 }
 
 fn start_of(pid: u32) -> Option<String> {
-    provenance::process_start(pid)
+    provenance::process_start_for_test(pid)
         .ok()
         .map(|start| start_text(start.identity))
 }
@@ -224,9 +224,9 @@ impl Real {
     }
 
     pub(crate) fn endpoint(&self) -> HerdrEndpoint {
-        HerdrEndpoint::new(NODE, &self.name, &self.socket(), SESSION)
+        HerdrEndpoint::new_for_test(NODE, &self.name, &self.socket(), SESSION)
             .unwrap()
-            .with_herdr_home(&self.dir.join("home"))
+            .with_herdr_home_for_test(&self.dir.join("home"))
             .unwrap()
     }
 
@@ -432,7 +432,7 @@ pub(crate) struct Witnessing {
 impl Witnessing {
     pub(crate) fn new(endpoint: &HerdrEndpoint) -> Self {
         Self {
-            inner: HerdrSocketTransport::new(
+            inner: HerdrSocketTransport::new_for_test(
                 endpoint,
                 HerdrSocketConfig::default(),
                 crate::services::session_host::herdr_for_test::wire::LineJsonFraming,
@@ -517,7 +517,7 @@ fn print_writes(transport: &Witnessing) -> Vec<(String, String, ServerWitness)> 
                 witness.socket.display(),
                 witness.pid
             );
-            let exe = provenance::process_exec_path(witness.pid).unwrap_or_default();
+            let exe = provenance::process_exec_path_for_test(witness.pid).unwrap_or_default();
             let mut bytes = Vec::new();
             std::fs::File::open(&exe)
                 .and_then(|mut file| file.read_to_end(&mut bytes))
@@ -724,7 +724,7 @@ pub(crate) fn control(real: &mut Real, label: &str) -> String {
     );
     let witness = host
         .restore_resume(&real.launch_endpoint())
-        .admitted_witness()
+        .admitted_witness_for_test()
         .expect("E7 reads off");
     let request = HerdrCreateRequest {
         endpoint: real.launch_endpoint(),

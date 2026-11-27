@@ -93,7 +93,7 @@ impl<B: BindingEvents> Sources<B> {
             return Ok(());
         };
         let committed_seq = events.last().map_or(0, |event| event.seq);
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         boundary_pause("snapshot");
         for link in pending {
             let Some((from, evidence)) = self.boundary_proof(writer, &link, &events)? else {
@@ -103,7 +103,7 @@ impl<B: BindingEvents> Sources<B> {
                 self.channel,
                 committed_seq,
                 || {
-                    #[cfg(all(test, unix))]
+                    #[cfg(all(any(test, feature = "test-support"), unix))]
                     boundary_pause("handoff");
                     writer
                         .store()
@@ -366,13 +366,13 @@ fn verified_first(source: &SourceId) -> bool {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 type BoundaryPause = (&'static str, Box<dyn FnOnce()>);
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! {
     static BOUNDARY_PAUSE: std::cell::RefCell<Option<BoundaryPause>> = const { std::cell::RefCell::new(None) };
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 fn boundary_pause(point: &str) {
     let pause = BOUNDARY_PAUSE.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -386,9 +386,9 @@ fn boundary_pause(point: &str) {
         pause();
     }
 }
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 impl<B: BindingEvents> Sources<B> {
-    pub(crate) fn with_boundary_pause<R>(
+    pub fn with_boundary_pause<R>(
         point: &'static str,
         pause: impl FnOnce() + 'static,
         run: impl FnOnce() -> R,

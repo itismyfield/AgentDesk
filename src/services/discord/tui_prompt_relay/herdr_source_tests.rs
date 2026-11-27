@@ -7,7 +7,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::{expected, owner};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{expected, owner};
 use crate::db::dispatched_sessions::hosted_execution::{
     ExpectedExecution, HostedLocation, HostedState,
 };
@@ -781,8 +781,10 @@ fn log_under(
     let marker = crate::services::tmux_common::session_temp_path(herdr.logical(), "spawn_nonce");
     let launched = std::fs::read_to_string(&marker).unwrap();
     std::fs::write(&marker, nonce).unwrap();
-    let hook =
-        binding_events::HookSignal::from_payload("session_start", &json!({"source": source}));
+    let hook = binding_events::HookSignal::from_payload_for_test(
+        "session_start",
+        &json!({"source": source}),
+    );
     let path = herdr.ingress.path(session).display().to_string();
     let proposal = binding_events::Proposal {
         channel_id: herdr.channel,
@@ -791,7 +793,7 @@ fn log_under(
         session_id: Some(session),
         path: &path,
         replaced: None,
-        cause: binding_events::CauseSource::Hook(hook.cause()),
+        cause: binding_events::CauseSource::Hook(hook.cause_for_test()),
         hook: Some(&hook),
     };
     with_tmux_source_authority(herdr.logical(), |_| record(&proposal));

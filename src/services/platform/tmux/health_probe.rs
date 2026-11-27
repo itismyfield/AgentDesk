@@ -7,7 +7,7 @@ use super::{
 use std::process::{Command, Output};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HealthTmuxQuery {
+pub enum HealthTmuxQuery {
     HasSession,
     PanePid,
     /// `tmux -V`, which prints the client version and starts no server.
@@ -16,21 +16,21 @@ pub(crate) enum HealthTmuxQuery {
 
 /// Why no command was built; no process exists for any of these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HealthTmuxRefusal {
+pub enum HealthTmuxRefusal {
     BlankSession,
     RuntimePathUnready,
     Unsupported,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum HealthTmuxAnswer {
+pub enum HealthTmuxAnswer {
     Present,
     Missing,
     PanePid(u32),
     Failed,
 }
 
-pub(crate) fn health_tmux_command(
+pub fn health_tmux_command(
     query: HealthTmuxQuery,
     session: &str,
 ) -> Result<Command, HealthTmuxRefusal> {
@@ -38,7 +38,7 @@ pub(crate) fn health_tmux_command(
 }
 
 /// `prepare` yields the `tmux -u` command; a cold PATH yields `None` and nothing is spawned.
-pub(crate) fn health_tmux_command_using(
+pub fn health_tmux_command_using(
     query: HealthTmuxQuery,
     session: &str,
     prepare: impl FnOnce() -> Option<Command>,
@@ -65,10 +65,7 @@ pub(crate) fn health_tmux_command_using(
 }
 
 /// Only a completed command reaches here; a missing session needs tmux's own missing answer.
-pub(crate) fn classify_health_tmux_output(
-    query: HealthTmuxQuery,
-    output: &Output,
-) -> HealthTmuxAnswer {
+pub fn classify_health_tmux_output(query: HealthTmuxQuery, output: &Output) -> HealthTmuxAnswer {
     match query {
         HealthTmuxQuery::HasSession => match classify_has_session_output(output) {
             SessionPresence::Present => HealthTmuxAnswer::Present,

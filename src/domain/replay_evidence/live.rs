@@ -6,7 +6,7 @@ pub(crate) mod issuer;
 
 /// A provider terminal from its complete reader.
 #[derive(Debug)]
-pub(crate) struct TerminalEvidence {
+pub struct TerminalEvidence {
     receipt_id: i64,
     nonce: String,
     kind: TerminalKind,
@@ -24,7 +24,7 @@ impl TerminalEvidence {
 
 /// Proof that one exact attempt produced no output, tool, input or provider turn.
 #[derive(Debug)]
-pub(crate) struct NoEffectEvidence {
+pub struct NoEffectEvidence {
     receipt_id: i64,
     nonce: String,
 }

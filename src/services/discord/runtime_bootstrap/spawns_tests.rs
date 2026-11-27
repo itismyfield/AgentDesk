@@ -282,7 +282,7 @@ async fn standby_marker_fences_intake_exposes_ack_and_counts_shutdown_once() {
         let _active_tick = shared_for_worker
             .restart
             .intake_worker_lifecycle
-            .try_begin_tick()
+            .try_begin_tick_for_test()
             .expect("tick admitted before restart fence");
         started_for_worker.notify_one();
         release_for_worker.notified().await;
@@ -373,7 +373,12 @@ fn cancellation_guard_rolls_back_consumed_slot_when_cancel_arrives_after_finish(
     drop(guard);
 
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
     assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
     assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
@@ -392,7 +397,7 @@ async fn cancellation_during_prepare_drain_drops_guard_and_restores_admission() 
     let tick = shared
         .restart
         .intake_worker_lifecycle
-        .try_begin_tick()
+        .try_begin_tick_for_test()
         .expect("admitted tick");
     let shared_for_prepare = shared.clone();
     let root_for_prepare = root.path().to_path_buf();
@@ -413,7 +418,12 @@ async fn cancellation_during_prepare_drain_drops_guard_and_restores_admission() 
     std::fs::remove_file(root.path().join("restart_pending")).expect("remove request");
     drop(tick);
     assert!(prepare.await.expect("prepare join").is_none());
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
     assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
     assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));
@@ -466,7 +476,12 @@ fn cancellation_before_any_staging_publishes_nothing_and_rolls_back() {
     );
     drop(guard);
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
 }
 
 #[test]
@@ -498,7 +513,12 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     );
     drop(guard);
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
 
     std::fs::remove_file(root.path().join("restart_cancelled")).expect("clear cancellation");
     let permit = begin_deferred_restart(&shared).expect("new restart permit");
@@ -521,7 +541,12 @@ fn cancellation_before_durable_commit_rolls_back_but_after_commit_stays_committe
     .expect("late cancellation");
     drop(guard);
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
-    assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
 }
 
@@ -543,7 +568,12 @@ fn superseded_owner_releases_slot_but_preserves_fence_for_next_nonce() {
             .shutdown_slot_consumed
             .load(Ordering::Acquire)
     );
-    assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
     shared
         .restart
@@ -848,7 +878,12 @@ fn commit_latch_child() {
     .expect("late cancellation");
     drop(guard);
 
-    assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 0);
 }
@@ -898,7 +933,10 @@ fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
         nonce.to_owned(),
     ));
     assert!(
-        !shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test(),
         "a legacy index is not our commit"
     );
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
@@ -918,7 +956,10 @@ fn an_absent_latch_defers_to_the_identity_artifact_before_rolling_back() {
         nonce.to_owned(),
     ));
     assert!(
-        shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test(),
         "a committed identity must not be unfenced by a late cancellation"
     );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
@@ -966,7 +1007,10 @@ fn a_commit_under_another_nonce_forbids_this_ones_rollback() {
     ));
 
     assert!(
-        shared.restart.intake_worker_lifecycle.admission_is_fenced(),
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test(),
         "a process that committed under any nonce must not be unfenced"
     );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
@@ -991,14 +1035,24 @@ async fn cancellation_restores_admission_health_and_consumed_barrier_slot() {
     .expect("first restart permit");
     assert!(!finish_deferred_restart(&shared, permit));
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 1);
-    assert!(shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(shared.restart.shutting_down.load(Ordering::Acquire));
     assert!(shared.restart.restart_pending.load(Ordering::Acquire));
 
     rollback_deferred_restart(&shared);
 
     assert_eq!(shared.restart.shutdown_remaining.load(Ordering::Acquire), 2);
-    assert!(!shared.restart.intake_worker_lifecycle.admission_is_fenced());
+    assert!(
+        !shared
+            .restart
+            .intake_worker_lifecycle
+            .admission_is_fenced_for_test()
+    );
     assert!(!shared.restart.shutting_down.load(Ordering::Acquire));
     assert!(!shared.restart.restart_pending.load(Ordering::Acquire));
     assert!(!shared.restart.shutdown_counted.load(Ordering::Acquire));

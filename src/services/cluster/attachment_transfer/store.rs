@@ -9,13 +9,13 @@ use super::{
     validate_attachment_bundle_v1,
 };
 
-pub(crate) const MAX_FILES: usize = 10;
-pub(crate) const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
-pub(crate) const MAX_BUNDLE_BYTES: usize = 24 * 1024 * 1024;
+pub const MAX_FILES: usize = 10;
+pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_BUNDLE_BYTES: usize = 24 * 1024 * 1024;
 const MAX_STORE_BYTES: i64 = 1024 * 1024 * 1024;
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ReadError {
+pub enum ReadError {
     #[error("attachment storage unavailable: {0}")]
     Storage(#[from] sqlx::Error),
     #[error("{0}")]
@@ -50,7 +50,7 @@ pub(crate) fn check_limits(bundle: &AttachmentBundleV1) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) async fn put(
+pub async fn put(
     pool: &PgPool,
     validated: &ValidatedAttachmentBundle,
 ) -> Result<BundleRef, String> {
@@ -118,7 +118,7 @@ pub(crate) async fn put(
     })
 }
 
-pub(crate) async fn load(
+pub async fn load(
     pool: &PgPool,
     reference: &BundleRef,
 ) -> Result<ValidatedAttachmentBundle, ReadError> {
@@ -170,7 +170,7 @@ fn decode(
         .map_err(|e| format!("invalid attachment bundle: {e:?}"))
 }
 
-pub(crate) async fn validate_refs(
+pub async fn validate_refs(
     pool: &PgPool,
     refs: &[BundleRef],
     provider: &str,
@@ -204,7 +204,7 @@ pub(crate) async fn validate_refs(
     Ok(())
 }
 
-pub(crate) async fn cleanup(pool: &PgPool) -> Result<u64, sqlx::Error> {
+pub async fn cleanup(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
     sqlx::query(
         "SELECT pg_advisory_xact_lock(hashtext('agentdesk.attachment-bundles.v1')::BIGINT)",

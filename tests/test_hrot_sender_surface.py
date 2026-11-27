@@ -80,6 +80,14 @@ class SenderSurfaceTests(unittest.TestCase):
                  "// p.request_as(&p, Operation::Apply(r), c)\n")
         self.assertEqual(self.with_source(ACTOR, gated), [])
 
+    def test_test_support_gate_keeps_production_sends_visible(self):
+        send = "\nfn f(p: P) { p.request(Operation::Inspect(r), c); }\n"
+        fixture = '\n#[cfg(any(test, feature = "test-support"))]' + send
+        self.assertEqual(self.with_source(ACTOR, fixture), [])
+        for predicate in ('any(test, feature = "production")', 'feature = "test-support"'):
+            with self.subTest(predicate=predicate):
+                self.assertTrue(self.with_source(ACTOR, f"\n#[cfg({predicate})]" + send))
+
 
 if __name__ == "__main__":
     unittest.main()

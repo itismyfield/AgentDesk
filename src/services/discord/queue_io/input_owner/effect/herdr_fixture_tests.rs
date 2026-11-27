@@ -23,7 +23,7 @@ impl BusyClaudeHerdr {
     fn leaf(self) -> Leaf {
         BusyClaude {
             probe_guard: None,
-            operation: BusyOperation::new(
+            operation: BusyOperation::new_for_test(
                 InputTarget::Herdr(self.target),
                 "tmux".into(),
                 &busy_inject::TIMING,

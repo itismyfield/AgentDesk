@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 #[allow(unused_imports)]
-pub(crate) use crate::services::git::{
+pub use crate::services::git::{
     ManagedWorktreeCleanup, cleanup_managed_worktree, find_latest_commit_for_issue,
     find_worktree_for_issue, git_best_commit_for_dispatch, git_branch_containing_commit,
     git_branch_name, git_dispatch_baseline_commit, git_head_commit, git_latest_commit_for_issue,
@@ -217,7 +217,7 @@ thread_local! {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
+pub fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {
         fn drop(&mut self) {

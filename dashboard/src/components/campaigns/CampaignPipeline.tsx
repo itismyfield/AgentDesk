@@ -15,20 +15,25 @@ import { campaignStageStep } from "./campaignModel";
 import { legacyTask, type OverviewTask } from "./campaignOverviewModel";
 import type { Tr } from "./campaignPresentation";
 import PipelineCanvas, { type PinDrop, type StateNodeData } from "./PipelineCanvas";
-import { changesText, connect, connectNew, diagnosticState, draftChanges } from "./pipelineEdit";
+import { changesText, connect, connectNew, diagnosticState, draftChanges, insertStateBetween, spliceStateBetween } from "./pipelineEdit";
 import PipelineEditPanel, { PipelineChecks } from "./PipelineEditor";
 import PipelineInspector from "./PipelineInspector";
 import PipelineStateList from "./PipelineStateList";
 import PipelineStatePicker from "./PipelineStatePicker";
-import { buildPipelineGraph, durationText, eventName, gateText, kindName, occupancyTexts, pinSummary, stateName } from "./pipelineModel";
+import { analyzePipelineBottlenecks, buildPipelineGraph, durationText, eventName, gateText, kindName, occupancyTexts, pinSummary, stateName } from "./pipelineModel";
 import { usePipelineEditor } from "./usePipelineEditor";
 
 /** A server campaign reads its own pipeline again whenever `stamp` (its view's as_of) moves, and checks a draft again
  * whenever `sequence` (its last event) does; a ledger campaign has neither. */
 export type PipelineSource = { kind: "server"; id: string; stamp: string; sequence?: number } | { kind: "legacy" };
 type Loaded = { pipeline: PipelineDefinition; detail: Detail | null; template: { id: string; version: number } | null };
-/** The find-or-make window: for a pin (`from`), or for the canvas tools' 상태 추가; `at` when a pin was let go on the canvas. */
-type Picking = { from: { state: string; pin: string } | null; anchor: RefObject<HTMLElement | null>; at?: PinDrop };
+/** The find-or-make window: for a pin (`from`), in-place edge insertion (`insert`), or canvas tools' 상태 추가; `at` when a pin was let go on the canvas. */
+type Picking = {
+  from: { state: string; pin: string } | null;
+  insert?: { transitionId: string; fromLabel: string; toLabel: string };
+  anchor: RefObject<HTMLElement | null>;
+  at?: PinDrop;
+};
 
 const METRO_COLORS = ["#0190fe", "#10b981", "#f59e0b", "#06b6d4", "#ec4899", "#3b82f6"];
 
@@ -63,11 +68,33 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
     [tasks, campaign],
   );
 
-  const { states, edges, current, activeLines, stations } = useMemo(() => {
+  const { states, edges, current, activeLines, stations, diagnostics } = useMemo(() => {
     const byBucket: Record<StageBucket, OverviewTask[]> = {
       plan: [], build: [], review: [], repair: [], merge: [], done: [], blocked: [],
     };
     for (const task of resolved) byBucket[taskStageBucket(task)].push(task);
+
+    const stageTitles: Record<"plan" | "build" | "review" | "repair" | "merge", string> = {
+      plan: tr("조사·설계", "Plan & Design"),
+      build: tr("구현", "Build"),
+      review: tr("리뷰", "Review"),
+      repair: tr("수리·재작업", "Fix & Rework"),
+      merge: tr("머지·배포", "Merge & Check"),
+    };
+    const activeTotal = resolved.filter((t) => t.status !== "completed" && t.status !== "skipped").length;
+    const reworkCount = byBucket.repair.length;
+    const reworkShare = activeTotal > 0 ? Math.round((reworkCount / activeTotal) * 100) : 0;
+    const blockedCount = byBucket.blocked.length;
+    let bottleneck: { bucket: StageBucket; title: string; count: number; gated: number; score: number } | null = null;
+    for (const b of ["plan", "build", "review", "repair", "merge"] as const) {
+      const list = byBucket[b];
+      if (!list.length) continue;
+      const gatedCount = list.filter((t) => t.gate !== null).length;
+      const score = list.length + gatedCount * 1.5;
+      if (!bottleneck || score > bottleneck.score) {
+        bottleneck = { bucket: b, title: stageTitles[b], count: list.length, gated: gatedCount, score };
+      }
+    }
 
     const detailFor = (bucket: StageBucket) => {
       const list = byBucket[bucket];
@@ -80,12 +107,12 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
     const waitingTone = (bucket: StageBucket) => byBucket[bucket].some((t) => t.gate !== null) ? ("waiting" as const) : ("normal" as const);
 
     const states: MachineState[] = [
-      { id: "plan", title: tr("조사·설계", "Plan & Design"), column: 0, row: 0, count: byBucket.plan.length, detail: detailFor("plan"), tone: waitingTone("plan") },
-      { id: "build", title: tr("구현", "Build"), column: 1, row: 0, count: byBucket.build.length, detail: detailFor("build"), tone: waitingTone("build") },
-      { id: "review", title: tr("리뷰", "Review"), column: 2, row: 0, count: byBucket.review.length, detail: detailFor("review"), tone: waitingTone("review") },
-      { id: "merge", title: tr("머지·배포", "Merge & Check"), column: 3, row: 0, count: byBucket.merge.length, detail: detailFor("merge"), tone: waitingTone("merge") },
+      { id: "plan", title: stageTitles.plan, column: 0, row: 0, count: byBucket.plan.length, detail: detailFor("plan"), tone: waitingTone("plan") },
+      { id: "build", title: stageTitles.build, column: 1, row: 0, count: byBucket.build.length, detail: detailFor("build"), tone: waitingTone("build") },
+      { id: "review", title: stageTitles.review, column: 2, row: 0, count: byBucket.review.length, detail: detailFor("review"), tone: waitingTone("review") },
+      { id: "merge", title: stageTitles.merge, column: 3, row: 0, count: byBucket.merge.length, detail: detailFor("merge"), tone: waitingTone("merge") },
       { id: "done", title: tr("완료", "Done"), column: 4, row: 0, count: byBucket.done.length, detail: detailFor("done"), tone: "final" },
-      { id: "repair", title: tr("수리·재작업", "Fix & Rework"), column: 2, row: 1, count: byBucket.repair.length, detail: detailFor("repair"), tone: byBucket.repair.length > 0 ? "waiting" : "normal" },
+      { id: "repair", title: stageTitles.repair, column: 2, row: 1, count: byBucket.repair.length, detail: detailFor("repair"), tone: byBucket.repair.length > 0 ? "waiting" : "normal" },
       { id: "blocked", title: tr("막힘·실패", "Blocked & Failed"), column: 3, row: 1, count: byBucket.blocked.length, detail: detailFor("blocked"), tone: byBucket.blocked.length > 0 ? "error" : "normal" },
     ];
 
@@ -168,11 +195,48 @@ function LedgerStageSummary({ campaign, tasks, tr }: { campaign?: Campaign; task
       });
     }
 
-    return { states, edges, current, activeLines, stations };
+    return { states, edges, current, activeLines, stations, diagnostics: { bottleneck, reworkCount, reworkShare, blockedCount } };
   }, [resolved, tr]);
 
   return (
     <div className="grid min-w-0 grid-cols-1 gap-4 p-3 sm:p-4">
+      {resolved.length > 0 && (
+        <div
+          data-testid="ledger-bottleneck-strip"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-[12px] border border-[var(--line-soft)] bg-[var(--bg-2)] px-3.5 py-2 text-xs [word-break:keep-all]"
+        >
+          {diagnostics.bottleneck ? (
+            <Chip tone={diagnostics.bottleneck.gated > 0 || diagnostics.bottleneck.count >= 2 ? "warn" : "info"}>
+              <Num>
+                {diagnostics.bottleneck.gated > 0
+                  ? tr(
+                      `병목 · ${diagnostics.bottleneck.title} (${diagnostics.bottleneck.count}개 체류 · 승인 대기 ${diagnostics.bottleneck.gated})`,
+                      `Bottleneck · ${diagnostics.bottleneck.title} (${diagnostics.bottleneck.count} queued · ${diagnostics.bottleneck.gated} awaiting approval)`,
+                    )
+                  : tr(
+                      `병목 · ${diagnostics.bottleneck.title} (${diagnostics.bottleneck.count}개 체류)`,
+                      `Bottleneck · ${diagnostics.bottleneck.title} (${diagnostics.bottleneck.count} queued)`,
+                    )}
+              </Num>
+            </Chip>
+          ) : (
+            <Chip tone="ok">{tr("병목 없음 · 흐름 원활", "No bottleneck · Flow healthy")}</Chip>
+          )}
+          <Chip tone={diagnostics.reworkCount > 0 ? "warn" : "neutral"}>
+            <Num>
+              {tr(
+                `재작업 루프 (리뷰 ⇄ 수리) · ${diagnostics.reworkCount}건 (${diagnostics.reworkShare}%)`,
+                `Rework loop (Review ⇄ Fix) · ${diagnostics.reworkCount} (${diagnostics.reworkShare}%)`,
+              )}
+            </Num>
+          </Chip>
+          {diagnostics.blockedCount > 0 && (
+            <Chip tone="err">
+              <Num>{tr(`막힘·실패 · ${diagnostics.blockedCount}건`, `Blocked / Failed · ${diagnostics.blockedCount}`)}</Num>
+            </Chip>
+          )}
+        </div>
+      )}
       <div className="min-w-0">
         <AgentStateMachine
           title={campaign?.title ?? tr("캠페인 단계 현황", "Campaign stage summary")}
@@ -255,19 +319,23 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
   const same = JSON.stringify([dispositions, approvals]);
   const tasks = useMemo(() => detail && Object.fromEntries(Object.entries(detail.execution.state_ids).map(([node, state]) => [node, { state, disposition: dispositions?.[node] }])), [detail, same]); // eslint-disable-line react-hooks/exhaustive-deps
   const graph = useMemo(() => shown && buildPipelineGraph(shown, tr, tasks, approvals, !!edit), [shown, tasks, same, tr, !!edit]); // eslint-disable-line react-hooks/exhaustive-deps
+  const flowDiag = useMemo(() => (graph ? analyzePipelineBottlenecks(graph) : null), [graph]);
   const nodeData = useMemo(() => new Map(graph ? [...graph.states.values()].map((state) => {
     const pins = graph.pins.get(state.id)!, occupancy = occupancyTexts(graph, state.id, tr), title = stateName(state, state.id, tr);
     const timeout = state.timeout ? durationText(state.timeout.after_seconds, tr) : "";
+    const isBottleneck = !edit && flowDiag?.bottleneck?.stateId === state.id;
     const data: StateNodeData & { aria: string } = {
       kind: state.kind, title, kindLabel: kindName(state.kind, tr), pins, entry: tr("진입", "In"), main: !graph.off.includes(state.id),
       occupancy, foot: state.owner || timeout ? [state.owner ?? "", timeout] : null, flagged: flagged.has(state.id),
       mark: changes?.states.added.includes(state.id) ? tr("새로", "New") : changes?.touched.has(state.id) ? tr("바뀜", "Changed") : null,
       add: edit && !state.kind.startsWith("end_") ? tr("+ 전환", "+ Transition") : null,
+      bottleneck: isBottleneck,
+      bottleneckLabel: isBottleneck ? tr("병목", "Bottleneck") : null,
       badges: [...state.id === graph.main[0] ? [{ text: tr("시작", "Start"), start: true }] : [], ...(graph.gates.get(state.id) ?? []).map((gate) => ({ text: gateText(graph, gate, tr), off: !!graph.approvals && !graph.approvals[gate] }))],
       aria: [title, kindName(state.kind, tr), ...occupancy.map(({ text }) => text), pinSummary(graph, state.id, tr)].filter(Boolean).join(", "),
     };
     return [state.id, data];
-  }) : []), [graph, flagged, changes, tr, !!edit]); // eslint-disable-line react-hooks/exhaustive-deps
+  }) : []), [graph, flowDiag, flagged, changes, tr, !!edit]); // eslint-disable-line react-hooks/exhaustive-deps
   const eventData = useMemo(() => new Map(graph?.events.map((event) => [event.id, { title: eventName(event.type, tr), target: `→ ${stateName(graph.states.get(event.state_id), event.state_id, tr)}` }]) ?? []), [graph, tr]);
 
   if (graph?.states.size === 0 && !edit) return <WidgetState kind="empty" title={tr("이 파이프라인에는 상태가 없어요.", "This pipeline has no states.")} />;
@@ -291,13 +359,38 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
   const locked = <Cap className="ml-auto">{tr("준비됨이나 중지됨일 때만 고칠 수 있어요.", "Only a prepared or stopped campaign can be edited.")}</Cap>;
   // A pin let go on a state points there and shows the state it leaves; one let go elsewhere, or a press of 찾기·만들기, asks where.
   const link = (from: string, pin: string, to: string) => { if (!edit) return; editor.update(() => connect(edit.draft, from, pin, to)[0]); setChosen(from); setPicking(null); };
-  const make = (kind: string, name: string) => { if (!edit) return; const [next, id] = connectNew(edit.draft, kind, name, picking?.from ?? undefined); editor.update(() => next); choose(id); setPicking(null); };
+  const beginInsertBetween = (transitionId: string, button: HTMLElement) => {
+    if (!edit) return;
+    const transition = edit.draft.transitions.find((t) => t.id === transitionId);
+    if (!transition) return;
+    const fromLabel = stateName(edit.draft.states.find((s) => s.id === transition.from), transition.from, tr);
+    const toLabel = stateName(edit.draft.states.find((s) => s.id === transition.to), transition.to, tr);
+    setPicking({
+      from: null,
+      insert: { transitionId, fromLabel, toLabel },
+      anchor: { current: button },
+    });
+  };
+  const make = (kind: string, name: string) => {
+    if (!edit) return;
+    if (picking?.insert) {
+      const [next, id] = insertStateBetween(edit.draft, picking.insert.transitionId, kind, name);
+      editor.update(() => next);
+      choose(id);
+      setPicking(null);
+      return;
+    }
+    const [next, id] = connectNew(edit.draft, kind, name, picking?.from ?? undefined);
+    editor.update(() => next);
+    choose(id);
+    setPicking(null);
+  };
   const pinLabel = (from: { state: string; pin: string }) => graph.pins.get(from.state)?.find((pin) => pin.id === from.pin)?.label ?? tr("+ 전환", "+ Transition");
   const tools = edit ? !phone && <div role="toolbar" aria-label={tr("편집 도구", "Edit tools")} className="ml-auto flex flex-wrap items-center gap-2">
     {detail?.editable === false && locked}
     {errors > 0 && <Chip tone="err"><Num>{tr(`검사 오류 ${errors}`, `${errors} check errors`)}</Num></Chip>}
     {editor.dirty && <Chip tone="warn"><Num>{tr(`저장 안 됨 · ${changesText(changes!, tr)}`, `Unsaved · ${changesText(changes!, tr)}`)}</Num></Chip>}
-    <Button variant="secondary" size="lg" icon={<Undo2 aria-hidden />} disabled={!editor.dirty || editor.saving} onClick={editor.revert}>{tr("되돌리기", "Revert")}</Button>
+    <Button variant="secondary" size="lg" icon={<Undo2 aria-hidden />} disabled={!editor.canUndo || editor.saving} onClick={editor.undo}>{tr("되돌리기", "Undo")}</Button>
     <Button variant="primary" size="lg" loading={editor.saving} disabled={blocked} onClick={() => void editor.save()}>{tr("저장", "Save")}</Button>
   </div> : detail && !phone && (editor.waiting ? <span className="ml-auto flex flex-wrap items-center gap-2">
     {detail.editable ? <Button variant="secondary" size="sm" icon={<PencilLine aria-hidden />} onClick={editor.resume}>{tr("이어서 편집", "Continue editing")}</Button> : locked}
@@ -332,7 +425,7 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
         {template && <Chip className="font-mono">{tr(`템플릿 ${template.id} v${template.version}`, `Template ${template.id} v${template.version}`)}</Chip>}
         {detail?.source === "saved" && <Chip tone="info">{tr("저장됨", "Saved")}</Chip>}
         {!edit && <Cap className="ml-auto max-[899px]:hidden"><Num>{tr(`상태 ${graph.states.size} · 전환 ${transitions}`, `${graph.states.size} states · ${transitions} transitions`)}</Num></Cap>}
-        {!detail && <Button variant="secondary" size="sm" className={edit ? "" : "max-[899px]:ml-auto"} aria-expanded={templatePreviewOpen} onClick={() => setTemplatePreviewOpen((v) => !v)}>
+        {!detail && <Button variant="secondary" size="sm" className={edit ? "" : "max-[899px]:ml-auto max-[899px]:!min-h-11 [@media(pointer:coarse)]:!min-h-11"} aria-expanded={templatePreviewOpen} onClick={() => setTemplatePreviewOpen((v) => !v)}>
           {templatePreviewOpen ? tr("템플릿 미리보기 접기", "Hide template preview") : tr("기본 9단계 템플릿 미리보기", "Preview built-in 9-stage template")}
         </Button>}
         {tools}
@@ -341,6 +434,46 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
           editor.waiting.revision !== detail.definition_revision && tr(`초안 기준 rev ${editor.waiting.revision} · 지금 서버 rev ${detail.definition_revision}. 저장하면 다른 곳에서 바뀐 내용을 먼저 보여 드려요.`,
             `The draft is on rev ${editor.waiting.revision}; the server is at rev ${detail.definition_revision}. Saving shows what changed elsewhere first.`)].filter(Boolean).join(" ")}</Desc>}
       </header>}
+      {!edit && detail && flowDiag && (flowDiag.totalActive > 0 || flowDiag.retryTransitionCount > 0) && (
+        <div
+          data-testid="server-bottleneck-strip"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-[var(--line-soft)] bg-[var(--bg-2)] px-4 py-2 text-xs [word-break:keep-all]"
+        >
+          {flowDiag.bottleneck ? (
+            <button
+              type="button"
+              data-testid="focus-bottleneck-state"
+              onClick={() => choose(flowDiag.bottleneck!.stateId)}
+              className="inline-flex min-h-7 cursor-pointer items-center gap-1.5 rounded-full border border-[color-mix(in_srgb,var(--warn)_50%,transparent)] bg-[var(--warn-soft)] px-3 py-1 font-medium text-[var(--warn-fg)] transition-colors hover:border-[var(--warn)] focus-visible:outline-2 focus-visible:outline-[var(--accent)] max-[899px]:!min-h-11 [@media(pointer:coarse)]:!min-h-11"
+            >
+              <Num>
+                {tr(
+                  `병목 · ${stateName(graph.states.get(flowDiag.bottleneck.stateId), flowDiag.bottleneck.stateId, tr)} (${flowDiag.bottleneck.total}개)`,
+                  `Bottleneck · ${stateName(graph.states.get(flowDiag.bottleneck.stateId), flowDiag.bottleneck.stateId, tr)} (${flowDiag.bottleneck.total})`,
+                )}
+              </Num>
+            </button>
+          ) : (
+            <Chip tone="ok">{tr("병목 없음 · 흐름 원활", "No bottleneck · Flow healthy")}</Chip>
+          )}
+          <Chip tone={flowDiag.totalHeld > 0 ? "warn" : "info"}>
+            <Num>
+              {tr(
+                `활성 체류 ${flowDiag.totalActive}개 · 보류 ${flowDiag.totalHeld}개`,
+                `${flowDiag.totalActive} active · ${flowDiag.totalHeld} held`,
+              )}
+            </Num>
+          </Chip>
+          <Chip tone={flowDiag.retryTransitionCount > 0 ? "warn" : "neutral"}>
+            <Num>
+              {tr(
+                `재시도 루프 ${flowDiag.retryTransitionCount}개`,
+                `${flowDiag.retryTransitionCount} retry loops`,
+              )}
+            </Num>
+          </Chip>
+        </div>
+      )}
       {status}
       {error && <WidgetState kind="stale" title={tr("파이프라인을 갱신하지 못했어요.", "Could not refresh the pipeline.")} description={error} />}
       {!detail && <LedgerStageSummary campaign={campaign} tasks={ledgerTasks} tr={tr} />}
@@ -367,17 +500,39 @@ export default function CampaignPipeline({ source, title, campaign, tasks: ledge
         {phoneView === "graph" ? <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} height="360px" defaultMinimapOpen={false} inspector={<PipelineInspector graph={graph} id={chosen} summary={summary} tr={tr} />} tr={tr}><div className="sr-only"><PipelineStateList graph={graph} open tr={tr} /></div></PipelineCanvas>
           : <div className="p-3"><PipelineStateList graph={graph} chosen={chosen} onChoose={setChosen} tr={tr} /></div>}
       </> : <PipelineCanvas label={tr("파이프라인 그래프", "Pipeline graph")} graph={graph} nodeData={nodeData} eventData={eventData} chosen={chosen} onChoose={setChosen} reveal={reveal} tr={tr}
-        edit={edit ? { busy: editor.saving, onLink: link, onDrop: (state, pin, at) => { setChosen(state); setPicking({ from: { state, pin }, anchor: spot, at }); }, onAdd: (button) => setPicking({ from: null, anchor: { current: button } }) } : undefined}
+        edit={edit ? {
+          busy: editor.saving,
+          onLink: link,
+          onDrop: (state, pin, at) => { setChosen(state); setPicking({ from: { state, pin }, anchor: spot, at }); },
+          onAdd: (button) => setPicking({ from: null, anchor: { current: button } }),
+          onInsertBetween: beginInsertBetween,
+        } : undefined}
         checks={edit && <PipelineChecks checks={checks} graphs={[edit.draft, edit.base]} onPick={(value) => { const id = placeOf(value); if (id) choose(id); }} tr={tr} />}
         inspector={edit ? <PipelineEditPanel graph={graph} draft={edit.draft} revision={edit.revision} chosen={chosen} flagged={flagged} changes={changes} busy={editor.saving} update={editor.update} onChoose={setChosen}
-          onFind={(transition, button) => setPicking({ from: { state: transition.from, pin: transition.id }, anchor: { current: button } })} tr={tr} />
+          onFind={(transition, button) => setPicking({ from: { state: transition.from, pin: transition.id }, anchor: { current: button } })}
+          onInsertBetween={(transition, button) => beginInsertBetween(transition.id, button)} tr={tr} />
           : <PipelineInspector graph={graph} id={chosen} summary={summary} tr={tr} />}>
         <div className="sr-only"><PipelineStateList graph={graph} open tr={tr} /></div>
         {/* A pin let go on the canvas: a dashed line from it to the window asking where it goes. */}
         {picking?.at && <svg aria-hidden className="pointer-events-none absolute inset-0 z-[5] size-full overflow-visible"><path d={`M${picking.at.fx},${picking.at.fy} L${picking.at.x},${picking.at.y}`} stroke="var(--accent)" strokeWidth={2} strokeDasharray="6 5" fill="none" /></svg>}
         <span ref={spot} aria-hidden className="pointer-events-none absolute size-px" style={picking?.at ? { left: picking.at.x, top: picking.at.y } : { left: 0, top: 0 }} />
-        {edit && <PipelineStatePicker open={!!picking} anchor={picking?.anchor ?? spot} draft={edit.draft} tr={tr} onPick={(to) => picking?.from && link(picking.from.state, picking.from.pin, to)} onCreate={make} onClose={() => setPicking(null)}
-          from={picking?.from ? { name: stateName(edit.draft.states.find((state) => state.id === picking.from!.state), picking.from.state, tr), label: pinLabel(picking.from) } : null} />}
+        {edit && <PipelineStatePicker open={!!picking} anchor={picking?.anchor ?? spot} draft={edit.draft} tr={tr}
+          onPick={(to) => {
+            if (picking?.insert) {
+              editor.update((d) => spliceStateBetween(d, picking.insert!.transitionId, to));
+              choose(to);
+              setPicking(null);
+            } else if (picking?.from) {
+              link(picking.from.state, picking.from.pin, to);
+            }
+          }}
+          onCreate={make}
+          onClose={() => setPicking(null)}
+          from={picking?.insert
+            ? { name: `${picking.insert.fromLabel} → ${picking.insert.toLabel}`, label: tr("사이에 끼워 넣기", "Insert between") }
+            : picking?.from
+              ? { name: stateName(edit.draft.states.find((state) => state.id === picking.from!.state), picking.from.state, tr), label: pinLabel(picking.from) }
+              : null} />}
       </PipelineCanvas>}
     </div>
     <Dialog open={editor.leaving !== null} onOpenChange={(open) => { if (!open) editor.decide(false); }} size="md"

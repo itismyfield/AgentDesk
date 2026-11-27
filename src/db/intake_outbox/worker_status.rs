@@ -89,7 +89,7 @@ const HOME_CLAIM_FENCE: &str = "io.home_epoch IS NULL";
 const REPLAY_CLAIM_FENCE: &str = "NOT replay_sources_blocked(io.provider, io.channel_id, COALESCE(io.replay_source_message_ids, ARRAY[io.user_msg_id]))";
 
 /// Claim the oldest eligible row without waiting on row or owner locks.
-pub(crate) async fn claim_pending_for_target_except(
+pub async fn claim_pending_for_target_except(
     pool: &PgPool,
     target_instance_id: &str,
     provider: &str,
@@ -202,7 +202,7 @@ pub(super) async fn confirm_claim(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn claim_pending_for_target(
+pub async fn claim_pending_for_target(
     pool: &PgPool,
     target_instance_id: &str,
     provider: &str,
@@ -310,7 +310,7 @@ async fn transition(
 }
 
 /// Release only this pre-accept claim, preserving retry/error bookkeeping.
-pub(crate) async fn return_claimed_to_pending(
+pub async fn return_claimed_to_pending(
     pool: &PgPool,
     id: i64,
     claim_owner: &str,
@@ -319,32 +319,20 @@ pub(crate) async fn return_claimed_to_pending(
 }
 
 /// A refused accept must stop the worker before it invokes the executor.
-pub(crate) async fn mark_accepted(
-    pool: &PgPool,
-    id: i64,
-    claim_owner: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn mark_accepted(pool: &PgPool, id: i64, claim_owner: &str) -> Result<bool, sqlx::Error> {
     transition(pool, id, claim_owner, Change::Accepted, None).await
 }
 
-pub(crate) async fn mark_spawned(
-    pool: &PgPool,
-    id: i64,
-    claim_owner: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn mark_spawned(pool: &PgPool, id: i64, claim_owner: &str) -> Result<bool, sqlx::Error> {
     transition(pool, id, claim_owner, Change::Spawned, None).await
 }
 
 /// A miss may also mean relay dispatch or terminal settlement already won.
-pub(crate) async fn mark_done(
-    pool: &PgPool,
-    id: i64,
-    claim_owner: &str,
-) -> Result<bool, sqlx::Error> {
+pub async fn mark_done(pool: &PgPool, id: i64, claim_owner: &str) -> Result<bool, sqlx::Error> {
     transition(pool, id, claim_owner, Change::Done, None).await
 }
 
-pub(crate) async fn mark_failed_pre_accept(
+pub async fn mark_failed_pre_accept(
     pool: &PgPool,
     id: i64,
     claim_owner: &str,
@@ -360,7 +348,7 @@ pub(crate) async fn mark_failed_pre_accept(
     .await
 }
 
-pub(crate) async fn mark_failed_post_accept(
+pub async fn mark_failed_post_accept(
     pool: &PgPool,
     id: i64,
     claim_owner: &str,
@@ -378,7 +366,7 @@ pub(crate) async fn mark_failed_post_accept(
 
 /// Existing maintenance API; no production sweep is started here. Errors may follow partial commits.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn sweep_stale_pre_accept_claims(
+pub async fn sweep_stale_pre_accept_claims(
     pool: &PgPool,
     stale_after_secs: i64,
 ) -> Result<u64, sqlx::Error> {
@@ -391,7 +379,7 @@ pub(crate) async fn sweep_stale_pre_accept_claims(
 }
 
 /// Stamped-only maintenance. Each row commits independently; an error can leave earlier rows rearmed.
-pub(crate) async fn sweep_stamped_claims(
+pub async fn sweep_stamped_claims(
     pool: &PgPool,
     stale_after_secs: i64,
 ) -> Result<u64, sqlx::Error> {

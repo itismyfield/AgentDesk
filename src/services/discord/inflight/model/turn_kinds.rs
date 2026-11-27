@@ -1,6 +1,6 @@
-use super::{Deserialize, InflightTurnState, Serialize};
+use super::{Deserialize, Serialize};
 
-/// Origin of a turn whose state is captured in [`InflightTurnState`]. Pure
+/// Origin of a turn whose state is captured in [`super::InflightTurnState`]. Pure
 /// audit metadata for #2285 / #2161 — callers must not branch RELAY routing on
 /// this value; the session-bound relay (epic #2285 E1–E5) treats every matched
 /// session uniformly.

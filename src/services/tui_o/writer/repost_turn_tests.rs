@@ -13,8 +13,8 @@ use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::InitSource;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
-use crate::services::tui_o::writer::tests::actor::*;
-use crate::services::tui_o::writer::tests::{
+use crate::services::tui_o::writer::test_support::*;
+use crate::services::tui_o::writer::test_support::{
     BOT, CHANNEL, FakePort, Harness, Reply, Writer, ledger_path, outcome, piece, unit,
 };
 use crate::services::tui_o::writer::{
@@ -290,13 +290,7 @@ async fn results(pool: &PgPool, key: &PieceKey) -> Vec<Option<AttemptResult>> {
 
 /// Whether message `id` already is `key`'s receipt, read back by recording it once more.
 async fn is_receipt(pool: &PgPool, key: &PieceKey, id: u64) -> bool {
-    let receipt = Receipt {
-        key: key.clone(),
-        message_id: id,
-        author_id: BOT,
-        slot: None,
-        method: ReceiptMethod::PostResponse,
-    };
+    let receipt = Receipt::for_test(key.clone(), id, BOT, None, ReceiptMethod::PostResponse);
     let outcome = record_receipt(pool, &receipt).await.unwrap();
     outcome == ReceiptOutcome::Known
 }
@@ -334,7 +328,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     };
     channel.append_ledger(refused).unwrap();
     let excluding = LedgerEntry::Excluded {
-        unit_key: excluded.unit().clone(),
+        unit_key: excluded.unit_for_test().clone(),
         reason: "operator".into(),
     };
     channel.append_ledger(excluding).unwrap();
@@ -378,7 +372,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let channel = harness.channel();
     let ledger = channel.ledger();
     assert!(ledger.violation().is_none());
-    let (_, latest) = ledger.latest_piece(auto.unit(), 0).unwrap();
+    let (_, latest) = ledger.latest_piece(auto.unit_for_test(), 0).unwrap();
     let history = harness.port.history.lock().unwrap().clone();
     let reposted = history.iter().find(|seen| seen.content == "auto piece");
     let reposted = reposted.unwrap().id;
@@ -463,7 +457,7 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     let ledger = TurnWriter::ledger(&mut writer);
     let settled = ledger.piece(0).unwrap().outcome.clone();
     assert_eq!(settled, Some(PieceOutcome::Posted(landed)));
-    let (serial, latest) = ledger.latest_piece(key.unit(), 0).unwrap();
+    let (serial, latest) = ledger.latest_piece(key.unit_for_test(), 0).unwrap();
     assert_eq!(
         (serial, &latest.outcome),
         (1, &Some(PieceOutcome::Posted(landed + 1)))
@@ -498,7 +492,7 @@ async fn f6_t10_recovered_admitted_piece_never_becomes_new_original_pg() {
         harness
             .channel()
             .ledger()
-            .latest_piece(key.unit(), 0)
+            .latest_piece(key.unit_for_test(), 0)
             .is_none()
     );
     pool.close().await;
@@ -551,7 +545,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     let seen = Arc::clone(&intent_first);
     let on_post = move || {
         let log = ProvenanceLog::open(&path).unwrap();
-        *seen.lock().unwrap() = Some(log.state().intent(2).is_some());
+        *seen.lock().unwrap() = Some(log.state().intent_for_test(2).is_some());
     };
     *harness.port.on_post.lock().unwrap() = Some(Box::new(on_post));
     harness
@@ -564,7 +558,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     harness.port.unreadable.store(true, Ordering::SeqCst);
     assert_eq!(writer.deliver(&piece("on", "on payload")).await, Step::Done);
     assert_eq!(*intent_first.lock().unwrap(), Some(true));
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     for native in ["before", "open-before"] {
         assert!(!admitted(native).await, "{native}");
     }

@@ -43,7 +43,6 @@ use super::super::{
     DELIVERY_LEASE_DEADLINE_MS, DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome,
     LeaseSnapshot, lease_now_ms,
 };
-use super::decision::LengthPolicyDecision;
 use crate::services::tui_o::cutover::{BodyClaim, BodySend, BodySite, claim_then_send_at};
 use transport::{TransportResult, drive_non_fresh_transport, post_send_finalize};
 

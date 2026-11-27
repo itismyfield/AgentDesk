@@ -1,7 +1,7 @@
 //! A Herdr create proven unsent retires an execution that never had a pane: presence reads that
 //! row as no session, while every other unplaced or busy row still holds.
 use super::*;
-use crate::db::dispatched_sessions::hosted_execution::tests::pending;
+use crate::db::dispatched_sessions::hosted_execution::test_support::pending;
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedExecution, HostedRecord, HostedState,
 };

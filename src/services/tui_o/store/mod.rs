@@ -1,24 +1,24 @@
 //! Persistent state of the O writer under `<runtime_root>/o_store`: once-written `init` and
 //! `o_era`, the delivery ledger, and the raw spool with cursors. Damage halts; it never re-inits.
 
-pub(crate) mod agy_delivery;
-pub(crate) mod agy_spool;
+pub mod agy_delivery;
+pub mod agy_spool;
 pub mod cleanup_witness;
-pub(crate) mod clear_end;
+pub mod clear_end;
 #[cfg(unix)]
-pub(crate) mod codex_end;
-pub(crate) mod codex_provenance;
+pub mod codex_end;
+pub mod codex_provenance;
 #[cfg(unix)]
-pub(crate) mod delivery_evidence;
+pub mod delivery_evidence;
 mod durable;
 pub(crate) mod input_notice_floor;
 pub mod ledger;
-pub(crate) mod restart_end;
-pub(crate) mod restart_notice;
+pub mod restart_end;
+pub mod restart_notice;
 pub mod rotation;
 pub mod spool;
-pub(crate) mod thread_children;
-pub(crate) mod tool_card_switch;
+pub mod thread_children;
+pub mod tool_card_switch;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;
@@ -37,7 +37,7 @@ use crate::services::session_host::surface_policy::InitScope;
 use ledger::{LedgerEntry, LedgerState, Unsent};
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use durable::fault;
+pub use durable::fault;
 
 pub const STORE_DIR_NAME: &str = "o_store";
 pub const ERA_FILE: &str = "o_era";
@@ -322,6 +322,16 @@ impl OStore {
         self.init_channel_as(init, InitOrigin::Fresh, scope)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_channel_as_for_test(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+    ) -> Result<(), StoreError> {
+        self.init_channel_as(init, origin, scope)
+    }
+
     /// As `init_channel`, recording `origin`; a `Fresh` init keeps its old bytes.
     pub(crate) fn init_channel_as(
         &self,
@@ -351,6 +361,17 @@ impl OStore {
             }
         };
         Ok(durable::create_once(&dir.join(INIT_FILE), &bytes)?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_era_as_for_test(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+        child: Option<&crate::services::session_host::surface_policy::VerifiedSurface>,
+    ) -> Result<(), StoreError> {
+        self.begin_era_as(init, origin, scope, child)
     }
 
     /// A first activation's `init`: a later channel of a sealed era, or else the channel the era is
@@ -488,7 +509,7 @@ impl ChannelStore {
 
     /// Small segments let a test see GC keep or drop a source's older records.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_segment_max_for_tests(&mut self, max: u64) {
+    pub fn set_segment_max_for_tests(&mut self, max: u64) {
         self.segment_max = max;
     }
 
@@ -566,74 +587,13 @@ mod windows_tests {
     }
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+mod test_support;
+
 #[cfg(test)]
 #[cfg(unix)]
 mod tests {
     use super::*;
-
-    impl OStore {
-        pub(crate) fn seed_boundary_resolved(
-            &self,
-            channel: u64,
-            source: &SourceId,
-            from: u64,
-        ) -> Result<(SourceId, u64), StoreError> {
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(self.channel_dir(channel).join(LEDGER_FILE))?;
-            let at = Utc::now();
-            ledger::append_to(
-                &mut file,
-                at,
-                &LedgerEntry::BoundaryResolved {
-                    source: source.clone(),
-                    from,
-                    excluded_range: 0..from,
-                    operator: "replay-fixture".into(),
-                    at,
-                    evidence: None,
-                },
-            )?;
-            Ok((source.clone(), from))
-        }
-
-        /// Seeds a durable approval for writer replay tests without an operator command.
-        pub(crate) fn record_operator_resume(
-            &self,
-            channel: u64,
-            rejected_serial: u64,
-            operator: &str,
-            reason: &str,
-        ) -> Result<ledger::ResumeApproval, StoreError> {
-            let path = self.channel_dir(channel).join(LEDGER_FILE);
-            let mut file = std::fs::OpenOptions::new()
-                .read(true)
-                .append(true)
-                .open(path)?;
-            let init = self
-                .read_init(channel)?
-                .ok_or_else(|| damage("missing init"))?;
-            let mut state = ledger::read_only(&mut file, init.initial_anchor)?;
-            if let Some(approval) = state.approval(rejected_serial) {
-                return Ok(approval.clone());
-            }
-            let at = Utc::now();
-            let entry = LedgerEntry::OperatorResume {
-                rejected_serial,
-                approval_id: uuid::Uuid::new_v4(),
-                operator: operator.into(),
-                reason: reason.into(),
-                at,
-            };
-            ledger::append_to(&mut file, at, &entry)?;
-            state.apply(at, entry);
-            state
-                .approval(rejected_serial)
-                .cloned()
-                .ok_or_else(|| damage("test approval was not applied"))
-        }
-    }
-
     use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 
     pub(super) fn enabled(runtime: &Path) -> OStore {
@@ -890,7 +850,7 @@ mod tests {
 #[cfg(any(test, feature = "test-support"))]
 impl ChannelStore {
     /// Shrinks the segment and spool limits so a test can fill the spool.
-    pub(crate) fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
+    pub fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
         (self.segment_max, self.spool_cap) = (segment_max, spool_cap);
     }
 }

@@ -68,12 +68,12 @@ pub(super) async fn hold_off_o_gateway(
 
 #[cfg(unix)]
 pub(super) mod scope_key {
-    pub(crate) struct WorkerScopeKey(pub(super) ());
+    pub struct WorkerScopeKey(pub(super) ());
 }
 
 /// The first entry consumes the slot even when the request does not match.
 #[cfg(unix)]
-pub(crate) fn take_before_effects(
+pub fn take_before_effects(
     request: &IntakeRequest,
     checkpoint_waits: CheckpointWaits,
 ) -> Option<BeforeEffects> {

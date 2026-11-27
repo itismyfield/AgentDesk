@@ -170,7 +170,7 @@ struct CodexCli {
 /// Needs the shared env lock already held, as `set_agentdesk_root_for_test` takes it.
 fn codex_cli() -> CodexCli {
     use crate::config::test_env::TestEnvVarGuard as Guard;
-    let lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+    let lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();

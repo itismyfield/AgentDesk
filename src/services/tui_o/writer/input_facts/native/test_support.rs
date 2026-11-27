@@ -3,6 +3,33 @@
 
 use super::*;
 
+impl Evidence {
+    pub fn completed_for_test(
+        namespace: String,
+        ticket: Ticket,
+        start: u64,
+        (opening_end, closer_start, end): (u64, u64, u64),
+        membership_row: String,
+        disposition: Disposition,
+    ) -> Self {
+        Self {
+            namespace,
+            ticket,
+            run: Some(Run {
+                start,
+                native_id: None,
+            }),
+            range: (opening_end, end),
+            membership_range: Some((0, opening_end)),
+            membership_row: Some(membership_row),
+            closer_range: Some((closer_start, end)),
+            disposition,
+            supersedes: None,
+            raw: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Stage {
     Waiting,

@@ -12,8 +12,8 @@ when the code has none).
 
 Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this file drifts.
 
-- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 96
-- Platform and third-party variables: 39
+- AgentDesk variables (`AGENTDESK_*`, `ADK_*`): 89
+- Platform and third-party variables: 38
 
 ## AgentDesk variables
 
@@ -25,8 +25,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_BUSY_INJECT_STASH_CHANNELS` | `src/services/claude_tui/busy_inject.rs` | Channel ids whose panes may take the stash path, comma-separated and read once; unset is none. |
 | `ADK_CAMPAIGN_PHASE_NONCE` | `src/services/campaign_execution/verification_runner.rs` | Set on every phase child so a later observation can match the exact process, not just its PID. |
 | `ADK_CARGO_SLOT_HELD` | `src/services/campaign_execution/adk_resources.rs` |  |
-| `ADK_ENV_PANIC_PROBE_CHILD` | `src/test_env_panic_probe.rs` |  |
-| `ADK_ENV_PROBE_MODE` | `src/test_env_panic_probe.rs` |  |
 | `ADK_FORCE_LOCAL_MEMORY` | `src/server/routes/memory_api.rs` | `ADK_FORCE_LOCAL_MEMORY=1` → always Local (testing / escape hatch). |
 | `ADK_GITHUB_SYNC_ALERT_CHANNEL` | `src/github/sync.rs` |  |
 | `ADK_HERDR_ADMISSION` | `src/services/herdr_admission.rs` | Herdr admission kill switch: `ADK_HERDR_ADMISSION`, read once, and a stop file that, once seen, keeps admission stopped until restart. |
@@ -37,7 +35,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `ADK_OBSERVABILITY_EVENT_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_OBSERVABILITY_QUALITY_RETENTION_DAYS` | `src/services/observability/retention.rs` |  |
 | `ADK_QUEUED_HEAD_INJECT` | `src/services/discord/queue_io/queued_head_inject.rs` | `ADK_QUEUED_HEAD_INJECT=1` opts into queued-head injection; absent values keep it off. |
-| `ADK_ROOT_GUARD_TEARDOWN_CHILD` | `src/config/test_env/teardown_probe.rs` |  |
 | `ADK_SLO_ALERT_CHANNEL` | `src/services/slo/mod.rs` | Fallback alert channel (adk-cc) used when `ADK_SLO_ALERT_CHANNEL` is unset. |
 | `ADK_TURN_PRESENCE_TAIL` | `src/services/discord/turn_presence/activity/tail.rs` |  |
 | `AGENTDESK_API_URL` | `src/cli/client.rs`, `src/cli/monitoring.rs` | `env_hint` names the environment variable(s) the *caller's* `api_base()` actually honors — client.rs resolves `AGENTDESK_API_URL` only, while monitoring.rs pre… |
@@ -55,7 +52,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_CODEX_REASONING_EFFORT` | `src/services/codex/effort.rs` |  |
 | `AGENTDESK_CODEX_REMOTE_TMUX` | `src/services/codex/command_streaming.rs` |  |
 | `AGENTDESK_CODEX_TUI_WARM_FOLLOWUP` | `src/services/codex_tui/warm_followup.rs` |  |
-| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/config/test_env.rs`, `src/config/test_instance.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |
+| `AGENTDESK_CONFIG` | `src/config/config_path/selection.rs`, `src/config/test_instance.rs` | `$AGENTDESK_CONFIG` selects an explicit config path before the normal root search. |
 | `AGENTDESK_CSWAP_PATH` | `src/services/cswap.rs` |  |
 | `AGENTDESK_DCSERVER_LABEL` | `src/cli/dcserver.rs` |  |
 | `AGENTDESK_DCSERVER_LOG_MAX_BYTES` | `src/logging.rs` |  |
@@ -96,7 +93,7 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_REPORT_PROVIDER` | `src/services/provider/restart_report_env.rs`, `src/services/discord/restart_report.rs` |  |
 | `AGENTDESK_REPO_DIR` | `src/services/git/repo_resolver.rs` | Priority: `AGENTDESK_REPO_DIR` env -> scan all known roots for a git workspace -> `~/AgentDesk`. |
 | `AGENTDESK_REVIEW_MCP_ALLOWLIST` | `src/services/mcp_config.rs` |  |
-| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_env/teardown_probe.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
+| `AGENTDESK_ROOT_DIR` | `src/cli/dcserver.rs`, `src/config.rs`, `src/config/runtime_root_guard.rs`, `src/config/test_instance.rs`, `src/services/campaign_execution/verification_runner.rs`, `src/services/claude.rs`, `src/services/codex.rs`, `src/services/qwen/session_lifecycle.rs`, `src/services/routines/migrated.rs` | Write a debug message to a specific log file under $AGENTDESK_ROOT_DIR/debug/. |
 | `AGENTDESK_SCHEMA_AHEAD_HOLD` | `src/cli/dcserver_pg_bootstrap.rs` | Whether the launchd environment leaves the schema-ahead hold on (default on). |
 | `AGENTDESK_SELF_WATCHDOG_MODE` | `src/services/discord/health/recovery/self_watchdog.rs` |  |
 | `AGENTDESK_SINGLE_MESSAGE_PANEL` | `src/services/discord/single_message_panel.rs` | Default ON; standard false tokens disable the live panel. |
@@ -107,10 +104,6 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `AGENTDESK_TEST_AGY_LOGIN` | `src/config/test_instance/agy_cell.rs` |  |
 | `AGENTDESK_TEST_LEASE` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_MANIFEST` | `src/config/test_instance.rs` |  |
-| `AGENTDESK_TEST_PG_RECLAIM_DENY_SERVERS` | `src/db/postgres/test_db_reclaim.rs` |  |
-| `AGENTDESK_TEST_PG_RECLAIM_LOG` | `src/db/postgres/test_db_reclaim.rs` |  |
-| `AGENTDESK_TEST_PG_RECLAIM_PAUSE_AT` | `src/db/postgres/test_db_reclaim.rs` | Test seam: a child process stops at this create stage until stdin yields a line. |
-| `AGENTDESK_TEST_PG_RECLAIM_SERVER` | `src/db/postgres/test_db_reclaim.rs` |  |
 | `AGENTDESK_TEST_RUN` | `src/config/test_instance/lifecycle.rs` |  |
 | `AGENTDESK_TEST_RUNTIME` | `src/config/runtime_root_guard.rs` |  |
 | `AGENTDESK_TOKEN` | `src/cli/run.rs` |  |
@@ -144,9 +137,8 @@ Regenerate with `python3 scripts/generate_env_reference.py`; CI fails when this 
 | `OBSIDIAN_REMOTE_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OBSIDIAN_VAULT_ROOT` | `src/services/operator_connectors.rs`, `src/services/routines/migrated.rs` |  |
 | `OPENAI_API_KEY` | `src/server/rate_limit_sync.rs` | --- Codex: ~/.codex/auth.json (CLI subscription), else OPENAI_API_KEY --- |
-| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/config/test_env.rs`, `src/services/campaign_execution/landing_prepare.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Put `dir` in front of `PATH` while the caller owns the shared env lock. |
+| `PATH` | `src/cli/doctor/orchestrator.rs`, `src/cli/init.rs`, `src/services/campaign_execution/landing_prepare.rs`, `src/services/platform/binary_resolver.rs`, `src/services/platform/binary_resolver/runtime_path.rs`, `src/services/platform/tmux/session_inventory.rs`, `src/services/session_host/herdr/autostart.rs` | Build a `Command` for `program` that runs with the merged runtime PATH. |
 | `PNPM_HOME` | `src/services/platform/binary_resolver.rs` |  |
-| `POSTGRES_TEST_ADMIN_DB` | `src/db/auto_queue/test_support.rs`, `src/high_risk_recovery.rs` |  |
 | `QWEN_CODE_SYSTEM_DEFAULTS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_CODE_SYSTEM_SETTINGS_PATH` | `src/cli/doctor/orchestrator.rs`, `src/services/discord/model_catalog.rs` |  |
 | `QWEN_HOME` | `src/cli/doctor/orchestrator.rs`, `src/services/mcp_config.rs`, `src/services/qwen.rs` |  |

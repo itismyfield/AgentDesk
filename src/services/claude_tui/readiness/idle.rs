@@ -1,7 +1,7 @@
 //! Idle submission keeps focus and stash protection without a screen readiness verdict.
 use super::super::busy_inject::screen;
 
-pub(crate) fn focus_modal(capture: &str) -> bool {
+pub fn focus_modal(capture: &str) -> bool {
     let plain = crate::services::codex_tui::input::strip_ansi_escape_sequences(capture);
     let normalized =
         super::super::prompt_readiness::normalize_prompt_readiness_panel_in_capture(&plain);

@@ -13,17 +13,17 @@ pub(crate) mod body_check;
 use crate::services::tui_o::store::OStore;
 
 mod child_run;
-pub(crate) use child_run::LegacyRun;
+pub use child_run::LegacyRun;
 mod first_turn;
-pub(crate) use first_turn::{
+pub use first_turn::{
     FirstAdmission, FirstPause, FirstProof, digest as first_prompt_digest,
     nonce_id as first_nonce_id,
 };
 mod send_stage;
-pub(crate) use send_stage::SendStage;
+pub use send_stage::SendStage;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Adoption {
+pub enum Adoption {
     /// Undecided: a Legacy body or placement releases it, a first `init` commits it.
     Pending,
     /// The channel's store exists, so O owns its output.
@@ -38,7 +38,7 @@ pub(crate) enum Adoption {
 }
 
 impl Adoption {
-    pub(crate) fn owned(self) -> bool {
+    pub fn owned(self) -> bool {
         matches!(self, Self::Committed | Self::Held)
     }
 }
@@ -56,7 +56,7 @@ struct LegacySends {
 /// A Legacy body send under way on its channel, held until its transport is done; `seq` is its
 /// claim order on that channel.
 #[derive(Debug)]
-pub(crate) struct LegacySend {
+pub struct LegacySend {
     sends: Arc<LegacySends>,
     seq: u64,
 }
@@ -77,7 +77,7 @@ impl Drop for LegacySend {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum ClaimReason {
+pub enum ClaimReason {
     EmptySelection,
     NonMember,
     NoCandidate,
@@ -104,32 +104,44 @@ impl Adoption {
 
 /// A body claim's answer: whether O owns the channel and, when Legacy sends, that send.
 #[derive(Debug)]
-pub(crate) struct BodyClaimed {
-    pub(crate) owned: bool,
-    pub(crate) send: Option<LegacySend>,
-    pub(crate) reason: ClaimReason,
+pub struct BodyClaimed {
+    pub owned: bool,
+    pub send: Option<LegacySend>,
+    pub reason: ClaimReason,
 }
 
 /// A sends snapshot taken before reading the binding log; order is local to this candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct TurnMark {
+pub struct TurnMark {
+    #[cfg(any(test, feature = "test-support"))]
+    pub sends: (u64, u64),
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) sends: (u64, u64),
+    #[cfg(any(test, feature = "test-support"))]
+    pub seq: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) seq: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub order: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) order: u64,
 }
 
 /// A late reservation's floors from its first read: the deferred `baseline` (0 unless clean), and
 /// `takeover_after` with the Legacy sends read before it, the floor a takeover judges from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct LateBoundary {
-    pub(crate) baseline: u64,
+pub struct LateBoundary {
+    pub baseline: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub takeover_after: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) takeover_after: u64,
     pub(crate) sends: (u64, u64),
 }
 
 /// One selected channel's adoption and the lock every transition of it takes.
 #[derive(Clone, Debug)]
-pub(crate) struct Candidate {
+pub struct Candidate {
     init_scope: Option<Arc<crate::services::session_host::surface_policy::InitScope>>,
     state: Arc<Mutex<Adoption>>,
     sends: Arc<LegacySends>,
@@ -191,7 +203,7 @@ impl Candidate {
         }
     }
 
-    pub(crate) fn new(state: Adoption) -> Self {
+    pub fn new(state: Adoption) -> Self {
         Self {
             init_scope: None,
             state: Arc::new(Mutex::new(state)),
@@ -223,6 +235,11 @@ impl Candidate {
         self.child.get().copied()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reserved_late_for_test() -> Self {
+        Self::reserved_late()
+    }
+
     pub(crate) fn reserved_late() -> Self {
         Self {
             late_origin: true,
@@ -230,7 +247,7 @@ impl Candidate {
         }
     }
 
-    pub(crate) fn late_adopt_origin(&self) -> bool {
+    pub fn late_adopt_origin(&self) -> bool {
         self.late_origin
     }
 
@@ -240,7 +257,7 @@ impl Candidate {
         (self.sends(), order)
     }
 
-    pub(crate) fn turn_mark(&self) -> Option<TurnMark> {
+    pub fn turn_mark(&self) -> Option<TurnMark> {
         *self
             .turn_mark
             .lock()
@@ -249,7 +266,7 @@ impl Candidate {
 
     /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn mark_turn_admitted(
+    pub fn mark_turn_admitted(
         &self,
         channel: u64,
         read_seq: impl FnOnce() -> Result<u64, String>,
@@ -287,7 +304,7 @@ impl Candidate {
     }
 
     /// The late reservation's binding boundary, once fixed.
-    pub(crate) fn late_boundary(&self) -> Option<LateBoundary> {
+    pub fn late_boundary(&self) -> Option<LateBoundary> {
         self.child_retry_boundary()
             .or_else(|| self.late_boundary.get().copied())
     }
@@ -312,6 +329,11 @@ impl Candidate {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lock_for_test(&self) -> MutexGuard<'_, Adoption> {
+        self.lock()
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, Adoption> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -324,7 +346,7 @@ impl Candidate {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn locked_for_test(&self) -> bool {
+    pub fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
@@ -332,8 +354,13 @@ impl Candidate {
     }
 
     /// Read without deciding anything, for callers that carry no body.
-    pub(crate) fn peek(&self) -> Adoption {
+    pub fn peek(&self) -> Adoption {
         *self.lock()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn claim_for_test(&self, channel: u64) -> bool {
+        self.claim(channel)
     }
 
     /// Whether O owns the channel for a placement, which carries no body; a pending adoption is
@@ -345,7 +372,7 @@ impl Candidate {
     /// Whether O owns the channel for a body Legacy would otherwise send, releasing a pending
     /// adoption first; a Legacy send is counted under this lock until its guard drops.
     #[track_caller]
-    pub(in crate::services) fn claim_body(&self, channel: u64) -> BodyClaimed {
+    pub fn claim_body(&self, channel: u64) -> BodyClaimed {
         self.claim_body_from(channel, std::panic::Location::caller())
     }
 
@@ -399,7 +426,7 @@ impl Candidate {
     }
 
     /// Legacy body sends this channel started and finished so far; callers hold the state lock.
-    pub(crate) fn sends(&self) -> (u64, u64) {
+    pub fn sends(&self) -> (u64, u64) {
         let sends = &self.sends;
         let started = sends.started.load(Ordering::SeqCst);
         (started, sends.finished.load(Ordering::SeqCst))
@@ -416,6 +443,11 @@ impl Candidate {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_for_test(&self, channel: u64) {
+        self.release(channel)
+    }
+
     /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided
     /// one is kept.
     pub(crate) fn release(&self, channel: u64) {
@@ -425,6 +457,11 @@ impl Candidate {
             self.settle_first();
             tracing::info!(channel, "[tui_o] adoption released before the first init");
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn defer_for_test(&self, channel: u64) -> bool {
+        self.defer(channel)
     }
 
     /// Leaves a pending adoption to Legacy until its host retries; true while it is deferred.
@@ -442,6 +479,11 @@ impl Candidate {
             Adoption::Deferred => true,
             Adoption::Committed | Adoption::Held | Adoption::Released => false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn confirm_store_for_test(&self) -> bool {
+        self.confirm_store()
     }
 
     /// A recovered store commits the adoption, unless Legacy already took the channel.
@@ -501,7 +543,7 @@ impl Drop for LateReservationGuard {
 
 /// Where this node stands for the selected channels: only the O home hosts or adopts them.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Site {
+pub enum Site {
     #[default]
     Home,
     Foreign {
@@ -531,10 +573,7 @@ pub(crate) fn stored_with_committed(
 
 /// The adoption each selected channel starts with, from the local store as it is on disk.
 /// A readable `init` commits; unreadable, orphaned or era-only state holds; absent is pending.
-pub(crate) fn stored(
-    runtime_root: Option<&Path>,
-    channels: &BTreeSet<u64>,
-) -> BTreeMap<u64, Adoption> {
+pub fn stored(runtime_root: Option<&Path>, channels: &BTreeSet<u64>) -> BTreeMap<u64, Adoption> {
     let all = |state| channels.iter().map(|&channel| (channel, state)).collect();
     let Some(root) = runtime_root else {
         return all(Adoption::Held);

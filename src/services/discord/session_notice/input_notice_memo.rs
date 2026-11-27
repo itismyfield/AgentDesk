@@ -16,10 +16,10 @@ struct Memo {
 
 static MEMO: LazyLock<Mutex<Memo>> = LazyLock::new(Mutex::default);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Classifier runs on this thread, for the cost tests.
-    pub(crate) static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `classify`'s answer for `prompt`, reused while the history keeps the state it was made under.
@@ -34,7 +34,7 @@ pub(in crate::services::discord) fn content(
     {
         return answer.clone();
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     RUNS.with(|runs| runs.set(runs.get() + 1));
     let answer = classify(prompt);
     let size = prompt.len() + answer.as_ref().map_or(0, String::len);

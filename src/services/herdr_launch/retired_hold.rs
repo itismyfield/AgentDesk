@@ -9,7 +9,7 @@ use super::HerdrLaunchError;
 use crate::db::dispatched_sessions::hosted_execution::{HostedExecution, HostedOwner};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RetiredHoldOutcome {
+pub enum RetiredHoldOutcome {
     Durable,
     NotDurable(String),
     Failed(String),
@@ -75,7 +75,7 @@ async fn checked_before_fresh(
 
 /// Removes only this nonce's hold; even an earlier unlink needs a directory flush.
 #[cfg(unix)]
-pub(crate) fn release(nonce: &str) -> RetiredHoldOutcome {
+pub fn release(nonce: &str) -> RetiredHoldOutcome {
     let (path, _) = match crate::services::claude::herdr_turn::unlink_hold(nonce) {
         Ok(unlinked) => unlinked,
         Err(error) => return RetiredHoldOutcome::Failed(error),

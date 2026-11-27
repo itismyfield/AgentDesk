@@ -61,7 +61,7 @@ fn after_osc(body: &str) -> Option<&str> {
 }
 
 /// The text a capture shows, carriage returns removed.
-pub(crate) fn strip_ansi_escape_sequences(capture: &str) -> String {
+pub fn strip_ansi_escape_sequences(capture: &str) -> String {
     pieces(capture)
         .filter_map(|piece| match piece {
             Piece::Text(c) if c != '\r' => Some(c),

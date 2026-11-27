@@ -18,7 +18,7 @@ pub(super) fn with_composer_mutation_lock<R>(
 }
 /// Try the existing composer fence; contention or poison leaves the callback unrun.
 #[allow(dead_code)]
-pub(crate) fn try_with_composer_mutation_lock<R>(
+pub fn try_with_composer_mutation_lock<R>(
     session_name: &str,
     operation: impl FnOnce() -> R,
 ) -> Option<R> {

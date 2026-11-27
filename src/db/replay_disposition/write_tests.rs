@@ -106,7 +106,7 @@ async fn exact_attempt_migration_preserves_0136_rows_and_reapplies_pg() {
     )
     .await
     .expect("connect without migrating");
-    let all = sqlx::migrate!("./migrations/postgres");
+    let all = sqlx::migrate!("../../migrations/postgres");
     let through_0136 = sqlx::migrate::Migrator {
         migrations: std::borrow::Cow::Owned(
             all.iter().filter(|m| m.version <= 136).cloned().collect(),

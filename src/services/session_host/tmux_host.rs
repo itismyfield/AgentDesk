@@ -16,7 +16,7 @@ mod fifo;
 pub(super) mod input;
 
 /// Adapter over platform probes and input executors, retaining their transport behaviour.
-pub(crate) struct TmuxHost;
+pub struct TmuxHost;
 
 fn map_output(result: Result<Output, String>) -> Result<HostMutation, HostError> {
     match result {
@@ -41,7 +41,7 @@ pub(super) fn create(request: &TmuxCreate<'_>) -> Result<Output, String> {
 }
 
 /// tmux `send-keys` name of a host key.
-pub(crate) fn tmux_key_name(key: HostKey) -> &'static str {
+pub fn tmux_key_name(key: HostKey) -> &'static str {
     match key {
         HostKey::Enter => "Enter",
         HostKey::Escape => "Escape",
@@ -91,8 +91,13 @@ impl TmuxHost {
     }
 
     /// Preserve the stop owner's keys and raw status/error handling.
-    pub(crate) fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
+    pub fn interrupt_keys(&self, name: &str, keys: &[&str]) -> Result<Output, String> {
         tmux::send_keys(name, keys)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn legacy_has_session_for_test(&self, name: &str) -> bool {
+        self.legacy_has_session(name)
     }
 
     /// Keep the legacy boolean collapse inside the platform compatibility probe.
@@ -109,11 +114,11 @@ impl TmuxHost {
         tmux::pane_liveness(name)
     }
 
-    pub(crate) fn pane_current_path(&self, name: &str) -> Option<String> {
+    pub fn pane_current_path(&self, name: &str) -> Option<String> {
         tmux::pane_current_path(name)
     }
 
-    pub(crate) fn list_session_names(&self) -> Result<Vec<String>, String> {
+    pub fn list_session_names(&self) -> Result<Vec<String>, String> {
         tmux::list_session_names()
     }
 
@@ -134,15 +139,15 @@ impl TmuxHost {
         tmux::capture_pane_timeout(session, scroll_back, timeout)
     }
 
-    pub(crate) fn kill(&self, name: &str, reason: &str) -> bool {
+    pub fn kill(&self, name: &str, reason: &str) -> bool {
         tmux::kill_session(name, reason)
     }
 
-    pub(crate) fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
+    pub fn kill_output(&self, name: &str, reason: &str) -> std::io::Result<Output> {
         tmux::kill_session_output(name, reason)
     }
 
-    pub(crate) fn kill_output_timeout(
+    pub fn kill_output_timeout(
         &self,
         name: &str,
         reason: &str,
@@ -181,7 +186,7 @@ impl TmuxHost {
         .into_output()
     }
 
-    pub(crate) fn liveness_within(
+    pub fn liveness_within(
         &self,
         session: HostSessionRef<'_>,
         budget: std::time::Duration,
@@ -318,7 +323,7 @@ mod tests {
     #[test]
     fn create_runs_the_prepared_argv_as_the_platform_does_and_keeps_the_raw_result() {
         use super::super::create::HostCreation;
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         let _root = crate::config::TestRuntimeRootGuard::new();
         let name = "adk-s04-create-port";
         let fake = FakeTmux::install(name);
@@ -375,7 +380,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_pid_delegation_preserves_the_lookup_for_herdr_shaped_names() {
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         let root = crate::config::TestRuntimeRootGuard::new();
         for name in ["adk-pid-delegation", "42"] {
             let fake = FakeTmux::install(name);
@@ -404,7 +409,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn observations_keep_probe_errors_distinct_from_legacy_bool_results() {
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         use crate::services::session_host::legacy_collapse;
         use crate::services::tmux_diagnostics;
 

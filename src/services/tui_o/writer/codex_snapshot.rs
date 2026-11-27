@@ -8,13 +8,13 @@ use crate::services::tui_prompt_dedupe::binding_context::BindingContext;
 use crate::services::tui_prompt_dedupe::binding_events::BindingEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum HostPath {
+pub enum HostPath {
     Legacy,
     Herdr { identity: String },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct Target {
+pub struct Target {
     pub channel: u64,
     pub tmux: String,
     pub nonce: String,
@@ -24,14 +24,14 @@ pub(crate) struct Target {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum PaneState {
+pub enum PaneState {
     Live,
     Dead,
     Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct Pane {
+pub struct Pane {
     pub name: String,
     pub state: PaneState,
 }
@@ -40,7 +40,7 @@ pub(crate) type Coverage = Result<(), String>;
 
 /// The observer verifies canonical context, native descriptor and runtime pin under authority.
 /// The census covers log panes, current contexts and live host/owner discovery, without TTL filtering.
-pub(crate) struct Inputs {
+pub struct Inputs {
     pub target: Target,
     pub context: BindingContext,
     pub current: SourceId,
@@ -54,11 +54,11 @@ pub(crate) struct Inputs {
     pub coverage: Coverage,
 }
 
-pub(crate) type Refresh<'a> = std::pin::Pin<
+pub type Refresh<'a> = std::pin::Pin<
     Box<dyn std::future::Future<Output = Result<std::sync::Arc<dyn Observer>, String>> + Send + 'a>,
 >;
 
-pub(crate) trait Observer: Send + Sync {
+pub trait Observer: Send + Sync {
     fn observe(&self, authority: &TmuxSourceAuthority<'_>) -> Result<Inputs, String>;
 
     /// Refresh slow discovery outside source authority; failure cannot authorize retirement.
@@ -68,7 +68,7 @@ pub(crate) trait Observer: Send + Sync {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub target: Target,
     pub context: BindingContext,
     pub current: SourceId,
@@ -80,7 +80,7 @@ pub(crate) struct Snapshot {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Observation {
+pub enum Observation {
     Complete(Box<Snapshot>),
     Unknown(String),
 }

@@ -9,14 +9,23 @@ use super::dormant::OwedOrigin;
 use super::{ExecutionProofRef, TurnEpisodeRef};
 use crate::services::provider::CancelToken;
 
-/// The one non-serialized permission state of an exact episode in this process boot.
-pub(crate) struct EpisodePermissionRecord {
-    execution: ExecutionProofRef,
-    episode: TurnEpisodeRef,
-    token: Arc<CancelToken>,
-    /// Held from the exact check through `Prepared` and the first poll; cancellation takes it too.
-    revoked: Mutex<Option<&'static str>>,
+mod episode_permission_record {
+    use super::*;
+
+    /// The one non-serialized permission state of an exact episode in this process boot.
+    pub struct EpisodePermissionRecord {
+        pub(super) execution: ExecutionProofRef,
+        pub(super) episode: TurnEpisodeRef,
+        pub(super) token: Arc<CancelToken>,
+        /// Held from the exact check through `Prepared` and the first poll; cancellation takes it too.
+        pub(super) revoked: Mutex<Option<&'static str>>,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use episode_permission_record::EpisodePermissionRecord;
+#[cfg(any(test, feature = "test-support"))]
+pub use episode_permission_record::EpisodePermissionRecord;
 
 type EpisodeKey = (u64, u64, String);
 
@@ -32,14 +41,14 @@ fn registry() -> MutexGuard<'static, HashMap<EpisodeKey, Arc<EpisodePermissionRe
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static READY: std::cell::RefCell<std::collections::HashSet<u64>> = Default::default();
 }
 
 /// Verified owed delivery stays off until P5; Legacy and Shadow channels never reach it.
-pub(crate) fn owed_delivery_ready(channel: u64) -> bool {
-    #[cfg(test)]
+pub fn owed_delivery_ready(channel: u64) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
     if READY.with(|ready| ready.borrow().contains(&channel)) {
         return true;
     }
@@ -75,6 +84,15 @@ impl EpisodePermissionRecord {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admit_for_test<T>(
+        &self,
+        origin: &OwedOrigin,
+        admitted: impl FnOnce() -> T,
+    ) -> Result<T, &'static str> {
+        self.admit(origin, admitted)
+    }
+
     /// Runs `admitted` under the record lock only while the exact permit still holds, so a
     /// cancellation either lands before the check or waits until the first poll returned.
     pub(crate) fn admit<T>(
@@ -104,7 +122,7 @@ impl EpisodePermissionRecord {
 }
 
 /// A writer that stops for good leaves each of its channel's records Unknown, never settled.
-pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
+pub fn revoke_channel(channel: u64, reason: &'static str) {
     let records: Vec<_> = (registry().iter())
         .filter(|(key, _)| key.0 == channel)
         .map(|(_, record)| Arc::clone(record))
@@ -114,8 +132,8 @@ pub(crate) fn revoke_channel(channel: u64, reason: &'static str) {
     }
 }
 
-#[cfg(test)]
-pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_ready_for_tests(channel: u64, ready: bool) {
     READY.with(|set| match ready {
         true => set.borrow_mut().insert(channel),
         false => set.borrow_mut().remove(&channel),
@@ -123,8 +141,8 @@ pub(crate) fn set_ready_for_tests(channel: u64, ready: bool) {
 }
 
 /// Test seam for P4-2's issuance: one Arc per exact episode, a conflict never replaces it.
-#[cfg(test)]
-pub(crate) fn issue_for_tests(
+#[cfg(any(test, feature = "test-support"))]
+pub fn issue_for_tests(
     execution: ExecutionProofRef,
     episode: TurnEpisodeRef,
     token: &Arc<CancelToken>,
@@ -174,8 +192,8 @@ fn issue(
     Ok(record)
 }
 
-#[cfg(test)]
-pub(crate) fn forget_channel_for_tests(channel: u64) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn forget_channel_for_tests(channel: u64) {
     registry().retain(|key, _| key.0 != channel);
 }
 
@@ -183,7 +201,7 @@ pub(crate) fn forget_channel_for_tests(channel: u64) {
 #[path = "admission_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-pub(crate) fn issued_for_tests(channel: u64, message: u64, nonce: &str) -> bool {
+#[cfg(any(test, feature = "test-support"))]
+pub fn issued_for_tests(channel: u64, message: u64, nonce: &str) -> bool {
     registry().contains_key(&(channel, message, nonce.to_owned()))
 }

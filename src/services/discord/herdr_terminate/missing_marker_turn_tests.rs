@@ -99,7 +99,7 @@ fn mm_retire_wakes_held_writer_and_normal_input_delivers_without_deadlock_pg() {
     let _binding = activity::tests::BindingRoot::enter(&root);
     let _confirmed = crate::services::tui_o::turn_mode::TestConfirmation::new(CHANNEL);
     let _namespace =
-        crate::services::platform::tmux::session_inventory::tests::ChannelNamespace::new(
+        crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace::new(
             CHANNEL,
             root.join("absence-private.sock"),
         );

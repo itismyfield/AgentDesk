@@ -23,7 +23,7 @@ const SCHEMA: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ClearEnd {
+pub struct ClearEnd {
     pub channel: u64,
     pub provider: String,
     pub tmux_session: String,
@@ -48,7 +48,7 @@ struct Records {
 /// How an append left the record: durable, or published by its rename but with its directory
 /// entry unsynced, so a host crash may still lose it.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Appended {
+pub enum Appended {
     Durable,
     PublishedUnsynced(String),
 }
@@ -75,7 +75,7 @@ pub(crate) fn subscribe(channel: u64) -> watch::Receiver<u64> {
 }
 
 /// The channel's records, oldest first; a missing file has none.
-pub(crate) fn read(runtime_root: &Path, channel: u64) -> Result<Vec<ClearEnd>, String> {
+pub fn read(runtime_root: &Path, channel: u64) -> Result<Vec<ClearEnd>, String> {
     let file = match fs::File::open(path(runtime_root, channel)) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -96,7 +96,7 @@ pub(crate) fn read(runtime_root: &Path, channel: u64) -> Result<Vec<ClearEnd>, S
 }
 
 /// Adds `record`, dropping the oldest past `MAX_RECORDS`; an error means nothing was published.
-pub(crate) fn append(runtime_root: &Path, record: ClearEnd) -> Result<Appended, String> {
+pub fn append(runtime_root: &Path, record: ClearEnd) -> Result<Appended, String> {
     let _write = WRITE.lock().unwrap_or_else(PoisonError::into_inner);
     let channel = record.channel;
     let target = path(runtime_root, channel);

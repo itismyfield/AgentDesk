@@ -80,7 +80,7 @@ pub(super) fn compare(file: std::fs::File, supplied: Option<&str>) -> &'static s
 
 /// Which Codex front end a launch expects the rollout header to name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexRolloutSource {
+pub enum CodexRolloutSource {
     Cli,
     Exec,
 }
@@ -95,21 +95,21 @@ impl CodexRolloutSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexHookSourceRoute {
+pub enum CodexHookSourceRoute {
     PayloadPath,
     RolloutIndex,
 }
 
 /// One Codex hook's claim: native session id, optional rollout path, launch mode.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct CodexHookSourceClaim<'a> {
+pub struct CodexHookSourceClaim<'a> {
     pub session_id: &'a str,
     pub transcript_path: Option<&'a Path>,
     pub expected_source: CodexRolloutSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VerifiedCodexHookSource {
+pub struct VerifiedCodexHookSource {
     pub session_id: String,
     pub rollout_path: PathBuf,
     pub identity: SourceFileIdentity,
@@ -118,7 +118,7 @@ pub(crate) struct VerifiedCodexHookSource {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CodexHookSourceRejection {
+pub enum CodexHookSourceRejection {
     InvalidSessionId,
     FileNameMismatch,
     OutsideSessionsRoot,
@@ -148,7 +148,7 @@ impl CodexHookSourceRejection {
 }
 
 /// Accepts a hook's rollout only when its file name, root, header id and source all agree.
-pub(crate) fn verify_codex_hook_source(
+pub fn verify_codex_hook_source(
     sessions_root: &Path,
     claim: &CodexHookSourceClaim<'_>,
 ) -> Result<VerifiedCodexHookSource, CodexHookSourceRejection> {
@@ -404,7 +404,7 @@ fn verify_rollout(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexSourceMode {
+pub enum CodexSourceMode {
     Legacy,
     Shadow,
     Verified,
@@ -437,6 +437,11 @@ impl CodexSourceMode {
             _ => Self::Invalid,
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launch_policy_for_test(self) -> Result<&'static str, &'static str> {
+        self.launch_policy()
+    }
+
     pub(crate) fn launch_policy(self) -> Result<&'static str, &'static str> {
         self.launch_decision().map(SourceLaunchPolicy::as_str)
     }
@@ -452,7 +457,7 @@ impl CodexSourceMode {
 }
 
 /// Validated once at startup; no active nonce or new launch reparses mutable env.
-pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
+pub fn codex_source_mode_snapshot() -> CodexSourceMode {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(mode) = SOURCE_MODE_TEST.with(|mode| mode.get()) {
         return mode;
@@ -470,7 +475,7 @@ pub(crate) fn codex_source_mode_snapshot() -> CodexSourceMode {
     })
 }
 #[cfg(any(test, feature = "test-support"))]
-thread_local! { pub(crate) static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
+thread_local! { pub static SOURCE_MODE_TEST: std::cell::Cell<Option<CodexSourceMode>> = const { std::cell::Cell::new(None) }; }
 
 /// Checks the actual argv bytes; missing or malformed digests never qualify a UPS.
 pub(crate) fn first_prompt_matches(expected: Option<&str>, prompt: &Value) -> bool {

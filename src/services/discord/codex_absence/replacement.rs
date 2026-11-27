@@ -51,12 +51,21 @@ fn state(key: &Key) -> Arc<State> {
 }
 
 /// Owns only the kill/create interval; every early return releases it.
-pub(crate) struct Replacement {
+pub struct Replacement {
     state: Arc<State>,
     completed: bool,
 }
 
 impl Replacement {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_for_test(
+        channel: Option<u64>,
+        tmux: &str,
+        token: Option<&Arc<CancelToken>>,
+    ) -> Result<Option<Self>, String> {
+        Self::begin(channel, tmux, token)
+    }
+
     pub(crate) fn begin(
         channel: Option<u64>,
         tmux: &str,
@@ -103,6 +112,11 @@ impl Replacement {
         }))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn complete_for_test(self) {
+        self.complete()
+    }
+
     /// The successor has completed spawn validation; its later death is real.
     pub(crate) fn complete(mut self) {
         self.completed = true;
@@ -119,14 +133,14 @@ impl Drop for Replacement {
 }
 
 /// Keeps the generation alive across a probe, including a whole replacement during its await.
-pub(crate) struct Probe {
+pub struct Probe {
     key: Key,
     state: Arc<State>,
     generation: u64,
 }
 
 impl Probe {
-    pub(crate) fn new(channel: u64, tmux: &str) -> Self {
+    pub fn new(channel: u64, tmux: &str) -> Self {
         let key = (channel, tmux.to_owned());
         let state = state(&key);
         let generation = state.lock().unwrap_or_else(|e| e.into_inner()).generation;
@@ -146,12 +160,12 @@ impl Probe {
                 .is_some_and(|turn| turn.current(&self.key))
     }
 
-    pub(crate) fn defer_death(&self) -> bool {
+    pub fn defer_death(&self) -> bool {
         self.protected(&self.state.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     /// Admission and replacement begin share a lock; no mutex is held across async cleanup.
-    pub(crate) fn cleanup(&self) -> Option<Cleanup> {
+    pub fn cleanup(&self) -> Option<Cleanup> {
         let mut phase = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let protected = self.protected(&phase);
         if protected || phase.cleanup {
@@ -165,7 +179,7 @@ impl Probe {
 }
 
 #[derive(Clone)]
-pub(crate) struct Cleanup {
+pub struct Cleanup {
     _held: Arc<CleanupState>,
 }
 

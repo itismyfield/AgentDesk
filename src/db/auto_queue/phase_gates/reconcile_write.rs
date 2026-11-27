@@ -7,12 +7,12 @@ use super::{PhaseGateRepairError, lock_phase_gate_state_on_pg_tx};
 
 /// One terminal phase-gate dispatch the repair re-evaluates.
 #[derive(Debug, Clone)]
-pub(crate) struct PhaseGateRepairCandidate {
-    pub(crate) phase: i64,
-    pub(crate) dispatch_id: String,
-    pub(crate) dispatch_status: String,
-    pub(crate) dispatch_context: Option<String>,
-    pub(crate) dispatch_result: Option<String>,
+pub struct PhaseGateRepairCandidate {
+    pub phase: i64,
+    pub dispatch_id: String,
+    pub dispatch_status: String,
+    pub dispatch_context: Option<String>,
+    pub dispatch_result: Option<String>,
 }
 
 const PHASE_GATE_REPAIR_CANDIDATE_PHASES_SQL: &str = "\
@@ -117,7 +117,7 @@ async fn lock_phase_gate_repair_candidate_phases_on_pg_tx(
 
 /// Checks the run exists, takes the dispatch-row, advisory and gate-row locks in the
 /// PATCH-compatible order, then reads the candidates.
-pub(crate) async fn lock_phase_gate_repair_candidates_on_pg_tx(
+pub async fn lock_phase_gate_repair_candidates_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase_filter: Option<i64>,
@@ -195,13 +195,13 @@ pub(crate) async fn lock_phase_gate_repair_candidates_on_pg_tx(
 }
 
 /// Gate and run state read after the reconcile loop, on the same tx.
-pub(crate) struct PhaseGateRepairRemainder {
-    pub(crate) blocking_gates_remaining: i64,
-    pub(crate) orphan_gates_skipped: usize,
-    pub(crate) run_status: Option<String>,
+pub struct PhaseGateRepairRemainder {
+    pub blocking_gates_remaining: i64,
+    pub orphan_gates_skipped: usize,
+    pub run_status: Option<String>,
 }
 
-pub(crate) async fn load_phase_gate_repair_remainder_on_pg_tx(
+pub async fn load_phase_gate_repair_remainder_on_pg_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     run_id: &str,
     phase_filter: Option<i64>,

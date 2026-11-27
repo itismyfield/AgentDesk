@@ -875,7 +875,10 @@ async fn exact_retry_reenters_only_through_its_own_continuation_pg() {
     )
     .await
     .expect("exact retry permit");
-    assert_eq!(permit.attempt().retry_of(), Some(previous.as_str()));
+    assert_eq!(
+        permit.attempt().retry_of_for_test(),
+        Some(previous.as_str())
+    );
     let next = permit.attempt().nonce().to_string();
     let session: (Option<String>, String) = sqlx::query_as(
         "SELECT claude_session_id, replay_episode_nonce FROM sessions WHERE session_key = 'retry-session'",
@@ -1017,8 +1020,11 @@ async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
             &token,
         )
         .unwrap();
-    let tap = RawTap::for_token(Some(&token));
-    assert!(!tap.active(), "off cannot claim an observation seal");
+    let tap = RawTap::for_token_for_test(Some(&token));
+    assert!(
+        !tap.active_for_test(),
+        "off cannot claim an observation seal"
+    );
     for seen in [
         Seen::Activity(Activity::Output),
         Seen::Broken,
@@ -1026,7 +1032,7 @@ async fn p4_off_terminal_paths_keep_legacy_and_restored_hold_results_pg() {
         Seen::Exited { waited: true },
         Seen::StderrDrained,
     ] {
-        tap.see(seen);
+        tap.see_for_test(seen);
     }
     assert!(
         token.replay_attempt().is_none(),
@@ -1148,7 +1154,7 @@ async fn p5_off_completed_key_is_consumed_pg() {
     ] {
         seen.record(fact);
     }
-    write::classify_normal(&pool, &attempt, &seen.terminal_evidence().unwrap())
+    write::classify_normal(&pool, &attempt, &seen.terminal_evidence_for_test().unwrap())
         .await
         .unwrap();
     let off = ReplayAdmissionContext::production(&pool, "new-node", "new-incarnation");
@@ -1222,8 +1228,10 @@ async fn p5_scoped_admission_cannot_produce_for_unsupported_runtimes_pg() {
                     .unwrap();
                 assert!(token.replay_attempt().is_none());
                 assert!(
-                    !crate::services::discord::replay_policy::live::RawTap::for_token(Some(&token))
-                        .active()
+                    !crate::services::discord::replay_policy::live::RawTap::for_token_for_test(
+                        Some(&token)
+                    )
+                    .active_for_test()
                 );
             }
         }

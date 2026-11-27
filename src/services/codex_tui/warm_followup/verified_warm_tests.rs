@@ -8,7 +8,7 @@ use crate::services::{
         warm_followup::{self, VerifiedWarmRequest},
     },
     provider::CancelToken,
-    provider_teardown::tests::test_support::FakeTmux,
+    provider_teardown::test_support::FakeTmux,
     tmux_common as tc,
     tui_o::store::codex_end,
     tui_prompt_dedupe::{

@@ -2,7 +2,7 @@ use sqlx::PgPool;
 
 /// Moves the session row's provider selector to `new` only while it still names one of `left`,
 /// so a cleared row or another chosen selector is not overwritten. Returns whether it moved.
-pub(crate) async fn move_provider_selector_pg(
+pub async fn move_provider_selector_pg(
     pool: &PgPool,
     session_row_id: i64,
     left: &[String],
@@ -27,7 +27,7 @@ pub(crate) async fn move_provider_selector_pg(
 
 /// Stores `session`, whose run began at `started`, as the provider selector of `session_key`'s row
 /// unless the channel was cleared since then. Returns whether a row took it.
-pub(crate) async fn store_provider_selector_pg(
+pub async fn store_provider_selector_pg(
     pool: &PgPool,
     session_key: &str,
     session: &str,

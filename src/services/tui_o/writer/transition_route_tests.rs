@@ -11,9 +11,8 @@ use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::writer::actor::{force_execution_for_tests, transition_hooks as hooks};
 use crate::services::tui_o::writer::host::Readiness;
-use crate::services::tui_o::writer::tests::CHANNEL;
-use crate::services::tui_o::writer::tests::actor::rotation::retire_tests::transition_actor_tests::*;
-use crate::services::tui_o::writer::tests::actor::{halt, polls, row};
+use crate::services::tui_o::writer::test_support::transition::*;
+use crate::services::tui_o::writer::test_support::{CHANNEL, halt, polls, row};
 use crate::services::tui_o::writer::transition_cleanup::{Request, Termination};
 use crate::services::tui_o::writer::transition_port::{
     Context, Operation, ScopeDigest, TransitionPort,
@@ -368,7 +367,7 @@ async fn transition_route_sends_nothing_to_an_actor_that_takes_no_work() {
 mod pg {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::db::dispatched_sessions::hosted_execution::tests::record;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::record;
     use crate::db::dispatched_sessions::hosted_execution::{
         HostedLocation, HostedOwner, HostedState,
     };

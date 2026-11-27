@@ -222,7 +222,7 @@ fn db_provider_session_restore_existing_cli_renders_session_panel_line() {
         None,
     );
     let kind = event.meta().kind;
-    let details = event.details_json();
+    let details = event.details_json_for_test();
 
     match &event {
         TurnEvent::SessionResumed(details) => {
@@ -694,7 +694,7 @@ fn assert_codex_late_item_followup(
             expected,
             expected,
             expected.is_busy(),
-            Some(TuiReadyState::from_turn_state(expected))
+            Some(TuiReadyState::from_turn_state_for_test(expected))
         )
     );
 }

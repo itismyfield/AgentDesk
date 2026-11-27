@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 /// Mutable entry for `key` under `parent`, created as null when absent.
 /// A `parent` that is not a mapping is replaced with an empty one.
-pub(crate) fn yaml_child<'a>(parent: &'a mut Value, key: &str) -> &'a mut Value {
+pub fn yaml_child<'a>(parent: &'a mut Value, key: &str) -> &'a mut Value {
     if !parent.is_mapping() {
         *parent = Value::Mapping(serde_yaml::Mapping::new());
     }
@@ -26,13 +26,13 @@ pub(crate) fn yaml_child<'a>(parent: &'a mut Value, key: &str) -> &'a mut Value 
     map.get_mut(&key).expect("entry exists after the insert")
 }
 
-pub(crate) fn yaml_set(parent: &mut Value, key: &str, value: Value) {
+pub fn yaml_set(parent: &mut Value, key: &str, value: Value) {
     *yaml_child(parent, key) = value;
 }
 
 // Local comparison only: include the two secrets deliberately omitted by Serialize.
 // Never log this projection or differences containing its values.
-pub(crate) fn typed_document(config: &Config) -> Result<Value, serde_yaml::Error> {
+pub fn typed_document(config: &Config) -> Result<Value, serde_yaml::Error> {
     let mut value = serde_yaml::to_value(config)?;
     yaml_set(
         yaml_child(&mut value, "server"),
@@ -75,7 +75,7 @@ fn disk_document(config: &Config) -> Result<Value, serde_yaml::Error> {
 
 /// Settings write-back gate: the patched document must serialize like `expected`,
 /// secrets included. The error names the section only, never a value.
-pub(crate) fn check_round_trip(expected: &Config, rendered: &str) -> Result<()> {
+pub fn check_round_trip(expected: &Config, rendered: &str) -> Result<()> {
     let actual: Config = serde_yaml::from_str(rendered)?;
     let expected = typed_document(expected)?;
     let actual = typed_document(&actual)?;
@@ -247,7 +247,7 @@ fn check_disk_secrets_kept(path: &Path, config: &Config, on_disk: Option<&Config
 }
 
 /// YAML text for writing `config` to `path`, checked before anything is written.
-pub(crate) fn render_config_for_path(path: &Path, config: &Config) -> Result<String> {
+pub fn render_config_for_path(path: &Path, config: &Config) -> Result<String> {
     let on_disk = read_config_on_disk(path)?;
     let config = &without_runtime_derivations(path, config, on_disk.as_ref());
     let rendered = serde_yaml::to_string(&disk_document(config)?)
@@ -301,14 +301,14 @@ fn replace_file(path: &Path, contents: &str) -> std::io::Result<()> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support {
+pub mod test_support {
     use std::path::Path;
 
     pub(crate) const SERVER_TOKEN: &str = "server-secret-token";
     pub(crate) const BOT_TOKEN: &str = "keeper-bot-secret-token";
 
     /// Writes a config holding both secrets, followed by `extra` top-level YAML.
-    pub(crate) fn write_secret_config(path: &Path, extra: &str) {
+    pub fn write_secret_config(path: &Path, extra: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let yaml = format!(
             "server:\n  auth_token: {SERVER_TOKEN}\ndiscord:\n  bots:\n    keeper:\n      token: {BOT_TOKEN}\n      provider: claude\n{extra}"
@@ -316,7 +316,7 @@ pub(crate) mod test_support {
         std::fs::write(path, yaml).unwrap();
     }
 
-    pub(crate) fn assert_secrets_on_disk(path: &Path) {
+    pub fn assert_secrets_on_disk(path: &Path) {
         let raw: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(raw["server"]["auth_token"].as_str(), Some(SERVER_TOKEN));
