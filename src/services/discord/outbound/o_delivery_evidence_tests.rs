@@ -755,10 +755,9 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
 async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg() {
     use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, run};
     use crate::services::tui_o::repost::{
-        identity::{IDENTITY_VERSION, SPLIT_VERSION, payload_sha256},
+        identity::{IDENTITY_VERSION, payload_sha256},
         io::probe::matcher::ObservedMessage,
-        o_piece_attempts::AttemptResult,
-        o_piece_delivery::{self as db, AdmittedBy, NewDelivery},
+        o_piece_delivery::{self as db, NewDelivery},
         runner::Runner,
     };
     let root = tempfile::tempdir().unwrap();
@@ -794,21 +793,15 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
     ));
     db::admit(
         &pool,
-        &NewDelivery {
-            key: key.clone(),
-            payload: piece.payload.clone(),
-            payload_sha256: payload_sha256(&piece.payload),
-            identity_version: IDENTITY_VERSION,
-            split_version: SPLIT_VERSION,
-            original_anchor: snowflake(500),
-            sender_id: 42,
-            admitted_by: AdmittedBy::Uncertain,
-            origin_serial: 0,
-            origin_node: "fixture".into(),
-            original: AttemptResult::Uncertain,
-            prior_retries: 0,
-            failure: None,
-        },
+        &NewDelivery::uncertain_for_test(
+            key.clone(),
+            piece.payload.clone(),
+            IDENTITY_VERSION,
+            snowflake(500),
+            42,
+            0,
+            "fixture".into(),
+        ),
     )
     .await
     .unwrap();
@@ -1003,10 +996,9 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
 async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, run};
     use crate::services::tui_o::repost::{
-        identity::{IDENTITY_VERSION, SPLIT_VERSION, payload_sha256},
+        identity::IDENTITY_VERSION,
         io::probe::matcher::ObservedMessage,
-        o_piece_attempts::AttemptResult,
-        o_piece_delivery::{self as db, AdmittedBy, NewDelivery},
+        o_piece_delivery::{self as db, NewDelivery},
         runner::Runner,
     };
     let root = tempfile::tempdir().unwrap();
@@ -1041,21 +1033,15 @@ async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     ));
     db::admit(
         &pool,
-        &NewDelivery {
+        &NewDelivery::uncertain_for_test(
             key,
-            payload: piece.payload.clone(),
-            payload_sha256: payload_sha256(&piece.payload),
-            identity_version: IDENTITY_VERSION,
-            split_version: SPLIT_VERSION,
-            original_anchor: snowflake(500),
-            sender_id: 42,
-            admitted_by: AdmittedBy::Uncertain,
-            origin_serial: 1,
-            origin_node: "fixture".into(),
-            original: AttemptResult::Uncertain,
-            prior_retries: 0,
-            failure: None,
-        },
+            piece.payload.clone(),
+            IDENTITY_VERSION,
+            snowflake(500),
+            42,
+            1,
+            "fixture".into(),
+        ),
     )
     .await
     .unwrap();

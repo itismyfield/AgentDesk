@@ -216,6 +216,37 @@ pub struct NewDelivery {
     pub(crate) failure: Option<Failure>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl NewDelivery {
+    pub fn uncertain_for_test(
+        key: PieceKey,
+        payload: String,
+        identity_version: i32,
+        original_anchor: u64,
+        sender_id: u64,
+        origin_serial: u64,
+        origin_node: String,
+    ) -> Self {
+        use crate::services::tui_o::repost::identity::{SPLIT_VERSION, payload_sha256};
+
+        Self {
+            key,
+            payload_sha256: payload_sha256(&payload),
+            payload,
+            identity_version,
+            split_version: SPLIT_VERSION,
+            original_anchor,
+            sender_id,
+            admitted_by: AdmittedBy::Uncertain,
+            origin_serial,
+            origin_node,
+            original: AttemptResult::Uncertain,
+            prior_retries: 0,
+            failure: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeliveryRow {
     #[cfg(any(test, feature = "test-support"))]

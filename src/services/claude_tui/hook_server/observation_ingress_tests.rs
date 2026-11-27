@@ -55,6 +55,12 @@ pub struct Ingress {
     _state: MutexGuard<'static, ()>,
 }
 
+impl Default for Ingress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Ingress {
     pub fn new() -> Self {
         let state_lock = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());

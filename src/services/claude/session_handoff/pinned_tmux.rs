@@ -373,6 +373,10 @@ pub mod tests {
         pub(crate) dir: tempfile::TempDir,
     }
     impl Server {
+        pub fn from_dir_for_test(dir: tempfile::TempDir) -> Self {
+            Self { dir }
+        }
+
         #[cfg(any(test, feature = "test-support"))]
         pub fn command_for_test(&self) -> std::process::Command {
             self.command()

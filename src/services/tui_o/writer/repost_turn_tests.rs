@@ -290,13 +290,7 @@ async fn results(pool: &PgPool, key: &PieceKey) -> Vec<Option<AttemptResult>> {
 
 /// Whether message `id` already is `key`'s receipt, read back by recording it once more.
 async fn is_receipt(pool: &PgPool, key: &PieceKey, id: u64) -> bool {
-    let receipt = Receipt {
-        key: key.clone(),
-        message_id: id,
-        author_id: BOT,
-        slot: None,
-        method: ReceiptMethod::PostResponse,
-    };
+    let receipt = Receipt::for_test(key.clone(), id, BOT, None, ReceiptMethod::PostResponse);
     let outcome = record_receipt(pool, &receipt).await.unwrap();
     outcome == ReceiptOutcome::Known
 }

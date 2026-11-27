@@ -313,6 +313,12 @@ pub struct Harness {
     pub alarms: Alarms,
 }
 
+impl Default for Harness {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Harness {
     pub fn new() -> Self {
         Self::build(|_| Vec::new())
@@ -570,6 +576,12 @@ pub struct FakeBindings {
     /// Set while every read of the log fails with this error.
     pub(super) failing: Mutex<Option<String>>,
 }
+impl Default for FakeBindings {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FakeBindings {
     pub fn new() -> Self {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
@@ -627,6 +639,12 @@ pub struct ODrive {
     sources: Sources<BindingLog>,
     deriver: UnitDeriver,
     owed: VecDeque<Derived>,
+}
+
+impl Default for ODrive {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ODrive {

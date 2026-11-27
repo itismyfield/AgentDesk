@@ -19,6 +19,12 @@ pub struct Rig {
     pub root: PathBuf,
     pub ctx: BindingContext,
 }
+impl Default for Rig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rig {
     pub fn new() -> Self {
         Self::for_channel(None)

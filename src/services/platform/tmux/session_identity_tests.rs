@@ -9,6 +9,12 @@ pub struct Rig {
     _root: crate::config::TestEnvVarGuard,
 }
 
+impl Default for Rig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rig {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();

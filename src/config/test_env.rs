@@ -92,6 +92,12 @@ pub struct TestRuntimeRootGuard {
     _root: tempfile::TempDir,
 }
 
+impl Default for TestRuntimeRootGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TestRuntimeRootGuard {
     pub fn path(&self) -> &std::path::Path {
         self._root.path()

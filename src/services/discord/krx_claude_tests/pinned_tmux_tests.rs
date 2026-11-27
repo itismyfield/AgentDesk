@@ -7,9 +7,7 @@ use crate::services::claude::session_handoff::pinned_tmux::*;
 async fn an_agentdesk_name_in_hangul_closes_only_its_exact_pane() {
     use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
     let root_guard = crate::config::TestRuntimeRootGuard::new();
-    let server = Server {
-        dir: tempfile::tempdir().unwrap(),
-    };
+    let server = Server::from_dir_for_test(tempfile::tempdir().unwrap());
     let logical =
         crate::services::provider::ProviderKind::Claude.build_tmux_session_name("게임-cc");
     server.start_named_for_test(&logical);

@@ -6,6 +6,9 @@ use crate::services::tui_o::writer::{adoption::LegacyTurnIdentity, binding::Bind
 pub struct LegacyRun {
     pub binding: BindingEvent,
     pub turn: Option<LegacyTurnIdentity>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub observed_end: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) observed_end: u64,
     pub delivery: Option<crate::services::tui_o::writer::adoption::LegacyDelivery>,
 }

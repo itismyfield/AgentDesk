@@ -34,6 +34,12 @@ pub struct Fixture {
     pub path: PathBuf,
 }
 
+impl Default for Fixture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Fixture {
     pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();

@@ -22,19 +22,20 @@ pub(in crate::services::discord) use identity::clear_admitted_restart_terminal;
 pub(in crate::services::discord) use identity::clear_inflight_state_for_captured_episode;
 
 pub(in crate::services::discord) use self::abandon::request_inflight_abandon_for_captured_episode;
-pub(crate) use self::abandon::{
-    request_inflight_abandon_if_matches, request_inflight_abandon_if_matches_zero_owned,
-};
+pub(crate) use self::abandon::request_inflight_abandon_if_matches;
+#[cfg(test)]
+pub(crate) use self::abandon::request_inflight_abandon_if_matches_zero_owned;
 #[cfg(test)]
 pub(super) use self::abandon::{
     request_inflight_abandon_if_matches_in_root,
     request_inflight_abandon_if_matches_zero_owned_in_root, row_has_finalizable_placeholder,
 };
+#[cfg(test)]
+pub(super) use self::identity::clear_inflight_state_if_matches_identity_in_root;
 pub(super) use self::identity::{
-    clear_inflight_state_if_matches_identity_in_root,
     clear_inflight_state_if_matches_identity_returning_row_in_root,
     clear_inflight_state_if_matches_identity_turn_nonce_in_root,
-    clear_rebind_origin_inflight_state_if_matches_identity_in_root, turn_nonce_matches,
+    clear_rebind_origin_inflight_state_if_matches_identity_in_root,
 };
 pub(in crate::services::discord) use self::reconcile_gate::{
     ReconcileClearOutcome, clear_inflight_state_for_reconcile, clear_rebind_origin_for_reconcile,
