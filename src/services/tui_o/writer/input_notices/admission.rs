@@ -1,9 +1,9 @@
 //! Final notice admission stays synchronous through prepare and the first POST poll.
 
 use super::super::pieces::PieceWork;
-use super::NoticeOrigin;
+use super::{NoticeOrigin, NoticeOwnership, observed_notice_attempt};
 use crate::services::discord::session_notice::input_notice;
-use crate::services::tui_input::human_frame::history::{self, ObservedAttempt};
+use crate::services::tui_input::human_frame::history;
 use crate::services::tui_o::shadow::{SourceId, UnitKind};
 use crate::services::tui_o::store::{ChannelStore, ledger::LedgerEntry};
 use crate::services::tui_prompt_dedupe::binding_events::{self as p5, BindingEvent, BindingTarget};
@@ -113,6 +113,11 @@ pub(crate) fn admit_notice<R>(
     if floored {
         return exclude(piece, store, "input_notice_migration_floor");
     }
+    let absorbed = evidence.is_absorbed_remove();
+    let command_row_uuid = evidence.command_row_uuid();
+    let receipt_uuid = command_row_uuid
+        .as_deref()
+        .unwrap_or(&piece.unit_key.native_key);
     tc::try_with_tmux_source_authority(&origin.logical_session, |_| {
         let events = p5::records_strict(store.init().channel)
             .map_err(|error| withheld(error.to_string()))?
@@ -123,27 +128,35 @@ pub(crate) fn admit_notice<R>(
         if input_notice::input_notice_content(&prompt).is_none() {
             return exclude(piece, store, "input_notice_source");
         }
-        match history::observed_attempt_checked(
-            "claude",
+        match observed_notice_attempt(
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(&piece.unit_key.native_key),
+            &piece.unit_key.native_key,
+            command_row_uuid.as_deref(),
+            absorbed,
         )
         .map_err(withheld)?
         {
-            ObservedAttempt::Known(_) => return exclude(piece, store, "input_notice_source"),
-            ObservedAttempt::Pending => match owners
-                .map(|owners| owners.decision(origin, &piece.unit_key.native_key, &prompt))
-            {
-                Some(history::notice_owner::Decision::Owned) => {
-                    return exclude(piece, store, "input_notice_source");
-                }
-                Some(history::notice_owner::Decision::Unowned) => {}
-                Some(history::notice_owner::Decision::Pending(_)) | None => {
+            NoticeOwnership::Known | NoticeOwnership::KnownCommand => {
+                return exclude(piece, store, "input_notice_source");
+            }
+            NoticeOwnership::Pending if absorbed => {
+                if !owners.is_some_and(|owners| owners.absorbed_unowned(origin, &prompt)) {
                     return Err(NoticeRefusal::OwnershipPending);
                 }
-            },
-            ObservedAttempt::None => {}
+            }
+            NoticeOwnership::Pending => {
+                match owners.map(|owners| owners.decision(origin, receipt_uuid, &prompt)) {
+                    Some(history::notice_owner::Decision::Owned) => {
+                        return exclude(piece, store, "input_notice_source");
+                    }
+                    Some(history::notice_owner::Decision::Unowned) => {}
+                    Some(history::notice_owner::Decision::Pending(_)) | None => {
+                        return Err(NoticeRefusal::OwnershipPending);
+                    }
+                }
+            }
+            NoticeOwnership::Unowned => {}
         }
         match crate::services::session_host::thread_host::current_execution_cached(
             store.init().channel,

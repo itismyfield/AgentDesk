@@ -72,6 +72,7 @@ pub(crate) fn materialized_notice_in(
         index: 0,
         payload: crate::services::discord::input_notice_content(prompt).unwrap(),
         notice_origin: Some(origin.clone()),
+        reply: None,
     };
     let mut store = harness.channel();
     if freeze && store.ledger().input_notices().migration.is_none() {

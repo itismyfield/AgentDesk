@@ -763,6 +763,8 @@ enum Wait {
     Go,
     Event,
     Watch(crate::services::discord::queue_io::input_owner::held_watch::ScreenProbe),
+    /// Its channel's Bound execution can never be recovered by this owner: settled after claim.
+    Reject(String),
 }
 
 /// Whether a start must wait for its pane's idle: a turn AgentDesk did not start holds the channel,
@@ -781,25 +783,11 @@ async fn start_waits(shared: &Shared, channel: ChannelId, context: &Value) -> Wa
     if row || rest(provider, id) {
         return Wait::Event;
     }
-    let screen = match start_wait::observe(shared, channel, context).await {
-        start_wait::Observed::Legacy => None,
+    match start_wait::observe(shared, channel, context).await {
+        start_wait::Observed::Legacy => {}
         // The driver preserves a known host refusal as a typed, confirmed non-send.
         start_wait::Observed::Refused => return Wait::Go,
-        start_wait::Observed::Native(screen) => Some(screen),
-    };
-    if let Some(screen) = screen {
-        if screen == Screen::Ready {
-            return Wait::Go;
-        }
-        let (shared, context) = (shared.clone(), context.clone());
-        return Wait::Watch(Box::new(move || {
-            tokio::runtime::Handle::current().block_on(async {
-                start_wait::observe(&shared, channel, &context)
-                    .await
-                    .native()
-                    .unwrap_or(Screen::Ready)
-            })
-        }));
+        observed => return start_wait::wait(observed, shared, channel, context),
     }
     if crate::services::tui_o::turn_mode::transcript_turns(id) {
         let busy = activity_now(shared, provider, channel).await.activity != Activity::Idle;
@@ -982,6 +970,9 @@ async fn start_idle(
     let (held, holder) = (front.clone(), mailbox.clone());
     let claim = claim_turn(&mailbox, front.1.message_id, &front).await?;
     let claim = claim.ok_or("NotSent(\"front_not_granted\")")?;
+    if let Wait::Reject(reason) = wait {
+        return start_wait::reject(&shared, channel, (&mailbox, &claim), reason).await;
+    }
     let (settled, answer) = tokio::sync::oneshot::channel();
     let origin = InputOrigin::from_context(kept.as_ref());
     let recovery = super::start_failure::MissingRecovery::default();
