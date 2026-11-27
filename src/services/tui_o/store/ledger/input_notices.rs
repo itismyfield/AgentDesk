@@ -369,10 +369,7 @@ impl MigrationSnapshot {
 
 #[cfg(any(test, feature = "test-support"))]
 impl NoticeState {
-    pub fn apply_for_test(
-        &mut self,
-        entry: NoticeEntry,
-    ) -> Result<Option<UnitKey>, String> {
+    pub fn apply_for_test(&mut self, entry: NoticeEntry) -> Result<Option<UnitKey>, String> {
         self.apply(entry)
     }
 }

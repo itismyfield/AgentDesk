@@ -337,10 +337,7 @@ pub fn format_direct_prompt_notification(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub fn format_subagent_notification_card(
-    tmux_session_name: &str,
-    prompt: &str,
-) -> String {
+pub fn format_subagent_notification_card(tmux_session_name: &str, prompt: &str) -> String {
     subagent_notification_card::format_subagent_notification_card(Some(tmux_session_name), prompt)
 }
 

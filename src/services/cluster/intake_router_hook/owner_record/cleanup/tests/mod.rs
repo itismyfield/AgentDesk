@@ -17,11 +17,7 @@ impl Fixture {
     pub async fn with_native(channel: u64, native: Option<Value>) -> Self {
         Self::with_native_provider(channel, "claude", native).await
     }
-    pub async fn with_native_provider(
-        channel: u64,
-        provider: &str,
-        native: Option<Value>,
-    ) -> Self {
+    pub async fn with_native_provider(channel: u64, provider: &str, native: Option<Value>) -> Self {
         Self::on_executor(channel, provider, native, "mac-a").await
     }
     pub async fn on_executor(

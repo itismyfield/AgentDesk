@@ -95,10 +95,7 @@ pub fn mark_turn(turn_id: &str, stage: &str) {
 }
 
 /// Runs a gateway event handler with `message` visible to [`mark_current`] and [`lock_wait`].
-pub fn gateway<F: Future>(
-    message: Option<u64>,
-    handler: F,
-) -> impl Future<Output = F::Output> {
+pub fn gateway<F: Future>(message: Option<u64>, handler: F) -> impl Future<Output = F::Output> {
     if let Some(message) = message {
         mark(message, "gateway", None);
     }

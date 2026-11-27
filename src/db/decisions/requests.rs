@@ -37,10 +37,7 @@ pub enum Stored {
 }
 
 /// Stores the request and its options in one transaction, once per idempotency key.
-pub async fn create_once(
-    pool: &PgPool,
-    new: &NewRequest<'_>,
-) -> Result<Stored, sqlx::Error> {
+pub async fn create_once(pool: &PgPool, new: &NewRequest<'_>) -> Result<Stored, sqlx::Error> {
     let request_id = Uuid::new_v4();
     let (logical, target) = (
         new.logical_channel_id.to_string(),

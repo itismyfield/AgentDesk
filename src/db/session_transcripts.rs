@@ -999,8 +999,7 @@ pub mod clear_fence_pg_tests {
     use super::*;
     use std::sync::Arc;
 
-    pub async fn create_pool()
-    -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
+    pub async fn create_pool() -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
         let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_transcript_clear_fence_4533",
             "session transcript clear fence",
@@ -1139,10 +1138,7 @@ pub mod clear_fence_pg_tests {
         entry
     }
 
-    pub async fn channel_pairs(
-        pool: &PgPool,
-        channel_id: &str,
-    ) -> Vec<ChannelTranscriptPair> {
+    pub async fn channel_pairs(pool: &PgPool, channel_id: &str) -> Vec<ChannelTranscriptPair> {
         fetch_recent_channel_pairs(pool, channel_id, 10)
             .await
             .expect("fetch recent pairs") // agentdesk-audit: allow-unwrap — test assertion in #[cfg(test)] module

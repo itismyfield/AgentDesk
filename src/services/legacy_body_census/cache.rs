@@ -77,12 +77,7 @@ impl ProjectionCache {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn fixture_at_age(
-        root: &Path,
-        current: &str,
-        now: i64,
-        age: u64,
-    ) -> std::sync::Arc<Self> {
+    pub fn fixture_at_age(root: &Path, current: &str, now: i64, age: u64) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             value: RwLock::new(Some((
                 Instant::now()

@@ -625,7 +625,10 @@ mod tests {
         let canonical: &crate::services::engine_runtime::session::EngineSession = session;
         assert_eq!(canonical.session_id.as_deref(), Some("retained-session"));
         assert_eq!(canonical.pending_uploads.as_ptr(), upload_storage);
-        assert_eq!(canonical.pending_uploads[0], crate::services::cluster::attachment_transfer::uploads::Upload::from("retained-upload"));
+        assert_eq!(
+            canonical.pending_uploads[0],
+            crate::services::cluster::attachment_transfer::uploads::Upload::from("retained-upload")
+        );
         assert_eq!(canonical.born_generation, 81);
         drop(core);
         assert!(through_engine.hard_stop().await.removed_token.is_some());

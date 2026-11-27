@@ -30,9 +30,6 @@ pub fn append_for_test(
     super::append(path, at, entry)
 }
 
-pub fn recover_for_test(
-    path: &Path,
-    initial_anchor: u64,
-) -> Result<LedgerState, StoreError> {
+pub fn recover_for_test(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     super::recover(path, initial_anchor)
 }
