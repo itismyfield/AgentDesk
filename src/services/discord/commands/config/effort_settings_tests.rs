@@ -555,7 +555,7 @@ fn only_a_herdr_codex_tui_channel_restarts_for_effort() {
 #[cfg(unix)]
 #[test]
 fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {
-    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
+    use crate::db::dispatched_sessions::hosted_execution::{HostedState, test_support};
     use crate::services::session_host::surface_policy::{Relation, force_relation_for_test};
     fixture(|_, _, _| {
         runtime().block_on(async {
@@ -572,12 +572,12 @@ fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {
             let _hosts = crate::config::session_hosts::force_for_test(Some(&node), &hosts);
             let _thread = force_relation_for_test(thread, Relation::Child { parent });
             let _codex = crate::services::turn_host::force_codex_switch_for_test(Some(true));
-            let mut owner = tests::owner(&thread.to_string());
+            let mut owner = test_support::owner(&thread.to_string());
             (owner.provider, owner.logical_key) = ("codex".into(), tmux.into());
             (owner.discord_token_hash, owner.owner_node) =
                 (shared.token_hash.clone(), node.clone());
             owner.runtime_root = crate::config::runtime_root().unwrap().display().to_string();
-            let mut bound = tests::record(&owner, "nonce-effort", HostedState::Bound);
+            let mut bound = test_support::record(&owner, "nonce-effort", HostedState::Bound);
             // A Bound record is read only when its process evidence names the owner's provider.
             bound.expected.as_mut().unwrap().binding_provider = "codex".into();
             let at = bound.location.as_mut().unwrap();
@@ -598,7 +598,7 @@ fn a_bound_codex_thread_under_a_herdr_parent_keeps_its_pane_on_effort_pg() {
             )
             .bind(&shared.token_hash)
             .bind(thread.to_string())
-            .bind(tests::wire(&bound))
+            .bind(test_support::wire(&bound))
             .execute(&pool)
             .await
             .unwrap();
