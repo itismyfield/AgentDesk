@@ -1,4 +1,6 @@
 use super::super::*;
+use super::response_format::retry_prompt_context::store;
+use crate::services::discord::turn_bridge::retry_prompt_store;
 use crate::services::observability::recovery_audit::RecoveryAuditRecord;
 use crate::services::observability::turn_lifecycle::{
     SessionStrategyDetails, TurnEvent, TurnLifecycleEmit, emit_turn_lifecycle,
@@ -262,14 +264,9 @@ pub(super) fn take_voluntary_feedback_reminder(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<String> {
-    let store = super::response_format::retry_prompt_context::store::peek;
-    store(
+    store::peek(
         shared.pg_pool.as_ref(),
-        &super::response_format::retry_prompt_context::store::key(
-            "voluntary_feedback_reminder",
-            provider,
-            channel_id.get(),
-        ),
+        &retry_prompt_store::key("voluntary_feedback_reminder", provider, channel_id.get()),
     )
 }
 
@@ -296,14 +293,9 @@ pub(super) fn take_turn_end_wip_warning(
     provider: &ProviderKind,
     channel_id: ChannelId,
 ) -> Option<String> {
-    let store = super::response_format::retry_prompt_context::store::peek;
-    store(
+    store::peek(
         shared.pg_pool.as_ref(),
-        &super::response_format::retry_prompt_context::store::key(
-            "turn_end_wip_warning",
-            provider,
-            channel_id.get(),
-        ),
+        &retry_prompt_store::key("turn_end_wip_warning", provider, channel_id.get()),
     )
 }
 

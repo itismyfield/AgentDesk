@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::cluster::attachment_transfer::{self as assets, uploads::Upload};
+use crate::services::discord::turn_bridge::retry_prompt_store;
 
 fn records_bytes(records: &[String]) -> Vec<Vec<u8>> {
     records
@@ -55,11 +56,7 @@ async fn normal_and_busy_preparation_preserve_attachment_bytes_and_retention_pg(
     assert_eq!(
         crate::services::discord::router::response_format::retry_prompt_context::store::peek(
             Some(&pool),
-            &crate::services::discord::router::response_format::retry_prompt_context::store::key(
-                "turn_end_wip_warning",
-                &ProviderKind::Claude,
-                727373
-            )
+            &retry_prompt_store::key("turn_end_wip_warning", &ProviderKind::Claude, 727373)
         )
         .as_deref(),
         Some("dirty")

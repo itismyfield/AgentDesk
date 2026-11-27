@@ -7,6 +7,7 @@ use crate::services::cluster::intake_router_hook::{
 use crate::services::cluster::intake_routing_config::OwnerAuthorityChannelOptIn;
 use crate::services::provider::ProviderKind;
 use crate::services::tui_o::cutover::intake_route::{self, IntakeRoute};
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
 use poise::serenity_prelude as serenity;
 
 #[derive(Debug)]
@@ -406,11 +407,10 @@ pub(crate) async fn admit_text_intake(
         )
         .sources
     });
-    let routed_reply_context =
-        super::response_format::retry_prompt_context::RetryPromptContext::for_routing(
-            request.reply_context.clone(),
-            matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
-        );
+    let routed_reply_context = RetryPromptContext::for_routing(
+        request.reply_context.clone(),
+        matches!(submission.origin, IntakeOrigin::QueuedDrain(_)),
+    );
     let ctx = IntakeRouterContext {
         mode,
         leader_instance_id: &self_instance_id,

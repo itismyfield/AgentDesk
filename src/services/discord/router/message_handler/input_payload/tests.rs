@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::discord::router::response_format::retry_prompt_context::Preludes;
+use crate::services::turn_orchestrator::retry_prompt_codec::Preludes;
 use serde_json::json;
 
 #[test]

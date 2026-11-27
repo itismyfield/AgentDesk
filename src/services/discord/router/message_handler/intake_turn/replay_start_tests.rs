@@ -13,6 +13,7 @@ use crate::services::discord::replay_policy::{ExactHandoff, ExactRetry, RetryPer
 use crate::services::discord::router::intake_dispatch::replay_admission::{
     input_hash, test_activation,
 };
+use crate::services::turn_orchestrator::retry_prompt_codec::RetryPromptContext;
 use std::time::Duration;
 
 #[path = "dispatch_runtime_tests.rs"]
@@ -21,7 +22,6 @@ mod dispatch_runtime_tests;
 const STALE: &str = "stale-resume";
 
 fn assert_retry_context_eq(actual: Option<&str>, expected: Option<&str>) {
-    use crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext;
     let actual = RetryPromptContext::restore(actual.map(str::to_owned));
     let expected = RetryPromptContext::restore(expected.map(str::to_owned));
     assert_eq!(actual.raw, expected.raw, "original reply custody");
@@ -2094,7 +2094,7 @@ async fn started(
         owner_id: "7".into(),
         agent_id: String::new(),
         attachments: serde_json::json!([]),
-        reply_context: crate::services::discord::router::response_format::retry_prompt_context::RetryPromptContext::raw(None).requeue(),
+        reply_context: RetryPromptContext::raw(None).requeue(),
         provenance: "new_input",
     };
     let receipt = write::register_or_reuse(&host.pool, &input, "node-a")
