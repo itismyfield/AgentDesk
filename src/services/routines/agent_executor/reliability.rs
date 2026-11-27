@@ -275,7 +275,8 @@ impl RoutineAgentExecutor {
                 PaneLiveness::Live | PaneLiveness::ProbeError => return None,
             };
         let channel_id = recorded_channel_id(result_json.get("channel_id"));
-        self.failure_admission
+        self.ports
+            .failure_admission
             .admit(&self.pool, &provider, channel_id, &session_name, observed)
             .await
             .then_some(message)

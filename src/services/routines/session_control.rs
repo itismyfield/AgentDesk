@@ -1,5 +1,6 @@
 mod persistent_target;
 use anyhow::{Result, anyhow};
+use futures::future::BoxFuture;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use persistent_target::seed_started_control_session;
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -10,13 +11,9 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use std::sync::Arc;
 
-use crate::services::engine_runtime::health_port::AppHealthRegistry;
 use crate::services::provider::ProviderKind;
 use crate::services::routines::provider_choice::{owned_session_route, session_route};
-use crate::services::turn_lifecycle::{
-    ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget, force_kill_turn,
-    force_kill_turn_for_row,
-};
+use crate::services::turn_lifecycle::{ForceKillRow, TurnLifecycleStopResult, TurnLifecycleTarget};
 
 use super::agent_executor::routine_agent_session_name;
 use super::store::RoutineRecord;
@@ -52,6 +49,16 @@ pub(crate) trait RoutineRuntimeReset: Sync {
     ) -> RuntimeResetOutcome;
 }
 
+pub(crate) trait RoutineTurnStop: Send + Sync {
+    fn force_kill<'a>(
+        &'a self,
+        target: &'a TurnLifecycleTarget,
+        row: Option<ForceKillRow<'a>>,
+        reason: &'a str,
+        code: &'static str,
+    ) -> BoxFuture<'a, TurnLifecycleStopResult>;
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutineSessionControlResult {
     pub action: &'static str,
@@ -77,7 +84,7 @@ pub struct RoutineSessionControlResult {
 #[derive(Clone)]
 pub struct RoutineSessionController {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<AppHealthRegistry>>,
+    stop: Arc<dyn RoutineTurnStop>,
 }
 
 #[derive(Debug, Clone)]
@@ -98,11 +105,8 @@ struct RoutineSessionRow {
 }
 
 impl RoutineSessionController {
-    pub fn new(pool: Arc<PgPool>, health_registry: Option<Arc<AppHealthRegistry>>) -> Self {
-        Self {
-            pool,
-            health_registry,
-        }
+    pub(crate) fn new(pool: Arc<PgPool>, stop: Arc<dyn RoutineTurnStop>) -> Self {
+        Self { pool, stop }
     }
 
     pub async fn teardown_fresh_session(
@@ -504,17 +508,17 @@ impl RoutineSessionController {
             channel_id: Some(target.channel_id),
             tmux_name: target.tmux_session.clone(),
         };
-        let registry = self.health_registry.as_deref();
-        let Some(session_key) = target.session_key.as_deref() else {
-            return force_kill_turn(registry, &lifecycle_target, reason, code).await;
-        };
-        let (pool, stored_provider) = (self.pool.as_ref(), Some(target.provider.as_str()));
-        let row = ForceKillRow {
-            pool,
-            session_key,
-            stored_provider,
-        };
-        force_kill_turn_for_row(registry, &lifecycle_target, row, reason, code).await
+        let row = target
+            .session_key
+            .as_deref()
+            .map(|session_key| ForceKillRow {
+                pool: &self.pool,
+                session_key,
+                stored_provider: Some(target.provider.as_str()),
+            });
+        self.stop
+            .force_kill(&lifecycle_target, row, reason, code)
+            .await
     }
 
     /// Disconnects only the single session row resolved for the owned tmux
@@ -706,6 +710,7 @@ pub fn provider_clear_behavior(provider: &ProviderKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
     use chrono::Utc;
     use serde_json::json;
 
@@ -715,7 +720,7 @@ mod tests {
         let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cc) VALUES ('agent-1', 'queue truth', 'claude', '6038771')").execute(&pool).await.unwrap();
-        let controller = RoutineSessionController::new(Arc::new(pool.clone()), None);
+        let controller = build_routine_session_controller(Arc::new(pool.clone()), None);
         let routine = routine_with_thread(if remote { "fresh" } else { "persistent" }, None);
         let result = if remote {
             controller
@@ -762,7 +767,7 @@ mod tests {
         let (shared, registry, key) = fixture.shared(&pool).await;
         let queue = fixture.queue_bytes(&shared);
         let pin = fixture.pin_after_legacy_verdict();
-        let controller = RoutineSessionController::new(Arc::new(pool.clone()), None);
+        let controller = build_routine_session_controller(Arc::new(pool.clone()), None);
         let channel = fixture.channel.get().to_string();
         let routine = routine_with_thread("persistent", Some(&channel));
         seed_started_control_session(&pool, &routine, "codex", &channel, &key).await;

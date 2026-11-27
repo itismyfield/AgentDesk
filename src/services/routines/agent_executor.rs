@@ -3,6 +3,8 @@ use chrono::{DateTime, Duration, Utc};
 
 mod execution;
 mod launch;
+pub(crate) use launch::RoutineLaunchRuntime;
+use launch::RoutineTurnLaunch;
 pub(crate) mod owner_input;
 use owner_input::AgentStartDisposition;
 mod owned_session;
@@ -17,9 +19,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 use crate::domain::bot_role::UtilityBotRole;
-use crate::services::engine_runtime::health_port::{
-    AppHealthRegistry, HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnStart, RoutineProcessPort,
-};
+use crate::services::engine_runtime::health_port::{OwnerInputRuntimePort, RoutineProcessPort};
 use crate::services::provider::ProviderKind;
 use crate::services::provider_error_transcript::is_strong_provider_error_transcript;
 
@@ -37,11 +37,19 @@ use super::store::{
 #[derive(Clone)]
 pub struct RoutineAgentExecutor {
     pool: Arc<PgPool>,
-    health_registry: Option<Arc<AppHealthRegistry>>,
-    bot_http: Option<Arc<dyn RoutineBotHttpPort>>,
-    failure_admission: Arc<dyn RoutineFailureAdmissionPort>,
+    launch: Option<Arc<dyn RoutineTurnLaunch>>,
+    ports: RoutineAgentPorts,
     default_completion_timeout_secs: u64,
     headless_fresh_agents: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct RoutineAgentPorts {
+    pub(crate) bot_http: Option<Arc<dyn RoutineBotHttpPort>>,
+    pub(crate) failure_admission: Arc<dyn RoutineFailureAdmissionPort>,
+    pub(crate) owner_input: Option<Arc<dyn OwnerInputRuntimePort>>,
+    pub(crate) process: Option<Arc<dyn RoutineProcessPort>>,
+    pub(crate) session_controller: RoutineSessionController,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -94,18 +102,16 @@ pub(crate) struct AgentTurnCompletion {
 }
 
 impl RoutineAgentExecutor {
-    pub(crate) fn new(
+    pub(crate) fn new<R: RoutineLaunchRuntime + 'static>(
         pool: Arc<PgPool>,
-        health_registry: Option<Arc<AppHealthRegistry>>,
-        bot_http: Option<Arc<dyn RoutineBotHttpPort>>,
-        failure_admission: Arc<dyn RoutineFailureAdmissionPort>,
+        launch: Option<Arc<R>>,
+        ports: RoutineAgentPorts,
         default_completion_timeout_secs: u64,
     ) -> Self {
         Self {
             pool,
-            health_registry,
-            bot_http,
-            failure_admission,
+            launch: launch.map(|runtime| runtime as Arc<dyn RoutineTurnLaunch>),
+            ports,
             default_completion_timeout_secs: default_completion_timeout_secs.max(1),
             headless_fresh_agents: false,
         }
@@ -908,9 +914,9 @@ impl RoutineAgentExecutor {
             return;
         }
 
-        let controller =
-            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-        match controller
+        match self
+            .ports
+            .session_controller
             .teardown_fresh_session(&routine, result_json, reason)
             .await
         {
@@ -1010,9 +1016,9 @@ impl RoutineAgentExecutor {
         if routine.execution_strategy != "fresh" {
             return;
         }
-        let controller =
-            RoutineSessionController::new(self.pool.clone(), self.health_registry.clone());
-        match controller
+        match self
+            .ports
+            .session_controller
             .teardown_fresh_session_by_name(
                 &routine,
                 &owned_tmux_session,

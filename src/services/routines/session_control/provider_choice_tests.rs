@@ -1,4 +1,5 @@
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_session_controller;
 use crate::services::routines::provider_choice::ProviderChoice;
 use crate::services::routines::store::{NewRoutine, RoutinePatch, RoutineStore};
 
@@ -54,7 +55,7 @@ async fn recovery_target_keeps_the_claimed_provider_after_definition_patch_pg() 
         .await
         .unwrap()
         .unwrap();
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), None);
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), None);
     let target = controller
         .resolve_fresh_target_for_name(&claimed_routine, &token, tmux)
         .await

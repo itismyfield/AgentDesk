@@ -140,7 +140,6 @@ impl RoutineAgentExecutor {
 
 pub(crate) mod custody {
     use super::*;
-    use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
     use crate::services::engine_runtime::health_port::owner_input::{
         OwnerInput, owner_input_actor,
     };
@@ -155,11 +154,12 @@ pub(crate) mod custody {
         if let Ok(handle) = super::super::owner_hook_tests::OWNER.try_with(Clone::clone) {
             return Ok(handle);
         }
-        let registry = executor
-            .health_registry
+        let owner_input = executor
+            .ports
+            .owner_input
             .as_deref()
             .ok_or_else(|| anyhow!("owner runtime unavailable"))?;
-        registry
+        owner_input
             .owner_mailbox(provider, channel)
             .await
             .map_err(anyhow::Error::msg)
@@ -203,8 +203,8 @@ pub(crate) mod custody {
 
     /// The owner runs an accepted start once its drive looks at the queue.
     async fn wake(executor: &RoutineAgentExecutor, provider: &str, channel: u64) {
-        if let Some(registry) = executor.health_registry.as_deref() {
-            registry.wake_owner(provider, channel).await;
+        if let Some(owner_input) = executor.ports.owner_input.as_deref() {
+            owner_input.wake_owner(provider, channel).await;
         }
     }
 
