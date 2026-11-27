@@ -171,7 +171,7 @@ pub(crate) struct BeaconArmed {
 
 impl BeaconArmed {
     /// `Some(n)` when the beacon is running on an `n`-worker runtime.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn workers(self) -> Option<u64> {
         self.workers
     }
@@ -240,7 +240,7 @@ impl RuntimeLiveness {
     }
 }
 
-fn age_since(stored: u64, now: u64) -> Option<u64> {
+pub(crate) fn age_since(stored: u64, now: u64) -> Option<u64> {
     let at = stored.checked_sub(1)?;
     Some(now.saturating_sub(at))
 }
@@ -395,7 +395,7 @@ impl HealthProbeOutcome {
         }
     }
 
-    fn error(&self) -> &str {
+    pub(crate) fn error(&self) -> &str {
         match self {
             Self::Responded { .. } => "-",
             Self::ConnectFailed { error, .. }
@@ -527,6 +527,3 @@ pub(crate) fn counter_test_lock() -> std::sync::MutexGuard<'static, ()> {
     static COUNTER_TESTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
     COUNTER_TESTS.lock().unwrap_or_else(|e| e.into_inner())
 }
-
-#[cfg(test)]
-mod tests;

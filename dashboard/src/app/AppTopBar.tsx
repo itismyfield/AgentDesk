@@ -1,5 +1,5 @@
 import { Bell, Moon, Palette, Search, Sun, WifiOff, X } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type MouseEvent, type SetStateAction } from "react";
 import { Cap, CardNote, CountBadge, Row, StatusDot } from "../components/common/KitPrimitives";
 import type { Notification } from "../components/NotificationCenter";
 import { IconButton } from "../kit/free/icon-button-clean";
@@ -115,10 +115,84 @@ export function AppTopBar({
   const routeLabel = currentRoute ? (isKo ? currentRoute.labelKo : currentRoute.labelEn) : tr("홈", "Home");
   const routeDescription = currentRoute ? (isKo ? currentRoute.descriptionKo : currentRoute.descriptionEn) : "";
   const [runningOpen, setRunningOpen] = useState(false);
+  const notificationRef = useRef<HTMLDivElement>(null);
+  const bellButtonRef = useRef<HTMLButtonElement>(null);
+  const notificationDialogRef = useRef<HTMLDivElement>(null);
+  const notificationCloseRef = useRef<HTMLButtonElement>(null);
+  const wasNotificationOpenRef = useRef(false);
+  const shouldRestoreBellFocusRef = useRef(false);
 
   useEffect(() => {
     setRunningOpen(false);
   }, [currentRoute?.path]);
+
+  useEffect(() => {
+    const wasOpen = wasNotificationOpenRef.current;
+    wasNotificationOpenRef.current = showNotificationPanel;
+    if (!wasOpen && showNotificationPanel) {
+      shouldRestoreBellFocusRef.current = false;
+      notificationCloseRef.current?.focus({ preventScroll: true });
+    } else if (wasOpen && !showNotificationPanel) {
+      const shouldRestore =
+        shouldRestoreBellFocusRef.current ||
+        !document.activeElement ||
+        document.activeElement === document.body ||
+        Boolean(notificationRef.current?.contains(document.activeElement));
+      shouldRestoreBellFocusRef.current = false;
+      if (shouldRestore) {
+        bellButtonRef.current?.focus({ preventScroll: true });
+      }
+    }
+  }, [showNotificationPanel]);
+
+  useEffect(() => {
+    if (!showNotificationPanel) return undefined;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!notificationRef.current?.contains(event.target as Node)) {
+        setShowNotificationPanel(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        shouldRestoreBellFocusRef.current = true;
+        setShowNotificationPanel(false);
+        return;
+      }
+      if (event.key === "Tab") {
+        const dialog = notificationDialogRef.current;
+        if (!dialog) return;
+        const focusable = Array.from(
+          dialog.querySelectorAll<HTMLElement>(
+            'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ),
+        );
+        if (focusable.length === 0) {
+          event.preventDefault();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        const active = document.activeElement as HTMLElement | null;
+        if (event.shiftKey) {
+          if (!active || !dialog.contains(active) || active === first) {
+            event.preventDefault();
+            last.focus({ preventScroll: true });
+          }
+        } else if (!active || !dialog.contains(active) || active === last) {
+          event.preventDefault();
+          first.focus({ preventScroll: true });
+        }
+      }
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+    };
+  }, [setShowNotificationPanel, showNotificationPanel]);
 
   const themeLabel = tr(
     resolvedTheme === "dark" ? "밝은 화면으로 전환" : "어두운 화면으로 전환",
@@ -259,17 +333,20 @@ export function AppTopBar({
             label={themeLabel}
             icon={resolvedTheme === "dark" ? <Sun /> : <Moon />}
             style={DESKTOP_ICON_BUTTON_STYLE}
+            className="pointer-coarse:[--size:44px]!"
             onClick={toggleShellTheme}
           />
         ) : null}
 
-        <div className="relative flex shrink-0">
+        <div ref={notificationRef} className="relative flex shrink-0">
           <IconButton
+            ref={bellButtonRef}
             variant={iconButtonVariant}
             label={notificationLabel}
             aria-expanded={showNotificationPanel}
             icon={<Bell />}
             style={iconButtonStyle}
+            className={!isMobileViewport ? "pointer-coarse:[--size:44px]!" : undefined}
             onClick={() => {
               setRunningOpen(false);
               setShowNotificationPanel((prev) => {
@@ -285,54 +362,70 @@ export function AppTopBar({
           ) : null}
 
           {showNotificationPanel ? (
-            <div
-              role="dialog"
-              aria-label={tr("알림", "Notifications")}
-              className="fixed inset-x-4 top-16 max-h-[calc(100dvh-10rem)] overflow-auto rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-2)] text-[var(--fg)] shadow-[var(--shadow-md)] sm:absolute sm:inset-x-auto sm:top-11 sm:right-0 sm:w-[22rem]"
-              style={{ zIndex: popoverZIndex }}
-            >
-              <div className="flex items-center justify-between gap-3 px-4 py-3">
-                <div className="min-w-0">
-                  <div className="text-sm leading-5 font-semibold text-[var(--fg)]">
-                    {tr("알림", "Notifications")}
+            <>
+              <div
+                aria-hidden="true"
+                className="fixed inset-0 bg-black/25 sm:hidden"
+                style={{ zIndex: popoverZIndex - 1 }}
+                onClick={() => {
+                  shouldRestoreBellFocusRef.current = true;
+                  setShowNotificationPanel(false);
+                }}
+              />
+              <div
+                ref={notificationDialogRef}
+                role="dialog"
+                aria-label={tr("알림", "Notifications")}
+                className="fixed inset-x-4 top-16 max-h-[calc(100dvh-10rem)] overflow-auto rounded-[var(--r-md)] border border-[var(--line-soft)] bg-[var(--bg-2)] text-[var(--fg)] shadow-[var(--shadow-md)] sm:absolute sm:inset-x-auto sm:top-11 sm:right-0 sm:w-[22rem]"
+                style={{ zIndex: popoverZIndex }}
+              >
+                <div className="flex items-center justify-between gap-3 px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="text-sm leading-5 font-semibold text-[var(--fg)]">
+                      {tr("알림", "Notifications")}
+                    </div>
+                    <Cap className="block">
+                      {tr("최근 1분 동안의 이벤트", "Events from the last minute")}
+                    </Cap>
                   </div>
-                  <Cap className="block">
-                    {tr("최근 1분 동안의 이벤트", "Events from the last minute")}
-                  </Cap>
+                  <IconButton
+                    ref={notificationCloseRef}
+                    variant="ghost"
+                    label={tr("알림 창 닫기", "Close notification panel")}
+                    icon={<X />}
+                    style={PHONE_ICON_BUTTON_STYLE}
+                    onClick={() => {
+                      shouldRestoreBellFocusRef.current = true;
+                      setShowNotificationPanel(false);
+                    }}
+                  />
                 </div>
-                <IconButton
-                  variant="ghost"
-                  label={tr("알림 창 닫기", "Close notification panel")}
-                  icon={<X />}
-                  style={PHONE_ICON_BUTTON_STYLE}
-                  onClick={() => setShowNotificationPanel(false)}
-                />
-              </div>
 
-              {recentNotifications.length === 0 ? (
-                <CardNote>{tr("새 알림이 없어요.", "No recent notifications.")}</CardNote>
-              ) : (
-                <div>
-                  {recentNotifications.map((notification) => (
-                    <Row key={notification.id} className="items-start border-t border-[var(--line-soft)] first:border-t">
-                      <StatusDot tone={notificationTone(notification.type)} className="mt-1.5" />
-                      <div className="min-w-0 flex-1">
-                        <div className="text-sm leading-5 text-[var(--fg)]">{notification.message}</div>
-                        <Cap className="mt-1 block">{formatRelativeTime(notification.ts, isKo)}</Cap>
-                      </div>
-                      <IconButton
-                        variant="ghost"
-                        label={tr("알림 지우기", "Dismiss notification")}
-                        icon={<X />}
-                        style={PHONE_ICON_BUTTON_STYLE}
-                        className="-my-1.5 -mr-2"
-                        onClick={() => dismissNotification(notification.id)}
-                      />
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </div>
+                {recentNotifications.length === 0 ? (
+                  <CardNote>{tr("새 알림이 없어요.", "No recent notifications.")}</CardNote>
+                ) : (
+                  <div>
+                    {recentNotifications.map((notification) => (
+                      <Row key={notification.id} className="items-start border-t border-[var(--line-soft)] first:border-t">
+                        <StatusDot tone={notificationTone(notification.type)} className="mt-1.5" />
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm leading-5 text-[var(--fg)]">{notification.message}</div>
+                          <Cap className="mt-1 block">{formatRelativeTime(notification.ts, isKo)}</Cap>
+                        </div>
+                        <IconButton
+                          variant="ghost"
+                          label={tr("알림 지우기", "Dismiss notification")}
+                          icon={<X />}
+                          style={PHONE_ICON_BUTTON_STYLE}
+                          className="-my-1.5 -mr-2"
+                          onClick={() => dismissNotification(notification.id)}
+                        />
+                      </Row>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </>
           ) : null}
         </div>
 
@@ -342,6 +435,7 @@ export function AppTopBar({
             label={tr("화면 꾸미기", "Appearance")}
             icon={<Palette />}
             style={DESKTOP_ICON_BUTTON_STYLE}
+            className="pointer-coarse:[--size:44px]!"
             onClick={() => {
               setRunningOpen(false);
               setShowTweaksPanel((prev) => {

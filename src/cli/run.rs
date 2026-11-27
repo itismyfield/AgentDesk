@@ -77,6 +77,7 @@ fn command_supports_json(command: &Commands) -> bool {
         | Commands::ReviewRecoverTarget(_)
         | Commands::Docs(_)
         | Commands::AutoQueue { .. }
+        | Commands::Decision(_)
         | Commands::ForceKill(_)
         | Commands::TurnLease(..)
         | Commands::GithubSync(_)
@@ -715,6 +716,7 @@ pub(crate) fn execute(command: Commands, json: bool) -> Result<()> {
         Commands::ProviderCli(args) => exit_for_cli(super::provider_cli::cmd_provider_cli(args)),
         Commands::Show { action } => exit_for_cli(handle_show(action)),
         Commands::Herdr(command) => exit_for_cli(super::herdr::run(command)),
+        Commands::Decision(command) => exit_for_cli(super::decision::run(command)),
         Commands::Health => exit_for_cli(super::client::cmd_health(json)),
         Commands::MachineCompare => exit_for_cli(super::client::cmd_machine_compare(json)),
         Commands::Activity(ActivityArgs {

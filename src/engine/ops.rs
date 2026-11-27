@@ -15,7 +15,7 @@ mod dm_reply_ops;
 mod escalation_ops;
 #[cfg(test)]
 mod escalation_owner_tests;
-mod exec_ops;
+pub(crate) mod exec_ops;
 mod http_ops;
 mod kanban_ops;
 
@@ -37,12 +37,9 @@ mod read_bridge;
 mod review_automation_ops;
 mod review_ops;
 mod runtime_ops;
-mod timeouts_ops;
+pub(crate) mod timeouts_ops;
 pub(crate) mod turn_ops;
 mod unsent_notify_ops;
-
-#[cfg(test)]
-mod unsent_notify_tests;
 
 pub(crate) use db_ops::execute_policy_sql;
 pub(crate) use exec_ops::{PolicyOpRemoveOutcome, install_policy_op_remove};

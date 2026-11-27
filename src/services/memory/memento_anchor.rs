@@ -336,7 +336,7 @@ impl SessionAnchorRequest<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) async fn load_session_anchor_prompt(
     request: SessionAnchorRequest<'_>,
 ) -> Option<(String, usize)> {

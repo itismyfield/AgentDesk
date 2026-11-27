@@ -65,7 +65,7 @@ pub(crate) type Admission<'a> = (&'a EpisodePermissionRecord, &'a OwedOrigin);
 static LAST_POSTED: LazyLock<Mutex<HashMap<u64, u64>>> = LazyLock::new(Mutex::default);
 
 // Tests read the position they set as a late-O-post stimulus; no production path reads it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn last_posted(channel: u64) -> Option<u64> {
     let posted = LAST_POSTED
         .lock()
@@ -73,13 +73,13 @@ pub fn last_posted(channel: u64) -> Option<u64> {
     posted.get(&channel).copied()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn note_posted_for_tests(channel: u64, msg_id: u64) {
     note_posted(channel, msg_id);
 }
 
 /// What a process restart does to the in-memory position; the guard keeps other restarts out.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn forget_posted_for_tests(channel: u64) -> std::sync::MutexGuard<'static, ()> {
     static RESTARTS: Mutex<()> = Mutex::new(());
     let restart = RESTARTS.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -357,7 +357,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         )
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(in crate::services) fn repost_posts_counter(&mut self) -> Arc<AtomicUsize> {
         let channel = self.channel;
         self.posts

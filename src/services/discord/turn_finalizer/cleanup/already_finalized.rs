@@ -44,7 +44,7 @@ pub(in crate::services::discord::turn_finalizer) async fn already_finalized_acti
     .await
     {
         Ok(captured) => captured,
-        Err(()) => return DuplicateCleanup::default(),
+        Err(_) => return DuplicateCleanup::default(),
     };
     let (finish, row_cleared) = if let Some(capture) = captured {
         capture.publish_release(shared, key);

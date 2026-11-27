@@ -137,7 +137,7 @@ export function TrendChart({ labels, series, tooltipLabels, variant = 'line', fo
       <div className="aui-trend-chart-frame" data-axes={axisMode}>
         {axisMode === 'both' && <div className="aui-trend-chart-y" aria-hidden="true">{shownTicks.map((tick, index) => <span key={index}>{format(tick)}</span>)}</div>}
         <div>
-          <div ref={plot} className="aui-trend-chart-plot" tabIndex={0} role="group" aria-label={label} style={{ height: plotHeight }} onPointerMove={(event: ReactPointerEvent) => { if (event.pointerType !== 'touch') move(event.clientX); }} onPointerLeave={() => { if (matchMedia('(hover: hover)').matches) setSelected(defaultIndex); }} onPointerDown={(event) => move(event.clientX)} onKeyDown={keys}>
+          <div ref={plot} className="aui-trend-chart-plot" tabIndex={spark && !tooltip ? undefined : 0} role={spark && !tooltip ? 'img' : 'group'} aria-label={label} style={{ height: plotHeight }} onPointerMove={(event: ReactPointerEvent) => { if (event.pointerType !== 'touch') move(event.clientX); }} onPointerLeave={() => { if (matchMedia('(hover: hover)').matches) setSelected(defaultIndex); }} onPointerDown={(event) => move(event.clientX)} onKeyDown={keys}>
             <svg viewBox={`0 0 ${width} ${plotHeight}`} preserveAspectRatio="none" aria-hidden="true">
               <defs>
                 {paths.map(({ color }, order) => <linearGradient key={order} id={`aui-trend-fill-${order}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor={color} stopOpacity="0.28" /><stop offset="1" stopColor={color} stopOpacity="0.02" /></linearGradient>)}

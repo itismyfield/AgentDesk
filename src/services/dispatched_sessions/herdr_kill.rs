@@ -36,8 +36,8 @@ pub(super) async fn herdr_force_kill(
         return None;
     }
     let registry = state.health_registry.as_deref()?;
-    #[cfg(test)]
-    crate::services::discord::herdr_terminate::run_before_selection_probe().await;
+    #[cfg(any(test, feature = "test-support"))]
+    super::herdr_probe_tests::run_before_selection_probe().await;
     let (key, dispatch) = (prepared.requested_key, prepared.active_dispatch_id.clone());
     let input = KillInput {
         state: state.clone(),

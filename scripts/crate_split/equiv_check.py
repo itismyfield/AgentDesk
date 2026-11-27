@@ -2,10 +2,10 @@
 """Static equivalence gate for one crate-split slice (standard library only).
 
     python3 scripts/crate_split/equiv_check.py --base <sha> --head <sha> [--repo .]
-        [--skip-cargo] [--windows auto|always|never] [--require move|vis]
+        [--skip-cargo] [--windows auto|always|never] [--require move|vis|cfg]
         [--exclude GLOB ...] [--allow-added-tests] [--log-dir DIR]
 
-The first output line is the verdict, `EQUIV_OK class=<move|vis|C>` or
+The first output line is the verdict, `EQUIV_OK class=<move|vis|cfg|C>` or
 `EQUIV_FAIL <item>[,<item>...]`, followed by a detail table and line evidence.
 
   a cargo     `cargo check --workspace --all-targets` at head; when the diff touches a
@@ -17,7 +17,9 @@ The first output line is the verdict, `EQUIV_OK class=<move|vis|C>` or
               a use/mod item that binds no existing name to another path, a path-only
               rewrite whose changed paths name moved items, a comment or generated docs
               (Cargo.lock included). vis: each changed line pair differs only in the
-              visibility of the item or field it declares. C: anything else, any Cargo.toml
+              visibility of the item or field it declares. cfg: a cfg predicate's `test` atom
+              reads `any(test, feature = "test-support")` (or back) in a package that declares no
+              `test-support` feature. C: anything else, any Cargo.toml
               edit included; string literals are compared whole. Each C line is printed as
               evidence. Fails only with --require.
   c tests     the static list of test function names is the same before and after
@@ -197,13 +199,22 @@ def known_crates(tree: Tree, paths) -> set:
     return names - {""}
 
 
+def declares_test_support(tree: Tree, path: str) -> bool:
+    """Whether the package a file belongs to declares a `test-support` feature (then `cfg` is not `vis`-safe)."""
+    manifest = nearest_manifest(tree, path)
+    text = tree.text(manifest) if manifest else None
+    return bool(text) and "test-support" in manifest_table(text, "features")
+
+
 def classify(repo, files, base: Tree, head: Tree) -> "equiv_class.Verdict":
     """The allow-list class (equiv_class.py) of the Rust files, and C for any manifest or other file."""
     rust = [p for _, p in files if p.endswith(".rs")]
     modules = {(side, p): tuple(module_of(tree, p).split("::")) for side, tree in (("-", base), ("+", head))
                for p in rust}
     crates = known_crates(base, rust) | known_crates(head, rust)
-    verdict = equiv_class.classify({p: base.text(p) for p in rust}, {p: head.text(p) for p in rust}, modules, crates)
+    verdict = equiv_class.classify({p: base.text(p) for p in rust}, {p: head.text(p) for p in rust}, modules, crates,
+                                   {p for p in rust if not declares_test_support(base, p)
+                                    and not declares_test_support(head, p)})
     for status, path in files:
         if path.endswith(".rs") or matches(path, GENERATED):
             continue
@@ -432,7 +443,7 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", default=".")
     parser.add_argument("--skip-cargo", action="store_true")
     parser.add_argument("--windows", choices=("auto", "always", "never"), default="auto")
-    parser.add_argument("--require", choices=("move", "vis"))
+    parser.add_argument("--require", choices=("move", "vis", "cfg"))
     parser.add_argument("--exclude", action="append", default=[])
     parser.add_argument("--allow-added-tests", action="store_true")
     parser.add_argument("--log-dir")
@@ -476,7 +487,8 @@ def main(argv=None) -> int:
             failed.append("a")
     class_ok = args.require is None or klass == args.require
     rows.append(("b class", klass if class_ok else f"FAIL ({klass}, required {args.require})",
-                 f"units moved={verdict.moved} inplace={verdict.inplace} vis={verdict.vis} paths={verdict.paths} "
+                 f"units moved={verdict.moved} inplace={verdict.inplace} vis={verdict.vis} cfg={verdict.cfg} "
+                 f"paths={verdict.paths} "
                  f"uses={verdict.uses} moddecl={verdict.moddecls} | C={len(verdict.reasons)}"))
     if not class_ok:
         failed.append("b")

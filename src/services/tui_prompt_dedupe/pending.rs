@@ -749,13 +749,13 @@ fn note(tmux_session: &str, key: MemoKey, outcome: &PendingRestore) {
     outcomes.insert(tmux_session.to_owned(), (key, outcome.clone()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_restore_outcomes_for_tests() {
     outcomes().clear();
 }
 
 /// Ages the pane's channel mapping past its TTL while its runtime binding stays fresh.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     let aged =
@@ -766,7 +766,7 @@ pub(crate) fn expire_channel_mapping_for_tests(tmux_session: &str) {
 }
 
 /// Ages the pane's runtime binding past its TTL; its alias, channel mapping and outcome stay.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     let aged =
@@ -780,7 +780,7 @@ pub(crate) fn expire_runtime_binding_for_tests(tmux_session: &str) {
 pub(crate) const CHANNEL_MAPPING_TTL: std::time::Duration = super::SESSION_MAPPING_TTL;
 
 /// Moves the pane's channel mapping `by` into the past while its runtime binding stays fresh.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn age_channel_mapping_for_tests(tmux_session: &str, by: std::time::Duration) {
     let mut state = super::STATE.lock().unwrap_or_else(|p| p.into_inner());
     state.aged_stamp_for_tests(by);

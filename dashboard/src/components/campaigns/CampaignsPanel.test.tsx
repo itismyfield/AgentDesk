@@ -706,3 +706,44 @@ it("falls back to a right-side slide-over Drawer when docking would leave < 520p
     Object.defineProperty(window, "innerWidth", { configurable: true, writable: true, value: originalInnerWidth });
   }
 });
+
+it("filters tasks by group from the Overview progress track and opens Wave GanttTimeline in Connections", async () => {
+  const multi = {
+    ...campaign,
+    nodes: [
+      makeCampaignNode("g1", { title: "Gateway schema", group: "Gateway", status: "completed" }),
+      makeCampaignNode("r1", { title: "Relay worker", group: "Relay", status: "running", dependencies: ["g1"] }),
+      makeCampaignNode("r2", { title: "Relay rollout", group: "Relay", status: "pending", dependencies: ["r1"] }),
+    ],
+  };
+  vi.mocked(getCampaigns).mockResolvedValue({ campaigns: [multi], live: {}, read: 1 });
+  await render();
+
+  // Overview renders ProjectProgressCard with group radio cards
+  const progressRegion = container.querySelector('[aria-label="Overall and group progress"]');
+  expect(progressRegion).not.toBeNull();
+  expect(progressRegion?.textContent).toContain("33%");
+
+  const relayCard = container.querySelector<HTMLButtonElement>('[data-group-card="Relay"]')!;
+  expect(relayCard).not.toBeNull();
+  await act(async () => relayCard.click());
+  expect(container.querySelector('[role="list"][aria-label="Relay tasks"]')).not.toBeNull();
+  await act(async () => container.querySelector<HTMLButtonElement>('[role="list"][aria-label="Relay tasks"] [data-task-id="r2"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay rollout");
+  await act(async () => document.querySelector<HTMLButtonElement>('[aria-label="Close details"]')!.click());
+
+  // Switch Connections to Wave GanttTimeline
+  await act(async () => button("Connections").click());
+  await act(async () => button("Timeline").click());
+  const gantt = container.querySelector(".aui-gantt-timeline-root");
+  expect(gantt).not.toBeNull();
+  expect(gantt?.getAttribute("data-embedded")).toBe("true");
+  expect(gantt?.getAttribute("data-axis")).toBe("wave");
+  expect(gantt?.textContent).toContain("Wave 1");
+  expect(gantt?.textContent).toContain("Wave 3");
+
+  // Completed-only Gateway group starts folded with 100% summary bar; clicking Relay worker bar opens details
+  expect(gantt?.querySelector('.aui-gantt-timeline-lane-summary.is-folded[aria-label="Gateway, 100%"]')).not.toBeNull();
+  await act(async () => gantt!.querySelector<HTMLButtonElement>('button.aui-gantt-timeline-bar[data-task-id="r1"]')!.click());
+  expect(document.querySelector(".campaign-node-detail h3")?.textContent).toContain("Relay worker");
+});

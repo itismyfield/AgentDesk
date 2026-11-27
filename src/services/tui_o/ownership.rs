@@ -90,7 +90,7 @@ impl OwnershipGate {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),

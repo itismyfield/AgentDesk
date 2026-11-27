@@ -24,14 +24,31 @@ export default function PipelineInspector({ graph, id, summary, tr }: { graph: P
     ...state.executor?.parameters?.effect_gates?.length ? [[tr("동작 승인", "Action approval"), state.executor.parameters.effect_gates.map((gate) => gateText(graph, gate, tr)).join(" · ")] as [string, ReactNode]] : [],
     [tr("지시", "Instructions"), state.instructions ? <span className="line-clamp-4 whitespace-pre-wrap">{state.instructions}</span> : tr("없음", "None")],
   ];
+  const occ = graph.occupancy?.get(state.id);
+  const stateGates = [
+    ...(graph.gates.get(state.id) ?? []),
+    ...pins.flatMap((p) => (!p.exhausted && p.transition.gate ? [p.transition.gate] : [])),
+    ...(state.executor?.parameters?.effect_gates ?? []),
+  ];
+  const unapprovedGates = [...new Set(stateGates)].filter((gate) => !graph.approvals || !graph.approvals[gate]);
+  const holdReasons = [
+    occ && occ.held > 0 && tr(`보류·막힘 작업 ${occ.held}개가 대기 중이에요`, `${occ.held} held/blocked tasks are queueing here`),
+    unapprovedGates.length > 0 && tr(`${unapprovedGates.map((g) => gateText(graph, g, tr)).join(", ")} 필요`, `Requires ${unapprovedGates.map((g) => gateText(graph, g, tr)).join(", ")}`),
+  ].filter(Boolean);
+  const showHoldNote = Boolean(occ && (occ.held > 0 || (occ.here + occ.held > 0 && unapprovedGates.length > 0))) || (!occ && unapprovedGates.length > 0);
   return <aside aria-label={tr("선택 상태", "Selected state")} className={ASIDE}>
     <InspSection className="border-t-0">
       <div className="flex min-w-0 items-center gap-2.5">
         <span className="grid size-8 shrink-0 place-items-center rounded-lg bg-[var(--bg-3)] text-[var(--fg-dim)]"><Icon aria-hidden className="size-4" /></span>
         <span className="grid min-w-0"><h3 className="m-0 truncate text-base text-[var(--fg)]">{name(state.id)}</h3><Cap className="truncate">{kindName(state.kind, tr)} · <span className="font-mono">{state.id}</span></Cap></span>
       </div>
-      {graph.occupancy && <Cap><Num>{[tr(`지금 머무는 작업 ${graph.occupancy.get(state.id)!.here}개`, `${graph.occupancy.get(state.id)!.here} tasks here now`),
-        graph.occupancy.get(state.id)!.held > 0 && tr(`막힘 ${graph.occupancy.get(state.id)!.held}개`, `${graph.occupancy.get(state.id)!.held} held`)].filter(Boolean).join(" · ")}</Num></Cap>}
+      {occ && <Cap><Num>{[tr(`지금 머무는 작업 ${occ.here}개`, `${occ.here} tasks here now`),
+        occ.held > 0 && tr(`막힘 ${occ.held}개`, `${occ.held} held`)].filter(Boolean).join(" · ")}</Num></Cap>}
+      {showHoldNote && holdReasons.length > 0 && (
+        <p data-testid="inspector-bottleneck-note" className="m-0 rounded-lg border border-[color-mix(in_srgb,var(--warn)_40%,transparent)] bg-[var(--warn-soft)] px-2.5 py-1.5 text-xs leading-4 text-[var(--warn-fg)] [word-break:keep-all]">
+          {holdReasons.join(" · ")}
+        </p>
+      )}
     </InspSection>
     <InspSection as="dl" className="grid grid-cols-[5.5rem_minmax(0,1fr)] gap-x-3 gap-y-1.5 text-[13px]">
       {fields.map(([label, value]) => <div key={label} className="contents"><dt>{label}</dt><dd className="m-0 min-w-0 text-[var(--fg)] [overflow-wrap:anywhere]">{value}</dd></div>)}

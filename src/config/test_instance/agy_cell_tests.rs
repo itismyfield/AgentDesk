@@ -1,4 +1,3 @@
-use super::super::login_test_support::claude_login_fixture;
 use super::super::tests as fixture;
 use super::super::*;
 use serde_json::json;
@@ -6,40 +5,7 @@ use std::os::unix::fs::PermissionsExt;
 
 const CHILD: &str = "ADK_AGY_CELL_CHILD";
 
-/// A declared agy-headless instance under `<home>/.adk/dev/instances` with a fake agy CLI
-/// that appends `ADK_CHILD <first arg>` and its env for every launch.
-pub(crate) fn agy_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (temp, root, home) = claude_login_fixture(false);
-    let login = home.join(".adk/dev/agy-login");
-    let cli = home.join("agy-bin/agy");
-    std::fs::create_dir_all(&login).unwrap();
-    std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
-    let capture = root.join("runtime/agy-env");
-    std::fs::write(
-        &cli,
-        format!(
-            "#!/bin/sh\n{{ echo \"ADK_CHILD $1\"; /usr/bin/env; }} >> {}\n[ \"$1\" = --version ] && echo 1.0.0\nexit 0\n",
-            crate::services::process::shell_escape(&capture.to_string_lossy())
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let declaration = json!({"mode":"dedicated_home","login_home":login,"cli":cli});
-    for name in ["manifest.json", "receipt.json"] {
-        let path = root.join(name);
-        let mut value = read_json(&path).unwrap();
-        value["agy_login"] = declaration.clone();
-        if name == "manifest.json" {
-            value["profile"]["name"] = json!("agy-headless");
-        }
-        std::fs::write(path, value.to_string()).unwrap();
-    }
-    std::fs::write(root.join("config/org.yaml"), json!({"version":1,
-        "agents":{"antigravity":{"display_name":"a","provider":"antigravity","auth_profile":"test-antigravity"}},
-        "provider_auth_profiles":{"test-antigravity":{"provider":"antigravity","home":login,"env":{}}},
-        "provider_auth_primary_profiles":{"antigravity":"test-antigravity"}}).to_string()).unwrap();
-    (temp, root, home)
-}
+pub(crate) use super::super::test_support::agy_fixture;
 
 fn write_credential(root: &Path, name: &str) -> String {
     let value = format!("SYNTHETIC_GEMINI_{name}");

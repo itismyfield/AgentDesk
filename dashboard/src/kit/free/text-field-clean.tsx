@@ -344,7 +344,7 @@ const css = /* css */ `
 .aui-text-field-clean[data-size="sm"] { --h: 28px; --px: 8px; --fs: 13px; --radius: calc(var(--aui-radius, 7px) - 1px); }
 .aui-text-field-clean[data-size="lg"] { --h: 36px; --px: 12px; --fs: 14px; --radius: calc(var(--aui-radius, 7px) + 1px); }
 /* Touch screens: a comfortable tap height, and 16px text so iOS doesn't zoom in on focus */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-field-clean { --fs: 16px; }
   .aui-text-field-clean[data-size="sm"] { --h: 34px; }
   .aui-text-field-clean[data-size="md"] { --h: 38px; }
@@ -457,7 +457,7 @@ const css = /* css */ `
 }
 .aui-text-field-clean__action + .aui-text-field-clean__action { margin-left: -4px; }
 /* Touch screens: bigger buttons and a hit area that reaches past them */
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-field-clean__action { width: 32px; height: 32px; max-width: none; max-height: none; }
   .aui-text-field-clean__action::before { content: ""; position: absolute; inset: -4px; }
 }
@@ -538,7 +538,7 @@ const css = /* css */ `
 
 /* Kit: keep the component inside its slot and grow touch targets. */
 .aui-text-field-clean { max-width: 100%; min-width: 0; }
-@media (pointer: coarse) {
+@media (pointer: coarse), (max-width: 899px) {
   .aui-text-field-clean:where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]),
   .aui-text-field-clean :where(button, a[href], input, select, textarea, [role="button"], [role="tab"], [role="option"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="checkbox"], [role="radio"], [role="switch"], [role="slider"], [role="link"], [role="treeitem"]) {
     min-width: 44px;

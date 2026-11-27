@@ -83,7 +83,13 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
 
   const [period, setPeriod] = useState<Period>(DEFAULT_PERIOD);
   const [reloadKey, setReloadKey] = useState(0);
+  const [skillReloadKey, setSkillReloadKey] = useState(0);
   const [catalogReloadKey, setCatalogReloadKey] = useState(0);
+  const [skillsRequested, setSkillsRequested] = useState(
+    () =>
+      getCachedSkillRanking(DEFAULT_PERIOD, 16) !== null &&
+      getCachedSkillCatalog() !== null,
+  );
   const [analytics, setAnalytics] = useState<TokenAnalyticsResponse | null>(
     () =>
       getCachedTokenAnalytics(DEFAULT_PERIOD)?.data ??
@@ -102,19 +108,14 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
       getCachedTokenAnalytics(DEFAULT_PERIOD) === null &&
       readPersistedAnalytics(DEFAULT_PERIOD) === null,
   );
-  const [skillLoading, setSkillLoading] = useState(
-    () =>
-      getCachedSkillRanking(DEFAULT_PERIOD, 16) === null &&
-      readPersistedSkillRanking(DEFAULT_PERIOD) === null,
-  );
-  const [catalogLoading, setCatalogLoading] = useState(
-    () => getCachedSkillCatalog() === null,
-  );
+  const [skillLoading, setSkillLoading] = useState(false);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [analyticsError, setAnalyticsError] = useState<string | null>(null);
   const [skillError, setSkillError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!skillsRequested) return;
     let active = true;
 
     const load = async () => {
@@ -147,46 +148,26 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
     return () => {
       active = false;
     };
-  }, [t, catalogReloadKey]);
+  }, [t, catalogReloadKey, skillsRequested]);
 
   useEffect(() => {
     let active = true;
 
     const load = async () => {
-      // SWR fast-path (#1250): hydrate from in-memory cache, then fall back to
-      // sessionStorage so the *first* tab entry after a reload still paints
-      // instantly instead of showing every "...불러오는 중" placeholder.
       const cachedAnalytics = getCachedTokenAnalytics(period);
       const persistedAnalytics = cachedAnalytics ? null : readPersistedAnalytics(period);
-      if (cachedAnalytics) {
-        setAnalytics(cachedAnalytics.data);
-      } else {
-        setAnalytics(persistedAnalytics);
-      }
-      const cachedRanking = getCachedSkillRanking(period, 16);
-      const persistedRanking = cachedRanking ? null : readPersistedSkillRanking(period);
-      setSkillRanking(cachedRanking?.data ?? persistedRanking);
-
+      setAnalytics(cachedAnalytics ? cachedAnalytics.data : persistedAnalytics);
       setLoading(!cachedAnalytics && persistedAnalytics === null);
-      setSkillLoading(!cachedRanking && persistedRanking === null);
       setAnalyticsError(null);
-      setSkillError(null);
 
-      // The Refresh button increments `reloadKey`. When it's > 0 we treat
-      // the fetch as user-initiated and bypass the browser cache (the
-      // backend now ships SWR Cache-Control on the analytics endpoint, so
-      // a default re-entry would otherwise be served by the browser cache).
       const forceRefresh = reloadKey > 0;
-      const [analyticsResult, skillResult] = await Promise.allSettled([
-        getTokenAnalytics(period, { forceRefresh, suppressErrorToast: true }),
-        getSkillRanking(period, 16, { suppressErrorToast: true }),
-      ]);
-      if (!active) return;
-
-      if (analyticsResult.status === "fulfilled") {
-        setAnalytics(analyticsResult.value);
-        writePersistedAnalytics(period, analyticsResult.value);
-      } else {
+      try {
+        const next = await getTokenAnalytics(period, { forceRefresh, suppressErrorToast: true });
+        if (!active) return;
+        setAnalytics(next);
+        writePersistedAnalytics(period, next);
+      } catch {
+        if (!active) return;
         setAnalyticsError(
           t(
             msg(
@@ -197,12 +178,35 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
             ),
           ),
         );
+      } finally {
+        if (active) setLoading(false);
       }
+    };
 
-      if (skillResult.status === "fulfilled") {
-        setSkillRanking(skillResult.value);
-        writePersistedSkillRanking(period, skillResult.value);
-      } else {
+    void load();
+    return () => {
+      active = false;
+    };
+  }, [period, reloadKey, t]);
+
+  useEffect(() => {
+    if (!skillsRequested) return;
+    let active = true;
+
+    const load = async () => {
+      const cachedRanking = getCachedSkillRanking(period, 16);
+      const persistedRanking = cachedRanking ? null : readPersistedSkillRanking(period);
+      setSkillRanking(cachedRanking?.data ?? persistedRanking);
+      setSkillLoading(!cachedRanking && persistedRanking === null);
+      setSkillError(null);
+
+      try {
+        const next = await getSkillRanking(period, 16, { suppressErrorToast: true });
+        if (!active) return;
+        setSkillRanking(next);
+        writePersistedSkillRanking(period, next);
+      } catch {
+        if (!active) return;
         setSkillError(
           t(
             msg(
@@ -213,23 +217,21 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
             ),
           ),
         );
+      } finally {
+        if (active) setSkillLoading(false);
       }
-
-      setLoading(false);
-      setSkillLoading(false);
     };
 
     void load();
     return () => {
       active = false;
     };
-  }, [period, reloadKey, t]);
+  }, [period, reloadKey, skillReloadKey, skillsRequested, t]);
 
   const summary = analytics?.summary;
-  const hasLoadError = Boolean(analyticsError || skillError || catalogError);
-  const combinedError = [analyticsError, skillError, catalogError]
-    .filter(Boolean)
-    .join(" ");
+  const hasLoadError = Boolean(analyticsError);
+  const combinedError = analyticsError ?? "";
+  const skillLoadError = skillError ?? catalogError;
   const series = useMemo(() => dailySeries(t), [t]);
   const totalInputTokens = useMemo(
     () => analytics?.daily.reduce((sum, day) => sum + day.input_tokens, 0) ?? 0,
@@ -283,9 +285,18 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
     [summary],
   );
 
+  const requestSkills = useCallback(() => {
+    setSkillsRequested(true);
+  }, []);
+
+  const retrySkills = useCallback(() => {
+    setSkillsRequested(true);
+    setSkillReloadKey((value) => value + 1);
+    if (catalogError) setCatalogReloadKey((value) => value + 1);
+  }, [catalogError]);
+
   const retry = () => {
     setReloadKey((value) => value + 1);
-    if (catalogError) setCatalogReloadKey((value) => value + 1);
   };
 
   // The kit control has no per-option props; tag its radios with the existing e2e hooks.
@@ -409,14 +420,20 @@ export default function StatsPageView({ settings }: StatsPageViewProps) {
           overallCacheHitRate={overallCacheHitRate}
           agentSkillRows={agentSkillPairs}
           series={series}
+          skillsLoading={skillsRequested && (skillLoading || catalogLoading)}
+          onAgentInspect={requestSkills}
         />
 
         <SkillUsageCard
           t={t}
-          loading={skillLoading || catalogLoading}
+          loading={skillsRequested && (skillLoading || catalogLoading)}
           rows={skillRows}
           byAgentRows={topAgentSkillPairs}
           windowCalls={skillWindowCalls}
+          requested={skillsRequested}
+          error={skillLoadError}
+          onRequest={requestSkills}
+          onRetry={retrySkills}
         />
 
         <div data-testid="stats-receipt">

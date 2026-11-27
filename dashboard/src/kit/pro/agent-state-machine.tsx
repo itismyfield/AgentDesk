@@ -93,7 +93,7 @@ const styles = `
   position: relative;
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 36px 18px;
+  gap: 36px 32px;
   min-height: 168px;
 }
 .aui-agent-state-machine-svg {
@@ -141,9 +141,9 @@ const styles = `
   align-items: center;
   justify-content: center;
   gap: 4px;
-  min-width: 28px;
+  min-width: 26px;
   height: 22px;
-  padding: 0 7px;
+  padding: 0 6px;
   border: 1px solid var(--aui-sm-line);
   border-radius: 999px;
   background: var(--aui-sm-card);
@@ -186,7 +186,7 @@ const styles = `
   background: #f3f3f4;
   color: #171717;
 }
-@container aui-sm (max-width: 640px) {
+@container aui-sm (max-width: 760px) {
   .aui-agent-state-machine-head > span { margin-left: 0; }
   .aui-agent-state-machine-board {
     display: flex;
@@ -209,20 +209,26 @@ const styles = `
     transform: none;
     align-self: flex-start;
     height: auto;
-    min-height: 32px;
+    min-width: 44px;
+    min-height: 44px;
     margin-left: 12px;
     padding: 5px 10px;
     font-size: 12px;
     order: var(--aui-sm-order, 0);
   }
+  .aui-agent-state-machine-chip::before { content: none; }
   .aui-agent-state-machine-chip-desktop { display: none; }
   .aui-agent-state-machine-chip-mobile { display: inline-flex; align-items: center; gap: 4px; }
 }
-@media (pointer: coarse) {
-  .aui-agent-state-machine-node,
-  .aui-agent-state-machine-chip {
+@media (pointer: coarse), (max-width: 899px) {
+  .aui-agent-state-machine-node {
     min-width: 44px;
     min-height: 44px;
+  }
+  .aui-agent-state-machine-chip::before {
+    content: '';
+    position: absolute;
+    inset: -11px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -316,13 +322,19 @@ export function AgentStateMachine({
             if (!from || !to || from.row !== to.row) return null;
             const order = from.row * 20 + from.column * 2 + 1;
             const countText = `${item.count ?? 0}×`;
+            const adjacent = Math.abs(to.column - from.column) === 1;
+            const gapIdx = Math.min(from.column, to.column);
+            const chipLeft = adjacent
+              ? `calc(${(gapIdx + 1) * 20}% + ${(gapIdx * 6.4 - 9.6).toFixed(1)}px)`
+              : `calc(${(from.column + to.column + 1) * 10}%)`;
             return (
               <button
                 key={`${item.from}-${item.to}`}
                 type="button"
                 className="aui-agent-state-machine-chip"
+                data-hit-slop="11"
                 data-dim={!item.count || undefined}
-                style={{ left: `calc(${(from.column + to.column + 1) * 10}%)`, top: from.row ? '78%' : '22%', '--aui-sm-order': order } as CSSProperties}
+                style={{ left: chipLeft, top: from.row ? '78%' : '22%', '--aui-sm-order': order } as CSSProperties}
                 aria-label={`${item.label ?? 'transition'} ${item.count ?? 0}`}
                 onClick={() => setEdge(`${item.from}-${item.to}`)}
               >

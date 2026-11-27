@@ -1,5 +1,7 @@
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Trash2 } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { deleteCampaign, type Campaign } from "../../api/campaigns";
+import { ApiRequestError } from "../../api/httpClient";
 import {
   DEFAULT_WORKFLOW_OPTIONS, isDefinitiveAnswer, sendServerCampaignCommand, serverCampaignProfile, serverCampaignRejection,
   type ServerCampaignCommand, type ServerCampaignDocument,
@@ -66,7 +68,10 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const [tab, setTab] = useState<CampaignTab>(queueLink ? "queue" : "campaigns");
   const [queueCard, setQueueCard] = useState<string | null>(queueLink?.card ?? null);
   const legacy = useLegacyCampaigns();
-  const { campaigns, live, loading, error, refreshedAt, checkedRead, onSaved } = legacy;
+  const { campaigns, live, loading, error, refreshedAt, checkedRead, onSaved, onDeleted } = legacy;
+  const [deleteTarget, setDeleteTarget] = useState<Campaign | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, CampaignDraft>>({});
   const onDraftChange = (key: string, draft: CampaignDraft | null, expected?: CampaignDraft) => setDrafts((current) => {
     // A save may finish after this task was reopened and its draft changed.
@@ -318,15 +323,57 @@ export default function CampaignsPanel({ language }: { language: string }) {
   const serverEvents = server.events?.campaign === serverDoc?.view.campaign_id ? server.events?.events ?? [] : [];
   const serverTaskViews = serverDoc ? serverTasks(serverDoc, serverEvents, tr) : [];
   const openNode = node && (campaign?.nodes.find((value) => value.id === node) ?? (mode === "server" ? serverDoc?.definition.nodes.find((value) => value.id === node) : undefined));
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    const targetId = deleteTarget.id;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteCampaign(targetId);
+      if (selectedId === targetId) { setNode(null); setEdit(null); }
+      if (campaigns.length === 1 && campaigns[0]?.id === targetId && summaries.length > 0) {
+        selectServer(summaries[0].view.campaign_id);
+      }
+      onDeleted(targetId);
+      setDeleteTarget(null);
+    } catch (cause) {
+      if (cause instanceof ApiRequestError && cause.status === 404) {
+        if (selectedId === targetId) { setNode(null); setEdit(null); }
+        onDeleted(targetId);
+        setDeleteTarget(null);
+      } else if (cause instanceof ApiRequestError && cause.status === 409) {
+        setDeleteError(tr("진행 중인 캠페인은 삭제할 수 없어요. 먼저 일시정지하거나 취소한 뒤 다시 시도하세요.", "Active campaigns cannot be deleted. Pause or cancel it first."));
+        void legacy.refreshCampaign(targetId);
+      } else {
+        setDeleteError(cause instanceof Error ? cause.message : tr("캠페인을 삭제하지 못했습니다.", "Could not delete the campaign."));
+      }
+    } finally {
+      setDeleting(false);
+    }
+  };
   const legacyDetail = campaign && <CampaignDetail key={`legacy:${campaign.id}`} title={campaign.title} showTitle={!phone} tr={tr}
     view={effectiveView} onViewChange={setDetailView}
     chips={!phone && <span className="flex flex-wrap items-center gap-2 text-xs text-[var(--fg-muted)]">
       <Chip title={tr("작업 기록부로 관리하는 캠페인", "Campaign kept as a task ledger")}>{tr("원장", "Ledger")}</Chip>
       <Num>{tr("라운드", "Round")} {campaign.round}</Num>
     </span>}
+    actions={<Button
+      variant="secondary"
+      size="sm"
+      icon={<Trash2 aria-hidden size={14} />}
+      data-testid="campaign-delete-trigger"
+      disabled={campaign.status === "active"}
+      title={campaign.status === "active"
+        ? tr("진행 중인 캠페인은 먼저 일시정지하거나 취소한 뒤 삭제할 수 있어요.", "Pause or cancel an active campaign before deleting it.")
+        : undefined}
+      onClick={() => leaveEditor(() => { setDeleteError(null); setDeleteTarget(campaign); })}
+    >{tr("삭제", "Delete")}</Button>}
     sentence={statusSentence(tr(...LEDGER_STATUS_LABELS[campaign.status]), legacyTasks, tr)}
     tracker={<CampaignBatchTracker campaign={campaign} tasks={legacyTasks} onOpenTask={setNode} tr={tr} />}
-    notes={editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
+    notes={<>
+      {editing && phone && <p role="status" className="m-0 rounded-lg border border-[var(--line)] px-3 py-2 text-sm text-[var(--fg-muted)]">{tr("관계도 편집은 900px 넘는 화면에서 열려요. 여기서는 보기만 해요.", "The relations editor opens on screens wider than 900px. This screen only shows them.")}</p>}
+      {campaign.status === "active" && <Cap className="hidden max-[899px]:block pointer-coarse:block">{tr("진행 중에는 일시정지·취소 후 삭제할 수 있어요.", "Pause or cancel before deleting.")}</Cap>}
+    </>}
     description={campaign.description && <details className="group min-w-0 text-xs text-[var(--fg-muted)]">
       <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-[var(--r-sm)] px-1 hover:text-[var(--fg)] [&::-webkit-details-marker]:hidden">
         <ChevronDown aria-hidden className="size-3.5 -rotate-90 transition-transform group-open:rotate-0 motion-reduce:transition-none" />{tr("캠페인 설명", "Campaign description")}
@@ -338,7 +385,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       recent={{ title: tr("최근 바뀐 작업", "Recently changed tasks"), entries: recentTaskChanges(legacyTasks) }}
       selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     relations={campaign.nodes.length > 0 && <CampaignRelations campaign={campaign} live={live[campaign.id]} selectedId={node} onOpen={setNode} onEdit={phone ? undefined : startEdit} tr={tr} />}
-    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} tr={tr} />}
+    board={(controls) => <CampaignBoard columns={legacyBoard(campaign.nodes, live[campaign.id])} tasks={legacyTasks} selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr} />}
     pipeline={<CampaignPipeline source={{ kind: "legacy" }} campaign={campaign} tasks={legacyTasks} tr={tr} />}
     task={openNode && "status" in openNode ? { id: openNode.id, label: campaignIssueLabel(openNode), body: <CampaignNodeDetails key={openNode.id} campaign={campaign} node={openNode} live={live[campaign.id]?.[openNode.id]} tr={tr} onSaved={onSaved}
       editing={drafts[`${campaign.id}:${openNode.id}`] ?? null} onDraftChange={(draft, expected) => onDraftChange(`${campaign.id}:${openNode.id}`, draft, expected)} /> } : null}
@@ -365,6 +412,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
       </>}
       notes={<>
         {detail?.error && <WidgetState kind="stale" title={tr("이 서버 캠페인을 갱신하지 못했습니다.", "Could not refresh this server campaign.")} description={detail.error + tr(" · 마지막 서버 스냅샷을 표시 중이며 중단만 보낼 수 있습니다.", " · Showing the last server snapshot; only stop can be sent.")} />}
+        {!edit.enabled && edit.reason && <Cap className="hidden max-[899px]:block pointer-coarse:block">{rejectionText(edit.reason, tr)}</Cap>}
         {renderForm(editKey(id), !edit.enabled)}
         {!phone && commands}
       </>}
@@ -372,7 +420,7 @@ export default function CampaignsPanel({ language }: { language: string }) {
         recent={{ title: tr("최근 이벤트", "Recent events"), entries: shown?.events ? recentServerEvents(shown.events) : null, note: shown && shown.failedAfter !== null ? tr("이벤트를 갱신하지 못했습니다", "Could not refresh events") : null }}
         footer={<>{phone && commands}<ServerCampaignSections document={serverDoc} link={`${window.location.origin}${window.location.pathname}${query ?? ""}`} tr={tr} /></>}
         selectedId={node} controls={controls} onOpen={setNode} campaignId={id} connection={connection} onApproved={() => refreshServer(id)} language={language} tr={tr} />}
-      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} tr={tr}
+      board={(controls) => <CampaignBoard columns={serverBoard(serverDoc, serverTaskViews, tr)} tasks={serverTaskViews} selectedId={node} controls={controls} onOpen={setNode} language={language} tr={tr}
         retry={{ enabled: retry.enabled && !busy.has(id), reason: retry.reason, onRetry: (nodeId) => runCommand(serverDoc, "prepare_retry", nodeId) }} />}
       pipeline={<CampaignPipeline source={{ kind: "server", id, stamp: view.as_of, sequence: view.last_event_sequence }} title={definition.title} dispositions={Object.fromEntries(view.nodes.map((value) => [value.id, value.runtime.disposition]))}
         approvals={definition.workflow_options ?? DEFAULT_WORKFLOW_OPTIONS} leave={leave} onEditing={setPipelineEditing} tr={tr} />}
@@ -432,6 +480,26 @@ export default function CampaignsPanel({ language }: { language: string }) {
         {phone ? <BottomSheet open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")}><div className={CAMPAIGN_SCOPE}>{list}</div></BottomSheet>
           : !wideEditor && <aside className={`min-w-0 ${folded ? "max-[1279px]:hidden" : ""}`}>{list}</aside>}
         {folded && <Modal open={picking} onClose={() => setPicking(false)} title={tr("캠페인 고르기", "Choose a campaign")} size="sm"><div className={CAMPAIGN_SCOPE}>{list}</div></Modal>}
+        {deleteTarget && <Modal
+          open
+          onClose={() => { if (!deleting) { setDeleteTarget(null); setDeleteError(null); } }}
+          closeOnBackdrop={!deleting}
+          closeOnEsc={!deleting}
+          title={tr("캠페인을 삭제할까요?", "Delete this campaign?")}
+          size="sm"
+        >
+          <div className={`${CAMPAIGN_SCOPE} grid gap-3 text-sm`} data-testid="campaign-delete-modal">
+            <p className="m-0 text-[var(--fg)] [word-break:keep-all]">
+              <strong className="font-semibold">{deleteTarget.title}</strong>
+              {tr(` (${deleteTarget.nodes.length}개 작업) 원장과 개정 기록을 영구 삭제합니다. 연결된 칸반 카드와 GitHub 이슈는 그대로 유지됩니다.`, ` (${deleteTarget.nodes.length} tasks) ledger and revision history will be permanently deleted. Linked Kanban cards and GitHub issues stay intact.`)}
+            </p>
+            {deleteError && <p role="alert" data-testid="campaign-delete-error" className="m-0 rounded-[var(--r-sm)] border border-[color-mix(in_oklch,var(--err)_45%,var(--line-soft))] bg-[var(--bg-2)] px-3 py-2 text-xs text-[var(--err)] [word-break:keep-all]">{deleteError}</p>}
+            <div className="flex flex-wrap justify-end gap-2 pt-1">
+              <Button variant="ghost" size="sm" disabled={deleting} data-testid="campaign-delete-cancel" onClick={() => { setDeleteTarget(null); setDeleteError(null); }}>{tr("취소", "Cancel")}</Button>
+              <Button variant="destructive" size="sm" loading={deleting} disabled={deleting} data-testid="campaign-delete-confirm" onClick={() => void confirmDelete()}>{tr("삭제 확인", "Delete campaign")}</Button>
+            </div>
+          </div>
+        </Modal>}
         <div className="grid min-w-0 content-start gap-4">
           {/* Nothing is called empty until both lists have answered without an error. */}
           {!campaigns.length && !summaries.length && !error && !serverDown && mode === "legacy" && !serverDrafts[NEW_DRAFT] && <WidgetState kind={loading || !listLoaded ? "loading" : "empty"} title={loading || !listLoaded ? tr("캠페인을 불러오고 있습니다.", "Loading campaigns.") : tr("등록된 캠페인이 없습니다.", "No campaigns yet.")} description={loading || !listLoaded ? undefined : tr("캠페인이 등록되면 작업 흐름과 진행 상황이 여기에 표시됩니다.", "Registered campaigns and their progress will appear here.")} />}

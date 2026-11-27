@@ -26,7 +26,7 @@ pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission
         .join("managed-ready")
         .join(channel.to_string())
         .join("native.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&session, &path);
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,

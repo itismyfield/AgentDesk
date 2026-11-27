@@ -36,7 +36,7 @@ impl Seal {
         self.claimed && self.closed && self.supported
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn fixture() -> Self {
         Self {
             claimed: true,

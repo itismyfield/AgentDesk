@@ -239,7 +239,10 @@ function buildCoalescedTimelineItem(
   };
 }
 
-export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGitHubComment[] {
+export function parseGitHubCommentTimeline(
+  comments: GitHubComment[],
+  tr: (ko: string, en: string) => string = (ko) => ko,
+): ParsedGitHubComment[] {
   return comments.flatMap<ParsedGitHubComment>((comment) => {
     const body = comment.body.trim();
     if (!body) return [];
@@ -256,7 +259,7 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       return [{
         kind: "review",
         status: "reviewing",
-        title: "리뷰 진행",
+        title: tr("리뷰 진행", "Review in progress"),
         summary: cleanMarkdownLine(firstLine ?? body),
         details: [],
         createdAt: comment.createdAt,
@@ -299,8 +302,8 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       return [{
         kind: "review",
         status: passed ? "passed" : "changes_requested",
-        title: passed ? "리뷰 통과" : "리뷰 피드백",
-        summary: highlights[0] ?? cleanMarkdownLine(firstLine ?? "리뷰 결과"),
+        title: passed ? tr("리뷰 통과", "Review passed") : tr("리뷰 피드백", "Review feedback"),
+        summary: highlights[0] ?? cleanMarkdownLine(firstLine ?? tr("리뷰 결과", "Review result")),
         details: passed ? [] : highlights.slice(1),
         createdAt: comment.createdAt,
         author,
@@ -313,8 +316,8 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       return [{
         kind: "pm",
         status: "decision",
-        title: heading ?? "PM 결정",
-        summary: cleanMarkdownLine(firstLine ?? "PM 결정"),
+        title: heading ?? tr("PM 결정", "PM decision"),
+        summary: cleanMarkdownLine(firstLine ?? tr("PM 결정", "PM decision")),
         details: extractListHighlights(body, 3),
         createdAt: comment.createdAt,
         author,
@@ -326,8 +329,8 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
       return [{
         kind: "work",
         status: "completed",
-        title: heading ?? "작업 완료",
-        summary: cleanMarkdownLine(firstLine ?? "작업 완료"),
+        title: heading ?? tr("작업 완료", "Work completed"),
+        summary: cleanMarkdownLine(firstLine ?? tr("작업 완료", "Work completed")),
         details: extractSectionHeadings(body, 3),
         createdAt: comment.createdAt,
         author,
@@ -340,7 +343,7 @@ export function parseGitHubCommentTimeline(comments: GitHubComment[]): ParsedGit
     return [{
       kind: "general",
       status: "comment",
-      title: heading ?? cleanMarkdownLine(firstLine ?? "코멘트"),
+      title: heading ?? cleanMarkdownLine(firstLine ?? tr("코멘트", "Comment")),
       summary: truncated,
       details: [],
       createdAt: comment.createdAt,

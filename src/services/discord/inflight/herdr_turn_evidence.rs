@@ -142,7 +142,7 @@ pub(in crate::services::discord) async fn watcher_herdr_evidence(
 
 /// The channel's current hosted execution nonce while it is Bound; `None` for any other state,
 /// a missing record or a failed read.
-async fn current_bound_nonce(
+pub(in crate::services::discord) async fn current_bound_nonce(
     shared: &SharedData,
     provider: &ProviderKind,
     row: &InflightTurnState,

@@ -68,13 +68,14 @@ function FsmToolbar({ ctx, actions }: Props) {
         </div>
 
         <div className="fsm-actions flex flex-wrap items-center justify-end gap-2">
-          <button onClick={actions.addState} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_INFO_STYLE}>
+          <button type="button" onClick={actions.addState} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_INFO_STYLE}>
             + {tr("상태 추가", "State")}
           </button>
-          <button onClick={actions.addTransition} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_ACCENT_STYLE}>
+          <button type="button" onClick={actions.addTransition} className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium" style={BUTTON_ACCENT_STYLE}>
             + {tr("전환 추가", "Edge")}
           </button>
           <button
+            type="button"
             onClick={actions.handleExportJson}
             disabled={!ctx.pipelineDraft}
             className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
@@ -83,6 +84,7 @@ function FsmToolbar({ ctx, actions }: Props) {
             {tr("JSON 내보내기", "Export JSON")}
           </button>
           <button
+            type="button"
             onClick={() => (actions.confirmLeave ?? ((run: () => void) => run()))(() => void actions.handleClearOverride())}
             disabled={ctx.saving || !ctx.overrideExists}
             className="btn min-h-11 rounded-lg border px-2.5 py-1.5 text-[11px] font-medium"
@@ -116,6 +118,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
       <div className="flex flex-wrap items-center justify-end gap-2">
         <LevelSwitch ctx={ctx} actions={actions} />
         <button
+          type="button"
           onClick={() => actions.setReloadKey((current: number) => current + 1)}
           className="min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium"
           style={PANEL_SOFT_STYLE}
@@ -123,6 +126,7 @@ function AdvancedToolbar({ ctx, actions }: Props) {
           {tr("새로고침", "Refresh")}
         </button>
         <button
+          type="button"
           onClick={() => (actions.confirmLeave ?? ((run: () => void) => run()))(() => void actions.handleClearOverride())}
           disabled={ctx.saving || !ctx.overrideExists}
           className="min-h-11 rounded-md border px-3 py-1.5 text-xs font-medium"
@@ -166,6 +170,8 @@ function LevelSwitch({ ctx, actions }: Props) {
       }}
     >
       <button
+        type="button"
+        aria-pressed={ctx.level === "repo"}
         onClick={() => actions.setLevel("repo")}
         className="min-h-11 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
         style={{
@@ -176,6 +182,8 @@ function LevelSwitch({ ctx, actions }: Props) {
         {tr("저장소 기준", "Repository")}
       </button>
       <button
+        type="button"
+        aria-pressed={ctx.level === "agent"}
         onClick={() => actions.setLevel("agent")}
         disabled={!ctx.selectedAgentId}
         className="min-h-11 rounded-md px-3 py-1.5 text-xs font-medium transition-colors"
@@ -196,6 +204,7 @@ function SaveControls({ ctx, actions, compact }: Props & { compact?: boolean }) 
   return (
     <div className="flex flex-wrap items-center justify-end gap-2">
       <button
+        type="button"
         onClick={() => actions.setReloadKey((current: number) => current + 1)}
         className="min-h-11 rounded-md border px-2.5 py-1.5 text-[11px] font-medium"
         style={BUTTON_NEUTRAL_STYLE}
@@ -210,9 +219,10 @@ function SaveControls({ ctx, actions, compact }: Props & { compact?: boolean }) 
 function SaveButton({ ctx, actions, label }: Props & { label: string }) {
   return (
     <button
+      type="button"
       onClick={() => void actions.handleSave()}
       disabled={ctx.saving || !ctx.hasVisibleChanges}
-      className="rounded-xl border px-3.5 py-1.5 text-xs font-semibold disabled:opacity-50"
+      className="inline-flex min-h-11 items-center justify-center rounded-xl border px-3.5 py-1.5 text-xs font-semibold disabled:opacity-50"
       style={{
         borderColor: "color-mix(in srgb, var(--th-accent-primary) 30%, var(--th-border) 70%)",
         background: "var(--th-accent-primary-soft)",

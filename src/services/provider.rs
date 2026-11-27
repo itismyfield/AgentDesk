@@ -21,7 +21,7 @@ pub(crate) mod session_prompt;
 pub(crate) mod session_source;
 pub(crate) use output_reader::herdr_provider_terminal_only;
 pub use output_reader::{fold_read_output_result, poll_output_file_until_result};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) mod read_fault;
 pub use cancel_watchdog::{CancelWatchdog, spawn_cancel_watchdog};
 pub use registry::{
@@ -380,7 +380,7 @@ impl CancelToken {
         self.child_pid_generation.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn store_child_process_for_test(&self, process: CapturedProcess) {
         let mut child = self.child_pid.lock().unwrap_or_else(|e| e.into_inner());
         self.child_pid_generation.fetch_add(1, Ordering::Relaxed);

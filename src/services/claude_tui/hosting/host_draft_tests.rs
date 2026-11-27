@@ -91,7 +91,7 @@ fn follow_up(name: &str, scenario: Scenario) -> (Ended, Vec<String>, usize) {
                     relay_last_offset: None,
                 },
             );
-            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+            crate::services::claude_tui::readiness::test_support::pre_source(&name, &transcript);
         }
         let guard = SpyGuard::install(SpyState {
             captures: scenario

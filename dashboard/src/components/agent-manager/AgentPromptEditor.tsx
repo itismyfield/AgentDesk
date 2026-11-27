@@ -4,7 +4,7 @@ import { useInRouterContext, useNavigate } from "react-router";
 import { Button } from "../../kit/free/button-clean";
 import { SegmentedControl } from "../../kit/free/segmented-control-clean";
 import { TreeView, type TreeNode } from "../../kit/free/tree-view-clean";
-import { InlineDiff } from "../../kit/pro/inline-diff";
+import { InlineDiff, type InlineDiffLabels } from "../../kit/pro/inline-diff";
 import { Cap } from "../common/KitPrimitives";
 
 export interface PromptHeadingNode {
@@ -151,10 +151,66 @@ export default function AgentPromptEditor({
 
       <div id={panelId} role="tabpanel" className="min-w-0">
         {mode === "edit" ? (
-          <textarea ref={textareaRef} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} style={{ minHeight }} className="w-full resize-y rounded-(--r-md) border border-(--line) bg-(--bg-1) px-3 py-2.5 font-mono text-base leading-5 text-(--fg) outline-none focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-(--accent) sm:text-xs" />
+          <textarea ref={textareaRef} aria-label={label} value={value} onChange={(e) => onChange(e.target.value)} style={{ minHeight }} className="w-full resize-y rounded-(--r-md) border border-(--line) bg-(--bg-1) px-3 py-2.5 font-mono text-base leading-5 text-(--fg) outline-none focus-visible:outline-2 focus-visible:outline-offset-[-1px] focus-visible:outline-(--accent) sm:pointer-fine:text-xs" />
         ) : (
           <div data-testid="prompt-inline-diff" className="min-w-0">
-            <InlineDiff original={baseline} suggested={value} defaultView="split" preserveLines showTools label={tr("저장 전 변경점 검증 (원문 대비 수정본)", "Pre-save diff verification (original vs draft)")} onDone={onChange} />
+            <InlineDiff
+              original={baseline}
+              suggested={value}
+              defaultView="split"
+              preserveLines
+              showTools
+              label={tr("저장 전 변경점 검증 (원문 대비 수정본)", "Pre-save diff verification (original vs draft)")}
+              labels={{
+                regionLabel: tr("문장 제안 검토", "Review inline changes"),
+                proposalUnit: tr("개 제안", "proposals"),
+                prevProposal: tr("이전 제안", "Previous proposal"),
+                nextProposal: tr("다음 제안", "Next proposal"),
+                rejectAll: tr("모두 거절", "Reject all"),
+                acceptAll: tr("모두 수락", "Accept all"),
+                reviewDone: tr("검토 완료", "Review complete"),
+                undo: tr("실행 취소", "Undo"),
+                originalColumn: tr("원문 · 검토 결과", "Original · reviewed"),
+                suggestedColumn: tr("제안 · 검토 결과", "Suggested · reviewed"),
+                emptyBody: tr("비교할 문장이 없습니다. 원문과 수정 제안을 연결해 주세요.", "Nothing to compare. Connect original and draft text."),
+                decideGroup: tr("제안 결정", "Proposal decision"),
+                decideProposalGroup: (idx) => tr(`제안 ${idx} 결정`, `Decide proposal ${idx}`),
+                acceptCurrent: tr("현재 제안 수락", "Accept current proposal"),
+                rejectCurrent: tr("현재 제안 거절", "Reject current proposal"),
+                accept: tr("수락", "Accept"),
+                reject: tr("거절", "Reject"),
+                toolsSummary: tr("검토 보조 도구", "Review tools"),
+                unifiedView: tr("통합 보기", "Unified view"),
+                splitView: tr("좌우 비교", "Split view"),
+                undoLast: tr("마지막 결정 취소", "Undo last decision"),
+                restartReview: tr("처음부터 검토", "Restart review"),
+                sheetAria: (idx) => tr(`제안 ${idx} 검토`, `Review proposal ${idx}`),
+                sheetTitle: (idx, total) => tr(`제안 ${idx} / ${total}`, `Proposal ${idx} / ${total}`),
+                closeSheet: tr("제안 검토 닫기", "Close proposal review"),
+                beforeHeading: tr("이전 내용", "Before"),
+                beforeEmpty: tr("추가 제안 · 이전 내용 없음", "Insertion · no previous text"),
+                afterHeading: tr("제안 내용", "Suggested"),
+                afterEmpty: tr("삭제 제안 · 새 내용 없음", "Deletion · no suggested text"),
+                whitespaceChange: tr("공백 변경", "Whitespace change"),
+                replaceChange: (b, a) => tr(`“${b}”을 “${a}”으로 바꾸기`, `Replace “${b}” with “${a}”`),
+                insertChange: (a) => tr(`“${a}” 추가`, `Insert “${a}”`),
+                removeChange: (b) => tr(`“${b}” 삭제`, `Delete “${b}”`),
+                proposalAria: (idx, total, detail) =>
+                  tr(
+                    `전체 ${total}개 중 제안 ${idx}. ${detail}. Y 또는 Enter 수락, N·Backspace·Delete 거절.`,
+                    `Proposal ${idx} of ${total}. ${detail}. Press Y or Enter to accept, N, Backspace, or Delete to reject.`,
+                  ),
+                remainingNotice: (rem) => tr(`${rem}개 제안이 남았습니다.`, `${rem} proposals remaining.`),
+                allDoneNotice: tr("모든 제안 검토를 마쳤습니다.", "All proposals reviewed."),
+                singleDecidedNotice: (detail, ok, end) =>
+                  tr(`${detail} 제안을 ${ok ? "수락" : "거절"}했습니다. ${end}`, `${ok ? "Accepted" : "Rejected"} ${detail}. ${end}`),
+                multiDecidedNotice: (cnt, ok, end) =>
+                  tr(`${cnt}개 제안을 모두 ${ok ? "수락" : "거절"}했습니다. ${end}`, `${ok ? "Accepted" : "Rejected"} all ${cnt} proposals. ${end}`),
+                undoneNotice: (undone, rem) =>
+                  tr(`마지막 결정 ${undone}개를 되돌렸습니다. ${rem}개 제안이 남았습니다.`, `Undid ${undone} decision(s). ${rem} proposals remaining.`),
+              }}
+              onDone={onChange}
+            />
           </div>
         )}
       </div>

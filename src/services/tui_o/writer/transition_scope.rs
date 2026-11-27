@@ -23,7 +23,7 @@ pub(crate) struct ScopeDigest([u8; 32], u8);
 
 impl ScopeDigest {
     /// A digest as this version shows it; another version or length is refused, never guessed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn parse(shown: &str) -> Result<Self, String> {
         let (hex, version) = shown
             .strip_prefix(PREFIX)

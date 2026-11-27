@@ -428,6 +428,11 @@ fn check_environment(
     Ok(())
 }
 
+/// The fake OS and launch context the probe tests and the herdr socket rig share (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "pane_probe_support.rs"]
+pub(crate) mod test_support;
+
 #[cfg(test)]
 #[path = "pane_probe_tests.rs"]
 pub(crate) mod tests;

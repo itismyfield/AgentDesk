@@ -1,6 +1,18 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 
 // Clean-room card from the leak-checked stat-card spec. No Pro source.
+export interface StatCardLabels {
+  loading: string;
+  up: string;
+  down: string;
+  flat: string;
+}
+export const statCardDefaultLabels: StatCardLabels = {
+  loading: '불러오는 중',
+  up: '증가',
+  down: '감소',
+  flat: '변화 없음',
+};
 export interface StatCardProps {
   label: string;
   value: number | string;
@@ -18,6 +30,7 @@ export interface StatCardProps {
   onPress?: () => void;
   action?: ReactNode;
   active?: boolean;
+  labels?: Partial<StatCardLabels>;
   className?: string;
   style?: CSSProperties;
 }
@@ -34,8 +47,8 @@ export function statDelta(value: number) {
 }
 
 const styles = `
-.aui-stat-card { --aui-stat-surface: #fff; --aui-stat-ink: #171717; --aui-stat-muted: #8f8f8f; --aui-stat-line: #ebebeb; --aui-stat-ok: #1e8a4f; --aui-stat-err: #f04438; --aui-stat-bone: #f0f0f0; --aui-stat-focus: rgba(0,96,226,.7); --aui-stat-shadow: 0 1px 2px rgb(0 0 0 / .03), 0 8px 24px rgb(0 0 0 / .035); --aui-stat-shadow-hover: 0 1px 2px rgb(0 0 0 / .04), 0 12px 32px rgb(0 0 0 / .07); position: relative; display: flex; flex-direction: column; width: 100%; min-width: 0; border: 1px solid var(--aui-stat-line); border-radius: 20px; background: var(--aui-stat-surface); color: var(--aui-stat-ink); box-shadow: var(--aui-stat-shadow); font: 14px/20px Inter, ui-sans-serif, system-ui, sans-serif; font-variant-numeric: tabular-nums; }
-:where(.dark,[data-theme="dark"]) .aui-stat-card { --aui-stat-surface: #232326; --aui-stat-ink: #ededed; --aui-stat-muted: #8f8f8f; --aui-stat-line: rgb(255 255 255 / .08); --aui-stat-ok: #5fc88a; --aui-stat-err: #ff6b5f; --aui-stat-bone: rgb(255 255 255 / .06); --aui-stat-focus: rgba(77,141,255,.8); --aui-stat-shadow: 0 1px 2px rgb(0 0 0 / .4), 0 8px 24px rgb(0 0 0 / .35); --aui-stat-shadow-hover: 0 1px 2px rgb(0 0 0 / .45), 0 12px 32px rgb(0 0 0 / .5); }
+.aui-stat-card { --aui-stat-surface: var(--aui-bg-1, #fff); --aui-stat-ink: var(--aui-fg, #171717); --aui-stat-muted: var(--aui-fg-muted, #8f8f8f); --aui-stat-line: var(--aui-line, #ebebeb); --aui-stat-ok: var(--aui-ok, #1e8a4f); --aui-stat-err: var(--aui-err, #f04438); --aui-stat-bone: var(--aui-bg-2, #f0f0f0); --aui-stat-focus: var(--aui-focus, rgba(0,96,226,.7)); --aui-stat-shadow: 0 1px 2px rgb(0 0 0 / .03), 0 8px 24px rgb(0 0 0 / .035); --aui-stat-shadow-hover: 0 1px 2px rgb(0 0 0 / .04), 0 12px 32px rgb(0 0 0 / .07); position: relative; display: flex; flex-direction: column; width: 100%; min-width: 0; border: 1px solid var(--aui-stat-line); border-radius: 20px; background: var(--aui-stat-surface); color: var(--aui-stat-ink); box-shadow: var(--aui-stat-shadow); font: 14px/20px var(--aui-font-sans, Inter, ui-sans-serif, system-ui, sans-serif); font-variant-numeric: tabular-nums; }
+:where(.dark,[data-theme="dark"]) .aui-stat-card { --aui-stat-surface: var(--aui-bg-1, #232326); --aui-stat-ink: var(--aui-fg, #ededed); --aui-stat-muted: var(--aui-fg-muted, #8f8f8f); --aui-stat-line: var(--aui-line, rgb(255 255 255 / .08)); --aui-stat-ok: var(--aui-ok, #5fc88a); --aui-stat-err: var(--aui-err, #ff6b5f); --aui-stat-bone: var(--aui-bg-2, rgb(255 255 255 / .06)); --aui-stat-focus: var(--aui-focus, rgba(77,141,255,.8)); --aui-stat-shadow: 0 1px 2px rgb(0 0 0 / .4), 0 8px 24px rgb(0 0 0 / .35); --aui-stat-shadow-hover: 0 1px 2px rgb(0 0 0 / .45), 0 12px 32px rgb(0 0 0 / .5); }
 .aui-stat-card-body { display: flex; flex-direction: column; gap: 16px; min-width: 0; padding: 20px; }
 .aui-stat-card-body[data-dim] { opacity: .45; transition: opacity 260ms ease; }
 .aui-stat-card:hover .aui-stat-card-body[data-dim] { opacity: .75; }
@@ -87,12 +100,13 @@ function useRoll(target: number, active: boolean) {
   return shown;
 }
 
-export function StatCard({ label, value, format = statNumber, delta, formatDelta = statDelta, deltaLabel, lowerIsBetter = false, icon, chart, layout = 'stack', footer, loading = false, href, onPress, action, active = true, className = '', style }: StatCardProps) {
+export function StatCard({ label, value, format = statNumber, delta, formatDelta = statDelta, deltaLabel, lowerIsBetter = false, icon, chart, layout = 'stack', footer, loading = false, href, onPress, action, active = true, labels, className = '', style }: StatCardProps) {
+  const words: StatCardLabels = { ...statCardDefaultLabels, ...labels };
   const numeric = typeof value === 'number' && Number.isFinite(value);
   const rolled = useRoll(numeric ? value : 0, numeric && !loading);
   const text = numeric ? format(loading ? value : rolled) : String(value);
   const good = delta === undefined ? null : delta === 0 ? 'flat' : (delta > 0) !== lowerIsBetter ? 'good' : 'bad';
-  const name = `${label}, ${loading ? '불러오는 중' : text}${delta !== undefined && Number.isFinite(delta) ? `, ${delta > 0 ? '증가' : delta < 0 ? '감소' : '변화 없음'} ${formatDelta(Math.abs(delta))}` : ''}`;
+  const name = `${label}, ${loading ? words.loading : text}${delta !== undefined && Number.isFinite(delta) ? `, ${delta > 0 ? words.up : delta < 0 ? words.down : words.flat} ${formatDelta(Math.abs(delta))}` : ''}`;
   const body = (
     <>
       <div className="aui-stat-card-top">{icon}{icon ? null : null}<span>{label}</span></div>

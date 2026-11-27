@@ -119,7 +119,7 @@ pub(crate) enum V2PurgeStop {
 pub(super) use herdr::{CheckedPurgeRequest, OwnCaptureRequest};
 
 /// Arms a failure returned after the next queue save of `channel` is already published.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn fail_next_publication_for_test(channel: ChannelId) {
     super::pending_queue_persistence::post_save_fault::fail_next(channel);
 }

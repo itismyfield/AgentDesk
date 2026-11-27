@@ -205,7 +205,7 @@ pub(crate) async fn record_purge_receipt_on(
     pool: Option<&PgPool>,
     reason: &'static str,
 ) -> CancelQueueLoss {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(channel) = target.channel_id {
         run_pre_record_probe_for_test(channel).await;
     }
@@ -226,16 +226,16 @@ pub(crate) async fn record_purge_receipt_on(
     outcome
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 type PreRecordProbe = Box<dyn FnOnce() -> futures::future::BoxFuture<'static, ()> + Send>;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 static PRE_RECORD_PROBE_FOR_TESTS: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<ChannelId, PreRecordProbe>>,
 > = std::sync::LazyLock::new(Default::default);
 
 /// Runs `probe` once when a purge receipt of `channel` is about to be recorded.
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) fn set_pre_record_probe_for_test(channel: ChannelId, probe: PreRecordProbe) {
     PRE_RECORD_PROBE_FOR_TESTS
         .lock()
@@ -243,7 +243,7 @@ pub(crate) fn set_pre_record_probe_for_test(channel: ChannelId, probe: PreRecord
         .insert(channel, probe);
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 async fn run_pre_record_probe_for_test(channel: ChannelId) {
     let probe = PRE_RECORD_PROBE_FOR_TESTS.lock().unwrap().remove(&channel);
     if let Some(probe) = probe {

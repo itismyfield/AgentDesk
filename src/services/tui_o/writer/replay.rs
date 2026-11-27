@@ -16,7 +16,7 @@ pub(super) fn filter(
     ledger: &LedgerState,
     retain: impl FnOnce(&mut dyn FnMut(&Derived) -> bool),
 ) -> ReplaySummary {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let mut kept = Vec::new();
     let mut summary = ReplaySummary {
         deferred: ledger.unresolved().is_some() || ledger.violation().is_some(),
@@ -27,7 +27,7 @@ pub(super) fn filter(
         let acked = !summary.deferred && super::owed::acked(ledger, derived);
         if !acked {
             summary.kept += 1;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SNAPSHOTS.with_borrow(|snapshots| {
                 if snapshots.is_some() {
                     kept.push(derived.clone());
@@ -47,7 +47,7 @@ pub(super) fn filter(
         }
         false
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     SNAPSHOTS.with_borrow_mut(|snapshots| {
         if let Some(snapshots) = snapshots {
             snapshots.push((summary, kept));
@@ -92,20 +92,20 @@ impl Budget {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type Snapshot = (ReplaySummary, Vec<Derived>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static SNAPSHOTS: std::cell::RefCell<Option<Vec<Snapshot>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) fn capture() {
     SNAPSHOTS.with_borrow_mut(|snapshots| *snapshots = Some(Vec::new()));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services) fn snapshots() -> Vec<Snapshot> {
     SNAPSHOTS.with_borrow(|snapshots| snapshots.clone().unwrap_or_default())
 }
