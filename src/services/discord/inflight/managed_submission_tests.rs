@@ -26,7 +26,7 @@ pub(super) fn managed_row(channel: u64) -> (InflightTurnState, ManagedSubmission
         .join("managed-ready")
         .join(channel.to_string())
         .join("native.jsonl");
-    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&session, &path);
     let mut state = InflightTurnState::new(
         ProviderKind::Claude,
         channel,
@@ -498,11 +498,12 @@ fn a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence() {
             relay_last_offset: None,
         },
     );
-    cap.observer().preparation_held(&PreparationHold::before(
-        session,
-        "cleanup_not_owned",
-        "transient cleanup refusal".into(),
-    ));
+    cap.observer()
+        .preparation_held(&PreparationHold::before_for_test(
+            session,
+            "cleanup_not_owned",
+            "transient cleanup refusal".into(),
+        ));
     assert!(cap.preparation_hold().is_some());
     guarded_outcome::with_owner(Some(cap.observer()), || {
         guarded_outcome::receipt(session, &row.user_text)
@@ -527,7 +528,10 @@ fn a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence() {
         "warm binding without SID uses the attempt native SID"
     );
     cap.observer()
-        .preparation_held(&PreparationHold::uncertain(session, "lost ACK".into()));
+        .preparation_held(&PreparationHold::uncertain_for_test(
+            session,
+            "lost ACK".into(),
+        ));
     cap.fence().before_first_payload().unwrap();
     assert!(
         cap.preparation_hold().is_some_and(|h| !h.may_requeue()),

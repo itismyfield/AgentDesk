@@ -134,6 +134,7 @@ pub(crate) async fn delivery_state(pool: &PgPool, turn_id: &str) -> (String, Opt
     .expect("read delivery state")
 }
 
+#[cfg(test)]
 async fn fixture() -> (crate::db::auto_queue::test_support::TestPostgresDb, PgPool) {
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;

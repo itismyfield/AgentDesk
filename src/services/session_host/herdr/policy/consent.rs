@@ -4,7 +4,7 @@ use super::{
     super::contract::ServerWitness,
     durable::{self, Directory},
 };
-pub(crate) use crate::domain::intake_consent::IntentRef;
+pub use crate::domain::intake_consent::IntentRef;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Component, PathBuf};
@@ -16,7 +16,7 @@ const PRE_RETURN_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ConsentKey {
+pub struct ConsentKey {
     pub node: String,
     pub user: u32,
     // Use the registry endpoint's socket_path verbatim; do not introduce a second alias policy.
@@ -27,7 +27,7 @@ pub(crate) struct ConsentKey {
 }
 
 impl ConsentKey {
-    pub(crate) fn normalized(mut self) -> Result<Self, String> {
+    pub fn normalized(mut self) -> Result<Self, String> {
         self.node = self.node.trim().to_owned();
         self.named_session = self.named_session.trim().to_owned();
         if self.node.is_empty() || self.named_session.is_empty() {
@@ -62,7 +62,7 @@ impl ConsentKey {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Preview {
+pub struct Preview {
     pub revision: u64,
     #[serde(with = "super::witness_codec")]
     pub witness: ServerWitness,
@@ -72,7 +72,7 @@ pub(crate) struct Preview {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum State {
+pub enum State {
     Pending,
     Denied,
     Expired,
@@ -82,7 +82,7 @@ pub(crate) enum State {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum CardState {
+pub enum CardState {
     #[default]
     Bound,
     Awaiting,
@@ -90,14 +90,14 @@ pub(crate) enum CardState {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum QuestionResult {
+pub enum QuestionResult {
     Current(Consent),
     RevisionChanged(Consent),
     AlreadyApplied(Consent),
 }
 
 impl QuestionResult {
-    pub(crate) fn into_consent(self) -> Consent {
+    pub fn into_consent(self) -> Consent {
         match self {
             Self::Current(value) | Self::RevisionChanged(value) | Self::AlreadyApplied(value) => {
                 value
@@ -108,7 +108,7 @@ impl QuestionResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ApplyResult {
+pub struct ApplyResult {
     pub before: Option<[u8; 32]>,
     pub after: Option<[u8; 32]>,
     pub backup: Option<PathBuf>,
@@ -117,7 +117,7 @@ pub(crate) struct ApplyResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Consent {
+pub struct Consent {
     schema: u32,
     pub key: ConsentKey,
     pub preview: Preview,
@@ -155,7 +155,7 @@ impl Consent {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Generation {
+pub struct Generation {
     pub nonce: String,
     pub preview: Preview,
     pub decision: Option<(u64, u64)>,
@@ -191,7 +191,7 @@ struct IntentPreview {
     preview: Preview,
 }
 
-pub(crate) struct Question {
+pub struct Question {
     pub key: ConsentKey,
     pub preview: Preview,
     pub owner: u64,
@@ -202,9 +202,9 @@ pub(crate) struct Question {
     pub intent: IntentRef,
 }
 
-pub(crate) struct ConsentStore(Directory);
+pub struct ConsentStore(Directory);
 impl ConsentStore {
-    pub(crate) fn new(root: Option<PathBuf>) -> Self {
+    pub fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))
     }
 
@@ -269,7 +269,7 @@ impl ConsentStore {
         decoded.map_err(|e: String| self.0.failure(&name, e))
     }
 
-    pub(crate) fn load(&self, key: &ConsentKey) -> Result<Option<Consent>, String> {
+    pub fn load(&self, key: &ConsentKey) -> Result<Option<Consent>, String> {
         let key = key
             .clone()
             .normalized()
@@ -280,8 +280,8 @@ impl ConsentStore {
             .transpose()
     }
 
-    #[cfg(test)]
-    pub(crate) fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn hold(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, false)
     }
 
@@ -291,11 +291,7 @@ impl ConsentStore {
             .map(QuestionResult::into_consent)
     }
 
-    pub(crate) fn hold_unbound(
-        &self,
-        question: Question,
-        now: u64,
-    ) -> Result<QuestionResult, String> {
+    pub fn hold_unbound(&self, question: Question, now: u64) -> Result<QuestionResult, String> {
         self.question(question, now, false, true)
     }
 
@@ -526,6 +522,11 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reserve_card_for_test(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
+        self.reserve_card(expected, now)
+    }
+
     pub(crate) fn reserve_card(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
             if current.state != State::Pending
@@ -538,6 +539,11 @@ impl ConsentStore {
             current.expires = now.saturating_add(TTL);
             Ok(())
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_card_for_test(&self, expected: &Consent, message: u64) -> Result<Consent, String> {
+        self.bind_card(expected, message)
     }
 
     pub(crate) fn bind_card(&self, expected: &Consent, message: u64) -> Result<Consent, String> {
@@ -621,6 +627,17 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn decide_for_test(
+        &self,
+        expected: &Consent,
+        actor: u64,
+        yes: bool,
+        now: u64,
+    ) -> Result<Consent, String> {
+        self.decide(expected, actor, yes, now)
+    }
+
     pub(crate) fn decide(
         &self,
         expected: &Consent,
@@ -643,6 +660,11 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expire_for_test(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
+        self.expire(expected, now)
+    }
+
     pub(crate) fn expire(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
             if current.state == State::Pending
@@ -653,6 +675,15 @@ impl ConsentStore {
             }
             Ok(())
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_apply_for_test(
+        &self,
+        expected: &Consent,
+        result: ApplyResult,
+    ) -> Result<Consent, String> {
+        self.record_apply(expected, result)
     }
 
     pub(crate) fn record_apply(
@@ -675,15 +706,15 @@ impl ConsentStore {
     }
 }
 
-pub(crate) mod settlement;
-pub(crate) mod workflow;
+pub mod settlement;
+pub mod workflow;
 
 #[cfg(test)]
 #[path = "consent_tests.rs"]
 mod tests;
 
 pub(crate) mod apply_owner;
-pub(crate) mod boot_recovery;
-pub(crate) mod card;
-pub(crate) mod engine;
-pub(crate) mod preview;
+pub mod boot_recovery;
+pub mod card;
+pub mod engine;
+pub mod preview;

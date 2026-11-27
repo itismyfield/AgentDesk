@@ -3,11 +3,11 @@ use std::cell::Cell;
 
 fn configured(endpoint: &HerdrEndpoint) -> crate::config::session_hosts::ChannelEndpoint {
     crate::config::session_hosts::ChannelEndpoint {
-        key: endpoint.config_key().into(),
-        execution_node: endpoint.execution_node().into(),
-        socket_path: endpoint.socket_path().into(),
+        key: endpoint.config_key_for_test().into(),
+        execution_node: endpoint.execution_node_for_test().into(),
+        socket_path: endpoint.socket_path_for_test().into(),
         herdr_home: "/unused/test-home".into(),
-        herdr_session: endpoint.herdr_session().into(),
+        herdr_session: endpoint.herdr_session_for_test().into(),
     }
 }
 
@@ -18,7 +18,7 @@ fn notice_fence_closing_tombstone_survives_target_drop_and_a_new_nonce_is_indepe
     let configured = configured(&endpoint);
     let stored = stored(&rig.server, HostedState::Bound);
     let nonce = stored.execution_nonce.clone();
-    let target = HerdrTarget::new(
+    let target = HerdrTarget::new_for_test(
         endpoint.clone(),
         transport(&rig.server, Vec::new()),
         &stored,
@@ -43,7 +43,8 @@ fn notice_fence_closing_tombstone_survives_target_drop_and_a_new_nonce_is_indepe
     successor.execution_nonce = format!("{nonce}-next");
     successor.expected.as_mut().unwrap().binding_nonce = successor.execution_nonce.clone();
     let _successor =
-        HerdrTarget::new(endpoint, transport(&rig.server, Vec::new()), &successor).unwrap();
+        HerdrTarget::new_for_test(endpoint, transport(&rig.server, Vec::new()), &successor)
+            .unwrap();
     assert!(
         try_notice_fence(&configured, &successor.execution_nonce, || called
             .set(called.get() + 1))
@@ -65,7 +66,7 @@ fn notice_fence_missing_duplicate_active_and_nested_reads_never_start() {
     let nonce = stored.execution_nonce.clone();
     let called = Cell::new(0);
     assert!(try_notice_fence(&configured, &nonce, || called.set(called.get() + 1)).is_err());
-    let target = HerdrTarget::new(
+    let target = HerdrTarget::new_for_test(
         endpoint.clone(),
         transport(&rig.server, Vec::new()),
         &stored,
@@ -90,7 +91,7 @@ fn notice_fence_missing_duplicate_active_and_nested_reads_never_start() {
     assert_eq!(called.get(), 1);
     stored.location.as_mut().unwrap().pane_id.push_str("-other");
     let _duplicate =
-        HerdrTarget::new(endpoint, transport(&rig.server, Vec::new()), &stored).unwrap();
+        HerdrTarget::new_for_test(endpoint, transport(&rig.server, Vec::new()), &stored).unwrap();
     assert!(try_notice_fence(&configured, &nonce, || called.set(called.get() + 1)).is_err());
     assert_eq!(called.get(), 1);
     assert!(rig.server.mutations().is_empty());
@@ -111,7 +112,7 @@ fn a_restored_bound_execution_admits_notices_but_never_reopens_a_closing_or_reti
     assert!(restore_execution_fence(&stored));
     assert!(try_notice_fence(&configured, &nonce, || ()).is_ok());
     // A target built later shares the restored entry instead of adding a second candidate.
-    let target = HerdrTarget::new(
+    let target = HerdrTarget::new_for_test(
         endpoint.clone(),
         transport(&rig.server, Vec::new()),
         &stored,

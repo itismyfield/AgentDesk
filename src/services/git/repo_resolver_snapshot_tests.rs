@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 const REPO: &str = "github:\n  repo_dirs: {'owner/repo': 'repos/project'}\n";
 

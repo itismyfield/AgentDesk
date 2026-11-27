@@ -6,7 +6,7 @@ description = "AI agent orchestration platform"
 license = "MIT"
 
 [workspace]
-members = ["crates/adk-base", "crates/adk-store", "crates/adk-test-support"]
+members = ["crates/adk-base", "crates/adk-runtime", "crates/adk-store", "crates/adk-test-support"]
 resolver = "3"
 
 [lib]
@@ -15,10 +15,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "agentdesk"
 path = "src/main.rs"
-
-[lints.rust]
-# M-KRX가 feature를 선언하기 전까지 켤 수 없는 값만 등록한다.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("test-support"))'] }
 
 [lints.clippy]
 # #2954 stage-1 hard gates. Full `-D warnings` is tracked separately because
@@ -40,8 +36,15 @@ result_large_err = "deny"
 too_many_arguments = "deny"
 type_complexity = "deny"
 
+[features]
+# Test-only items KE·DL·ROOT tests reach once KRX is its own crate (#7353 KRX-TS). Off by default; the
+# upper packages enable it as a dev-dependency only, so release builds never see it.
+test-support = ["dep:adk-test-support", "tokio/test-util"]
+
 [dependencies]
 adk-base = { path = "crates/adk-base" }
+adk-runtime = { path = "crates/adk-runtime" }
+adk-test-support = { path = "crates/adk-test-support", optional = true }
 adk-store = { path = "crates/adk-store" }
 # HTTP server
 axum = { version = "0.8", features = ["ws", "macros"] }
@@ -129,6 +132,7 @@ plist = "1.8"
 
 [dev-dependencies]
 adk-base = { path = "crates/adk-base", features = ["test-support"] }
+adk-runtime = { path = "crates/adk-runtime", features = ["test-support"] }
 adk-test-support = { path = "crates/adk-test-support" }
 flate2 = "1"
 filetime = "0.2"

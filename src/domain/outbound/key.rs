@@ -6,23 +6,20 @@ use super::ids::{OutboundChannelId, OutboundMessageId, OutboundUserId};
 
 /// `correlation_id` groups related attempts; `semantic_event_id` names one event in the group.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct OutboundDeliveryId {
-    pub(crate) correlation_id: String,
-    pub(crate) semantic_event_id: String,
+pub struct OutboundDeliveryId {
+    pub correlation_id: String,
+    pub semantic_event_id: String,
 }
 
 impl OutboundDeliveryId {
-    pub(crate) fn new(
-        correlation_id: impl Into<String>,
-        semantic_event_id: impl Into<String>,
-    ) -> Self {
+    pub fn new(correlation_id: impl Into<String>, semantic_event_id: impl Into<String>) -> Self {
         Self {
             correlation_id: correlation_id.into(),
             semantic_event_id: semantic_event_id.into(),
         }
     }
 
-    pub(crate) fn key_for(
+    pub fn key_for(
         &self,
         target: OutboundTargetKey,
         operation: OutboundOperationKey,
@@ -37,15 +34,21 @@ impl OutboundDeliveryId {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ManualOutboundDeliveryId<'a> {
-    pub(crate) correlation_id: &'a str,
-    pub(crate) semantic_event_id: &'a str,
+pub struct ManualOutboundDeliveryId<'a> {
+    pub correlation_id: &'a str,
+    pub semantic_event_id: &'a str,
 }
 
 /// Typed components instead of a joined string, so `("a::b", "c")` and `("a", "b::c")` differ.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct OutboundDedupKey {
+pub struct OutboundDedupKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub correlation_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) correlation_id: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub semantic_event_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) semantic_event_id: String,
     pub(crate) target: OutboundTargetKey,
     pub(crate) operation: OutboundOperationKey,
@@ -53,7 +56,7 @@ pub(crate) struct OutboundDedupKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum OutboundTargetKey {
+pub enum OutboundTargetKey {
     Channel {
         channel: OutboundChannelId,
     },
@@ -67,7 +70,7 @@ pub(crate) enum OutboundTargetKey {
 }
 
 impl OutboundTargetKey {
-    pub(crate) fn channel(id: u64) -> Self {
+    pub fn channel(id: u64) -> Self {
         Self::Channel {
             channel: OutboundChannelId::new(id),
         }
@@ -76,7 +79,7 @@ impl OutboundTargetKey {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum OutboundOperationKey {
+pub enum OutboundOperationKey {
     Send,
     Edit { message_id: OutboundMessageId },
 }

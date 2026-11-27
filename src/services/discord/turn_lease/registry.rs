@@ -5,7 +5,7 @@ async fn runtime(
     registry: &HealthRegistry,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Result<Arc<SharedData>, String> {
+) -> Result<Arc<SharedData>, LeaseError> {
     registry
         .shared_for_provider_on_channel(provider, channel)
         .await
@@ -16,7 +16,7 @@ pub(crate) async fn inspect(
     registry: &HealthRegistry,
     provider: &ProviderKind,
     channel: ChannelId,
-) -> Result<Option<LeaseIdentity>, String> {
+) -> Result<Option<LeaseIdentity>, LeaseError> {
     let shared = runtime(registry, provider, channel).await?;
     let lease = identity(&shared, provider, channel).await?;
     if let Some(expected) = lease.as_ref() {
@@ -30,7 +30,7 @@ pub(crate) async fn inspect(
 pub(crate) async fn release(
     registry: &HealthRegistry,
     request: ReleaseRequest,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, LeaseError> {
     let provider = ProviderKind::from_str(&request.expected.provider).ok_or("unknown provider")?;
     let channel = ChannelId::new(request.expected.channel_id);
     let shared = runtime(registry, &provider, channel).await?;

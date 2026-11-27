@@ -1,5 +1,5 @@
 use super::*;
-use crate::config::snapshot_reader_tests::{Fixture, isolated};
+use crate::config::snapshot_reader_support::{Fixture, isolated};
 
 #[test]
 fn bot_boot_modules_keep_the_installed_config() {

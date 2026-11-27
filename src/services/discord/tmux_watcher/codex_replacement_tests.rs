@@ -20,7 +20,7 @@ use crate::services::discord::turn_bridge::{
 };
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::provider::CancelToken;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events as p5};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -786,11 +786,11 @@ async fn codex_host_gate_rechecks_a_replacement_completed_inside_the_probe() {
     let host = HostSnapshot::new(WatchHost::Legacy);
     let observed =
         super::host_gate::host_alive(&shared, TMUX, ChannelId::new(CHANNEL), &host, async {
-            let replacement = Replacement::begin(Some(CHANNEL), TMUX, Some(&token))
+            let replacement = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
                 .unwrap()
                 .unwrap();
             tokio::task::yield_now().await;
-            replacement.complete();
+            replacement.complete_for_test();
             false
         })
         .await;

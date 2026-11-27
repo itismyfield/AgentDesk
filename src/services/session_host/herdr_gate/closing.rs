@@ -7,7 +7,7 @@ use super::execution_fences;
 
 /// Whether a termination shut execution `nonce`'s fence; the mark outlives the fence's targets
 /// and is lost only with the process.
-pub(crate) fn execution_closing(nonce: &str) -> bool {
+pub fn execution_closing(nonce: &str) -> bool {
     let fences: Vec<_> = execution_fences()
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -21,8 +21,8 @@ pub(crate) fn execution_closing(nonce: &str) -> bool {
 }
 
 /// Test seam: leaves execution `nonce` shut, as a termination that sent its close does.
-#[cfg(test)]
-pub(crate) fn shut_execution_for_test(nonce: &str) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn shut_execution_for_test(nonce: &str) {
     let key = |part: &str| part.to_string();
     let fence = super::fence_at((
         key("node"),

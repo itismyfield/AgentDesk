@@ -69,7 +69,7 @@ mod first_admission_tests {
         let config = serde_json::from_value(serde_json::json!({"server":{}, "agents":[{"id":"first", "name":"first", "channels":{"codex":{"id":channel.to_string(), "runtime":"tui"}}}], "tui_o":{"writer":{"channels":[channel], "late_adopt":true}}})).unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(&config, |_, _| {
+            .seeded_for_test(&config, |_, _| {
                 Ok(std::collections::BTreeMap::from([(
                     channel,
                     Adoption::Pending,

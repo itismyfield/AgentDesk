@@ -52,7 +52,7 @@ async fn record_upload_history(
     }
 }
 
-pub(crate) async fn prepare_admitted_live_attachments(
+pub(in crate::services::discord::router) async fn prepare_admitted_live_attachments(
     deps: &super::super::message_handler::IntakeDeps<'_>,
     local_permit: &LocalAdmissionPermit,
     channel_id: serenity::ChannelId,

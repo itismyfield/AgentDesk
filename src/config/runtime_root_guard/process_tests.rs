@@ -4,19 +4,29 @@ use std::sync::OnceLock;
 
 fn production_probe() -> &'static Path {
     static PROBE: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
-    &PROBE.get_or_init(|| {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("probe.rs");
-        let binary = dir.path().join(format!("probe{}", std::env::consts::EXE_SUFFIX));
-        let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/config/runtime_root_guard.rs");
-        std::fs::write(&source, format!(
-            "#[path = {module:?}] mod runtime_root_guard;\nfn home() -> Option<std::path::PathBuf> {{ std::env::var_os(\"HOME\").map(std::path::PathBuf::from) }}\nfn main() {{ let before = std::env::var_os(\"AGENTDESK_ROOT_DIR\"); let root = runtime_root_guard::resolve(home); assert_eq!(root, runtime_root_guard::resolve(home)); for thread in (0..4).map(|_| std::thread::spawn(|| runtime_root_guard::resolve(home))) {{ assert_eq!(root, thread.join().unwrap()); }} assert_eq!(before, std::env::var_os(\"AGENTDESK_ROOT_DIR\")); println!(\"{{}}\", root.unwrap().display()); }}\n"
-        )).unwrap();
-        let output = Command::new("rustc").args(["--edition=2024", "--crate-name", "runtime_root_probe"])
-            .arg(&source).arg("-o").arg(&binary).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        (dir, binary)
-    }).1
+    &PROBE
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let repo_root = option_env!("ADK_REPO_ROOT").unwrap_or(env!("CARGO_MANIFEST_DIR"));
+            let source = Path::new(repo_root).join("tests/fixtures/runtime_root_probe.rs");
+            let binary = dir
+                .path()
+                .join(format!("probe{}", std::env::consts::EXE_SUFFIX));
+            let output = Command::new("rustc")
+                .args(["--edition=2024", "--crate-name", "runtime_root_probe"])
+                .arg(&source)
+                .arg("-o")
+                .arg(&binary)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            (dir, binary)
+        })
+        .1
 }
 
 fn run_probe(home: &Path, root: Option<&str>, test_process: bool) -> Output {

@@ -1,12 +1,12 @@
 #[cfg(unix)]
 use crate::services::claude_tui::guarded_outcome::{self, OwnedWarmOutcome, SubmissionError};
 use crate::services::process::reaping::CommandReapExt;
-pub(crate) mod capability_probe;
+pub mod capability_probe;
 mod process_session_launch;
-pub(crate) use process_session_launch::execute_streaming_local_process;
+pub use process_session_launch::execute_streaming_local_process;
 
 #[cfg(unix)]
-pub(crate) mod tui_session_launch;
+pub mod tui_session_launch;
 #[cfg(unix)]
 use tui_session_launch::prepare_and_create_claude_tui_session;
 
@@ -58,14 +58,14 @@ mod backend_routing;
 #[cfg(test)]
 mod c1_teardown_tests;
 #[cfg(unix)]
-pub(crate) mod fresh_notice;
+pub mod fresh_notice;
 #[cfg(unix)]
-pub(crate) mod herdr_return;
+pub mod herdr_return;
 #[cfg(unix)]
-pub(crate) mod herdr_turn;
-pub(crate) mod host_gate;
+pub mod herdr_turn;
+pub mod host_gate;
 #[cfg(unix)]
-pub(crate) mod session_handoff;
+pub mod session_handoff;
 mod stream_result;
 use self::active_usage::{AssistantUsageState, observe_assistant_usage};
 #[cfg(unix)]
@@ -82,7 +82,7 @@ use crate::services::{
 };
 
 #[cfg(unix)]
-const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
+pub const CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS: usize = 2;
 #[cfg(unix)]
 const CLAUDE_TUI_FRESH_PROMPT_READY_BACKOFF_BASE: Duration = Duration::from_secs(5);
 #[cfg(unix)]
@@ -93,7 +93,7 @@ const CLAUDE_TUI_TRANSCRIPT_INITIAL_WAIT_MAX_INTERVAL: Duration = Duration::from
 const CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV: &str = "AGENTDESK_CLAUDE_TUI_FOLLOWUP_REQUEUE";
 
 /// Default ON; `0`, `false`, `off` or `no` disables follow-up requeue.
-pub(crate) fn claude_tui_followup_requeue_enabled() -> bool {
+pub fn claude_tui_followup_requeue_enabled() -> bool {
     crate::utils::env_flag(CLAUDE_TUI_FOLLOWUP_REQUEUE_ENV, true)
 }
 
@@ -1497,14 +1497,14 @@ pub(crate) fn emit_followup_restart_suppressed_notice(
 
 #[cfg(unix)]
 #[derive(Debug, Clone)]
-pub(crate) struct ClaudeTuiSessionResolution {
-    pub(crate) session_id: String,
-    pub(crate) transcript_path: std::path::PathBuf,
-    pub(crate) resume: bool,
+pub struct ClaudeTuiSessionResolution {
+    pub session_id: String,
+    pub transcript_path: std::path::PathBuf,
+    pub resume: bool,
 }
 
 #[cfg(unix)]
-pub(crate) fn resolve_claude_tui_session_for_launch(
+pub fn resolve_claude_tui_session_for_launch(
     working_dir: &std::path::Path,
     requested_session_id: Option<&str>,
     claude_home: Option<&std::path::Path>,
@@ -1857,18 +1857,18 @@ fn execute_streaming_local_tui_tmux(
     )
 }
 #[cfg(unix)]
-pub(crate) mod first_input;
+pub mod first_input;
 #[cfg(unix)]
 #[path = "claude_tui/hosting/fresh_lifecycle.rs"]
 mod fresh_lifecycle;
-#[cfg(all(test, unix))]
-pub(crate) use fresh_lifecycle::fresh_hold_for_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
+pub use fresh_lifecycle::fresh_hold_for_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use fresh_lifecycle::run_claude_tui_fresh_turn_and_finalize_for_test;
 
 /// A tmux Claude TUI turn as dispatch runs it, for tests outside this module.
-#[cfg(all(test, unix))]
-pub(crate) fn tmux_tui_turn_for_tests(
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn tmux_tui_turn_for_tests(
     working_dir: &str,
     session_id: Option<&str>,
     cancel_token: std::sync::Arc<CancelToken>,
@@ -1952,7 +1952,7 @@ fn claude_tui_fresh_prompt_ready_backoff(completed_attempts: usize) -> Duration 
 }
 
 #[cfg(unix)]
-pub(crate) fn emit_claude_tui_watcher_handoff(
+pub fn emit_claude_tui_watcher_handoff(
     sender: &Sender<StreamMessage>,
     transcript_path_string: &str,
     tmux_session_name: &str,
@@ -2023,7 +2023,7 @@ fn handoff_claude_tui_watcher(
 
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn read_claude_tui_transcript_until_done(
+pub fn read_claude_tui_transcript_until_done(
     transcript_path: &str,
     start_offset: u64,
     sender: Sender<StreamMessage>,
@@ -2645,7 +2645,7 @@ fn execute_streaming_local_tmux(
     // Get paths
     let exe =
         std::env::current_exe().map_err(|e| format!("Failed to get executable path: {}", e))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let exe = std::env::var_os("ADK_TEST_PROCESS_WRAPPER_EXE")
         .map(std::path::PathBuf::from)
         .unwrap_or(exe);

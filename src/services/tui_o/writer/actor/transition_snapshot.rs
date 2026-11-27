@@ -165,10 +165,10 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         authority: Option<&crate::services::tmux_common::TmuxSourceAuthority<'_>>,
         prepared_legacy: Option<LegacyHops>,
     ) -> Result<(Snapshot, Common), String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let _authority_scope =
             super::transition::test_hooks::snapshot_authority_scope(authority.is_some());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         super::transition::test_hooks::snapshot_built();
         let channel = self.writer.channel();
         let (rotation, checkpoint) = self.sources.transition_rotation();
@@ -279,9 +279,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .ok_or("the channel's POSTs in flight are not counted")?;
         let protected = self.verified.as_ref().map(super::super::owed::protected);
         let retry = usize::from(self.writer.has_local_retry());
-        let images = super::super::tool_images::select::open_count(self.writer.store().ledger());
         Ok(Obligations {
-            owed: self.owed.len() + retry + self.notice_debt_open() + images,
+            owed: self.owed.len() + retry + self.notice_debt_open(),
             prepared: usize::from(self.writer.store().ledger().unresolved().is_some()),
             unsealed: usize::from(self.deriver.has_unsealed()),
             posting,
@@ -303,15 +302,15 @@ fn home_now(gate: &OwnershipGate) -> Home {
 // Test seam for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    pub(in crate::services) fn obligations_for_test(&mut self) -> Result<Obligations, String> {
+    pub fn obligations_for_test(&mut self) -> Result<Obligations, String> {
         self.obligations()
     }
 }
 
 /// The pinned source and history of the pane's execution, read only while its spawn nonce is
 /// still the one the request was checked against.
-pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
-    #[cfg(test)]
+pub fn execution_read(channel: u64, context: &Context) -> Execution {
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED_EXECUTION.with(|forced| forced.borrow().clone()) {
         return forced;
     }
@@ -325,7 +324,7 @@ pub(crate) fn execution_read(channel: u64, context: &Context) -> Execution {
 
 /// The sources the execution holds by its history. A history not known whole, without a current
 /// session, or with an unpinned session a candidate may be is an error, never an empty set.
-pub(crate) fn execution_sources(
+pub fn execution_sources(
     history: &SourceHistory,
     candidates: &BTreeSet<&str>,
 ) -> Result<Vec<SourceId>, String> {
@@ -353,14 +352,14 @@ pub(crate) fn execution_sources(
     Ok(held)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED_EXECUTION: std::cell::RefCell<Option<Execution>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Answers every execution read on this thread with `read` until dropped.
-#[cfg(test)]
-pub(crate) fn force_execution_for_tests(read: Execution) -> impl Drop {
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_execution_for_tests(read: Execution) -> impl Drop {
     struct Restore(Option<Execution>);
     impl Drop for Restore {
         fn drop(&mut self) {

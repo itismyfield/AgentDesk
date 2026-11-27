@@ -6,18 +6,18 @@ use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
 /// The original request: stable key, scope, every absorbed source, original text and side inputs.
-pub(crate) struct CanonicalInput {
-    pub(crate) request_key: String,
-    pub(crate) provider: String,
-    pub(crate) channel: String,
-    pub(crate) sources: Vec<String>,
-    pub(crate) original_text: String,
-    pub(crate) owner_id: String,
-    pub(crate) agent_id: String,
-    pub(crate) attachments: serde_json::Value,
-    pub(crate) reply_context: Option<String>,
+pub struct CanonicalInput {
+    pub request_key: String,
+    pub provider: String,
+    pub channel: String,
+    pub sources: Vec<String>,
+    pub original_text: String,
+    pub owner_id: String,
+    pub agent_id: String,
+    pub attachments: serde_json::Value,
+    pub reply_context: Option<String>,
     /// `new_input` for a fresh request, `reentry` for a stored operation coming back.
-    pub(crate) provenance: &'static str,
+    pub provenance: &'static str,
 }
 
 impl CanonicalInput {
@@ -29,7 +29,7 @@ impl CanonicalInput {
 
 /// Registers the request once under its key, or returns the receipt already stored under it.
 /// Same-key registrations are serialised, so a later one reuses the first instead of being fenced.
-pub(crate) async fn register_or_reuse(
+pub async fn register_or_reuse(
     pool: &PgPool,
     input: &CanonicalInput,
     instance: &str,
@@ -41,7 +41,7 @@ pub(crate) async fn register_or_reuse(
 }
 
 /// Reuses the caller's transaction so preserving an unstarted delivery cannot commit half custody.
-pub(crate) async fn register_or_reuse_on_tx(
+pub async fn register_or_reuse_on_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     input: &CanonicalInput,
     instance: &str,
@@ -67,7 +67,7 @@ pub(crate) async fn register_or_reuse_on_tx(
 }
 
 /// Refuses an exact retry whose input is not the request stored under the receipt; writes nothing.
-pub(crate) async fn ensure_same_request(
+pub async fn ensure_same_request(
     pool: &PgPool,
     receipt_id: i64,
     input: &CanonicalInput,
@@ -179,7 +179,7 @@ async fn insert_registered(
 
 /// Binds the session to a registered receipt's nonce before its begin, so an exact retry can move
 /// it later; `Ok(false)` when no session row carries the key.
-pub(crate) async fn bind_session(
+pub async fn bind_session(
     pool: &PgPool,
     session_key: &str,
     receipt_id: i64,
@@ -199,7 +199,7 @@ pub(crate) async fn bind_session(
 }
 
 /// Which attempt a begin starts: the registered nonce, or the next nonce after a no-effect one.
-pub(crate) enum BeginFrom<'a> {
+pub enum BeginFrom<'a> {
     Registered {
         nonce: &'a str,
     },
@@ -211,20 +211,20 @@ pub(crate) enum BeginFrom<'a> {
 }
 
 /// The effect binding stored with the start; the permit can only be spent on it.
-pub(crate) struct EffectProjection<'a> {
-    pub(crate) effect_target: &'a str,
-    pub(crate) input_hash: &'a str,
-    pub(crate) binding: &'a serde_json::Value,
+pub struct EffectProjection<'a> {
+    pub effect_target: &'a str,
+    pub input_hash: &'a str,
+    pub binding: &'a serde_json::Value,
 }
 
 impl EffectProjection<'_> {
-    pub(crate) fn requires_prior_ack(&self) -> bool {
+    pub fn requires_prior_ack(&self) -> bool {
         serde_json::from_str::<Vec<String>>(self.effect_target)
             .is_ok_and(|key| key.first().is_some_and(|kind| kind == "busy_pane"))
     }
 
     /// Saves the busy binding before begin; a different saved projection is never replaced.
-    pub(crate) async fn save(
+    pub async fn save(
         &self,
         pool: &PgPool,
         receipt_id: i64,
@@ -260,7 +260,7 @@ impl EffectProjection<'_> {
 
 /// A committed start; the permit layer seals it into the one `StartPermit` for this attempt.
 #[derive(Debug)]
-pub(crate) struct BeginAck {
+pub struct BeginAck {
     attempt: ExactAttempt,
     effect_target: String,
     input_hash: String,
@@ -272,14 +272,14 @@ impl BeginAck {
         &self.binding
     }
 
-    pub(crate) fn into_parts(self) -> (ExactAttempt, String, String) {
+    pub fn into_parts(self) -> (ExactAttempt, String, String) {
         (self.attempt, self.effect_target, self.input_hash)
     }
 }
 
 /// Starts one exact attempt with its projection; a retry also moves its session off the stale
 /// resume in the same commit. A start exists only when this returns `Ok`.
-pub(crate) async fn begin(
+pub async fn begin(
     pool: &PgPool,
     receipt_id: i64,
     from: BeginFrom<'_>,

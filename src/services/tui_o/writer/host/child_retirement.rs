@@ -21,7 +21,7 @@ static KEPT: LazyLock<Mutex<BTreeMap<u64, ManagedWriterHandle>>> = LazyLock::new
 
 /// Keeps each thread child's handle for its retirement; every other writer is left to the
 /// gateway lifecycle and returned detached.
-pub(crate) fn keep_stoppable(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
+pub fn keep_stoppable(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandle<()>> {
     let mut detached = Vec::new();
     for handle in handles {
         if cutover::thread_child(handle.channel) {
@@ -37,13 +37,13 @@ pub(crate) fn keep_stoppable(handles: Vec<ManagedWriterHandle>) -> Vec<JoinHandl
 /// What thread_gc pins before its row delete: the child's lifecycle ticket and the writer
 /// generation hosting it. It grants nothing over a successor, the parent or a sibling.
 #[derive(Debug)]
-pub(crate) struct RetirementRequest {
+pub struct RetirementRequest {
     ticket: RetirementTicket,
     writer: u64,
 }
 
 /// This process's child stores, as the thread GC boundary reaches them.
-pub(crate) struct ChildStores;
+pub struct ChildStores;
 
 impl ChildStore for ChildStores {
     type Pinned = RetirementRequest;
@@ -122,7 +122,6 @@ async fn retire_child(
         owed.binding_pending,
         owed.verified_work,
         owed.posting,
-        owed.images,
     ];
     if debt.iter().any(|count| *count != 0) {
         return Err(format!("the child writer still owes output: {debt:?}"));

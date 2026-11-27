@@ -7,7 +7,7 @@
 ///   - `migrations/postgres/0107_intake_outbox_dispatched_clock.sql` (nine-state CHECK)
 ///   - All usages in `src/db/intake_outbox.rs` and related services
 ///   - Partial unique index `intake_outbox_one_open_route_per_channel` predicate
-pub(crate) const INTAKE_OUTBOX_OPEN_STATUSES_SQL: &str =
+pub const INTAKE_OUTBOX_OPEN_STATUSES_SQL: &str =
     "'pending', 'claimed', 'accepted', 'spawned', 'dispatched'";
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ pub struct AgentChannels {
 }
 
 impl AgentChannels {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new() -> Self {
         Self::default()
     }
@@ -40,7 +40,7 @@ impl AgentChannels {
         self.inner.contains_key(&Self::normalize_key(id))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with(mut self, id: impl AsRef<str>, channel: AgentChannel) -> Self {
         self.insert(id, channel);
         self

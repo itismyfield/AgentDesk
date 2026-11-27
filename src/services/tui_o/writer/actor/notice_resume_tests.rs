@@ -223,12 +223,12 @@ async fn notice_owner_resume_context_change_invalidates_prepared_census() {
         .unwrap();
     let batch = Batch::prepare(actor.writer_mut_for_test().store());
     assert_eq!(
-        batch.decision(&origin, "context-change", &frame),
+        batch.decision_for_test(&origin, "context-change", &frame),
         Decision::Owned
     );
     std::fs::remove_file(resumed.path).unwrap();
     assert_eq!(
-        batch.decision(&origin, "context-change", &frame),
+        batch.decision_for_test(&origin, "context-change", &frame),
         Decision::Pending("execution_context_changed")
     );
     c.run(&mut actor).await;

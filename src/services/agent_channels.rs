@@ -104,7 +104,6 @@ pub(crate) async fn resolve_review_followup_channel_pg(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::db::agents::AgentChannelBindings;
     use crate::domain::provider::ProviderKind;
     use std::cell::RefCell;
@@ -183,37 +182,5 @@ mod tests {
         assert_eq!(*calls.borrow(), ["cc", "cdx"]);
         assert_eq!(bindings.provider_for_channel(|_| true), None);
         assert_eq!(bindings.provider_for_channel(|_| false), None);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn default_reload_during_binding_query_is_observed_after_await_pg() {
-        if !child(
-            "services::agent_channels::tests::default_reload_during_binding_query_is_observed_after_await_pg",
-            "ADK_AGENT_CHANNELS_PG_CHILD",
-        ) {
-            return;
-        }
-        let (db, pool) = crate::services::discord::host_defer_gate::tests::postgres().await;
-        sqlx::query("INSERT INTO agents (id, name, provider, discord_channel_cc, discord_channel_cdx) VALUES ('live-default', 'live-default', NULL, 'cc', 'cdx')")
-            .execute(&pool).await.unwrap();
-        let mut lock = pool.begin().await.unwrap();
-        sqlx::query("LOCK TABLE agents IN ACCESS EXCLUSIVE MODE")
-            .execute(&mut *lock)
-            .await
-            .unwrap();
-        install_default("claude");
-        let pending = resolve_agent_primary_channel_pg(&pool, "live-default");
-        tokio::pin!(pending);
-        assert!(futures::poll!(&mut pending).is_pending());
-        install_default("codex");
-        lock.commit().await.unwrap();
-        let channel = tokio::time::timeout(std::time::Duration::from_secs(15), pending)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(channel.as_deref(), Some("cdx"));
-        pool.close().await;
-        db.drop().await;
     }
 }

@@ -17,7 +17,7 @@ impl ConsistentEpisodeSnapshot {
     pub(super) fn records(&self) -> &[EpisodeMetadata] {
         &self.records
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn fixture(records: Vec<EpisodeMetadata>) -> Self {
         Self::decode(
             records
@@ -29,7 +29,7 @@ impl ConsistentEpisodeSnapshot {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DurableEvidenceAck {
+pub struct DurableEvidenceAck {
     pub record: Uuid,
     pub version: u32,
     pub digest: String,
@@ -49,7 +49,7 @@ static APPEND: std::sync::OnceLock<AppendExact> = std::sync::OnceLock::new();
 
 /// Installs the delivery journal's strict append beside the health registry; the first install wins.
 #[cfg(unix)]
-pub(crate) fn install_append(append: AppendExact) {
+pub fn install_append(append: AppendExact) {
     let _ = APPEND.set(append);
 }
 
@@ -64,7 +64,7 @@ async fn append_exact(pool: sqlx::PgPool, metadata: &EpisodeMetadata) -> Result<
 }
 
 // The disabled producer returns before acquiring a connection or creating a writer.
-pub(crate) async fn record_episode_evidence(
+pub async fn record_episode_evidence(
     enabled: bool,
     pool: &sqlx::PgPool,
     metadata: &EpisodeMetadata,
@@ -97,7 +97,7 @@ pub(crate) async fn record_episode_evidence(
     }
 }
 
-pub(crate) async fn resolve_in_tx(
+pub async fn resolve_in_tx(
     connection: &mut sqlx::PgConnection,
     episode: Uuid,
 ) -> Result<StrictResolution, sqlx::Error> {
@@ -116,6 +116,15 @@ pub(crate) async fn resolve_in_tx(
 }
 
 // This port performs no terminal SQL yet; C7 owns association locking and the existing CAS.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn guard_terminal_in_tx_for_test(
+    connection: &mut sqlx::PgConnection,
+    target: &DbTarget,
+    intent: TerminalIntent,
+) -> Result<TerminalDisposition, sqlx::Error> {
+    guard_terminal_in_tx(connection, target, intent).await
+}
+
 pub(crate) async fn guard_terminal_in_tx(
     connection: &mut sqlx::PgConnection,
     target: &DbTarget,

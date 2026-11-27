@@ -15,7 +15,7 @@ use crate::services::tui_o::store::ledger::{LedgerState, PieceDisposition, Piece
 type Stored = (String, String, String, i64);
 
 #[derive(Default)]
-pub(crate) enum ReceiptOverlay {
+pub enum ReceiptOverlay {
     /// No re-post hook is installed; the local ledger decides alone.
     #[default]
     Disabled,
@@ -82,8 +82,6 @@ impl ReceiptOverlay {
         (0..ledger.next_serial())
             .filter_map(|serial| ledger.piece(serial))
             .filter(|piece| ledger.excluded(&piece.unit_key).is_none())
-            // An image Discord refused on its own is omitted with a notice, not a blocked channel.
-            .filter(|piece| ledger.tool_images().omitted(&piece.unit_key).is_none())
             .find_map(
                 |piece| match self.disposition(ledger, &piece.unit_key, piece.piece_index) {
                     PieceDisposition::Blocked { serial, status } => Some((serial, status)),
@@ -126,7 +124,7 @@ async fn receipted(
 
 /// Receipt ids are candidates, including receipts found only by a later shared probe.
 #[cfg(unix)]
-pub(crate) async fn delivery_candidates(
+pub async fn delivery_candidates(
     pool: &PgPool,
     key: &super::o_piece_delivery::PieceKey,
     sender: u64,

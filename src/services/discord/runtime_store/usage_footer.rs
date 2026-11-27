@@ -6,7 +6,7 @@ fn key(channel: u64) -> String {
     format!("discord_usage_footer:{channel}")
 }
 
-pub(crate) async fn enabled(pool: Option<&PgPool>, channel: u64) -> bool {
+pub async fn enabled(pool: Option<&PgPool>, channel: u64) -> bool {
     let Some(pool) = pool else { return true };
     match sqlx::query_scalar::<_, bool>("SELECT value::boolean FROM kv_meta WHERE key = $1")
         .bind(key(channel))
@@ -21,7 +21,7 @@ pub(crate) async fn enabled(pool: Option<&PgPool>, channel: u64) -> bool {
     }
 }
 
-pub(in crate::services::discord) async fn update(
+pub async fn update(
     pool: Option<&PgPool>,
     channel: u64,
     requested: Option<bool>,

@@ -11,26 +11,26 @@ pub(super) enum Rescope {
     Busy,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static WORK: (AtomicUsize, std::sync::atomic::AtomicBool) = (
     AtomicUsize::new(0),
     std::sync::atomic::AtomicBool::new(false),
 );
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    pub static BEFORE_SCOPE_ATTEMPT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn note_work(owed: usize, unsealed: bool) {
     WORK.0.store(owed, Ordering::SeqCst);
     WORK.1.store(unsealed, Ordering::SeqCst);
 }
 
-#[cfg(test)]
-pub(crate) fn work_for_tests() -> (usize, bool) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn work_for_tests() -> (usize, bool) {
     (WORK.0.load(Ordering::SeqCst), WORK.1.load(Ordering::SeqCst))
 }
 
@@ -62,7 +62,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .map(|cursor| cursor.source.clone())
             .collect();
         let mut persisted = Ok(());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(enter) = BEFORE_SCOPE_ATTEMPT.with_borrow_mut(Option::take) {
             enter();
         }
@@ -113,7 +113,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     self.deriver = configured_deriver(
                         channel,
                         crate::services::tui_o::shadow::ShadowProvider::Codex,
-                        self.writer.store(),
+                        self.writer.store().ledger(),
                     );
                 }
                 if changed {
@@ -156,15 +156,8 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 pub(super) fn configured_deriver(
     channel: u64,
     provider: ShadowProvider,
-    store: &crate::services::tui_o::store::ChannelStore,
+    ledger: &crate::services::tui_o::store::ledger::LedgerState,
 ) -> UnitDeriver {
-    let ledger = store.ledger();
-    let images = super::super::tool_images::derive::ImageRun::new(
-        channel,
-        provider,
-        ledger,
-        &store.init().sources,
-    );
     let inputs = super::super::pieces::ToolCardInputs {
         known: ledger.non_card_tool_keys(),
         recorded_cards: ledger.card_tool_keys(),
@@ -184,5 +177,4 @@ pub(super) fn configured_deriver(
         ))
         .with_tool_cards(inputs)
         .with_turn_summary(summary)
-        .with_tool_images(images)
 }

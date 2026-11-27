@@ -177,7 +177,7 @@ export function Step3AgentSelection({
                       );
                     }}
                     rows={6}
-                    className="w-full rounded-lg px-3 py-2 text-xs bg-surface-subtle border resize-y"
+                    className="w-full rounded-lg px-3 py-2 text-xs max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border resize-y"
                     style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
                     placeholder={tr("에이전트의 역할과 행동 규칙을 정의합니다", "Define the agent's role and behavior")}
                   />
@@ -196,7 +196,7 @@ export function Step3AgentSelection({
             placeholder={tr("에이전트 이름", "Agent name")}
             value={customName}
             onChange={(event) => setCustomName(event.target.value)}
-            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <input
@@ -205,7 +205,7 @@ export function Step3AgentSelection({
             placeholder={tr("한줄 설명", "Brief description")}
             value={customDesc}
             onChange={(event) => setCustomDesc(event.target.value)}
-            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
         </div>
@@ -216,7 +216,7 @@ export function Step3AgentSelection({
             placeholder={tr("영문 이름 (선택)", "English name (optional)")}
             value={customNameEn}
             onChange={(event) => setCustomNameEn(event.target.value)}
-            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <input
@@ -225,13 +225,13 @@ export function Step3AgentSelection({
             placeholder={tr("영문 설명 (선택)", "English description (optional)")}
             value={customDescEn}
             onChange={(event) => setCustomDescEn(event.target.value)}
-            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm bg-surface-subtle border"
+            className="min-h-11 min-w-0 flex-1 rounded-md px-3 py-2 text-sm max-[899px]:text-base pointer-coarse:text-base bg-surface-subtle border"
             style={{ borderColor: borderInput, color: "var(--th-text-primary)" }}
           />
           <button type="button"
             onClick={addCustomAgent}
             disabled={!customName.trim()}
-            className="min-h-11 w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 transition-colors whitespace-nowrap"
+            className="min-h-11 w-full sm:w-auto px-4 py-2 rounded-lg text-sm font-medium bg-[var(--accent)] text-[var(--accent-ink)] hover:opacity-90 disabled:opacity-40 transition-colors whitespace-nowrap"
           >
             + {tr("추가", "Add")}
           </button>

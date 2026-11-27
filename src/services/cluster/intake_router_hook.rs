@@ -36,17 +36,17 @@ mod capacity_tests;
 mod edge_case_tests;
 #[cfg(test)]
 mod execution_requirement_tests;
-mod o_input;
-#[cfg(test)]
-pub(crate) use o_input::{BEFORE_PLAN, ENTERED};
+pub mod o_input;
+#[cfg(any(test, feature = "test-support"))]
+pub use o_input::{BEFORE_PLAN, ENTERED};
 #[cfg(test)]
 mod o_route_tests;
-pub(crate) mod owner_record;
+pub mod owner_record;
 mod session_owner;
 
-pub(crate) use session_owner::{SessionOwnerResolution, resolve_session_owner};
+pub use session_owner::{SessionOwnerResolution, resolve_session_owner};
 
-pub(crate) use super::intake_routing_config::{
+pub use super::intake_routing_config::{
     EffectiveIntakeRoutingConfig, IntakeRoutingMode, effective_intake_routing_config,
     intake_routing_status_json,
 };
@@ -54,7 +54,7 @@ pub(crate) use super::intake_routing_config::{
 mod model;
 mod placement;
 use model::build_payload_for_insert;
-pub(crate) use model::{
+pub use model::{
     IntakeBlockedReason, IntakeRouterContext, IntakeRouterDecision, IntakeRoutingBasis,
     ObservedIntakeOutcome, RanLocalReason, ResolvedSessionOwner,
 };
@@ -151,7 +151,7 @@ async fn check_required_target(
 
 /// Run the leader-side placement hook. Enforce mode fails safe whenever a
 /// local execution could split an existing session or duplicate an open route.
-pub(crate) async fn try_route_intake(
+pub async fn try_route_intake(
     pool: &PgPool,
     ctx: &IntakeRouterContext<'_>,
 ) -> IntakeRouterDecision {
@@ -843,12 +843,13 @@ async fn agent_preferred_labels_for_channel(
         .map(|(_, _, labels)| labels))
 }
 
-#[cfg(test)]
-pub(crate) mod pg_tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod pg_tests {
     use super::*;
+    #[cfg(test)]
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
-    pub(crate) fn ctx_for_channel<'a>(
+    pub fn ctx_for_channel<'a>(
         mode: IntakeRoutingMode,
         channel: &'a str,
     ) -> IntakeRouterContext<'a> {
@@ -878,6 +879,7 @@ pub(crate) mod pg_tests {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_agent_with_preference(
         pool: &PgPool,
         agent_id: &str,
@@ -897,6 +899,7 @@ pub(crate) mod pg_tests {
         .expect("seed agent");
     }
 
+    #[cfg(test)]
     async fn seed_worker_node(
         pool: &PgPool,
         instance_id: &str,
@@ -919,6 +922,7 @@ pub(crate) mod pg_tests {
         .await;
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_worker_node_with_capabilities(
         pool: &PgPool,
         instance_id: &str,
@@ -940,6 +944,7 @@ pub(crate) mod pg_tests {
         .expect("seed worker_nodes");
     }
 
+    #[cfg(test)]
     pub(super) async fn seed_session_owner(
         pool: &PgPool,
         session_key: &str,
@@ -2564,6 +2569,7 @@ pub(crate) mod pg_tests {
         pg_db.drop().await;
     }
 
+    #[cfg(test)]
     async fn seed_open_route(pool: &PgPool, channel_id: &str, target_instance_id: &str) {
         sqlx::query(
             "INSERT INTO intake_outbox (
@@ -2580,6 +2586,7 @@ pub(crate) mod pg_tests {
         .expect("seed open route");
     }
 
+    #[cfg(test)]
     async fn open_route_owner_telemetry_case(
         channel_id: &str,
         owner_instance_id: Option<&str>,

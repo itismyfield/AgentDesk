@@ -34,7 +34,7 @@ fn start_of(pid: u32) -> ProcessStart {
 }
 
 /// Every process is a bootstrapped server; the scripted socket carries the rest.
-pub(crate) struct Bootstrapped;
+pub struct Bootstrapped;
 
 impl ServerProvenance for Bootstrapped {
     fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
@@ -83,12 +83,12 @@ type Reply = Box<dyn Fn(&Value, &AtomicU32) -> Value + Send + Sync>;
 /// One accepted connection: the request it carried, if any, and every byte it sent.
 type Conn = (Option<Value>, usize);
 
-pub(crate) struct Server {
+pub struct Server {
     path: PathBuf,
     /// The pid of the process accepting connections, as the peer reader reports it.
     serving: Arc<AtomicU32>,
     /// Every connection in accept order: the method it carried, if any, and its bytes.
-    pub(crate) conns: Arc<Mutex<Vec<Conn>>>,
+    pub conns: Arc<Mutex<Vec<Conn>>>,
     /// The result every ping gets.
     pong: Arc<Mutex<Value>>,
     stop: Arc<AtomicBool>,
@@ -96,7 +96,7 @@ pub(crate) struct Server {
 }
 
 /// Answers the one request on each connection with `reply`'s result, then closes it.
-pub(crate) fn serve(reply: Reply) -> Server {
+pub fn serve(reply: Reply) -> Server {
     let name = format!("adk-lh-{}-{}.sock", std::process::id(), socket_number());
     let path = std::env::temp_dir().join(&name);
     let path = if path.as_os_str().len() > 90 {
@@ -182,7 +182,7 @@ fn answer(
 }
 
 impl Server {
-    pub(crate) fn methods(&self) -> Vec<String> {
+    pub fn methods(&self) -> Vec<String> {
         let conns = self.conns.lock().unwrap();
         let method = |request: &Value| request["method"].as_str().unwrap_or("?").to_string();
         conns
@@ -211,7 +211,7 @@ impl Drop for Server {
     }
 }
 
-pub(crate) fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
+pub fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
     HerdrLaunchEndpoint {
         execution_node: "mac-mini".into(),
         config_key: "pilot".into(),
@@ -221,7 +221,7 @@ pub(crate) fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
 }
 
 /// A host whose connections name the server's current serving pid as their peer.
-pub(crate) fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
+pub fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     let endpoint = HerdrEndpoint::new("mac-mini", "pilot", &server.path, "adk")
         .unwrap()
         .with_herdr_home(Path::new(HOME))
@@ -245,7 +245,7 @@ pub(crate) fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     host
 }
 
-pub(crate) fn workdir() -> (tempfile::TempDir, PathBuf) {
+pub fn workdir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let real = std::fs::canonicalize(dir.path()).unwrap();
     (dir, real)
@@ -494,7 +494,7 @@ fn process_info(shell: Value, foreground: Option<&[u32]>) -> Value {
 
 #[test]
 fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
-    use crate::services::session_host::herdr::pane_probe::tests::{
+    use crate::services::session_host::herdr::pane_probe::test_support::{
         FakeOs, NONCE, context, env_naming,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -536,7 +536,7 @@ fn launch_evidence_waits_for_unreported_foreground_to_be_listed() {
 // The probe reads the located pane on its own connections, each from the launch's server.
 #[test]
 fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
-    use crate::services::session_host::herdr::pane_probe::tests::{
+    use crate::services::session_host::herdr::pane_probe::test_support::{
         FakeOs, NONCE, context, env_naming,
     };
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -619,36 +619,6 @@ fn launch_evidence_probes_the_located_pane_on_the_launch_server() {
 
 #[path = "launch_policy_tests.rs"]
 mod policy;
-
-// The composed Discord scenario keeps the production socket launch adapter and scripts only OS/peer reads.
-impl SocketHerdrLaunchHost {
-    pub(crate) fn socket_rig_for_test(endpoint: HerdrEndpoint, os: Box<dyn ProcessOs>) -> Self {
-        let mut host = Self::new(vec![endpoint], HerdrSocketConfig::default());
-        host.os = os;
-        host.read_restore = |transport, _| match transport.server_witness() {
-            Ok(witness) => RestoreResume::Off { witness },
-            Err(reason) => RestoreResume::Unverified(reason),
-        };
-        host.sources.clear();
-        let (endpoint, transport) = host.endpoints.pop().unwrap();
-        let transport = Arc::try_unwrap(transport)
-            .unwrap_or_else(|_| panic!("unshared fixture transport"))
-            .with_peer_reader(Box::new(|_| {
-                Ok((
-                    7,
-                    ProcessStart {
-                        identity: StartIdentity::Darwin {
-                            seconds: 1_000,
-                            micros: 0,
-                        },
-                        wall_clock: SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
-                    },
-                ))
-            }));
-        host.endpoints.push((endpoint, Arc::new(transport)));
-        host
-    }
-}
 
 struct InstanceBootstrapped;
 
@@ -775,11 +745,11 @@ impl super::super::wire::HerdrFraming for WirePaneTarget {
 fn test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts() {
     use crate::config::test_instance;
     if !test_instance::requested() {
-        let (_temp, root) = test_instance::tests::fixture();
-        let output = crate::config::test_instance::tests::command(&root)
+        let (_temp, root) = test_instance::test_support::fixture();
+        let output = crate::config::test_instance::test_support::command(&root)
             .args(["--exact", concat!(module_path!(),
                 "::test_instance_socket_launch_records_owned_pair_before_input_and_fences_foreign_receipts")
-                .strip_prefix("agentdesk::").unwrap(), "--nocapture"])
+                .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::")).unwrap(), "--nocapture"])
             .env("AGENTDESK_TEST_MANIFEST", root.join("manifest.json"))
             .env("AGENTDESK_ROOT_DIR", &root)
             .env("AGENTDESK_CONFIG", root.join("config/agentdesk.yaml"))

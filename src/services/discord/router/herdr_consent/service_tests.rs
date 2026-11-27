@@ -479,7 +479,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
     let _runtime = crate::config::set_agentdesk_root_for_test(runtime.path());
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    let (config_dir, peer) = preview::tests::fixture(
+    let (config_dir, peer) = preview::test_support::fixture(
         r#"if [ "$HERDR_CONFIG_PATH" = "$HOME/config.toml" ]; then printf 'apply\n' >> "$HOME/apply.calls"; fi; printf 'config: ok\n'"#,
     );
     peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
@@ -587,7 +587,7 @@ async fn actual_owner_retry_card_apply_and_duplicate_use_one_original_mailbox_pa
         .unwrap()
         .into_consent();
     store()
-        .decide(&pending, message.author.id.get(), false, now())
+        .decide_for_test(&pending, message.author.id.get(), false, now())
         .unwrap();
     let drained = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let count = drained.clone();
@@ -895,7 +895,7 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
     let channel = serenity::ChannelId::new(discord_mock::CHANNEL_ID);
     let _boot = session_hosts::force_for_test(Some("node"), &[(channel.get(), "node")])
         .with_mode(EndpointMode::UserDefault);
-    let (config_dir, peer) = preview::tests::fixture("printf 'config: ok\\n'");
+    let (config_dir, peer) = preview::test_support::fixture("printf 'config: ok\\n'");
     peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
     let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
     let _peer = ScopedPeer(previous);
@@ -954,9 +954,9 @@ async fn actual_applied_startup_keeps_failed_consent_retryable_and_releases_late
             )
             .unwrap()
             .into_consent();
-        let accepted = store().decide(&pending, 1, true, now()).unwrap();
+        let accepted = store().decide_for_test(&pending, 1, true, now()).unwrap();
         store()
-            .record_apply(
+            .record_apply_for_test(
                 &accepted,
                 consent::ApplyResult {
                     before: Some([1; 32]),
@@ -1122,7 +1122,7 @@ async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_me
     std::fs::write(&config, format!("server:\n  port: 8791\nagents:\n{agents}")).unwrap();
     let _boot = session_hosts::force_for_test(Some("node"), &[(held, "node"), (open, "node")])
         .with_mode(EndpointMode::UserDefault);
-    let (config_dir, peer) = preview::tests::fixture("printf 'config: ok\\n'");
+    let (config_dir, peer) = preview::test_support::fixture("printf 'config: ok\\n'");
     peer.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
     let previous = TEST_SOURCE.with(|source| source.replace(Some(peer.clone())));
     let _peer = ScopedPeer(previous);
@@ -1184,9 +1184,9 @@ async fn actual_held_boot_channel_replays_only_its_applied_consent_once_after_me
             )
             .unwrap()
             .into_consent();
-        let accepted = store().decide(&pending, 1, true, now()).unwrap();
+        let accepted = store().decide_for_test(&pending, 1, true, now()).unwrap();
         let applied = store()
-            .record_apply(
+            .record_apply_for_test(
                 &accepted,
                 consent::ApplyResult {
                     before: Some([1; 32]),

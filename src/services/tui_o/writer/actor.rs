@@ -75,8 +75,6 @@ pub struct Undelivered {
     pub verified_work: usize,
     /// The channel's POSTs started and not ended.
     pub posting: usize,
-    /// Open tool-image and omission-notice obligations, as a source transition counts them.
-    pub images: usize,
     /// Each unretired, unparked source's path and how far its bytes are captured.
     pub captured: Vec<(std::path::PathBuf, u64)>,
 }
@@ -146,7 +144,7 @@ pub mod native_input;
 mod state {
     use super::*;
 
-    pub(in crate::services) struct Actor<P, L, A, B> {
+    pub struct Actor<P, L, A, B> {
         pub(super) replay_deferred: bool,
         pub(super) writer: ChannelWriter<P, L, A>,
         pub(super) deriver: UnitDeriver,
@@ -167,7 +165,7 @@ mod state {
 #[cfg(not(any(test, feature = "test-support")))]
 use state::Actor;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use state::Actor;
+pub use state::Actor;
 
 #[derive(Default)]
 struct Waiting {
@@ -246,13 +244,17 @@ where
     B: BindingEvents,
 {
     let mut writer = writer.with_repost_stop(stop.clone());
-    let deriver = fresh_resume::configured_deriver(writer.channel(), provider, writer.store());
+    let deriver =
+        fresh_resume::configured_deriver(writer.channel(), provider, writer.store().ledger());
     let mut sources = Sources::new(writer.channel(), provider, Arc::clone(&bindings))
         .with_suspension(writer.suspension.clone())
         .with_producer_absent(producer_absent)
         .with_native_inputs(_native.is_some());
     if let Some(readers) = readers {
         sources = sources.with_readers(readers);
+    }
+    if let Some(anchors) = sources.reply_anchors() {
+        writer.attach_reply_anchors(anchors);
     }
     let owed = VecDeque::new();
     let ready = admission::owed_delivery_ready(writer.channel());
@@ -388,7 +390,6 @@ where
         }
         actor.prepare_notices(&fresh).await;
         actor.observe_waiting(false);
-        actor.writer.record_images(&mut actor.deriver);
         let drain = actor.writer.boot.first_drain();
         let serial_before = drain
             .as_ref()
@@ -399,9 +400,6 @@ where
             actor.refilter_after_open();
         }
         if !actor.writer.has_local_retry() {
-            if actor.delivery_allowed() {
-                actor.writer.select_images(now).await;
-            }
             actor.deliver_owed(&progress).await;
         }
         // A restart-cut episode's one notice goes after this poll's owed pieces.
@@ -451,7 +449,7 @@ where
         actor.poll_transition(sources_resumed, &unsettled).await;
         actor.observe_waiting(sources_resumed);
         progress.publish(actor.progress());
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         fresh_resume::note_work(actor.owed.len(), actor.deriver.has_unsealed());
         // A writer that stopped in this poll ends now, so its readiness drops before the next poll.
         if actor.writer.is_stopped() {
@@ -496,8 +494,8 @@ where
     actor.writer.stop_cause().cloned()
 }
 
-#[cfg(test)]
-pub(crate) async fn run_channel_at<P, L, A, B>(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn run_channel_at<P, L, A, B>(
     writer: ChannelWriter<P, L, A>,
     provider: ShadowProvider,
     bindings: Arc<B>,
@@ -528,22 +526,22 @@ mod notice_settlement;
 #[cfg(not(any(test, feature = "test-support")))]
 mod notice_work;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) mod notice_work;
-#[cfg(test)]
-pub(crate) use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
+pub mod notice_work;
+#[cfg(any(test, feature = "test-support"))]
+pub use fresh_resume::{BEFORE_SCOPE_ATTEMPT, work_for_tests};
 mod automatic;
 mod automatic_age;
 mod codex_age;
-pub(crate) mod codex_retention;
+pub mod codex_retention;
 mod transition;
 mod transition_snapshot;
 // Test seams for the actor tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::WAIT_LIMIT_FOR_TEST;
+pub use test_access::WAIT_LIMIT_FOR_TEST;
 
-pub(crate) mod codex_submission;
+pub mod codex_submission;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     fn project_operator_resumes(&mut self) {
@@ -565,6 +563,12 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                         index: piece.piece_index,
                         payload: piece.payload.clone(),
                         notice_origin: piece.notice_origin.clone(),
+                        reply: self
+                            .writer
+                            .store()
+                            .ledger()
+                            .reply_to(rejected)
+                            .map(super::reply_anchor::ReplyRef::Fixed),
                     },
                 )
             })
@@ -784,11 +788,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             return;
         }
         let protected = self.verified.as_ref().map(super::owed::protected);
-        let ledger = self.writer.store().ledger();
-        let Some(images) = super::tool_images::select::kept_sources(ledger, &mut self.deriver)
-        else {
-            return;
-        };
         let collectable = self.sources.collectable().into_iter();
         let mut collectable = collectable.filter(|(source, _)| {
             !protected
@@ -802,11 +801,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             ) {
                 continue;
             }
-            let floor = images.get(&source_key(&source)).copied();
-            while self.writer.store().retained_segments(&source) > keep
-                && super::tool_images::select::below(self.writer.store(), &source, floor)
-            {
-                self.writer.persist_before_gc(&mut self.deriver, &source);
+            while self.writer.store().retained_segments(&source) > keep {
                 if let Err(error) = self.writer.store().gc_oldest_segment(&source) {
                     let violation = self.writer.store().ledger().violation().map(str::to_string);
                     let alarm = match violation {
@@ -844,7 +839,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         super::progress::position(owed, retry, ledger, unsealed)
     }
 
-    /// Pieces, an open `Prepared`, open image obligations, unsealed units, sources read short of their end, binds not
+    /// Pieces, an open `Prepared`, unsealed units, sources read short of their end, binds not
     /// applied, verified work, POSTs in flight and each source's capture, stamped `asked`; `None` when the store, checkpoint or a source length is unreadable.
     fn undelivered(&mut self, asked: u64) -> Option<Undelivered> {
         #[cfg(test)]
@@ -868,7 +863,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         );
         let store = self.writer.store();
         let prepared = usize::from(store.ledger().unresolved().is_some());
-        let images = super::tool_images::select::open_count(store.ledger());
         let rotation = store.rotation().ok()?;
         let checkpoint = store.binding_checkpoint().ok()?;
         let mut uncaptured = 0;
@@ -896,7 +890,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             verified_work: self.verified.as_ref().map_or(0, |log| log.work.len()),
             // A channel no writer counted yet has started no POST in this process.
             posting: super::deliver::posts_in_flight(channel).unwrap_or(0),
-            images,
             captured,
         })
     }
@@ -950,16 +943,14 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
-#[cfg(all(test, unix))]
-pub(crate) use transition::scoped_tests::{
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
-#[cfg(test)]
-pub(crate) use transition::test_hooks as transition_hooks;
-#[cfg(test)]
-pub(crate) use transition_snapshot::{
-    execution_read, execution_sources, force_execution_for_tests,
-};
+#[cfg(any(test, feature = "test-support"))]
+pub use transition::test_hooks as transition_hooks;
+#[cfg(any(test, feature = "test-support"))]
+pub use transition_snapshot::{execution_read, execution_sources, force_execution_for_tests};
 
 #[cfg(test)]
 mod test_support {

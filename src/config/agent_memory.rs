@@ -65,7 +65,7 @@ impl Config {
     }
 
     /// The SAK file is the memory fallback for deployments without Memento.
-    pub(crate) fn shared_knowledge_injection_enabled(&self) -> bool {
+    pub fn shared_knowledge_injection_enabled(&self) -> bool {
         match self.memory.as_ref().map(|m| m.shared_knowledge_injection) {
             Some(SharedKnowledgeInjection::On) => true,
             Some(SharedKnowledgeInjection::Off) => false,

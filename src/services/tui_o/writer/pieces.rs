@@ -26,6 +26,7 @@ pub struct PieceWork {
     pub output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     pub notice_origin: Option<Box<super::input_notices::NoticeOrigin>>,
+    pub reply: Option<super::reply_anchor::ReplyRef>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -61,7 +62,6 @@ pub struct UnitDeriver {
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Origin>,
     notices: super::input_notices::Projection,
     restart: super::restart_end::Projection,
-    images: Option<super::tool_images::derive::ImageRun>,
 }
 
 impl UnitDeriver {
@@ -76,7 +76,6 @@ impl UnitDeriver {
             output_origin: None,
             notices: super::input_notices::Projection::default(),
             restart: super::restart_end::Projection::default(),
-            images: None,
         }
     }
 
@@ -99,14 +98,9 @@ impl UnitDeriver {
         self
     }
 
-    /// Delivery actors opt in, like tool cards.
-    pub(crate) fn with_tool_images(mut self, images: super::tool_images::derive::ImageRun) -> Self {
-        self.images = Some(images);
-        self
-    }
-
-    pub(crate) fn images(&mut self) -> Option<&mut super::tool_images::derive::ImageRun> {
-        self.images.as_mut()
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_input_notices_for_test(self, notices: super::input_notices::Projection) -> Self {
+        self.with_input_notices(notices)
     }
 
     pub(crate) fn with_input_notices(mut self, notices: super::input_notices::Projection) -> Self {
@@ -133,6 +127,15 @@ impl UnitDeriver {
         logical_session: impl Fn() -> Option<String>,
     ) -> Vec<Derived> {
         let mut derived = self.derive_with_session(record, version, logical_session);
+        let coord = super::reply_anchor::Coord {
+            source: source.clone(),
+            range: record.start..record.end,
+        };
+        for item in &mut derived {
+            if let Derived::Piece(piece) = item {
+                piece.reply = Some(super::reply_anchor::ReplyRef::At(coord.clone()));
+            }
+        }
         if self.notices.enabled() {
             match self
                 .notices
@@ -157,9 +160,6 @@ impl UnitDeriver {
         if let Some(summary) = &mut self.summary {
             summary.enter(&source.path);
         }
-        if let Some(images) = &mut self.images {
-            images.enter(source);
-        }
     }
 
     pub(super) fn restart_projection(&mut self) -> &mut super::restart_end::Projection {
@@ -176,17 +176,9 @@ impl UnitDeriver {
             provider: self.provider,
             source: source.clone(),
         };
-        let ended = self.restart.before(&binding, record);
-        let out = ended.map_or_else(Vec::new, |ended| self.end_projection(&ended));
-        // A verified end this run cannot apply for lack of its opener still ends the image turn,
-        // once this record's row preparation has restored that turn.
-        if let (Some(images), Some(turn)) = (
-            self.images.as_mut(),
-            self.restart.cutoff_turn(source, record.start),
-        ) {
-            images.cut_at(source, record.start, turn);
-        }
-        out
+        self.restart
+            .before(&binding, record)
+            .map_or_else(Vec::new, |ended| self.end_projection(&ended))
     }
 
     pub(super) fn end_projection(&mut self, ended: &super::restart_end::Ended) -> Vec<Derived> {
@@ -198,9 +190,6 @@ impl UnitDeriver {
             .unwrap_or_default();
         if let Some(summary) = &mut self.summary {
             summary.physical_end(&ended.source.path);
-        }
-        if let Some(images) = &mut self.images {
-            images.physical_end(&ended.source, ended.record.end);
         }
         if let Some(origin) = &self.output_origin {
             for item in &mut out {
@@ -252,9 +241,7 @@ impl UnitDeriver {
             Vec::new().into_iter()
         };
         let mut out = Vec::new();
-        let facts = classify_with_version(self.provider, &value, identity_version);
-        let images = (self.images.as_mut()).map(|run| run.record(record, &value, &facts));
-        for fact in facts {
+        for fact in classify_with_version(self.provider, &value, identity_version) {
             match fact {
                 RecordFact::Unit(native_key, kind, content) => {
                     let (channel_id, provider) = (self.channel, self.provider);
@@ -314,7 +301,6 @@ impl UnitDeriver {
                 }
             }
         }
-        out.extend(images.into_iter().flatten().map(Derived::Piece));
         if let Some(origin) = &self.output_origin {
             for item in &mut out {
                 if let Derived::Piece(piece) = item {
@@ -437,6 +423,7 @@ impl UnitDeriver {
                         index,
                         payload,
                         notice_origin: None,
+                        reply: None,
                     })
                 };
                 pieces.map(piece).collect()

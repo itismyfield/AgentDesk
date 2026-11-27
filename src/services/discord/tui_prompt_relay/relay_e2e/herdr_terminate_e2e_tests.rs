@@ -553,7 +553,7 @@ async fn registered_bound(rig: herdr::P11TerminationRig, refused_first: bool) {
     append(&answered("earlier"));
     let register = crate::services::tui_prompt_dedupe::register_tmux_runtime_binding;
     register(&tmux, claude(&transcript, &session));
-    crate::services::claude_tui::readiness::tests::pre_source(&tmux, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(&tmux, &transcript);
 
     let id = recent_message_id();
     harness.seed_channel_history(&[(id, ORIGINAL, false)]);

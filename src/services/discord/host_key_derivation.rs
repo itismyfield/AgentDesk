@@ -189,3 +189,9 @@ pub(crate) async fn routine_session_failure_admitted(
 #[cfg(test)]
 #[path = "host_key_derivation_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod ke_session_tests;
+
+#[cfg(test)]
+mod ke_tests;

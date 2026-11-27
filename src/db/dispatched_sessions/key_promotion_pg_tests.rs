@@ -41,7 +41,7 @@ fn key(name: &str) -> String {
 async fn key_promotion_recreation_commits_primary_alias_and_outcome_pg() {
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let dir = tempfile::tempdir().unwrap();
-    let _namespace = session_inventory::tests::ChannelNamespace::new(
+    let _namespace = session_inventory::test_support::ChannelNamespace::new(
         CHANNEL.parse().unwrap(),
         dir.path().join("isolated.sock"),
     );
@@ -269,8 +269,8 @@ async fn key_promotion_live_failed_unknown_foreign_server_and_pending_hold_pg() 
         before,
         "host change after actor UPDATE must roll back"
     );
-    let pending = crate::db::dispatched_sessions::hosted_execution::tests::pending(
-        &crate::db::dispatched_sessions::hosted_execution::tests::owner(CHANNEL),
+    let pending = crate::db::dispatched_sessions::hosted_execution::test_support::pending(
+        &crate::db::dispatched_sessions::hosted_execution::test_support::owner(CHANNEL),
         "pending",
     );
     sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE id = $2")

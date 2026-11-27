@@ -11,33 +11,33 @@
 //! - `model` owns shared row/data shapes.
 
 mod claim;
-mod delivery;
+pub mod delivery;
 mod diagnostics;
 mod followup;
 mod model;
 mod notify;
 mod retry;
 
-pub(crate) use claim::{
+pub use claim::{
     DISPATCH_OUTBOX_CLAIM_STALE_SECS, mark_dispatch_outbox_claimed_pg,
     select_pending_dispatch_outbox_claim_candidates_pg,
     select_stale_dispatch_outbox_claim_owner_candidates_pg, update_dispatch_outbox_claim_owner_pg,
 };
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use delivery::DispatchOutboxLeaseUpdateError;
-pub(crate) use delivery::{
+pub use delivery::DispatchOutboxLeaseUpdateError;
+pub use delivery::{
     dispatch_notify_delivery_suppressed_pg, mark_dispatch_dispatched_pg, mark_outbox_done_pg,
     mark_outbox_failed_pg,
 };
-pub(crate) use diagnostics::{
+pub use diagnostics::{
     record_routing_diagnostics_pg, record_task_dispatch_routing_diagnostics_pg,
     wait_reason_from_routing_diagnostics,
 };
-pub(crate) use followup::{
+pub use followup::{
     clear_all_dispatch_threads_pg, load_card_status_pg, load_completed_dispatch_info_pg,
 };
-#[cfg(test)]
-pub(crate) use model::DispatchOutboxClaimCandidate;
-pub(crate) use model::{CompletedDispatchInfo, DispatchOutboxRow};
-pub(crate) use notify::requeue_dispatch_notify_pg;
-pub(crate) use retry::schedule_outbox_retry_pg;
+#[cfg(any(test, feature = "test-support"))]
+pub use model::DispatchOutboxClaimCandidate;
+pub use model::{CompletedDispatchInfo, DispatchOutboxRow};
+pub use notify::requeue_dispatch_notify_pg;
+pub use retry::schedule_outbox_retry_pg;

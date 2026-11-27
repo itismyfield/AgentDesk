@@ -1851,6 +1851,35 @@ class RustSources(unittest.TestCase):
                 self.assertEqual([[r["from"], r["to"], r["key"][:2]] for r in doc["relocation_keys"]],
                                  [pair + [["src/krx/t.rs", "moved"]] for pair in moved])
 
+    def test_file_changing_move_counts_only_through_a_matching_relocation_row(self):
+        base, test = self.root / "base", "#[test]\nfn moved() {}\n"
+        for rel, text in {"Cargo.toml": '[package]\nname = "x"\n', "src/lib.rs": "#[cfg(test)]\nmod krx;\n",
+                          "src/krx.rs": test}.items():
+            (base / rel).parent.mkdir(parents=True, exist_ok=True)
+            (base / rel).write_text(text)
+        row = "x src/krx.rs krx::moved x src/host/t.rs host::t::moved\n"
+        rows = self.root / rts.RELOCATIONS
+        rows.parent.mkdir(parents=True, exist_ok=True)
+        cases = {"listed": (row, test), "unlisted": ("", test), "deleted": (row, ""),
+                 "ignored": (row, "#[ignore]\n" + test), "wrong file": (row.replace("host/t.rs", "host/u.rs"), test)}
+        for case, (listed, moved) in cases.items():
+            with self.subTest(case):
+                rows.write_text(listed)
+                self.tree({"src/lib.rs": "#[cfg(test)]\nmod host;\n", "src/host.rs": "mod t;\n", "src/host/t.rs": moved})
+                self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "r.json")[0], 0)
+                doc = json.loads((self.root / "r.json").read_text())
+                accepted = [[["x", "krx::moved"], ["x", "host::t::moved"]]] if case == "listed" else []
+                self.assertEqual((doc["relocated"]["linux"], doc["removed"]["linux"]),
+                                 (accepted, [] if accepted else ["krx::moved"]))
+        # A same-file move of another base test onto that head test leaves both origins lost.
+        (base / "src/lib.rs").write_text('#[cfg(test)]\nmod krx;\n#[cfg(test)]\n#[path = "host/t.rs"]\nmod old;\n')
+        (base / "src/host").mkdir()
+        (base / "src/host/t.rs").write_text(test)
+        rows.write_text(row)
+        self.assertEqual(self.cli("removed", "--base-root", base, "--json-out", self.root / "r.json")[0], 0)
+        doc = json.loads((self.root / "r.json").read_text())
+        self.assertEqual((doc["relocated"]["linux"], doc["removed"]["linux"]), ([], ["krx::moved", "old::moved"]))
+
     def test_cfg_evaluator_operators(self):
         cases = [("( unix )", "linux", True), ("( not ( unix ) )", "linux", False),
                  ("( any ( windows target_os = macos ) )", "macos", True),

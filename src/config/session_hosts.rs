@@ -16,8 +16,8 @@ const CHANNELS_KEY: &str = "session_hosts.herdr.channels";
 const RETIRED_GUARD_KEY: &str = "session_hosts.claude_guard_channels";
 const RETIRED_GUARD_ENV: &str = "AGENTDESK_CLAUDE_SUBMIT_GUARD_CHANNEL_IDS";
 
-pub(crate) mod approval_store;
-pub(crate) mod migration;
+pub mod approval_store;
+pub mod migration;
 pub(crate) mod projection;
 mod user_default;
 
@@ -103,7 +103,7 @@ pub struct EndpointConfig {
 
 /// One configured endpoint, named by its config key.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ChannelEndpoint {
+pub struct ChannelEndpoint {
     pub key: String,
     pub execution_node: String,
     pub socket_path: PathBuf,
@@ -113,7 +113,7 @@ pub(crate) struct ChannelEndpoint {
 
 /// The validated section and this node's id, as the process booted with them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct BootSessionHosts {
+pub struct BootSessionHosts {
     config: SessionHostsConfig,
     channels: BTreeMap<u64, ChannelEndpoint>,
     local_node: Option<String>,
@@ -132,7 +132,7 @@ fn normalized(config: &Config) -> Result<Config> {
 }
 
 impl BootSessionHosts {
-    pub(crate) fn from_config(config: &Config) -> Result<Self> {
+    pub fn from_config(config: &Config) -> Result<Self> {
         let effective = normalized(config)?;
         let channels = validate_effective(&effective)?;
         let yaml = effective.session_hosts.retired_guard.0;
@@ -156,19 +156,19 @@ impl BootSessionHosts {
         })
     }
 
-    pub(crate) fn herdr_endpoint(&self, channel: u64) -> Option<&ChannelEndpoint> {
+    pub fn herdr_endpoint(&self, channel: u64) -> Option<&ChannelEndpoint> {
         self.channels.get(&channel)
     }
 
-    pub(crate) fn local_node(&self) -> Option<&str> {
+    pub fn local_node(&self) -> Option<&str> {
         self.local_node.as_deref()
     }
 
-    pub(crate) fn channels(&self) -> &BTreeMap<u64, ChannelEndpoint> {
+    pub fn channels(&self) -> &BTreeMap<u64, ChannelEndpoint> {
         &self.channels
     }
 
-    pub(crate) fn config(&self) -> &SessionHostsConfig {
+    pub fn config(&self) -> &SessionHostsConfig {
         &self.config
     }
 }
@@ -288,26 +288,26 @@ fn bound_as_tui(config: &Config, key: &str, channel: u64, providers: &[&str]) ->
 
 /// Migration metadata stays outside the boot configuration's equality contract.
 #[derive(Debug, Clone)]
-pub(crate) struct BootMigration {
+pub struct BootMigration {
     candidate: SessionHostsConfig,
     diagnostic: Option<migration::Diagnostic>,
     admission_stopped: bool,
 }
 
 impl BootMigration {
-    pub(crate) fn restart_required(&self, config: &Config) -> bool {
+    pub fn restart_required(&self, config: &Config) -> bool {
         normalized(config).map_or(true, |effective| self.candidate != effective.session_hosts)
     }
 
-    pub(crate) fn candidate(&self) -> &SessionHostsConfig {
+    pub fn candidate(&self) -> &SessionHostsConfig {
         &self.candidate
     }
 
-    pub(crate) fn migration(&self) -> Option<&migration::Diagnostic> {
+    pub fn migration(&self) -> Option<&migration::Diagnostic> {
         self.diagnostic.as_ref()
     }
 
-    pub(crate) fn admission_stopped(&self) -> bool {
+    pub fn admission_stopped(&self) -> bool {
         self.admission_stopped
     }
 }
@@ -315,14 +315,14 @@ impl BootMigration {
 static BOOT_MIGRATION: OnceLock<BootMigration> = OnceLock::new();
 static BOOT: OnceLock<BootSessionHosts> = OnceLock::new();
 
-#[cfg(test)]
-pub(crate) fn install(config: &Config) -> Result<()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn install(config: &Config) -> Result<()> {
     let boot = BootSessionHosts::from_config(config)?;
     let _ = BOOT.set(boot);
     Ok(())
 }
 
-pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
+pub fn install_selected(selection: migration::HostsBootSelection) {
     let (hosts, migration) = selection.into_parts();
     BOOT.get_or_init(|| {
         let _ = BOOT_MIGRATION.set(migration);
@@ -331,7 +331,7 @@ pub(crate) fn install_selected(selection: migration::HostsBootSelection) {
 }
 
 /// The boot section, or `None` before install, which configures nothing.
-pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
+pub fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) -> R {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(forced) = FORCED.with(|forced| forced.borrow().clone()) {
         return read(Some(&forced));
@@ -339,7 +339,7 @@ pub(crate) fn with_boot<R>(read: impl FnOnce(Option<&BootSessionHosts>) -> R) ->
     read(BOOT.get())
 }
 
-pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
+pub fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -> R) -> R {
     #[cfg(any(test, feature = "test-support"))]
     if FORCED.with(|forced| forced.borrow().is_some()) {
         return FORCED_MIGRATION.with(|forced| read(forced.borrow().as_ref()));
@@ -347,12 +347,12 @@ pub(crate) fn with_boot_migration<R>(read: impl FnOnce(Option<&BootMigration>) -
     read(BOOT_MIGRATION.get())
 }
 
-pub(crate) fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
+pub fn herdr_endpoint(channel: u64) -> Option<ChannelEndpoint> {
     with_boot(|boot| boot.and_then(|boot| boot.herdr_endpoint(channel)).cloned())
 }
 
 /// Whether boot config routes this channel to a Herdr endpoint; callers outside the host-policy owners ask this instead of reading the endpoint.
-pub(crate) fn has_herdr_endpoint(channel: u64) -> bool {
+pub fn has_herdr_endpoint(channel: u64) -> bool {
     with_boot(|boot| boot.is_some_and(|boot| boot.herdr_endpoint(channel).is_some()))
 }
 
@@ -362,7 +362,7 @@ pub(crate) fn configured_channel_ids() -> Vec<String> {
     with_boot(|boot| boot.map_or_else(Vec::new, ids))
 }
 
-pub(crate) fn local_node() -> Option<String> {
+pub fn local_node() -> Option<String> {
     with_boot(|boot| {
         boot.and_then(BootSessionHosts::local_node)
             .map(str::to_owned)
@@ -377,13 +377,11 @@ thread_local! {
 
 /// Replaces the boot section on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
+pub struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
 
 /// Installs a real selection's hosts and migration metadata on this thread until dropped.
-#[cfg(all(test, unix))]
-pub(crate) fn force_selected_for_test(
-    selection: migration::HostsBootSelection,
-) -> ForcedSessionHosts {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn force_selected_for_test(selection: migration::HostsBootSelection) -> ForcedSessionHosts {
     let (hosts, metadata) = selection.into_parts();
     ForcedSessionHosts(
         FORCED.with(|forced| forced.replace(Some(hosts))),
@@ -392,10 +390,7 @@ pub(crate) fn force_selected_for_test(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_for_test(
-    local_node: Option<&str>,
-    channels: &[(u64, &str)],
-) -> ForcedSessionHosts {
+pub fn force_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) -> ForcedSessionHosts {
     let endpoint = |execution_node: &str| ChannelEndpoint {
         key: format!("{execution_node}-endpoint"),
         execution_node: execution_node.to_owned(),
@@ -434,8 +429,8 @@ pub(crate) fn force_for_test(
 }
 
 /// Boots this thread with the section `config` validates to, until dropped.
-#[cfg(test)]
-pub(crate) fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
     let boot = BootSessionHosts::from_config(config).expect("valid session_hosts");
     ForcedSessionHosts(
         FORCED.with(|forced| forced.replace(Some(boot))),
@@ -444,8 +439,8 @@ pub(crate) fn force_config_for_test(config: &Config) -> ForcedSessionHosts {
 }
 
 /// Fixes `channels` as the boot section of this whole process; only an isolated child may call it.
-#[cfg(test)]
-pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)]) {
     let forced = force_for_test(local_node, channels);
     let boot = FORCED
         .with(|forced| forced.borrow().clone())
@@ -459,7 +454,7 @@ pub(crate) fn install_for_test(local_node: Option<&str>, channels: &[(u64, &str)
 
 #[cfg(any(test, feature = "test-support"))]
 impl ForcedSessionHosts {
-    pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
+    pub fn with_mode(self, mode: EndpointMode) -> Self {
         FORCED.with(|forced| {
             if let Some(boot) = forced.borrow_mut().as_mut() {
                 for endpoint in boot.config.herdr.endpoints.values_mut() {

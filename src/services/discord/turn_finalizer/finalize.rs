@@ -96,7 +96,7 @@ pub(super) async fn do_finalize_with_probe(
         .await
         {
             Ok(captured) => captured,
-            Err(()) => return FinalizeOutcome::AlreadyFinalized,
+            Err(_) => return FinalizeOutcome::AlreadyFinalized,
         }
     };
     let owned_snapshot = captured

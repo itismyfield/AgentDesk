@@ -23,7 +23,7 @@ pub(crate) enum Terminal {
     Failed,
 }
 
-pub(crate) struct Plan {
+pub struct Plan {
     pub key: TurnKey,
     pub last_seq: u64,
     pub fingerprint: Hash,
@@ -31,7 +31,7 @@ pub(crate) struct Plan {
     pub footer: Piece,
 }
 
-pub(crate) struct Piece {
+pub struct Piece {
     pub source: Range<usize>,
     pub payload: String,
     pub correlation: String,
@@ -117,6 +117,6 @@ impl Piece {
     }
 }
 
-pub(crate) fn hash(text: &str) -> Hash {
+pub fn hash(text: &str) -> Hash {
     Sha256::digest(text.as_bytes()).into()
 }

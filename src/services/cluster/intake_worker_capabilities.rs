@@ -15,7 +15,7 @@ static ROUTING_OWNER: LazyLock<RwLock<[BTreeSet<String>; 2]>> =
     LazyLock::new(|| RwLock::new([BTreeSet::new(), BTreeSet::new()]));
 
 /// Only this runtime publishes its own capability; a gateway never fills it for another node.
-pub(crate) fn publish_routing_owner(provider: &str, rest_ready: bool) {
+pub fn publish_routing_owner(provider: &str, rest_ready: bool) {
     let provider = provider.trim().to_ascii_lowercase();
     let mut owner = ROUTING_OWNER.write().unwrap_or_else(|e| e.into_inner());
     owner[0].insert(provider.clone());
@@ -30,7 +30,7 @@ pub(crate) fn publish_routing_owner(provider: &str, rest_ready: bool) {
 static GATEWAY_WAITER_PROVIDERS: LazyLock<RwLock<BTreeMap<String, usize>>> =
     LazyLock::new(|| RwLock::new(BTreeMap::new()));
 
-pub(crate) fn register_intake_worker_provider(provider: &str) {
+pub fn register_intake_worker_provider(provider: &str) {
     let provider = provider.trim().to_ascii_lowercase();
     if provider.is_empty() {
         return;
@@ -48,7 +48,7 @@ pub(super) fn active_intake_worker_providers() -> Vec<String> {
 }
 
 /// Keeps gateway intent advertised until cancellation or backend ownership ends.
-pub(crate) struct GatewayWaiterGuard {
+pub struct GatewayWaiterGuard {
     state: std::sync::Arc<GatewayWaiterState>,
 }
 
@@ -57,10 +57,10 @@ struct GatewayWaiterState {
     advertised: std::sync::atomic::AtomicBool,
 }
 
-pub(crate) struct GatewayWaiterCancellation(std::sync::Weak<GatewayWaiterState>);
+pub struct GatewayWaiterCancellation(std::sync::Weak<GatewayWaiterState>);
 
 impl GatewayWaiterCancellation {
-    pub(crate) fn withdraw(self) {
+    pub fn withdraw(self) {
         if let Some(state) = self.0.upgrade() {
             state.withdraw();
         }
@@ -68,7 +68,7 @@ impl GatewayWaiterCancellation {
 }
 
 impl GatewayWaiterGuard {
-    pub(crate) fn new(provider: &str) -> Self {
+    pub fn new(provider: &str) -> Self {
         let provider = provider.trim().to_ascii_lowercase();
         if !provider.is_empty() {
             let mut providers = GATEWAY_WAITER_PROVIDERS
@@ -84,7 +84,7 @@ impl GatewayWaiterGuard {
         }
     }
 
-    pub(crate) fn cancellation(&self) -> GatewayWaiterCancellation {
+    pub fn cancellation(&self) -> GatewayWaiterCancellation {
         GatewayWaiterCancellation(std::sync::Arc::downgrade(&self.state))
     }
 }
@@ -128,7 +128,7 @@ fn active_gateway_waiter_providers() -> Vec<String> {
 /// A node that does not advertise this must never be yielded to: it is not
 /// contending for the lease, so handing the gateway over would leave Discord
 /// unserved.
-pub(crate) fn node_awaits_gateway(node: &Value, provider: &str) -> bool {
+pub fn node_awaits_gateway(node: &Value, provider: &str) -> bool {
     let provider = provider.trim().to_ascii_lowercase();
     if provider.is_empty() {
         return false;
@@ -146,7 +146,7 @@ pub(crate) fn node_awaits_gateway(node: &Value, provider: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub(crate) fn capabilities_with_runtime_state(base: &Value) -> Value {
+pub fn capabilities_with_runtime_state(base: &Value) -> Value {
     let mut capabilities = base.as_object().cloned().unwrap_or_default();
     super::readiness::publish(&mut capabilities);
     super::machine_resources::publish(&mut capabilities);
@@ -210,14 +210,14 @@ pub(crate) fn capabilities_with_runtime_state(base: &Value) -> Value {
     Value::Object(capabilities)
 }
 
-pub(crate) fn node_supports_intake_provider(node: &Value, provider: &str) -> bool {
+pub fn node_supports_intake_provider(node: &Value, provider: &str) -> bool {
     node_intake_worker(node, provider).is_some()
 }
 
 /// Returns whether a worker can safely consume this request's protocol shape.
 /// Legacy provider-capable workers remain eligible for non-preserving requests,
 /// while preserving requests require an explicit versioned feature advertisement.
-pub(crate) fn node_supports_intake_request(
+pub fn node_supports_intake_request(
     node: &Value,
     provider: &str,
     preserve_on_cancel: bool,
@@ -331,7 +331,7 @@ mod tests {
     }
 }
 
-pub(crate) async fn refresh_worker_node_runtime_capabilities(
+pub async fn refresh_worker_node_runtime_capabilities(
     pool: &PgPool,
     instance_id: &str,
 ) -> Result<(), String> {

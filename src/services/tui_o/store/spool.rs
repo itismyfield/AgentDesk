@@ -23,7 +23,7 @@ pub const SEGMENT_MAX_BYTES: u64 = 64 << 20;
 /// Per-channel spool ceiling; reaching it pauses the source instead of dropping records.
 pub const SPOOL_CAP_BYTES: u64 = 1 << 30;
 /// Replay keeps each segment's body-selection version; new appends roll forward to current rules.
-pub(crate) const READABLE_IDENTITY_VERSIONS: [u32; 7] = [2, 3, 4, 5, 6, 7, 8];
+pub const READABLE_IDENTITY_VERSIONS: [u32; 7] = [2, 3, 4, 5, 6, 7, 8];
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cursor {
@@ -446,12 +446,6 @@ impl ChannelStore {
     pub fn retained_segments(&self, source: &SourceId) -> usize {
         let spool = self.sources.get(&source_key(source));
         spool.map_or(0, |spool| spool.segments.len())
-    }
-
-    /// Where the oldest retained segment of `source` ends.
-    pub fn oldest_segment_end(&self, source: &SourceId) -> Option<u64> {
-        let spool = self.sources.get(&source_key(source))?;
-        spool.segments.first().map(|segment| segment.end)
     }
 
     pub fn spool_bytes(&self) -> u64 {

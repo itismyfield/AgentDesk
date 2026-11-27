@@ -46,7 +46,7 @@ fn resumed_session(
 
 /// The launch and attach of a turn's source, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launched_source_for_test(
+pub fn launched_source_for_test(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,
@@ -126,6 +126,10 @@ pub(super) fn launched_source(
         }
     };
     let prepare = |prepared: &PreparedIncarnation| {
+        // A greeting's own execution is known before its Pending row or pane can exist.
+        let nonce = &prepared.context.execution_nonce;
+        crate::services::claude_tui::owner_input::record_successor(nonce)
+            .map_err(|e| launch_error("prepare_command", e))?;
         let (system, model) = (turn.system_prompt, turn.model);
         let (session, hooks) = (session_id.as_str(), hook_endpoint.clone());
         let command = super::super::tui_session_launch::prepare_claude_herdr_launch(

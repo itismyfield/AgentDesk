@@ -15,7 +15,7 @@ pub(in crate::services::discord) mod draft_release_watch;
 #[cfg(test)]
 mod hold_release_tests;
 mod inflight_row;
-mod policy;
+pub(in crate::services::discord) mod policy;
 pub(crate) use inflight_row::FollowupRetryRow;
 pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};
@@ -52,6 +52,17 @@ fn input_file_path_in_root(
     root.join(provider.as_str())
         .join(channel_id.to_string())
         .join(format!("{user_msg_id}.json"))
+}
+
+/// `input_file_path_in_root` for retry-store tests declared outside this module.
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) fn input_file_path_in_root_for_tests(
+    root: &Path,
+    provider: &ProviderKind,
+    channel_id: u64,
+    user_msg_id: u64,
+) -> PathBuf {
+    input_file_path_in_root(root, provider, channel_id, user_msg_id)
 }
 
 #[cfg(any(test, feature = "test-support"))]

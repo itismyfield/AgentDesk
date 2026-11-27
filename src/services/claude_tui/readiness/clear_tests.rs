@@ -2,22 +2,13 @@ use super::*;
 use crate::services::claude::herdr_turn::composer;
 use crate::services::claude_tui::host_input::{InputRefusal, InputRun};
 use crate::services::tui_prompt_dedupe::binding_events as events;
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::os::unix::fs::MetadataExt;
+#[cfg(test)]
 use std::rc::Rc;
 
-thread_local! {
-    static AFTER_RESERVE: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
-}
-pub(crate) fn after_reserve() {
-    if let Some(callback) = AFTER_RESERVE.with(|slot| slot.take()) {
-        callback();
-    }
-}
-
-pub(crate) fn after_next_reserve(callback: impl FnOnce() + 'static) {
-    AFTER_RESERVE.with(|slot| *slot.borrow_mut() = Some(Box::new(callback)));
-}
+#[cfg(test)]
+use super::super::test_support::AFTER_RESERVE;
 
 struct ClearRig {
     rig: Rig,

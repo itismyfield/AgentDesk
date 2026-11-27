@@ -1,21 +1,32 @@
+#[cfg(test)]
+use super::test_support::forget_session;
+pub use super::test_support::{after_first_look, daemon_restart};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+#[cfg(test)]
 use crate::services::claude_tui::hook_server;
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(test)]
 use std::time::Duration;
 
-pub(crate) struct Rig {
+pub struct Rig {
     _dir: tempfile::TempDir,
-    pub(crate) session: String,
-    pub(crate) path: PathBuf,
-    pub(crate) root: PathBuf,
-    pub(crate) ctx: BindingContext,
+    pub session: String,
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub ctx: BindingContext,
 }
+impl Default for Rig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Rig {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::for_channel(None)
     }
     fn for_channel(channel: Option<u64>) -> Self {
@@ -82,11 +93,11 @@ impl Rig {
         )
         .unwrap();
     }
-    pub(crate) fn assistant(&self, text: &str) {
+    pub fn assistant(&self, text: &str) {
         self.append(json!({"type":"assistant","timestamp":Utc::now(),
             "message":{"role":"assistant","content":[{"type":"text","text":text}]}}));
     }
-    pub(crate) fn terminal(&self) {
+    pub fn terminal(&self) {
         self.append(json!({"type":"system","subtype":"turn_duration"}));
     }
     fn hook(&self, source: &str) {
@@ -100,10 +111,10 @@ impl Rig {
             false,
         );
     }
-    pub(crate) fn ready(&self) -> bool {
+    pub fn ready(&self) -> bool {
         observe(&self.session, Some(&self.path)).is_some()
     }
-    pub(crate) fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
+    pub fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
         super::super::input::send_warm_followup_owned(&self.session, "one original", None)
     }
 }
@@ -111,6 +122,7 @@ impl Rig {
 #[cfg(unix)]
 #[path = "clear_tests.rs"]
 pub(crate) mod clear_tests;
+#[cfg(test)]
 #[path = "idle_compaction_tests.rs"]
 mod idle_compaction_tests;
 #[path = "restart_tests.rs"]
@@ -398,36 +410,6 @@ fn subagent_stop_and_reentrant_stop_cannot_clear_root_continuation() {
     assert!(r.ready());
 }
 
-thread_local! {
-    static SOURCES: std::cell::RefCell<Vec<tempfile::TempDir>> = const { std::cell::RefCell::new(Vec::new()) };
-}
-/// Existing submission fixtures exercise keys and custody over a completed source.
-pub(crate) fn idle_fixture(session: &str) {
-    if Source::current(session, None).is_some_and(|source| source.path.exists()) {
-        return;
-    }
-    ledger()
-        .entries
-        .retain(|source, _| source.session != session);
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("fixture.jsonl");
-    fs::write(
-        &path,
-        "{\"type\":\"system\",\"subtype\":\"turn_duration\"}\n",
-    )
-    .unwrap();
-    ledger().entries.insert(
-        Source {
-            session: session.into(),
-            nonce: source::nonce(session).flatten(),
-            native: "fixture".into(),
-            path,
-        },
-        Entry::default(),
-    );
-    SOURCES.with(|sources| sources.borrow_mut().push(dir));
-}
-
 #[test]
 fn restored_history_needs_new_activity_and_summary_needs_a_matching_stop() {
     let _root = crate::config::TestRuntimeRootGuard::new();
@@ -607,24 +589,6 @@ fn a_timed_out_hold_tells_an_unmoved_idle_source_from_a_running_turn() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
-/// Runs `act` once the wait on `session` made its first look. That look creates the ledger entry
-/// after the wait kept its Stamp, so `act` lands inside the wait without a hook in the wait.
-pub(crate) fn after_first_look(
-    session: &str,
-    act: impl FnOnce() + Send + 'static,
-) -> std::thread::JoinHandle<()> {
-    assert_eq!(retained_sources(session), 0, "no look precedes the wait");
-    let session = session.to_owned();
-    std::thread::spawn(move || {
-        let until = std::time::Instant::now() + Duration::from_secs(30);
-        while retained_sources(&session) == 0 {
-            assert!(std::time::Instant::now() < until, "the wait never looked");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        act();
-    })
-}
-
 // Evidence inside a window delivers the waiting input; Cancel ends the wait even when no
 // SessionStart follows, before submission can recheck the token.
 #[cfg(unix)]
@@ -700,11 +664,13 @@ fn evidence_that_lands_inside_a_window_delivers_the_waiting_input() {
     }
 }
 
+#[cfg(test)]
 /// The end of a turn as Claude writes it: the answer, each Stop hook output, the summary, the
 /// duration. `stops` are `(command, stdout)` pairs sharing the summary's tool use id.
 fn ended_turn(r: &Rig, answered: DateTime<Utc>, stops: &[(String, &str)], summary: Value) {
     ended_turn_as(r, answered, stops, summary, &|_, id| json!(id));
 }
+#[cfg(test)]
 /// `link` maps each Stop output's index and the summary's tool use id to the output's id; null drops it.
 fn ended_turn_as(
     r: &Rig,
@@ -732,15 +698,18 @@ fn ended_turn_as(
     summary["timestamp"] = json!(Utc::now());
     r.append(summary);
 }
+#[cfg(test)]
 fn relay(r: &Rig) -> String {
     let native = r.ctx.expected_native_session_id.as_deref().unwrap();
     format!(
         "/bin/agentdesk claude-hook-relay --endpoint http://127.0.0.1:8791 --provider claude --event Stop --session-id {native}"
     )
 }
+#[cfg(test)]
 fn quiet_summary() -> Value {
     json!({"hookCount":3,"hookErrors":[],"hookAdditionalContext":[],"preventedContinuation":false,"stopReason":"","hasOutput":true})
 }
+#[cfg(test)]
 const QUIET: &str = "{\"suppressOutput\":true}\n";
 
 // After a restart only this run's turn closed by the relay's quiet Stop its summary names stands in
@@ -857,6 +826,7 @@ fn an_idle_session_closed_before_a_restart_takes_its_first_input_once() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|budget| budget.set(None));
 }
 
+#[cfg(test)]
 /// A Claude relaunched with `--resume` over `history`: its accepted SessionStart, then the resume's
 /// own metadata.
 fn resumed_over(history: &dyn Fn(&Rig)) -> Rig {
@@ -867,6 +837,7 @@ fn resumed_over(history: &dyn Fn(&Rig)) -> Rig {
     r.append(json!({"type":"tools-used"}));
     r
 }
+#[cfg(test)]
 fn old_history(r: &Rig, rows: &[Value]) {
     let old = Utc::now() - chrono::Duration::hours(1);
     for row in rows {
@@ -875,6 +846,7 @@ fn old_history(r: &Rig, rows: &[Value]) {
         r.append(row);
     }
 }
+#[cfg(test)]
 fn finished(r: &Rig) {
     old_history(
         r,
@@ -884,6 +856,7 @@ fn finished(r: &Rig) {
         ],
     );
 }
+#[cfg(test)]
 fn cut_short(r: &Rig) {
     old_history(
         r,
@@ -893,13 +866,16 @@ fn cut_short(r: &Rig) {
         ],
     );
 }
+#[cfg(test)]
 fn permission_marked(r: &Rig) {
     cut_short(r);
     r.append(json!({"type":"permission-mode","permissionMode":"bypassPermissions"}));
 }
+#[cfg(test)]
 fn typed(r: &Rig) {
     r.append(json!({"type":"user","timestamp":Utc::now(),"message":{"role":"user","content":"typed in the pane"}}));
 }
+#[cfg(test)]
 fn marked(r: &Rig) {
     r.append(json!({"type":"permission-mode","permissionMode":"default"}));
 }
@@ -1049,42 +1025,6 @@ fn an_unrecorded_resume_start_keeps_the_restart_floor_without_refusing_its_hook(
     );
     daemon_restart(&r.session);
     assert!(r.ready(), "a published record is whole");
-}
-
-/// A resume accepted before start records existed: its restart finds no record to restore from.
-pub(crate) fn lose_resume_record(nonce: &str) {
-    fs::remove_file(resume_record::record_path(nonce).unwrap()).unwrap();
-}
-
-/// A daemon restart: the ledger forgets `session`, while its files, markers and launch remain.
-pub(crate) fn daemon_restart(session: &str) {
-    let mut state = ledger();
-    state.entries.retain(|source, _| source.session != session);
-    state.starts.retain(|(started, _), _| started != session);
-}
-
-#[cfg(unix)]
-pub(crate) fn fresh_fixture(session: &str) {
-    if let Some(path) = super::super::guarded_outcome::fresh_source_for_tests() {
-        pre_source(session, Path::new(&path));
-    }
-}
-
-pub(crate) fn pre_source(session: &str, path: &Path) {
-    let source = Source::current(session, Some(path)).unwrap_or_else(|| Source {
-        session: session.into(),
-        nonce: source::nonce(session).flatten(),
-        native: path.file_stem().unwrap().to_string_lossy().into_owned(),
-        path: path.into(),
-    });
-    let mut state = ledger();
-    state
-        .entries
-        .retain(|old, _| old.session != session || old == &source);
-    state.entries.entry(source).or_insert_with(|| Entry {
-        start: true,
-        ..Entry::default()
-    });
 }
 
 #[test]
@@ -1323,6 +1263,7 @@ fn permission_mode_is_a_barrier_until_later_completion_not_a_permanent_veto() {
     super::super::input::FOLLOWUP_TIMEOUT_FOR_TESTS.with(|b| b.set(None));
 }
 
+#[cfg(test)]
 #[cfg(unix)]
 fn shell_quote(path: &Path) -> String {
     format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
@@ -1489,38 +1430,7 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
-pub(crate) mod compact_tests;
-
-// A process restart forgets volatile readiness without deleting durable hook evidence.
-pub(crate) fn forget_session(session: &str) {
-    let mut state = ledger();
-    state.entries.retain(|source, _| source.session != session);
-    state.starts.retain(|(logical, _), _| logical != session);
-}
-
-// Reproduce the interval after durable certification and before volatile Start publication.
-pub(crate) fn restore_bound_start(session: &str, at: DateTime<Utc>) {
-    let binding = tui_prompt_dedupe::runtime_binding_for_tmux_session(session).unwrap();
-    let nonce = source::nonce(session).flatten().unwrap();
-    let bound = Source {
-        session: session.into(),
-        nonce: Some(nonce.clone()),
-        native: binding.session_id.unwrap(),
-        path: binding.output_path.into(),
-    };
-    let mut state = ledger();
-    state.entries.entry(bound.clone()).or_default();
-    state.starts.insert((session.into(), nonce), (at, bound));
-}
-
-pub(crate) fn retained_sources(session: &str) -> usize {
-    let nonce = source::nonce(session).flatten();
-    ledger()
-        .entries
-        .keys()
-        .filter(|source| source.session == session && source.nonce == nonce)
-        .count()
-}
+pub mod compact_tests;
 
 #[test]
 fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {

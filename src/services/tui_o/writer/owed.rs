@@ -273,10 +273,6 @@ fn unit_key(derived: &Derived) -> Option<&UnitKey> {
 /// Only a recorded Posted or a legitimate Excluded settles work; any other outcome is kept debt.
 pub(super) fn acked(ledger: &LedgerState, derived: &Derived) -> bool {
     match derived {
-        // An image marker only places the first attempt; the image selector owns the rest.
-        Derived::Piece(piece) if piece.unit_key.kind == UnitKind::ToolImage => {
-            (ledger.tool_images()).first_attempt_done(ledger, &piece.unit_key)
-        }
         Derived::Piece(piece) => {
             let latest = ledger.latest_piece(&piece.unit_key, piece.index);
             let posted =
@@ -385,6 +381,9 @@ pub(crate) fn protected(log: &OwedLog) -> HashSet<String> {
     }
     keys
 }
+
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod test_support;
 
 #[cfg(all(test, unix))]
 #[path = "owed_tests.rs"]

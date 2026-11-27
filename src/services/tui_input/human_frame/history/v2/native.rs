@@ -1,58 +1,58 @@
 //! Native input evidence stays attached to its original registration through projection.
 use super::*;
-pub(crate) use crate::domain::human_input::native_source::{Episode, Ticket};
+pub use crate::domain::human_input::native_source::{Episode, Ticket};
 #[cfg(unix)]
 #[path = "native_barrier.rs"]
 pub(crate) mod barrier;
 #[cfg(unix)]
 #[path = "native_control.rs"]
-pub(crate) mod control;
+pub mod control;
 #[cfg(unix)]
 #[path = "native_receipt.rs"]
 mod receipt;
 
 #[cfg(unix)]
 #[derive(Clone, serde::Serialize)]
-pub(crate) struct EvidenceRegistration {
-    pub(crate) namespace: String,
-    pub(crate) ticket: Ticket,
-    pub(crate) frame_hash: String,
+pub struct EvidenceRegistration {
+    pub namespace: String,
+    pub ticket: Ticket,
+    pub frame_hash: String,
     #[serde(skip)]
-    pub(crate) exact_frame_hash: String,
-    pub(crate) receipts: Vec<String>,
+    pub exact_frame_hash: String,
+    pub receipts: Vec<String>,
     #[serde(skip)]
-    pub(crate) candidate: bool,
+    pub candidate: bool,
+    #[serde(skip)]
+    pub not_sent: bool,
     /// The unsettled registration's stored barrier, read-only input to a supersession candidate.
     #[serde(skip)]
-    pub(crate) barrier: Option<barrier::Barrier>,
+    pub barrier: Option<barrier::Barrier>,
 }
 
 #[cfg(unix)]
-pub(crate) fn registrations_fingerprint(
-    registrations: &[EvidenceRegistration],
-) -> Result<String, String> {
+pub fn registrations_fingerprint(registrations: &[EvidenceRegistration]) -> Result<String, String> {
     serde_json::to_vec(registrations)
         .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
         .map_err(|e| e.to_string())
 }
 
 #[cfg(unix)]
-pub(crate) fn frame_hashes(text: &str) -> Vec<String> {
+pub fn frame_hashes(text: &str) -> Vec<String> {
     super::super::class_hashes(text)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Intent {
+pub enum Intent {
     Primary(Episode),
     Follower,
 }
 
 impl Intent {
-    pub(crate) fn attribution(&self, sources: &[String]) -> serde_json::Value {
+    pub fn attribution(&self, sources: &[String]) -> serde_json::Value {
         serde_json::json!({"sources": sources, "native_intent": self})
     }
 
-    pub(crate) fn episode(&self, primary: u64) -> Result<Option<Episode>, String> {
+    pub fn episode(&self, primary: u64) -> Result<Option<Episode>, String> {
         match self {
             Self::Primary(episode)
                 if episode.user_message_id != primary
@@ -70,7 +70,7 @@ impl Intent {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum Disposition {
+pub enum Disposition {
     Executed,
     WithdrawnNotExecuted,
     TransferredUnverified,
@@ -79,25 +79,25 @@ pub(crate) enum Disposition {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Outcome {
-    pub(crate) disposition: Disposition,
-    pub(crate) range: Option<[u64; 2]>,
+pub struct Outcome {
+    pub disposition: Disposition,
+    pub range: Option<[u64; 2]>,
     #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct Settlement {
-    pub(crate) ticket: Ticket,
-    pub(crate) outcome: Option<Outcome>,
+pub struct Settlement {
+    pub ticket: Ticket,
+    pub outcome: Option<Outcome>,
     #[serde(default)]
-    pub(crate) withdrawal_notice: bool,
+    pub withdrawal_notice: bool,
     #[serde(default)]
-    pub(crate) cleanup_complete: bool,
+    pub cleanup_complete: bool,
     #[serde(default)]
     pub(crate) warned: bool,
     #[serde(flatten)]
-    pub(crate) extra: serde_json::Map<String, Value>,
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl Outcome {
@@ -115,6 +115,11 @@ impl Outcome {
 }
 
 impl Settlement {
+    #[cfg(unix)]
+    pub(super) fn not_sent(&self) -> bool {
+        self.extra.get("not_sent") == Some(&Value::Bool(true))
+    }
+
     #[cfg(unix)]
     pub(super) fn matches_key_witness(&self, captured: &Ticket) -> bool {
         let current = &self.ticket;
@@ -160,9 +165,9 @@ struct BootRecord<'a> {
 
 #[cfg(unix)]
 #[derive(Clone, Serialize, Deserialize)]
-pub(crate) struct RestoredRecord {
-    pub(crate) namespace: String,
-    pub(crate) settlement: Settlement,
+pub struct RestoredRecord {
+    pub namespace: String,
+    pub settlement: Settlement,
     registration: Registration,
     #[serde(default)]
     entry: Option<Entry>,
@@ -170,7 +175,7 @@ pub(crate) struct RestoredRecord {
 
 #[cfg(unix)]
 impl RestoredRecord {
-    pub(crate) fn decode(value: Value) -> Result<Self, String> {
+    pub fn decode(value: Value) -> Result<Self, String> {
         let record: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
         record.settlement.validate(&record.registration)?;
         if record.namespace.is_empty()
@@ -198,7 +203,7 @@ impl RestoredRecord {
 }
 
 /// Returns no work for historical envelopes; a v3 read must succeed before any boot deletion.
-pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, String> {
+pub fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, String> {
     let raw = match std::fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
@@ -250,9 +255,16 @@ pub(crate) fn boot_records(path: &Path, provider: &str) -> Result<Vec<Value>, St
 #[cfg(unix)]
 use super::read_stamp::evidence_registrations;
 
+#[cfg(unix)]
+pub struct ChannelClassification {
+    pub revision: u64,
+    pub has_open_barrier: bool,
+    pub registrations: Vec<EvidenceRegistration>,
+}
+
 impl Registry {
     #[cfg(unix)]
-    pub(crate) fn native_boot_record(
+    pub fn native_boot_record(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -279,7 +291,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn adopt_native_records(
+    pub fn adopt_native_records(
         &self,
         records: &[RestoredRecord],
     ) -> Result<Vec<RestoredRecord>, String> {
@@ -472,21 +484,46 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_evidence_registrations(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn native_evidence_registrations_for_test(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect_cache(|cache| cache.evidence(false))
+        self.native_evidence_registrations()
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_classification_registrations(
+    pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
-        self.inspect_cache(|cache| cache.evidence(true))
+        self.inspect_cache(|cache| cache.evidence(false, None))
+    }
+
+    #[cfg(unix)]
+    pub fn native_classification_registrations(&self) -> Result<Vec<EvidenceRegistration>, String> {
+        self.inspect_cache(|cache| cache.evidence(true, None))
+    }
+
+    #[cfg(unix)]
+    pub fn native_classification_revision(&self) -> Result<u64, String> {
+        self.inspect_cache(|cache| cache.revision())
+    }
+
+    #[cfg(unix)]
+    pub fn native_classification_for_channel(
+        &self,
+        channel: u64,
+    ) -> Result<ChannelClassification, String> {
+        self.inspect_cache(|cache| {
+            Ok(ChannelClassification {
+                revision: cache.revision()?,
+                has_open_barrier: cache.has_open_barrier(channel)?,
+                registrations: cache.evidence(true, Some(channel))?,
+            })
+        })
     }
 
     /// The cold effect calls this before arming only when its payload carries explicit intent.
-    pub(crate) fn prepare_native_intent(
+    pub fn prepare_native_intent(
         &self,
         namespace: &str,
         key: &Value,
@@ -510,15 +547,15 @@ impl Registry {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn prepare_native(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepare_native(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.native_transaction(namespace, &ticket.key, |registration| {
             prepare_ticket(registration, ticket)
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn record_native_outcome(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_native_outcome(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -544,7 +581,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn record_native_outcome_at_stamp(
+    pub fn record_native_outcome_at_stamp(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -561,6 +598,9 @@ impl Registry {
                     .ok_or("native ticket missing")?;
                 if current.ticket != *ticket {
                     return Err("native result ticket mismatch".into());
+                }
+                if current.not_sent() {
+                    return Err("native result follows confirmed NotSent".into());
                 }
                 let native = outcome.extra.contains_key("native_proof");
                 if native {
@@ -626,7 +666,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn ack_native_withdrawal_notice(
+    pub fn ack_native_withdrawal_notice(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -650,7 +690,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_ticket(&self, namespace: &str, key: &Value) -> Result<Ticket, String> {
+    pub fn native_ticket(&self, namespace: &str, key: &Value) -> Result<Ticket, String> {
         self.inspect(|snapshot| {
             let registration = snapshot
                 .live
@@ -675,11 +715,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn note_native_any_key(
-        &self,
-        namespace: &str,
-        ticket: &Ticket,
-    ) -> Result<(), String> {
+    pub fn note_native_any_key(&self, namespace: &str, ticket: &Ticket) -> Result<(), String> {
         self.native_transaction(namespace, &ticket.key, |registration| {
             let current = registration
                 .native_settlement
@@ -689,7 +725,7 @@ impl Registry {
             if !current.matches_key_witness(ticket) || current.outcome.is_some() {
                 return Err("native key receipt ticket mismatch".into());
             }
-            if current.extra.get("not_sent") == Some(&Value::Bool(true)) {
+            if current.not_sent() {
                 return Err("native key follows confirmed NotSent".into());
             }
             registration
@@ -703,7 +739,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn native_settlement(
+    pub fn native_settlement(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -735,7 +771,7 @@ impl Registry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn ack_native_cleanup(
+    pub fn ack_native_cleanup(
         &self,
         namespace: &str,
         ticket: &Ticket,
@@ -775,8 +811,7 @@ impl Registry {
         check: impl FnOnce(&Snapshot) -> Result<(), String>,
         apply: impl FnOnce(&mut Registration) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.transaction(|snapshot| {
-            check(snapshot)?;
+        self.transaction_checked(check, |snapshot| {
             let mut active = snapshot
                 .live
                 .iter_mut()
@@ -831,7 +866,7 @@ fn prepare_ticket(registration: &mut Registration, ticket: &Ticket) -> Result<()
 }
 
 #[cfg(unix)]
-pub(crate) fn scoped_ticket() -> Result<(Registry, String, Ticket), String> {
+pub fn scoped_ticket() -> Result<(Registry, String, Ticket), String> {
     let context = super::context().ok_or("native attempt scope missing")?;
     if context.receipt_only {
         return Err("native receipt scope cannot prepare input".into());

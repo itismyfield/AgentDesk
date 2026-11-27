@@ -28,7 +28,7 @@ async fn a2_fresh_hold_preserves_binding_through_no_init_and_notifies_once_pg() 
         relay_last_offset: None,
     };
     tui_prompt_dedupe::register_tmux_runtime_binding(&name, binding.clone());
-    crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+    crate::services::claude_tui::readiness::test_support::pre_source(&name, &transcript);
     crate::services::claude_tui::composer_lock::guard_draft(
         &name,
         crate::services::claude_tui::composer_lock::DraftGuard::RecoveryRequired,
@@ -374,7 +374,7 @@ async fn a2_uncertain_payload_keeps_the_binding_and_notice_without_resubmission_
     cap.fence().before_first_payload().unwrap();
     guarded_outcome::with_owner(Some(cap.observer()), || {
         guarded_outcome::SubmissionError::Held(
-            crate::services::claude_tui::input::PreparationHold::uncertain(
+            crate::services::claude_tui::input::PreparationHold::uncertain_for_test(
                 &name,
                 "uncertain ACK".into(),
             ),
@@ -541,7 +541,7 @@ async fn a2_cleanup_refusal_then_success_delivers_once_without_requeue() {
             relay_last_offset: None,
         },
     );
-    crate::services::claude_tui::readiness::tests::pre_source(&session, &path);
+    crate::services::claude_tui::readiness::test_support::pre_source(&session, &path);
     let view = crate::services::claude_tui::input::submission::tests::view;
     let empty = view("", false);
     let mut captures = std::collections::VecDeque::from([Some(view("person draft", false))]);
@@ -670,7 +670,10 @@ async fn a2_dispatch_settles_without_tui_receipt_but_completion_stays_gated() {
     inflight::save_inflight_state_create_new(&state.inflight_state).unwrap();
     let session = state.inflight_state.tmux_session_name.as_deref().unwrap();
     cap.observer().preparation_held(
-        &crate::services::claude_tui::input::PreparationHold::uncertain(session, "lost ACK".into()),
+        &crate::services::claude_tui::input::PreparationHold::uncertain_for_test(
+            session,
+            "lost ACK".into(),
+        ),
     );
     ctx.should_complete_work_dispatch_after_delivery = true;
     ctx.watcher_delivery_pin = None;

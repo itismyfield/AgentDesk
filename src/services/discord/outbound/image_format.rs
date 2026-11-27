@@ -1,10 +1,10 @@
 //! Image checks shared by scheduled-message uploads and tool-result images: MIME, size and magic.
 
 /// Largest decoded image either path accepts; the scheduled-message store checks the same bound.
-pub(crate) const MAX_IMAGE_BYTES: usize = crate::db::scheduled_messages::MAX_IMAGE_BYTES;
+pub const MAX_IMAGE_BYTES: usize = crate::db::scheduled_messages::MAX_IMAGE_BYTES;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Rejected {
+pub enum Rejected {
     /// Empty, or larger than `MAX_IMAGE_BYTES` once decoded.
     Size,
     /// The bytes do not open as the MIME says, or the MIME is not PNG, JPEG, GIF or WebP.
@@ -12,7 +12,7 @@ pub(crate) enum Rejected {
 }
 
 /// Whether `filename`'s extension names the lowercase `content_type`.
-pub(crate) fn extension_matches(filename: &str, content_type: &str) -> bool {
+pub fn extension_matches(filename: &str, content_type: &str) -> bool {
     let extension = filename
         .rsplit_once('.')
         .filter(|(stem, _)| !stem.is_empty())
@@ -29,12 +29,12 @@ pub(crate) fn extension_matches(filename: &str, content_type: &str) -> bool {
 }
 
 /// Whether base64 text of this length can decode within `MAX_IMAGE_BYTES`, checked before decoding.
-pub(crate) fn encoded_fits(encoded_len: usize) -> bool {
+pub fn encoded_fits(encoded_len: usize) -> bool {
     encoded_len <= MAX_IMAGE_BYTES.div_ceil(3) * 4
 }
 
 /// Decoded bytes against the lowercase `content_type`; tool images may carry no filename.
-pub(crate) fn check_bytes(content_type: &str, data: &[u8]) -> Result<(), Rejected> {
+pub fn check_bytes(content_type: &str, data: &[u8]) -> Result<(), Rejected> {
     if !(1..=MAX_IMAGE_BYTES).contains(&data.len()) {
         return Err(Rejected::Size);
     }

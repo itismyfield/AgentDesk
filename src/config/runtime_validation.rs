@@ -25,17 +25,16 @@ pub(super) fn validate(config: &Config) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+/// Fixtures KE·ROOT tests reuse once KRX is its own crate (KRX-TS): the removed-runtime message, the hosting
+/// reset guard and the config builders. The unit tests below keep their own cases.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use crate::config::{AgentChannel, AgentChannelConfig, AgentDef, Config, ProviderConfig};
-    use crate::services::provider::ProviderKind;
-    use crate::services::provider_hosting::{self, ProviderSessionDriver};
+    use crate::services::provider_hosting;
 
-    pub(crate) const REMOVED: &str =
-        "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
-    const ALIASES: &[&str] = &["claude-e", "claude_e", " ClAuDe-E ", "\tCLAUDE_E\t"];
+    pub const REMOVED: &str = "runtime 'claude-e' was removed — delete it from agentdesk.yaml";
 
-    pub(crate) struct ResetHosting;
+    pub struct ResetHosting;
 
     impl Drop for ResetHosting {
         fn drop(&mut self) {
@@ -43,7 +42,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
+    pub fn fixture(runtime: Option<&str>, channel: bool, provider: &str) -> Config {
         let mut config = Config::default();
         if channel {
             let mut agent: AgentDef = serde_yaml::from_str("id: fixture\nname: Fixture\n").unwrap();
@@ -67,7 +66,7 @@ pub(crate) mod tests {
         config
     }
 
-    pub(crate) fn write_config(path: &std::path::Path, config: &Config) {
+    pub fn write_config(path: &std::path::Path, config: &Config) {
         let mut yaml = serde_yaml::to_value(config).unwrap();
         // The config serializer omits targetless channel maps; validate their raw input too.
         for (index, agent) in config.agents.iter().enumerate() {
@@ -76,6 +75,16 @@ pub(crate) mod tests {
         }
         std::fs::write(path, serde_yaml::to_string(&yaml).unwrap()).unwrap();
     }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::test_support::{REMOVED, ResetHosting, fixture, write_config};
+    use crate::config::{AgentChannel, AgentChannelConfig, Config};
+    use crate::services::provider::ProviderKind;
+    use crate::services::provider_hosting::{self, ProviderSessionDriver};
+
+    const ALIASES: &[&str] = &["claude-e", "claude_e", " ClAuDe-E ", "\tCLAUDE_E\t"];
 
     // Observe the actual supported driver if strict loading silently accepts a removed alias.
     fn strict_rejection(config: &Config) {

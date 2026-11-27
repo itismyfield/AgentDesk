@@ -35,10 +35,10 @@ pub(super) fn position(
 
 type Board = Mutex<HashMap<u64, (u64, ChannelProgress)>>;
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static BOARD: std::sync::LazyLock<Board> = std::sync::LazyLock::new(Board::default);
 // Tests keep one board per thread so fixtures of parallel tests never meet.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BOARD: Board = Board::default();
 }
@@ -48,9 +48,9 @@ static NEXT_ACTOR: AtomicU64 = AtomicU64::new(1);
 fn with_board<R>(use_board: impl FnOnce(&mut HashMap<u64, (u64, ChannelProgress)>) -> R) -> R {
     let locked =
         |board: &Board| use_board(&mut board.lock().unwrap_or_else(PoisonError::into_inner));
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     return locked(&BOARD);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BOARD.with(locked)
 }
 
@@ -85,7 +85,7 @@ impl Drop for Publisher {
 }
 
 /// The position the running actor of `channel` last published; `None` when no actor runs.
-pub(crate) fn read(channel: u64) -> Option<ChannelProgress> {
+pub fn read(channel: u64) -> Option<ChannelProgress> {
     with_board(|board| board.get(&channel).map(|(_, progress)| *progress))
 }
 

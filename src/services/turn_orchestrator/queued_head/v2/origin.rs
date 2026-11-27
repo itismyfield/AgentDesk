@@ -147,7 +147,3 @@ pub(crate) fn waiting_origin(
     }
     Ok(None)
 }
-
-#[cfg(test)]
-#[path = "origin_tests.rs"]
-mod tests;

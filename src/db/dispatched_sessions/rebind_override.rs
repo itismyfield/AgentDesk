@@ -4,7 +4,7 @@ use sqlx::PgPool;
 /// the rest of the live session row. The `recorded_at` CASE is intentionally
 /// identical to `upsert_hook_session_pg`: repeated observations of the same
 /// selector do not extend the missing-transcript grace window.
-pub(crate) async fn upsert_rebind_session_override_pg(
+pub async fn upsert_rebind_session_override_pg(
     pool: &PgPool,
     session_key: &str,
     provider: &str,

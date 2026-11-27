@@ -13,7 +13,7 @@ use crate::domain::replay_evidence::recovery::root::{OwnedRuntimeRoot, issuer};
 pub(crate) mod issuer_key;
 
 #[cfg(unix)]
-pub(crate) struct Singleton {
+pub struct Singleton {
     file: Arc<File>,
     root: Option<PathBuf>,
 }
@@ -28,7 +28,7 @@ fn write_dcserver_lock_pid(mut file: &File) -> std::io::Result<()> {
 
 #[cfg(unix)]
 impl Singleton {
-    pub(crate) fn acquire(root: Option<&Path>) -> Result<Self, String> {
+    pub fn acquire(root: Option<&Path>) -> Result<Self, String> {
         use std::os::fd::AsRawFd;
         let path = root
             .map(|root| root.join("runtime/dcserver.lock"))
@@ -51,7 +51,7 @@ impl Singleton {
         })
     }
 
-    pub(crate) fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
+    pub fn recovery_root(&self) -> Option<OwnedRuntimeRoot> {
         Some(issuer::owned(
             issuer_key::SingletonRootKey(()),
             self.root.clone()?,
@@ -60,8 +60,8 @@ impl Singleton {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(crate) fn acquire_for_tests(root: &Path) -> Result<OwnedRuntimeRoot, String> {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn acquire_for_tests(root: &Path) -> Result<OwnedRuntimeRoot, String> {
     Singleton::acquire(Some(root))?
         .recovery_root()
         .ok_or_else(|| "root unavailable".into())

@@ -14,7 +14,7 @@ use super::clear_persist_failure_tests::{queue_len, seed_backlog, session_state}
 use crate::services::discord::host_defer_gate::tests::{map_channel, postgres};
 use crate::services::discord::{SharedData, make_shared_data_for_tests_with_storage};
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_o::store::{clear_end, codex_end};
 
 const OLD_SESSION: &str = "provider-session-before-clear";

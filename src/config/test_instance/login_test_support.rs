@@ -3,8 +3,8 @@
 
 use super::*;
 
-pub(crate) fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
-    let (temp, previous) = tests::fixture();
+pub fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let (temp, previous) = test_support::fixture();
     let home = temp.path().canonicalize().unwrap();
     let home = if quoted {
         home.join("login home 'active'")
@@ -53,7 +53,7 @@ pub(crate) fn claude_login_fixture(quoted: bool) -> (tempfile::TempDir, PathBuf,
     (temp, root, home)
 }
 
-pub(crate) fn bind_claude_login(root: &Path, home: &Path) {
+pub fn bind_claude_login(root: &Path, home: &Path) {
     let login = serde_json::json!({"mode":"default_active","account_slot":3,
         "login_home":home,"config_dir":root.join("home/.adk/profiles/claude/test-claude"),"cli":home.join(".local/bin/claude")});
     for name in ["manifest.json", "receipt.json"] {
@@ -69,7 +69,7 @@ pub(crate) fn bind_claude_login(root: &Path, home: &Path) {
     std::fs::write(path, org.to_string()).unwrap();
 }
 
-pub(crate) fn review_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub fn review_fixture() -> (tempfile::TempDir, PathBuf, PathBuf) {
     let (temp, root, home) = claude_login_fixture(true);
     bind_claude_login(&root, &home);
     let sentinel = root.join("runtime/provider-started");

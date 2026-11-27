@@ -32,7 +32,7 @@ use crate::services::session_host::model::HostMutation;
 
 /// What serves an endpoint now, against the server a nonce's grant admitted.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum GrantedServer {
+pub enum GrantedServer {
     /// The granted server answers, or no grant names one.
     Kept,
     /// No server answered.
@@ -43,16 +43,19 @@ pub(crate) enum GrantedServer {
 /// Another server than the granted one answers; `startup` says `observe_policy` proved its policy
 /// from its start.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ReplacedServer {
+pub struct ReplacedServer {
+    #[cfg(any(test, feature = "test-support"))]
+    pub current: ServerWitness,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) current: ServerWitness,
-    pub(crate) startup: bool,
+    pub startup: bool,
 }
 
-pub(crate) struct SocketHerdrLaunchHost {
+pub struct SocketHerdrLaunchHost {
     endpoints: Vec<(HerdrEndpoint, Arc<HerdrSocketTransport>)>,
     policy: ProofCache,
     sources: Vec<Arc<dyn PeerSource>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     checker: Option<Arc<dyn super::policy::ConfigChecker>>,
     witnessed: Mutex<HashMap<HerdrLaunchEndpoint, ServerWitness>>,
     prepared_existing: tokio::sync::Mutex<HashMap<HerdrLaunchEndpoint, PreparedPolicy>>,
@@ -197,7 +200,7 @@ pub(crate) fn accepting_pid(socket: &Path, wait: Duration) -> Option<u32> {
 
 impl SocketHerdrLaunchHost {
     /// No I/O: every call dials its own connection.
-    pub(crate) fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
+    pub fn new(endpoints: Vec<HerdrEndpoint>, config: HerdrSocketConfig) -> Self {
         let endpoints = endpoints
             .into_iter()
             .map(|endpoint| {
@@ -215,7 +218,7 @@ impl SocketHerdrLaunchHost {
             endpoints,
             policy: ProofCache::default(),
             sources,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             checker: None,
             witnessed: Mutex::default(),
             prepared_existing: tokio::sync::Mutex::default(),
@@ -245,7 +248,7 @@ impl SocketHerdrLaunchHost {
 
     /// The current next-restart policy of `launch`'s server, recorded for health and remembered
     /// as the witness later mutations of this endpoint compare against.
-    pub(crate) async fn observe_policy(
+    pub async fn observe_policy(
         &self,
         launch: &HerdrLaunchEndpoint,
     ) -> Result<super::policy::NextRestartProof, String> {
@@ -255,7 +258,7 @@ impl SocketHerdrLaunchHost {
     }
 
     /// `observe_policy` through `source`, with the health observation it recorded.
-    pub(crate) async fn observe_policy_from(
+    pub async fn observe_policy_from(
         &self,
         launch: &HerdrLaunchEndpoint,
         source: Arc<dyn PeerSource>,
@@ -264,7 +267,7 @@ impl SocketHerdrLaunchHost {
         serde_json::Value,
     ) {
         let checker: &dyn super::policy::ConfigChecker = &LocalChecker;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let checker = self.checker.as_deref().unwrap_or(checker);
         let mut checked = self.policy.next_restart(source, checker).await;
         if let Ok(proof) = &checked {
@@ -280,7 +283,7 @@ impl SocketHerdrLaunchHost {
 
     /// Remember settled admission observations per server/config incarnation; strict targets
     /// still decide whether the observation actually proved this server's startup policy.
-    pub(crate) async fn prepare_existing_policy(
+    pub async fn prepare_existing_policy(
         &self,
         launch: &HerdrLaunchEndpoint,
         nonce: &str,
@@ -378,11 +381,17 @@ impl SocketHerdrLaunchHost {
             .cloned()
     }
 
-    pub(crate) fn consent_source(
-        &self,
-        endpoint: &HerdrLaunchEndpoint,
-    ) -> Option<Arc<dyn PeerSource>> {
+    pub fn consent_source(&self, endpoint: &HerdrLaunchEndpoint) -> Option<Arc<dyn PeerSource>> {
         self.source(endpoint)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mutation_evidence_for_test(
+        &self,
+        endpoint: &HerdrEndpoint,
+        nonce: &str,
+    ) -> Result<ExistingMutationEvidence, Unverified> {
+        self.mutation_evidence(endpoint, nonce)
     }
 
     pub(crate) fn mutation_evidence(
@@ -419,11 +428,7 @@ impl SocketHerdrLaunchHost {
     }
 
     /// The server on `launch` against the one `nonce`'s grant admitted; reads no policy.
-    pub(crate) fn granted_server(
-        &self,
-        launch: &HerdrLaunchEndpoint,
-        nonce: &str,
-    ) -> GrantedServer {
+    pub fn granted_server(&self, launch: &HerdrLaunchEndpoint, nonce: &str) -> GrantedServer {
         let Some((endpoint, transport)) = self.endpoint(launch) else {
             return GrantedServer::Kept;
         };
@@ -446,14 +451,14 @@ impl SocketHerdrLaunchHost {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_policy_source_for_test(mut self, source: Arc<dyn PeerSource>) -> Self {
         self.sources = vec![source];
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_policy_checker_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_policy_checker_for_test(
         mut self,
         checker: Arc<dyn super::policy::ConfigChecker>,
     ) -> Self {
@@ -461,22 +466,22 @@ impl SocketHerdrLaunchHost {
         self
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn with_transport_for_test(mut self, transport: Arc<HerdrSocketTransport>) -> Self {
         self.endpoints[0].1 = transport;
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn poison_grants_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn poison_grants_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.grants.lock().unwrap();
             panic!("injected grant cache failure");
         }));
     }
 
-    #[cfg(test)]
-    pub(crate) fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
         self.witnessed.lock().unwrap().insert(
             HerdrLaunchEndpoint {
                 execution_node: endpoint.execution_node().into(),
@@ -487,21 +492,21 @@ impl SocketHerdrLaunchHost {
             witness,
         );
     }
-    #[cfg(test)]
-    pub(crate) fn poison_witnessed_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn poison_witnessed_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.witnessed.lock().unwrap();
             panic!("injected witnessed cache failure");
         }));
     }
-    #[cfg(test)]
-    pub(crate) fn poison_proof_for_test(&self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn poison_proof_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.policy.poison_for_test()
         }));
     }
-    #[cfg(test)]
-    pub(crate) fn with_prepared_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_prepared_for_test(
         mut self,
         prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
     ) -> Self {
@@ -511,15 +516,15 @@ impl SocketHerdrLaunchHost {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_restored_for_test(mut self, restored: GrantRestoration) -> Self {
         self.grants = Mutex::new(GrantCache::restored(Ok(restored)));
         self
     }
 
     /// Test seam: replaces the E7 read every endpoint check goes through.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_read_restore_for_test(
+    pub fn set_read_restore_for_test(
         &mut self,
         read: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     ) {
@@ -528,31 +533,26 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: replaces the process table and the provider window the pane probe reads.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_process_os_for_test(&mut self, os: Box<dyn ProcessOs>, window: Duration) {
+    pub fn set_process_os_for_test(&mut self, os: Box<dyn ProcessOs>, window: Duration) {
         self.os = os;
         self.provider_window = window;
     }
 
     /// Test seam: the transport of the endpoint at `index`.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn endpoint_transport_for_test(&self, index: usize) -> &Arc<HerdrSocketTransport> {
+    pub fn endpoint_transport_for_test(&self, index: usize) -> &Arc<HerdrSocketTransport> {
         &self.endpoints[index].1
     }
 
     /// Test seam: takes the last endpoint and its transport out of this host.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn pop_endpoint_for_test(
-        &mut self,
-    ) -> Option<(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
+    pub fn pop_endpoint_for_test(&mut self) -> Option<(HerdrEndpoint, Arc<HerdrSocketTransport>)> {
         self.endpoints.pop()
     }
 
     /// Test seam: a create that skips the launch admission, as an admitted create runs.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn create_eligible_for_test(
-        &self,
-        request: &HerdrCreateRequest,
-    ) -> HerdrCreateOutcome {
+    pub fn create_eligible_for_test(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.create_eligible(request)
     }
 
@@ -872,6 +872,11 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
     }
 }
 
-#[cfg(test)]
+/// The socket launch host the composed upper-crate scenarios script (KRX-TS).
+#[cfg(any(test, feature = "test-support"))]
+#[path = "launch_host_support.rs"]
+mod support;
+
+#[cfg(any(test, feature = "test-support"))]
 #[path = "launch_host_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

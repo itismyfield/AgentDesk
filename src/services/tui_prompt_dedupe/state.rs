@@ -147,8 +147,8 @@ pub(crate) fn assert_marker_publication_unlocked_for_tests() {
 }
 
 /// Test-only raw view of one tmux session's runtime-binding and channel entries; nothing is purged.
-#[cfg(all(test, unix))]
-pub(crate) fn with_tmux_entries_for_tests<R>(
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn with_tmux_entries_for_tests<R>(
     tmux_session_name: &str,
     edit: impl FnOnce(&mut Option<(TuiRuntimeBinding, Instant)>, &mut Option<(u64, Instant)>) -> R,
 ) -> R {
@@ -171,8 +171,8 @@ pub(crate) fn with_tmux_entries_for_tests<R>(
 }
 
 /// Test-only: ages every stamp past the session-mapping TTL and returns an already expired stamp.
-#[cfg(all(test, unix))]
-pub(crate) fn expired_session_mapping_stamp_for_tests() -> Instant {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn expired_session_mapping_stamp_for_tests() -> Instant {
     let past_ttl = SESSION_MAPPING_TTL + Duration::from_secs(1);
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     let _ = state.aged_stamp_for_tests(past_ttl);

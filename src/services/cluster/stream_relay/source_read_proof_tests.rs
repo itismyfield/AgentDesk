@@ -2,12 +2,12 @@ use super::*;
 use crate::services::tmux_common as tc;
 
 #[cfg(unix)]
-pub(crate) fn seal(session: &str, end: u64) -> (tempfile::TempDir, PrefixSeal) {
+pub fn seal(session: &str, end: u64) -> (tempfile::TempDir, PrefixSeal) {
     seal_with_frontier(session, end, (7, 0))
 }
 
 #[cfg(unix)]
-pub(crate) fn seal_with_frontier(
+pub fn seal_with_frontier(
     session: &str,
     end: u64,
     frontier: (i64, u64),
@@ -190,7 +190,7 @@ fn s2a1_codex_marker_only_mutation_invalidates_before_publication() {
 }
 
 #[cfg(unix)]
-pub(crate) fn prefix(seal: &PrefixSeal, end: u64) -> PrefixSeal {
+pub fn prefix(seal: &PrefixSeal, end: u64) -> PrefixSeal {
     let version = ReadVersion::from_fd(&seal.file).expect("version");
     SourceReadProof::capture(
         seal.file.clone(),
@@ -207,7 +207,7 @@ pub(crate) fn prefix(seal: &PrefixSeal, end: u64) -> PrefixSeal {
 }
 
 #[cfg(unix)]
-pub(crate) fn exhaust_revision(session: &str) {
+pub fn exhaust_revision(session: &str) {
     let key = tc::with_tmux_source_authority(session, |authority| authority.pin())
         .expect("pin")
         .key;

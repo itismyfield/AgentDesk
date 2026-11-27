@@ -44,7 +44,7 @@ impl<I: HostIo> Hosted<'_, I> {
 
 impl Readiness {
     /// Ready channels considered by the periodic retention sweep.
-    pub(crate) fn transition_channels(&self) -> Vec<u64> {
+    pub fn transition_channels(&self) -> Vec<u64> {
         locked(&self.ready).iter().copied().collect()
     }
 
@@ -73,19 +73,19 @@ impl Readiness {
     }
 
     /// The running actor's port, while it takes work as `with_submission` checks it.
-    pub(crate) fn transition(&self, channel: u64) -> Option<TransitionPort> {
+    pub fn transition(&self, channel: u64) -> Option<TransitionPort> {
         self.with_transition(channel, false, |port| Ok(port.clone()))
             .ok()
     }
 
     /// Returns a live port for read-only diagnostics; requests still enforce suspension.
-    pub(crate) fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
+    pub fn observation_transition(&self, channel: u64) -> Option<TransitionPort> {
         self.with_transition(channel, true, |port| Ok(port.clone()))
             .ok()
     }
 
     /// Consumes `reply` only while the run `sent` named is still the channel's current one.
-    pub(crate) fn with_transition_reply<T>(
+    pub fn with_transition_reply<T>(
         &self,
         channel: u64,
         sent: &TransitionPort,
@@ -122,12 +122,12 @@ impl Readiness {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_support {
     use super::*;
 
     /// A channel [`Readiness::host_port_for_test`] registered; it leaves readiness on drop.
-    pub(crate) struct HostedForTest(Arc<Readiness>, u64);
+    pub struct HostedForTest(Arc<Readiness>, u64);
 
     impl Drop for HostedForTest {
         fn drop(&mut self) {
@@ -139,7 +139,7 @@ mod test_support {
     impl Readiness {
         /// Registers `port` for `channel` as a running run under `gate` would, readable while
         /// `resumed` holds and `stopping` does not.
-        pub(crate) fn host_port_for_test(
+        pub fn host_port_for_test(
             self: &Arc<Self>,
             channel: u64,
             gate: &Arc<OwnershipGate>,

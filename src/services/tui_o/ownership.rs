@@ -7,7 +7,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, TryLockError, Try
 
 use tokio::sync::watch;
 
-pub(crate) mod execution;
+pub mod execution;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatewayOwnership {
@@ -22,7 +22,7 @@ pub enum GatewayOwnership {
 }
 
 impl GatewayOwnership {
-    pub(crate) fn epoch(self) -> Option<u64> {
+    pub fn epoch(self) -> Option<u64> {
         match self {
             Self::Owned { epoch } | Self::ExecutionOwned { epoch, .. } => Some(epoch),
             Self::Unknown | Self::Lost => None,
@@ -90,8 +90,8 @@ impl OwnershipGate {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn locked_for_test(&self) -> bool {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)

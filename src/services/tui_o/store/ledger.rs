@@ -18,11 +18,12 @@ use crate::services::tui_o::shadow::{SourceId, UnitKey};
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 
 pub mod input_notices;
+mod reply_to;
 // Test seams for the ledger notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::{append_for_test, recover_for_test};
+pub use test_access::{append_for_test, recover_for_test};
 pub mod tool_images;
 #[cfg(test)]
 mod tool_images_tests;
@@ -61,6 +62,11 @@ pub enum LedgerEntry {
     OutputOrigin {
         serial: u64,
         artifact: crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+    },
+    /// Written before the POST once its anchor binding is durable; the serial replies to `anchor`.
+    ReplyTo {
+        serial: u64,
+        anchor: u64,
     },
     Prepared {
         serial: u64,
@@ -233,6 +239,7 @@ pub struct LedgerState {
     budget_roots: BTreeSet<u64>,
     output_origins:
         BTreeMap<u64, crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    reply_tos: BTreeMap<u64, u64>,
     latest: HashMap<(UnitKey, u32), u64>,
     excluded: BTreeMap<UnitKey, String>,
     gc: HashMap<SourceId, Vec<(u64, u64)>>,
@@ -251,6 +258,14 @@ impl LedgerState {
             floor: initial_anchor,
             ..Self::default()
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn output_origin_for_test(
+        &self,
+        serial: u64,
+    ) -> Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        self.output_origin(serial)
     }
 
     pub(crate) fn output_origin(
@@ -440,6 +455,11 @@ impl LedgerState {
         self.resolved.get(source).map(|(from, _)| *from)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn boundary_evidence_for_test(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
+        self.boundary_evidence(source)
+    }
+
     pub(crate) fn boundary_evidence(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
         self.resolved.get(source)?.1.as_deref()
     }
@@ -508,6 +528,7 @@ impl LedgerState {
                 }
                 self.exact_evidence.push(*metadata);
             }
+            LedgerEntry::ReplyTo { serial, anchor } => self.replay_reply_to(serial, anchor),
             LedgerEntry::OutputOrigin { serial, artifact } => {
                 if serial != self.next_serial
                     || self.open_serial.is_some()
@@ -574,7 +595,6 @@ impl LedgerState {
                     }
                 }
                 self.latest.insert((unit_key.clone(), piece_index), serial);
-                self.tool_images.note_attempt(&unit_key, serial);
                 let piece = PieceRecord {
                     unit_key,
                     piece_index,
@@ -595,14 +615,10 @@ impl LedgerState {
                 self.pieces.insert(serial, piece);
             }
             LedgerEntry::Posted { serial, msg_id, .. } => {
-                match tool_images::late_confirm(self, serial, msg_id) {
-                    tool_images::LateConfirm::Accept { anchor } => self.anchor = anchor,
-                    tool_images::LateConfirm::Reject(detail) => self.violate(detail),
-                    _ if msg_id > self.anchor => self.anchor = msg_id,
-                    _ if !self.reordered_post(msg_id) => {
-                        self.violate(format!("serial {serial} posted {msg_id} behind the anchor"))
-                    }
-                    tool_images::LateConfirm::Ordinary => {}
+                if msg_id > self.anchor {
+                    self.anchor = msg_id;
+                } else if !self.reordered_post(msg_id) {
+                    self.violate(format!("serial {serial} posted {msg_id} behind the anchor"));
                 }
                 self.posted.insert(msg_id);
                 self.resolve(serial, PieceOutcome::Posted(msg_id), at);
@@ -675,11 +691,7 @@ pub(super) fn create_empty(path: &Path) -> Result<(), StoreError> {
     Ok(fsync_parent_dir(path)?)
 }
 
-pub(super) fn append(
-    path: &Path,
-    at: DateTime<Utc>,
-    entry: &LedgerEntry,
-) -> Result<(), StoreError> {
+pub fn append(path: &Path, at: DateTime<Utc>, entry: &LedgerEntry) -> Result<(), StoreError> {
     Ok(super::durable::append_synced(path, &line(at, entry)?)?)
 }
 
@@ -773,7 +785,7 @@ impl Unsent {
 }
 
 /// Replays the ledger from `initial_anchor`; an unfinished last line is cut, any other bad line is damage.
-pub(super) fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
+pub fn recover(path: &Path, initial_anchor: u64) -> Result<LedgerState, StoreError> {
     recover_with_tail(path, initial_anchor, || {})
 }
 
@@ -825,13 +837,13 @@ fn replay(
                 return Ok((state, false));
             };
             if withdrawable(&state, &last.entry, unsent) {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::Cut)?;
                 reader.get_ref().set_len(start)?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::strike(path, super::durable::fault::Step::CutSync)?;
                 reader.get_ref().sync_all()?;
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::durable::fault::note_withdrawn(path);
                 return Ok((state, true));
             }

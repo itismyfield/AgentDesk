@@ -271,7 +271,7 @@ impl IntakeRig {
             },
         );
         if !codex {
-            crate::services::claude_tui::readiness::tests::pre_source(&name, &transcript);
+            crate::services::claude_tui::readiness::test_support::pre_source(&name, &transcript);
         }
         discord::host_defer_gate::tests::map_channel(&shared, channel, &label).await;
         {
@@ -392,7 +392,7 @@ impl IntakeRig {
                 relay_last_offset: None,
             },
         );
-        crate::services::claude_tui::readiness::tests::pre_source(&name, &self.transcript);
+        crate::services::claude_tui::readiness::test_support::pre_source(&name, &self.transcript);
     }
 
     async fn state(&self) -> Value {

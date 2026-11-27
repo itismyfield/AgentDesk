@@ -27,7 +27,7 @@ mod details {
     use super::ReplaySummary;
 
     #[derive(Clone, Debug, Default)]
-    pub(crate) struct Details {
+    pub struct Details {
         pub records: u64,
         pub done: u64,
         pub prepared: u64,
@@ -40,7 +40,7 @@ mod details {
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) use details::Details;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use details::Details;
+pub use details::Details;
 
 impl Trace {
     pub(super) fn new(
@@ -182,7 +182,7 @@ impl Trace {
             deferred = details.replay.deferred,
             "[tui_o] writer boot stage"
         );
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         EVENTS.with_borrow_mut(|events| {
             if let Some(events) = events {
                 events.push(Event {
@@ -232,26 +232,26 @@ impl Drop for Phase {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
-pub(crate) struct Event {
+pub struct Event {
     pub channel: u64,
     pub stage: &'static str,
     pub status: &'static str,
     pub details: Details,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static EVENTS: std::cell::RefCell<Option<Vec<Event>>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
-pub(crate) fn capture() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn capture() {
     EVENTS.with_borrow_mut(|events| *events = Some(Vec::new()));
 }
 
-#[cfg(test)]
-pub(crate) fn events() -> Vec<Event> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn events() -> Vec<Event> {
     EVENTS.with_borrow(|events| events.clone().unwrap_or_default())
 }

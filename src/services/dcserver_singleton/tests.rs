@@ -19,7 +19,7 @@ fn p5_singleton_requires_exclusive_ownership_across_processes() {
         module_path!(),
         "::p5_singleton_requires_exclusive_ownership_across_processes"
     )
-    .strip_prefix("agentdesk::")
+    .strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
     .unwrap();
     let peer = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", name, "--nocapture"])

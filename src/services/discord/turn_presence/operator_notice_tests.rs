@@ -41,7 +41,7 @@ pub(crate) fn restart_for_test(notice: &OperatorNotice) -> bool {
 fn notice(root: &Path, home: &str, channel: u64) -> OperatorNotice {
     OperatorNotice {
         root: Some(root.to_path_buf()),
-        ..OperatorNotice::herdr_home("notice-node", &PathBuf::from(home), channel)
+        ..OperatorNotice::herdr_home_for_test("notice-node", &PathBuf::from(home), channel)
     }
 }
 

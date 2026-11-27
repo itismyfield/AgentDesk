@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::Notify;
 
-pub(crate) fn recovery_wakeup(provider: &ProviderKind) -> Arc<Notify> {
+pub fn recovery_wakeup(provider: &ProviderKind) -> Arc<Notify> {
     static WAKEUPS: OnceLock<Mutex<HashMap<String, Arc<Notify>>>> = OnceLock::new();
     super::durable::lock(WAKEUPS.get_or_init(Mutex::default))
         .entry(provider.as_str().to_string())

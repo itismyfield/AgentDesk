@@ -15,7 +15,7 @@ pub(super) struct Directory {
 }
 
 fn root() -> std::io::Result<PathBuf> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         static ROOT: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
         return Ok(ROOT
@@ -23,7 +23,7 @@ fn root() -> std::io::Result<PathBuf> {
             .path()
             .to_path_buf());
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     crate::config::runtime_root()
         .map(|root| root.join("runtime").join("portable_attachments"))
         .ok_or_else(|| std::io::Error::other("runtime root unavailable"))

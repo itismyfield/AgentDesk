@@ -6,7 +6,7 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 #[allow(unused_imports)]
-pub(crate) use crate::services::git::{
+pub use crate::services::git::{
     ManagedWorktreeCleanup, cleanup_managed_worktree, find_latest_commit_for_issue,
     find_worktree_for_issue, git_best_commit_for_dispatch, git_branch_containing_commit,
     git_branch_name, git_dispatch_baseline_commit, git_head_commit, git_latest_commit_for_issue,
@@ -20,7 +20,7 @@ pub(crate) use crate::services::git::{
 ///
 /// Equivalent to `hostname -s` on Unix. Falls back to "localhost" on failure.
 pub fn hostname_short() -> String {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(host) = TEST_HOSTNAME.with(|slot| slot.borrow().clone()) {
         return host;
     }
@@ -211,13 +211,13 @@ mod hostname_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static TEST_HOSTNAME: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
-pub(crate) fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_hostname_for_test<R>(hostname: &str, run: impl FnOnce() -> R) -> R {
     struct Reset(Option<String>);
     impl Drop for Reset {
         fn drop(&mut self) {

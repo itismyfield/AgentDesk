@@ -209,10 +209,10 @@ impl CodexTransport for TmuxCodexInput {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type Injected = (Box<dyn CodexTransport>, Box<dyn MutationGate>);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static INJECTED: std::cell::RefCell<Option<Injected>> = const { std::cell::RefCell::new(None) };
 }
@@ -225,7 +225,7 @@ fn with_legacy_using<R>(
     default_transport: &mut dyn CodexTransport,
     operation: impl FnOnce(&mut dyn CodexTransport, &dyn MutationGate) -> R,
 ) -> R {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some((mut transport, gate)) = INJECTED.with(|slot| slot.borrow_mut().take()) {
         let result = operation(transport.as_mut(), gate.as_ref());
         INJECTED.with(|slot| *slot.borrow_mut() = Some((transport, gate)));
@@ -764,8 +764,8 @@ impl<E: TuiActionExecutor> CodexWrites for ExecutorWrites<'_, E> {
 }
 
 /// Recording transport and gate the Codex TUI tests install in place of tmux.
-#[cfg(test)]
-pub(crate) mod spy {
+#[cfg(any(test, feature = "test-support"))]
+pub mod spy {
     use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::rc::Rc;
@@ -778,7 +778,7 @@ pub(crate) mod spy {
         tmux_key_name,
     };
 
-    pub(crate) struct SpyState {
+    pub struct SpyState {
         pub calls: Vec<String>,
         /// Answer for the n-th send (load, literal, paste or keys), counted from 0.
         pub fail_send: Option<(usize, Result<Output, String>)>,
@@ -982,7 +982,7 @@ pub(crate) mod spy {
         }
     }
 
-    pub(crate) fn resolved(host: TargetHost) -> InputTarget {
+    pub fn resolved(host: TargetHost) -> InputTarget {
         InputTarget::from_session_target(&ResolvedSessionTarget {
             input: SessionTargetInput::RawName("AgentDesk-codex-p6b".to_string()),
             session_key: None,
@@ -990,7 +990,7 @@ pub(crate) mod spy {
         })
     }
 
-    pub(crate) fn known(kind: HostKind) -> TargetHost {
+    pub fn known(kind: HostKind) -> TargetHost {
         TargetHost::Known {
             kind,
             source: TargetSource::SessionRecord,
@@ -1025,10 +1025,10 @@ pub(crate) mod spy {
     }
 
     /// Routes this thread's legacy Codex input through a spy until dropped.
-    pub(crate) struct SpyGuard(pub Rc<RefCell<SpyState>>);
+    pub struct SpyGuard(pub Rc<RefCell<SpyState>>);
 
     impl SpyGuard {
-        pub(crate) fn install(state: SpyState) -> Self {
+        pub fn install(state: SpyState) -> Self {
             let state = Rc::new(RefCell::new(state));
             let injected: Injected = (
                 Box::new(Spy(state.clone())),
@@ -1038,7 +1038,7 @@ pub(crate) mod spy {
             Self(state)
         }
 
-        pub(crate) fn calls(&self) -> Vec<String> {
+        pub fn calls(&self) -> Vec<String> {
             self.0.borrow().calls.clone()
         }
     }

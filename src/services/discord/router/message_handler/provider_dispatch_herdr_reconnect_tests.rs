@@ -23,7 +23,10 @@ pub(super) fn launch(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started
 pub(super) fn launch_pinless(fx: &Fixture, launcher: &Arc<Launcher>) -> (String, Started) {
     launch_with(fx, launcher, || {
         let started = fx.start_provider(launcher, false)?;
-        crate::services::claude_tui::readiness::tests::pre_source(fx.logical(), &started.path);
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            fx.logical(),
+            &started.path,
+        );
         fx.started.store(true, Ordering::SeqCst);
         let (status, _) = fx.ingress.send_envelope(
             &format!("/hooks/claude/SessionStart?session_id={}", started.session),
@@ -162,7 +165,7 @@ pub(super) fn clear_pending(fx: &Fixture, cleared: &str) -> std::path::PathBuf {
     .unwrap();
     let text = path.display().to_string();
     let payload = json!({"source": "clear", "session_id": cleared, "transcript_path": text});
-    let hook = HookSignal::from_payload("session_start", &payload);
+    let hook = HookSignal::from_payload_for_test("session_start", &payload);
     let proposal = Proposal {
         channel_id: CHANNEL,
         provider: "claude",
@@ -451,7 +454,7 @@ fn awaiting_clear_after_real_readiness_restart_sends_once_and_preserves_old_curs
     let old_cursor = std::fs::read(&cursor).unwrap();
     let cleared = uuid();
     let path = clear_pending(&fx, &cleared);
-    crate::services::claude_tui::readiness::tests::forget_session(fx.logical());
+    crate::services::claude_tui::readiness::test_support::forget_session(fx.logical());
     assert_eq!(restart_and_reconnect(&fx).published, 1);
     assert_eq!(cleared_turn(&fx, &launcher, &cleared, &path), Ok(()));
     assert_eq!(fx.rig.sends().len(), 4, "one paste and Enter after restart");
@@ -515,7 +518,7 @@ fn assert_invalid_clear_adoption(invalid: &str) {
             let proof: Value = serde_json::from_slice(&std::fs::read(&certified).unwrap()).unwrap();
             let published: chrono::DateTime<chrono::Utc> =
                 serde_json::from_value(proof["published"].clone()).unwrap();
-            readiness::tests::restore_bound_start(
+            readiness::test_support::restore_bound_start(
                 fx.logical(),
                 published + chrono::Duration::nanoseconds(1),
             );
@@ -527,7 +530,7 @@ fn assert_invalid_clear_adoption(invalid: &str) {
                 value["pending"]["seq"] = json!(u64::MAX);
             } else {
                 value["consumed"] = json!(true);
-                readiness::tests::forget_session(fx.logical());
+                readiness::test_support::forget_session(fx.logical());
             }
             std::fs::write(&certified, serde_json::to_vec(&value).unwrap()).unwrap();
         }
@@ -714,7 +717,10 @@ fn awaiting_clear_certification_supersedes_an_older_or_same_tick_volatile_start_
         } else {
             published - chrono::Duration::nanoseconds(1)
         };
-        crate::services::claude_tui::readiness::tests::restore_bound_start(fx.logical(), prior);
+        crate::services::claude_tui::readiness::test_support::restore_bound_start(
+            fx.logical(),
+            prior,
+        );
         assert_eq!(
             cleared_turn(&fx, &launcher, &cleared, &path),
             Ok(()),
@@ -722,7 +728,7 @@ fn awaiting_clear_certification_supersedes_an_older_or_same_tick_volatile_start_
         );
         assert_eq!(fx.rig.sends().len(), 4, "one new paste and Enter");
         assert_eq!(
-            crate::services::claude_tui::readiness::tests::retained_sources(fx.logical()),
+            crate::services::claude_tui::readiness::test_support::retained_sources(fx.logical()),
             1,
             "only the new current source remains"
         );

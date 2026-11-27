@@ -9,8 +9,14 @@ use axum::http::StatusCode;
 async fn raw_alias_kill_tmux_ends_current_session_pg() {
     let rig = PromotionRig::new(81190321).await;
     let (state, headers) = (rig.app_state(), axum::http::HeaderMap::new());
-    let (status, body) =
-        super::kill_tmux_session_impl(&state, &headers, &rig.old, "manual cleanup", None).await;
+    let (status, body) = crate::services::dispatched_sessions::kill_tmux_session_impl(
+        &state,
+        &headers,
+        &rig.old,
+        "manual cleanup",
+        None,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "{body:?}");
     assert_eq!(body.0["tmux_killed"], true, "{body:?}");
     assert!(rig.others().is_empty(), "{:?}", rig.others());

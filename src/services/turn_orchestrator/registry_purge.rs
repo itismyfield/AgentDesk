@@ -45,7 +45,7 @@ use super::{
     GLOBAL_RECOVERY_DONE_SIGNALS, GLOBAL_TURN_FINISHED_SIGNALS, Intervention,
     QueuePersistenceContext, RecoveryKickoffResult, RequeueInterventionResult, TryStartTurnResult,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::{HydratePendingQueueResult, MailboxUnreachable};
 use crate::services::provider::CancelToken;
 
@@ -120,10 +120,10 @@ pub(super) fn gate_closed_arm(
         | M::CommitCapturedReadyDelivery { .. }
         // Clears only its own reservation, which a closed actor cannot hold.
         | M::Injection(super::injected_inputs::InjectionMsg::Abandon { .. }) => return Some(msg),
+        #[cfg(any(test, feature = "test-support"))]
+        M::AgeActiveTurnForTest { .. } | M::AgeInboundWaitsForTest { .. } => return Some(msg),
         #[cfg(test)]
-        M::AgeActiveTurnForTest { .. }
-        | M::AgeInboundWaitsForTest { .. }
-        | M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
+        M::AgeValveClearedDispatchForTest { .. } => return Some(msg),
         // Start-like arms would bind work the unlink orphans; callers replay through
         // the `*_with_closed_retry` helpers below.
         M::TryStartTurn { reply, .. } => {
@@ -173,7 +173,7 @@ pub(super) fn gate_closed_arm(
         M::FinishTurnIfMatches { .. } => "FinishTurnIfMatches",
         M::ReleaseWitnessedEpisode(_) => "ReleaseWitnessedEpisode",
         M::FinishTurnIfToken { .. } => "FinishTurnIfToken",
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::HardStop { .. } => "HardStop",
         M::FinishCancelledTurn { .. } => "FinishCancelledTurn",
         M::RestartDrain { .. } => "RestartDrain",
@@ -183,7 +183,7 @@ pub(super) fn gate_closed_arm(
         #[cfg(unix)]
         M::CaptureOwnQueue(request) => request.refuse_closed(),
         M::CancelQueuedPrimaryMessage { .. } => "CancelQueuedPrimaryMessage",
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         M::ReplaceQueue { .. } => "ReplaceQueue",
         // Verdict arms: their empty answer would read as "nothing to do".
         M::ClearRecoveryMarker { reply } => reply.refuse("ClearRecoveryMarker"),
@@ -340,7 +340,7 @@ pub(crate) struct PurgeQueueResult {
 
 impl ChannelMailboxHandle {
     /// Like `hydrate_pending_queue_from_disk`, but an unreachable actor is an error.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn try_hydrate_pending_queue_from_disk(
         &self,
         persistence: QueuePersistenceContext,

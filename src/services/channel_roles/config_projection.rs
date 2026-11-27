@@ -8,7 +8,7 @@ use crate::services::org_catalog::{
 use crate::services::provider::ProviderKind;
 use crate::utils::format::expand_tilde_string as expand_tilde;
 
-pub(crate) fn default_prompt_path(role_id: &str) -> Option<String> {
+pub fn default_prompt_path(role_id: &str) -> Option<String> {
     let root = crate::config::runtime_root()?;
     let agents_root = crate::runtime_layout::managed_agents_root(&root);
     let canonical = agents_root.join(role_id).join("IDENTITY.md");
@@ -22,7 +22,7 @@ pub(crate) fn default_prompt_path(role_id: &str) -> Option<String> {
     Some(canonical.display().to_string())
 }
 
-pub(crate) fn default_workspace(role_id: &str) -> Option<String> {
+pub fn default_workspace(role_id: &str) -> Option<String> {
     let root = crate::config::runtime_root()?;
     Some(root.join("workspaces").join(role_id).display().to_string())
 }
@@ -48,7 +48,7 @@ fn match_channel(
         .then_some(1)
 }
 
-pub(crate) fn find_channel_binding<'a>(
+pub fn find_channel_binding<'a>(
     config: &'a Config,
     channel_id: ChannelId,
     channel_name: Option<&str>,
@@ -78,7 +78,7 @@ pub(crate) fn find_channel_binding<'a>(
     best.map(|(agent, provider_key, channel, _)| (agent, provider_key, channel))
 }
 
-pub(crate) fn binding_provider(
+pub fn binding_provider(
     agent: &crate::config::AgentDef,
     provider_key: &str,
     channel: &AgentChannel,
@@ -90,7 +90,7 @@ pub(crate) fn binding_provider(
         .and_then(|raw| ProviderKind::from_str(&raw))
 }
 
-pub(crate) fn role_projection_from_channel(
+pub fn role_projection_from_channel(
     agent: &crate::config::AgentDef,
     provider_key: &str,
     channel: &AgentChannel,

@@ -1,4 +1,4 @@
-use super::tests::install_clear_end;
+use super::test_support::install_clear_end;
 use crate::config::TestEnvVarGuard;
 use crate::services::{
     claude_tui::hook_server::observation_ingress::observe_binding_hook,
@@ -8,7 +8,7 @@ use crate::services::{
         warm_followup::{self, VerifiedWarmRequest},
     },
     provider::CancelToken,
-    provider_teardown::tests::test_support::FakeTmux,
+    provider_teardown::test_support::FakeTmux,
     tmux_common as tc,
     tui_o::store::codex_end,
     tui_prompt_dedupe::{

@@ -49,7 +49,7 @@ impl ClaudeBinary {
         })
     }
 
-    pub(crate) fn resolve() -> Result<(Self, BinaryResolution), String> {
+    pub fn resolve() -> Result<(Self, BinaryResolution), String> {
         // #4627: the sole sanctioned raw-path seam. The generic
         // `resolve_provider_binary("claude")` scrubs the raw path, so this
         // chokepoint uses the sealed resolver to obtain the unscrubbed
@@ -63,7 +63,7 @@ impl ClaudeBinary {
         Ok((binary, resolution))
     }
 
-    pub(crate) fn from_tmux_wrapper_argv(program: &str) -> Self {
+    pub fn from_tmux_wrapper_argv(program: &str) -> Self {
         Self {
             program: OsString::from(program),
         }
@@ -112,7 +112,7 @@ enum ExecutionPurpose {
     Simple,
     Agents,
     Legacy,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Future,
 }
 
@@ -122,7 +122,7 @@ impl ExecutionPurpose {
     }
 }
 
-pub(crate) struct ClaudeCommandBuilder {
+pub struct ClaudeCommandBuilder {
     command: Command,
     purpose: ExecutionPurpose,
 }
@@ -141,26 +141,41 @@ impl ClaudeCommandBuilder {
         Self { command, purpose }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_simple_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::for_simple(binary, resolution)
+    }
+
     /// Build a command that launches the Claude binary directly. Applies the
     /// binary-resolution PATH by construction.
     pub(crate) fn for_simple(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Simple)
     }
 
-    pub(crate) fn for_agents(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+    pub fn for_agents(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Agents)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_legacy_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::for_legacy(binary, resolution)
     }
 
     pub(crate) fn for_legacy(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Legacy)
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_future_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_future_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Future)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_resolved_version_probe_for_test(
         binary: &ClaudeBinary,
         resolution: &BinaryResolution,
     ) -> Self {
-        Self::build(binary.program(), Some(resolution), ExecutionPurpose::Future)
+        Self::for_resolved_version_probe(binary, resolution)
     }
 
     /// Build the native Claude `--version` probe from a resolved capability.
@@ -177,6 +192,11 @@ impl ClaudeCommandBuilder {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_version_smoke_for_test(program: &str, canonical_path: &str) -> Self {
+        Self::for_version_smoke(program, canonical_path)
+    }
+
     /// Build the native Claude version-smoke probe. This uses the CLI boundary
     /// string only after the provider discriminator selected `claude`.
     pub(crate) fn for_version_smoke(program: &str, canonical_path: &str) -> Self {
@@ -191,7 +211,7 @@ impl ClaudeCommandBuilder {
     /// `agentdesk tmux-wrapper` boundary. The wrapper boundary is the sole
     /// untyped CLI argv ingress; once it is wrapped, the path cannot escape this
     /// module. Applies the exec-path PATH by construction.
-    pub(crate) fn for_tmux_wrapper_argv(program: &str) -> Self {
+    pub fn for_tmux_wrapper_argv(program: &str) -> Self {
         let binary = ClaudeBinary::from_tmux_wrapper_argv(program);
         let mut builder = Self::build(binary.program(), None, ExecutionPurpose::TuiWrapper);
         binary.augment_exec_path(builder.command_mut());
@@ -201,12 +221,12 @@ impl ClaudeCommandBuilder {
     /// Mutable access to the wrapped command for site-specific configuration
     /// (args, cwd, env, stdio, process group). The binary-resolution PATH is
     /// already applied.
-    pub(crate) fn command_mut(&mut self) -> &mut Command {
+    pub fn command_mut(&mut self) -> &mut Command {
         &mut self.command
     }
 
     /// Consume the builder and return the fully-guarded `Command`.
-    pub(crate) fn into_command(mut self) -> Result<Command, String> {
+    pub fn into_command(mut self) -> Result<Command, String> {
         if crate::config::test_instance::environment::claude_login_enabled_checked()? {
             if !self.purpose.allowed_in_opt_in() {
                 return Err("test instance Claude execution purpose rejected".into());

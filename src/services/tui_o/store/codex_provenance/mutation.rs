@@ -3,10 +3,10 @@
 use super::super::{ChannelStore, StoreError, durable};
 use super::CodexEpisodeDeny;
 use super::submit_floor::{DurableClosedEpisode, Schema2, SubmitFloor};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::valid;
 use super::{CODEX_PROVENANCE_FILE, CodexEpisodeSpan};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::{CodexProvenance, SCHEMA};
 use super::{Sidecar, retained};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::decisions::PersistenceReason;
@@ -299,8 +299,8 @@ impl ChannelStore {
     }
 
     /// Test seam for a new execution's empty sidecar; its real caller belongs to P4-2.
-    #[cfg(test)]
-    pub(crate) fn init_codex_provenance(&mut self) -> Result<(), StoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_codex_provenance(&mut self) -> Result<(), StoreError> {
         if self.codex_provenance() != Sidecar::Missing {
             return Err(StoreError::Rejected("codex provenance exists".into()));
         }
@@ -320,8 +320,8 @@ impl ChannelStore {
     }
 
     /// Publish the returned span only after its durable replace succeeds.
-    #[cfg(test)]
-    pub(crate) fn persist_codex_span(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn persist_codex_span(
         &mut self,
         span: CodexEpisodeSpan,
     ) -> Result<CodexEpisodeSpan, StoreError> {
@@ -348,7 +348,7 @@ impl ChannelStore {
 
     /// A conflict or an unreadable sidecar is Rejected and leaves the store writable; only a
     /// failed write marks it failed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn change_codex_provenance(
         &mut self,
         change: impl FnOnce(&mut CodexProvenance),

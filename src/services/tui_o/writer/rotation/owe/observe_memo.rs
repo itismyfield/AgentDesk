@@ -19,13 +19,14 @@ struct Key {
 struct Memo {
     kept: Option<(Key, Analyzed)>,
     /// Inputs reduced through this seed, for the cost tests.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     reduced: usize,
 }
 
 pub(super) struct Seed {
     projection: Result<Projection, String>,
     memo: Mutex<Memo>,
+    pub(super) quiet: Option<super::QuietOffer>,
 }
 
 impl Seed {
@@ -33,6 +34,7 @@ impl Seed {
         Self {
             projection,
             memo: Mutex::default(),
+            quiet: None,
         }
     }
 
@@ -76,7 +78,7 @@ impl Seed {
         {
             return analyzed.clone();
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             memo.reduced += 1;
         }
@@ -85,14 +87,14 @@ impl Seed {
         analyzed
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn reduced(&self) -> usize {
         self.memo.lock().unwrap_or_else(|e| e.into_inner()).reduced
     }
 }
 
 /// Every field of every registration in order, as it is stored. Derived equality would fold
-/// path spellings that a barrier digest tells apart, and serialization alone skips three fields.
+/// path spellings that a barrier digest tells apart, and serialization alone skips derived fields.
 fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
     let fields: Vec<_> = registrations
         .iter()
@@ -104,6 +106,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 exact_frame_hash,
                 receipts,
                 candidate,
+                not_sent,
                 barrier,
             } = registration;
             (
@@ -113,6 +116,7 @@ fn spelled(registrations: &[Registration]) -> Option<Vec<u8>> {
                 exact_frame_hash,
                 receipts,
                 candidate,
+                not_sent,
                 barrier,
             )
         })

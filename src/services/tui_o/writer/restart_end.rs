@@ -46,7 +46,7 @@ fn scope_matches(end: &RestartEnd, event: &BindingEvent, binding: &SourceBinding
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct VerifiedEnd {
+pub struct VerifiedEnd {
     end: RestartEnd,
     snapshot: Option<Fingerprint>,
     captured: bool,
@@ -166,7 +166,7 @@ thread_local! {
 mod repair_tests;
 
 /// Called on a worker before folding native records; the current resume nonce may be newer.
-pub(crate) fn validated(
+pub fn validated(
     ends: Vec<RestartEnd>,
     history: &[BindingEvent],
     binding: &SourceBinding,
@@ -357,13 +357,6 @@ impl Projection {
         ended
     }
 
-    /// The native turn of a verified end cut exactly at `at`, applied or not.
-    pub(super) fn cutoff_turn(&self, source: &SourceId, at: u64) -> Option<Option<&str>> {
-        let end =
-            (self.ends.iter()).find(|end| same_source(&end.source, source) && end.cutoff == at);
-        end.map(|end| end.native_turn_id.as_deref())
-    }
-
     pub(super) fn through(&mut self, source: &SourceId, through: u64) -> Option<Ended> {
         self.take(source, through)
     }
@@ -385,7 +378,7 @@ pub(super) fn capture_current<B: BindingEvents>(
 }
 
 /// Loading precedes both boot replay and capture, so no unit crosses its end before sealing.
-pub(super) async fn refresh<P, L, A, B>(
+pub async fn refresh<P, L, A, B>(
     writer: &mut ChannelWriter<P, L, A>,
     deriver: &mut UnitDeriver,
     bindings: &B,

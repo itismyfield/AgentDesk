@@ -1,5 +1,5 @@
-pub(crate) mod reaping;
-pub(crate) mod stream_child;
+pub mod reaping;
+pub mod stream_child;
 
 use std::process::{Command, Output};
 use std::sync::Arc;
@@ -299,8 +299,8 @@ impl ProcessIdentity {
     /// platforms (Linux/macOS) — without this hook, regression tests cannot
     /// distinguish "captured a real starttime" from "snapshot is empty and
     /// guard silently disabled".
-    #[cfg(test)]
-    pub(crate) fn raw_starttime(&self) -> Option<u128> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raw_starttime(&self) -> Option<u128> {
         #[cfg(target_os = "macos")]
         {
             self.starttime.or(self.macos_lstart_hash)
@@ -312,8 +312,8 @@ impl ProcessIdentity {
     }
 
     /// Test-only synthetic constructor used to pin the mismatch-skip path.
-    #[cfg(test)]
-    pub(crate) fn from_raw_for_test(starttime: Option<u128>) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_raw_for_test(starttime: Option<u128>) -> Self {
         Self {
             starttime,
             #[cfg(target_os = "macos")]
@@ -516,7 +516,7 @@ pub fn kill_pid_tree(pid: u32) {
 }
 
 #[cfg(unix)]
-pub(crate) fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
+pub fn kill_pid_tree_if_identity_matches(pid: u32, identity: ProcessIdentity) -> bool {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     if !identity.has_baseline() {
         tracing::debug!(
@@ -596,7 +596,7 @@ pub fn kill_child_tree(child: &mut std::process::Child) {
 
 /// Shell-escape a string using single quotes (POSIX safe).
 /// Internal single quotes are replaced with `'\''`.
-pub(crate) fn shell_escape(s: &str) -> String {
+pub fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

@@ -1,0 +1,2 @@
+key: session-lifecycle-herdr-retired-row-notice
+| `session-lifecycle` Herdr live row-end notice (#8435) | `b04ea56650e5397989d33f1be199be21a83c8d0e` | Current and NoRecord post twice after a failed settlement | Target records delivery per nonce and save generation before settlement. Repeat ticks use the record and restart retires the live owner. [Report](session-lifecycle/herdr-retired-row-notice.report.md) |

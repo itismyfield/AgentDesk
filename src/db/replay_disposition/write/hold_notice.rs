@@ -117,7 +117,7 @@ pub(crate) async fn withhold_and_notify(
 }
 
 /// Restores delivery custody only: the locked canonical tuple never becomes an execution permit.
-pub(crate) async fn recover_hold_notice(
+pub async fn recover_hold_notice(
     pool: &PgPool,
     receipt_id: i64,
     provider: &str,

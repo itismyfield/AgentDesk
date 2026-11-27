@@ -5,11 +5,11 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub(crate) const ADMISSION_ENV: &str = "ADK_HERDR_ADMISSION";
+pub const ADMISSION_ENV: &str = "ADK_HERDR_ADMISSION";
 const STOP_FILE: [&str; 2] = ["herdr", "admission-off"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StopCause {
+pub enum StopCause {
     /// The environment switch disables admission.
     Env,
     /// The stop file exists now or existed earlier in this process.
@@ -20,7 +20,7 @@ pub(crate) enum StopCause {
 }
 
 impl StopCause {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Env => "env",
             Self::File => "file",
@@ -31,7 +31,7 @@ impl StopCause {
 }
 
 #[derive(Debug)]
-pub(crate) struct Admission {
+pub struct Admission {
     env_stopped: bool,
     stop_file: Option<PathBuf>,
     latched: AtomicBool,
@@ -39,7 +39,7 @@ pub(crate) struct Admission {
 
 impl Admission {
     /// A resolved environment switch decides admission independently of the stop file.
-    pub(crate) fn new(enabled: bool, stop_file: Option<PathBuf>) -> Self {
+    pub fn new(enabled: bool, stop_file: Option<PathBuf>) -> Self {
         Self {
             env_stopped: !enabled,
             stop_file,
@@ -83,7 +83,7 @@ pub(crate) fn stop_file_path() -> Option<PathBuf> {
 static PROCESS: OnceLock<Admission> = OnceLock::new();
 
 /// The process switch, built on first use: only a configured channel's judgement reaches it.
-pub(crate) fn check() -> Result<(), StopCause> {
+pub fn check() -> Result<(), StopCause> {
     if crate::config::session_hosts::with_boot_migration(|metadata| {
         metadata.is_some_and(|metadata| metadata.admission_stopped())
     }) {
@@ -105,10 +105,10 @@ thread_local! {
 
 /// Replaces the process switch on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedAdmission(Option<std::sync::Arc<Admission>>);
+pub struct ForcedAdmission(Option<std::sync::Arc<Admission>>);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn force_for_test(admission: Admission) -> ForcedAdmission {
+pub fn force_for_test(admission: Admission) -> ForcedAdmission {
     let forced = Some(std::sync::Arc::new(admission));
     ForcedAdmission(FORCED.with(|cell| cell.replace(forced)))
 }

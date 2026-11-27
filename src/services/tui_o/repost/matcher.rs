@@ -11,20 +11,38 @@ use crate::services::tui_o::repost::send::{RepostEnvelope, RepostIds};
 
 /// A message as Discord returned it. `nonce` is only what came back, never what was sent.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ObservedMessage {
-    pub(crate) id: u64,
+pub struct ObservedMessage {
+    pub id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub channel_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) channel_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub author_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) author_id: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub content: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) content: String,
     /// Embeds of the kind a send attaches, with or without a footer.
+    #[cfg(any(test, feature = "test-support"))]
+    pub rich_embeds: usize,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) rich_embeds: usize,
+    #[cfg(any(test, feature = "test-support"))]
+    pub footers: Vec<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) footers: Vec<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub nonce: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) nonce: Option<String>,
 }
 
 /// Who else may own a message. `Unknown` is a failed lookup, never an empty index.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum AttributionSnapshot {
+pub enum AttributionSnapshot {
     Known {
         /// Recorded receipts of the channel, by message id.
         receipts: BTreeMap<u64, PieceKey>,
@@ -35,7 +53,7 @@ pub(crate) enum AttributionSnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RecoveryKind {
+pub enum RecoveryKind {
     /// The observed nonce came back while only the original had been sent.
     OriginalRecovered,
     /// A re-post carrying the piece's marker.
@@ -44,33 +62,79 @@ pub(crate) enum RecoveryKind {
     OriginUnknown,
 }
 
-/// A message of this piece and how it was told apart; recording `receipt` is the caller's.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedReceipt {
-    pub(crate) receipt: Receipt,
-    pub(crate) channel_id: u64,
-    pub(crate) recovery: RecoveryKind,
-    pub(crate) observed_nonce: Option<String>,
-    pub(crate) observed_marker: Option<String>,
-    pub(crate) content_sha256: String,
-    pub(crate) matcher_version: i32,
+mod validated_receipt {
+    use super::{Receipt, RecoveryKind};
+
+    /// A message of this piece and how it was told apart; recording `receipt` is the caller's.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ValidatedReceipt {
+        #[cfg(any(test, feature = "test-support"))]
+        pub receipt: Receipt,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) receipt: Receipt,
+        pub(crate) channel_id: u64,
+        #[cfg(any(test, feature = "test-support"))]
+        pub recovery: RecoveryKind,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) recovery: RecoveryKind,
+        #[cfg(any(test, feature = "test-support"))]
+        pub observed_nonce: Option<String>,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) observed_nonce: Option<String>,
+        #[cfg(any(test, feature = "test-support"))]
+        pub observed_marker: Option<String>,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) observed_marker: Option<String>,
+        pub(crate) content_sha256: String,
+        pub(crate) matcher_version: i32,
+    }
 }
 
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use validated_receipt::ValidatedReceipt;
+#[cfg(any(test, feature = "test-support"))]
+pub use validated_receipt::ValidatedReceipt;
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Attribution {
+pub struct Attribution {
+    #[cfg(any(test, feature = "test-support"))]
+    /// New messages of this piece. Two or more distinct ids are a duplicate, not a resend reason.
+    pub found: BTreeMap<u64, ValidatedReceipt>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// New messages of this piece. Two or more distinct ids are a duplicate, not a resend reason.
     pub(crate) found: BTreeMap<u64, ValidatedReceipt>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Messages already recorded as this piece's receipts.
+    pub recorded: BTreeSet<u64>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Messages already recorded as this piece's receipts.
     pub(crate) recorded: BTreeSet<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Exact matches another piece, or a lookup that failed, could also claim.
+    pub unattributed: BTreeSet<u64>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Exact matches another piece, or a lookup that failed, could also claim.
     pub(crate) unattributed: BTreeSet<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// The payload under a footer that is not this piece's intact marker.
+    pub damaged: BTreeSet<u64>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// The payload under a footer that is not this piece's intact marker.
     pub(crate) damaged: BTreeSet<u64>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// A marker-like footer this build cannot read, such as an older format: never absence.
+    pub unreadable: BTreeSet<u64>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// A marker-like footer this build cannot read, such as an older format: never absence.
     pub(crate) unreadable: BTreeSet<u64>,
 }
 
 impl Attribution {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_clear_for_test(&self) -> bool {
+        self.is_clear()
+    }
+
     /// Nothing seen could be this piece.
     pub(crate) fn is_clear(&self) -> bool {
         self.found.is_empty()
@@ -78,6 +142,11 @@ impl Attribution {
             && self.unattributed.is_empty()
             && self.damaged.is_empty()
             && self.unreadable.is_empty()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn distinct_ids_for_test(&self) -> usize {
+        self.distinct_ids()
     }
 
     /// Distinct ids known to be this piece's messages.
@@ -140,7 +209,7 @@ fn marker_claim(footer: &str, channel: u64) -> Option<bool> {
 }
 
 /// Adds what `seen` shows about the piece of `scope` to `into`; repeated ids count once.
-pub(crate) fn match_observations<'m>(
+pub fn match_observations<'m>(
     scope: &EvidenceScope,
     snapshot: &AttributionSnapshot,
     seen: impl IntoIterator<Item = &'m ObservedMessage>,

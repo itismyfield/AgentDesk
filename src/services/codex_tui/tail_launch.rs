@@ -10,18 +10,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc::Sender};
 use std::time::SystemTime;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type SelectionEdit = Box<dyn FnOnce(&mut CodexTuiSessionSelection)>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type ProofBoundary = Box<dyn FnOnce(&BindingContext)>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static SELECTION_FOR_TESTS: std::cell::RefCell<Option<SelectionEdit>> = Default::default();
-    pub(crate) static BEFORE_RESUME_PROOF: std::cell::RefCell<Option<ProofBoundary>> = Default::default();
+    pub static SELECTION_FOR_TESTS: std::cell::RefCell<Option<SelectionEdit>> = Default::default();
+    pub static BEFORE_RESUME_PROOF: std::cell::RefCell<Option<ProofBoundary>> = Default::default();
 }
 
 /// A resume carries `(rollout_path, start_offset, selected_session_id)`; `None` tails fresh.
-pub(crate) struct ValidatedTail {
+pub struct ValidatedTail {
     resume: Option<(PathBuf, u64, String)>,
     context: BindingContext,
 }
@@ -37,11 +37,11 @@ fn verified(context: &BindingContext) -> bool {
 }
 
 /// Deterministic selection checks; the marker written after this can prove they passed.
-pub(crate) fn validate_selection(
+pub fn validate_selection(
     context: &BindingContext,
     selection: &CodexTuiSessionSelection,
 ) -> Result<ValidatedTail, String> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let selection = &SELECTION_FOR_TESTS.with_borrow_mut(|slot| {
         let mut selection = selection.clone();
         if let Some(edit) = slot.take() {
@@ -91,7 +91,7 @@ pub(crate) fn record_resume_proof(
     else {
         return Ok(());
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BEFORE_RESUME_PROOF.with_borrow_mut(|slot| {
         if let Some(boundary) = slot.take() {
             boundary(context);

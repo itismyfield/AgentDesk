@@ -49,7 +49,7 @@ fn accepted(
         .hold(question, 100)
         .map(QuestionResult::into_consent)
         .unwrap();
-    store.decide(&held, 1, true, 101).unwrap()
+    store.decide_for_test(&held, 1, true, 101).unwrap()
 }
 
 #[test]

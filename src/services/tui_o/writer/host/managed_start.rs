@@ -102,7 +102,7 @@ pub fn start_managed<I: HostIo>(
                 armed: true,
             },
             host,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             keep,
         });
     }

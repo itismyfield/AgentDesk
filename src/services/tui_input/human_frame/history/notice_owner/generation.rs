@@ -1,6 +1,7 @@
 //! Pending work is revisited only after an observable dependency change or a bounded retry; a
 //! retry that finds the same dependencies again waits twice as long, up to a minute.
 use super::*;
+use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::store::ledger::input_notices::RecordId;
 use crate::services::tui_prompt_dedupe::binding_events;
 use tokio::time::{Duration, Instant};
@@ -16,7 +17,7 @@ pub(super) fn retry_delay(repeats: u32) -> Duration {
 }
 
 pub(crate) fn fingerprint(path: &Path) -> Option<Fingerprint> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     super::context_observation::tests::stat(path);
     Fingerprint::of(&std::fs::metadata(path).ok()?).ok()
 }
@@ -48,6 +49,10 @@ pub(crate) struct WorkCache {
 }
 
 impl WorkCache {
+    pub(crate) fn reevaluate_source(&mut self, source: &SourceId) {
+        self.records.retain(|(kept, _, _), _| kept != source);
+    }
+
     pub(crate) fn select(&mut self, store: &ChannelStore, owners: &Batch) -> HashSet<RecordId> {
         if self.binding.is_none() {
             self.binding = binding_events::log_path(store.init().channel)

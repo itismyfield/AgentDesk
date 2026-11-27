@@ -128,6 +128,35 @@ export function connectNew(draft: Draft, kind: string, title: string, from?: { s
   const named = title.trim() ? patchState(added, id, { title: title.trim() }) : added;
   return [from ? connect(named, from.state, from.pin, id)[0] : named, id];
 }
+/** Inserts a new state of `kind` directly on an existing transition (`A -> B` becomes `A -> new -> B`), preserving `existing`'s condition, priority, gate, and retry. */
+export function insertStateBetween(draft: Draft, transitionId: string, kind: string, title = ""): [Draft, string] {
+  const existing = draft.transitions.find((t) => t.id === transitionId);
+  if (!existing) return connectNew(draft, kind, title);
+  const [added, newId] = addState(draft, kind);
+  const named = title.trim() ? patchState(added, newId, { title: title.trim() }) : added;
+  const rewired = patchTransition(named, existing.id, { to: newId });
+  if (!kind.startsWith("end_") && existing.to && existing.to !== newId) {
+    const [withOut, outId] = addTransition(rewired, newId);
+    return [patchTransition(withOut, outId, { to: existing.to }), newId];
+  }
+  return [rewired, newId];
+}
+/** Splices an existing state `middleId` into `transitionId` (`A -> B` becomes `A -> middleId -> B`). */
+export function spliceStateBetween(draft: Draft, transitionId: string, middleId: string): Draft {
+  const existing = draft.transitions.find((t) => t.id === transitionId);
+  const middle = draft.states.find((s) => s.id === middleId);
+  if (!existing || !middle || middleId === existing.from || middleId === existing.to) return draft;
+  const rewired = patchTransition(draft, existing.id, { to: middleId });
+  if (
+    !middle.kind.startsWith("end_") &&
+    existing.to &&
+    !rewired.transitions.some((t) => t.from === middleId && t.to === existing.to)
+  ) {
+    const [withOut, outId] = addTransition(rewired, middleId);
+    return patchTransition(withOut, outId, { to: existing.to });
+  }
+  return rewired;
+}
 /** A retry budget is one count however many transitions share it, so its max changes on all of them. */
 export const setRetryMax = (draft: Draft, budget: string, max: number): Draft =>
   ({ ...draft, transitions: draft.transitions.map((value) => value.retry?.budget_id === budget ? { ...value, retry: { ...value.retry, max } } : value) });

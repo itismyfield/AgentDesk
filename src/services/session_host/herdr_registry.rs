@@ -117,18 +117,18 @@ struct Registered {
     host: ReadOnlyHerdrHost,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type TestReads = (
     fn(&dyn HerdrTransport, &HerdrEndpoint) -> super::herdr::observe::RestoreResume,
     Arc<dyn super::herdr::pane_probe::ProcessOs>,
 );
 
-pub(crate) struct HerdrRegistry {
+pub struct HerdrRegistry {
     endpoints: Vec<Registered>,
     #[cfg(unix)]
     launch: Option<SocketHerdrLaunchHost>,
     /// E7 and process reads every target gets instead of the OS ones.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     reads: Option<TestReads>,
 }
 
@@ -137,12 +137,12 @@ impl HerdrRegistry {
         endpoints: Vec::new(),
         #[cfg(unix)]
         launch: None,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         reads: None,
     };
 
     /// The endpoints whose `execution_node` is this node. No socket is dialled here.
-    pub(crate) fn build(boot: &BootSessionHosts) -> Self {
+    pub fn build(boot: &BootSessionHosts) -> Self {
         let Some(local) = boot.local_node() else {
             return Self::EMPTY;
         };
@@ -192,7 +192,7 @@ impl HerdrRegistry {
         Self {
             endpoints,
             launch: Some(launch),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             reads: None,
         }
     }
@@ -203,40 +203,34 @@ impl HerdrRegistry {
         Self::EMPTY
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_transport(
-        endpoint: HerdrEndpoint,
-        transport: Arc<dyn HerdrTransport>,
-    ) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_transport(endpoint: HerdrEndpoint, transport: Arc<dyn HerdrTransport>) -> Self {
         Self {
             endpoints: vec![Registered::new(endpoint, Shared(transport))],
             ..Self::EMPTY
         }
     }
 
-    #[cfg(all(test, unix))]
-    pub(crate) fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
+    #[cfg(all(any(test, feature = "test-support"), unix))]
+    pub fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
         self.launch = Some(host);
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_reads(self, reads: TestReads) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_reads(self, reads: TestReads) -> Self {
         Self {
             reads: Some(reads),
             ..self
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.endpoints.is_empty()
     }
 
     /// Reads whole registered endpoints. A changed server or exceeded budget is not a census.
-    pub(crate) fn read_pane_census(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(String, Vec<String>)>, String> {
+    pub fn read_pane_census(&self, limit: usize) -> Result<Vec<(String, Vec<String>)>, String> {
         use super::herdr::model::{HERDR_PROTOCOL, HerdrRequest, HerdrResult};
         let mut census = Vec::new();
         let mut count = self.endpoints.len();
@@ -298,13 +292,18 @@ impl HerdrRegistry {
     }
 
     /// Reads cwd only on the endpoint named by this execution, never another endpoint's pane.
-    pub(crate) fn working_dir(&self, stored: &HostedExecution) -> Option<PathBuf> {
+    pub fn working_dir(&self, stored: &HostedExecution) -> Option<PathBuf> {
         let entry = self.endpoints.iter().find(|entry| {
             HerdrPaneView::new(&entry.endpoint, Arc::new(entry.transport.clone()), stored).is_some()
         })?;
         let pane = &stored.location.as_ref()?.pane_id;
         let reference = HostSessionRef::herdr_pane(pane);
         entry.host.current_working_dir(reference).ok().flatten()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sole_host_for_test(&self) -> Option<&dyn InteractiveSessionHost> {
+        self.sole_host()
     }
 
     /// The one local endpoint's read-only host; none, or several, give no host.
@@ -316,12 +315,12 @@ impl HerdrRegistry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn launch_host(&self) -> Option<&SocketHerdrLaunchHost> {
+    pub fn launch_host(&self) -> Option<&SocketHerdrLaunchHost> {
         self.launch.as_ref()
     }
 
     /// The gated input target of a stored execution located on a registered endpoint.
-    pub(crate) fn target(&self, stored: &HostedExecution) -> Option<HerdrTarget> {
+    pub fn target(&self, stored: &HostedExecution) -> Option<HerdrTarget> {
         #[cfg(unix)]
         let evidence = if let Some(location) = &stored.location {
             self.endpoints
@@ -347,6 +346,15 @@ impl HerdrRegistry {
         self.target_with_evidence_result(stored, evidence)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn target_with_evidence_for_test(
+        &self,
+        stored: &HostedExecution,
+        evidence: ExistingMutationEvidence,
+    ) -> Option<HerdrTarget> {
+        self.target_with_evidence(stored, evidence)
+    }
+
     /// Preloaded evidence only; constructing or judging a target performs no store lookup.
     pub(crate) fn target_with_evidence(
         &self,
@@ -370,7 +378,7 @@ impl HerdrRegistry {
                 evidence.clone(),
             )
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let target = match &self.reads {
             Some((restore, os)) => target.map(|target| target.with_reads(*restore, os.clone())),
             None => target,
@@ -380,12 +388,12 @@ impl HerdrRegistry {
 
     /// A read-only view of a stored execution located on a registered endpoint; unlike a target
     /// it needs no launch evidence.
-    pub(crate) fn view(&self, stored: &HostedExecution) -> Option<HerdrPaneView> {
+    pub fn view(&self, stored: &HostedExecution) -> Option<HerdrPaneView> {
         let view = self.endpoints.iter().find_map(|registered| {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
             HerdrPaneView::new(&registered.endpoint, transport, stored)
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let view = match &self.reads {
             Some((_, os)) => view.map(|view| view.with_os(os.clone())),
             None => view,
@@ -394,7 +402,7 @@ impl HerdrRegistry {
     }
 
     #[cfg(unix)]
-    pub(crate) fn retired_probe(
+    pub fn retired_probe(
         &self,
         stored: &HostedExecution,
     ) -> Option<super::herdr_gate::legacy_return::RetiredProbe> {
@@ -403,7 +411,7 @@ impl HerdrRegistry {
             let transport: Arc<dyn HerdrTransport> = Arc::new(registered.transport.clone());
             RetiredProbe::new(registered.endpoint.clone(), transport, stored)
         });
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let probe = match &self.reads {
             Some((_, os)) => probe.map(|probe| probe.with_os(os.clone())),
             None => probe,
@@ -424,12 +432,12 @@ impl Registered {
 }
 
 static EMPTY: HerdrRegistry = HerdrRegistry::EMPTY;
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 static REGISTRY: OnceLock<HerdrRegistry> = OnceLock::new();
 
 /// The registry of the boot section, fixed on first use after boot installed it.
-#[cfg(not(test))]
-pub(crate) fn registry() -> &'static HerdrRegistry {
+#[cfg(not(any(test, feature = "test-support")))]
+pub fn registry() -> &'static HerdrRegistry {
     if let Some(registry) = REGISTRY.get() {
         return registry;
     }
@@ -440,27 +448,27 @@ pub(crate) fn registry() -> &'static HerdrRegistry {
 }
 
 /// Tests see only a registry they installed on their own thread.
-#[cfg(test)]
-pub(crate) fn registry() -> &'static HerdrRegistry {
+#[cfg(any(test, feature = "test-support"))]
+pub fn registry() -> &'static HerdrRegistry {
     FORCED.with(|forced| forced.get()).unwrap_or(&EMPTY)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static FORCED: std::cell::Cell<Option<&'static HerdrRegistry>> = const { std::cell::Cell::new(None) };
 }
 
 /// Installs `registry` on this thread until dropped.
-#[cfg(test)]
-pub(crate) struct ForcedRegistry(Option<&'static HerdrRegistry>);
+#[cfg(any(test, feature = "test-support"))]
+pub struct ForcedRegistry(Option<&'static HerdrRegistry>);
 
-#[cfg(test)]
-pub(crate) fn force_for_test(registry: HerdrRegistry) -> ForcedRegistry {
+#[cfg(any(test, feature = "test-support"))]
+pub fn force_for_test(registry: HerdrRegistry) -> ForcedRegistry {
     let leaked: &'static HerdrRegistry = Box::leak(Box::new(registry));
     ForcedRegistry(FORCED.with(|forced| forced.replace(Some(leaked))))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for ForcedRegistry {
     fn drop(&mut self) {
         FORCED.with(|forced| forced.set(self.0.take()));

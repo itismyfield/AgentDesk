@@ -3,7 +3,7 @@ static INCARNATION: std::sync::LazyLock<String> =
     std::sync::LazyLock::new(|| uuid::Uuid::new_v4().to_string());
 
 /// Returns the random UUID minted once, on first use, for this process.
-pub(crate) fn incarnation() -> &'static str {
+pub fn incarnation() -> &'static str {
     &INCARNATION
 }
 
