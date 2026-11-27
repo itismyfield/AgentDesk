@@ -213,16 +213,6 @@ const PATH_OWNERS: &[(&str, &str, &str)] = &[
         "fn legacy_layout_needs_migration(",
         "detects a legacy layout to migrate",
     ),
-    (
-        "src/cli/migrate/plan.rs",
-        "fn load_existing_role_ids(",
-        "reads both layouts as migration input",
-    ),
-    (
-        "src/cli/migrate/apply.rs",
-        "fn apply_import_plan(",
-        "writes the migrated file",
-    ),
 ];
 
 const BYPASS: &str = r#"var(?:_os)?\(\s*"AGENTDESK_CONFIG"|config_file_path\(|\.join\(\s*"agentdesk\.yaml"\s*\)|"config/agentdesk\.yaml""#;

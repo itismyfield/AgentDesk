@@ -71,20 +71,6 @@ src/
 │   │   ├── orchestrator.rs
 │   │   ├── provider_cli_name.rs
 │   │   └── startup.rs
-│   ├── migrate/
-│   │   ├── apply/
-│   │   │   ├── agent_assets.rs
-│   │   │   ├── discord_auth.rs
-│   │   │   ├── fingerprint.rs
-│   │   │   ├── fs_write.rs
-│   │   │   ├── org_updates.rs
-│   │   │   ├── phase_state.rs
-│   │   │   ├── secrets.rs
-│   │   │   └── sessions.rs
-│   │   ├── apply.rs
-│   │   ├── apply_config_tests.rs
-│   │   ├── plan.rs
-│   │   └── source.rs
 │   ├── provider_cli/
 │   │   └── mod.rs
 │   ├── args.rs
@@ -115,7 +101,6 @@ src/
 │   ├── init.rs
 │   ├── intake_outbox.rs
 │   ├── json_output.rs
-│   ├── migrate.rs
 │   ├── mod.rs
 │   ├── monitoring.rs
 │   ├── o.rs

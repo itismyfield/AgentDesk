@@ -39,7 +39,6 @@ main에 이미 들어갔는지 역적용(`git apply --check -R`)으로 갈랐다
 | `src/cli/doctor/orchestrator.rs` | 없음 | #8157 |
 | `src/dispatch/dispatch_context.rs` | 없음 | — |
 | `src/db/auto_queue/phase_gates.rs` | 없음 | — |
-| `src/cli/migrate/apply.rs` | 없음 | — |
 
 - #7353 S4(db·server·config) 조각: 리뷰 ref가 아직 없다(S1 `land-i7353s1`만 착지).
   `config.rs`와 `db/postgres.rs`는 S4가 시작되면 겹치므로 착수 때 소유를 다시 확인한다.
@@ -49,28 +48,6 @@ main에 이미 들어갔는지 역적용(`git apply --check -R`)으로 갈랐다
 ## 책임 지도와 조각
 
 줄 수는 `wc -l`이고 괄호 안은 prod 구간(끝의 inline 시험 모듈 제외)이다.
-
-### 1. `src/cli/migrate/apply.rs` — 3,234 (prod 3,234) · assembly · 겹침 0
-
-| 구간 | 책임 | 옮길 곳 | 줄 |
-|---|---|---|---|
-| 1–206 | import·상수·상태/보고 타입 | 남김 | 206 |
-| 207–864 | apply 조립(`apply_import_plan`, agent 파일 적용, running audit) | 남김 | 658 |
-| 865–963 | org schema 갱신 목록 조립 | child `org_updates` | 99 |
-| 964–1310 | phase/task 상태·resume 복원 | child `phase_state` | 347 |
-| 1311–1435 | `persist_audit_state`(clippy allow 기준선) | 남김 | 125 |
-| 1436–1737 | 세션 계획·transcript 변환 | child `sessions` | 302 |
-| 1738–1875 | DB import(`sqlx::query` 표면 기준선) | 남김 | 138 |
-| 1876–2384 | Discord 계정 매핑·auth 보고·bot settings 계획 | child `discord_auth` | 509 |
-| 2385–2679 | token·secret ref 해석 | child `secrets` | 295 |
-| 2680–2701, 2888–2914 | snapshot 복사(destructive call site 기준선) | 남김 | 49 |
-| 2702–2887 | agent 병합·prompt 렌더·memory import | child `agent_assets` | 186 |
-| 2915–3074 | tree 복사·백업·파일 쓰기 | child `fs_write` | 160 |
-| 3075–3235 | source fingerprint·해시 | child `fingerprint` | 161 |
-
-결과 예상: 부모 약 1,200줄, child 8개. **조각 S1(첫 조각)**.
-부모를 prod 1,000줄 아래로 더 내리려면 기준선에 묶인 함수 5개를 옮겨야 하므로
-기준선 정리 조각에서 다룬다.
 
 ### 2. `src/db/auto_queue/phase_gates.rs` — 3,001 (prod 969) · adapter · 겹침 0
 
@@ -165,9 +142,10 @@ main에 이미 들어갔는지 역적용(`git apply --check -R`)으로 갈랐다
 
 ## 순서
 
+CLI 이관기가 삭제되어 조각 S1은 분할 대상에서 빠졌다.
+
 | 조각 | 파일 | 새 파일 | 전제 |
 |---|---|---|---|
-| S1 | `cli/migrate/apply.rs` | 8 | 없음(첫 조각) |
 | S2 | `phase_gates.rs`·`loader.rs`·`health_api.rs`·`postgres.rs`의 시험 모듈 | 5 | 없음 |
 | S3·S4 | `cli/doctor/orchestrator.rs` | 6 + 6 | 없음 |
 | S5 | `dispatch/dispatch_context.rs` | 8 | 역방향 edge 선검사 |

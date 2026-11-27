@@ -286,10 +286,6 @@ pub fn shared_agent_knowledge_path(root: &Path) -> PathBuf {
     resolve_memory_path(root, &load_memory_backend(root).file.sak_path)
 }
 
-pub fn long_term_memory_root(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).file.ltm_root)
-}
-
 pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     fs::create_dir_all(root).map_err(|e| format!("Failed to create '{}': {e}", root.display()))?;
 
