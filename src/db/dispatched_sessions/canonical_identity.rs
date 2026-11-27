@@ -99,8 +99,8 @@ impl HookSessionUpsertError {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn test_conflict(kind: SessionIdentityConflictKind, message: &str) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn test_conflict(kind: SessionIdentityConflictKind, message: &str) -> Self {
         conflict(kind, message)
     }
 }

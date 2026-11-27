@@ -174,8 +174,8 @@ pub async fn advance(pool: &PgPool, id: i64) -> Result<bool, sqlx::Error> {
     .await
 }
 
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests;
 
 /// Recheck control freshness under the transition's owner lock; a fresh Busy response wins a race.
 pub(crate) async fn allows_on_tx(

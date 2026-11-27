@@ -239,6 +239,6 @@ impl Origin {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "output_fixture_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

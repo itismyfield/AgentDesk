@@ -993,13 +993,13 @@ mod tests {
 }
 
 // Test-only PostgreSQL setup and assertions intentionally fail fast.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::expect_used)]
-pub(crate) mod clear_fence_pg_tests {
+pub mod clear_fence_pg_tests {
     use super::*;
     use std::sync::Arc;
 
-    pub(crate) async fn create_pool()
+    pub async fn create_pool()
     -> (crate::db::dispatch_test_db::DispatchPostgresTestDb, PgPool) {
         let db = crate::db::dispatch_test_db::DispatchPostgresTestDb::create(
             "agentdesk_transcript_clear_fence_4533",
@@ -1109,7 +1109,7 @@ pub(crate) mod clear_fence_pg_tests {
         db.drop().await;
     }
 
-    pub(crate) fn entry<'a>(
+    pub fn entry<'a>(
         turn_id: &'a str,
         channel_id: &'a str,
         turn_started_at_millis: i64,
@@ -1139,7 +1139,7 @@ pub(crate) mod clear_fence_pg_tests {
         entry
     }
 
-    pub(crate) async fn channel_pairs(
+    pub async fn channel_pairs(
         pool: &PgPool,
         channel_id: &str,
     ) -> Vec<ChannelTranscriptPair> {

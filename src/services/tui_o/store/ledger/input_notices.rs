@@ -369,7 +369,7 @@ impl MigrationSnapshot {
 
 #[cfg(any(test, feature = "test-support"))]
 impl NoticeState {
-    pub(in crate::services) fn apply_for_test(
+    pub fn apply_for_test(
         &mut self,
         entry: NoticeEntry,
     ) -> Result<Option<UnitKey>, String> {

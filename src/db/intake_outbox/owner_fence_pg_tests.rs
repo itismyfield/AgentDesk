@@ -7,7 +7,7 @@ use serde_json::json;
 use sqlx::{Postgres, Transaction};
 use std::time::Duration;
 
-pub(crate) async fn seed(pool: &PgPool, channel: &str, status: &str, stamp: bool) -> i64 {
+pub async fn seed(pool: &PgPool, channel: &str, status: &str, stamp: bool) -> i64 {
     sqlx::query("INSERT INTO agents (id, name, provider) VALUES ('fence-agent', 'Fence', 'claude') ON CONFLICT DO NOTHING")
         .execute(pool).await.unwrap();
     let id = sqlx::query_scalar(
@@ -40,7 +40,7 @@ pub(crate) async fn seed(pool: &PgPool, channel: &str, status: &str, stamp: bool
     id
 }
 
-pub(crate) async fn snapshot(pool: &PgPool, id: i64) -> Value {
+pub async fn snapshot(pool: &PgPool, id: i64) -> Value {
     sqlx::query_scalar("SELECT to_jsonb(io) FROM intake_outbox io WHERE id=$1")
         .bind(id)
         .fetch_one(pool)
@@ -48,7 +48,7 @@ pub(crate) async fn snapshot(pool: &PgPool, id: i64) -> Value {
         .unwrap()
 }
 
-pub(crate) async fn owners(pool: &PgPool, channel: &str) -> Value {
+pub async fn owners(pool: &PgPool, channel: &str) -> Value {
     sqlx::query_scalar(
         "SELECT jsonb_agg(to_jsonb(o) ORDER BY generation)
         FROM intake_session_owners o WHERE provider='claude' AND raw_channel_id=$1",
@@ -74,7 +74,7 @@ pub(crate) async fn transfer(tx: &mut Transaction<'_, Postgres>, channel: &str, 
     );
 }
 
-pub(crate) async fn move_owner(pool: &PgPool, channel: &str, target: &str) {
+pub async fn move_owner(pool: &PgPool, channel: &str, target: &str) {
     let mut tx = pool.begin().await.unwrap();
     transfer(&mut tx, channel, target).await;
     tx.commit().await.unwrap();

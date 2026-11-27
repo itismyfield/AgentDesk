@@ -11,7 +11,7 @@ pub enum EffectTarget {
         channel: String,
     },
     /// The busy-pane injection path, which is not connected yet.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BusyPane {
         owner: String,
         pane: String,
@@ -25,7 +25,7 @@ impl EffectTarget {
             Self::ProviderStart { provider, channel } => {
                 serde_json::json!(["provider_start", provider, channel])
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             Self::BusyPane { owner, pane } => serde_json::json!(["busy_pane", owner, pane]),
         }
         .to_string()

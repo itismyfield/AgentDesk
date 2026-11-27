@@ -571,7 +571,7 @@ impl Runner {
 
 #[cfg(any(test, feature = "test-support"))]
 impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
-    pub(in crate::services) fn runner_mut(&mut self) -> &mut Runner {
+    pub fn runner_mut(&mut self) -> &mut Runner {
         &mut self.runner
     }
 
@@ -584,7 +584,7 @@ impl<T: BoundedTransport + ProbeRead + Send + Sync + 'static> ChannelTurn<T> {
     }
 
     /// Opens and activates the sidecar as a turn would, then fails its writes after `cut`.
-    pub(in crate::services) fn fail_log_after(&mut self, frontier: u64, cut: Option<usize>) {
+    pub fn fail_log_after(&mut self, frontier: u64, cut: Option<usize>) {
         self.log(frontier).expect("sidecar opens").fail_after = cut;
     }
 }

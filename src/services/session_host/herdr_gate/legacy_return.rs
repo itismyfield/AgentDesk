@@ -193,6 +193,6 @@ impl RetiredEnd {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "legacy_return_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

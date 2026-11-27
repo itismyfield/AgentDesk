@@ -6,7 +6,7 @@ use crate::services::cluster::intake_router_hook::owner_record::{
 };
 use serde_json::json;
 
-pub(crate) fn payload(channel: &str, message: &str, gateway: &str) -> outbox::InsertPendingPayload {
+pub fn payload(channel: &str, message: &str, gateway: &str) -> outbox::InsertPendingPayload {
     outbox::InsertPendingPayload {
         target_instance_id: gateway.into(),
         forwarded_by_instance_id: gateway.into(),
@@ -77,7 +77,7 @@ impl Drop for RuntimeRoot {
     }
 }
 
-pub(crate) struct FixtureDb {
+pub struct FixtureDb {
     pub(crate) _db: TestPostgresDb,
     _root: RuntimeRoot,
 }
@@ -88,7 +88,7 @@ impl FixtureDb {
     }
 }
 
-pub(crate) async fn fixture(channel: &str) -> (FixtureDb, PgPool, Origin) {
+pub async fn fixture(channel: &str) -> (FixtureDb, PgPool, Origin) {
     let root = RuntimeRoot::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -167,7 +167,7 @@ pub(crate) async fn fixture(channel: &str) -> (FixtureDb, PgPool, Origin) {
     )
 }
 
-pub(crate) async fn revoke(pool: &PgPool, origin: &Origin) {
+pub async fn revoke(pool: &PgPool, origin: &Origin) {
     let mut tx = pool.begin().await.unwrap();
     let id = OwnerIdentity::new(&origin.provider, &origin.channel);
     custody::lock(&mut tx, &id).await.unwrap();

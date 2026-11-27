@@ -42,7 +42,7 @@ pub struct OriginFixture {
 
 impl OriginFixture {
     /// Origin whose HEAD is `default_branch`; a non-main default also gets a newer commit than main.
-    pub(crate) fn new(default_branch: &str) -> Self {
+    pub fn new(default_branch: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin.git");
         let origin_str = origin.to_str().unwrap();

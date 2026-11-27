@@ -83,7 +83,7 @@ pub enum SessionHandle {
         /// Bound at creation so output APIs never reopen an arbitrary pathname.
         output: Arc<Mutex<std::fs::File>>,
     },
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     TestProcess {
         pid: u32,
         alive: Arc<std::sync::atomic::AtomicBool>,
@@ -296,7 +296,7 @@ impl SessionBackend for ProcessBackend {
                     Err("Child stdin already closed".to_string())
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SessionHandle::TestProcess { alive, .. } => {
                 if alive.load(std::sync::atomic::Ordering::Relaxed) {
                     Ok(())
@@ -320,7 +320,7 @@ impl SessionBackend for ProcessBackend {
                     false
                 }
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SessionHandle::TestProcess { alive, .. } => {
                 alive.load(std::sync::atomic::Ordering::Relaxed)
             }
@@ -332,7 +332,7 @@ impl SessionHandle {
     pub fn pid(&self) -> u32 {
         match self {
             SessionHandle::Process { pid, .. } => *pid,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SessionHandle::TestProcess { pid, .. } => *pid,
         }
     }
@@ -589,7 +589,7 @@ pub fn terminate_process_handle(handle: SessionHandle) {
                 let _ = process.wait();
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         SessionHandle::TestProcess { alive, .. } => {
             alive.store(false, std::sync::atomic::Ordering::Relaxed);
         }
@@ -619,7 +619,7 @@ fn reap_stopped_process_handle(handle: SessionHandle) {
                     }
                 });
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         SessionHandle::TestProcess { alive, .. } => {
             alive.store(false, std::sync::atomic::Ordering::Relaxed);
         }

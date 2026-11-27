@@ -551,11 +551,11 @@ pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
 
-    pub(crate) fn observe_and_decide(
+    pub fn observe_and_decide(
         pane: &CompactPaneKey,
         occupied: u64,
         threshold: CompactThreshold,
@@ -563,7 +563,7 @@ pub(crate) mod tests {
         observe_and_decide_with_source(pane, occupied, threshold, CompactWindowSource::Proven)
     }
 
-    pub(crate) fn pane() -> CompactPaneKey {
+    pub fn pane() -> CompactPaneKey {
         CompactPaneKey {
             channel_id: 42,
             tmux_session_name: "tmux-4591".to_string(),
@@ -572,11 +572,11 @@ pub(crate) mod tests {
 
     // window 1_000_000, percent 50, lower 300_000 → effective 500_000,
     // rearm_floor = 500_000 - 5% * 1_000_000 = 450_000.
-    pub(crate) fn threshold_for(window: u64) -> CompactThreshold {
+    pub fn threshold_for(window: u64) -> CompactThreshold {
         compact_threshold(window, 50, 300_000).expect("valid threshold fixture")
     }
 
-    pub(crate) fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
+    pub fn armed_state(pane: &CompactPaneKey) -> Option<bool> {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())
@@ -585,7 +585,7 @@ pub(crate) mod tests {
             .map(|entry| entry.armed)
     }
 
-    pub(crate) fn panes_is_empty() -> bool {
+    pub fn panes_is_empty() -> bool {
         COMPACT_TRIGGER_STATE
             .lock()
             .unwrap_or_else(|error| error.into_inner())

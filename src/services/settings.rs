@@ -809,12 +809,12 @@ fn seeded_runtime_config_map(
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use serde_json::json;
 
-    pub(crate) struct TestDatabase {
+    pub struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -822,7 +822,7 @@ pub(crate) mod tests {
     }
 
     impl TestDatabase {
-        pub(crate) async fn create() -> Self {
+        pub async fn create() -> Self {
             crate::db::postgres::postgres_test_database_url_base().expect(
                 "POSTGRES_TEST_DATABASE_URL_BASE required for settings runtime-config PG tests",
             ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
@@ -875,7 +875,7 @@ pub(crate) mod tests {
             pool
         }
 
-        pub(crate) async fn drop(self) {
+        pub async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,

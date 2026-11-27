@@ -89,7 +89,7 @@ fn retired_record() -> HostedExecution {
     record
 }
 
-pub(crate) fn ended(record: &HostedExecution) -> RetiredEnd {
+pub fn ended(record: &HostedExecution) -> RetiredEnd {
     RetiredEnd::observe_with_os(
         &endpoint(),
         Arc::new(MissingPane),
@@ -99,7 +99,7 @@ pub(crate) fn ended(record: &HostedExecution) -> RetiredEnd {
     .unwrap()
 }
 
-pub(crate) fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, ReturnEndRefusal> {
+pub fn provider_alive(record: &HostedExecution) -> Result<RetiredEnd, ReturnEndRefusal> {
     RetiredEnd::observe_with_os(
         &endpoint(),
         Arc::new(MissingPane),

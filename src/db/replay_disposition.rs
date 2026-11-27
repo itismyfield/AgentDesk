@@ -87,6 +87,6 @@ pub mod write;
 #[cfg(test)]
 mod write_tests;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "replay_disposition_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

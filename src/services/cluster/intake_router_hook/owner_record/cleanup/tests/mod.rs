@@ -3,7 +3,7 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::cluster::intake_router_hook::owner_record::{self, output};
 use crate::services::tui_o::ownership::execution;
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _db: TestPostgresDb,
     pub(crate) pool: PgPool,
     id: OwnerIdentity,

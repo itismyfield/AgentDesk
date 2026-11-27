@@ -843,12 +843,12 @@ async fn agent_preferred_labels_for_channel(
         .map(|(_, _, labels)| labels))
 }
 
-#[cfg(test)]
-pub(crate) mod pg_tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod pg_tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
 
-    pub(crate) fn ctx_for_channel<'a>(
+    pub fn ctx_for_channel<'a>(
         mode: IntakeRoutingMode,
         channel: &'a str,
     ) -> IntakeRouterContext<'a> {

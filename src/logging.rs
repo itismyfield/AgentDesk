@@ -37,8 +37,8 @@ pub(crate) fn tracing_env_filter() -> Result<EnvFilter> {
     Ok(filter)
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use std::ffi::OsString;
     use tracing_subscriber::fmt::writer::MakeWriter;
@@ -96,7 +96,7 @@ pub(crate) mod tests {
         }
     }
 
-    pub(crate) fn capture_logs_with_default_filter<F>(emit: F) -> String
+    pub fn capture_logs_with_default_filter<F>(emit: F) -> String
     where
         F: FnOnce(),
     {

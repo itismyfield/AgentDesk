@@ -669,8 +669,8 @@ pub async fn attach_retry_dispatch_on_pg_tx(
     Ok(())
 }
 
-#[cfg(test)]
-pub(crate) mod selector_cleanup_tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod selector_cleanup_tests {
     use super::{
         HookSessionUpsert, clear_session_id_by_key_pg, clear_stale_session_id_pg,
         disconnect_stale_fixed_session_by_key_pg, gc_stale_fixed_working_sessions_db_pg,
@@ -679,7 +679,7 @@ pub(crate) mod selector_cleanup_tests {
         upsert_hook_session_pg,
     };
 
-    pub(crate) struct TestPostgresDb {
+    pub struct TestPostgresDb {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -737,7 +737,7 @@ pub(crate) mod selector_cleanup_tests {
         }
     }
 
-    pub(crate) async fn seed_session_with_selectors(
+    pub async fn seed_session_with_selectors(
         pool: &sqlx::PgPool,
         session_key: &str,
         status: &str,
@@ -759,7 +759,7 @@ pub(crate) mod selector_cleanup_tests {
         .unwrap(); // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
     }
 
-    pub(crate) async fn session_state(
+    pub async fn session_state(
         pool: &sqlx::PgPool,
         session_key: &str,
     ) -> (String, Option<String>, Option<String>, Option<String>) {
@@ -774,7 +774,7 @@ pub(crate) mod selector_cleanup_tests {
         .unwrap() // agentdesk-audit: allow-unwrap — test helper/assert in #[cfg(test)] mod selector_cleanup_tests
     }
 
-    pub(crate) async fn assert_cleanup_preserved_selectors(pool: &sqlx::PgPool, session_key: &str) {
+    pub async fn assert_cleanup_preserved_selectors(pool: &sqlx::PgPool, session_key: &str) {
         let (status, active_dispatch_id, claude_session_id, raw_provider_session_id) =
             session_state(pool, session_key).await;
 

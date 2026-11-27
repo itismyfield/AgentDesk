@@ -79,7 +79,7 @@ pub async fn with_memento_test_endpoint<T>(
 #[cfg(any(test, feature = "test-support"))]
 impl MementoBackend {
     /// Resolves the workspace under a fixture runtime config with no workspace override.
-    pub(crate) fn resolve_workspace_for_test(
+    pub fn resolve_workspace_for_test(
         &self,
         role_id: &str,
         channel_id: u64,

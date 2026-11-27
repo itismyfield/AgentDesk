@@ -19,8 +19,8 @@ use serde_json::Value;
 use sqlx::AssertSqlSafe;
 use sqlx::PgPool;
 
-#[cfg(test)]
-pub(crate) mod owner_fence_pg_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod owner_fence_pg_tests;
 
 /// Owned snapshot of an `intake_outbox` row. The `Phase 3` worker poll
 /// claims a row, deserializes the payload columns into this struct, then

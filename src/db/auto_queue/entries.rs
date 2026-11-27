@@ -1507,14 +1507,14 @@ async fn record_entry_transition_on_pg(
     .map_err(|error| format!("record auto-queue transition for {entry_id}: {error}"))
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
     use crate::db::auto_queue::test_support::TestPostgresDb;
     use crate::test_support::wait::poll_within;
     use sqlx::{Connection, PgConnection, PgPool};
 
-    pub(crate) async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
+    pub async fn setup_entry(pool: &PgPool, run_status: &str, entry_status: &str) {
         sqlx::query(
             "INSERT INTO agents (id, name, provider, discord_channel_id)
              VALUES ('gate-agent', 'Gate Agent', 'claude', 'gate-channel')",
@@ -1549,7 +1549,7 @@ pub(crate) mod tests {
         .expect("seed gate entry");
     }
 
-    pub(crate) async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
+    pub async fn seed_dispatch(pool: &PgPool, dispatch_id: &str) {
         sqlx::query(
             "INSERT INTO task_dispatches
                 (id, kanban_card_id, to_agent_id, dispatch_type, status)
@@ -1561,7 +1561,7 @@ pub(crate) mod tests {
         .expect("seed gate dispatch");
     }
 
-    pub(crate) async fn entry_status(pool: &PgPool) -> String {
+    pub async fn entry_status(pool: &PgPool) -> String {
         sqlx::query_scalar("SELECT status FROM auto_queue_entries WHERE id = 'gate-entry'")
             .fetch_one(pool)
             .await
@@ -1575,7 +1575,7 @@ pub(crate) mod tests {
             .expect("load gate run status")
     }
 
-    pub(crate) async fn transition_count(pool: &PgPool) -> i64 {
+    pub async fn transition_count(pool: &PgPool) -> i64 {
         sqlx::query_scalar(
             "SELECT COUNT(*)::BIGINT
              FROM auto_queue_entry_transitions
@@ -1586,7 +1586,7 @@ pub(crate) mod tests {
         .expect("count gate entry transitions")
     }
 
-    pub(crate) async fn begin_run_token_holder(database_url: &str) -> PgConnection {
+    pub async fn begin_run_token_holder(database_url: &str) -> PgConnection {
         let mut conn = PgConnection::connect(database_url)
             .await
             .expect("connect run-token holder");
@@ -1601,7 +1601,7 @@ pub(crate) mod tests {
         conn
     }
 
-    pub(crate) async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
+    pub async fn run_token_waiter_sample(conn: &mut PgConnection) -> Result<(), String> {
         sqlx::query("SELECT pg_stat_clear_snapshot()")
             .execute(&mut *conn)
             .await

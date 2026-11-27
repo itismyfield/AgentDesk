@@ -2,13 +2,13 @@ use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::cluster::intake_router_hook::owner_record::{self, custody, output, plan};
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     pub db: TestPostgresDb,
     pub pool: sqlx::PgPool,
     pub channel: String,
 }
 impl Fixture {
-    pub(crate) async fn new(channel: &str) -> Self {
+    pub async fn new(channel: &str) -> Self {
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         sqlx::query("INSERT INTO agents(id,name,provider,discord_channel_id,default_execution_node_id) VALUES('custody-agent','fixture','claude',$1,'mac-a')")
