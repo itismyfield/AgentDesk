@@ -521,7 +521,10 @@ fn s2b1_pending_with_first_key_retires_after_restart_without_resubmission_pg() {
         let started = fx
             .start_provider(&launcher, true)
             .expect("own SessionStart");
-        crate::services::claude_tui::readiness::tests::pre_source(fx.logical(), &started.path);
+        crate::services::claude_tui::readiness::test_support::pre_source(
+            fx.logical(),
+            &started.path,
+        );
         assert!(wait_for(&fx.finished, "first submit", || fx.rig.sends()
             == prompt_sends()));
         assert!(
