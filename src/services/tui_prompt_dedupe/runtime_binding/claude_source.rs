@@ -531,7 +531,7 @@ pub(crate) fn observe_current_claude_hook(
         if !binding_events::codex::source_file_matches(&source) {
             return Err(io::Error::other("Claude transcript changed during refresh"));
         }
-        let mut proposal = candidate.proposal.expect("channel was checked");
+        let mut proposal = proposal;
         let moved = source.path != output;
         if !moved {
             proposal.cause = CauseSource::Hook(BindingCause::SameSessionVerified);
@@ -543,10 +543,9 @@ pub(crate) fn observe_current_claude_hook(
             return Err(io::Error::other("Claude transcript refresh was superseded"));
         }
         if moved {
-            let runtime = state
-                .runtime_by_tmux
-                .get_mut(&tmux)
-                .expect("pane was checked");
+            let runtime = state.runtime_by_tmux.get_mut(&tmux).ok_or_else(|| {
+                io::Error::other("Claude pane binding disappeared during refresh")
+            })?;
             let _ = switch_transcript(&tmux, runtime, session_id, proposal.path);
             authority.invalidate();
             return Ok(false);
