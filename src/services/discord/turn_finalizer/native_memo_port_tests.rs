@@ -243,3 +243,251 @@ async fn a_cut_source_submits_nothing_until_a_reopened_seed_reads_new_rows_pg() 
     );
     rig.close().await;
 }
+
+#[derive(Default)]
+struct ReceiptProbeState {
+    registrations: Vec<Registration>,
+    receipt_nonces: Vec<String>,
+    offered: Vec<Disposition>,
+}
+
+struct ReceiptHeadProbe(std::sync::Mutex<ReceiptProbeState>);
+
+impl EvidencePort for ReceiptHeadProbe {
+    fn snapshot(&self, _: NoticeOrigin) -> Held<'_, Result<Snapshot, String>> {
+        let registrations = self.0.lock().unwrap().registrations.clone();
+        Box::pin(async move {
+            Ok(Snapshot {
+                generation: 2,
+                registrations,
+            })
+        })
+    }
+
+    fn receipt(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> Held<'_, Result<(), String>> {
+        assert_eq!(observed, current);
+        let mut state = self.0.lock().unwrap();
+        state.receipt_nonces.push(origin.execution_nonce.clone());
+        let result = if origin.execution_nonce == "incarnation-1" {
+            Err("original device no longer stats as registered".into())
+        } else {
+            assert_eq!(origin.execution_nonce, "incarnation-2");
+            let receipt = &current.receipts[index];
+            let (namespace, ticket) = receipt.identity();
+            let (_, row, _, _) = receipt.record();
+            let registration = state
+                .registrations
+                .iter_mut()
+                .find(|r| r.namespace == namespace && r.ticket == *ticket)
+                .unwrap();
+            assert_eq!(row, "successor-row");
+            registration.receipts.push(row.into());
+            Ok(())
+        };
+        Box::pin(async move { result })
+    }
+
+    fn offer(
+        &self,
+        observed: Observation,
+        current: Observation,
+        index: usize,
+        origin: NoticeOrigin,
+    ) -> Held<'_, Result<bool, String>> {
+        assert_eq!(observed, current);
+        assert_eq!(origin.execution_nonce, "incarnation-2");
+        let evidence = &current.evidence[index];
+        assert_eq!(evidence.membership_row.as_deref(), Some("successor-row"));
+        self.0
+            .lock()
+            .unwrap()
+            .offered
+            .push(evidence.disposition.clone());
+        Box::pin(async { Ok(true) })
+    }
+
+    fn abstain(
+        &self,
+        _: Observation,
+        _: Observation,
+        _: (Vec<Barrier>, Vec<Barrier>),
+        _: bool,
+        _: NoticeOrigin,
+    ) -> Held<'_, Result<(), String>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    fn terminal(
+        &self,
+        _: Observation,
+        _: Registration,
+        _: Tail,
+        _: NoticeOrigin,
+    ) -> Held<'_, Terminal> {
+        Box::pin(async { Err("probe transcript has complete records".into()) })
+    }
+
+    fn retry(&self) -> Held<'_, ()> {
+        Box::pin(async {})
+    }
+}
+
+#[tokio::test]
+async fn probe_old_device_head_receipt_and_successor_same_source() {
+    use crate::services::tui_o::writer::binding::{BindingCause, BindingRecord, BindingTarget};
+    use serde_json::json;
+    use sha2::Digest;
+
+    const REFRESH_MOVES_CURSOR: bool = false;
+    let root = crate::config::TestRuntimeRootGuard::new();
+    let mut f = Fixture::at(
+        root.path().join("runtime/receipt-probe.json"),
+        830_187,
+        true,
+    );
+    let source = f.ticket.source.clone().unwrap();
+    let live = SourceId {
+        session_id: source.session_id.clone(),
+        path: source.transcript.clone(),
+        dev: source.file[0],
+        ino: source.file[1],
+    };
+    let stored = SourceId {
+        dev: live.dev ^ (1 << 40),
+        ..live.clone()
+    };
+    let original_rows = [
+        json!({"type": "user", "uuid": "original-row", "sessionId": source.session_id, "message": {"content": f.input["payload"]["frame"]}}),
+        json!({"type": "system", "subtype": "turn_duration"}),
+    ];
+    let mut transcript = original_rows
+        .iter()
+        .map(|row| format!("{row}\n"))
+        .collect::<String>();
+    let offset = transcript.len() as u64;
+    let successor_rows = [
+        json!({"type": "user", "uuid": "successor-row", "sessionId": source.session_id, "message": {"content": "successor fixture"}}),
+        json!({"type": "system", "subtype": "turn_duration"}),
+    ];
+    transcript.extend(successor_rows.iter().map(|row| format!("{row}\n")));
+    std::fs::write(&live.path, &transcript).unwrap();
+
+    let namespace = "native-fixture";
+    let mut successor = f.input.clone();
+    successor["identity"]["primary"] = (f.ticket.channel_id + 2).into();
+    successor["identity"]["sources"][0]["message_id"] = (f.ticket.channel_id + 2).into();
+    successor["attempt"]["nonce"] = "successor-attempt".into();
+    successor["attempt"]["target"]["execution_nonce"] = "incarnation-2".into();
+    successor["attempt"]["source"]["offset"] = offset.into();
+    successor["payload"]["frame"] = "successor fixture".into();
+    f.history.prepare(namespace, &successor).unwrap();
+    let key = json!({"identity": successor["identity"], "attempt": successor["attempt"]});
+    let successor_ticket = crate::services::tui_input::human_frame::history::v2::native::Ticket {
+        source: Some(f.history.source(namespace, &key).unwrap()),
+        key,
+        owning_episode: None,
+        ..f.ticket.clone()
+    };
+    f.history
+        .prepare_native(namespace, &successor_ticket)
+        .unwrap();
+
+    let mut registrations = f.history.native_classification_registrations().unwrap();
+    assert_eq!(registrations.len(), 2);
+    let original = registrations
+        .iter_mut()
+        .find(|r| r.ticket == f.ticket)
+        .unwrap();
+    original.ticket.source.as_mut().unwrap().file[0] = stored.dev;
+    original.ticket.key["attempt"]["source"]["file"][0] = stored.dev.into();
+    f.ticket.source.as_mut().unwrap().file[0] = stored.dev;
+    let mut capture = SupplyCapture::resume_at(
+        &f,
+        &root.path().join("receipt-probe-store"),
+        true,
+        transcript.len() as u64,
+        hex::encode(sha2::Sha256::digest(transcript.as_bytes())),
+    );
+    {
+        let mut events = capture.bindings.events.lock().unwrap();
+        let mut resume = events[0].clone();
+        resume.seq = 2;
+        resume.execution_nonce = "incarnation-2".into();
+        if let BindingRecord::Bound {
+            old, new, cause, ..
+        } = &mut resume.record
+        {
+            *old = Some(stored.clone());
+            *new = BindingTarget::Source(live.clone());
+            *cause = BindingCause::Resume;
+        }
+        let mut refresh = resume.clone();
+        refresh.seq = 3;
+        if let BindingRecord::Bound {
+            old,
+            cause,
+            evidence,
+            ..
+        } = &mut refresh.record
+        {
+            *old = Some(live.clone());
+            *cause = BindingCause::SameSessionVerified;
+            evidence.hook_event = "user_prompt_submit".into();
+        }
+        events.extend([resume, refresh]);
+        capture.bindings.notice.send_replace(3);
+    }
+
+    let probe = Arc::new(ReceiptHeadProbe(std::sync::Mutex::new(ReceiptProbeState {
+        registrations,
+        ..Default::default()
+    })));
+    let port = NativePort {
+        inner: probe.clone(),
+    };
+    for _ in 0..2 {
+        poll(&mut capture, &port).await;
+    }
+    assert_eq!(
+        capture.writer.store().binding_checkpoint().unwrap(),
+        Some(3)
+    );
+    let expected_cursor = if REFRESH_MOVES_CURSOR { &live } else { &stored };
+    assert!(capture.writer.store().cursor(expected_cursor).is_some());
+    {
+        let mut state = probe.0.lock().unwrap();
+        assert!(
+            state.offered.is_empty(),
+            "the original blocks the first candidate slot"
+        );
+        if REFRESH_MOVES_CURSOR {
+            assert!(
+                state.receipt_nonces.is_empty(),
+                "the old nonce has no binding on the current device"
+            );
+        } else {
+            assert_eq!(state.receipt_nonces, ["incarnation-1", "incarnation-1"]);
+        }
+        state.registrations.retain(|r| r.ticket == successor_ticket);
+        assert_eq!(state.registrations.len(), 1);
+        state.receipt_nonces.clear();
+    }
+    poll(&mut capture, &port).await;
+    let state = probe.0.lock().unwrap();
+    if REFRESH_MOVES_CURSOR {
+        assert_eq!(state.receipt_nonces, ["incarnation-2"]);
+        assert_eq!(state.offered, [Disposition::Executed]);
+    } else {
+        assert!(state.receipt_nonces.is_empty());
+        assert!(
+            state.offered.is_empty(),
+            "the stored device still filters the successor"
+        );
+    }
+}
