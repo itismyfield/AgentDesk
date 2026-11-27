@@ -230,7 +230,7 @@ impl InputTransport for TmuxInput {
     }
 
     fn capture_draft(&mut self, session: &str) -> Option<String> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(program) = spy::draft_route(session) {
             return capture_draft_with(program, session, DRAFT_CAPTURE_TIMEOUT);
         }
@@ -442,7 +442,7 @@ pub fn run_plan(
         if let Err(stopped) = plan.step(action, actions.get(index + 1)) {
             return stopped;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         spy::after_action(target, action);
     }
     InputRun::Applied

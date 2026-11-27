@@ -306,14 +306,14 @@ pub(super) fn execute_observed(
             }) {
                 return Ok(false);
             }
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "session_temp");
             crate::services::tmux_common::cleanup_session_temp_files_under_source_authority(
                 authority,
                 tmux_session_name,
                 &fence,
             )?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             actual_submit_tests::note_dead_temp_cleanup(tmux_session_name, "codex_session_files");
             crate::services::codex_tui::session::CodexTuiSessionFiles::for_tmux_session(
                 tmux_session_name,
@@ -352,7 +352,7 @@ pub(super) fn execute_observed(
         crate::services::tui_prompt_dedupe::register_tmux_channel(tmux_session_name, channel_id);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     actual_submit_tests::run_before_create_effect();
     if captured.is_some_and(|captured| {
         !observation.is_some_and(|observed| {

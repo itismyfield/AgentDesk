@@ -628,7 +628,7 @@ fn tail_source_with_clock<L: Into<PaneLiveness>>(
                 clock.sleep(Duration::from_millis(100));
             }
             Ok(n) => {
-                #[cfg(all(test, unix))]
+                #[cfg(all(any(test, feature = "test-support"), unix))]
                 crate::services::codex::actual_submit_tests::source_io::read(
                     &file,
                     "rollout_tail",

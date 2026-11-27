@@ -234,7 +234,7 @@ pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), Stri
         tmux_session_name,
         prompt,
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let tail_result = if actual_submit_tests::take_tail_fault() {
         Err("injected Codex transcript tail failure".to_owned())
     } else {

@@ -360,7 +360,7 @@ fn persist_checkpoint(
     temp.write_all(format!("{marker}\n").as_bytes())?;
     temp.as_file().sync_all()?;
     temp.persist(&path).map_err(|error| error.error)?;
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     crate::services::codex::actual_submit_tests::source_io::advance(
         Path::new(&binding.output_path),
         "durable_cursor_commit",
@@ -479,7 +479,7 @@ fn advance_cursor(
         }
         entry.value = binding;
         entry.recorded_at = Instant::now();
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         crate::services::codex::actual_submit_tests::source_io::advance(
             Path::new(output_path),
             "runtime_cursor_commit",

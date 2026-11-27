@@ -27,7 +27,7 @@ impl StreamChild {
         watchdog: Option<CancelWatchdog>,
     ) -> Self {
         let pid = child.id();
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         stream_queue::test_delay::register_pid(pid);
         Self {
             pid,
@@ -104,7 +104,7 @@ impl StreamChild {
         }
         if self.status.is_some() {
             self.exited_at = Some(Instant::now());
-            #[cfg(all(test, unix))]
+            #[cfg(all(any(test, feature = "test-support"), unix))]
             stream_queue::test_delay::after_exit();
         }
         Ok(())

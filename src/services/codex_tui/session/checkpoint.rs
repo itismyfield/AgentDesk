@@ -48,10 +48,10 @@ impl Source {
         let start = boundary(&mut file, end - 1)?;
         file.seek(SeekFrom::Start(start))?;
         let mut bytes = Vec::new();
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         let observed_file = file.try_clone()?;
         file.take(end - start).read_to_end(&mut bytes)?;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         crate::services::codex::actual_submit_tests::source_io::read(
             &observed_file,
             "checkpoint_record",
@@ -105,7 +105,7 @@ pub fn boundary(file: &mut File, offset: u64) -> io::Result<u64> {
         let len = (end - start) as usize;
         file.seek(SeekFrom::Start(start))?;
         file.read_exact(&mut chunk[..len])?;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         crate::services::codex::actual_submit_tests::source_io::read(
             file,
             "checkpoint_boundary",
@@ -266,7 +266,7 @@ pub(crate) fn first_user_record_created_since(
     loop {
         line.clear();
         let read = reader.read_line(&mut line).ok()?;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         crate::services::codex::actual_submit_tests::source_io::read(
             reader.get_ref(),
             "checkpoint_scan",

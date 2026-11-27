@@ -11,7 +11,7 @@ type Samples = Arc<Mutex<Stats>>;
 static WATCHED: LazyLock<Mutex<HashMap<Identity, Samples>>> = LazyLock::new(Default::default);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Stats {
+pub struct Stats {
     pub read_calls: u64,
     pub read_bytes: u64,
     pub advance_commits: u64,

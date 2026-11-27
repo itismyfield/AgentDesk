@@ -35,13 +35,13 @@ pub trait ReturnPorts {
 pub struct ProductionPorts;
 
 impl ReturnPorts for ProductionPorts {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn herdr<'a>(&self, record: &'a HostedExecution) -> Box<dyn EarlierExecution + 'a> {
         let logical = &record.owner.logical_key;
         tests::standing_in(logical, true).unwrap_or_else(|| Box::new(HerdrPane::of(record)))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
         tests::standing_in(logical, false).unwrap_or_else(|| Box::new(LegacyTmux(logical)))
     }
