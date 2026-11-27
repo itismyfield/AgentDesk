@@ -301,6 +301,46 @@ async fn hook_refresh_compaction_starts_at_its_own_cursor_and_keeps_posts_unique
     halt(stop, task).await;
 }
 
+#[test]
+fn hook_refresh_rejects_a_delayed_hook_from_the_previous_path() {
+    let session = uuid::Uuid::new_v4().to_string();
+    let (_harness, path) = launched(&session);
+    let pane = ProducerPane::launch(&session, &path);
+    let mut headers = execution_headers(&pane, &session, &path);
+    pane.http(
+        "SessionStart",
+        Some("startup"),
+        &session,
+        &session,
+        &path,
+        1,
+    );
+    let project = tempfile::tempdir_in(path.parent().unwrap().parent().unwrap()).unwrap();
+    let moved = project.path().join(format!("{session}.jsonl"));
+    std::fs::write(&moved, session_row(&session)).unwrap();
+    let mut hook = |path: &Path, seconds| {
+        let time = pane.base + TimeDelta::seconds(seconds);
+        headers.insert(
+            RELAY_PUBLISHED_AT_HEADER,
+            time.to_rfc3339().parse().unwrap(),
+        );
+        let payload = serde_json::json!({"session_id": session, "transcript_path": path});
+        observe_binding_hook(
+            "claude",
+            "Stop",
+            Some(&session),
+            Some(&session),
+            &payload,
+            &headers,
+        )
+    };
+    assert!(!hook(&moved, 3).refused());
+    let pin = source_id_for(&session, &moved).unwrap();
+    assert_eq!(pane.history().current.unwrap().pin, Some(pin.clone()));
+    hook(&path, 2);
+    assert_eq!(pane.history().current.unwrap().pin, Some(pin));
+}
+
 fn kind(event: &BindingEvent) -> String {
     match &event.record {
         BindingRecord::Bound {

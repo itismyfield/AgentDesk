@@ -385,6 +385,14 @@ impl ClaudeFold {
     fn confirm(&mut self, session: &str, pin: Pin, at: DateTime<Utc>) {
         if self.current_is(session) {
             let current = self.history.current.as_mut().expect("current checked");
+            if current
+                .pin
+                .as_ref()
+                .zip(pin.0.as_ref())
+                .is_some_and(|(old, new)| old.path != new.path)
+            {
+                current.since = Some(at);
+            }
             (current.pin, current.pinned_at) = pin;
             current.since.get_or_insert(at);
         } else {

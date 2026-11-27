@@ -578,7 +578,7 @@ pub(super) struct NativeCleanup {
     admission: NativeAdmission,
     row: Option<super::super::inflight::InflightTurnState>,
     started_before: std::time::Instant,
-    pub(super) source_fence: Option<native_supply::SourceFence>,
+    source_fence: Option<native_supply::SourceFence>,
 }
 
 #[cfg(unix)]

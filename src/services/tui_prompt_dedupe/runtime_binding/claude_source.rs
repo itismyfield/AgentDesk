@@ -373,6 +373,25 @@ impl Candidate<'_> {
             None => (None, SourceHistory::default()),
         };
         let (pin, pinned_at) = pinned.unzip();
+        if refresh
+            && pin
+                .as_ref()
+                .is_some_and(|pin| pin.path != Path::new(candidate))
+        {
+            let since = history
+                .current
+                .as_ref()
+                .map(|visit| visit.since.unwrap_or(visit.seen));
+            if !history.complete
+                || !self
+                    .hook
+                    .published_at
+                    .zip(since)
+                    .is_some_and(|(hook, since)| hook > since)
+            {
+                return Ok((refused(SourceRejection::Regression), false));
+            }
+        }
         let pin = pin.filter(|pin| {
             pin.session_id == bound_session
                 && pin.path == Path::new(&bound.output_path)
