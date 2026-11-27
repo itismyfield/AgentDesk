@@ -1,29 +1,34 @@
-# 출력 writer 유휴 대기
+# 출력 writer 유휴 관측
 
-기준 코드 `b5609d74b37a3b9d9851181071b2d359fe058c46`의 `writer/actor.rs:306, 470–488`은
-1초마다 본문을 실행한다. Codex 제출 mailbox는 이미 수신으로 깨어나며, 다른 깨우기
-경로에는 고정 timer를 쓴다. 이 모델의 명령은 기존 timer를 기다리던 transition mailbox를 뜻한다.
+고정 주기 코드 `82e9662e4ca964a3e113c885be8aaeaf20216992`는
+`writer/actor/publishing.rs`에서 1초마다 다음 관측을 예약한다.
+앞선 백오프의 코드 기준은 `c85323730d6a9e10730eb5ce19463f8a0274204d`다.
+원래 고정 주기는 `1f61b76313ebc6219a0c4cb6117e25582aa57a1d`의
+`writer/actor.rs:446, 472–488`에서 본문과 transition mailbox를 매번 처리했다.
 
-| 구성 | 입력·hook·transition 명령 즉시 깨우기 | spool·transcript 최대 15초 | 들어온 변화는 결국 처리 |
+| 구성 | 입력·hook 즉시 깨우기 | 알림 없는 변화 1초 관측 | 들어온 변화는 결국 처리 |
 | --- | --- | --- | --- |
 | `WriterIdleBefore.cfg` | 위반 | 충족 | 충족 |
-| `WriterIdleBackoff.cfg` | 충족 | 충족 | 충족 |
-| `WriterIdleNoMaxTimer.cfg` | 충족 | 경과 시간이 멈춘 반례 | 위반 |
+| `WriterIdleBackoff.cfg` | 충족 | 위반 | 충족 |
+| `WriterIdleFixed.cfg` | 충족 | 충족 | 충족 |
+| `WriterIdleNoMaxTimer.cfg` | 충족 | 이전 15초 단계에서 정지 | 위반 |
+| `WriterIdleNoTimer.cfg` | 충족 | 고정 주기의 timer 제거 시 정지 | 위반 |
 
-TLC 1.7.4에서 세 구성의 실제 위반이 `expected.tsv`와 일치했다. 백오프 구성은
-`IdlePromptWake`, `IdleWithinMax`, `IdleEventuallyProcesses`를 모두 충족했다.
-최대 timer를 없애면 15초 단계에서 남은 시간이 0인 채 spool 또는 transcript가
-보류되어 무한히 머문다. 숫자 불변식만으로 이 정지를 검출할 수 없어 liveness를 함께 검사한다.
+TLC 1.7.4는 다섯 구성에서 예상한 규칙을 확인했다. 백오프는
+`IdleWithinOne`을 깨지만 종전 15초 관측 상한은 충족한다. 두 timer 제거
+구성에서는 시간 흐름도 멈춰 수치 상한만으로 실패를 검출할 수 없다.
+`IdleEventuallyProcesses`는 보류한 spool·transcript·명령이 끝내 처리되지 않는 반례를 검출한다.
 
-한 변화가 어느 timer 구간에서든 들어올 수 있다. pending 신호가 있으면 다음 동작은
-처리이며, timer와 처리에는 약한 공정성을 둔다. Rust에서는 `Notify::notify_one`이
-대기 future 생성 전 신호도 permit으로 보존한다. Binding watch와 mailbox는 각각
-변경 버전과 큐를 보존한다. 한 차례 깨어나면 같은 채널에 함께 도착한 작업도 원래 순서로 본다.
-시간 상한은 대기 구간을 모델링하며, 디스크·네트워크 동작 완료까지의 실시간 상한은 아니다.
+모델은 스탬프가 이미 찍힌 한 유휴 채널에 한 변화가 들어오는 경우를 다룬다.
+입력과 hook은 대기 future 생성 전에도 `Notify::notify_one` permit 또는
+binding watch 버전을 남긴다. transition 명령은 bounded mailbox에 남아
+다음 기존 관측에서 소비된다. timer와 관측에는 약한 공정성을 둔다.
+1초는 다음 관측까지의 대기 한도이며 디스크·네트워크 동작의 완료 시간은 별도다.
 
-Spool 세대는 하나의 writer가 소유한 `ChannelStore`의 성공한 spool 변경에서 전진한다.
-기동 시 기존 spool 재생과 내구성 검사를 수행한다. 운영 중 별도의 spool writer를
-전제하지 않는다. transcript 메타데이터는 파일 교체와 길이 감소를 구분한다.
-메타데이터 외 의존성과 시간 기반 정리는 최대 15초마다 정상 본문에서 확인한다.
+Rust는 작업 전 transcript 메타데이터와 spool 세대를 샘플링한다.
+입력·hook·ownership 변화는 이전 스탬프를 무효화한다.
+소유 writer의 spool 커밋을 세대로 확인하고, 파일 교체와 길이 감소는 메타데이터로 구분한다.
+이전 spool 재생과 내구성 검사는 기동 때 수행한다. 미완료 binding과 원본 정리
+의무가 남은 동안에는 1초 관측에서 처리 기회를 갖는다.
 
 [모델](WriterIdle.tla) · [상태 차트](writer-idle.chart.mmd)
