@@ -63,3 +63,79 @@ fn an_owned_start_that_sent_nothing_holds_its_front_and_keeps_its_birth() {
         "the turn's bridge still owns its row"
     );
 }
+
+fn assert_wait_site(boundary: &str, route: &str) {
+    let owner = include_str!("owner_input.rs")
+        .split_whitespace()
+        .collect::<String>()
+        .replace(",)", ")");
+    let (_, after_boundary) = owner.split_once(boundary).expect("owner decision");
+    assert!(
+        after_boundary.contains(route),
+        "the owner decision must preserve its own diagnostic route"
+    );
+}
+
+#[test]
+fn owner_start_wait_site_active_turn() {
+    assert_wait_site(
+        "letresult=matchhandoff",
+        "letactive=matchidle_wait::active_turn(&mailbox,origin,channel,original.1.message_id).await",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_boot_ready() {
+    assert_wait_site(
+        "asyncfnstart_waits(",
+        "native_prepare::boot_ready(shared,channel).await{returnWait::Event(\"boot_ready\");",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_row_or_rest() {
+    assert_wait_site(
+        "asyncfnstart_waits(",
+        "ifrow||rest(provider,id){returnWait::Event(\"row_or_rest\");",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_transcript_busy() {
+    assert_wait_site(
+        "asyncfnstart_waits(",
+        "ifbusy{returnWait::Event(\"transcript_busy\");",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_screen() {
+    assert_wait_site(
+        "letSome(screen)=screen",
+        "returnWait::Watch(\"screen\",Box::new(move||",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_native_wait() {
+    assert_wait_site(
+        "fnnative_wait(",
+        "Screen::Blocked|Screen::Unknown=>Wait::Watch(\"native_wait\",Box::new(read))",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_unnamed_target() {
+    assert_wait_site(
+        "fnnamed_wait(",
+        "Wait::Watch(\"unnamed_target\",Box::new(move||",
+    );
+}
+
+#[test]
+fn owner_start_wait_site_late_screen() {
+    assert_wait_site(
+        "letprobe=late_probe(",
+        "idle_wait::refusal(turn.channel_id,claim.front().1.message_id,\"late_screen\")",
+    );
+}

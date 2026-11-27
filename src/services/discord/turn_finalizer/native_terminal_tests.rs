@@ -824,3 +824,6 @@ async fn native_8148_terminal_writer_rejects_tail_appended_after_proof_pg() {
 async fn native_8148_terminal_writer_holds_full_tail_read_failure_pg() {
     check_writer_rejection(PollFault::EofRead).await;
 }
+
+#[path = "native_rowless_wait_tests.rs"]
+mod rowless_wait;
