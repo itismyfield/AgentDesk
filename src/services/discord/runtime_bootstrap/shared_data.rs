@@ -275,9 +275,9 @@ pub(super) fn run_bot_build_shared_data(
 pub(crate) fn shared_data_without_policy_for_tests(
     registry: &Arc<health::HealthRegistry>,
     pg_pool: Option<sqlx::PgPool>,
-    owner_wake: Option<fn(&Arc<SharedData>, ChannelId)>,
+    #[cfg(unix)] owner_wake: Option<fn(&Arc<SharedData>, ChannelId)>,
 ) -> Arc<SharedData> {
-    let mut shared = run_bot_build_shared_data(
+    let shared = run_bot_build_shared_data(
         DiscordBotSettings::default(),
         &ProviderKind::Claude,
         RuntimeServices {
@@ -306,6 +306,9 @@ pub(crate) fn shared_data_without_policy_for_tests(
             codex_goals_reset_channels: &[],
         },
     );
+    #[cfg(unix)]
+    let mut shared = shared;
+    #[cfg(unix)]
     if let Some(wake) = owner_wake {
         Arc::get_mut(&mut shared).unwrap().router_ports.owner_wake = wake;
     }
@@ -341,7 +344,12 @@ mod tests {
             .unwrap();
         let _entered = runtime.enter();
         let allocations = EngineRuntime::record_allocations_for_tests();
-        let shared = shared_data_without_policy_for_tests(&registry, None, None);
+        let shared = shared_data_without_policy_for_tests(
+            &registry,
+            None,
+            #[cfg(unix)]
+            None,
+        );
         assert_original_engine_allocation(allocations, &shared);
         assert!(shared.policy.engine.is_none());
         let published = crate::services::discord::health::runtime_registry::runtime_registry()
