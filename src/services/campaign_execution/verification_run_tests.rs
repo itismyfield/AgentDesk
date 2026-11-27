@@ -1,9 +1,16 @@
 use super::test_support::{at, environment, input, receipt, result, spec, spec_with_audit};
 use super::*;
-use crate::services::campaign_execution::definition;
-use crate::services::campaign_execution::definition::{PROFILE_VERSION, WORKFLOW_VERSION};
-use crate::services::campaign_execution::model::{Role, SessionIdentity};
-use crate::services::campaign_execution::profile::ResourceKind;
+use crate::services::campaign_execution::{
+    definition::{self, PROFILE_VERSION, WORKFLOW_VERSION},
+    model::{
+        Action, ActionKind, ActionState, AttemptBinding, HostGate, Repository, Role,
+        SessionIdentity, Stage,
+    },
+    profile::{
+        Candidate, EnvironmentComponent, ExecutedTest, ResourceIdentity, ResourceKind, TestOutcome,
+    },
+};
+use std::collections::BTreeMap;
 
 pub(crate) fn gate() -> HostGate {
     HostGate {

@@ -1,10 +1,17 @@
 use super::*;
 use crate::services::campaign_execution::{
     control::test_support as domain,
-    evidence_gate::tests::{OUTPUT, actions, assess, collected, registered, seal},
-    profile::TestOutcome,
-    verification_run::{Cancellation, NotSentReason, PhaseInitiation, VerificationCollection},
+    evidence_gate::{
+        GateReason, StageAssessment, Verdict,
+        tests::{OUTPUT, actions, assess, collected, registered, seal},
+    },
+    model::{ActionState, AttemptBinding, Role, Run, Stage},
+    profile::{ReviewExtent, ReviewRange, TestOutcome},
+    verification_run::{
+        Cancellation, NotSentReason, PhaseInitiation, VerificationCollection, VerificationRun,
+    },
 };
+use std::collections::BTreeSet;
 
 fn actor(attempt: &str, session: &str, native: &str) -> ActorIdentity {
     let mut identity = domain::binding(&domain::running()).session;

@@ -1,8 +1,14 @@
 use super::*;
-use crate::services::campaign_execution::definition::{
-    DefinitionInput, NodeDefinition, VerificationKind, WORKFLOW_VERSION, validate_definition,
+use crate::services::campaign_execution::{
+    definition::{
+        AcceptanceCondition, DefinitionHashes, DefinitionInput, NodeDefinition, PROFILE_VERSION,
+        VerificationKind, WORKFLOW_VERSION, profile_hash, validate_definition,
+    },
+    model::{
+        AttemptBinding, ExecutionReadiness, HostGate, Repository, Role, SessionIdentity, Stage,
+    },
 };
-use crate::services::campaign_execution::model::{HostGate, SessionIdentity};
+use chrono::{DateTime, Utc};
 
 fn at() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-10-28T04:00:00Z")

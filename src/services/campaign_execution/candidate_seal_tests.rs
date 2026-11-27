@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::campaign_execution::{
+    adk_workspace::WorkspaceObservation,
     control::test_support as domain,
     evidence_gate::{
         test_support::{REPO, claim, workspace},
