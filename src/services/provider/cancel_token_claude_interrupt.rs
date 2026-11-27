@@ -280,20 +280,29 @@ fn own_turn_step(
 /// Bytes one backstop poll reads of a held turn; a longer turn is read on at later polls.
 pub const OWN_TURN_POLL_BUDGET: u64 = 256 * 1024;
 
-/// The backstop's read of a held turn from its own input start.
-#[derive(Default)]
-pub(crate) struct OwnTurnCursor {
-    /// The identity of the file read and the end of its records consumed; `None` before a read.
-    at: Option<(Option<(u64, u64)>, u64)>,
-    /// An incomplete last line, kept until its newline is written.
-    partial: Vec<u8>,
-    own: Option<CodexOwnTurn>,
-    /// The read is over: the turn ended or another began, or what followed the input was not it.
-    over: bool,
-    /// Bytes the last poll read.
-    #[cfg(test)]
-    pub(crate) polled: u64,
+mod own_turn_cursor {
+    use super::*;
+
+    /// The backstop's read of a held turn from its own input start.
+    #[derive(Default)]
+    pub struct OwnTurnCursor {
+        /// The identity of the file read and the end of its records consumed; `None` before a read.
+        pub(super) at: Option<(Option<(u64, u64)>, u64)>,
+        /// An incomplete last line, kept until its newline is written.
+        pub(super) partial: Vec<u8>,
+        pub(super) own: Option<CodexOwnTurn>,
+        /// The read is over: the turn ended or another began, or what followed the input was not it.
+        pub(super) over: bool,
+        /// Bytes the last poll read.
+        #[cfg(test)]
+        pub(crate) polled: u64,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use own_turn_cursor::OwnTurnCursor;
+#[cfg(any(test, feature = "test-support"))]
+pub use own_turn_cursor::OwnTurnCursor;
 
 impl OwnTurnCursor {
     /// Reads at most the poll budget past `consumed` and steps each complete record read.

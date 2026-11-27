@@ -133,7 +133,7 @@ impl Chain {
         self.sources.len() as u64 - 1
     }
 
-    pub(crate) fn request(&self, job: &str) -> Request {
+    pub fn request(&self, job: &str) -> Request {
         let end = ExecutionEnd {
             host: "mac-mini".into(),
             pane: self.pane.clone(),
@@ -152,7 +152,7 @@ impl Chain {
         }
     }
 
-    pub(crate) fn context(&self) -> Context {
+    pub fn context(&self) -> Context {
         Context {
             codex: None,
             tmux: self.pane.clone(),

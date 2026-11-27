@@ -118,7 +118,7 @@ impl DeliveryLease for Lease {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Alarms(Arc<Mutex<Vec<WriterAlarm>>>);
+pub struct Alarms(Arc<Mutex<Vec<WriterAlarm>>>);
 
 impl AlarmSink for Alarms {
     fn raise(&self, _channel: u64, alarm: WriterAlarm) {

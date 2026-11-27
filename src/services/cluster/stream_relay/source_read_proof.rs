@@ -49,11 +49,20 @@ pub(crate) fn revision(key: &str) -> Option<u64> {
         .unwrap_or(Some(0))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SourcePin {
-    key: String,
-    revision: u64,
+mod source_pin {
+    use super::*;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct SourcePin {
+        pub(super) key: String,
+        pub(super) revision: u64,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use source_pin::SourcePin;
+#[cfg(any(test, feature = "test-support"))]
+pub use source_pin::SourcePin;
 
 impl SourcePin {
     #[cfg(any(test, feature = "test-support"))]

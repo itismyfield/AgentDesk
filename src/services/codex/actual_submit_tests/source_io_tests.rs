@@ -18,7 +18,7 @@ pub(crate) struct Stats {
     pub events: Vec<(&'static str, u64, u64)>,
 }
 
-pub(crate) struct Watch {
+pub struct Watch {
     identity: Identity,
     samples: Samples,
 }

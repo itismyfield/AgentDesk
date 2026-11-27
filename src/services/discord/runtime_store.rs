@@ -346,7 +346,7 @@ mod test_generation_publication {
             const { std::cell::Cell::new(None) };
     }
 
-    pub(in crate::services::discord) struct Publication {
+    pub struct Publication {
         previous_binding: Option<ProcessGenerationAllocation>,
     }
 

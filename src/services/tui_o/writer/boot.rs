@@ -234,7 +234,7 @@ impl Drop for Phase {
 
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug)]
-pub(crate) struct Event {
+pub struct Event {
     pub channel: u64,
     pub stage: &'static str,
     pub status: &'static str,

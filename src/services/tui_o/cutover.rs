@@ -513,7 +513,7 @@ pub mod test_override {
         with_lookups(|lookups| lookups.keys().cloned().collect())
     }
 
-    pub(crate) struct LookupsGuard(Option<Lookups>);
+    pub struct LookupsGuard(Option<Lookups>);
 
     pub fn force_channel_lookups() -> LookupsGuard {
         LookupsGuard(LOOKUPS.with(|cell| cell.replace(Some(Lookups::new()))))

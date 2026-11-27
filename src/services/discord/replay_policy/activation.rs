@@ -61,7 +61,7 @@ pub mod test_activation {
         super::Settings::parse(true, Some(&channels)).selected(channel)
     }
 
-    pub(crate) struct Activated(String);
+    pub struct Activated(String);
 
     pub fn activate(channel: u64) -> Activated {
         ACTIVE.lock().unwrap().push(channel.to_string());

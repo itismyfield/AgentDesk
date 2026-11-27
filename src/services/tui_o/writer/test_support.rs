@@ -92,7 +92,7 @@ pub struct FakePort {
     pub history_reads: AtomicUsize,
     pub on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
-    pub(crate) delay: Mutex<Option<std::time::Duration>>,
+    pub delay: Mutex<Option<std::time::Duration>>,
 }
 
 impl FakePort {

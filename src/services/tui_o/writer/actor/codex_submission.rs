@@ -55,21 +55,39 @@ fn suspended_failure() -> CommandFailure {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Reply {
-    generation: u64,
-    run: Arc<()>,
-    closed: Option<Closed>,
-    prepared: Option<Prepared>,
-    read_back: Option<ReadBack>,
-    deny: Option<DenyRecorded>,
+mod reply {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Reply {
+        pub(super) generation: u64,
+        pub(super) run: Arc<()>,
+        pub(super) closed: Option<Closed>,
+        pub(super) prepared: Option<Prepared>,
+        pub(super) read_back: Option<ReadBack>,
+        pub(super) deny: Option<DenyRecorded>,
+    }
 }
 
-#[derive(Debug)]
-pub(crate) struct Prepared {
-    run: Arc<()>,
-    floor: NativeFloor,
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reply::Reply;
+#[cfg(any(test, feature = "test-support"))]
+pub use reply::Reply;
+
+mod prepared {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Prepared {
+        pub(super) run: Arc<()>,
+        pub(super) floor: NativeFloor,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use prepared::Prepared;
+#[cfg(any(test, feature = "test-support"))]
+pub use prepared::Prepared;
 
 impl Prepared {
     pub(crate) fn floor(&self) -> &NativeFloor {
@@ -77,11 +95,20 @@ impl Prepared {
     }
 }
 
-#[derive(Debug)]
-pub(crate) struct Closed {
-    run: Arc<()>,
-    durable: DurableClosedEpisode,
+mod closed {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Closed {
+        pub(super) run: Arc<()>,
+        pub(super) durable: DurableClosedEpisode,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use closed::Closed;
+#[cfg(any(test, feature = "test-support"))]
+pub use closed::Closed;
 
 impl Closed {
     pub(crate) fn span(&self) -> &CodexEpisodeSpan {

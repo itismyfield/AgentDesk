@@ -2953,7 +2953,7 @@ pub use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for
 /// test that takes the mutex in that gap sees a half-restored environment, and
 /// the vars still to be restored name tempdirs this value has already deleted.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct PinnedRuntimeHost {
+pub struct PinnedRuntimeHost {
     pub root: tempfile::TempDir,
     pub claude_home: tempfile::TempDir,
     pub(crate) codex_home: tempfile::TempDir,

@@ -144,7 +144,7 @@ pub mod native_input;
 mod state {
     use super::*;
 
-    pub(in crate::services) struct Actor<P, L, A, B> {
+    pub struct Actor<P, L, A, B> {
         pub(super) replay_deferred: bool,
         pub(super) writer: ChannelWriter<P, L, A>,
         pub(super) deriver: UnitDeriver,
@@ -165,7 +165,7 @@ mod state {
 #[cfg(not(any(test, feature = "test-support")))]
 use state::Actor;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use state::Actor;
+pub use state::Actor;
 
 #[derive(Default)]
 struct Waiting {

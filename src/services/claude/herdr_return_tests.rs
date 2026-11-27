@@ -16,13 +16,13 @@ const LOGICAL: &str = "AgentDesk-claude-return";
 
 /// One host's earlier Claude: running while `alive`; an `/exit` ends it unless `stays`.
 #[derive(Default)]
-pub(crate) struct Side {
-    pub(crate) alive: bool,
+pub struct Side {
+    pub alive: bool,
     unknown: bool,
     draft: bool,
     stays: bool,
     reads: usize,
-    pub(crate) exits: usize,
+    pub exits: usize,
     /// A flag the `/exit` that ends it writes, as its host sees the end.
     pub(crate) ends: Option<PathBuf>,
 }

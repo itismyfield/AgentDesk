@@ -18,7 +18,7 @@ thread_local! {
 
 // Installation remains test-only until association and preservation guards are deployed.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct Installed(Option<Capability>);
+pub struct Installed(Option<Capability>);
 #[cfg(any(test, feature = "test-support"))]
 impl Drop for Installed {
     fn drop(&mut self) {

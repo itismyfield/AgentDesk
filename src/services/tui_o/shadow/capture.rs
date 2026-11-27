@@ -129,7 +129,7 @@ pub mod renumber {
         Guard(key)
     }
 
-    pub(crate) struct Guard((u64, u64));
+    pub struct Guard((u64, u64));
 
     impl Drop for Guard {
         fn drop(&mut self) {

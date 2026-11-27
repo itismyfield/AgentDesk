@@ -39,22 +39,40 @@ pub struct TestInstance {
     environment: environment::Environment,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct TmuxHost {
-    pub(crate) socket: PathBuf,
-    pub(crate) tmpdir: PathBuf,
-    pub(crate) prefix: String,
+mod tmux_host {
+    use super::*;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct TmuxHost {
+        pub(crate) socket: PathBuf,
+        pub(crate) tmpdir: PathBuf,
+        pub(crate) prefix: String,
+    }
 }
 
-#[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct HerdrHost {
-    pub(crate) socket: PathBuf,
-    pub(crate) home: PathBuf,
-    pub(crate) session: String,
-    pub(crate) endpoint_key: String,
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use tmux_host::TmuxHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use tmux_host::TmuxHost;
+
+mod herdr_host {
+    use super::*;
+
+    #[derive(Debug, Clone, Deserialize, serde::Serialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    pub struct HerdrHost {
+        pub(crate) socket: PathBuf,
+        pub(crate) home: PathBuf,
+        pub(crate) session: String,
+        pub(crate) endpoint_key: String,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use herdr_host::HerdrHost;
+#[cfg(any(test, feature = "test-support"))]
+pub use herdr_host::HerdrHost;
 
 pub fn requested() -> bool {
     INSTANCE.get().is_some() || std::env::var_os(MARKER).is_some()

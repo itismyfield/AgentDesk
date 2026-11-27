@@ -882,7 +882,7 @@ mod spy {
         std::sync::LazyLock::new(Default::default);
 
     #[cfg(unix)]
-    pub(crate) struct ActionWatch(HerdrTarget);
+    pub struct ActionWatch(HerdrTarget);
     #[cfg(unix)]
     impl Drop for ActionWatch {
         fn drop(&mut self) {

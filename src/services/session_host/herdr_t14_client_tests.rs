@@ -852,7 +852,7 @@ impl Drop for RealServer {
     }
 }
 
-pub(crate) struct RealClient {
+pub struct RealClient {
     child: Option<Child>,
     stdin: Option<std::process::ChildStdin>,
     ledger: Ledger,

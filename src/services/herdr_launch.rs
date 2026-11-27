@@ -291,7 +291,7 @@ thread_local! {
 
 /// Stands in for the writer's readiness on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct WriterAcceptsGuard(Option<bool>);
+pub struct WriterAcceptsGuard(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn force_writer_accepts(writer_accepts: Option<bool>) -> WriterAcceptsGuard {

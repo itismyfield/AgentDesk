@@ -59,7 +59,7 @@ thread_local! {
     static NEXT: RefCell<Option<Mutation>> = const { RefCell::new(None) };
 }
 
-pub(crate) struct Injection;
+pub struct Injection;
 
 impl Injection {
     pub fn fired(&self) -> bool {

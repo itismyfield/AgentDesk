@@ -356,7 +356,7 @@ pub fn herdr_turn_switched_on() -> bool {
 
 /// Stands in for the live switch on this thread until dropped.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedSwitch(Option<bool>);
+pub struct ForcedSwitch(Option<bool>);
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn force_switch_for_test(on: Option<bool>) -> ForcedSwitch {

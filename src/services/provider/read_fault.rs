@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 static FAULT: Mutex<Option<(PathBuf, u64)>> = Mutex::new(None);
 
-pub(crate) struct ReadFault(PathBuf, u64);
+pub struct ReadFault(PathBuf, u64);
 
 pub fn after_offset(path: &Path, offset: u64) -> ReadFault {
     let mut fault = FAULT.lock().unwrap();

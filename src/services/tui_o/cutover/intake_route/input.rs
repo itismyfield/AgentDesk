@@ -171,7 +171,7 @@ pub struct InputProbe {
 static PROBE: std::sync::Mutex<Option<InputProbe>> = std::sync::Mutex::new(None);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ProbeGuard;
+pub struct ProbeGuard;
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn install_probe(probe: InputProbe) -> ProbeGuard {

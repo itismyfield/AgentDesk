@@ -386,14 +386,25 @@ pub type LaunchHook = Box<
         CreatedSubmit,
     ) -> Result<(), String>,
 >;
-/// A driver's first prompt either failed before the owner took it, as any launch failure, or was
-/// settled by the owner, which leaves no observer, resend or teardown to the driver.
 #[cfg(unix)]
-#[derive(Debug)]
-pub(crate) enum OwnedLaunch {
-    Before(guarded_outcome::SubmissionError),
-    Settled(String),
+mod owned_launch {
+    use super::*;
+
+    /// A driver's first prompt either failed before the owner took it, as any launch failure, or was
+    /// settled by the owner, which leaves no observer, resend or teardown to the driver.
+    #[derive(Debug)]
+    pub enum OwnedLaunch {
+        Before(guarded_outcome::SubmissionError),
+        Settled(String),
+    }
 }
+
+#[cfg(unix)]
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use owned_launch::OwnedLaunch;
+#[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
+pub use owned_launch::OwnedLaunch;
 #[cfg(unix)]
 impl From<guarded_outcome::SubmissionError> for OwnedLaunch {
     fn from(error: guarded_outcome::SubmissionError) -> Self {

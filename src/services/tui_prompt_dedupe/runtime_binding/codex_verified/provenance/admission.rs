@@ -9,14 +9,23 @@ use super::dormant::OwedOrigin;
 use super::{ExecutionProofRef, TurnEpisodeRef};
 use crate::services::provider::CancelToken;
 
-/// The one non-serialized permission state of an exact episode in this process boot.
-pub(crate) struct EpisodePermissionRecord {
-    execution: ExecutionProofRef,
-    episode: TurnEpisodeRef,
-    token: Arc<CancelToken>,
-    /// Held from the exact check through `Prepared` and the first poll; cancellation takes it too.
-    revoked: Mutex<Option<&'static str>>,
+mod episode_permission_record {
+    use super::*;
+
+    /// The one non-serialized permission state of an exact episode in this process boot.
+    pub struct EpisodePermissionRecord {
+        pub(super) execution: ExecutionProofRef,
+        pub(super) episode: TurnEpisodeRef,
+        pub(super) token: Arc<CancelToken>,
+        /// Held from the exact check through `Prepared` and the first poll; cancellation takes it too.
+        pub(super) revoked: Mutex<Option<&'static str>>,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use episode_permission_record::EpisodePermissionRecord;
+#[cfg(any(test, feature = "test-support"))]
+pub use episode_permission_record::EpisodePermissionRecord;
 
 type EpisodeKey = (u64, u64, String);
 

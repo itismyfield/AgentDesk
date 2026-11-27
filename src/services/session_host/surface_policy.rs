@@ -56,7 +56,7 @@ thread_local! {
 
 /// This thread's relation of `channel` until dropped, for a judgement no boot view is built for.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct ForcedRelation(u64);
+pub struct ForcedRelation(u64);
 
 #[cfg(any(test, feature = "test-support"))]
 pub fn force_relation_for_test(channel: u64, relation: Relation) -> ForcedRelation {

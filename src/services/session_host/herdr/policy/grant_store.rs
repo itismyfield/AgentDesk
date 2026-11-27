@@ -9,12 +9,21 @@ use crate::services::herdr_launch::{HerdrLaunchEndpoint, policy::LaunchGrantStor
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct GrantRestoration {
-    pub(crate) by_endpoint:
-        HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
-    pub(crate) unknown_failure: bool,
+mod grant_restoration {
+    use super::*;
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct GrantRestoration {
+        pub(crate) by_endpoint:
+            HashMap<HerdrLaunchEndpoint, Result<Vec<LaunchAdmissionGrant>, Unverified>>,
+        pub(crate) unknown_failure: bool,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use grant_restoration::GrantRestoration;
+#[cfg(any(test, feature = "test-support"))]
+pub use grant_restoration::GrantRestoration;
 
 impl GrantRestoration {
     #[cfg(any(test, feature = "test-support"))]

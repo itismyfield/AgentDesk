@@ -109,12 +109,21 @@ impl Drop for ClearGuard {
     }
 }
 
-pub(crate) struct Scope {
-    key: Key,
-    cell: Arc<Cell>,
-    epoch: u64,
-    finished: AtomicBool,
+mod scope {
+    use super::*;
+
+    pub struct Scope {
+        pub(super) key: Key,
+        pub(super) cell: Arc<Cell>,
+        pub(super) epoch: u64,
+        pub(super) finished: AtomicBool,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use scope::Scope;
+#[cfg(any(test, feature = "test-support"))]
+pub use scope::Scope;
 
 impl Scope {
     fn register(key: Key) -> Result<Arc<Self>, String> {
@@ -170,7 +179,16 @@ impl Drop for Scope {
 }
 
 pub(crate) struct Checked(Arc<Scope>);
-pub(crate) struct EffectPermit(Arc<Cell>);
+mod effect_permit {
+    use super::*;
+
+    pub struct EffectPermit(pub(super) Arc<Cell>);
+}
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use effect_permit::EffectPermit;
+#[cfg(any(test, feature = "test-support"))]
+pub use effect_permit::EffectPermit;
 
 impl Checked {
     pub(crate) fn begin_effect(&self) -> Result<EffectPermit, String> {

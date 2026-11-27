@@ -36,23 +36,32 @@ pub(crate) struct ProviderEvidence {
     pub quota_verified: bool,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct ExecutionProbe {
-    pub schema: u32,
-    pub boot_id: String,
-    pub observed_at_ms: i64,
-    pub expires_at_ms: i64,
-    pub os: String,
-    pub arch: String,
-    #[serde(serialize_with = "crate::config::RuntimeProfile::serialize_registry")]
-    pub runtime_profile: crate::config::RuntimeProfile,
-    pub release: Value,
-    pub providers: BTreeMap<String, ProviderEvidence>,
-    pub tools: BTreeMap<String, bool>,
-    pub repositories: BTreeMap<String, bool>,
-    pub backends: Vec<String>,
-    pub disk_free_bytes: Option<u64>,
+mod execution_probe {
+    use super::*;
+
+    #[derive(Clone, Debug, Serialize, Deserialize)]
+    pub struct ExecutionProbe {
+        pub schema: u32,
+        pub boot_id: String,
+        pub observed_at_ms: i64,
+        pub expires_at_ms: i64,
+        pub os: String,
+        pub arch: String,
+        #[serde(serialize_with = "crate::config::RuntimeProfile::serialize_registry")]
+        pub runtime_profile: crate::config::RuntimeProfile,
+        pub release: Value,
+        pub providers: BTreeMap<String, ProviderEvidence>,
+        pub tools: BTreeMap<String, bool>,
+        pub repositories: BTreeMap<String, bool>,
+        pub backends: Vec<String>,
+        pub disk_free_bytes: Option<u64>,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use execution_probe::ExecutionProbe;
+#[cfg(any(test, feature = "test-support"))]
+pub use execution_probe::ExecutionProbe;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub(crate) struct ReadinessReport {
