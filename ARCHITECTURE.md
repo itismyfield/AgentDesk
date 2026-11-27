@@ -515,6 +515,7 @@ src/
 │   │   └── naming.rs
 │   ├── tool_summary/
 │   │   └── code_mode.rs
+│   ├── agent_handoff.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs
@@ -559,6 +560,8 @@ src/
 │   │   │   ├── host_repair.rs
 │   │   │   ├── host_repair_tests.rs
 │   │   │   └── key_promotion_tests.rs
+│   │   ├── turn_ops/
+│   │   │   └── handoff_port.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -1629,7 +1632,8 @@ src/
 │   │   ├── adk_session/
 │   │   │   └── host_label_tests.rs
 │   │   ├── agent_handoff/
-│   │   │   └── accepted_tests.rs
+│   │   │   ├── accepted_tests.rs
+│   │   │   └── js_handoff.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── draft_release_watch.rs
 │   │   │   ├── hold_release_tests.rs

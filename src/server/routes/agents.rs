@@ -1045,11 +1045,11 @@ pub async fn agent_message(
         );
     };
 
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+    let channel_kind = match crate::domain::agent_handoff::AgentHandoffChannelKind::parse(
         body.channel_kind.as_deref(),
     ) {
         Ok(channel_kind) => channel_kind,
-        Err(error) => return (error.status(), Json(error.body())),
+        Err(error) => return bad_request(error),
     };
 
     match crate::services::discord::agent_handoff::send_agent_handoff(
@@ -1112,7 +1112,7 @@ pub async fn agent_handoff(
         );
     };
 
-    let channel_kind = match crate::services::discord::agent_handoff::AgentHandoffChannelKind::parse(
+    let channel_kind = match crate::domain::agent_handoff::AgentHandoffChannelKind::parse(
         body.channel_kind.as_deref(),
     ) {
         Ok(channel_kind) => channel_kind,
@@ -1123,7 +1123,7 @@ pub async fn agent_handoff(
                 "handoff",
                 "invalid_channel_kind",
             );
-            return (error.status(), Json(error.body()));
+            return bad_request(error);
         }
     };
 
