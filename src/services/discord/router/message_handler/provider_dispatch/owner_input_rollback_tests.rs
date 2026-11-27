@@ -471,6 +471,131 @@ async fn a1_owned_busy_rollback_keeps_the_bot_queue_namespace() {
     assert_eq!(rig.state().await["items"], json!([]));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn idle_tmux_machine_front_bypasses_the_legacy_busy_diagnostic() {
+    if !creator_child(concat!(
+        "services::discord::router::message_handler::provider_dispatch::owner_input::tests::rollback::",
+        "idle_tmux_machine_front_bypasses_the_legacy_busy_diagnostic"
+    )) {
+        return;
+    }
+    let _root = crate::config::TestRuntimeRootGuard::new();
+    let provider = ProviderKind::Claude;
+    let rig = IntakeRig::build(
+        7_676_119,
+        true,
+        provider.clone(),
+        None,
+        Some(false),
+        Some("wake-watch-test"),
+        None,
+    )
+    .await;
+    let native = rig.renderer.join("transcript");
+    fs::write(&native, IDLE).unwrap();
+    fs::remove_file(&rig.transcript).unwrap();
+    fs::hard_link(&native, &rig.transcript).unwrap();
+    let name = provider.build_tmux_session_name(&format!("a1-rollback-{}", rig.channel.get()));
+    let (dir, session_id) = {
+        let core = rig.shared.core.lock().await;
+        let session = &core.sessions[&rig.channel];
+        (
+            session.current_path.clone().unwrap(),
+            session.session_id.clone().unwrap(),
+        )
+    };
+    let front = rig
+        .mailbox
+        .v2_request(|slot| {
+            let owner = slot.as_mut().unwrap();
+            let front = owner.front().unwrap();
+            owner.grant_front(&front)?;
+            Ok(front)
+        })
+        .await
+        .unwrap();
+    let origin = InputOrigin::from_context(
+        super::super::front_context(&rig.mailbox, &front)
+            .await
+            .unwrap()
+            .as_ref(),
+    );
+    assert_eq!(origin, InputOrigin::HttpStart);
+    let claim = claim_turn(&rig.mailbox, front.1.message_id, &front)
+        .await
+        .unwrap()
+        .unwrap();
+    let (settled, answer) = tokio::sync::oneshot::channel();
+    let owner = OwnerTurn {
+        mailbox: rig.mailbox.clone(),
+        runtime: Some(rig.shared.clone()),
+        claim,
+        settled,
+        origin,
+        late: Default::default(),
+        recovery: Default::default(),
+        refusal: Default::default(),
+    };
+    let (owner, legacy) = OwnerTurn::early(
+        &rig.shared,
+        &ProviderKind::Claude,
+        rig.channel,
+        Some(&name),
+        None,
+        Some(owner),
+        false,
+    )
+    .await
+    .unwrap();
+    let owner = owner.expect("the front must remain claimed for dispatch");
+    let cancel = Arc::new(CancelToken::new());
+    let mut stream = None;
+    if legacy {
+        // The transcript has just closed after the diagnostic selected the busy handler.
+        owner
+            .legacy_diagnostic(
+                &rig.shared,
+                &provider,
+                rig.channel,
+                (Some(name), None),
+                (&dir, Some(session_id)),
+            )
+            .await;
+    } else {
+        let shared = rig.shared.clone();
+        let channel = rig.channel.get();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        stream = Some(receiver);
+        let cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            let host = TurnHost::Tmux;
+            let mut turn = super::super::busy_turn::build(
+                None,
+                Some(&shared),
+                &provider,
+                PROMPT,
+                &name,
+                &host,
+                channel,
+            );
+            turn.cancel = cancel;
+            turn.working_dir = &dir;
+            turn.session_id = Some(&session_id);
+            super::super::execute_owned(turn, sender, owner)
+        });
+    }
+    let result = tokio::time::timeout(Duration::from_secs(30), answer).await;
+    cancel
+        .cancelled
+        .store(true, std::sync::atomic::Ordering::Release);
+    drop(stream);
+    assert_eq!(result.unwrap().unwrap(), Ok(()), "{}", rig.trace.text());
+    wait("the idle front's keys", || {
+        events(&rig.renderer) == ["paste", "Enter"]
+    });
+    assert_eq!(rig.state().await["items"], json!([]));
+}
+
 /// Real drive and intake: a pane busy with a turn AgentDesk did not start takes the owned front
 /// once, settled delivered, with no completion, requeue or provider failure from the intake turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
