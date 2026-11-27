@@ -312,6 +312,8 @@ fn resume_production_path_retains_live_owner_after_teardown() {
 
 #[tokio::test]
 async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_finishes() {
+    #[cfg(unix)]
+    let runtime = crate::config::TestRuntimeRootGuard::new();
     let pg_db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let shared =
@@ -361,15 +363,13 @@ async fn production_resume_lock_blocks_effective_intake_snapshot_until_rebind_fi
         .lock_owned()
         .await;
     #[cfg(unix)]
-    let queue_dir = tempfile::tempdir().expect("owner queue directory");
-    #[cfg(unix)]
     let (owner, wake_probe, mut wakes) = {
         use crate::services::discord::host_teardown_gate::test_support::ResumeOwnerWakeProbe;
         use crate::services::turn_orchestrator::PendingQueueItem;
         let owner = crate::services::discord::input_mailbox_for_test(&shared, channel_id.get());
         owner
             .v2_adopt(
-                queue_dir.path().join("owner.json"),
+                runtime.path().join("runtime/owner.json"),
                 "claude/resume-test".into(),
             )
             .await
