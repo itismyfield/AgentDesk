@@ -655,7 +655,7 @@ async fn f4_nonce_receipt_closes_the_existing_budget_pg() {
     let seen = attribute(&scope, nobody_else(), &returned);
     let candidate = &seen.found[&41];
     assert_eq!(candidate.recovery, RecoveryKind::OriginalRecovered);
-    assert_eq!(candidate.receipt.slot, Some(0));
+    assert_eq!(candidate.receipt.slot_for_test(), Some(0));
 
     // A write that never reached PostgreSQL resolves nothing.
     let down = sqlx::postgres::PgPoolOptions::new()
@@ -687,13 +687,10 @@ async fn f4_receipt_race_never_reattributes_a_message_pg() {
     let message = sent_by_bot(51, "same");
     let seen_by_a = attribute(&scope_now(&pool, a).await, nobody_else(), &message);
     let candidate = seen_by_a.found[&51].receipt.clone();
-    assert_eq!(candidate.method, ReceiptMethod::ExactMatch);
+    assert_eq!(candidate.method_for_test(), ReceiptMethod::ExactMatch);
 
     // B records the same message first.
-    let first = Receipt {
-        key: b.clone(),
-        ..candidate.clone()
-    };
+    let first = candidate.clone().with_key_for_test(b.clone());
     assert!(matches!(
         record_receipt(&pool, &first).await.unwrap(),
         ReceiptOutcome::Recorded { .. }
@@ -753,13 +750,7 @@ async fn f4_row_change_invalidates_absence_evidence_pg() {
     // A receipt moves only the revision; the evidence is stale all the same.
     let receipt = &keys[1];
     let evidence = absent_evidence(scope_now(&pool, receipt).await, run_1.clone());
-    let recorded = Receipt {
-        key: receipt.clone(),
-        message_id: 61,
-        author_id: BOT,
-        slot: None,
-        method: ReceiptMethod::Marker,
-    };
+    let recorded = Receipt::for_test(receipt.clone(), 61, BOT, None, ReceiptMethod::Marker);
     record_receipt(&pool, &recorded).await.unwrap();
     let (row, spent) = current(receipt.clone()).await;
     assert_eq!(spent.len(), 1);

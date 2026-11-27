@@ -62,13 +62,8 @@ async fn shared(pool: &PgPool, native: &str, shared: Shared, message_id: u64) ->
     let admitted = o_piece_delivery::admit(pool, &new).await.unwrap();
     assert!(matches!(admitted, AdmitOutcome::Admitted(_)));
     if shared.receipt {
-        let receipt = Receipt {
-            key: key.clone(),
-            message_id,
-            author_id: BOT,
-            slot: Some(1),
-            method: ReceiptMethod::Marker,
-        };
+        let receipt =
+            Receipt::for_test(key.clone(), message_id, BOT, Some(1), ReceiptMethod::Marker);
         let recorded = o_piece_delivery::record_receipt(pool, &receipt).await;
         assert!(matches!(recorded.unwrap(), ReceiptOutcome::Recorded { .. }));
     }

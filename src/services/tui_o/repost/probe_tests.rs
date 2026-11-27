@@ -277,7 +277,7 @@ async fn f4_two_passes_wait_after_completion() {
     let [first, second] = evidence.passes_for_test();
     assert_eq!(first.started_at_for_test(), first_due);
     assert_eq!(second.started_at_for_test(), second_due);
-    assert_eq!(first.proof_for_test().message_id(), 900);
+    assert_eq!(first.proof_message_id_for_test(), 900);
 }
 
 #[tokio::test(start_paused = true)]
@@ -480,8 +480,8 @@ async fn f4_history_keeps_stable_ids_for_both_additional_slots() {
     let found: Vec<_> = seen.found.keys().copied().collect();
     assert_eq!(found, [301, 302], "the marker names the piece");
     for receipt in seen.found.values() {
-        assert_eq!(receipt.receipt.method, ReceiptMethod::Marker);
-        assert_eq!(receipt.receipt.slot, None);
+        assert_eq!(receipt.receipt.method_for_test(), ReceiptMethod::Marker);
+        assert_eq!(receipt.receipt.slot_for_test(), None);
         assert_eq!(
             receipt.observed_marker.as_deref(),
             Some(marker(&piece).as_str())
@@ -664,20 +664,24 @@ async fn f4_known_original_nonce_returns_original_recovered() {
     let recovered = &only_original.found[&201];
     assert_eq!(recovered.recovery, RecoveryKind::OriginalRecovered);
     assert_eq!(
-        (recovered.receipt.slot, recovered.receipt.method),
+        (
+            recovered.receipt.slot_for_test(),
+            recovered.receipt.method_for_test()
+        ),
         (Some(0), ReceiptMethod::Nonce)
     );
     assert_eq!(recovered.observed_nonce.as_deref(), Some(ids.nonce()));
     // An exact match without a nonce is the piece, but not provably its original.
     let exact = &only_original.found[&202];
     assert_eq!(exact.recovery, RecoveryKind::OriginUnknown);
-    assert_eq!(exact.receipt.slot, None);
+    assert_eq!(exact.receipt.slot_for_test(), None);
 
     let (_, after_a_repost) = first_pass(&discord, scope(&[0, 1])).await;
     let shared = &after_a_repost.found[&201];
     assert_eq!(shared.recovery, RecoveryKind::OriginUnknown);
     assert_eq!(
-        shared.receipt.slot, None,
+        shared.receipt.slot_for_test(),
+        None,
         "the nonce is shared by every send"
     );
     discord.gets();
@@ -716,8 +720,11 @@ fn f4_same_payload_claimants_are_not_arbitrarily_assigned() {
     assert!(attribute(contested, &[rival_marked]).is_clear_for_test());
 
     let seen = attribute(known(), &exact);
-    assert_eq!(seen.found[&301].receipt.method, ReceiptMethod::ExactMatch);
-    assert_eq!(seen.found[&301].receipt.key, own.key);
+    assert_eq!(
+        seen.found[&301].receipt.method_for_test(),
+        ReceiptMethod::ExactMatch
+    );
+    assert_eq!(seen.found[&301].receipt.key_for_test(), &own.key);
 }
 
 #[tokio::test(start_paused = true)]
@@ -976,7 +983,7 @@ async fn f4r_the_latest_snapshot_rejudges_everything_the_session_read() {
     let mut session = ProbeSession::new(scope(&[0]), vec![900], Instant::now());
     drive(&mut session, &reader, &known(), 1).await;
     assert_eq!(
-        session.attribution().found[&450].receipt.method,
+        session.attribution().found[&450].receipt.method_for_test(),
         ReceiptMethod::ExactMatch
     );
     let nonce = RepostIds::for_piece(&marker(&key("f4")))
@@ -1122,7 +1129,7 @@ async fn f4r2_an_intact_marker_read_by_id_outlives_a_truncated_listing() {
         assert_eq!(progress, Progress::Present);
     }
     let found = &session.attribution().found[&450];
-    assert_eq!(found.receipt.method, ReceiptMethod::Marker);
+    assert_eq!(found.receipt.method_for_test(), ReceiptMethod::Marker);
 }
 
 /// The marker and nonce `key("f4")` had before the marker named its channel, fixed as data.
@@ -1222,7 +1229,7 @@ async fn f4r3_a_nonce_once_read_stays_without_any_other_evidence() {
         [Progress::Present]
     );
     let found = &session.attribution().found[&450];
-    assert_eq!(found.receipt.method, ReceiptMethod::Nonce);
+    assert_eq!(found.receipt.method_for_test(), ReceiptMethod::Nonce);
 }
 
 #[tokio::test(start_paused = true)]

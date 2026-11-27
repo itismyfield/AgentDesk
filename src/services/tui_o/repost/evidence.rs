@@ -164,8 +164,8 @@ impl CompletedPass {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn proof_for_test(&self) -> &PermissionProof {
-        self.proof()
+    pub fn proof_message_id_for_test(&self) -> u64 {
+        self.proof().message_id()
     }
 
     pub(crate) fn proof(&self) -> &PermissionProof {

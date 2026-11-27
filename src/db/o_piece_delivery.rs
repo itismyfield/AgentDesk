@@ -390,6 +390,41 @@ pub struct Receipt {
     pub(crate) method: ReceiptMethod,
 }
 
+#[cfg(any(test, feature = "test-support"))]
+impl Receipt {
+    pub fn for_test(
+        key: PieceKey,
+        message_id: u64,
+        author_id: u64,
+        slot: Option<u8>,
+        method: ReceiptMethod,
+    ) -> Self {
+        Self {
+            key,
+            message_id,
+            author_id,
+            slot,
+            method,
+        }
+    }
+
+    pub fn with_key_for_test(self, key: PieceKey) -> Self {
+        Self { key, ..self }
+    }
+
+    pub fn key_for_test(&self) -> &PieceKey {
+        &self.key
+    }
+
+    pub fn slot_for_test(&self) -> Option<u8> {
+        self.slot
+    }
+
+    pub fn method_for_test(&self) -> ReceiptMethod {
+        self.method
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReceiptOutcome {
     Recorded {
