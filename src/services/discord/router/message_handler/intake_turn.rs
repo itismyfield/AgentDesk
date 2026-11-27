@@ -1031,7 +1031,7 @@ pub(super) async fn handle_text_message(
             .await;
         // The claim owns the route: publish it before this turn can be observed.
         if started {
-            route.publish(shared, &provider);
+            adk_thread::publish(&route, shared, &provider);
         }
 
         // #3813 Phase 1a: intake latency span anchor (turn claimed; observation-only

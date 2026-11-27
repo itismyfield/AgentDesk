@@ -88,7 +88,7 @@ pub(in crate::services::discord) use transcript_binding_stall::o_owns;
 pub(in crate::services::discord) use transcript_binding_stall::o_witness_backdate_for_tests;
 mod thread_turn;
 pub(crate) use thread_turn::ThreadTurnRuntime;
-mod turn_deliver;
+pub(in crate::services) mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
 pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;

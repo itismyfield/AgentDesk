@@ -7,6 +7,8 @@ use crate::services::codex::herdr_turn::{
     CodexHerdrTurn, logged_source_for_test as logged_source, submit_for_test as submit,
     submit_owned_for_test as submit_owned,
 };
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
+use crate::services::discord::queue_io::input_owner::cold::v2_cold_observed;
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::herdr_socket_rig_tests::{HerdrRig, KEY, NODE, PANE, SESSION};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
@@ -156,7 +158,7 @@ fn run_case(case: Case) {
     .unwrap();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727399));
-    rt.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),json!({"nonce":"codex-herdr-scope","provider":"codex","target":{"host":"herdr","owner":turn.owner.logical_key,"root":"test","execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),turn.prompt.into(),727399)).unwrap();
+    rt.block_on(v2_cold_fixture(&mailbox, root.path().join("herdr-owner.json"),json!({"nonce":"codex-herdr-scope","provider":"codex","target":{"host":"herdr","owner":turn.owner.logical_key,"root":"test","execution_nonce":nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),turn.prompt.into(),727399)).unwrap();
     let effect_pool = pool.clone();
     let effect_owner = turn.owner.clone();
     let effect_endpoint = turn.endpoint.clone();
@@ -166,8 +168,11 @@ fn run_case(case: Case) {
         .unwrap()
         .join("runtime/discord_pending_queue/cold-matrix/727399-herdr-owner.json");
     let (attempt, outcome) = rt
-        .block_on(
-            mailbox.v2_cold_observed(1, std::sync::Arc::new(|| 10000), move |frame| {
+        .block_on(v2_cold_observed(
+            &mailbox,
+            1,
+            std::sync::Arc::new(|| 10000),
+            move |frame| {
                 assert!(
                     crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
                     "actual Codex Herdr submit requires exact source scope"
@@ -282,8 +287,8 @@ fn run_case(case: Case) {
                     }
                     result
                 }
-            }),
-        )
+            },
+        ))
         .unwrap();
     let owner_snapshot = rt
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))

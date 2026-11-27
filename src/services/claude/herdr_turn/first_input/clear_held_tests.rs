@@ -2,6 +2,7 @@ use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::claude::herdr_turn::{Attached, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
 use crate::services::discord::{
     owner_drive_for_test as drive, owner_effect_for_test as effect,
     owner_held_watch_for_test as held_watch,
@@ -198,7 +199,8 @@ fn run(case: Case) {
         "source":{"kind":"pre_source","expected_session_id":attached.session_id_for_test(),
             "expected_transcript":source.path,"binding_watermark":null}});
     runtime
-        .block_on(mailbox.v2_cold_fixture(
+        .block_on(v2_cold_fixture(
+            &mailbox,
             root.path().join("held-clear.json"),
             attempt.clone(),
             "one original".into(),

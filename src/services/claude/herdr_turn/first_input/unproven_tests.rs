@@ -3,6 +3,8 @@
 use crate::services::claude::herdr_turn::{Attached, composer, write_for_test};
 use crate::services::claude_tui::guarded_outcome;
 use crate::services::claude_tui::{hook_server::HookEventKind, readiness};
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
+use crate::services::discord::queue_io::retained_notice;
 use crate::services::discord::{
     owner_effect_for_test as effect, owner_held_watch_for_test as held_watch,
 };
@@ -245,7 +247,8 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                 attempt.clone(),
                 channel,
             )),
-            _ => runtime.block_on(mailbox.v2_cold_fixture(
+            _ => runtime.block_on(v2_cold_fixture(
+                &mailbox,
                 root.path().join("unproven.json"),
                 attempt.clone(),
                 "one original".into(),
@@ -433,10 +436,18 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
                     let pool = db.connect_and_migrate().await;
                     let namespace = snapshot["namespace"].as_str().unwrap();
-                    let enqueue = crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice;
-                    let first = enqueue(&pool, "claude", channel, namespace, entry).await.unwrap();
-                    let repeated = enqueue(&pool, "claude", channel, namespace, entry).await.unwrap();
-                    assert_eq!(first, repeated, "replaying an owed notice keeps its identity");
+                    let first =
+                        retained_notice::enqueue(&pool, "claude", channel, namespace, entry)
+                            .await
+                            .unwrap();
+                    let repeated =
+                        retained_notice::enqueue(&pool, "claude", channel, namespace, entry)
+                            .await
+                            .unwrap();
+                    assert_eq!(
+                        first, repeated,
+                        "replaying an owed notice keeps its identity"
+                    );
                     let posts: Vec<(String, String)> = sqlx::query_as(
                         "SELECT source, content FROM message_outbox WHERE target = $1 ORDER BY id",
                     )
@@ -444,10 +455,14 @@ fn owner_outcome(cases: &[(Case, u64)]) {
                     .fetch_all(&pool)
                     .await
                     .unwrap();
-                    assert_eq!(posts.len(), 1, "one retained original owes one actual notice: {posts:?}");
+                    assert_eq!(
+                        posts.len(),
+                        1,
+                        "one retained original owes one actual notice: {posts:?}"
+                    );
                     assert_eq!(posts[0].0, "retained_input_notice");
                     assert!(posts[0].1.contains("필요하면 같은 내용을 다시 보내 주세요"));
-                    assert!(crate::services::turn_orchestrator::ChannelMailboxHandle::v2_notice_is_non_turn(&posts[0].1));
+                    assert!(retained_notice::is_non_turn(&posts[0].1));
                     (db, pool)
                 })
             });
@@ -709,7 +724,8 @@ fn held_front_wakes_once_cleared(dialog: Option<&str>, proven: bool) {
         "source":{"kind":"pre_source","expected_session_id":null,
             "expected_transcript":null,"binding_watermark":null}});
     runtime
-        .block_on(mailbox.v2_cold_fixture(
+        .block_on(v2_cold_fixture(
+            &mailbox,
             root.path().join("restored-draft.json"),
             attempt.clone(),
             "one original".into(),
