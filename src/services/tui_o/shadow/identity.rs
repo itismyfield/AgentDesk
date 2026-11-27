@@ -174,7 +174,7 @@ pub struct V5Rule(());
 
 #[cfg(any(test, feature = "test-support"))]
 impl V5Rule {
-    pub(crate) fn hold() -> Self {
+    pub fn hold() -> Self {
         V5_RULE.set(true);
         Self(())
     }

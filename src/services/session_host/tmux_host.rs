@@ -95,6 +95,11 @@ impl TmuxHost {
         tmux::send_keys(name, keys)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn legacy_has_session_for_test(&self, name: &str) -> bool {
+        self.legacy_has_session(name)
+    }
+
     /// Keep the legacy boolean collapse inside the platform compatibility probe.
     pub(crate) fn legacy_has_session(&self, name: &str) -> bool {
         tmux::has_session(name)
@@ -318,7 +323,7 @@ mod tests {
     #[test]
     fn create_runs_the_prepared_argv_as_the_platform_does_and_keeps_the_raw_result() {
         use super::super::create::HostCreation;
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         let _root = crate::config::TestRuntimeRootGuard::new();
         let name = "adk-s04-create-port";
         let fake = FakeTmux::install(name);
@@ -375,7 +380,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn legacy_pid_delegation_preserves_the_lookup_for_herdr_shaped_names() {
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         let root = crate::config::TestRuntimeRootGuard::new();
         for name in ["adk-pid-delegation", "42"] {
             let fake = FakeTmux::install(name);
@@ -404,7 +409,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn observations_keep_probe_errors_distinct_from_legacy_bool_results() {
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         use crate::services::session_host::legacy_collapse;
         use crate::services::tmux_diagnostics;
 

@@ -42,6 +42,9 @@ pub struct ReceiptSnapshot {
     pub episode_nonce: Option<String>,
     pub request_key: Option<String>,
     pub(crate) request_hash: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub original_text: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) original_text: String,
     pub(crate) preserved: Option<serde_json::Value>,
 }

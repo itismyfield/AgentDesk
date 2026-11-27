@@ -171,7 +171,7 @@ struct Fixture {
 impl Fixture {
     fn new(tag: &str, help: &str) -> Self {
         let root = TestRuntimeRootGuard::new();
-        let endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();

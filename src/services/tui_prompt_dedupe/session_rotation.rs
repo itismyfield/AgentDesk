@@ -271,12 +271,12 @@ pub fn clear_claude_session_rotation(tmux_session_name: &str) -> bool {
 /// `discord::tui_prompt_relay::session_rotation_settle`, which look the adopted
 /// id up exactly the way production does. Without one shared lock those tests
 /// would clear each other's fixtures.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static ROTATION_TEST_SERIAL: Mutex<()> = Mutex::new(());
 
 /// Take the shared lock and start from empty stores.
-#[cfg(test)]
-pub(crate) fn lock_claude_session_rotations_for_tests() -> std::sync::MutexGuard<'static, ()> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn lock_claude_session_rotations_for_tests() -> std::sync::MutexGuard<'static, ()> {
     let guard = ROTATION_TEST_SERIAL
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -284,7 +284,7 @@ pub(crate) fn lock_claude_session_rotations_for_tests() -> std::sync::MutexGuard
     guard
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn reset_claude_session_rotations_for_tests() {
     ROTATIONS
         .lock()

@@ -13,10 +13,10 @@ struct SyncState {
 
 static SYNCS: LazyLock<Mutex<HashMap<PathBuf, SyncState>>> = LazyLock::new(Mutex::default);
 
-pub(crate) struct SyncFault(PathBuf);
+pub struct SyncFault(PathBuf);
 
 impl SyncFault {
-    pub(crate) fn new(path: &Path) -> Self {
+    pub fn new(path: &Path) -> Self {
         assert!(
             SYNCS
                 .lock()
@@ -27,11 +27,11 @@ impl SyncFault {
         Self(path.into())
     }
 
-    pub(crate) fn fail(&self, fail: bool) {
+    pub fn fail(&self, fail: bool) {
         SYNCS.lock().unwrap().get_mut(&self.0).unwrap().fail = fail;
     }
 
-    pub(crate) fn calls(&self) -> usize {
+    pub fn calls(&self) -> usize {
         SYNCS.lock().unwrap().get(&self.0).unwrap().calls
     }
 }
@@ -54,7 +54,7 @@ pub(crate) fn before_sync(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub(crate) fn hold_path(nonce: &str) -> PathBuf {
+pub fn hold_path(nonce: &str) -> PathBuf {
     crate::config::runtime_root()
         .unwrap()
         .join("runtime/herdr_input_holds")

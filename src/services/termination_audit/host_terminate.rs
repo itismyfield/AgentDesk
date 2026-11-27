@@ -61,7 +61,7 @@ pub mod herdr_terminate {
 
     impl<'a> OperatorTerminateWarrant<'a> {
         #[cfg(any(test, feature = "test-support"))]
-        pub(crate) fn issue(target: HerdrTarget) -> Self {
+        pub fn issue(target: HerdrTarget) -> Self {
             Self {
                 target,
                 fence: None,

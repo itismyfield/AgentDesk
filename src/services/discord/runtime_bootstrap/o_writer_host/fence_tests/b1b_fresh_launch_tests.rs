@@ -701,8 +701,8 @@ async fn run_fifo(
                 move |observation, token| {
                     let token = token.expect("actual provider token");
                     let exact_self = observation.is_some_and(|observed| {
-                        observed.matches_token(token)
-                            && observed.recheck(CANARY_CHANNEL, CANARY_TMUX)
+                        observed.matches_token_for_test(token)
+                            && observed.recheck_for_test(CANARY_CHANNEL, CANARY_TMUX)
                     });
                     let row =
                         crate::services::discord::inflight::load_inflight_state_read_only_result(

@@ -64,7 +64,7 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         nonce: "a8214001",
         text: "the held input",
     };
-    assert!(observation.admits_for_test(&request));
+    assert!(observation.admits_for_test_for_test(&request));
     let mut probe = observation.probe();
     let mut file = std::fs::OpenOptions::new()
         .append(true)
@@ -97,7 +97,7 @@ fn a_captured_busy_source_admits_after_idle_compaction_metadata() {
         "the captured probe wakes for Idle delegation after the completed tail"
     );
     assert!(
-        !observation.admits_for_test(&request),
+        !observation.admits_for_test_for_test(&request),
         "the captured Busy writer delegates verified Idle instead of injecting into it"
     );
     assert!(rig.sends().is_empty(), "the observer itself sends no keys");

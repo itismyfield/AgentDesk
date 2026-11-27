@@ -65,13 +65,25 @@ pub struct Activation {
     pub(crate) frontier: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Intent {
-    pub(crate) key: Option<PieceKey>,
-    pub(crate) payload_sha256: String,
-    /// The activation the original was sent under.
-    pub(crate) generation: u64,
+mod intent {
+    use super::PieceKey;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Intent {
+        #[cfg(any(test, feature = "test-support"))]
+        pub key: Option<PieceKey>,
+        #[cfg(not(any(test, feature = "test-support")))]
+        pub(crate) key: Option<PieceKey>,
+        pub(crate) payload_sha256: String,
+        /// The activation the original was sent under.
+        pub(crate) generation: u64,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use intent::Intent;
+#[cfg(any(test, feature = "test-support"))]
+pub use intent::Intent;
 
 /// The replayed sidecar.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -102,6 +114,11 @@ impl Provenance {
             .is_some_and(|&frontier| serial >= frontier)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn intent_for_test(&self, serial: u64) -> Option<&Intent> {
+        self.intent(serial)
+    }
+
     pub(crate) fn intent(&self, serial: u64) -> Option<&Intent> {
         self.intents.get(&serial)
     }
@@ -113,6 +130,11 @@ impl Provenance {
 
     pub(crate) fn started(&self, serial: u64) -> bool {
         self.pending.contains(&serial) || self.admitted.contains(&serial)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reported_for_test(&self, serial: u64) -> bool {
+        self.reported(serial)
     }
 
     pub(crate) fn reported(&self, serial: u64) -> bool {

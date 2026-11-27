@@ -97,6 +97,14 @@ impl VerifiedSurface {
         (self.destination, self.parent, self.kind)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_discord_for_test(
+        channel: &poise::serenity_prelude::GuildChannel,
+        kind: RuntimeHandoffKind,
+    ) -> Option<Self> {
+        Self::from_discord(channel, kind)
+    }
+
     /// Only a channel Discord itself returned, of an actual thread kind, under a nonzero parent.
     pub(crate) fn from_discord(
         channel: &poise::serenity_prelude::GuildChannel,
@@ -148,7 +156,7 @@ impl InitScope {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn fixture(channels: &[u64]) -> Self {
+    pub fn fixture(channels: &[u64]) -> Self {
         Self {
             bindings: channels.iter().copied().collect(),
             kinds: Default::default(),

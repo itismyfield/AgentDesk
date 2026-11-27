@@ -69,8 +69,8 @@ impl<'a> TmuxSourceAuthority<'a> {
         crate::services::cluster::stream_relay::source_read_proof::revision(self.1)
     }
 
-    #[cfg(test)]
-    pub(crate) fn pin(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pin(
         &self,
     ) -> Option<crate::services::cluster::stream_relay::source_read_proof::SourcePin> {
         crate::services::cluster::stream_relay::source_read_proof::SourcePin::capture(
@@ -1592,7 +1592,7 @@ fn truncate_jsonl_head_with_invalidation(
             Ok(false) => {
                 invalidate();
                 staged = std::fs::rename(&tmp_path, path);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if staged.is_ok() {
                     ROTATION_AFTER_RENAME.with_borrow_mut(|hook| {
                         if let Some(hook) = hook.take() {
@@ -3842,7 +3842,7 @@ another scrolled-back prose line";
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static ROTATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static ROTATION_AFTER_RENAME: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }

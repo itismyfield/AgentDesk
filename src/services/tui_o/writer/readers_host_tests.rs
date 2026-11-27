@@ -57,7 +57,7 @@ fn install_boot(on: bool) {
     assert!(
         channel_policy::boot()
             .unwrap()
-            .selected()
+            .selected_for_test()
             .contains(&CHANNEL)
     );
 }
@@ -874,11 +874,11 @@ async fn readers_s1b_host_dormant_membership_is_per_channel() {
     crate::config_live_reload::install(config);
     let boot = channel_policy::boot().unwrap();
     assert_eq!(
-        boot.selected().iter().copied().collect::<Vec<_>>(),
+        boot.selected_for_test().iter().copied().collect::<Vec<_>>(),
         [CHANNEL, OTHER]
     );
     assert_eq!(
-        boot.dormant_channels().iter().copied().collect::<Vec<_>>(),
+        boot.dormant_channels_for_test().iter().copied().collect::<Vec<_>>(),
         [CHANNEL]
     );
     let (io, ready) = (TestIo::over(&a), Arc::new(Readiness::default()));

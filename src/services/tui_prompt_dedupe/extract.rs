@@ -636,7 +636,7 @@ pub(super) fn decide_observation(
         }
         #[cfg(test)]
         if observation.may_park {
-            super::handoff::tests::before_parking_commit(&candidates[0]);
+            super::handoff::test_support::before_parking_commit(&candidates[0]);
         }
         if observation.may_park
             && state.park_handoff_observation(
@@ -684,7 +684,7 @@ pub(super) fn decide_observation(
         return Decision::LeaseOnly;
     }
     #[cfg(test)]
-    super::handoff::tests::before_owning_commit(&candidates[0]);
+    super::handoff::test_support::before_owning_commit(&candidates[0]);
     if local_only {
         return Decision::Own {
             lease: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,

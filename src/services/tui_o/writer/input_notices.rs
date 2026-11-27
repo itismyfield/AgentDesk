@@ -139,7 +139,7 @@ impl Projection {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_tests() -> Self {
+    pub fn for_tests() -> Self {
         Self {
             enabled: true,
             ..Self::default()

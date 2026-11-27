@@ -38,6 +38,11 @@ pub fn install(pool: sqlx::PgPool, pin: ExactEpisodePin) -> Installed {
     }))
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn logical_key_for_test() -> Option<String> {
+    logical_key()
+}
+
 pub(crate) fn logical_key() -> Option<String> {
     CURRENT.with(|current| current.borrow().as_ref().map(|c| c.pin.owner.clone()))
 }
@@ -49,6 +54,11 @@ fn append(capability: &Capability, evidence: EpisodeEvidence) -> Result<(), Stri
         .block_on(record_episode_evidence(true, &capability.pool, &metadata))?
         .ok_or_else(|| "strict evidence ACK unavailable".to_owned())?;
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn begin_input_for_test() -> Result<(), String> {
+    begin_input()
 }
 
 pub(crate) fn begin_input() -> Result<(), String> {
@@ -71,6 +81,11 @@ pub(crate) fn begin_input() -> Result<(), String> {
         }
     });
     Ok(())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn observe_untouched_for_test(untouched: bool) {
+    observe_untouched(untouched)
 }
 
 pub(crate) fn observe_untouched(untouched: bool) {

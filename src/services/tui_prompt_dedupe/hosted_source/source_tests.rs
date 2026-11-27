@@ -6,15 +6,15 @@ use crate::config::TestEnvVarGuard;
 use crate::services::tui_prompt_dedupe as dedupe;
 use dedupe::binding_events::{CauseSource, Proposal};
 
-pub(crate) const CHANNEL: u64 = 7_186_401;
-pub(crate) const LOGICAL: &str = "AgentDesk-claude-source-carrier";
-pub(crate) const N1: &str = "0123456789abcdef0123456789abcdef";
-pub(crate) const N2: &str = "1123456789abcdef0123456789abcdef";
+pub const CHANNEL: u64 = 7_186_401;
+pub const LOGICAL: &str = "AgentDesk-claude-source-carrier";
+pub const N1: &str = "0123456789abcdef0123456789abcdef";
+pub const N2: &str = "1123456789abcdef0123456789abcdef";
 
-pub(crate) struct BindingRoot(Option<PathBuf>);
+pub struct BindingRoot(Option<PathBuf>);
 
 impl BindingRoot {
-    pub(crate) fn at(root: &Path) -> Self {
+    pub fn at(root: &Path) -> Self {
         let previous = binding_events::test_root();
         binding_events::set_test_root(Some(root));
         Self(previous)
@@ -27,15 +27,15 @@ impl Drop for BindingRoot {
     }
 }
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     _state: MutexGuard<'static, ()>,
     _env: TestEnvVarGuard,
-    pub(crate) root: tempfile::TempDir,
+    pub root: tempfile::TempDir,
     previous: Option<PathBuf>,
 }
 
 impl Fixture {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let env = crate::config::set_agentdesk_root_for_test(root.path());
         let state = dedupe::TEST_LOCK
@@ -53,7 +53,7 @@ impl Fixture {
         }
     }
 
-    pub(crate) fn source(&self, nonce: &str, session: &str) -> SourceId {
+    pub fn source(&self, nonce: &str, session: &str) -> SourceId {
         let path = self.root.path().join(format!("{session}.jsonl"));
         std::fs::write(
             &path,

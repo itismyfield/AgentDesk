@@ -526,6 +526,16 @@ pub async fn enqueue_outbox_pg_on_tx_with_ttl(
     enqueue_outbox_pg_on_tx_with_ttl_and_attachment(tx, message, dedupe_ttl_secs, None).await
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment_for_test(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    attachment: Option<OutboxAttachment<'_>>,
+) -> Result<Option<i64>, OutboxEnqueueError> {
+    enqueue_outbox_pg_on_tx_with_ttl_and_attachment(tx, message, dedupe_ttl_secs, attachment).await
+}
+
 pub(crate) async fn enqueue_outbox_pg_on_tx_with_ttl_and_attachment(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     message: OutboxMessage<'_>,
@@ -633,6 +643,16 @@ pub async fn stage_outbox_pg_with_ttl(
     dedupe_ttl_secs: i64,
 ) -> Result<i64, OutboxEnqueueError> {
     stage_outbox_pg_with_ttl_and_attachment(pool, message, dedupe_ttl_secs, None).await
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn stage_outbox_pg_with_ttl_and_attachment_for_test(
+    pool: &PgPool,
+    message: OutboxMessage<'_>,
+    dedupe_ttl_secs: i64,
+    attachment: Option<OutboxAttachment<'_>>,
+) -> Result<i64, OutboxEnqueueError> {
+    stage_outbox_pg_with_ttl_and_attachment(pool, message, dedupe_ttl_secs, attachment).await
 }
 
 pub(crate) async fn stage_outbox_pg_with_ttl_and_attachment(

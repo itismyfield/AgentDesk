@@ -8,7 +8,7 @@ fn poll(pending: &mut Pending, session: &str) -> Outcome {
     })
 }
 
-pub(crate) fn pane() -> ScriptedTmux {
+pub fn pane() -> ScriptedTmux {
     let tmux = ScriptedTmux::new(&view("", false));
     tmux.set_dead(false);
     fs::write(tmux.directory().join("control"), view("/compact", false)).unwrap();
@@ -288,7 +288,7 @@ fn compact_ignores_suppressed_summary_timer_and_late_assistant_until_final() {
 }
 
 // Redacted record kinds/order from the coordinator's isolated 2.1.322 capture, rows 46..64.
-pub(crate) fn compact_records(r: &Rig, failed: bool) {
+pub fn compact_records(r: &Rig, failed: bool) {
     if failed {
         r.append(
             json!({"type":"user","message":{"content":"<command-name>/compact</command-name>"}}),

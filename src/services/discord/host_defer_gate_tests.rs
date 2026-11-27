@@ -166,7 +166,7 @@ impl ScriptedTmux {
 #[tokio::test]
 async fn the_promote_gate_holds_only_what_the_host_guard_keeps_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
     let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
@@ -195,7 +195,7 @@ async fn the_promote_gate_reads_the_channel_row_under_another_name_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
     use crate::db::dispatched_sessions::hosted_execution::test_support::{future_schema, record};
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
     let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
@@ -237,7 +237,7 @@ async fn the_promote_gate_leaves_a_herdr_channel_to_its_turn_host_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
     use crate::db::dispatched_sessions::hosted_execution::test_support::record;
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
     let shared = shared_on(&pool).await;
     let provider = ProviderKind::Claude;
@@ -370,7 +370,7 @@ impl Nameless {
 #[tokio::test]
 async fn the_promote_gate_reads_the_channel_row_with_no_channel_name_pg() {
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install("-");
     let (db, pool) = postgres().await;
     let (shared, _registry) = with_second_bot(&pool, "p4c1f-second-bot").await;
     let provider = ProviderKind::Claude;
@@ -431,7 +431,7 @@ async fn the_promote_gate_starts_only_the_turn_that_moves_this_node_s_claude_bac
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
     use crate::db::dispatched_sessions::hosted_execution::test_support::{future_schema, record};
     let _root = crate::config::TestRuntimeRootGuard::new();
-    let _tmux = crate::services::provider_teardown::tests::test_support::FakeTmux::install("-");
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install("-");
     let _hosts = crate::config::session_hosts::force_for_test(Some("test-node"), &[]);
     let (db, pool) = postgres().await;
     let shared = shared_on(&pool).await;

@@ -437,6 +437,11 @@ impl CodexSourceMode {
             _ => Self::Invalid,
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn launch_policy_for_test(self) -> Result<&'static str, &'static str> {
+        self.launch_policy()
+    }
+
     pub(crate) fn launch_policy(self) -> Result<&'static str, &'static str> {
         self.launch_decision().map(SourceLaunchPolicy::as_str)
     }

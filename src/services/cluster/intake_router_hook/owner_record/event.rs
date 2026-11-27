@@ -25,13 +25,41 @@ pub struct Event {
     pub bot: String,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeliveryState {
-    Pending,
-    Posting,
-    Sent,
-    Uncertain,
+mod reservation {
+    use super::Event;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DeliveryState {
+        Pending,
+        Posting,
+        Sent,
+        Uncertain,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct Reservation {
+        pub outbox_id: i64,
+        pub event: Event,
+        pub state: DeliveryState,
+        pub post_started_at: Option<chrono::DateTime<chrono::Utc>>,
+        pub message_id: Option<String>,
+    }
+
+    pub struct Description<'a> {
+        pub home: &'a str,
+        pub home_label: &'a str,
+        pub target_label: &'a str,
+        pub new_session: bool,
+        pub home_changed: bool,
+        pub bot: &'a str,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reservation::{DeliveryState, Description, Reservation};
+#[cfg(any(test, feature = "test-support"))]
+pub use reservation::{DeliveryState, Description, Reservation};
+
 impl DeliveryState {
     fn read(state: Option<&str>) -> Result<Self, sqlx::Error> {
         match state {
@@ -42,15 +70,6 @@ impl DeliveryState {
             _ => Err(invalid("unknown notice delivery state")),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Reservation {
-    pub outbox_id: i64,
-    pub event: Event,
-    pub state: DeliveryState,
-    pub post_started_at: Option<chrono::DateTime<chrono::Utc>>,
-    pub message_id: Option<String>,
 }
 
 #[derive(sqlx::FromRow)]
@@ -64,16 +83,18 @@ struct StoredNotice {
     routing_notice_message_id: Option<String>,
 }
 
-pub(crate) struct Description<'a> {
-    pub home: &'a str,
-    pub home_label: &'a str,
-    pub target_label: &'a str,
-    pub new_session: bool,
-    pub home_changed: bool,
-    pub bot: &'a str,
-}
 fn invalid(error: impl ToString) -> sqlx::Error {
     sqlx::Error::Protocol(error.to_string())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn reserve_on_tx_for_test(
+    tx: &mut Transaction<'_, Postgres>,
+    id: &OwnerIdentity,
+    generation: i64,
+    description: Description<'_>,
+) -> Result<Option<Reservation>, sqlx::Error> {
+    reserve_on_tx(tx, id, generation, description).await
 }
 
 /// The caller commits this together with owner CAS and admission, or rolls all three back.

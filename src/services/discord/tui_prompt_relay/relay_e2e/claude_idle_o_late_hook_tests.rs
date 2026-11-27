@@ -169,7 +169,7 @@ fn newer_explicit_hook_blocks_proof_before_follow_applies_it() {
             .unwrap();
         pending(&f);
         assert!(link(&f).hot_candidate.is_some());
-        assert!(f.channel().ledger().boundary_evidence(&f.b()).is_none());
+        assert!(f.channel().ledger().boundary_evidence_for_test(&f.b()).is_none());
         e.deliver(100).await;
         assert_eq!(f.posts(), ["A_BODY"]);
         e.capture().unwrap();
@@ -309,7 +309,7 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
             }
             assert!(
                 f.channel()
-                    .refine_provisional_hot_link(&expected, &event)
+                    .refine_provisional_hot_link_for_test(&expected, &event)
                     .unwrap()
                     .is_none(),
                 "fault {fault}"
@@ -333,7 +333,7 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
             let mut channel = f.channel();
             assert!(
                 channel
-                    .refine_provisional_hot_link(&expected, &event)
+                    .refine_provisional_hot_link_for_test(&expected, &event)
                     .unwrap()
                     .is_some()
             );
@@ -357,7 +357,7 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
             let after = std::fs::read(&path).unwrap();
             assert!(
                 channel
-                    .refine_provisional_hot_link(&expected, &event)
+                    .refine_provisional_hot_link_for_test(&expected, &event)
                     .unwrap()
                     .is_none()
             );
@@ -377,7 +377,7 @@ fn refinement_guards_and_continuation_event_contract_are_durable_and_idempotent(
             .unwrap();
         assert!(
             f.channel()
-                .refine_provisional_hot_link(&expected, &event)
+                .refine_provisional_hot_link_for_test(&expected, &event)
                 .is_err()
         );
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -438,7 +438,7 @@ fn explicit_resume_and_automatic_resolution_share_one_committed_order() {
             e.deliver(100).await;
             if point == "snapshot" || !mutex_held {
                 assert_eq!(f.posts(), ["A_BODY"], "Hook durable first at {point}");
-                assert!(f.channel().ledger().boundary_evidence(&f.b()).is_none());
+                assert!(f.channel().ledger().boundary_evidence_for_test(&f.b()).is_none());
                 e.capture().unwrap();
                 refined(&f, "resume");
             } else {

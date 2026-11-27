@@ -214,6 +214,6 @@ pub async fn hold_before_effects(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "consent_handoff_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

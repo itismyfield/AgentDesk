@@ -45,7 +45,7 @@ impl HerdrLaunchHost for PolicyLauncher {
     fn create_user_default(&self, request: &UserDefaultCreateRequest) -> HerdrCreateOutcome {
         if let Err(error) = request
             .permit
-            .fence(&request.endpoint, self.source.as_ref())
+            .fence_for_test(&request.endpoint, self.source.as_ref())
         {
             return HerdrCreateOutcome::NotSent(format!("{error:?}"));
         }
@@ -54,7 +54,7 @@ impl HerdrLaunchHost for PolicyLauncher {
             label: request.label.clone(),
             cwd: request.cwd.clone(),
             command: request.command.clone(),
-            restore_off_witness: request.permit.witness().clone(),
+            restore_off_witness: request.permit.witness_for_test().clone(),
         })
     }
     fn restore_resume(&self, endpoint: &HerdrLaunchEndpoint) -> RestoreResume {
@@ -574,7 +574,7 @@ fn rr_preclaim_first_ingress_before_reader_recovers_and_submits_the_same_q_pg() 
                 observed_cas.fetch_add(1, Ordering::SeqCst);
                 assert!(
                     policy
-                        .mutation_evidence(&endpoint, &nonce)
+                        .mutation_evidence_for_test(&endpoint, &nonce)
                         .unwrap()
                         .startup
                         .is_some(),

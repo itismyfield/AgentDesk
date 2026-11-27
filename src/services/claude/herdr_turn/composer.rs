@@ -13,14 +13,14 @@ use std::time::{Duration, Instant};
 const COMPOSER_READY_WAIT: Duration = Duration::from_secs(10);
 const COMPOSER_POLL: Duration = Duration::from_millis(200);
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static READY_WAIT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+    pub static READY_WAIT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
 }
 /// The first input's readiness budget.
 fn composer_ready_wait() -> Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(budget) = READY_WAIT_FOR_TESTS.with(std::cell::Cell::get) {
         return budget;
     }

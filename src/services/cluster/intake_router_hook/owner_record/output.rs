@@ -67,6 +67,16 @@ async fn begin(pool: &PgPool) -> Result<Transaction<'static, Postgres>, sqlx::Er
 }
 
 impl Scope {
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn acquire_for_test(
+        &self,
+        channel: &str,
+        payload: &str,
+        artifact: Option<&Artifact>,
+    ) -> Result<EffectGuard, AcquireError> {
+        self.acquire(channel, payload, artifact).await
+    }
+
     pub(crate) async fn acquire(
         &self,
         channel: &str,
@@ -230,11 +240,11 @@ pub async fn acquire_unstamped(pool: &PgPool, channel: &str) -> Result<EffectGua
 
 #[cfg(any(test, feature = "test-support"))]
 impl Origin {
-    pub(crate) fn channel_for_test(&self) -> &str {
+    pub fn channel_for_test(&self) -> &str {
         &self.channel
     }
 
-    pub(crate) fn receipt_for_test(&self) -> i64 {
+    pub fn receipt_for_test(&self) -> i64 {
         self.receipt
     }
 }

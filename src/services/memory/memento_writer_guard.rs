@@ -25,6 +25,11 @@ pub struct WriterClaim {
 }
 
 impl WriterClaim {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn acquire_for_test(directory: &Path, key: &str) -> Result<Option<Self>, String> {
+        Self::acquire(directory, key)
+    }
+
     /// `None` means a previous write was confirmed successful. In-flight and
     /// unresolved writes return errors, so callers cannot report false success.
     pub(crate) fn acquire(directory: &Path, key: &str) -> Result<Option<Self>, String> {
@@ -79,6 +84,11 @@ impl WriterClaim {
             }
         }
         Ok(Some(claim))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn complete_for_test(self) -> Result<(), String> {
+        self.complete()
     }
 
     /// Call only after an unambiguous remote success. Dropping a claim without

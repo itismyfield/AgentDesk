@@ -62,9 +62,19 @@ pub(super) fn may_prepare(
 }
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_local_retry_for_test(&mut self) -> bool {
+        self.has_local_retry()
+    }
+
     pub(crate) fn has_local_retry(&mut self) -> bool {
         notice_selection::candidates(self.store().ledger())
             .any(|root| !notice_selection::is_notice(&root.piece))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn retry_local_for_test(&mut self, now: DateTime<Utc>) -> Step {
+        self.retry_local(now).await
     }
 
     pub(crate) async fn retry_local(&mut self, now: DateTime<Utc>) -> Step {

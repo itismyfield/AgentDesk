@@ -240,7 +240,7 @@ pub struct RealServer {
 }
 
 impl RealServer {
-    pub(crate) fn new(provider: &'static str) -> Self {
+    pub fn new(provider: &'static str) -> Self {
         assert!(matches!(provider, "claude" | "codex"));
         let read = |key| PathBuf::from(std::env::var_os(key).unwrap_or_else(|| panic!("{key}")));
         let root = read("ADK_TEST_HERDR_ROOT").canonicalize().unwrap();
@@ -356,7 +356,7 @@ impl RealServer {
     pub fn dir(&self) -> &Path {
         &self.dir
     }
-    pub(crate) fn home(&self) -> &Path {
+    pub fn home(&self) -> &Path {
         &self.home
     }
     pub fn fake_provider(&self) -> &Path {
@@ -368,11 +368,11 @@ impl RealServer {
     pub fn input_receipts_path(&self) -> &Path {
         &self.input_receipts
     }
-    pub(crate) fn session(&self) -> &str {
+    pub fn session(&self) -> &str {
         "agentdesk-t14"
     }
 
-    pub(crate) fn socket(&self) -> PathBuf {
+    pub fn socket(&self) -> PathBuf {
         let path = self.dir.join("run/h.sock");
         assert!(
             path.parent()
@@ -470,7 +470,7 @@ impl RealServer {
         assert_eq!(text, expected, "T14 exact sealed login environment");
     }
 
-    pub(crate) fn start(&mut self) {
+    pub fn start(&mut self) {
         assert!(self.child.is_none());
         self.preflight();
         let out = std::fs::File::create(self.dir.join("server.out")).unwrap();
@@ -547,7 +547,7 @@ impl RealServer {
         reply["result"].clone()
     }
 
-    pub(crate) fn installer(&self, boot: BootSessionHosts) -> impl Fn() + Send + Sync + 'static {
+    pub fn installer(&self, boot: BootSessionHosts) -> impl Fn() + Send + Sync + 'static {
         let root = self.root.clone();
         move || {
             std::mem::forget(crate::services::codex::isolated_herdr_path_for_test(&root));
@@ -811,7 +811,7 @@ impl RealServer {
         }
     }
 
-    pub(crate) fn stop(&mut self) -> bool {
+    pub fn stop(&mut self) -> bool {
         if self.stopped {
             return self.ledger.remaining().is_empty();
         }

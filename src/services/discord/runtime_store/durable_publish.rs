@@ -8,23 +8,38 @@ use std::path::Path;
 use super::durable_ancestors::fsync_created_ancestors;
 use super::{AtomicWriteContext, PARENT_DIR_FSYNC_FLUSHES, classify_io_error};
 
-/// Step that failed before the rename made the new bytes visible.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrePublishStage {
-    CreateDir,
-    CreateTemp,
-    Write,
-    FileSync,
-    Rename,
+mod publish_outcome {
+    use super::FlushStatus;
+
+    /// Step that failed before the rename made the new bytes visible.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum PrePublishStage {
+        CreateDir,
+        CreateTemp,
+        Write,
+        FileSync,
+        Rename,
+    }
+
+    /// Nothing was published; the target still holds its previous bytes (or is still absent).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PrePublishError {
+        pub stage: PrePublishStage,
+        /// The same text `atomic_write` returns for this failure, ENOSPC classification included.
+        pub message: String,
+    }
+
+    /// The new bytes are visible at the target path.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Published {
+        pub flush_status: FlushStatus,
+    }
 }
 
-/// Nothing was published; the target still holds its previous bytes (or is still absent).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PrePublishError {
-    pub(crate) stage: PrePublishStage,
-    /// The same text `atomic_write` returns for this failure, ENOSPC classification included.
-    pub(crate) message: String,
-}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use publish_outcome::{PrePublishError, PrePublishStage, Published};
+#[cfg(any(test, feature = "test-support"))]
+pub use publish_outcome::{PrePublishError, PrePublishStage, Published};
 
 impl std::fmt::Display for PrePublishError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -50,10 +65,13 @@ pub enum FlushStatus {
     SyncFailed { stage: SyncStage, error: String },
 }
 
-/// The new bytes are visible at the target path.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Published {
-    pub(crate) flush_status: FlushStatus,
+#[cfg(any(test, feature = "test-support"))]
+pub fn publish_durable_for_test(
+    root: &Path,
+    path: &Path,
+    data: &str,
+) -> Result<Published, PrePublishError> {
+    publish_durable(root, path, data)
 }
 
 /// Publishes `data` at `path`, then flushes its parent and the directories up to `root`, the
@@ -82,17 +100,17 @@ fn write_and_rename(path: &Path, data: &str) -> Result<(), PrePublishError> {
     let unique = uuid::Uuid::new_v4().simple();
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     let tmp = path.with_file_name(format!(".{file_name}.{unique}.tmp"));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::CreateTemp, &tmp)
         .map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
     let mut file =
         fs::File::create(&tmp).map_err(failed(PrePublishStage::CreateTemp, "create_tmp"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::Write, &tmp)
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
     file.write_all(data.as_bytes())
         .map_err(failed(PrePublishStage::Write, "write_all"))?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::inject(path, flush_probe::Step::FileSync, &tmp)
         .map_err(failed(PrePublishStage::FileSync, "sync_all"))?;
     file.sync_all()
@@ -141,16 +159,16 @@ pub(super) fn flush_dir(
     open_stage: SyncStage,
     sync_stage: SyncStage,
 ) -> Result<(), (SyncStage, io::Error)> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     match flush_probe::dir_decision(target, open_stage, dir) {
         flush_probe::Decision::Proceed => {}
         flush_probe::Decision::Fail(stage, error) => return Err((stage, error)),
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let _ = target;
     let opened = fs::File::open(dir).map_err(|error| (open_stage, error));
     let synced = opened.and_then(|file| file.sync_all().map_err(|error| (sync_stage, error)));
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     flush_probe::record(
         target,
         synced.as_ref().err().map_or(sync_stage, |e| e.0),
@@ -382,9 +400,9 @@ pub mod flush_probe {
     pub struct Event {
         pub target: PathBuf,
         pub step: Step,
-        pub(crate) dir: PathBuf,
+        pub dir: PathBuf,
         pub ok: bool,
-        pub(crate) target_bytes: Option<String>,
+        pub target_bytes: Option<String>,
     }
 
     /// Holds a flush until released; `entered` reports that a flush reached it.

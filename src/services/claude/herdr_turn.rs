@@ -6,17 +6,17 @@ pub mod handoff;
 pub mod hold_record;
 pub(crate) mod hold_resolve;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use first_input::owned_pending_prompt_for_tests;
+pub use first_input::owned_pending_prompt_for_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use first_input::regression_tests::regression_attached;
+pub use first_input::regression_tests::regression_attached;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use first_input::{
+pub use first_input::{
     Notice, held_record_for_test, record_outcome_for_test, submit_for_test, submit_owned_for_test,
     write_for_test,
 };
 use handoff::launched_source;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use handoff::launched_source_for_test;
+pub use handoff::launched_source_for_test;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -457,7 +457,7 @@ pub(crate) fn start_logged(channel: u64, logical: &str, nonce: &str, session_id:
 }
 
 /// As `start_logged`, but a log that cannot be read is an error rather than a missing start.
-pub(crate) fn start_log_read(
+pub fn start_log_read(
     channel: u64,
     logical: &str,
     nonce: &str,
@@ -820,6 +820,11 @@ pub struct HerdrTurnLines {
 }
 
 impl HerdrTurnLines {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn process_for_test(&mut self, line: &str, sender: &Sender<StreamMessage>) -> bool {
+        self.process(line, sender)
+    }
+
     pub(crate) fn process(&mut self, line: &str, sender: &Sender<StreamMessage>) -> bool {
         if is_turn_prompt(line) {
             if self.prompt_seen {
@@ -934,9 +939,9 @@ mod live_reader;
 mod never_attached;
 mod pending;
 use pending::pending_source;
-pub(crate) mod retry_probe;
+pub mod retry_probe;
 use live_reader::read_to_provider_terminal;
-pub(crate) use retry_probe::take as take_retry_probe;
+pub use retry_probe::take as take_retry_probe;
 pub mod start_offset;
 mod terminal_replay;
 pub use terminal_replay::{
@@ -962,7 +967,14 @@ pub fn take_owner_bound_failure() -> bool {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use super::tui_session_launch::prepare_claude_herdr_launch as prepare_herdr_for_login_test;
+pub use super::tui_session_launch::prepare_herdr_for_login_test;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_input_admission_for_test<T>(
+    send: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    with_input_admission(send)
+}
 
 /// Admission is checked on every first-input effect, including already attached executions.
 pub(crate) fn with_input_admission<T>(

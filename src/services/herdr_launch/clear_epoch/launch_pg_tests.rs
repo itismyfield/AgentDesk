@@ -35,7 +35,7 @@ async fn clear_after_launch_check_before_create_authorization_sends_nothing_pg()
     let clear = Arc::new(Mutex::new(None));
     let saved = clear.clone();
     let key = owner.clone();
-    let _watch = clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Checked, move || {
+    let _watch = clear_epoch::test_support::watch(&owner, clear_epoch::test_support::Point::Checked, move || {
         *saved.lock().unwrap() = Some(clear_epoch::begin_clear(
             &key.provider,
             &key.discord_token_hash,
@@ -64,7 +64,7 @@ async fn authorized_create_after_clear_still_blocks_clear_until_projection_pg() 
     let (release, resumed) = std::sync::mpsc::channel();
     let resumed = Mutex::new(resumed);
     let _watch =
-        clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Authorized, move || {
+        clear_epoch::test_support::watch(&owner, clear_epoch::test_support::Point::Authorized, move || {
             authorized.send(()).unwrap();
             resumed
                 .lock()

@@ -26,6 +26,11 @@ pub struct Shared {
 }
 
 impl Shared {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn target_for_test(&self) -> Target<'_> {
+        self.target()
+    }
+
     pub(crate) fn target(&self) -> Target<'_> {
         let home = if self.conflict {
             Home::Conflict

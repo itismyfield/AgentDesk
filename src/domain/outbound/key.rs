@@ -42,7 +42,13 @@ pub struct ManualOutboundDeliveryId<'a> {
 /// Typed components instead of a joined string, so `("a::b", "c")` and `("a", "b::c")` differ.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct OutboundDedupKey {
+    #[cfg(any(test, feature = "test-support"))]
+    pub correlation_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) correlation_id: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub semantic_event_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) semantic_event_id: String,
     pub(crate) target: OutboundTargetKey,
     pub(crate) operation: OutboundOperationKey,

@@ -24,7 +24,7 @@ pub(crate) fn at(seconds: u64) -> ProcessStart {
 pub struct FakeOs {
     pub(crate) parents: HashMap<u32, u32>,
     pub(crate) starts: Mutex<HashMap<u32, VecDeque<ProcessStart>>>,
-    pub(crate) environ: Result<Vec<String>, RestoreUnverified>,
+    pub environ: Result<Vec<String>, RestoreUnverified>,
     pub(crate) environs: Mutex<HashMap<u32, VecDeque<Vec<String>>>>,
 }
 
@@ -49,7 +49,7 @@ impl FakeOs {
         }
     }
 
-    pub(crate) fn starting(self, pid: u32, starts: &[ProcessStart]) -> Self {
+    pub fn starting(self, pid: u32, starts: &[ProcessStart]) -> Self {
         self.starts
             .lock()
             .unwrap()

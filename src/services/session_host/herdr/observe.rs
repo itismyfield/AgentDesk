@@ -54,6 +54,11 @@ pub enum RestoreUnverified {
 }
 
 impl RestoreResume {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admitted_witness_for_test(self) -> Option<ServerWitness> {
+        self.admitted_witness()
+    }
+
     /// The only server a create or input may reach; anything but `Off` admits none.
     pub(crate) fn admitted_witness(self) -> Option<ServerWitness> {
         match self {

@@ -136,11 +136,11 @@ pub struct TestHost {
     pub facts: Mutex<ActivationFacts>,
     pub on_facts: Mutex<FactsHook>,
     /// Legacy's relay state for channels that already hold output; fails closed when unset.
-    pub(crate) legacy: Mutex<Option<Arc<dyn LegacyView>>>,
+    pub legacy: Mutex<Option<Arc<dyn LegacyView>>>,
     /// The tmux session each channel's binding names, `host-<channel>` when unset.
-    pub(crate) sessions: Mutex<BTreeMap<u64, String>>,
+    pub sessions: Mutex<BTreeMap<u64, String>>,
     /// Legacy's custody of a channel as the gateway reads it, as an inflight row; none when unset.
-    pub(crate) custody: Mutex<CustodyProbe>,
+    pub custody: Mutex<CustodyProbe>,
     /// Legacy's mailbox work and watcher emission for every channel; idle by default.
     pub(crate) busy: std::sync::atomic::AtomicBool,
     pub(crate) relaying: std::sync::atomic::AtomicBool,

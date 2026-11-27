@@ -265,6 +265,11 @@ impl AlarmRouter {
         Self::new(alert_channel, notifier, PROCESS_HEALTH.clone())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn raise_at_for_test(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
+        self.raise_at(channel, alarm, now)
+    }
+
     pub(crate) fn raise_at(&self, channel: u64, alarm: &WriterAlarm, now: Instant) {
         let incident = match alarm {
             WriterAlarm::WaitingTooLong { incident, .. } => {

@@ -754,12 +754,12 @@ fn open_control(root: &std::path::Path) -> Result<std::fs::File, String> {
 
 // Test seams over the private control-channel helpers, for the lifecycle tests in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn nanoseconds_for_test(seconds: i64, nanos: i64) -> Option<u64> {
+pub fn nanoseconds_for_test(seconds: i64, nanos: i64) -> Option<u64> {
     nanoseconds(seconds, nanos)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn dispatch_control_for_test(
+pub fn dispatch_control_for_test(
     peer: std::net::SocketAddr,
     body: &[u8],
 ) -> Result<serde_json::Value, String> {
@@ -767,7 +767,7 @@ pub(crate) fn dispatch_control_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_control_for_test(
+pub fn prepare_control_for_test(
     peer: std::net::SocketAddr,
     body: &[u8],
 ) -> Result<serde_json::Value, String> {
@@ -775,24 +775,24 @@ pub(crate) fn prepare_control_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn derive_control_key_for_test<'a>(
+pub fn derive_control_key_for_test<'a>(
     credentials: impl IntoIterator<Item = (&'a str, &'a [u8])>,
 ) -> [u8; 32] {
     derive_control_key(credentials)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn control_hmac_for_test(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
+pub fn control_hmac_for_test(key: &[u8; 32], bytes: &[u8]) -> [u8; 32] {
     control_hmac(key, bytes)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn hex_digest_for_test(digest: [u8; 32]) -> String {
+pub fn hex_digest_for_test(digest: [u8; 32]) -> String {
     hex_digest(digest)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn signed_control_for_test(
+pub fn signed_control_for_test(
     key: &[u8; 32],
     domain: &[u8],
     value: &serde_json::Value,

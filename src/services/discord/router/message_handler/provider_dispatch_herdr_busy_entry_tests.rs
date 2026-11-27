@@ -1542,10 +1542,10 @@ fn a_pinless_idle_input_delegates_without_another_authentic_hook_pg() {
         .expect("the real cold source has the existing B1 Idle proof");
     let reservation = readiness::reserve(proof).expect("that exact public proof reserves");
     assert!(
-        reservation.current(),
+        reservation.current_for_test(),
         "the source remains current through reservation"
     );
-    reservation.not_sent();
+    reservation.not_sent_for_test();
     assert!(readiness::observe(fx.logical(), Some(&started.path)).is_some());
     let heads = late_tests::write_on_enter(&fx, &intake, &started.session, &started.path, false);
     intake.runtime.block_on(async {

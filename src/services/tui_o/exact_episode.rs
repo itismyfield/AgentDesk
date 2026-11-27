@@ -492,30 +492,40 @@ fn exact_child(p: &ExactPieceRef, pin: &ExactEpisodePin, records: &[EpisodeMetad
     matches!((attempts.as_slice(), receipts.as_slice(), commits.as_slice()), ([(a, af)], [(t, receipt)], [(c, cf)]) if *a == p && *t == p && *c == p && af == cf && valid_frontier(af, &p.source, p.range) && receipt.requested_channel == pin.channel_id && receipt.requested_channel == receipt.returned_channel && !receipt.message_id.is_empty() && receipt.author == pin.expected_author && receipt.payload_digest == p.payload_digest)
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DbTarget {
-    pub id: i64,
-    pub birth: u64,
-    pub episode: Uuid,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TerminalIntent {
-    BodyDone,
-    PolicySettle,
-    Failed,
-    Unknown,
-    RetryAsNew,
-    Delete,
-    Reopen,
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TerminalDisposition {
-    Applied,
-    AlreadySatisfied,
-    Unchanged,
-    Deferred,
+mod terminal {
+    use super::Uuid;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct DbTarget {
+        pub id: i64,
+        pub birth: u64,
+        pub episode: Uuid,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum TerminalIntent {
+        BodyDone,
+        PolicySettle,
+        Failed,
+        Unknown,
+        RetryAsNew,
+        Delete,
+        Reopen,
+    }
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum TerminalDisposition {
+        Applied,
+        AlreadySatisfied,
+        Unchanged,
+        Deferred,
+    }
 }
 
-#[cfg(test)]
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use terminal::{DbTarget, TerminalDisposition, TerminalIntent};
+#[cfg(any(test, feature = "test-support"))]
+pub use terminal::{DbTarget, TerminalDisposition, TerminalIntent};
+
+#[cfg(any(test, feature = "test-support"))]
 #[path = "exact_episode_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

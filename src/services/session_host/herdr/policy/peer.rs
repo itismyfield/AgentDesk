@@ -16,7 +16,7 @@ mod loaded_image;
 pub(crate) use loaded_image::{LoadedImage, SUPPORTED};
 
 /// Match this process's mapped executable and generation to the already pinned image token.
-pub(crate) fn verify_current_image(checker: &FileToken) -> Result<(), Unverified> {
+pub fn verify_current_image(checker: &FileToken) -> Result<(), Unverified> {
     let pid = std::process::id();
     let start = provenance::process_start(pid).map_err(|_| Unverified::Peer)?;
     #[cfg(target_os = "macos")]

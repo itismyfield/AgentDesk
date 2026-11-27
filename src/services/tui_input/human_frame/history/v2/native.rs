@@ -470,6 +470,14 @@ impl Registry {
     }
 
     #[cfg(unix)]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn native_evidence_registrations_for_test(
+        &self,
+    ) -> Result<Vec<EvidenceRegistration>, String> {
+        self.native_evidence_registrations()
+    }
+
+    #[cfg(unix)]
     pub(crate) fn native_evidence_registrations(
         &self,
     ) -> Result<Vec<EvidenceRegistration>, String> {
@@ -514,7 +522,7 @@ impl Registry {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_native_outcome(
+    pub fn record_native_outcome(
         &self,
         namespace: &str,
         ticket: &Ticket,

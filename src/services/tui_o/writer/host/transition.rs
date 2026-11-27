@@ -127,7 +127,7 @@ mod test_support {
     use super::*;
 
     /// A channel [`Readiness::host_port_for_test`] registered; it leaves readiness on drop.
-    pub(crate) struct HostedForTest(Arc<Readiness>, u64);
+    pub struct HostedForTest(Arc<Readiness>, u64);
 
     impl Drop for HostedForTest {
         fn drop(&mut self) {
@@ -139,7 +139,7 @@ mod test_support {
     impl Readiness {
         /// Registers `port` for `channel` as a running run under `gate` would, readable while
         /// `resumed` holds and `stopping` does not.
-        pub(crate) fn host_port_for_test(
+        pub fn host_port_for_test(
             self: &Arc<Self>,
             channel: u64,
             gate: &Arc<OwnershipGate>,

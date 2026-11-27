@@ -40,7 +40,7 @@ pub fn tail() -> Vec<Value> {
 }
 
 /// A synthetic idle compaction: boundary, summary and re-attachments, then `tail`.
-pub(crate) fn compacted_tail() -> Vec<Value> {
+pub fn compacted_tail() -> Vec<Value> {
     let mut records = vec![
         json!({"type":"system","subtype":"compact_boundary","compactMetadata":{"trigger":"auto"}}),
         json!({"type":"user","isCompactSummary":true,"message":{"role":"user","content":"summary"}}),
@@ -67,7 +67,7 @@ const MEASURED: &str = "reply:3942 stop:855 system/stop_hook_summary:1083 system
     repl-mode:87 session-owner:186 atis-latch:82 data-flow-records:192 cost-state:864";
 
 /// `MEASURED` as records of `native`, each padded to its measured length.
-pub(crate) fn measured_compaction_tail(native: &str) -> Vec<Value> {
+pub fn measured_compaction_tail(native: &str) -> Vec<Value> {
     let quiet = r#"{"suppressOutput":true}"#;
     let hook = |event: &str, name: &str, id: &str| {
         json!({"type":"attachment","attachment":{"type":"hook_success","hookEvent":event,

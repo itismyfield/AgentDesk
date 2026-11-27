@@ -422,7 +422,7 @@ fn registration_completion_accepts_adoption_advanced_binding() {
                 "registration logged A before completion"
             );
             assert_eq!(
-                adopt_from_hook(&a, &b, &HookSignal::from_payload("session_start", &payload)),
+                adopt_from_hook(&a, &b, &HookSignal::from_payload_for_test("session_start", &payload)),
                 AdoptionHttp::Durable(DurableKind::Adopted)
             );
             assert_eq!(
@@ -717,7 +717,7 @@ fn stale_snapshot_keeps_the_adoption(launch: bool) {
     let (seam_stale, seam_b, payload) = (stale.clone(), b.clone(), race.payload.clone());
     dedupe::pane_registration::BEFORE_JUDGED.with_borrow_mut(|v| {
         *v = Some(Box::new(move || {
-            let hook = HookSignal::from_payload("session_start", &payload);
+            let hook = HookSignal::from_payload_for_test("session_start", &payload);
             let adopted = adopt_from_hook(&seam_stale, &seam_b, &hook);
             assert_eq!(adopted, AdoptionHttp::Durable(DurableKind::Adopted));
         }))

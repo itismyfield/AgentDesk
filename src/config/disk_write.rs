@@ -308,7 +308,7 @@ pub mod test_support {
     pub(crate) const BOT_TOKEN: &str = "keeper-bot-secret-token";
 
     /// Writes a config holding both secrets, followed by `extra` top-level YAML.
-    pub(crate) fn write_secret_config(path: &Path, extra: &str) {
+    pub fn write_secret_config(path: &Path, extra: &str) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let yaml = format!(
             "server:\n  auth_token: {SERVER_TOKEN}\ndiscord:\n  bots:\n    keeper:\n      token: {BOT_TOKEN}\n      provider: claude\n{extra}"
@@ -316,7 +316,7 @@ pub mod test_support {
         std::fs::write(path, yaml).unwrap();
     }
 
-    pub(crate) fn assert_secrets_on_disk(path: &Path) {
+    pub fn assert_secrets_on_disk(path: &Path) {
         let raw: serde_yaml::Value =
             serde_yaml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
         assert_eq!(raw["server"]["auth_token"].as_str(), Some(SERVER_TOKEN));

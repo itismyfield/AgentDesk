@@ -77,7 +77,7 @@ impl OStore {
 // Test seam for the child init tests mounted in the root test host.
 #[cfg(any(test, feature = "test-support"))]
 impl OStore {
-    pub(crate) fn init_channel_checked_for_test(
+    pub fn init_channel_checked_for_test(
         &self,
         init: &Initialized,
         origin: InitOrigin,

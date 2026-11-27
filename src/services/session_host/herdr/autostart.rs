@@ -192,6 +192,6 @@ fn remember(socket: &Path, value: &Value) {
 #[path = "autostart_tests.rs"]
 mod tests;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "autostart_real_tests.rs"]
-pub(crate) mod real_tests;
+pub mod real_tests;

@@ -78,7 +78,7 @@ pub fn future_schema(owner: &HostedOwner) -> Value {
 }
 
 impl HostedObservation {
-    pub(crate) fn known_fixture(record: HostedExecution) -> Self {
+    pub fn known_fixture(record: HostedExecution) -> Self {
         let raw = Some(serde_json::to_value(&record).expect("fixture serializes"));
         Self {
             session_id: 0,

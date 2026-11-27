@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Counts {
-    pub(crate) reads: usize,
-    pub(crate) stats: usize,
+pub struct Counts {
+    pub reads: usize,
+    pub stats: usize,
 }
 
 thread_local! {
@@ -20,7 +20,7 @@ pub(crate) fn stat(path: &Path) {
     COUNTS.with_borrow_mut(|counts| counts.entry(path.to_path_buf()).or_default().stats += 1);
 }
 
-pub(crate) fn take(path: &Path) -> Counts {
+pub fn take(path: &Path) -> Counts {
     COUNTS.with_borrow_mut(|counts| counts.remove(path).unwrap_or_default())
 }
 
@@ -45,7 +45,7 @@ fn replacement_fingerprint_uses_identity_when_available() {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub enum Stage {
     AfterRead,
     BeforeValidate,
 }
@@ -62,7 +62,7 @@ thread_local! {
 pub(crate) struct Injection;
 
 impl Injection {
-    pub(crate) fn fired(&self) -> bool {
+    pub fn fired(&self) -> bool {
         NEXT.with_borrow(Option::is_none)
     }
 }
@@ -73,7 +73,7 @@ impl Drop for Injection {
     }
 }
 
-pub(crate) fn mutate_once(stage: Stage, change: impl FnOnce(&Path) + 'static) -> Injection {
+pub fn mutate_once(stage: Stage, change: impl FnOnce(&Path) + 'static) -> Injection {
     NEXT.with_borrow_mut(|next| {
         assert!(
             next.replace(Mutation {

@@ -52,6 +52,16 @@ pub struct HerdrEndpoint {
 }
 
 impl HerdrEndpoint {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        execution_node: &str,
+        config_key: &str,
+        socket_path: &Path,
+        herdr_session: &str,
+    ) -> Result<Self, HostError> {
+        Self::new(execution_node, config_key, socket_path, herdr_session)
+    }
+
     pub(crate) fn new(
         execution_node: &str,
         config_key: &str,
@@ -76,6 +86,11 @@ impl HerdrEndpoint {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_herdr_home_for_test(self, herdr_home: &Path) -> Result<Self, HostError> {
+        self.with_herdr_home(herdr_home)
+    }
+
     /// The bootstrap home whose `config.toml` and `xdg/` the server must have been started with.
     pub(crate) fn with_herdr_home(self, herdr_home: &Path) -> Result<Self, HostError> {
         if !herdr_home.is_absolute() {
@@ -87,6 +102,11 @@ impl HerdrEndpoint {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_mode_for_test(self, mode: EndpointMode) -> Self {
+        self.with_mode(mode)
+    }
+
     pub(crate) fn with_mode(self, mode: EndpointMode) -> Self {
         Self { mode, ..self }
     }
@@ -95,8 +115,18 @@ impl HerdrEndpoint {
         self.mode
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn execution_node_for_test(&self) -> &str {
+        self.execution_node()
+    }
+
     pub(crate) fn execution_node(&self) -> &str {
         &self.execution_node
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn config_key_for_test(&self) -> &str {
+        self.config_key()
     }
 
     pub(crate) fn config_key(&self) -> &str {
@@ -107,8 +137,18 @@ impl HerdrEndpoint {
         self.herdr_home.as_deref()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn socket_path_for_test(&self) -> &Path {
+        self.socket_path()
+    }
+
     pub(crate) fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_session_for_test(&self) -> &str {
+        self.herdr_session()
     }
 
     pub(crate) fn herdr_session(&self) -> &str {
@@ -244,6 +284,11 @@ pub enum HerdrRequest {
 }
 
 impl HerdrRequest {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_read_only_for_test(&self) -> bool {
+        self.is_read_only()
+    }
+
     /// Only these may be resent: a retry cannot deliver input twice. Anything not
     /// listed, including a request added later, counts as a mutation.
     pub(crate) fn is_read_only(&self) -> bool {

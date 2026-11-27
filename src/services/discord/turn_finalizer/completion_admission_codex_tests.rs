@@ -122,7 +122,7 @@ fn taken_over(restarted: bool) -> test_override::ChannelsGuard {
     let state = [Adoption::Pending, Adoption::Committed][usize::from(restarted)];
     let seeded = |_: &_, _| Ok(std::collections::BTreeMap::from([(CHANNEL, state)]));
     let boot = BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(&config, seeded).unwrap();
+    let boot = boot.seeded_for_test(&config, seeded).unwrap();
     let candidate = boot.candidate(CHANNEL).unwrap();
     assert_eq!(candidate.late_adopt_origin(), !restarted);
     *candidate.lock() = Adoption::Committed;
@@ -155,7 +155,7 @@ fn bound(
     std::fs::write(&path, text).unwrap();
     use crate::services::tui_prompt_dedupe::binding_events as p5;
     let hook =
-        p5::HookSignal::from_payload("session_start", &serde_json::json!({"source": "startup"}));
+        p5::HookSignal::from_payload_for_test("session_start", &serde_json::json!({"source": "startup"}));
     let proposal = p5::Proposal {
         channel_id: CHANNEL,
         provider: "codex",
@@ -163,7 +163,7 @@ fn bound(
         session_id: Some("parent"),
         path: path.to_str().unwrap(),
         replaced: None,
-        cause: p5::CauseSource::Hook(hook.cause()),
+        cause: p5::CauseSource::Hook(hook.cause_for_test()),
         hook: Some(&hook),
     };
     assert_eq!(

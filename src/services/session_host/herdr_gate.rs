@@ -12,7 +12,7 @@ pub mod legacy_return;
 mod closing;
 pub use closing::execution_closing;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use closing::shut_execution_for_test;
+pub use closing::shut_execution_for_test;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,7 +124,7 @@ fn herdr_key(key: HostKey) -> &'static str {
 
 /// Test seam: Herdr's key name for `key`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn herdr_key_for_test(key: HostKey) -> &'static str {
+pub fn herdr_key_for_test(key: HostKey) -> &'static str {
     herdr_key(key)
 }
 
@@ -340,6 +340,15 @@ fn on_endpoint(location: &HostedLocation, endpoint: &HerdrEndpoint) -> bool {
 }
 
 impl HerdrTarget {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+    ) -> Option<Self> {
+        Self::new(endpoint, transport, stored)
+    }
+
     /// A Pending or Bound execution with launch evidence, located on `endpoint`; no I/O.
     pub(crate) fn new(
         endpoint: HerdrEndpoint,
@@ -352,6 +361,16 @@ impl HerdrTarget {
             stored,
             ExistingMutationEvidence::default(),
         )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_with_evidence_for_test(
+        endpoint: HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+        evidence: ExistingMutationEvidence,
+    ) -> Option<Self> {
+        Self::new_with_evidence(endpoint, transport, stored, evidence)
     }
 
     /// Evidence is loaded by the async owner; judging never queries its store.
@@ -411,7 +430,7 @@ impl HerdrTarget {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_reads(
+    pub fn with_reads(
         self,
         read_restore: fn(&dyn HerdrTransport, &HerdrEndpoint) -> RestoreResume,
         os: Arc<dyn ProcessOs>,
@@ -426,7 +445,7 @@ impl HerdrTarget {
 
     /// Test seam: holds this pane's execution fence for `mutation` until the guard drops.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn acquire_for_test(
+    pub fn acquire_for_test(
         &self,
         mutation: Mutation,
     ) -> Result<impl Sized + use<>, HerdrGateRefusal> {
@@ -435,7 +454,7 @@ impl HerdrTarget {
 
     /// Test seam: sends `request` on the pinned judgment, as the input executor does.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn send_pinned_for_test(
+    pub fn send_pinned_for_test(
         &self,
         request: HerdrRequest,
     ) -> Result<HostMutation, HostError> {
@@ -537,9 +556,19 @@ impl HerdrTarget {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn pin_terminate_for_test(&self) -> Result<(), HerdrGateRefusal> {
+        self.pin_terminate()
+    }
+
     /// Pins only a termination judgment; ordinary stop verdicts grant no close authority.
     pub(crate) fn pin_terminate(&self) -> Result<(), HerdrGateRefusal> {
         self.pin(Mutation::Terminate)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_close_pinned_for_test(&self) -> CloseEffect {
+        self.send_close_pinned()
     }
 
     /// Consumes a termination judgment, reading the live switch immediately before the write.
@@ -587,10 +616,20 @@ impl HerdrTarget {
         *pinned = None;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_text_for_test(&self, text: &str) -> Result<HostMutation, HostError> {
+        self.send_text(text)
+    }
+
     pub(crate) fn send_text(&self, text: &str) -> Result<HostMutation, HostError> {
         let pane_id = self.0.pane.clone();
         let text = text.to_string();
         self.send_content(HerdrRequest::PaneSendText { pane_id, text })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_paste_for_test(&self, text: &str) -> Result<HostMutation, HostError> {
+        self.send_paste(text)
     }
 
     /// One bracketed paste, as tmux `paste-buffer -p` delivers it; a body holding the end
@@ -617,6 +656,11 @@ impl HerdrTarget {
             text,
             keys,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_keys_for_test(&self, keys: &[HostKey]) -> Result<HostMutation, HostError> {
+        self.send_keys(keys)
     }
 
     pub(crate) fn send_keys(&self, keys: &[HostKey]) -> Result<HostMutation, HostError> {
@@ -802,6 +846,15 @@ pub struct HerdrPaneView {
 }
 
 impl HerdrPaneView {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        endpoint: &HerdrEndpoint,
+        transport: Arc<dyn HerdrTransport>,
+        stored: &HostedExecution,
+    ) -> Option<Self> {
+        Self::new(endpoint, transport, stored)
+    }
+
     /// A Pending or Bound execution whose stored location names exactly `endpoint`; no I/O.
     pub(crate) fn new(
         endpoint: &HerdrEndpoint,
@@ -824,7 +877,7 @@ impl HerdrPaneView {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_os(self, os: Arc<dyn ProcessOs>) -> Self {
+    pub fn with_os(self, os: Arc<dyn ProcessOs>) -> Self {
         Self { os, ..self }
     }
 

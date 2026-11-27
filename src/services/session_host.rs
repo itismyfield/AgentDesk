@@ -65,19 +65,22 @@ mod tmux_host;
 pub mod traits;
 // Test seams: the Herdr internals the session-host tests reach from their upper-crate hosts.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod herdr_for_test {
-    pub(crate) use super::herdr::*;
+pub mod herdr_for_test {
+    pub use super::herdr::{
+        contract, launch_host, managed_config, model, observe, pane_probe, policy, provenance,
+        transport, wire,
+    };
 }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod herdr_gate_for_test {
-    pub(crate) use super::herdr_gate::*;
+pub mod herdr_gate_for_test {
+    pub use super::herdr_gate::*;
 }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod herdr_registry_for_test {
-    pub(crate) use super::herdr_registry::*;
+pub mod herdr_registry_for_test {
+    pub use super::herdr_registry::*;
 }
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use herdr_host::HerdrHost;
+pub use herdr_host::HerdrHost;
 
 pub use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
@@ -90,7 +93,7 @@ pub use herdr::model::HerdrEndpoint;
 pub use herdr::policy;
 pub use herdr_gate::legacy_return;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use herdr_gate::shut_execution_for_test;
+pub use herdr_gate::shut_execution_for_test;
 pub use herdr_gate::{execution_closing, restore_execution_fence, try_notice_fence};
 // The unix Herdr turn executor, behind its off-by-default switch, builds targets here.
 #[cfg_attr(not(test), allow(unused_imports))]

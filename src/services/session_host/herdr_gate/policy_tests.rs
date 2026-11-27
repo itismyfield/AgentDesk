@@ -37,11 +37,11 @@ fn policy_target(
     restore: Restore,
     os: Arc<dyn ProcessOs>,
 ) -> HerdrTarget {
-    let configured = endpoint(&rig.server).with_mode(mode);
+    let configured = endpoint(&rig.server).with_mode_for_test(mode);
     let registry = HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
         .with_reads((restore, os));
     registry
-        .target_with_evidence(&stored(&rig.server, HostedState::Bound), evidence)
+        .target_with_evidence_for_test(&stored(&rig.server, HostedState::Bound), evidence)
         .expect("complete recorded execution makes a target")
 }
 
@@ -50,10 +50,10 @@ fn admitted(rig: &Rig, nonce: &str, pid: u32) -> ExistingMutationEvidence {
         startup: None,
         grant: Some(grant_for_test(
             &crate::services::herdr_launch::HerdrLaunchEndpoint {
-                execution_node: endpoint(&rig.server).execution_node().into(),
-                config_key: endpoint(&rig.server).config_key().into(),
+                execution_node: endpoint(&rig.server).execution_node_for_test().into(),
+                config_key: endpoint(&rig.server).config_key_for_test().into(),
                 socket_addr: rig.server.path.to_string_lossy().into_owned(),
-                herdr_session: endpoint(&rig.server).herdr_session().into(),
+                herdr_session: endpoint(&rig.server).herdr_session_for_test().into(),
             },
             nonce,
             witness(rig, pid),
@@ -80,18 +80,18 @@ fn policy_legacy_mutations_keep_e7_and_need_no_new_evidence() {
         Ok(()),
         "legacy_mutation_no_new_proof_contract"
     );
-    assert_eq!(target.send_text("x").unwrap(), HostMutation::Confirmed);
+    assert_eq!(target.send_text_for_test("x").unwrap(), HostMutation::Confirmed);
     target
         .pin(Mutation::Cancel)
         .expect("Legacy Cancel needs only E7");
     assert_eq!(
-        target.send_keys(&[HostKey::Escape]).unwrap(),
+        target.send_keys_for_test(&[HostKey::Escape]).unwrap(),
         HostMutation::Confirmed
     );
     target
-        .pin_terminate()
+        .pin_terminate_for_test()
         .expect("Legacy Terminate needs only E7");
-    assert_eq!(target.send_close_pinned(), CloseEffect::Acknowledged);
+    assert_eq!(target.send_close_pinned_for_test(), CloseEffect::Acknowledged);
     assert_eq!(
         RESTORE_READS.with(Cell::get),
         3,
@@ -132,18 +132,18 @@ fn policy_user_grant_allows_all_mutations_without_current_file_policy() {
         Ok(()),
         "existing_grant_ignores_current_e7_contract"
     );
-    assert_eq!(target.send_text("x").unwrap(), HostMutation::Confirmed);
+    assert_eq!(target.send_text_for_test("x").unwrap(), HostMutation::Confirmed);
     target
         .pin(Mutation::Cancel)
         .expect("historical grant admits exact Cancel");
     assert_eq!(
-        target.send_keys(&[HostKey::Escape]).unwrap(),
+        target.send_keys_for_test(&[HostKey::Escape]).unwrap(),
         HostMutation::Confirmed
     );
     target
-        .pin_terminate()
+        .pin_terminate_for_test()
         .expect("historical grant admits exact Terminate");
-    assert_eq!(target.send_close_pinned(), CloseEffect::Acknowledged);
+    assert_eq!(target.send_close_pinned_for_test(), CloseEffect::Acknowledged);
     crate::services::session_host::policy::permit::EVENTS.with(|events| {
         assert_eq!(
             events.borrow().as_slice(),
@@ -235,7 +235,7 @@ fn policy_grant_does_not_adopt_replaced_root_or_provider() {
 #[test]
 fn policy_registry_default_evidence_does_not_fabricate_a_grant() {
     let rig = rig();
-    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let configured = endpoint(&rig.server).with_mode_for_test(EndpointMode::UserDefault);
     let registry = HerdrRegistry::with_transport(configured, transport(&rig.server, vec![SERVER]))
         .with_reads((counted_off, launched_os(&rig)));
     let target = registry
@@ -290,7 +290,7 @@ fn policy_legacy_admission_and_terminate_version_refusals_stay_exact() {
         launched_os(&rig),
     );
     assert_eq!(
-        target.pin_terminate(),
+        target.pin_terminate_for_test(),
         Err(HerdrGateRefusal::TerminateUnsupportedServer)
     );
     assert!(rig.server.mutations().is_empty());
@@ -301,7 +301,7 @@ fn policy_grant_cache_failure_is_distinct_and_probes_nothing() {
     for cache in ["grants", "witnessed", "proof"] {
         RESTORE_READS.with(|reads| reads.set(0));
         let rig = rig();
-        let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+        let configured = endpoint(&rig.server).with_mode_for_test(EndpointMode::UserDefault);
         let host = crate::services::session_host::SocketHerdrLaunchHost::new(
             vec![configured.clone()],
             Default::default(),
@@ -365,7 +365,7 @@ fn policy_prepared_store_failure_is_distinct_from_absent_authority() {
     ] {
         RESTORE_READS.with(|reads| reads.set(0));
         let rig = rig();
-        let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+        let configured = endpoint(&rig.server).with_mode_for_test(EndpointMode::UserDefault);
         let host = crate::services::session_host::SocketHerdrLaunchHost::new(
             vec![configured.clone()],
             Default::default(),
@@ -415,11 +415,11 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
     let grant_root = temporary.path().join("grants");
     let grant = admitted(&rig, NONCE, SERVER).grant.unwrap();
     let launch_endpoint = grant.endpoint().clone();
-    let store = FileGrantStore::new(Some(grant_root.clone()));
+    let store = FileGrantStore::new_for_test(Some(grant_root.clone()));
     store.save(grant.clone()).await.unwrap();
     drop(store);
-    let restarted_store = FileGrantStore::new(Some(grant_root.clone()));
-    let restored = restarted_store.load_all(&[launch_endpoint]).await.unwrap();
+    let restarted_store = FileGrantStore::new_for_test(Some(grant_root.clone()));
+    let restored = restarted_store.load_all_for_test(&[launch_endpoint]).await.unwrap();
     assert!(!restored.unknown_failure);
     let restored = restored
         .by_endpoint
@@ -438,7 +438,7 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
         "restored_grant_gate_fixture_store_is_absent_contract"
     );
 
-    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let configured = endpoint(&rig.server).with_mode_for_test(EndpointMode::UserDefault);
     let make_registry = |grants| {
         let host = crate::services::session_host::SocketHerdrLaunchHost::new(
             vec![configured.clone()],
@@ -497,7 +497,7 @@ fn policy_remembered_grant_after_boot_failure_reaches_only_exact_nonce_input() {
     use crate::services::herdr_launch::HerdrLaunchHost;
     RESTORE_READS.with(|reads| reads.set(0));
     let rig = rig();
-    let configured = endpoint(&rig.server).with_mode(EndpointMode::UserDefault);
+    let configured = endpoint(&rig.server).with_mode_for_test(EndpointMode::UserDefault);
     let host = crate::services::session_host::SocketHerdrLaunchHost::new(
         vec![configured.clone()],
         Default::default(),

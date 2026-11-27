@@ -4,7 +4,7 @@ pub mod submit;
 #[cfg(unix)]
 use submit::settle_submit;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use submit::{settle_submit_for_test, test_support::install_clear_end};
+pub use submit::{settle_submit_for_test, test_support::install_clear_end};
 
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1224,7 +1224,7 @@ pub(crate) fn verified_warm(request: VerifiedWarmRequest<'_>) -> Result<(), Stri
     let token = std::sync::Arc::clone(&request.token);
     let result = verified_warm_inner(request);
     if let Err(error) = &result {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         actual_boundary(&format!("held:{error}"));
         tracing::warn!(
             tmux_session_name,
@@ -1311,14 +1311,14 @@ fn verified_warm_inner(request: VerifiedWarmRequest<'_>) -> Result<(), String> {
     )
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 type ActualBoundary = Box<dyn FnMut(&str)>;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static ACTUAL_BOUNDARY: std::cell::RefCell<Option<ActualBoundary>> = const { std::cell::RefCell::new(None) };
+    pub static ACTUAL_BOUNDARY: std::cell::RefCell<Option<ActualBoundary>> = const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn actual_boundary(stage: &str) {
     ACTUAL_BOUNDARY.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {

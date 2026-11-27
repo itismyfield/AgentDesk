@@ -22,7 +22,7 @@ pub struct Environment {
 
 /// Loads the environment for the instance tests mounted in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn load_for_test(root: &Path, manifest: &Value, config: &Value) -> Result<(), String> {
+pub fn load_for_test(root: &Path, manifest: &Value, config: &Value) -> Result<(), String> {
     Environment::load(root, manifest, config).map(drop)
 }
 

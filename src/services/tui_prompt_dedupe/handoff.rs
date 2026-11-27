@@ -908,6 +908,10 @@ pub fn durable_handoff_present_for_tests(provider: &str, tmux: &str) -> bool {
     durable_path(&normalize_provider(provider), tmux.trim()).is_some_and(|path| path.exists())
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "handoff_test_support.rs"]
+pub(super) mod test_support;
+
 #[cfg(test)]
 #[path = "handoff_tests.rs"]
 pub(super) mod tests;

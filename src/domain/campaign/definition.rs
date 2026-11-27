@@ -263,7 +263,7 @@ pub fn validate_definition(input: DefinitionInput) -> Result<ValidatedDefinition
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn graph_changed(old: &ValidatedDefinition, next: &ValidatedDefinition) -> bool {
     let edges = |definition: &ValidatedDefinition| -> BTreeSet<(String, String)> {
         definition

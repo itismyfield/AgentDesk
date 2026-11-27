@@ -7,8 +7,8 @@ mod rpc;
 mod turn;
 mod wire;
 
-#[cfg(all(test, unix))]
-pub(crate) mod lifecycle_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod lifecycle_tests;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

@@ -226,6 +226,15 @@ impl ChannelStore {
         self.mutate(|store| Ok(durable::replace(&store.dir.join(BOUNDARY_FILE), &bytes)?))
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn refine_provisional_hot_link_for_test(
+        &mut self,
+        expected: &SourceLink,
+        event: &BindingEvent,
+    ) -> Result<Option<Rotation>, StoreError> {
+        self.refine_provisional_hot_link(expected, event)
+    }
+
     /// Refines only a later explicit re-pin of this exact provisional Unknown attachment.
     pub(crate) fn refine_provisional_hot_link(
         &mut self,

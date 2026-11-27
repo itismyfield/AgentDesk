@@ -95,14 +95,14 @@ impl PolicyCase {
         configured.socket_path = case.fx.rig.socket().into();
         let hosts = crate::config::session_hosts::force_config_for_test(&config);
         let configured = crate::config::session_hosts::herdr_endpoint(CHANNEL).unwrap();
-        let endpoint = HerdrEndpoint::new(
+        let endpoint = HerdrEndpoint::new_for_test(
             &configured.execution_node,
             &configured.key,
             &configured.socket_path,
             &configured.herdr_session,
         )
         .unwrap()
-        .with_mode(mode);
+        .with_mode_for_test(mode);
         let HostedRecord::Known(mut record) = case.fx.record() else {
             panic!("launched N1")
         };
@@ -159,13 +159,13 @@ impl PolicyCase {
             std::os::unix::fs::PermissionsExt::from_mode(0o700),
         )
         .unwrap();
-        let store = FileGrantStore::new(Some(grants.path().into()));
+        let store = FileGrantStore::new_for_test(Some(grants.path().into()));
         let original_grant = granted.map(|pid| {
             let grant = grant_for_test(&launch, &case.nonce, witness(pid));
             case.fx.rt.block_on(store.save(grant.clone())).unwrap();
-            grant.encode().unwrap()
+            grant.encode_for_test().unwrap()
         });
-        let restored = case.fx.rt.block_on(store.load_all(&[launch])).unwrap();
+        let restored = case.fx.rt.block_on(store.load_all_for_test(&[launch])).unwrap();
         let registry = case
             .fx
             .rig
@@ -222,7 +222,7 @@ impl PolicyCase {
         herdr_endpoints()
             .launch_host()
             .unwrap()
-            .mutation_evidence(&self.endpoint, &self.case.nonce)
+            .mutation_evidence_for_test(&self.endpoint, &self.case.nonce)
             .unwrap()
     }
 

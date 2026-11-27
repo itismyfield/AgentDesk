@@ -18,13 +18,13 @@ mod pane_key {
     /// Per-pane key for the once-per-fill-cycle armed flag, keyed by channel and tmux pane so
     /// [`super::clear_for_tmux`] can forget every channel's flag for a recreated pane name.
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    pub(crate) struct CompactPaneKey {
+    pub struct CompactPaneKey {
         pub(super) channel_id: u64,
         pub(super) tmux_session_name: String,
     }
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use pane_key::CompactPaneKey;
+pub use pane_key::CompactPaneKey;
 #[cfg(not(any(test, feature = "test-support")))]
 use pane_key::CompactPaneKey;
 
@@ -483,6 +483,11 @@ pub(crate) fn clear_for_tmux(tmux_session_name: &str) {
 }
 
 #[cfg(any(test, feature = "test-support"))]
+pub fn clear_for_tmux_for_test(tmux_session_name: &str) {
+    clear_for_tmux(tmux_session_name);
+}
+
+#[cfg(any(test, feature = "test-support"))]
 fn reset_for_test() {
     let mut guard = COMPACT_TRIGGER_STATE
         .lock()
@@ -494,17 +499,17 @@ fn reset_for_test() {
 // Test seams for the compact tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl CompactPaneKey {
-    pub(crate) fn channel_id_for_test(&self) -> u64 {
+    pub fn channel_id_for_test(&self) -> u64 {
         self.channel_id
     }
 
-    pub(crate) fn tmux_session_name_for_test(&self) -> &str {
+    pub fn tmux_session_name_for_test(&self) -> &str {
         &self.tmux_session_name
     }
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn pane_still_disarmed_for_send_for_test(
+pub fn pane_still_disarmed_for_send_for_test(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -513,7 +518,7 @@ pub(crate) fn pane_still_disarmed_for_send_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn submit_under_composer_lock_for_test<T>(
+pub fn submit_under_composer_lock_for_test<T>(
     pane: &CompactPaneKey,
     generation: u64,
     threshold: CompactThreshold,
@@ -538,12 +543,12 @@ pub(crate) fn submit_under_composer_lock_for_test<T>(
 /// The armed flag is process-global test state. Keep every stateful test
 /// serialized so one fixture cannot clear another under normal parallel runs.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+pub static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 /// Acquire the shared state guard and reset all compact-trigger test state while
 /// the guard is held. The caller retains the guard for its entire test.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
+pub fn state_test_guard() -> std::sync::MutexGuard<'static, ()> {
     let guard = STATE_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());

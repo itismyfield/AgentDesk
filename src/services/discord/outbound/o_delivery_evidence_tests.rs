@@ -830,7 +830,7 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
     let run = run("i7441b");
     let mut runner = Runner::new(pool.clone(), 42, run);
     runner
-        .tick(
+        .tick_for_test(
             f.row.channel_id,
             &reader,
             &[proof],
@@ -1076,7 +1076,7 @@ async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     ]);
     let mut runner = Runner::new(pool.clone(), 42, run("mixed"));
     runner
-        .tick(
+        .tick_for_test(
             f.row.channel_id,
             &reader,
             &[proof],

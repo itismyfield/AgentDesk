@@ -2,14 +2,14 @@ use super::*;
 use crate::services::discord::codex_absence::InflightObs;
 use crate::services::tui_prompt_dedupe::clear_relaunch;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type AdmissionObserver =
     Box<dyn FnOnce(Option<&InflightObs>, Option<&std::sync::Arc<CancelToken>>)>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) type InitialCaptureObserver = Box<dyn FnOnce(bool)>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     pub(super) static AFTER_INITIAL_CAPTURE: std::cell::RefCell<Option<InitialCaptureObserver>> = const { std::cell::RefCell::new(None) };
     pub(super) static ADMISSION_OBSERVER: std::cell::RefCell<Option<AdmissionObserver>> = const { std::cell::RefCell::new(None) };
@@ -85,7 +85,7 @@ pub(super) fn execute_observed(
             .as_ref()
             .is_some_and(|token| observed.matches_token(token))
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSION_OBSERVER.with_borrow_mut(|slot| {
         if let Some(observer) = slot.take() {
             observer(observation, cancel_token.as_ref());
@@ -101,7 +101,7 @@ pub(super) fn execute_observed(
                 .and_then(|observed| clear_relaunch::absent_capture(tmux_session_name, observed))
         })
         .flatten();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AFTER_INITIAL_CAPTURE.with_borrow_mut(|slot| {
         if let Some(effect) = slot.take() {
             effect(captured.is_some());

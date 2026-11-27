@@ -13,8 +13,8 @@ mod absent_open;
 mod fresh_admission;
 #[path = "herdr_bootstrap.rs"]
 pub mod herdr_bootstrap;
-#[cfg(test)]
-pub(crate) use fresh_admission::fresh_scope_ownership_calls_for_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub use fresh_admission::fresh_scope_ownership_calls_for_tests;
 pub use fresh_admission::{
     FRESH_SCOPE_BUSY, fresh_scope_eligible, fresh_scope_pending, input_hold_reason_for_channel,
     input_reason_for_channel, successor_unproved_for_channel, with_current_scope_nonce,

@@ -29,7 +29,7 @@ pub struct Receiver {
 }
 
 pub enum Operation {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     Prepare(SubmitFloor),
     Capture(Box<(PreparedLaunch, ExecutionProofRef)>),
     Close(Box<CodexEpisodeSpan>),
@@ -173,6 +173,11 @@ impl Port {
         answer
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn request_for_test(&self, operation: Operation) -> Result<Reply, String> {
+        self.request(operation).await
+    }
+
     pub(crate) async fn request(&self, operation: Operation) -> Result<Reply, String> {
         self.request_inner(operation)
             .await
@@ -269,7 +274,7 @@ impl Receiver {
             Err(StoreError::Rejected("foreign actor command".into()))
         } else {
             match request.operation {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 Operation::Prepare(floor) => {
                     if let SubmitFloor::NativeFloor(floor) = &floor {
                         prepared = Some((**floor).clone());
@@ -454,13 +459,23 @@ impl crate::services::tui_o::writer::host::Readiness {
 
     /// Consumers must be bounded and synchronous, without re-entering Readiness.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_prepared_reply<T>(
+    pub fn with_prepared_reply<T>(
         &self,
         channel: u64,
         reply: Reply,
         consume: impl FnOnce(&Prepared) -> T,
     ) -> Result<T, &'static str> {
         self.with_submission(channel, |port| Ok(consume(&port.take_prepared(reply)?)))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_closed_reply_for_test<T>(
+        &self,
+        channel: u64,
+        reply: Reply,
+        issue: impl FnOnce(&Closed) -> T,
+    ) -> Result<T, &'static str> {
+        self.with_closed_reply(channel, reply, issue)
     }
 
     /// Consumers must be bounded and synchronous, without re-entering Readiness.

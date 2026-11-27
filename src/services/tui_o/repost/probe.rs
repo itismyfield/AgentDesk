@@ -23,6 +23,8 @@ use matcher::{Attribution, AttributionSnapshot, ObservedMessage, match_observati
 pub(crate) const PAGE_LIMIT: u8 = 100;
 /// Pages one `advance` reads before yielding the channel back as `Partial`.
 pub(crate) const PAGES_PER_STEP: usize = 10;
+#[cfg(any(test, feature = "test-support"))]
+pub const PAGES_PER_STEP_FOR_TEST: usize = PAGES_PER_STEP;
 
 /// Read-only Discord access. A failure or timeout is never an empty answer.
 pub trait ProbeRead {
@@ -61,6 +63,11 @@ pub enum Progress {
 }
 
 impl Progress {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn covered_for_test(&self) -> bool {
+        self.covered()
+    }
+
     /// Whether the last pass read its whole range; found ids stand either way.
     pub(crate) fn covered(&self) -> bool {
         matches!(

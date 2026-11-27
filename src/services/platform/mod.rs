@@ -27,7 +27,7 @@ pub mod owner_publication_fence {
     pub struct Scope(bool);
 
     impl Scope {
-        pub(crate) fn enter() -> Self {
+        pub fn enter() -> Self {
             Self(HELD.replace(true))
         }
     }

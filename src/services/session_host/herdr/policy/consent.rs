@@ -522,6 +522,11 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reserve_card_for_test(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
+        self.reserve_card(expected, now)
+    }
+
     pub(crate) fn reserve_card(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
             if current.state != State::Pending
@@ -534,6 +539,11 @@ impl ConsentStore {
             current.expires = now.saturating_add(TTL);
             Ok(())
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn bind_card_for_test(&self, expected: &Consent, message: u64) -> Result<Consent, String> {
+        self.bind_card(expected, message)
     }
 
     pub(crate) fn bind_card(&self, expected: &Consent, message: u64) -> Result<Consent, String> {
@@ -617,6 +627,17 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn decide_for_test(
+        &self,
+        expected: &Consent,
+        actor: u64,
+        yes: bool,
+        now: u64,
+    ) -> Result<Consent, String> {
+        self.decide(expected, actor, yes, now)
+    }
+
     pub(crate) fn decide(
         &self,
         expected: &Consent,
@@ -639,6 +660,11 @@ impl ConsentStore {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn expire_for_test(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
+        self.expire(expected, now)
+    }
+
     pub(crate) fn expire(&self, expected: &Consent, now: u64) -> Result<Consent, String> {
         self.update(expected, |current| {
             if current.state == State::Pending
@@ -649,6 +675,15 @@ impl ConsentStore {
             }
             Ok(())
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_apply_for_test(
+        &self,
+        expected: &Consent,
+        result: ApplyResult,
+    ) -> Result<Consent, String> {
+        self.record_apply(expected, result)
     }
 
     pub(crate) fn record_apply(

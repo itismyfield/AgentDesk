@@ -199,7 +199,7 @@ async fn live_case(mut body: String, tool: bool, control: &str) {
         DRIVER_CHANNEL_ID,
     )
     .await;
-    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
         DRIVER_TMUX_SESSION,
     );
     fake.enable_fixture_launch();

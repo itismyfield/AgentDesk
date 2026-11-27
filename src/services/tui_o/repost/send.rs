@@ -56,6 +56,10 @@ pub struct RepostEnvelope {
     content: String,
     ids: RepostIds,
     additional: bool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub output_origin:
+        Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) output_origin:
         Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact>,
     /// The re-posted unit's push decision, made by the notification policy.
@@ -63,6 +67,11 @@ pub struct RepostEnvelope {
 }
 
 impl RepostEnvelope {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn original_for_test(channel: u64, content: String, ids: RepostIds) -> Self {
+        Self::original(channel, content, ids)
+    }
+
     /// A piece's first post while re-posting is on: the content plus the shared nonce.
     pub(crate) fn original(channel: u64, content: String, ids: RepostIds) -> Self {
         Self {
@@ -73,6 +82,11 @@ impl RepostEnvelope {
             output_origin: None,
             silent: false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn additional_for_test(channel: u64, content: String, ids: RepostIds) -> Self {
+        Self::additional(channel, content, ids)
     }
 
     /// A re-post: the same content and nonce, with the note and marker in an embed footer.
@@ -102,6 +116,11 @@ impl RepostEnvelope {
         }
         let footer = format!("{REPOST_NOTE} {}", self.ids.marker);
         message.embed(CreateEmbed::new().footer(CreateEmbedFooter::new(footer)))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn carries_marker_for_test(&self, created: &CreatedMessage) -> bool {
+        self.carries_marker(created)
     }
 
     /// A re-post counts as identified only when the created message kept its marker.
@@ -175,9 +194,21 @@ impl AttemptGuard {
 /// `wire == counted + throttled`, and `counted <= 1`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DispatchReport {
+    #[cfg(any(test, feature = "test-support"))]
+    pub outcome: WireOutcome,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) outcome: WireOutcome,
+    #[cfg(any(test, feature = "test-support"))]
+    pub wire: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) wire: u32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub counted: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) counted: u32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub throttled: u32,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) throttled: u32,
 }
 
@@ -193,6 +224,11 @@ pub trait BoundedTransport {
 pub struct DispatchCounts(Arc<WireCount>);
 
 impl DispatchCounts {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn report_for_test(&self, outcome: WireOutcome) -> DispatchReport {
+        self.report(outcome)
+    }
+
     pub(crate) fn report(&self, outcome: WireOutcome) -> DispatchReport {
         DispatchReport {
             outcome,

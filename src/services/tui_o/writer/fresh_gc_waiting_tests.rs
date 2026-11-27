@@ -50,7 +50,7 @@ async fn scenario(case: Case) {
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _fake_tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());

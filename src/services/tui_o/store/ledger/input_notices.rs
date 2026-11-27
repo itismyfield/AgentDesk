@@ -349,7 +349,7 @@ impl NoticeState {
 
 // Test seams for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) fn record_id_for_test(record: &SourceRange) -> RecordId {
+pub fn record_id_for_test(record: &SourceRange) -> RecordId {
     record_id(record)
 }
 

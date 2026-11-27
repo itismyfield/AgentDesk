@@ -300,7 +300,7 @@ impl ProcessIdentity {
     /// distinguish "captured a real starttime" from "snapshot is empty and
     /// guard silently disabled".
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn raw_starttime(&self) -> Option<u128> {
+    pub fn raw_starttime(&self) -> Option<u128> {
         #[cfg(target_os = "macos")]
         {
             self.starttime.or(self.macos_lstart_hash)
@@ -313,7 +313,7 @@ impl ProcessIdentity {
 
     /// Test-only synthetic constructor used to pin the mismatch-skip path.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn from_raw_for_test(starttime: Option<u128>) -> Self {
+    pub fn from_raw_for_test(starttime: Option<u128>) -> Self {
         Self {
             starttime,
             #[cfg(target_os = "macos")]

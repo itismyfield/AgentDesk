@@ -156,7 +156,7 @@ async fn consent_apply_owner_rechecks_config_peer_and_candidate_after_checker() 
 #[tokio::test]
 async fn consent_apply_owner_refuses_peer_replacement_during_checker() {
     struct ReplacedSource {
-        source: Arc<preview::tests::Source>,
+        source: Arc<preview::test_support::Source>,
         marker: std::path::PathBuf,
     }
     impl PeerSource for ReplacedSource {

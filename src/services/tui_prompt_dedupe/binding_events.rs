@@ -102,6 +102,11 @@ pub struct HookSignal {
     pub published_at: Option<DateTime<Utc>>,
 }
 impl HookSignal {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_payload_for_test(event: &str, payload: &serde_json::Value) -> Self {
+        Self::from_payload(event, payload)
+    }
+
     pub(crate) fn from_payload(event: &str, payload: &serde_json::Value) -> Self {
         let text = |key: &str| payload.get(key).and_then(|v| v.as_str()).map(str::to_owned);
         Self {
@@ -112,6 +117,11 @@ impl HookSignal {
             published_at: None,
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn cause_for_test(&self) -> BindingCause {
+        self.cause()
+    }
+
     /// Only SessionStart names why the session changed.
     pub(crate) fn cause(&self) -> BindingCause {
         if self.event != "session_start" {
@@ -147,6 +157,17 @@ pub struct Proposal<'a> {
     pub hook: Option<&'a HookSignal>,
 }
 impl<'a> Proposal<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_binding_for_test(
+        channel_id: Option<u64>,
+        tmux_session: &'a str,
+        binding: &'a TuiRuntimeBinding,
+        replaced: Option<&'a TuiRuntimeBinding>,
+        cause: CauseSource,
+    ) -> Option<Self> {
+        Self::for_binding(channel_id, tmux_session, binding, replaced, cause)
+    }
+
     /// `None` for runtimes O does not read and for panes without a known channel.
     pub(crate) fn for_binding(
         channel_id: Option<u64>,

@@ -29,7 +29,7 @@ pub(super) fn create(
     };
     let launching = clear_epoch::Launching::for_launch(&owner).unwrap();
     let permit = launching
-        .scope()
+        .scope_for_test()
         .check_epoch()
         .unwrap()
         .begin_effect()
@@ -42,8 +42,8 @@ pub(super) fn create(
         restore_off_witness: witness,
     };
     let pane = match host_for(HostKind::Herdr)
-        .create(HostCreate::herdr(host, &request, &permit))
-        .into_herdr()
+        .create(HostCreate::herdr_for_test(host, &request, &permit))
+        .into_herdr_for_test()
     {
         HerdrCreateOutcome::Created { pane_id } => pane_id,
         other => panic!("W1 actual S04 create {provider}: {other:?}"),

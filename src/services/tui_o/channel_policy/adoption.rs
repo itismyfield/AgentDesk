@@ -113,8 +113,17 @@ pub struct BodyClaimed {
 /// A sends snapshot taken before reading the binding log; order is local to this candidate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TurnMark {
+    #[cfg(any(test, feature = "test-support"))]
+    pub sends: (u64, u64),
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) sends: (u64, u64),
+    #[cfg(any(test, feature = "test-support"))]
+    pub seq: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) seq: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub order: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) order: u64,
 }
 
@@ -123,6 +132,9 @@ pub struct TurnMark {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LateBoundary {
     pub baseline: u64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub takeover_after: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) takeover_after: u64,
     pub(crate) sends: (u64, u64),
 }
@@ -223,6 +235,11 @@ impl Candidate {
         self.child.get().copied()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reserved_late_for_test() -> Self {
+        Self::reserved_late()
+    }
+
     pub(crate) fn reserved_late() -> Self {
         Self {
             late_origin: true,
@@ -249,7 +266,7 @@ impl Candidate {
 
     /// Admission never waits for adoption; a failed log read leaves the host's baseline in use.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn mark_turn_admitted(
+    pub fn mark_turn_admitted(
         &self,
         channel: u64,
         read_seq: impl FnOnce() -> Result<u64, String>,
@@ -312,6 +329,11 @@ impl Candidate {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn lock_for_test(&self) -> MutexGuard<'_, Adoption> {
+        self.lock()
+    }
+
     pub(crate) fn lock(&self) -> MutexGuard<'_, Adoption> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -324,7 +346,7 @@ impl Candidate {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn locked_for_test(&self) -> bool {
+    pub fn locked_for_test(&self) -> bool {
         matches!(
             self.state.try_lock(),
             Err(std::sync::TryLockError::WouldBlock)
@@ -416,6 +438,11 @@ impl Candidate {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_for_test(&self, channel: u64) {
+        self.release(channel)
+    }
+
     /// Leaves a pending or deferred adoption to Legacy for the rest of this process; a decided
     /// one is kept.
     pub(crate) fn release(&self, channel: u64) {
@@ -425,6 +452,11 @@ impl Candidate {
             self.settle_first();
             tracing::info!(channel, "[tui_o] adoption released before the first init");
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn defer_for_test(&self, channel: u64) -> bool {
+        self.defer(channel)
     }
 
     /// Leaves a pending adoption to Legacy until its host retries; true while it is deferred.
@@ -442,6 +474,11 @@ impl Candidate {
             Adoption::Deferred => true,
             Adoption::Committed | Adoption::Held | Adoption::Released => false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn confirm_store_for_test(&self) -> bool {
+        self.confirm_store()
     }
 
     /// A recovered store commits the adoption, unless Legacy already took the channel.

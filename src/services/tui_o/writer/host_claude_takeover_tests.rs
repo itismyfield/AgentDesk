@@ -20,13 +20,13 @@ fn reserve_for(channel: u64, parent: Option<u64>) -> test_override::ChannelsGuar
         use crate::services::session_host::surface_policy::VerifiedSurface;
         let thread = thread_for(channel, parent);
         boot.reserve_boot_children(&[(channel, parent)]);
-        assert!(boot.resolve_child(
+        assert!(boot.resolve_child_for_test(
             channel,
-            VerifiedSurface::from_discord(&thread, ClaudeTui).unwrap(),
+            VerifiedSurface::from_discord_for_test(&thread, ClaudeTui).unwrap(),
             false
         ));
     }
-    assert!(boot.output_candidate(channel).unwrap().late_adopt_origin());
+    assert!(boot.output_candidate_for_test(channel).unwrap().late_adopt_origin());
     test_override::force_boot(boot)
 }
 
@@ -42,7 +42,7 @@ fn boot_for(selected: u64) -> BootChannels {
     let pending = |_: &_, _| Ok(BTreeMap::from([(selected, Adoption::Pending)]));
     BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, pending)
+        .seeded_for_test(&config, pending)
         .unwrap()
 }
 
@@ -296,7 +296,7 @@ async fn reserved_for_with_custody(
 }
 
 fn reserved_adoption(channel: u64) -> Adoption {
-    test_override::with_channels(|boot| boot.unwrap().output_candidate(channel).unwrap().peek())
+    test_override::with_channels(|boot| boot.unwrap().output_candidate_for_test(channel).unwrap().peek())
 }
 
 async fn settle() {
@@ -326,7 +326,7 @@ async fn late_claude_thread_startup_and_same_execution_verification_take_one_sou
     .await;
     let floor = test_override::with_channels(|boot| {
         boot.unwrap()
-            .output_candidate(CH)
+            .output_candidate_for_test(CH)
             .unwrap()
             .late_boundary()
             .unwrap()
@@ -526,7 +526,7 @@ async fn reserved_child_preserves_old_source_offer_but_holds_reused_turn_nonce_o
     })
     .await;
     let candidate =
-        test_override::with_channels(|boot| boot.unwrap().output_candidate(CH).unwrap());
+        test_override::with_channels(|boot| boot.unwrap().output_candidate_for_test(CH).unwrap());
     let binding = ChannelBindingLog::new(CH, ShadowProvider::Claude)
         .binding_events_since(CH, 0)
         .unwrap()
@@ -772,7 +772,7 @@ async fn exercise_effort_restart(pool: &sqlx::PgPool, ch: u64, parent: u64, end:
         transcript_tail::claude_transcript_path,
     };
     use crate::services::provider::CancelToken;
-    use crate::services::provider_teardown::tests::test_support::cleared;
+    use crate::services::provider_teardown::test_support::cleared;
     use crate::services::tui_o::cutover::{
         BodyClaim, BodySend, BodySite, IdentityError, claim_then_send_at,
     };

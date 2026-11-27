@@ -66,7 +66,7 @@ const DEFINITION_COLUMNS: &str = "id, content, discord_mention_user_ids, title, 
 
 /// Test seam: the definition column list every row read selects.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn definition_columns_for_test() -> &'static str {
+pub const fn definition_columns_for_test() -> &'static str {
     DEFINITION_COLUMNS
 }
 

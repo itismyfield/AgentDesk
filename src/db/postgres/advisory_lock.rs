@@ -166,7 +166,7 @@ impl AdvisoryLockLease {
 
     /// The idle timeout this lease's own session runs under, as PostgreSQL reports it.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) async fn session_idle_timeout(&mut self) -> Result<String, sqlx::Error> {
+    pub async fn session_idle_timeout(&mut self) -> Result<String, sqlx::Error> {
         sqlx::query_scalar("SHOW idle_session_timeout")
             .fetch_one(&mut self.conn)
             .await

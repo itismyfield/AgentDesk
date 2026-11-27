@@ -9,8 +9,8 @@ impl BootState {
         Self(AtomicU8::new(0))
     }
 
-    #[cfg(test)]
-    pub(crate) const fn new() -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn new() -> Self {
         Self::empty()
     }
 

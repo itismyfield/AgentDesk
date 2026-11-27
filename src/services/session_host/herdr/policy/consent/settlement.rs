@@ -292,9 +292,9 @@ pub async fn release(
     Ok(current)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "settlement_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 
 #[cfg(test)]
 #[path = "return_tests.rs"]

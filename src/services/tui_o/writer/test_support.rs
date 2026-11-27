@@ -31,8 +31,8 @@ use crate::services::tui_o::store::ledger::PieceOutcome;
 use crate::services::tui_o::store::{ChannelStore, InitSource, Initialized, OStore, StoreConfig};
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
-pub(crate) mod codex_ready;
-pub(crate) mod transition;
+pub mod codex_ready;
+pub mod transition;
 
 pub const BOT: u64 = 42;
 pub const CHANNEL: u64 = 7;
@@ -80,17 +80,17 @@ pub struct FakePort {
     pub replies: Mutex<VecDeque<Reply>>,
     pub(super) posts: Mutex<Vec<String>>,
     pub(super) prepared_before_post: Mutex<Vec<bool>>,
-    pub(crate) ledger: Mutex<Option<PathBuf>>,
+    pub ledger: Mutex<Option<PathBuf>>,
     pub unreadable: AtomicBool,
     /// When set, a POST's HTTP request starts at the future's first poll, like the real client.
-    pub(crate) lazy: AtomicBool,
+    pub lazy: AtomicBool,
     /// Each lazy request logs `http` when it starts.
-    pub(crate) started: Arc<Mutex<Vec<&'static str>>>,
+    pub started: Arc<Mutex<Vec<&'static str>>>,
     /// A lazy request waits on this before it completes.
-    pub(crate) hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    pub hold: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
     pub on_post: PostHook,
     pub history_reads: AtomicUsize,
-    pub(crate) on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub on_construct: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Each POST answers only after this long.
     pub(crate) delay: Mutex<Option<std::time::Duration>>,
 }
@@ -234,9 +234,9 @@ impl DiscordPort for FakePort {
 
 #[derive(Default)]
 pub struct FakeLease {
-    pub(crate) busy: AtomicBool,
-    pub(crate) released: Arc<AtomicUsize>,
-    pub(crate) on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
+    pub busy: AtomicBool,
+    pub released: Arc<AtomicUsize>,
+    pub on_acquire: Mutex<Option<Box<dyn Fn() + Send>>>,
     /// Channels whose writer the host reported stopped for good.
     pub unavailable: Mutex<Vec<u64>>,
 }
@@ -266,7 +266,7 @@ impl DeliveryLease for Arc<FakeLease> {
 
 /// The alarms of one harness channel; an alarm for any other channel fails the test.
 #[derive(Clone)]
-pub(crate) struct Alarms {
+pub struct Alarms {
     channel: u64,
     pub raised: Arc<Mutex<Vec<WriterAlarm>>>,
     pub cleared: Arc<AtomicUsize>,
@@ -479,10 +479,10 @@ pub fn append(path: &Path, bytes: &[u8]) {
     file.write_all(bytes).unwrap();
 }
 /// A harness whose channel was switched over a transcript already holding `body`.
-pub(crate) fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
+pub fn switched_over(body: &[u8]) -> (Harness, PathBuf, SourceId) {
     switched_over_on(CHANNEL, body)
 }
-pub(crate) fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
+pub fn switched_over_on(channel: u64, body: &[u8]) -> (Harness, PathBuf, SourceId) {
     let mut bound = None;
     let harness = Harness::build_channel(channel, |runtime| {
         let path = runtime.join("t.jsonl");
@@ -503,18 +503,18 @@ pub async fn polls(count: u32) {
     tokio::time::sleep(POLL_INTERVAL * count).await;
 }
 /// A spawned actor; it returns why it stopped.
-pub(crate) type Actor = tokio::task::JoinHandle<Option<super::deliver::StopCause>>;
-pub(crate) fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
+pub type Actor = tokio::task::JoinHandle<Option<super::deliver::StopCause>>;
+pub fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
     spawn_as(writer, ShadowProvider::Claude)
 }
-pub(crate) fn spawn_as(
+pub fn spawn_as(
     mut writer: Writer,
     provider: ShadowProvider,
 ) -> (watch::Sender<bool>, Actor) {
     let bindings = startup_log(&mut writer);
     spawn_with(writer, provider, bindings)
 }
-pub(crate) fn spawn_with(
+pub fn spawn_with(
     writer: Writer,
     provider: ShadowProvider,
     bindings: Arc<impl BindingEvents>,
@@ -524,7 +524,7 @@ pub(crate) fn spawn_with(
     let task = tokio::spawn(run_channel(writer, provider, bindings, stopped, resumed));
     (stop, task)
 }
-pub(crate) fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
+pub fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>) -> BindingEvent {
     BindingEvent {
         seq,
         channel_id: CHANNEL,
@@ -535,7 +535,7 @@ pub(crate) fn event(seq: u64, record: BindingRecord, committed_at: DateTime<Utc>
         committed_at,
     }
 }
-pub(crate) fn bound(
+pub fn bound(
     seq: u64,
     old: Option<&SourceId>,
     new: BindingTarget,
@@ -557,7 +557,7 @@ pub(crate) fn bound(
     event(seq, record, Utc::now())
 }
 /// A binding log whose startup binds name every source the channel was switched over.
-pub(crate) fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
+pub fn startup_log(writer: &mut Writer) -> Arc<FakeBindings> {
     let bindings = Arc::new(FakeBindings::new());
     let sources: Vec<SourceId> = writer.store().cursors().map(|c| c.source.clone()).collect();
     for (seq, source) in (1..).zip(sources) {
@@ -574,7 +574,7 @@ pub struct FakeBindings {
     pub(super) failing: Mutex<Option<String>>,
 }
 impl FakeBindings {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
         let failing = Mutex::new(None);
         Self {
@@ -583,11 +583,11 @@ impl FakeBindings {
             failing,
         }
     }
-    pub(crate) fn fail(&self, error: Option<&str>) {
+    pub fn fail(&self, error: Option<&str>) {
         *self.failing.lock().unwrap() = error.map(str::to_string);
     }
     /// Commits `event` and moves the notice to its seq.
-    pub(crate) fn commit(&self, event: BindingEvent) {
+    pub fn commit(&self, event: BindingEvent) {
         let seq = event.seq;
         self.events.lock().unwrap().push(event);
         self.notice.send_replace(seq);
@@ -611,7 +611,7 @@ impl BindingEvents for FakeBindings {
     }
 }
 
-pub(crate) fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
+pub fn writer_over(harness: &Harness, store: ChannelStore) -> Writer {
     let (gate, port) = (Arc::clone(&harness.gate), Arc::clone(&harness.port));
     let lease = Arc::clone(&harness.lease);
     ChannelWriter::new(store, gate, port, lease, harness.alarms.clone())
@@ -633,13 +633,13 @@ pub struct ODrive {
 }
 
 impl ODrive {
-    pub(crate) fn store(&self) -> &OStore {
+    pub fn store(&self) -> &OStore {
         &self.harness.store
     }
 
     /// A writer on a ready channel's store, which holds a binding checkpoint, here before any
     /// logged record; call it on a thread that sees the test log.
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let harness = Harness::new();
         harness.channel().set_binding_checkpoint(0).unwrap();
         harness.gate.acquired();
@@ -658,7 +658,7 @@ impl ODrive {
     }
 
     /// Every post so far, after following the log and posting what it owes now.
-    pub(crate) async fn step(&mut self) -> Vec<String> {
+    pub async fn step(&mut self) -> Vec<String> {
         self.sources.follow(&mut self.writer).unwrap();
         let (writer, deriver, owed) = (&mut self.writer, &mut self.deriver, &mut self.owed);
         self.sources.capture(writer, deriver, owed).unwrap();
@@ -670,7 +670,7 @@ impl ODrive {
 
     /// What a dcserver restart keeps of O: its store. The writer, its sources and what it owes
     /// start again from there.
-    pub(crate) fn restart(&mut self) {
+    pub fn restart(&mut self) {
         self.writer = self.harness.writer();
         self.sources = Sources::new(CHANNEL, ShadowProvider::Codex, Arc::new(BindingLog));
         self.deriver = UnitDeriver::new(CHANNEL, ShadowProvider::Codex);
@@ -680,7 +680,7 @@ impl ODrive {
     }
 
     /// How far O has captured `source`, from its own store.
-    pub(crate) fn captured_through(&mut self, source: &SourceId) -> Option<u64> {
+    pub fn captured_through(&mut self, source: &SourceId) -> Option<u64> {
         let cursor = self.writer.store().cursor(source);
         cursor.map(|cursor| cursor.captured_through)
     }
@@ -736,7 +736,7 @@ pub struct FooterWriter {
 }
 
 impl FooterWriter {
-    pub(crate) fn new(channel: u64, pool: sqlx::PgPool) -> Self {
+    pub fn new(channel: u64, pool: sqlx::PgPool) -> Self {
         let harness = Harness::build_channel(channel, |_| Vec::new());
         harness.gate.acquired();
         harness.port.usage_footer_pool.set(pool).unwrap();
@@ -748,7 +748,7 @@ impl FooterWriter {
         self.harness._runtime.path()
     }
 
-    pub(crate) fn restart(&mut self) {
+    pub fn restart(&mut self) {
         self.writer = self.harness.writer();
     }
 

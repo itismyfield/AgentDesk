@@ -100,8 +100,18 @@ impl DispatchPermit {
         self.grant.key()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn slot_for_test(&self) -> u8 {
+        self.slot()
+    }
+
     pub(crate) fn slot(&self) -> u8 {
         self.grant.slot()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn payload_for_test(&self) -> &str {
+        self.payload()
     }
 
     pub(crate) fn payload(&self) -> &str {

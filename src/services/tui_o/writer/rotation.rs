@@ -87,6 +87,9 @@ struct Validation {
 }
 
 pub struct Sources<B> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub replayed: super::ReplaySummary,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) replayed: super::ReplaySummary,
     native: Option<owe::NativeSources>,
     channel: u64,
@@ -255,7 +258,7 @@ pub fn bound_source(event: &BindingEvent) -> Option<&SourceId> {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn bound_source_for_test(event: &BindingEvent) -> Option<&SourceId> {
+pub fn bound_source_for_test(event: &BindingEvent) -> Option<&SourceId> {
     bound_source(event)
 }
 

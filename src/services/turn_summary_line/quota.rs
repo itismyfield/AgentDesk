@@ -421,3 +421,9 @@ pub fn legacy_started(raw: &str) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 #[path = "quota_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn with_locked_quota_cache<T>(run: impl FnOnce() -> T) -> T {
+    let _guard = CACHE.write().unwrap();
+    run()
+}

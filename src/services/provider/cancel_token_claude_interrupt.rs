@@ -21,13 +21,17 @@ pub struct HerdrInterruptState {
     pub turn_start: std::sync::OnceLock<HerdrTurnStart>,
     /// Whether this turn's reader has seen its own start, and a stop that met the turn unbound.
     pub(crate) own_start: Mutex<OwnStart>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// The backstop's read of this turn from its own start, resumed poll to poll.
+    pub own_turn: Mutex<OwnTurnCursor>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// The backstop's read of this turn from its own start, resumed poll to poll.
     pub(crate) own_turn: Mutex<OwnTurnCursor>,
     /// The token's turn; a saved start names it so a successor turn never reuses it.
     pub(crate) turn_nonce: Option<String>,
     /// Delivered live row-end notices keyed by execution nonce and row save generation.
     #[cfg(unix)]
-    pub(crate) recovery_notices: Mutex<std::collections::HashSet<(String, u64)>>,
+    pub recovery_notices: Mutex<std::collections::HashSet<(String, u64)>>,
 }
 
 /// Writes a recorded turn start to that turn's durable row; the Discord layer installs it.
@@ -83,6 +87,11 @@ impl HerdrInterruptState {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn source_observed_for_test(&self, file: (u64, u64)) {
+        self.source_observed(file)
+    }
+
     /// The reader opened this turn's source at its first own record; a cold start's file is
     /// pinned to it once, so a later file at the same path is never this turn's.
     pub(crate) fn source_observed(&self, file: (u64, u64)) {
@@ -108,6 +117,11 @@ impl HerdrInterruptState {
             }
             OwnStart::Seen { .. } => false,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn own_start_observed_for_test(&self, progress: u64, turn_id: &str) {
+        self.own_start_observed(progress, turn_id)
     }
 
     /// The reader saw this turn's own start `turn_id`, records complete up to `progress`: an armed
@@ -574,7 +588,7 @@ fn run_publish_hook() {
 
 /// Settlement runs wherever Herdr hosts turns; a test override can only switch it off.
 pub fn herdr_stop_settlement_available() -> bool {
-    #[cfg(all(test, unix))]
+    #[cfg(all(any(test, feature = "test-support"), unix))]
     if !HERDR_SETTLEMENT_OVERRIDE.with(|value| value.get()) {
         return false;
     }
@@ -583,7 +597,7 @@ pub fn herdr_stop_settlement_available() -> bool {
 
 /// A requested switch cannot enable Escape before provider-terminal settlement exists.
 pub fn herdr_cancel_enabled() -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(enabled) = HERDR_CANCEL_OVERRIDE.with(|value| value.get()) {
         return enabled && herdr_stop_settlement_available();
     }
@@ -604,11 +618,15 @@ pub fn herdr_cancel_enabled() -> bool {
     enabled
 }
 
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    #[cfg(unix)]
+    pub static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
 #[cfg(test)]
 thread_local! {
-    pub(crate) static HERDR_CANCEL_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    #[cfg(unix)]
-    pub(crate) static HERDR_SETTLEMENT_OVERRIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
     static DECIDE_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
     static PUBLISH_HOOK: std::cell::RefCell<Option<Box<dyn Fn()>>> = const { std::cell::RefCell::new(None) };
 }

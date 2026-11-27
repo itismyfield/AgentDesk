@@ -82,8 +82,18 @@ pub async fn observe_turn(
 }
 
 impl InflightObs {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn matches_token_for_test(&self, current: &Arc<CancelToken>) -> bool {
+        self.matches_token(current)
+    }
+
     pub(crate) fn matches_token(&self, current: &Arc<CancelToken>) -> bool {
         matches!(&self.kind, ObservationKind::ExactSelf { token, .. } if Arc::ptr_eq(token, current))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn recheck_for_test(&self, channel: u64, tmux: &str) -> bool {
+        self.recheck(channel, tmux)
     }
 
     /// Late checks read only the row and token; they do not re-observe the mailbox actor.
@@ -116,5 +126,5 @@ impl InflightObs {
     }
 }
 
-#[cfg(test)]
-pub(crate) mod test_setup;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_setup;

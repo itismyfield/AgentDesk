@@ -130,11 +130,11 @@ fn observed(raw: &[u8]) -> Result<bool, String> {
     Ok(applied.available)
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
     use super::*;
 
-    pub(crate) fn answer(requested: bool, available: bool, active: bool) -> Vec<u8> {
+    pub fn answer(requested: bool, available: bool, active: bool) -> Vec<u8> {
         let settings = serde_json::json!({"type":"control_response","response":{
             "subtype":"success","request_id":"get_settings","response":{"applied":{
                 "model":"claude-opus-4-8","ultracode":active,
@@ -184,7 +184,7 @@ pub(crate) mod tests {
 
     /// A stand-in CLI that records how it was run and prints the answer file beside it.
     #[cfg(unix)]
-    pub(crate) fn stand_in(dir: &Path, answer: &[u8]) -> PathBuf {
+    pub fn stand_in(dir: &Path, answer: &[u8]) -> PathBuf {
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join("claude");
         std::fs::write(dir.join("answer"), answer).unwrap();

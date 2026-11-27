@@ -90,7 +90,7 @@ pub(crate) struct Fixture {
     pub handles: Vec<ManagedWriterHandle>,
     io: Arc<Io>,
     _selection: crate::services::tui_o::cutover::test_override::ChannelsGuard,
-    _fake: crate::services::provider_teardown::tests::test_support::FakeTmux,
+    _fake: crate::services::provider_teardown::test_support::FakeTmux,
     _guards: [crate::config::TestEnvVarGuard; 2],
     _env_root: tempfile::TempDir,
     _isolation: Isolation,
@@ -140,7 +140,7 @@ impl Fixture {
         dedupe::register_tmux_channel(&tmux, channel);
         dedupe::binding_events::set_test_root(Some(root.path()));
         let fake =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(&tmux);
+            crate::services::provider_teardown::test_support::FakeTmux::install(&tmux);
         let at = chrono::Utc::now().to_rfc3339();
         let meta = serde_json::json!({"type":"session_meta","timestamp":at,"payload":{
             "id":id,"timestamp":at,"cwd":root.path(),"source":"cli","originator":"codex_cli_rs"}});

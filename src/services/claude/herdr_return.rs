@@ -179,6 +179,6 @@ impl EarlierExecution for HerdrPane<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "herdr_return_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

@@ -36,6 +36,7 @@ use crate::services::session_host::herdr_for_test::transport::{
     HerdrSocketConfig, HerdrSocketTransport, PeerReader,
 };
 use crate::services::session_host::herdr_for_test::wire::{LineJsonFraming, MAX_FRAME_BYTES};
+use crate::services::session_host::herdr_gate::HerdrGateRefusal;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
@@ -315,8 +316,8 @@ fn peers(pids: Vec<u32>) -> PeerReader {
 }
 
 fn endpoint(server: &Server) -> HerdrEndpoint {
-    HerdrEndpoint::new("mac-mini", "mini", &server.path, "agentdesk")
-        .and_then(|endpoint| endpoint.with_herdr_home(std::path::Path::new("/adk/herdr")))
+    HerdrEndpoint::new_for_test("mac-mini", "mini", &server.path, "agentdesk")
+        .and_then(|endpoint| endpoint.with_herdr_home_for_test(std::path::Path::new("/adk/herdr")))
         .unwrap()
 }
 
@@ -337,7 +338,7 @@ fn transport_with(
         retry_backoff: Duration::from_millis(50),
         max_frame_bytes: MAX_FRAME_BYTES,
     };
-    let socket = HerdrSocketTransport::new(&endpoint(server), config, LineJsonFraming);
+    let socket = HerdrSocketTransport::new_for_test(&endpoint(server), config, LineJsonFraming);
     Arc::new(socket.with_peer_reader(peers))
 }
 
@@ -354,7 +355,7 @@ fn off_where_dialled(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> Resto
 /// E7 that names another server than the one the pane readings come from.
 fn off_elsewhere(_: &dyn HerdrTransport, endpoint: &HerdrEndpoint) -> RestoreResume {
     let witness = ServerWitness {
-        socket: endpoint.socket_path().to_path_buf(),
+        socket: endpoint.socket_path_for_test().to_path_buf(),
         pid: 99,
         start: start(1_000).identity,
     };
@@ -529,7 +530,7 @@ fn hosted_target(
 ) -> InputTarget {
     let _registry = herdr_registry::force_for_test(registry(rig, pids).with_reads((restore, os)));
     let stored = stored(&rig.server, HostedState::Bound);
-    InputTarget::from_hosted_target(&resolved(PANE), &stored)
+    InputTarget::from_hosted_target_for_test(&resolved(PANE), &stored)
 }
 
 fn herdr(target: &InputTarget) -> &HerdrTarget {
@@ -741,20 +742,20 @@ fn only_a_registered_local_endpoint_makes_a_herdr_target() {
     ];
     let forced = herdr_registry::force_for_test(registry(&rig, vec![SERVER]));
     for (resolved, stored, refusal) in cases {
-        let target = InputTarget::from_hosted_target(&resolved, &stored);
+        let target = InputTarget::from_hosted_target_for_test(&resolved, &stored);
         assert_eq!(target, InputTarget::Refused(refusal), "{stored:?}");
         let plan = [TuiInputAction::Escape, TuiInputAction::Enter];
         let ran = run_plan(&target, &LegacyTmuxGate, &mut Untouched, &plan, None);
         assert_eq!(ran, InputRun::Refused(refusal));
     }
     // A Herdr pane that reads missing is never handed to recreation.
-    let target = InputTarget::from_hosted_target(&resolved(PANE), &bound);
+    let target = InputTarget::from_hosted_target_for_test(&resolved(PANE), &bound);
     assert!(matches!(target, InputTarget::Herdr(_)));
     let outcome = classify(&target, SessionLiveness::Missing, &HostCapture::Unavailable);
-    assert!(!outcome.allows_recreate(), "{outcome:?}");
+    assert!(!outcome.allows_recreate_for_test(), "{outcome:?}");
     drop(forced);
     assert_eq!(
-        InputTarget::from_hosted_target(&resolved(PANE), &bound),
+        InputTarget::from_hosted_target_for_test(&resolved(PANE), &bound),
         InputTarget::Refused(unsupported),
         "no registry, no target"
     );
@@ -768,12 +769,12 @@ fn a_herdr_followup_retire_is_refused_and_kills_nothing() {
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let gate = herdr(&target);
     let spy = SpyGuard::install(SpyState::default());
-    let retired = FollowupHost::herdr(gate).retire("stranded_prompt_draft_recreate", "test");
+    let retired = FollowupHost::herdr_for_test(gate).retire_for_test("stranded_prompt_draft_recreate", "test");
     assert_eq!(
         retired,
         HostInputOutcome::Refused(InputRefusal::Unsupported(HostKind::Herdr))
     );
-    HerdrInput::new(gate).retire(PANE, "stranded_prompt_draft_recreate", "test");
+    HerdrInput::new_for_test(gate).retire(PANE, "stranded_prompt_draft_recreate", "test");
     assert!(spy.calls().is_empty(), "{:?}", spy.calls());
     assert!(rig.server.conns().is_empty(), "{:?}", rig.server.conns());
 }
@@ -810,7 +811,7 @@ fn the_boot_registry_holds_only_this_nodes_endpoints() {
     };
     assert!(
         built(Some("mac-mini"), &[(1, "mac-mini")])
-            .sole_host()
+            .sole_host_for_test()
             .is_some()
     );
     assert!(built(Some("mac-mini"), &[(1, "mac-book")]).is_empty());
@@ -899,7 +900,7 @@ fn operator_warrant_cannot_cross_to_a_tmux_host() {
     switch.set(Some(true));
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let operator = OperatorTerminateWarrant::issue(herdr(&target).clone());
-    let warrant = HostTerminateWarrant::from_operator(operator);
+    let warrant = HostTerminateWarrant::from_operator_for_test(operator);
     let result = terminate_hosted_session(&TmuxHost, warrant);
     assert!(
         matches!(
@@ -933,18 +934,18 @@ fn m0_terminate_off_has_zero_effect() {
             before,
             "disabled owner performs no I/O"
         );
-        herdr(&target).pin_terminate().unwrap();
+        herdr(&target).pin_terminate_for_test().unwrap();
         assert_eq!(
-            herdr(&target).send_close_pinned(),
+            herdr(&target).send_close_pinned_for_test(),
             CloseEffect::NotSent("herdr_terminate_disabled".into())
         );
         assert!(rig.server.mutations().is_empty());
     }
     switch.set(Some(true));
-    herdr(&target).pin_terminate().unwrap();
+    herdr(&target).pin_terminate_for_test().unwrap();
     switch.set(Some(false));
     assert_eq!(
-        herdr(&target).send_close_pinned(),
+        herdr(&target).send_close_pinned_for_test(),
         CloseEffect::NotSent("herdr_terminate_disabled".into())
     );
     assert!(
@@ -977,7 +978,7 @@ fn m0_close_effect_positive() {
     assert_eq!(mutations[0]["params"], json!({"pane_id": PANE}));
     assert!(rig.server.conns().iter().all(|seen| seen.after_reply == 0));
     assert!(matches!(
-        herdr(&target).send_close_pinned(),
+        herdr(&target).send_close_pinned_for_test(),
         CloseEffect::NotSent(_)
     ));
     assert_eq!(rig.server.mutations().len(), 1, "one consumed judgment");
@@ -1124,7 +1125,7 @@ fn m0_close_requires_both_stamps() {
     let mut unproven = stored(&rig.server, HostedState::Bound);
     unproven.expected = None;
     assert!(
-        HerdrTarget::new(
+        HerdrTarget::new_for_test(
             endpoint(&rig.server),
             transport(&rig.server, vec![SERVER]),
             &unproven
@@ -1150,11 +1151,11 @@ fn m0_terminate_request_pair_is_exact() {
     };
     for input in [Mutation::Input, Mutation::Cancel] {
         gate.pin(input).unwrap();
-        close_results.push(gate.send_close_pinned());
+        close_results.push(gate.send_close_pinned_for_test());
         gate.pin(input).unwrap();
         input_results.push(gate.send_pinned_for_test(close.clone()));
     }
-    gate.pin_terminate().unwrap();
+    gate.pin_terminate_for_test().unwrap();
     input_results.push(gate.send_pinned_for_test(close));
     for request in [
         HerdrRequest::PaneSendText {
@@ -1171,7 +1172,7 @@ fn m0_terminate_request_pair_is_exact() {
             keys: vec!["enter".into()],
         },
     ] {
-        gate.pin_terminate().unwrap();
+        gate.pin_terminate_for_test().unwrap();
         input_results.push(gate.send_pinned_for_test(request));
     }
     assert!(rig.server.mutations().is_empty());
@@ -1420,7 +1421,7 @@ mod service {
         ) -> crate::services::session_host::herdr_for_test::contract::HerdrOutcome {
             let outcome = self.inner.call_with_witness(call, witness);
             // The service's only witnessed write is its close; `closes` asserts the shape.
-            if !call.request.is_read_only() {
+            if !call.request.is_read_only_for_test() {
                 if self.vanish_on_close {
                     self.gone.store(true, Ordering::SeqCst);
                 }

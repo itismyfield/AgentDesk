@@ -32,6 +32,11 @@ impl HostTerminateWarrant<'_> {
 }
 #[cfg(unix)]
 impl<'a> HostTerminateWarrant<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_operator_for_test(warrant: OperatorTerminateWarrant<'a>) -> Self {
+        Self::from_operator(warrant)
+    }
+
     pub(crate) fn from_operator(warrant: OperatorTerminateWarrant<'a>) -> Self {
         Self {
             proof: TerminateProof::Operator(warrant),

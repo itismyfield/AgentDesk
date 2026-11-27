@@ -726,7 +726,7 @@ fn warm_host_recovery_and_busy_wait_reach_managed_idle_submission() {
                 PROMPT,
                 sender,
                 Some(token),
-                &FollowupHost::legacy_tmux(name),
+                &FollowupHost::legacy_tmux_for_test(name),
                 Some(id),
             )
         })

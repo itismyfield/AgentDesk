@@ -536,7 +536,7 @@ mod transition_snapshot;
 #[cfg(any(test, feature = "test-support"))]
 mod test_access;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services) use test_access::WAIT_LIMIT_FOR_TEST;
+pub use test_access::WAIT_LIMIT_FOR_TEST;
 
 pub mod codex_submission;
 
@@ -935,7 +935,7 @@ pub(crate) fn undelivered_reads_for_test() -> usize {
 #[cfg(test)]
 pub(crate) use test_support::exercise_held_actor_for_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use transition::scoped_support::{
+pub use transition::scoped_support::{
     exercise_local_retry_retention_for_tests, exercise_scope_waiting_job_for_tests,
 };
 #[cfg(any(test, feature = "test-support"))]

@@ -35,14 +35,14 @@ type StandIns = Vec<(String, Arc<Mutex<Side>>, Arc<Mutex<Side>>)>;
 static STAND_INS: Mutex<StandIns> = Mutex::new(Vec::new());
 
 /// `logical`'s Herdr and tmux Claude as every production return reads them while this lives.
-pub(crate) struct StandIn {
+pub struct StandIn {
     logical: String,
-    pub(crate) herdr: Arc<Mutex<Side>>,
-    pub(crate) tmux: Arc<Mutex<Side>>,
+    pub herdr: Arc<Mutex<Side>>,
+    pub tmux: Arc<Mutex<Side>>,
 }
 
 impl StandIn {
-    pub(crate) fn new(logical: &str) -> Self {
+    pub fn new(logical: &str) -> Self {
         let (herdr, tmux) = (Arc::<Mutex<Side>>::default(), Arc::<Mutex<Side>>::default());
         let mut stand_ins = STAND_INS.lock().unwrap_or_else(|e| e.into_inner());
         stand_ins.retain(|(key, _, _)| key != logical);
@@ -481,7 +481,7 @@ fn b7_a_session_moved_on_from_its_launch_returns_under_the_launch_account_pg() {
 }
 
 /// Makes `profile` the configured Claude account, with its own managed home under a scratch HOME.
-pub(crate) fn claude_account(profile: &str) -> (TestEnvVarGuard, tempfile::TempDir, PathBuf) {
+pub fn claude_account(profile: &str) -> (TestEnvVarGuard, tempfile::TempDir, PathBuf) {
     let user = tempfile::tempdir().unwrap();
     let guard = TestEnvVarGuard::set_path_after_shared_test_env_lock("HOME", user.path());
     let claude = crate::services::provider::ProviderKind::Claude;

@@ -337,7 +337,7 @@ impl SessionAnchorRequest<'_> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) async fn load_session_anchor_prompt(
+pub async fn load_session_anchor_prompt(
     request: SessionAnchorRequest<'_>,
 ) -> Option<(String, usize)> {
     let prompt = load_session_anchor_snapshot(request).await?;

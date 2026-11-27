@@ -15,9 +15,9 @@ pub(crate) use source::launch_start_hook;
 /// Ledger fixtures and the reservation hook upper-crate tests reuse (KRX-TS).
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "readiness_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 mod wait;
 mod watched;
 pub use watched::{Expiry, Unproven, WINDOW, WaitCause, watched};
@@ -468,6 +468,11 @@ impl Reservation {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn current_for_test(&self) -> bool {
+        self.current()
+    }
+
     pub(crate) fn current(&self) -> bool {
         Source::current(&self.source.session, Some(&self.source.path)).as_ref()
             == Some(&self.source)
@@ -482,6 +487,11 @@ impl Reservation {
                 .entries
                 .get(&self.source)
                 .is_some_and(|entry| entry.revision == self.revision)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn not_sent_for_test(self) {
+        self.not_sent()
     }
 
     /// Only a known pre-key refusal releases a local reservation; uncertainty stays fenced.

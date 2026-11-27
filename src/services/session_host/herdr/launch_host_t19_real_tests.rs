@@ -316,14 +316,14 @@ impl T19Server {
     }
 
     fn endpoint(&self) -> HerdrEndpoint {
-        HerdrEndpoint::new("t19-node", "t19", &self.socket(), "t19")
+        HerdrEndpoint::new_for_test("t19-node", "t19", &self.socket(), "t19")
             .unwrap()
-            .with_herdr_home(&self.dir.join("home"))
+            .with_herdr_home_for_test(&self.dir.join("home"))
             .unwrap()
     }
 
     fn transport(&self) -> HerdrSocketTransport {
-        HerdrSocketTransport::new(
+        HerdrSocketTransport::new_for_test(
             &self.endpoint(),
             HerdrSocketConfig::default(),
             LineJsonFraming,
@@ -338,7 +338,7 @@ impl T19Server {
             self.child.as_ref().unwrap().id(),
             "T19 socket peer is the owned child"
         );
-        let exe = PathBuf::from(provenance::process_exec_path(witness.pid).unwrap())
+        let exe = PathBuf::from(provenance::process_exec_path_for_test(witness.pid).unwrap())
             .canonicalize()
             .unwrap();
         assert_eq!(exe, self.bin, "T19 W3 socket peer runs the scratch copy");
@@ -347,7 +347,7 @@ impl T19Server {
     }
 
     fn record(&mut self, pid: u32, role: &str) {
-        let start = start_text(provenance::process_start(pid).unwrap().identity);
+        let start = start_text(provenance::process_start_for_test(pid).unwrap().identity);
         let pgid = ps(pid, "pgid=").parse::<u32>().unwrap();
         self.append(
             json!({"event":"process", "generation":self.generation, "pid":pid,
@@ -399,7 +399,7 @@ impl T19Server {
             request,
         };
         let transport = self.transport();
-        let reply = if call.request.is_read_only() {
+        let reply = if call.request.is_read_only_for_test() {
             let (reply, observed) = transport.call(&call);
             assert_eq!(observed.unwrap(), witness);
             reply
@@ -530,7 +530,7 @@ impl T19Server {
         let _ = child.wait();
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.owned.iter().any(|(pid, start)| {
-            provenance::process_start(*pid).is_ok_and(|now| start_text(now.identity) == *start)
+            provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start)
         }) && Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(100));
@@ -539,7 +539,7 @@ impl T19Server {
             .owned
             .iter()
             .filter(|(pid, start)| {
-                provenance::process_start(*pid).is_ok_and(|now| start_text(now.identity) == *start)
+                provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start)
             })
             .map(|(pid, _)| *pid)
             .collect();
@@ -555,7 +555,7 @@ impl Drop for T19Server {
         self.stop();
         let mut left = Vec::new();
         for (pid, start) in &self.owned {
-            if provenance::process_start(*pid).is_ok_and(|now| start_text(now.identity) == *start) {
+            if provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start) {
                 // Only recorded child identities may receive a cleanup signal.
                 let _ = Command::new("/bin/kill")
                     .args(["-TERM", &pid.to_string()])
@@ -714,7 +714,7 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
         };
         let witness = host
             .restore_resume(&endpoint)
-            .admitted_witness()
+            .admitted_witness_for_test()
             .expect("T19 first launch canonical off");
         assert_eq!(witness, server.witness());
         let pane = restore_evidence::create(&server, &host, endpoint, witness, provider, &path);
@@ -948,14 +948,14 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             foreground.iter().all(|process| process.pid == shell),
             "T19 restored AgentDesk pane is shell only: {info:?}"
         );
-        let shell_start = provenance::process_start(shell).unwrap().identity;
-        let shell_exe = provenance::process_exec_path(shell).expect("T19 shell exec is readable");
+        let shell_start = provenance::process_start_for_test(shell).unwrap().identity;
+        let shell_exe = provenance::process_exec_path_for_test(shell).expect("T19 shell exec is readable");
         assert_eq!(
             shell_exe, T19_SHELL,
             "T19 restored root is the configured shell"
         );
         assert_eq!(
-            provenance::process_start(shell).unwrap().identity,
+            provenance::process_start_for_test(shell).unwrap().identity,
             shell_start,
             "T19 shell identity is unchanged across the OS exec read"
         );

@@ -54,7 +54,7 @@ impl Fixture {
             input,
         }
     }
-    pub(crate) fn outcome(disposition: Disposition) -> Outcome {
+    pub fn outcome(disposition: Disposition) -> Outcome {
         Outcome {
             disposition,
             range: Some([0, 1]),

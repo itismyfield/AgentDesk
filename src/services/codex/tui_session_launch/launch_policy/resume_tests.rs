@@ -25,7 +25,7 @@ fn codex_herdr_prepare_resumes_only_with_exact_restart_source() {
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
     let _tmux = binding_context::tests::fake_tmux(root.path());
-    let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+    let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(

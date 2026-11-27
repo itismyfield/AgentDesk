@@ -65,7 +65,7 @@ pub fn after_open(pending: &mut bool, ledger: &LedgerState) -> bool {
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn after_open_for_test(pending: &mut bool, ledger: &LedgerState) -> bool {
+pub fn after_open_for_test(pending: &mut bool, ledger: &LedgerState) -> bool {
     after_open(pending, ledger)
 }
 

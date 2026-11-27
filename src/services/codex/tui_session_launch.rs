@@ -190,7 +190,7 @@ pub(super) fn preflight_codex_tui_turn(
     )
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 thread_local! {
     pub(super) static BEFORE_PANE_EFFECT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
@@ -254,7 +254,7 @@ pub struct CodexHerdrLaunchable {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexHerdrLaunchable {
     /// A launchable built field by field, for tests outside this module.
-    pub(crate) fn from_parts_for_test(
+    pub fn from_parts_for_test(
         codex_bin: String,
         resolution: crate::services::platform::BinaryResolution,
         policy: &'static str,
@@ -270,7 +270,7 @@ impl CodexHerdrLaunchable {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexHerdrLaunchable {
     /// A verified launchable that runs `bin`, for tests that render a pane command.
-    pub(crate) fn for_tests(bin: &str) -> Self {
+    pub fn for_tests(bin: &str) -> Self {
         Self {
             codex_bin: bin.into(),
             resolution: crate::services::platform::BinaryResolution {
@@ -490,7 +490,7 @@ pub fn emit_codex_tui_post_tail_handoff(
             cancel_token_for_post_tail.as_ref(),
         ) {
             Ok(()) => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if let Some(seam) = AFTER_READINESS_WAIT.with_borrow_mut(Option::take) {
                     seam();
                 }
@@ -761,7 +761,7 @@ mod tests {
         let (root, _env) = binding_context::tests::fixture_after_shared_test_env_lock();
         let _tmux = binding_context::tests::fake_tmux(root.path());
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
@@ -834,7 +834,7 @@ mod tests {
         }
         let _mode = SourceModeRestore(SOURCE_MODE_TEST.with(|slot| slot.get()));
         let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let _endpoint = crate::services::claude_tui::hook_server::publish_hook_endpoint(
@@ -1097,7 +1097,7 @@ mod tests {
         let _lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, _env) = tests::fixture_after_shared_test_env_lock();
         let _tmux = tests::fake_tmux(root.path());
-        let _endpoint = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let dir = root.path();

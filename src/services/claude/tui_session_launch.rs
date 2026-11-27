@@ -30,7 +30,7 @@ pub(crate) fn install_thread_writer_policy(
 
 /// A cold launch with default settings for `channel_id`, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_and_create_claude_tui_session_for_test(
+pub fn prepare_and_create_claude_tui_session_for_test(
     tmux_session_name: &str,
     working_dir: &str,
     working_dir_path: &std::path::Path,
@@ -256,6 +256,28 @@ pub(crate) fn mark_returned_to_tmux(name: &str) -> Result<(), String> {
             "herdr return: the host marker of {name} reads {other:?}"
         )),
     }
+}
+
+#[cfg(unix)]
+#[cfg(any(test, feature = "test-support"))]
+pub fn prepare_herdr_for_login_test(
+    prepared: &PreparedIncarnation,
+    working_dir_path: &std::path::Path,
+    resolved_session_id: &str,
+    system_prompt: Option<&str>,
+    model_override: Option<&str>,
+    hook_endpoint: String,
+    auth_env_lines: &str,
+) -> Result<crate::services::herdr_launch::HerdrLaunchCommand, String> {
+    prepare_claude_herdr_launch(
+        prepared,
+        working_dir_path,
+        resolved_session_id,
+        system_prompt,
+        model_override,
+        hook_endpoint,
+        auth_env_lines,
+    )
 }
 
 /// Herdr pane command for one prepared incarnation: the same launch script as tmux, with

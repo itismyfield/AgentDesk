@@ -17,6 +17,9 @@ pub struct OwnerPermit {
     pub identity: OwnerIdentity,
     pub executor: String,
     pub generation: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    pub session_ref: SessionRef,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) session_ref: SessionRef,
     gate: Arc<OwnershipGate>,
 }
@@ -54,6 +57,11 @@ impl OwnerPermit {
             gate: self.gate(),
         }))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn same_execution_for_test(&self, other: &Self) -> bool {
+        self.same_execution(other)
+    }
+
     pub(crate) fn same_execution(&self, other: &Self) -> bool {
         self.identity == other.identity
             && self.executor == other.executor
@@ -65,6 +73,9 @@ impl OwnerPermit {
 #[derive(Clone, Debug)]
 pub struct View {
     pub permit: Result<Arc<OwnerPermit>, String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub candidate: Candidate,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) candidate: Candidate,
     pub(crate) retained: Option<Arc<OwnerPermit>>,
 }

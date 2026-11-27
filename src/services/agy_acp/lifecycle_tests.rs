@@ -3,13 +3,19 @@ use std::process::Command;
 use std::sync::mpsc::channel;
 use std::time::{Duration, Instant};
 
-use super::actor::{self, Deadlines, Event, Handle, TurnRequest};
+#[cfg(test)]
+use super::actor::{self, Event};
+use super::actor::{Deadlines, Handle, TurnRequest};
+#[cfg(test)]
 use super::rpc::Inbound;
 use super::*;
 use crate::services::process::{ProcessGroupProbe, ProcessIdentity, process_group_probe};
 use crate::services::provider::CancelToken;
+#[cfg(test)]
 use crate::services::stream_json_cli::codec::{AgyCodec, StreamJsonCodec};
-use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
+use crate::test_support::wait::WAIT_CAP;
+#[cfg(test)]
+use crate::test_support::wait::{join_within, recv_within};
 
 /// Scripted ACP agent: answers the handshake, then behaves per mode.
 const AGENT: &str = r#"mode=$1; log=$2; echo $$ > "$log.pid"; held=; sid=sess-1
@@ -47,7 +53,7 @@ const QUICK: Deadlines = Deadlines {
     cancel: Duration::from_millis(300),
 };
 
-pub(crate) fn fake_launch(dir: &Path, mode: &str) -> Launch {
+pub fn fake_launch(dir: &Path, mode: &str) -> Launch {
     let script = dir.join("agent.sh");
     std::fs::write(&script, AGENT).unwrap();
     let log = dir.join(format!("{mode}.log"));
@@ -65,11 +71,11 @@ pub(crate) fn fake_launch(dir: &Path, mode: &str) -> Launch {
     }
 }
 
-pub(crate) fn log(dir: &Path, mode: &str) -> String {
+pub fn log(dir: &Path, mode: &str) -> String {
     std::fs::read_to_string(dir.join(format!("{mode}.log"))).unwrap_or_default()
 }
 
-pub(crate) fn pid_file(dir: &Path, name: &str) -> u32 {
+pub fn pid_file(dir: &Path, name: &str) -> u32 {
     let path = dir.join(name);
     let written = || std::fs::read_to_string(&path).is_ok_and(|pid| pid.ends_with('\n'));
     assert!(eventually(WAIT_CAP, written));
@@ -80,7 +86,7 @@ pub(crate) fn pid_file(dir: &Path, name: &str) -> u32 {
         .unwrap()
 }
 
-pub(crate) fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool {
+pub fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool {
     let deadline = Instant::now() + cap;
     while !done() {
         if Instant::now() >= deadline {
@@ -91,12 +97,12 @@ pub(crate) fn eventually(cap: Duration, mut done: impl FnMut() -> bool) -> bool 
     true
 }
 
-pub(crate) fn alive(pid: u32) -> bool {
+pub fn alive(pid: u32) -> bool {
     crate::services::process::unix_process_presence(pid) == ProcessGroupProbe::Live
 }
 
 /// A turn on `destination`'s production actor, run as `run_turn` runs it, cancelled by `cancel`.
-pub(crate) fn acp_turn(
+pub fn acp_turn(
     destination: u64,
     dir: &Path,
     mode: &str,

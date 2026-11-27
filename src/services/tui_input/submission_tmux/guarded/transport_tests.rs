@@ -115,7 +115,7 @@ while True:
         String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 
-    pub(crate) fn receiver(&self, label: &str) -> String {
+    pub fn receiver(&self, label: &str) -> String {
         let dir = self.root.path().join(label);
         std::fs::create_dir(&dir).unwrap();
         format!(
@@ -167,7 +167,7 @@ while True:
         std::fs::read(self.root.path().join(label).join("received")).unwrap_or_default()
     }
 
-    pub(crate) fn assert_enter(&self, label: &str, expected: usize) {
+    pub fn assert_enter(&self, label: &str, expected: usize) {
         if expected > 0 {
             wait_until(|| self.count(label) >= expected);
         }
@@ -196,7 +196,7 @@ while True:
         });
     }
 
-    pub(crate) fn attach(&self, session: &str) {
+    pub fn attach(&self, session: &str) {
         self.attach_with_target(session, session, &format!("{}-driver", self.socket));
     }
 

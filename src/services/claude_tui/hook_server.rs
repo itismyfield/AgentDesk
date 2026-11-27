@@ -115,8 +115,17 @@ impl HookEventKind {
 #[cfg(any(test, feature = "test-support"))]
 #[derive(Default)]
 pub struct HookBroadcastProbe {
+    #[cfg(any(test, feature = "test-support"))]
+    pub primary_discarded: std::sync::atomic::AtomicBool,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) primary_discarded: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
+    pub primary_sent: tokio::sync::Notify,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) primary_sent: tokio::sync::Notify,
+    #[cfg(any(test, feature = "test-support"))]
+    pub release_alias: tokio::sync::Notify,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) release_alias: tokio::sync::Notify,
 }
 
@@ -145,7 +154,7 @@ impl HookServerState {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
+    pub fn new_with_claude_projects_root(claude_projects_root: PathBuf) -> Self {
         let mut state = Self::new();
         state.claude_projects_root = Some(claude_projects_root);
         state
@@ -779,6 +788,10 @@ fn normalize_hook_event_name(value: &str) -> String {
         .collect::<String>()
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
+    LazyLock::new(|| std::sync::Mutex::new(()));
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -789,9 +802,6 @@ pub(crate) mod tests {
     /// How long a wait for something that must happen polls before failing: a hang detector, not a
     /// bound of the contract, so a slow runner only makes a broken build fail later.
     const LIVENESS: std::time::Duration = std::time::Duration::from_secs(10);
-
-    pub(crate) static ENDPOINT_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
-        LazyLock::new(|| std::sync::Mutex::new(()));
 
     #[test]
     fn hook_event_kind_normalizes_provider_hook_names() {

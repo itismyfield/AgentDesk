@@ -22,6 +22,9 @@ use crate::services::tui_o::store::ledger::{PieceOutcome, PieceRecord};
 /// An original whose result went uncertain while re-post was on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OriginalAttempt {
+    #[cfg(any(test, feature = "test-support"))]
+    pub serial: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) serial: u64,
     pub key: PieceKey,
     pub(crate) payload: String,
@@ -103,6 +106,9 @@ pub fn classify(
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BacklogEntry {
+    #[cfg(any(test, feature = "test-support"))]
+    pub serial: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) serial: u64,
     pub(crate) unit_key: UnitKey,
     pub(crate) piece_index: u32,
@@ -203,6 +209,11 @@ pub enum OriginalGate {
 }
 
 impl AdmittedKeys {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn original_for_test(&self, unit_key: &UnitKey, piece_index: u32) -> OriginalGate {
+        self.original(unit_key, piece_index)
+    }
+
     pub(crate) fn original(&self, unit_key: &UnitKey, piece_index: u32) -> OriginalGate {
         let Some(key) = PieceKey::new(unit_key.clone(), piece_index) else {
             return OriginalGate::SendLocal;
@@ -292,6 +303,15 @@ impl<'a> Admitter<'a> {
         Ok(outcome)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn resume_pending_for_test<'r>(
+        &self,
+        log: &mut ProvenanceLog,
+        record: impl Fn(u64) -> Option<&'r PieceRecord>,
+    ) -> Vec<(u64, Result<AdmitOutcome, AdoptError>)> {
+        self.resume_pending(log, record).await
+    }
+
     /// Finishes admissions a crash or an outage left pending; `record` finds a serial's ledger
     /// record. Each serial's result is returned.
     pub(crate) async fn resume_pending<'r>(
@@ -343,11 +363,25 @@ impl<'a> Admitter<'a> {
         o_piece_delivery::admit(self.pool, &new).await
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn admitted_keys_for_test(&self, channel_id: u64) -> AdmittedKeys {
+        self.admitted_keys(channel_id).await
+    }
+
     pub(crate) async fn admitted_keys(&self, channel_id: u64) -> AdmittedKeys {
         match o_piece_delivery::admitted_keys(self.pool, channel_id).await {
             Ok(keys) => AdmittedKeys::Known(keys.into_iter().collect()),
             Err(error) => AdmittedKeys::Unreadable(error.to_string()),
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn promote_posted_for_test(
+        &self,
+        key: &PieceKey,
+        message_id: u64,
+    ) -> Result<ReceiptOutcome, LedgerError> {
+        self.promote_posted(key, message_id).await
     }
 
     /// Records a durable local `Posted` of an admitted piece as its receipt.

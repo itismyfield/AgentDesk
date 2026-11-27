@@ -423,7 +423,7 @@ fn boot_saved(
     facts.poll(u64::MAX).unwrap();
     let registrations: Vec<_> = f
         .history
-        .native_evidence_registrations()
+        .native_evidence_registrations_for_test()
         .unwrap()
         .into_iter()
         .filter(|r| r.matches(&binding))

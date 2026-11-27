@@ -321,7 +321,7 @@ impl ChannelStore {
 
     /// Publish the returned span only after its durable replace succeeds.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn persist_codex_span(
+    pub fn persist_codex_span(
         &mut self,
         span: CodexEpisodeSpan,
     ) -> Result<CodexEpisodeSpan, StoreError> {

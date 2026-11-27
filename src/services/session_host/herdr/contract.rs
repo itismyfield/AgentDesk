@@ -57,7 +57,7 @@ pub struct ServerWitness {
 #[cfg(any(test, feature = "test-support"))]
 impl ServerWitness {
     /// A server for tests outside this module, which cannot build a start identity.
-    pub(crate) fn for_test(pid: u32) -> Self {
+    pub fn for_test(pid: u32) -> Self {
         Self {
             socket: "/tmp/herdr-test.sock".into(),
             pid,

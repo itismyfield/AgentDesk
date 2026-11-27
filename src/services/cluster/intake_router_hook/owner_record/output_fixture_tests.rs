@@ -78,12 +78,12 @@ impl Drop for RuntimeRoot {
 }
 
 pub struct FixtureDb {
-    pub(crate) _db: TestPostgresDb,
+    pub _db: TestPostgresDb,
     _root: RuntimeRoot,
 }
 
 impl FixtureDb {
-    pub(crate) async fn single_pool(&self) -> PgPool {
+    pub async fn single_pool(&self) -> PgPool {
         self._db.connect_and_migrate_with_max_connections(1).await
     }
 }

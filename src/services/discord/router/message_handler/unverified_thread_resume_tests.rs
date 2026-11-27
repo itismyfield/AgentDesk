@@ -39,12 +39,12 @@ pub(in crate::services::discord) fn thread_child(
         )]))
     };
     let boot = BootChannels::validate(&config).unwrap();
-    let boot = boot.seeded(&config, pending).unwrap();
+    let boot = boot.seeded_for_test(&config, pending).unwrap();
     let ids = (thread.to_string(), parent.to_string());
     let surface = json!({"id": ids.0, "parent_id": ids.1, "type": 11, "name": "t"});
     let surface = serde_json::from_value(surface).unwrap();
     boot.reserve_boot_children(&[(thread, parent)]);
-    let surface = VerifiedSurface::from_discord(&surface, ClaudeTui).unwrap();
+    let surface = VerifiedSurface::from_discord_for_test(&surface, ClaudeTui).unwrap();
     assert!(boot.resolve_child(thread, surface, false));
     test_override::force_boot(boot)
 }

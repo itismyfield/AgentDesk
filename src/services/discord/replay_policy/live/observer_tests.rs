@@ -396,7 +396,7 @@ fn p2_only_owned_direct_runtimes_can_activate() {
                     && driver == D::LegacyPrompt
                     && runtime.is_none();
                 assert_eq!(
-                    seal::can_activate(provider.clone(), driver, runtime),
+                    can_activate_for_test(provider.clone(), driver, runtime),
                     expected,
                     "{provider:?}/{driver:?}/{runtime:?}"
                 );
@@ -412,13 +412,13 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
     for label in ["finish", "drop", "duplicate", "timeout"] {
         let live = live(&pool, "codex", label).await;
         let tok = token(&live);
-        let tap = RawTap::for_codex(Some(&tok));
+        let tap = RawTap::for_codex_for_test(Some(&tok));
         for fact in [
             Seen::StdoutEof,
             Seen::Exited { waited: true },
             Seen::StderrDrained,
         ] {
-            tap.see(fact);
+            tap.see_for_test(fact);
         }
         assert!(
             live.observation_for_test().no_effect_evidence().is_none(),
@@ -426,20 +426,20 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
         );
         match label {
             "finish" => {
-                tap.finish(true, Seen::StderrDrained);
+                tap.finish_for_test(true, Seen::StderrDrained);
                 assert!(live.observation_for_test().no_effect_evidence().is_some());
             }
             "duplicate" => {
-                let duplicate = RawTap::for_codex(Some(&tok));
-                assert!(!duplicate.active());
-                tap.finish(true, Seen::StderrDrained);
+                let duplicate = RawTap::for_codex_for_test(Some(&tok));
+                assert!(!duplicate.active_for_test());
+                tap.finish_for_test(true, Seen::StderrDrained);
                 assert!(live.observation_for_test().no_effect_evidence().is_none());
             }
             "timeout" => {
-                let (_, observed) = live.take_for_decision(Duration::ZERO).await.unwrap();
+                let (_, observed) = live.take_for_decision_for_test(Duration::ZERO).await.unwrap();
                 assert!(observed.no_effect_evidence().is_none());
-                tap.finish(true, Seen::StderrDrained);
-                assert!(live.take_for_decision(Duration::ZERO).await.is_none());
+                tap.finish_for_test(true, Seen::StderrDrained);
+                assert!(live.take_for_decision_for_test(Duration::ZERO).await.is_none());
             }
             _ => {
                 drop(tap);
@@ -666,7 +666,7 @@ async fn p2_quiet_retry_is_exact_once_and_success_is_one_response_pg() {
         .await
         .unwrap()
         .into_parts();
-        assert!(attempt.retry_of().is_some());
+        assert!(attempt.retry_of_for_test().is_some());
         let next = Arc::new(LiveAttempt::new(attempt));
         let next_token = token(&next);
         let next_state = inflight(&next);
@@ -849,10 +849,10 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
     let pool = db.connect_and_migrate_with_max_connections(4).await;
     let live = live(&pool, "claude", "file-phrase").await;
     let tok = token(&live);
-    let tap = RawTap::for_file(Some(&tok));
-    tap.file_activity();
-    tap.finish(true, Seen::StderrDrained);
-    assert!(!live.stale(), "assistant text is not a bridge Error");
+    let tap = RawTap::for_file_for_test(Some(&tok));
+    tap.file_activity_for_test();
+    tap.finish_for_test(true, Seen::StderrDrained);
+    assert!(!live.stale_for_test(), "assistant text is not a bridge Error");
     assert!(
         !crate::services::discord::replay_policy::ordinary_outcome(
             Some(&pool),
@@ -861,7 +861,7 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
         )
         .await
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }
@@ -934,7 +934,7 @@ async fn recovery_codex_stderr_descendant_is_cancelled_and_joined_pg() {
         )
         .await
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }
@@ -947,7 +947,7 @@ async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
     let tok = token(&live);
     let state = inflight(&live);
     live.record(Seen::Broken);
-    live.mark_stale();
+    live.mark_stale_for_test();
     assert!(
         !crate::services::discord::replay_policy::error_is_ordinary(
             Some(&pool),
@@ -967,7 +967,7 @@ async fn p4_stale_reader_without_bridge_stale_decision_is_durably_held_pg() {
         stored, "withheld",
         "unmatched stale cannot stay unclassified"
     );
-    assert_eq!(live.verdict(), Some(Verdict::Held));
+    assert_eq!(live.verdict_for_test(), Some(Verdict::Held));
     pool.close().await;
     db.drop().await;
 }

@@ -144,7 +144,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     "actual Claude Herdr submit requires owner scope"
                 );
                 use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
-                let mut preparation = HerdrInput::new(attached.target_for_test());
+                let mut preparation = HerdrInput::new(attached.target_for_test_for_test());
                 InputTransport::load_buffer(&mut preparation, "memory-only", "not submitted")
                     .unwrap();
                 drop(preparation);
@@ -177,7 +177,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     cancel: None,
                 };
                 let _launching =
-                    crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)
+                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(&turn.owner)
                         .unwrap();
                 let _clear = clear_first.then(|| {
                     crate::services::herdr_launch::clear_epoch::begin_clear(
@@ -190,9 +190,9 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                 let _check = clear_checked.then(|| {
                     let saved = saved_clear.clone();
                     let owner = turn.owner.clone();
-                    crate::services::herdr_launch::clear_epoch::tests::watch(
+                    crate::services::herdr_launch::clear_epoch::test_support::watch(
                         &turn.owner,
-                        crate::services::herdr_launch::clear_epoch::tests::Point::Checked,
+                        crate::services::herdr_launch::clear_epoch::test_support::Point::Checked,
                         move || {
                             *saved.lock().unwrap() =
                                 Some(crate::services::herdr_launch::clear_epoch::begin_clear(

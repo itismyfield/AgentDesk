@@ -35,10 +35,19 @@ pub(crate) enum CleanupPhase {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct HoldRecord {
     pub(crate) schema: u8,
+    #[cfg(any(test, feature = "test-support"))]
+    pub recorded_at: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) recorded_at: String,
     pub(crate) provider: String,
     pub(crate) logical_key: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub execution_nonce: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) execution_nonce: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub hold_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) hold_id: String,
     pub(crate) frame_sha256: String,
     pub(crate) screen_exact: bool,
@@ -46,9 +55,19 @@ pub struct HoldRecord {
     pub(crate) file: Option<(u64, u64)>,
     pub(crate) offset_before: u64,
     pub(crate) started_at: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub send_outcome: SendOutcome,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) send_outcome: SendOutcome,
+    #[cfg(any(test, feature = "test-support"))]
+    /// When the final outcome was recorded; the windows run from it, else from `recorded_at`.
+    pub outcome_at: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// When the final outcome was recorded; the windows run from it, else from `recorded_at`.
     pub(crate) outcome_at: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub unsent_proof: UnsentProof,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) unsent_proof: UnsentProof,
     pub(crate) cleanup_phase: CleanupPhase,
     pub(crate) cleanup_at: Option<String>,

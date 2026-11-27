@@ -405,6 +405,15 @@ pub async fn persist_turn_db(
     persist_turn_db_with_clear_fence(pg_pool, entry, None).await
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn persist_turn_db_with_clear_fence_for_test(
+    pg_pool: Option<&PgPool>,
+    entry: PersistSessionTranscript<'_>,
+    fence: Option<ChannelClearFence>,
+) -> Result<bool> {
+    persist_turn_db_with_clear_fence(pg_pool, entry, fence).await
+}
+
 pub(crate) async fn persist_turn_db_with_clear_fence(
     pg_pool: Option<&PgPool>,
     entry: PersistSessionTranscript<'_>,

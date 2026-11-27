@@ -73,6 +73,11 @@ impl PieceKey {
         (postable && named).then_some(Self { unit, piece_index })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn unit_for_test(&self) -> &UnitKey {
+        self.unit()
+    }
+
     pub(crate) fn unit(&self) -> &UnitKey {
         &self.unit
     }
@@ -221,6 +226,9 @@ pub struct DeliveryRow {
     pub(crate) original_anchor: u64,
     pub(crate) sender_id: u64,
     pub(crate) admitted_by: AdmittedBy,
+    #[cfg(any(test, feature = "test-support"))]
+    pub origin_serial: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) origin_serial: u64,
     pub(crate) origin_node: String,
     pub(crate) failure: Option<Failure>,

@@ -15,14 +15,26 @@ static INSTANCE: OnceLock<Result<TestInstance, String>> = OnceLock::new();
 
 #[derive(Debug)]
 pub struct TestInstance {
+    #[cfg(any(test, feature = "test-support"))]
+    pub root: PathBuf,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) root: PathBuf,
     config_path: PathBuf,
+    #[cfg(any(test, feature = "test-support"))]
+    pub instance_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) instance_id: String,
     #[cfg(unix)]
     pub(crate) head: String,
     #[cfg(unix)]
     pub(crate) worktree: PathBuf,
+    #[cfg(any(test, feature = "test-support"))]
+    pub tmux: TmuxHost,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) tmux: TmuxHost,
+    #[cfg(any(test, feature = "test-support"))]
+    pub herdr: HerdrHost,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) herdr: HerdrHost,
     environment: environment::Environment,
 }
@@ -295,6 +307,11 @@ impl TestInstance {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub fn configure_tmux_command_for_test(command: &mut Command) -> io::Result<()> {
+    configure_tmux_command(command)
+}
+
 pub(crate) fn configure_tmux_command(command: &mut Command) -> io::Result<()> {
     if let Some(instance) = current().map_err(io::Error::other)? {
         environment::validate_path(&instance.root).map_err(io::Error::other)?;
@@ -553,15 +570,15 @@ pub(crate) use owner::{begin_herdr_create, owned_herdr, validate_herdr_create_ta
 
 // Test seams over private declaration readers, for the instance tests in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) const MARKER_FOR_TEST: &str = MARKER;
+pub const MARKER_FOR_TEST: &str = MARKER;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn read_json_for_test(path: &Path) -> Result<Value, String> {
+pub fn read_json_for_test(path: &Path) -> Result<Value, String> {
     read_json(path)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn load_instance_declaration_for_test(
+pub fn load_instance_declaration_for_test(
     path: &Path,
     root: &Path,
     config_path: &Path,
@@ -570,11 +587,11 @@ pub(crate) fn load_instance_declaration_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use test_support::agy_fixture;
+pub use test_support::agy_fixture;
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/host_scope_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "test_instance/login_test_support.rs"]

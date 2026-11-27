@@ -212,7 +212,7 @@ impl HerdrRegistry {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
+    pub fn with_launch_host(mut self, host: SocketHerdrLaunchHost) -> Self {
         self.launch = Some(host);
         self
     }
@@ -301,6 +301,11 @@ impl HerdrRegistry {
         entry.host.current_working_dir(reference).ok().flatten()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn sole_host_for_test(&self) -> Option<&dyn InteractiveSessionHost> {
+        self.sole_host()
+    }
+
     /// The one local endpoint's read-only host; none, or several, give no host.
     pub(crate) fn sole_host(&self) -> Option<&dyn InteractiveSessionHost> {
         match self.endpoints.as_slice() {
@@ -339,6 +344,15 @@ impl HerdrRegistry {
         #[cfg(not(unix))]
         let evidence = Ok(ExistingMutationEvidence::default());
         self.target_with_evidence_result(stored, evidence)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn target_with_evidence_for_test(
+        &self,
+        stored: &HostedExecution,
+        evidence: ExistingMutationEvidence,
+    ) -> Option<HerdrTarget> {
+        self.target_with_evidence(stored, evidence)
     }
 
     /// Preloaded evidence only; constructing or judging a target performs no store lookup.

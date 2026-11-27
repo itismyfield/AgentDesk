@@ -326,14 +326,14 @@ async fn an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_sl
         .unwrap();
     down.close().await;
     let outage = Admitter::new(&down, "node-a", BOT);
-    let failed = outage.resume_pending(&mut log, record).await;
+    let failed = outage.resume_pending_for_test(&mut log, record).await;
     assert!(
         failed.iter().all(|(_, result)| result.is_err()),
         "{failed:?}"
     );
     assert_eq!(log.state().pending().collect::<Vec<_>>(), [3, 4]);
 
-    let resumed = admitter.resume_pending(&mut log, record).await;
+    let resumed = admitter.resume_pending_for_test(&mut log, record).await;
     let admitted = matches!(
         resumed[..],
         [
@@ -354,7 +354,7 @@ async fn an_admission_a_crash_or_outage_cut_resumes_from_the_sidecar_with_one_sl
     }
     assert!(
         admitter
-            .resume_pending(&mut sidecar(&dir), record)
+            .resume_pending_for_test(&mut sidecar(&dir), record)
             .await
             .is_empty()
     );
@@ -380,11 +380,11 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
 
     // Holder B re-derives the piece under its own serial, as after a fork or a renumbered ledger.
     let holder_b = Admitter::new(&pool, "node-b", BOT);
-    let index = holder_b.admitted_keys(CHANNEL).await;
-    assert_eq!(index.original(&sent.unit_key, 0), OriginalGate::Admitted);
-    assert_eq!(index.original(&sent.unit_key, 1), OriginalGate::SendLocal);
+    let index = holder_b.admitted_keys_for_test(CHANNEL).await;
+    assert_eq!(index.original_for_test(&sent.unit_key, 0), OriginalGate::Admitted);
+    assert_eq!(index.original_for_test(&sent.unit_key, 1), OriginalGate::SendLocal);
     let tool = unit("t10", UnitKind::Tool);
-    assert_eq!(index.original(&tool, 0), OriginalGate::SendLocal);
+    assert_eq!(index.original_for_test(&tool, 0), OriginalGate::SendLocal);
 
     let dir_b = tempfile::tempdir().unwrap();
     let mut log_b = sidecar(&dir_b);
@@ -419,9 +419,12 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
         .unwrap();
     down.close().await;
     let unread = Admitter::new(&down, "node-b", BOT);
-    let index = unread.admitted_keys(CHANNEL).await;
+    let index = unread.admitted_keys_for_test(CHANNEL).await;
     assert!(matches!(index, AdmittedKeys::Unreadable(_)));
-    assert_eq!(index.original(&sent.unit_key, 0), OriginalGate::Unknown);
+    assert_eq!(
+        index.original_for_test(&sent.unit_key, 0),
+        OriginalGate::Unknown
+    );
     pool.close().await;
     db.drop().await;
 }
@@ -458,14 +461,14 @@ async fn a_local_posted_of_an_admitted_piece_becomes_its_receipt_before_any_furt
         .unwrap();
     down.close().await;
     let outage = Admitter::new(&down, "node-a", BOT);
-    assert!(outage.promote_posted(&key, 61).await.is_err());
+    assert!(outage.promote_posted_for_test(&key, 61).await.is_err());
 
     let reposted = record("t08", "piece", Some(PieceOutcome::Posted(61)));
     let unrelated = record("other", "x", Some(PieceOutcome::Posted(62)));
     let admitted = BTreeSet::from([key.clone()]);
     let promote = posted_receipts([&sent, &reposted, &unrelated], &admitted);
     assert_eq!(promote, [(key.clone(), 61)]);
-    let recorded = admitter.promote_posted(&key, 61).await.unwrap();
+    let recorded = admitter.promote_posted_for_test(&key, 61).await.unwrap();
     assert!(matches!(recorded, ReceiptOutcome::Recorded { .. }));
     assert_eq!(next_grant(&pool, &key).await, GrantOutcome::Resolved);
     pool.close().await;
@@ -700,7 +703,7 @@ async fn f4_receipt_race_never_reattributes_a_message_pg() {
         receipts: BTreeMap::from([(51, b.clone())]),
         same_payload: Vec::new(),
     };
-    assert!(attribute(&scope_now(&pool, a).await, now_known, &message).is_clear());
+    assert!(attribute(&scope_now(&pool, a).await, now_known, &message).is_clear_for_test());
     assert_ne!(next_grant(&pool, a).await, GrantOutcome::Resolved);
     pool.close().await;
     db.drop().await;
@@ -726,13 +729,17 @@ async fn f4_row_change_invalidates_absence_evidence_pg() {
     let slot = &keys[0];
     let evidence = absent_evidence(scope_now(&pool, slot).await, run_1.clone());
     let (row, spent) = current(slot.clone()).await;
-    assert!(evidence.validate_current(&row, &spent, &run_1));
+    assert!(evidence.validate_current_for_test(&row, &spent, &run_1));
     assert_eq!(send_uncertain(&pool, slot, Intent::AutoReconfirm).await, 1);
     let (row, spent) = current(slot.clone()).await;
-    assert!(!evidence.validate_current(&row, &spent, &run_1));
+    assert!(!evidence.validate_current_for_test(&row, &spent, &run_1));
     let stale = grant(
         &pool,
-        request(slot, evidence.scope().row_revision, Intent::AutoReconfirm),
+        request(
+            slot,
+            evidence.scope_for_test().row_revision,
+            Intent::AutoReconfirm,
+        ),
     );
     assert!(matches!(stale.await.unwrap(), GrantOutcome::Stale { .. }));
     assert_eq!(attempts(&pool, slot).await.unwrap().len(), 2);
@@ -750,7 +757,7 @@ async fn f4_row_change_invalidates_absence_evidence_pg() {
     record_receipt(&pool, &recorded).await.unwrap();
     let (row, spent) = current(receipt.clone()).await;
     assert_eq!(spent.len(), 1);
-    assert!(!evidence.validate_current(&row, &spent, &run_1));
+    assert!(!evidence.validate_current_for_test(&row, &spent, &run_1));
     pool.close().await;
     db.drop().await;
 }
@@ -785,17 +792,17 @@ fn f3r_a_failed_append_refuses_more_until_a_reopen_cuts_its_bytes() {
     // The retry would land after the partial bytes; it is refused instead.
     assert!(log.append(intent(4)).is_err());
     assert!(log.activate(9).is_err());
-    assert!(log.state().intent(4).is_none());
+    assert!(log.state().intent_for_test(4).is_none());
 
     let mut reopened = sidecar(&dir);
-    assert!(reopened.state().intent(4).is_none());
+    assert!(reopened.state().intent_for_test(4).is_none());
     reopened.append(intent(4)).unwrap();
     reopened
         .append(ProvenanceEntry::AdmissionPending { serial: 4 })
         .unwrap();
     // Every line replays: nothing damaged sits in the middle of the file.
     let replayed = sidecar(&dir);
-    assert!(replayed.state().intent(4).is_some());
+    assert!(replayed.state().intent_for_test(4).is_some());
     assert_eq!(replayed.state().pending().collect::<Vec<_>>(), [4]);
 }
 

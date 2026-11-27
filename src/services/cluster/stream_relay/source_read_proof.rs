@@ -5,16 +5,16 @@ use std::sync::{LazyLock, Mutex};
 static REVISIONS: LazyLock<Mutex<HashMap<String, Option<u64>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     // REVISIONS critical sections open on this thread; other test threads may hold it meanwhile.
     static REVISIONS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 struct RevisionsHeld;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl RevisionsHeld {
     fn enter() -> Self {
         REVISIONS_HELD.with(|depth| depth.set(depth.get() + 1));
@@ -22,7 +22,7 @@ impl RevisionsHeld {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Drop for RevisionsHeld {
     fn drop(&mut self) {
         REVISIONS_HELD.with(|depth| depth.set(depth.get() - 1));
@@ -56,7 +56,7 @@ pub(crate) struct SourcePin {
 }
 
 impl SourcePin {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn capture(key: String) -> Option<Self> {
         let _held = RevisionsHeld::enter();
         let revision = REVISIONS
@@ -93,7 +93,7 @@ pub struct SourceCertificate {
 
 impl SourceCertificate {
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn prefix_is_current(&self) -> bool {
+    pub fn prefix_is_current(&self) -> bool {
         self.seal.is_current()
     }
 
@@ -105,7 +105,7 @@ impl SourceCertificate {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn confirmed(
+    pub fn confirmed(
         seal: &PrefixSeal,
         end: u64,
         generation: i64,
@@ -137,7 +137,7 @@ pub struct ReadVersion {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl ReadVersion {
-    pub(crate) fn from_fd(file: &std::fs::File) -> Option<Self> {
+    pub fn from_fd(file: &std::fs::File) -> Option<Self> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::MetadataExt;
@@ -172,7 +172,7 @@ pub struct SourceReadProof {
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl SourceReadProof {
-    pub(crate) fn capture(
+    pub fn capture(
         file: std::sync::Arc<std::fs::File>,
         path: std::path::PathBuf,
         pin: SourcePin,
@@ -201,6 +201,11 @@ impl SourceReadProof {
             reset: frontier.1,
             digest: Sha256::digest(bytes).into(),
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seal_prefix_for_test(&self) -> Option<PrefixSeal> {
+        self.seal_prefix()
     }
 
     pub(crate) fn seal_prefix(&self) -> Option<PrefixSeal> {
@@ -292,6 +297,6 @@ pub(crate) fn assert_revision_unlocked_for_tests() {
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "source_read_proof_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

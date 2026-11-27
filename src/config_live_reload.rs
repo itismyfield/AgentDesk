@@ -52,9 +52,9 @@ const POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 // Watcher timings for the daemon-snapshot tests mounted in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) const DEBOUNCE_FOR_TEST: Duration = DEBOUNCE;
+pub const DEBOUNCE_FOR_TEST: Duration = DEBOUNCE;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) const POLL_INTERVAL_FOR_TEST: Duration = POLL_INTERVAL;
+pub const POLL_INTERVAL_FOR_TEST: Duration = POLL_INTERVAL;
 
 /// Outcome of a single reload attempt. Returned by [`reload_from_path`] so the
 /// watcher, an on-demand trigger, and tests can all share the same core path.
@@ -314,7 +314,7 @@ pub struct TestLiveGuard {
 
 #[cfg(any(test, feature = "test-support"))]
 impl TestLiveGuard {
-    pub(crate) fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
+    pub fn on_before_restore(&mut self, observer: impl FnOnce() + Send + Sync + 'static) {
         assert!(self.before_restore.is_none());
         self.before_restore = Some(Box::new(observer));
     }

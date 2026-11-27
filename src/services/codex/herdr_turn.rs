@@ -8,7 +8,7 @@ mod first_input;
 #[cfg(unix)]
 pub mod restart_intent;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use first_input::{pending_lookup_probe, submit_for_test, submit_owned_for_test};
+pub use first_input::{pending_lookup_probe, submit_for_test, submit_owned_for_test};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -440,13 +440,13 @@ pub fn kept_options(nonce: &str, options: &CodexLaunchOptions) -> String {
 
 /// The launch options of `turn`, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launch_options_for_test(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
+pub fn launch_options_for_test(turn: &CodexHerdrTurn<'_>) -> CodexLaunchOptions {
     launch_options(turn)
 }
 
 /// The launch of `turn`, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launch_of_for_test(
+pub fn launch_of_for_test(
     turn: &CodexHerdrTurn<'_>,
     provider_root: Option<&Path>,
     ports: &dyn CodexHerdrPorts,
@@ -457,7 +457,7 @@ pub(crate) fn launch_of_for_test(
 
 /// The pane command of `prepared`, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn pane_command_for_test(
+pub fn pane_command_for_test(
     turn: &CodexHerdrTurn<'_>,
     prepared: &PreparedIncarnation,
     launch: (
@@ -471,19 +471,19 @@ pub(crate) fn pane_command_for_test(
 
 /// What execution `nonce` keeps of `options`, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn kept_options_for_test(nonce: &str, options: &CodexLaunchOptions) -> String {
+pub fn kept_options_for_test(nonce: &str, options: &CodexLaunchOptions) -> String {
     kept_options(nonce, options)
 }
 
 /// The Source execution `nonce`'s own hook recorded, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn logged_source_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
+pub fn logged_source_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Option<SourceId> {
     logged_source(turn, nonce)
 }
 
 /// The launch-options check of a later prompt, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn options_kept_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
+pub fn options_kept_for_test(turn: &CodexHerdrTurn<'_>, nonce: &str) -> Result<(), String> {
     options_kept(turn, nonce)
 }
 

@@ -32,6 +32,11 @@ pub struct LaunchObservation {
 }
 
 impl LaunchObservation {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(channel: Option<u64>, pane: &str) -> Self {
+        Self::new(channel, pane)
+    }
+
     pub(crate) fn new(channel: Option<u64>, pane: &str) -> Self {
         let id = channel.and_then(|channel| attempt::current(channel, pane));
         let mut capture_failure = None;
@@ -59,6 +64,11 @@ impl LaunchObservation {
             old,
             capture_failure,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepare_for_test(&mut self, context: &BindingContext) {
+        self.prepare(context)
     }
 
     pub(crate) fn prepare(&mut self, context: &BindingContext) {
@@ -107,6 +117,11 @@ impl LaunchObservation {
                     "Codex successor Seal not recorded");
             }
         });
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn spawned_for_test(&self, context: &BindingContext) {
+        self.spawned(context)
     }
 
     /// Called only after the existing create and marker publication both succeeded.

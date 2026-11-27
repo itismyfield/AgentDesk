@@ -51,10 +51,10 @@ pub enum PromptReadinessKind {
     ProvenWarmFollowup,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// The follow-up readiness timeout this test thread uses instead of the configured one.
-    pub(crate) static FOLLOWUP_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
+    pub static FOLLOWUP_TIMEOUT_FOR_TESTS: std::cell::Cell<Option<Duration>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -64,7 +64,7 @@ thread_local! {
 /// safe fallback. A configured `0` is treated as unset to avoid an
 /// immediate-timeout footgun. See `RuntimeSettingsConfig::followup_prompt_ready_timeout_secs`.
 fn followup_prompt_ready_timeout() -> Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(timeout) = FOLLOWUP_TIMEOUT_FOR_TESTS.with(std::cell::Cell::get) {
         return timeout;
     }

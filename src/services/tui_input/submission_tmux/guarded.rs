@@ -183,6 +183,11 @@ impl PaneIdentity {
             self.pane_pid.clone(),
         ]
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observe_for_test(session: &str) -> Option<Self> {
+        Self::observe(session)
+    }
+
     pub(crate) fn observe(session: &str) -> Option<Self> {
         let out = SubmissionTmux
             .run(&[

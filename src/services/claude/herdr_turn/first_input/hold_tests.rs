@@ -122,7 +122,7 @@ fn hold_resolve_crash_after_hold_before_first_key_holds_front_then_releases_and_
         held_record_for_test(logical, &attached, "next input", 0, ago),
         &refused,
     );
-    let Ok(Some(Held::V2(record))) = hold_record::read(attached.nonce_for_test()) else {
+    let Ok(Some(Held::V2(record))) = hold_record::read(attached.nonce_for_test_for_test()) else {
         panic!("the outcome rewrote the in-flight record");
     };
     let recorded = (

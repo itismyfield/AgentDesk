@@ -21,7 +21,7 @@ impl ScopedBridgeDeadline {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn new(budget: Duration) -> Self {
+    pub fn new(budget: Duration) -> Self {
         Self::install(Instant::now() + budget)
     }
 }

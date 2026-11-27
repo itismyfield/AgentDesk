@@ -968,7 +968,8 @@ class RealOutsideMember(unittest.TestCase):
         for member, rel, done, d, want_line, want_edits in cases:
             with self.subTest(d["message"]), tempfile.TemporaryDirectory() as tmp:
                 repo, _ = real_repo(Path(tmp), OUTSIDE)
-                cargo = Path(tmp) / "cargo"
+                # Keep the diagnostic stub distinct from the runner cargo shim.
+                cargo = Path(tmp) / "fake-cargo"
                 cargo.write_text(f"#!{sys.executable}\n{FAKE_CARGO}")
                 cargo.chmod(0o755)
                 cargo.with_suffix(".json").write_text(json.dumps({"diags": {member: [[rel, done, d]]}, "libs": {

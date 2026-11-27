@@ -58,7 +58,7 @@ fn rollout(harness: &Harness, name: &str, bytes: &[u8]) -> (PathBuf, SourceId) {
 /// Appends the hook's bind of `path` through the binding log's own writer.
 fn bind_late(channel: u64, path: &Path) {
     let hook =
-        p5::HookSignal::from_payload("session_start", &serde_json::json!({"source": "startup"}));
+        p5::HookSignal::from_payload_for_test("session_start", &serde_json::json!({"source": "startup"}));
     let proposal = p5::Proposal {
         channel_id: channel,
         provider: "codex",
@@ -66,7 +66,7 @@ fn bind_late(channel: u64, path: &Path) {
         session_id: Some("s-codex"),
         path: path.to_str().unwrap(),
         replaced: None,
-        cause: p5::CauseSource::Hook(hook.cause()),
+        cause: p5::CauseSource::Hook(hook.cause_for_test()),
         hook: Some(&hook),
     };
     assert_eq!(
@@ -432,7 +432,7 @@ mod claude_takeover;
 
 #[cfg(unix)]
 struct SettledResume {
-    _tmux: crate::services::provider_teardown::tests::test_support::FakeTmux,
+    _tmux: crate::services::provider_teardown::test_support::FakeTmux,
     _env: [crate::config::TestEnvVarGuard; 2],
     context: crate::services::tui_prompt_dedupe::binding_context::BindingContext,
     source: SourceId,
@@ -499,7 +499,7 @@ fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, Settl
     )
     .unwrap();
     dedupe::register_tmux_channel(&context.tmux_session, channel);
-    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
         &context.tmux_session,
     );
     let path = context

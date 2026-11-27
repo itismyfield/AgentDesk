@@ -22,6 +22,9 @@ pub enum CloseBasis {
 
 pub struct HerdrInputState {
     pub submission: HerdrSubmission,
+    #[cfg(any(test, feature = "test-support"))]
+    pub phase: InputPhase,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) phase: InputPhase,
     pub(crate) exit: Option<ExitDecision>,
     /// Recorded by the close itself, so a later seal still names its evidence.
@@ -187,10 +190,10 @@ pub enum ExitDecision {
     PolicyClose(BeforeStartProof),
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs inside a seal after its one stop observation, where a concurrent stop can land.
-    pub(crate) static EXIT_OBSERVED: std::cell::Cell<Option<fn(&HerdrInterruptState)>> =
+    pub static EXIT_OBSERVED: std::cell::Cell<Option<fn(&HerdrInterruptState)>> =
         const { std::cell::Cell::new(None) };
 }
 
@@ -218,7 +221,7 @@ pub fn seal_exit(token: &CancelToken, cancelled: bool, terminal_admitted: bool) 
         )
         && state.close_observed(&mut input, stop)
         && token.turn_nonce().is_some();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(hook) = EXIT_OBSERVED.with(std::cell::Cell::get) {
         hook(&state);
     }

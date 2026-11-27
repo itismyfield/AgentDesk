@@ -1,10 +1,10 @@
 use super::*;
 
-pub(crate) fn instance_child(test_name: &str) -> bool {
+pub fn instance_child(test_name: &str) -> bool {
     crate::config::test_instance::tests::instance_child(test_name, "I2B_PROVIDER_CHILD")
 }
 
-pub(crate) fn with_instance(test_name: &str, check: impl FnOnce()) {
+pub fn with_instance(test_name: &str, check: impl FnOnce()) {
     if !instance_child(test_name) {
         return;
     }
@@ -18,7 +18,7 @@ fn overlay(provider: ProviderKind) -> ProviderAuthOverlay {
     resolve(provider, Some(&id), None, &queries::provider_auth_catalog()).unwrap()
 }
 
-pub(crate) fn synthetic_login_shell(root: &Path) -> PathBuf {
+pub fn synthetic_login_shell(root: &Path) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let shell = root.join("fake-login-shell");
     std::fs::write(&shell, format!(
@@ -177,14 +177,14 @@ fn test_instance_codex_direct_launch_preserves_startup_path() {
     );
 }
 
-pub(crate) const CAPTURE: &str = r#"printf '%s\n' "$HOME" "$TMPDIR" "$XDG_CONFIG_HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$AGENTDESK_API_URL" "$ADK_API_URL" "$AGENTDESK_DCSERVER_LABEL" "$AGENTDESK_RELEASE_TMUX_SESSION" "$AGENTDESK_TEST_MANIFEST" "$AGENTDESK_ROOT_DIR" "$AGENTDESK_CONFIG" "${MEMENTO_ACCESS_KEY+present}" "${ANTHROPIC_API_KEY+present}" "${OPENAI_API_KEY+present}" "${OP_SERVICE_ACCOUNT_TOKEN+present}" "$1""#;
+pub const CAPTURE: &str = r#"printf '%s\n' "$HOME" "$TMPDIR" "$XDG_CONFIG_HOME" "$CLAUDE_CONFIG_DIR" "$CODEX_HOME" "$AGENTDESK_API_URL" "$ADK_API_URL" "$AGENTDESK_DCSERVER_LABEL" "$AGENTDESK_RELEASE_TMUX_SESSION" "$AGENTDESK_TEST_MANIFEST" "$AGENTDESK_ROOT_DIR" "$AGENTDESK_CONFIG" "${MEMENTO_ACCESS_KEY+present}" "${ANTHROPIC_API_KEY+present}" "${OPENAI_API_KEY+present}" "${OP_SERVICE_ACCOUNT_TOKEN+present}" "$1""#;
 
-pub(crate) fn assert_child_environment(output: std::process::Output, root: &Path, argument: &str) {
+pub fn assert_child_environment(output: std::process::Output, root: &Path, argument: &str) {
     assert!(output.status.success());
     assert_environment_capture(&output.stdout, root, argument);
 }
 
-pub(crate) fn assert_environment_capture(value: &[u8], root: &Path, argument: &str) {
+pub fn assert_environment_capture(value: &[u8], root: &Path, argument: &str) {
     let value = std::str::from_utf8(value).unwrap();
     let lines: Vec<_> = value.lines().collect();
     let id = root.file_name().unwrap().to_str().unwrap();
@@ -449,7 +449,7 @@ fn test_instance_restart_discovery_reads_only_declared_provider_homes() {
     );
 }
 
-pub(crate) fn fake_provider(root: &Path, provider: &str) -> PathBuf {
+pub fn fake_provider(root: &Path, provider: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let binary = root.join("fixture-worktree/target/debug").join(provider);
     let argv = root.join(format!("{provider}.argv"));

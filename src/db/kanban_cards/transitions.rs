@@ -67,7 +67,7 @@ pub async fn clear_session_for_turn_target_on_pg_tx(
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn clear_session_for_turn_target_pg(
     pool: &PgPool,
     session_key: &str,

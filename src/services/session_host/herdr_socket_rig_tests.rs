@@ -300,7 +300,7 @@ impl HerdrRig {
     }
 
     /// Installs the same fake endpoint on each async worker and blocking executor thread.
-    pub(crate) fn thread_installer(
+    pub fn thread_installer(
         &self,
         node: &str,
         key: &str,
@@ -375,19 +375,19 @@ impl HerdrRig {
     }
 
     /// The pane runs the launch at `context`, and its provider process is seen to exist or not.
-    pub(crate) fn provider_seen(&self, context: &Path, alive: bool) {
+    pub fn provider_seen(&self, context: &Path, alive: bool) {
         let os = Seen(FakeOs::launched(env_naming(context)), alive);
         *self.os.os.lock().unwrap() = Some(Arc::new(os));
     }
 
     /// The pane's root shell was restarted after the launch recorded it; the provider is the same.
-    pub(crate) fn restart_shell(&self, context: &Path) {
+    pub fn restart_shell(&self, context: &Path) {
         self.os
             .set(FakeOs::launched(env_naming(context)).starting(SHELL, &[start(1_009)]));
     }
 
     /// A restarted server restored the pane as shell `NEW_SHELL` alone.
-    pub(crate) fn restore_as_new_shell(&self, context: &Path) {
+    pub fn restore_as_new_shell(&self, context: &Path) {
         let os = FakeOs::launched(env_naming(context));
         self.os.set(os.starting(NEW_SHELL, &[start(1_100)]));
         let info = json!({"pane_id": PANE, "shell_pid": NEW_SHELL,
@@ -403,7 +403,7 @@ impl HerdrRig {
     }
 
     /// How many reads of whether a pid exists the gate has made.
-    pub(crate) fn exists_reads(&self) -> usize {
+    pub fn exists_reads(&self) -> usize {
         self.os.exists_reads.load(Ordering::SeqCst)
     }
 
@@ -425,7 +425,7 @@ impl HerdrRig {
     }
 
     /// Replies with `result` to every `method` request after a pane write sends `key`.
-    pub(crate) fn answer_after_key(&self, key: &str, method: &str, result: Value) {
+    pub fn answer_after_key(&self, key: &str, method: &str, result: Value) {
         self.answer(&format!("{AFTER_KEY}{key}:{method}"), result);
     }
 
@@ -457,7 +457,7 @@ impl HerdrRig {
     }
 
     /// Every later process read of the pane names `foreground` under its root shell.
-    pub(crate) fn foreground(&self, foreground: &[u32]) {
+    pub fn foreground(&self, foreground: &[u32]) {
         let listed: Vec<Value> = foreground.iter().map(|pid| json!({"pid": pid})).collect();
         let info = json!({"pane_id": PANE, "shell_pid": SHELL,
             "foreground_process_group_id": foreground.first(), "foreground_processes": listed});
@@ -468,7 +468,7 @@ impl HerdrRig {
     }
 
     /// The next pane read lists `first` in the foreground, every later one `then`.
-    pub(crate) fn foreground_then(&self, first: &[u32], then: &[u32]) {
+    pub fn foreground_then(&self, first: &[u32], then: &[u32]) {
         let info = |listed: &[u32]| {
             let pids: Vec<Value> = listed.iter().map(|pid| json!({"pid": pid})).collect();
             let info = json!({"pane_id": PANE, "shell_pid": SHELL,
@@ -479,7 +479,7 @@ impl HerdrRig {
     }
 
     /// The server pid each later dial reaches, in order; the last one repeats.
-    pub(crate) fn serve_as(&self, pids: &[u32]) {
+    pub fn serve_as(&self, pids: &[u32]) {
         *self.servers.lock().unwrap() = pids.iter().copied().collect();
     }
 
@@ -506,7 +506,7 @@ impl HerdrRig {
     }
 
     /// The next `answered` pane writes are answered and every later one is left unanswered.
-    pub(crate) fn answer_sends_then_leave_unanswered(&self, answered: usize) {
+    pub fn answer_sends_then_leave_unanswered(&self, answered: usize) {
         self.answered_sends.store(answered, Ordering::SeqCst);
     }
 
@@ -542,7 +542,7 @@ pub struct NativeHerdrRig {
 }
 
 impl NativeHerdrRig {
-    pub(crate) fn start(test: &str) -> Self {
+    pub fn start(test: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("adk-hn-")
             .tempdir_in("/tmp")
@@ -585,7 +585,7 @@ impl NativeHerdrRig {
     pub fn socket(&self) -> PathBuf {
         self.root.path().join("herdr.sock")
     }
-    pub(crate) fn home(&self) -> PathBuf {
+    pub fn home(&self) -> PathBuf {
         self.root.path().join("home")
     }
     pub fn requests(&self) -> Vec<Value> {
@@ -595,7 +595,7 @@ impl NativeHerdrRig {
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
-    pub(crate) fn prove_native_off(&self) {
+    pub fn prove_native_off(&self) {
         let endpoint = HerdrEndpoint::new("test-node", "native", &self.socket(), SESSION)
             .unwrap()
             .with_herdr_home(&self.home())
@@ -728,7 +728,7 @@ impl ProcessOs for SharedRigOs {
 }
 impl HerdrRig {
     /// Keeps one policy cache across reader passes, with only peer/process I/O scripted.
-    pub(crate) fn policy_registry_on_this_thread(
+    pub fn policy_registry_on_this_thread(
         &self,
         endpoint: HerdrEndpoint,
         prepare: impl FnOnce(super::SocketHerdrLaunchHost) -> super::SocketHerdrLaunchHost,
@@ -760,7 +760,7 @@ impl HerdrRig {
     }
 
     /// As thread_installer, retaining the production launch/create/evidence adapter over this socket.
-    pub(crate) fn thread_installer_with_launch(
+    pub fn thread_installer_with_launch(
         &self,
         node: &str,
         key: &str,

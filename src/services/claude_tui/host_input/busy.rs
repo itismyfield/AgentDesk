@@ -3,7 +3,7 @@ pub mod herdr;
 mod tmux;
 pub use herdr::observe as observe_herdr;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use herdr::{Context, Source};
+pub use herdr::{Context, Source};
 pub use tmux::{cause, loads};
 
 use std::path::{Path, PathBuf};
@@ -82,6 +82,18 @@ impl BusyOperation {
         Self::new(target, program, timing, declared, cancel, writer)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(
+        target: InputTarget,
+        program: PathBuf,
+        timing: &'static busy_inject::Timing,
+        declared: bool,
+        cancel: Arc<CancelToken>,
+        writer: Option<String>,
+    ) -> Result<Self, String> {
+        Self::new(target, program, timing, declared, cancel, writer)
+    }
+
     pub(crate) fn new(
         target: InputTarget,
         program: PathBuf,
@@ -149,8 +161,13 @@ pub struct BusyObservation {
 #[cfg(any(test, feature = "test-support"))]
 impl BusyObservation {
     /// The Herdr read this observation captured, for tests outside this module.
-    pub(crate) fn context_for_test(&self) -> Option<&herdr::Context> {
+    pub fn context_for_test(&self) -> Option<&herdr::Context> {
         self.context.as_deref()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admits_for_test_for_test(&self, request: &Request<'_>) -> bool {
+        self.admits_for_test(request)
     }
 
     pub(crate) fn admits_for_test(&self, request: &Request<'_>) -> bool {

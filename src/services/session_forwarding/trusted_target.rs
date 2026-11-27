@@ -129,10 +129,7 @@ impl TrustedForwardTarget {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_test(
-        owner_instance_id: &str,
-        origin: &str,
-    ) -> Result<Self, TrustedTargetError> {
+    pub fn for_test(owner_instance_id: &str, origin: &str) -> Result<Self, TrustedTargetError> {
         let origin = parse_origin(origin, TrustedTargetError::InvalidConfiguredOrigin)?;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(FORWARD_TIMEOUT_SECS))

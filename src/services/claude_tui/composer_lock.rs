@@ -71,10 +71,17 @@ pub fn try_with_composer_mutation_lock<R>(
     None
 }
 
-/// A private, non-sendable witness exists only while the actual composer lock is held.
-pub(crate) struct ComposerPermit<'a> {
-    _local: std::marker::PhantomData<(&'a str, std::rc::Rc<()>)>,
+mod permit {
+    /// A private, non-sendable witness exists only while the actual composer lock is held.
+    pub struct ComposerPermit<'a> {
+        pub(super) _local: std::marker::PhantomData<(&'a str, std::rc::Rc<()>)>,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use permit::ComposerPermit;
+#[cfg(any(test, feature = "test-support"))]
+pub use permit::ComposerPermit;
 
 /// Passes a witness only while the same blocking composer fence is held.
 pub(crate) fn with_composer_permit<R>(

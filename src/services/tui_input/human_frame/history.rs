@@ -19,8 +19,8 @@ mod screen;
 #[cfg(test)]
 mod screen_tests;
 mod stamped;
-#[cfg(test)]
-pub(crate) use stamped::READS as HISTORY_READS;
+#[cfg(any(test, feature = "test-support"))]
+pub use stamped::READS as HISTORY_READS;
 pub(crate) use stamped::Token as KnownToken;
 pub mod v2;
 

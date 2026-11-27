@@ -6,11 +6,11 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{file_identity, same_file};
 use crate::services::tui_prompt_dedupe::codex_verified::VerifiedSourceSnapshot;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static OWNERSHIP_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(test)]
-pub(crate) fn fresh_scope_ownership_calls_for_tests() -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn fresh_scope_ownership_calls_for_tests() -> usize {
     OWNERSHIP_CALLS.swap(0, std::sync::atomic::Ordering::SeqCst)
 }
 
@@ -227,7 +227,7 @@ pub fn with_fresh_scope(
         {
             return Ok(false);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         OWNERSHIP_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         if !binding_events::codex::latest_ownership(channel, &tmux)
             .is_ok_and(|pin| pin.is_some_and(|(_, current, _)| current == nonce))

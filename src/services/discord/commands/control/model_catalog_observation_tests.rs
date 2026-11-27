@@ -276,7 +276,7 @@ fn model_catalog_new_model_save_cancels_previous_observation_after_failed_launch
         let provider = ProviderKind::Claude;
         let name = provider.build_tmux_session_name("model-catalog-recovery");
         let tmux =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(&name);
+            crate::services::provider_teardown::test_support::FakeTmux::install(&name);
         let discord = crate::services::discord::admin_host_guard::tests::Recorder::start().await;
         shared.core.lock().await.sessions.insert(
             channel,

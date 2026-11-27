@@ -43,7 +43,7 @@ fn hook(next: &BindingContext, id: &str, path: &Path, event: &str) {
             &payload,
             &headers,
         );
-    assert!(!ingress.refused(), "{event}: {ingress:?}");
+    assert!(!ingress.refused_for_test(), "{event}: {ingress:?}");
 }
 
 fn metadata(next: &BindingContext, id: &str, path: &Path, root: &Path) {
@@ -90,7 +90,7 @@ async fn exercise(case: Case) {
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
     let _tmux =
-        crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());

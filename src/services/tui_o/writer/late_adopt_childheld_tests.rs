@@ -20,7 +20,7 @@ pub(super) fn child_boot(
     .unwrap();
     let boot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |channels, _| {
+        .seeded_for_test(&config, |channels, _| {
             Ok(channel_policy::stored(
                 Some(f.harness._runtime.path()),
                 channels,
@@ -34,7 +34,7 @@ pub(super) fn child_boot(
     .unwrap();
     assert!(boot.resolve_child(
         CHANNEL,
-        VerifiedSurface::from_discord(&thread, ClaudeTui).unwrap(),
+        VerifiedSurface::from_discord_for_test(&thread, ClaudeTui).unwrap(),
         false
     ));
     let candidate = boot.output_candidate(CHANNEL).unwrap();
@@ -166,7 +166,7 @@ async fn childheld_readiness_rechecks_a_candidate_released_during_host_preparati
         true,
         vec![(CHANNEL, Some(ClaudeTui), Some(candidate))],
         || {
-            assert!(stale.release_child_run(
+            assert!(stale.release_child_run_for_test(
                 CHANNEL,
                 channel_policy::LegacyRun {
                     binding: bound(2, source_id_for("running", &f.path).unwrap()),

@@ -10,7 +10,7 @@ pub struct Submitted {
 #[cfg(any(test, feature = "test-support"))]
 impl Submitted {
     /// The transcript offset the response is read from, for tests outside this module.
-    pub(crate) fn start_offset_for_test(&self) -> u64 {
+    pub fn start_offset_for_test(&self) -> u64 {
         self.start_offset
     }
 }
@@ -180,7 +180,7 @@ fn exhausted(detail: Option<&str>) -> String {
 
 /// The owned first prompt, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_owned_for_test(
+pub fn submit_owned_for_test(
     hook: crate::services::claude_tui::owner_input::LaunchHook,
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
@@ -200,7 +200,7 @@ pub(crate) fn submit_owned_for_test(
 
 /// The readiness retry loop with injected readiness and sleep, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn submit_using_for_test(
+pub fn submit_using_for_test(
     transcript_path_string: &str,
     fresh_turn_start_offset: u64,
     ready: impl FnMut() -> Result<(), SubmissionError>,
@@ -218,13 +218,13 @@ pub(crate) fn submit_using_for_test(
 
 /// The readiness exhaustion message, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn exhausted_for_test(detail: Option<&str>) -> String {
+pub fn exhausted_for_test(detail: Option<&str>) -> String {
     exhausted(detail)
 }
 
 /// The fresh prompt readiness attempt limit, for tests outside `claude`.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn claude_tui_fresh_prompt_max_ready_attempts_for_test() -> usize {
+pub fn claude_tui_fresh_prompt_max_ready_attempts_for_test() -> usize {
     CLAUDE_TUI_FRESH_PROMPT_MAX_READY_ATTEMPTS
 }
 

@@ -25,7 +25,7 @@ pub fn fresh_hold_for_tests(
 
 /// A fresh Claude TUI turn through finalize, for tests outside `claude`.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn run_claude_tui_fresh_turn_and_finalize_for_test(
+pub fn run_claude_tui_fresh_turn_and_finalize_for_test(
     (transcript_path, transcript_path_string): (&std::path::Path, &str),
     sender: Sender<StreamMessage>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,

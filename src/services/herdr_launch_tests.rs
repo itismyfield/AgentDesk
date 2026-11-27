@@ -14,7 +14,7 @@ use crate::services::herdr_launch::*;
 use crate::services::herdr_launch::{
     o_ready_at_for_test as o_ready_at, retire_unsent_for_test as retire_unsent,
 };
-use crate::services::session_host::{EvidenceGap, HostKind, RestoreResume};
+use crate::services::session_host::{EvidenceGap, HostKind, RESTORE_RESUME_NOT_OFF, RestoreResume};
 use crate::services::tui_prompt_dedupe::binding_context::PreparedIncarnation;
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};
@@ -158,18 +158,24 @@ async fn herdr_launch_refuses_an_incomplete_endpoint_or_restore_resume_before_an
         Some(endpoint)
     };
     let cases = [
-        (None, ENDPOINT_MISSING),
-        (with(|e| e.config_key = " ".into()), ENDPOINT_MISSING),
-        (with(|e| e.execution_node.clear()), ENDPOINT_MISSING),
-        (with(|e| e.herdr_session.clear()), ENDPOINT_MISSING),
+        (None, ENDPOINT_MISSING_FOR_TEST),
+        (
+            with(|e| e.config_key = " ".into()),
+            ENDPOINT_MISSING_FOR_TEST,
+        ),
+        (
+            with(|e| e.execution_node.clear()),
+            ENDPOINT_MISSING_FOR_TEST,
+        ),
+        (with(|e| e.herdr_session.clear()), ENDPOINT_MISSING_FOR_TEST),
         (
             with(|e| e.socket_addr = "herdr.sock".into()),
-            ENDPOINT_MISSING,
+            ENDPOINT_MISSING_FOR_TEST,
         ),
     ];
     // Windows reads the Unix socket path as not absolute, so the endpoint is refused before restore.
     let not_off = if cfg!(windows) {
-        ENDPOINT_MISSING
+        ENDPOINT_MISSING_FOR_TEST
     } else {
         RESTORE_RESUME_NOT_OFF
     };
@@ -913,7 +919,7 @@ fn a_late_reserved_channel_is_not_o_owned_for_a_herdr_turn() {
     .unwrap();
     let snapshot = BootChannels::validate(&config)
         .unwrap()
-        .seeded(&config, |channels, _| {
+        .seeded_for_test(&config, |channels, _| {
             Ok(channel_policy::stored(Some(root.path()), channels))
         })
         .unwrap();

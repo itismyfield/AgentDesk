@@ -50,6 +50,11 @@ pub enum InputRefusal {
 }
 
 impl InputTarget {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn legacy_tmux_for_test(session_name: &str) -> Self {
+        Self::legacy_tmux(session_name)
+    }
+
     /// A legacy tmux caller already confirmed the session's host.
     pub(crate) fn legacy_tmux(session_name: &str) -> Self {
         Self::Tmux(session_name.to_string())
@@ -62,6 +67,14 @@ impl InputTarget {
         Self::from_host(&target.host, |_| {
             Self::Refused(InputRefusal::Unsupported(HostKind::Herdr))
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_hosted_target_for_test(
+        target: &ResolvedSessionTarget,
+        stored: &HostedExecution,
+    ) -> Self {
+        Self::from_hosted_target(target, stored)
     }
 
     /// Resolved evidence with the row's stored execution: a Herdr pane becomes a target only
@@ -254,6 +267,11 @@ pub struct HerdrInput<'a> {
 }
 
 impl<'a> HerdrInput<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(target: &'a HerdrTarget) -> Self {
+        Self::new(target)
+    }
+
     pub(crate) fn new(target: &'a HerdrTarget) -> Self {
         Self {
             target,
@@ -769,6 +787,11 @@ impl HostInputOutcome {
         matches!(self, Self::Cleared | Self::ReadySameExecution)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn allows_recreate_for_test(&self) -> bool {
+        self.allows_recreate()
+    }
+
     /// Only this hands recreation to the existing launch owner.
     pub(crate) fn allows_recreate(&self) -> bool {
         matches!(self, Self::LegacyRecreateEligible)
@@ -1132,7 +1155,7 @@ mod spy {
             Self(state)
         }
 
-        pub(crate) fn calls(&self) -> Vec<String> {
+        pub fn calls(&self) -> Vec<String> {
             self.0.borrow().calls.clone()
         }
     }

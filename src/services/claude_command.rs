@@ -141,6 +141,11 @@ impl ClaudeCommandBuilder {
         Self { command, purpose }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_simple_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::for_simple(binary, resolution)
+    }
+
     /// Build a command that launches the Claude binary directly. Applies the
     /// binary-resolution PATH by construction.
     pub(crate) fn for_simple(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
@@ -151,16 +156,29 @@ impl ClaudeCommandBuilder {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Agents)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_legacy_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
+        Self::for_legacy(binary, resolution)
+    }
+
     pub(crate) fn for_legacy(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Legacy)
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn for_future_for_test(
+    pub fn for_future_for_test(
         binary: &ClaudeBinary,
         resolution: &BinaryResolution,
     ) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Future)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_resolved_version_probe_for_test(
+        binary: &ClaudeBinary,
+        resolution: &BinaryResolution,
+    ) -> Self {
+        Self::for_resolved_version_probe(binary, resolution)
     }
 
     /// Build the native Claude `--version` probe from a resolved capability.
@@ -175,6 +193,11 @@ impl ClaudeCommandBuilder {
             Some(resolution),
             ExecutionPurpose::VersionProbe,
         )
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_version_smoke_for_test(program: &str, canonical_path: &str) -> Self {
+        Self::for_version_smoke(program, canonical_path)
     }
 
     /// Build the native Claude version-smoke probe. This uses the CLI boundary

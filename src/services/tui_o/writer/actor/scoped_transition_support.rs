@@ -7,7 +7,7 @@ use crate::services::tui_o::writer::transition_port::TransitionPort;
 use std::task::Poll;
 
 /// Inspect crosses the real mailbox; only Apply uses a synthetic job to test its closed gate.
-pub(crate) async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
+pub async fn exercise_scope_waiting_job_for_tests<P, L, A, B>(
     mut writer: ChannelWriter<P, L, A>,
     bindings: Arc<B>,
     tmux: &str,
@@ -234,7 +234,7 @@ where
 }
 
 /// Keeps retry production, census and Apply on the same actor-owned ChannelStore cache.
-pub(crate) async fn exercise_local_retry_retention_for_tests<P, L, A, B>(
+pub async fn exercise_local_retry_retention_for_tests<P, L, A, B>(
     mut writer: ChannelWriter<P, L, A>,
     bindings: Arc<B>,
     context: impl Fn() -> Context,

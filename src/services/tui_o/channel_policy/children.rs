@@ -347,6 +347,13 @@ pub(super) fn seeded_from_store(
 }
 
 impl BootChannels {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_scope_view_for_test(
+        &self,
+    ) -> Arc<crate::services::session_host::surface_policy::InitScope> {
+        self.init_scope_view()
+    }
+
     pub(crate) fn init_scope_view(
         &self,
     ) -> Arc<crate::services::session_host::surface_policy::InitScope> {
@@ -368,7 +375,7 @@ impl BootChannels {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn child_fixture_held(&self, channel: u64) -> Option<bool> {
+    pub fn child_fixture_held(&self, channel: u64) -> Option<bool> {
         self.children
             .entries
             .lock()
@@ -415,6 +422,16 @@ impl BootChannels {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         entries.get(&channel)?.unresolved_late().cloned()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn resolve_child_for_test(
+        &self,
+        channel: u64,
+        surface: VerifiedSurface,
+        fresh: bool,
+    ) -> bool {
+        self.resolve_child(channel, surface, fresh)
     }
 
     /// Records a relationship Discord itself returned; `fresh` when no Legacy turn ever ran there.

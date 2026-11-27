@@ -638,8 +638,8 @@ pub(super) fn observe_inner(
         steer_echo: false,
         hosted_source,
     };
-    #[cfg(test)]
-    handoff::tests::before_owning_publish(&event.prompt);
+    #[cfg(any(test, feature = "test-support"))]
+    handoff::test_support::before_owning_publish(&event.prompt);
     let _ = OBSERVED_PROMPTS.send(event);
     PromptObservation::PublishedSshDirect
 }

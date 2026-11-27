@@ -7,11 +7,11 @@ use std::collections::{HashMap, HashSet};
 
 mod census;
 mod context_observation;
-#[cfg(test)]
-pub(crate) use context_observation::tests as context_observation_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub use context_observation::tests as context_observation_tests;
 pub(crate) mod generation;
-#[cfg(all(test, unix))]
-pub(crate) use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub use census::tests::{Stage as CensusStage, fail_once as fail_census_once};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
@@ -108,10 +108,10 @@ fn stamp() -> Option<Stamp> {
     file_stamp(&path().ok()?)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static SNAPSHOT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    pub(crate) static CENSUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static SNAPSHOT_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static CENSUS_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A V2 history shares the kept parse of every reader; a V1 store over 256 KiB is not kept.
@@ -141,8 +141,8 @@ fn same_scope(a: &NoticeOrigin, b: &NoticeOrigin) -> bool {
 }
 
 impl Batch {
-    #[cfg(test)]
-    pub(crate) fn prepare(store: &ChannelStore) -> Self {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepare(store: &ChannelStore) -> Self {
         let mut batch = Self::default();
         batch.refresh(store);
         batch
@@ -195,7 +195,7 @@ impl Batch {
                 .filter(|s| s.same_inputs(store, &before, &mut observations))
                 .map_or(0, |s| s.repeats.saturating_add(1));
             let snapshot = snapshot.get_or_insert_with(|| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 SNAPSHOT_READS.with(|c| c.set(c.get() + 1));
                 path().and_then(|p| read_snapshot(&p))
             });
@@ -301,6 +301,11 @@ impl Batch {
                     .cloned()
             })
             .flatten()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn decision_for_test(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {
+        self.decision(origin, row, prompt)
     }
 
     pub(crate) fn decision(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {

@@ -2,7 +2,7 @@
 
 use super::*;
 
-pub(in crate::services) const WAIT_LIMIT_FOR_TEST: Duration = WAIT_LIMIT;
+pub const WAIT_LIMIT_FOR_TEST: Duration = WAIT_LIMIT;
 
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
     /// An actor over `writer` with nothing owed, no transition receiver and no verified log.

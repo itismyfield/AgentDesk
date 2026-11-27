@@ -282,8 +282,8 @@ pub(crate) fn relation(channel: u64) -> crate::services::session_host::surface_p
 }
 
 /// The legacy mark used by output-free adoption fixtures.
-#[cfg(test)]
-pub(crate) fn mark_codex_turn_admitted(
+#[cfg(any(test, feature = "test-support"))]
+pub fn mark_codex_turn_admitted(
     channel: u64,
     provider: &crate::services::provider::ProviderKind,
     provider_session_id: Option<&str>,

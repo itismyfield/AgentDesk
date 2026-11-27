@@ -287,6 +287,15 @@ impl BootChannels {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn seeded_for_test(
+        self,
+        config: &Config,
+        stored: impl FnOnce(&BTreeSet<u64>, bool) -> std::io::Result<BTreeMap<u64, Adoption>>,
+    ) -> Result<Self> {
+        self.seeded(config, stored)
+    }
+
     /// Starts each selected channel's adoption. The store is read only for an enabled writer with
     /// a non-empty selection. The home also keeps every channel its store committed; a non-home
     /// node adopts nothing and reports local store state.
@@ -377,6 +386,11 @@ impl BootChannels {
         &self.channels
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn selected_for_test(&self) -> &BTreeSet<u64> {
+        self.selected()
+    }
+
     /// The channels the boot config selected, for restart-required comparison.
     pub(crate) fn selected(&self) -> &BTreeSet<u64> {
         &self.selected
@@ -419,6 +433,11 @@ impl BootChannels {
         )
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn dormant_channels_for_test(&self) -> &BTreeSet<u64> {
+        self.dormant_channels()
+    }
+
     /// Installed dormant policy, kept fixed across live config reloads.
     pub(crate) fn dormant_channels(&self) -> &BTreeSet<u64> {
         &self.dormant_channels
@@ -458,6 +477,11 @@ impl BootChannels {
             .unwrap_or_else(PoisonError::into_inner)
             .get(&channel)
             .cloned()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn output_candidate_for_test(&self, channel: u64) -> Option<Candidate> {
+        self.output_candidate(channel)
     }
 
     pub(crate) fn output_candidate(&self, channel: u64) -> Option<Candidate> {

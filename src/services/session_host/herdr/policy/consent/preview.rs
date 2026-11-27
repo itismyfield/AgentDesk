@@ -68,6 +68,10 @@ pub async fn prepare(source: Arc<dyn PeerSource>, revision: u64) -> Result<Prepa
     .map_err(|e| format!("preview owner: {e}"))?
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
+#[path = "preview_test_support.rs"]
+pub mod test_support;
+
 #[cfg(test)]
 #[path = "preview_tests.rs"]
-pub(crate) mod tests;
+mod tests;

@@ -88,7 +88,7 @@ pub fn teardown_tmux(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "provider_teardown_tests.rs"]

@@ -154,9 +154,9 @@ fn keep(resume: Resume) {
     kept.push(resume);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 pub fn local(
@@ -184,7 +184,7 @@ pub fn local(
     let mut file = File::open(&path).ok()?;
     let before = file.metadata().ok()?;
     let identity = crate::services::tui_o::shadow::capture::file_identity(&before);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AFTER_SNAPSHOT.with(|hook| {
         if let Some(hook) = hook.take() {
             hook();

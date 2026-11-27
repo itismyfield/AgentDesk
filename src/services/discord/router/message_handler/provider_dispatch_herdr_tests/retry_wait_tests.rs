@@ -85,7 +85,7 @@ fn started_unproven_wait_does_not_wake_until_evidence_or_due_pg() {
     };
     let _runtime = fx.rt.enter();
     let (pool, owner) = (fx.pool.clone(), fx.owner.clone());
-    let mut read = herdr_turn::retry_probe::read(pool, owner, CHANNEL, started.session, cause);
+    let mut read = herdr_turn::retry_probe::read_for_test(pool, owner, CHANNEL, started.session, cause);
     for _ in 0..2 {
         assert_ne!(read(), Screen::Ready, "a logged start alone proves nothing");
     }
@@ -143,7 +143,7 @@ fn a_row_that_moves_on_after_a_successful_reprobe_is_refused_unproven_then_read_
         let _runtime = fx.rt.enter();
         let (pool, owner) = (fx.pool.clone(), fx.owner.clone());
         let mut read =
-            herdr_turn::retry_probe::read(pool, owner, CHANNEL, started.session.clone(), cause);
+            herdr_turn::retry_probe::read_for_test(pool, owner, CHANNEL, started.session.clone(), cause);
         assert_eq!(read(), Screen::Ready, "{tag}: the moved row wakes its wait");
         drop(_runtime);
         if tag == "bound" {

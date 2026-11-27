@@ -34,7 +34,7 @@ fn start_of(pid: u32) -> ProcessStart {
 }
 
 /// Every process is a bootstrapped server; the scripted socket carries the rest.
-pub(crate) struct Bootstrapped;
+pub struct Bootstrapped;
 
 impl ServerProvenance for Bootstrapped {
     fn process_start(&self, pid: u32) -> Result<ProcessStart, RestoreUnverified> {
@@ -83,7 +83,7 @@ type Reply = Box<dyn Fn(&Value, &AtomicU32) -> Value + Send + Sync>;
 /// One accepted connection: the request it carried, if any, and every byte it sent.
 type Conn = (Option<Value>, usize);
 
-pub(crate) struct Server {
+pub struct Server {
     path: PathBuf,
     /// The pid of the process accepting connections, as the peer reader reports it.
     serving: Arc<AtomicU32>,
@@ -96,7 +96,7 @@ pub(crate) struct Server {
 }
 
 /// Answers the one request on each connection with `reply`'s result, then closes it.
-pub(crate) fn serve(reply: Reply) -> Server {
+pub fn serve(reply: Reply) -> Server {
     let name = format!("adk-lh-{}-{}.sock", std::process::id(), socket_number());
     let path = std::env::temp_dir().join(&name);
     let path = if path.as_os_str().len() > 90 {
@@ -211,7 +211,7 @@ impl Drop for Server {
     }
 }
 
-pub(crate) fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
+pub fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
     HerdrLaunchEndpoint {
         execution_node: "mac-mini".into(),
         config_key: "pilot".into(),
@@ -221,7 +221,7 @@ pub(crate) fn launch_endpoint(server: &Server) -> HerdrLaunchEndpoint {
 }
 
 /// A host whose connections name the server's current serving pid as their peer.
-pub(crate) fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
+pub fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     let endpoint = HerdrEndpoint::new("mac-mini", "pilot", &server.path, "adk")
         .unwrap()
         .with_herdr_home(Path::new(HOME))
@@ -245,7 +245,7 @@ pub(crate) fn launch_host(server: &Server) -> SocketHerdrLaunchHost {
     host
 }
 
-pub(crate) fn workdir() -> (tempfile::TempDir, PathBuf) {
+pub fn workdir() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let real = std::fs::canonicalize(dir.path()).unwrap();
     (dir, real)

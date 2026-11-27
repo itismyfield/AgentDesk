@@ -26,13 +26,26 @@ pub struct RunScope {
 /// Everything absence evidence is about; any change means the passes looked for something else.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvidenceScope {
+    #[cfg(any(test, feature = "test-support"))]
+    pub key: PieceKey,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) key: PieceKey,
     pub(crate) payload_sha256: String,
+    #[cfg(any(test, feature = "test-support"))]
+    pub sender_id: u64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) sender_id: u64,
     pub(crate) identity_version: i32,
     pub(crate) split_version: i32,
     pub(crate) matcher_version: i32,
+    #[cfg(any(test, feature = "test-support"))]
+    pub row_revision: i64,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) row_revision: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Every consumed slot, all settled: the sends the passes looked for.
+    pub checked_slots: Vec<u8>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Every consumed slot, all settled: the sends the passes looked for.
     pub(crate) checked_slots: Vec<u8>,
     /// The piece's own stored anchor, never the ledger's latest one.
@@ -94,17 +107,26 @@ impl PermissionProof {
     }
 }
 
-/// One pass that read every page from its fixed upper bound down to the anchor.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct CompletedPass {
-    scope: EvidenceScope,
-    number: u8,
-    /// The newest id of the pass's first page; `None` when the channel had no message at all.
-    upper: Option<u64>,
-    started_at: Instant,
-    completed_at: Instant,
-    proof: PermissionProof,
+mod completed_pass {
+    use super::{EvidenceScope, Instant, PermissionProof};
+
+    /// One pass that read every page from its fixed upper bound down to the anchor.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct CompletedPass {
+        pub(super) scope: EvidenceScope,
+        pub(super) number: u8,
+        /// The newest id of the pass's first page; `None` when the channel had no message at all.
+        pub(super) upper: Option<u64>,
+        pub(super) started_at: Instant,
+        pub(super) completed_at: Instant,
+        pub(super) proof: PermissionProof,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use completed_pass::CompletedPass;
+#[cfg(any(test, feature = "test-support"))]
+pub use completed_pass::CompletedPass;
 
 impl CompletedPass {
     pub(super) fn new(
@@ -128,12 +150,22 @@ impl CompletedPass {
         self.upper
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn started_at_for_test(&self) -> Instant {
+        self.started_at()
+    }
+
     pub(crate) fn started_at(&self) -> Instant {
         self.started_at
     }
 
     pub(crate) fn completed_at(&self) -> Instant {
         self.completed_at
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn proof_for_test(&self) -> &PermissionProof {
+        self.proof()
     }
 
     pub(crate) fn proof(&self) -> &PermissionProof {
@@ -165,12 +197,32 @@ impl NotFoundEvidence {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scope_for_test(&self) -> &EvidenceScope {
+        self.scope()
+    }
+
     pub(crate) fn scope(&self) -> &EvidenceScope {
         &self.passes[0].scope
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn passes_for_test(&self) -> &[CompletedPass; 2] {
+        self.passes()
+    }
+
     pub(crate) fn passes(&self) -> &[CompletedPass; 2] {
         &self.passes
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn validate_current_for_test(
+        &self,
+        row: &DeliveryRow,
+        attempts: &[AttemptRow],
+        run: &RunScope,
+    ) -> bool {
+        self.validate_current(row, attempts, run)
     }
 
     /// Whether the evidence still describes the row, slots and reader as read now. Approval,

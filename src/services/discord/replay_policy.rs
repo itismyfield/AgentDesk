@@ -102,6 +102,11 @@ pub struct RetryPermit {
 }
 
 impl RetryPermit {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_no_effect_for_test(ack: NoEffectAck) -> Self {
+        Self::from_no_effect(ack)
+    }
+
     pub(crate) fn from_no_effect(ack: NoEffectAck) -> Self {
         let (receipt_id, previous_nonce, proof, pool) = ack.into_parts();
         let next_nonce = uuid::Uuid::new_v4().to_string();

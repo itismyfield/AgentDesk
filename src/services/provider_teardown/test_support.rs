@@ -3,7 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 
 /// PATH-first fake tmux logging each call: sessions exist with live panes, only a new
 /// session fails, and a kill notes an exit reason already written. No CLI resolves.
-pub(crate) struct FakeTmux {
+pub struct FakeTmux {
     dir: tempfile::TempDir,
     _env: Vec<crate::config::TestEnvVarGuard>,
 }
@@ -19,7 +19,7 @@ impl FakeTmux {
     }
 
     /// Needs the shared test-env lock held, e.g. by a `TestRuntimeRootGuard`.
-    pub(crate) fn install(name: &str) -> Self {
+    pub fn install(name: &str) -> Self {
         let dir = tempfile::TempDir::new().expect("tmux dir");
         let reason = crate::services::tmux_common::session_temp_path(name, "exit_reason");
         std::fs::write(dir.path().join("reason_path"), reason).unwrap();
@@ -76,7 +76,7 @@ impl FakeTmux {
         Self { dir, _env: env }
     }
 
-    pub(crate) fn add_unwatched_inventory(&self, name: &str) {
+    pub fn add_unwatched_inventory(&self, name: &str) {
         std::fs::write(
             self.dir.path().join("external_sessions"),
             format!("{name}\n"),
@@ -84,32 +84,32 @@ impl FakeTmux {
         .unwrap();
     }
 
-    pub(crate) fn mark_missing(&self) {
+    pub fn mark_missing(&self) {
         std::fs::write(self.dir.path().join("missing"), "").unwrap();
     }
 
     /// The flag `mark_missing` writes, for a session another fake ends.
-    pub(crate) fn missing_flag(&self) -> std::path::PathBuf {
+    pub fn missing_flag(&self) -> std::path::PathBuf {
         self.dir.path().join("missing")
     }
 
-    pub(crate) fn mark_present(&self) {
+    pub fn mark_present(&self) {
         let _ = std::fs::remove_file(self.dir.path().join("missing"));
     }
 
     /// A remain-on-exit pane keeps its session present after its process has ended.
-    pub(crate) fn mark_dead_pane(&self) {
+    pub fn mark_dead_pane(&self) {
         self.mark_present();
         std::fs::write(self.dir.path().join("pane_dead"), "").unwrap();
     }
 
     /// Successful kills remove this session from later presence and inventory reads.
-    pub(crate) fn become_missing_after_kill(&self) {
+    pub fn become_missing_after_kill(&self) {
         std::fs::write(self.dir.path().join("missing_after_kill"), "").unwrap();
     }
 
     /// New sessions run only their fixture command and expose a ready, empty composer.
-    pub(crate) fn enable_fixture_launch(&self) {
+    pub fn enable_fixture_launch(&self) {
         std::fs::write(self.dir.path().join("launch_enabled"), "").unwrap();
         std::fs::write(
             self.dir.path().join("ready"),
@@ -119,52 +119,84 @@ impl FakeTmux {
     }
 
     /// Every later presence probe fails with a socket error, neither present nor missing.
-    pub(crate) fn fail_probes(&self) {
+    pub fn fail_probes(&self) {
         std::fs::write(self.dir.path().join("probe_fails"), "").unwrap();
     }
 
-    pub(crate) fn restore_probes(&self) {
+    pub fn restore_probes(&self) {
         let _ = std::fs::remove_file(self.dir.path().join("probe_fails"));
     }
 
     /// The session disappears but kill returns an unconfirmed failure.
-    pub(crate) fn lose_kill_ack_after_exit(&self) {
+    pub fn lose_kill_ack_after_exit(&self) {
         let _ = std::fs::remove_file(self.dir.path().join("kill_fails"));
         std::fs::write(self.dir.path().join("lost_kill_ack"), "").unwrap();
     }
 
     /// Every later kill fails and leaves the session in place.
-    pub(crate) fn fail_kills(&self) {
+    pub fn fail_kills(&self) {
         std::fs::write(self.dir.path().join("kill_fails"), "").unwrap();
     }
 
     /// Later kills wait (up to 10s) until `release_kills`; `killing` says one is waiting.
-    pub(crate) fn hold_kills(&self) {
+    pub fn hold_kills(&self) {
         std::fs::write(self.dir.path().join("hold"), "").unwrap();
     }
 
-    pub(crate) fn killing(&self) -> bool {
+    pub fn killing(&self) -> bool {
         self.dir.path().join("killing").exists()
     }
 
-    pub(crate) fn release_kills(&self) {
+    pub fn release_kills(&self) {
         std::fs::write(self.dir.path().join("release"), "").unwrap();
     }
 
     /// The session's pane runs `pid`, which a later kill ends unless the pane survives it.
-    pub(crate) fn run_pane(&self, pid: u32) {
+    pub fn run_pane(&self, pid: u32) {
         std::fs::write(self.dir.path().join("pane_pid"), pid.to_string()).unwrap();
     }
 
-    pub(crate) fn keep_pane_alive(&self) {
+    pub fn keep_pane_alive(&self) {
         std::fs::write(self.dir.path().join("pane_survives"), "").unwrap();
     }
 
     /// The logged calls, oldest first, and clears the log.
-    pub(crate) fn take_calls(&self) -> Vec<String> {
+    pub fn take_calls(&self) -> Vec<String> {
         let log = self.dir.path().join("calls");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
         let _ = std::fs::remove_file(log);
         calls.lines().map(str::to_string).collect()
     }
+}
+
+use super::TeardownClearance;
+use crate::services::session_host::{
+    AutomaticEffect, HostWitness, SessionTargetEvidence, SessionTargetEvidenceSource,
+    SessionTargetInput, StateChange, clear_legacy_session, resolve_session_target,
+};
+
+struct LegacyRow(String);
+
+impl SessionTargetEvidenceSource for LegacyRow {
+    fn read_evidence(&self, _input: &SessionTargetInput) -> SessionTargetEvidence {
+        SessionTargetEvidence {
+            session_key: Some(format!("claude/hash/mac-mini:{}", self.0)),
+            session_name: Some(self.0.clone()),
+            session_record: HostWitness::LegacyRow,
+            inflight_locator: HostWitness::Absent,
+            host_marker: HostWitness::Absent,
+            ..SessionTargetEvidence::unread()
+        }
+    }
+}
+
+/// A clearance the guard admitted for a found legacy row named `name`.
+pub fn cleared(name: &str) -> TeardownClearance {
+    let input = SessionTargetInput::SessionKey(format!("claude/hash/mac-mini:{name}"));
+    let target = resolve_session_target(input, &LegacyRow(name.to_string()));
+    let change = StateChange::Automatic {
+        effect: AutomaticEffect::Kill,
+        observed: None,
+    };
+    TeardownClearance::Cleared(clear_legacy_session(&target, change).expect("legacy row"))
 }

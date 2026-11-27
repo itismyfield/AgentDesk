@@ -230,7 +230,7 @@ async fn owner_cleanup_actual_normal_end_retries_and_retires_only_exact_launch_f
     )) {
         return;
     }
-    use crate::services::provider_teardown::tests::test_support::FakeTmux;
+    use crate::services::provider_teardown::test_support::FakeTmux;
     let _root = crate::config::TestRuntimeRootGuard::new();
     for (channel, absent) in [(73369305, true), (73369306, false)] {
         let binding = native(channel);
@@ -306,7 +306,7 @@ async fn owner_cleanup_normal_end_rechecks_source_at_physical_boundary_pg() {
     )) {
         return;
     }
-    use crate::services::provider_teardown::tests::test_support::FakeTmux;
+    use crate::services::provider_teardown::test_support::FakeTmux;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 73369307;
     let binding = native(channel);
@@ -351,7 +351,7 @@ async fn owner_cleanup_completed_inflight_restart_archives_exact_source_before_f
     )) {
         return;
     }
-    use crate::services::provider_teardown::tests::test_support::FakeTmux;
+    use crate::services::provider_teardown::test_support::FakeTmux;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 73369308;
     let binding = native(channel);

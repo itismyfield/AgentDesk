@@ -29,7 +29,7 @@ async fn clear_waits_for_pane_projection_after_authorized_create_pg() {
     let mut release = Release(Some(resume));
     let resumed = Mutex::new(resumed);
     let _watch =
-        clear_epoch::tests::watch(&owner, clear_epoch::tests::Point::Projecting, move || {
+        clear_epoch::test_support::watch(&owner, clear_epoch::test_support::Point::Projecting, move || {
             projecting.send(()).unwrap();
             resumed
                 .lock()

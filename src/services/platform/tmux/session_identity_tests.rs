@@ -1,15 +1,16 @@
 use super::*;
+#[cfg(test)]
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 pub(crate) struct Rig {
-    pub(crate) dir: tempfile::TempDir,
+    pub dir: tempfile::TempDir,
     _path: crate::config::TestEnvVarGuard,
     _root: crate::config::TestEnvVarGuard,
 }
 
 impl Rig {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("tmux");
         let binary = crate::services::platform::binary_resolver::runtime_command("tmux").unwrap();
@@ -35,7 +36,7 @@ impl Rig {
         }
     }
 
-    pub(crate) fn raw(&self, args: &[&str]) -> Output {
+    pub fn raw(&self, args: &[&str]) -> Output {
         Command::new(self.dir.path().join("tmux"))
             .env_remove("AGENTDESK_IDENTITY")
             .args(args)

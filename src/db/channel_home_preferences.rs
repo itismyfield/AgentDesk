@@ -40,8 +40,8 @@ pub async fn read(
 }
 
 /// Revision zero means no row. A reset writes inherit rather than deleting the row.
-#[cfg(test)]
-pub(crate) async fn write(
+#[cfg(any(test, feature = "test-support"))]
+pub async fn write(
     pool: &PgPool,
     identity: &OwnerIdentity,
     expected_revision: i64,

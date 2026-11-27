@@ -34,22 +34,22 @@ struct UnreadyPane {
     aliases: HashSet<String>,
 }
 static FAILED_PANES: LazyLock<Mutex<HashMap<Pane, UnreadyPane>>> = LazyLock::new(Default::default);
-#[cfg(test)]
-thread_local! { pub(crate) static BLOCK_ALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
-#[cfg(test)]
-thread_local! { pub(crate) static BEFORE_JUDGED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
-#[cfg(test)]
-thread_local! { pub(crate) static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BLOCK_ALIAS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BEFORE_JUDGED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static BEFORE_COMPLETE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) }; }
 
 // The rehydrate pass registers through `register_judged_claude_pane`; these unjudged forms are for tests.
-#[cfg(test)]
-pub(crate) fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_claude_pane(tmux: &str, channel: u64, binding: TuiRuntimeBinding) {
     register_claude_pane_with(tmux, channel, binding, Record::Stat);
 }
 
 /// A launch registration without a judged binding, for tests that drive it directly.
-#[cfg(test)]
-pub(crate) fn register_launched_claude_pane(
+#[cfg(any(test, feature = "test-support"))]
+pub fn register_launched_claude_pane(
     tmux: &str,
     channel: u64,
     binding: TuiRuntimeBinding,
@@ -68,7 +68,7 @@ pub fn register_judged_claude_pane(
     context_path: Option<&std::path::Path>,
     judged: Option<&TuiRuntimeBinding>,
 ) -> bool {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(seam) = BEFORE_JUDGED.with_borrow_mut(Option::take) {
         seam();
     }
@@ -166,7 +166,7 @@ fn register_claude_pane_judged(
             authority, "claude", channel, binding, record, cause,
         )
     });
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(complete) = BEFORE_COMPLETE.with_borrow_mut(Option::take) {
         complete();
     }
@@ -345,7 +345,7 @@ fn finish_under_authority(key: &Pane, ok: bool) {
         return;
     }
     let Some(pane) = failed.get(key) else { return };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if BLOCK_ALIAS.get() {
         return;
     }

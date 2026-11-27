@@ -31,6 +31,11 @@ impl PreparationHold {
             && self.unproven.is_none()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn before_for_test(session: &str, reason: &'static str, detail: String) -> Self {
+        Self::before(session, reason, detail)
+    }
+
     pub(crate) fn before(session: &str, reason: &'static str, detail: String) -> Self {
         crate::services::claude_tui::composer_lock::guard_draft(
             session,
@@ -44,6 +49,11 @@ impl PreparationHold {
             modal: false,
             unproven: None,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn uncertain_for_test(session: &str, detail: String) -> Self {
+        Self::uncertain(session, detail)
     }
 
     pub(crate) fn uncertain(session: &str, detail: String) -> Self {

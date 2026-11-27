@@ -363,6 +363,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             .clone()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn repost_turn_for_test(&mut self) {
+        self.repost_turn().await
+    }
+
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
     pub(crate) async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();

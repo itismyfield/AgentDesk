@@ -38,9 +38,22 @@ impl GrantRestoration {
 
 pub struct FileGrantStore(Directory);
 impl FileGrantStore {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(root: Option<PathBuf>) -> Self {
+        Self::new(root)
+    }
+
     pub(crate) fn new(root: Option<PathBuf>) -> Self {
         Self(Directory(root))
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn load_all_for_test(
+        &self,
+        endpoints: &[HerdrLaunchEndpoint],
+    ) -> Result<GrantRestoration, String> {
+        self.load_all(endpoints).await
+    }
+
     pub(crate) async fn load_all(
         &self,
         endpoints: &[HerdrLaunchEndpoint],

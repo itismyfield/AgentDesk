@@ -143,7 +143,7 @@ fn target(
     } else {
         transport
     };
-    HerdrTarget::new(
+    HerdrTarget::new_for_test(
         endpoint(&rig.server),
         transport,
         &stored(&rig.server, HostedState::Bound),
@@ -240,7 +240,7 @@ fn replaced_root_end_refuses_new_provider_and_unverified_pane() {
                 Err(RestoreUnverified::ProcessUnreadable);
         }
         let row = stored(&rig.server, HostedState::Bound);
-        let reading = HerdrPaneView::new(
+        let reading = HerdrPaneView::new_for_test(
             &endpoint(&rig.server),
             transport(&rig.server, vec![SERVER]),
             &row,
@@ -440,7 +440,7 @@ fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> H
         transport
     };
     let configured =
-        endpoint(&rig.server).with_mode(crate::config::session_hosts::EndpointMode::UserDefault);
+        endpoint(&rig.server).with_mode_for_test(crate::config::session_hosts::EndpointMode::UserDefault);
     let launch = crate::services::herdr_launch::HerdrLaunchEndpoint {
         execution_node: configured.execution_node().into(),
         config_key: configured.config_key().into(),
@@ -457,7 +457,7 @@ fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> H
         grant: Some(grant_for_test(&launch, NONCE, server(granted))),
     };
     let stored = stored(&rig.server, HostedState::Bound);
-    HerdrTarget::new_with_evidence(configured, transport, &stored, evidence)
+    HerdrTarget::new_with_evidence_for_test(configured, transport, &stored, evidence)
         .unwrap()
         .with_reads(off_where_dialled, os)
 }

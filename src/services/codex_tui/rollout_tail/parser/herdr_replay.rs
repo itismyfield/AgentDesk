@@ -55,7 +55,7 @@ impl super::RolloutRecordDecoder {
     /// A row's read after its token is gone: it stops at the turn's first terminal, so a later
     /// turn's records never decide it. `None` when the file cannot be read.
     #[cfg(unix)]
-    pub(crate) fn replay_restored_herdr_turn(
+    pub fn replay_restored_herdr_turn(
         file: &mut std::fs::File,
         start: u64,
         len: u64,

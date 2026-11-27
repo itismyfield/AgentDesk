@@ -11,7 +11,7 @@ use std::time::Duration;
 #[cfg(not(any(test, feature = "test-support")))]
 use std::time::Instant;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use test_clock::Instant;
+pub use test_clock::Instant;
 use tokio::sync::broadcast;
 
 use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -367,8 +367,8 @@ use extract::{
     take_matching_pending_prompt, take_or_record_recent_observed_prompt,
 };
 pub use handoff::RecordEvidence;
-#[cfg(test)]
-pub(crate) use handoff::tests::on_owning_publish;
+#[cfg(any(test, feature = "test-support"))]
+pub use handoff::test_support::on_owning_publish;
 pub use handoff::{
     BindOutcome, HandoffGuard, bind_discord_handoff_record, drain_expired_handoffs,
     reserve_discord_handoff,
@@ -419,37 +419,37 @@ mod test_clock {
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    pub(crate) struct Instant(std::time::Instant);
+    pub struct Instant(std::time::Instant);
 
     impl Instant {
-        pub(crate) fn now() -> Self {
+        pub fn now() -> Self {
             Self(std::time::Instant::now() + *offset())
         }
 
-        pub(crate) fn reset() {
+        pub fn reset() {
             *offset() = Duration::ZERO;
             BEFORE_BOOT_UNDATABLE.store(false, Ordering::SeqCst);
         }
 
         /// Makes every `checked_sub` fail until the next `reset`.
-        pub(crate) fn refuse_dates_before_boot() {
+        pub fn refuse_dates_before_boot() {
             BEFORE_BOOT_UNDATABLE.store(true, Ordering::SeqCst);
         }
 
         /// Moves the clock forward without restamping anything, so recorded entries age.
-        pub(crate) fn advance(by: Duration) {
+        pub fn advance(by: Duration) {
             *offset() += by;
         }
 
-        pub(crate) fn elapsed(self) -> Duration {
+        pub fn elapsed(self) -> Duration {
             Self::now().duration_since(self)
         }
 
-        pub(crate) fn duration_since(self, earlier: Self) -> Duration {
+        pub fn duration_since(self, earlier: Self) -> Duration {
             self.0.duration_since(earlier.0)
         }
 
-        pub(crate) fn checked_sub(self, by: Duration) -> Option<Self> {
+        pub fn checked_sub(self, by: Duration) -> Option<Self> {
             if BEFORE_BOOT_UNDATABLE.load(Ordering::SeqCst) {
                 return None;
             }

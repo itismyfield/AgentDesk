@@ -93,8 +93,8 @@ pub(crate) async fn read_on_tx(
 }
 
 /// Lets a test change shared state from another connection right after a stale refresh.
-#[cfg(test)]
-pub(crate) static AFTER_REFRESH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+#[cfg(any(test, feature = "test-support"))]
+pub static AFTER_REFRESH: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 /// The home proof a fallback channel last planned with; `None` marks custody fallback never planned.
 pub(crate) async fn channel_proof(
@@ -137,12 +137,12 @@ pub(crate) async fn replan_held(
                 0,
             )
             .await?;
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let hook = AFTER_REFRESH
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .take();
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             if let Some(sql) = hook {
                 sqlx::query(sqlx::AssertSqlSafe(sql)).execute(pool).await?;
             }

@@ -498,7 +498,7 @@ fn a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence() {
             relay_last_offset: None,
         },
     );
-    cap.observer().preparation_held(&PreparationHold::before(
+    cap.observer().preparation_held(&PreparationHold::before_for_test(
         session,
         "cleanup_not_owned",
         "transient cleanup refusal".into(),
@@ -527,7 +527,7 @@ fn a2_transient_admission_hold_clears_only_at_an_accepted_payload_fence() {
         "warm binding without SID uses the attempt native SID"
     );
     cap.observer()
-        .preparation_held(&PreparationHold::uncertain(session, "lost ACK".into()));
+        .preparation_held(&PreparationHold::uncertain_for_test(session, "lost ACK".into()));
     cap.fence().before_first_payload().unwrap();
     assert!(
         cap.preparation_hold().is_some_and(|h| !h.may_requeue()),

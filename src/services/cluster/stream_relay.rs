@@ -138,6 +138,11 @@ impl RelayMetrics {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn record_terminal_outcome_for_test(&self, sequence: u64, outcome: DeliveryOutcome) {
+        self.record_terminal_outcome(sequence, outcome)
+    }
+
     /// #3041 P1-3 R5 / P1-5: record THIS terminal frame's resolved outcome keyed
     /// by its exact sequence, in a bounded FIFO ring. Called from `deliver_frame`
     /// for a result-bearing terminal delivery (`Delivered`/`NotDelivered`) and may
@@ -178,33 +183,33 @@ impl RelayMetrics {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_delivered_sequence_for_test(&self, sequence: u64) {
+    pub fn record_delivered_sequence_for_test(&self, sequence: u64) {
         self.last_delivered_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_terminal_committed_sequence_for_test(&self, sequence: u64) {
+    pub fn record_terminal_committed_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_committed_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
         self.record_terminal_outcome(sequence, DeliveryOutcome::Delivered);
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_terminal_skipped_sequence_for_test(&self, sequence: u64) {
+    pub fn record_terminal_skipped_sequence_for_test(&self, sequence: u64) {
         self.last_terminal_skipped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
         self.record_terminal_outcome(sequence, DeliveryOutcome::NotDelivered);
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_dropped_sequence_for_test(&self, sequence: u64) {
+    pub fn record_dropped_sequence_for_test(&self, sequence: u64) {
         self.last_dropped_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn record_sink_error_sequence_for_test(&self, sequence: u64) {
+    pub fn record_sink_error_sequence_for_test(&self, sequence: u64) {
         self.last_sink_error_sequence_plus_one
             .fetch_max(encode_sequence_marker(sequence), Ordering::AcqRel);
     }

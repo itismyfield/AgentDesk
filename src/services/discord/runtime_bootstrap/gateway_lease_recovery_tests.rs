@@ -119,7 +119,7 @@ impl PromotionFixture {
                 runtime
                     .restart
                     .intake_worker_lifecycle
-                    .admission_is_fenced(),
+                    .admission_is_fenced_for_test(),
                 "committed promotion keeps every runtime admission fence closed"
             );
             assert!(
@@ -138,7 +138,7 @@ impl PromotionFixture {
                 !runtime
                     .restart
                     .intake_worker_lifecycle
-                    .admission_is_fenced(),
+                    .admission_is_fenced_for_test(),
                 "cancelled promotion reopens every runtime admission fence"
             );
             assert!(
@@ -367,7 +367,7 @@ async fn promotion_owner_recovers_all_runtimes_when_cancel_precedes_first_poll_t
             !runtime
                 .restart
                 .intake_worker_lifecycle
-                .admission_is_fenced()
+                .admission_is_fenced_for_test()
         );
         assert!(
             !runtime
@@ -411,7 +411,7 @@ async fn superseded_promotion_preserves_new_owner_fence_and_flags() {
             runtime
                 .restart
                 .intake_worker_lifecycle
-                .admission_is_fenced()
+                .admission_is_fenced_for_test()
         );
         assert!(
             runtime
@@ -465,7 +465,7 @@ async fn supersession_chain_keeps_owner_until_final_cancel_and_recovers_all_runt
             !runtime
                 .restart
                 .intake_worker_lifecycle
-                .admission_is_fenced()
+                .admission_is_fenced_for_test()
         );
         assert!(
             !runtime
@@ -523,7 +523,7 @@ async fn existing_marker_cancel_restores_promotion_fence_for_retry() {
             !runtime
                 .restart
                 .intake_worker_lifecycle
-                .admission_is_fenced()
+                .admission_is_fenced_for_test()
         );
         assert!(
             !runtime

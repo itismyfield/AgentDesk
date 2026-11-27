@@ -142,14 +142,14 @@ pub fn herdr_listing_order(logical: &str) -> std::sync::Arc<Mutex<()>> {
 /// commits before the change returns and a later hook sees the change.
 fn change_hold(logical: &str, change: impl FnOnce(&mut HerdrExecutions)) {
     let order = herdr_listing_order(logical);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Err(std::sync::TryLockError::WouldBlock) = order.try_lock() {
         HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("listing contended")));
     }
     let _order = order.lock().unwrap_or_else(|p| p.into_inner());
     crate::services::tmux_common::with_tmux_source_authority(logical, |_| {
         listed(|flag| flag.fetch_or(true, AcqRel));
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Err(std::sync::TryLockError::WouldBlock) = HERDR_EXECUTIONS.try_lock() {
             HOLD_CONTENDED.with_borrow(|sent| sent.as_ref().map(|tx| tx.send("hold contended")));
         }
@@ -157,17 +157,17 @@ fn change_hold(logical: &str, change: impl FnOnce(&mut HerdrExecutions)) {
     });
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Told when this thread's hold change waits on a handoff or a claim holding the map.
-    pub(crate) static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
+    pub static HOLD_CONTENDED: std::cell::RefCell<Option<std::sync::mpsc::Sender<&'static str>>> =
         const { std::cell::RefCell::new(None) };
     /// Parks this thread's next claim before it reads its admission, until the test resumes it.
-    pub(crate) static ADMISSION_PAUSE: std::cell::RefCell<
+    pub static ADMISSION_PAUSE: std::cell::RefCell<
         Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
     > = const { std::cell::RefCell::new(None) };
     /// Admission reads this thread lets pass before `ADMISSION_PAUSE` parks one.
-    pub(crate) static ADMISSION_PAUSE_SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static ADMISSION_PAUSE_SKIPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The admission a watcher claim on `logical` commits under, the map locked until it drops.
@@ -177,7 +177,7 @@ pub fn herdr_claim_admission(
     logical: &str,
     herdr_host: bool,
 ) -> Result<Option<std::sync::MutexGuard<'static, HerdrExecutions>>, ()> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     ADMISSION_PAUSE.with_borrow_mut(|pause| {
         pause.as_ref()?;
         let skips = ADMISSION_PAUSE_SKIPS.get();

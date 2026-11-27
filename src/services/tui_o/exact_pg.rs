@@ -116,6 +116,15 @@ pub async fn resolve_in_tx(
 }
 
 // This port performs no terminal SQL yet; C7 owns association locking and the existing CAS.
+#[cfg(any(test, feature = "test-support"))]
+pub async fn guard_terminal_in_tx_for_test(
+    connection: &mut sqlx::PgConnection,
+    target: &DbTarget,
+    intent: TerminalIntent,
+) -> Result<TerminalDisposition, sqlx::Error> {
+    guard_terminal_in_tx(connection, target, intent).await
+}
+
 pub(crate) async fn guard_terminal_in_tx(
     connection: &mut sqlx::PgConnection,
     target: &DbTarget,

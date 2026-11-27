@@ -73,8 +73,16 @@ pub fn turn_step<L>(admission: &Admission<L>) -> TurnStep {
 
 #[derive(Debug, Default)]
 pub struct TickReport {
+    #[cfg(any(test, feature = "test-support"))]
+    /// Fresh absence evidence, one per piece, for a turn to judge.
+    pub ready: Vec<NotFoundEvidence>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Fresh absence evidence, one per piece, for a turn to judge.
     pub(crate) ready: Vec<NotFoundEvidence>,
+    #[cfg(any(test, feature = "test-support"))]
+    /// What recording each probed success returned, by message id.
+    pub recorded: Vec<(u64, ReceiptOutcome)>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// What recording each probed success returned, by message id.
     pub(crate) recorded: Vec<(u64, ReceiptOutcome)>,
     /// Pieces left as they were, with why.
@@ -135,6 +143,17 @@ impl Runner {
             receipts.insert(id, owner.clone());
         }
         Some(receipts)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn tick_for_test(
+        &mut self,
+        channel: u64,
+        reader: &impl ProbeRead,
+        proof_ids: &[u64],
+        settled_at: Instant,
+    ) -> Result<Tick, LedgerError> {
+        self.tick(channel, reader, proof_ids, settled_at).await
     }
 
     /// One pass over the channel's admitted pieces: expired slots settled, probes advanced, found

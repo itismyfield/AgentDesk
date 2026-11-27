@@ -57,6 +57,15 @@ pub struct Replacement {
 }
 
 impl Replacement {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_for_test(
+        channel: Option<u64>,
+        tmux: &str,
+        token: Option<&Arc<CancelToken>>,
+    ) -> Result<Option<Self>, String> {
+        Self::begin(channel, tmux, token)
+    }
+
     pub(crate) fn begin(
         channel: Option<u64>,
         tmux: &str,
@@ -101,6 +110,11 @@ impl Replacement {
             state,
             completed: false,
         }))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn complete_for_test(self) {
+        self.complete()
     }
 
     /// The successor has completed spawn validation; its later death is real.

@@ -86,8 +86,8 @@ mod instance_scope;
 pub use instance_scope::{input_command, validate_target};
 pub mod health_probe;
 pub(crate) mod session_identity;
-#[cfg(all(test, unix))]
-pub(crate) mod session_identity_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod session_identity_tests;
 #[cfg(unix)]
 pub mod session_inventory;
 
@@ -1314,18 +1314,23 @@ mod etime_tests {
     }
 }
 
-#[cfg(all(test, unix))]
-pub(crate) mod timeout_tests {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod timeout_tests {
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    pub(crate) struct PathOverride {
+    pub struct PathOverride {
         _guard: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
     }
 
     impl PathOverride {
+        #[cfg(any(test, feature = "test-support"))]
+        pub fn prepend_for_test(path: &std::path::Path) -> Self {
+            Self::prepend(path)
+        }
+
         pub(crate) fn prepend(path: &std::path::Path) -> Self {
             let guard = crate::config::shared_test_env_lock()
                 .lock()
@@ -1356,7 +1361,7 @@ pub(crate) mod timeout_tests {
         }
     }
 
-    pub(crate) fn write_fake_tmux(dir: &std::path::Path, body: &str) {
+    pub fn write_fake_tmux(dir: &std::path::Path, body: &str) {
         let path = dir.join("tmux");
         let mut file = std::fs::File::create(&path).expect("fake tmux");
         writeln!(file, "#!/bin/sh").expect("shebang");

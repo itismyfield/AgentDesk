@@ -116,7 +116,7 @@ async fn local_retry_http_uses_the_ledger_payload_and_spends_only_one_additional
         let when = local_retry::pending(writer.store().ledger())
             .map(|root| root.due)
             .unwrap_or_else(Utc::now);
-        let step = writer.retry_local(when).await;
+        let step = writer.retry_local_for_test(when).await;
         assert_eq!(
             step,
             if case == 5 { Step::Stopped } else { Step::Done },
@@ -139,8 +139,8 @@ async fn local_retry_http_uses_the_ledger_payload_and_spends_only_one_additional
         for _ in 0..3 {
             drop(writer);
             writer = open();
-            writer.retry_local(when + chrono::Duration::days(1)).await;
-            assert!(!writer.has_local_retry());
+            writer.retry_local_for_test(when + chrono::Duration::days(1)).await;
+            assert!(!writer.has_local_retry_for_test());
         }
         let messages = format!("/api/v10/channels/{channel}/messages");
         let bodies: Vec<_> = mock

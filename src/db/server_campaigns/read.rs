@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
 use super::*;
+#[cfg(any(test, feature = "test-support"))]
+use crate::domain::campaign::model::{Action, Attempt, AttemptBinding, ChangeReason};
 use crate::domain::campaign::{decision_item::ApprovalBinding, definition::ValidatedDefinition};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DefinitionRevision {
     pub revision: u64,
@@ -11,7 +13,7 @@ pub struct DefinitionRevision {
     pub change: Option<ChangeReason>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSnapshot {
     pub sequence: u64,
@@ -20,14 +22,14 @@ pub struct RunSnapshot {
     pub definition_pin: ValidatedDefinition,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     pub attempt: Attempt,
     pub definition_pin: ValidatedDefinition,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRecord {
     pub id: String,
@@ -123,7 +125,7 @@ pub async fn list(pool: &PgPool, limit: i64, offset: i64) -> StoreResult<Vec<Cam
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn revisions(pool: &PgPool, id: &str) -> StoreResult<Vec<DefinitionRevision>> {
     let rows = sqlx::query_as::<_, (i64, Json<ValidatedDefinition>, Option<Json<ChangeReason>>)>(
         "SELECT revision, definition, change FROM server_campaign_revisions WHERE campaign_id = $1 ORDER BY revision DESC LIMIT 10",
@@ -199,7 +201,7 @@ pub async fn events(
     Ok(rows.into_iter().map(|v| v.0).collect())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn run_history(
     pool: &PgPool,
     id: &str,
@@ -237,7 +239,7 @@ pub async fn run_history(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn attempts(pool: &PgPool, id: &str, run: &str) -> StoreResult<Vec<AttemptRecord>> {
     let rows = sqlx::query_as::<_, (Json<Attempt>, Json<ValidatedDefinition>)>(
         "SELECT document, definition_pin FROM server_campaign_attempts WHERE campaign_id = $1 AND run_id = $2 ORDER BY attempt_id",
@@ -251,7 +253,7 @@ pub async fn attempts(pool: &PgPool, id: &str, run: &str) -> StoreResult<Vec<Att
         .collect())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn action_history(
     pool: &PgPool,
     id: &str,
@@ -267,7 +269,7 @@ pub async fn action_history(
     Ok(rows.into_iter().map(|v| v.0).collect())
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub async fn evidence(pool: &PgPool, id: &str, run: &str) -> StoreResult<Vec<EvidenceRecord>> {
     let rows: Vec<Json<EvidenceRecord>> = sqlx::query_scalar(
         "SELECT document FROM server_campaign_evidence WHERE campaign_id = $1 AND run_id = $2 ORDER BY evidence_id",

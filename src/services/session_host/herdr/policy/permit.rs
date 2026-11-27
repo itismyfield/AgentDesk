@@ -21,8 +21,22 @@ impl CreatePermit {
         Ok(Self { endpoint, proof })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn witness_for_test(&self) -> &ServerWitness {
+        self.witness()
+    }
+
     pub(crate) fn witness(&self) -> &ServerWitness {
         self.proof.witness()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn fence_for_test(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        source: &dyn PeerSource,
+    ) -> Result<(), Unverified> {
+        self.fence(endpoint, source)
     }
 
     pub(crate) fn fence(
@@ -75,6 +89,11 @@ struct WireGrant {
 }
 
 impl LaunchAdmissionGrant {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn encode_for_test(&self) -> Result<Vec<u8>, String> {
+        self.encode()
+    }
+
     pub(crate) fn encode(&self) -> Result<Vec<u8>, String> {
         serde_json::to_vec(&WireGrant {
             schema: 1,
@@ -136,11 +155,30 @@ impl LaunchAdmissionGrant {
         Ok(grant)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn endpoint_for_test(&self) -> &HerdrLaunchEndpoint {
+        self.endpoint()
+    }
+
     pub(crate) fn endpoint(&self) -> &HerdrLaunchEndpoint {
         &self.endpoint
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn nonce_for_test(&self) -> &str {
+        self.nonce()
+    }
+
     pub(crate) fn nonce(&self) -> &str {
         &self.nonce
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn witness_for_for_test(
+        &self,
+        endpoint: &HerdrLaunchEndpoint,
+        nonce: &str,
+    ) -> Result<&ServerWitness, Unverified> {
+        self.witness_for(endpoint, nonce)
     }
 
     pub(crate) fn witness_for(
@@ -157,7 +195,13 @@ impl LaunchAdmissionGrant {
 
 #[derive(Debug, Clone, Default)]
 pub struct ExistingMutationEvidence {
+    #[cfg(any(test, feature = "test-support"))]
+    pub startup: Option<StartupProof>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) startup: Option<StartupProof>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub grant: Option<LaunchAdmissionGrant>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) grant: Option<LaunchAdmissionGrant>,
 }
 
@@ -184,7 +228,7 @@ impl ExistingMutationPermit {
         if !admitted {
             return Err(Unverified::Identity);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         EVENTS.with(|events| events.borrow_mut().push("ExistingMutationPermit"));
         Ok(Self(current))
     }
@@ -209,11 +253,8 @@ pub fn grant_for_test(
     }
 }
 
-#[cfg(test)]
-pub(crate) fn create_for_test(
-    endpoint: HerdrLaunchEndpoint,
-    witness: ServerWitness,
-) -> CreatePermit {
+#[cfg(any(test, feature = "test-support"))]
+pub fn create_for_test(endpoint: HerdrLaunchEndpoint, witness: ServerWitness) -> CreatePermit {
     CreatePermit::new(endpoint, proof_for_test(witness)).unwrap()
 }
 
@@ -245,7 +286,7 @@ fn proof_for_test(witness: ServerWitness) -> NextRestartProof {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static EVENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    pub static EVENTS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
 }

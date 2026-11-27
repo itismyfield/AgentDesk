@@ -615,12 +615,14 @@ fn creation_fault(step: &str) -> io::Result<()> {
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) mod test_support;
 
-#[cfg(all(test, unix))]
-pub(crate) mod tests {
-    pub(crate) use super::test_support::{fixture, fixture_after_shared_test_env_lock};
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod tests {
+    pub use super::test_support::{fixture, fixture_after_shared_test_env_lock};
     use super::*;
     use crate::config::TestEnvVarGuard as Guard;
+    #[cfg(test)]
     use crate::services::tmux_common::spawn_markers::stamp_spawn_markers;
+    #[cfg(test)]
     use SessionPresence::{Missing, Present, ProbeFailed};
     use std::os::unix::fs::PermissionsExt;
 
@@ -658,7 +660,7 @@ pub(crate) mod tests {
             "env restored"
         );
     }
-    pub(crate) fn prepared() -> PreparedIncarnation {
+    pub fn prepared() -> PreparedIncarnation {
         let tmux = format!("binding-{}", uuid::Uuid::new_v4().simple());
         PreparedIncarnation::prepare("claude", &tmux, Some(42), Some("native-id"), false).unwrap()
     }
@@ -750,7 +752,7 @@ pub(crate) mod tests {
             );
         }
     }
-    pub(crate) fn fake_tmux(root: &Path) -> Guard {
+    pub fn fake_tmux(root: &Path) -> Guard {
         let stub = "#!/bin/bash\nprintf '%s\\n' \"$*\" >> \"$AGENTDESK_ROOT_DIR/tmux.calls\"\n";
         fs::write(root.join("tmux"), stub).unwrap();
         fs::set_permissions(root.join("tmux"), fs::Permissions::from_mode(0o700)).unwrap();
@@ -759,6 +761,7 @@ pub(crate) mod tests {
         );
         Guard::prepend_path_after_shared_test_env_lock(root)
     }
+    #[cfg(test)]
     pub(crate) fn launch_failures(
         mut launch: impl FnMut(&str) -> Result<(), String>,
         script_ext: &str,

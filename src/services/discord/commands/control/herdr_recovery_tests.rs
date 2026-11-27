@@ -444,7 +444,7 @@ mod retired_selector {
             let startup =
                 crate::services::herdr_launch::clear_epoch::Launching::for_launch(&record.owner)
                     .unwrap();
-            let scope = startup.scope();
+            let scope = startup.scope_for_test();
             let permit = scope.check_epoch().unwrap().begin_effect().unwrap();
             crate::services::tui_prompt_dedupe::admit_herdr_execution(
                 &record.owner.logical_key,
@@ -468,7 +468,7 @@ mod retired_selector {
             );
             assert_eq!(
                 target
-                    .send_keys(&[crate::services::session_host::HostKey::Enter])
+                    .send_keys_for_test(&[crate::services::session_host::HostKey::Enter])
                     .unwrap(),
                 crate::services::session_host::HostMutation::Confirmed
             );

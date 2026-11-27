@@ -83,7 +83,7 @@ impl DispatchPostgresTestDb {
         }
     }
 
-    pub(crate) fn database_name(&self) -> &str {
+    pub fn database_name(&self) -> &str {
         &self.database_name
     }
 
@@ -112,7 +112,7 @@ impl DispatchPostgresTestDb {
         pool
     }
 
-    pub(crate) async fn drop(mut self) {
+    pub async fn drop(mut self) {
         let result = crate::db::postgres::drop_test_database(
             &self.admin_url,
             &self.database_name,

@@ -302,6 +302,6 @@ pub fn wake_hint_observed(session: &str) -> Result<Option<String>, ()> {
     .ok_or(())?
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "submission_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

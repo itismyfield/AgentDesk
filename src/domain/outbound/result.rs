@@ -28,10 +28,21 @@ pub enum FallbackUsed {
 pub struct DeliveredMessage {
     pub(crate) channel_id: OutboundChannelId,
     pub(crate) message_id: OutboundMessageId,
+    #[cfg(any(test, feature = "test-support"))]
+    /// Id as returned by the transport; test doubles may return non-numeric ids.
+    pub raw_message_id: String,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// Id as returned by the transport; test doubles may return non-numeric ids.
     pub(crate) raw_message_id: String,
+    #[cfg(any(test, feature = "test-support"))]
+    /// `None` for anything that is not a split chunk.
+    pub chunk_index: Option<usize>,
+    #[cfg(not(any(test, feature = "test-support")))]
     /// `None` for anything that is not a split chunk.
     pub(crate) chunk_index: Option<usize>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub chunk_count: Option<usize>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) chunk_count: Option<usize>,
 }
 

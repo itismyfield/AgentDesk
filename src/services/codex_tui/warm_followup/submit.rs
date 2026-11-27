@@ -111,7 +111,7 @@ pub fn settle_submit(
 
 /// Settles one submit for the warm follow-up test mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn settle_submit_for_test(
+pub fn settle_submit_for_test(
     target: &InputTarget,
     tmux_session_name: &str,
     outcome: CodexFollowupPromptSubmitOutcome,
@@ -238,7 +238,7 @@ pub(crate) mod tests {
     #[test]
     fn submitted_warm_capture_failure_warns_only_for_fresh_shadow_successor() {
         use crate::services::codex_tui::execution_end::producer::LaunchObservation;
-        use crate::services::provider_teardown::tests::test_support::FakeTmux;
+        use crate::services::provider_teardown::test_support::FakeTmux;
         use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
         let _root = crate::config::TestRuntimeRootGuard::new();
         attempt::reset_for_tests();

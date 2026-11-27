@@ -174,7 +174,7 @@ fn host(o: &OStore, port: Arc<Port>, alarms: Alarms, cap: u64) -> Host {
     Actor::new_for_test(
         writer,
         UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
-            .with_input_notices(Projection::for_tests()),
+            .with_input_notices_for_test(Projection::for_tests()),
         Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone()),
         bindings,
     )
@@ -316,7 +316,7 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
     let before = std::fs::read(notice_ledger(runtime.path())).unwrap();
     for _ in 0..2 {
         *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
-            .with_input_notices(Projection::for_tests());
+            .with_input_notices_for_test(Projection::for_tests());
         let derived = actor.deriver_mut_for_test().derive_scoped(
             &crate::services::tui_o::shadow::CapturedRecord {
                 start: next.record.start,

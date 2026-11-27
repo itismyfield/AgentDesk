@@ -170,6 +170,15 @@ impl ProcessBackend {
         Self
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn create_session_with_command_env_for_test(
+        &self,
+        config: &SessionConfig,
+        apply_command_env: impl FnOnce(&mut Command),
+    ) -> Result<SessionHandle, String> {
+        self.create_session_with_command_env(config, apply_command_env)
+    }
+
     pub(crate) fn create_session_with_command_env(
         &self,
         config: &SessionConfig,

@@ -39,6 +39,15 @@ pub(super) enum Request<'a> {
 pub struct HostCreate<'a>(pub(super) Request<'a>);
 
 impl<'a> HostCreate<'a> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_for_test(
+        host: &'a dyn HerdrLaunchHost,
+        request: &'a HerdrCreateRequest,
+        _held: &'a EffectPermit,
+    ) -> Self {
+        Self::herdr(host, request, _held)
+    }
+
     pub(crate) fn herdr(
         host: &'a dyn HerdrLaunchHost,
         request: &'a HerdrCreateRequest,
@@ -132,6 +141,11 @@ impl CreateOutcome {
                 Err("host create evidence does not contain command output".into())
             }
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn into_herdr_for_test(self) -> HerdrCreateOutcome {
+        self.into_herdr()
     }
 
     /// Herdr's own reply, including an unconfirmed pane the launch still records.

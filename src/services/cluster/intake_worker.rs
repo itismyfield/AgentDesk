@@ -131,6 +131,11 @@ impl Default for IntakeWorkerLifecycle {
 }
 
 impl IntakeWorkerLifecycle {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_begin_tick_for_test(&self) -> Option<impl Sized + '_> {
+        self.try_begin_tick()
+    }
+
     /// Acquire admission for one complete worker tick. The post-increment fence
     /// check closes the load-before-fence race: either the tick is counted before
     /// the poller drains, or it relinquishes admission without touching the DB.
@@ -156,6 +161,11 @@ impl IntakeWorkerLifecycle {
 
     pub fn unfence_admission(&self) {
         self.admission_fenced.store(false, Ordering::SeqCst);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admission_is_fenced_for_test(&self) -> bool {
+        self.admission_is_fenced()
     }
 
     pub(crate) fn admission_is_fenced(&self) -> bool {

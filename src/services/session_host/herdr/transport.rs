@@ -61,6 +61,11 @@ pub struct HerdrSocketTransport<F: HerdrFraming = LineJsonFraming> {
 }
 
 impl<F: HerdrFraming> HerdrSocketTransport<F> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(endpoint: &HerdrEndpoint, config: HerdrSocketConfig, framing: F) -> Self {
+        Self::new(endpoint, config, framing)
+    }
+
     /// No I/O: every call dials its own connection.
     pub(crate) fn new(endpoint: &HerdrEndpoint, config: HerdrSocketConfig, framing: F) -> Self {
         Self {
@@ -74,7 +79,7 @@ impl<F: HerdrFraming> HerdrSocketTransport<F> {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_peer_reader(self, read_peer: PeerReader) -> Self {
+    pub fn with_peer_reader(self, read_peer: PeerReader) -> Self {
         Self { read_peer, ..self }
     }
 

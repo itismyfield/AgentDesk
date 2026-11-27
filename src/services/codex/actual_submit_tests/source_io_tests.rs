@@ -24,7 +24,7 @@ pub(crate) struct Watch {
 }
 
 impl Watch {
-    pub(crate) fn start(path: &Path) -> Self {
+    pub fn start(path: &Path) -> Self {
         let metadata = std::fs::metadata(path).unwrap();
         let identity = (metadata.dev(), metadata.ino());
         let samples = Arc::new(Mutex::new(Stats::default()));
@@ -38,7 +38,7 @@ impl Watch {
         Self { identity, samples }
     }
 
-    pub(crate) fn stats(&self) -> Stats {
+    pub fn stats(&self) -> Stats {
         self.samples.lock().unwrap().clone()
     }
 }

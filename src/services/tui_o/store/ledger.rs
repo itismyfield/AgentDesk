@@ -253,6 +253,14 @@ impl LedgerState {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn output_origin_for_test(
+        &self,
+        serial: u64,
+    ) -> Option<&crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        self.output_origin(serial)
+    }
+
     pub(crate) fn output_origin(
         &self,
         serial: u64,
@@ -438,6 +446,11 @@ impl LedgerState {
     /// The start an operator resolved for a pending source; the first entry stands.
     pub fn boundary_resolved(&self, source: &SourceId) -> Option<u64> {
         self.resolved.get(source).map(|(from, _)| *from)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn boundary_evidence_for_test(&self, source: &SourceId) -> Option<&BoundaryEvidence> {
+        self.boundary_evidence(source)
     }
 
     pub(crate) fn boundary_evidence(&self, source: &SourceId) -> Option<&BoundaryEvidence> {

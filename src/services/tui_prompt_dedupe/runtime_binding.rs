@@ -35,8 +35,8 @@ pub use codex_hook::{
     register_codex_herdr_placeholder, register_launched_tmux_runtime_binding,
     register_launched_tmux_runtime_binding_under_source_authority,
 };
-#[cfg(test)]
-pub(crate) use codex_verified::{
+#[cfg(any(test, feature = "test-support"))]
+pub use codex_verified::{
     DeliveryPermission as CodexDeliveryPermissionForTests,
     set_permission_for_tests as set_codex_delivery_permission_for_tests,
 };
@@ -470,8 +470,8 @@ pub fn reset_state_for_tests() {
 }
 
 /// Test-only: when the runtime binding for `tmux_session_name` was last written.
-#[cfg(test)]
-pub(crate) fn runtime_binding_recorded_at_for_tests(tmux_session_name: &str) -> Option<Instant> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn runtime_binding_recorded_at_for_tests(tmux_session_name: &str) -> Option<Instant> {
     let state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state
         .runtime_by_tmux

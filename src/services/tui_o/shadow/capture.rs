@@ -689,8 +689,8 @@ mod tests {
 
 pub mod observation;
 
-#[cfg(test)]
-pub(crate) mod io_trace {
+#[cfg(any(test, feature = "test-support"))]
+pub mod io_trace {
     use std::cell::RefCell;
     #[cfg(unix)]
     pub(crate) fn record_source(file: &std::fs::File, tag: &'static str, len: u64) {
@@ -736,7 +736,7 @@ pub(crate) mod io_trace {
             (hook.action)();
         }
     }
-    pub(crate) fn take() -> Vec<(u64, u64, bool)> {
+    pub fn take() -> Vec<(u64, u64, bool)> {
         READS.with_borrow_mut(std::mem::take)
     }
 }

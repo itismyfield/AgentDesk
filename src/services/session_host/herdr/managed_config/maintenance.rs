@@ -55,13 +55,13 @@ pub fn records() -> BTreeMap<String, Record> {
 
 /// Test seam: the cause a pass records for a home whose server must restart.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn restart_cause_for_test() -> &'static str {
+pub const fn restart_cause_for_test() -> &'static str {
     RESTART
 }
 
 /// Test seam: forgets `home`'s record, as a new process starts without one.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn forget_record_for_test(home: &str) {
+pub fn forget_record_for_test(home: &str) {
     RECORDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
@@ -152,6 +152,11 @@ pub struct OperatorNotice {
 }
 
 impl OperatorNotice {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn herdr_home_for_test(node: &str, home: &std::path::Path, channel: u64) -> Self {
+        Self::herdr_home(node, home, channel)
+    }
+
     /// A managed herdr home's fault on `node`; PIDs, ticks, mtimes and error text are not identity.
     pub(crate) fn herdr_home(node: &str, home: &std::path::Path, channel: u64) -> Self {
         use sha2::{Digest, Sha256};
@@ -205,7 +210,7 @@ pub fn pass(boot: &BootSessionHosts, personal: &PersonalPaths, observe: bool) ->
 
 /// Test seam: one pass with `read` standing in for the E7 read of each home.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn pass_with_for_test(
+pub fn pass_with_for_test(
     boot: &BootSessionHosts,
     personal: &PersonalPaths,
     read: &dyn Fn(&str) -> Option<RestoreResume>,
@@ -296,6 +301,11 @@ fn pass_with(
         });
     }
     faults
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub async fn notify_for_test(faults: Vec<Fault>, observe: ObserveNotice) {
+    notify(faults, observe).await;
 }
 
 /// Moves each home's notice episode to its confirmed cause; without a channel or a poster the

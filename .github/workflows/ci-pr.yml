@@ -267,6 +267,7 @@ jobs:
               - 'src/config/**'
               - 'src/domain/file_sync.rs'
               - 'src/domain/intake_consent.rs'
+              - 'src/domain/retry_wait.rs'
               # domain/mod.rs re-exports the unix-only adk-base intake_consent behind cfg(unix).
               - 'src/domain/mod.rs'
               - 'src/db/**'

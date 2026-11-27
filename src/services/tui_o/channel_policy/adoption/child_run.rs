@@ -72,6 +72,11 @@ impl Candidate {
             .unwrap_or_else(PoisonError::into_inner)
             .boundary
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_child_run_for_test(&self, channel: u64, run: LegacyRun) -> bool {
+        self.release_child_run(channel, run)
+    }
+
     /// Only a source-bound refusal under the parent's boot kind grants this exception.
     pub(crate) fn release_child_run(&self, channel: u64, run: LegacyRun) -> bool {
         use crate::services::agent_protocol::RuntimeHandoffKind::{ClaudeTui, CodexTui};

@@ -44,7 +44,7 @@ fn list_profile_bindings_from_schema(
     )
 }
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use crate::services::provider_auth_profile::queries::provider_auth_catalog;
+pub use crate::services::provider_auth_profile::queries::provider_auth_catalog;
 
 fn fallback_profile_available(
     provider: &ProviderKind,

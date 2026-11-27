@@ -78,8 +78,18 @@ impl NativeFloor {
         self.generation_mtime_ns
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn execution_for_test(&self) -> &ExecutionProofRef {
+        self.execution()
+    }
+
     pub(crate) fn execution(&self) -> &ExecutionProofRef {
         &self.execution
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn checkpoint_for_test(&self) -> (&SourceId, u64, &str) {
+        self.checkpoint()
     }
 
     pub(crate) fn checkpoint(&self) -> (&SourceId, u64, &str) {
@@ -260,6 +270,6 @@ impl DurableClosedEpisode {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 #[path = "submit_floor_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

@@ -6,6 +6,7 @@ use crate::config::test_instance::{
     MARKER_FOR_TEST as MARKER, load_instance_declaration_for_test as load_instance_declaration,
     read_json_for_test as read_json,
 };
+use crate::services::claude::herdr_turn::{prepare_herdr_for_login_test, with_input_admission_for_test};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -184,7 +185,7 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
         ] {
             assert!(
                 ProcessBackend::new()
-                    .create_session_with_command_env(&config, |command| {
+                    .create_session_with_command_env_for_test(&config, |command| {
                         command.env(key, value);
                     })
                     .is_err()
@@ -195,7 +196,7 @@ fn instance_backend_refuses_foreign_files_before_create_or_spawn() {
             "HOME",
             std::ffi::OsStr::new("/synthetic/foreign-home"),
         );
-        assert!(configure_tmux_command(&mut Command::new("/bin/false")).is_err());
+        assert!(configure_tmux_command_for_test(&mut Command::new("/bin/false")).is_err());
     }
 }
 
@@ -883,12 +884,12 @@ fn review_builder_purposes_and_metadata_admission() {
         let (binary, resolution) = ClaudeBinary::resolve().unwrap();
         let cli = home.join(".local/bin/claude");
         let constructors = [
-            B::for_simple(&binary, &resolution),
+            B::for_simple_for_test(&binary, &resolution),
             B::for_agents(&binary, &resolution),
-            B::for_legacy(&binary, &resolution),
+            B::for_legacy_for_test(&binary, &resolution),
             B::for_future_for_test(&binary, &resolution),
-            B::for_resolved_version_probe(&binary, &resolution),
-            B::for_version_smoke(cli.to_str().unwrap(), cli.to_str().unwrap()),
+            B::for_resolved_version_probe_for_test(&binary, &resolution),
+            B::for_version_smoke_for_test(cli.to_str().unwrap(), cli.to_str().unwrap()),
             B::for_tmux_wrapper_argv(cli.to_str().unwrap()),
         ];
         for (i, mut builder) in constructors.into_iter().enumerate() {
@@ -1324,7 +1325,7 @@ mod login_admission_tests {
             for slot in ["3", "2", "1", "unavailable"] {
                 std::fs::write(home.join("active-slot"), slot).unwrap();
                 let first_input = std::cell::Cell::new(0);
-                let result = with_input_admission(|| {
+                let result = with_input_admission_for_test(|| {
                     first_input.set(first_input.get() + 1);
                     Ok(())
                 });
@@ -1669,7 +1670,7 @@ fn instance_owner_paste_uses_logical_outer_target_and_preserves_pinned_action() 
         let marker = crate::services::tmux_common::session_temp_path(&name, "spawn_nonce");
         std::fs::create_dir_all(Path::new(&marker).parent().unwrap()).unwrap();
         std::fs::write(marker, nonce).unwrap();
-        let pin = PaneIdentity::observe(&name).unwrap();
+        let pin = PaneIdentity::observe_for_test(&name).unwrap();
         let codex = mode == "codex";
         owner_input::with_scope(
             "claude".into(),
@@ -1687,7 +1688,7 @@ fn instance_owner_paste_uses_logical_outer_target_and_preserves_pinned_action() 
                     PinnedInput::Enter,
                 ] {
                     let result = TmuxHost
-                        .actor_input(
+                        .actor_input_for_test(
                             &program,
                             &name,
                             std::time::Duration::from_secs(2),

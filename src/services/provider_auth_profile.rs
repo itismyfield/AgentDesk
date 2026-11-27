@@ -15,8 +15,8 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 #[cfg(all(test, unix))]
 mod direct_spawn_tests;
 pub mod fallback;
-#[cfg(all(test, unix))]
-pub(crate) mod instance_env_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod instance_env_tests;
 
 use crate::domain::provider_auth_profile::ProfileOverrides;
 pub use crate::domain::provider_auth_profile::{

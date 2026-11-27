@@ -160,7 +160,7 @@ fn exercise_actor(alternate_owner: bool) {
         tokio::time::pause();
         let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let _fake_tmux =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+            crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(Some(root.path()));
         let (old_context, _, _) = durable_canary_without_launch_files(root.path());

@@ -276,6 +276,11 @@ impl TransitionPort {
         (port, receiver)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_open_for_test(&self) -> bool {
+        self.is_open()
+    }
+
     /// An actor still holds this run's mailbox.
     pub(crate) fn is_open(&self) -> bool {
         !self.send.is_closed()
@@ -289,6 +294,16 @@ impl TransitionPort {
     /// runs to its end, and only the reply is lost.
     pub async fn request(&self, operation: Operation, context: Context) -> Result<Reply, String> {
         self.request_as(self, operation, context).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn request_as_for_test(
+        &self,
+        named: &Self,
+        operation: Operation,
+        context: Context,
+    ) -> Result<Reply, String> {
+        self.request_as(named, operation, context).await
     }
 
     /// [`Self::request`] naming the run of `named` while it goes into this port's mailbox.

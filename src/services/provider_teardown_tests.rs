@@ -4,37 +4,8 @@ use super::*;
 
 pub(crate) mod test_support {
     pub(crate) use super::super::test_support::FakeTmux;
+    pub(crate) use super::super::test_support::cleared;
     use super::*;
-    use crate::services::session_host::{
-        AutomaticEffect, HostWitness, SessionTargetEvidence, SessionTargetEvidenceSource,
-        SessionTargetInput, StateChange, clear_legacy_session, resolve_session_target,
-    };
-
-    struct LegacyRow(String);
-
-    impl SessionTargetEvidenceSource for LegacyRow {
-        fn read_evidence(&self, _input: &SessionTargetInput) -> SessionTargetEvidence {
-            SessionTargetEvidence {
-                session_key: Some(format!("claude/hash/mac-mini:{}", self.0)),
-                session_name: Some(self.0.clone()),
-                session_record: HostWitness::LegacyRow,
-                inflight_locator: HostWitness::Absent,
-                host_marker: HostWitness::Absent,
-                ..SessionTargetEvidence::unread()
-            }
-        }
-    }
-
-    /// A clearance the guard admitted for a found legacy row named `name`.
-    pub(crate) fn cleared(name: &str) -> TeardownClearance {
-        let input = SessionTargetInput::SessionKey(format!("claude/hash/mac-mini:{name}"));
-        let target = resolve_session_target(input, &LegacyRow(name.to_string()));
-        let change = StateChange::Automatic {
-            effect: AutomaticEffect::Kill,
-            observed: None,
-        };
-        TeardownClearance::Cleared(clear_legacy_session(&target, change).expect("legacy row"))
-    }
 
     /// Every clearance a teardown must refuse for `name`, labelled.
     pub(crate) fn refusals(name: &str) -> Vec<(&'static str, Option<TeardownClearance>)> {

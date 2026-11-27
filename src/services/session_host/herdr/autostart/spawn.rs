@@ -378,7 +378,7 @@ pub fn ensured_on_this_thread() -> usize {
     ENSURED.with(std::cell::Cell::get)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static TEST_CONTEXTS: Mutex<BTreeMap<PathBuf, Context>> = Mutex::new(BTreeMap::new());
 
 /// Whether this host may start `socket`'s server, as `ensure` would judge it.
@@ -390,19 +390,19 @@ fn context_for(socket: &Path) -> Context {
     scoped(socket).unwrap_or_else(Context::for_process)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn scoped(socket: &Path) -> Option<Context> {
     TEST_CONTEXTS.lock().ok()?.get(socket).cloned()
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 fn scoped(_: &Path) -> Option<Context> {
     None
 }
 
 /// Makes `ensure` use `context` for `socket` until the guard drops; sockets keep tests apart.
-#[cfg(test)]
-pub(crate) fn scoped_context(socket: &Path, context: Context) -> impl Drop + use<> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn scoped_context(socket: &Path, context: Context) -> impl Drop + use<> {
     struct Scoped(PathBuf);
     impl Drop for Scoped {
         fn drop(&mut self) {

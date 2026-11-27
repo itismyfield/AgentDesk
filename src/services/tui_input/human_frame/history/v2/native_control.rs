@@ -144,6 +144,15 @@ impl Registry {
         })
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn try_native_not_sent_for_test(
+        &self,
+        namespace: &str,
+        ticket: &Ticket,
+    ) -> Result<(), String> {
+        self.try_native_not_sent(namespace, ticket)
+    }
+
     pub(crate) fn try_native_not_sent(
         &self,
         namespace: &str,

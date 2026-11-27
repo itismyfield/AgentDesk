@@ -1,22 +1,26 @@
-pub(crate) use super::test_support::{after_first_look, daemon_restart, forget_session};
+#[cfg(test)]
+use super::test_support::forget_session;
+pub use super::test_support::{after_first_look, daemon_restart};
 use super::*;
 use crate::services::agent_protocol::RuntimeHandoffKind;
+#[cfg(test)]
 use crate::services::claude_tui::hook_server;
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+#[cfg(test)]
 use std::time::Duration;
 
-pub(crate) struct Rig {
+pub struct Rig {
     _dir: tempfile::TempDir,
-    pub(crate) session: String,
-    pub(crate) path: PathBuf,
-    pub(crate) root: PathBuf,
-    pub(crate) ctx: BindingContext,
+    pub session: String,
+    pub path: PathBuf,
+    pub root: PathBuf,
+    pub ctx: BindingContext,
 }
 impl Rig {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::for_channel(None)
     }
     fn for_channel(channel: Option<u64>) -> Self {
@@ -83,11 +87,11 @@ impl Rig {
         )
         .unwrap();
     }
-    pub(crate) fn assistant(&self, text: &str) {
+    pub fn assistant(&self, text: &str) {
         self.append(json!({"type":"assistant","timestamp":Utc::now(),
             "message":{"role":"assistant","content":[{"type":"text","text":text}]}}));
     }
-    pub(crate) fn terminal(&self) {
+    pub fn terminal(&self) {
         self.append(json!({"type":"system","subtype":"turn_duration"}));
     }
     fn hook(&self, source: &str) {
@@ -101,10 +105,10 @@ impl Rig {
             false,
         );
     }
-    pub(crate) fn ready(&self) -> bool {
+    pub fn ready(&self) -> bool {
         observe(&self.session, Some(&self.path)).is_some()
     }
-    pub(crate) fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
+    pub fn send(&self) -> Result<(), super::super::guarded_outcome::SubmissionError> {
         super::super::input::send_warm_followup_owned(&self.session, "one original", None)
     }
 }
@@ -112,6 +116,7 @@ impl Rig {
 #[cfg(unix)]
 #[path = "clear_tests.rs"]
 pub(crate) mod clear_tests;
+#[cfg(test)]
 #[path = "idle_compaction_tests.rs"]
 mod idle_compaction_tests;
 #[path = "restart_tests.rs"]
@@ -1406,7 +1411,7 @@ fn startup_workspace_caller_uses_home_only_plan_before_every_dialog_key() {
 
 #[cfg(unix)]
 #[path = "compact_tests.rs"]
-pub(crate) mod compact_tests;
+pub mod compact_tests;
 
 #[test]
 fn a_closed_managed_attempt_refuses_before_waiting_for_native_readiness() {

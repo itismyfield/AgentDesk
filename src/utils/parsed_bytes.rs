@@ -20,10 +20,10 @@ static TICK: AtomicU64 = AtomicU64::new(0);
 static KEPT: LazyLock<Mutex<HashMap<(PathBuf, TypeId), Kept>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Builds run on this thread, for the parse-count tests.
-    pub(crate) static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static BUILDS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// `build`'s value for `raw`, the bytes just read from `path`; a failed build is never kept.
@@ -41,7 +41,7 @@ pub fn reuse<T: Any + Send + Sync>(
         }
     }
     drop(kept);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BUILDS.with(|builds| builds.set(builds.get() + 1));
     let value = Arc::new(build(&raw)?);
     let mut kept = KEPT.lock().unwrap_or_else(PoisonError::into_inner);

@@ -1244,7 +1244,7 @@ impl ProducerPane {
         let payload = serde_json::json!({ "source": source, "transcript_path": path });
         let hook = p5::HookSignal {
             published_at: Some(self.base + TimeDelta::seconds(secs)),
-            ..p5::HookSignal::from_payload(event, &payload)
+            ..p5::HookSignal::from_payload_for_test(event, &payload)
         };
         // Delivery drains each rotation before the next hook, as a settled pane does.
         crate::services::tui_prompt_dedupe::clear_claude_session_rotation(self.tmux);
@@ -1502,7 +1502,7 @@ async fn an_unregistered_member_starts_no_writer_and_rebinding_resumes_its_store
         let config = serde_json::from_value::<crate::config::Config>(value).unwrap();
         let boot = BootChannels::validate(&config)
             .unwrap()
-            .seeded(&config, |channels, _| {
+            .seeded_for_test(&config, |channels, _| {
                 Ok(crate::services::tui_o::channel_policy::stored(
                     Some(harness._runtime.path()),
                     &channels

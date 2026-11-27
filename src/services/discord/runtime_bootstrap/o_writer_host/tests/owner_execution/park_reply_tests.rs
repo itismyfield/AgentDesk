@@ -9,7 +9,7 @@ const REPLY: &str = "fresh Claude reply after missing source";
 
 fn session_start(channel: u64, name: &str, id: &str, path: &Path) -> events::Committed {
     let path = path.to_str().unwrap();
-    let hook = events::HookSignal::from_payload(
+    let hook = events::HookSignal::from_payload_for_test(
         "SessionStart",
         &json!({
             "source":"startup", "session_id":id, "transcript_path":path

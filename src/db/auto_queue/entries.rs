@@ -63,7 +63,7 @@ pub struct DispatchTerminalEntrySyncResult {
 // Defined in a private child so default builds name it only inside `entries`, as before.
 mod entry_status_row {
     #[derive(Debug, Clone)]
-    pub(crate) struct EntryStatusRow {
+    pub struct EntryStatusRow {
         pub(super) run_id: String,
         pub(super) card_id: String,
         pub(super) agent_id: String,
@@ -79,23 +79,23 @@ mod entry_status_row {
 #[cfg(not(any(test, feature = "test-support")))]
 use entry_status_row::EntryStatusRow;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use entry_status_row::EntryStatusRow;
+pub use entry_status_row::EntryStatusRow;
 
 #[cfg(any(test, feature = "test-support"))]
 impl EntryStatusRow {
-    pub(crate) fn status_for_test(&self) -> &str {
+    pub fn status_for_test(&self) -> &str {
         &self.status
     }
 
-    pub(crate) fn dispatch_id_for_test(&self) -> Option<&str> {
+    pub fn dispatch_id_for_test(&self) -> Option<&str> {
         self.dispatch_id.as_deref()
     }
 
-    pub(crate) fn slot_index_for_test(&self) -> Option<i64> {
+    pub fn slot_index_for_test(&self) -> Option<i64> {
         self.slot_index
     }
 
-    pub(crate) fn completed_at_for_test(&self) -> Option<&str> {
+    pub fn completed_at_for_test(&self) -> Option<&str> {
         self.completed_at.as_deref()
     }
 }

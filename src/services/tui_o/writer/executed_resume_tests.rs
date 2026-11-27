@@ -67,7 +67,7 @@ impl Cold {
             "TMPDIR", &parent,
         )];
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let endpoint = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let endpoint = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let (root, env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();

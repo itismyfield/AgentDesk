@@ -28,9 +28,9 @@ use std::{
 };
 
 pub(super) const A: &str = "019e660d-4859-7522-9cee-8ba7c4e7c743";
-pub(crate) const PROMPT: &str = "read verified source";
+pub const PROMPT: &str = "read verified source";
 
-pub(crate) struct Fixture {
+pub struct Fixture {
     pub(super) fake: crate::services::provider_teardown::test_support::FakeTmux,
     pub(crate) context: BindingContext,
     pub(crate) root: tempfile::TempDir,
@@ -249,7 +249,7 @@ pub(super) fn unit(id: &str, text: &str) -> String {
         json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":id,"content":[{"type":"output_text","text":text}]}})
     )
 }
-pub(crate) fn response(path: &Path, id: &str, text: &str) {
+pub fn response(path: &Path, id: &str, text: &str) {
     append(path, &unit(id, text));
     append(
         path,
@@ -259,11 +259,11 @@ pub(crate) fn response(path: &Path, id: &str, text: &str) {
         ),
     );
 }
-pub(crate) async fn polls() {
+pub async fn polls() {
     tokio::time::sleep(actor::POLL_INTERVAL * 3).await;
 }
 
-pub(crate) fn posted(store: &ChannelStore) -> usize {
+pub fn posted(store: &ChannelStore) -> usize {
     let ledger = store.ledger();
     (0..ledger.next_serial())
         .filter_map(|serial| ledger.piece(serial))

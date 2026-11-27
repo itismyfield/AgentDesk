@@ -14,7 +14,10 @@ use crate::services::provider::ProviderKind;
 
 pub(crate) use local::LocalMemoryBackend;
 #[cfg(any(test, feature = "test-support"))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use memento::load_session_anchor_prompt;
+#[cfg(any(test, feature = "test-support"))]
+pub use memento::load_session_anchor_prompt;
 #[cfg(any(test, feature = "test-support"))]
 pub use memento::with_memento_test_endpoint;
 pub use memento::{

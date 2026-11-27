@@ -258,7 +258,7 @@ async fn original_retry_and_approved_notice_share_clear_first_without_preparing_
         let before = writer.store().ledger().next_serial();
         let step = if mode == "retry" {
             writer
-                .retry_local(Utc::now() + chrono::Duration::days(1))
+                .retry_local_for_test(Utc::now() + chrono::Duration::days(1))
                 .await
         } else {
             writer.deliver(&Derived::Piece(item.clone())).await

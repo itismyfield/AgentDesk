@@ -139,8 +139,8 @@ impl Scope {
         let state = self.cell.state.lock().unwrap_or_else(|e| e.into_inner());
         self.allowed(&state)?;
         drop(state);
-        #[cfg(test)]
-        tests::point(&self.key, tests::Point::Checked);
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::point(&self.key, test_support::Point::Checked);
         Ok(Checked(Arc::clone(self)))
     }
 
@@ -179,8 +179,8 @@ impl Checked {
         state.effects += 1;
         drop(state);
         let permit = EffectPermit(Arc::clone(&self.0.cell));
-        #[cfg(test)]
-        tests::point(&self.0.key, tests::Point::Authorized);
+        #[cfg(any(test, feature = "test-support"))]
+        test_support::point(&self.0.key, test_support::Point::Authorized);
         Ok(permit)
     }
 }
@@ -202,6 +202,12 @@ pub struct Launching {
 }
 
 impl Launching {
+    #[cfg(any(unix, test))]
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn enter_for_test(owner: &HostedOwner) -> Result<Self, String> {
+        Self::enter(owner)
+    }
+
     #[cfg(any(unix, test))]
     pub(crate) fn enter(owner: &HostedOwner) -> Result<Self, String> {
         let mut guard = Self::for_launch(owner)?;
@@ -231,6 +237,11 @@ impl Launching {
             scope,
             previous: None,
         })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn scope_for_test(&self) -> Arc<Scope> {
+        self.scope()
     }
 
     pub(crate) fn scope(&self) -> Arc<Scope> {
@@ -266,5 +277,8 @@ impl Drop for Current {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
+
 #[cfg(test)]
-pub(crate) mod tests;
+mod tests;

@@ -91,31 +91,31 @@ enum SourceReadDecision {
     Unavailable,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     static BEFORE_COMMIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = Default::default();
     static PERMISSIONS: std::cell::RefCell<std::collections::HashMap<String, DeliveryPermission>> = Default::default();
 }
-#[cfg(test)]
-pub(crate) fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_permission_for_tests(context: &BindingContext, permission: DeliveryPermission) {
     PERMISSIONS.with(|values| {
         values
             .borrow_mut()
             .insert(context.execution_nonce.clone(), permission);
     });
 }
-#[cfg(test)]
-pub(crate) fn clear_permissions_for_tests() {
+#[cfg(any(test, feature = "test-support"))]
+pub fn clear_permissions_for_tests() {
     PERMISSIONS.with(|values| values.borrow_mut().clear());
     BEFORE_COMMIT.with(|action| action.borrow_mut().take());
 }
 
-#[cfg(test)]
-pub(crate) fn before_commit_for_tests(action: impl FnOnce() + 'static) {
+#[cfg(any(test, feature = "test-support"))]
+pub fn before_commit_for_tests(action: impl FnOnce() + 'static) {
     BEFORE_COMMIT.with(|slot| *slot.borrow_mut() = Some(Box::new(action)));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn before_commit() {
     BEFORE_COMMIT.with(|action| {
         if let Some(action) = action.borrow_mut().take() {
@@ -125,7 +125,7 @@ fn before_commit() {
 }
 
 pub(super) fn permission(context: &BindingContext) -> DeliveryPermission {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(value) =
         PERMISSIONS.with(|values| values.borrow().get(&context.execution_nonce).copied())
     {
@@ -318,7 +318,7 @@ fn commit(
             Err(error) => Decision::Rejected(format!("{error:?}")),
         }
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_commit();
     // A path hint cannot split a retry of the same opened native descriptor.
     let persisted_claim = match (&previous, &decision) {
@@ -381,7 +381,7 @@ pub fn publication_allowed(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn proof_for_binding_for_test(
+pub fn proof_for_binding_for_test(
     authority: &TmuxSourceAuthority<'_>,
     context: &BindingContext,
     binding: &TuiRuntimeBinding,
@@ -390,7 +390,7 @@ pub(crate) fn proof_for_binding_for_test(
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn publication_allowed_for_test(
+pub fn publication_allowed_for_test(
     authority: &TmuxSourceAuthority<'_>,
     binding: &TuiRuntimeBinding,
 ) -> bool {
@@ -600,7 +600,7 @@ fn executed_resume(
             .and_then(|source| source_id(&source))
     };
     let source = descriptor(&probe)?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     before_commit();
     let same = |claim: &Claim| {
         (descriptor(claim)? == source)

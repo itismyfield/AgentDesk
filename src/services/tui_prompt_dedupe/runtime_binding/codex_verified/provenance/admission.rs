@@ -75,6 +75,15 @@ impl EpisodePermissionRecord {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn admit_for_test<T>(
+        &self,
+        origin: &OwedOrigin,
+        admitted: impl FnOnce() -> T,
+    ) -> Result<T, &'static str> {
+        self.admit(origin, admitted)
+    }
+
     /// Runs `admitted` under the record lock only while the exact permit still holds, so a
     /// cancellation either lands before the check or waits until the first poll returned.
     pub(crate) fn admit<T>(
@@ -183,7 +192,7 @@ pub fn forget_channel_for_tests(channel: u64) {
 #[path = "admission_tests.rs"]
 mod tests;
 
-#[cfg(test)]
-pub(crate) fn issued_for_tests(channel: u64, message: u64, nonce: &str) -> bool {
+#[cfg(any(test, feature = "test-support"))]
+pub fn issued_for_tests(channel: u64, message: u64, nonce: &str) -> bool {
     registry().contains_key(&(channel, message, nonce.to_owned()))
 }

@@ -72,17 +72,17 @@ pub fn baseline(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn first_bound_for_test(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
+pub fn first_bound_for_test(events: &[BindingEvent]) -> Option<(SourceId, u64)> {
     first_bound(events)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn baseline_for_test(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
+pub fn baseline_for_test(events: &[BindingEvent], boundary: u64) -> Option<(SourceId, u64)> {
     baseline(events, boundary)
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn thread_plan_for_test(
+pub fn thread_plan_for_test(
     events: &[BindingEvent],
     parent: u64,
 ) -> Option<(

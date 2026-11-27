@@ -8,7 +8,7 @@ struct Hook {
 
 static HOOKS: Mutex<Vec<Hook>> = Mutex::new(Vec::new());
 
-pub(crate) fn on_poll_once(path: &Path, hook: Box<dyn FnOnce() + Send>) {
+pub fn on_poll_once(path: &Path, hook: Box<dyn FnOnce() + Send>) {
     HOOKS.lock().unwrap_or_else(|e| e.into_inner()).push(Hook {
         path: path.to_owned(),
         run: hook,

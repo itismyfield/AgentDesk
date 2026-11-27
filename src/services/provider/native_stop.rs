@@ -76,6 +76,11 @@ struct WriterReceipt {
 }
 
 impl ReceiptSink {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn receipt_for_test(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
+        self.receipt(receipt)
+    }
+
     pub(crate) fn receipt(&self, receipt: crate::services::claude_tui::input::UserReceipt) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if self.accepted.get().is_some() {
@@ -91,6 +96,11 @@ impl ReceiptSink {
             input.receipt = Some(receipt);
         }
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn finished_for_test(&self, run: &crate::services::claude_tui::host_input::InputRun) {
+        self.finished(run)
+    }
+
     pub(crate) fn finished(&self, run: &crate::services::claude_tui::host_input::InputRun) {
         let mut input = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if input.applied || self.cached().is_some() {
@@ -198,6 +208,11 @@ impl ReceiptSink {
     pub fn arm_first_key(&self) {
         let _ = self.gate(UNGATED, NO_KEY_YET);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn writer_first_key_for_test(&self) -> bool {
+        self.writer_first_key()
+    }
+
     /// The writer's first payload key; refused once a stop took the gate before it.
     pub(crate) fn writer_first_key(&self) -> bool {
         self.gate(NO_KEY_YET, MAY_HAVE_WRITTEN)
@@ -256,11 +271,11 @@ impl ReceiptSink {
         }
     }
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn retains_receipt(&self) -> bool {
+    pub fn retains_receipt(&self) -> bool {
         self.inner.lock().unwrap().receipt.is_some()
     }
-    #[cfg(test)]
-    pub(crate) fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observed(&self) -> Option<Result<NativeUserPin, ()>> {
         self.cached()
     }
 }

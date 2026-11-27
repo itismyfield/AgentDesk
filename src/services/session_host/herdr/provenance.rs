@@ -264,6 +264,12 @@ pub(crate) fn process_parent(pid: u32) -> Result<u32, RestoreUnverified> {
 }
 
 #[cfg(target_os = "linux")]
+#[cfg(any(test, feature = "test-support"))]
+pub fn process_start_for_test(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
+    process_start(pid)
+}
+
+#[cfg(target_os = "linux")]
 #[allow(unsafe_code)]
 pub(crate) fn process_start(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     let unreadable = RestoreUnverified::ProcessUnreadable;
@@ -372,6 +378,12 @@ pub(crate) fn process_argv(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline"))
         .map_err(|_| RestoreUnverified::ProcessUnreadable)?;
     linux_environ(&raw)
+}
+
+#[cfg(target_os = "linux")]
+#[cfg(any(test, feature = "test-support"))]
+pub fn process_exec_path_for_test(pid: u32) -> Option<String> {
+    process_exec_path(pid)
 }
 
 #[cfg(target_os = "linux")]

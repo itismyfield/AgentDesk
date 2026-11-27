@@ -14,6 +14,10 @@ pub(super) const TEXT: &str =
 pub struct HoldNotice {
     pub(crate) dedupe_key: String,
     pub outbox_id: i64,
+    #[cfg(any(test, feature = "test-support"))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hold_nonce: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) hold_nonce: Option<String>,
 }

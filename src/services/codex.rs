@@ -1,14 +1,14 @@
 mod command_streaming;
 mod effort;
 use crate::services::process::reaping::CommandReapExt;
-#[cfg(all(test, unix))]
+#[cfg(all(any(test, feature = "test-support"), unix))]
 use effort::from_env as codex_reasoning_effort_from_env;
 mod direct_reader;
 pub use command_streaming::{CommandStreamingRequest, execute_command_streaming_observed};
 #[cfg(unix)]
 mod absence_launch;
-#[cfg(all(test, unix))]
-pub(crate) mod actual_submit_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod actual_submit_tests;
 #[cfg(unix)]
 use crate::services::codex_tui::verified_hold;
 mod process_session_launch;
@@ -35,13 +35,13 @@ use tui_session_launch::launch_policy::codex_tui_option_args;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(crate) use tui_session_launch::launch_policy::isolated_herdr_path_for_test;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::prepare_codex_tui_launch_script;
+pub use tui_session_launch::prepare_codex_tui_launch_script;
 #[cfg(unix)]
 use tui_session_launch::publish_codex_tui_launch_script;
 #[cfg(unix)]
 pub use tui_session_launch::validate_herdr_fresh_argv;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) use tui_session_launch::{
+pub use tui_session_launch::{
     CodexHerdrLaunchable,
     first_input::{Create, Observe, Submitted, create_for_test, observe_for_test},
     launch_policy::{
@@ -169,6 +169,9 @@ pub struct CodexLaunchOptions {
     pub(crate) developer_instructions: Option<String>,
     pub(crate) resume_session_id: Option<String>,
     pub(crate) model: Option<String>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub reasoning_effort: Option<String>,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) reasoning_effort: Option<String>,
     pub(crate) compact_token_limit: Option<u64>,
     pub(crate) readonly_mode: bool,
@@ -1405,10 +1408,10 @@ fn resolve_codex_tui_tail_result(
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// Runs once between a ready composer and the RuntimeReady recheck.
-    pub(crate) static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static AFTER_READINESS_WAIT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]
@@ -2674,11 +2677,11 @@ mod verified_admission_tests {
         let _state = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let _hosts = crate::config::session_hosts::force_for_test(None, &[]);
-        let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let fake =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+            crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         let binary = root.path().join("codex");
         let _binary = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
         let marker = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "spawn_nonce");
@@ -2847,7 +2850,7 @@ mod verified_admission_tests {
     fn verified_existing_ingress_holds_before_auth_lookup_cleanup_or_launch() {
         verified(|tmux, root| {
             let fake =
-                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+                crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2931,7 +2934,7 @@ mod verified_admission_tests {
     fn verified_startup_dialog_error_returns_reason_without_teardown() {
         verified(|tmux, _| {
             let fake =
-                crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+                crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2962,7 +2965,7 @@ mod verified_admission_tests {
         verified(|tmux, _| {
             for alive in [false, true] {
                 let fake =
-                    crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+                    crate::services::provider_teardown::test_support::FakeTmux::install(
                         tmux,
                     );
                 let _liveness = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
@@ -3002,7 +3005,7 @@ mod verified_admission_tests {
                     "{calls:?}"
                 );
                 assert!(
-                    !crate::services::provider_teardown::tests::test_support::take_exit_reason(
+                    !crate::services::provider_teardown::test_support::take_exit_reason(
                         tmux
                     )
                 );

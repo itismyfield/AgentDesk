@@ -24,7 +24,10 @@ const MEMENTO_CONTEXT_FULL_TOKEN_BUDGET: u64 = 1_000;
 #[path = "memento_anchor.rs"]
 mod anchor;
 #[cfg(any(test, feature = "test-support"))]
+#[cfg(not(any(test, feature = "test-support")))]
 pub(crate) use anchor::load_session_anchor_prompt;
+#[cfg(any(test, feature = "test-support"))]
+pub use anchor::load_session_anchor_prompt;
 pub use anchor::{SessionAnchorRequest, load_session_anchor_snapshot};
 #[path = "memento_endpoint.rs"]
 mod endpoint;

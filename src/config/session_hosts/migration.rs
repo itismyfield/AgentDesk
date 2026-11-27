@@ -42,6 +42,11 @@ impl HostsBootSelection {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn into_parts_for_test(self) -> (BootSessionHosts, super::BootMigration) {
+        self.into_parts()
+    }
+
     pub(crate) fn into_parts(self) -> (BootSessionHosts, super::BootMigration) {
         (
             self.hosts,

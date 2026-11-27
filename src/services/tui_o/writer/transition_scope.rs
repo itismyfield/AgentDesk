@@ -24,7 +24,7 @@ pub struct ScopeDigest([u8; 32], u8);
 impl ScopeDigest {
     /// A digest as this version shows it; another version or length is refused, never guessed.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn parse(shown: &str) -> Result<Self, String> {
+    pub fn parse(shown: &str) -> Result<Self, String> {
         let (hex, version) = shown
             .strip_prefix(PREFIX)
             .map(|hex| (hex, 1))

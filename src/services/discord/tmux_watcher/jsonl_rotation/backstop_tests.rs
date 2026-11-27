@@ -382,7 +382,7 @@ fn s2a1_rotation_rename_reset_gap_refusal_cancel_retry_and_old_fd_are_fenced() {
         (generation, 0),
     )
     .expect("proof");
-    let seal = proof.seal_prefix().expect("prefix");
+    let seal = proof.seal_prefix_for_test().expect("prefix");
     let shared = crate::services::discord::make_shared_data_for_tests();
     let coord = shared.tmux_relay_coord(channel);
     assert_eq!(

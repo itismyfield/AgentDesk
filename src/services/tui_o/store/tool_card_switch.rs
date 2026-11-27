@@ -94,6 +94,11 @@ pub fn effective(global: bool, value: &Value) -> bool {
 pub struct ToolCardSwitch;
 
 impl ToolCardSwitch {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn for_channel_for_test(channel: u64) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        Self::for_channel(channel)
+    }
+
     /// Only constructing a reader performs file I/O; each decision reads live config and watch.
     pub(crate) fn for_channel(channel: u64) -> Arc<dyn Fn() -> bool + Send + Sync> {
         let Some(root) = crate::config::runtime_root() else {

@@ -334,7 +334,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     };
     channel.append_ledger(refused).unwrap();
     let excluding = LedgerEntry::Excluded {
-        unit_key: excluded.unit().clone(),
+        unit_key: excluded.unit_for_test().clone(),
         reason: "operator".into(),
     };
     channel.append_ledger(excluding).unwrap();
@@ -378,7 +378,7 @@ async fn f6_general_auto_and_resume_never_overlap_posts_pg() {
     let channel = harness.channel();
     let ledger = channel.ledger();
     assert!(ledger.violation().is_none());
-    let (_, latest) = ledger.latest_piece(auto.unit(), 0).unwrap();
+    let (_, latest) = ledger.latest_piece(auto.unit_for_test(), 0).unwrap();
     let history = harness.port.history.lock().unwrap().clone();
     let reposted = history.iter().find(|seen| seen.content == "auto piece");
     let reposted = reposted.unwrap().id;
@@ -463,7 +463,7 @@ async fn f6_t09_open_prepared_blocks_every_sender_pg() {
     let ledger = TurnWriter::ledger(&mut writer);
     let settled = ledger.piece(0).unwrap().outcome.clone();
     assert_eq!(settled, Some(PieceOutcome::Posted(landed)));
-    let (serial, latest) = ledger.latest_piece(key.unit(), 0).unwrap();
+    let (serial, latest) = ledger.latest_piece(key.unit_for_test(), 0).unwrap();
     assert_eq!(
         (serial, &latest.outcome),
         (1, &Some(PieceOutcome::Posted(landed + 1)))
@@ -498,7 +498,7 @@ async fn f6_t10_recovered_admitted_piece_never_becomes_new_original_pg() {
         harness
             .channel()
             .ledger()
-            .latest_piece(key.unit(), 0)
+            .latest_piece(key.unit_for_test(), 0)
             .is_none()
     );
     pool.close().await;
@@ -551,7 +551,7 @@ async fn f6_t11_pre_activation_backlog_never_posts_pg() {
     let seen = Arc::clone(&intent_first);
     let on_post = move || {
         let log = ProvenanceLog::open(&path).unwrap();
-        *seen.lock().unwrap() = Some(log.state().intent(2).is_some());
+        *seen.lock().unwrap() = Some(log.state().intent_for_test(2).is_some());
     };
     *harness.port.on_post.lock().unwrap() = Some(Box::new(on_post));
     harness

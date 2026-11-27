@@ -61,6 +61,11 @@ pub enum TuiReadyState {
 }
 
 impl TuiReadyState {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn from_turn_state_for_test(state: TuiTurnState) -> Self {
+        Self::from_turn_state(state)
+    }
+
     pub(crate) fn from_turn_state(state: TuiTurnState) -> Self {
         match state {
             TuiTurnState::Idle => Self::Ready,

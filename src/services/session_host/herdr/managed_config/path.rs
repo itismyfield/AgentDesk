@@ -142,6 +142,11 @@ fn copied(error: &io::Error) -> io::Error {
 }
 
 impl ManagedHome {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn local_for_test(boot: &BootSessionHosts, personal: &PersonalPaths) -> Vec<Target> {
+        Self::local(boot, personal)
+    }
+
     pub(crate) fn local(boot: &BootSessionHosts, personal: &PersonalPaths) -> Vec<Target> {
         Self::of(boot.local_node(), boot.config(), personal)
     }

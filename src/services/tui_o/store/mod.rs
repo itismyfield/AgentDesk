@@ -322,6 +322,16 @@ impl OStore {
         self.init_channel_as(init, InitOrigin::Fresh, scope)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn init_channel_as_for_test(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+    ) -> Result<(), StoreError> {
+        self.init_channel_as(init, origin, scope)
+    }
+
     /// As `init_channel`, recording `origin`; a `Fresh` init keeps its old bytes.
     pub(crate) fn init_channel_as(
         &self,
@@ -351,6 +361,17 @@ impl OStore {
             }
         };
         Ok(durable::create_once(&dir.join(INIT_FILE), &bytes)?)
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn begin_era_as_for_test(
+        &self,
+        init: &Initialized,
+        origin: InitOrigin,
+        scope: &InitScope,
+        child: Option<&crate::services::session_host::surface_policy::VerifiedSurface>,
+    ) -> Result<(), StoreError> {
+        self.begin_era_as(init, origin, scope, child)
     }
 
     /// A first activation's `init`: a later channel of a sealed era, or else the channel the era is
@@ -566,13 +587,12 @@ mod windows_tests {
     }
 }
 
-#[cfg(test)]
-#[cfg(unix)]
-mod tests {
+#[cfg(all(any(test, feature = "test-support"), unix))]
+mod test_support {
     use super::*;
 
     impl OStore {
-        pub(crate) fn seed_boundary_resolved(
+        pub fn seed_boundary_resolved(
             &self,
             channel: u64,
             source: &SourceId,
@@ -598,7 +618,7 @@ mod tests {
         }
 
         /// Seeds a durable approval for writer replay tests without an operator command.
-        pub(crate) fn record_operator_resume(
+        pub fn record_operator_resume(
             &self,
             channel: u64,
             rejected_serial: u64,
@@ -633,7 +653,11 @@ mod tests {
                 .ok_or_else(|| damage("test approval was not applied"))
         }
     }
+}
 
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
     use crate::services::tui_o::shadow::{ShadowProvider, UnitKey, UnitKind};
 
     pub(super) fn enabled(runtime: &Path) -> OStore {
@@ -890,7 +914,7 @@ mod tests {
 #[cfg(any(test, feature = "test-support"))]
 impl ChannelStore {
     /// Shrinks the segment and spool limits so a test can fill the spool.
-    pub(crate) fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
+    pub fn set_limits_for_test(&mut self, segment_max: u64, spool_cap: u64) {
         (self.segment_max, self.spool_cap) = (segment_max, spool_cap);
     }
 }

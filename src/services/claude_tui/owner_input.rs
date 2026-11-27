@@ -451,17 +451,22 @@ pub fn install_launch(hook: LaunchHook) -> LaunchGuard {
 
 /// Records the execution a restart greeting's launch is about to create, before its row or pane.
 #[cfg(unix)]
-pub(crate) type Successor = Box<dyn Fn(&str) -> Result<(), String> + Send>;
+pub type Successor = Box<dyn Fn(&str) -> Result<(), String> + Send>;
 #[cfg(unix)]
 thread_local! { static SUCCESSOR: RefCell<Option<Successor>> = const { RefCell::new(None) }; }
 
 /// Asks `record` on every launch of this thread until the launch guard drops.
 #[cfg(unix)]
-pub(crate) fn install_successor(record: Successor) {
+pub fn install_successor(record: Successor) {
     SUCCESSOR.with(|slot| *slot.borrow_mut() = Some(record));
 }
 
 /// Records `nonce` as the successor of the greeting this thread launches; other launches pass.
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub fn record_successor_for_test(nonce: &str) -> Result<(), String> {
+    record_successor(nonce)
+}
+
 #[cfg(unix)]
 pub(crate) fn record_successor(nonce: &str) -> Result<(), String> {
     SUCCESSOR.with(|slot| {

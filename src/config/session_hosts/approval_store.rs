@@ -28,7 +28,10 @@ pub trait ApprovalStore {
     }
 }
 
-pub struct FileApprovalStore(pub(crate) Option<PathBuf>);
+pub struct FileApprovalStore(
+    #[cfg(any(test, feature = "test-support"))] pub Option<PathBuf>,
+    #[cfg(not(any(test, feature = "test-support")))] pub(crate) Option<PathBuf>,
+);
 
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -59,7 +62,7 @@ impl FileApprovalStore {
                 "recovery-critical atomic write failed"
             );
         })?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if name == "current.json" && FAIL_CURRENT_SYNC.with(|fault| fault.replace(false)) {
             return Err("injected current snapshot directory sync failure".into());
         }
@@ -233,7 +236,11 @@ impl ApprovalStore for FileApprovalStore {
 #[cfg(test)]
 thread_local! {
     pub(super) static FAIL_CLEANUP_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    pub(crate) static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+thread_local! {
+    pub static FAIL_CURRENT_SYNC: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn cleanup_sync(path: &std::path::Path) -> std::io::Result<()> {

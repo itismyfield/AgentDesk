@@ -45,6 +45,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{
 pub use owner_port::OwnerPort;
 
 pub(crate) const ENDPOINT_MISSING: &str = "endpoint_missing";
+#[cfg(any(test, feature = "test-support"))]
+pub const ENDPOINT_MISSING_FOR_TEST: &str = ENDPOINT_MISSING;
 pub(crate) const HERDR_NOT_ADMITTED: &str = "herdr launch is not admitted";
 const HOST_KIND_TEMP_EXT: &str = "host_kind";
 /// What Herdr gives every pane process (same set through 0.9.5); a provider that sees them may
@@ -304,7 +306,7 @@ impl Drop for WriterAcceptsGuard {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const fn host_kind_temp_ext_for_test() -> &'static str {
+pub const fn host_kind_temp_ext_for_test() -> &'static str {
     HOST_KIND_TEMP_EXT
 }
 
@@ -627,8 +629,8 @@ pub async fn launch_herdr_session(
         None => return Ok(indeterminate("create call did not return".into())),
     };
     let location = pane_location(&endpoint, pane_id);
-    #[cfg(test)]
-    clear_epoch::tests::before_projection(&owner);
+    #[cfg(any(test, feature = "test-support"))]
+    clear_epoch::test_support::before_projection(&owner);
     // The row is read again after the socket call: only this nonce's Pending takes the pane.
     let recorded = match load_row(pool, &owner).await {
         Ok(current) => {
@@ -861,7 +863,7 @@ fn record_herdr_host_marker(logical_key: &str) -> Result<(), String> {
     std::fs::write(&path, HostKind::Herdr.as_str()).map_err(|error| format!("{path}: {error}"))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[cfg(unix)]
 #[path = "herdr_launch/retired_hold/tests.rs"]
-pub(crate) mod retired_durability_tests;
+pub mod retired_durability_tests;

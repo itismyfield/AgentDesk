@@ -2954,8 +2954,8 @@ pub use test_env::{TestEnvVarGuard, TestRuntimeRootGuard, set_agentdesk_root_for
 /// the vars still to be restored name tempdirs this value has already deleted.
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) struct PinnedRuntimeHost {
-    pub(crate) root: tempfile::TempDir,
-    pub(crate) claude_home: tempfile::TempDir,
+    pub root: tempfile::TempDir,
+    pub claude_home: tempfile::TempDir,
     pub(crate) codex_home: tempfile::TempDir,
     _guards: [TestEnvVarGuard; 3],
     _env_lock: test_env_lock::SharedTestEnvLockGuard,

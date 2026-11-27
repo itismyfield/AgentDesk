@@ -65,6 +65,11 @@ impl ExactAttempt {
         &self.nonce
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn retry_of_for_test(&self) -> Option<&str> {
+        self.retry_of()
+    }
+
     pub(crate) fn retry_of(&self) -> Option<&str> {
         self.retry_of.as_deref()
     }

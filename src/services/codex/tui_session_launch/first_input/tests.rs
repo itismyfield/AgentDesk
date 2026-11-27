@@ -56,8 +56,8 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             &overlay,
         )
         .unwrap();
-        let script_path = launch.script_path_for_test().to_owned();
-        let owner_path = launch.owner_path_for_test().to_owned();
+        let script_path = launch.script_path_for_test_for_test().to_owned();
+        let owner_path = launch.owner_path_for_test_for_test().to_owned();
         let script = std::fs::read_to_string(&script_path).unwrap();
         assert_eq!(
             script.matches(shell_escape(prompt).as_str()).count(),
@@ -74,7 +74,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
             true,
         );
         let mut end =
-            crate::services::codex_tui::execution_end::producer::LaunchObservation::new(None, name);
+            crate::services::codex_tui::execution_end::producer::LaunchObservation::new_for_test(None, name);
         let channel = 727396 + u64::from(failed);
         let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(channel));
         runtime.block_on(mailbox.v2_cold_fixture(root.path().join(format!("owner-{channel}.json")),serde_json::json!({"nonce":format!("codex-scope-{channel}"),"provider":"codex","target":{"host":"tmux","owner":name,"root":launch.prepared_for_test().context.owner_runtime_root,"execution_nonce":launch.prepared_for_test().context.execution_nonce},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),channel)).unwrap();
@@ -129,7 +129,7 @@ fn cold_codex_argv_create_returns_before_rollout_and_failed_create_cleans_its_fi
                 !root.path().join("home/sessions").exists(),
                 "no rollout is needed for physical create"
             );
-            assert_eq!(submitted.prepared_for_test().context.provider, "codex");
+            assert_eq!(submitted.prepared_for_test_for_test().context.provider, "codex");
             let calls = std::fs::read_to_string(root.path().join("tmux.calls")).unwrap();
             assert_eq!(
                 calls
@@ -196,7 +196,7 @@ fn test_instance_codex_native_and_herdr_scripts_execute_with_declared_environmen
                     .unwrap();
                 scope::assert_child_environment(output, &instance.root, "native-capture");
             };
-            run(launch.script_path_for_test());
+            run(launch.script_path_for_test_for_test());
             let argv = std::fs::read_to_string(instance.root.join("codex.argv")).unwrap();
             assert_eq!(argv.lines().last(), Some(prompt));
             let runtime = tokio::runtime::Builder::new_current_thread()

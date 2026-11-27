@@ -44,6 +44,9 @@ pub enum GrantedServer {
 /// from its start.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplacedServer {
+    #[cfg(any(test, feature = "test-support"))]
+    pub current: ServerWitness,
+    #[cfg(not(any(test, feature = "test-support")))]
     pub(crate) current: ServerWitness,
     pub startup: bool,
 }
@@ -382,6 +385,15 @@ impl SocketHerdrLaunchHost {
         self.source(endpoint)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mutation_evidence_for_test(
+        &self,
+        endpoint: &HerdrEndpoint,
+        nonce: &str,
+    ) -> Result<ExistingMutationEvidence, Unverified> {
+        self.mutation_evidence(endpoint, nonce)
+    }
+
     pub(crate) fn mutation_evidence(
         &self,
         endpoint: &HerdrEndpoint,
@@ -461,7 +473,7 @@ impl SocketHerdrLaunchHost {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn poison_grants_for_test(&self) {
+    pub fn poison_grants_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.grants.lock().unwrap();
             panic!("injected grant cache failure");
@@ -469,7 +481,7 @@ impl SocketHerdrLaunchHost {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
+    pub fn seed_witness_for_test(&self, endpoint: &HerdrEndpoint, witness: ServerWitness) {
         self.witnessed.lock().unwrap().insert(
             HerdrLaunchEndpoint {
                 execution_node: endpoint.execution_node().into(),
@@ -481,20 +493,20 @@ impl SocketHerdrLaunchHost {
         );
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn poison_witnessed_for_test(&self) {
+    pub fn poison_witnessed_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let _guard = self.witnessed.lock().unwrap();
             panic!("injected witnessed cache failure");
         }));
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn poison_proof_for_test(&self) {
+    pub fn poison_proof_for_test(&self) {
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.policy.poison_for_test()
         }));
     }
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn with_prepared_for_test(
+    pub fn with_prepared_for_test(
         mut self,
         prepared: Result<Vec<LaunchAdmissionGrant>, Unverified>,
     ) -> Self {
@@ -512,7 +524,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: replaces the E7 read every endpoint check goes through.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn set_read_restore_for_test(
+    pub fn set_read_restore_for_test(
         &mut self,
         read: fn(&HerdrSocketTransport, &HerdrEndpoint) -> RestoreResume,
     ) {
@@ -528,7 +540,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: the transport of the endpoint at `index`.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn endpoint_transport_for_test(&self, index: usize) -> &Arc<HerdrSocketTransport> {
+    pub fn endpoint_transport_for_test(&self, index: usize) -> &Arc<HerdrSocketTransport> {
         &self.endpoints[index].1
     }
 
@@ -542,7 +554,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: a create that skips the launch admission, as an admitted create runs.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn create_eligible_for_test(
+    pub fn create_eligible_for_test(
         &self,
         request: &HerdrCreateRequest,
     ) -> HerdrCreateOutcome {
@@ -870,6 +882,6 @@ impl HerdrLaunchHost for SocketHerdrLaunchHost {
 #[path = "launch_host_support.rs"]
 mod support;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "launch_host_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

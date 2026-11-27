@@ -136,7 +136,7 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
         resume_root.as_deref(),
         inherited_verified,
     )?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     BEFORE_PANE_EFFECT.with_borrow_mut(|slot| {
         if let Some(effect) = slot.take() {
             effect();
@@ -147,25 +147,35 @@ pub(in crate::services::codex) fn preflight_codex_tui_turn_with_policy(
 
 /// The TUI argv up to its prompt, for tests outside `codex`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
+pub fn codex_tui_option_args_for_test(options: &CodexLaunchOptions) -> Vec<String> {
     codex_tui_option_args(options)
 }
 
 /// The resolved Codex binary, for tests outside `codex`.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
+pub fn resolve_codex_binary_for_test() -> crate::services::platform::BinaryResolution {
     resolve_codex_binary()
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
 impl CodexTuiLaunchScript {
     /// The prepared incarnation, for tests outside `codex`.
-    pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
+    pub fn prepared_for_test(&self) -> &PreparedIncarnation {
         &self.prepared
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn script_path_for_test_for_test(&self) -> &str {
+        self.script_path_for_test()
     }
 
     pub(crate) fn script_path_for_test(&self) -> &str {
         &self.script_path
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn owner_path_for_test_for_test(&self) -> &str {
+        self.owner_path_for_test()
     }
 
     pub(crate) fn owner_path_for_test(&self) -> &str {
@@ -268,7 +278,7 @@ fn validate_herdr_resume_argv(args: &[String], session: &str) -> Result<(), Stri
 
 /// The Herdr pane command of one prepared incarnation, for tests outside this module.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn prepare_codex_herdr_launch_for_test(
+pub fn prepare_codex_herdr_launch_for_test(
     prepared: &PreparedIncarnation,
     launchable: &CodexHerdrLaunchable,
     launch_options: &CodexLaunchOptions,

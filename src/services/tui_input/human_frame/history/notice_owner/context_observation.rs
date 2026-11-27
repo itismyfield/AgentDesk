@@ -4,8 +4,8 @@ use crate::services::tui_prompt_dedupe::binding_context::{self, BindingContext};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-#[cfg(test)]
-pub(crate) mod tests;
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests;
 
 pub(super) struct Observed {
     pub(super) stamp: Option<Stamp>,

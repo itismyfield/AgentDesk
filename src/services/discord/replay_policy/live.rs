@@ -10,6 +10,15 @@ use crate::services::agent_protocol::StreamMessage;
 use std::sync::Mutex;
 pub(crate) mod issuer_key;
 pub(crate) mod seal;
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn can_activate_for_test(
+    provider: crate::services::provider::ProviderKind,
+    driver: crate::services::provider_hosting::ProviderSessionDriver,
+    runtime: Option<crate::services::agent_protocol::RuntimeHandoffKind>,
+) -> bool {
+    seal::can_activate(provider, driver, runtime)
+}
 mod tap;
 pub use tap::RawTap;
 
@@ -141,6 +150,11 @@ impl RawObservation {
         self.active()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn terminal_evidence_for_test(&self) -> Option<TerminalEvidence> {
+        self.terminal_evidence()
+    }
+
     /// Normal-classification evidence: a complete observation with exactly one provider terminal.
     pub(crate) fn terminal_evidence(&self) -> Option<TerminalEvidence> {
         match self.terminals().as_slice() {
@@ -152,6 +166,11 @@ impl RawObservation {
             )),
             _ => None,
         }
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn no_effect_evidence_for_test(&self) -> Option<NoEffectEvidence> {
+        self.no_effect_evidence()
     }
 
     /// No-effect evidence: complete, no activity at all, and no successful provider turn.
@@ -176,12 +195,19 @@ impl RawObservation {
 }
 
 /// How a protected attempt's terminal was settled; only `Ordinary` admits ordinary effects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Verdict {
-    Ordinary,
-    Retried,
-    Held,
+mod verdict {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum Verdict {
+        Ordinary,
+        Retried,
+        Held,
+    }
 }
+
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use verdict::Verdict;
+#[cfg(any(test, feature = "test-support"))]
+pub use verdict::Verdict;
 
 /// The in-process record of one started protected attempt. Only the token of the executor that
 /// spent its start permit carries one, so a restored or foreign turn never decides with it.
@@ -214,6 +240,14 @@ impl LiveAttempt {
     fn record_fact(&self, seen: Seen) {
         lock(&self.observation).append(seen);
         self.recorded.notify_waiters();
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub async fn take_for_decision_for_test(
+        &self,
+        wait: std::time::Duration,
+    ) -> Option<(ExactAttempt, RawObservation)> {
+        self.take_for_decision(wait).await
     }
 
     /// Hands the attempt to its one decision once the reader finished, or what it saw by `wait`.
@@ -283,12 +317,27 @@ impl LiveAttempt {
         *lock(&self.verdict) = Some(verdict);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn verdict_for_test(&self) -> Option<Verdict> {
+        self.verdict()
+    }
+
     pub(crate) fn verdict(&self) -> Option<Verdict> {
         *lock(&self.verdict)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn mark_stale_for_test(&self) {
+        self.mark_stale()
+    }
+
     pub(crate) fn mark_stale(&self) {
         self.stale.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stale_for_test(&self) -> bool {
+        self.stale()
     }
 
     pub(crate) fn stale(&self) -> bool {
@@ -297,13 +346,13 @@ impl LiveAttempt {
 
     /// A copy of what the reader recorded so far.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn observation_for_test(&self) -> RawObservation {
+    pub fn observation_for_test(&self) -> RawObservation {
         lock(&self.observation).clone()
     }
 
     /// The receipt ID and nonce of the attempt not yet handed to a decision, if any.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub(crate) fn attempt_identity_for_test(&self) -> Option<(i64, String)> {
+    pub fn attempt_identity_for_test(&self) -> Option<(i64, String)> {
         lock(&self.attempt)
             .as_ref()
             .map(|attempt| (attempt.receipt_id(), attempt.nonce().to_string()))

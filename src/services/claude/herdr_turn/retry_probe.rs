@@ -12,7 +12,7 @@ use crate::domain::retry_wait::RetryCause as Cause;
 use crate::services::claude_tui::busy_inject::Screen;
 
 /// One read of the cause a retry wait holds on.
-pub(crate) type CauseRead = Box<dyn FnMut() -> Screen + Send>;
+pub type CauseRead = Box<dyn FnMut() -> Screen + Send>;
 
 thread_local! {
     static LEFT: RefCell<Option<CauseRead>> = const { RefCell::new(None) };
@@ -45,8 +45,19 @@ pub(super) fn armed(turn: &HerdrTurn<'_>, session_id: &str, error: String) -> St
 }
 
 /// The read the last typed refusal on this thread left; taken once.
-pub(crate) fn take() -> Option<CauseRead> {
+pub fn take() -> Option<CauseRead> {
     LEFT.with(|left| left.borrow_mut().take())
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub fn read_for_test(
+    pool: PgPool,
+    owner: HostedOwner,
+    channel: u64,
+    session: String,
+    cause: Cause,
+) -> CauseRead {
+    read(pool, owner, channel, session, cause)
 }
 
 /// Reads `owner`'s row (and, for a never-started pane, the binding log) for a change of `cause`:

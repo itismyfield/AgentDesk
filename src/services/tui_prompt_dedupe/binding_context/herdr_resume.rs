@@ -45,6 +45,16 @@ impl ResumeStart {
         Ok(())
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn capture_for_test(
+        operation: String,
+        channel: u64,
+        source: &SourceId,
+        store: &crate::services::tui_o::store::OStore,
+    ) -> Result<Self, String> {
+        Self::capture(operation, channel, source, store)
+    }
+
     /// Capture only after the caller confirmed the old execution ended; O must have captured EOF.
     pub(crate) fn capture(
         operation: String,

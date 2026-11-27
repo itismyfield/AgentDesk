@@ -333,16 +333,16 @@ pub(crate) fn resolve_for_turn(
 
 /// The quiet a turn or pass waits out; a test on this thread may shorten it.
 pub fn quiet() -> Duration {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(quiet) = QUIET.with(std::cell::Cell::get) {
         return quiet;
     }
     UNPLACED_QUIET
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static QUIET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub static QUIET: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
 }
 
 /// `Ok(true)` while the row is still `nonce`'s Pending with no pane; `Ok(false)` once it is retired.

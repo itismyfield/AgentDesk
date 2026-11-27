@@ -316,10 +316,7 @@ pub fn sync_managed_skills(root: &Path) -> Result<SkillSyncReport, String> {
 
 /// Copies a skill tree as the refresh path does, for the shipped-tree test in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn copy_skill_dir_resolving_symlinks_for_test(
-    src: &Path,
-    dest: &Path,
-) -> Result<(), String> {
+pub fn copy_skill_dir_resolving_symlinks_for_test(src: &Path, dest: &Path) -> Result<(), String> {
     skill_sync::copy_skill_dir_resolving_symlinks(src, dest)
 }
 

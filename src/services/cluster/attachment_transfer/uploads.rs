@@ -54,7 +54,7 @@ impl From<&str> for Upload {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl PartialEq<&str> for Upload {
     fn eq(&self, other: &&str) -> bool {
         matches!(self, Self::Local(value) if value == other)
@@ -63,7 +63,7 @@ impl PartialEq<&str> for Upload {
 
 pub type PendingUploads = Vec<Upload>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl PartialEq<String> for Upload {
     fn eq(&self, other: &String) -> bool {
         matches!(self, Self::Local(value) if value == other)

@@ -1,30 +1,48 @@
 //! The argv-bearing create returns a ticket before rollout discovery and response tailing.
 use super::*;
 
-pub(crate) struct Create<'a> {
-    pub tmux_session_name: &'a str,
-    pub working_dir: &'a str,
-    pub prompt: &'a str,
-    pub turn_nonce: Option<&'a str>,
-    pub auth_profile: &'a str,
-    pub launch: CodexTuiLaunchScript,
-    pub selection: &'a crate::services::codex_tui::session::CodexTuiSessionSelection,
-    pub end_observation:
-        &'a mut crate::services::codex_tui::execution_end::producer::LaunchObservation,
+mod launch_inputs {
+    use super::{CancelToken, CodexTuiLaunchScript, PreparedIncarnation, Sender, StreamMessage};
+
+    pub struct Create<'a> {
+        pub tmux_session_name: &'a str,
+        pub working_dir: &'a str,
+        pub prompt: &'a str,
+        pub turn_nonce: Option<&'a str>,
+        pub auth_profile: &'a str,
+        pub launch: CodexTuiLaunchScript,
+        pub selection: &'a crate::services::codex_tui::session::CodexTuiSessionSelection,
+        pub end_observation:
+            &'a mut crate::services::codex_tui::execution_end::producer::LaunchObservation,
+    }
+
+    pub struct Submitted {
+        pub(in crate::services::codex) prepared: PreparedIncarnation,
+        pub(in crate::services::codex) validated_tail:
+            crate::services::codex_tui::tail_launch::ValidatedTail,
+        pub(in crate::services::codex) rollout_modified_since: std::time::SystemTime,
+        pub(in crate::services::codex) handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
+    }
+
+    pub struct Observe<'a> {
+        pub submitted: Submitted,
+        pub working_dir: &'a str,
+        pub sender: Sender<StreamMessage>,
+        pub cancel_token: Option<std::sync::Arc<CancelToken>>,
+        pub tmux_session_name: &'a str,
+        pub prompt: &'a str,
+    }
 }
 
-pub(crate) struct Submitted {
-    pub(in crate::services::codex) prepared: PreparedIncarnation,
-    pub(in crate::services::codex) validated_tail:
-        crate::services::codex_tui::tail_launch::ValidatedTail,
-    pub(in crate::services::codex) rollout_modified_since: std::time::SystemTime,
-    pub(in crate::services::codex) handoff: crate::services::tui_prompt_dedupe::HandoffGuard,
-}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use launch_inputs::{Create, Observe, Submitted};
+#[cfg(any(test, feature = "test-support"))]
+pub use launch_inputs::{Create, Observe, Submitted};
 
 #[cfg(any(test, feature = "test-support"))]
 impl Submitted {
     /// A ticket as a create returns it, for tests outside this module.
-    pub(crate) fn for_test(
+    pub fn for_test(
         prepared: PreparedIncarnation,
         validated_tail: crate::services::codex_tui::tail_launch::ValidatedTail,
         rollout_modified_since: std::time::SystemTime,
@@ -38,6 +56,11 @@ impl Submitted {
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn prepared_for_test_for_test(&self) -> &PreparedIncarnation {
+        self.prepared_for_test()
+    }
+
     pub(crate) fn prepared_for_test(&self) -> &PreparedIncarnation {
         &self.prepared
     }
@@ -45,13 +68,13 @@ impl Submitted {
 
 /// The argv-bearing create, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn create_for_test(input: Create<'_>) -> Result<Submitted, String> {
+pub fn create_for_test(input: Create<'_>) -> Result<Submitted, String> {
     create(input)
 }
 
 /// The response observation after a create, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn observe_for_test(input: Observe<'_>) -> Result<(), String> {
+pub fn observe_for_test(input: Observe<'_>) -> Result<(), String> {
     observe(input)
 }
 
@@ -181,15 +204,6 @@ pub(in crate::services::codex) fn spawn_owned(
     hook(Lineage::Created, target, source, None, submit)?;
     let output = slot.lock().unwrap_or_else(|e| e.into_inner()).take();
     output.ok_or_else(|| "owner spawned without the create's result".into())
-}
-
-pub(crate) struct Observe<'a> {
-    pub submitted: Submitted,
-    pub working_dir: &'a str,
-    pub sender: Sender<StreamMessage>,
-    pub cancel_token: Option<std::sync::Arc<CancelToken>>,
-    pub tmux_session_name: &'a str,
-    pub prompt: &'a str,
 }
 
 pub(in crate::services::codex) fn observe(input: Observe<'_>) -> Result<(), String> {

@@ -724,11 +724,11 @@ async fn seed_ready_row(pool: &sqlx::PgPool, shared: &SharedData, channel: u64) 
         .execute(pool).await.unwrap();
 }
 fn applied(consent: &Consent) -> Consent {
-    let reserved = store().reserve_card(consent, now()).unwrap();
-    let bound = store().bind_card(&reserved, 8_916_999).unwrap();
-    let accepted = store().decide(&bound, bound.owner, true, now()).unwrap();
+    let reserved = store().reserve_card_for_test(consent, now()).unwrap();
+    let bound = store().bind_card_for_test(&reserved, 8_916_999).unwrap();
+    let accepted = store().decide_for_test(&bound, bound.owner, true, now()).unwrap();
     store()
-        .record_apply(
+        .record_apply_for_test(
             &accepted,
             consent::ApplyResult {
                 before: Some([1; 32]),
@@ -1258,7 +1258,7 @@ async fn expired_consent_backstop_restores_head_without_store_or_card_effects() 
     let f = Fixture::new("disabled").await;
     let _boot = session_hosts::force_for_test(Some("node"), &[(discord_mock::CHANNEL_ID, "node")])
         .with_mode(EndpointMode::UserDefault);
-    let (_config, source) = preview::tests::fixture("printf 'config: ok\n'");
+    let (_config, source) = preview::test_support::fixture("printf 'config: ok\n'");
     source.0.lock().unwrap().witness.socket = "/adk/herdr/agentdesk.sock".into();
     let _source = ScopedAdmissionPeer(TEST_SOURCE.with(|slot| slot.replace(Some(source))));
     let patches = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -1312,9 +1312,9 @@ async fn expired_consent_backstop_restores_head_without_store_or_card_effects() 
         )
         .await
         .unwrap();
-    let reserved = store().reserve_card(&held, 100).unwrap();
-    let bound = store().bind_card(&reserved, 8_916_990).unwrap();
-    let expired = store().expire(&bound, 1_900).unwrap();
+    let reserved = store().reserve_card_for_test(&held, 100).unwrap();
+    let bound = store().bind_card_for_test(&reserved, 8_916_990).unwrap();
+    let expired = store().expire_for_test(&bound, 1_900).unwrap();
     assert_eq!(expired.state, State::Expired);
     let path = f
         .root
@@ -1856,7 +1856,7 @@ async fn a_passing_admission_check_is_kept_by_the_launch_host() {
     let _registry =
         crate::services::session_host::herdr_socket_rig_tests::boot_registry_on_this_thread(&boot);
     let configured = endpoint(CHANNEL).unwrap();
-    let (_dir, source) = preview::tests::fixture("printf 'config: ok\n'");
+    let (_dir, source) = preview::test_support::fixture("printf 'config: ok\n'");
     {
         let mut peer = source.0.lock().unwrap();
         std::fs::write(
@@ -1870,7 +1870,7 @@ async fn a_passing_admission_check_is_kept_by_the_launch_host() {
     }
     let (checked, _) = observe(&configured, source).await;
     assert!(checked.is_ok(), "{checked:?}");
-    let registered = crate::services::session_host::HerdrEndpoint::new(
+    let registered = crate::services::session_host::HerdrEndpoint::new_for_test(
         &configured.execution_node,
         &configured.config_key,
         std::path::Path::new(&configured.socket_addr),
@@ -1881,7 +1881,7 @@ async fn a_passing_admission_check_is_kept_by_the_launch_host() {
         .launch_host()
         .unwrap();
     let evidence = host
-        .mutation_evidence(&registered, "any-execution")
+        .mutation_evidence_for_test(&registered, "any-execution")
         .unwrap();
     assert!(
         evidence.startup.is_some(),
