@@ -1,0 +1,2 @@
+key: 690-input-single-path-drive-recheck
+| `input-single-path` owner drive backoff (#8458) | `c7ad3ff2e1` | A held original can remain without work after its host or owner gate clears. Four Before cfgs fail `QueueEventuallyDelivered`. | Four paired After cfgs pass with a bounded recheck, optional wakes and no timer on an empty queue. [Entry points and TLC](input-single-path/drive-recheck.report.md) |

@@ -758,6 +758,14 @@ input-single-path/InputCancelSelection.cfg	InputCancelSelection	-	-
 input-single-path/InputCancelSelectionAmbiguous.cfg	InputCancelSelection	NoAmbiguousExecution,NoAmbiguousOffer	-
 input-single-path/InputCancelSelectionLegacyGuarded.cfg	InputCancelSelection	LegacyFrontRemoved	-
 input-single-path/InputCancelSelectionNoRevoke.cfg	InputCancelSelection	FrontGrantRevoked	-
+input-single-path/InputDriveRecheckHandoffAfter.cfg	InputDriveRecheck	-	-
+input-single-path/InputDriveRecheckHandoffBefore.cfg	InputDriveRecheck	-	QueueEventuallyDelivered
+input-single-path/InputDriveRecheckHeadAfter.cfg	InputDriveRecheck	-	-
+input-single-path/InputDriveRecheckHeadBefore.cfg	InputDriveRecheck	-	QueueEventuallyDelivered
+input-single-path/InputDriveRecheckNoGrantAfter.cfg	InputDriveRecheck	-	-
+input-single-path/InputDriveRecheckNoGrantBefore.cfg	InputDriveRecheck	-	QueueEventuallyDelivered
+input-single-path/InputDriveRecheckRetryWaitAfter.cfg	InputDriveRecheck	-	-
+input-single-path/InputDriveRecheckRetryWaitBefore.cfg	InputDriveRecheck	-	QueueEventuallyDelivered
 input-single-path/InputNativeStop.cfg	InputNativeStop	-	-
 input-single-path/InputNativeStopAbsorptionBefore.cfg	InputNativeStop	NoForeignEscape,OwnInputStops	-
 input-single-path/InputNativeStopBefore.cfg	InputNativeStop	OwnInputStops	-
