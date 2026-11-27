@@ -13,9 +13,9 @@ use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::store::InitSource;
 use crate::services::tui_o::store::ledger::{LedgerEntry, PieceOutcome};
 use crate::services::tui_o::writer::deliver::{ChannelWriter, Step};
-use crate::services::tui_o::writer::test_support::*;
 use crate::services::tui_o::writer::test_support::{
-    BOT, CHANNEL, FakePort, Harness, Reply, Writer, ledger_path, outcome, piece, unit,
+    BOT, CHANNEL, FakePort, Harness, Reply, Writer, append, halt, ledger_path, outcome, piece, row,
+    spawn, switched_over, unit,
 };
 use crate::services::tui_o::writer::{
     DiscordPort, PostOutcome, SeenMessage, WriterAlarm, deliver, pieces,
