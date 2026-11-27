@@ -566,7 +566,7 @@ S2 거절 경계 델타: registration CAS 거절은 name-only cleanup과 분리�
 | `dashboard/src/components/session-panel/SessionPanelModel.ts:41`, `:47-49` | name 우선. name 없으면 `Session ${key.slice(0,8)}`로 축약, full에는 key. | 실제 name/label 제공; React 문자열 그대로 표시. emoji supplementary char 포함 byte/UTF-16 절단 fixture 검토. |
 | `dashboard/src/components/session-panel/SessionInfoCard.tsx:33` | 전체 세션 키 문자열 표시. | escape는 React 기본 적용. 한글 문자열 UI fixture 검증. |
 | `dashboard/src/components/cluster/ClusterNodesPanel.tsx:81,84-86,96` | name/key 표시, 중지 호출에는 전체 session_key 그대로 사용. | S9에서 legacy→신규 primary 승격 뒤 중지를 호출해 **새 이름 세션이 없음**을 단언. 단순 key 전달 동일성은 성공 기준이 아님. |
-| `src/server/routes/docs/inventory/endpoints/part_01.rs:357`, `part_05.rs:458,465`, `part_06.rs:131` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
+| `docs/data/api-endpoints.json` | API 예제의 AgentDesk-* 이름. | 새 예제와 legacy 호환 예제 구분; 생성 문서 경로로 반영. |
 
 API·UI는 코드 조사만 수행했다. 실제 빌드/운영 API 접근을 했다고 주장하지 않는다. 부모의 격리 fixture 렌더와 함께 증거 수준을 구분해야 한다.
 
