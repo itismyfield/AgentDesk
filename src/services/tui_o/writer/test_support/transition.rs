@@ -43,12 +43,7 @@ pub fn started(body: &[u8]) -> (Harness, PathBuf, SourceId, Arc<FakeBindings>) {
     (harness, path, source, bindings)
 }
 
-pub fn transcript(
-    beside: &Path,
-    name: &str,
-    session: &str,
-    body: &[u8],
-) -> (PathBuf, SourceId) {
+pub fn transcript(beside: &Path, name: &str, session: &str, body: &[u8]) -> (PathBuf, SourceId) {
     let path = beside.with_file_name(name);
     std::fs::write(&path, body).unwrap();
     let source = source_id_for(session, &path).unwrap();
@@ -100,11 +95,7 @@ pub fn chain_on(hops: usize, herdr: bool) -> Chain {
 }
 
 /// As `chain_on`, with hop `n`'s session and transcript body from `hop(n)`.
-pub fn chain_named(
-    hops: usize,
-    herdr: bool,
-    hop: impl Fn(usize) -> (String, Vec<u8>),
-) -> Chain {
+pub fn chain_named(hops: usize, herdr: bool, hop: impl Fn(usize) -> (String, Vec<u8>)) -> Chain {
     let (harness, a_path, a, bindings) = started(&row("m0", "before the switch"));
     let pane = format!("hrot-{}", uuid::Uuid::new_v4().simple());
     let (mut sources, mut paths) = (vec![a], vec![a_path.clone()]);
@@ -267,10 +258,7 @@ pub fn files(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
     found
 }
 
-pub fn execution(
-    current: &SourceId,
-    seen: DateTime<Utc>,
-) -> (Option<SourceId>, SourceHistory) {
+pub fn execution(current: &SourceId, seen: DateTime<Utc>) -> (Option<SourceId>, SourceHistory) {
     let visit = Visit {
         session: current.session_id.clone(),
         pin: Some(current.clone()),

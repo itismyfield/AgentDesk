@@ -303,11 +303,12 @@ fn thread_children_raw_parent_and_wrong_provider_are_rejected_before_floor() {
         "id": "43", "parent_id": "42", "type": 10, "name": "fixture"
     }))
     .unwrap();
-    let wrong = crate::services::session_host::surface_policy::VerifiedSurface::from_discord_for_test(
-        &channel,
-        RuntimeHandoffKind::CodexTui,
-    )
-    .unwrap();
+    let wrong =
+        crate::services::session_host::surface_policy::VerifiedSurface::from_discord_for_test(
+            &channel,
+            RuntimeHandoffKind::CodexTui,
+        )
+        .unwrap();
     let mut init = fixture(43);
     init.policy_parent = Some(42);
     assert!(

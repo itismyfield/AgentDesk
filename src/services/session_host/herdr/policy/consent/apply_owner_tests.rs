@@ -1,4 +1,4 @@
-use super::super::preview::{self, tests::fixture};
+use super::super::preview::{self, test_support::fixture};
 use super::*;
 use std::fs;
 

@@ -670,7 +670,10 @@ async fn a2_dispatch_settles_without_tui_receipt_but_completion_stays_gated() {
     inflight::save_inflight_state_create_new(&state.inflight_state).unwrap();
     let session = state.inflight_state.tmux_session_name.as_deref().unwrap();
     cap.observer().preparation_held(
-        &crate::services::claude_tui::input::PreparationHold::uncertain_for_test(session, "lost ACK".into()),
+        &crate::services::claude_tui::input::PreparationHold::uncertain_for_test(
+            session,
+            "lost ACK".into(),
+        ),
     );
     ctx.should_complete_work_dispatch_after_delivery = true;
     ctx.watcher_delivery_pin = None;

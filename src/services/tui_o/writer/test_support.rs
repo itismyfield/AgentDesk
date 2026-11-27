@@ -507,10 +507,7 @@ pub type Actor = tokio::task::JoinHandle<Option<super::deliver::StopCause>>;
 pub fn spawn(writer: Writer) -> (watch::Sender<bool>, Actor) {
     spawn_as(writer, ShadowProvider::Claude)
 }
-pub fn spawn_as(
-    mut writer: Writer,
-    provider: ShadowProvider,
-) -> (watch::Sender<bool>, Actor) {
+pub fn spawn_as(mut writer: Writer, provider: ShadowProvider) -> (watch::Sender<bool>, Actor) {
     let bindings = startup_log(&mut writer);
     spawn_with(writer, provider, bindings)
 }

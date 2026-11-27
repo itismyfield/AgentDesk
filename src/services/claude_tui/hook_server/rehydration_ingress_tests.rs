@@ -422,7 +422,11 @@ fn registration_completion_accepts_adoption_advanced_binding() {
                 "registration logged A before completion"
             );
             assert_eq!(
-                adopt_from_hook(&a, &b, &HookSignal::from_payload_for_test("session_start", &payload)),
+                adopt_from_hook(
+                    &a,
+                    &b,
+                    &HookSignal::from_payload_for_test("session_start", &payload)
+                ),
                 AdoptionHttp::Durable(DurableKind::Adopted)
             );
             assert_eq!(

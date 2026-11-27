@@ -154,8 +154,10 @@ fn bound(
     }
     std::fs::write(&path, text).unwrap();
     use crate::services::tui_prompt_dedupe::binding_events as p5;
-    let hook =
-        p5::HookSignal::from_payload_for_test("session_start", &serde_json::json!({"source": "startup"}));
+    let hook = p5::HookSignal::from_payload_for_test(
+        "session_start",
+        &serde_json::json!({"source": "startup"}),
+    );
     let proposal = p5::Proposal {
         channel_id: CHANNEL,
         provider: "codex",

@@ -178,7 +178,12 @@ fn force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg() {
                     let (wrapper, cli) = wrapper_with_cli(dir.path(), ignored, &mut spawned);
                     let pid = wrapper.id();
                     register(wrapper);
-                    turn(&shared, channel(n as u64), CapturedProcess::capture_for_test(pid)).await;
+                    turn(
+                        &shared,
+                        channel(n as u64),
+                        CapturedProcess::capture_for_test(pid),
+                    )
+                    .await;
                     assert!(
                         !force_kill(&registry, channel(n as u64), "").await,
                         "{ignored}"
@@ -193,7 +198,12 @@ fn force_kill_ends_a_process_backend_wrapper_and_its_cli_group_pg() {
                 let (held, held_cli) = wrapper_with_cli(dir.path(), "INT TERM", &mut spawned);
                 let held_pid = held.id();
                 let held = register(held);
-                turn(&shared, channel(5), CapturedProcess::capture_for_test(wrapper.id())).await;
+                turn(
+                    &shared,
+                    channel(5),
+                    CapturedProcess::capture_for_test(wrapper.id()),
+                )
+                .await;
                 assert!(!force_kill(&registry, channel(5), "").await);
                 let gone = gone_within(&[wrapper.id(), cli], Duration::from_secs(5));
                 assert!(gone, "the token's own wrapper and CLI group are gone");

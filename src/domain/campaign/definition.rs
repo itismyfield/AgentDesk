@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};

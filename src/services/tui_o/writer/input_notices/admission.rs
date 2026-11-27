@@ -31,7 +31,7 @@ thread_local! {
     pub static NOTICE_CALLS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn count_notice_refusal(piece: &PieceWork) {
     if piece.unit_key.kind == UnitKind::InputNotice {
         NOTICE_CALLS.with(|c| {

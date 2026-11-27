@@ -166,10 +166,7 @@ impl ClaudeCommandBuilder {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_future_for_test(
-        binary: &ClaudeBinary,
-        resolution: &BinaryResolution,
-    ) -> Self {
+    pub fn for_future_for_test(binary: &ClaudeBinary, resolution: &BinaryResolution) -> Self {
         Self::build(binary.program(), Some(resolution), ExecutionPurpose::Future)
     }
 

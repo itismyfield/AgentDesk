@@ -2680,8 +2680,7 @@ mod verified_admission_tests {
         let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        let fake =
-            crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+        let fake = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         let binary = root.path().join("codex");
         let _binary = Guard::set_path_after_shared_test_env_lock("AGENTDESK_CODEX_PATH", &binary);
         let marker = crate::services::tmux_common::session_temp_path(CANARY_TMUX, "spawn_nonce");
@@ -2849,8 +2848,7 @@ mod verified_admission_tests {
     #[test]
     fn verified_existing_ingress_holds_before_auth_lookup_cleanup_or_launch() {
         verified(|tmux, root| {
-            let fake =
-                crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
+            let fake = crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2933,8 +2931,7 @@ mod verified_admission_tests {
     #[test]
     fn verified_startup_dialog_error_returns_reason_without_teardown() {
         verified(|tmux, _| {
-            let fake =
-                crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
+            let fake = crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
             let _ = fake.take_calls();
             let nonce = crate::services::tmux_common::session_temp_path(tmux, "spawn_nonce");
             let before = std::fs::read(&nonce).unwrap();
@@ -2965,9 +2962,7 @@ mod verified_admission_tests {
         verified(|tmux, _| {
             for alive in [false, true] {
                 let fake =
-                    crate::services::provider_teardown::test_support::FakeTmux::install(
-                        tmux,
-                    );
+                    crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
                 let _liveness = crate::services::tmux_diagnostics::PaneLivenessOverrideGuard::set(
                     tmux,
                     if alive {
@@ -3004,11 +2999,7 @@ mod verified_admission_tests {
                     !calls.iter().any(|call| call.starts_with("kill-session")),
                     "{calls:?}"
                 );
-                assert!(
-                    !crate::services::provider_teardown::test_support::take_exit_reason(
-                        tmux
-                    )
-                );
+                assert!(!crate::services::provider_teardown::test_support::take_exit_reason(tmux));
             }
         });
     }

@@ -381,9 +381,7 @@ pub struct ForcedSessionHosts(Option<BootSessionHosts>, Option<BootMigration>);
 
 /// Installs a real selection's hosts and migration metadata on this thread until dropped.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub fn force_selected_for_test(
-    selection: migration::HostsBootSelection,
-) -> ForcedSessionHosts {
+pub fn force_selected_for_test(selection: migration::HostsBootSelection) -> ForcedSessionHosts {
     let (hosts, metadata) = selection.into_parts();
     ForcedSessionHosts(
         FORCED.with(|forced| forced.replace(Some(hosts))),

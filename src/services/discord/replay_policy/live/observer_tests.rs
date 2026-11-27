@@ -436,10 +436,17 @@ async fn p2_physical_facts_need_one_owned_seal_pg() {
                 assert!(live.observation_for_test().no_effect_evidence().is_none());
             }
             "timeout" => {
-                let (_, observed) = live.take_for_decision_for_test(Duration::ZERO).await.unwrap();
+                let (_, observed) = live
+                    .take_for_decision_for_test(Duration::ZERO)
+                    .await
+                    .unwrap();
                 assert!(observed.no_effect_evidence().is_none());
                 tap.finish_for_test(true, Seen::StderrDrained);
-                assert!(live.take_for_decision_for_test(Duration::ZERO).await.is_none());
+                assert!(
+                    live.take_for_decision_for_test(Duration::ZERO)
+                        .await
+                        .is_none()
+                );
             }
             _ => {
                 drop(tap);
@@ -852,7 +859,10 @@ async fn p3_file_text_is_activity_not_a_stale_error_pg() {
     let tap = RawTap::for_file_for_test(Some(&tok));
     tap.file_activity_for_test();
     tap.finish_for_test(true, Seen::StderrDrained);
-    assert!(!live.stale_for_test(), "assistant text is not a bridge Error");
+    assert!(
+        !live.stale_for_test(),
+        "assistant text is not a bridge Error"
+    );
     assert!(
         !crate::services::discord::replay_policy::ordinary_outcome(
             Some(&pool),

@@ -122,7 +122,10 @@ fn exact_self_observation_rechecks_row_nonce_and_cancellation_without_actor_wait
             row[field] = value;
             let bytes = serde_json::to_vec(&row).unwrap();
             std::fs::write(&path, &bytes).unwrap();
-            assert!(!observed.recheck_for_test(CHANNEL, TMUX), "accepted changed {field}");
+            assert!(
+                !observed.recheck_for_test(CHANNEL, TMUX),
+                "accepted changed {field}"
+            );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
         }
         std::fs::write(&path, original).unwrap();

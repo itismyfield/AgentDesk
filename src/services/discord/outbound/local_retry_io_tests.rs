@@ -139,7 +139,9 @@ async fn local_retry_http_uses_the_ledger_payload_and_spends_only_one_additional
         for _ in 0..3 {
             drop(writer);
             writer = open();
-            writer.retry_local_for_test(when + chrono::Duration::days(1)).await;
+            writer
+                .retry_local_for_test(when + chrono::Duration::days(1))
+                .await;
             assert!(!writer.has_local_retry_for_test());
         }
         let messages = format!("/api/v10/channels/{channel}/messages");

@@ -10,11 +10,7 @@ type Hook = Arc<dyn Fn() + Send + Sync>;
 static HOOKS: LazyLock<Mutex<HashMap<(Key, Point), Hook>>> = LazyLock::new(Default::default);
 pub struct Watch(Key, Point);
 
-pub fn watch(
-    owner: &HostedOwner,
-    at: Point,
-    hook: impl Fn() + Send + Sync + 'static,
-) -> Watch {
+pub fn watch(owner: &HostedOwner, at: Point, hook: impl Fn() + Send + Sync + 'static) -> Watch {
     let key = (
         owner.provider.clone(),
         owner.discord_token_hash.clone(),

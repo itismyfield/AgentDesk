@@ -726,7 +726,9 @@ async fn seed_ready_row(pool: &sqlx::PgPool, shared: &SharedData, channel: u64) 
 fn applied(consent: &Consent) -> Consent {
     let reserved = store().reserve_card_for_test(consent, now()).unwrap();
     let bound = store().bind_card_for_test(&reserved, 8_916_999).unwrap();
-    let accepted = store().decide_for_test(&bound, bound.owner, true, now()).unwrap();
+    let accepted = store()
+        .decide_for_test(&bound, bound.owner, true, now())
+        .unwrap();
     store()
         .record_apply_for_test(
             &accepted,

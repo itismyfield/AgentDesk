@@ -135,8 +135,8 @@ pub struct HookServerState {
     memento_feedback: PendingMementoFeedbackTracker,
     relay_receipts: RelayReceiptLedger,
     claude_projects_root: Option<PathBuf>,
-    #[cfg(test)]
-    pub(crate) broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
+    #[cfg(any(test, feature = "test-support"))]
+    pub broadcast_probe: Option<std::sync::Arc<HookBroadcastProbe>>,
 }
 
 impl HookServerState {
@@ -146,7 +146,7 @@ impl HookServerState {
             event_tx,
             memento_feedback: PendingMementoFeedbackTracker::default(),
             relay_receipts: RelayReceiptLedger::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             broadcast_probe: None,
             claude_projects_root:
                 crate::services::claude_tui::hook_output_guard::configured_claude_projects_root(),
@@ -621,7 +621,7 @@ async fn receive_hook(
         );
     } else {
         let primary_discarded = state.event_tx.send(event).is_err();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(probe) = state.broadcast_probe.as_ref() {
             probe
                 .primary_discarded

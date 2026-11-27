@@ -199,9 +199,8 @@ async fn live_case(mut body: String, tool: bool, control: &str) {
         DRIVER_CHANNEL_ID,
     )
     .await;
-    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
-        DRIVER_TMUX_SESSION,
-    );
+    let fake =
+        crate::services::provider_teardown::test_support::FakeTmux::install(DRIVER_TMUX_SESSION);
     fake.enable_fixture_launch();
     inflight::clear_inflight_state(&ProviderKind::Claude, DRIVER_CHANNEL_ID);
     driver.inflight.provider = "codex".into();

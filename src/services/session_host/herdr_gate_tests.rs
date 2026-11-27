@@ -769,7 +769,8 @@ fn a_herdr_followup_retire_is_refused_and_kills_nothing() {
     let target = hosted_target(&rig, vec![SERVER], off_where_dialled, launched_os(&rig));
     let gate = herdr(&target);
     let spy = SpyGuard::install(SpyState::default());
-    let retired = FollowupHost::herdr_for_test(gate).retire_for_test("stranded_prompt_draft_recreate", "test");
+    let retired = FollowupHost::herdr_for_test(gate)
+        .retire_for_test("stranded_prompt_draft_recreate", "test");
     assert_eq!(
         retired,
         HostInputOutcome::Refused(InputRefusal::Unsupported(HostKind::Herdr))

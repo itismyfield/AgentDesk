@@ -454,10 +454,7 @@ impl HerdrTarget {
 
     /// Test seam: sends `request` on the pinned judgment, as the input executor does.
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub fn send_pinned_for_test(
-        &self,
-        request: HerdrRequest,
-    ) -> Result<HostMutation, HostError> {
+    pub fn send_pinned_for_test(&self, request: HerdrRequest) -> Result<HostMutation, HostError> {
         self.send_pinned(request)
     }
 

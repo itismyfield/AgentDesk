@@ -2,33 +2,6 @@
 
 use super::*;
 
-pub(crate) mod test_support {
-    pub(crate) use super::super::test_support::FakeTmux;
-    pub(crate) use super::super::test_support::cleared;
-    use super::*;
-
-    /// Every clearance a teardown must refuse for `name`, labelled.
-    pub(crate) fn refusals(name: &str) -> Vec<(&'static str, Option<TeardownClearance>)> {
-        vec![
-            (
-                "refused",
-                Some(TeardownClearance::Refused("kept".to_string())),
-            ),
-            ("missing clearance", None),
-            (
-                "cleared for another session",
-                Some(cleared(&format!("{name}-other"))),
-            ),
-        ]
-    }
-
-    /// Whether the exit reason of `name` is on disk, removing it for the next case.
-    pub(crate) fn take_exit_reason(name: &str) -> bool {
-        let path = crate::services::tmux_common::session_temp_path(name, "exit_reason");
-        std::fs::remove_file(path).is_ok()
-    }
-}
-
 use test_support::{FakeTmux, cleared, refusals, take_exit_reason};
 
 const NAME: &str = "adk-w2a-teardown-sink";

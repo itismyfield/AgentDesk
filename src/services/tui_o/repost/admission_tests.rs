@@ -381,8 +381,14 @@ async fn a_new_holder_never_resends_an_admitted_original_and_a_changed_payload_g
     // Holder B re-derives the piece under its own serial, as after a fork or a renumbered ledger.
     let holder_b = Admitter::new(&pool, "node-b", BOT);
     let index = holder_b.admitted_keys_for_test(CHANNEL).await;
-    assert_eq!(index.original_for_test(&sent.unit_key, 0), OriginalGate::Admitted);
-    assert_eq!(index.original_for_test(&sent.unit_key, 1), OriginalGate::SendLocal);
+    assert_eq!(
+        index.original_for_test(&sent.unit_key, 0),
+        OriginalGate::Admitted
+    );
+    assert_eq!(
+        index.original_for_test(&sent.unit_key, 1),
+        OriginalGate::SendLocal
+    );
     let tool = unit("t10", UnitKind::Tool);
     assert_eq!(index.original_for_test(&tool, 0), OriginalGate::SendLocal);
 

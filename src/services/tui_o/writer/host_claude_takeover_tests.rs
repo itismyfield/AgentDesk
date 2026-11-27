@@ -26,7 +26,11 @@ fn reserve_for(channel: u64, parent: Option<u64>) -> test_override::ChannelsGuar
             false
         ));
     }
-    assert!(boot.output_candidate_for_test(channel).unwrap().late_adopt_origin());
+    assert!(
+        boot.output_candidate_for_test(channel)
+            .unwrap()
+            .late_adopt_origin()
+    );
     test_override::force_boot(boot)
 }
 
@@ -296,7 +300,12 @@ async fn reserved_for_with_custody(
 }
 
 fn reserved_adoption(channel: u64) -> Adoption {
-    test_override::with_channels(|boot| boot.unwrap().output_candidate_for_test(channel).unwrap().peek())
+    test_override::with_channels(|boot| {
+        boot.unwrap()
+            .output_candidate_for_test(channel)
+            .unwrap()
+            .peek()
+    })
 }
 
 async fn settle() {

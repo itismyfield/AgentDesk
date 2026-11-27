@@ -67,12 +67,12 @@ pub fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
 pub struct LocalEvidence {
     pieces: HashMap<(UnitKey, u32), (u64, ledger::PieceRecord)>,
     confirmations: HashMap<u64, Box<ledger::PostConfirmation>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub retained_payload_bytes: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub max_line_bytes: usize,
     /// Ledger lines this observation parsed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub parsed_lines: usize,
 }
 
@@ -201,7 +201,7 @@ pub fn local(
         ),
         None => (0, LocalEvidence::default(), 0, 0, (0, Vec::new())),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         state.parsed_lines = 0;
     }
@@ -232,12 +232,12 @@ pub fn local(
         if line.last() != Some(&b'\n') {
             return None;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             state.max_line_bytes = state.max_line_bytes.max(line.len());
         }
         let parsed: ledger::LedgerLine = serde_json::from_slice(&line).ok()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             state.parsed_lines += 1;
         }
@@ -346,7 +346,7 @@ pub fn local(
     {
         return None;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         state.retained_payload_bytes = payload_bytes;
     }

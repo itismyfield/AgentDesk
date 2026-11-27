@@ -6,7 +6,9 @@ use crate::config::test_instance::{
     MARKER_FOR_TEST as MARKER, load_instance_declaration_for_test as load_instance_declaration,
     read_json_for_test as read_json,
 };
-use crate::services::claude::herdr_turn::{prepare_herdr_for_login_test, with_input_admission_for_test};
+use crate::services::claude::herdr_turn::{
+    prepare_herdr_for_login_test, with_input_admission_for_test,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

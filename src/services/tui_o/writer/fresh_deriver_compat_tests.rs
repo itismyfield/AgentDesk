@@ -114,8 +114,7 @@ async fn fresh_proof_preserves_tool_cards_and_turn_summary_after_deriver_reset()
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     cards_on(root.path());
@@ -222,8 +221,7 @@ async fn pending_deriver_holds(case: Pending) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     cards_on(root.path());

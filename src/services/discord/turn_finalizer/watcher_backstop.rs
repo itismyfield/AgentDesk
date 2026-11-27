@@ -758,7 +758,8 @@ mod tests {
             let path = dir.path().join("rewritten.jsonl");
             std::fs::write(&path, &seen_start).unwrap();
             let held = HeldTurn::new(&path, 0, &path);
-            held.herdr.own_start_observed_for_test(seen_start.len() as u64, "a");
+            held.herdr
+                .own_start_observed_for_test(seen_start.len() as u64, "a");
             let inode = std::fs::metadata(&path).unwrap().ino();
             for (rewrite, ends) in [("b", false), ("a", true)] {
                 std::fs::write(&path, turn(rewrite)).unwrap();

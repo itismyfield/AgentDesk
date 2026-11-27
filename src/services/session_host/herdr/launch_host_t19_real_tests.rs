@@ -530,7 +530,8 @@ impl T19Server {
         let _ = child.wait();
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.owned.iter().any(|(pid, start)| {
-            provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start)
+            provenance::process_start_for_test(*pid)
+                .is_ok_and(|now| start_text(now.identity) == *start)
         }) && Instant::now() < deadline
         {
             std::thread::sleep(Duration::from_millis(100));
@@ -539,7 +540,8 @@ impl T19Server {
             .owned
             .iter()
             .filter(|(pid, start)| {
-                provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start)
+                provenance::process_start_for_test(*pid)
+                    .is_ok_and(|now| start_text(now.identity) == *start)
             })
             .map(|(pid, _)| *pid)
             .collect();
@@ -555,7 +557,9 @@ impl Drop for T19Server {
         self.stop();
         let mut left = Vec::new();
         for (pid, start) in &self.owned {
-            if provenance::process_start_for_test(*pid).is_ok_and(|now| start_text(now.identity) == *start) {
+            if provenance::process_start_for_test(*pid)
+                .is_ok_and(|now| start_text(now.identity) == *start)
+            {
                 // Only recorded child identities may receive a cleanup signal.
                 let _ = Command::new("/bin/kill")
                     .args(["-TERM", &pid.to_string()])
@@ -949,7 +953,8 @@ fn herdr_t19_resume_true_restores_claude_and_codex_as_shells_only() {
             "T19 restored AgentDesk pane is shell only: {info:?}"
         );
         let shell_start = provenance::process_start_for_test(shell).unwrap().identity;
-        let shell_exe = provenance::process_exec_path_for_test(shell).expect("T19 shell exec is readable");
+        let shell_exe =
+            provenance::process_exec_path_for_test(shell).expect("T19 shell exec is readable");
         assert_eq!(
             shell_exe, T19_SHELL,
             "T19 restored root is the configured shell"

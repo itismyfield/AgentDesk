@@ -33,8 +33,11 @@ fn managed(server: &RealServer) -> ManagedHome {
 
 fn reading(server: &RealServer) -> RestoreResume {
     let endpoint = server.endpoint();
-    let transport =
-        HerdrSocketTransport::new_for_test(&endpoint, HerdrSocketConfig::default(), LineJsonFraming);
+    let transport = HerdrSocketTransport::new_for_test(
+        &endpoint,
+        HerdrSocketConfig::default(),
+        LineJsonFraming,
+    );
     observe::read_restore_resume(&transport, &endpoint)
 }
 

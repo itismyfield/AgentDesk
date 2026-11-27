@@ -195,8 +195,10 @@ fn run_case(case: Case) {
                     bootstrap: false,
                 };
                 let _launching =
-                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(&turn.owner)
-                        .unwrap();
+                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(
+                        &turn.owner,
+                    )
+                    .unwrap();
                 let _clear = (case == Case::ClearBefore).then(|| {
                     crate::services::herdr_launch::clear_epoch::begin_clear(
                         &turn.owner.provider,

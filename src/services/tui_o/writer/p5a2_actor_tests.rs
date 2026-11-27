@@ -139,8 +139,7 @@ impl Fixture {
         std::fs::write(&marker, &context.execution_nonce).unwrap();
         dedupe::register_tmux_channel(&tmux, channel);
         dedupe::binding_events::set_test_root(Some(root.path()));
-        let fake =
-            crate::services::provider_teardown::test_support::FakeTmux::install(&tmux);
+        let fake = crate::services::provider_teardown::test_support::FakeTmux::install(&tmux);
         let at = chrono::Utc::now().to_rfc3339();
         let meta = serde_json::json!({"type":"session_meta","timestamp":at,"payload":{
             "id":id,"timestamp":at,"cwd":root.path(),"source":"cli","originator":"codex_cli_rs"}});

@@ -80,7 +80,10 @@ fn policy_legacy_mutations_keep_e7_and_need_no_new_evidence() {
         Ok(()),
         "legacy_mutation_no_new_proof_contract"
     );
-    assert_eq!(target.send_text_for_test("x").unwrap(), HostMutation::Confirmed);
+    assert_eq!(
+        target.send_text_for_test("x").unwrap(),
+        HostMutation::Confirmed
+    );
     target
         .pin(Mutation::Cancel)
         .expect("Legacy Cancel needs only E7");
@@ -91,7 +94,10 @@ fn policy_legacy_mutations_keep_e7_and_need_no_new_evidence() {
     target
         .pin_terminate_for_test()
         .expect("Legacy Terminate needs only E7");
-    assert_eq!(target.send_close_pinned_for_test(), CloseEffect::Acknowledged);
+    assert_eq!(
+        target.send_close_pinned_for_test(),
+        CloseEffect::Acknowledged
+    );
     assert_eq!(
         RESTORE_READS.with(Cell::get),
         3,
@@ -132,7 +138,10 @@ fn policy_user_grant_allows_all_mutations_without_current_file_policy() {
         Ok(()),
         "existing_grant_ignores_current_e7_contract"
     );
-    assert_eq!(target.send_text_for_test("x").unwrap(), HostMutation::Confirmed);
+    assert_eq!(
+        target.send_text_for_test("x").unwrap(),
+        HostMutation::Confirmed
+    );
     target
         .pin(Mutation::Cancel)
         .expect("historical grant admits exact Cancel");
@@ -143,7 +152,10 @@ fn policy_user_grant_allows_all_mutations_without_current_file_policy() {
     target
         .pin_terminate_for_test()
         .expect("historical grant admits exact Terminate");
-    assert_eq!(target.send_close_pinned_for_test(), CloseEffect::Acknowledged);
+    assert_eq!(
+        target.send_close_pinned_for_test(),
+        CloseEffect::Acknowledged
+    );
     crate::services::session_host::policy::permit::EVENTS.with(|events| {
         assert_eq!(
             events.borrow().as_slice(),
@@ -419,7 +431,10 @@ async fn policy_restored_durable_grant_reaches_input_gate_without_reading_store_
     store.save(grant.clone()).await.unwrap();
     drop(store);
     let restarted_store = FileGrantStore::new_for_test(Some(grant_root.clone()));
-    let restored = restarted_store.load_all_for_test(&[launch_endpoint]).await.unwrap();
+    let restored = restarted_store
+        .load_all_for_test(&[launch_endpoint])
+        .await
+        .unwrap();
     assert!(!restored.unknown_failure);
     let restored = restored
         .by_endpoint

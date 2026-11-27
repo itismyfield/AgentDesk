@@ -26,7 +26,7 @@ pub struct HookFanout {
     pub primary_discarded: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Default for HookEvent {
     fn default() -> Self {
         Self {

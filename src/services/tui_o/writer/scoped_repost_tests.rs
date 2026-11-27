@@ -25,8 +25,7 @@ async fn scoped_full_resume_blocks_actual_repost_before_sidecar_activation_pg() 
             .unwrap_or_else(|error| error.into_inner()),
     };
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = super::super::canary_policy::fresh_resume::proven(root.path());

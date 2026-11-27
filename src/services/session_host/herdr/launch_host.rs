@@ -554,10 +554,7 @@ impl SocketHerdrLaunchHost {
 
     /// Test seam: a create that skips the launch admission, as an admitted create runs.
     #[cfg(any(test, feature = "test-support"))]
-    pub fn create_eligible_for_test(
-        &self,
-        request: &HerdrCreateRequest,
-    ) -> HerdrCreateOutcome {
+    pub fn create_eligible_for_test(&self, request: &HerdrCreateRequest) -> HerdrCreateOutcome {
         self.create_eligible(request)
     }
 

@@ -363,11 +363,6 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             .clone()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    pub async fn repost_turn_for_test(&mut self) {
-        self.repost_turn().await
-    }
-
     /// One re-post turn, after this poll's owed pieces; nothing without a turn or once stopped.
     pub(crate) async fn repost_turn(&mut self) {
         let allowed = self.suspension.is_empty();
@@ -653,7 +648,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
             }
             Some(Err(Refusal::Withheld(reason))) => {
                 self.defer_notice_delivery(piece);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 super::input_notices::admission::count_notice_refusal(piece);
                 tracing::info!(channel, reason, unit_key = ?piece.unit_key,
                     "[tui_o] verified piece withheld before Prepared");

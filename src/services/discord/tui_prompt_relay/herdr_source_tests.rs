@@ -781,8 +781,10 @@ fn log_under(
     let marker = crate::services::tmux_common::session_temp_path(herdr.logical(), "spawn_nonce");
     let launched = std::fs::read_to_string(&marker).unwrap();
     std::fs::write(&marker, nonce).unwrap();
-    let hook =
-        binding_events::HookSignal::from_payload_for_test("session_start", &json!({"source": source}));
+    let hook = binding_events::HookSignal::from_payload_for_test(
+        "session_start",
+        &json!({"source": source}),
+    );
     let path = herdr.ingress.path(session).display().to_string();
     let proposal = binding_events::Proposal {
         channel_id: herdr.channel,

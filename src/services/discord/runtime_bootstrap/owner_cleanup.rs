@@ -178,8 +178,7 @@ mod tests {
         let owner = failed.routing_cleanup.native.as_ref().unwrap()["owner"]
             .as_str()
             .unwrap();
-        let recovered =
-            crate::services::provider_teardown::test_support::FakeTmux::install(owner);
+        let recovered = crate::services::provider_teardown::test_support::FakeTmux::install(owner);
         recovered.become_missing_after_kill();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

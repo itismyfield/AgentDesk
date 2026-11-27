@@ -439,8 +439,8 @@ fn granted_target(rig: &Rig, os: Arc<ProofOs>, granted: u32, missing: bool) -> H
     } else {
         transport
     };
-    let configured =
-        endpoint(&rig.server).with_mode_for_test(crate::config::session_hosts::EndpointMode::UserDefault);
+    let configured = endpoint(&rig.server)
+        .with_mode_for_test(crate::config::session_hosts::EndpointMode::UserDefault);
     let launch = crate::services::herdr_launch::HerdrLaunchEndpoint {
         execution_node: configured.execution_node().into(),
         config_key: configured.config_key().into(),

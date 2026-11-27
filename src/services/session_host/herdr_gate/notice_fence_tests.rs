@@ -43,7 +43,8 @@ fn notice_fence_closing_tombstone_survives_target_drop_and_a_new_nonce_is_indepe
     successor.execution_nonce = format!("{nonce}-next");
     successor.expected.as_mut().unwrap().binding_nonce = successor.execution_nonce.clone();
     let _successor =
-        HerdrTarget::new_for_test(endpoint, transport(&rig.server, Vec::new()), &successor).unwrap();
+        HerdrTarget::new_for_test(endpoint, transport(&rig.server, Vec::new()), &successor)
+            .unwrap();
     assert!(
         try_notice_fence(&configured, &successor.execution_nonce, || called
             .set(called.get() + 1))

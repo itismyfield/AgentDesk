@@ -81,9 +81,8 @@ async fn s2b1b_actual_driver_missing_episode_refuses_before_transport() {
         crate::services::tmux_common::session_temp_path(&context.tmux_session, "spawn_nonce");
     std::fs::create_dir_all(std::path::Path::new(&path).parent().unwrap()).unwrap();
     std::fs::write(path, &context.execution_nonce).unwrap();
-    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
-        &context.tmux_session,
-    );
+    let fake =
+        crate::services::provider_teardown::test_support::FakeTmux::install(&context.tmux_session);
     let _ = fake.take_calls();
     let (sender, _receiver) = std::sync::mpsc::channel();
     let result = tokio::task::spawn_blocking(move || {

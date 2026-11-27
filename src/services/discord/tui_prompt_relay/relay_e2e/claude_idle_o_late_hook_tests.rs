@@ -169,7 +169,12 @@ fn newer_explicit_hook_blocks_proof_before_follow_applies_it() {
             .unwrap();
         pending(&f);
         assert!(link(&f).hot_candidate.is_some());
-        assert!(f.channel().ledger().boundary_evidence_for_test(&f.b()).is_none());
+        assert!(
+            f.channel()
+                .ledger()
+                .boundary_evidence_for_test(&f.b())
+                .is_none()
+        );
         e.deliver(100).await;
         assert_eq!(f.posts(), ["A_BODY"]);
         e.capture().unwrap();
@@ -438,7 +443,12 @@ fn explicit_resume_and_automatic_resolution_share_one_committed_order() {
             e.deliver(100).await;
             if point == "snapshot" || !mutex_held {
                 assert_eq!(f.posts(), ["A_BODY"], "Hook durable first at {point}");
-                assert!(f.channel().ledger().boundary_evidence_for_test(&f.b()).is_none());
+                assert!(
+                    f.channel()
+                        .ledger()
+                        .boundary_evidence_for_test(&f.b())
+                        .is_none()
+                );
                 e.capture().unwrap();
                 refined(&f, "resume");
             } else {

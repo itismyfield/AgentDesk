@@ -1,3 +1,4 @@
+use super::TeardownClearance;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
@@ -199,4 +200,25 @@ pub fn cleared(name: &str) -> TeardownClearance {
         observed: None,
     };
     TeardownClearance::Cleared(clear_legacy_session(&target, change).expect("legacy row"))
+}
+
+/// Every clearance a teardown must refuse for `name`, labelled.
+pub fn refusals(name: &str) -> Vec<(&'static str, Option<TeardownClearance>)> {
+    vec![
+        (
+            "refused",
+            Some(TeardownClearance::Refused("kept".to_string())),
+        ),
+        ("missing clearance", None),
+        (
+            "cleared for another session",
+            Some(cleared(&format!("{name}-other"))),
+        ),
+    ]
+}
+
+/// Whether the exit reason of `name` is on disk, removing it for the next case.
+pub fn take_exit_reason(name: &str) -> bool {
+    let path = crate::services::tmux_common::session_temp_path(name, "exit_reason");
+    std::fs::remove_file(path).is_ok()
 }

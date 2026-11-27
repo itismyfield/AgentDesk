@@ -57,8 +57,10 @@ fn rollout(harness: &Harness, name: &str, bytes: &[u8]) -> (PathBuf, SourceId) {
 
 /// Appends the hook's bind of `path` through the binding log's own writer.
 fn bind_late(channel: u64, path: &Path) {
-    let hook =
-        p5::HookSignal::from_payload_for_test("session_start", &serde_json::json!({"source": "startup"}));
+    let hook = p5::HookSignal::from_payload_for_test(
+        "session_start",
+        &serde_json::json!({"source": "startup"}),
+    );
     let proposal = p5::Proposal {
         channel_id: channel,
         provider: "codex",
@@ -499,9 +501,8 @@ fn settled_resume_for_first_init(channel: u64, history: bool) -> (Harness, Settl
     )
     .unwrap();
     dedupe::register_tmux_channel(&context.tmux_session, channel);
-    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
-        &context.tmux_session,
-    );
+    let fake =
+        crate::services::provider_teardown::test_support::FakeTmux::install(&context.tmux_session);
     let path = context
         .provider_root
         .as_ref()

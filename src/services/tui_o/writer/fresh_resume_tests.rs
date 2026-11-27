@@ -300,8 +300,7 @@ async fn first_fresh_proof_with_no_old_cursor_records_nonce_and_stops_ownership_
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (current, source) = proven(root.path());
@@ -813,8 +812,7 @@ async fn scope_during_transition(inspect: bool) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let n2 = (!inspect).then(|| proven(root.path()).1);
@@ -957,8 +955,7 @@ async fn selection_install_fault(after_rename: bool) {
     let _dedupe = DedupeGuard::acquire();
     let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
     let _scope = ScopeFixture::new();
-    let _tmux =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _tmux = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     dedupe::reset_state_for_tests();
     dedupe::binding_events::set_test_root(Some(root.path()));
     let (_, old) = proven(root.path());

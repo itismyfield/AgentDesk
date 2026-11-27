@@ -54,7 +54,10 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
                 crate::services::tui_prompt_dedupe::clear_tmux_runtime_binding(&session);
             }
             if !stop_first {
-                assert!(sink.writer_first_key_for_test(), "{case}: the writer keys first");
+                assert!(
+                    sink.writer_first_key_for_test(),
+                    "{case}: the writer keys first"
+                );
                 append(
                     &path,
                     serde_json::json!({"type":"system","subtype":"turn_duration"}),
@@ -72,7 +75,10 @@ fn a_stop_takes_a_fresh_writers_gate_only_before_its_first_key() {
                         "{case}: main cancels"
                     );
                     assert!(cancelled, "{case}");
-                    assert!(!sink.writer_first_key_for_test(), "{case}: the writer sends no key");
+                    assert!(
+                        !sink.writer_first_key_for_test(),
+                        "{case}: the writer sends no key"
+                    );
                 }
                 false => {
                     assert!(

@@ -385,7 +385,9 @@ fn hold_denied(source: u64, generation: u64) -> Consent {
         .unwrap()
         .into_consent();
     match held.state {
-        State::Pending => store().decide_for_test(&held, held.owner, false, now()).unwrap(),
+        State::Pending => store()
+            .decide_for_test(&held, held.owner, false, now())
+            .unwrap(),
         _ => held,
     }
 }
@@ -650,7 +652,9 @@ async fn applied_boot_replay_never_runs_a_returned_input() {
 }
 
 fn applied(held: &Consent) -> Consent {
-    let accepted = store().decide_for_test(held, held.owner, true, now()).unwrap();
+    let accepted = store()
+        .decide_for_test(held, held.owner, true, now())
+        .unwrap();
     let receipt = consent::ApplyResult {
         before: Some([1; 32]),
         after: Some([4; 32]),

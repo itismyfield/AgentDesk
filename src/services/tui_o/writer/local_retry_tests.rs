@@ -103,7 +103,9 @@ async fn local_retry_real_deliver_consumes_once_and_children_never_receive_a_bud
             drop(writer);
             writer = harness.writer();
             assert_eq!(
-                writer.retry_local_for_test(when + chrono::Duration::days(1)).await,
+                writer
+                    .retry_local_for_test(when + chrono::Duration::days(1))
+                    .await,
                 Step::Done
             );
             assert_eq!(writer.deliver(&item).await, Step::Done);

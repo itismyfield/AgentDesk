@@ -165,7 +165,11 @@ impl PolicyCase {
             case.fx.rt.block_on(store.save(grant.clone())).unwrap();
             grant.encode_for_test().unwrap()
         });
-        let restored = case.fx.rt.block_on(store.load_all_for_test(&[launch])).unwrap();
+        let restored = case
+            .fx
+            .rt
+            .block_on(store.load_all_for_test(&[launch]))
+            .unwrap();
         let registry = case
             .fx
             .rig

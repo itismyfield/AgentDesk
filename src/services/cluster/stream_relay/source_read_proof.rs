@@ -105,12 +105,7 @@ impl SourceCertificate {
     }
 
     #[cfg(all(any(test, feature = "test-support"), unix))]
-    pub fn confirmed(
-        seal: &PrefixSeal,
-        end: u64,
-        generation: i64,
-        reset: u64,
-    ) -> Option<Self> {
+    pub fn confirmed(seal: &PrefixSeal, end: u64, generation: i64, reset: u64) -> Option<Self> {
         (generation != 0
             && generation == seal.generation
             && reset == seal.reset

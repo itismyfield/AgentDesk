@@ -82,7 +82,10 @@ async fn transition_port_of_a_restarted_run_refuses_the_old_runs_requests_and_re
     assert_eq!(consumed.get(), 0, "[T3:old_reply]");
     let ended = a.request(inspect(), context()).await.err();
     assert_eq!(ended.as_deref(), Some("actor ended"), "[T3:old_mailbox]");
-    let foreign = b.request_as_for_test(&a, inspect(), context()).await.unwrap();
+    let foreign = b
+        .request_as_for_test(&a, inspect(), context())
+        .await
+        .unwrap();
     assert_eq!(
         foreign.refused,
         Some(Refused::ForeignRun),

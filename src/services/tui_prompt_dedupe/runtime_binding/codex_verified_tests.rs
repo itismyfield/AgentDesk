@@ -1201,7 +1201,10 @@ fn nonverified_incarnations_keep_legacy_publication_independent_of_process_mode(
             SOURCE_MODE_TEST.with(|m| m.set(Some(mode)));
             let result = h.send("user-prompt-submit", ID, json!(PROMPT), None);
             SOURCE_MODE_TEST.with(|m| m.set(None));
-            assert!(!result.refused_for_test(), "{policy:?}/{mode:?}: {result:?}");
+            assert!(
+                !result.refused_for_test(),
+                "{policy:?}/{mode:?}: {result:?}"
+            );
             register_tmux_runtime_binding(&h.context.tmux_session, h.binding());
             assert!(h.consumer().is_some());
             let log = fs::read_to_string(
@@ -1234,7 +1237,10 @@ fn actual_commit_rechecks_open_file_identity_and_startup_recovers_bad_initial_up
             fs::rename(&path, path.with_extension("old")).unwrap();
             fs::write(path, bytes).unwrap();
         });
-        assert!(h.send("session-start", ID, Value::Null, None).refused_for_test());
+        assert!(
+            h.send("session-start", ID, Value::Null, None)
+                .refused_for_test()
+        );
         assert!(h.fold().verified.is_none());
         h.absent();
     }

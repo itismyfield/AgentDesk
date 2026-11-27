@@ -1422,7 +1422,11 @@ mod tests {
         let _boot = test_override::force_candidates(&[(owned, RuntimeHandoffKind::ClaudeTui)]);
         for (channel, _, candidate) in boot_ownership() {
             if channel == owned {
-                assert!(candidate.expect("selected channel").confirm_store_for_test());
+                assert!(
+                    candidate
+                        .expect("selected channel")
+                        .confirm_store_for_test()
+                );
             }
         }
 

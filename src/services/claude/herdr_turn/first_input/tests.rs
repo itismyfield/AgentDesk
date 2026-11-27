@@ -177,8 +177,10 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     cancel: None,
                 };
                 let _launching =
-                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(&turn.owner)
-                        .unwrap();
+                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(
+                        &turn.owner,
+                    )
+                    .unwrap();
                 let _clear = clear_first.then(|| {
                     crate::services::herdr_launch::clear_epoch::begin_clear(
                         &turn.owner.provider,

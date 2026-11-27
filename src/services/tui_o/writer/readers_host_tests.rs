@@ -878,7 +878,10 @@ async fn readers_s1b_host_dormant_membership_is_per_channel() {
         [CHANNEL, OTHER]
     );
     assert_eq!(
-        boot.dormant_channels_for_test().iter().copied().collect::<Vec<_>>(),
+        boot.dormant_channels_for_test()
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
         [CHANNEL]
     );
     let (io, ready) = (TestIo::over(&a), Arc::new(Readiness::default()));

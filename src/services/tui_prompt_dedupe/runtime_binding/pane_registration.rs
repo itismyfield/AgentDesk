@@ -118,7 +118,7 @@ pub fn register_rehydrated_tmux_runtime_binding_under_source_authority(
 
 /// A restore names how the pane's binding is logged; see `Record`. `None` when nothing was published;
 /// an unpublished `Persisted` when the pane's pin refused it.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn register_claude_pane_with(
     tmux: &str,
     channel: u64,
@@ -134,7 +134,7 @@ pub fn register_unmoved_claude_pane(tmux: &str, channel: u64, binding: TuiRuntim
     register_judged_claude_pane(tmux, channel, binding, None, Some(&judged))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn register_claude_pane_with_cause(
     tmux: &str,
     channel: u64,

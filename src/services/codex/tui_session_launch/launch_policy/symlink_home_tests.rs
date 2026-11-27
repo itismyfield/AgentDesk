@@ -65,8 +65,7 @@ fn adopt_under_symlinked_home(via_alias: bool) -> IngressOutcome {
     std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
     std::fs::write(&marker, &context.execution_nonce).unwrap();
     dedupe::register_tmux_channel(CANARY_TMUX, CANARY_CHANNEL);
-    let _fake =
-        crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
+    let _fake = crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
     let home = if via_alias {
         alias
     } else {
