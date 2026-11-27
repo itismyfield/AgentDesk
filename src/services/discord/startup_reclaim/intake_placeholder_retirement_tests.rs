@@ -43,7 +43,7 @@ fn intake_retirement_does_not_turn_prose_or_other_spinners_into_orphan_candidate
 #[tokio::test]
 async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() {
     use crate::services::discord::health::test_support::{MockDiscord, message_json};
-    use crate::services::discord::{runtime_store, tui_direct_pending_start};
+    use crate::services::discord::{inflight, runtime_store, tui_direct_pending_start};
     use axum::http::Method;
     use std::fs;
 
@@ -58,6 +58,7 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
     const OTHER_ANCHOR: u64 = 107;
     const ABORT_OWNER: u64 = 108;
     const QUARANTINED_ABORT: u64 = 109;
+    const LATE_INFLIGHT: u64 = 110;
     const NOW: i64 = 1_700_000_000;
 
     let root = crate::config::TestRuntimeRootGuard::new();
@@ -119,6 +120,7 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
         MISMATCHED,
         ABORT_OWNER,
         QUARANTINED_ABORT,
+        LATE_INFLIGHT,
         UNOWNED,
     ]
     .into_iter()
@@ -126,11 +128,33 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
     .collect();
     let late_path = path(LATE_OWNER);
     let late_record = record(LATE_OWNER);
+    let row = inflight::InflightTurnState::new(
+        provider.clone(),
+        CHANNEL,
+        None,
+        0,
+        0,
+        LATE_INFLIGHT,
+        "prompt".to_owned(),
+        None,
+        None,
+        None,
+        None,
+        0,
+    );
+    let row_path = inflight::inflight_state_path(
+        &runtime_store::discord_inflight_root().unwrap(),
+        &provider,
+        CHANNEL,
+    );
+    fs::create_dir_all(row_path.parent().unwrap()).unwrap();
+    let row_bytes = serde_json::to_vec(&row).unwrap();
     let page = serde_json::Value::Array(messages);
     let channel_messages = format!("/channels/{CHANNEL}/messages");
     let discord = MockDiscord::start_with(Arc::new(move |method, path| {
         if method == Method::GET && path.ends_with(&channel_messages) {
             fs::write(&late_path, &late_record).unwrap();
+            fs::write(&row_path, &row_bytes).unwrap();
             Some((200, page.clone()))
         } else {
             None
@@ -154,6 +178,10 @@ async fn runtime_hygiene_startup_reclaim_keeps_uncertain_pending_start_owners() 
         path(LATE_OWNER).is_file(),
         "the page introduced a late owner"
     );
+    let live_row = inflight::load_inflight_state_read_only_result(&provider, CHANNEL)
+        .unwrap()
+        .unwrap();
+    assert_eq!(live_row.current_msg_id, LATE_INFLIGHT);
     let calls = discord.calls_for(CHANNEL);
     let attempted: Vec<_> = calls
         .iter()
