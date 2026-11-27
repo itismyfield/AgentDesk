@@ -2,7 +2,7 @@ use crate::db::server_campaigns::evidence_store::*;
 use crate::domain::campaign::evidence::EvidenceDecision;
 use crate::domain::campaign::evidence::EvidenceStatus;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence::EvidenceEnvelope,
     evidence_gate::{
         GATE_RULE_VERSION,

@@ -2,12 +2,12 @@ use super::*;
 use crate::services::campaign_execution::{
     adk_workspace::WorkspaceObservation,
     candidate_seal::CandidateSeal,
-    control::tests as domain,
+    control::test_support as domain,
     definition::{AcceptanceCondition, VerificationKind},
     evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
     model::*,
     profile::*,
-    verification_run::*,
+    verification_run::{test_support as a1, *},
 };
 
 pub(crate) const OUTPUT: &str = "output-h1";
@@ -367,8 +367,9 @@ fn a1_drive(
     exit: impl Fn(&str) -> i32,
     checkout_sha: &str,
 ) -> (VerificationRun, BTreeMap<String, Action>) {
-    use crate::services::campaign_execution::verification_run::tests as a1;
-    let mut registration = a1::registration();
+    use crate::services::campaign_execution::verification_run::tests::registration;
+
+    let mut registration = registration();
     registration.spec = spec.clone();
     registration.check_id = check_id.into();
     let binding = registration.owner_binding.clone();
@@ -390,7 +391,6 @@ pub(crate) fn a1_finish(
     exit: impl Fn(&str) -> i32,
     checkout_sha: &str,
 ) {
-    use crate::services::campaign_execution::verification_run::tests as a1;
     let check_id = run.origin.check_id.clone();
     let check_id = check_id.as_str();
     let selection = spec.check(check_id).unwrap().selection;
@@ -493,7 +493,7 @@ fn a1_collected(
     audit_exit: i32,
     checkout_sha: &str,
 ) -> (VerificationRun, BTreeMap<String, Action>) {
-    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
+    let spec = a1::spec_with_audit();
     let exit = |phase: &str| match phase {
         "test" => test_exit,
         "audit" => audit_exit,
@@ -515,7 +515,7 @@ fn spec_plan(spec: &VerificationSpec, run: &VerificationRun) -> VerificationPlan
 
 #[test]
 fn a1_collected_sealed_output_is_judged_against_the_seal_not_the_input_binding() {
-    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
+    let spec = a1::spec_with_audit();
     let judge = |(run, actions): (VerificationRun, BTreeMap<String, Action>)| {
         assess_verification(&run, &actions, &spec_plan(&spec, &run))
     };
@@ -539,7 +539,7 @@ fn a1_collected_sealed_output_is_judged_against_the_seal_not_the_input_binding()
 
 #[test]
 fn each_v_is_judged_on_its_own_check_of_a_multi_check_plan() {
-    let mut spec = crate::services::campaign_execution::verification_run::tests::spec();
+    let mut spec = a1::spec();
     let mut second = spec.checks[0].clone();
     spec.checks[0].id = "c1".into();
     second.id = "c2".into();
@@ -590,7 +590,7 @@ fn each_v_is_judged_on_its_own_check_of_a_multi_check_plan() {
 
 #[test]
 fn a1_collected_preparation_failure_without_a_confirmed_cause_is_not_a_quality_failure() {
-    let spec = crate::services::campaign_execution::verification_run::tests::spec_with_audit();
+    let spec = a1::spec_with_audit();
     // The plan helper's own write failure (ENOSPC) exits 1 with no signal; nothing confirms a code error.
     let plan_write_failure = |phase: &str| if phase == "plan" { 1 } else { 0 };
     let passed = [("a", TestOutcome::Passed)];

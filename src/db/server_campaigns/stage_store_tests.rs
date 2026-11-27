@@ -1,7 +1,7 @@
 use crate::db::server_campaigns::*;
 use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
-    candidate_seal::CandidateSeal, control::tests as domain, stage_fsm::tests as fsm,
+    candidate_seal::CandidateSeal, control::test_support as domain, stage_fsm::tests as fsm,
     verification_run::Slot,
 };
 use crate::services::krx_db_tests::server_campaigns_storage::{

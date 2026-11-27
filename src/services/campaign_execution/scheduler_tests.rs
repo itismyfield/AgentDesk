@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::campaign_execution::{
-    control::{decide, tests as domain},
+    control::{decide, test_support as domain},
     lifecycle::tests as life,
     stage_fsm::tests as fsm,
 };

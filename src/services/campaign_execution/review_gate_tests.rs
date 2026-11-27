@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence_gate::tests::{OUTPUT, actions, assess, collected, registered, seal},
     profile::TestOutcome,
     verification_run::{Cancellation, NotSentReason, PhaseInitiation, VerificationCollection},
@@ -420,7 +420,7 @@ fn resume_replaces_collected_interruptions_and_unclassified_preparation_failures
     let mut prepared = interrupted.clone();
     prepared.collection = Some(VerificationCollection::PreparationFailed {
         phase_id: "plan".into(),
-        record: crate::services::campaign_execution::verification_run::tests::result(
+        record: crate::services::campaign_execution::verification_run::test_support::result(
             "plan",
             1,
             crate::services::campaign_execution::verification_run::PhaseOutput::None,

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use super::*;
 #[cfg(unix)]
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::campaign_execution::control::tests as domain;
+use crate::services::campaign_execution::control::test_support as domain;
 #[cfg(unix)]
 use crate::services::campaign_execution::stage_fsm::tests as fsm;
 
@@ -464,7 +464,7 @@ async fn a_retained_phase_result_is_committed_once_and_then_acknowledged_pg() {
     use crate::services::campaign_execution::{
         evidence::{EvidenceEnvelope, TuiPayload, TuiSubmission},
         evidence_gate::tests::{REPO, workspace},
-        verification_run::{PhaseOutput, ProcessIdentity, tests as a1},
+        verification_run::{PhaseOutput, ProcessIdentity, test_support as a1},
     };
 
     let db = TestPostgresDb::create().await;

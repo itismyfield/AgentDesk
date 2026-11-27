@@ -1,7 +1,7 @@
 use crate::db::server_campaigns::*;
 use crate::domain::campaign::model::*;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence::{EvidenceEnvelope, EvidenceStatus, TuiPayload, TuiSubmission},
     evidence_gate::tests::{REPO, workspace},
     profile::{ExecutedTest, ExecutionEnvironment, TestOutcome},
@@ -9,7 +9,7 @@ use crate::services::campaign_execution::{
     verification_run::{
         ArtifactRef, ListedTest, NotSentReason, PhaseInitiation, PhaseInput, PhaseKind,
         PhaseOutput, ProcessIdentity, TerminationObservation, TreeState, VerificationCollection,
-        digest_of, plan_scope, tests as a1,
+        digest_of, plan_scope, test_support as a1,
     },
 };
 use crate::services::krx_db_tests::server_campaigns_storage::{

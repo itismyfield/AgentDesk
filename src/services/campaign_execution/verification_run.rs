@@ -4,13 +4,14 @@ pub use crate::domain::campaign::verification_run::*;
 use super::model::{Action, ActionKind, ActionState, AttemptBinding, HostGate, Repository, Stage};
 #[cfg(test)]
 use super::profile::{
-    Candidate, CheckKind, EnvironmentComponent, ExecutedTest, ExecutionEnvironment,
-    ResourceIdentity, TestOutcome,
+    Candidate, EnvironmentComponent, ExecutedTest, ResourceIdentity, TestOutcome,
 };
 #[cfg(test)]
-use chrono::{DateTime, Utc};
-#[cfg(test)]
 use std::collections::BTreeMap;
+
+#[cfg(any(test, feature = "test-support"))]
+#[path = "verification_run_test_support.rs"]
+pub mod test_support;
 
 #[cfg(test)]
 #[path = "verification_run_tests.rs"]

@@ -9,7 +9,7 @@ use crate::db::server_campaigns::{
     command_transaction::StoreRequest,
 };
 use crate::domain::campaign::model::{Command, CommandEnvelope};
-use crate::services::campaign_execution::control::tests as domain;
+use crate::services::campaign_execution::control::test_support as domain;
 
 fn render(outcome: &CommandOutcome) -> StoreResult<ReceiptResponse> {
     Ok(ReceiptResponse {

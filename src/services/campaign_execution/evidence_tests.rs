@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::campaign_execution::{
-    control::tests as domain,
+    control::test_support as domain,
     evidence_gate::tests::{OUTPUT, collected, seal},
     model::{AttemptOutcome, NodeRuntime, Stage},
     profile::TestOutcome,

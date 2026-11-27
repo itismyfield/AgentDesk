@@ -1,7 +1,7 @@
 use crate::db::server_campaigns::*;
 use crate::domain::campaign::definition::DefinitionInput;
 use crate::domain::campaign::model::*;
-use crate::services::campaign_execution::control::{self, tests as domain};
+use crate::services::campaign_execution::control::{self, test_support as domain};
 use crate::services::krx_db_tests::server_campaigns_storage::{
     Harness, applied, envelope, execute, render, send,
 };

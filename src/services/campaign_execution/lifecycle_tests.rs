@@ -2,7 +2,7 @@ use serde_json::json;
 
 use super::*;
 use crate::services::campaign_execution::{
-    control::{decide, tests as domain},
+    control::{decide, test_support as domain},
     definition,
     evidence_gate::StageAssessment,
     stage_fsm::tests as fsm,
