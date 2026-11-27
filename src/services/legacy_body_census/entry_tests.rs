@@ -497,31 +497,6 @@ fn journal_initialization_is_pinned_before_recovery_and_drain() {
     );
 }
 
-#[tokio::test]
-async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
-    let root = tempfile::tempdir().unwrap();
-    std::fs::create_dir(root.path().join("runtime")).unwrap();
-    std::fs::write(
-        root.path().join("runtime/dcserver.pid"),
-        std::process::id().to_string(),
-    )
-    .unwrap();
-    let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
-    let boot = boot();
-    let journal = Journal::open(
-        root.path(),
-        &boot,
-        None,
-        Duration::from_secs(2),
-        Arc::new(|| {}),
-    )
-    .await;
-    let written = header(root.path(), &boot);
-    assert_eq!(written["doctor_boot_id"], doctor);
-    assert_ne!(written["doctor_boot_id"], written["boot_id"]);
-    assert_eq!(journal.snapshot()["journal_ready"], true);
-}
-
 #[test]
 fn dangling_or_cyclic_predecessors_are_inconclusive() {
     use std::collections::BTreeMap;

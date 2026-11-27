@@ -70,6 +70,7 @@ plist = "1.8"
 adk-base = { path = "../adk-base", features = ["test-support"] }
 adk-test-support = { path = "../adk-test-support" }
 filetime = "0.2"
+plist = "1.8"
 tokio = { version = "1", features = ["test-util"] }
 tower = { version = "0.5", features = ["util"] }
 

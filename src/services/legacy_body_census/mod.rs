@@ -158,6 +158,15 @@ impl Journal {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub async fn boot_journal_snapshot_for_test(
+    root: &std::path::Path,
+    boot: &crate::services::process_boot::Boot,
+) -> Value {
+    let journal = Journal::open(root, boot, None, Duration::from_secs(2), Arc::new(|| {})).await;
+    journal.snapshot()
+}
+
 static JOURNAL: OnceLock<Journal> = OnceLock::new();
 static READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 

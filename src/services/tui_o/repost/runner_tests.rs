@@ -649,12 +649,8 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         native_key: "t18".into(),
         kind: UnitKind::Body,
     };
-    let approved = ApprovedRejected {
-        rejected_serial: 2,
-        key: PieceKey::new(unit, 0).unwrap(),
-        payload: "piece".into(),
-        anchor: 40,
-    };
+    let approved =
+        ApprovedRejected::for_test(2, PieceKey::new(unit, 0).unwrap(), "piece".into(), 40);
     let resume = |check| DispatchIntent::OperatorResume {
         approval_id: "approval-1".into(),
         approved: approved.clone(),
@@ -668,7 +664,12 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
     let mut on = runner(&pool, &run);
     let stale = on.try_next_dispatch(&mut writer, resume(&Approves(false)));
     assert_eq!(turn_step(&stale.await.unwrap()), TurnStep::Stopped);
-    assert!(load(&pool, &approved.key).await.unwrap().is_none());
+    assert!(
+        load(&pool, approved.key_for_test())
+            .await
+            .unwrap()
+            .is_none()
+    );
 
     // T18: the 403 original, the approved retry goes uncertain, Auto takes the last slot.
     let admission = on.try_next_dispatch(&mut writer, resume(&Approves(true)));
@@ -693,10 +694,10 @@ async fn f5_t18_t19_operator_and_auto_share_the_three_post_budget_pg() {
         .finish(&mut writer, &pool)
         .await
         .unwrap();
-    let intent = DispatchIntent::Auto(evidence(&pool, &approved.key, &run).await);
+    let intent = DispatchIntent::Auto(evidence(&pool, approved.key_for_test(), &run).await);
     let last = on.try_next_dispatch(&mut writer, intent);
     assert_eq!(turn_step(&last.await.unwrap()), TurnStep::Done);
-    let spent = slots(&pool, &approved.key).await;
+    let spent = slots(&pool, approved.key_for_test()).await;
     assert_eq!(spent.len(), 3);
     assert_eq!(spent[0], (0, Some(AttemptResult::Rejected)));
     assert_eq!(wire.posts(), 2);

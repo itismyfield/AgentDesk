@@ -479,11 +479,13 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
     let dir = tempfile::tempdir().unwrap();
     let mut log = sidecar(&dir);
     let admitter = Admitter::new(&pool, "node-a", BOT);
-    let approved = |native_key: &str| ApprovedRejected {
-        rejected_serial: 2,
-        key: PieceKey::new(unit(native_key, UnitKind::Body), 0).unwrap(),
-        payload: "piece".into(),
-        anchor: 40,
+    let approved = |native_key: &str| {
+        ApprovedRejected::for_test(
+            2,
+            PieceKey::new(unit(native_key, UnitKind::Body), 0).unwrap(),
+            "piece".into(),
+            40,
+        )
     };
     let operator = || Intent::OperatorResume {
         approval_id: "approval-1".into(),
@@ -492,9 +494,15 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
     // 403 original, approved retry goes uncertain, the automatic reconfirm takes the last slot.
     let first = approved("t18");
     let known = PriorBudget::Known { counted_posts: 1 };
-    let admitted = admitter.adopt_operator(&first, known).await.unwrap();
+    let admitted = admitter
+        .adopt_operator_for_test(&first, known)
+        .await
+        .unwrap();
     assert!(matches!(admitted, AdmitOutcome::Admitted(_)));
-    assert_eq!(send_uncertain(&pool, &first.key, operator()).await, 1);
+    assert_eq!(
+        send_uncertain(&pool, first.key_for_test(), operator()).await,
+        1
+    );
     let retry = record(
         "t18",
         "piece",
@@ -510,32 +518,38 @@ async fn an_operator_retry_and_the_automatic_reconfirm_share_one_three_post_budg
         .unwrap();
     assert!(matches!(joined, AdmitOutcome::Existing(_)));
     assert_eq!(
-        send_uncertain(&pool, &first.key, Intent::AutoReconfirm).await,
+        send_uncertain(&pool, first.key_for_test(), Intent::AutoReconfirm).await,
         2
     );
     assert_eq!(
-        next_grant(&pool, &first.key).await,
+        next_grant(&pool, first.key_for_test()).await,
         GrantOutcome::CapReached
     );
-    let results: Vec<_> = attempts(&pool, &first.key).await.unwrap();
+    let results: Vec<_> = attempts(&pool, first.key_for_test()).await.unwrap();
     assert_eq!(results.len(), 3);
     assert_eq!(results[0].result, Some(AttemptResult::Rejected));
 
     // Sends an operator already made before admission count against the same three.
     let earlier = approved("t18-earlier");
     let known = PriorBudget::Known { counted_posts: 2 };
-    admitter.adopt_operator(&earlier, known).await.unwrap();
-    assert_eq!(send_uncertain(&pool, &earlier.key, operator()).await, 2);
+    admitter
+        .adopt_operator_for_test(&earlier, known)
+        .await
+        .unwrap();
     assert_eq!(
-        next_grant(&pool, &earlier.key).await,
+        send_uncertain(&pool, earlier.key_for_test(), operator()).await,
+        2
+    );
+    assert_eq!(
+        next_grant(&pool, earlier.key_for_test()).await,
         GrantOutcome::CapReached
     );
     let unknown = approved("t18-unknown");
     admitter
-        .adopt_operator(&unknown, PriorBudget::Unknown)
+        .adopt_operator_for_test(&unknown, PriorBudget::Unknown)
         .await
         .unwrap();
-    let refused = next_grant(&pool, &unknown.key).await;
+    let refused = next_grant(&pool, unknown.key_for_test()).await;
     assert_eq!(
         refused,
         GrantOutcome::Failed(crate::services::tui_o::repost::o_piece_delivery::Failure::CapUnknown)

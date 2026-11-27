@@ -1,6 +1,9 @@
 //! Admitting pieces into the shared re-post budget: an uncertain original sent while re-post was on,
 //! or an operator-approved rejected piece. Anything older or unproven is reported once, never sent.
 
+#[cfg(any(test, feature = "test-support"))]
+mod test_support;
+
 use std::collections::BTreeSet;
 use std::io;
 

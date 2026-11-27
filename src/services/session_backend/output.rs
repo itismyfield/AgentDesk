@@ -24,7 +24,7 @@ pub fn capture_process_output(
                 output.clone(),
                 ProcessBackend::new().is_alive(&entry.handle),
             ),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             SessionHandle::TestProcess { .. } => return Some(Err("process_output_not_bound")),
         }
     };

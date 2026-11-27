@@ -1,4 +1,6 @@
-use crate::services::legacy_body_census::{ensure_ready, health_json, start};
+use crate::services::legacy_body_census::{
+    boot_journal_snapshot_for_test, ensure_ready, health_json, start,
+};
 use crate::services::process_boot::{self, Boot};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -219,4 +221,26 @@ async fn production_selection_records_both_installation_outcomes() {
         .collect();
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0]["installed"], case == "installed");
+}
+
+#[tokio::test]
+async fn doctor_pid_mtime_is_preserved_as_a_distinct_identity() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir(root.path().join("runtime")).unwrap();
+    std::fs::write(
+        root.path().join("runtime/dcserver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+    let doctor = crate::cli::doctor::startup::current_boot_id_at(root.path()).unwrap();
+    let boot = Boot {
+        id: uuid::Uuid::new_v4().to_string(),
+        started_at_ms: chrono::Utc::now().timestamp_millis(),
+        monotonic: std::time::Instant::now(),
+    };
+    let snapshot = boot_journal_snapshot_for_test(root.path(), &boot).await;
+    let written = header(root.path(), &boot);
+    assert_eq!(written["doctor_boot_id"], doctor);
+    assert_ne!(written["doctor_boot_id"], written["boot_id"]);
+    assert_eq!(snapshot["journal_ready"], true);
 }
