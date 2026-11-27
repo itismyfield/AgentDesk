@@ -1,6 +1,6 @@
 # Catch-up cursor over a V2 queue channel
 
-Code SHA `1f61b76313ebc6219a0c4cb6117e25582aa57a1d` is the before snapshot. The fixed mode applies the proposed `v2_held_sources` partition to that snapshot.
+Code SHA `1f61b76313ebc6219a0c4cb6117e25582aa57a1d` is the before snapshot. Code SHA `e2381c0c157411c8cf12e32d3e783fa33b607fd7` implements the fixed `v2_held_sources` partition.
 
 ## Model and rules
 
@@ -39,10 +39,10 @@ The inventory uses `git grep` on `retained_inputs`, `RetainedInput`, `notice.enq
 | `turn_orchestrator/queued_head/v2/retained.rs:96–148`, `turn_orchestrator/queued_head/v2/routine_settlement.rs:169–198` | Exact late delivery writes terminal identities. Routine settlement may withdraw its authorized synthetic original. | Deliver, or synthetic withdrawal outside scope |
 | `turn_orchestrator/queued_head/v2/retained.rs:248–270,304–327`, `turn_orchestrator/queued_head/v2/projection.rs:96–109`, `tui_input/human_frame/history/v2.rs:503` | Projection and boot bind closure consume retained evidence. History may still confirm the attempt. | Preserve retention, or Deliver |
 | `turn_orchestrator/queued_head/v2/attempt.rs:164–206`, `turn_orchestrator/queued_head/v2/cold_source.rs:143–158`, `turn_orchestrator/queued_head/v2/sources.rs:218–305` | Attempt metadata, pre-key source acknowledgements and history sync use retained originals. | Preserve state |
-| `turn_orchestrator/queued_head/v2.rs:575–590`, `turn_orchestrator/queued_head/v2/actor.rs:95–120`, `turn_orchestrator/queued_head/v2/source_admission.rs:338–420,509–528,600–621`, `turn_orchestrator/queued_head/v2/sources.rs:33–72` | Original/source lookup, ticket and bind status, no-send proof and Discord ID fencing read retained originals. | Preserve state |
+| `turn_orchestrator/queued_head/v2.rs:575–590`, `turn_orchestrator/queued_head/v2/actor.rs:95–118`, `turn_orchestrator/queued_head/v2/source_admission.rs:338–420,509–528,600–621`, `turn_orchestrator/queued_head/v2/sources.rs:33–72` | Original/source lookup, ticket and bind status, no-send proof and Discord ID fencing read retained originals. | Preserve state |
 | `turn_orchestrator/queued_head/v2/effort_continue.rs:253–277`, `turn_orchestrator/queued_head/v2/readiness_hold.rs:264–273`, `discord/queue_io/input_owner/routine.rs:107–134` | Effort continuation barrier, readiness hold cleanup, routine notice projection consume the record. | Preserve state |
 | `turn_orchestrator/queued_head/v2/readiness_hold.rs:220–224`, `turn_orchestrator/queued_head/v2/refused.rs:56–77` | Refused attempt/front notices belong to separate persisted lists, already classified as settled evidence. | Settled evidence |
-| `discord/commands/control.rs:597,739,794–806`, `discord/catch_up/retry_state.rs:533–576`, `turn_orchestrator/queued_head/v2/clear.rs:39–141,185–245` | Explicit session clear removes retained records, reports discarded sources and fences backlog outside the snapshot. | Clear waiting modeled separately; physical clear uses a separate fence |
+| `discord/commands/control.rs:597,739,794–806`, `discord/catch_up/retry_state.rs:533–576`, `turn_orchestrator/queued_head/v2/clear.rs:39–141,185–245` | Explicit session clear removes retained records, reports discarded sources and fences backlog outside the snapshot. | Clear models waiting control. Physical clear uses a separate fence |
 | `discord/commands/stop.rs:84–92,180–213`, `turn_orchestrator/queued_head/v2/control.rs:31–68`, `turn_orchestrator/queued_head/v2/projection.rs:178–214`, `discord/herdr_terminate/retired_wake.rs:46–65` | Stop routes active-turn controls or wakes the owner later; checked terminate purge matches the snapshot and drops only untried waiting items. | Retention remains available |
 | `turn_orchestrator/pending_queue_persistence/queued_recovery.rs:113–152`, `discord/recovery_known_ids.rs:149–173`, `discord/catch_up/phase1_sweep.rs:130–146,222–242`, `discord/catch_up/phase2_sweep.rs:134–135` | Both phases merge disk evidence into known IDs; phase 1 writes the contiguous frontier. | Arm, Scan |
 
@@ -62,7 +62,7 @@ The inventory uses `git grep` on `retained_inputs`, `RetainedInput`, `notice.enq
 4. **Filter only, scan.** The same told-unsent original has no terminal identity by `retained.rs:287–300` and `origin.rs:61–72`. Omitting it from both arms loses membership. `classification.rs:154–160` reaches Recover within the window. TLC records input 1 in the reinjection set on the first scan.
 5. **Fixed, scan.** The told record is still a known ID and has `V2Delivered`. `frontier_evidence.rs:49–55` passes it. Owed source copies still win in the disk reader and pre-existing mailbox arms still win at merge.
 
-The WSL host has Java and `tla2tools-1.7.4.jar`; the `~/.claude/skills/statechart/scripts/statechart` launcher is absent. Raw Java TLC returned 12 for invariant counterexamples and 13 for the isolated liveness counterexample. The before/fixed lane check maps a verified counterexample to status 1. The repository `scripts/ci/statecharts_tlc.py` checked all five configs with their expected verdicts in 11.8 seconds. The Mermaid chart shows the complete one-ID projection from TLC's DOT graph (15 distinct states), with labels from the view and stuttering edges omitted.
+The WSL host has Java and `tla2tools-1.7.4.jar`. The `~/.claude/skills/statechart/scripts/statechart` launcher is absent. Raw Java TLC returned 12 for invariant counterexamples and 13 for the isolated liveness counterexample. The before/fixed lane check maps a verified counterexample to status 1. The repository `scripts/ci/statecharts_tlc.py` checked all five configs with their expected verdicts in 11.8 seconds. The Mermaid chart shows the complete one-ID projection from TLC's DOT graph (15 distinct states), with labels from the view and stuttering edges omitted.
 
 ## Design boundary
 
