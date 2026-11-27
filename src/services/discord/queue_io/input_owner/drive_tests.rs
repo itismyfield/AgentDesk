@@ -1063,3 +1063,51 @@ async fn the_due_is_judged_before_c_s_and_never_after_an_approved_first_key() {
         assert!(after["head_injection"].is_null(), "{after}");
     }
 }
+
+#[tokio::test(start_paused = true)]
+async fn a_held_front_is_delivered_without_a_wake_or_an_armed_probe() {
+    let _root = TestRuntimeRootGuard::new();
+    let registry = ChannelMailboxRegistry::default();
+    let channel = 7_272_799;
+    let mailbox = owner(&registry, channel, 1).await;
+    let ready = Arc::new(AtomicBool::new(false));
+    let host = ready.clone();
+    let (passed, mut passes) = tokio::sync::mpsc::unbounded_channel();
+    let drive = Arc::new(Drive {
+        mailbox: mailbox.clone(),
+        channel,
+        handoff: handoff(
+            mailbox.clone(),
+            channel,
+            |_| Box::pin(async {}),
+            move |_| {
+                if host.load(Ordering::SeqCst) {
+                    Completion::Submitted
+                } else {
+                    Completion::Held("host not ready".into())
+                }
+            },
+        ),
+        settled: Some(Arc::new(move || {
+            let _ = passed.send(());
+            Box::pin(async {})
+        })),
+    });
+
+    wake(drive.clone());
+    passes.recv().await.expect("the initial pass ended");
+    let held = snapshot(&mailbox).await;
+    assert_eq!(held["items"].as_array().unwrap().len(), 1);
+    assert!(held["head_injection"].is_null());
+    assert!(!super::super::held_watch::has_watch(channel));
+
+    ready.store(true, Ordering::SeqCst);
+    tokio::time::timeout(Duration::from_secs(10), passes.recv())
+        .await
+        .expect("drive did not reconsider within ten seconds of host readiness")
+        .expect("the resumed pass ended");
+    let delivered = snapshot(&mailbox).await;
+    assert_eq!(delivered["items"], json!([]));
+    assert!(delivered["head_injection"].is_null());
+    assert_eq!(delivered["retained_inputs"], json!([]));
+}
