@@ -705,8 +705,6 @@ src/
 │   │   ├── docs/
 │   │   │   ├── inventory/
 │   │   │   │   └── endpoints_tests.rs
-│   │   │   ├── testdata/
-│   │   │   │   └── responses.snap
 │   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
