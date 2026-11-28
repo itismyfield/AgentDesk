@@ -34,6 +34,17 @@ case "${1:-}" in -m) echo "${FAKE_ARCH:-arm64}";; *) echo Darwin;; esac
 STUB
 cat >"$WORK/tools/rustc" <<'STUB'
 #!/usr/bin/env bash
+if [ "${1:-}" = --edition ]; then
+    [ "$PWD" = "$FIXTURE_TOOLCHAIN_ROOT" ] && [ -f rust-toolchain.toml ] || exit 92
+    [ "${*: -2:1}" = -o ] || exit 93
+    cat >"${*: -1}" <<'RESOLVER'
+#!/usr/bin/env bash
+[ "$PWD" = "$FIXTURE_SERVICE_CWD" ] || exit 94
+printf '%s\n' "$AGENTDESK_CONFIG"
+RESOLVER
+    chmod +x "${*: -1}"
+    exit 0
+fi
 echo "rustc ${FAKE_RUSTC:-1.92.0}"
 echo "host: aarch64-apple-darwin"
 STUB
@@ -213,6 +224,10 @@ if rc == 0 and sys.argv[1] == '--release-source':
 sys.exit(rc)
 PY
 cp "$ROOT/scripts/release_source.py" "$WORK/repo/scripts/"
+cp "$ROOT/scripts/resolve-config-path.sh" "$WORK/repo/scripts/"
+if [ -f "$ROOT/scripts/refresh_release_launchd_plist.py" ]; then
+    cp "$ROOT/scripts/refresh_release_launchd_plist.py" "$WORK/repo/scripts/"
+fi
 mkdir -p "$WORK/repo/scripts/lib" "$WORK/repo/skills" "$WORK/repo/policies" "$WORK/repo/dashboard"
 cp "$ROOT/scripts/lib/"*.sh "$WORK/repo/scripts/lib/"
 cp "$ROOT/scripts/_deploy_policy_generation.sh" "$WORK/repo/scripts/"
@@ -225,7 +240,13 @@ entry_config="${AGENTDESK_CONFIG:-}"
 _self_hosted_release_session() { return 1; }
 _acquire_release_deploy_lock() { :; }
 _resolve_release_server_port() { echo 1; }
-_release_config_path() { printf '%s\n' "${AGENTDESK_CONFIG:-$ADK_REL/fixture-config.yml}"; }
+_release_config_path() {
+    if [ -n "${FIXTURE_TOOLCHAIN_ROOT:-}" ]; then
+        bash "$SCRIPT_DIR/resolve-config-path.sh" "$ADK_REL"
+    else
+        printf '%s\n' "${AGENTDESK_CONFIG:-$ADK_REL/fixture-config.yml}"
+    fi
+}
 wait_for_release_runtime_boot() { :; }
 curl() { return 1; }
 _check_repo_remote_freshness() { :; }
@@ -538,6 +559,22 @@ PY
     echo "PASS $scenario"
 )
 
+write_fixture_plist() {
+    python3 - "$HOME" "$WORK" "$1" "$2" "$3" <<'PY'
+from pathlib import Path
+import plistlib
+import sys
+
+home, work, label, cwd, config = sys.argv[1:]
+path = Path(home) / 'Library' / 'LaunchAgents' / f'{label}.plist'
+path.parent.mkdir(parents=True, exist_ok=True)
+with path.open('wb') as stream:
+    plistlib.dump(dict(Label=label, WorkingDirectory=cwd, EnvironmentVariables=dict(
+        HOME=home, PATH=f'{work}/tools:/usr/bin:/bin', AGENTDESK_ROOT_DIR=f'{work}/leader',
+        AGENTDESK_CONFIG=config)), stream)
+PY
+}
+
 run_entry_case() (
     local scenario=$1 rc=0 expected_rc=1 reason='load average' expected_builds=0
     local source="$WORK/leader/bin/agentdesk" deployed="$WORK/leader/runtime/release-source.json"
@@ -551,6 +588,7 @@ run_entry_case() (
     export AGENTDESK_DEPLOY_PEERS=peer FAKE_LOAD=9 FAKE_PENDING='[]'
     unset AGENTDESK_CONFIG AGENTDESK_DEPLOY_BINARY AGENTDESK_DEPLOY_PEER_ARTIFACT_DIR AGENTDESK_DEPLOY_TARGET_SHA
     unset AGENTDESK_DEPLOY_PEER_INVOCATION AGENTDESK_DEPLOY_ALL_NODES AGENTDESK_DEPLOY_PEER_BUILD_FALLBACK
+    unset AGENTDESK_DCSERVER_LABEL AGENTDESK_PLIST_REL
     : >"$TRACE"
     mkdir -p "$HOME" "$WORK/leader/"{dashboard/dist,runtime}
     printf '<html></html>\n' >"$WORK/leader/dashboard/dist/index.html"
@@ -632,6 +670,13 @@ PYMANIFEST
                     printf 'cluster: {enabled: true, role: hub}\n' >"$selected_config"
                     expected_rc=0; expected_builds=1; reason='Building release binary'
                     ;;
+                release-env-toolchain-hub)
+                    printf '[toolchain]\nchannel = "fixture"\n' >"$WORK/repo/rust-toolchain.toml"
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$WORK/leader/toolchain-role.yml"
+                    printf '%s\n' 'AGENTDESK_CONFIG=toolchain-role.yml' "PATH=$WORK/tools:/usr/bin:/bin" \
+                        "FIXTURE_TOOLCHAIN_ROOT=$WORK/repo" "FIXTURE_SERVICE_CWD=$WORK/leader" >"$WORK/release-env-fixture"
+                    expected_rc=0; expected_builds=1; reason='Building release binary'
+                    ;;
                 release-env-missing)
                     reason='Cannot determine the cluster role'
                     ;;
@@ -642,9 +687,42 @@ PYMANIFEST
                 *) fail "unknown entry case $scenario" ;;
             esac
             ;;
+        custom-plist-*)
+            export FAKE_LOAD=1 AGENTDESK_DEPLOY_SKIP_BUILD_CACHE_CLEANUP=1 AGENTDESK_DCSERVER_LABEL=service.fixture
+            local service_cwd="$WORK/service-cwd" config="$WORK/service-cwd/plist-role.yml"
+            mkdir -p "$service_cwd"
+            printf 'cluster: {enabled: false}\n' >"$WORK/leader/fixture-config.yml"
+            printf 'cluster: {enabled: true, role: runner}\n' >"$config"
+            reason='Deploy from the primary or provide AGENTDESK_DEPLOY_BINARY'
+            case "$scenario" in
+                custom-plist-explicit-runner) ;;
+                custom-plist-relative-runner)
+                    config=${config##*/}
+                    printf 'cluster: {enabled: false}\n' >"$WORK/leader/$config"
+                    ;;
+                custom-plist-overlay-runner)
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$config"
+                    printf 'cluster: {enabled: true, role: runner}\n' >"$service_cwd/overlaid-role.yml"
+                    printf 'AGENTDESK_CONFIG=overlaid-role.yml\n' >>"$WORK/release-env-fixture"
+                    ;;
+                custom-plist-hub)
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$config"
+                    expected_rc=0; expected_builds=1; reason='Building release binary'
+                    ;;
+                custom-plist-missing)
+                    reason='Cannot verify the existing release plist'
+                    ;;
+                *) fail "unknown entry case $scenario" ;;
+            esac
+            if [ "$scenario" != custom-plist-missing ]; then
+                write_fixture_plist "$AGENTDESK_DCSERVER_LABEL" "$service_cwd" "$config"
+            fi
+            ;;
         peers-only*)
             export FAKE_LOAD=1
             args=(--peers-only)
+            local plist_config="$WORK/leader/fixture-config.yml"
+            write_fixture_plist com.agentdesk.release "$WORK/leader" "$plist_config"
             case "$scenario" in
                 peers-only)
                     expected_rc=0; reason='migrations already applied'
@@ -654,6 +732,12 @@ PYMANIFEST
                     expected_rc=0; reason='migrations already applied'
                     expected_leg='peer-leg profile=release-fast fast=1'
                     printf '{"repo_head":"%s","build_profile":"release-fast"}\n' "$EXPECTED_SHA" >"$deployed"
+                    ;;
+                peers-only-plist-runner)
+                    printf 'cluster: {enabled: true, role: runner}\n' >"$plist_config"
+                    printf 'cluster: {enabled: true, role: hub}\n' >"$WORK/leader/next-role.yml"
+                    printf 'AGENTDESK_CONFIG=next-role.yml\n' >>"$WORK/release-env-fixture"
+                    reason='run on the primary with a known cluster role'
                     ;;
                 peers-only-wrong-head)
                     printf '{"repo_head":"%s"}\n' "${EXPECTED_SHA//0/1}" >"$deployed"
@@ -688,7 +772,7 @@ PYMANIFEST
             grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
             ! grep -qx dependencies "$TRACE" || fail "$scenario installed dashboard dependencies"
             ;;
-        release-env-hub|release-env-relative-hub|standalone-source)
+        release-env-hub|release-env-relative-hub|release-env-toolchain-hub|standalone-source|custom-plist-hub)
             grep -qx restart "$TRACE" || fail "$scenario did not reach activation"
             ;;
         *) ! grep -Ex 'stage|restart' "$TRACE" || fail "$scenario reached local staging or restart" ;;
@@ -705,7 +789,7 @@ PYMANIFEST
 
 run_scenario() {
     case "$1" in
-        high-load-*|direct-peer|release-env-*|standalone-source|peers-only*) run_entry_case "$1" ;;
+        high-load-*|direct-peer|release-env-*|standalone-source|custom-plist-*|peers-only*) run_entry_case "$1" ;;
         *) run_case "$1" ;;
     esac
 }
@@ -717,9 +801,10 @@ else
     for scenario in success codesign-verbosity hash arch transfer stages size signature execute runtime toolchain os format source profile signature-meta optimized-hash concurrency detach leader-staged leader-live witness-mismatch unavailable launch-fail peer-platform head-target \
         high-load-install high-load-source high-load-dashboard no-fallback no-fallback-unavailable no-fallback-old-checkout \
         default-success fallback-value-not-one direct-peer release-env-runner release-env-caller release-env-relative-runner \
-        release-env-relative-hub release-env-hub release-env-missing standalone-source \
+        release-env-relative-hub release-env-hub release-env-toolchain-hub release-env-missing standalone-source \
+        custom-plist-explicit-runner custom-plist-relative-runner custom-plist-overlay-runner custom-plist-hub custom-plist-missing \
         peers-only peers-only-fast peers-only-wrong-head peers-only-migration peers-only-checksum \
-        peers-only-bad-signature peers-only-no-source; do
+        peers-only-bad-signature peers-only-no-source peers-only-plist-runner; do
         run_scenario "$scenario"
         count=$((count + 1))
     done
