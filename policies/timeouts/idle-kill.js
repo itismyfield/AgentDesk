@@ -60,6 +60,8 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
+        // SQL NULL is the legacy record; kill-tmux also checks owner-local markers.
+        "AND s.hosted_execution IS NULL " +
         mainChannelSqlGuard +
         "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' ";
       // Exclude unavailable owners before LIMIT so an offline node's backlog
@@ -103,6 +105,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
 
       function killTmuxIdleSessions(sessions, minimumIdleMinutes, reasonLabel, maxKills) {
         var killedCount = 0;
+        var loggedApiFailure = false;
         for (var i = 0; i < sessions.length; i++) {
           if (killedCount >= maxKills) {
             agentdesk.log.info("[idle-kill] Reached max " + maxKills + " kills for this category. Breaking early.");
@@ -131,6 +134,13 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
+          var error = killResp && killResp.error;
+          if (typeof error === "string" &&
+              /^(bridge deadline passed|response deadline exceeded|connect deadline exceeded)\b/.test(error)) {
+            agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + (sessions.length - i - 1));
+            break;
+          }
+
           // A host-guard refusal (Herdr or unresolved host) keeps the session and is not a failure.
           if (killResp && killResp.refused) {
             agentdesk.log.warn(
@@ -141,7 +151,10 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           }
 
           if (!killResp || !killResp.ok) {
-            agentdesk.log.error("[idle-kill] kill-tmux API failed for " + s.session_key + ": " + JSON.stringify(killResp));
+            if (!loggedApiFailure) {
+              agentdesk.log.error("[idle-kill] kill-tmux API failed for " + s.session_key + ": " + JSON.stringify(killResp));
+              loggedApiFailure = true;
+            }
             continue;
           }
 
