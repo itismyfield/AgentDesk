@@ -59,10 +59,10 @@ impl std::error::Error for ThreadSetupError {}
 /// Checked before any thread, reservation or run-row side effect, so a runtime that has not
 /// registered yet (right after a restart) defers the run instead of failing it.
 pub(super) async fn ensure_provider_registered(
-    registry: &AppHealthRegistry,
+    runtime: &impl RoutineLaunchRuntime,
     provider: &ProviderKind,
 ) -> Result<()> {
-    if !registry.registered_token_hashes(provider).await.is_empty() {
+    if runtime.provider_registered(provider).await {
         return Ok(());
     }
     Err(TransientStartError {

@@ -4,11 +4,36 @@
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::runtime_registry::RestoreRuntimeRegistry;
 use crate::services::discord::queue_io::input_owner::cold::v2_cold_observed;
 use crate::services::discord::runtime_store::discord_pending_queue_root;
+use crate::services::discord::{SharedData, shared_data_without_policy_for_tests};
+use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::scheduled_messages::owner_input::AgentTurnStartDisposition;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
+use poise::serenity_prelude::ChannelId;
+use std::cell::Cell;
+use std::sync::Arc;
+
+thread_local! {
+    static SCHEDULED_WAKES: Cell<usize> = const { Cell::new(0) };
+}
+
+fn count_scheduled_wake(shared: &Arc<SharedData>, channel: ChannelId) {
+    assert!(!shared.has_policy_engine_for_tests());
+    assert_eq!(channel.get(), 123456789);
+    SCHEDULED_WAKES.with(|count| count.set(count.get() + 1));
+}
+
+struct ResetBootstrapGeneration;
+
+impl Drop for ResetBootstrapGeneration {
+    fn drop(&mut self) {
+        crate::services::discord::runtime_store::set_process_generation_for_tests(None);
+    }
+}
 
 #[tokio::test]
 async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_outcome() {
@@ -30,8 +55,16 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
     .await
     .unwrap();
     let fire = claim_one(&pool, "owner-worker").await;
-    let registry = ChannelMailboxRegistry::default();
-    let handle = registry.handle(poise::serenity_prelude::ChannelId::new(123456789));
+    let _restore_registry = RestoreRuntimeRegistry::capture();
+    let _restore_generation = ResetBootstrapGeneration;
+    let registry = Arc::new(HealthRegistry::new());
+    let shared = shared_data_without_policy_for_tests(
+        &registry,
+        Some(pool.clone()),
+        Some(count_scheduled_wake),
+    );
+    registry.register("claude".into(), shared).await;
+    let handle = registry.owner_mailbox("claude", 123456789).await.unwrap();
     let path = discord_pending_queue_root()
         .unwrap()
         .join("scheduled-owner.json");
@@ -39,16 +72,18 @@ async fn postgres_accepted_snapshot_waits_for_exact_owner_then_settles_recorded_
         .v2_adopt(path.clone(), "scheduled-owner".into())
         .await
         .unwrap();
-    let generation = crate::services::discord::runtime_store::generation_path().unwrap();
-    std::fs::create_dir_all(generation.parent().unwrap()).unwrap();
-    std::fs::write(generation, "5").unwrap();
+    SCHEDULED_WAKES.with(|count| count.set(0));
+    let result = start_agent_turn(&pool, registry.as_ref(), &fire)
+        .await
+        .unwrap();
+    assert!(matches!(result, AgentTurnStartDisposition::Accepted));
+    assert_eq!(SCHEDULED_WAKES.with(Cell::get), 1);
     owner_input::OWNER.scope(handle.clone(),async {
-        let result=start_agent_turn(&pool,&HealthRegistry::new(),&fire).await.unwrap();
-        assert!(matches!(result,AgentTurnStartDisposition::Accepted));
         let (turn,committed,started,error):(String,bool,Option<DateTime<Utc>>,String)=sqlx::query_as("SELECT turn_id,launch_committed_at IS NOT NULL,turn_started_at,error FROM scheduled_message_deliveries WHERE id=$1")
             .bind(&fire.delivery_id).fetch_one(&pool).await.unwrap();
         assert!(committed);assert!(started.is_none());
-        let input=ChannelMailboxHandle::restore_owner_input(serde_json::from_str(error.strip_prefix("owner-input:").unwrap()).unwrap()).unwrap();
+        let input=OwnerInput::restore(serde_json::from_str(error.strip_prefix("owner-input:").unwrap()).unwrap()).unwrap();
+        assert_eq!(input.admission_committed, Some(true));
         assert!(input.original["text"].as_str().unwrap().contains("Frozen snapshot"));
         assert!(input.context["scheduled_snapshot_session_label"].is_string());
         // The legacy start's source, channel hint and snapshot label, kept for the owner's start.

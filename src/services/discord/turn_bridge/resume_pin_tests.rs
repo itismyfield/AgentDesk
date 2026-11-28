@@ -242,7 +242,8 @@ fn actual_postlude_runtime_proof(response: Option<&str>, case: &str) {
     );
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         use crate::db::session_transcripts::record_channel_clear_boundary;
-        use crate::services::routines::{NewRoutine, RoutineAgentExecutor, RoutineStore};
+        use crate::services::discord::health::routine_ports::build_routine_agent_executor;
+        use crate::services::routines::{NewRoutine, RoutineStore};
         let db = if response.is_some() { Some(crate::dispatch::test_support::DispatchPostgresTestDb::create("sa2_postlude", "SA2 actual caller").await) } else { None };
         let pool = if let Some(db) = &db { Some(db.connect_and_migrate_with_max_connections(4).await) } else { None };
         let shared = super::super::make_shared_data_for_tests_with_storage(pool.clone());
@@ -432,7 +433,7 @@ inflight_state: durable.clone(), };
             let pool = pool.as_ref().unwrap();
             let pairs = crate::db::session_transcripts::fetch_recent_channel_pairs(pool, &channel, 10).await.unwrap();
             assert_eq!(pairs.iter().map(|pair| &*pair.assistant_message).collect::<Vec<_>>(), if case == "own" { vec![response] } else { vec![] }, "case={case}");
-            let outcomes = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800).poll_agent_runs(store.as_ref().unwrap(), 10, false).await.unwrap();
+            let outcomes = build_routine_agent_executor(Arc::new(pool.clone()), None, 1800).poll_agent_runs(store.as_ref().unwrap(), 10, false).await.unwrap();
             assert_eq!(outcomes.len(), usize::from(case == "own"), "case={case}");
             if case == "own" { assert_eq!((&*outcomes[0].run_id, &*outcomes[0].status), (&*run_id, "succeeded")); }
             drop((shared, store));

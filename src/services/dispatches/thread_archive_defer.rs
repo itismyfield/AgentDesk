@@ -11,8 +11,6 @@ pub(crate) fn install(probe: fn(u64) -> bool) {
 
 /// An uninstalled probe counts as fresh, like an unreadable row, so the archive waits.
 fn has_fresh_inflight_for_channel(channel_id: u64) -> bool {
-    #[cfg(test)]
-    crate::services::discord::install_engine_probes();
     FRESH_INFLIGHT_PROBE
         .get()
         .is_none_or(|probe| probe(channel_id))

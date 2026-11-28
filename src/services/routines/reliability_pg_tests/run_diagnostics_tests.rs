@@ -1,4 +1,7 @@
 use super::*;
+use crate::services::discord::health::routine_ports::{
+    build_routine_agent_executor, build_routine_discord_logger,
+};
 use serde_json::json;
 
 #[tokio::test(flavor = "current_thread")]
@@ -12,7 +15,7 @@ async fn i8117_attention_survives_expiry_and_concurrent_loggers_pg() {
         .attach_routine(new_routine("attention-expiry", None, Some("6551999")))
         .await
         .unwrap();
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     for run in 0..2 {
         let claimed = store.claim_run_now(&routine.id).await.unwrap().unwrap();
         store
@@ -32,7 +35,7 @@ async fn i8117_attention_survives_expiry_and_concurrent_loggers_pg() {
         logger.log_run_outcome(&store, &outcome).await;
         sqlx::query("UPDATE message_outbox SET created_at=NOW()-INTERVAL '10 minutes', dedupe_expires_at=CASE WHEN dedupe_expires_at IS NULL THEN NULL ELSE NOW()-INTERVAL '1 second' END WHERE source='routine-runtime'")
             .execute(&pool).await.unwrap();
-        let fresh = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+        let fresh = build_routine_discord_logger(Arc::new(pool.clone()), None);
         let (left, right) = tokio::join!(
             fresh.log_run_outcome(&store, &outcome),
             logger.log_run_outcome(&store, &outcome)
@@ -134,7 +137,7 @@ async fn i8117_failed_paused_notices_are_safe_and_nonturn_pg() {
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
     let store = store(&pool);
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     for status in ["failed", "paused"] {
         let routine = store
             .attach_routine(new_routine(status, None, Some("6551999")))
@@ -227,7 +230,7 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
     let path = root.path().join("diagnostics.js");
     std::fs::write(&path, "agentdesk.routines.register({name:'fixture',tick(ctx){return {action:'complete',result:{ok:true}};}});").unwrap();
     let script = loader.load_script(root.path(), &path).unwrap();
-    let logger = RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), None);
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), None);
     for manual in [false, true] {
         let mut definition =
             new_routine(if manual { "manual" } else { "due" }, None, Some("8117999"));
@@ -300,7 +303,7 @@ async fn i8117_due_manual_and_poll_store_without_diagnostic_wire_pg() {
     crate::services::routines::run_diagnostics::started(&store, &claimed).await;
     let run_id = claimed.run_id.clone();
     let routine_id = claimed.routine_id.clone();
-    let executor = RoutineAgentExecutor::new(
+    let executor = build_routine_agent_executor(
         Arc::new(pool.clone()),
         Some(Arc::new(HealthRegistry::new())),
         60,

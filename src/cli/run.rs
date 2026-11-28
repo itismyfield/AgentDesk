@@ -11,17 +11,12 @@ use super::args::{
     ReviewRecoverTargetArgs, ReviewVerdictArgs, SendArgs, SendToAgentArgs, ShowAction,
     TerminationsArgs, TmuxWrapperArgs,
 };
+use crate::domain::agent_handoff::AgentHandoffChannelKind;
 
-fn agent_handoff_channel_kind(
-    value: AgentHandoffChannelKindArg,
-) -> crate::services::discord::agent_handoff::AgentHandoffChannelKind {
+fn agent_handoff_channel_kind(value: AgentHandoffChannelKindArg) -> AgentHandoffChannelKind {
     match value {
-        AgentHandoffChannelKindArg::Cc => {
-            crate::services::discord::agent_handoff::AgentHandoffChannelKind::Cc
-        }
-        AgentHandoffChannelKindArg::Cdx => {
-            crate::services::discord::agent_handoff::AgentHandoffChannelKind::Cdx
-        }
+        AgentHandoffChannelKindArg::Cc => AgentHandoffChannelKind::Cc,
+        AgentHandoffChannelKindArg::Cdx => AgentHandoffChannelKind::Cdx,
     }
 }
 

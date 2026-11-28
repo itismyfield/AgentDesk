@@ -149,7 +149,7 @@ impl std::ops::DerefMut for SharedData {
     }
 }
 
-/// The bot token hash, for tests outside `services`.
+/// Test accessors for callers outside `services`.
 #[cfg(test)]
 impl SharedData {
     #[cfg(unix)]
@@ -160,6 +160,11 @@ impl SharedData {
     #[cfg(unix)]
     pub(crate) fn token_hash_for_test(&self) -> &str {
         &self.token_hash
+    }
+
+    #[cfg(unix)]
+    pub(crate) fn has_policy_engine_for_tests(&self) -> bool {
+        self.engine.policy.engine.is_some()
     }
 }
 

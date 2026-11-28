@@ -151,7 +151,7 @@ fn trimmed_header_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// Test helper: run `body` and collect the claimed-header flags this module logs.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn capture_identity<T>(body: impl FnOnce() -> T) -> (T, Vec<bool>) {
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;

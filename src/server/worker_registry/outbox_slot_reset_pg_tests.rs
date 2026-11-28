@@ -142,6 +142,8 @@ struct Fixture {
 
 impl Fixture {
     async fn new(root: &TestRuntimeRootGuard, db: &TestPostgresDb, parent_base: u64) -> Self {
+        crate::services::discord::install_engine_probes();
+        crate::services::discord::outbound::install_engine_ports();
         ROW_GUARD_CALLS.lock().unwrap().clear();
         let token = crate::runtime_layout::credential_token_path(
             root.path(),

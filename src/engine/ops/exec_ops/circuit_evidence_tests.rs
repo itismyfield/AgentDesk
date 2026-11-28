@@ -3,6 +3,7 @@ use rquickjs::Object;
 use serde_json::json;
 
 fn seed(root: &std::path::Path) -> serde_json::Value {
+    crate::services::discord::install_engine_probes();
     let evidence = json!({
         "version": 1, "evidence_id": "alpha-policy-evidence",
         "origin": {

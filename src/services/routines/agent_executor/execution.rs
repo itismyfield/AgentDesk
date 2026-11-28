@@ -136,7 +136,7 @@ impl RoutineAgentExecutor {
         let Some(result) = result else {
             return;
         };
-        let Some(registry) = self.health_registry.as_deref() else {
+        let Some(process) = self.ports.process.as_deref() else {
             return;
         };
         let Some(provider) = result
@@ -158,7 +158,7 @@ impl RoutineAgentExecutor {
             return;
         };
         let channel = poise::serenity_prelude::ChannelId::new(channel);
-        registry
+        process
             .cancel_routine_process_turn(&provider, channel, turn_id, reason)
             .await;
     }

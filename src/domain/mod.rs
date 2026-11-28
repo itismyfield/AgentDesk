@@ -1,3 +1,4 @@
+pub mod agent_handoff;
 pub(crate) mod atomic_write;
 pub use adk_base::domain::auto_queue_log;
 pub use adk_base::domain::automation_contract;

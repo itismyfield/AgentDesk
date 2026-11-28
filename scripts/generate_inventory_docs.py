@@ -101,6 +101,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "dispatch/": "Dispatch context construction, review metadata, and worktree targeting.",
     "domain/": "Shared pure values and static contracts.",
     "engine/": "QuickJS policy runtime, hook wiring, transition logic, and Rust-JS bridge ops.",
+    "engine_probe_tests.rs": "Fresh-process tests for engine probe behavior before and after the Discord adapters are installed.",
     "error.rs": "Shared HTTP and policy error type with typed codes and JSON response helpers.",
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",

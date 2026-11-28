@@ -29,7 +29,6 @@ use crate::services::routines::execution_mode::{
     ExecutionProjection, definition_for_create, notice_limit_for_create,
 };
 use crate::services::routines::provider_choice::{self, ProviderChoice, choice_for_request};
-use crate::services::routines::session_control::RoutineRuntimeReset;
 use crate::services::routines::store::{RoutineRecord, RoutineRunRecord};
 use crate::services::routines::{
     NewRoutine, RoutineLifecycleEvent, RoutineScriptLoader, RoutineSessionCommand,
@@ -634,11 +633,8 @@ async fn control_routine_session(
         routine_id,
         command.as_str()
     );
-    let runtime_reset = state
-        .health_registry
-        .as_deref()
-        .map(|registry| registry as &dyn RoutineRuntimeReset);
-    let session = routine_session_controller(state)?
+    let (controller, runtime_reset) = routine_session_controller(state)?;
+    let session = controller
         .control_persistent_session(&routine, command, &reason, runtime_reset)
         .await
         .map_err(session_control_error)?;

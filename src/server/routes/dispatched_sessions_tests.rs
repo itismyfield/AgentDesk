@@ -867,8 +867,85 @@ async fn force_kill_without_runtime_keys_refuses_unconfirmed_hosts_pg() {
         );
         assert_eq!(tmux.take_calls(), [""; 0], "{condition:?}: no tmux call");
     }
+    assert_row_keyed_force_kill_order(&pool).await;
     pool.close().await;
     pg_db.drop().await;
+}
+
+async fn assert_row_keyed_force_kill_order(pool: &sqlx::PgPool) {
+    use crate::services::discord::{health::HealthRegistry, host_teardown_gate::test_support};
+    use crate::services::provider::ProviderKind;
+    use crate::services::turn_lifecycle::{
+        ForceKillRow, TurnLifecycleTarget, force_kill_turn_for_row,
+    };
+    use poise::serenity_prelude::ChannelId;
+
+    let channel = ChannelId::new(6_513_900);
+    let other = ChannelId::new(channel.get() + 1);
+    let name = "AgentDesk-claude-row-keyed-stop-order";
+    let shared = test_support::shared_on(pool).await;
+    let key = test_support::channel_key(&shared, name);
+    test_support::seed(
+        pool,
+        &key,
+        name,
+        channel.get(),
+        test_support::Stored::Legacy,
+    )
+    .await;
+    test_support::busy_turn(&shared, channel, name).await;
+    test_support::busy_turn(&shared, other, name).await;
+    let inflight = test_support::inflight_needing_backfill(channel);
+    let other_inflight = test_support::inflight_needing_backfill(other);
+
+    let marker = crate::services::tmux_common::session_temp_path(name, "generation");
+    std::fs::create_dir_all(std::path::Path::new(&marker).parent().unwrap()).unwrap();
+    std::fs::write(&marker, "wrapper generation").unwrap();
+    let generation =
+        crate::services::tmux_common::spawn_markers::read_generation_file_mtime_ns(name);
+    assert!(generation > 0);
+    let quote = crate::services::process::shell_escape;
+    let body = format!(
+        "[ \"$1\" = -u ] && shift\ncase \"$1\" in\n\
+         has-session) exit 0 ;;\nkill-session) [ -f {} ] && rm {} ;;\n*) exit 1 ;;\nesac",
+        quote(inflight.to_str().unwrap()),
+        quote(&marker),
+    );
+    let (_probe, _path) = install_tmux_probe(&body);
+    let target = TurnLifecycleTarget {
+        provider: Some(ProviderKind::Claude),
+        channel_id: Some(channel),
+        tmux_name: name.to_string(),
+    };
+    let row = ForceKillRow {
+        pool,
+        session_key: &key,
+        stored_provider: Some("claude"),
+    };
+    let result = force_kill_turn_for_row::<Arc<HealthRegistry>>(
+        None,
+        &target,
+        row,
+        "operator cleanup",
+        "force_kill_api",
+    )
+    .await;
+
+    assert!(
+        result.tmux_killed,
+        "the inflight row existed when tmux was killed"
+    );
+    assert!(
+        !std::path::Path::new(&marker).exists(),
+        "the kill removed the marker"
+    );
+    assert_eq!(test_support::stop_generation(channel), Some(generation));
+    assert!(result.inflight_cleared);
+    assert!(!inflight.exists());
+    assert!(
+        other_inflight.exists(),
+        "the other channel shares only the name"
+    );
 }
 
 /// Seeds a card with one live dispatch, its auto-queue entry, and one session per host
@@ -1342,8 +1419,9 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
 /// stays as it was. Once a runtime takes the channel the same row is disconnected.
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
     use crate::services::discord::host_teardown_gate::test_support as host;
-    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
+    use crate::services::routines::RoutineSessionCommand::Kill;
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1354,7 +1432,7 @@ async fn routine_teardown_kept_by_the_host_guard_disconnects_nothing_pg() {
                VALUES ('r-agent', 'routine guard', 'claude', '6551000')";
     exec(&pool, sql, &[]).await;
     let (shared, registry) = host::runtime(&pool).await;
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), Some(registry));
     let host_name = crate::services::platform::hostname_short();
     for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
         .into_iter()
@@ -1659,7 +1737,8 @@ fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
 /// disconnects nothing and touches neither session.
 #[tokio::test(flavor = "current_thread")]
 async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothing_pg() {
-    use crate::services::routines::{RoutineSessionCommand::Kill, RoutineSessionController};
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
+    use crate::services::routines::RoutineSessionCommand::Kill;
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
     let runtime_root = tempfile::TempDir::new().expect("runtime root");
     let set = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock;
@@ -1671,7 +1750,7 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
     exec(&pool, sql, &[]).await;
     let host = crate::services::discord::host_teardown_gate::test_support::runtime(&pool);
     let (shared, registry) = host.await;
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry));
+    let controller = build_routine_session_controller(Arc::new(pool.clone()), Some(registry));
     let host_name = crate::services::platform::hostname_short();
     for (round, condition) in [LiveServer, MissingBinary, NoServerSocket]
         .into_iter()

@@ -213,6 +213,7 @@ pub(crate) mod host {
 
         async fn check_slot_clear(deferred: bool) {
             let root = crate::config::TestRuntimeRootGuard::new();
+            crate::services::discord::install_engine_probes();
             let db = TestPostgresDb::create().await;
             let pool = db.connect_and_migrate_with_max_connections(8).await;
             let shared = crate::services::discord::make_shared_data_for_tests();
@@ -398,6 +399,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let shared = crate::services::discord::make_shared_data_for_tests();
@@ -614,6 +616,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) = runtime(&pool).await;
@@ -735,6 +738,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
         let (shared, registry) = runtime(&pool).await;
@@ -858,6 +862,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let tmux = TmuxEnv::install(Tmux::MissingBinary);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
@@ -921,6 +926,7 @@ pub(crate) mod host {
         let root = tempfile::TempDir::new().unwrap();
         let _root =
             TestEnvVarGuard::set_path_after_shared_test_env_lock("AGENTDESK_ROOT_DIR", root.path());
+        crate::services::discord::install_engine_probes();
         let tmux = TmuxEnv::install(Tmux::MissingBinary);
         let db = TestPostgresDb::create().await;
         let pool = db.connect_and_migrate().await;
