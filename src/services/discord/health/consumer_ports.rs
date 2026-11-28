@@ -14,7 +14,7 @@ use crate::services::discord::relay_recovery;
 use crate::services::discord::zombie_foreground_release;
 use crate::services::engine_runtime::health_port::{
     AppHealth, AppHealthBinding, AxisBSite, FinishCancelledMailboxResult, HeadlessDmTurnStart,
-    HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort,
+    HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort, ResumePorts,
     ResumeRuntimePort, RoutineProcessPort, StaleSweepPort,
 };
 use crate::services::provider::ProviderKind;
@@ -229,6 +229,26 @@ impl ResumeRuntimePort for HealthRegistry {
         ))
     }
 
+    fn session_transition_completion(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+    ) -> impl Send + '_ {
+        shared.session_transition_completion(channel_id)
+    }
+
+    fn acquire_session_transition(
+        shared: &SharedData,
+        channel_id: ChannelId,
+    ) -> BoxFuture<'_, Option<tokio::sync::OwnedMutexGuard<()>>> {
+        Box::pin(async move {
+            shared
+                .session_transition_locks
+                .acquire(channel_id)
+                .await
+                .ok()
+        })
+    }
+
     fn retain_resume_runtime_owner_before_teardown(
         shared: &SharedData,
         channel_id: ChannelId,
@@ -260,20 +280,15 @@ impl ResumeRuntimePort for HealthRegistry {
             retain_runtime_owner,
         ))
     }
+}
 
-    fn resume_host_refusal<'a>(
-        pool: &'a PgPool,
-        provider: Option<&'a ProviderKind>,
-        channel_id: Option<ChannelId>,
-        session_key: &'a str,
-        tmux_name: &'a str,
-    ) -> BoxFuture<'a, Option<String>> {
-        Box::pin(host_defer_gate::resume_host_refusal(
-            pool,
-            provider,
-            channel_id,
-            session_key,
-            tmux_name,
-        ))
+pub(crate) fn resume_ports(registry: Option<&HealthRegistry>) -> ResumePorts<'_, HealthRegistry> {
+    ResumePorts {
+        registry,
+        host_refusal: |pool, provider, channel, key, tmux| {
+            Box::pin(host_defer_gate::resume_host_refusal(
+                pool, provider, channel, key, tmux,
+            ))
+        },
     }
 }

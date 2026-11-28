@@ -226,7 +226,8 @@ async fn resolve_channel_runtime_for_launch(
         .get(&channel_id)
         .and_then(|session| session.channel_name.clone());
     if let Some(session) = data.sessions.get_mut(&channel_id) {
-        let refreshed_path = session.validated_path(channel_id);
+        let refreshed_path =
+            crate::services::discord::session_runtime::validated_path(session, channel_id);
         let session_changed = session.session_id != current.1;
         let loaded_changed = session.memento_context_loaded != current.2;
         let path_changed = refreshed_path

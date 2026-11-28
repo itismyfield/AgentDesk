@@ -22,6 +22,7 @@ use crate::services::provider::ProviderKind;
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 pub(in crate::services::discord) mod boot_hold;
 mod consumer_ports;
+pub(crate) use consumer_ports::resume_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;

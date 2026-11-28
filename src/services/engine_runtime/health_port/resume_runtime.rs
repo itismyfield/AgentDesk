@@ -27,6 +27,16 @@ pub(crate) trait ResumeRuntimePort: Send + Sync {
         channel_id: ChannelId,
     ) -> BoxFuture<'a, bool>;
 
+    fn session_transition_completion(
+        shared: &Arc<Self::Runtime>,
+        channel_id: ChannelId,
+    ) -> impl Send + '_;
+
+    fn acquire_session_transition(
+        shared: &Self::Runtime,
+        channel_id: ChannelId,
+    ) -> BoxFuture<'_, Option<tokio::sync::OwnedMutexGuard<()>>>;
+
     /// Keeps the channel's authoritative owner before teardown can remove the watcher slot.
     fn retain_resume_runtime_owner_before_teardown(
         shared: &Self::Runtime,
@@ -47,13 +57,16 @@ pub(crate) trait ResumeRuntimePort: Send + Sync {
         tmux_session_name: &'a str,
         retain_runtime_owner: bool,
     ) -> BoxFuture<'a, ()>;
+}
 
-    /// Why the host guard refuses a resume of this session, if it does.
-    fn resume_host_refusal<'a>(
-        pool: &'a PgPool,
-        provider: Option<&'a ProviderKind>,
-        channel_id: Option<ChannelId>,
-        session_key: &'a str,
-        tmux_name: &'a str,
-    ) -> BoxFuture<'a, Option<String>>;
+/// The host check applies even without a registry or a channel.
+pub(crate) struct ResumePorts<'a, R> {
+    pub(crate) registry: Option<&'a R>,
+    pub(crate) host_refusal: for<'b> fn(
+        &'b PgPool,
+        Option<&'b ProviderKind>,
+        Option<ChannelId>,
+        &'b str,
+        &'b str,
+    ) -> BoxFuture<'b, Option<String>>,
 }

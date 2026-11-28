@@ -3,23 +3,22 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
 use serde::Deserialize;
 use serde_json::json;
 use sqlx::PgPool;
 
-use crate::app_state::AppState;
 use crate::db::dispatched_sessions::{
     self as dispatched_sessions_db, SessionRebindContext, load_force_kill_session_pg,
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::engine_runtime::health_port::{AppHealthRegistry, ResumeRuntimePort};
+use crate::services::engine_runtime::health_port::{ResumePorts, ResumeRuntimePort};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
-    ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
+    ForceKillRow, LifecycleStopPort, TurnLifecycleTarget, force_kill_turn_with_verdict,
+    force_kill_verdict,
 };
 use poise::serenity_prelude::ChannelId;
 
@@ -177,43 +176,15 @@ impl ResumeRebindOutcome {
     }
 }
 
-/// POST /api/sessions/{session_key}/resume-previous
-///
-/// Rebind the session identified by `session_key` to a previous provider
-/// session. Mirrors the forwarding + teardown contract of `/force-kill`.
-pub async fn resume_previous_session(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Path(session_key): Path<String>,
-    Json(opts): Json<ResumePreviousOptions>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    let Some(pool) = state.pg_pool_ref() else {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "postgres pool unavailable"})),
-        );
-    };
-    let forward_context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
-    dispatch_resume_previous(
-        pool,
-        state.health_registry.as_deref(),
-        &forward_context,
-        Some(&headers),
-        &session_key,
-        &opts,
-    )
-    .await
-}
-
 /// Shared entry point for the HTTP route and the `/resume` slash command: load
 /// the owning node, forward cross-node when this node is not the owner (so a
 /// gateway node never mutates a session it does not run — S1), and otherwise
 /// run the local rebind. HTTP callers pass the incoming headers so forwarded
 /// requests are fenced against both the expected and current database owner;
 /// in-process callers pass `None` and can originate (but never receive) forwarding.
-pub(crate) async fn dispatch_resume_previous(
+pub(crate) async fn dispatch_resume_previous<R: ResumeRuntimePort + LifecycleStopPort>(
     pool: &PgPool,
-    registry: Option<&AppHealthRegistry>,
+    ports: ResumePorts<'_, R>,
     forward_context: &crate::services::session_forwarding::ForwardCallerContext,
     request_headers: Option<&HeaderMap>,
     session_key: &str,
@@ -303,7 +274,7 @@ pub(crate) async fn dispatch_resume_previous(
 
     match perform_resume_rebind(
         pool,
-        registry,
+        ports,
         session_key,
         provider,
         channel_id,
@@ -322,15 +293,16 @@ pub(crate) async fn dispatch_resume_previous(
 /// off here. `provider` is `None` only for unparseable session keys — in that
 /// case tmux teardown and the in-memory mirror are skipped but the DB rebind
 /// still runs.
-pub(crate) async fn perform_resume_rebind(
+pub(crate) async fn perform_resume_rebind<R: ResumeRuntimePort + LifecycleStopPort>(
     pool: &PgPool,
-    registry: Option<&AppHealthRegistry>,
+    ports: ResumePorts<'_, R>,
     session_key: &str,
     provider: Option<ProviderKind>,
     channel_id: Option<ChannelId>,
     tmux_name: &str,
     opts: &ResumePreviousOptions,
 ) -> Result<ResumeRebindOutcome, ResumeRebindError> {
+    let registry = ports.registry;
     let resume_runtime = if let (Some(registry), Some(provider), Some(channel_id)) =
         (registry, provider.as_ref(), channel_id)
     {
@@ -343,14 +315,12 @@ pub(crate) async fn perform_resume_rebind(
     let _completion = resume_runtime
         .as_ref()
         .zip(channel_id)
-        .map(|(shared, channel)| shared.session_transition_completion(channel));
-    let _transition_guard = match resume_runtime.as_ref().zip(channel_id) {
+        .map(|(shared, channel)| R::session_transition_completion(shared, channel));
+    let _transition_guard = match resume_runtime.as_deref().zip(channel_id) {
         Some((shared, channel_id)) => Some(
-            shared
-                .session_transition_locks
-                .acquire(channel_id)
+            R::acquire_session_transition(shared, channel_id)
                 .await
-                .map_err(|_| ResumeRebindError::TransitionBusy)?,
+                .ok_or(ResumeRebindError::TransitionBusy)?,
         ),
         None => None,
     };
@@ -410,13 +380,8 @@ pub(crate) async fn perform_resume_rebind(
             return Err(ResumeRebindError::HostUnsupported(reason));
         }
     }
-    let host_refusal = <AppHealthRegistry as ResumeRuntimePort>::resume_host_refusal(
-        pool,
-        provider.as_ref(),
-        channel_id,
-        session_key,
-        tmux_name,
-    );
+    let host_refusal =
+        (ports.host_refusal)(pool, provider.as_ref(), channel_id, session_key, tmux_name);
     if let Some(reason) = host_refusal.await {
         return Err(ResumeRebindError::HostUnsupported(reason));
     }
@@ -555,9 +520,7 @@ pub(crate) async fn perform_resume_rebind(
     // until the resumed turn replaces it; confirmed pane death clears it below.
     let owner_retained_before_teardown =
         if let (Some(shared), Some(channel_id)) = (resume_runtime.as_deref(), channel_id) {
-            <AppHealthRegistry as ResumeRuntimePort>::retain_resume_runtime_owner_before_teardown(
-                shared, channel_id, tmux_name,
-            )
+            R::retain_resume_runtime_owner_before_teardown(shared, channel_id, tmux_name)
         } else {
             false
         };
@@ -587,9 +550,7 @@ pub(crate) async fn perform_resume_rebind(
     let runtime_binding_clear = match pane_liveness {
         crate::services::platform::tmux::PaneLiveness::DeadOrAbsent => {
             if owner_retained_before_teardown && let Some(shared) = resume_runtime.as_deref() {
-                <AppHealthRegistry as ResumeRuntimePort>::clear_resume_runtime_owner_after_death(
-                    shared, tmux_name,
-                );
+                R::clear_resume_runtime_owner_after_death(shared, tmux_name);
             }
             clear_resume_runtime_binding(tmux_name)
         }
@@ -605,7 +566,7 @@ pub(crate) async fn perform_resume_rebind(
     let in_memory_rebound = if let (Some(shared), Some(provider), Some(channel_id)) =
         (resume_runtime.as_deref(), provider.as_ref(), channel_id)
     {
-        <AppHealthRegistry as ResumeRuntimePort>::rebind_channel_provider_session(
+        R::rebind_channel_provider_session(
             shared,
             provider,
             channel_id,
@@ -657,6 +618,7 @@ pub(crate) struct PreviousSessionCandidate {
 mod tests {
 
     use super::*;
+    use crate::services::discord::health::resume_ports;
     use filetime::{FileTime, set_file_mtime};
 
     #[test]
@@ -990,7 +952,7 @@ mod tests {
                 f.home.clone(),
                 super::perform_resume_rebind(
                     &pool,
-                    None,
+                    resume_ports(None),
                     key,
                     Some(ProviderKind::Claude),
                     None,
@@ -1027,7 +989,7 @@ mod tests {
                 f.home.clone(),
                 super::perform_resume_rebind(
                     &pool,
-                    None,
+                    resume_ports(None),
                     key,
                     Some(ProviderKind::Claude),
                     None,
@@ -1061,7 +1023,7 @@ mod tests {
                 f.home.clone(),
                 super::perform_resume_rebind(
                     &pool,
-                    None,
+                    resume_ports(None),
                     key,
                     Some(ProviderKind::Claude),
                     None,
@@ -1092,7 +1054,7 @@ mod tests {
                 home.path().to_path_buf(),
                 super::perform_resume_rebind(
                     &pool,
-                    None,
+                    resume_ports(None),
                     key,
                     Some(ProviderKind::Claude),
                     None,
