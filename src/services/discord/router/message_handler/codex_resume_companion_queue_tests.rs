@@ -1240,24 +1240,28 @@ mod herdr_owner_resume {
             matches!(loss, PaneLoss::AfterKey).then_some(KeyReply { sent, reply }),
         );
         assert_ne!(started.session, previous.session);
-        assert!(
-            fx.rt
-                .block_on(
-                    crate::db::dispatched_sessions::provider_resume_fence::load_for_owner_pg(
-                        &fx.pool, &old.owner,
+        // The launch worker releases the fence after the test publishes SessionStart.
+        let assert_fence_released = || {
+            assert!(
+                fx.rt
+                    .block_on(
+                        crate::db::dispatched_sessions::provider_resume_fence::load_for_owner_pg(
+                            &fx.pool, &old.owner,
+                        )
                     )
-                )
-                .unwrap()
-                .is_none()
-        );
+                    .unwrap()
+                    .is_none()
+            );
+        };
         let after_command = before + 1;
         match loss {
             PaneLoss::BeforeAttach => {
                 let result = crate::test_support::wait::join_within(first, LIMIT);
                 assert!(result.is_err(), "{result:?}");
+                assert_fence_released();
                 intake
                     .runtime
-                    .block_on(wait_for_idle_turn_to_unwind(&intake));
+                    .block_on(wait_for_placed_start_to_unwind(&intake));
                 assert_eq!(fx.rig.sends().len(), after_command);
                 assert_eq!(fx.row(), Some(HostedState::Pending));
                 let first_state = snapshot(&intake);
@@ -1268,7 +1272,7 @@ mod herdr_owner_resume {
                 assert!(crate::test_support::wait::join_within(retry, LIMIT).is_err());
                 intake
                     .runtime
-                    .block_on(wait_for_idle_turn_to_unwind(&intake));
+                    .block_on(wait_for_placed_start_to_unwind(&intake));
                 assert_eq!(fx.row(), Some(HostedState::Retired));
                 assert_wait(&intake, &front, &nonce);
                 assert!(
@@ -1293,6 +1297,7 @@ mod herdr_owner_resume {
             }
             PaneLoss::BeforeKey(recovery) => {
                 crate::test_support::wait::recv_within(&capture_ready.unwrap(), LIMIT);
+                assert_fence_released();
                 let state = snapshot(&intake);
                 assert_eq!(
                     state["head_injection"]["attempt"]["target"]["execution_nonce"],
@@ -1303,12 +1308,15 @@ mod herdr_owner_resume {
                 assert_eq!(fx.rig.sends().len(), after_command);
                 let head = state["head_injection"].clone();
                 fx.rig.show_panes(&[]);
+                fx.rig.foreground(&[]);
                 fx.rig.exists(20, false);
                 resume_capture.unwrap().send(()).unwrap();
-                assert!(crate::test_support::wait::join_within(first, LIMIT).is_err());
+                let result = crate::test_support::wait::join_within(first, LIMIT);
+                assert!(result.is_err(), "{result:?}");
+                assert_eq!(fx.rig.sends().len(), after_command);
                 intake
                     .runtime
-                    .block_on(wait_for_idle_turn_to_unwind(&intake));
+                    .block_on(wait_for_placed_start_to_unwind(&intake));
                 let state = snapshot(&intake);
                 assert!(state["head_injection"].is_null(), "{state}");
                 assert_eq!(state["items"], json!([front.1]));
@@ -1339,6 +1347,7 @@ mod herdr_owner_resume {
             }
             PaneLoss::AfterKey => {
                 crate::test_support::wait::recv_within(&key_seen, LIMIT);
+                assert_fence_released();
                 assert_eq!(fx.rig.sends().len(), after_command + 2);
                 assert_eq!(fx.row(), Some(HostedState::Pending));
                 let state = snapshot(&intake);
@@ -1377,6 +1386,14 @@ mod herdr_owner_resume {
         }
         drop(intake);
         drop(original_runtime);
+    }
+
+    async fn wait_for_placed_start_to_unwind(intake: &Intake) {
+        let row = discord::inflight::row_removed::watch(&ProviderKind::Claude, CHANNEL).unwrap();
+        wait_for_idle_turn_to_unwind(intake).await;
+        if let Some(row) = row {
+            crate::test_support::wait::await_within(row.removed(), LIMIT).await;
+        }
     }
 
     fn restore_reserved(intake: &Intake, front: &OwnerFront, head: Value) {
