@@ -18,10 +18,18 @@ struct KeyReply {
     reply: mpsc::Receiver<()>,
 }
 
+#[derive(Clone, Copy)]
+enum PaneLoss {
+    BeforeAttach,
+    BeforeKey { requeue: bool },
+    AfterKey,
+}
+
 fn start(
     fx: &Fixture,
     intake: &Intake,
     front: OwnerFront,
+    launch_signal: Option<mpsc::Sender<Result<(), String>>>,
 ) -> std::thread::JoinHandle<Result<(), String>> {
     let runtime = intake.runtime.handle().clone();
     let shared = intake.shared.clone();
@@ -38,7 +46,7 @@ fn start(
         let _config = crate::config::session_hosts::force_config_for_test(&config);
         let _admission = open_admission();
         let _writer = crate::services::herdr_launch::force_writer_accepts(Some(true));
-        runtime.block_on(async {
+        let result = runtime.block_on(async {
             let (entered, resume) =
                 discord::router::intake_dispatch::after_upload_take(ChannelId::new(CHANNEL))
                     .await
@@ -52,7 +60,11 @@ fn start(
             };
             let (result, _rest) = tokio::join!(tokio::time::timeout(LIMIT, start), recording);
             result.unwrap()
-        })
+        });
+        if let (Some(send), Err(error)) = (launch_signal, &result) {
+            let _ = send.send(Err(error.clone()));
+        }
+        result
     })
 }
 
@@ -69,10 +81,11 @@ fn launch(
     if key_reply.is_some() {
         fx.rig.answer_sends_then_leave_unanswered(2);
     }
+    let launch_signal = command.clone();
     let mut command = Some(command);
     fx.rig.on_send(move |params| {
         if let Some(command) = command.take() {
-            command.send(()).unwrap();
+            command.send(Ok(())).unwrap();
             crate::test_support::wait::recv_within(&allowed, LIMIT);
         } else if let Some(key) = key_reply.take_if(|_| params["keys"] == json!(["enter"])) {
             key.sent.send(()).unwrap();
@@ -80,8 +93,9 @@ fn launch(
         }
     });
     let mut events = fx.ingress.state.subscribe();
-    let caller = start(fx, intake, front);
-    crate::test_support::wait::recv_within(&command_seen, LIMIT);
+    let caller = start(fx, intake, front, Some(launch_signal));
+    crate::test_support::wait::recv_within(&command_seen, LIMIT)
+        .expect("the owner starts its successor before the binding read can fail");
     let HostedRecord::Known(pending) = fx.record() else {
         panic!("a create must have installed its Pending row");
     };
@@ -169,10 +183,18 @@ fn launch(
 }
 
 fn tick_and_grant(intake: &Intake, original: &OwnerFront) -> Option<OwnerFront> {
-    let original = original.clone();
     intake
         .runtime
-        .block_on(intake.mailbox.v2_request(move |slot| {
+        .block_on(tick_and_grant_on_mailbox(&intake.mailbox, original.clone()))
+        .unwrap()
+}
+
+async fn tick_and_grant_on_mailbox(
+    mailbox: &ChannelMailboxHandle,
+    original: OwnerFront,
+) -> Result<Option<OwnerFront>, String> {
+    mailbox
+        .v2_request(move |slot| {
             let owner = slot.as_mut().unwrap();
             if let Some(due) = owner.settle_due() {
                 owner.tick(due)?;
@@ -185,8 +207,8 @@ fn tick_and_grant(intake: &Intake, original: &OwnerFront) -> Option<OwnerFront> 
                 assert!(owner.grant_front(front)?);
             }
             Ok(front)
-        }))
-        .unwrap()
+        })
+        .await
 }
 
 fn snapshot(intake: &Intake) -> Value {
@@ -223,7 +245,7 @@ fn assert_wait(intake: &Intake, front: &OwnerFront, nonce: &str) {
     assert_eq!(failures, 0, "the pane loss does not spend a start failure");
 }
 
-fn placed_attach(lose_before_attach: bool) {
+fn placed_attach(loss: PaneLoss) {
     let fx = Fixture::new("placed-attach-owner", None);
     let (old_nonce, previous) = reconnect::launch(&fx, &Arc::new(Launcher::default()));
     let _registry = fx.rig.registry_on_this_thread();
@@ -295,13 +317,45 @@ fn placed_attach(lose_before_attach: bool) {
     let before = fx.rig.sends().len();
     let (sent, key_seen) = mpsc::channel();
     let (release, reply) = mpsc::channel();
+    let (capture_ready, resume_capture) = match loss {
+        PaneLoss::BeforeKey { .. } => {
+            let (entered, ready) = mpsc::channel();
+            let (resume, continued) = mpsc::channel();
+            let continued = Mutex::new(Some(continued));
+            let (mailbox, runtime) = (intake.mailbox.clone(), intake.runtime.handle().clone());
+            fx.rig.on_reply(move |call| {
+                use crate::services::session_host::herdr_socket_rig_tests::HerdrRequest;
+                if !matches!(call.request, HerdrRequest::PaneRead { .. }) {
+                    return;
+                }
+                let mut continued = continued.lock().unwrap();
+                if continued.is_none() {
+                    return;
+                }
+                let reserved = tokio::task::block_in_place(|| {
+                    runtime.block_on(
+                        mailbox
+                            .v2_request(|slot| Ok(slot.as_ref().unwrap().active_attempt().is_ok())),
+                    )
+                })
+                .unwrap();
+                if reserved {
+                    let continued = continued.take().unwrap();
+                    entered.send(()).unwrap();
+                    crate::test_support::wait::recv_within(&continued, LIMIT);
+                }
+            });
+            (Some(ready), Some(resume))
+        }
+        _ => (None, None),
+    };
     let (first, nonce, started) = launch(
         &fx,
         &intake,
         front.clone(),
         (&old_nonce, &previous.session),
-        lose_before_attach,
-        (!lose_before_attach).then_some(KeyReply { sent, reply }),
+        matches!(loss, PaneLoss::BeforeAttach),
+        matches!(loss, PaneLoss::AfterKey).then_some(KeyReply { sent, reply }),
     );
     assert_ne!(started.session, previous.session);
     assert!(
@@ -315,117 +369,258 @@ fn placed_attach(lose_before_attach: bool) {
             .is_none()
     );
     let after_command = before + 1;
-    if lose_before_attach {
-        let result = crate::test_support::wait::join_within(first, LIMIT);
-        assert!(result.is_err(), "{result:?}");
-        intake
-            .runtime
-            .block_on(super::wait_for_idle_turn_to_unwind(&intake));
-        assert_eq!(fx.rig.sends().len(), after_command);
-        assert_eq!(fx.row(), Some(HostedState::Pending));
-        let first_state = snapshot(&intake);
+    match loss {
+        PaneLoss::BeforeAttach => {
+            let result = crate::test_support::wait::join_within(first, LIMIT);
+            assert!(result.is_err(), "{result:?}");
+            intake
+                .runtime
+                .block_on(super::wait_for_idle_turn_to_unwind(&intake));
+            assert_eq!(fx.rig.sends().len(), after_command);
+            assert_eq!(fx.row(), Some(HostedState::Pending));
+            let first_state = snapshot(&intake);
 
-        // Let RED reach the retire boundary even if the first refusal spent a start failure.
-        let retry = tick_and_grant(&intake, &front).expect("the same front can retry");
-        let retry = start(&fx, &intake, retry);
-        assert!(crate::test_support::wait::join_within(retry, LIMIT).is_err());
-        intake
-            .runtime
-            .block_on(super::wait_for_idle_turn_to_unwind(&intake));
-        assert_eq!(fx.row(), Some(HostedState::Retired));
-        assert_wait(&intake, &front, &nonce);
-        assert!(
-            snapshot(&intake)["retry"]["wait"]["wait_seq"]
-                .as_u64()
-                .unwrap()
-                > first_state["retry"]["wait"]["wait_seq"].as_u64().unwrap()
-        );
-        assert_eq!(
-            first_state["retry"]["wait"]["cause"],
-            json!({"kind":"pending_attach","nonce":nonce})
-        );
-        assert_eq!(fx.rig.sends().len(), after_command);
+            // Let RED reach the retire boundary even if the first refusal spent a start failure.
+            let retry = tick_and_grant(&intake, &front).expect("the same front can retry");
+            let retry = start(&fx, &intake, retry, None);
+            assert!(crate::test_support::wait::join_within(retry, LIMIT).is_err());
+            intake
+                .runtime
+                .block_on(super::wait_for_idle_turn_to_unwind(&intake));
+            assert_eq!(fx.row(), Some(HostedState::Retired));
+            assert_wait(&intake, &front, &nonce);
+            assert!(
+                snapshot(&intake)["retry"]["wait"]["wait_seq"]
+                    .as_u64()
+                    .unwrap()
+                    > first_state["retry"]["wait"]["wait_seq"].as_u64().unwrap()
+            );
+            assert_eq!(
+                first_state["retry"]["wait"]["cause"],
+                json!({"kind":"pending_attach","nonce":nonce})
+            );
+            assert_eq!(fx.rig.sends().len(), after_command);
 
-        let retry = tick_and_grant(&intake, &front).unwrap();
-        let (successor, new_nonce, new) =
-            launch(&fx, &intake, retry, (&nonce, &started.session), false, None);
-        assert_ne!(new_nonce, nonce);
-        assert_ne!(new.session, started.session);
-        fx.finished.store(false, Ordering::SeqCst);
-        fx.answer_after(&new, after_command + 1);
-        assert_eq!(
-            crate::test_support::wait::join_within(successor, LIMIT),
-            Ok(())
-        );
-        let sends = fx.rig.sends();
-        assert_eq!(sends.len(), after_command + 3);
-        assert!(
-            sends[after_command + 1]["text"]
-                .as_str()
-                .unwrap()
-                .contains(INPUT)
-        );
-        assert_eq!(sends[after_command + 2]["keys"], json!(["enter"]));
-        let state = snapshot(&intake);
-        assert_eq!(state["items"], json!([]));
-        assert_eq!(state["retained_inputs"], json!([]));
-    } else {
-        crate::test_support::wait::recv_within(&key_seen, LIMIT);
-        assert_eq!(fx.rig.sends().len(), after_command + 2);
-        assert_eq!(fx.row(), Some(HostedState::Pending));
-        let state = snapshot(&intake);
-        assert_eq!(state["head_injection"]["phase"], "may_have_sent", "{state}");
-        fx.rig.show_panes(&[]);
-        fx.rig.exists(20, false);
-        release.send(()).unwrap();
-        assert!(crate::test_support::wait::join_within(first, LIMIT).is_err());
-        intake
-            .runtime
-            .block_on(super::wait_for_idle_turn_to_unwind(&intake));
-        let install = fx.rig.thread_installer_with_launch(NODE, KEY, SESSION);
-        install();
-        let _runtime = fx.rt.enter();
-        QUIET.with(|quiet| quiet.set(Some(Duration::ZERO)));
-        discord::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
-            &intake.shared,
-            &ProviderKind::Claude,
-        );
-        QUIET.with(|quiet| quiet.set(None));
-        drop(_runtime);
-        assert_eq!(fx.row(), Some(HostedState::Retired));
-        assert!(tick_and_grant(&intake, &front).is_none());
-        let state = snapshot(&intake);
-        assert_eq!(state["retained_inputs"][0]["reason"]["kind"], "unconfirmed");
-        assert_eq!(
-            state["retained_inputs"][0]["input"]["original"],
-            json!(front.1)
-        );
-        let mut owner_drive = super::source_retry_drive(&intake);
-        let (done, complete) = tokio::sync::mpsc::unbounded_channel();
-        Arc::get_mut(&mut owner_drive).unwrap().settled = Some(Arc::new(move || {
-            let _ = done.send(());
-            Box::pin(async {})
-        }));
-        intake.runtime.block_on(async {
-            let mut complete = complete;
-            drive::wake(owner_drive);
-            tokio::time::timeout(LIMIT, complete.recv())
-                .await
-                .unwrap()
-                .unwrap();
-        });
-        assert_eq!(fx.rig.sends().len(), after_command + 2);
+            assert_successor(
+                &fx,
+                &intake,
+                &front,
+                (&nonce, &started.session),
+                after_command,
+            );
+        }
+        PaneLoss::BeforeKey { requeue } => {
+            crate::test_support::wait::recv_within(&capture_ready.unwrap(), LIMIT);
+            let state = snapshot(&intake);
+            assert_eq!(
+                state["head_injection"]["attempt"]["target"]["execution_nonce"],
+                nonce
+            );
+            assert_eq!(state["head_injection"]["original"], json!(front.1));
+            assert_eq!(fx.row(), Some(HostedState::Pending));
+            assert_eq!(fx.rig.sends().len(), after_command);
+            fx.rig.show_panes(&[]);
+            fx.rig.exists(20, false);
+            resume_capture.unwrap().send(()).unwrap();
+            assert!(crate::test_support::wait::join_within(first, LIMIT).is_err());
+            intake
+                .runtime
+                .block_on(super::wait_for_idle_turn_to_unwind(&intake));
+            let state = snapshot(&intake);
+            assert!(state["head_injection"].is_null(), "{state}");
+            assert_eq!(state["items"], json!([front.1]));
+            assert_eq!(state["retained_inputs"], json!([]));
+            assert!(state["retry"]["wait"].is_null());
+            if requeue {
+                retain_and_requeue(&fx, &intake, &front, &nonce, &started);
+            }
+            periodic_retire(&fx, &intake);
+            assert!(snapshot(&intake)["retry"]["wait"].is_null());
+            assert_eq!(fx.rig.sends().len(), after_command);
+            assert_successor(
+                &fx,
+                &intake,
+                &front,
+                (&nonce, &started.session),
+                after_command,
+            );
+        }
+        PaneLoss::AfterKey => {
+            crate::test_support::wait::recv_within(&key_seen, LIMIT);
+            assert_eq!(fx.rig.sends().len(), after_command + 2);
+            assert_eq!(fx.row(), Some(HostedState::Pending));
+            let state = snapshot(&intake);
+            assert_eq!(state["head_injection"]["phase"], "may_have_sent", "{state}");
+            fx.rig.show_panes(&[]);
+            fx.rig.exists(20, false);
+            release.send(()).unwrap();
+            assert!(crate::test_support::wait::join_within(first, LIMIT).is_err());
+            intake
+                .runtime
+                .block_on(super::wait_for_idle_turn_to_unwind(&intake));
+            periodic_retire(&fx, &intake);
+            assert!(tick_and_grant(&intake, &front).is_none());
+            let state = snapshot(&intake);
+            assert_eq!(state["retained_inputs"][0]["reason"]["kind"], "unconfirmed");
+            assert_eq!(
+                state["retained_inputs"][0]["input"]["original"],
+                json!(front.1)
+            );
+            let mut owner_drive = super::source_retry_drive(&intake);
+            let (done, complete) = tokio::sync::mpsc::unbounded_channel();
+            Arc::get_mut(&mut owner_drive).unwrap().settled = Some(Arc::new(move || {
+                let _ = done.send(());
+                Box::pin(async {})
+            }));
+            intake.runtime.block_on(async {
+                let mut complete = complete;
+                drive::wake(owner_drive);
+                tokio::time::timeout(LIMIT, complete.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            });
+            assert_eq!(fx.rig.sends().len(), after_command + 2);
+        }
     }
     drop(intake);
     drop(original_runtime);
 }
 
+fn periodic_retire(fx: &Fixture, intake: &Intake) {
+    fx.rig.thread_installer_with_launch(NODE, KEY, SESSION)();
+    let _runtime = fx.rt.enter();
+    QUIET.with(|quiet| quiet.set(Some(Duration::ZERO)));
+    discord::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
+        &intake.shared,
+        &ProviderKind::Claude,
+    );
+    QUIET.with(|quiet| quiet.set(None));
+    assert_eq!(fx.row(), Some(HostedState::Retired));
+}
+
+fn retain_and_requeue(
+    fx: &Fixture,
+    intake: &Intake,
+    front: &OwnerFront,
+    nonce: &str,
+    started: &Started,
+) {
+    use crate::services::discord::queue_io::input_owner::{effect, pump};
+    let prepared = effect::PreparedPayload {
+        frame: front.1.text.clone(),
+        sources: vec![front.1.message_id.to_string()],
+        attempt: json!({
+            "nonce":uuid(), "provider":"claude",
+            "target":{"host":"herdr","owner":fx.logical(),"root":fx.rig.socket(),"execution_nonce":nonce},
+            "source":{"kind":"pre_source","expected_session_id":started.session,
+                "expected_transcript":started.path,"binding_watermark":null}
+        }),
+    };
+    intake.runtime.block_on(async {
+        let granted = tick_and_grant_on_mailbox(&intake.mailbox, front.clone())
+            .await
+            .unwrap();
+        let claim = drive::claim_turn(&intake.mailbox, front.1.message_id, &granted)
+            .await
+            .unwrap()
+            .unwrap();
+        let clock = Arc::new(|| chrono::Utc::now().timestamp_millis().max(0) as u64);
+        let result = pump::submit_front(
+            &intake.mailbox,
+            Some(claim),
+            prepared,
+            clock,
+            Box::new(|_| Ok(effect::refused("pane unavailable".into(), false))),
+        )
+        .await;
+        assert_eq!(
+            result,
+            Ok(effect::Completion::NotSent("pane unavailable".into()))
+        );
+        let original = front.1.clone();
+        intake
+            .mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                let state = owner.json()?;
+                assert_eq!(state["retained_inputs"][0]["disposition"], "known_not_sent");
+                assert_eq!(
+                    state["retained_inputs"][0]["input"]["original"],
+                    json!(original)
+                );
+                assert!(state["retry"]["wait"].is_null());
+                assert_eq!(owner.requeue_known_not_sent()?.len(), 1);
+                Ok(())
+            })
+            .await
+            .unwrap();
+    });
+}
+
+fn assert_successor(
+    fx: &Fixture,
+    intake: &Intake,
+    front: &OwnerFront,
+    prior: (&str, &str),
+    after_command: usize,
+) {
+    let original = front.1.clone();
+    intake
+        .runtime
+        .block_on(intake.mailbox.v2_request(move |slot| {
+            assert_eq!(slot.as_ref().unwrap().start_failures_for_test(&original), 0);
+            Ok(())
+        }))
+        .unwrap();
+    let retry = tick_and_grant(intake, front).unwrap();
+    let (successor, new_nonce, new) = launch(fx, intake, retry, prior, false, None);
+    assert_ne!(new_nonce, prior.0);
+    assert_ne!(new.session, prior.1);
+    fx.finished.store(false, Ordering::SeqCst);
+    fx.answer_after(&new, after_command + 1);
+    assert_eq!(
+        crate::test_support::wait::join_within(successor, LIMIT),
+        Ok(())
+    );
+    let sends = fx.rig.sends();
+    assert_eq!(sends.len(), after_command + 3);
+    assert!(
+        sends[after_command + 1]["text"]
+            .as_str()
+            .unwrap()
+            .contains(INPUT)
+    );
+    assert_eq!(sends[after_command + 2]["keys"], json!(["enter"]));
+    let state = snapshot(intake);
+    assert_eq!(state["items"], json!([]));
+    assert_eq!(state["retained_inputs"], json!([]));
+    let original = front.1.clone();
+    intake
+        .runtime
+        .block_on(intake.mailbox.v2_request(move |slot| {
+            assert_eq!(slot.as_ref().unwrap().start_failures_for_test(&original), 0);
+            Ok(())
+        }))
+        .unwrap();
+}
+
 #[test]
 fn s2b1_placed_attach_missing_before_key_retries_same_ticket_pg() {
-    placed_attach(true);
+    placed_attach(PaneLoss::BeforeAttach);
 }
 
 #[test]
 fn s2b1_placed_attach_missing_after_key_does_not_resubmit_pg() {
-    placed_attach(false);
+    placed_attach(PaneLoss::AfterKey);
+}
+
+#[test]
+fn s2b1_placed_attach_missing_after_reserve_retries_same_ticket_pg() {
+    placed_attach(PaneLoss::BeforeKey { requeue: false });
+}
+
+#[test]
+fn s2b1_placed_attach_missing_known_not_sent_requeues_same_ticket_pg() {
+    placed_attach(PaneLoss::BeforeKey { requeue: true });
 }
