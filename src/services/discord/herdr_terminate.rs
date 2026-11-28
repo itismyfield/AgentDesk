@@ -251,7 +251,7 @@ pub(super) async fn retire_confirmed(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "herdr_terminate/terminate_hook_tests.rs"]
+#[path = "herdr_terminate/terminate_hook_test_support.rs"]
 mod terminate_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 use terminate_hook_tests::{
@@ -913,7 +913,7 @@ pub(crate) mod test_turn {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "herdr_terminate/route_fixture_tests.rs"]
+#[path = "herdr_terminate/route_fixture_test_support.rs"]
 pub(crate) mod route_tests;
 
 #[cfg(test)]

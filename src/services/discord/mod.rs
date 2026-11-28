@@ -194,9 +194,9 @@ mod tmux_watcher_registry;
 #[cfg(test)]
 mod tmux_watcher_registry_restore_tests;
 #[cfg(test)]
-mod dl_herdr_terminate_tests;
+mod dl_herdr_terminate_test_host;
 #[cfg(all(test, unix))]
-mod dl_herdr_terminate_unix_tests;
+mod dl_herdr_terminate_unix_test_host;
 #[cfg(test)]
 mod dl_turn_bridge_test_host;
 #[cfg(all(test, unix))]
