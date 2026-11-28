@@ -217,7 +217,7 @@ async fn idle_tick_hook_bind_wakes_and_posts_once_in_source_order() {
 
 #[tokio::test(start_paused = true)]
 async fn idle_tick_durable_input_registration_wakes_the_waiting_actor() {
-    use crate::services::tui_input::human_frame::history::v2::native_tests::Fixture;
+    use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
 
     let channel = 838503;
     let (_harness, _, _, bindings, stop, task) = start_idle(channel);
