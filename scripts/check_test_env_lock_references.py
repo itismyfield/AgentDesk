@@ -18,6 +18,7 @@ except ModuleNotFoundError:
 ROOT = "__ROOT_LITERAL__"
 SUPPORT_SOURCE = Path("src/services/turn_orchestrator/test_support_tests.rs")
 SUPPORT_PATH = "__SUPPORT_PATH_LITERAL__"
+TEST_SUPPORT_FEATURE = '"test-support"'
 CONFIG = "crate::config"
 SUPPORT = "crate::services::turn_orchestrator::test_support"
 OBS = "crate::services::observability"
@@ -33,6 +34,8 @@ def rust_text(source: str) -> str:
                 out.append(text)
             elif kind == LITERAL and text == '"turn_orchestrator/test_support_tests.rs"':
                 out.append(SUPPORT_PATH)
+            elif kind == LITERAL and text == TEST_SUPPORT_FEATURE:
+                out.append(text)
             elif kind == LITERAL:
                 out.append(ROOT if re.fullmatch(r'(?:r(#+)?)?"AGENTDESK_ROOT_DIR"\1?', text) else "__LITERAL__")
             else:
@@ -182,8 +185,10 @@ def canonical_owners(sources: dict[Path, str]) -> set[str]:
         (function(env, "set_agentdesk_root_for_test"), f"TestEnvVarGuard::set_path({ROOT},path)"),
         (compact(config), "usetest_env::{TestEnvVarGuard,TestRuntimeRootGuard,set_agentdesk_root_for_test}"),
     ]
-    declaration = f"#[cfg(test)]#[path={SUPPORT_PATH}]pub(crate)modtest_support;"
-    if declaration not in compact(sources[Path("src/services/turn_orchestrator.rs")]):
+    declaration = f"#[path={SUPPORT_PATH}]pub(crate)modtest_support;"
+    test_gates = ("#[cfg(test)]", f"#[cfg(any(test,feature={TEST_SUPPORT_FEATURE}))]")
+    orchestrator = compact(sources[Path("src/services/turn_orchestrator.rs")])
+    if not any(gate + declaration in orchestrator for gate in test_gates):
         raise ValueError("test_support must use the reviewed test-only module source")
     support = sources[SUPPORT_SOURCE]
     wrapper = block(support, r"\bimpl\s+SharedEnvLock\b")
@@ -235,7 +240,10 @@ def audit(root: Path) -> tuple[list[str], int, list[str]]:
         constants.add("AGENTDESK_ROOT_DIR_ENV")
         keys = re.findall(r"\b(?:std::)?env::(?:set_var|remove_var)\s*\(\s*([^,)]*)", text)
         direct = any(key.strip() == ROOT or key.strip() in constants for key in keys)
-        dynamic_key = any(key.strip() != "__LITERAL__" and key.strip() != ROOT and key.strip() not in constants for key in keys)
+        dynamic_key = any(
+            key.strip() not in ("__LITERAL__", ROOT, TEST_SUPPORT_FEATURE) and key.strip() not in constants
+            for key in keys
+        )
         root_evidence = ROOT in text or "AGENTDESK_ROOT_DIR_ENV" in text
         if dynamic_key and not root_evidence:
             dynamic.append(str(path))
