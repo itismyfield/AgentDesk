@@ -1,6 +1,7 @@
 use chrono::{DateTime, TimeDelta, Utc};
 
 use super::*;
+use crate::services::tui_o::writer::test_support::transition::{started, transcript};
 
 #[path = "archived_source_tests.rs"]
 mod archived_source;
@@ -19,28 +20,6 @@ fn row_at(id: &str, text: &str, at: DateTime<Utc>) -> Vec<u8> {
 fn rotate(seq: u64, old: &SourceId, new: &SourceId, cause: BindingCause) -> BindingEvent {
     let target = BindingTarget::Source(new.clone());
     bound(seq, Some(old), target, cause, Some(old))
-}
-
-/// A switched-over channel `a`, whose startup bind is seq 1, and an owned gateway.
-fn started(body: &[u8]) -> (Harness, PathBuf, SourceId, Arc<FakeBindings>) {
-    let (harness, path, source) = switched_over(body);
-    let bindings = Arc::new(FakeBindings::new());
-    let target = BindingTarget::Source(source.clone());
-    bindings.commit(bound(1, None, target, BindingCause::Startup, None));
-    harness.gate.acquired();
-    (harness, path, source, bindings)
-}
-
-pub(crate) fn transcript(
-    beside: &Path,
-    name: &str,
-    session: &str,
-    body: &[u8],
-) -> (PathBuf, SourceId) {
-    let path = beside.with_file_name(name);
-    std::fs::write(&path, body).unwrap();
-    let source = source_id_for(session, &path).unwrap();
-    (path, source)
 }
 
 fn retired(harness: &Harness, source: &SourceId) -> bool {

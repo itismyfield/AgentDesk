@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use super::herdr::contract::{HerdrOutcome, HerdrTransport, ServerHello, ServerWitness, Witnessed};
 use super::herdr::model::HerdrEndpoint;
-pub(crate) use super::herdr::model::{HerdrCall, HerdrRequest};
+pub use super::herdr::model::{HerdrCall, HerdrRequest};
 use super::herdr::observe::{RestoreResume, RestoreUnverified};
 use super::herdr::pane_probe::ProcessOs;
 use super::herdr::pane_probe::test_support::{FakeOs, context, env_naming};
@@ -26,14 +26,14 @@ use super::herdr::wire::{LineJsonFraming, MAX_FRAME_BYTES};
 use super::herdr_registry::{self, ForcedRegistry, HerdrRegistry};
 use crate::db::dispatched_sessions::hosted_execution::{ExpectedExecution, ProcessStamp};
 
-pub(crate) const PANE: &str = "w1-1";
-pub(crate) const NODE: &str = "mac-mini";
-pub(crate) const KEY: &str = "mini";
-pub(crate) const SESSION: &str = "agentdesk";
-pub(crate) const SHELL: u32 = 10;
-pub(crate) const PROVIDER: u32 = 20;
+pub const PANE: &str = "w1-1";
+pub const NODE: &str = "mac-mini";
+pub const KEY: &str = "mini";
+pub const SESSION: &str = "agentdesk";
+pub const SHELL: u32 = 10;
+pub const PROVIDER: u32 = 20;
 /// The root shell a restarted server gives the pane in place of the launch's.
-pub(crate) const NEW_SHELL: u32 = 11;
+pub const NEW_SHELL: u32 = 11;
 
 /// The process reads the gate sees; empty until a test names the running provider. A pid a test
 /// set answers whether it exists as set, any other as the named OS does; every such read is counted.
@@ -142,7 +142,7 @@ impl ProcessOs for Seen {
     }
 }
 
-pub(crate) struct HerdrRig {
+pub struct HerdrRig {
     path: PathBuf,
     requests: Arc<Mutex<Vec<Value>>>,
     answers: Answers,
@@ -194,7 +194,7 @@ fn off_where_dialled(transport: &dyn HerdrTransport, _: &HerdrEndpoint) -> Resto
 }
 
 impl HerdrRig {
-    pub(crate) fn start() -> Self {
+    pub fn start() -> Self {
         static SOCKETS: AtomicU64 = AtomicU64::new(0);
         let n = SOCKETS.fetch_add(1, Ordering::SeqCst);
         let path = PathBuf::from("/tmp").join(format!("adk-ht-{}-{n}.sock", std::process::id()));
@@ -278,18 +278,18 @@ impl HerdrRig {
         }
     }
 
-    pub(crate) fn socket(&self) -> &Path {
+    pub fn socket(&self) -> &Path {
         &self.path
     }
 
     /// This node's registry over the rig, installed on the calling thread until dropped.
-    pub(crate) fn registry_on_this_thread(&self) -> ForcedRegistry {
+    pub fn registry_on_this_thread(&self) -> ForcedRegistry {
         self.registry_as_on_this_thread(NODE, KEY, &self.path, SESSION)
     }
 
     /// The registry of `node`'s endpoint `key` at `at`, as a channel's config names it, with every
     /// dial reaching the rig; installed on the calling thread until dropped.
-    pub(crate) fn registry_as_on_this_thread(
+    pub fn registry_as_on_this_thread(
         &self,
         node: &str,
         key: &str,
@@ -300,7 +300,7 @@ impl HerdrRig {
     }
 
     /// Installs the same fake endpoint on each async worker and blocking executor thread.
-    pub(crate) fn thread_installer(
+    pub fn thread_installer(
         &self,
         node: &str,
         key: &str,
@@ -358,13 +358,13 @@ impl HerdrRig {
     }
 
     /// Writes launch context `nonce`'s file, as a launch does, and returns its path.
-    pub(crate) fn context(&self, nonce: &str) -> PathBuf {
+    pub fn context(&self, nonce: &str) -> PathBuf {
         context(nonce)
     }
 
     /// The pane runs the provider of the execution whose launch context is `context`;
     /// `replaced` restarts that provider after the launch recorded it.
-    pub(crate) fn run_provider(&self, context: &Path, replaced: bool) {
+    pub fn run_provider(&self, context: &Path, replaced: bool) {
         let os = FakeOs::launched(env_naming(context));
         let os = if replaced {
             os.starting(PROVIDER, &[start(1_005)])
@@ -375,19 +375,19 @@ impl HerdrRig {
     }
 
     /// The pane runs the launch at `context`, and its provider process is seen to exist or not.
-    pub(crate) fn provider_seen(&self, context: &Path, alive: bool) {
+    pub fn provider_seen(&self, context: &Path, alive: bool) {
         let os = Seen(FakeOs::launched(env_naming(context)), alive);
         *self.os.os.lock().unwrap() = Some(Arc::new(os));
     }
 
     /// The pane's root shell was restarted after the launch recorded it; the provider is the same.
-    pub(crate) fn restart_shell(&self, context: &Path) {
+    pub fn restart_shell(&self, context: &Path) {
         self.os
             .set(FakeOs::launched(env_naming(context)).starting(SHELL, &[start(1_009)]));
     }
 
     /// A restarted server restored the pane as shell `NEW_SHELL` alone.
-    pub(crate) fn restore_as_new_shell(&self, context: &Path) {
+    pub fn restore_as_new_shell(&self, context: &Path) {
         let os = FakeOs::launched(env_naming(context));
         self.os.set(os.starting(NEW_SHELL, &[start(1_100)]));
         let info = json!({"pane_id": PANE, "shell_pid": NEW_SHELL,
@@ -398,17 +398,17 @@ impl HerdrRig {
     }
 
     /// Every later read of whether `pid` exists answers `exists`.
-    pub(crate) fn exists(&self, pid: u32, exists: bool) {
+    pub fn exists(&self, pid: u32, exists: bool) {
         self.os.exists.lock().unwrap().insert(pid, exists);
     }
 
     /// How many reads of whether a pid exists the gate has made.
-    pub(crate) fn exists_reads(&self) -> usize {
+    pub fn exists_reads(&self) -> usize {
         self.os.exists_reads.load(Ordering::SeqCst)
     }
 
     /// Replies with `result` to every later `method` request.
-    pub(crate) fn answer(&self, method: &str, result: Value) {
+    pub fn answer(&self, method: &str, result: Value) {
         self.answer_sequence(method, [result]);
     }
 
@@ -420,27 +420,27 @@ impl HerdrRig {
     }
 
     /// Replies with `result` to every `method` request after the next pane write.
-    pub(crate) fn answer_after_send(&self, method: &str, result: Value) {
+    pub fn answer_after_send(&self, method: &str, result: Value) {
         self.answer(&format!("{AFTER_SEND}{method}"), result);
     }
 
     /// Replies with `result` to every `method` request after a pane write sends `key`.
-    pub(crate) fn answer_after_key(&self, key: &str, method: &str, result: Value) {
+    pub fn answer_after_key(&self, key: &str, method: &str, result: Value) {
         self.answer(&format!("{AFTER_KEY}{key}:{method}"), result);
     }
 
     /// Runs `hook` on the params of every later pane write before the server answers it.
-    pub(crate) fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
+    pub fn on_send(&self, hook: impl FnMut(&Value) + Send + 'static) {
         *self.on_send.lock().unwrap() = Some(Box::new(hook));
     }
 
     /// Pauses a caller after a real socket reply, while the server can serve another writer.
-    pub(crate) fn on_reply(&self, hook: impl Fn(&HerdrCall) + Send + Sync + 'static) {
+    pub fn on_reply(&self, hook: impl Fn(&HerdrCall) + Send + Sync + 'static) {
         *self.on_reply.lock().unwrap() = Some(Arc::new(hook));
     }
 
     /// Every later snapshot is complete and lists exactly `panes`.
-    pub(crate) fn show_panes(&self, panes: &[&str]) {
+    pub fn show_panes(&self, panes: &[&str]) {
         let panes: Vec<Value> = panes
             .iter()
             .map(|pane| {
@@ -457,7 +457,7 @@ impl HerdrRig {
     }
 
     /// Every later process read of the pane names `foreground` under its root shell.
-    pub(crate) fn foreground(&self, foreground: &[u32]) {
+    pub fn foreground(&self, foreground: &[u32]) {
         let listed: Vec<Value> = foreground.iter().map(|pid| json!({"pid": pid})).collect();
         let info = json!({"pane_id": PANE, "shell_pid": SHELL,
             "foreground_process_group_id": foreground.first(), "foreground_processes": listed});
@@ -468,7 +468,7 @@ impl HerdrRig {
     }
 
     /// The next pane read lists `first` in the foreground, every later one `then`.
-    pub(crate) fn foreground_then(&self, first: &[u32], then: &[u32]) {
+    pub fn foreground_then(&self, first: &[u32], then: &[u32]) {
         let info = |listed: &[u32]| {
             let pids: Vec<Value> = listed.iter().map(|pid| json!({"pid": pid})).collect();
             let info = json!({"pane_id": PANE, "shell_pid": SHELL,
@@ -479,12 +479,12 @@ impl HerdrRig {
     }
 
     /// The server pid each later dial reaches, in order; the last one repeats.
-    pub(crate) fn serve_as(&self, pids: &[u32]) {
+    pub fn serve_as(&self, pids: &[u32]) {
         *self.servers.lock().unwrap() = pids.iter().copied().collect();
     }
 
     /// The launch evidence of the pane's root shell and provider, for `nonce`.
-    pub(crate) fn expected(&self, nonce: &str) -> ExpectedExecution {
+    pub fn expected(&self, nonce: &str) -> ExpectedExecution {
         let stamp = |pid, seconds| ProcessStamp {
             pid,
             start: format!("darwin:{seconds}.000000"),
@@ -500,22 +500,22 @@ impl HerdrRig {
 
     /// Pane writes leave without a reply while `unanswered`: the client cannot tell whether
     /// they landed.
-    pub(crate) fn leave_sends_unanswered(&self, unanswered: bool) {
+    pub fn leave_sends_unanswered(&self, unanswered: bool) {
         self.unanswered_sends.store(unanswered, Ordering::SeqCst);
         self.answered_sends.store(usize::MAX, Ordering::SeqCst);
     }
 
     /// The next `answered` pane writes are answered and every later one is left unanswered.
-    pub(crate) fn answer_sends_then_leave_unanswered(&self, answered: usize) {
+    pub fn answer_sends_then_leave_unanswered(&self, answered: usize) {
         self.answered_sends.store(answered, Ordering::SeqCst);
     }
 
-    pub(crate) fn requests(&self) -> Vec<Value> {
+    pub fn requests(&self) -> Vec<Value> {
         self.requests.lock().unwrap().clone()
     }
 
     /// The params of every pane write that reached the server, in order.
-    pub(crate) fn sends(&self) -> Vec<Value> {
+    pub fn sends(&self) -> Vec<Value> {
         let sends = self.requests().into_iter().filter(|r| {
             r["method"]
                 .as_str()
@@ -536,13 +536,13 @@ impl Drop for HerdrRig {
 }
 
 /// A separate process keeps Linux peer provenance tied to its exec-time environment.
-pub(crate) struct NativeHerdrRig {
+pub struct NativeHerdrRig {
     root: tempfile::TempDir,
     child: std::process::Child,
 }
 
 impl NativeHerdrRig {
-    pub(crate) fn start(test: &str) -> Self {
+    pub fn start(test: &str) -> Self {
         let root = tempfile::Builder::new()
             .prefix("adk-hn-")
             .tempdir_in("/tmp")
@@ -582,20 +582,20 @@ impl NativeHerdrRig {
         panic!("native server did not bind");
     }
 
-    pub(crate) fn socket(&self) -> PathBuf {
+    pub fn socket(&self) -> PathBuf {
         self.root.path().join("herdr.sock")
     }
-    pub(crate) fn home(&self) -> PathBuf {
+    pub fn home(&self) -> PathBuf {
         self.root.path().join("home")
     }
-    pub(crate) fn requests(&self) -> Vec<Value> {
+    pub fn requests(&self) -> Vec<Value> {
         std::fs::read_to_string(self.root.path().join("requests.jsonl"))
             .unwrap_or_default()
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
     }
-    pub(crate) fn prove_native_off(&self) {
+    pub fn prove_native_off(&self) {
         let endpoint = HerdrEndpoint::new("test-node", "native", &self.socket(), SESSION)
             .unwrap()
             .with_herdr_home(&self.home())
@@ -643,13 +643,13 @@ impl Drop for NativeHerdrRig {
 }
 
 /// Installs the ordinary boot-built registry, including its production launch host.
-pub(crate) fn native_registry_on_this_thread(
+pub fn native_registry_on_this_thread(
     boot: &crate::config::session_hosts::BootSessionHosts,
 ) -> impl Drop + use<> {
     herdr_registry::force_for_test(HerdrRegistry::build(boot))
 }
 
-pub(crate) fn native_server_child() -> bool {
+pub fn native_server_child() -> bool {
     let Some(root) = std::env::var_os("ADK_TEST_NATIVE_HERDR_DIR").map(PathBuf::from) else {
         return false;
     };
@@ -728,7 +728,7 @@ impl ProcessOs for SharedRigOs {
 }
 impl HerdrRig {
     /// Keeps one policy cache across reader passes, with only peer/process I/O scripted.
-    pub(crate) fn policy_registry_on_this_thread(
+    pub fn policy_registry_on_this_thread(
         &self,
         endpoint: HerdrEndpoint,
         prepare: impl FnOnce(super::SocketHerdrLaunchHost) -> super::SocketHerdrLaunchHost,
@@ -760,7 +760,7 @@ impl HerdrRig {
     }
 
     /// As thread_installer, retaining the production launch/create/evidence adapter over this socket.
-    pub(crate) fn thread_installer_with_launch(
+    pub fn thread_installer_with_launch(
         &self,
         node: &str,
         key: &str,
@@ -791,11 +791,11 @@ impl HerdrRig {
 }
 
 #[path = "herdr_t14_client_tests.rs"]
-pub(crate) mod t14_client;
+pub mod t14_client;
 
 /// Installs on this thread the registry `boot` builds for its node, production launch host included.
 #[cfg(unix)]
-pub(crate) fn boot_registry_on_this_thread(
+pub fn boot_registry_on_this_thread(
     boot: &crate::config::session_hosts::BootSessionHosts,
 ) -> impl Drop + use<> {
     herdr_registry::force_for_test(HerdrRegistry::build(boot))

@@ -9,14 +9,13 @@ use sqlx::PgPool;
 
 use super::{HeadlessAgentTurnReservation, HealthRegistry};
 use crate::services::discord::SharedData;
-use crate::services::discord::admin_host_guard::ManagedResetVerdict;
-use crate::services::discord::relay_recovery::{self, AxisBSite};
+use crate::services::discord::host_defer_gate;
+use crate::services::discord::relay_recovery;
 use crate::services::discord::zombie_foreground_release;
-use crate::services::discord::{host_defer_gate, host_teardown_gate};
 use crate::services::engine_runtime::health_port::{
-    AppHealth, AppHealthBinding, FinishCancelledMailboxResult, HeadlessDmTurnStart,
-    HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort,
-    ResumeRuntimePort, RoutineProcessPort, SlotResetPort, StaleSweepPort,
+    AppHealth, AppHealthBinding, AxisBSite, FinishCancelledMailboxResult, HeadlessDmTurnStart,
+    HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart, QueueCancelPort, ResumePorts,
+    ResumeRuntimePort, RoutineProcessPort, StaleSweepPort,
 };
 use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
@@ -90,7 +89,7 @@ impl StaleSweepPort<AxisBSite> for HealthRegistry {
         site: AxisBSite,
     ) -> BoxFuture<'a, bool> {
         Box::pin(relay_recovery::automatic_stale_sweep_warrants(
-            Some(self),
+            self,
             session_key,
             provider_name,
             site,
@@ -230,6 +229,26 @@ impl ResumeRuntimePort for HealthRegistry {
         ))
     }
 
+    fn session_transition_completion(
+        shared: &Arc<SharedData>,
+        channel_id: ChannelId,
+    ) -> impl Send + '_ {
+        shared.session_transition_completion(channel_id)
+    }
+
+    fn acquire_session_transition(
+        shared: &SharedData,
+        channel_id: ChannelId,
+    ) -> BoxFuture<'_, Option<tokio::sync::OwnedMutexGuard<()>>> {
+        Box::pin(async move {
+            shared
+                .session_transition_locks
+                .acquire(channel_id)
+                .await
+                .ok()
+        })
+    }
+
     fn retain_resume_runtime_owner_before_teardown(
         shared: &SharedData,
         channel_id: ChannelId,
@@ -261,46 +280,15 @@ impl ResumeRuntimePort for HealthRegistry {
             retain_runtime_owner,
         ))
     }
-
-    fn resume_host_refusal<'a>(
-        pool: &'a PgPool,
-        provider: Option<&'a ProviderKind>,
-        channel_id: Option<ChannelId>,
-        session_key: &'a str,
-        tmux_name: &'a str,
-    ) -> BoxFuture<'a, Option<String>> {
-        Box::pin(host_defer_gate::resume_host_refusal(
-            pool,
-            provider,
-            channel_id,
-            session_key,
-            tmux_name,
-        ))
-    }
 }
 
-impl SlotResetPort for HealthRegistry {
-    type Verdict = ManagedResetVerdict;
-
-    fn verdict_refusal(verdict: &ManagedResetVerdict) -> Option<&str> {
-        verdict.refusal()
-    }
-
-    fn row_host_refusal<'a>(
-        pool: &'a PgPool,
-        stored_provider: Option<&'a str>,
-        channel_id: Option<&'a str>,
-        session_key: &'a str,
-        tmux_name: &'a str,
-        caller: &'a str,
-    ) -> BoxFuture<'a, Option<String>> {
-        Box::pin(host_teardown_gate::row_host_refusal(
-            pool,
-            stored_provider,
-            channel_id,
-            session_key,
-            tmux_name,
-            caller,
-        ))
+pub(crate) fn resume_ports(registry: Option<&HealthRegistry>) -> ResumePorts<'_, HealthRegistry> {
+    ResumePorts {
+        registry,
+        host_refusal: |pool, provider, channel, key, tmux| {
+            Box::pin(host_defer_gate::resume_host_refusal(
+                pool, provider, channel, key, tmux,
+            ))
+        },
     }
 }

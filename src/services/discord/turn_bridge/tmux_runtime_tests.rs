@@ -20,7 +20,7 @@ fn provider_interrupt_on_keeps_the_session_and_uses_only_the_planned_key() {
     run(async {
         let outcome = interrupt_provider_cli_turn(&ProviderKind::Codex, &token, "cancel").await;
         assert!(outcome.sent_keys, "{outcome:?}");
-        assert!(TmuxHost.legacy_has_session(name));
+        assert!(TmuxHost.legacy_has_session_for_test(name));
         let calls = fixture.take_calls();
         assert_eq!(
             calls

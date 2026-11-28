@@ -9,7 +9,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
 };
 use crate::services::codex_tui::canary::{CANARY_CHANNEL, CANARY_TMUX};
 use crate::services::provider::{CancelToken, ProviderKind};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe::binding_context::{
     BINDING_HEADER, CapturedContext, HookBindingEnvelope, ObservedHookProcess, PreparedIncarnation,
     SpawnNonceMarker,

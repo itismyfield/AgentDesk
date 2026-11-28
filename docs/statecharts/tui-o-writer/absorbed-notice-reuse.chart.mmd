@@ -1,0 +1,54 @@
+---
+title: "같은 본문의 후속 흡수 입력 공지"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: restart
+    lg1: done
+    lg2: active
+  }
+  class lg0 yellow
+  class lg1 teal
+  class lg2 blue
+  s0: 첫 흡수 입력의 공지 정산 대기
+  s1: 재시작 후 원장과 원본 재생
+  s2: 첫 공지의 제외와 소비 범위를 원장에 보존
+  s3: 후속 흡수 입력의 근거를 검토
+  s4: 귀속 증거가 불충분해 보류
+  s5: 후속 입력의 공지 필요
+  s6: 후속 공지 전송 또는 확인 대기
+  s7: 새 등록 입력의 공지 제외
+  s8: 미소유 입력의 공지 한 건 확인
+  [*] --> s0
+  s0 --> s1: writer 재시작
+  s0 --> s2: 첫 등록 소유권과 소비 범위를 기록
+  s1 --> s0: 원장에서 이전 소비 범위를 복원
+  s2 --> s1: writer 재시작
+  s2 --> s3: 후속 흡수 행을 캡처해 원장에 기록
+  s1 --> s2: 원장에서 이전 소비 범위를 복원
+  s3 --> s4: 현재 자료로 귀속을 결정할 수 없음
+  s3 --> s1: writer 재시작
+  s3 --> s5: 남은 등록이 없음을 확인
+  s4 --> s1: writer 재시작
+  s5 --> s6: 후속 공지를 준비
+  s5 --> s1: writer 재시작
+  s3 --> s7: 후속 입력을 새 등록에 귀속
+  s1 --> s3: 원장에서 이전 소비 범위를 복원
+  s6 --> s1: writer 재시작
+  s7 --> s1: writer 재시작
+  s1 --> s4: 원장에서 이전 소비 범위를 복원
+  s1 --> s5: 원장에서 이전 소비 범위를 복원
+  s6 --> s8: 게시 결과를 확인해 원장에 기록
+  s1 --> s6: 원장에서 이전 소비 범위를 복원
+  s1 --> s7: 원장에서 이전 소비 범위를 복원
+  s8 --> s1: writer 재시작
+  s1 --> s8: 원장에서 이전 소비 범위를 복원
+  class s0 blue
+  class s1 yellow
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 teal
+  class s8 teal

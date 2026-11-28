@@ -4,9 +4,9 @@ use std::sync::Mutex;
 
 static FAULT: Mutex<Option<(PathBuf, u64)>> = Mutex::new(None);
 
-pub(crate) struct ReadFault(PathBuf, u64);
+pub struct ReadFault(PathBuf, u64);
 
-pub(crate) fn after_offset(path: &Path, offset: u64) -> ReadFault {
+pub fn after_offset(path: &Path, offset: u64) -> ReadFault {
     let mut fault = FAULT.lock().unwrap();
     assert!(fault.is_none(), "only one scoped reader fault may be armed");
     *fault = Some((path.to_owned(), offset));

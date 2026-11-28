@@ -39,8 +39,8 @@ Selection observer required gate가 red로 만드는 observer 사망은 **프로
 ### PG15 exact owner proof의 판정 wrapper (#5185)
 
 PR·main·nightly는 nextest 한 번으로 모든 lib 시험을 돌린다. `scripts/run_test_lane.py`는 PR의
-`PostgreSQL 15 exact owner proof`만 감싸며, 기대 집합은 `--expected-ids` 파일
-(`scripts/ci/pg15_required_ids.txt`)이다.
+`PostgreSQL 15 exact owner proof`만 감싸며, 기대 집합은 lib 바이너리마다 하나인 `--expected-ids` 파일
+(`scripts/ci/pg15_required_ids.txt`, `-p adk-runtime`용 `scripts/ci/pg15_required_runtime_ids.txt`)이다.
 
 이 wrapper는 **실행 건수 임계를 쓰지
 않는다.** 임계는 집합의 스칼라 요약이고, 실측된 두 회피가 모두 임계를 통과했다:
@@ -271,7 +271,7 @@ nextest worker 와 PR `pg15_owner_proof` 는 **각자의 job 에서 `Start Postg
 
 ### Serial execution
 
-- PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `rust_build`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`의 시험만 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. `required_contexts`의 `Fast targeted tests (ubuntu-latest)` 판정이 `rust_tests` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
+- PR `pg15_owner_proof`(`PostgreSQL 15 owner proof`)는 `rust_build`와 같은 `needs`·`if`로 `postgres:15`를 띄우고, `server_version_num`이 15가 아니면 실패한다. `scripts/ci/pg15_required_ids.txt`(루트 lib)와 `scripts/ci/pg15_required_runtime_ids.txt`(`-p adk-runtime`)의 시험만 lib 바이너리마다 `--exact`·`--test-threads=1`로 실행하며 `run_test_lane.py --expected-ids`가 누락·추가·미실행·빈 목록을 실패로 판정한다. `required_contexts`의 `Fast targeted tests (ubuntu-latest)` 판정이 `rust_tests` 필터로 이 결과도 확인한다(`docs/ci/postgres-service-image.md`).
 - PR infra retry는 `Rust tests (worker N)` 워커만 후보로 본다. 로그가 infra로 분류된 워커만 `classify-worker --infra-evidence`로 넘기고, 워커 아티팩트에 시험 실패·읽을 수 없는 결과가 있거나 분류되지 않은 워커·내려받기 실패·만료된 아티팩트·plan 부재가 있거나, 워커의 시험 단계 로그에 nextest 실패(`LEAK-FAIL`, `error: test run failed`, runner의 `##[error]Process completed with exit code 100.` 줄)가 있으면 아티팩트가 없어도 모든 워커의 재시도를 막는다. 최초 attempt에서만 한 번 요청하며 default branch checkout과 요청 전 stale-attempt·PR head 검사는 유지한다.
 - PR `check_fast_cross_os_targets`(`Windows exact targets`)의 `Writer namespace exact Windows targets` step 예산은 `timeout-minutes: 60` 이고 job 수준 timeout 은 두지 않는다. 값은 `check-ci-runner-hardening.sh` 가 고정한다. 2026-10-15~16 PR CI 실측 약 40회가 24~46분(p90 약 42분)이었고 45분 예산에서 #7021(2회) 등 세 건이 시간 초과로 끊겼다. p90 이 40분을 넘었으므로 step 분할을 후속으로 검토한다. 그 뒤 같은 job 이 Windows nextest list 로 `rust_test_sources.py compare --platform windows` 를 30분 예산으로 실행한다.
 - nextest worker 는 `.config/nextest.toml` 의 `ci` profile(`test-threads = 1`)로 계획된 시험을 하나씩 실행한다 — `high_risk_recovery::` 도 같다.

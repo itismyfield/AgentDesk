@@ -1,4 +1,5 @@
 //! Immutable request context crosses formatting; each HTTP future owns its own PG guard.
+use crate::domain::outbound::port::{DispatchMessagePostError, DispatchMessagePostErrorKind};
 use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::legacy_body_census::{request_context, transport};
 use poise::serenity_prelude::{self as serenity, ChannelId};
@@ -59,14 +60,14 @@ impl RequestError for serenity::Error {
     }
 }
 
-impl RequestError for crate::services::dispatches::discord_delivery::DispatchMessagePostError {
+impl RequestError for DispatchMessagePostError {
     fn rejected(&self) -> bool {
         self.http_status()
             .is_some_and(|s| rejected_status(s.as_u16()))
     }
     fn authority(error: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> Self {
         Self::new(
-            crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind::Other,
+            DispatchMessagePostErrorKind::Other,
             error.into().to_string(),
         )
     }

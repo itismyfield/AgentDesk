@@ -61,7 +61,7 @@ pub async fn load_active_card_program_pg(
     Ok(Some((status, program)))
 }
 
-pub(crate) async fn load_card_program_for_update_in_tx(
+pub async fn load_card_program_for_update_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     card_id: &str,
 ) -> Result<Option<(String, serde_json::Value)>, String> {

@@ -14,7 +14,7 @@ pub(super) fn anchor_record(value: &Value, content: &str) -> AnchorRecord {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SessionAnchorPrompt {
+pub struct SessionAnchorPrompt {
     pub text: String,
     pub records: Vec<AnchorRecord>,
 }

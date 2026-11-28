@@ -6,10 +6,10 @@ use axum::http::{HeaderMap, StatusCode};
 use chrono::{DateTime, Utc};
 use serde_json::{Value, json};
 
-pub(crate) const RELAY_REQUEST_ID_HEADER: &str = "x-agentdesk-relay-request-id";
-pub(crate) const RELAY_PUBLISHED_AT_HEADER: &str = "x-agentdesk-relay-published-at";
-pub(crate) const RELAY_DEADLINE_HEADER: &str = "x-agentdesk-relay-deadline";
-pub(crate) const RELAY_RESPOND_BY_HEADER: &str = "x-agentdesk-relay-respond-by";
+pub const RELAY_REQUEST_ID_HEADER: &str = "x-agentdesk-relay-request-id";
+pub const RELAY_PUBLISHED_AT_HEADER: &str = "x-agentdesk-relay-published-at";
+pub const RELAY_DEADLINE_HEADER: &str = "x-agentdesk-relay-deadline";
+pub const RELAY_RESPOND_BY_HEADER: &str = "x-agentdesk-relay-respond-by";
 pub(crate) const DELIVERY_TTL: Duration = Duration::from_secs(60 * 60);
 pub(crate) const LEDGER_RETENTION: Duration = Duration::from_secs(2 * 60 * 60);
 

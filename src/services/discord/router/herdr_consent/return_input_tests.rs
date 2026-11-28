@@ -280,9 +280,9 @@ impl migration::RowSource for Rows {
         &self,
         _: &std::collections::BTreeSet<u64>,
     ) -> Result<Vec<migration::MigrationRow>, String> {
-        use crate::db::dispatched_sessions::hosted_execution::{self as hosted, tests};
-        let mut bound = tests::record(
-            &tests::owner(&CHANNEL.to_string()),
+        use crate::db::dispatched_sessions::hosted_execution::{self as hosted, test_support};
+        let mut bound = test_support::record(
+            &test_support::owner(&CHANNEL.to_string()),
             "e",
             hosted::HostedState::Bound,
         );
@@ -385,7 +385,9 @@ fn hold_denied(source: u64, generation: u64) -> Consent {
         .unwrap()
         .into_consent();
     match held.state {
-        State::Pending => store().decide(&held, held.owner, false, now()).unwrap(),
+        State::Pending => store()
+            .decide_for_test(&held, held.owner, false, now())
+            .unwrap(),
         _ => held,
     }
 }
@@ -650,14 +652,16 @@ async fn applied_boot_replay_never_runs_a_returned_input() {
 }
 
 fn applied(held: &Consent) -> Consent {
-    let accepted = store().decide(held, held.owner, true, now()).unwrap();
+    let accepted = store()
+        .decide_for_test(held, held.owner, true, now())
+        .unwrap();
     let receipt = consent::ApplyResult {
         before: Some([1; 32]),
         after: Some([4; 32]),
         backup: None,
         detail: None,
     };
-    store().record_apply(&accepted, receipt).unwrap()
+    store().record_apply_for_test(&accepted, receipt).unwrap()
 }
 
 struct Broken;
@@ -707,7 +711,7 @@ async fn applied_retry_replays_its_receipt_without_preview_and_reconsents_only_n
         let _kicks = kicks_drain(&ran);
         let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
             .with_mode(EndpointMode::UserDefault);
-        let (config_dir, fixture) = preview::tests::fixture("printf 'config: ok\\n'");
+        let (config_dir, fixture) = preview::test_support::fixture("printf 'config: ok\\n'");
         fixture.0.lock().unwrap().witness.socket = SOCKET.into();
         let prepared = preview::prepare(fixture.clone(), 1).await.unwrap();
         let _peer = Peer::set(if reconsent { fixture } else { Arc::new(Broken) });
@@ -770,7 +774,7 @@ async fn recordless_retry_reruns_admission_once_and_continues_to_one_card() {
         let ran = Arc::new(Mutex::new(Vec::new()));
         let _boot = session_hosts::force_for_test(Some("node"), &[(CHANNEL, "node")])
             .with_mode(EndpointMode::UserDefault);
-        let (_config_dir, fixture) = preview::tests::fixture("printf 'config: ok\\n'");
+        let (_config_dir, fixture) = preview::test_support::fixture("printf 'config: ok\\n'");
         fixture.0.lock().unwrap().witness.socket = SOCKET.into();
         let prepared = preview::prepare(fixture.clone(), 1).await.unwrap();
         let _peer = Peer::set(fixture);

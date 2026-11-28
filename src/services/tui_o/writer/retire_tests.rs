@@ -4,6 +4,7 @@ use crate::services::tui_o::store::rotation::{
     BOUNDARY_FILE, Boundary, Rotation, SourceLink, Successor,
 };
 use crate::services::tui_o::store::spool::source_key;
+use crate::services::tui_o::writer::test_support::transition::hop_at;
 
 #[path = "resume_time_tests.rs"]
 mod resume_time_tests;
@@ -24,24 +25,6 @@ pub(crate) mod transition_actor_tests;
 
 fn session_start() -> String {
     HookEventKind::SessionStart.as_str().to_owned()
-}
-
-/// A bind of `new` in pane `tmux`, named by hook `hook` (empty for a record no hook made).
-pub(crate) fn hop_at(
-    seq: u64,
-    tmux: &str,
-    old: Option<&SourceId>,
-    new: &SourceId,
-    cause: BindingCause,
-    hook: &str,
-) -> BindingEvent {
-    let target = BindingTarget::Source(new.clone());
-    let mut event = bound(seq, old, target, cause, None);
-    event.tmux_session = tmux.into();
-    if let BindingRecord::Bound { evidence, .. } = &mut event.record {
-        evidence.hook_event = hook.into();
-    }
-    event
 }
 
 /// A resume naming the source the pane already reads, as a relaunch's SessionStart records it.

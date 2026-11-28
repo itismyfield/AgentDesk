@@ -1,203 +1,29 @@
 //! The verified collector through the real `Sources` resume, follow and capture paths.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use chrono::Utc;
-use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
+use super::test_support::{
+    Bindings, CHANNEL, Port, Writer, append, body, event, header, opened, owed_writer, payload,
+    span, switched_on,
+};
 use super::*;
-use crate::services::claude_tui::hook_server::HookEventKind;
-use crate::services::tui_o::ownership::OwnershipGate;
 use crate::services::tui_o::shadow::binding_reader::source_id_for;
 use crate::services::tui_o::store::codex_provenance::{CODEX_PROVENANCE_FILE, CodexProvenance};
 use crate::services::tui_o::store::rotation::{BOUNDARY_FILE, Boundary};
 use crate::services::tui_o::store::spool::source_key;
-use crate::services::tui_o::store::{InitSource, Initialized, OStore, STORE_DIR_NAME, StoreConfig};
+use crate::services::tui_o::store::{OStore, STORE_DIR_NAME};
+use crate::services::tui_o::writer::WriterAlarm;
 use crate::services::tui_o::writer::actor::{POLL_INTERVAL, run_channel};
-use crate::services::tui_o::writer::binding::{
-    BindingCause, BindingEvent, BindingEvents, BindingEvidence, BindingRecord, BindingTarget,
-};
-use crate::services::tui_o::writer::deliver::ChannelWriter;
+use crate::services::tui_o::writer::binding::BindingCause;
 use crate::services::tui_o::writer::pieces::UnitDeriver;
 use crate::services::tui_o::writer::rotation::Sources;
-use crate::services::tui_o::writer::{
-    AlarmSink, DeliveryLease, DiscordPort, PostOutcome, SeenMessage, WriterAlarm,
-};
 use crate::services::tui_prompt_dedupe::codex_verified::provenance::{
-    CodexEpisodeDeny, CodexEpisodeSpan, ExecutionProofRef, TurnEpisodeRef,
+    CodexEpisodeDeny, CodexEpisodeSpan,
 };
-
-const CHANNEL: u64 = 584_521;
-
-#[derive(Default)]
-pub(crate) struct Port {
-    history_override: Mutex<Option<Vec<SeenMessage>>>,
-    history_reads: std::sync::atomic::AtomicUsize,
-    posts: Mutex<Vec<String>>,
-    /// Runs inside each POST's first poll, under the gate and any record lock.
-    on_post: Mutex<Option<Box<dyn Fn() + Send>>>,
-    /// Each POST answers only after this long.
-    pub(crate) delay: Mutex<Option<std::time::Duration>>,
-}
-
-impl Port {
-    pub(crate) fn posts(&self) -> Vec<String> {
-        self.posts.lock().unwrap().clone()
-    }
-}
-
-impl DiscordPort for Port {
-    fn bot_id(&self) -> u64 {
-        42
-    }
-
-    fn post(
-        &self,
-        _channel: u64,
-        content: String,
-    ) -> impl std::future::Future<Output = PostOutcome> + Send + 'static {
-        let mut posts = self.posts.lock().unwrap();
-        posts.push(content.clone());
-        let (id, author_id) = (1000 + posts.len() as u64, 42);
-        drop(posts);
-        if let Some(hook) = self.on_post.lock().unwrap().as_ref() {
-            hook();
-        }
-        let message = SeenMessage {
-            id,
-            author_id,
-            content,
-        };
-        let delay = *self.delay.lock().unwrap();
-        async move {
-            if let Some(delay) = delay {
-                tokio::time::sleep(delay).await;
-            }
-            PostOutcome::Created(message)
-        }
-    }
-
-    /// A readable channel where only another author spoke after `after`.
-    async fn history_after(&self, _channel: u64, after: u64) -> Result<Vec<SeenMessage>, String> {
-        self.history_reads
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if let Some(history) = &*self.history_override.lock().unwrap() {
-            return Ok(history
-                .iter()
-                .filter(|message| message.id > after)
-                .cloned()
-                .collect());
-        }
-        let (id, author_id, content) = (after + 1, 7, "chatter".to_owned());
-        Ok(vec![SeenMessage {
-            id,
-            author_id,
-            content,
-        }])
-    }
-
-    async fn message(&self, _channel: u64, _id: u64) -> Result<Option<SeenMessage>, String> {
-        Ok(None)
-    }
-}
-
-pub(crate) struct Lease;
-
-thread_local! {
-    /// While set, every lease on this thread is held elsewhere.
-    pub(crate) static LEASE_BUSY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-impl DeliveryLease for Lease {
-    type Held = ();
-
-    fn try_acquire(&self, _channel: u64, _serial: u64) -> Option<()> {
-        (!LEASE_BUSY.get()).then_some(())
-    }
-}
-
-#[derive(Clone, Default)]
-pub(crate) struct Alarms(Arc<Mutex<Vec<WriterAlarm>>>);
-
-impl AlarmSink for Alarms {
-    fn raise(&self, _channel: u64, alarm: WriterAlarm) {
-        self.0.lock().unwrap().push(alarm);
-    }
-}
-
-/// An in-memory Codex binding log whose seq notice moves with each bind.
-pub(crate) struct Bindings {
-    channel: u64,
-    events: Mutex<Vec<BindingEvent>>,
-    notice: watch::Sender<u64>,
-}
-
-impl Bindings {
-    pub(crate) fn new() -> Arc<Self> {
-        Self::on(CHANNEL)
-    }
-
-    pub(crate) fn on(channel: u64) -> Arc<Self> {
-        let (events, notice) = (Mutex::new(Vec::new()), watch::channel(0).0);
-        Arc::new(Self {
-            channel,
-            events,
-            notice,
-        })
-    }
-
-    pub(crate) fn bind(&self, old: Option<&SourceId>, new: &SourceId, cause: BindingCause) {
-        let mut events = self.events.lock().unwrap();
-        let seq = events.len() as u64 + 1;
-        let evidence = BindingEvidence {
-            hook_event: HookEventKind::SessionStart.as_str().into(),
-            received_at: Utc::now(),
-            reclaims: false,
-        };
-        let record = BindingRecord::Bound {
-            old: old.cloned(),
-            new: BindingTarget::Source(new.clone()),
-            cause,
-            parent_hint: old.cloned(),
-            evidence,
-        };
-        events.push(BindingEvent {
-            seq,
-            channel_id: self.channel,
-            provider: ShadowProvider::Codex,
-            tmux_session: "pane".into(),
-            execution_nonce: "nonce".into(),
-            record,
-            committed_at: Utc::now(),
-        });
-        self.notice.send_replace(seq);
-    }
-}
-
-impl BindingEvents for Bindings {
-    fn binding_events_since(&self, _channel: u64, after: u64) -> Result<Vec<BindingEvent>, String> {
-        let events = self.events.lock().unwrap();
-        Ok(events.iter().filter(|e| e.seq > after).cloned().collect())
-    }
-
-    fn subscribe(&self, _channel: u64) -> watch::Receiver<u64> {
-        self.notice.subscribe()
-    }
-}
-
-pub(crate) type Writer = ChannelWriter<Port, Lease, Alarms>;
-
-pub(crate) fn owed_writer(store: ChannelStore) -> (Writer, Arc<Port>) {
-    let (gate, port) = (
-        Arc::new(OwnershipGate::default()),
-        Arc::new(Port::default()),
-    );
-    gate.acquired();
-    let writer = ChannelWriter::new(store, gate, Arc::clone(&port), Lease, Alarms::default());
-    (writer, port)
-}
 
 /// One actor's Codex sources and deriver, owing into the verified collector.
 pub(crate) struct Collector {
@@ -234,30 +60,6 @@ pub(crate) fn kept<T>(result: Result<T, WriterAlarm>, step: &str) -> T {
     result.unwrap_or_else(|alarm| panic!("{step} halted the writer: {alarm:?}"))
 }
 
-fn header(session: &str) -> String {
-    let meta = serde_json::json!({"type": "session_meta", "payload": {
-        "id": session, "cwd": "/native", "source": "cli", "originator": "codex-tui"}});
-    format!("{meta}\n")
-}
-
-fn event(kind: &str, id: &str) -> String {
-    let event = serde_json::json!({"type": "event_msg", "payload": {"type": kind, "turn_id": id}});
-    format!("{event}\n")
-}
-
-fn body(id: &str, text: &str) -> String {
-    let body = serde_json::json!({"type": "response_item", "payload": {
-        "type": "message", "role": "assistant", "id": id,
-        "content": [{"type": "output_text", "text": text}]}});
-    format!("{body}\n")
-}
-
-fn append(path: &Path, lines: &[String]) {
-    use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
-    file.write_all(lines.concat().as_bytes()).unwrap();
-}
-
 fn transcript(beside: &Path, name: &str, session: &str, lines: &[String]) -> SourceId {
     let path = beside.with_file_name(name);
     std::fs::write(
@@ -277,44 +79,6 @@ fn switched() -> (tempfile::TempDir, OStore, SourceId) {
     switched_on(CHANNEL)
 }
 
-pub(crate) fn switched_on(channel: u64) -> (tempfile::TempDir, OStore, SourceId) {
-    let runtime = tempfile::tempdir().unwrap();
-    let head = header("s1");
-    let path = runtime.path().join("a.jsonl");
-    std::fs::write(&path, &head).unwrap();
-    let source = source_id_for("s1", &path).unwrap();
-    let config = StoreConfig { enabled: true };
-    let store = OStore::open_if_enabled(&config, runtime.path())
-        .unwrap()
-        .unwrap();
-    let init = InitSource {
-        source_id: source.clone(),
-        delivery_start: head.len() as u64,
-        prefix_hash: hex::encode(Sha256::digest(head.as_bytes())),
-    };
-    let initialized = |channel| {
-        let (sources, build_digest, at) = (vec![init.clone()], "b".to_string(), Utc::now());
-        Ok(Initialized {
-            policy_parent: None,
-            channel,
-            sources,
-            initial_anchor: 100,
-            build_digest,
-            at,
-        })
-    };
-    store
-        .begin_fixture_era(&[channel], Utc::now(), initialized)
-        .unwrap();
-    (runtime, store, source)
-}
-
-pub(crate) fn opened(store: &OStore) -> ChannelStore {
-    let era = store.read_era().unwrap().unwrap();
-    let channel = era.initial_channels[0];
-    store.open_channel(&era, channel).unwrap().unwrap()
-}
-
 fn channel_file(runtime: &tempfile::TempDir, file: &str) -> PathBuf {
     channel_file_on(runtime, CHANNEL, file)
 }
@@ -324,43 +88,10 @@ fn channel_file_on(runtime: &tempfile::TempDir, channel: u64, file: &str) -> Pat
     dir.join(channel.to_string()).join(file)
 }
 
-fn span(source: &SourceId, start: u64, end: Option<u64>) -> CodexEpisodeSpan {
-    let execution = ExecutionProofRef {
-        owner_runtime_root: "/runtime/owner".into(),
-        tmux_session: "pane".into(),
-        execution_nonce: "execution".into(),
-        proof_seq: 4,
-        source: source.clone(),
-    };
-    let episode = TurnEpisodeRef {
-        channel_id: CHANNEL,
-        user_message_id: 10,
-        request_owner_id: 8,
-        turn_nonce: "turn".into(),
-        native_turn_id: "n1".into(),
-    };
-    CodexEpisodeSpan {
-        execution,
-        episode,
-        delivery_channel_id: CHANNEL,
-        offset_authority_channel_id: CHANNEL,
-        generation_mtime_ns: 1,
-        start,
-        end,
-    }
-}
-
 fn present(store: &ChannelStore) -> CodexProvenance {
     match store.codex_provenance() {
         Sidecar::Present(read) => read.raw().clone(),
         other => panic!("sidecar not present: {other:?}"),
-    }
-}
-
-fn payload(work: &OwedWork) -> &str {
-    match &work.derived {
-        Derived::Piece(piece) => &piece.payload,
-        other => panic!("not a piece: {other:?}"),
     }
 }
 

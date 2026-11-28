@@ -1,6 +1,7 @@
 use super::*;
 
 // Each fence test uses a scratch runtime root and only writes its fixture marker.
+#[cfg(test)]
 fn fence_envelope(
     tmux: &str,
     channel: u64,
@@ -17,6 +18,7 @@ fn fence_envelope(
     }
 }
 
+#[cfg(test)]
 fn fence_hook(
     ingress: &Ingress,
     command: &str,

@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 use tower::ServiceExt;
 
 async fn detail_body(app: &axum::Router) -> Value {

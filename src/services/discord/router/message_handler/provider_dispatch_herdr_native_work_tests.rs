@@ -102,7 +102,12 @@ fn work_at_closer(has_id: bool) {
     let mut config = crate::config::Config::default();
     config.policies.dir = policies.path().to_path_buf();
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(fx.pool.clone())).unwrap();
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(fx.pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let intake = Intake::with_engine(&fx, &started, Some(engine));
     let start = std::fs::metadata(&started.path).unwrap().len();
     let heads = answer_on_enter(&fx, &intake, &started, true);

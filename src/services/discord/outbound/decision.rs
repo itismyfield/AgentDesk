@@ -18,7 +18,7 @@ use super::message::{
     OutboundTarget,
 };
 use super::policy::{FallbackPolicy, LengthStrategy};
-use super::result::FallbackUsed;
+use crate::domain::outbound::result::FallbackUsed;
 
 pub(crate) use crate::domain::outbound::policy::DISCORD_MESSAGE_HARD_LIMIT_CHARS;
 /// Conservative chunk target used by new outbound policy planning.

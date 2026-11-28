@@ -106,7 +106,7 @@ pub fn resolve_verdict(context: Option<&Value>, result: &Value) -> VerdictResolu
 }
 
 /// Return the complete policy decision so callers only coordinate its effects.
-pub(crate) fn evaluate(context: Option<&Value>, result: &Value) -> Value {
+pub fn evaluate(context: Option<&Value>, result: &Value) -> Value {
     let resolution = resolve_verdict(context, result);
     let expected = context
         .and_then(|context| context.get("phase_gate"))

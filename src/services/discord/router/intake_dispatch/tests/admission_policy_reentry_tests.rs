@@ -1,10 +1,10 @@
 //! A live admission followed by the owner's real idle start must reload changed policy.
 use super::*;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::services::discord::queue_io::input_admission::Admission;
 use crate::services::discord::queue_io::input_ingress;
 use crate::services::discord::router::herdr_consent::admission::tests::install_final_local_probe;
 use crate::services::discord::shared_state::test_rest;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 use serde_json::json;
 use std::cell::Cell;
 use std::rc::Rc;

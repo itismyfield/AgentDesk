@@ -131,7 +131,7 @@ mod tests {
         let channel = 73369320;
         let binding =
             super::super::super::commands::control::execution_cleanup::tests::native(channel);
-        let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(
+        let fake = crate::services::provider_teardown::test_support::FakeTmux::install(
             binding["owner"].as_str().unwrap(),
         );
         fake.fail_kills();
@@ -178,8 +178,7 @@ mod tests {
         let owner = failed.routing_cleanup.native.as_ref().unwrap()["owner"]
             .as_str()
             .unwrap();
-        let recovered =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(owner);
+        let recovered = crate::services::provider_teardown::test_support::FakeTmux::install(owner);
         recovered.become_missing_after_kill();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {

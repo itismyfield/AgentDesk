@@ -2153,8 +2153,9 @@ class ModuleLayerBaselineCheck(unittest.TestCase):
         self.assertEqual(caller_occurrence["count"], 2)
 
     def test_real_mapping_classifies_pure_leaf_overrides(self) -> None:
-        provider, discord, restart_mode, terminal_proof, application = map(self._node, (
-            "services::provider", "services::discord::transport", "services::discord::restart_mode",
+        provider = "src/adk_runtime_lib.rs::crate::services::provider"
+        discord, restart_mode, terminal_proof, application = map(self._node, (
+            "services::discord::transport", "services::discord::restart_mode",
             "cli::restart_terminal_proof", "engine"))
         graph = self._graph()
         graph["nodes"] = [provider, discord, restart_mode, terminal_proof, application]

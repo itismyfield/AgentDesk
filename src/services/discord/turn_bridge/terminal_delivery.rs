@@ -2476,16 +2476,16 @@ mod relay_state_contract_refs {
     //! contract, the CI wiring, and why there are no `// sym:` labels.
     #[test]
     fn contract_symbols_exist() {
-        use super::super::spawn_turn_bridge as _;
-        use super::advance_tmux_relay_confirmed_end as _;
+        let _ = super::super::spawn_turn_bridge;
+        let _ = super::advance_tmux_relay_confirmed_end;
         let _ = super::BridgeDeliveryLease::commit_and_advance;
-        use super::super::terminal_controller_cutover::deliver_long_chunks_via_controller as _;
-        use super::super::terminal_controller_cutover::deliver_short_replace_via_controller as _;
+        let _ = super::super::terminal_controller_cutover::deliver_long_chunks_via_controller;
+        let _ = super::super::terminal_controller_cutover::deliver_short_replace_via_controller;
         // I5 turn_delivered producer: the in-band terminal-outcome delivery path.
-        use super::super::terminal_outcome_delivery::run_terminal_outcome_delivery as _;
+        let _ = super::super::terminal_outcome_delivery::run_terminal_outcome_delivery;
         // I5 resume_offset producers: completion postlude + runtime-handoff loop.
-        use super::super::completion_postlude::run_completion_postlude as _;
-        use super::super::runtime_handoff_loop::handle_runtime_handoff_loop_message as _;
+        let _ = super::super::completion_postlude::run_completion_postlude;
+        let _ = super::super::runtime_handoff_loop::handle_runtime_handoff_loop_message;
     }
 }
 

@@ -15,9 +15,10 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::services::discord::SharedData;
 use crate::services::discord::herdr_terminate::{
-    NeverStartedTerminate, TerminationResult, terminate_enabled, terminate_never_started,
+    NeverStartedTerminate, TerminationResult, terminate_never_started,
 };
 use crate::services::provider::ProviderKind;
+use crate::services::session_host::operation_policy::terminate_enabled;
 
 /// Ends the never-started execution `claim`'s front waited on, then drops that wait. A turn still
 /// holding the channel, a logged start or the switch off closes nothing; the next turn follows.

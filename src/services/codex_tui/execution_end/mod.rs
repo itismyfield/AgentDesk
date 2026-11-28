@@ -1,12 +1,12 @@
 #[cfg(unix)]
-pub(crate) mod attempt;
+pub mod attempt;
 #[cfg(unix)]
-pub(crate) mod capture;
+pub mod capture;
 #[cfg(unix)]
-pub(crate) mod confirm;
+pub mod confirm;
 pub(crate) mod identity;
 #[cfg(unix)]
-pub(crate) mod producer;
+pub mod producer;
 
 #[cfg(all(test, unix))]
 mod attempt_tests;

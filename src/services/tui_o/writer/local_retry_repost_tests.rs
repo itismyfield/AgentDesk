@@ -140,7 +140,7 @@ async fn local_retry_real_hook_durable_intent_returns_to_repost_owner_pg() {
     );
     assert_eq!(writer.store().ledger().piece(0).unwrap().local_retry, None);
     let log = ProvenanceLog::open(&sidecar(&harness)).unwrap();
-    assert!(log.state().intent(0).is_some());
+    assert!(log.state().intent_for_test(0).is_some());
     assert_eq!((io.reads.load(Ordering::SeqCst), io.wire()), (0, 0));
 
     pool.close().await;

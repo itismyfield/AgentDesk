@@ -2,9 +2,9 @@
 //! piece's own anchor, each under a fresh permission proof. Reads only: no POST, slot or SQL.
 
 #[path = "evidence.rs"]
-pub(crate) mod evidence;
+pub mod evidence;
 #[path = "matcher.rs"]
-pub(crate) mod matcher;
+pub mod matcher;
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -23,9 +23,11 @@ use matcher::{Attribution, AttributionSnapshot, ObservedMessage, match_observati
 pub(crate) const PAGE_LIMIT: u8 = 100;
 /// Pages one `advance` reads before yielding the channel back as `Partial`.
 pub(crate) const PAGES_PER_STEP: usize = 10;
+#[cfg(any(test, feature = "test-support"))]
+pub const PAGES_PER_STEP_FOR_TEST: usize = PAGES_PER_STEP;
 
 /// Read-only Discord access. A failure or timeout is never an empty answer.
-pub(crate) trait ProbeRead {
+pub trait ProbeRead {
     /// Names the credentials both reads use, so a change discards the pass.
     fn credentials(&self) -> String;
     /// One message by id; `Ok(None)` is a 404.
@@ -44,7 +46,7 @@ pub(crate) trait ProbeRead {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Progress {
+pub enum Progress {
     /// Too early for the next pass.
     Waiting { until: Instant },
     /// The page budget ran out above the anchor; this session may resume the pass.
@@ -61,6 +63,11 @@ pub(crate) enum Progress {
 }
 
 impl Progress {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn covered_for_test(&self) -> bool {
+        self.covered()
+    }
+
     /// Whether the last pass read its whole range; found ids stand either way.
     pub(crate) fn covered(&self) -> bool {
         matches!(
@@ -84,7 +91,7 @@ pub(crate) struct PassCursor {
     proof_listed: bool,
 }
 
-pub(crate) struct ProbeSession {
+pub struct ProbeSession {
     scope: EvidenceScope,
     /// Known messages of the sender in this channel, the anchor first, to prove read permission.
     proof_ids: Vec<u64>,
@@ -98,7 +105,7 @@ pub(crate) struct ProbeSession {
 }
 
 impl ProbeSession {
-    pub(crate) fn new(scope: EvidenceScope, proof_ids: Vec<u64>, settled_at: Instant) -> Self {
+    pub fn new(scope: EvidenceScope, proof_ids: Vec<u64>, settled_at: Instant) -> Self {
         Self {
             scope,
             proof_ids,
@@ -111,7 +118,7 @@ impl ProbeSession {
     }
 
     /// What this session's reads show of the piece, judged by the latest snapshot.
-    pub(crate) fn attribution(&self) -> &Attribution {
+    pub fn attribution(&self) -> &Attribution {
         &self.seen
     }
 
@@ -154,7 +161,7 @@ impl ProbeSession {
     }
 
     /// Reads up to `PAGES_PER_STEP` pages of the current pass, starting one when it is due.
-    pub(crate) async fn advance(
+    pub async fn advance(
         &mut self,
         reader: &impl ProbeRead,
         run: &RunScope,

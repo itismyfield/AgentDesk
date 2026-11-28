@@ -3,7 +3,7 @@
 /// The loop always consumes exactly the expected token length. A caller-controlled
 /// token therefore cannot increase comparison work, while equal-prefix and
 /// same-length probes still avoid an early byte-mismatch exit.
-pub(crate) fn constant_time_token_eq(expected: &str, supplied: &str) -> bool {
+pub fn constant_time_token_eq(expected: &str, supplied: &str) -> bool {
     let expected = expected.as_bytes();
     let supplied = supplied.as_bytes();
     let mut diff = 0;

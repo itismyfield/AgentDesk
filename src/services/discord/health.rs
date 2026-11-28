@@ -22,10 +22,12 @@ use crate::services::provider::ProviderKind;
 //     send-to-agent/outbound dispatch, re-exported here for compatibility
 pub(in crate::services::discord) mod boot_hold;
 mod consumer_ports;
+pub(crate) use consumer_ports::resume_ports;
 mod headless_turn;
 pub(in crate::services::discord) mod liveness_authority;
 pub(in crate::services::discord) mod mailbox;
 mod managed_reset_port;
+pub(crate) use managed_reset_port::slot_row_host_refusal;
 pub(crate) mod o_transition;
 mod provider_probe;
 // #5071 T4-B2c (4987 S1): the relay-reachability observation library and
@@ -88,7 +90,7 @@ pub(in crate::services::discord) use transcript_binding_stall::o_owns;
 pub(in crate::services::discord) use transcript_binding_stall::o_witness_backdate_for_tests;
 mod thread_turn;
 pub(crate) use thread_turn::ThreadTurnRuntime;
-mod turn_deliver;
+pub(in crate::services) mod turn_deliver;
 mod unbound_owners;
 mod unpaired_active_token;
 pub(in crate::services::discord) use unbound_owners::UnboundRuntimeSnapshot;
@@ -114,6 +116,8 @@ pub(crate) use super::turn_presence::supervisor::tests::seed_presence_for_tests;
 pub(crate) use super::turn_presence::supervisor::{
     restart_operator_notice_for_test, send_operator_notices_on_this_thread,
 };
+#[cfg(test)]
+pub use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
 pub use crate::services::discord::outbound::send_api::{handle_send, handle_senddm};
 use crate::services::discord::outbound::send_gate::dm_default_agent_authorizes_unmapped_private_channel;
 #[allow(unused_imports)]
@@ -142,8 +146,6 @@ pub(crate) use turn_deliver::inject_tests::{
     InjectPane, claim_kinded, end_turn, inject_hook, queue_texts, register_inject_runtime,
     register_inject_runtime_for_provider, send_meanwhile, start_without_gateway,
 };
-#[cfg(test)]
-pub use turn_deliver::{ExternalHold, HumanInputDelivery, HumanInputError};
 pub use turn_deliver::{HumanInputRequest, deliver_human_input, external_turn_hold_for_start};
 pub(crate) use turn_deliver::{InjectAttempt, InjectOrigin, SOURCE_OWNED, inject_human_input};
 pub(crate) use turn_deliver::{deliver_with_reply, preflight_human_input};

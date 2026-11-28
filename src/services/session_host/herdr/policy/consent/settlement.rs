@@ -6,14 +6,14 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SettlementKey {
+pub struct SettlementKey {
     pub nonce: String,
     pub store: String,
     pub id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum Resolution {
+pub enum Resolution {
     Released,
     Discarded,
     /// Reserved for the legacy binding `target`; held until that binding is the durable approval.
@@ -55,13 +55,13 @@ impl Resolution {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Settlement {
+pub struct Settlement {
     pub key: SettlementKey,
     pub resolution: Resolution,
 }
 
 impl Consent {
-    pub(crate) fn resolution(&self, intent: &IntentRef) -> Option<Resolution> {
+    pub fn resolution(&self, intent: &IntentRef) -> Option<Resolution> {
         self.settlements
             .iter()
             .find(|settled| settled.key.store == intent.store && settled.key.id == intent.id)
@@ -69,7 +69,7 @@ impl Consent {
     }
 
     /// Open returns stay unresolved: they hold the channel until their legacy binding closes them.
-    pub(crate) fn unresolved_intents(&self) -> Vec<IntentRef> {
+    pub fn unresolved_intents(&self) -> Vec<IntentRef> {
         self.intents
             .iter()
             .filter(|intent| {
@@ -92,7 +92,7 @@ impl Consent {
             .filter(|intent| self.resolution(intent).is_none())
     }
 
-    pub(crate) fn releasable_intents(&self) -> Vec<IntentRef> {
+    pub fn releasable_intents(&self) -> Vec<IntentRef> {
         if self.state != State::Applied {
             return Vec::new();
         }
@@ -110,7 +110,7 @@ impl Consent {
     }
 
     /// An Applied retry opens a new generation only for awaiting input bound to another preview.
-    pub(crate) fn needs_new_generation(&self) -> bool {
+    pub fn needs_new_generation(&self) -> bool {
         self.releasable_intents().is_empty()
             && self.awaiting().any(|intent| {
                 self.intent_previews.iter().any(|held| {
@@ -191,12 +191,12 @@ impl ConsentStore {
         self.0.keys()
     }
 
-    pub(crate) fn load_all(&self) -> Result<Vec<Consent>, String> {
+    pub fn load_all(&self) -> Result<Vec<Consent>, String> {
         self.load_each()?.into_iter().collect()
     }
 
     /// Inventory uncertainty is global; an identified file's error does not hide its neighbors.
-    pub(crate) fn load_each(&self) -> Result<Vec<Result<Consent, String>>, String> {
+    pub fn load_each(&self) -> Result<Vec<Result<Consent, String>>, String> {
         Ok(self.inventory_keys()?.into_iter().map(|name| {
             let bytes = self.0.read_stable(&name)?.ok_or_else(|| self.0.failure(&name, "snapshot disappeared during inventory; retry the read"))?;
             let raw: serde_json::Value = serde_json::from_slice(&bytes)
@@ -214,7 +214,7 @@ impl ConsentStore {
         }).collect())
     }
 
-    pub(crate) fn unresolved(&self) -> Result<Vec<(Consent, Vec<IntentRef>)>, String> {
+    pub fn unresolved(&self) -> Result<Vec<(Consent, Vec<IntentRef>)>, String> {
         Ok(self
             .load_all()?
             .into_iter()
@@ -235,7 +235,7 @@ impl ConsentStore {
     }
 
     /// Applies every transition in one durable update, or none of them.
-    pub(crate) fn settle(
+    pub fn settle(
         &self,
         expected: &Consent,
         changes: &[(IntentRef, Resolution)],
@@ -248,7 +248,7 @@ impl ConsentStore {
     }
 
     /// The caller must have confirmed this exact reference was durably discarded by its custody owner.
-    pub(crate) fn acknowledge_discard(
+    pub fn acknowledge_discard(
         &self,
         expected: &Consent,
         intent: &IntentRef,
@@ -260,12 +260,12 @@ impl ConsentStore {
 /// Both operations remain durable and idempotent by (store, id) after restart or acknowledgement failure.
 /// Nonce identifies the receipt; changing it must never repeat a payload.
 #[async_trait::async_trait]
-pub(crate) trait CustodySink: Send {
+pub trait CustodySink: Send {
     async fn release(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
     async fn wake(&mut self, key: &SettlementKey, intent: &IntentRef) -> Result<(), String>;
 }
 
-pub(crate) async fn release(
+pub async fn release(
     store: &ConsentStore,
     expected: &Consent,
     sink: &mut impl CustodySink,
@@ -292,9 +292,9 @@ pub(crate) async fn release(
     Ok(current)
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "settlement_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;
 
 #[cfg(test)]
 #[path = "return_tests.rs"]

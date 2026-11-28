@@ -256,6 +256,7 @@ jobs:
             cross_os_rust:
               - 'crates/*/Cargo.toml'
               - 'src/services/engine_runtime/mod.rs'
+              - 'src/services/engine_runtime/health_port/stale_sweep.rs'
               - 'src/services/engine_runtime/relay_state.rs'
               - 'src/services/engine_runtime/relay_state/coord.rs'
               - 'src/services/decision_gate/**'
@@ -267,6 +268,7 @@ jobs:
               - 'src/config/**'
               - 'src/domain/file_sync.rs'
               - 'src/domain/intake_consent.rs'
+              - 'src/domain/retry_wait.rs'
               # domain/mod.rs re-exports the unix-only adk-base intake_consent behind cfg(unix).
               - 'src/domain/mod.rs'
               - 'src/db/**'
@@ -1168,7 +1170,7 @@ jobs:
             fi
           }
           pin scripts/ci/nextest_required.py c19a273c124eb7869a0e5dc489b99379974b9632d35224ccb613a6af00f78d6f
-          pin scripts/check-ci-runner-hardening.sh 2e927396fe4d8e73cff38c092636dbc0402eccc7c973c7a995df4af0d17e373b
+          pin scripts/check-ci-runner-hardening.sh b28938a2ae94c441cfb2d62f73240b231ca05c671eb016bf3fef168878e50b2a
           scripts/check-ci-runner-hardening.sh
           python3 scripts/check_writer_gate_ci_wiring.py
       - name: Judge required checks
@@ -1274,7 +1276,8 @@ jobs:
           python3 scripts/ci/lib-test-artifact.py prepare-nextest
           --source "$RUNNER_TEMP/nextest" --directory "$RUNNER_TEMP/lib-test-artifact"
 
-      # The ids file and this exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      # Each ids file and its exact list must match; run_test_lane fails a missing, extra or unexecuted id.
+      # One lane per lib binary: run_test_lane cross-checks a single libtest summary.
       - name: Begin runner memory step
         continue-on-error: true
         shell: bash
@@ -1293,7 +1296,6 @@ jobs:
           --expected-ids scripts/ci/pg15_required_ids.txt --
           env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact --
           cargo test --lib -- --exact
-          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
           dispatch::dispatch_cancel::pg_observability_tests::cancel_run_lookup_ignores_malformed_legacy_context
           krx_db_tests::run_owner_guard_pg_tests::cancel_rereads_dispatch_claimed_mid_cancel_pg
           krx_db_tests::run_owner_guard_pg_tests::concurrent_phase_gate_saves_serialize_on_dispatch_row_pg
@@ -1313,6 +1315,12 @@ jobs:
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_counts_surviving_associated_dispatch_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_cancel_ignores_unrelated_malformed_context_pg
           services::auto_queue::cancel_run::malformed_context_pg_tests::public_end_ignores_unrelated_malformed_context_pg
+
+          python3 scripts/run_test_lane.py --lane pg --max-summaries 4
+          --expected-ids scripts/ci/pg15_required_runtime_ids.txt --
+          env -u AGENTDESK_ROOT_DIR python3 scripts/ci/lib-test-artifact.py run --require-artifact --
+          cargo test -p adk-runtime --lib -- --exact
+          db::postgres::tests::postgres_json_extract_0058_up_and_down_preserve_array_path_behavior
 
       - name: End runner memory step
         if: always()

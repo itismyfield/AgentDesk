@@ -2,20 +2,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct CapabilityRouteDecision {
-    pub(crate) instance_id: Option<String>,
-    pub(crate) eligible: bool,
-    pub(crate) reasons: Vec<String>,
+pub struct CapabilityRouteDecision {
+    pub instance_id: Option<String>,
+    pub eligible: bool,
+    pub reasons: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct CapabilityRouteCandidate {
-    pub(crate) decision: CapabilityRouteDecision,
-    pub(crate) score: i64,
-    pub(crate) last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
+pub struct CapabilityRouteCandidate {
+    pub decision: CapabilityRouteDecision,
+    pub score: i64,
+    pub last_heartbeat_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-pub(crate) fn explain_capability_match(
+pub fn explain_capability_match(
     node: &Value,
     required_capabilities: &Value,
 ) -> CapabilityRouteDecision {
@@ -130,7 +130,7 @@ pub(crate) fn explain_capability_match(
     }
 }
 
-pub(crate) fn select_capability_route(
+pub fn select_capability_route(
     nodes: &[Value],
     required_capabilities: &Value,
 ) -> Vec<CapabilityRouteCandidate> {

@@ -5,7 +5,7 @@ use super::model::HostKind;
 use super::resolve::HostWitness;
 use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord, HostedState};
 
-pub(crate) fn session_record_witness(lookup: &HostedLookup) -> HostWitness {
+pub fn session_record_witness(lookup: &HostedLookup) -> HostWitness {
     match lookup {
         HostedLookup::Found(found) => match &found.record {
             HostedRecord::Legacy => HostWitness::LegacyRow,
@@ -39,7 +39,7 @@ mod tests {
         CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
     };
     use crate::db::dispatched_sessions::HookSessionUpsert;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
         TOKEN, future_schema, owner, pending, record, wire,
     };
     use crate::db::dispatched_sessions::hosted_execution::{

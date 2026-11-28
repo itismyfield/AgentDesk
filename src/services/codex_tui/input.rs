@@ -95,7 +95,7 @@ use super::host_input;
 use super::host_input::{TuiActionExecutor, run_actions_with_executor};
 use crate::services::provider::{CancelToken, cancel_requested};
 use crate::services::session_host::HostKey;
-pub(crate) use crate::services::tui_input::ansi::strip_ansi_escape_sequences;
+pub use crate::services::tui_input::ansi::strip_ansi_escape_sequences;
 use tokio::runtime::{Handle, RuntimeFlavor};
 use tokio::sync::Notify;
 
@@ -106,23 +106,23 @@ const DEFAULT_LITERAL_CHUNK_CHARS: usize = 1800;
 
 mod composer_content;
 mod composer_lock;
-mod submission;
+pub mod submission;
 pub use submission::owned_preserved_plan;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) use submission::{draft_notice_event_for_test, enqueue_draft_notice_for_test};
-pub(crate) use submission::{
+pub use submission::{draft_notice_event_for_test, enqueue_draft_notice_for_test};
+pub use submission::{
     notify_owned_draft, owned_prompt_plan, prompt_submission_fits_pane, submission_busy_in_pane,
     submission_draft_in_pane, submission_modal_in_pane, submission_readiness_from_ansi_pane,
 };
 use submission::{prompt_readiness_snapshot_with_pane, submission_snapshot_with_pane};
 mod composer_status;
 mod herdr_cancel;
-pub(crate) use herdr_cancel::herdr_turn_in_progress;
+pub use herdr_cancel::herdr_turn_in_progress;
 mod inline_banner;
 use composer_content::boxed_composer_body;
-pub(crate) use composer_content::{ComposerContent, active_composer_content_in_pane};
+pub use composer_content::{ComposerContent, active_composer_content_in_pane};
 #[allow(unused_imports)]
-pub(crate) use composer_lock::try_with_composer_mutation_lock;
+pub use composer_lock::try_with_composer_mutation_lock;
 use composer_lock::with_composer_mutation_lock;
 use composer_status::line_is_codex_fast_context_status;
 pub(crate) use inline_banner::pane_has_blocking_action_menu;
@@ -402,7 +402,7 @@ fn rollout_composer_ready_state() -> &'static RolloutComposerReadyState {
     })
 }
 
-pub(crate) fn record_rollout_composer_ready(session_name: &str) {
+pub fn record_rollout_composer_ready(session_name: &str) {
     if session_name.trim().is_empty() {
         return;
     }
@@ -969,7 +969,7 @@ enum PromptSubmitConfirmation {
 /// `Unconfirmed` is deliberately terminal so an Enter that may have reached
 /// Codex is never replayed.
 #[derive(Debug)]
-pub(crate) enum CodexFollowupPromptSubmitOutcome {
+pub enum CodexFollowupPromptSubmitOutcome {
     Submitted,
     /// Planning or delivery failed before any Enter attempt. The caller may
     /// cold-fallback only if the pinned rollout also remained unchanged.
@@ -1193,7 +1193,7 @@ pub(crate) fn admit_codex_prompt_under_lock(
 
 /// The owner's admission of `prompt`: its plan and one composer capture, refused before any key
 /// by a typed pane veto, or by the prompt itself as `Err(Err(_))`.
-pub(crate) fn admit_owned_codex_prompt(
+pub fn admit_owned_codex_prompt(
     session_name: &str,
     prompt: &str,
 ) -> Result<(Vec<TuiInputAction>, String), Result<super::busy_inject::Veto, String>> {
@@ -1339,7 +1339,7 @@ pub(super) fn submit_codex_followup_prompt_under_lock(
 /// - any bottom-of-pane snippet where a box-drawing line and a
 ///   footer phrase appear together but in the wrong order or with
 ///   visible status output between them.
-pub(crate) fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
+pub fn pane_looks_ready_for_codex_prompt(pane: &str) -> bool {
     // recent[0] is the bottom-most non-empty line; index increases
     // moving upward (away from the live composer).
     let recent: Vec<&str> = pane
@@ -1407,7 +1407,7 @@ const CODEX_ACTIVE_TURN_CAPTURE_TIMEOUT: std::time::Duration =
     std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CodexPaneBusySignal {
+pub enum CodexPaneBusySignal {
     Fresh,
     Idle,
     Expired,

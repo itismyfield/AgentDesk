@@ -27,7 +27,7 @@ async fn worker_profile_routes_preserve_execution_auth_and_remove_admin_methods(
     config.data.dir = dir.path().join("data");
     config.server.auth_token = Some("profile-test-token".into());
     std::fs::create_dir_all(&config.policies.dir).unwrap();
-    let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+    let engine = PolicyEngine::new(&config).unwrap();
     for profile in [
         crate::config::RuntimeProfile::Full,
         crate::config::RuntimeProfile::Runner,
@@ -126,7 +126,7 @@ async fn transcript_transition_operator_endpoint_is_removed_for_every_profile() 
     config.data.dir = dir.path().join("data");
     config.server.auth_token = Some("profile-test-token".into());
     std::fs::create_dir_all(&config.policies.dir).unwrap();
-    let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+    let engine = PolicyEngine::new(&config).unwrap();
     for profile in [
         crate::config::RuntimeProfile::Full,
         crate::config::RuntimeProfile::Runner,

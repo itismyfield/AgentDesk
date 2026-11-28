@@ -258,7 +258,7 @@ async fn native_8148_coldsource_key_witnesses_pin_identity_and_preserve_exclusiv
         let bound = fresh.native_ticket(&f.namespace, &f.ticket.key).unwrap();
         let saved = || fresh.native_settlement(&f.namespace, &bound).unwrap();
         let any_key = |namespace, ticket| fresh.note_native_any_key(namespace, ticket);
-        let not_sent = |namespace, ticket| fresh.try_native_not_sent(namespace, ticket);
+        let not_sent = |namespace, ticket| fresh.try_native_not_sent_for_test(namespace, ticket);
         let mut wrong_key = bound.clone();
         wrong_key.key["attempt"]["nonce"] = json!("foreign");
         let mut wrong_channel = bound.clone();

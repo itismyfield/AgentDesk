@@ -53,7 +53,7 @@ pub(crate) struct HookOutputInspection {
     pub(crate) char_len: usize,
 }
 
-pub(crate) fn configured_claude_projects_root() -> Option<PathBuf> {
+pub fn configured_claude_projects_root() -> Option<PathBuf> {
     std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)

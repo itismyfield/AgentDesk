@@ -2,7 +2,7 @@ use super::provider_dispatch::{StreamingTurn, execute};
 use crate::config::TestEnvVarGuard as Env;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::{adk_session, session_locator};
-use crate::services::platform::tmux::session_inventory::tests::ChannelNamespace;
+use crate::services::platform::tmux::session_inventory::test_support::ChannelNamespace;
 use crate::services::provider::{CancelToken, ProviderKind};
 use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 

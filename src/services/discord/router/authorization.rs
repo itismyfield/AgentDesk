@@ -1,4 +1,4 @@
-pub(crate) use crate::services::cluster::intake_turn::TurnKind;
+use crate::services::cluster::intake_turn::TurnKind;
 
 /// Returns `true` when a Discord message arriving on a channel was authored
 /// by the dedicated notify bot (or the agent's own background-task self-emit

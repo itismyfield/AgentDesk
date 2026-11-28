@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// The message a bundle belongs to. Every field is compared, so a bundle can
 /// never be consumed against another bot, channel, or message.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AttachmentMessageIdentity {
+pub struct AttachmentMessageIdentity {
     pub provider: String,
     pub channel_id: String,
     pub user_msg_id: String,
@@ -13,7 +13,7 @@ pub(crate) struct AttachmentMessageIdentity {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct BundleRef {
+pub struct BundleRef {
     pub bundle_id: uuid::Uuid,
     pub identity: AttachmentMessageIdentity,
     pub source_count: u32,
@@ -21,17 +21,17 @@ pub(crate) struct BundleRef {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(crate) enum Upload {
+pub enum Upload {
     Local(String),
     Bundle(BundleRef),
 }
 
 impl Upload {
-    pub(crate) fn is_local(&self) -> bool {
+    pub fn is_local(&self) -> bool {
         matches!(self, Self::Local(_))
     }
 
-    pub(crate) fn history_record(&self) -> String {
+    pub fn history_record(&self) -> String {
         match self {
             Self::Local(record) => record.clone(),
             Self::Bundle(reference) => format!(
@@ -54,16 +54,16 @@ impl From<&str> for Upload {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl PartialEq<&str> for Upload {
     fn eq(&self, other: &&str) -> bool {
         matches!(self, Self::Local(value) if value == other)
     }
 }
 
-pub(crate) type PendingUploads = Vec<Upload>;
+pub type PendingUploads = Vec<Upload>;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl PartialEq<String> for Upload {
     fn eq(&self, other: &String) -> bool {
         matches!(self, Self::Local(value) if value == other)

@@ -40,7 +40,7 @@ fn git_ref_exists(repo_dir: &str, git_ref: &str) -> bool {
 
 /// Branch that `refs/remotes/origin/HEAD` points at (e.g. `develop`), if its tracking ref exists.
 /// Local read only; [`refreshed_upstream_base_ref`] is the path that asks the remote.
-pub(crate) fn origin_default_branch(repo_dir: &str) -> Option<String> {
+pub fn origin_default_branch(repo_dir: &str) -> Option<String> {
     let target = GitCommand::new()
         .repo(repo_dir)
         .args([
@@ -57,7 +57,7 @@ pub(crate) fn origin_default_branch(repo_dir: &str) -> Option<String> {
 }
 
 /// `preferred` followed by `fallbacks` without duplicates, so a known default branch is tried first.
-pub(crate) fn default_first_candidates(
+pub fn default_first_candidates(
     preferred: impl IntoIterator<Item = String>,
     fallbacks: &[&str],
 ) -> Vec<String> {

@@ -7,29 +7,29 @@ use crate::services::agent_protocol::{NativeTerminalKind, StreamMessage};
 
 /// A turn's provider terminal as `HerdrTurnLines` accepts it, and the record range it read.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Terminal {
-    pub(crate) kind: NativeTerminalKind,
+pub struct Terminal {
+    pub kind: NativeTerminalKind,
     pub(crate) start: u64,
     pub(crate) end: u64,
-    pub(crate) result: String,
+    pub result: String,
     /// The turn's streamed output in order, as the live bridge receives it.
-    pub(crate) output: Vec<TurnOutput>,
+    pub output: Vec<TurnOutput>,
 }
 
 /// A streamed assistant text chunk, or a tool use between chunks.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TurnOutput {
+pub enum TurnOutput {
     Text(String),
     Tool,
 }
 
 /// The transcript could not be read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Unobserved;
+pub struct Unobserved;
 
 /// Admission's re-read of a Claude turn from its descriptor: from the first record stamped at or
 /// after the input, as the reader starts, to the first terminal `HerdrTurnLines` accepts.
-pub(crate) fn replay_herdr_turn(
+pub fn replay_herdr_turn(
     file: &mut std::fs::File,
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,
@@ -41,7 +41,7 @@ pub(crate) fn replay_herdr_turn(
 
 /// What a transcript shows of the input's own turn.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum TurnRead {
+pub enum TurnRead {
     Terminal(Terminal),
     /// No record is stamped at or after the input, or no terminal follows it yet.
     NoTerminal,
@@ -53,7 +53,7 @@ pub(crate) enum TurnRead {
 
 /// The row end's I read: `None` unless the last turn closed, else the input's turn once its time
 /// is known.
-pub(crate) fn closed_turn_read(
+pub fn closed_turn_read(
     file: &mut std::fs::File,
     submitted_at: Option<chrono::DateTime<chrono::Utc>>,
     len: u64,
@@ -67,7 +67,7 @@ pub(crate) fn closed_turn_read(
 }
 
 /// The row end's E read once the writer is gone, as `ended_turn` reads the transcript.
-pub(crate) fn ended_turn_read(
+pub fn ended_turn_read(
     file: &mut std::fs::File,
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,
@@ -91,7 +91,7 @@ fn turn_read(
 
 /// What the row pass reads of a Herdr turn from its own start once its provider is gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EndedTurn {
+pub enum EndedTurn {
     Terminal,
     NoTerminal,
     /// Another turn's records share the turn's range.
@@ -100,7 +100,7 @@ pub(crate) enum EndedTurn {
 
 /// The row pass's read once the writer is gone: a torn tail that parses whole is the last record,
 /// any other is none, so only an unreadable transcript leaves the turn unobserved.
-pub(crate) fn ended_turn(
+pub fn ended_turn(
     file: &mut std::fs::File,
     submitted_at: chrono::DateTime<chrono::Utc>,
     len: u64,

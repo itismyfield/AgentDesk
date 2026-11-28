@@ -26,7 +26,11 @@ const EXPLICIT_ENV: &str = "AGENTDESK_CONFIG";
 /// the runtime root, the working directory, then `~/.adk/release`.
 pub fn resolved_config_path() -> PathBuf {
     // Test builds skip `~/.adk/release` as their runtime root does, so they never read the live config.
-    let home = if cfg!(test) { None } else { dirs::home_dir() };
+    let home = if cfg!(any(test, feature = "test-support")) {
+        None
+    } else {
+        dirs::home_dir()
+    };
     resolve_with(
         explicit_env(),
         super::runtime_root(),
@@ -54,7 +58,7 @@ pub fn load_config_file(path: &Path) -> Result<Option<Config>> {
 }
 
 /// One WARN per file version for a resolved config file that failed to load.
-pub(crate) fn warn_unloadable(path: &Path, error: std::fmt::Arguments<'_>) {
+pub fn warn_unloadable(path: &Path, error: std::fmt::Arguments<'_>) {
     if first_failure_of_this_version(path) {
         tracing::warn!(
             path = %path.display(),

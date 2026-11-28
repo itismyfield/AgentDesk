@@ -24,10 +24,10 @@ struct Kept {
 static KEPT: LazyLock<Mutex<HashMap<(PathBuf, TypeId), Kept>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
     /// History byte reads on this thread, for the cost tests.
-    pub(crate) static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub static READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The history file state a kept answer was computed under; equal only while no write landed.
@@ -86,7 +86,7 @@ pub(super) fn read<T: Any + Send + Sync>(
     {
         return Ok(Ok(value));
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     READS.with(|reads| reads.set(reads.get() + 1));
     let mut raw = Vec::new();
     file.read_to_end(&mut raw)?;

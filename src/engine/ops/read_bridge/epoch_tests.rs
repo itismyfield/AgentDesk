@@ -7,7 +7,7 @@ use futures::FutureExt;
 
 use super::contract_tests::{seed, until, write};
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
+use crate::db::pg_wire_proxy::PgWireProxy;
 
 const EPOCHS: usize = 4;
 /// Main, tick and their two reload Contexts.
@@ -126,8 +126,18 @@ async fn policy_read_bridge_returns_connections_and_threads_across_engine_epochs
         );
         std::fs::write(&file, policy_source(epoch)).unwrap();
         let accepted = proxy.accepted();
-        let main = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
-        let tick = crate::engine::PolicyEngine::new_for_tick(&config, Some(pool.clone())).unwrap();
+        let main = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .unwrap();
+        let tick = crate::engine::PolicyEngine::new_for_tick(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .unwrap();
         let loaded = vec![format!("amp-s1-load{epoch}")];
         assert_eq!((names(&main), names(&tick)), (loaded.clone(), loaded));
         for engine in [&main, &tick] {

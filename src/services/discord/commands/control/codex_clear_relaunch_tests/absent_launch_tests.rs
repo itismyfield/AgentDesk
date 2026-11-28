@@ -181,7 +181,7 @@ async fn restored_head_reaches_provider_with_capture(
             | HistoricalMarker::RenamedIdentity
             | HistoricalMarker::MissingIdentity
     ) {
-        let hash = crate::services::discord::settings::discord_token_hash(TEST_BOT);
+        let hash = crate::utils::discord::discord_token_hash(TEST_BOT);
         let key = crate::services::discord::adk_session::build_namespaced_session_key(
             &hash,
             &ProviderKind::Codex,

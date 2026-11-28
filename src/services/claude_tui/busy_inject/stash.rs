@@ -6,7 +6,7 @@ use std::io::Write;
 use super::super::owner_input;
 use super::{Outcome, Pane, Timing, Veto, WriteFailure};
 
-pub(crate) use crate::services::session_host::KeyOutcome as Key;
+pub use crate::services::session_host::KeyOutcome as Key;
 use crate::services::session_host::{HostKey, PinnedInput, SubmitPayload};
 
 pub(in crate::services::claude_tui) fn submit(

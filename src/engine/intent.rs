@@ -355,14 +355,17 @@ fn execute_activate_auto_queue(
     let pool = pg_pool.or_else(|| engine.pg_pool()).ok_or_else(|| {
         anyhow::anyhow!("postgres backend is required for auto-queue activation intent")
     })?;
+    let row_guard = engine.slot_row_guard();
     let (_status, response) = crate::utils::async_bridge::block_on_pg_result(
         pool,
         {
             let engine = engine.clone();
             let body = body;
             move |_bridge_pool| async move {
-                match crate::services::auto_queue::route::activate_with_bridge_pg(engine, body)
-                    .await
+                match crate::services::auto_queue::route::activate_with_bridge_pg(
+                    engine, row_guard, body,
+                )
+                .await
                 {
                     Ok(response) => Ok(response),
                     Err(error) => Ok(error.into_json_response()),
@@ -538,8 +541,12 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-            .expect("create policy engine");
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .expect("create policy engine");
 
         let result = execute_intents_with_backends(
             Some(&pool),

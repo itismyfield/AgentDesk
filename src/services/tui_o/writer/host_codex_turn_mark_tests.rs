@@ -310,15 +310,15 @@ fn only_a_reserved_deferred_candidate_marks_and_failed_reads_clear_the_mark() {
         );
         assert!(ordinary.turn_mark().is_none());
         if state != Adoption::Deferred {
-            let decided = Candidate::reserved_late();
-            *decided.lock() = state;
+            let decided = Candidate::reserved_late_for_test();
+            *decided.lock_for_test() = state;
             assert!(!decided.mark_turn_admitted(CODEX, || panic!(
                 "non-Deferred candidates read no binding log"
             )));
             assert!(decided.turn_mark().is_none());
         }
     }
-    let candidate = Candidate::reserved_late();
+    let candidate = Candidate::reserved_late_for_test();
     assert!(candidate.mark_turn_admitted(CODEX, || Ok(4)));
     assert!(candidate.turn_mark().is_some());
     assert!(!candidate.mark_turn_admitted(CODEX, || Err("binding read failed".into())));
@@ -327,7 +327,7 @@ fn only_a_reserved_deferred_candidate_marks_and_failed_reads_clear_the_mark() {
         "an earlier mark cannot survive a failed fresh read"
     );
     assert!(!candidate.mark_turn_admitted(CODEX, || {
-        *candidate.lock() = Adoption::Released;
+        *candidate.lock_for_test() = Adoption::Released;
         Ok(5)
     }));
     assert!(
@@ -339,7 +339,7 @@ fn only_a_reserved_deferred_candidate_marks_and_failed_reads_clear_the_mark() {
 #[test]
 fn a_later_admission_wins_when_binding_reads_publish_in_reverse_order() {
     const CODEX: u64 = 61_858;
-    let candidate = Candidate::reserved_late();
+    let candidate = Candidate::reserved_late_for_test();
     let mut later = None;
     candidate.mark_turn_admitted(CODEX, || {
         assert!(!candidate.locked_for_test());
@@ -407,7 +407,7 @@ async fn body_claim_logs_distinguish_previous_and_current_turns_without_body_con
         .await
         .unwrap();
     assert_eq!(status, cutover::BodySend::Sent("status only"));
-    *candidate.lock() = Adoption::Committed;
+    *candidate.lock_for_test() = Adoption::Committed;
     let owned: cutover::BodySend<()> = cutover::claim_then_send(
         Some(cutover::BodyClaim::new(CODEX, Some(CodexTui))),
         || async { panic!("O owns the body") },

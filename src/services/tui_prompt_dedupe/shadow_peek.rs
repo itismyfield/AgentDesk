@@ -22,7 +22,7 @@ pub(crate) fn try_peek_tmux_runtime_binding(
 }
 
 /// Preserves the observer's optional lookup when the shared state cannot be locked.
-pub(crate) fn peek_tmux_runtime_binding(tmux_session_name: &str) -> Option<TuiRuntimeBinding> {
+pub fn peek_tmux_runtime_binding(tmux_session_name: &str) -> Option<TuiRuntimeBinding> {
     try_peek_tmux_runtime_binding(tmux_session_name)
         .ok()
         .flatten()

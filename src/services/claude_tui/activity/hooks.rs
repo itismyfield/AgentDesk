@@ -6,7 +6,7 @@ use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 
-pub(crate) fn note_hook(
+pub fn note_hook(
     accepted: bool,
     headers: &HeaderMap,
     provider: &str,

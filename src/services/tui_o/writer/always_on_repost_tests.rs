@@ -43,7 +43,7 @@ async fn confirmation_case(found: bool, restart: bool) {
             tokio::task::yield_now().await;
         }
     });
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     let answer = key("answer");
     assert!(
         load(&pool, &answer).await.unwrap().is_some(),
@@ -56,14 +56,14 @@ async fn confirmation_case(found: bool, restart: bool) {
     assert_eq!(io.wire(), 0);
     let reads = io.reads.load(Ordering::SeqCst);
     tokio::time::advance(FIRST_PASS_AFTER - Duration::from_nanos(1)).await;
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     assert_eq!(
         io.reads.load(Ordering::SeqCst),
         reads,
         "first confirmation cannot start early"
     );
     tokio::time::advance(Duration::from_nanos(1)).await;
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     assert!(
         io.reads.load(Ordering::SeqCst) > reads,
         "first confirmation actually reads history"
@@ -74,23 +74,23 @@ async fn confirmation_case(found: bool, restart: bool) {
         drop(writer);
         let hook = default_hook(&harness, pool.clone(), &io);
         writer = harness.writer().with_repost(Some(Box::new(hook)));
-        writer.repost_turn().await;
+        writer.repost_turn_for_test().await;
         tokio::time::advance(FIRST_PASS_AFTER - Duration::from_nanos(1)).await;
-        writer.repost_turn().await;
+        writer.repost_turn_for_test().await;
         assert_eq!(
             io.wire(),
             0,
             "restart cannot reuse the previous confirmation"
         );
         tokio::time::advance(Duration::from_nanos(1)).await;
-        writer.repost_turn().await;
+        writer.repost_turn_for_test().await;
         assert_eq!(io.wire(), 0, "restart needs its own second pass");
     }
     tokio::time::advance(SECOND_PASS_AFTER - Duration::from_nanos(1)).await;
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     assert_eq!(io.wire(), 0, "second confirmation cannot grant early");
     tokio::time::advance(Duration::from_nanos(1)).await;
-    writer.repost_turn().await;
+    writer.repost_turn_for_test().await;
     assert_eq!(
         io.wire(),
         usize::from(!found),
@@ -114,7 +114,7 @@ async fn confirmation_case(found: bool, restart: bool) {
     );
     for _ in 0..3 {
         tokio::time::advance(FIRST_PASS_AFTER + SECOND_PASS_AFTER).await;
-        writer.repost_turn().await;
+        writer.repost_turn_for_test().await;
         assert_eq!(
             writer.deliver(&piece("answer", "one answer")).await,
             Step::Done

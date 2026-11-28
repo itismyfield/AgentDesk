@@ -4,9 +4,9 @@ use crate::domain::bot_role::UtilityBotRole;
 
 /// Actionable alerts use announce so the resident role sees the notification.
 /// Delivery stamps non-turn provenance; the worker falls back to notify.
-pub(crate) const ACTIONABLE_OPS_ALERT_BOT: &str = UtilityBotRole::Announce.alias();
+pub const ACTIONABLE_OPS_ALERT_BOT: &str = UtilityBotRole::Announce.alias();
 
-pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
+pub fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -> bool {
     matches!(
         (source, reason_code),
         ("outbox_delivery_alert", Some("outbox_delivery_failed"))
@@ -32,7 +32,7 @@ pub(crate) fn is_actionable_ops_alert(source: &str, reason_code: Option<&str>) -
 /// Keep this classification separate from `is_actionable_ops_alert`: some
 /// notify-only alerts still need the same intake provenance if their bot is
 /// later configured as an allowed sender.
-pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&str>) -> bool {
+pub fn is_non_turn_operational_alert(source: &str, reason_code: Option<&str>) -> bool {
     is_actionable_ops_alert(source, reason_code)
         || (source == "routine-runtime" && reason_code == Some("routine_run_attention"))
         || (source == "lifecycle_notifier" && reason_code == Some("stale_replay_withheld"))
@@ -44,7 +44,7 @@ pub(crate) fn is_non_turn_operational_alert(source: &str, reason_code: Option<&s
             && reason_code.is_some_and(|reason| reason.starts_with("auto_queue.monitor_")))
 }
 
-pub(crate) fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
+pub fn normalized_session_key(target: &str, session_key: Option<&str>) -> Option<String> {
     session_key
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -55,7 +55,7 @@ pub(crate) fn normalized_session_key(target: &str, session_key: Option<&str>) ->
         })
 }
 
-pub(crate) fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
+pub fn normalized_reason_code(reason_code: Option<&str>) -> Option<&str> {
     reason_code.map(str::trim).filter(|value| !value.is_empty())
 }
 
@@ -91,7 +91,7 @@ fn private_session_provider_from_key(session_key: Option<&str>) -> Option<String
     is_dm_session_channel_segment(&channel_segment).then(|| provider.as_str().to_string())
 }
 
-pub(crate) fn delivery_bot_for_target_session<'a>(
+pub fn delivery_bot_for_target_session<'a>(
     target: &str,
     configured_bot: &'a str,
     session_key: Option<&str>,
@@ -104,7 +104,7 @@ pub(crate) fn delivery_bot_for_target_session<'a>(
     Cow::Borrowed(configured_bot)
 }
 
-pub(crate) fn dedupe_key_for_message(
+pub fn dedupe_key_for_message(
     target: &str,
     content: &str,
     reason_code: Option<&str>,

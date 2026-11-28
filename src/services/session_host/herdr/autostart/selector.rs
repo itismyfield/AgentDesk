@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 /// What the process does with its selected socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Role {
+pub enum Role {
     /// `herdr server`: binds the socket.
     Server,
     /// The TUI client or `session attach`: starts a server on the socket when none answers.

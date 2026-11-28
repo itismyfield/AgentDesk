@@ -8,7 +8,7 @@ const TURN_STATE_MAX_TAIL_BYTES: u64 = 1024 * 1024;
 /// by `jsonl_ready_for_input`'s `offset_behind` path — without it, a written
 /// terminator followed by trailing housekeeping reads as Busy forever
 /// (#2790, #3030); see [`scan_strict_terminator`] for the walk-back.
-pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+pub fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,
         path,
@@ -22,12 +22,12 @@ pub(crate) fn jsonl_strict_terminator_idle(provider: &ProviderKind, path: &Path)
 /// this accepts only the authoritative TURN-END terminator (see
 /// [`envelope_is_turn_end_terminator`]) — a completed `agent_message` (Codex
 /// can write one mid-turn) is walked past, not treated as Busy.
-pub(crate) fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
+pub fn jsonl_turn_end_terminator_idle(provider: &ProviderKind, path: &Path) -> bool {
     jsonl_completion_scan_idle(provider, path)
 }
 
 /// Finalizer/gate authority entry point: only authoritative terminators prove completion.
-pub(crate) fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
+pub fn jsonl_completion_scan_idle(provider: &ProviderKind, path: &Path) -> bool {
     scan_strict_terminator_idle_with_strictness(
         provider,
         path,
@@ -193,7 +193,7 @@ fn provider_envelope_turn_state(provider: &ProviderKind, json: &Value) -> Option
 /// ONLY `turn.completed` (excludes a mid-turn `agent_message`); Claude ONLY
 /// `result` and `system{turn_duration | stop_hook_summary}`. `false` means
 /// "Idle-class but not a boundary → keep scanning back".
-pub(crate) fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
+pub fn envelope_is_turn_end_terminator(provider: &ProviderKind, json: &Value) -> bool {
     let Some(type_str) = json.get("type").and_then(Value::as_str) else {
         return false;
     };

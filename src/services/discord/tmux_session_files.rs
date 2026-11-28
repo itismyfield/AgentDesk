@@ -1193,46 +1193,46 @@ mod tests {
             || tc::with_tmux_source_authority(&session, |authority| authority.pin()).expect("pin");
         let first = pin();
         stamp_session_generation_marker(&session).expect("stamp");
-        assert!(!first.is_current());
+        assert!(!first.is_current_for_test());
         let standalone = pin();
         let nonce = write_spawn_nonce(&session).expect("nonce");
         assert_eq!(read_spawn_nonce(&session), Some(nonce));
-        assert!(!standalone.is_current());
+        assert!(!standalone.is_current_for_test());
         let combined = pin();
         assert!(stamp_spawn_markers(&session, None).is_ok());
-        assert!(!combined.is_current());
+        assert!(!combined.is_current_for_test());
         let path = generation_path(&session);
         let content = std::fs::read(&path).expect("content");
         let before = pin();
         preserve_session_generation_mtime_after_write(&session, &path, &content, "s2a1_same");
-        assert!(before.is_current());
+        assert!(before.is_current_for_test());
         let mtime = read_generation_file_mtime_ns(&session);
         preserve_session_generation_mtime_after_write(&session, &path, b"changed", "s2a1_changed");
-        assert!(!before.is_current());
+        assert!(!before.is_current_for_test());
         assert_eq!(read_generation_file_mtime_ns(&session), mtime);
         assert_eq!(std::fs::read(&path).unwrap(), b"changed");
         let bound = pin();
         tc::write_tmux_channel_binding(&session, 59_960_401).expect("binding");
-        assert!(!bound.is_current());
+        assert!(!bound.is_current_for_test());
         let same = pin();
         tc::write_tmux_channel_binding(&session, 59_960_401).expect("same binding");
-        assert!(same.is_current());
+        assert!(same.is_current_for_test());
         let old = pin();
         let blocked = format!("{}.tmp.{}", nonce_path(&session), std::process::id());
         std::fs::create_dir(&blocked).expect("block temp");
         assert!(write_spawn_nonce(&session).is_err());
         assert!(read_spawn_nonce(&session).is_none());
         assert!(
-            !old.is_current(),
+            !old.is_current_for_test(),
             "failed writer fences its destination deletion"
         );
         std::fs::remove_dir(&blocked).expect("remove fixture dir");
         let before_cleanup = pin();
         tc::cleanup_session_temp_files(&session);
-        assert!(!before_cleanup.is_current());
+        assert!(!before_cleanup.is_current_for_test());
         let empty = pin();
         tc::cleanup_session_temp_files(&session);
-        assert!(empty.is_current());
+        assert!(empty.is_current_for_test());
     }
 
     #[test]
@@ -1258,7 +1258,7 @@ mod tests {
                 tc::with_tmux_source_authority(&session, |authority| authority.pin()).expect("pin");
             if changed_generation {
                 stamp_session_generation_marker(&session).expect("new gen");
-                assert!(!old_pin.is_current());
+                assert!(!old_pin.is_current_for_test());
             }
             let token = shared.relay_frontier_token(channel);
             let guard = shared
@@ -1308,7 +1308,7 @@ mod tests {
                 )
             );
             if changed_generation {
-                assert!(!old_pin.is_current());
+                assert!(!old_pin.is_current_for_test());
             }
             assert_eq!(
                 format!(

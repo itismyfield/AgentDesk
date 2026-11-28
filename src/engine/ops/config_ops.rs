@@ -337,8 +337,12 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from("/nonexistent");
         config.policies.hot_reload = false;
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-            .expect("build config ops PolicyEngine");
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .expect("build config ops PolicyEngine");
         let read = r#"JSON.stringify({
             retries: agentdesk.config.get("maxEntryRetries"),
             staleSec: agentdesk.config.get("rateLimitStaleSec"),
@@ -417,8 +421,12 @@ mod tests {
             let mut config = crate::config::Config::default();
             config.policies.dir = std::path::PathBuf::from("/nonexistent");
             config.policies.hot_reload = false;
-            let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-                .map_err(|error| format!("build config ops PolicyEngine: {error}"))?;
+            let engine = crate::engine::PolicyEngine::new_with_pg(
+                &config,
+                Some(pool.clone()),
+                crate::services::discord::health::slot_row_host_refusal,
+            )
+            .map_err(|error| format!("build config ops PolicyEngine: {error}"))?;
             let before: String = engine
                 .eval_js(r#"agentdesk.config.get("review_enabled")"#)
                 .map_err(|error| {
@@ -496,8 +504,12 @@ mod tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from("/nonexistent");
         config.policies.hot_reload = false;
-        let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-            .expect("build config ops PolicyEngine");
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .expect("build config ops PolicyEngine");
 
         let initial_json: String = engine
             .eval_js(

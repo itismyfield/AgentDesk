@@ -30,7 +30,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
         let (root, _env) = dedupe::binding_context::tests::fixture_after_shared_test_env_lock();
         let _scope = ScopeFixture::new();
         let _tmux =
-            crate::services::provider_teardown::tests::test_support::FakeTmux::install(CANARY_TMUX);
+            crate::services::provider_teardown::test_support::FakeTmux::install(CANARY_TMUX);
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(Some(root.path()));
         let (_, old) = proven(root.path());
@@ -107,7 +107,7 @@ async fn durable_retry_approval_and_open_prepared_hold_a_valid_fresh_scope() {
         assert!(could_install);
         let mut writer = harness.writer();
         assert_eq!(
-            writer.has_local_retry(),
+            writer.has_local_retry_for_test(),
             obligation == Obligation::LocalRetry
         );
         assert_eq!(

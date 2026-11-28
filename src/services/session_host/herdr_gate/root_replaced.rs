@@ -2,14 +2,14 @@
 use super::*;
 
 #[derive(Debug)]
-pub(crate) struct ReplacedRootEnd {
+pub struct ReplacedRootEnd {
     record: HostedExecution,
     witness: ServerWitness,
 }
 
 impl HerdrTarget {
     /// E7, pane and original process absence must all belong to the same server.
-    pub(crate) fn replaced_root_end(
+    pub fn replaced_root_end(
         &self,
         record: &HostedExecution,
         previous: Option<&ReplacedRootEnd>,
@@ -17,7 +17,7 @@ impl HerdrTarget {
         self.recovery_end(record, previous, false)
     }
 
-    pub(crate) fn recovery_end(
+    pub fn recovery_end(
         &self,
         record: &HostedExecution,
         previous: Option<&ReplacedRootEnd>,
@@ -101,7 +101,7 @@ impl HerdrTarget {
 
     /// `HerdrPaneView::ended` of a reading of this target's pane; on a server that replaced the
     /// granted one, a recorded process that started before this boot also counts as gone.
-    pub(crate) fn ended_reading(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
+    pub fn ended_reading(&self, record: &HostedExecution, reading: &PaneReading) -> bool {
         let rebooted = || match self.0.transport.server_witness() {
             Ok(current) => self.0.rebooted(&current),
             Err(_) => None,
