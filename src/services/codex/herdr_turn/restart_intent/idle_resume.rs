@@ -40,7 +40,7 @@ fn read(owner: &HostedOwner) -> Option<Kept> {
 
 /// Stores the thread the channel's live O cursor reads as `record`'s, which the end is about to
 /// retire; answers the operation that names this record.
-pub(crate) fn keep(record: &HostedExecution) -> Result<String, String> {
+pub fn keep(record: &HostedExecution) -> Result<String, String> {
     let channel = record
         .owner
         .channel_id
@@ -60,7 +60,7 @@ pub(crate) fn keep(record: &HostedExecution) -> Result<String, String> {
 }
 
 /// Cancels the record `operation` stored when its end retired nothing; another end's record stays.
-pub(crate) fn forget(owner: &HostedOwner, operation: &str) {
+pub fn forget(owner: &HostedOwner, operation: &str) {
     let Some(mut kept) = read(owner).filter(|kept| kept.operation == operation) else {
         return;
     };
@@ -72,7 +72,7 @@ pub(crate) fn forget(owner: &HostedOwner, operation: &str) {
 
 /// Cancels whatever thread an idle end kept for `owner`'s retired execution `nonce`, so a clear
 /// leaves nothing for the next launch to resume; `Err` when that cancel did not land.
-pub(crate) fn forbid(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
+pub fn forbid(owner: &HostedOwner, nonce: &str) -> Result<(), String> {
     match read(owner).filter(|kept| !kept.cancelled && kept.retired_nonce == nonce) {
         Some(mut kept) => {
             kept.cancelled = true;

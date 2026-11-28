@@ -8,7 +8,7 @@ use crate::services::tui_o::store::OStore;
 use crate::services::tui_prompt_dedupe::binding_context::ResumeStart;
 use crate::services::tui_prompt_dedupe::binding_events::SourceId;
 
-pub(crate) mod idle_resume;
+pub mod idle_resume;
 
 thread_local! {
     static OPERATION: RefCell<Option<String>> = const { RefCell::new(None) };
