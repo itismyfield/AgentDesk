@@ -92,6 +92,7 @@ where
     let mut sources_resumed = false;
     let mut quiescent = false;
     let mut tick = idle::Tick::new(&actor);
+    let mut restart_notices = writer::restart_notice::Delivery::default();
     let mut next = None;
     while !actor.writer.is_stopped() && !*stop.borrow() {
         if let Some(delay) = next.take()
@@ -126,7 +127,11 @@ where
         if actor.writer.is_stopped() {
             break;
         }
-        let can_skip = quiescent && !owing.demand.wanted() && !actor.transitions.pending();
+        let can_skip = quiescent
+            && !restart_notices.pending()
+            && !owing.demand.wanted()
+            && !actor.transitions.pending()
+            && !actor.sources.reader_maintenance_due();
         if !tick.needs_work(actor.writer.store(), can_skip) {
             let serial = actor.writer.store().ledger().next_serial();
             actor.repost_if_ready().await;
@@ -220,9 +225,12 @@ where
             actor.deliver_owed(&progress).await;
         }
         // A restart-cut episode's one notice goes after this poll's owed pieces.
-        if sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry() {
-            actor.writer.deliver_restart_notices().await;
-        }
+        let notice_ready =
+            sources_resumed && actor.delivery_allowed() && !actor.writer.has_local_retry();
+        actor
+            .writer
+            .deliver_restart_notices(&mut restart_notices, notice_ready)
+            .await;
         if let Some(drain) = drain {
             let prepared = actor
                 .writer

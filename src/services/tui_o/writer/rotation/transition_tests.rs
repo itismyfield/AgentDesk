@@ -252,10 +252,15 @@ async fn transition_watch_closes_only_a_configured_readers_fd_and_names_an_unwat
         let reader = &sources.readers[0];
         assert_eq!(reader.capture.is_some(), keeps_fd, "[{case}] fd");
         assert_eq!(armed, Some(watch), "[{case}] watch");
+        let watch_state = match watch {
+            Watch::Fd => RetiredWatch::Descriptor(Instant::now() + RETIRED_WATCH),
+            Watch::Path => RetiredWatch::Path,
+            Watch::Unwatched => RetiredWatch::Expired,
+        };
         assert_eq!(
-            reader.watch_until,
-            Some(Instant::now() + RETIRED_WATCH),
-            "[{case}] until"
+            reader.retired_watch,
+            Some(watch_state),
+            "[{case}] watch state"
         );
         let cleared = (
             reader.quiet,

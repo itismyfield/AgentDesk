@@ -7,6 +7,7 @@ export function state({idle}) {
 export const step = action => ({
   IdleArrive: '변화 발생',
   IdleClock: '1초 경과',
+  IdleRelease: '공지 게시 lease 해제',
   IdlePoll: 'writer 처리',
   IdleSkip: '스탬프 일치, 본문 단락',
 })[action] ?? action;

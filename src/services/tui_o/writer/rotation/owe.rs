@@ -221,7 +221,8 @@ impl<B: BindingEvents> Sources<B> {
 
 pub(super) struct Reader {
     pub(super) source: SourceId,
-    /// `None` once a retired source's watch has ended or its file is gone.
+    pub(super) key: String,
+    /// Retained only while reading or explicitly watching a retired descriptor.
     pub(super) capture: Option<SourceCapture>,
     /// A batch the full spool refused; it is retried before the source is read again.
     pub(super) pending: Option<CaptureBatch>,
@@ -230,8 +231,7 @@ pub(super) struct Reader {
     pub(super) quiet: Option<(u64, Instant)>,
     pub(super) rotated_at: Option<Instant>,
     pub(super) growth_alarmed: bool,
-    /// Set while retired: the source is only stat-watched until then.
-    pub(super) watch_until: Option<Instant>,
+    pub(super) retired_watch: Option<RetiredWatch>,
     /// The old source's length at its rotation; its successor waits until it is read and spooled.
     pub(super) drain_to: Option<u64>,
     pub(super) dormant: Option<Instant>,
@@ -243,6 +243,7 @@ pub(super) struct Reader {
 impl Reader {
     pub(super) fn new(source: SourceId, capture: Option<SourceCapture>) -> Self {
         Self {
+            key: source_key(&source),
             source,
             capture,
             pending: None,
@@ -250,7 +251,7 @@ impl Reader {
             quiet: None,
             rotated_at: None,
             growth_alarmed: false,
-            watch_until: None,
+            retired_watch: None,
             drain_to: None,
             dormant: None,
             idle: None,
@@ -261,11 +262,14 @@ impl Reader {
     }
 
     pub(super) fn reading(&self) -> bool {
-        self.capture.is_some() && self.watch_until.is_none()
+        self.capture.is_some() && self.retired_watch.is_none()
     }
 
     pub(super) fn backlog_end(&self) -> Option<u64> {
-        let capture = self.capture.as_ref().filter(|_| self.watch_until.is_none());
+        let capture = self
+            .capture
+            .as_ref()
+            .filter(|_| self.retired_watch.is_none());
         capture.and_then(|capture| capture.file_len().ok())
     }
 }
@@ -510,24 +514,16 @@ impl<B: BindingEvents> Sources<B> {
     #[cfg(unix)]
     fn native_idle(&self, source: &SourceId) -> bool {
         // The typed port rechecks the latest binding; Current is a resume-time history hint.
-        self.readers
-            .iter()
-            .find(|r| &r.source == source)
-            .is_some_and(|reader| {
-                reader.pending.is_none()
-                    && reader.capture.as_ref().is_some_and(|capture| {
-                        self.native
-                            .as_ref()
-                            .and_then(|n| n.seeds.get(source))
-                            .is_some_and(|seed| {
-                                seed.projection().is_ok_and(|seed| {
-                                    seed.idle()
-                                        && seed.through() == capture.captured_through()
-                                        && capture.read_through() == seed.through()
-                                        && capture.file_len().ok() == Some(seed.through())
-                                })
-                            })
-                    })
+        self.native
+            .as_ref()
+            .and_then(|native| native.seeds.get(source))
+            .is_some_and(|seed| {
+                seed.projection().is_ok_and(|seed| {
+                    seed.idle()
+                        && self
+                            .complete_native_capture(source, seed.through())
+                            .is_some()
+                })
             })
     }
 
@@ -618,15 +614,25 @@ impl<B: BindingEvents> Sources<B> {
     #[cfg(unix)]
     fn complete_native_capture(&self, source: &SourceId, through: u64) -> Option<Fingerprint> {
         let reader = self.readers.iter().find(|r| &r.source == source)?;
-        let capture = reader
-            .capture
-            .as_ref()
-            .filter(|_| reader.pending.is_none())?;
-        let fingerprint = capture.fingerprint().ok()?;
-        (through == capture.captured_through()
-            && through == capture.read_through()
-            && through == fingerprint.len)
-            .then_some(fingerprint)
+        if reader.pending.is_some() {
+            return None;
+        }
+        let fingerprint = match &reader.capture {
+            Some(capture)
+                if through == capture.captured_through() && through == capture.read_through() =>
+            {
+                capture.fingerprint().ok()?
+            }
+            None if matches!(
+                reader.retired_watch,
+                Some(RetiredWatch::Path | RetiredWatch::PathUntil(_))
+            ) =>
+            {
+                Fingerprint::path(source).ok()?
+            }
+            _ => return None,
+        };
+        (through == fingerprint.len).then_some(fingerprint)
     }
 
     #[cfg(unix)]

@@ -57,8 +57,10 @@ mod codex_fresh;
 mod current;
 #[path = "fork_lineage.rs"]
 mod fork_lineage;
+mod idle_reader;
 mod owe;
 use current::Current;
+use idle_reader::RetiredWatch;
 pub(crate) mod provenance;
 #[path = "rotation/reader_count.rs"]
 mod reader_count;
@@ -737,7 +739,7 @@ impl<B: BindingEvents> Sources<B> {
         let Some(reader) = self.readers.iter_mut().find(|r| r.source == *source) else {
             return Err(halt("an attached source has no reader"));
         };
-        (reader.watch_until, reader.quiet) = (None, None);
+        (reader.retired_watch, reader.quiet) = (None, None);
         if reader.capture.is_none() {
             let cursor = writer.store().cursor(source).cloned();
             let cursor = cursor.ok_or_else(|| halt("retired source lost its cursor"))?;

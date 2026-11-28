@@ -83,10 +83,13 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     pub(super) fn replaced_source(&self, reader: &Reader) -> bool {
-        let key = source_key(&reader.source);
-        let hop = self.rotation.successors.get(&key).and_then(|next| next.seq);
+        let hop = self
+            .rotation
+            .successors
+            .get(&reader.key)
+            .and_then(|next| next.seq);
         (self.replaced.as_ref()).is_some_and(|(_, judged)| {
-            hop.is_some_and(|seq| judged.get(&(key, seq)) == Some(&true))
+            hop.is_some_and(|seq| judged.get(&(reader.key.clone(), seq)) == Some(&true))
         })
     }
 

@@ -1,2 +1,2 @@
 key: writer-idle
-| `tui-o-writer` idle polling (#8385) | `b5609d74b3` + idle backoff | Fixed polling delays hook, input and transition command wakes. Removing the maximum timer can strand a transcript or spool change. | The 1/5/15-second model wakes on published work and eventually processes every modeled event. See [report](tui-o-writer/writer-idle.report.md). |
+| `tui-o-writer` idle polling (#8385) | `e47058ab2d` | A stamp match can strand a restart notice. Quiet retired readers can keep the full path active. | The 1-second observation keeps pending work and reader deadlines independent of the stamp. See [report](tui-o-writer/writer-idle.report.md). |

@@ -189,6 +189,69 @@ async fn idle_tick_unchanged_source_skips_work_at_the_head_of_the_loop() {
     halt(stop, task).await;
 }
 
+async fn restart_with_retired_source(
+    channel: u64,
+) -> (
+    Harness,
+    PathBuf,
+    SourceId,
+    Arc<IdleBindings>,
+    watch::Sender<bool>,
+    Actor,
+) {
+    let (harness, path, old, bindings, stop, task) = start_idle(channel);
+    let next = path.with_file_name("current.jsonl");
+    std::fs::write(&next, row("current", "current output")).unwrap();
+    let next = source_id_for("current", &next).unwrap();
+    let mut hop = bound(
+        2,
+        Some(&old),
+        BindingTarget::Source(next.clone()),
+        BindingCause::Clear,
+        Some(&old),
+    );
+    hop.channel_id = channel;
+    bindings.log.commit(hop);
+    polls(16).await;
+    halt(stop, task).await;
+    assert!(path.exists());
+    let store = harness.channel();
+    assert!(store.cursor(&old).unwrap().retired);
+    assert!(!store.cursor(&next).unwrap().retired);
+    drop(store);
+    let (stop, task) = spawn_with(harness.writer(), ShadowProvider::Claude, bindings.clone());
+    idle_window().await;
+    (harness, path, old, bindings, stop, task)
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_with_a_retired_source_skips_unchanged_observations_after_restart() {
+    let (_harness, _, _, bindings, stop, task) = restart_with_retired_source(838509).await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    polls(3).await;
+    assert_eq!(bindings.source_checks.load(Ordering::SeqCst), before);
+    halt(stop, task).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn idle_tick_unretires_a_growing_source_at_the_next_observation() {
+    let (harness, path, old, bindings, stop, task) = restart_with_retired_source(838510).await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    polls(3).await;
+    let unchanged = bindings.source_checks.load(Ordering::SeqCst);
+    append(&path, &row("regrowth", "late output"));
+    polls(1).await;
+    assert!(!harness.channel().cursor(&old).unwrap().retired);
+    assert!(
+        bindings.source_checks.load(Ordering::SeqCst) > unchanged,
+        "regrowth reached the observation path"
+    );
+    assert_eq!(unchanged, before, "the previous unchanged ticks skipped");
+    polls(3).await;
+    assert_eq!(harness.port.posts(), ["current output", "late output"]);
+    halt(stop, task).await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn idle_tick_hook_bind_wakes_and_posts_once_in_source_order() {
     let channel = 838502;

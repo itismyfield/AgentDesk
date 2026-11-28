@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::services::tui_o::store::restart_notice::{self, Intent};
-use crate::services::tui_o::writer::restart_notice::{Notice, TEXT, unit_key};
+use crate::services::tui_o::writer::restart_notice::{Delivery, Notice, TEXT, unit_key};
 
 fn intent() -> Intent {
     Intent::exact(CHANNEL, ShadowProvider::Claude, Some("cut-turn"), 4).unwrap()
@@ -22,7 +22,10 @@ fn root(harness: &Harness) -> &std::path::Path {
 /// A second boot records the same episode again and delivers with a fresh writer.
 async fn reboot(harness: &Harness) {
     restart_notice::record(root(harness), &intent()).unwrap();
-    harness.writer().deliver_restart_notices().await;
+    harness
+        .writer()
+        .deliver_restart_notices(&mut Delivery::default(), true)
+        .await;
 }
 
 #[tokio::test]
@@ -124,11 +127,52 @@ async fn a_busy_lease_keeps_the_intent_pending() {
     let harness = fixture();
     restart_notice::record(root(&harness), &intent()).unwrap();
     harness.lease.busy.store(true, Ordering::SeqCst);
-    harness.writer().deliver_restart_notices().await;
+    let mut work = Delivery::default();
+    harness
+        .writer()
+        .deliver_restart_notices(&mut work, true)
+        .await;
     assert!(harness.port.posts().is_empty());
     assert_eq!(restart_notice::pending(root(&harness), CHANNEL), [intent()]);
+    assert!(work.pending());
     harness.lease.busy.store(false, Ordering::SeqCst);
-    harness.writer().deliver_restart_notices().await;
+    harness
+        .writer()
+        .deliver_restart_notices(&mut work, true)
+        .await;
+    assert_eq!(harness.port.posts(), [TEXT]);
+    assert!(!work.pending());
+}
+
+#[tokio::test]
+async fn an_unsynced_done_marker_keeps_the_notice_obligation_without_a_second_post() {
+    use crate::services::tui_o::store::fault::{self, Step};
+
+    let harness = fixture();
+    let root = root(&harness);
+    restart_notice::record(root, &intent()).unwrap();
+    let failed = fault::plant(
+        root,
+        Step::RestartNoticeDirSync,
+        std::io::ErrorKind::Other,
+        None,
+    );
+    let mut work = Delivery::default();
+    for _ in 0..2 {
+        harness
+            .writer()
+            .deliver_restart_notices(&mut work, true)
+            .await;
+        assert!(restart_notice::pending(root, CHANNEL).is_empty());
+        assert!(work.pending());
+        assert_eq!(harness.port.posts(), [TEXT]);
+    }
+    drop(failed);
+    harness
+        .writer()
+        .deliver_restart_notices(&mut work, true)
+        .await;
+    assert!(!work.pending());
     assert_eq!(harness.port.posts(), [TEXT]);
 }
 

@@ -27,20 +27,14 @@ impl<B: BindingEvents> Sources<B> {
     }
 
     pub(crate) fn quiescent_for_stamp(&self) -> bool {
-        // Binding retries and old reader deadlines can progress without a file change.
+        // Pending binding work is independent of the transcript stamp.
         self.quiescent_for_rescope()
             && self
                 .checkpoint
                 .is_some_and(|seq| *self.notice.borrow() <= seq)
             && !self.log_alarmed
             && !self.clear_due
-            && !self.readers.iter().any(|reader| {
-                !reader.parked
-                    && match reader.watch_until {
-                        Some(_) => reader.capture.is_some(),
-                        None => reader.rotated_at.is_some(),
-                    }
-            })
+            && !self.legacy_hops_unread
     }
 
     /// The actor checks quiescence before replacing readers; the shared selection stays monotone.

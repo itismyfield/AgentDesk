@@ -2240,6 +2240,8 @@ tui-o-writer/WriterIdleBefore.cfg	WriterIdle	IdlePromptWake	-
 tui-o-writer/WriterIdleFixed.cfg	WriterIdle	-	-
 tui-o-writer/WriterIdleNoMaxTimer.cfg	WriterIdle	-	IdleEventuallyProcesses
 tui-o-writer/WriterIdleNoTimer.cfg	WriterIdle	-	IdleEventuallyProcesses
+tui-o-writer/WriterIdleNoticeSkip.cfg	WriterIdle	-	IdleEventuallyProcesses
+tui-o-writer/WriterIdleRotationBusy.cfg	WriterIdle	IdleSkipsQuietReader	-
 tui-o-writer/WriterMissingHaltBefore.cfg	WriterMissingHalt	NoUnchangedReboot	-
 tui-o-writer/WriterMissingHaltBinding.cfg	WriterMissingHalt	-	-
 tui-o-writer/WriterMissingHaltEarly.cfg	WriterMissingHalt	-	-

@@ -11,7 +11,7 @@ use crate::services::tui_o::writer::transition_cleanup::ReaderView;
 /// How a source retired by a transition cleanup is watched for growth from then on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum Watch {
-    /// A legacy reader keeps its FD for the retired watch, as a provider retirement keeps it.
+    /// A legacy transition keeps the original descriptor until its watch ends.
     Fd,
     /// A configured reader closes its FD and watches the path.
     Path,
@@ -145,24 +145,24 @@ impl<B: BindingEvents> Sources<B> {
         )
     }
 
-    /// Watches a source its transition cleanup retired as a provider retirement would, keeping
-    /// what it captured and dropping only its own pending validation.
+    /// Watches a source retired by transition cleanup and drops only its own pending validation.
     pub(crate) fn arm_transition_watch(&mut self, source: &SourceId) -> Option<Watch> {
         if (self.validation.as_ref()).is_some_and(|job| job.cursor.source == *source) {
             self.validation = None;
         }
         let configured = self.reader_config.is_some();
         let reader = self.readers.iter_mut().find(|r| r.source == *source)?;
-        reader.watch_until = Some(Instant::now() + RETIRED_WATCH);
-        (reader.quiet, reader.drain_to, reader.dormant, reader.idle) = (None, None, None, None);
-        if configured {
-            reader.capture = None;
-            return Some(Watch::Path);
-        }
-        Some(match reader.capture {
-            Some(_) => Watch::Fd,
-            None => Watch::Unwatched,
-        })
+        (reader.drain_to, reader.idle) = (None, None);
+        let (kind, watch) = match (configured, reader.capture.is_some()) {
+            (true, _) => (Watch::Path, RetiredWatch::Path),
+            (false, true) => (
+                Watch::Fd,
+                RetiredWatch::Descriptor(Instant::now() + RETIRED_WATCH),
+            ),
+            (false, false) => (Watch::Unwatched, RetiredWatch::Expired),
+        };
+        reader.retire(watch);
+        Some(kind)
     }
 
     /// A file already grown past its cursor un-retires the source the cleanup just retired.

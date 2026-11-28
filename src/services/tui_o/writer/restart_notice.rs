@@ -21,6 +21,18 @@ pub(crate) enum Notice {
     Pending,
 }
 
+#[derive(Default)]
+pub(super) struct Delivery {
+    pending: bool,
+    settle_retry: Option<Intent>,
+}
+
+impl Delivery {
+    pub(super) fn pending(&self) -> bool {
+        self.pending
+    }
+}
+
 pub(crate) fn unit_key(intent: &Intent) -> UnitKey {
     UnitKey {
         channel_id: intent.channel,
@@ -67,7 +79,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
     }
 
     /// Each recorded episode in order; the first one still pending holds the rest for a later poll.
-    pub(crate) async fn deliver_restart_notices(&mut self) {
+    pub(super) async fn deliver_restart_notices(&mut self, work: &mut Delivery, ready: bool) {
         let Some(root) = self
             .store()
             .restart_notice_root()
@@ -75,7 +87,18 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
         else {
             return;
         };
-        for intent in restart_notice::pending(&root, self.channel()) {
+        if let Some(intent) = &work.settle_retry {
+            if !ready || !settle(&root, intent) {
+                return;
+            }
+            work.settle_retry = None;
+        }
+        let (intents, unreadable) = restart_notice::scan(&root, self.channel());
+        work.pending = unreadable || !intents.is_empty();
+        if !ready {
+            return;
+        }
+        for intent in intents {
             let notice = self.post_restart_notice(&intent).await;
             if notice == Notice::Pending {
                 return;
@@ -85,10 +108,21 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink> ChannelWriter<P, L, A> {
                 ?notice,
                 "[tui_o] restart notice settled"
             );
-            if let Err(error) = restart_notice::settle(&root, &intent) {
-                tracing::warn!(channel = intent.channel, %error, "[tui_o] restart notice kept");
+            if !settle(&root, &intent) {
+                work.settle_retry = Some(intent);
                 return;
             }
+        }
+        work.pending = unreadable;
+    }
+}
+
+fn settle(root: &std::path::Path, intent: &Intent) -> bool {
+    match restart_notice::settle(root, intent) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(channel = intent.channel, %error, "[tui_o] restart notice kept");
+            false
         }
     }
 }

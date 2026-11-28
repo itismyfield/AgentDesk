@@ -14,7 +14,7 @@
 | `WriterIdleNoMaxTimer.cfg` | 충족 | 이전 15초 단계에서 정지 | 위반 |
 | `WriterIdleNoTimer.cfg` | 충족 | 고정 주기의 timer 제거 시 정지 | 위반 |
 
-TLC 1.7.4는 다섯 구성에서 예상한 규칙을 확인했다. 백오프는
+TLC 1.7.4는 일곱 구성에서 예상한 규칙을 확인했다. 백오프는
 `IdleWithinOne`을 깨지만 종전 15초 관측 상한은 충족한다. 두 timer 제거
 구성에서는 시간 흐름도 멈춰 수치 상한만으로 실패를 검출할 수 없다.
 `IdleEventuallyProcesses`는 보류한 spool·transcript·명령이 끝내 처리되지 않는 반례를 검출한다.
@@ -24,6 +24,16 @@ TLC 1.7.4는 다섯 구성에서 예상한 규칙을 확인했다. 백오프는
 binding watch 버전을 남긴다. transition 명령은 bounded mailbox에 남아
 다음 기존 관측에서 소비된다. timer와 관측에는 약한 공정성을 둔다.
 1초는 다음 관측까지의 대기 한도이며 디스크·네트워크 동작의 완료 시간은 별도다.
+
+| 추가 구성 | 조건 | 결과 |
+| --- | --- | --- |
+| `WriterIdleNoticeSkip.cfg` | 공지 기록으로 한 번 깨우지만 lease 경합 뒤에는 스탬프만 비교 | `IdleEventuallyProcesses` 위반 |
+| `WriterIdleRotationBusy.cfg` | 옛 reader가 있다고 판정해 마감·파일 변화 없는 본문까지 실행 | `IdleSkipsQuietReader` 위반 |
+| `WriterIdleFixed.cfg` | 공지와 reader 마감은 스탬프와 독립이며 옛 파일 성장은 스탬프 차이로 관측 | 두 규칙 충족 |
+
+공지는 lease가 풀리거나 정산을 다시 시도할 때까지 독립된 의무로 남는다.
+옛 reader는 상태에 맞는 감시·검증 시점에 본문을 실행한다. 감시 중인 은퇴
+파일이 커지면 정규 관측에서 다시 연다.
 
 Rust는 작업 전 transcript 메타데이터와 spool 세대를 샘플링한다.
 입력·hook·ownership 변화는 이전 스탬프를 무효화한다.

@@ -11,6 +11,7 @@ use crate::services::tui_o::{
 struct Stamp {
     transcripts: Vec<Option<Fingerprint>>,
     spool: u64,
+    restart_notices: Option<Fingerprint>,
 }
 
 impl Stamp {
@@ -29,6 +30,7 @@ impl Stamp {
         Some(Self {
             transcripts,
             spool: store.spool_generation(),
+            restart_notices: store.restart_notice_stamp().ok()?,
         })
     }
 }
@@ -38,6 +40,41 @@ pub(super) struct Tick {
     listener: Listener,
     binding: Option<watch::Receiver<u64>>,
     ownership: Option<watch::Receiver<GatewayOwnership>>,
+    observations: Observations,
+}
+
+struct Observations {
+    opened: tokio::time::Instant,
+    ticks: u64,
+    eligible: u64,
+    skipped: u64,
+}
+
+impl Observations {
+    fn new() -> Self {
+        Self {
+            opened: tokio::time::Instant::now(),
+            ticks: 0,
+            eligible: 0,
+            skipped: 0,
+        }
+    }
+
+    fn add(&mut self, channel: u64, can_skip: bool, skipped: bool) {
+        self.ticks += 1;
+        self.eligible += u64::from(can_skip);
+        self.skipped += u64::from(skipped);
+        if self.opened.elapsed() >= Duration::from_secs(60) {
+            tracing::info!(
+                channel,
+                ticks = self.ticks,
+                can_skip = self.eligible,
+                stamp_skipped = self.skipped,
+                "[tui_o] writer idle observations"
+            );
+            *self = Self::new();
+        }
+    }
 }
 
 impl Tick {
@@ -50,6 +87,7 @@ impl Tick {
             listener: Listener::new(channel),
             binding: Some(actor.bindings.subscribe(channel)),
             ownership: Some(actor.writer.gate.subscribe()),
+            observations: Observations::new(),
         }
     }
 
@@ -58,6 +96,7 @@ impl Tick {
         let stamp = can_skip.then(|| Stamp::read(store)).flatten();
         let same = stamp.is_some() && stamp == self.stamp;
         self.stamp = stamp;
+        self.observations.add(store.init().channel, can_skip, same);
         !same
     }
 
