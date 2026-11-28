@@ -240,11 +240,106 @@ fn keyed(
 }
 
 #[cfg(unix)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum MirrorHost {
-    Tmux,
-    Herdr,
+    Tmux(TmuxMirrorEpoch),
+    Herdr(Option<String>),
     Deferred,
+}
+
+/// Local evidence checked under source authority before each target operation.
+#[cfg(unix)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TmuxMirrorEpoch {
+    generation: i64,
+    nonce: Option<String>,
+}
+
+#[cfg(unix)]
+impl TmuxMirrorEpoch {
+    pub(super) fn capture(name: &str) -> Option<Self> {
+        crate::services::tmux_common::with_tmux_source_authority(name, Self::read)
+    }
+
+    fn read(authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>) -> Option<Self> {
+        use crate::services::tmux_common::{host_marker, spawn_markers};
+        use crate::services::tui_prompt_dedupe::binding_context::{
+            SpawnNonceMarker, observe_spawn_nonce_marker,
+        };
+        let name = authority.session();
+        if crate::services::tui_prompt_dedupe::herdr_listing(name).is_some()
+            || !host_marker::marker_is_tmux(&host_marker::read_host_kind_marker(name))
+        {
+            return None;
+        }
+        let nonce = match observe_spawn_nonce_marker(name) {
+            SpawnNonceMarker::Known(nonce) => Some(nonce),
+            SpawnNonceMarker::Absent => None,
+            SpawnNonceMarker::Unreadable => return None,
+        };
+        Some(Self {
+            generation: spawn_markers::read_generation_file_mtime_ns(name),
+            nonce,
+        })
+    }
+
+    pub(super) fn is_current(
+        &self,
+        authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    ) -> bool {
+        Self::read(authority).as_ref() == Some(self)
+    }
+
+    pub(super) fn probe<T>(&self, name: &str, probe: impl FnOnce() -> T) -> Option<T> {
+        crate::services::tmux_common::with_tmux_source_authority(name, |authority| {
+            self.is_current(authority).then(probe)
+        })
+    }
+
+    pub(super) fn evict_confirmed_orphan(
+        &self,
+        shared: &SharedData,
+        provider: &ProviderKind,
+        name: &str,
+        binding: Option<&crate::services::tui_prompt_dedupe::TuiRuntimeBinding>,
+        channel: Option<u64>,
+        restored_owner: Option<ChannelId>,
+    ) -> Option<()> {
+        use crate::services::{tmux_common, tui_prompt_dedupe as dedupe};
+        tmux_common::with_tmux_source_authority(name, |authority| {
+            if !self.is_current(authority)
+                || shared.tmux_watchers.has_live_watcher_handle(name)
+                || shared.tmux_watchers.owner_channel_for_tmux_session(name) != restored_owner
+            {
+                return None;
+            }
+            let removed = dedupe::evict_tmux_mirror_if_current_under_source_authority(
+                authority, binding, channel,
+            )?;
+            shared
+                .tmux_watchers
+                .clear_restored_owner_for_tmux_session(name);
+            if provider == &ProviderKind::Claude && binding.is_some() {
+                dedupe::forget_hook_adopted_claude_session_id(name);
+            }
+            let permanent_loss_count = super::idle_relay_drift::record_confirmed_dead_orphan_loss(
+                provider,
+                name,
+                channel
+                    .or_else(|| restored_owner.map(ChannelId::get))
+                    .unwrap_or(0),
+            );
+            if removed {
+                tracing::warn!(
+                    tmux_session_name = name,
+                    provider = provider.as_str(),
+                    permanent_loss_count,
+                    "evicted stale dedupe mirror for dead/orphaned TUI session"
+                );
+            }
+            Some(())
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -267,17 +362,6 @@ pub(super) fn retain_mirror_lookup_warnings(
         });
 }
 
-#[cfg(unix)]
-impl MirrorHost {
-    pub(super) fn is_tmux(self) -> bool {
-        self == Self::Tmux
-    }
-
-    pub(super) fn is_herdr(self) -> bool {
-        self == Self::Herdr
-    }
-}
-
 /// Read the keyed guard's host evidence on the blocking pool before probing a pane.
 #[cfg(unix)]
 pub(super) fn mirror_evict_admitted(
@@ -286,12 +370,15 @@ pub(super) fn mirror_evict_admitted(
     tmux_name: &str,
     channel_hint: Option<u64>,
 ) -> MirrorHost {
+    use crate::db::dispatched_sessions::hosted_execution::HostedRecord;
     use crate::services::session_host::HostKind;
 
+    let epoch = TmuxMirrorEpoch::capture(tmux_name);
+    let tmux_admission = || epoch.clone().map_or(MirrorHost::Deferred, MirrorHost::Tmux);
     // Test runtimes built without a pool predate the guard; production requires PostgreSQL.
     #[cfg(test)]
     if shared.pg_pool.is_none() {
-        return MirrorHost::Tmux;
+        return tmux_admission();
     }
     let gate = async {
         use crate::services::agent_protocol::RuntimeHandoffKind;
@@ -319,14 +406,26 @@ pub(super) fn mirror_evict_admitted(
             provider,
             tmux_name,
         );
-        super::inflight::mirror_host_for_lookup(&lookup, provider, channel, &key, tmux_name)
+        match super::inflight::mirror_host_for_lookup(&lookup, provider, channel, &key, tmux_name) {
+            Some(HostKind::Tmux) => Some(tmux_admission()),
+            Some(HostKind::Herdr) => {
+                let nonce = match lookup {
+                    HostedLookup::Found(row) => match row.record {
+                        HostedRecord::Known(record) => Some(record.execution_nonce),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                Some(MirrorHost::Herdr(nonce))
+            }
+            _ => None,
+        }
     };
     let result = match tokio::runtime::Handle::try_current() {
         Ok(handle) => match handle
             .block_on(async { tokio::time::timeout(MIRROR_LOOKUP_BUDGET, gate).await })
         {
-            Ok(Some(HostKind::Tmux)) => Ok(MirrorHost::Tmux),
-            Ok(Some(HostKind::Herdr)) => Ok(MirrorHost::Herdr),
+            Ok(Some(host)) => Ok(host),
             Ok(_) => Err("host check inconclusive; mirror kept"),
             Err(_) => Err("host check timed out; mirror kept"),
         },

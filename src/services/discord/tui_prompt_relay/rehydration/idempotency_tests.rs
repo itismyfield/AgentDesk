@@ -90,19 +90,19 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
             )
             .unwrap();
         }
-        let hosts = HashMap::from([
+        let mut hosts = HashMap::from([
             (
                 names[0].clone(),
                 super::super::super::host_defer_gate::MirrorHost::Deferred,
             ),
             (
                 names[1].clone(),
-                super::super::super::host_defer_gate::MirrorHost::Tmux,
+                MirrorHost::Tmux(TmuxMirrorEpoch::capture(admitted).unwrap()),
             ),
         ]);
-        let plan = codex_tui_rehydrate_plan(&names, &hosts);
+        let plan = codex_tui_rehydrate_plan(&names, &mut hosts);
         let published = rehydrate_codex_tui_binding_transaction(
-            admitted,
+            (admitted, &TmuxMirrorEpoch::capture(admitted).unwrap()),
             CHANNEL,
             &HashSet::new(),
             &plan.reserved_rollout_paths,
@@ -123,7 +123,7 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
         assert!(dedupe::runtime_binding_for_tmux_session(admitted).is_none());
 
         let control = rehydrate_codex_tui_binding_transaction(
-            admitted,
+            (admitted, &TmuxMirrorEpoch::capture(admitted).unwrap()),
             CHANNEL,
             &HashSet::new(),
             &plan.reserved_rollout_paths,
@@ -138,7 +138,7 @@ fn deferred_codex_pane_blocks_markerless_rollout_publication() {
 
 fn rehydrate(observe: impl FnOnce()) -> Option<dedupe::TuiRuntimeBinding> {
     rehydrate_codex_tui_binding_transaction(
-        SESSION,
+        (SESSION, &TmuxMirrorEpoch::capture(SESSION).unwrap()),
         CHANNEL,
         &claimed_codex_tui_rollout_paths(),
         &HashSet::new(),
@@ -544,7 +544,7 @@ fn unusable_marker_preserves_valid_binding_and_cursor() {
         ] {
             assert!(
                 rehydrate_codex_tui_binding_transaction(
-                    SESSION,
+                    (SESSION, &TmuxMirrorEpoch::capture(SESSION).unwrap()),
                     CHANNEL,
                     &claims,
                     &HashSet::new(),

@@ -200,6 +200,7 @@ pub fn runtime_bindings_for_kind(
 pub fn evict_previous_tmux_mirror_under_source_authority(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     expected: &TuiRuntimeBinding,
+    herdr_nonce: Option<&str>,
 ) -> bool {
     let name = authority.session();
     // A listing protects both an admitted source and publication in progress.
@@ -216,10 +217,12 @@ pub fn evict_previous_tmux_mirror_under_source_authority(
         event.tmux_session == name
             && !matches!(event.new, binding_events::BindingTarget::Rejected { .. })
     });
-    if pane_events
-        .clone()
-        .any(|event| event.execution_nonce.is_some())
-    {
+    if pane_events.clone().any(|event| {
+        event
+            .execution_nonce
+            .as_deref()
+            .is_some_and(|nonce| herdr_nonce.is_none_or(|current| nonce == current))
+    }) {
         return false;
     }
     let matches_source = |event: &binding_events::BindingEvent| match &event.new {
@@ -241,18 +244,28 @@ pub fn evict_previous_tmux_mirror_under_source_authority(
     if !previous_tmux {
         return false;
     }
+    evict_tmux_mirror_if_current_under_source_authority(authority, Some(expected), Some(channel))
+        .unwrap_or(false)
+}
+
+/// Removes the mirror only if its binding and channel still match the caller's snapshot.
+#[cfg(unix)]
+pub fn evict_tmux_mirror_if_current_under_source_authority(
+    authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
+    binding: Option<&TuiRuntimeBinding>,
+    channel: Option<u64>,
+) -> Option<bool> {
+    let name = authority.session();
     let removed = with_runtime_binding_state_under_source_authority(authority, |state| {
-        if state.runtime_by_tmux.get(name).map(|entry| &entry.value) != Some(expected)
-            || state.channel_by_tmux.get(name).map(|entry| entry.value) != Some(channel)
+        if state.runtime_by_tmux.get(name).map(|entry| &entry.value) != binding
+            || state.channel_by_tmux.get(name).map(|entry| entry.value) != channel
         {
-            return false;
+            return None;
         }
-        remove_tmux_mirror(state, name)
-    });
-    if removed {
-        clear_evicted_mirror_compact_state(name);
-    }
-    removed
+        Some(remove_tmux_mirror(state, name))
+    })?;
+    clear_evicted_mirror_compact_state(name);
+    Some(removed)
 }
 
 pub fn codex_verified_publication_allowed(

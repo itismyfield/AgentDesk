@@ -19,14 +19,17 @@ pub use codex_policy::{
     codex_verified_source_allowed_under_source_authority,
 };
 mod codex_hook;
-#[cfg(unix)]
-pub use binding_access::evict_previous_tmux_mirror_under_source_authority;
 pub use binding_access::register_provider_session;
 use binding_access::same_runtime_source;
 pub use binding_access::{
     RuntimeObservation, codex_verified_marker_metadata, codex_verified_publication_allowed,
     runtime_binding_for_tmux_session, runtime_binding_for_tmux_session_under_source_authority,
     runtime_bindings_for_kind, runtime_observation_under_source_authority,
+};
+#[cfg(unix)]
+pub use binding_access::{
+    evict_previous_tmux_mirror_under_source_authority,
+    evict_tmux_mirror_if_current_under_source_authority,
 };
 pub mod codex_verified;
 #[cfg(test)]
@@ -45,7 +48,8 @@ pub use codex_verified::{
 pub use codex_verified::{
     channel_allowed_under_source_authority as codex_verified_channel_allowed_under_source_authority,
     codex_verified_discovered_channel, observe_verified_codex_hook,
-    recover_discovered_codex_binding, resolve_registered_claims as resolve_codex_claims,
+    recover_discovered_codex_binding, recover_discovered_codex_binding_under_source_authority,
+    resolve_registered_claims as resolve_codex_claims,
 };
 pub mod pane_registration;
 pub use adopt_skip::*;

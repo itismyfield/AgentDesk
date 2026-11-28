@@ -237,11 +237,13 @@ pub(super) fn restore_codex_owner_channel(
     shared: &Arc<SharedData>,
     tmux: &str,
     channel: u64,
+    epoch: &TmuxMirrorEpoch,
 ) -> Option<bool> {
     crate::services::tmux_common::with_tmux_source_authority(tmux, |authority| {
-        crate::services::tui_prompt_dedupe::codex_verified_channel_allowed_under_source_authority(
-            authority, channel,
-        )
+        (epoch.is_current(authority)
+            && crate::services::tui_prompt_dedupe::codex_verified_channel_allowed_under_source_authority(
+                authority, channel,
+            ))
         .then(|| {
             shared
                 .tmux_watchers

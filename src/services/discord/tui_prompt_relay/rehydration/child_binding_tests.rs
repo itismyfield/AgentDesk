@@ -53,8 +53,15 @@ fn child_marker_rehydrate_publishes_no_child_and_fallback_excludes_it() {
         serde_json::json!({"rollout_path": child,"session_id": header["payload"]["id"]});
     std::fs::write(&marker_path, format!("{old_marker}\n")).unwrap();
     let empty = HashSet::new();
-    let restored =
-        rehydrate_codex_tui_binding_transaction(name, channel, &empty, &empty, &empty, true, || {});
+    let restored = rehydrate_codex_tui_binding_transaction(
+        (name, &TmuxMirrorEpoch::capture(name).unwrap()),
+        channel,
+        &empty,
+        &empty,
+        &empty,
+        true,
+        || {},
+    );
     assert!(
         restored.is_none(),
         "rehydrate must not restore the child's binding"
@@ -85,9 +92,16 @@ fn child_marker_rehydrate_publishes_no_child_and_fallback_excludes_it() {
         ),
     )
     .unwrap();
-    let restored =
-        rehydrate_codex_tui_binding_transaction(name, channel, &empty, &empty, &empty, true, || {})
-            .expect("the rejected child marker must permit parent fallback");
+    let restored = rehydrate_codex_tui_binding_transaction(
+        (name, &TmuxMirrorEpoch::capture(name).unwrap()),
+        channel,
+        &empty,
+        &empty,
+        &empty,
+        true,
+        || {},
+    )
+    .expect("the rejected child marker must permit parent fallback");
     assert_eq!(restored.output_path, parent.display().to_string());
     let events = ChannelBindingLog::new(channel, ShadowProvider::Codex)
         .binding_events_since(channel, 0)

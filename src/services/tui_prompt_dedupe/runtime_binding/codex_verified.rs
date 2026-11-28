@@ -781,11 +781,14 @@ pub fn channel_allowed_under_source_authority(
 
 pub fn recover_discovered_codex_binding(tmux: &str, channel: u64) -> bool {
     tc::with_tmux_source_authority(tmux, |authority| {
-        recover_discovered_under_authority(authority, channel)
+        recover_discovered_codex_binding_under_source_authority(authority, channel)
     })
 }
 
-fn recover_discovered_under_authority(authority: &TmuxSourceAuthority<'_>, channel: u64) -> bool {
+pub fn recover_discovered_codex_binding_under_source_authority(
+    authority: &TmuxSourceAuthority<'_>,
+    channel: u64,
+) -> bool {
     let context = match current_context(authority) {
         Ok(None) => {
             let nonce = match binding_context::observe_spawn_nonce_marker(authority.session()) {
