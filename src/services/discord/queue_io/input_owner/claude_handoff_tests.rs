@@ -6,7 +6,7 @@ mod custody_tests;
 mod left_herdr_tests;
 
 use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
-use crate::services::discord::queue_io::input_owner::claude_handoff::tests::{
+use crate::services::discord::queue_io::input_owner::claude_handoff::hook_tests::{
     close_attempts, herdr_host, install_forced, refuse_host, retry_waiting,
 };
 use crate::services::discord::queue_io::input_owner::claude_handoff::{HELD, now_ms, schedule};

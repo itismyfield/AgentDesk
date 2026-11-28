@@ -265,7 +265,7 @@ async fn judge(
     continuing: bool,
 ) -> Result<Option<(String, TurnHost)>, String> {
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(target) = tests::judged(channel.get()) {
+    if let Some(target) = hook_tests::judged(channel.get()) {
         return Ok(Some(target));
     }
     if !continuing
@@ -289,7 +289,7 @@ async fn judge(
 /// Whether host policy no longer routes the channel to Herdr, so a journal has no handoff target.
 fn left_herdr(channel: u64) -> bool {
     #[cfg(any(test, feature = "test-support"))]
-    if tests::judged(channel).is_some() {
+    if hook_tests::judged(channel).is_some() {
         return false;
     }
     crate::services::session_host::thread_host::left_herdr(channel)
@@ -310,7 +310,7 @@ where
     Fut: std::future::Future<Output = Result<bool, String>>,
 {
     #[cfg(any(test, feature = "test-support"))]
-    if let Some(result) = tests::close_result(channel) {
+    if let Some(result) = hook_tests::close_result(channel) {
         return result;
     }
     match LegacyTmux(logical).liveness() {
@@ -542,7 +542,7 @@ pub(crate) fn recover(shared: Shared, channel: Channel) {
             let id = journal.id;
             if let Err(error) = mailbox.v2_request(move |slot| slot.as_mut().ok_or("owner missing")?.finish_handoff(&id)).await { tracing::warn!(%error,"handoff completion journal held"); }
             #[cfg(any(test, feature = "test-support"))]
-            tests::finished(channel.get());
+            hook_tests::finished(channel.get());
         } else if journal.ended || journal.retry_after_ms > now_ms() {
             // An unended journal with no deadline pending waits for an input, never for a timer.
             schedule(shared, channel, journal.id, journal.failures);
@@ -624,4 +624,9 @@ fn busy_output_ready(channel: u64) -> bool {
 
 #[cfg(any(test, feature = "test-support"))]
 #[path = "claude_handoff_hook_tests.rs"]
-pub(crate) mod tests;
+pub(in crate::services::discord) mod hook_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod tests {
+    pub(crate) use super::hook_tests::{force_host, herdr_host};
+}
