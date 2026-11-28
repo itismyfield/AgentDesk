@@ -2247,6 +2247,7 @@ src/
 │   │   │   │   ├── raw_request_tests.rs
 │   │   │   │   └── transport.rs
 │   │   │   ├── body_census.rs
+│   │   │   ├── bot_http.rs
 │   │   │   ├── completed_turn_ledger.rs
 │   │   │   ├── confirmation.rs
 │   │   │   ├── decision.rs
@@ -2421,6 +2422,7 @@ src/
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── held_sources.rs
+│   │   │   ├── human_input.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
@@ -2547,7 +2549,8 @@ src/
 │   │   │   ├── restart.rs
 │   │   │   └── shared.rs
 │   │   ├── relay_health/
-│   │   │   └── frontier.rs
+│   │   │   ├── frontier.rs
+│   │   │   └── retry_delay.rs
 │   │   ├── relay_recovery/
 │   │   │   ├── tests/
 │   │   │   │   ├── circuit_breaker_apply.rs
@@ -3061,7 +3064,8 @@ src/
 │   │   │   └── write.rs
 │   │   ├── shared_state/
 │   │   │   ├── g7_host.rs
-│   │   │   └── g7_host_tests.rs
+│   │   │   ├── g7_host_tests.rs
+│   │   │   └── health_ports.rs
 │   │   ├── stall_recovery/
 │   │   │   ├── ke_queue_tests.rs
 │   │   │   └── ke_queue_unix_tests.rs
