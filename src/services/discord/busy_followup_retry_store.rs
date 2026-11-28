@@ -14,6 +14,8 @@ pub(in crate::services::discord) mod draft_release_watch;
 mod hold_release_tests;
 mod inflight_row;
 pub(in crate::services::discord) mod policy;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod sweep_test_support;
 pub(crate) use inflight_row::FollowupRetryRow;
 pub(crate) use policy::{BacklogLayers, LayerSnapshot, RetryClass, parked_only};
 use policy::{CheckedInputView, SourceRead, read_source_in_root};
@@ -654,7 +656,7 @@ fn clear_if_current(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::discord::InflightTurnState;
+    use super::sweep_test_support::{legacy, with_root};
 
     fn record_busy_retry_at(
         provider: &ProviderKind,
@@ -665,27 +667,6 @@ mod tests {
     ) -> Result<BusyRetryDecision, String> {
         let ids = (channel_id, user_msg_id, notice_message_id);
         record_retry_at(provider, ids, &[], (0, now_ms), None)
-    }
-
-    fn legacy(notice_message_id: u64, count: u32, first_ms: u64) -> BusyFollowupRetryState {
-        let json = serde_json::json!({
-            "notice_message_id": notice_message_id,
-            "busy_retry_count": count,
-            "first_busy_retry_at_ms": first_ms,
-        });
-        serde_json::from_value(json).expect("legacy record")
-    }
-
-    fn with_root(test: impl FnOnce()) {
-        let _lock = crate::config::shared_test_env_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let root = tempfile::tempdir().expect("runtime root");
-        let _guard = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
-            "AGENTDESK_ROOT_DIR",
-            root.path(),
-        );
-        test();
     }
 
     #[test]
@@ -804,51 +785,6 @@ mod tests {
             assert_eq!(unrelated.user_msg_id, unrelated_head_id);
             assert!(unrelated.state.is_none());
             assert!(!state_is_capped(unrelated.state));
-        });
-    }
-
-    /// A terminal answer unties the card but keeps spent retries; age alone never deletes them or
-    /// an unreadable record, while an unspent binding ages out.
-    #[test]
-    fn sweeps_delete_only_unspent_bindings_however_old() {
-        with_root(|| {
-            let provider = ProviderKind::Claude;
-            let root = runtime_store::discord_busy_followup_retries_root().expect("store root");
-            let now = 1_000 + 25 * 60 * 60 * 1_000;
-            let channel = root.join("claude/48884");
-            let seed = |id: u64, state: &BusyFollowupRetryState| {
-                save_in_root(&root, &provider, 48_884, id, state).expect("seed");
-            };
-            seed(48_885, &legacy(900, 1, 1_000));
-            seed(48_886, &legacy(901, 0, 1_000));
-            let capped = BusyFollowupRetryState::charge(None, 902, 300_000, 1_000, None);
-            seed(48_887, &capped);
-            fs::write(channel.join("48888.json"), b"{").expect("unreadable record");
-            let mut answered = InflightTurnState::new(
-                provider.clone(),
-                48_884,
-                None,
-                7,
-                48_887,
-                902,
-                "answered".into(),
-                None,
-                None,
-                None,
-                None,
-                0,
-            );
-            answered.busy_followup_retry_user_msg_id = 48_887;
-            release_notice(&provider, ChannelId::new(48_884), &answered);
-            let capped = BusyFollowupRetryState {
-                notice_bound: false,
-                ..capped
-            };
-            assert_eq!(sweep_expired_in_root_at(&root, now), 1);
-            assert!(load_in_root(&root, &provider, 48_884, 48_885).is_some());
-            assert!(load_in_root(&root, &provider, 48_884, 48_886).is_none());
-            assert_eq!(load_in_root(&root, &provider, 48_884, 48_887), Some(capped));
-            assert!(channel.join("48888.json").exists());
         });
     }
 

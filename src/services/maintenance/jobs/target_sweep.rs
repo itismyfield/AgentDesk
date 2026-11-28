@@ -161,13 +161,13 @@ pub async fn collect_and_sweep(config: Config) -> Result<SweepReport> {
 /// Recursively sum file sizes under `dir`. Best-effort: fs errors are swallowed
 /// per-entry (we don't want a single permission-denied to abort the whole
 /// maintenance tick).
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static MEASURE_THREAD_OBSERVER: std::sync::Mutex<
     Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
 > = std::sync::Mutex::new(None);
 
 fn measure_dir_size(dir: &Path) -> Result<u64> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(observer) = MEASURE_THREAD_OBSERVER
         .lock()
         .unwrap_or_else(|error| error.into_inner())

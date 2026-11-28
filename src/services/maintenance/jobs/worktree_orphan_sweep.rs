@@ -85,7 +85,7 @@ where
     F: FnOnce() -> T + Send + 'static,
 {
     tokio::task::spawn_blocking(move || {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         observe_blocking_call_site();
         operation()
     })
@@ -109,7 +109,7 @@ fn collect_child_directories(root: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 static BLOCKING_CALL_SITE_OBSERVER: std::sync::Mutex<
     Option<std::sync::mpsc::Sender<std::thread::ThreadId>>,
 > = std::sync::Mutex::new(None);
@@ -117,7 +117,7 @@ static BLOCKING_CALL_SITE_OBSERVER: std::sync::Mutex<
 #[cfg(test)]
 static BLOCKING_CALL_SITE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 fn observe_blocking_call_site() {
     if let Some(observer) = BLOCKING_CALL_SITE_OBSERVER
         .lock()

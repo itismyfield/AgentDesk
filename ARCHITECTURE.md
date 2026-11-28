@@ -1652,7 +1652,8 @@ src/
 │   │   │   ├── hold_release_tests.rs
 │   │   │   ├── inflight_row.rs
 │   │   │   ├── policy.rs
-│   │   │   └── policy_tests.rs
+│   │   │   ├── policy_tests.rs
+│   │   │   └── sweep_test_support.rs
 │   │   ├── catch_up/
 │   │   │   ├── frontier_sweep_tests/
 │   │   │   │   ├── dispatch_retirement_tests.rs
@@ -2367,6 +2368,7 @@ src/
 │   │   │   ├── canary_workspace_tests.rs
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
+│   │   │   ├── ke_retry_sweep_tests.rs
 │   │   │   └── kickoff.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
