@@ -1,6 +1,7 @@
 use super::*;
 use crate::services::cluster::intake_router_hook::owner_record::output;
 use crate::services::tui_o::repost::dispatch::RepostWriter;
+use crate::services::tui_o::repost::identity::PieceKey;
 use crate::services::tui_o::shadow::{UnitKey, UnitKind};
 use crate::services::tui_o::writer::{
     AlarmSink, DeliveryLease, WriterAlarm, deliver::ChannelWriter,
@@ -73,6 +74,12 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
         })
         .unwrap();
     opened
+        .append_ledger(LedgerEntry::ReplyTo {
+            serial: 0,
+            anchor: 4242,
+        })
+        .unwrap();
+    opened
         .append_ledger(LedgerEntry::Prepared {
             notice_origin: None,
             serial: 0,
@@ -98,6 +105,13 @@ async fn owner_repost_real_http_revocation_preserves_unresolved_and_stops_pg() {
             .with_owner_scope(scope),
     );
     let mut writer = ChannelWriter::new(opened, gate, gateway, Lease, alarms.clone());
+    // A re-post reads the original's origin and reply through the trait it is generic over.
+    let ledger = writer.store().ledger();
+    let key = PieceKey::new(ledger.piece(0).unwrap().unit_key.clone(), 0).unwrap();
+    let stored = ledger.output_origin_for_test(0).cloned();
+    assert!(stored.is_some());
+    assert_eq!(RepostWriter::output_origin(&writer, &key), stored);
+    assert_eq!(RepostWriter::reply_to(&writer, &key), Some(4242));
     RepostWriter::record(&mut writer, &denied).await;
     assert!(
         matches!(denied.outcome, WireOutcome::Withheld(_)),

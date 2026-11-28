@@ -5,6 +5,10 @@ use crate::services::tui_o::store::ChannelStore;
 use crate::services::tui_o::writer::input_notices::NoticeOrigin;
 use std::collections::{HashMap, HashSet};
 
+mod absorption;
+use absorption::AbsorptionLookup;
+#[cfg(unix)]
+pub(crate) use absorption::{AbsorptionProofs, ConsumedAbsorptions};
 mod census;
 mod context_observation;
 #[cfg(any(test, feature = "test-support"))]
@@ -52,9 +56,17 @@ struct Scope {
     native_stamp: Option<Fingerprint>,
     exact: Answers,
     census: Answers,
+    absorbed: absorption::Proven,
 }
 
 impl Scope {
+    fn covers(&self, origin: &NoticeOrigin) -> bool {
+        origin.record.end <= self.through
+            && self.native_stamp.as_ref().is_some_and(|held| {
+                census::fingerprint(&origin.record.source).as_ref() == Some(held)
+            })
+    }
+
     fn current(
         &self,
         store: &ChannelStore,
@@ -144,11 +156,11 @@ impl Batch {
     #[cfg(any(test, feature = "test-support"))]
     pub fn prepare(store: &ChannelStore) -> Self {
         let mut batch = Self::default();
-        batch.refresh(store);
+        batch.refresh(store, None);
         batch
     }
 
-    pub(crate) fn refresh(&mut self, store: &ChannelStore) {
+    pub(crate) fn refresh(&mut self, store: &ChannelStore, lookup: Option<&AbsorptionLookup<'_>>) {
         let before = stamp();
         self.stamp = before.clone();
         let mut previous = std::mem::take(&mut self.scopes);
@@ -223,16 +235,35 @@ impl Batch {
                     .ok()
                 })
                 .map(|(entries, blocked)| {
-                    attribute(&entries, &blocked, rows.as_deref().map(Vec::as_slice))
+                    let (absorbed, reserved) = absorption::collect(
+                        store,
+                        origin,
+                        &entries,
+                        &blocked,
+                        native_stamp.as_ref(),
+                        lookup,
+                    );
+                    let (exact, census, owners) = attribute(
+                        &entries,
+                        &blocked,
+                        rows.as_deref().map(Vec::as_slice),
+                        &reserved,
+                    );
+                    (exact, census, owners, absorbed)
                 });
-            let transient = native_stamp.is_none()
-                && generation::fingerprint(&origin.record.source.path).is_some_and(|fp| {
+            let observed_native = generation::fingerprint(&origin.record.source.path);
+            let stable_stamp = native_stamp
+                .clone()
+                .filter(|fp| Some(fp) == observed_native.as_ref());
+            let transient = stable_stamp.is_none()
+                && observed_native.as_ref().is_some_and(|fp| {
                     fp.dev == origin.record.source.dev && fp.ino == origin.record.source.ino
                 });
             let unstable = attributed.is_none()
                 || rows.is_none()
+                || transient
                 || executions.values().any(|e| e.unavailable);
-            let (exact, census, owners) = attributed.unwrap_or_default();
+            let (exact, census, owners, absorbed) = attributed.unwrap_or_default();
             self.scopes.push(Scope {
                 origin: origin.clone(),
                 executions,
@@ -244,7 +275,7 @@ impl Batch {
                 .flatten()
                 .as_deref()
                 .and_then(generation::fingerprint),
-                observed_native: generation::fingerprint(&origin.record.source.path),
+                observed_native,
                 prefix: store
                     .cursor(&origin.record.source)
                     .map_or(String::new(), |c| c.prefix_hash.clone()),
@@ -259,9 +290,10 @@ impl Batch {
                 }),
                 repeats: if unstable && !transient { repeats } else { 0 },
                 through: *through,
-                native_stamp: native_stamp.clone(),
+                native_stamp: stable_stamp,
                 exact,
                 census,
+                absorbed,
             });
         }
         let changed = observations.changed();
@@ -308,32 +340,64 @@ impl Batch {
         self.decision(origin, row, prompt)
     }
 
-    pub(crate) fn decision(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {
+    pub(crate) fn reevaluate_source(&mut self, source: &crate::services::tui_o::shadow::SourceId) {
+        for scope in self
+            .scopes
+            .iter_mut()
+            .filter(|s| &s.origin.record.source == source)
+        {
+            scope.retry_at = Some(tokio::time::Instant::now());
+        }
+    }
+
+    pub(crate) fn absorbed_owner(&self, origin: &NoticeOrigin, prompt: &str) -> Option<String> {
+        self.absorbed_answer(origin, prompt)?.clone()
+    }
+
+    pub(crate) fn absorbed_unowned(&self, origin: &NoticeOrigin, prompt: &str) -> bool {
+        self.absorbed_answer(origin, prompt)
+            .is_some_and(Option::is_none)
+    }
+
+    fn absorbed_answer(&self, origin: &NoticeOrigin, prompt: &str) -> Option<&Option<String>> {
+        let scope = self.valid_scope(origin, &class_hashes(prompt)).ok()?;
+        if !scope.covers(origin) {
+            return None;
+        }
+        scope
+            .absorbed
+            .get(&(origin.record.start, origin.record.end))
+    }
+
+    fn valid_scope(&self, origin: &NoticeOrigin, hashes: &[String]) -> Result<&Scope, Decision> {
         if self.stamp != stamp() {
-            return Decision::Pending("history_snapshot_changed");
+            return Err(Decision::Pending("history_snapshot_changed"));
         }
         let Some(scope) = self.scopes.iter().find(|s| same_scope(&s.origin, origin)) else {
-            return Decision::Pending("original_binding_missing");
+            return Err(Decision::Pending("original_binding_missing"));
         };
-        let hashes = class_hashes(prompt);
         if scope.executions.iter().any(|(path, observed)| {
             observed.frames.iter().any(|h| hashes.contains(h))
                 && (observed.changed || file_stamp(path).as_ref() != observed.stamp.as_ref())
         }) {
-            return Decision::Pending("execution_context_changed");
+            return Err(Decision::Pending("execution_context_changed"));
         }
+        Ok(scope)
+    }
+
+    pub(crate) fn decision(&self, origin: &NoticeOrigin, row: &str, prompt: &str) -> Decision {
+        let hashes = class_hashes(prompt);
+        let scope = match self.valid_scope(origin, &hashes) {
+            Ok(scope) => scope,
+            Err(answer) => return answer,
+        };
         if let Some((offset, frames, answer)) = scope.exact.get(row)
             && *offset <= origin.record.start
             && frames.iter().any(|h| hashes.contains(h))
         {
             return *answer;
         }
-        let source = &origin.record.source;
-        let valid = scope
-            .native_stamp
-            .as_ref()
-            .is_some_and(|held| census::fingerprint(source).as_ref() == Some(held));
-        if !valid || origin.record.end > scope.through {
+        if !scope.covers(origin) {
             return Decision::Pending("native_census_unavailable");
         }
         scope
@@ -586,6 +650,7 @@ fn attribute(
     entries: &[Entry],
     blocked: &Blocked,
     rows: Option<&[Taken]>,
+    reserved: &HashMap<String, u64>,
 ) -> (Answers, Answers, HashMap<String, String>) {
     let mut owners = HashMap::new();
     let mut exact: Answers = HashMap::new();
@@ -630,7 +695,11 @@ fn attribute(
         let matching: Vec<_> = free
             .iter()
             .copied()
-            .filter(|e| e.offset <= row.offset && row.hashes.contains(&e.class_hash))
+            .filter(|e| {
+                e.offset <= row.offset
+                    && reserved.get(&e.id).is_none_or(|at| row.offset < *at)
+                    && row.hashes.contains(&e.class_hash)
+            })
             .collect();
         let decision =
             if let Some((_, reason)) = blocked.iter().find(|(h, _)| row.hashes.contains(h)) {

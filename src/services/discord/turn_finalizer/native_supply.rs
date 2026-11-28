@@ -108,10 +108,7 @@ impl Port {
         }
         Ok(())
     }
-    async fn registrations(
-        &self,
-    ) -> Result<Vec<crate::services::tui_o::writer::input_facts::native::Registration>, String>
-    {
+    async fn histories(&self) -> Result<Vec<Registry>, String> {
         let (live, boot) = self.custody().await?;
         let mut histories = Vec::new();
         for input in live {
@@ -128,12 +125,43 @@ impl Port {
                 histories.push(history);
             }
         }
-        let mut registrations = Vec::new();
-        for history in histories {
-            registrations.extend(history.native_classification_registrations()?);
-        }
-        Ok(registrations)
+        Ok(histories)
     }
+
+    async fn changed_snapshot(
+        &self,
+        origin: NoticeOrigin,
+        known: Option<&[u64]>,
+    ) -> Result<Option<Snapshot>, String> {
+        let histories = self.histories().await?;
+        if let Some(known) = known.filter(|known| known.len() == histories.len()) {
+            let mut same = true;
+            for (history, known) in histories.iter().zip(known) {
+                if history.native_classification_revision()? != *known {
+                    same = false;
+                    break;
+                }
+            }
+            if same {
+                return Ok(None);
+            }
+        }
+        self.origin(&origin)?;
+        let mut snapshot = Snapshot {
+            generation: self.shared.restart.current_generation,
+            registrations: Vec::new(),
+            registry_revisions: Vec::with_capacity(histories.len()),
+            has_open_barrier: false,
+        };
+        for history in histories {
+            let viewed = history.native_classification_for_channel(self.channel)?;
+            snapshot.registry_revisions.push(viewed.revision);
+            snapshot.registrations.extend(viewed.registrations);
+            snapshot.has_open_barrier |= viewed.has_open_barrier;
+        }
+        Ok(Some(snapshot))
+    }
+
     fn saved_live(&self, input: &NativePrepared) -> Result<Option<Job>, String> {
         if input.key.generation != self.shared.restart.current_generation {
             return Ok(None);
@@ -204,6 +232,7 @@ impl Port {
             exact_frame_hash: String::new(),
             receipts: Vec::new(),
             candidate: false,
+            not_sent: false,
             barrier: None,
         })
         .matches(&current.binding)
@@ -321,6 +350,7 @@ impl Port {
                 exact_frame_hash: String::new(),
                 receipts: Vec::new(),
                 candidate: false,
+                not_sent: false,
                 barrier: None,
             })
             .matches(&current.binding)
@@ -542,12 +572,19 @@ impl EvidencePort for Port {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Snapshot, String>> + Send + '_>>
     {
         Box::pin(async move {
-            self.origin(&origin)?;
-            Ok(Snapshot {
-                generation: self.shared.restart.current_generation,
-                registrations: self.registrations().await?,
-            })
+            self.changed_snapshot(origin, None)
+                .await?
+                .ok_or("native snapshot missing".into())
         })
+    }
+    fn snapshot_since<'a>(
+        &'a self,
+        origin: NoticeOrigin,
+        known: Option<&'a [u64]>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<Snapshot>, String>> + Send + 'a>,
+    > {
+        Box::pin(self.changed_snapshot(origin, known))
     }
     fn offer(
         &self,

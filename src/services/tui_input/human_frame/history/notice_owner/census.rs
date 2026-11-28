@@ -302,18 +302,9 @@ fn rows(
             && value["isMeta"] != true
             && !crate::services::tui_o::shadow::identity::record_is_compact_summary(&value)
         {
-            match &value["message"]["content"] {
-                serde_json::Value::String(text) => Some(text.clone()),
-                serde_json::Value::Array(blocks) => blocks
-                    .iter()
-                    .map(|b| (b["type"] == "text").then(|| b["text"].as_str()))
-                    .collect::<Option<Option<Vec<_>>>>()
-                    .flatten()
-                    .map(|v| v.join("\n")),
-                _ => None,
-            }
+            exact_text(&value["message"]["content"])
         } else if value["type"] == "attachment" && value["attachment"]["type"] == "queued_command" {
-            value["attachment"]["prompt"].as_str().map(str::to_owned)
+            exact_text(&value["attachment"]["prompt"])
         } else {
             None
         };
@@ -333,4 +324,16 @@ fn rows(
         return Err(Transient(None));
     }
     Ok(Some(progress))
+}
+
+fn exact_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Array(blocks) => blocks
+            .iter()
+            .map(|b| (b["type"] == "text").then_some(b["text"].as_str()?))
+            .collect::<Option<Vec<_>>>()
+            .map(|texts| texts.join("\n")),
+        _ => None,
+    }
 }

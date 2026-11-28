@@ -1,6 +1,8 @@
 //! Native input identity and provenance; the writer owns Claude terminal-input notices.
 
 // Test builds open it to the admission tests mounted in the discord-layer test host.
+#[cfg(unix)]
+pub(super) mod absorption;
 #[cfg(not(any(test, feature = "test-support")))]
 pub(super) mod admission;
 #[cfg(any(test, feature = "test-support"))]
@@ -19,6 +21,7 @@ use crate::services::tui_o::shadow::{
     CapturedRecord, ShadowProvider, SourceRange, UnitKey, UnitKind,
 };
 use crate::services::tui_prompt_dedupe;
+pub(crate) use crate::services::tui_prompt_dedupe::ClaudeWriterInput as NativeInput;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoticeOrigin {
@@ -66,23 +69,13 @@ pub(crate) fn discord_input(prompt: &str) -> bool {
     tui_prompt_dedupe::is_discord_relayed_user_prompt(prompt)
 }
 
-/// A native row the writer may announce.
-pub(crate) struct NativeInput {
-    pub prompt: String,
-    pub uuid: Option<String>,
-    /// A scheduled-task fire, which the shared extraction drops as `isMeta`.
-    pub scheduled: bool,
+#[cfg(any(test, feature = "test-support"))]
+pub fn discord_input_for_test(prompt: &str) -> bool {
+    discord_input(prompt)
 }
 
-/// The writer's own reading of a native row: a typed input, or a scheduled fire's row.
 pub(crate) fn native_input(row: &serde_json::Value) -> Option<NativeInput> {
-    let (prompt, uuid, scheduled) =
-        tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)?;
-    Some(NativeInput {
-        prompt,
-        uuid,
-        scheduled,
-    })
+    tui_prompt_dedupe::extract_claude_writer_input_with_entry_id(row)
 }
 
 impl NativeInput {
@@ -105,18 +98,53 @@ impl NativeInput {
     }
 }
 
-/// A native user row always carries the JSON string `"user"`, so other rows skip the parse.
-fn may_be_user(line: &[u8]) -> bool {
-    line.windows(6).any(|window| window == b"\"user\"")
+/// These native rows carry a type token. Other rows can skip the notice parse.
+fn may_be_input(line: &[u8]) -> bool {
+    line.split(|&byte| byte == b'"')
+        .any(|token| matches!(token, b"user" | b"queued_command" | b"absorbed_mid_turn"))
 }
 
 /// Only a row that may become a notice needs its binding origin, which reads the whole binding log.
 pub(crate) fn needs_origin(record: &CapturedRecord) -> bool {
-    may_be_user(&record.line)
+    may_be_input(&record.line)
         && serde_json::from_slice(&record.line)
             .ok()
             .and_then(|value| native_input(&value))
             .is_some_and(|input| !discord_input(&input.prompt) && input.notice().is_some())
+}
+
+enum NoticeOwnership {
+    Known,
+    KnownCommand,
+    Pending,
+    Unowned,
+}
+
+fn observed_notice_attempt(
+    session: &str,
+    prompts: &[String],
+    input_uuid: &str,
+    command_row_uuid: Option<&str>,
+    absorbed: bool,
+) -> Result<NoticeOwnership, String> {
+    let row = command_row_uuid.unwrap_or(input_uuid);
+    let observed = |uuid| history::observed_attempt_checked("claude", session, prompts, Some(uuid));
+    let attempt = if absorbed {
+        history::observed_attempt_checked("claude", session, prompts, None)?
+    } else {
+        observed(row)?
+    };
+    Ok(match attempt {
+        ObservedAttempt::Known(_) if command_row_uuid.is_some() => NoticeOwnership::KnownCommand,
+        ObservedAttempt::Known(_) => NoticeOwnership::Known,
+        ObservedAttempt::Pending
+            if row != input_uuid && matches!(observed(input_uuid)?, ObservedAttempt::Known(_)) =>
+        {
+            NoticeOwnership::Known
+        }
+        ObservedAttempt::Pending => NoticeOwnership::Pending,
+        ObservedAttempt::None => NoticeOwnership::Unowned,
+    })
 }
 
 #[derive(Default)]
@@ -153,7 +181,7 @@ impl Projection {
         record: &CapturedRecord,
         origin: Result<NoticeOrigin, String>,
     ) -> Result<Option<PieceWork>, String> {
-        if !self.enabled || provider != ShadowProvider::Claude || !may_be_user(&record.line) {
+        if !self.enabled || provider != ShadowProvider::Claude || !may_be_input(&record.line) {
             return Ok(None);
         }
         let value = serde_json::from_slice(&record.line)
@@ -167,7 +195,12 @@ impl Projection {
         let Some(payload) = input.notice() else {
             return Ok(None);
         };
-        let NativeInput { prompt, uuid, .. } = input;
+        let NativeInput {
+            prompt,
+            uuid,
+            command_row_uuid,
+            ..
+        } = input;
         let native_key = uuid.ok_or("input notice has no native user UUID")?;
         let origin = origin?;
         if origin.record.start != record.start
@@ -178,18 +211,22 @@ impl Projection {
         {
             return Err("input notice has incomplete original provenance".into());
         }
-        match history::observed_attempt_checked(
-            "claude",
+        match observed_notice_attempt(
             &origin.logical_session,
             std::slice::from_ref(&prompt),
-            Some(&native_key),
+            &native_key,
+            command_row_uuid.as_deref(),
+            tui_prompt_dedupe::is_claude_absorbed_remove(&value),
         )? {
-            ObservedAttempt::Known(_) => return Ok(None),
-            // Unconfirmed ownership is kept as evidence and debt until a receipt decides it.
-            ObservedAttempt::Pending => {
+            NoticeOwnership::Known => return Ok(None),
+            // Keep the physical receipt row until ownership settles the original input key.
+            NoticeOwnership::KnownCommand => {
+                return Err("input notice awaiting ownership settlement".into());
+            }
+            NoticeOwnership::Pending => {
                 return Err("input notice injection ownership pending".into());
             }
-            ObservedAttempt::None => {}
+            NoticeOwnership::Unowned => {}
         }
         let unit_key = UnitKey {
             channel_id: channel,
@@ -212,6 +249,7 @@ impl Projection {
             index: 0,
             payload,
             notice_origin: Some(Box::new(origin)),
+            reply: None,
         }))
     }
 }
