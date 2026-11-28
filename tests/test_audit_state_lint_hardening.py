@@ -476,6 +476,30 @@ class SourceTextGuardAuditTests(AuditRepoCase):
         )
 
 
+class TestInflowAuditTests(AuditRepoCase):
+    SOURCE_READER = ('#[test]\nfn source_reader() {\n'
+                     '    let _ = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/lib.rs"));\n}\n')
+
+    def test_new_test_file_reading_rust_source_fails(self):
+        self.assert_flagged({"crates/member/src/reader_tests.rs": self.SOURCE_READER},
+                            "source tree read in test `source_reader`")
+
+    def test_new_test_file_in_a_directory_with_tests_fails(self):
+        for existing in ("src/owner/first_tests.rs", "src/owner/mod.rs", "src/owner.rs"):
+            with self.subTest(existing=existing):
+                rc, out = self.run_audit({"src/owner/second_tests.rs": "#[test]\nfn added() {}\n"},
+                                         base_files={existing: "#[cfg(test)]\nmod tests {}\n"})
+                self.assertEqual(rc, 1, out)
+                self.assertIn("src/owner/second_tests.rs", out)
+                self.assertIn(f"existing tests in {existing}", out)
+
+    def test_adding_cases_to_an_existing_file_leaves_old_source_reads_alone(self):
+        path = "src/owner/first_tests.rs"
+        rc, out = self.run_audit({path: self.SOURCE_READER + "#[test]\nfn added() {}\n"},
+                                 base_files={path: self.SOURCE_READER})
+        self.assertEqual(rc, 0, out)
+
+
 class SourceTextGuardAllowListFormatTests(unittest.TestCase):
     def findings(self, text: str) -> list[str]:
         with tempfile.TemporaryDirectory() as directory:
