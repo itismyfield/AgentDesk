@@ -237,12 +237,14 @@ enum Ledger<'a> {
     V2(&'a mut Snapshot),
 }
 
+type PendingPublication = Option<(String, String)>;
+
 #[derive(Clone)]
 pub struct Registry {
     path: PathBuf,
     cached: Arc<Mutex<read_stamp::Cache>>,
     /// (old, candidate) of a publication whose durability is unconfirmed.
-    pending: Arc<Mutex<Option<(String, String)>>>,
+    pending: Arc<Mutex<PendingPublication>>,
     encode_fault: Arc<std::sync::atomic::AtomicBool>,
 }
 impl Registry {
@@ -272,7 +274,14 @@ impl Registry {
         &self,
         apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.locked(false, |ledger| match ledger {
+        self.transaction_checked(|_| Ok(()), apply)
+    }
+    fn transaction_checked<T>(
+        &self,
+        check: impl FnOnce(&Snapshot) -> Result<(), String>,
+        apply: impl FnOnce(&mut Snapshot) -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.locked(false, check, |ledger| match ledger {
             Ledger::V2(state) => apply(state),
             Ledger::V1 => Err("a migrating transaction found a V1 store".into()),
         })
@@ -282,6 +291,7 @@ impl Registry {
     fn locked<T>(
         &self,
         keyless: bool,
+        check: impl FnOnce(&Snapshot) -> Result<(), String>,
         apply: impl FnOnce(Ledger<'_>) -> Result<T, String>,
     ) -> Result<T, String> {
         use crate::services::discord::runtime_store::{
@@ -298,39 +308,18 @@ impl Registry {
             .open(self.path.with_extension("lock"))
             .map_err(|e| e.to_string())?;
         lock.lock().map_err(|e| e.to_string())?;
-        let (raw, present) = match std::fs::read_to_string(&self.path) {
-            Ok(raw) => (raw, true),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                (migration::MISSING.into(), false)
-            }
-            Err(e) => return Err(e.to_string()),
-        };
         let context = || AtomicWriteContext::new("injected_frames_v2");
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((old, candidate)) = pending.as_ref() {
-            // The unconfirmed candidate must become durable, or the old bytes must still stand.
-            if raw == *candidate {
-                if retry_published_status(&self.path, context()) != FlushStatus::Flushed {
-                    return Err("history candidate durability unconfirmed".into());
-                }
-            } else if raw != *old {
-                return Err(
-                    "history changed after an unconfirmed publication; preserve both".into(),
-                );
-            }
-            *pending = None;
-        }
-        if keyless
-            && present
-            && !compat::v2_head(raw.as_bytes())
-            && matches!(migration::decode(&raw)?, migration::Decoded::Legacy(_))
-        {
+        let present = self.refresh_transaction_cache(
+            &mut cached,
+            &mut pending,
+            "history candidate durability unconfirmed",
+        )?;
+        if keyless && present && cached.legacy() {
             cached.clear();
             return apply(Ledger::V1);
         }
-        if cached.raw() != Some(raw.as_str()) {
-            cached.replace(raw.clone(), migration::restore(&raw)?);
-        }
+        check(cached.state().ok_or("history cache unavailable")?)?;
         let state = cached.state_mut().ok_or("history cache unavailable")?;
         let encoded = apply(Ledger::V2(state)).and_then(|result| {
             if self.encode_fault.load(std::sync::atomic::Ordering::SeqCst) {
@@ -345,7 +334,7 @@ impl Registry {
                 return Err(error);
             }
         };
-        if candidate == raw {
+        if cached.raw() == Some(candidate.as_str()) {
             return Ok(result);
         }
         let published = critical_publish_status(&self.path, &candidate, context());
@@ -361,9 +350,9 @@ impl Registry {
                 Ok(result)
             }
             status => {
-                cached.clear();
+                let old = cached.take_raw();
                 if status.is_ok() {
-                    *pending = Some((raw, candidate));
+                    *pending = old.map(|raw| (raw, candidate));
                 }
                 Err("history publication unconfirmed; preserve registration".into())
             }

@@ -24,11 +24,14 @@ const _: () = assert!(
 );
 
 /// Uses the gateway's cached client, so O shares Legacy's rate limiter and route buckets.
+#[derive(Clone)]
 pub(crate) struct GatewayPort {
     http: Arc<serenity::Http>,
     bot_id: u64,
     owner: Option<crate::services::cluster::intake_router_hook::owner_record::output::Scope>,
     agy_correlation: Option<agy::Correlation>,
+    /// The message a POST replies to; set only on a per-unit copy of the port.
+    reply_to: Option<u64>,
     #[cfg(test)]
     repost_base: Option<String>,
 }
@@ -40,6 +43,7 @@ impl GatewayPort {
             bot_id,
             owner: None,
             agy_correlation: None,
+            reply_to: None,
             #[cfg(test)]
             repost_base: None,
         }
@@ -141,13 +145,21 @@ impl DiscordPort for GatewayPort {
     ) -> impl Future<Output = PostOutcome> + Send + 'static {
         let http = Arc::clone(&self.http);
         let agy = self.agy_correlation.clone();
-        let bot_id = self.bot_id;
+        let (bot_id, reply_to) = (self.bot_id, self.reply_to);
         async move {
             let message = super::notification_policy::scoped_message(channel)
                 .content(content)
                 .allowed_mentions(
                     crate::services::message_outbox::mentions::relay_allowed_mentions(),
                 );
+            // A deleted anchor still posts, without the reference.
+            let message = match reply_to {
+                Some(id) => message.reference_message(
+                    serenity::MessageReference::from((ChannelId::new(channel), MessageId::new(id)))
+                        .fail_if_not_exists(false),
+                ),
+                None => message,
+            };
             let message = match &agy {
                 Some(correlation) => correlation.attach(message),
                 None => message,
@@ -209,6 +221,37 @@ impl DiscordPort for GatewayPort {
             policy::unit_class(kind),
             self.post_origin(channel, content, origin),
         )
+    }
+
+    fn post_unit_reply(
+        &self,
+        channel: u64,
+        content: String,
+        origin: Option<
+            crate::services::cluster::intake_router_hook::owner_record::output::Artifact,
+        >,
+        kind: crate::services::tui_o::shadow::UnitKind,
+        reply_to: Option<u64>,
+    ) -> impl Future<Output = PostOutcome> + Send + 'static {
+        // A copy carries the reply, so `post` stays the sole request and Created response.
+        let port = Self {
+            reply_to,
+            ..self.clone()
+        };
+        async move { port.post_unit(channel, content, origin, kind).await }
+    }
+
+    fn mark_joined(&self, channel: u64, message: u64) -> impl Future<Output = ()> + Send + 'static {
+        let http = Arc::clone(&self.http);
+        async move {
+            let (channel_id, message_id) = (ChannelId::new(channel), MessageId::new(message));
+            let added = super::super::reaction_lifecycle::try_add_reaction_raw_detailed(
+                &http, channel_id, message_id, '➕',
+            );
+            if let Err(error) = added.await {
+                tracing::warn!(channel, message, %error, "[tui_o] joined mark not added");
+            }
+        }
     }
 
     fn post_unit_attachment(

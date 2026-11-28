@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { KanbanCard, TaskDispatch, WSEvent } from "../types";
 import * as api from "../api/client";
 
@@ -149,11 +149,34 @@ export function KanbanProvider({ initialCards, initialDispatches, children }: Ka
     return () => window.removeEventListener("pcd-ws-event", handleWs);
   }, [upsertKanbanCard, upsertTaskDispatch, deleteKanbanCard, reloadKanbanCards]);
 
+  const contextValue = useMemo<KanbanContextValue>(
+    () => ({
+      kanbanCards,
+      taskDispatches,
+      upsertKanbanCard,
+      upsertTaskDispatch,
+      setKanbanCards,
+      deleteKanbanCard,
+      kanbanCardsState,
+      reloadKanbanCards,
+      requestKanbanCards,
+      requestTaskDispatches,
+    }),
+    [
+      kanbanCards,
+      taskDispatches,
+      upsertKanbanCard,
+      upsertTaskDispatch,
+      deleteKanbanCard,
+      kanbanCardsState,
+      reloadKanbanCards,
+      requestKanbanCards,
+      requestTaskDispatches,
+    ],
+  );
+
   return (
-    <KanbanContext.Provider value={{
-      kanbanCards, taskDispatches, upsertKanbanCard, upsertTaskDispatch, setKanbanCards, deleteKanbanCard,
-      kanbanCardsState, reloadKanbanCards, requestKanbanCards, requestTaskDispatches,
-    }}>
+    <KanbanContext.Provider value={contextValue}>
       {children}
     </KanbanContext.Provider>
   );

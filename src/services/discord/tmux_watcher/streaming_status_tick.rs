@@ -279,19 +279,21 @@ pub(super) async fn update_streaming_status_tick(
         if inflight_missing_for_streaming && pane_actively_streaming_for_streaming {
             // #3107 self-heal: pane live but inflight cleared mid-turn —
             // re-establish a watcher-owned inflight (idempotent + 1-shot log).
-            let reacquired = reacquire_watcher_inflight_for_active_stream(
-                &watcher_provider,
-                channel_id,
-                &tmux_session_name,
-                &output_path,
-                data_start_offset,
-                status_panel_msg_id,
-                placeholder_msg_id,
-                // #3107 (P2#3, F3): thread the #3099 hourglass anchor
-                // (captured before `restored_turn` was `.take()`n) so a
-                // mid-stream inflight loss keeps the `⏳ → ✅` cleanup anchor.
-                restored_injected_prompt_message_id,
-            );
+            let reacquired = reacquire_under_transition(&shared, channel_id, || {
+                reacquire_watcher_inflight_for_active_stream(
+                    &watcher_provider,
+                    channel_id,
+                    &tmux_session_name,
+                    &output_path,
+                    data_start_offset,
+                    status_panel_msg_id,
+                    placeholder_msg_id,
+                    // #3107 (P2#3, F3): thread the #3099 hourglass anchor
+                    // (captured before `restored_turn` was `.take()`n) so a
+                    // mid-stream inflight loss keeps the `⏳ → ✅` cleanup anchor.
+                    restored_injected_prompt_message_id,
+                )
+            });
             if reacquired && !active_stream_inflight_reacquire_logged {
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 tracing::warn!(

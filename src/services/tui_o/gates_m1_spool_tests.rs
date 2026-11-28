@@ -213,6 +213,7 @@ impl Fixture {
                     index: piece.index,
                     payload: piece.payload.clone(),
                     notice_origin: None,
+                    reply: None,
                 })
             })
             .collect();
