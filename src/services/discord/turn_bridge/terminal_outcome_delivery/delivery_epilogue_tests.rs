@@ -25,7 +25,7 @@ mod codex_empty_tests;
 mod o_done_reaction_tests;
 mod provider_failure_tests;
 #[cfg(all(test, unix))]
-pub(in crate::services::discord) mod recovery_retry_guard_tests;
+mod recovery_retry_guard_tests;
 #[cfg(unix)]
 pub(in crate::services::discord) mod rowless_receipt_tests;
 mod settled_delivery_tests;
@@ -629,8 +629,8 @@ pub(in crate::services::discord) const DRIVER_CHANNEL_ID: u64 = 5_191_001;
 pub(in crate::services::discord) const DRIVER_USER_MSG_ID: u64 = 5_191_002;
 pub(in crate::services::discord) const DRIVER_CURRENT_MSG_ID: u64 = 5_191_003;
 const DRIVER_STALE_PREFIX_MSG_ID: u64 = 5_191_004;
-pub(in crate::services::discord) const DRIVER_FALLBACK_ANCHOR_MSG_ID: u64 = 5_191_005;
-pub(in crate::services::discord) const DRIVER_TMUX_SESSION: &str = "adk-5191-driver";
+const DRIVER_FALLBACK_ANCHOR_MSG_ID: u64 = 5_191_005;
+const DRIVER_TMUX_SESSION: &str = "adk-5191-driver";
 pub(in crate::services::discord) const DRIVER_BODY: &str =
     "terminal answer body for the #5191 delivery driver";
 const DRIVER_PUBLISH_PANIC: &str = "driver panic inside the terminal publish";

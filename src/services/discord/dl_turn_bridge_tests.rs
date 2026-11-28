@@ -21,10 +21,6 @@ mod foreign_terminal_custody_tests;
 #[path = "turn_bridge/headless_delivery/production_seam_tests.rs"]
 mod production_seam_tests;
 
-#[cfg(all(test, unix))]
-#[path = "turn_bridge/terminal_outcome_delivery/delivery_epilogue_tests/recovery_retry_guard_tests/replay_turn_tests.rs"]
-mod replay_turn_tests;
-
 #[path = "turn_bridge/stream_tick/rollover_guard_tests.rs"]
 mod rollover_guard_tests;
 

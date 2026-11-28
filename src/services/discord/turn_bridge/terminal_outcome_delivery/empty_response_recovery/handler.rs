@@ -252,7 +252,7 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
                     )
                 })
                 .unwrap_or(false);
-            #[cfg(any(test, feature = "test-support"))]
+            #[cfg(test)]
             if let Some(path) = inflight_state.output_path.as_deref() {
                 output_growth::grow(path);
             }
@@ -546,9 +546,24 @@ pub(in crate::services::discord::turn_bridge::terminal_outcome_delivery) async f
 
 /// Lets a test append to the output file between the two stale-session scans, as a source
 /// still being written does.
-#[cfg(any(test, feature = "test-support"))]
-#[path = "output_growth_hook_tests.rs"]
-pub(in crate::services::discord) mod output_growth;
+#[cfg(test)]
+pub(in crate::services::discord::turn_bridge) mod output_growth {
+    static PENDING: std::sync::LazyLock<dashmap::DashMap<String, String>> =
+        std::sync::LazyLock::new(dashmap::DashMap::new);
+
+    pub(in crate::services::discord::turn_bridge) fn after_first_scan(path: &str, line: &str) {
+        PENDING.insert(path.to_string(), line.to_string());
+    }
+
+    pub(super) fn grow(path: &str) {
+        use std::io::Write as _;
+        let Some((_, line)) = PENDING.remove(path) else {
+            return;
+        };
+        let mut file = std::fs::OpenOptions::new().append(true).open(path);
+        writeln!(file.as_mut().unwrap(), "{line}").unwrap();
+    }
+}
 
 #[cfg(test)]
 mod tests {
