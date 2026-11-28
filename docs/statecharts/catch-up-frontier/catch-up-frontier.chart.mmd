@@ -2,75 +2,66 @@
 title: "Catch-up cursor over a V2 queue channel"
 ---
 stateDiagram-v2
-  state "Legend" as legend {
-    lg0: Stuck
-    lg1: Moved
-  }
-  class lg0 pink
-  class lg1 teal
-  s0: cursor 0: next input waiting
-  s1: cursor 0: next input being sent
-  s2: cursor 0: next input dropped, not sent
-  s3: cursor 0: next input owed after an unclear send
-  s4: cursor 0: next input delivered
-  s5: cursor 1: next input waiting
-  s6: cursor 1: next input being sent
-  s7: cursor 1: next input dropped, not sent
-  s8: cursor 1: next input owed after an unclear send
-  s9: cursor 1: next input delivered
-  s10: cursor 2: next input waiting
-  s11: cursor 2: next input being sent
-  s12: cursor 2: next input dropped, not sent
-  s13: cursor 2: next input owed after an unclear send
-  s14: cursor 2: next input delivered
-  s15: cursor 3: every input behind it
   [*] --> s0
-  s0 --> s1: an input is sent
-  s0 --> s2: a waiting input is dropped
-  s1 --> s3: the send is unclear
-  s1 --> s4: the send is confirmed
-  s2 --> s0: the periodic scan runs
-  s3 --> s0: an owed input is queued again
-  s3 --> s4: the send is confirmed
-  s4 --> s5: the periodic scan runs
-  s4 --> s6: the periodic scan runs
-  s5 --> s6: an input is sent
-  s5 --> s7: a waiting input is dropped
-  s6 --> s8: the send is unclear
-  s6 --> s9: the send is confirmed
-  s7 --> s5: the periodic scan runs
-  s4 --> s8: the periodic scan runs
-  s4 --> s10: the periodic scan runs
-  s8 --> s5: an owed input is queued again
-  s8 --> s9: the send is confirmed
-  s4 --> s11: the periodic scan runs
-  s9 --> s10: the periodic scan runs
-  s10 --> s11: an input is sent
-  s10 --> s12: a waiting input is dropped
-  s9 --> s11: the periodic scan runs
-  s11 --> s13: the send is unclear
-  s11 --> s14: the send is confirmed
-  s12 --> s10: the periodic scan runs
-  s4 --> s13: the periodic scan runs
-  s4 --> s15: the periodic scan runs
-  s9 --> s13: the periodic scan runs
-  s13 --> s10: an owed input is queued again
-  s13 --> s14: the send is confirmed
-  s9 --> s15: the periodic scan runs
-  s14 --> s15: the periodic scan runs
-  class s0 pink
-  class s1 pink
-  class s2 pink
-  class s3 pink
-  class s4 pink
-  class s5 teal
-  class s6 teal
-  class s7 teal
-  class s8 teal
-  class s9 teal
-  class s10 teal
-  class s11 teal
-  class s12 teal
-  class s13 teal
-  class s14 teal
-  class s15 teal
+  state "Cursor 0 · waiting" as s0
+  class s0 before
+  state "Cursor 0 · being sent" as s1
+  class s1 before
+  state "Cursor 0 · retained unsent, notice owed" as s2
+  class s2 before
+  state "Cursor 0 · dropped and recoverable" as s3
+  class s3 before
+  state "Cursor 0 · settled" as s4
+  class s4 before
+  state "Cursor 0 · retained unconfirmed, notice owed" as s5
+  class s5 before
+  state "Cursor 0 · retained unsent, resend notice enqueued" as s6
+  class s6 before
+  state "Cursor 0 · cleared unsent, still reads as owed" as s7
+  class s7 before
+  state "Cursor 1 · settled" as s8
+  class s8 advanced
+  state "Cursor 0 · retained unconfirmed, notice enqueued" as s9
+  class s9 before
+  state "Cursor 0 · cleared unconfirmed" as s10
+  class s10 before
+  state "Cursor 1 · retained unsent, resend notice enqueued" as s11
+  class s11 advanced
+  state "Cursor 1 · retained unconfirmed, notice enqueued" as s12
+  class s12 advanced
+  state "Cursor 1 · cleared unconfirmed" as s13
+  class s13 advanced
+  state "Cursor 1 · cleared unsent, still reads as owed" as s14
+  class s14 advanced
+  s0 --> s1: the owner attempts the input
+  s0 --> s2: the owner retains the unsent input
+  s0 --> s3: a waiting input is dropped
+  s1 --> s4: the owner confirms delivery
+  s1 --> s5: the confirmation window ends
+  s1 --> s2: the owner retains the unsent input
+  s2 --> s4: the owner confirms delivery
+  s2 --> s0: the owner requeues an eligible unsent input
+  s2 --> s6: the owner records the enqueued notice
+  s2 --> s7: the owner clears waiting inputs
+  s3 --> s0: catch-up scans
+  s4 --> s8: catch-up scans
+  s5 --> s4: the owner confirms delivery
+  s5 --> s9: the owner records the enqueued notice
+  s5 --> s10: the owner clears waiting inputs
+  s6 --> s4: the owner confirms delivery
+  s6 --> s7: the owner clears waiting inputs
+  s6 --> s11: catch-up scans
+  s7 --> s4: the owner confirms delivery
+  s9 --> s4: the owner confirms delivery
+  s9 --> s10: the owner clears waiting inputs
+  s9 --> s12: catch-up scans
+  s10 --> s4: the owner confirms delivery
+  s10 --> s13: catch-up scans
+  s11 --> s8: the owner confirms delivery
+  s11 --> s14: the owner clears waiting inputs
+  s12 --> s8: the owner confirms delivery
+  s12 --> s13: the owner clears waiting inputs
+  s13 --> s8: the owner confirms delivery
+  s14 --> s8: the owner confirms delivery
+  classDef before fill:#fce7f3
+  classDef advanced fill:#ccfbf1

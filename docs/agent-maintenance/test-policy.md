@@ -51,6 +51,8 @@ do the same thing?" If yes, do not write it.
     `scripts/ci/rust_test_sources.py check`; the allowlist
     `scripts/ci/test_wait_allowlist.txt` only shrinks (new rows fail against the
     PR base).
+14. Extend a module's existing test module or `*_tests.rs` file with new cases.
+15. Share mock and fixture structs through the module's existing test support.
 
 ## Scope
 
@@ -59,7 +61,8 @@ lines by `scripts/audit_state_lint_hardening.py` for `*_MUTANT`/`*_MUTATION` env
 names and `*mutant` hook functions; a switch under another name is left to review.
 Source-text guards kept on purpose are listed in
 `scripts/ci/source_text_guard_allowlist.txt`, and the same script fails added test
-lines that read Rust source outside a listed guard. The lexer in
+lines that read Rust source outside a listed guard. For rule 14, it checks new
+`*_tests.rs` files against the comparison base. The lexer in
 `src/test_support.rs` is a rule 8 exception that stays only for those guards.
 Existing process-global environment dependencies (raw counts in `src/`: about
 350 lines containing `set_var(` and 980 containing `shared_test_env_lock()`) are
