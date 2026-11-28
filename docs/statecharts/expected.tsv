@@ -2059,6 +2059,8 @@ session-lifecycle/TmuxSessionRawAliasParsed.cfg	TmuxSession	RawMissNeedsRace	-
 session-lifecycle/TmuxSessionRawAliasProviderDefault.cfg	TmuxSession	RawProviderFromRecord	-
 session-lifecycle/TmuxSessionRawAliasUnnormalized.cfg	TmuxSession	RawAliasReachesRow,NoDeadlock	-
 session-lifecycle/TmuxSocketBoot.cfg	TmuxSocketBoot	-	-
+session-rotation/FixedCore.cfg	SessionRotation	-	-
+session-rotation/LatchKeyFixed.cfg	SessionRotation	-	-
 thread-host/ThreadHostS1aAfterAll.cfg	ThreadHostS1a	-	-
 thread-host/ThreadHostS1aAfterBoot.cfg	ThreadHostS1a	-	-
 thread-host/ThreadHostS1aAfterBusy.cfg	ThreadHostS1a	-	-

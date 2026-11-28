@@ -138,6 +138,8 @@ pub use adk_runtime::services::tmux_diagnostics;
 pub(crate) mod tmux_turn_liveness;
 pub mod tmux_wrapper;
 pub mod tool_output_guard;
+#[cfg(test)]
+pub(crate) mod transcript_rotation;
 // Output track: the shadow and the dormant writer store, each behind an off-by-default flag.
 pub(crate) mod tui_o {
     pub(crate) mod cutover {

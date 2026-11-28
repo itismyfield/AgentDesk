@@ -21,7 +21,11 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod cold_source;
 pub(crate) mod effort_restart;
+#[cfg(test)]
+#[path = "v2/owner_tests/fixtures/previous_v2_reader.rs"]
+pub(crate) mod previous_v2;
 pub(crate) mod retry_wait;
+pub(crate) mod rotation;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SnapshotV2 {
@@ -62,6 +66,8 @@ pub(crate) struct SnapshotV2 {
     /// The front's retry wait and the last wait number issued.
     #[serde(default, skip_serializing_if = "retry_wait::Waits::is_unused")]
     pub(crate) retry: retry_wait::Waits,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) rotation: Option<rotation::RotationIntent>,
 }
 
 pub(crate) const ROUTINE_DELIVERY_DEADLINE_FIELD: &str = "routine_delivery_deadline_ms";

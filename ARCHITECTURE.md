@@ -414,6 +414,7 @@ src/
 │   ├── session_transcripts_retired_boundary_pg_tests.rs
 │   ├── status_check_migration_tests.rs
 │   ├── timestamps.rs
+│   ├── transcript_rotation_requests.rs
 │   └── turns.rs
 ├── dispatch/
 │   ├── dispatch_status/
@@ -796,6 +797,8 @@ src/
 │   │   │   │   ├── types.rs
 │   │   │   │   └── validation.rs
 │   │   │   └── auto_queue_preflight_harness_tests.rs
+│   │   ├── transcript_rotation/
+│   │   │   └── rotation_tests.rs
 │   │   ├── agent_input_tests.rs
 │   │   ├── agents.rs
 │   │   ├── agents_crud.rs
@@ -879,6 +882,7 @@ src/
 │   │   ├── skills_manifest_audit_tests.rs
 │   │   ├── stats.rs
 │   │   ├── termination_events.rs
+│   │   ├── transcript_rotation.rs
 │   │   └── turn_lease.rs
 │   ├── task_dispatch_claims/
 │   │   ├── config_read.rs
@@ -4688,6 +4692,11 @@ src/
 │   │   ├── claude_idle.rs
 │   │   ├── cleanup_host.rs
 │   │   └── tests_pg.rs
+│   ├── transcript_rotation/
+│   │   ├── eligibility.rs
+│   │   ├── mod.rs
+│   │   ├── rotation_tests.rs
+│   │   └── schedules.rs
 │   ├── tui_input/
 │   │   ├── actor/
 │   │   │   ├── gate/
@@ -5409,6 +5418,7 @@ src/
 │   │   │   │   ├── retained.rs
 │   │   │   │   ├── retry_wait.rs
 │   │   │   │   ├── retry_wait_tests.rs
+│   │   │   │   ├── rotation.rs
 │   │   │   │   ├── routine_settlement.rs
 │   │   │   │   ├── source_admission.rs
 │   │   │   │   ├── sources.rs
@@ -5418,7 +5428,8 @@ src/
 │   │   │   ├── v2_types/
 │   │   │   │   ├── cold_source.rs
 │   │   │   │   ├── effort_restart.rs
-│   │   │   │   └── retry_wait.rs
+│   │   │   │   ├── retry_wait.rs
+│   │   │   │   └── rotation.rs
 │   │   │   ├── compat.rs
 │   │   │   ├── compat_tests.rs
 │   │   │   ├── mend.rs

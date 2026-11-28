@@ -25,6 +25,9 @@ pub struct RuntimeSettingsConfig {
     pub in_progress_stale_min: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent: Option<u64>,
+    /// Minimum transcript size for rotation; absence disables the rotation endpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_rotation_soft_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_compact_percent_codex: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +116,7 @@ impl RuntimeSettingsConfig {
             && self.requested_timeout_min.is_none()
             && self.in_progress_stale_min.is_none()
             && self.context_compact_percent.is_none()
+            && self.transcript_rotation_soft_bytes.is_none()
             && self.context_compact_percent_codex.is_none()
             && self.context_compact_percent_claude.is_none()
             && self.context_compact_window_claude.is_none()

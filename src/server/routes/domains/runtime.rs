@@ -4,7 +4,7 @@ use super::super::{
     ApiRouter, AppState, agents, agents_crud, agents_input_result, agents_turn_deliver, cluster,
     decisions, dispatched_sessions, dispatches, dm_reply, health_api, hooks, monitoring,
     prompt_audit, protected_api_domain, provider_cli_api, queue_api, termination_events,
-    turn_lease,
+    transcript_rotation, turn_lease,
 };
 use axum::{
     Router,
@@ -147,6 +147,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
             .route("/decisions/{id}", get(decisions::show))
             .route("/agents/{id}/prompt-audit", get(prompt_audit::prompt))
             .route("/agents/{id}/anchors", get(prompt_audit::anchors))
+            .route(
+                "/sessions/{key}/rotation-handoff",
+                post(transcript_rotation::submit).get(transcript_rotation::status),
+            )
             .route("/sessions", get(agents_crud::list_sessions))
             .route("/dm-reply/register", post(dm_reply::register_handler))
             .route("/hook/reset-status", post(hooks::reset_status))
