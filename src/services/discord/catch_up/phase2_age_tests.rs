@@ -2,6 +2,7 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use super::super::super::clock::{CatchUpClock, SystemClock};
 use super::*;
+use crate::services::turn_orchestrator::MAX_INTERVENTIONS_PER_CHANNEL;
 #[path = "phase2_bot_boundary_tests.rs"]
 mod phase2_bot_boundary_tests;
 
