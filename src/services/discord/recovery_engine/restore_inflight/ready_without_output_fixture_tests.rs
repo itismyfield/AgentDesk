@@ -11,7 +11,7 @@ pub(in crate::services::discord) struct Fixture {
     pub(in crate::services::discord) state: inflight::InflightTurnState,
     pub(in crate::services::discord) shared: Arc<SharedData>,
     _env: crate::config::TestEnvVarGuard,
-    _root: tempfile::TempDir,
+    pub(in crate::services::discord) _root: tempfile::TempDir,
 }
 
 impl Fixture {
