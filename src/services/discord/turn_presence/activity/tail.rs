@@ -174,7 +174,7 @@ impl TailReader {
         }
         Ok(())
     }
-    pub(super) fn diagnostics(&self) -> (u64, u64, u64, u64) {
+    pub(in crate::services::discord) fn diagnostics(&self) -> (u64, u64, u64, u64) {
         (
             self.meta.window_start,
             self.meta.bootstrap_end,
