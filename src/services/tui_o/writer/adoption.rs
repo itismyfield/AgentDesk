@@ -237,7 +237,7 @@ pub(crate) fn supersedes(pending: &BindingEvent, later: &BindingEvent) -> bool {
 
 /// The sources a binding log names: every bound one in seq order, and those only named as an old
 /// or parent source. A bind still pending refuses the log; a superseded one does not.
-pub(crate) fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&SourceId>), Refused> {
+pub fn logged(events: &[BindingEvent]) -> Result<(Vec<&SourceId>, Vec<&SourceId>), Refused> {
     let (mut bound, mut named, mut pending) = (Vec::new(), Vec::new(), Vec::<&BindingEvent>::new());
     for event in events {
         match &event.record {
@@ -835,7 +835,7 @@ impl Snapshot {
 
 /// Fails closed at once: Legacy has started but holds no cursor.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) struct NoLegacy;
+pub struct NoLegacy;
 
 #[cfg(any(test, feature = "test-support"))]
 impl LegacyView for NoLegacy {

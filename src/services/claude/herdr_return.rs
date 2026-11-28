@@ -18,7 +18,7 @@ use crate::services::session_host::{
 use crate::services::turn_host::ReturnPlan;
 
 /// The executions a return reads; tests stand in for both hosts.
-pub(crate) trait ReturnPorts {
+pub trait ReturnPorts {
     fn herdr<'a>(&self, record: &'a HostedExecution) -> Box<dyn EarlierExecution + 'a> {
         Box::new(HerdrPane::of(record))
     }
@@ -32,23 +32,23 @@ pub(crate) trait ReturnPorts {
     }
 }
 
-pub(crate) struct ProductionPorts;
+pub struct ProductionPorts;
 
 impl ReturnPorts for ProductionPorts {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn herdr<'a>(&self, record: &'a HostedExecution) -> Box<dyn EarlierExecution + 'a> {
         let logical = &record.owner.logical_key;
         tests::standing_in(logical, true).unwrap_or_else(|| Box::new(HerdrPane::of(record)))
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn tmux<'a>(&self, logical: &'a str) -> Box<dyn EarlierExecution + 'a> {
         tests::standing_in(logical, false).unwrap_or_else(|| Box::new(LegacyTmux(logical)))
     }
 }
 
 /// What a return turn carries over to its tmux turn.
-pub(crate) struct ReturnTurn<'a> {
+pub struct ReturnTurn<'a> {
     pub pool: &'a PgPool,
     pub channel_id: u64,
     pub working_dir: &'a str,
@@ -58,7 +58,7 @@ pub(crate) struct ReturnTurn<'a> {
 
 /// Moves `plan`'s execution back to tmux; every failure leaves it where it was and stops the turn.
 /// A Bound execution ends by one `/exit` and retires; a retired one only finishes its move.
-pub(crate) fn execute(
+pub fn execute(
     turn: &ReturnTurn<'_>,
     plan: &ReturnPlan,
     runtime: &Handle,
@@ -179,6 +179,6 @@ impl EarlierExecution for HerdrPane<'_> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "herdr_return_tests.rs"]
-pub(crate) mod tests;
+pub mod tests;

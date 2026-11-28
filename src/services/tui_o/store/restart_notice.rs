@@ -19,7 +19,7 @@ static WRITE: Mutex<()> = Mutex::new(());
 /// The exact episode a restart cut: the row's channel, provider, turn nonce and born generation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Intent {
+pub struct Intent {
     pub channel: u64,
     pub provider: ShadowProvider,
     pub turn_nonce: String,
@@ -28,7 +28,7 @@ pub(crate) struct Intent {
 
 impl Intent {
     /// `None` without an exact episode identity; no notice is ever synthesized from less.
-    pub(crate) fn exact(
+    pub fn exact(
         channel: u64,
         provider: ShadowProvider,
         turn_nonce: Option<&str>,
@@ -67,7 +67,7 @@ fn done(root: &Path, intent: &Intent) -> PathBuf {
 }
 
 /// Durable before it returns; the same episode recorded again is a no-op.
-pub(crate) fn record(root: &Path, intent: &Intent) -> Result<(), String> {
+pub fn record(root: &Path, intent: &Intent) -> Result<(), String> {
     let exact = Intent::exact(
         intent.channel,
         intent.provider,
@@ -98,7 +98,7 @@ pub(crate) fn record(root: &Path, intent: &Intent) -> Result<(), String> {
 }
 
 /// This channel's recorded, unsettled episodes; an unreadable file stays for a later pass.
-pub(crate) fn pending(root: &Path, channel: u64) -> Vec<Intent> {
+pub fn pending(root: &Path, channel: u64) -> Vec<Intent> {
     let Ok(entries) = fs::read_dir(dir(root, channel)) else {
         return Vec::new();
     };

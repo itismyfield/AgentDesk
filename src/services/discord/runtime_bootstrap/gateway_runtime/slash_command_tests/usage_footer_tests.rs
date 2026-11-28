@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::tui_o::writer::tests::FooterWriter;
+use crate::services::tui_o::writer::test_support::FooterWriter;
 
 async fn worker_turn(writer: &mut FooterWriter, id: &str) -> String {
     let _root = fixture_runtime_root(writer.root());

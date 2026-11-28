@@ -5,7 +5,7 @@ use std::process::Output;
 use crate::services::claude_tui::host_input::InputTransport;
 use crate::services::session_host::{HostKey, SubmitPayload, TmuxHost};
 
-pub(crate) mod guarded;
+pub mod guarded;
 
 pub(crate) struct SubmissionTmux;
 

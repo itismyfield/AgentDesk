@@ -167,32 +167,50 @@ fn receipt(request: &Request<'_>, text: String, offset: u64, target: HerdrTarget
         });
 }
 
-#[derive(Clone)]
-pub(crate) struct Source {
-    pub(super) id: SourceId,
-    pub(super) offset: u64,
+mod context {
+    use super::{HerdrTarget, SourceId};
+
+    #[derive(Clone)]
+    pub struct Source {
+        pub(in crate::services::claude_tui::host_input::busy) id: SourceId,
+        pub(in crate::services::claude_tui::host_input::busy) offset: u64,
+    }
+
+    pub struct Context {
+        pub(super) channel: u64,
+        pub(in crate::services::claude_tui::host_input::busy) logical: String,
+        pub(super) nonce: String,
+        pub(super) output_ready: fn(u64) -> bool,
+        pub(in crate::services::claude_tui::host_input::busy) target: HerdrTarget,
+        pub(in crate::services::claude_tui::host_input::busy) writer: String,
+        pub(in crate::services::claude_tui::host_input::busy) attempt_target: serde_json::Value,
+    }
 }
 
-pub(crate) struct Context {
-    channel: u64,
-    pub(super) logical: String,
-    nonce: String,
-    output_ready: fn(u64) -> bool,
-    pub(super) target: HerdrTarget,
-    pub(super) writer: String,
-    pub(super) attempt_target: serde_json::Value,
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use context::{Context, Source};
+#[cfg(any(test, feature = "test-support"))]
+pub use context::{Context, Source};
+
+mod reading {
+    use super::{BusyState, Source};
+
+    pub struct Reading {
+        pub(in super::super) state: BusyState,
+        pub(in super::super) source: Option<Source>,
+        pub(in super::super) idle_verified: bool,
+    }
 }
 
-pub(crate) struct Reading {
-    pub(super) state: BusyState,
-    pub(super) source: Option<Source>,
-    pub(super) idle_verified: bool,
-}
+#[cfg(not(any(test, feature = "test-support")))]
+pub(crate) use reading::Reading;
+#[cfg(any(test, feature = "test-support"))]
+pub use reading::Reading;
 
 #[cfg(any(test, feature = "test-support"))]
 impl Source {
     /// The bound transcript source, for tests outside this module.
-    pub(crate) fn id_for_test(&self) -> SourceId {
+    pub fn id_for_test(&self) -> SourceId {
         self.id.clone()
     }
 }
@@ -200,7 +218,7 @@ impl Source {
 #[cfg(any(test, feature = "test-support"))]
 impl Context {
     /// A read context built field by field, for tests outside this module.
-    pub(crate) fn for_test(
+    pub fn for_test(
         channel: u64,
         logical: String,
         nonce: String,
@@ -220,27 +238,27 @@ impl Context {
         }
     }
 
-    pub(crate) fn output_ready_for_test(&self) -> fn(u64) -> bool {
+    pub fn output_ready_for_test(&self) -> fn(u64) -> bool {
         self.output_ready
     }
 
-    pub(crate) fn target_for_test(&self) -> &HerdrTarget {
+    pub fn target_for_test(&self) -> &HerdrTarget {
         &self.target
     }
 
-    pub(crate) fn writer_for_test(&self) -> &str {
+    pub fn writer_for_test(&self) -> &str {
         &self.writer
     }
 
-    pub(crate) fn attempt_target_for_test(&self) -> &serde_json::Value {
+    pub fn attempt_target_for_test(&self) -> &serde_json::Value {
         &self.attempt_target
     }
 
-    pub(crate) fn read_for_test(&self) -> Reading {
+    pub fn read_for_test(&self) -> Reading {
         self.read()
     }
 
-    pub(crate) fn current_source_for_test(
+    pub fn current_source_for_test(
         &self,
         authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     ) -> Option<Source> {
@@ -250,11 +268,11 @@ impl Context {
 
 #[cfg(any(test, feature = "test-support"))]
 impl Reading {
-    pub(crate) fn state_for_test(&self) -> BusyState {
+    pub fn state_for_test(&self) -> BusyState {
         self.state
     }
 
-    pub(crate) fn idle_verified_for_test(&self) -> bool {
+    pub fn idle_verified_for_test(&self) -> bool {
         self.idle_verified
     }
 }
@@ -277,7 +295,7 @@ impl Reading {
     }
 }
 
-pub(crate) fn observe(
+pub fn observe(
     (channel, logical, nonce): (u64, &str, &str),
     (target, writer, attempt_target): (HerdrTarget, String, serde_json::Value),
     output_ready: fn(u64) -> bool,

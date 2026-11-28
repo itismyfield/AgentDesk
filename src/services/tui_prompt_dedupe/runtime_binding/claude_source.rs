@@ -16,7 +16,7 @@ use binding_events::{BindingCause, Committed, SourceId};
 
 /// What a registration writes to the binding event log before it publishes the binding.
 #[derive(Clone, Debug)]
-pub(crate) enum Record {
+pub enum Record {
     /// The file on disk decides between Source and Pending.
     Stat,
     /// A source the Claude check verified; recorded as this identity if the path still names it.
@@ -29,7 +29,7 @@ pub(crate) enum Record {
 
 /// What a registration's record left in the log.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Persisted {
+pub enum Persisted {
     /// The log names the published source: a stat's record or the verified identity.
     Logged,
     /// Nothing verified was logged; the pane waits on its exact path and the next pass checks again.
@@ -42,7 +42,7 @@ pub(crate) enum Persisted {
 
 impl Persisted {
     /// Whether the registration may publish its binding.
-    pub(crate) fn published(self) -> bool {
+    pub fn published(self) -> bool {
         matches!(self, Self::Logged | Self::AwaitingExact)
     }
 }
@@ -440,7 +440,7 @@ impl Candidate<'_> {
 
 /// Verifies the launch source on its own hook; a prompt may also reclaim a Pending it outlived.
 /// The binding, cursor and hook routing stay as they are.
-pub(crate) fn reclaim_with_current_prompt(
+pub fn reclaim_with_current_prompt(
     authority: &crate::services::tmux_common::TmuxSourceAuthority<'_>,
     session_id: &str,
     hook: &HookSignal,

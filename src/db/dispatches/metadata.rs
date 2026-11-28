@@ -1,19 +1,19 @@
 use sqlx::{PgPool, Row as SqlxRow};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct DispatchDeliveryMetadata {
-    pub(crate) dispatch_type: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) context: Option<String>,
+pub struct DispatchDeliveryMetadata {
+    pub dispatch_type: Option<String>,
+    pub status: Option<String>,
+    pub context: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct CardIssueInfo {
-    pub(crate) issue_url: Option<String>,
-    pub(crate) issue_number: Option<i64>,
+pub struct CardIssueInfo {
+    pub issue_url: Option<String>,
+    pub issue_number: Option<i64>,
 }
 
-pub(crate) fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
+pub fn dispatch_context_value(dispatch_context: Option<&str>) -> Option<serde_json::Value> {
     dispatch_context.and_then(|ctx| serde_json::from_str::<serde_json::Value>(ctx).ok())
 }
 
@@ -60,7 +60,7 @@ pub(crate) fn parse_pg_dispatch_context(
     Some(value)
 }
 
-pub(crate) async fn load_dispatch_delivery_metadata_pg(
+pub async fn load_dispatch_delivery_metadata_pg(
     pool: &PgPool,
     dispatch_id: &str,
 ) -> Result<DispatchDeliveryMetadata, String> {
@@ -90,7 +90,7 @@ pub(crate) async fn load_dispatch_delivery_metadata_pg(
     .ok_or_else(|| format!("dispatch {dispatch_id} not found"))
 }
 
-pub(crate) async fn load_card_issue_info_pg(
+pub async fn load_card_issue_info_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<CardIssueInfo, String> {
@@ -119,7 +119,7 @@ pub(crate) async fn load_card_issue_info_pg(
     .map(|value| value.unwrap_or_default())
 }
 
-pub(crate) async fn latest_completed_review_provider_pg(
+pub async fn latest_completed_review_provider_pg(
     pool: &PgPool,
     card_id: &str,
 ) -> Result<Option<String>, String> {

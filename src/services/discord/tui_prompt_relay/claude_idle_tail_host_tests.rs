@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 
 fn lease(channel_id: ChannelId, tmux: &str) -> ExternalInputRelayLease {
     let lease = ExternalInputRelayLease {

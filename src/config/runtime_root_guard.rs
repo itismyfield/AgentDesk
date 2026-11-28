@@ -7,7 +7,9 @@ pub(super) fn resolve(home: impl FnOnce() -> Option<PathBuf>) -> Option<PathBuf>
             return Some(PathBuf::from(trimmed));
         }
     }
-    if cfg!(test) || std::env::var_os("AGENTDESK_TEST_RUNTIME").is_some() {
+    if cfg!(any(test, feature = "test-support"))
+        || std::env::var_os("AGENTDESK_TEST_RUNTIME").is_some()
+    {
         static ROOT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
         return ROOT
             .get_or_init(|| {

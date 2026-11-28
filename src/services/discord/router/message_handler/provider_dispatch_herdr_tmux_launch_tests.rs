@@ -1,7 +1,7 @@
 //! Real tmux Claude launches whose sessions move to Herdr or come back from it.
 
 use super::*;
-use crate::services::provider_teardown::tests::test_support::{FakeTmux, cleared};
+use crate::services::provider_teardown::test_support::{FakeTmux, cleared};
 use crate::services::tui_prompt_dedupe::binding_context::{
     CapturedContext, HookBindingEnvelope, execution_context,
 };

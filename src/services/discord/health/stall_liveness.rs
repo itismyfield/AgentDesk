@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn advancing_relay_offset_defers_cleanup() {
         let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(4178_001);
+        let channel = ChannelId::new(4_178_001);
         let tmux_session = "AgentDesk-codex-relay-offset-liveness";
         let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
@@ -1298,7 +1298,7 @@ mod tests {
     #[test]
     fn frozen_undelivered_backlog_never_self_justifies_liveness() {
         let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(4178_002);
+        let channel = ChannelId::new(4_178_002);
         let tmux_session = "AgentDesk-codex-frozen-backlog-liveness";
         let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));
@@ -1376,7 +1376,7 @@ mod tests {
     #[test]
     fn draining_undelivered_backlog_keeps_deferring_across_ticks_until_drained() {
         let provider = ProviderKind::Codex;
-        let channel = ChannelId::new(4178_003);
+        let channel = ChannelId::new(4_178_003);
         let tmux_session = "AgentDesk-codex-draining-backlog-liveness";
         let _root = isolated_runtime_root();
         clear_stall_watchdog_liveness_state(&provider, channel, Some(tmux_session));

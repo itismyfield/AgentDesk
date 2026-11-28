@@ -19,11 +19,11 @@ use super::*;
 
 mod operations;
 mod provider_errors;
-pub(crate) use operations::{
+pub use operations::{
     OperationPlan, PendingOperation, acknowledge_start_durable, active_channels, owner_provider,
     pending_operation, recovery_state, retry_interrupted_durable, try_execution,
 };
-pub(crate) use provider_errors::observe_provider_error;
+pub use provider_errors::observe_provider_error;
 
 #[cfg(test)]
 mod postgres_tests;
@@ -32,7 +32,7 @@ mod restore_window_tests;
 
 /// A test-only durable store for one task, so a test never attaches the process one.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_store {
+pub mod test_store {
     use super::*;
 
     tokio::task_local! {
@@ -40,7 +40,7 @@ pub(crate) mod test_store {
     }
 
     /// Runs `future` with the recovery store on `pool` and `catalog` for this task only.
-    pub(crate) async fn with_store<F: std::future::Future>(
+    pub async fn with_store<F: std::future::Future>(
         pool: PgPool,
         catalog: RecoveryCatalog,
         future: F,

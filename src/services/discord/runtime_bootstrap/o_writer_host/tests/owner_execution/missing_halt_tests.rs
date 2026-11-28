@@ -1,6 +1,6 @@
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::{
-    HostedLocation, HostedOwner, HostedState, tests::record,
+    HostedLocation, HostedOwner, HostedState, test_support::record,
 };
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};

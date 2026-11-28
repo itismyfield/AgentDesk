@@ -3,9 +3,7 @@ mod handoff;
 mod options;
 #[cfg(test)]
 pub(crate) use discovery::find_rollout_by_session_id_under;
-pub(crate) use discovery::{
-    default_codex_home, observe_rollout_turn_state, rollout_file_matches_cwd,
-};
+pub use discovery::{default_codex_home, observe_rollout_turn_state, rollout_file_matches_cwd};
 pub use discovery::{default_codex_sessions_dir, find_rollout_by_session_id};
 use discovery::{latest_rollout_for_cwd_and_session_since, rollout_file_len, same_path};
 use handoff::{
@@ -32,7 +30,7 @@ use parser::{
     RolloutParseState, emit_done, process_rollout_line_bytes,
     task_complete_fallback_supersedes_final_text,
 };
-pub(crate) use parser::{RolloutRecordDecoder, recover_captured_rollout_response};
+pub use parser::{RolloutRecordDecoder, recover_captured_rollout_response};
 // REQ-006: share the single rollout discovery primitive so `session.rs` and
 // `rollout_tail.rs` do not maintain two divergent directory walkers. Tailing
 // semantics are unchanged — callers here still apply their own cwd/session/mtime
@@ -263,12 +261,12 @@ pub fn tail_rollout_file_from_offset_for_tmux<L: Into<PaneLiveness>>(
     .map(|result| result.0)
 }
 
-pub(crate) use following_source::{
+pub use following_source::{
     FixedRecoverySource, tail_fixed_recovery_rollout, tail_recovery_rollout_for_tmux,
 };
 
 /// Strict idle reader completion carries the opened descriptor, never a later path stat.
-pub(crate) fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
+pub fn tail_idle_rollout_for_tmux<L: Into<PaneLiveness>>(
     (rollout_path, start_offset): (&Path, u64),
     session_id: Option<String>,
     sender: Sender<StreamMessage>,

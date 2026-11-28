@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
+pub fn git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
         .args([
@@ -25,24 +25,24 @@ pub(crate) fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
-pub(crate) fn commit(dir: &Path, message: &str) -> String {
+pub fn commit(dir: &Path, message: &str) -> String {
     git(dir, &["commit", "--allow-empty", "-m", message]);
     git(dir, &["rev-parse", "HEAD"])
 }
 
 /// `seed` pushes to `origin`; `desk` is the AgentDesk-side clone taken at `main_tip`/`default_tip`.
-pub(crate) struct OriginFixture {
+pub struct OriginFixture {
     _tmp: tempfile::TempDir,
     pub(crate) origin: PathBuf,
     pub(crate) seed: PathBuf,
     pub(crate) desk: PathBuf,
-    pub(crate) main_tip: String,
+    pub main_tip: String,
     pub(crate) default_tip: String,
 }
 
 impl OriginFixture {
     /// Origin whose HEAD is `default_branch`; a non-main default also gets a newer commit than main.
-    pub(crate) fn new(default_branch: &str) -> Self {
+    pub fn new(default_branch: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let origin = tmp.path().join("origin.git");
         let origin_str = origin.to_str().unwrap();
@@ -79,19 +79,19 @@ impl OriginFixture {
         }
     }
 
-    pub(crate) fn desk_dir(&self) -> &str {
+    pub fn desk_dir(&self) -> &str {
         self.desk.to_str().unwrap()
     }
 
     /// Commits on the seed's current branch and pushes it, returning the new tip.
-    pub(crate) fn push_new_commit(&self, message: &str) -> String {
+    pub fn push_new_commit(&self, message: &str) -> String {
         let tip = commit(&self.seed, message);
         git(&self.seed, &["push", "origin", "HEAD"]);
         tip
     }
 
     /// Makes every desk fetch from origin wait `seconds` before it starts transferring.
-    pub(crate) fn delay_desk_fetches(&self, seconds: u32) {
+    pub fn delay_desk_fetches(&self, seconds: u32) {
         let upload_pack = format!("sleep {seconds}; git-upload-pack");
         git(
             &self.desk,

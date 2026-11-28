@@ -3,7 +3,7 @@ use super::*;
 impl EntryDispatchFailureResult {
     /// One dispatch failure on a caller-owned tx: retry decision and transition audit under the
     /// entry and run locks; a non-live run makes the entry terminal instead of blocking.
-    pub(crate) async fn write_on_pg_tx(
+    pub async fn write_on_pg_tx(
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         entry_id: &str,
         max_retries: i64,
@@ -122,7 +122,7 @@ impl EntryDispatchFailureResult {
     }
 
     /// Whether this write left an entry `failed` that owes a run-completion attempt.
-    pub(crate) fn run_finalize_due(&self) -> bool {
+    pub fn run_finalize_due(&self) -> bool {
         self.changed && self.to_status == ENTRY_STATUS_FAILED
     }
 }

@@ -2,10 +2,10 @@
 //! attachments to another cluster node. Storage and materialization share the
 //! same validator; durable queue references contain no node-local path or URL.
 
-pub(crate) mod materialize;
-pub(crate) mod store;
+pub mod materialize;
+pub mod store;
 pub(crate) mod temporary;
-pub(crate) mod uploads;
+pub mod uploads;
 
 pub(crate) use crate::domain::cluster_policy::{
     ATTACHMENT_CAPABILITY as CAPABILITY, supports_attachment_transfer as supports,
@@ -27,14 +27,14 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Envelope version this build understands; any other value is rejected.
-pub(crate) const ATTACHMENT_BUNDLE_V1: u16 = 1;
+pub const ATTACHMENT_BUNDLE_V1: u16 = 1;
 
-pub(crate) use uploads::AttachmentMessageIdentity;
+pub use uploads::AttachmentMessageIdentity;
 
 /// One attachment. `filename` is untrusted display text: S2 derives the storage
 /// name from ordinal and digest, and a consumer escapes it before echoing it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AttachmentEntryV1 {
+pub struct AttachmentEntryV1 {
     pub filename: String,
     pub sha256: String,
     pub bytes: Vec<u8>,
@@ -44,7 +44,7 @@ pub(crate) struct AttachmentEntryV1 {
 /// node path: the receiver materializes from the envelope alone, so an expired
 /// or re-signed URL cannot turn a stored bundle into an unreadable one.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct AttachmentBundleV1 {
+pub struct AttachmentBundleV1 {
     pub version: u16,
     pub identity: AttachmentMessageIdentity,
     /// Attachments on the source message. `entries` must carry exactly this many,
@@ -56,10 +56,10 @@ pub(crate) struct AttachmentBundleV1 {
 /// A bundle that passed [`validate_attachment_bundle_v1`]. Consumers receive
 /// only this type, so a partially checked bundle is unrepresentable.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ValidatedAttachmentBundle(AttachmentBundleV1);
+pub struct ValidatedAttachmentBundle(AttachmentBundleV1);
 
 impl ValidatedAttachmentBundle {
-    pub(crate) fn as_bundle(&self) -> &AttachmentBundleV1 {
+    pub fn as_bundle(&self) -> &AttachmentBundleV1 {
         &self.0
     }
 }
@@ -67,7 +67,7 @@ impl ValidatedAttachmentBundle {
 /// Why a bundle was refused. Every variant is fail-closed: no caller may degrade
 /// an attachment turn into a text-only one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AttachmentBundleError {
+pub enum AttachmentBundleError {
     UnsupportedVersion,
     IdentityMismatch,
     IncompleteBundle,
@@ -75,7 +75,7 @@ pub(crate) enum AttachmentBundleError {
 }
 
 /// Lowercase hex SHA-256, the digest form stored in [`AttachmentEntryV1`].
-pub(crate) fn attachment_sha256_hex(bytes: &[u8]) -> String {
+pub fn attachment_sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
@@ -83,7 +83,7 @@ pub(crate) fn attachment_sha256_hex(bytes: &[u8]) -> String {
 /// per message: a wrong version, a foreign identity, a short or padded entry
 /// set, or one corrupted entry rejects the whole bundle. Size ceilings belong to
 /// S2 transport, which sees the encoded envelope before it is decoded.
-pub(crate) fn validate_attachment_bundle_v1(
+pub fn validate_attachment_bundle_v1(
     bundle: AttachmentBundleV1,
     expected: &AttachmentMessageIdentity,
 ) -> Result<ValidatedAttachmentBundle, AttachmentBundleError> {

@@ -747,7 +747,10 @@ async fn gateway_self_fence_keeps_the_execution_owner_and_native_session_pg() {
         .await
         .unwrap()
         .expect("the owner still grants execution");
-    assert!(after.same_execution(&permit), "{after:?} != {permit:?}");
+    assert!(
+        after.same_execution_for_test(&permit),
+        "{after:?} != {permit:?}"
+    );
     assert_eq!(
         shared.core.lock().await.sessions[&channel_id]
             .session_id

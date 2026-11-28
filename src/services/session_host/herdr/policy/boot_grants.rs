@@ -44,7 +44,7 @@ async fn load(
         })
 }
 
-pub(crate) async fn prepare(boot: &BootSessionHosts) {
+pub async fn prepare(boot: &BootSessionHosts) {
     let loaded = load(boot.config(), boot.local_node(), &store()).await;
     let _ = PREPARED.set(loaded);
 }

@@ -125,16 +125,16 @@ fn seed_successor_recorded_through_take_owned() {
         let context = owner.runtime.block_on(read).unwrap().unwrap();
         restart_seed::successor_nonce(&context).map(str::to_owned)
     };
-    assert_eq!(scope::record_successor("before"), Ok(()));
+    assert_eq!(scope::record_successor_for_test("before"), Ok(()));
     assert_eq!(recorded(), None, "no record before the owner's handoff");
     let Some(Taken::Launch(guard)) = take_owned(&turn, Some(claim), registration, reply_once(None))
     else {
         panic!("a cold greeting hands its launch over");
     };
-    assert_eq!(scope::record_successor("successor"), Ok(()));
+    assert_eq!(scope::record_successor_for_test("successor"), Ok(()));
     assert_eq!(recorded().as_deref(), Some("successor"));
     drop(guard);
-    assert_eq!(scope::record_successor("after"), Ok(()));
+    assert_eq!(scope::record_successor_for_test("after"), Ok(()));
     assert_eq!(
         recorded().as_deref(),
         Some("successor"),

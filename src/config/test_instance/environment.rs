@@ -8,7 +8,7 @@ use super::agy_cell::{self, AgyLogin};
 use super::{checked_path, current, rejected, requested};
 
 #[derive(Debug)]
-pub(super) struct Environment {
+pub struct Environment {
     api: String,
     claude_login: Option<ClaudeLogin>,
     agy_login: Option<AgyLogin>,
@@ -22,7 +22,7 @@ pub(super) struct Environment {
 
 /// Loads the environment for the instance tests mounted in the root test host.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn load_for_test(root: &Path, manifest: &Value, config: &Value) -> Result<(), String> {
+pub fn load_for_test(root: &Path, manifest: &Value, config: &Value) -> Result<(), String> {
     Environment::load(root, manifest, config).map(drop)
 }
 
@@ -282,7 +282,7 @@ fn home_at(root: &Path, provider: &str) -> Result<PathBuf, String> {
     }
 }
 
-pub(crate) fn provider_home(provider: &str) -> Result<Option<PathBuf>, String> {
+pub fn provider_home(provider: &str) -> Result<Option<PathBuf>, String> {
     let Some(snapshot) = scope()? else {
         return Ok(None);
     };
@@ -302,7 +302,7 @@ pub(crate) fn managed_profiles_root() -> Result<Option<PathBuf>, String> {
     Ok(scope()?.map(|env| Path::new(&env.required["HOME"]).join(".adk/profiles")))
 }
 
-pub(crate) fn validate_provider_home(provider: &str, path: &Path) -> Result<(), String> {
+pub fn validate_provider_home(provider: &str, path: &Path) -> Result<(), String> {
     if let Some(expected) = provider_home(provider)? {
         if path != expected {
             return Err(rejected());
@@ -357,7 +357,7 @@ pub(crate) fn validate_overlay(
     validate_provider_home(provider, &expected)
 }
 
-pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), String> {
+pub fn configure_child_command(command: &mut Command) -> Result<(), String> {
     if let Some(snapshot) = scope()? {
         let extras: Vec<_> = command
             .get_envs()
@@ -420,7 +420,7 @@ pub(crate) fn configure_child_command(command: &mut Command) -> Result<(), Strin
     Ok(())
 }
 
-pub(crate) fn shell_environment() -> Result<String, String> {
+pub fn shell_environment() -> Result<String, String> {
     let Some(snapshot) = scope()? else {
         return Ok(String::new());
     };
@@ -441,7 +441,7 @@ pub(crate) fn shell_environment() -> Result<String, String> {
     Ok(script)
 }
 
-pub(crate) fn validate_api_target(target: &str) -> Result<(), String> {
+pub fn validate_api_target(target: &str) -> Result<(), String> {
     if let Some(snapshot) = scope()?
         && snapshot.api != target
     {
@@ -450,7 +450,7 @@ pub(crate) fn validate_api_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn http_agent() -> ureq::Agent {
+pub fn http_agent() -> ureq::Agent {
     if requested() {
         ureq::AgentBuilder::new()
             .redirects(0)
@@ -461,7 +461,7 @@ pub(crate) fn http_agent() -> ureq::Agent {
     }
 }
 
-pub(crate) fn refuse_service_management() -> Result<(), String> {
+pub fn refuse_service_management() -> Result<(), String> {
     if requested() { Err(rejected()) } else { Ok(()) }
 }
 
@@ -480,7 +480,7 @@ pub(crate) fn validate_config(config: &crate::config::Config) -> Result<(), Stri
     Ok(())
 }
 
-pub(crate) fn validate_path(path: &Path) -> Result<(), String> {
+pub fn validate_path(path: &Path) -> Result<(), String> {
     if scope()?.is_some() {
         let instance = current()?.ok_or_else(rejected)?;
         if !path.starts_with(&instance.root) {
@@ -561,14 +561,14 @@ impl ClaudeLogin {
     }
 }
 
-pub(crate) fn claude_login_enabled() -> bool {
+pub fn claude_login_enabled() -> bool {
     scope()
         .ok()
         .flatten()
         .is_some_and(|v| v.claude_login.is_some())
 }
 
-pub(crate) fn resolve_profile(
+pub fn resolve_profile(
     provider: &str,
     selected: Option<&str>,
 ) -> Result<Option<crate::services::provider_auth_profile::ProviderAuthOverlay>, String> {
@@ -616,7 +616,7 @@ pub(crate) fn resolve_profile(
     ))
 }
 
-pub(crate) fn provider_shell_environment(
+pub fn provider_shell_environment(
     overlay: &crate::services::provider_auth_profile::ProviderAuthOverlay,
 ) -> Result<String, String> {
     let mut script = shell_environment()?;
@@ -709,7 +709,7 @@ pub(crate) fn claude_relay_command(
     }
 }
 
-pub(crate) fn claude_login_presence() -> Option<bool> {
+pub fn claude_login_presence() -> Option<bool> {
     if !claude_login_enabled() {
         return None;
     }
@@ -718,7 +718,7 @@ pub(crate) fn claude_login_presence() -> Option<bool> {
     ))
 }
 
-pub(crate) fn claude_login_metadata_command() -> Command {
+pub fn claude_login_metadata_command() -> Command {
     let mut command = Command::new(metadata_program());
     // No -w/-g: inspect existence, never request the secret value.
     command.args(["find-generic-password", "-s", "Claude Code-credentials"]);
@@ -787,7 +787,7 @@ pub(crate) fn provider_resolution_allowed(provider: &str) -> Result<bool, String
 static METADATA_TEST_PROGRAM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn set_metadata_program_for_tests(path: PathBuf) {
+pub fn set_metadata_program_for_tests(path: PathBuf) {
     *METADATA_TEST_PROGRAM.lock().unwrap() = Some(path);
 }
 
@@ -838,7 +838,7 @@ fn admission_command(login: &ClaudeLogin) -> Command {
     command
 }
 
-pub(crate) fn claude_launch_admission() -> Result<(), String> {
+pub fn claude_launch_admission() -> Result<(), String> {
     if let Some(login) = scope()?.and_then(|snapshot| snapshot.claude_login.as_ref())
         && !bounded_success(
             &mut admission_command(login),
@@ -850,7 +850,7 @@ pub(crate) fn claude_launch_admission() -> Result<(), String> {
     Ok(())
 }
 
-pub(crate) fn claude_provider_exports() -> Result<String, String> {
+pub fn claude_provider_exports() -> Result<String, String> {
     let Some(login) = scope()?.and_then(|snapshot| snapshot.claude_login.as_ref()) else {
         return Ok(String::new());
     };
@@ -922,6 +922,6 @@ pub(crate) fn admit_claude_wrapper(command: &mut Command) -> Result<(), String> 
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
+pub fn login_fixture_for_tests() -> (tempfile::TempDir, PathBuf, PathBuf) {
     super::login_test_support::review_fixture()
 }

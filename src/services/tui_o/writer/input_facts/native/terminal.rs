@@ -96,22 +96,22 @@ pub(super) fn foreign_prompt(
 /// The complete cursor an EOF proof starts from and the unterminated bytes buffered after it.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct Tail {
-    pub(crate) through: u64,
-    pub(crate) prefix_hash: String,
-    pub(crate) fingerprint: Fingerprint,
-    pub(crate) digest: String,
+pub struct Tail {
+    pub through: u64,
+    pub prefix_hash: String,
+    pub fingerprint: Fingerprint,
+    pub digest: String,
 }
 
 /// One strict closer read whole at the EOF of an ended execution; the capture cursor stays put.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawWitness {
-    pub(crate) version: u32,
-    pub(crate) tail: Tail,
-    pub(crate) aborted: bool,
-    pub(crate) execution_nonce: String,
-    pub(crate) registrations_fingerprint: String,
+pub struct RawWitness {
+    pub version: u32,
+    pub tail: Tail,
+    pub aborted: bool,
+    pub execution_nonce: String,
+    pub registrations_fingerprint: String,
 }
 
 impl RawWitness {
@@ -120,7 +120,7 @@ impl RawWitness {
     }
 
     /// Whether this is the closer of `evidence`, for the same file and the same execution.
-    pub(crate) fn seals(&self, evidence: &Evidence) -> bool {
+    pub fn seals(&self, evidence: &Evidence) -> bool {
         let kind = match self.aborted {
             true => Disposition::Cancelled,
             false => Disposition::Executed,
@@ -151,7 +151,7 @@ pub(super) fn gate(binding: &SourceBinding, value: &Value) -> Result<(), String>
 }
 
 /// Whether an unterminated tail is one whole strict closer of this source: `Ok(aborted)`.
-pub(crate) fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, String> {
+pub fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, String> {
     let whole = binding.provider == ShadowProvider::Claude
         && bytes.first() == Some(&b'{')
         && bytes.last() == Some(&b'}')
@@ -168,7 +168,7 @@ pub(crate) fn raw_closer(binding: &SourceBinding, bytes: &[u8]) -> Result<bool, 
 }
 
 /// Whether the evidence ends inside what the observation authenticated.
-pub(crate) fn within(observed: &Observation, evidence: &Evidence) -> bool {
+pub fn within(observed: &Observation, evidence: &Evidence) -> bool {
     match &evidence.raw {
         None => evidence.range.1 <= observed.through,
         Some(raw) => {

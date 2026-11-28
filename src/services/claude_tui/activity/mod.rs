@@ -1,8 +1,8 @@
 //! Source-scoped observation only. Input, queue, stop and close owners retain every effect.
 mod background;
-pub(crate) mod events;
-pub(crate) mod processes;
-pub(crate) use background::{Background, Child};
+pub mod events;
+pub mod processes;
+pub use background::{Background, Child};
 mod hooks;
 mod poll;
 mod source;
@@ -10,7 +10,7 @@ mod tools;
 mod transcript;
 
 use chrono::{DateTime, Utc};
-pub(crate) use hooks::note_hook;
+pub use hooks::note_hook;
 use source::{Source, Stamp};
 use std::{
     collections::HashMap,
@@ -19,7 +19,7 @@ use std::{
 use transcript::{Frame, Turn};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Foreground {
+pub enum Foreground {
     Unknown,
     Submitted,
     Generating,
@@ -133,7 +133,7 @@ fn foreground(entry: &Entry, frame: &Frame, now: DateTime<Utc>) -> Foreground {
     Foreground::Unknown
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Snapshot {
+pub struct Snapshot {
     pub foreground: Foreground,
     pub background: Background,
     pub children: Vec<Child>,
@@ -157,7 +157,7 @@ impl Snapshot {
         }
     }
     /// Presence checks the same source and collector revision after the bounded read.
-    pub(crate) fn current(&self) -> bool {
+    pub fn current(&self) -> bool {
         if self.expires.is_some_and(|until| Utc::now() >= until) {
             return false;
         }
@@ -175,7 +175,7 @@ impl Snapshot {
     }
 
     /// Watch holders must not wait on authority or a collector that is waiting on authority.
-    pub(crate) fn try_current(&self) -> bool {
+    pub fn try_current(&self) -> bool {
         let Some(source) = &self.source else {
             return false;
         };
@@ -199,7 +199,7 @@ impl Snapshot {
         .unwrap_or(false)
     }
 }
-pub(crate) fn observe(session: &str) -> Snapshot {
+pub fn observe(session: &str) -> Snapshot {
     poll::start();
     observe_at(session, Utc::now())
 }
@@ -270,7 +270,7 @@ fn make_snapshot(source: Source, entry: &Entry, now: DateTime<Utc>) -> Snapshot 
     }
 }
 /// Footer reads use the timer's cached observation and never replay a rollout on its hot path.
-pub(crate) fn cached_for_channel(channel: u64) -> Option<Snapshot> {
+pub fn cached_for_channel(channel: u64) -> Option<Snapshot> {
     let candidates: Vec<_> = ledger()
         .entries
         .keys()
@@ -291,12 +291,12 @@ pub(crate) fn cached_for_channel(channel: u64) -> Option<Snapshot> {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn poll_for_tests() {
+pub fn poll_for_tests() {
     poll::tick();
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn revision_for_tests(session: &str) -> Option<u64> {
+pub fn revision_for_tests(session: &str) -> Option<u64> {
     let source = Source::current(session)?;
     ledger().entries.get(&source).map(|entry| entry.revision)
 }

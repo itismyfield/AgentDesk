@@ -1,4 +1,4 @@
-pub(crate) fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
+pub fn parse_github_repo_from_remote(remote: &str) -> Option<String> {
     let trimmed = remote.trim().trim_end_matches(".git");
     let path = trimmed
         .strip_prefix("git@github.com:")

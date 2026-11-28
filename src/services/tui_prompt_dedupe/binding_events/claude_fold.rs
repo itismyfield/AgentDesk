@@ -271,7 +271,7 @@ pub(super) struct ClaudeFold {
 }
 
 /// The current execution's stat identity, only while no verified pin or other waiting session owns it.
-pub(crate) fn unverified_current_source(
+pub fn unverified_current_source(
     channel_id: u64,
     tmux_session: &str,
     nonce: &str,
@@ -485,11 +485,11 @@ fn visit(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) struct ThreadResume {
+pub struct ThreadResume {
     pub(crate) parent: u64,
     pub(crate) tmux: String,
     pub(crate) source: SourceId,
-    pub(crate) offset: u64,
+    pub offset: u64,
     pub(crate) sha256: String,
 }
 
@@ -502,7 +502,7 @@ fn thread_resume_path(channel: u64) -> io::Result<PathBuf> {
         .ok_or_else(|| io::Error::other("runtime root unavailable"))
 }
 
-pub(crate) fn read_thread_resumes(channel: u64) -> io::Result<Vec<ThreadResume>> {
+pub fn read_thread_resumes(channel: u64) -> io::Result<Vec<ThreadResume>> {
     match std::fs::read(thread_resume_path(channel)?) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(io::Error::other),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
@@ -511,7 +511,7 @@ pub(crate) fn read_thread_resumes(channel: u64) -> io::Result<Vec<ThreadResume>>
 }
 
 #[cfg(unix)]
-pub(crate) fn check_thread_resume(
+pub fn check_thread_resume(
     channel: u64,
     parent: u64,
     tmux: &str,

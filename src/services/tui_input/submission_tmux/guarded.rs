@@ -77,7 +77,7 @@ impl Geometry {
 
 #[cfg(unix)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct PaneIdentity {
+pub struct PaneIdentity {
     session: String,
     window: String,
     pane: String,
@@ -170,7 +170,7 @@ fn read_capture(mut output: Output, geometry: &Geometry) -> Option<String> {
 #[cfg(test)]
 mod protocol_tests;
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod transport_tests;
+pub mod transport_tests;
 
 #[cfg(unix)]
 impl PaneIdentity {
@@ -183,6 +183,11 @@ impl PaneIdentity {
             self.pane_pid.clone(),
         ]
     }
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn observe_for_test(session: &str) -> Option<Self> {
+        Self::observe(session)
+    }
+
     pub(crate) fn observe(session: &str) -> Option<Self> {
         let out = SubmissionTmux
             .run(&[

@@ -1,11 +1,11 @@
-pub(crate) mod activity;
-pub(crate) mod busy_inject;
+pub mod activity;
+pub mod busy_inject;
 #[cfg(all(test, unix))]
 mod busy_inject_tests;
-pub(crate) mod composer_lock;
-pub(crate) mod guarded_outcome;
+pub mod composer_lock;
+pub mod guarded_outcome;
 pub mod hook_bundle;
-pub(crate) mod hook_output_guard;
+pub mod hook_output_guard;
 #[cfg(test)]
 mod hook_output_guard_tests;
 #[cfg(test)]
@@ -15,22 +15,22 @@ pub mod hook_relay;
 pub mod hook_server;
 #[cfg(test)]
 mod hook_server_memento_tests;
-pub(crate) mod host_input;
+pub mod host_input;
 #[cfg(unix)]
-pub(crate) mod hosting;
+pub mod hosting;
 pub mod input;
 pub(crate) mod memento_feedback;
 pub(crate) mod memento_writer_hook;
 pub(super) mod prompt_readiness;
-pub(crate) mod readiness;
+pub mod readiness;
 pub mod session;
-pub(crate) mod source_verify;
+pub mod source_verify;
 pub(crate) mod startup_dialog;
-pub(crate) mod submission_fence;
+pub mod submission_fence;
 pub mod transcript_tail;
 pub mod tui_relay;
 
-pub(crate) mod owner_input;
+pub mod owner_input;
 
 #[cfg(all(test, unix))]
 mod owner_input_tests;

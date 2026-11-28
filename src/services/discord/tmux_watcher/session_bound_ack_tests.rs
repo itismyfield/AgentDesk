@@ -333,7 +333,7 @@ mod confirmed_fresh_delivery {
             (44, None, false),
         ] {
             let metrics = Arc::new(RelayMetrics::default());
-            metrics.record_terminal_outcome(
+            metrics.record_terminal_outcome_for_test(
                 sequence,
                 DeliveryOutcome::FreshDelivered {
                     committed_to,
@@ -359,14 +359,14 @@ mod confirmed_fresh_delivery {
     #[test]
     fn fresh_resolution_is_exact_sequence_and_does_not_suppress_neighbors() {
         let metrics = Arc::new(RelayMetrics::default());
-        metrics.record_terminal_outcome(
+        metrics.record_terminal_outcome_for_test(
             50,
             DeliveryOutcome::FreshDelivered {
                 committed_to: None,
                 persistence_recorded: false,
             },
         );
-        metrics.record_terminal_outcome(51, DeliveryOutcome::NotDelivered);
+        metrics.record_terminal_outcome_for_test(51, DeliveryOutcome::NotDelivered);
 
         assert!(matches!(
             session_bound_relay_ack_snapshot_outcome(Some(&target(metrics.clone(), 50))),

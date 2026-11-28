@@ -10,8 +10,8 @@ use crate::services::tui_o::store::ledger::input_notices::{
 use crate::services::tui_o::store::ledger::{LedgerEntry, LedgerState};
 use sha2::Digest;
 
-#[cfg(test)]
-thread_local! { pub(crate) static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
+#[cfg(any(test, feature = "test-support"))]
+thread_local! { pub static EVALUATIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) }; }
 
 fn notice(item: &Derived) -> Option<&PieceWork> {
     match item {
@@ -332,7 +332,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .iter()
             .filter(|(id, e)| changed.contains(*id) && !state.terminal(ledger, id, e))
             .map(|(_, e)| {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 EVALUATIONS.with(|c| {
                     let (work, logs) = c.get();
                     c.set((work + 1, logs));
@@ -369,7 +369,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             }
         }
         let mut owners = std::mem::take(&mut self.writer.notice_owners);
-        owners.refresh(self.writer.store());
+        {
+            let store = self.writer.store();
+            #[cfg(unix)]
+            let lookup = |origin: &_, stamp: &_, consumed: &_| {
+                super::super::input_notices::absorption::authenticated_proofs(
+                    store,
+                    &self.sources,
+                    origin,
+                    stamp,
+                    consumed,
+                )
+            };
+            #[cfg(unix)]
+            owners.refresh(store, Some(&lookup));
+            #[cfg(not(unix))]
+            owners.refresh(store, None);
+        }
         let mut cache = std::mem::take(&mut self.writer.notice_cache);
         cache.track_contexts(
             &owners,
@@ -412,6 +428,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 self.defer_notice(id, "migration_unresolved");
                 continue;
             }
+            let command_row_uuid = evidence.command_row_uuid();
             let (Some(unit_key), Some(payload), Some(origin)) =
                 (evidence.unit_key, evidence.payload, evidence.origin)
             else {
@@ -424,6 +441,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                 payload,
                 index: 0,
                 notice_origin: Some(origin),
+                reply: None,
             };
             let owners = std::mem::take(&mut self.writer.notice_owners);
             let admission = admit_notice(&piece, self.writer.store(), Some(&owners), |_| ());
@@ -441,8 +459,11 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
                     return;
                 }
                 Err(NoticeRefusal::OwnershipPending) => {
+                    let receipt_uuid = command_row_uuid
+                        .as_deref()
+                        .unwrap_or(&piece.unit_key.native_key);
                     let reason = match self.writer.notice_owners.decision(piece.notice_origin.as_deref().unwrap(),
-                        &piece.unit_key.native_key, evidence.prompt.as_deref().unwrap_or("")) {
+                        receipt_uuid, evidence.prompt.as_deref().unwrap_or("")) {
                         crate::services::tui_input::human_frame::history::notice_owner::Decision::Pending(reason) => reason,
                         _ => "ownership_pending",
                     };
@@ -528,7 +549,7 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
             .insert(id.clone(), reason.into())
             .is_none()
         {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             EVALUATIONS.with(|c| {
                 let (work, logs) = c.get();
                 c.set((work, logs + 1));
@@ -607,27 +628,23 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
 // Test seams for the notice tests mounted in the discord-layer test host.
 #[cfg(any(test, feature = "test-support"))]
 impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, L, A, B> {
-    pub(in crate::services) fn persist_notice_evidence_for_test(&mut self) -> Vec<UnitKey> {
+    pub fn persist_notice_evidence_for_test(&mut self) -> Vec<UnitKey> {
         self.persist_notice_evidence()
     }
 
-    pub(in crate::services) async fn prepare_notices_for_test(&mut self, fresh: &[UnitKey]) {
+    pub async fn prepare_notices_for_test(&mut self, fresh: &[UnitKey]) {
         self.prepare_notices(fresh).await;
     }
 
-    pub(in crate::services) fn defer_notice_for_test(
-        &mut self,
-        id: (SourceId, u64, u64),
-        reason: &str,
-    ) {
+    pub fn defer_notice_for_test(&mut self, id: (SourceId, u64, u64), reason: &str) {
         self.defer_notice(id, reason);
     }
 
-    pub(in crate::services) fn notice_debt_extra_for_test(&mut self) -> usize {
+    pub fn notice_debt_extra_for_test(&mut self) -> usize {
         self.notice_debt_extra()
     }
 
-    pub(in crate::services) fn notice_raw_independent_for_test(&mut self) -> bool {
+    pub fn notice_raw_independent_for_test(&mut self) -> bool {
         self.notice_raw_independent()
     }
 }

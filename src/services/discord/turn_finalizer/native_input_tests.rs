@@ -1,6 +1,6 @@
 use super::*;
 use crate::services::tui_input::human_frame::history::v2::{
-    native::Disposition, native_tests::Fixture,
+    native::Disposition, native_support::Fixture,
 };
 use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding, SourceId};
 use crate::services::tui_o::writer::input_facts::native::Observation;
@@ -56,11 +56,11 @@ fn native_8148_b2_typed_admission_refuses_stale_stamp_source_and_actor() {
         through: facts.observation_progress().0,
         registrations_fingerprint:
             crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
-                &f.history.native_evidence_registrations().unwrap(),
+                &f.history.native_evidence_registrations_for_test().unwrap(),
             )
             .unwrap(),
         evidence: facts
-            .native_evidence(&f.history.native_evidence_registrations().unwrap())
+            .native_evidence(&f.history.native_evidence_registrations_for_test().unwrap())
             .unwrap(),
     };
     assert_eq!(batch.evidence.len(), 1);
@@ -273,11 +273,11 @@ fn b2b_batch(f: &Fixture) -> Observation {
         through: facts.observation_progress().0,
         registrations_fingerprint:
             crate::services::tui_o::writer::input_facts::native::registrations_fingerprint(
-                &f.history.native_evidence_registrations().unwrap(),
+                &f.history.native_evidence_registrations_for_test().unwrap(),
             )
             .unwrap(),
         evidence: facts
-            .native_evidence(&f.history.native_evidence_registrations().unwrap())
+            .native_evidence(&f.history.native_evidence_registrations_for_test().unwrap())
             .unwrap(),
     }
 }

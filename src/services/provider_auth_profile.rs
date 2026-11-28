@@ -15,16 +15,16 @@ use crate::utils::format::expand_tilde_string as expand_tilde;
 #[cfg(all(test, unix))]
 mod direct_spawn_tests;
 pub mod fallback;
-#[cfg(all(test, unix))]
-pub(crate) mod instance_env_tests;
+#[cfg(all(any(test, feature = "test-support"), unix))]
+pub mod instance_env_tests;
 
 use crate::domain::provider_auth_profile::ProfileOverrides;
 pub use crate::domain::provider_auth_profile::{
     DEFAULT_PROFILE_ID, ProviderAuthOverlay, ProviderAuthProfileDef,
 };
 
-pub(crate) mod queries;
-pub(crate) mod repository;
+pub mod queries;
+pub mod repository;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthProfileError {
@@ -510,12 +510,12 @@ pub fn extra_accounts_root() -> Result<PathBuf, AuthProfileError> {
         return Ok(root);
     }
     // Test fixtures isolate managed homes through HOME, including on Windows.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
         .map(PathBuf::from)
         .or_else(dirs::home_dir);
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     let home = dirs::home_dir();
     home.map(|home| home.join(".adk").join("profiles"))
         .ok_or(AuthProfileError::UserHomeUnavailable)

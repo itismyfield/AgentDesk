@@ -15,7 +15,7 @@ use tokio::time::Instant;
 
 mod streaming;
 
-pub(crate) fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
+pub fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
     let mut bytes = Vec::new();
     File::open(path)
         .ok()?
@@ -27,12 +27,7 @@ pub(crate) fn json<T: DeserializeOwned>(path: &Path, cap: u64) -> Option<T> {
         .flatten()
 }
 
-pub(crate) fn source(
-    root: &Path,
-    channel: u64,
-    path: &Path,
-    file: (u64, u64),
-) -> Option<spool::Cursor> {
+pub fn source(root: &Path, channel: u64, path: &Path, file: (u64, u64)) -> Option<spool::Cursor> {
     let store = OStore::existing(root)?;
     let dir = store.channel_dir(channel);
     let _publication = super::source_refresh::snapshot(&dir).ok()??;
@@ -60,7 +55,7 @@ pub(crate) fn source(
     (cursor.source == source).then_some(cursor)
 }
 
-pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
+pub fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> {
     let store = OStore::existing(root)?;
     let dir = store.channel_dir(channel);
     let _publication = super::source_refresh::snapshot(&dir).ok()??;
@@ -72,20 +67,20 @@ pub(crate) fn stamp(root: &Path, channel: u64) -> Option<std::time::SystemTime> 
 
 // Candidates are scoped to one manifest; they never authorize a writer or replace ledger replay.
 #[derive(Clone, Default)]
-pub(crate) struct LocalEvidence {
+pub struct LocalEvidence {
     pieces: HashMap<(UnitKey, u32), (u64, ledger::PieceRecord)>,
     confirmations: HashMap<u64, Box<ledger::PostConfirmation>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub retained_payload_bytes: usize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub max_line_bytes: usize,
     /// Ledger lines this observation parsed.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub parsed_lines: usize,
 }
 
 impl LocalEvidence {
-    pub(crate) fn confirmed_post(&self, key: &UnitKey, index: u32, bot_id: u64) -> Option<u64> {
+    pub fn confirmed_post(&self, key: &UnitKey, index: u32, bot_id: u64) -> Option<u64> {
         let (serial, piece) = self.latest_piece(key, index)?;
         let confirmation = self.confirmations.get(&serial)?;
         if !confirmation.matches(serial, piece, bot_id) {
@@ -97,11 +92,7 @@ impl LocalEvidence {
         }
     }
 
-    pub(crate) fn latest_piece(
-        &self,
-        key: &UnitKey,
-        index: u32,
-    ) -> Option<(u64, &ledger::PieceRecord)> {
+    pub fn latest_piece(&self, key: &UnitKey, index: u32) -> Option<(u64, &ledger::PieceRecord)> {
         self.pieces
             .get(&(key.clone(), index))
             .map(|(serial, record)| (*serial, record))
@@ -166,12 +157,12 @@ fn keep(resume: Resume) {
     kept.push(resume);
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 thread_local! {
-    pub(crate) static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub static AFTER_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
-pub(crate) fn local(
+pub fn local(
     root: &Path,
     channel: u64,
     requested: &[(UnitKey, u32)],
@@ -198,7 +189,7 @@ pub(crate) fn local(
     let mut file = File::open(&path).ok()?;
     let before = file.metadata().ok()?;
     let identity = crate::services::tui_o::shadow::capture::file_identity(&before);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     AFTER_SNAPSHOT.with(|hook| {
         if let Some(hook) = hook.take() {
             hook();
@@ -215,7 +206,7 @@ pub(crate) fn local(
         ),
         None => (0, LocalEvidence::default(), 0, 0, (0, Vec::new())),
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         state.parsed_lines = 0;
     }
@@ -246,12 +237,12 @@ pub(crate) fn local(
         if line.last() != Some(&b'\n') {
             return None;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             state.max_line_bytes = state.max_line_bytes.max(line.len());
         }
         let parsed: ledger::LedgerLine = serde_json::from_slice(&line).ok()?;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             state.parsed_lines += 1;
         }
@@ -360,7 +351,7 @@ pub(crate) fn local(
     {
         return None;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     {
         state.retained_payload_bytes = payload_bytes;
     }

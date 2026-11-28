@@ -13,7 +13,7 @@ pub(super) async fn hold_off_o_gateway(
     phase: &'static str,
 ) -> Result<bool, sqlx::Error> {
     let selected = intake_route::selected_codex_input(provider, channel_id.get());
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if selected && phase == "final" {
         test_executor::checkpoint(test_executor::Checkpoint::PreAccept).await;
     }
@@ -68,12 +68,12 @@ pub(super) async fn hold_off_o_gateway(
 
 #[cfg(unix)]
 pub(super) mod scope_key {
-    pub(crate) struct WorkerScopeKey(pub(super) ());
+    pub struct WorkerScopeKey(pub(super) ());
 }
 
 /// The first entry consumes the slot even when the request does not match.
 #[cfg(unix)]
-pub(crate) fn take_before_effects(
+pub fn take_before_effects(
     request: &IntakeRequest,
     checkpoint_waits: CheckpointWaits,
 ) -> Option<BeforeEffects> {

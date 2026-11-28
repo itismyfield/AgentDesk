@@ -600,6 +600,10 @@ pub struct PipelineConfig {
     #[serde(default)]
     pub clocks: HashMap<String, ClockConfig>,
     /// Retired `timeouts:` section: accepted and ignored so older manifests still load.
+    #[cfg(any(test, feature = "test-support"))]
+    #[serde(default, rename = "timeouts", skip_serializing)]
+    pub _retired_timeouts: Option<serde::de::IgnoredAny>,
+    #[cfg(not(any(test, feature = "test-support")))]
     #[serde(default, rename = "timeouts", skip_serializing)]
     pub(crate) _retired_timeouts: Option<serde::de::IgnoredAny>,
     #[serde(default)]

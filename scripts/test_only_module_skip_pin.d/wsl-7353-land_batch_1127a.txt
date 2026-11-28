@@ -1,0 +1,5 @@
+resolver | src/services/herdr_launch/clear_epoch/test_support.rs
+resolver | src/services/session_host/herdr/policy/consent/preview_test_support.rs
+resolver | src/services/tui_o/repost/admission/test_support.rs
+resolver | src/services/tui_o/store/test_support.rs
+resolver | src/services/tui_prompt_dedupe/handoff_test_support.rs

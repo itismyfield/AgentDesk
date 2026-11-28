@@ -25,6 +25,6 @@ fn boot_id_from_pid_file(pid_file: &std::path::Path) -> Result<String, String> {
     Ok(format!("{pid}-{mtime}"))
 }
 
-pub(crate) fn current_boot_id_at(root: &std::path::Path) -> Result<String, String> {
+pub fn current_boot_id_at(root: &std::path::Path) -> Result<String, String> {
     boot_id_from_pid_file(&root.join("runtime").join("dcserver.pid"))
 }

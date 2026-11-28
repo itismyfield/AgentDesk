@@ -3,7 +3,7 @@ use std::cell::{Cell, RefCell};
 use super::*;
 use crate::config::session_hosts::approval_store::FileApprovalStore;
 use crate::config::session_hosts::{EndpointMode, HerdrSection};
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record};
 
 const CHANNEL: u64 = 41;
 

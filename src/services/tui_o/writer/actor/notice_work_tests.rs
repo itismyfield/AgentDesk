@@ -174,7 +174,7 @@ fn host(o: &OStore, port: Arc<Port>, alarms: Alarms, cap: u64) -> Host {
     Actor::new_for_test(
         writer,
         UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
-            .with_input_notices(Projection::for_tests()),
+            .with_input_notices_for_test(Projection::for_tests()),
         Sources::new(CHANNEL, ShadowProvider::Claude, bindings.clone()),
         bindings,
     )
@@ -218,18 +218,15 @@ fn rerender_fixture(
         end: bytes.len() as u64,
         line: bytes[..bytes.len() - 1].to_vec(),
     };
-    let origin = actor
-        .sources_for_test()
-        .notice_origin(&source, &record)
-        .unwrap();
-    actor.deriver_mut_for_test().derive_scoped(
+    let origin = actor.notice_origin_for_test(&source, &record).unwrap();
+    actor.derive_scoped_for_test(
         &record,
         &source,
         crate::services::tui_o::shadow::IDENTITY_VERSION,
         Ok(origin),
         || None,
     );
-    let mut pending = actor.deriver_mut_for_test().take_notice_evidence();
+    let mut pending = actor.take_notice_evidence_for_test();
     assert_eq!(pending.len(), 1);
     let evidence = pending.pop().unwrap();
     assert_ne!(evidence.payload.as_deref(), Some(OLD_NOTICE_PAYLOAD));
@@ -266,6 +263,7 @@ fn undelivered_reports_notice_debt_once_across_queue_and_evidence() {
         index: 0,
         payload: evidence.payload.unwrap(),
         notice_origin: evidence.origin,
+        reply: None,
     };
     actor
         .owed_mut_for_test()
@@ -316,8 +314,8 @@ fn rerendered_notice_redrive_preserves_payload_without_appending_duplicate_rows(
     let before = std::fs::read(notice_ledger(runtime.path())).unwrap();
     for _ in 0..2 {
         *actor.deriver_mut_for_test() = UnitDeriver::new(CHANNEL, ShadowProvider::Claude)
-            .with_input_notices(Projection::for_tests());
-        let derived = actor.deriver_mut_for_test().derive_scoped(
+            .with_input_notices_for_test(Projection::for_tests());
+        let derived = actor.derive_scoped_for_test(
             &crate::services::tui_o::shadow::CapturedRecord {
                 start: next.record.start,
                 end: next.record.end,
@@ -375,7 +373,7 @@ fn rerendered_notice_origin_enrichment_appends_the_kept_payload() {
             }),
         })
         .unwrap();
-    actor.deriver_mut_for_test().derive_scoped(
+    actor.derive_scoped_for_test(
         &crate::services::tui_o::shadow::CapturedRecord {
             start: next.record.start,
             end: next.record.end,
@@ -639,6 +637,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
             index: 0,
             payload: "-# ⌨️ held".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     let progress = crate::services::tui_o::writer::progress::Publisher::new(CHANNEL);
@@ -653,6 +652,7 @@ async fn a_withheld_notice_keeps_debt_without_stalling_or_falsely_draining_body(
                 index: 0,
                 payload: format!("answer-{pass}"),
                 notice_origin: None,
+                reply: None,
             },
         ));
         VISITS.with(|visits| visits.set((0, Some(2))));
@@ -871,6 +871,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             index: 0,
             payload: "-# ⌨️ open".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     actor.owed_mut_for_test().push_back(Derived::Piece(
@@ -885,6 +886,7 @@ async fn refilter_after_notice_settlement_ends_the_pass_before_any_later_body_st
             index: 0,
             payload: "later answer".into(),
             notice_origin: None,
+            reply: None,
         },
     ));
     actor.set_replay_deferred_for_test(true);

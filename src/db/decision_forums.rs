@@ -3,7 +3,7 @@
 use sqlx::PgPool;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ForumState {
+pub enum ForumState {
     Ready(String),
     /// Committed before the single create request; the forum may appear later.
     CreateMayHaveSent,
@@ -11,12 +11,12 @@ pub(crate) enum ForumState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ForumRow {
+pub struct ForumRow {
     pub forum_name: String,
     pub state: ForumState,
 }
 
-pub(crate) async fn load(
+pub async fn load(
     pool: &PgPool,
     guild_id: u64,
     category_id: u64,
@@ -40,7 +40,7 @@ pub(crate) async fn load(
 }
 
 /// A forum belongs to one category: a ready row takes the forum ID from any older row.
-pub(crate) async fn store(
+pub async fn store(
     pool: &PgPool,
     guild_id: u64,
     category_id: u64,

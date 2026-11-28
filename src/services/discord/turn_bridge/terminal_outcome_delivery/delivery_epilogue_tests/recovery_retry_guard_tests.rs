@@ -9,7 +9,7 @@ use super::super::recovery_retry::{
 };
 use super::*;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
-use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
 use crate::services::discord::inflight::seed_session_row;
 use crate::services::provider::CancelToken;
 
