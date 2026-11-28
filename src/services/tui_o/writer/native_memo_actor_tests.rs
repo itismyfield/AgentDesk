@@ -253,6 +253,62 @@ async fn idle_tick_unretires_a_growing_source_at_the_next_observation() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn idle_tick_with_a_retired_codex_source_skips_until_the_turn_ends() {
+    let channel = 838511;
+    let provider = ShadowProvider::Codex;
+    let (harness, path, old) = switched_over_on(channel, b"");
+    let current = path.with_file_name("current.jsonl");
+    std::fs::write(&current, b"").unwrap();
+    let current_source = source_id_for("current", &current).unwrap();
+    let mut store = harness.channel();
+    store.attach_source(&current_source).unwrap();
+    store.set_retired(&old, true).unwrap();
+    store.set_binding_checkpoint(2).unwrap();
+    drop(store);
+
+    let bindings = Arc::new(IdleBindings {
+        log: FakeBindings::new(),
+        source_checks: AtomicUsize::new(0),
+    });
+    for (seq, source) in [(1, old), (2, current_source)] {
+        let mut startup = bound(
+            seq,
+            None,
+            BindingTarget::Source(source),
+            BindingCause::Startup,
+            None,
+        );
+        startup.channel_id = channel;
+        startup.provider = provider;
+        bindings.log.commit(startup);
+    }
+    harness.gate.acquired();
+    let write = |record: serde_json::Value| append(&current, format!("{record}\n").as_bytes());
+    let (stop, task) = spawn_with(harness.writer(), provider, bindings.clone());
+    write(
+        serde_json::json!({"type":"event_msg","timestamp":"2026-10-19T00:00:00Z","payload":{"type":"task_started","turn_id":"turn"}}),
+    );
+    write(
+        serde_json::json!({"type":"response_item","payload":{"type":"message","role":"assistant","id":"answer","content":[{"type":"output_text","text":"answer"}]}}),
+    );
+    idle_window().await;
+    halt(stop, task).await;
+    assert_eq!(harness.port.posts(), ["answer"]);
+
+    let (stop, task) = spawn_with(harness.writer(), provider, bindings.clone());
+    idle_window().await;
+    let before = bindings.source_checks.load(Ordering::SeqCst);
+    polls(3).await;
+    assert_eq!(bindings.source_checks.load(Ordering::SeqCst), before);
+    write(
+        serde_json::json!({"type":"event_msg","timestamp":"2026-10-19T00:00:07Z","payload":{"type":"task_complete","turn_id":"turn"}}),
+    );
+    polls(3).await;
+    halt(stop, task).await;
+    assert_eq!(harness.port.posts(), ["answer", "-# ⏱️ 7초 (09:00)"]);
+}
+
+#[tokio::test(start_paused = true)]
 async fn idle_tick_hook_bind_wakes_and_posts_once_in_source_order() {
     let channel = 838502;
     let (harness, path, source, bindings, stop, task) = start_idle(channel);

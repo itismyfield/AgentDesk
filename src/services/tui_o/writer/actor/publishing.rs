@@ -290,6 +290,7 @@ where
         if quiescent && position.debt != 0 {
             next = Some(Duration::ZERO);
         }
+        // Buffered projections stay in the deriver until a new record or restart witness arrives.
         quiescent = sources_resumed
             && restart_ready
             && position.debt == 0
@@ -297,7 +298,6 @@ where
             && !actor.replay_deferred
             && actor.scope_hold.is_none()
             && actor.sources.quiescent_for_stamp()
-            && !actor.deriver.has_pending_projection_probe()
             && !actor.transitions.pending();
     }
     actor.writer.stop_cause().cloned()
