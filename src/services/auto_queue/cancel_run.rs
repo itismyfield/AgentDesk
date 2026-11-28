@@ -6,8 +6,6 @@ use sqlx::{PgPool, Postgres, QueryBuilder, Row};
 use crate::db::auto_queue::run_status::is_live_run_status;
 use crate::services::engine_runtime::health_port::{SlotRowGuard, SlotRuntimeHealth};
 
-#[cfg(test)]
-mod malformed_context_pg_tests;
 mod remaining_live_census;
 mod terminalize_tx;
 

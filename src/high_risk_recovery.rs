@@ -153,7 +153,7 @@ fn cross_channel_tmux_claim_observability_distinguishes_thread_follow_up_4984() 
     );
 }
 
-fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
+pub(crate) fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     crate::pipeline::ensure_loaded();
     let mut config = Config::default();
     config.policies.dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
@@ -166,7 +166,7 @@ fn test_engine_with_pg(pg_pool: sqlx::PgPool) -> PolicyEngine {
     .expect("create pg-backed policy engine")
 }
 
-async fn seed_agent_pg(pool: &sqlx::PgPool) {
+pub(crate) async fn seed_agent_pg(pool: &sqlx::PgPool) {
     sqlx::query(
         "INSERT INTO agents (
              id,
@@ -191,7 +191,7 @@ async fn seed_agent_pg(pool: &sqlx::PgPool) {
     .expect("seed postgres agent");
 }
 
-async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
+pub(crate) async fn seed_card_pg(pool: &sqlx::PgPool, card_id: &str, status: &str) {
     sqlx::query(
         "INSERT INTO kanban_cards (
             id,
@@ -1281,6 +1281,3 @@ async fn completed_queue_review_drift_reconcile_promotes_only_stale_done_entries
         .expect("close pg-only high_risk_recovery pool");
     pg_db.drop().await;
 }
-
-#[path = "services/auto_queue/dispatched_entry_recovery_pg_tests.rs"]
-mod dispatched_entry_recovery_pg_tests;

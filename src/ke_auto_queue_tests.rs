@@ -18,12 +18,16 @@ mod cleanup_tasks_ownership_pg_tests;
 mod command_advisory_pg_tests;
 #[path = "supervisor/decision_log_pg_tests.rs"]
 mod decision_log_pg_tests;
+#[path = "services/auto_queue/dispatched_entry_recovery_pg_tests.rs"]
+mod dispatched_entry_recovery_pg_tests;
 #[path = "db/dispatched_sessions/tests.rs"]
 mod dispatched_sessions_store_tests;
 #[path = "dispatch/fresh_worktree_pg_tests.rs"]
 mod fresh_worktree_pg_tests;
 #[path = "services/auto_queue/fsm_tests.rs"]
 mod fsm_tests;
+#[path = "services/auto_queue/cancel_run/malformed_context_pg_tests.rs"]
+mod malformed_context_pg_tests;
 #[path = "services/auto_queue/planning_dispatch_failure_pg_tests.rs"]
 mod planning_dispatch_failure_pg_tests;
 #[path = "db/server_campaigns/stage_store_tests.rs"]

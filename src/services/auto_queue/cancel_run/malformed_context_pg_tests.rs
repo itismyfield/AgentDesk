@@ -1,5 +1,6 @@
-use super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::services::auto_queue::cancel_run::{cancel_selected_runs_with_pg, end_run_with_pg};
+use sqlx::PgPool;
 
 const MATRIX_RUN: &str = "run-owner-matrix";
 
