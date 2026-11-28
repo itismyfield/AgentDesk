@@ -62,19 +62,27 @@ timeouts.onTick1min = function(ev) {
 // [I] moved to 30s tier for critical-path isolation (#127)
 timeouts.onTick5min = function(ev) {
   var start = Date.now();
-  var t;
-  // #126: Purge expired kv_meta keys
-  t = Date.now();
-  try {
+  function runSection(name, work) {
+    var t = Date.now();
+    var expired = agentdesk.db.withWorkDeadline(timeouts._idleKillReserveMs, function() {
+      try {
+        return work.call(timeouts) === true;
+      } catch (e) {
+        if (e && e.deadline_exceeded === true) return true;
+        agentdesk.log.warn("[tick5min] " + name + " error: " + e);
+        return false;
+      }
+    });
+    agentdesk.log.debug("[tick5min][" + name + "] " + (Date.now() - t) + "ms");
+    return expired;
+  }
+  var idleSettled = false;
+  if (runSection("kv_ttl", function() {
     agentdesk.db.execute("DELETE FROM kv_meta WHERE expires_at IS NOT NULL AND expires_at < datetime('now')");
-  } catch(e) { agentdesk.log.warn("[tick5min] kv_ttl error: " + e); }
-  agentdesk.log.debug("[tick5min][kv_ttl] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_B(); } catch(e) { agentdesk.log.warn("[tick5min] B error: " + e); }
-  agentdesk.log.debug("[tick5min][B] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_G(); } catch(e) { agentdesk.log.warn("[tick5min] G error: " + e); }
-  agentdesk.log.debug("[tick5min][G] " + (Date.now() - t) + "ms");
-  t = Date.now(); try { timeouts._section_O(); } catch(e) { agentdesk.log.warn("[tick5min] O error: " + e); }
-  agentdesk.log.debug("[tick5min][O] " + (Date.now() - t) + "ms");
+  }) || runSection("B", timeouts._section_B) || runSection("G", timeouts._section_G) ||
+      runSection("O", function() { return (idleSettled = timeouts._section_O()); })) {
+    if (!idleSettled) timeouts._logIdleKillDeadline();
+  }
   agentdesk.log.debug("[tick5min] total " + (Date.now() - start) + "ms");
 };
 

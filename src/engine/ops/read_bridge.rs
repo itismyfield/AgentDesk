@@ -102,12 +102,19 @@ impl ReadBridge {
         if worker.requests.send(request).is_err() {
             return Err(ReadError::Bridge(stopped(worker)));
         }
-        match wait(&answer) {
+        match wait(
+            &answer,
+            crate::utils::bridge_deadline::current_work_deadline(),
+        ) {
             Ok(result) => {
                 *slot = Some(worker);
                 result
             }
-            Err(mpsc::RecvError) => Err(ReadError::Bridge(stopped(worker))),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                *slot = Some(worker);
+                Err(ReadError::Bridge(DEADLINE_EXCEEDED.to_string()))
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(ReadError::Bridge(stopped(worker))),
         }
     }
 
@@ -164,15 +171,24 @@ fn panic_message(payload: &(dyn Any + Send + 'static)) -> String {
 }
 
 /// A multi-thread runtime worker blocks in place, as the shared-pool bridge path does.
-fn wait<T>(answer: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvError> {
+fn wait<T>(
+    answer: &mpsc::Receiver<T>,
+    deadline: Option<Instant>,
+) -> Result<T, mpsc::RecvTimeoutError> {
+    let receive = || match deadline {
+        Some(deadline) => answer.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+        None => answer
+            .recv()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+    };
     match tokio::runtime::Handle::try_current() {
         Ok(handle)
             if tokio::task::try_id().is_some()
                 && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread =>
         {
-            tokio::task::block_in_place(|| answer.recv())
+            tokio::task::block_in_place(receive)
         }
-        _ => answer.recv(),
+        _ => receive(),
     }
 }
 

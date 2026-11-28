@@ -1,8 +1,9 @@
 use rquickjs::{Ctx, Function, Object, Result as JsResult, function::Opt};
 use sqlx::PgPool;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{db_execute_raw, db_guard_raw, db_query_json_raw, db_query_raw};
+use crate::utils::bridge_deadline::{ScopedWorkDeadline, work_deadline};
 
 pub(in crate::engine::ops) fn register_db_ops<'js>(
     ctx: &Ctx<'js>,
@@ -10,6 +11,23 @@ pub(in crate::engine::ops) fn register_db_ops<'js>(
 ) -> JsResult<()> {
     let ad: Object<'js> = ctx.globals().get("agentdesk")?;
     let db_obj = Object::new(ctx.clone())?;
+
+    db_obj.set(
+        "withWorkDeadline",
+        Function::new(
+            ctx.clone(),
+            |reserve_ms: u32, work: Function<'js>| -> JsResult<bool> {
+                let Some(deadline) = work_deadline(Duration::from_millis(reserve_ms.into())) else {
+                    return work.call(());
+                };
+                if Instant::now() >= deadline {
+                    return Ok(true);
+                }
+                let _work = ScopedWorkDeadline::install(deadline);
+                Ok(work.call::<_, bool>(())? || Instant::now() >= deadline)
+            },
+        )?,
+    )?;
 
     // Internal: __db_query_raw(sql, params_json) → json_string
     let pg_q = pg_pool.clone();

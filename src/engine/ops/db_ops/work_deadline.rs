@@ -15,7 +15,7 @@ where
     F: Future<Output = Result<T, String>> + Send + 'static,
     T: Send + 'static,
 {
-    if reserve.is_zero() {
+    if reserve.is_zero() && crate::utils::bridge_deadline::current_work_deadline().is_none() {
         run_async_bridge_pg(pool, future_factory).map_err(PgWorkError::Other)
     } else {
         block_on_pg_result_before(pool, reserve, future_factory)

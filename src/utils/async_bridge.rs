@@ -156,6 +156,16 @@ where
     M: Fn(String) -> E + Copy + Send + 'static,
     B: FnOnce(PgPool) -> F + Send + 'static,
 {
+    if let Some(deadline) = super::bridge_deadline::current_work_deadline() {
+        return block_on_pg_until(pool, deadline, future_factory, map_runtime_error).map_err(
+            |error| match error {
+                PgWorkError::Deadline => {
+                    map_runtime_error("postgres bridge work deadline exceeded".to_string())
+                }
+                PgWorkError::Other(error) => error,
+            },
+        );
+    }
     let deadline = current_bridge_deadline_budget(map_runtime_error)?;
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         if tokio::task::try_id().is_none() {
@@ -222,9 +232,9 @@ where
     }
 }
 
-pub enum PgWorkError {
+pub enum PgWorkError<E = String> {
     Deadline,
-    Other(String),
+    Other(E),
 }
 
 pub fn block_on_pg_result_before<F, T>(
@@ -239,8 +249,29 @@ where
     let deadline = match super::bridge_deadline::work_deadline(reserve) {
         Some(deadline) if Instant::now() < deadline => deadline,
         Some(_) => return Err(PgWorkError::Deadline),
-        None => return block_on_pg_result(pool, future_factory, PgWorkError::Other),
+        None => {
+            return block_on_pg_result(pool, future_factory, |error| error)
+                .map_err(PgWorkError::Other);
+        }
     };
+    block_on_pg_until(pool, deadline, future_factory, |error| error)
+}
+
+fn block_on_pg_until<F, T, E, M>(
+    pool: &PgPool,
+    deadline: Instant,
+    future_factory: impl FnOnce(PgPool) -> F + Send + 'static,
+    map_runtime_error: M,
+) -> Result<T, PgWorkError<E>>
+where
+    F: Future<Output = Result<T, E>> + Send + 'static,
+    T: Send + 'static,
+    E: Send + 'static,
+    M: Fn(String) -> E + Copy + Send + 'static,
+{
+    if Instant::now() >= deadline {
+        return Err(PgWorkError::Deadline);
+    }
     let pool = pool.clone();
     let (reply, result) = mpsc::channel();
     // Bound the caller even when runtime setup or connection cleanup overruns.
@@ -249,9 +280,9 @@ where
         Ok(outcome) if Instant::now() < deadline => outcome,
         Ok(_) => Err(PgWorkError::Deadline),
         Err(mpsc::RecvTimeoutError::Timeout) => Err(PgWorkError::Deadline),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Err(PgWorkError::Other(
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(PgWorkError::Other(map_runtime_error(
             "postgres bridge worker stopped".to_string(),
-        )),
+        ))),
     };
     if let Ok(handle) = tokio::runtime::Handle::try_current()
         && handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread
@@ -270,9 +301,10 @@ where
     let timing = crate::logging::intake_timing::carry();
     std::thread::spawn(move || {
         let _timing = timing.entered();
-        let outcome = build_runtime(PgWorkError::Other).and_then(|runtime| {
+        let bridge_error = |error| PgWorkError::Other(map_runtime_error(error));
+        let outcome = build_runtime(bridge_error).and_then(|runtime| {
             runtime.block_on(run_pg_work_before(deadline, async move {
-                let bridge_pool = build_bridge_pg_pool(&pool, PgWorkError::Other).await?;
+                let bridge_pool = build_bridge_pg_pool(&pool, bridge_error).await?;
                 let result = future_factory(bridge_pool.clone())
                     .await
                     .map_err(PgWorkError::Other);
@@ -285,10 +317,10 @@ where
     wait()
 }
 
-async fn run_pg_work_before<T>(
+async fn run_pg_work_before<T, E>(
     deadline: Instant,
-    future: impl Future<Output = Result<T, PgWorkError>>,
-) -> Result<T, PgWorkError> {
+    future: impl Future<Output = Result<T, PgWorkError<E>>>,
+) -> Result<T, PgWorkError<E>> {
     if Instant::now() >= deadline {
         return Err(PgWorkError::Deadline);
     }
@@ -346,6 +378,32 @@ mod tests {
             result,
             Err(ref error) if error == "bridge deadline passed before async bridge started"
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn block_on_pg_result_before_maps_unarmed_success_and_error_pg() {
+        use crate::db::auto_queue::test_support::TestPostgresDb;
+        use crate::test_support::wait::{WAIT_CAP, await_within};
+
+        let database = TestPostgresDb::create().await;
+        let pool = database.connect_and_migrate_with_max_connections(2).await;
+        let reserve = Duration::from_millis(200);
+        assert!(super::super::bridge_deadline::current().is_none());
+        let query = |sql| {
+            block_on_pg_result_before(&pool, reserve, move |pool| async move {
+                sqlx::query_scalar::<_, i32>(sql)
+                    .fetch_one(&pool)
+                    .await
+                    .map_err(|error| error.to_string())
+            })
+        };
+        assert!(matches!(query("SELECT 42"), Ok(42)));
+        assert!(matches!(
+            query("SELECT 1 / 0"),
+            Err(PgWorkError::Other(error)) if error.contains("division by zero")
+        ));
+        await_within(pool.close(), WAIT_CAP).await;
+        await_within(database.drop(), WAIT_CAP).await;
     }
 
     #[test]

@@ -300,6 +300,100 @@ async fn idle_kill_db_work_deadline_settles_and_resumes_pg() {
     checked.unwrap();
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
+    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::engine::{hooks::Hook, loader::load_single_policy};
+    use std::path::Path;
+
+    let database = TestPostgresDb::create().await;
+    let pool = database.connect_and_migrate_with_max_connections(2).await;
+    let policy_pool = pool.clone();
+    let checks = tokio::spawn(async move {
+        let runtime = Runtime::new().unwrap();
+        let ctx = Context::full(&runtime).unwrap();
+        let slot = new_eval_deadline_slot();
+        install_policy_interrupt_handler(&runtime, slot.clone(), None);
+        ctx.with(|ctx| {
+            ctx.eval::<(), _>(r#"
+                var warnings = [], gQueries = 0, slowG = true, ownerGets = 0, killPosts = 0;
+                var agentdesk = {
+                    log: {warn: function(line) { warnings.push(line); }, debug: function() {}},
+                    config: {get: function(key) { return key === "server_port" ? 8791 : 45; }},
+                    pipeline: {
+                        getConfig: function() { return {}; },
+                        kickoffState: function() { return "requested"; },
+                        nextGatedTarget: function() { return "in_progress"; }
+                    },
+                    http: {
+                        get: function() {
+                            ownerGets++;
+                            return {cluster: {local_instance_id: null, configured_forward_owner_ids: []}, nodes: []};
+                        },
+                        post: function(url) {
+                            if (url.indexOf("idle-cleanup-candidates") >= 0) {
+                                return {decisions: {slow: {supported: true}}};
+                            }
+                            killPosts++;
+                            return {ok: true, skipped_provider_activity_guard: true};
+                        }
+                    }
+                };
+            "#).unwrap();
+            super::super::db_ops::register_db_ops(&ctx, Some(policy_pool.clone())).unwrap();
+            ctx.eval::<(), _>(r#"
+                var query = agentdesk.db.query;
+                agentdesk.db.query = function(sql, params, reserve) {
+                    if (sql.indexOf("FROM task_dispatches WHERE status IN") >= 0) {
+                        gQueries++;
+                        if (slowG) return query("SELECT 1 FROM pg_sleep(1.5)", [], reserve);
+                    }
+                    if (sql.indexOf("idle_cursor_at") >= 0) {
+                        return [{
+                            session_key: "slow", provider: "claude", instance_id: null,
+                            idle_cursor_at: "2000-01-01T00:00:00Z", idle_cursor_id: "1"
+                        }];
+                    }
+                    return [];
+                };
+            "#).unwrap();
+        });
+        let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/timeouts.js");
+        let policy = load_single_policy(&ctx, &file).unwrap();
+        ctx.with(|ctx| {
+            let tick = || {
+                let _armed = ArmedDeadline::new(&slot, Duration::from_millis(900));
+                let function = policy.hooks[&Hook::OnTick5min]
+                    .clone()
+                    .restore(&ctx)
+                    .unwrap();
+                function
+                    .call::<_, ()>(())
+                    .expect("onTick5min must return without a QuickJS interrupt");
+                assert!(crate::utils::bridge_deadline::current_work_deadline().is_none());
+            };
+
+            tick();
+            assert_eq!(ctx.eval::<i32, _>("gQueries").unwrap(), 1);
+            assert_eq!(ctx.eval::<i32, _>("ownerGets + killPosts").unwrap(), 0);
+            assert_eq!(
+                ctx.eval::<Vec<String>, _>("warnings").unwrap(),
+                ["[idle-kill] kill-tmux deadline reached; remaining=unknown"],
+            );
+
+            ctx.eval::<(), _>("slowG = false;").unwrap();
+            tick();
+            assert_eq!(ctx.eval::<i32, _>("gQueries").unwrap(), 2);
+            assert_eq!(ctx.eval::<i32, _>("killPosts").unwrap(), 1);
+            assert_eq!(ctx.eval::<i32, _>("warnings.length").unwrap(), 1);
+        });
+    });
+    let checked = await_within(checks, Duration::from_secs(20)).await;
+    await_within(pool.close(), SERVER_WAIT_CAP).await;
+    await_within(database.drop(), SERVER_WAIT_CAP).await;
+    checked.unwrap();
+}
+
 fn load_pg_idle_policy(ctx: &rquickjs::Ctx<'_>, pool: sqlx::PgPool) {
     ctx.eval::<(), _>(
         r#"

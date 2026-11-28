@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 thread_local! {
     // The QuickJS interrupt handler cannot fire while Rust runs, so bridge ops bound themselves by this.
     static CURRENT: Cell<Option<Instant>> = const { Cell::new(None) };
+    static WORK: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// Installs a deadline on this thread and restores the previous (outer) one on drop.
@@ -35,11 +36,31 @@ impl Drop for ScopedBridgeDeadline {
 
 /// The armed deadline, or `None` when no bounded eval is in flight and callers keep their defaults.
 pub fn current() -> Option<Instant> {
-    CURRENT.with(|cell| cell.get())
+    current_work_deadline().or_else(|| CURRENT.with(Cell::get))
 }
 
 pub fn work_deadline(reserve: Duration) -> Option<Instant> {
-    current().map(|deadline| deadline.checked_sub(reserve).unwrap_or_else(Instant::now))
+    let hard = CURRENT.with(Cell::get)?;
+    let limit = hard.checked_sub(reserve).unwrap_or_else(Instant::now);
+    Some(current_work_deadline().map_or(limit, |outer| outer.min(limit)))
+}
+
+pub fn current_work_deadline() -> Option<Instant> {
+    WORK.with(Cell::get)
+}
+
+pub struct ScopedWorkDeadline(Option<Instant>);
+
+impl ScopedWorkDeadline {
+    pub fn install(deadline: Instant) -> Self {
+        Self(WORK.with(|cell| cell.replace(Some(deadline))))
+    }
+}
+
+impl Drop for ScopedWorkDeadline {
+    fn drop(&mut self) {
+        WORK.with(|cell| cell.set(self.0));
+    }
 }
 
 /// The remaining budget: `Some(Duration::ZERO)` once the deadline has passed, `None` when unarmed.
@@ -68,5 +89,21 @@ mod tests {
             assert_eq!(current(), Some(outer));
         }
         assert_eq!(current(), None);
+    }
+
+    #[test]
+    fn work_scope_shares_the_hard_deadline_and_restores_default_behavior() {
+        let hard = Instant::now() + Duration::from_secs(5);
+        let _hard = ScopedBridgeDeadline::install(hard);
+        let reserve = Duration::from_millis(200);
+        let work = hard - reserve;
+        {
+            let _work = ScopedWorkDeadline::install(work);
+            assert_eq!(current(), Some(work));
+            assert_eq!(work_deadline(Duration::ZERO), Some(work));
+            assert_eq!(work_deadline(reserve), Some(work));
+        }
+        assert_eq!(current(), Some(hard));
+        assert_eq!(current_work_deadline(), None);
     }
 }

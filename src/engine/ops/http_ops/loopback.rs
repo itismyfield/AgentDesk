@@ -124,13 +124,21 @@ pub(super) fn invoke_localhost_before(
         }
         let _ = reply.send(outcome);
     });
+    let expired = || response_deadline_exceeded(start_claimed.swap(true, Ordering::AcqRel));
     match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-        Ok(Ok(response)) => response,
-        Ok(Err(error)) => error.response(),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            response_deadline_exceeded(start_claimed.swap(true, Ordering::AcqRel)).response()
+        Ok(Ok(response)) if Instant::now() < deadline => response,
+        Ok(Err(error)) => {
+            if error.deadline_started.is_some() || Instant::now() < deadline {
+                return error.response();
+            }
+            let mut failure = expired();
+            failure.io = error.io;
+            failure.response()
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => r#"{"error":"thread panic"}"#.to_string(),
+        Err(mpsc::RecvTimeoutError::Disconnected) if Instant::now() < deadline => {
+            r#"{"error":"thread panic"}"#.to_string()
+        }
+        _ => expired().response(),
     }
 }
 

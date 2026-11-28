@@ -3,6 +3,7 @@ module.exports = function attachIdleKill(timeouts, helpers) {
   var scanAfter = null;
   // Leave time for QuickJS to settle the cursor and log the tick summary.
   var deadlineReserveMs = 200;
+  timeouts._idleKillReserveMs = deadlineReserveMs;
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
   var getTimeoutInterval = helpers.getTimeoutInterval;
@@ -28,13 +29,18 @@ module.exports = function attachIdleKill(timeouts, helpers) {
   var _queuePMDecision = helpers._queuePMDecision;
   var _flushPMDecisions = helpers._flushPMDecisions;
 
+  timeouts._logIdleKillDeadline = function(remaining) {
+    var count = typeof remaining === "number" ? remaining : "unknown";
+    agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + count);
+  };
+
   timeouts._section_O = function() {
     try {
       runIdleScan();
     } catch (error) {
       if (!error || error.deadline_exceeded !== true) throw error;
-      var remaining = typeof error.remaining === "number" ? error.remaining : "unknown";
-      agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + remaining);
+      timeouts._logIdleKillDeadline(error.remaining);
+      return true;
     }
   };
 

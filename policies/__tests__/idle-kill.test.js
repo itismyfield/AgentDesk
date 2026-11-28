@@ -110,6 +110,40 @@ test("idle-kill reports a preflight deadline without classifying or posting cand
   assert.equal(state.logs.error.length, 0);
 });
 
+test("onTick5min settles a slow G query before idle-kill can issue a POST", () => {
+  let protectedWork = false;
+  let consumed = false;
+  let hitG = false;
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    withWorkDeadline(reserveMs, work) {
+      assert.equal(reserveMs, 200);
+      if (consumed) return true;
+      protectedWork = true;
+      try { return work() || consumed; }
+      finally { protectedWork = false; }
+    },
+    dbQuery(sql) {
+      if (!sql.includes("INTERVAL '6 hours'") && sql.includes("FROM task_dispatches WHERE status IN")) {
+        hitG = true;
+        consumed = true;
+        throw Object.assign(new Error("PG deadline"), { deadline_exceeded: protectedWork });
+      }
+      return [];
+    },
+    httpGet() {
+      assert.equal(consumed, false, "QuickJS has no time left for owner preflight");
+    }
+  });
+
+  policy.onTick5min({});
+
+  assert.equal(hitG, true);
+  assert.deepEqual(state.logs.warn, ["[idle-kill] kill-tmux deadline reached; remaining=unknown"]);
+  assert.equal(state.httpGets.length, 0);
+  assert.equal(state.httpPosts.length, 0);
+});
+
 test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the next sweep", () => {
   const rows = orderedRows([idleRow("slow"), idleRow("ready")]);
   const { policy, state } = loadPolicy("policies/timeouts.js", {
