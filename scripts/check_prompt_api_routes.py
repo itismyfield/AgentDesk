@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Read-only staged prompt path lint against this checkout's endpoint inventory."""
 import argparse
+import json
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
 URL = re.compile(r'''(?<![^\s"'`(<])https?://(?:127\.0\.0\.1|localhost|\[::1\]):[0-9]+/api/[^\s"'`()<>\\]*''')
+API_ENDPOINTS_JSON = Path('docs/data/api-endpoints.json')
 JOIN = re.compile(r'''\s*\+|[/${"']''')
 
 def joined(line, match):
@@ -18,22 +20,30 @@ def joined(line, match):
         rest = rest[1:]
     return bool(JOIN.match(rest))
 
+def load_endpoint_pairs(catalog: Path) -> list[tuple[str, str]]:
+    entries = json.loads(catalog.read_text(encoding='utf-8'))
+    if not isinstance(entries, list) or not entries:
+        raise ValueError('expected a non-empty endpoint inventory')
+    pairs = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError('expected an endpoint object')
+        method, path = entry.get('method'), entry.get('path')
+        if (not isinstance(method, str) or not method
+                or not isinstance(path, str) or not path.startswith('/')):
+            raise ValueError('invalid endpoint method or path')
+        pairs.append((method, path))
+    return pairs
+
 def inventory(repo):
-    root = repo / 'src/server/routes/docs/inventory/endpoints'
-    parts = re.findall(r'^mod (part_\d+);$', (root / 'mod.rs').read_text(encoding='utf-8'), re.M)
-    if not parts:
-        raise ValueError('empty inventory')
-    paths = set()
-    for part in parts:
-        source = (root / (part + '.rs')).read_text(encoding='utf-8')
-        entries = re.findall(r'^\s*ep\(\s*"[^"\\]+"\s*,\s*"([^"\\]+)"\s*,', source, re.M)
-        if len(entries) != len(re.findall(r'^\s*ep\(', source, re.M)):
-            raise ValueError('unparsed endpoint')
-        paths.update(entries)
-    if not paths:
-        raise ValueError('empty inventory')
-    return [re.compile(''.join('.+' if token.startswith('{*') else '[^/]+' if token.startswith('{') else re.escape(token)
-                              for token in re.split(r'(\{\*?[^{}]+\})', path))) for path in paths]
+    paths = {pair[1] for pair in load_endpoint_pairs(repo / API_ENDPOINTS_JSON)}
+    return [
+        re.compile(''.join(
+            '.+' if token.startswith('{*') else '[^/]+' if token.startswith('{') else re.escape(token)
+            for token in re.split(r'(\{\*?[^{}]+\})', path)
+        ))
+        for path in sorted(paths)
+    ]
 
 def candidates(source):
     source = re.sub(r'<!--.*?(?:-->|\Z)', lambda m: '\n' * m[0].count('\n'), source, flags=re.S)

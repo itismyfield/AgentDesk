@@ -1956,10 +1956,9 @@ test or turning it `#[ignore]` needs an exact ID and kind row in
     observability instrumentation at the rereview/reopen/transition
     attribution sites — no route/behavior change).
   - `src/server/routes/docs.rs` was decomposed by #3836 into a thin route
-    facade plus `src/server/routes/docs/{guides,inventory,taxonomy}.rs` and
-    ordered endpoint inventory parts under
-    `src/server/routes/docs/inventory/endpoints/`; keep new API-docs data in
-    those child modules and preserve `scripts/check_api_docs_coverage.py`.
+    facade plus `src/server/routes/docs/{guides,inventory,taxonomy}.rs`. The
+    ordered endpoint inventory is in `docs/data/api-endpoints.json`. Keep
+    new endpoint data there and preserve `scripts/check_api_docs_coverage.py`.
   - `src/server/routes/escalation.rs` (giant review surface; +3 from #4486 UtilityBotRole alias typing, mechanical/non-behavioral).
   - `src/server/routes/review_verdict/decision_route.rs` was decomposed in
     #3038 slice 1 and S1-relocated into a 26-line route shim delegating to

@@ -712,30 +712,11 @@ src/
 │   │   │   └── thread_reuse.rs
 │   │   ├── docs/
 │   │   │   ├── inventory/
-│   │   │   │   └── endpoints/
-│   │   │   │       ├── cluster_execution.rs
-│   │   │   │       ├── decisions.rs
-│   │   │   │       ├── kakao_calendar.rs
-│   │   │   │       ├── mod.rs
-│   │   │   │       ├── part_01.rs
-│   │   │   │       ├── part_02.rs
-│   │   │   │       ├── part_03.rs
-│   │   │   │       ├── part_04.rs
-│   │   │   │       ├── part_05.rs
-│   │   │   │       ├── part_06.rs
-│   │   │   │       ├── part_07.rs
-│   │   │   │       ├── part_08.rs
-│   │   │   │       ├── part_09.rs
-│   │   │   │       ├── part_10.rs
-│   │   │   │       ├── part_11.rs
-│   │   │   │       ├── prompt_audit.rs
-│   │   │   │       ├── public_surfaces.rs
-│   │   │   │       ├── server_campaign_pipeline.rs
-│   │   │   │       ├── server_campaigns.rs
-│   │   │   │       └── session_evidence.rs
+│   │   │   │   └── endpoints_tests.rs
 │   │   │   ├── group_response.rs
 │   │   │   ├── guides.rs
 │   │   │   ├── inventory.rs
+│   │   │   ├── snapshot_tests.rs
 │   │   │   └── taxonomy.rs
 │   │   ├── domains/
 │   │   │   ├── access.rs
