@@ -13,7 +13,7 @@ pub(in crate::services::discord) struct BootInputs {
 }
 
 #[derive(Clone)]
-pub(in crate::services::discord::turn_finalizer) struct RestoredInput {
+pub(in crate::services::discord) struct RestoredInput {
     record: RestoredRecord,
     row: Option<InflightTurnState>,
     key: TurnKey,
@@ -21,7 +21,7 @@ pub(in crate::services::discord::turn_finalizer) struct RestoredInput {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::services::discord::turn_finalizer) enum RestoreStep {
+pub(in crate::services::discord) enum RestoreStep {
     Register,
     Settle,
     Abstain(bool),
@@ -582,9 +582,7 @@ impl TurnFinalizer {
 #[path = "native_restore_gc_tests.rs"]
 mod gc_tests;
 
-pub(in crate::services::discord::turn_finalizer) fn validate_record(
-    record: &RestoredRecord,
-) -> Result<(), String> {
+pub(in crate::services::discord) fn validate_record(record: &RestoredRecord) -> Result<(), String> {
     let Some(outcome) = record.settlement.outcome.as_ref() else {
         record.settlement.barrier(&record.namespace)?;
         return Ok(());

@@ -77,7 +77,7 @@ impl NativePrepared {
             }
     }
 
-    pub(in crate::services::discord::turn_finalizer) async fn install_control(
+    pub(in crate::services::discord) async fn install_control(
         &self,
         history: &Registry,
         shared: &Arc<SharedData>,
@@ -240,7 +240,7 @@ impl NativePrepared {
     }
 }
 
-pub(in crate::services::discord::turn_finalizer) async fn reconcile(
+pub(in crate::services::discord) async fn reconcile(
     entry: &mut LedgerEntry,
     shared: &Arc<SharedData>,
 ) {

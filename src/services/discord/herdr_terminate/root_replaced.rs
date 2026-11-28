@@ -97,7 +97,7 @@ thread_local! {
     pub(crate) static CLEANUPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[cfg(any(test, feature = "test-support"))]
-#[path = "root_replaced_hook_tests.rs"]
+#[path = "root_replaced_hook_test_support.rs"]
 mod root_replaced_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use root_replaced_hook_tests::{AFTER_FINAL_PROOF, CAS_ATTEMPTS};

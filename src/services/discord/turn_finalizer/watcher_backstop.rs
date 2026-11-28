@@ -39,7 +39,7 @@ pub(super) const WATCHER_BACKSTOP_TERMINAL_STREAK: u8 = 2;
 ///     `PausedLive` defers; `Unknown`
 ///     (non-JSONL runtime) consults the pane-ready fallback ONLY at the natural
 ///     deadline.
-pub(super) fn watcher_backstop_turn_is_terminal(
+pub(in crate::services::discord) fn watcher_backstop_turn_is_terminal(
     shared: &Arc<SharedData>,
     turn: impl Into<BackstopTurn>,
     provider: &ProviderKind,

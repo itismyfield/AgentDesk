@@ -18,7 +18,7 @@ pub(super) fn episode_fingerprint(nonce: Option<&str>) -> [u8; 32] {
 
 pub(in crate::services::discord) struct CapturedFinish {
     pub(in crate::services::discord) finish: crate::services::turn_orchestrator::FinishTurnResult,
-    pub(super) snapshot: Option<SyntheticClaimSnapshot>,
+    pub(in crate::services::discord) snapshot: Option<SyntheticClaimSnapshot>,
     /// This claim itself removed the episode's row.
     pub(super) row_cleared: bool,
 }
@@ -228,13 +228,13 @@ fn warn_episode_row_retained(
     );
 }
 
-pub(super) struct TerminalEvidence {
+pub(in crate::services::discord) struct TerminalEvidence {
     /// Observed legacy None is distinct from an uncaptured episode.
-    pub(super) episode_captured: bool,
-    pub(super) turn_nonce: Option<String>,
-    pub(super) claim_snapshot: Option<SyntheticClaimSnapshot>,
+    pub(in crate::services::discord) episode_captured: bool,
+    pub(in crate::services::discord) turn_nonce: Option<String>,
+    pub(in crate::services::discord) claim_snapshot: Option<SyntheticClaimSnapshot>,
     /// The tmux session a stale-busy probe proved gone, for drifted-row retirement.
-    pub(super) probed_tmux_session: Option<String>,
+    pub(in crate::services::discord) probed_tmux_session: Option<String>,
 }
 
 /// One policy close, built from the row the notice ACK returned: the finalizer owns it, and only

@@ -14,19 +14,12 @@ use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::inject_hook;
 use crate::services::discord::health::{HealthRegistry, InjectPane, register_inject_runtime};
 use crate::services::discord::inflight::TurnSource;
+use crate::services::discord::queue_io::queued_head_inject::hook_tests::Probe;
 use crate::services::discord::{SharedData, queue_dispatch, queue_io, router, runtime_store};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{
     ChannelMailboxRegistry, Intervention, QueueIdentity, QueuedHeadClaim,
 };
-
-/// Heads the queued-head kickoff offered to the injector, in order.
-pub(super) static OFFERED_HEADS: std::sync::Mutex<Vec<MessageId>> =
-    std::sync::Mutex::new(Vec::new());
-
-/// Every attempt row the queued-head kickoff emitted, in order.
-pub(super) static ATTEMPT_ROWS: std::sync::Mutex<Vec<super::AttemptRow>> =
-    std::sync::Mutex::new(Vec::new());
 
 #[path = "queued_head_auto_tests.rs"]
 mod auto;
@@ -38,6 +31,7 @@ const AUTHOR_NAME: &str = "s2b author";
 const GUILD: &str = "6813000";
 
 struct Fixture {
+    probe: Probe,
     _db: TestPostgresDb,
     pool: sqlx::PgPool,
     context: serenity::Context,
@@ -142,6 +136,7 @@ impl Fixture {
         pane.reseat_row(TurnSource::Managed, holder_message.get());
         let holder = Arc::new(CancelToken::new());
         let channel = ChannelId::new(channel);
+        let probe = Probe::install(channel);
         assert!(
             shared
                 .mailbox(channel)
@@ -284,6 +279,7 @@ impl Fixture {
             Some(pool.clone()),
         );
         Self {
+            probe,
             _db: db,
             pool,
             context,
@@ -623,13 +619,13 @@ async fn kickoff_reuses_channel_routing_lookup_before_queued_head_attempt_pg() {
         assert_eq!(head.author_id, UserId::new(author));
         let channel_gets = fixture.gets();
         let parent_gets = fixture.parent_gets.load(Relaxed);
-        assert!(!ATTEMPT_ROWS.lock().unwrap().iter().any(|row| {
+        assert!(!fixture.probe.rows().iter().any(|row| {
             row.channel_id == channel && row.head_message_id == head.message_id.get()
         }));
 
         fixture.kick().await;
 
-        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let rows = fixture.probe.rows();
         let row = rows
             .iter()
             .find(|row| row.channel_id == channel && row.head_message_id == head.message_id.get())
@@ -706,7 +702,7 @@ async fn s2b_a_head_whose_author_is_not_named_stays_queued_pg() {
         drop(transition);
         let (bytes, queue) = (fixture.bytes(), format!("{:?}", fixture.queue().await));
         fixture.kick().await;
-        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let rows = fixture.probe.rows();
         let row = rows.iter().rev().find(|row| row.channel_id == channel);
         let row = row.map(|row| (row.outcome, row.reason));
         assert_eq!(row, Some(("not_sent", reason)), "{lookup}");
@@ -1204,7 +1200,7 @@ async fn s2b_reserved_and_may_have_sent_owners_recheck_the_row_before_pane_io_pg
         );
         let disk = fixture.disk();
         assert!(disk.is_array() || disk["head_injection"].is_null());
-        let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+        let rows = fixture.probe.rows();
         let row = rows.iter().rev().find(|row| row.channel_id == channel);
         assert_eq!(
             row.map(|row| (row.outcome, row.head_state)),
@@ -1562,7 +1558,7 @@ async fn a_parked_head_is_never_typed_and_a_reserved_head_still_holds_the_order_
     fixture.park(&ids);
     let before = fixture.bytes();
     fixture.kick().await;
-    assert!(!OFFERED_HEADS.lock().unwrap().contains(&head.message_id));
+    assert!(!fixture.probe.offers().contains(&head.message_id));
     assert_eq!(fixture.pane.tmux_calls(), 0);
     assert_eq!(fixture.bytes(), before);
     let persistence = crate::services::discord::queue_persistence_context(
@@ -1619,7 +1615,7 @@ async fn menu_keeps_the_queued_head_without_any_key_pg() {
     };
     for _ in 0..2 {
         assert!(
-            super::try_busy(
+            crate::services::discord::queue_io::queued_head_inject::try_busy(
                 &deps,
                 &ProviderKind::Claude,
                 fixture.channel,
@@ -1661,7 +1657,7 @@ async fn unread_idle_composer_consumes_the_queued_head_without_notice_pg() {
         token: "s2b-test-token",
     };
     assert!(
-        super::try_busy(
+        crate::services::discord::queue_io::queued_head_inject::try_busy(
             &deps,
             &ProviderKind::Claude,
             fixture.channel,
@@ -1796,9 +1792,9 @@ async fn queued_busy_injection_marks_committed_source(observed: bool) {
     );
     assert_eq!(fixture.pane.keys(), ["paste-buffer", "send-keys"]);
     assert!(
-        ATTEMPT_ROWS
-            .lock()
-            .unwrap()
+        fixture
+            .probe
+            .rows()
             .iter()
             .any(|row| row.channel_id == channel.get() && row.outcome == "injected")
     );

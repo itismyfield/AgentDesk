@@ -2,7 +2,7 @@
 // carries the `pg_` marker the PG test lane selects on.
 #[cfg(test)]
 mod pg_tests {
-    use crate::db::auto_queue::test_support::TestPostgresDb;
+    use super::super::create_cleanup_test_db;
     use crate::services::auto_queue::cancel_run::{
         cancel_live_dispatches_for_runs_pg, cancel_selected_runs_with_pg,
         clear_sessions_for_dispatches_pg, end_run_with_pg,
@@ -377,7 +377,7 @@ mod pg_tests {
     /// policy tick calls.
     #[tokio::test]
     async fn crash_after_cancel_commit_converges_on_replay_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "crash").await;
 
@@ -446,7 +446,7 @@ mod pg_tests {
     /// inside this test's own database.
     #[tokio::test]
     async fn session_clear_failure_stays_retry_eligible_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "retry").await;
 
@@ -567,7 +567,7 @@ mod pg_tests {
     /// never executed by any test.
     #[tokio::test]
     async fn drain_with_health_registry_clears_slot_thread_sessions_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "registry").await;
 
@@ -607,7 +607,7 @@ mod pg_tests {
     /// not clear the new owner's slot threads.
     #[tokio::test]
     async fn replay_skips_slot_threads_after_slot_reassignment_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "aba").await;
 
@@ -709,7 +709,7 @@ mod pg_tests {
     ///   unrecoverable state this PR claims to have eliminated.
     #[tokio::test]
     async fn enqueue_is_atomic_with_the_state_change_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "atomic").await;
 
@@ -805,7 +805,7 @@ mod pg_tests {
     ///    session id behind and destroying the retry evidence.
     #[tokio::test]
     async fn slot_release_and_its_durable_record_commit_together_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "atomicslots").await;
 
@@ -895,7 +895,7 @@ mod pg_tests {
     /// id is actually cleared by step 4, through the slot's thread bindings.
     #[tokio::test]
     async fn session_clear_is_a_structural_no_op_after_the_cancel_commit_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "noop").await;
 
@@ -976,7 +976,7 @@ mod pg_tests {
             "precondition: nothing has touched this channel's runtime yet"
         );
 
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) =
             seed_run_holding_slot_on_thread(&pool, "runtime", RUNTIME_THREAD_ID).await;
@@ -1032,7 +1032,7 @@ mod pg_tests {
     /// reported rather than silently skipped.
     #[tokio::test]
     async fn poison_and_exhausted_tasks_dead_letter_instead_of_blocking_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // An older, undecodable row sits ahead of everything else.
@@ -1095,7 +1095,7 @@ mod pg_tests {
     /// pins the value and the wall-clock budget that follows from it.
     #[tokio::test]
     async fn repeatedly_failing_task_dead_letters_at_the_attempt_cap_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "cap").await;
 
@@ -1177,7 +1177,7 @@ mod pg_tests {
     /// task twice and firing its observability emits twice.
     #[tokio::test]
     async fn a_claimed_task_is_not_drained_twice_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "claim").await;
 
@@ -1297,7 +1297,7 @@ mod pg_tests {
              keeps failing for roughly 13-17 minutes is parked permanently"
         );
 
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "deadletter").await;
 
@@ -1431,7 +1431,7 @@ mod pg_tests {
     /// `completed: false` with the slot still held.
     #[tokio::test]
     async fn an_already_emitted_task_is_never_re_emitted_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "reemit").await;
 
@@ -1542,7 +1542,7 @@ mod pg_tests {
     /// rather than about one call site.
     #[tokio::test]
     async fn a_failed_emit_mark_fires_no_emit_and_releases_no_slot_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "markfail").await;
         let emits_before = emit_probe::emit_count(&dispatch_id);
@@ -1675,7 +1675,7 @@ mod pg_tests {
     /// provider session really was cleared before the `DELETE` was reached.
     #[tokio::test]
     async fn a_failed_retirement_delete_records_an_attempt_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "delfail").await;
 
@@ -1756,7 +1756,7 @@ mod pg_tests {
     /// a terminal state through the ordinary attempt bookkeeping.
     #[tokio::test]
     async fn a_poison_row_whose_park_write_fails_is_not_reported_as_parked_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
 
         let poison_id = sqlx::query_scalar::<_, i64>(
@@ -1815,7 +1815,7 @@ mod pg_tests {
     /// untouched, so the row never approaches the cap at all.
     #[tokio::test]
     async fn an_unrecordable_attempt_is_reported_instead_of_looking_like_a_retry_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "noattempt").await;
 
@@ -1899,7 +1899,7 @@ mod pg_tests {
     /// JSONB enrollment boundary can be asserted after the inline drain.
     #[tokio::test]
     async fn cancel_rolls_back_null_generation_in_tx_without_enrolling_it_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "null-in-tx").await;
         let card_id = "card-cleanup-null-in-tx";
@@ -1986,7 +1986,7 @@ mod pg_tests {
         use std::time::Duration;
         use tokio::time::{Instant, sleep};
 
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate_with_max_connections(8).await;
         let (run_id, _dispatch_id) = seed_run_holding_slot(&pool, "null-aba-a").await;
         let first_card_id = "card-cleanup-null-aba-a";
@@ -2192,7 +2192,7 @@ mod pg_tests {
     /// entry, dispatch, or partial card state behind.
     #[tokio::test]
     async fn null_generation_rollback_failure_aborts_cancel_transaction_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
         let (run_id, dispatch_id) = seed_run_holding_slot(&pool, "null-atomic").await;
         let card_id = "card-cleanup-null-atomic";
@@ -2267,7 +2267,7 @@ mod pg_tests {
 
     #[tokio::test]
     async fn end_run_does_not_change_card_state_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // Seed: create agent, card (in_progress), run, dispatch, entry
@@ -2381,7 +2381,7 @@ mod pg_tests {
     /// continuing a replay-safe Some sibling from the same row.
     #[tokio::test]
     async fn tampered_null_generation_skips_card_but_rolls_back_some_sibling_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
 
         let null_card_id = "card-tampered-null-generation";
@@ -2489,7 +2489,7 @@ mod pg_tests {
 
     #[tokio::test]
     async fn generation_mismatch_skips_card_rollback_pg() {
-        let pg_db = TestPostgresDb::create().await;
+        let pg_db = create_cleanup_test_db().await;
         let pool = pg_db.connect_and_migrate().await;
 
         // Seed: agent, card, run, dispatches, entries

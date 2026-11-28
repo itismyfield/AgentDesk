@@ -104,7 +104,9 @@ pub(crate) fn refusal(status: StatusCode, result: &str, detail: &str) -> (Status
 
 /// Result records the terminate target wrote on this thread, field by field.
 #[derive(Clone, Default)]
-pub(crate) struct Results(Arc<Mutex<Vec<BTreeMap<String, String>>>>);
+pub(crate) struct Results(
+    pub(in crate::services::discord) Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+);
 
 impl Results {
     pub(crate) fn take(&self) -> Vec<BTreeMap<String, String>> {

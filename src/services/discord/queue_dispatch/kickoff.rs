@@ -4,15 +4,15 @@ use crate::services::cluster::intake_turn::IntakeExecution;
 use crate::services::discord::queue_io::transport::IntakeDeps;
 use crate::services::discord::shared_state::{PortFuture, QueuedAdmission, QueuedRun};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "cancel_backstop_race_support_tests.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "owner_race_hook_tests.rs"]
-mod owner_race_hook_tests;
+#[path = "owner_race_hook_test_support.rs"]
+mod owner_race_hook_test_support;
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services::discord) use owner_race_hook_tests::{
+pub(in crate::services::discord) use owner_race_hook_test_support::{
     install_owner_race_pause, owner_race_kick_attempts, owner_race_pause,
 };
 
@@ -127,7 +127,7 @@ async fn kickoff_queue_channel_inner(
         return IdleQueueKickoffChannelOutcome::default();
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let _cancel_backstop_race = cancel_backstop_test_support::pause(channel_id).await;
 
     #[cfg(any(test, feature = "test-support"))]

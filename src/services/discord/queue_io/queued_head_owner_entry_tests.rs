@@ -47,7 +47,7 @@ async fn an_owner_channel_kickoff_wakes_the_owner_and_runs_no_legacy_step_pg() {
     assert!(looked().await, "the owner's drive looked at its front");
     assert_eq!(fixture.gets(), gets, "no legacy routing read");
     let channel = fixture.channel.get();
-    let rows = ATTEMPT_ROWS.lock().unwrap().clone();
+    let rows = fixture.probe.rows();
     assert!(
         !rows.iter().any(|row| row.channel_id == channel),
         "no legacy queued-head attempt"

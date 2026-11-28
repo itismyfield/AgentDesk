@@ -1,0 +1,5 @@
+resolver | src/services/discord/dl_herdr_terminate_test_host.rs
+resolver | src/services/discord/dl_herdr_terminate_unix_test_host.rs
+resolver | src/services/discord/herdr_terminate/root_replaced_hook_test_support.rs
+resolver | src/services/discord/herdr_terminate/route_fixture_test_support.rs
+resolver | src/services/discord/herdr_terminate/terminate_hook_test_support.rs

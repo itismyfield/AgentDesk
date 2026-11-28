@@ -228,7 +228,7 @@ def audit(root: Path) -> tuple[list[str], int, list[str]]:
         for path in sorted((root / tree).rglob("*.rs")):
             source = path.read_text()
             if (path.relative_to(root) == Path("src/services/turn_orchestrator.rs")
-                    or path.name.endswith("_hook_tests.rs")
+                    or path.name.endswith(("_hook_tests.rs", "_support_test.rs"))
                     or any(word in source for word in ("AGENTDESK_ROOT_DIR", "shared_test_env_lock", "set_agentdesk_root_for_test", "set_var", "remove_var", "lock_env_then_runtime", "TestEnvVarGuard", "TestRuntimeRootGuard"))):
                 sources[path.relative_to(root)] = rust_text(source)
     try:

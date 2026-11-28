@@ -12,15 +12,13 @@ use crate::services::tui_o::writer::input_facts::native::Evidence;
 use poise::serenity_prelude::MessageId;
 use std::io::{Read, Seek, SeekFrom};
 
-#[cfg(test)]
-tokio::task_local! {
-    pub(in crate::services::discord::turn_finalizer) static RECORD_REGISTRY_LOCK:
-        (std::path::PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>);
-}
+#[cfg(any(test, feature = "test-support"))]
+#[path = "native_completion_hook_test_support.rs"]
+pub(in crate::services::discord) mod hook_tests;
 
 /// Records an executed primary's completion once its result is durable and before its row CAS.
 /// A missing or replaced row, or an unreadable run, ends the step without records.
-pub(in crate::services::discord::turn_finalizer) async fn record(
+pub(in crate::services::discord) async fn record(
     shared: &Arc<SharedData>,
     settlement: &Settlement,
     evidence: &Evidence,
@@ -34,19 +32,8 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
     if evidence.ticket.owning_episode.is_none() || evidence.disposition != Disposition::Executed {
         return;
     }
-    #[cfg(test)]
-    let _registry_lock = RECORD_REGISTRY_LOCK
-        .try_with(|(path, entered)| {
-            let lock = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(path.with_extension("lock"))
-                .unwrap();
-            lock.try_lock().unwrap();
-            entered.store(true, std::sync::atomic::Ordering::SeqCst);
-            lock
-        })
-        .ok();
+    #[cfg(any(test, feature = "test-support"))]
+    let _registry_lock = hook_tests::lock_registry();
     if settlement.ticket != evidence.ticket
         || settlement.cleanup_complete
         || !settlement

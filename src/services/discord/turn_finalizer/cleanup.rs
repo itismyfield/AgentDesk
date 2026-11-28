@@ -698,7 +698,7 @@ mod tests {
         f(tmp.path());
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     fn exercise_finalizer_runtime_root() {
         with_isolated_runtime_root(|root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))

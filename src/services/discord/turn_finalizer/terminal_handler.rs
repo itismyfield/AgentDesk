@@ -4,11 +4,11 @@ use crate::services::tui_input::human_frame::history::v2::native::Settlement;
 
 #[cfg(unix)]
 #[path = "native_policy.rs"]
-pub(super) mod native_policy;
+pub(in crate::services::discord) mod native_policy;
 #[path = "policy_commit.rs"]
 mod policy_commit;
 pub(super) use policy_commit::PolicyCommit;
-pub(super) async fn handle_terminal(
+pub(in crate::services::discord) async fn handle_terminal(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     key: TurnKey,
@@ -332,15 +332,16 @@ pub(super) async fn handle_policy_close(
 /// An inactive native admission carries separate result and cleanup authority.
 #[cfg(unix)]
 #[derive(Clone)]
-struct NativeAdmission {
-    evidence: crate::services::tui_o::writer::input_facts::native::Evidence,
+pub(in crate::services::discord) struct NativeAdmission {
+    pub(in crate::services::discord) evidence:
+        crate::services::tui_o::writer::input_facts::native::Evidence,
     registrations_fingerprint: String,
-    cleanup: Option<(TurnKey, Arc<CancelToken>)>,
+    pub(in crate::services::discord) cleanup: Option<(TurnKey, Arc<CancelToken>)>,
 }
 
 #[cfg(unix)]
 impl NativeAdmission {
-    fn capture(
+    pub(in crate::services::discord) fn capture(
         observed: &crate::services::tui_o::writer::input_facts::native::Observation,
         current: &crate::services::tui_o::writer::input_facts::native::Observation,
         index: usize,
@@ -378,19 +379,20 @@ impl NativeAdmission {
 /// Explicit intent captures its own actor before keys; an empty lease never grants ownership.
 #[cfg(unix)]
 #[derive(Clone)]
-pub(super) struct NativePrepared {
+pub(in crate::services::discord) struct NativePrepared {
     history: crate::services::tui_input::human_frame::history::v2::Registry,
     namespace: String,
-    ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
+    pub(in crate::services::discord) ticket:
+        crate::services::tui_input::human_frame::history::v2::native::Ticket,
     key: TurnKey,
     actor: Option<Arc<CancelToken>>,
-    started_before: std::time::Instant,
+    pub(in crate::services::discord) started_before: std::time::Instant,
     row_witness: Option<super::super::inflight::InflightTurnState>,
 }
 
 #[cfg(unix)]
 impl NativePrepared {
-    pub(super) async fn capture(
+    pub(in crate::services::discord) async fn capture(
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         namespace: &str,
         ticket: crate::services::tui_input::human_frame::history::v2::native::Ticket,
@@ -470,7 +472,7 @@ impl NativePrepared {
         Ok(current)
     }
 
-    pub(super) fn any_key(
+    pub(in crate::services::discord) fn any_key(
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
     ) -> Result<(), String> {
@@ -484,7 +486,7 @@ impl NativePrepared {
     }
 
     #[cfg(unix)]
-    async fn admit(
+    pub(in crate::services::discord) async fn admit(
         &self,
         observed: &crate::services::tui_o::writer::input_facts::native::Observation,
         current: &crate::services::tui_o::writer::input_facts::native::Observation,
@@ -574,10 +576,10 @@ pub(in crate::services::discord::turn_finalizer) async fn record_native_terminal
 /// A captured native result retains its row debt until the snapshot CAS succeeds.
 #[cfg(unix)]
 #[derive(Clone)]
-pub(super) struct NativeCleanup {
+pub(in crate::services::discord) struct NativeCleanup {
     admission: NativeAdmission,
     row: Option<super::super::inflight::InflightTurnState>,
-    started_before: std::time::Instant,
+    pub(in crate::services::discord) started_before: std::time::Instant,
 }
 
 #[cfg(unix)]
@@ -707,7 +709,7 @@ impl NativeCleanup {
         Ok(saved)
     }
 
-    pub(super) async fn drive(
+    pub(in crate::services::discord) async fn drive(
         &self,
         history: &crate::services::tui_input::human_frame::history::v2::Registry,
         shared: &Arc<SharedData>,
@@ -805,10 +807,6 @@ impl NativeCleanup {
         Ok(true)
     }
 }
-
-#[cfg(all(test, unix))]
-#[path = "native_input_tests.rs"]
-mod native_input_tests;
 
 #[cfg(unix)]
 pub(super) async fn prepare_saved_notice(
