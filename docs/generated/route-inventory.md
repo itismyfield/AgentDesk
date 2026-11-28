@@ -259,7 +259,7 @@
 | `POST` | `/api/reviews/decision` | `review_verdict::submit_review_decision` | `src/server/routes/review_verdict/decision_route.rs:45` | `src/server/routes/domains/reviews.rs:23` |
 | `POST` | `/api/reviews/recovery` | `reviews::recover_review_target` | `src/server/routes/reviews.rs:613` | `src/server/routes/domains/reviews.rs:21` |
 | `POST` | `/api/reviews/tuning/aggregate` | `review_verdict::aggregate_review_tuning` | `src/server/routes/review_verdict/tuning_aggregate.rs:10` | `src/server/routes/domains/reviews.rs:27` |
-| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:274` | `src/server/routes/domains/reviews.rs:22` |
+| `POST` | `/api/reviews/verdict` | `review_verdict::submit_verdict` | `src/server/routes/review_verdict/verdict_route.rs:258` | `src/server/routes/domains/reviews.rs:22` |
 | `GET` | `/api/routines` | `routines::list_routines` | `src/server/routes/routines/handlers.rs:40` | `src/server/routes/domains/ops.rs:163` |
 | `POST` | `/api/routines` | `routines::attach_routine` | `src/server/routes/routines/handlers.rs:249` | `src/server/routes/domains/ops.rs:163` |
 | `GET` | `/api/routines/metrics` | `routines::routine_metrics` | `src/server/routes/routines/handlers.rs:155` | `src/server/routes/domains/ops.rs:167` |
