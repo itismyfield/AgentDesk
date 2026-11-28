@@ -836,6 +836,7 @@ async fn custody_lock_contention_preserves_pending_recovery_pg() {
 
 // Contract: one boot warns a channel once, and a native input that owns no turn warns nobody,
 // while custody still keeps every episode.
+#[cfg(unix)]
 #[tokio::test]
 async fn one_boot_warns_a_channel_once_and_never_for_a_turnless_input() {
     use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;

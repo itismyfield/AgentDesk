@@ -35,7 +35,7 @@ pub(in crate::services::discord) async fn restore_queued_and_inflight_for_tests(
 
 pub(in crate::services::discord) use queued_recovery::complete_active_reconcile;
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(in crate::services::discord) async fn prepare_owner_execution_for_tests(
     provider: &ProviderKind,
     pool: Option<&sqlx::PgPool>,

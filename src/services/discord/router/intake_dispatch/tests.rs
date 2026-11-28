@@ -992,6 +992,7 @@ mod snapshot_tests {
 
 /// Discord sends of one O input admitted and finished as a writer hold, which never advances the
 /// checkpoint the home's catch-up reads.
+#[cfg(unix)]
 async fn held_input_sends(env: &ScopedIntakeTestEnv, o: ChannelId) -> Vec<String> {
     let config = crate::runtime_layout::config_file_path(env._root.path());
     std::fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -1017,6 +1018,7 @@ async fn held_input_sends(env: &ScopedIntakeTestEnv, o: ChannelId) -> Vec<String
 }
 
 /// A Foreign node without an execution view holds an O channel's input silently for its home.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_foreign_node_holds_o_input_without_telling_the_user() {
     use crate::services::agent_protocol::RuntimeHandoffKind::ClaudeTui;
@@ -1031,6 +1033,7 @@ async fn a_foreign_node_holds_o_input_without_telling_the_user() {
 
 /// PG names the O home as the execution owner: the Foreign node's boot view holds the input
 /// silently, while a home whose own owner read fails still warns the user.
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn a_foreign_node_is_silent_on_a_home_owned_channel_pg() {
     use crate::services::discord::runtime_bootstrap::prepare_owner_execution_for_tests as boot;
