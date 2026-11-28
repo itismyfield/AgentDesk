@@ -1,7 +1,7 @@
 // Reader's words for ChannelHome.tla: one O channel whose execution node is set per channel.
 // "Designated node" is the node the setting names; "gateway" is the node that holds the Discord
 // gateway lease and runs the channel when the designated node cannot.
-export const title = "One O channel with a per-channel execution node, issue 8486";
+export const title = "One O channel with a per-channel execution node, issue 8486 (revision 2)";
 
 const node = (n) => (n === "D" ? "the designated node" : "the gateway");
 
@@ -10,7 +10,11 @@ const home = (v) => {
   return `Home is ${node(v.owner)}`;
 };
 
-const setting = (v) => (v.want === "D" ? "set to the designated node" : "no node set");
+const setting = (v) => {
+  const now = v.want === "D" ? "set to the designated node" : "no node set";
+  const edited = v.edits > 0 ? `, ${v.edits} file edit${v.edits > 1 ? "s" : ""} so far` : "";
+  return (v.yaml.G === v.want ? now : `${now}, the hub's file says otherwise`) + edited;
+};
 
 const input = (v) => {
   if (v.q === "arrived") return ", an input waits at the gateway";
@@ -34,19 +38,30 @@ const idle = (v) => {
   return kept.length ? `, idle session on ${kept.map(node).join(" and ")}` : "";
 };
 
+const lifecycle = (v) => {
+  const dead = ["D", "G"].filter((n) => v.bind[n] === "dead");
+  const parts = [];
+  if (dead.length) parts.push(`, ${dead.map(node).join(" and ")} cleared its session`);
+  if (v.child) parts.push(", thread recorded on the designated node");
+  return parts.join("");
+};
+
 const harm = (v) => {
   const marks = [];
   if (v.refusals > 0) marks.push("refusal shown");
   const fates = Object.values(v.fate);
-  const lost = fates.filter((fate) => fate === "lost").length;
-  if (lost > 0) marks.push(`${lost} input${lost > 1 ? "s" : ""} lost`);
+  const held = (t) => v.qtok === Number(t) || ["D", "G"].some((n) => v.run[n] === Number(t));
+  const lost = Object.entries(v.fate).filter(([t, fate]) => fate === "open" && !held(t)).length;
+  if (lost > 0) marks.push(`${lost} input${lost > 1 ? "s" : ""} left unanswered`);
+  if (["D", "G"].some((n) => v.sess[n] === "busy" && v.store[n] === "old" && v.owner === n))
+    marks.push("writes from an old store");
   if (Object.values(v.ans).some((count) => count > 1)) marks.push("answered twice");
   if (v.cutBusy) marks.push("busy turn cut");
   return marks.length ? ` [${marks.join(", ")}]` : "";
 };
 
 export const state = (v) =>
-  `${home(v)} (${setting(v)}${v.up ? "" : ", designated node down"})${input(v)}${turns(v)}${idle(v)}${harm(v)}`;
+  `${home(v)} (${setting(v)}${v.up ? "" : ", designated node down"})${input(v)}${turns(v)}${idle(v)}${lifecycle(v)}${harm(v)}`;
 
 export const group = (v) => {
   if (v.owner === "none") return "Unmanaged";
@@ -80,6 +95,11 @@ const labels = {
   Withheld: "the turn ends and its answer is withheld",
   Refresh: "a node reads the owner row again",
   StaleEnd: "the old home ends its idle session",
+  Clear: "you clear the session on its home",
+  Renew: "the home opens a new generation for its next session",
+  RecordChild: "the designated node records the thread",
+  DropAdmitted: "the input leaves custody with no turn",
+  OrphanMove: "the gateway moves the channel off the offline home and tells you",
 };
 
 export const step = (action) => (action in labels ? labels[action] : action);
