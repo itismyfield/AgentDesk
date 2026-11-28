@@ -264,7 +264,10 @@ async fn anchorless_turns_started_in_the_same_second_are_two_rows_pg() {
         }
     };
     assert_eq!(first.finalizer_turn_id, second.finalizer_turn_id);
-    for turn in [&first, &second] {
+    for (boot_generation, turn) in [(G, &first), (G + 1, &second)] {
+        crate::services::discord::runtime_store::set_process_generation_for_tests(Some(
+            boot_generation,
+        ));
         env.seed(turn, 0);
         boot(&env, Some(&pool)).await;
     }
@@ -829,4 +832,23 @@ async fn custody_lock_contention_preserves_pending_recovery_pg() {
         "pending recovery resumes after contention"
     );
     finish(db, pool).await;
+}
+
+// Contract: one boot warns a channel once, and a native input that owns no turn warns nobody,
+// while custody still keeps every episode.
+#[tokio::test]
+async fn one_boot_warns_a_channel_once_and_never_for_a_turnless_input() {
+    use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
+    let env = Env::new();
+    let mut turn = tui_direct(&env, 5_998_131, true);
+    turn.user_msg_id += 6;
+    env.seed(&turn, 0);
+    pending_start(5_998_131, "AgentDesk-claude-notice");
+    let root = env.dir().parent().unwrap().to_path_buf();
+    Fixture::at(root.join("injected_frames.json"), 5_998_141, false);
+    super::boot_custody::preserve_native_before_boot_reap(&root, &CLAUDE).unwrap();
+    reap_inflight_rows_at_boot_with_guard(&BootReapOnce::default(), &CLAUDE, None).await;
+    assert_eq!(episode_dirs(&env).len(), 3, "custody keeps every episode");
+    let [notice] = notices(&custody(&env), &CLAUDE).try_into().unwrap();
+    assert_eq!(notice.target, "channel:5998131");
 }

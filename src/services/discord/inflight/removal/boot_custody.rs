@@ -80,7 +80,7 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
     let boot_generation = runtime_store::process_generation_binding().generation;
     for (digest, (key, items)) in episodes {
         let dir = custody.join(digest);
-        if let Err(error) = preserve_episode(&root, &dir, key, items, boot_generation) {
+        if let Err(error) = preserve_episode(&root, &dir, key, items, boot_generation, false) {
             let dir = dir.display();
             tracing::warn!(provider = provider.as_str(), %dir, %error, "boot custody copy failed");
         }
@@ -88,21 +88,34 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
 }
 
 /// Publishes the episode marker once, then one revision with what no earlier one holds; every
-/// publication flushes the directories up to the runtime `root`.
+/// publication flushes the directories up to the runtime `root`. A `quiet` episode warns nobody
+/// until a later pass brings it a turn that may have lost output.
 fn preserve_episode(
     root: &Path,
     dir: &Path,
     key: Value,
     items: Vec<Item>,
     boot: u64,
+    quiet: bool,
 ) -> Result<(), String> {
     let context = AtomicWriteContext::new("discord_custody").durable_root(root);
     let marker = dir.join("episode.json");
-    if !marker.exists() {
-        let tui_direct = items
+    let tui_direct = !quiet
+        && items
             .iter()
             .any(|Item(kind, .., seg, _)| *kind != "row" || seg.is_some());
-        let marker_json = json!({ "episode": key, "tui_direct": tui_direct, "first_boot": boot });
+    let published = marker
+        .exists()
+        .then(|| fs::read(&marker).ok())
+        .map(|bytes| bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()));
+    let first_boot = match &published {
+        None => Some(boot),
+        Some(Some(old)) if tui_direct && old["tui_direct"] != true => old["first_boot"].as_u64(),
+        Some(_) => None,
+    };
+    if let Some(first_boot) = first_boot {
+        let marker_json =
+            json!({ "episode": key, "tui_direct": tui_direct, "first_boot": first_boot });
         runtime_store::critical_publish(&marker, &marker_json.to_string(), context)?;
     }
     let (rev, (digests, transcripts)) = held_copies(dir)?;
@@ -459,6 +472,7 @@ pub(super) fn preserve_native_before_boot_reap(
             .ok_or("native input identity missing")?;
         let key = episode_key(provider, [channel, message], None);
         let dir = custody.join(sha(key.to_string().as_bytes()));
+        let quiet = native_is_quiet(&record["settlement"]);
         let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
         preserve_episode(
             root,
@@ -466,9 +480,15 @@ pub(super) fn preserve_native_before_boot_reap(
             key,
             vec![Item("native_input", source.clone(), Ok(bytes), None, None)],
             boot,
+            quiet,
         )?;
     }
     Ok(true)
+}
+
+/// A native input that owns no turn, or was never sent, has no turn output to lose.
+pub(super) fn native_is_quiet(settlement: &Value) -> bool {
+    settlement["ticket"]["owning_episode"].is_null() || settlement["not_sent"] == true
 }
 
 pub(super) fn inflight_age_secs_for_path(path: &Path) -> Option<u64> {

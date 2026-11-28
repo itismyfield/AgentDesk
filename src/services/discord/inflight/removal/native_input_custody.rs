@@ -79,6 +79,7 @@ fn persist_locked(
             None,
         )],
         runtime_store::process_generation_binding().generation,
+        serde_json::to_value(&record.settlement).is_ok_and(|s| native_is_quiet(&s)),
     )
     .map(|()| true)
 }

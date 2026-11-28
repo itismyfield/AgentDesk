@@ -1,5 +1,5 @@
-//! Boot custody notice: one message_outbox row per TUI-direct custody episode, deduped for good
-//! by what its marker records; what PostgreSQL does not take waits for the next boot.
+//! Boot custody notice: one message_outbox row per channel and boot over its TUI-direct custody
+//! episodes, deduped for good by what the markers record; what PostgreSQL does not take waits.
 
 use super::boot_custody::sha;
 use crate::services::discord::bot_role::UtilityBotRole;
@@ -27,6 +27,10 @@ pub(super) struct Notice {
     pub(super) bot: String,
     pub(super) text: String,
     pub(super) dir: PathBuf,
+    /// The boot that first held the episode; one notice speaks for a channel's boot.
+    boot: Option<u64>,
+    /// Episodes of the same channel and boot whose retention follows this notice's row.
+    others: Vec<PathBuf>,
 }
 
 /// Starts the notice pass off the boot path over the provider's custody.
@@ -71,18 +75,18 @@ pub(super) async fn enqueue_custody_notices(
         match retention::terminal(pool, notice).await {
             Ok(Some(sent_at)) => {
                 if let Some(sent_at) = sent_at {
-                    match retention::remove_expired(
-                        &notice.dir,
-                        sent_at.into(),
-                        std::time::SystemTime::now(),
-                    ) {
-                        Ok(Some(size)) => {
-                            removed += 1;
-                            bytes += size;
-                        }
-                        Ok(None) => {}
-                        Err(error) => {
-                            tracing::warn!(%dir, %error, "terminal custody retained after cleanup error")
+                    let now = std::time::SystemTime::now();
+                    for held in std::iter::once(&notice.dir).chain(&notice.others) {
+                        match retention::remove_expired(held, sent_at.into(), now) {
+                            Ok(Some(size)) => {
+                                removed += 1;
+                                bytes += size;
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                let dir = held.display();
+                                tracing::warn!(%dir, %error, "terminal custody retained after cleanup error")
+                            }
                         }
                     }
                 }
@@ -140,8 +144,8 @@ async fn readdress(pool: &PgPool, id: i64, bot: &str) {
     }
 }
 
-/// The notice of each TUI-direct episode in custody; an episode whose marker fails is logged
-/// with its path and skipped.
+/// One notice per channel and boot over the TUI-direct episodes in custody, keeping the first
+/// episode's text and key; an episode whose marker fails is logged with its path and skipped.
 pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
     let entries = match fs::read_dir(custody) {
         Ok(entries) => entries.flatten().map(|entry| entry.path()),
@@ -154,13 +158,19 @@ pub(super) fn notices(custody: &Path, provider: &ProviderKind) -> Vec<Notice> {
     };
     let mut dirs: Vec<PathBuf> = entries.collect();
     dirs.sort();
-    let mut notices = Vec::new();
+    let mut notices: Vec<Notice> = Vec::new();
     for dir in dirs {
         if !fs::symlink_metadata(&dir).is_ok_and(|meta| meta.is_dir()) {
             continue;
         }
         match episode_notice(&dir, provider) {
-            Ok(notice) => notices.extend(notice),
+            Ok(Some(notice)) => match notices.iter_mut().find(|kept| {
+                kept.boot.is_some() && (&kept.target, kept.boot) == (&notice.target, notice.boot)
+            }) {
+                Some(kept) => kept.others.push(notice.dir),
+                None => notices.push(notice),
+            },
+            Ok(None) => {}
             Err((step, cause)) => {
                 let (provider, dir) = (provider.as_str(), dir.display());
                 tracing::warn!(provider, %dir, step, %cause, "custody episode skipped");
@@ -211,6 +221,8 @@ fn episode_notice(
         bot,
         text,
         dir,
+        boot: marker["first_boot"].as_u64(),
+        others: Vec::new(),
     }))
 }
 
