@@ -87,7 +87,7 @@ async fn canary_without_core_session_and_unresolved_workspace_parks_original_pg(
     crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
     std::fs::write(fixture.history(), b"").unwrap();
     assert!(!crate::services::tui_prompt_dedupe::codex_verified_requires_proof(CANARY_TMUX));
-    let persistence = crate::services::discord::queue_dispatch::queue_persistence_context(
+    let persistence = crate::services::discord::queue_persistence_context(
         &fixture.shared,
         &ProviderKind::Codex,
         channel,
