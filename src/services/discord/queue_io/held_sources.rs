@@ -1,7 +1,7 @@
 use super::super::recovery_known_ids::RecoveryKnownIdArm;
 
 /// Ids a read-only V2 queue file keeps stay known, so catch-up never takes them again on a binary
-/// that cannot write that file; only a settled one may let the frontier pass.
+/// that cannot write that file; an id with no remaining delivery obligation lets the frontier pass.
 pub(in crate::services::discord) async fn merge_v2_held_sources(
     shared: &crate::services::discord::SharedData,
     channel: poise::serenity_prelude::ChannelId,
