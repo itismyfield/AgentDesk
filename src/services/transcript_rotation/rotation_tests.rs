@@ -48,6 +48,7 @@ fn eligibility(debt: &Undelivered) -> Eligibility<'_> {
 struct QueueFixture(TestRuntimeRootGuard);
 
 impl QueueFixture {
+    // Acquire the environment lock before the PostgreSQL fixture takes its lifecycle lock.
     fn new() -> Self {
         let root = TestRuntimeRootGuard::new();
         std::fs::create_dir(root.path().join("runtime")).unwrap();
@@ -89,9 +90,9 @@ fn request(native_session_id: Uuid) -> (RotationIntent, Handoff) {
 
 #[tokio::test]
 async fn rotation_latch_insert_before_owner_commit_pg() {
+    let fixture = QueueFixture::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let fixture = QueueFixture::new();
     let path = fixture.path("queue.json");
     let mut owner = owner(&path);
     let initial = std::fs::read(&path).unwrap();
@@ -138,9 +139,9 @@ async fn rotation_latch_insert_before_owner_commit_pg() {
 
 #[tokio::test]
 async fn rotation_latch_survives_reselect_pg() {
+    let fixture = QueueFixture::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let fixture = QueueFixture::new();
     let a = Uuid::new_v4();
     let b = Uuid::new_v4();
     for (index, (native, expected)) in [(a, true), (b, true), (a, false)].into_iter().enumerate() {
