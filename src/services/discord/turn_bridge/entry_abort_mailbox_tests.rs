@@ -1,7 +1,6 @@
 use crate::services::agent_protocol::StreamMessage;
 use crate::services::discord::gateway::TurnGateway;
 use crate::services::discord::inflight::InflightTurnState;
-use crate::services::discord::queue_io::mailbox_recovery_kickoff;
 use crate::services::discord::turn_bridge::bridge_entry_persist::entry_abort_mailbox_tests::seed_context;
 use crate::services::discord::turn_bridge::{BridgeCompletionSignal, spawn_turn_bridge};
 use crate::services::discord::{
@@ -753,7 +752,7 @@ async fn herdr_cold_case(
 
 #[cfg(unix)]
 #[path = "entry_abort_cold_error_tests.rs"]
-pub(in crate::services::discord::turn_bridge) mod cold_error;
+mod cold_error;
 
 /// A Herdr Codex turn from the real rollout reader through admission, the bridge and the finalizer.
 #[cfg(unix)]
