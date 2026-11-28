@@ -132,7 +132,7 @@ where
             && !owing.demand.wanted()
             && !actor.transitions.pending()
             && !actor.sources.reader_maintenance_due();
-        if !tick.needs_work(actor.writer.store(), can_skip) {
+        if !tick.needs_work(actor.writer.store(), provider, can_skip) {
             let serial = actor.writer.store().ledger().next_serial();
             actor.repost_if_ready().await;
             if actor.writer.store().ledger().next_serial() != serial {

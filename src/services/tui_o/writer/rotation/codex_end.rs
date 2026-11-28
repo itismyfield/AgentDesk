@@ -26,6 +26,7 @@ impl<B: BindingEvents> Sources<B> {
         if self.provider != ShadowProvider::Codex {
             return Ok(());
         }
+        self.codex_end_due = false;
         let panes: HashSet<_> = self
             .rotation
             .successors
@@ -42,11 +43,19 @@ impl<B: BindingEvents> Sources<B> {
         }
         let store = writer.store();
         // A preliminary read avoids re-publishing seals whose edges already hold durable proof.
-        let relevant = store.codex_ends().is_ok_and(|records| {
-            records
+        let relevant = match store.codex_ends() {
+            Ok(records) => records
                 .iter()
-                .any(|record| self.codex_edge(store, record).is_some())
-        });
+                .any(|record| self.codex_edge(store, record).is_some()),
+            Err(_) => {
+                self.codex_end_due = self
+                    .rotation
+                    .successors
+                    .values()
+                    .any(|next| next.proof.is_none());
+                return Ok(());
+            }
+        };
         if !relevant {
             return Ok(());
         }
@@ -54,6 +63,7 @@ impl<B: BindingEvents> Sources<B> {
         let records = match durable {
             Ok(records) => records,
             Err(reason) => {
+                self.codex_end_due = true;
                 tracing::debug!(
                     channel = self.channel,
                     reason,

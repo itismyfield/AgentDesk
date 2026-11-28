@@ -381,6 +381,12 @@ impl ChannelStore {
             .ok_or_else(|| "the store has no runtime root".into())
     }
 
+    pub(crate) fn codex_end_path(&self) -> Option<PathBuf> {
+        self.codex_end_root()
+            .ok()
+            .map(|root| path(root, self.init.channel))
+    }
+
     /// Strictly reads this channel's existing End records beside its store.
     pub(crate) fn codex_ends(&self) -> Result<Vec<CodexEnd>, String> {
         read(self.codex_end_root()?, self.init.channel)

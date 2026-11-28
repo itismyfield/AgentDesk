@@ -12,25 +12,38 @@ struct Stamp {
     transcripts: Vec<Option<Fingerprint>>,
     spool: u64,
     restart_notices: Option<Fingerprint>,
+    codex_ends: Option<Fingerprint>,
+}
+
+fn path_stamp(path: &std::path::Path) -> Option<Option<Fingerprint>> {
+    match std::fs::metadata(path) {
+        Ok(meta) => Some(Some(Fingerprint::of(&meta).ok()?)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
+        Err(_) => None,
+    }
 }
 
 impl Stamp {
-    fn read(store: &ChannelStore) -> Option<Self> {
+    fn read(store: &ChannelStore, provider: ShadowProvider) -> Option<Self> {
         if store.io_failure().is_some() {
             return None;
         }
         let transcripts = store
             .cursors()
-            .map(|cursor| match std::fs::metadata(&cursor.source.path) {
-                Ok(meta) => Some(Some(Fingerprint::of(&meta).ok()?)),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(None),
-                Err(_) => None,
-            })
+            .map(|cursor| path_stamp(&cursor.source.path))
             .collect::<Option<_>>()?;
+        let codex_ends = if provider == ShadowProvider::Codex
+            && let Some(path) = store.codex_end_path()
+        {
+            path_stamp(&path)?
+        } else {
+            None
+        };
         Some(Self {
             transcripts,
             spool: store.spool_generation(),
             restart_notices: store.restart_notice_stamp().ok()?,
+            codex_ends,
         })
     }
 }
@@ -91,9 +104,14 @@ impl Tick {
         }
     }
 
-    pub(super) fn needs_work(&mut self, store: &ChannelStore, can_skip: bool) -> bool {
+    pub(super) fn needs_work(
+        &mut self,
+        store: &ChannelStore,
+        provider: ShadowProvider,
+        can_skip: bool,
+    ) -> bool {
         // Sample before work so a write racing with capture still differs on the next tick.
-        let stamp = can_skip.then(|| Stamp::read(store)).flatten();
+        let stamp = can_skip.then(|| Stamp::read(store, provider)).flatten();
         let same = stamp.is_some() && stamp == self.stamp;
         self.stamp = stamp;
         self.observations.add(store.init().channel, can_skip, same);

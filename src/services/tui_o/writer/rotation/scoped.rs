@@ -34,6 +34,7 @@ impl<B: BindingEvents> Sources<B> {
                 .is_some_and(|seq| *self.notice.borrow() <= seq)
             && !self.log_alarmed
             && !self.clear_due
+            && !self.codex_end_due
             && !self.legacy_hops_unread
     }
 

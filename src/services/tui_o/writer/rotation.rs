@@ -132,6 +132,7 @@ pub struct Sources<B> {
     /// Clear ends published for this channel, and whether they must be matched again.
     clear_notice: watch::Receiver<u64>,
     clear_due: bool,
+    codex_end_due: bool,
     reader_config: Option<ReaderConfig>,
     producer_absent: bool,
     last_wall: Option<SystemTime>,
@@ -307,6 +308,7 @@ impl<B: BindingEvents> Sources<B> {
             names: Names::new(provider),
             clear_notice: crate::services::tui_o::store::clear_end::subscribe(channel),
             clear_due: false,
+            codex_end_due: false,
             replayed: super::ReplaySummary::default(),
             reader_config: None,
             producer_absent: false,
