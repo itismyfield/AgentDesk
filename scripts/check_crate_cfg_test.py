@@ -26,7 +26,7 @@ else:
 
 
 BASELINE = "scripts/crate_cfg_test_baseline.txt"
-INITIAL_BASELINE_SHA256 = "f2beed562a5020fe206cb3661c3bd2e2c6a1565d9f4731988ec9d10d03fa0aee"
+INITIAL_BASELINE_SHA256 = "9076d8a1f7b2aa2fd4d93dd93b0817b88dae200a4fefb615f6a926dad9ed6a1b"
 ALLOW = "// cfg-test-in-crate: allow "
 CLOSER = {"(": ")", "[": "]", "{": "}"}
 CANDIDATE = re.compile(
@@ -73,15 +73,15 @@ def crate_sources(root: Path) -> set[Path]:
             if not path.is_relative_to(root):
                 raise ValueError(f"crate source outside worktree: {path}")
             if not path.name.endswith("_tests.rs") and any(
-                not any(requires_test(cfg) for cfg in chain) for chain in chains
+                not any(requires_test(cfg, dependency_test=False) for cfg in chain) for chain in chains
             ):
                 sources.add(path)
     return sources
 
 
-def requires_test(predicate: str) -> bool:
+def requires_test(predicate: str, *, dependency_test: bool = True) -> bool:
     return bool(TEST_WORD.search(predicate)) and cfg_requires_test(
-        predicate.strip().removesuffix(","), strict=True
+        predicate.strip().removesuffix(","), strict=not dependency_test, dependency_test=dependency_test
     )
 
 
@@ -171,7 +171,7 @@ def file_findings(path: str, source: str):
             if match["inner"]:
                 kind, target = "cfg-not-test" if negated else "cfg-test-item", ""
             elif test_only and (module := MODULE.match(code, start)):
-                if module[1] == "{":
+                if module[1] == "{" and requires_test(predicate, dependency_test=False):
                     skip_until = end_group(code, module.end() - 1)
                 continue
             else:
@@ -224,12 +224,15 @@ def check(root: Path, found: dict[str, Finding], base_ref: str) -> int:
 
     for row in sorted(growth):
         print(f"CFG_TEST_BASELINE_FAIL added row {row}")
+    stale = baseline - found.keys()
+    for row in sorted(stale):
+        print(f"CFG_TEST_BASELINE_FAIL stale row {row}")
     fresh = [site for key, site in found.items() if key not in baseline - growth]
     for site in fresh:
         print(f"CFG_TEST_IN_CRATE {site.path}:{site.line} {site.kind}")
     print(f"CFG_TEST_IN_CRATE_SUMMARY baseline={len(baseline)} sites={len(found)} "
-          f"new={len(fresh)} baseline_growth={len(growth)}")
-    return int(bool(fresh or growth))
+          f"new={len(fresh)} baseline_growth={len(growth)} baseline_stale={len(stale)}")
+    return int(bool(fresh or growth or stale))
 
 
 def main() -> int:

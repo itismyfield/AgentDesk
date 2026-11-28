@@ -111,6 +111,31 @@ const TOKENS: &str = stringify! { #[cfg(test)] fn inert() {} };
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("sites=0 new=0 baseline_growth=0", result.stdout)
 
+    def test_dependency_test_fixes_features_and_reuses_predicate_values(self):
+        self.write("src/dep.rs", '''#[cfg(any(test, not(feature = "test-support")))] fn missing() {}
+#[cfg(all(any(test, feature = "test-support"), not(feature = "test-support")))] fn missing_again() {}
+#[cfg(all(any(test, unix), not(unix)))] fn same_target_atom() {}
+#[cfg(any(test, feature = "test-support"))] fn linked() {}
+#[cfg(all(unix, any(test, feature = "test-support")))] fn linked_on_unix() {}
+#[cfg(any(test, all(feature = "foo", not(feature = "bar"))))] fn distinct_features() {}
+#[cfg(not(any(test, feature = "test-support")))] fn production_alternative() {}
+#[cfg(all(test, feature = "test-support"))] fn opted_in_unit_tests() {}
+''')
+        found = [(site.line, site.kind) for site in gate.scan(self.root).values()]
+        self.assertEqual(found, [(line, "cfg-test-item") for line in (1, 2, 3, 8)])
+
+    def test_dependency_test_does_not_hide_production_modules(self):
+        self.write("src/dep.rs", '''#[cfg(any(test, not(feature = "test-support")))]
+mod inline {
+    #[cfg(test)] fn inline_probe() {}
+}
+#[cfg(any(test, not(feature = "test-support")))]
+mod external;
+''')
+        self.write("src/external.rs", "#[cfg(test)] fn external_probe() {}\n")
+        found = [(site.path, site.line) for site in gate.scan(self.root).values()]
+        self.assertEqual(found, [("src/dep.rs", 3), ("src/external.rs", 1)])
+
     def test_existing_keys_survive_line_drift_and_new_occurrence_fails(self):
         old = "#[cfg(test)]\nfn old() {}\n#[cfg(not(test))] fn regular() {}\n"
         self.write("src/dep.rs", old)
@@ -136,6 +161,36 @@ const TOKENS: &str = stringify! { #[cfg(test)] fn inert() {} };
         result = self.run_gate()
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn("CFG_TEST_IN_CRATE src/dep.rs:2 cfg-test-statement\n", result.stdout)
+
+    def test_removed_probe_requires_cleanup_and_cannot_reuse_its_row(self):
+        self.write("src/dep.rs", "fn old() {\n    #[cfg(test)] probe();\n}\n")
+        self.snapshot()
+        self.commit_base()
+
+        self.write("src/dep.rs", "fn old() {\n\n    #[cfg( test )]\n    probe ( );\n}\n")
+        moved = self.run_gate()
+        self.assertEqual(moved.returncode, 0, moved.stdout + moved.stderr)
+
+        self.write("src/dep.rs", "fn old() {}\n")
+        stale = self.run_gate()
+        self.assertEqual(stale.returncode, 1, stale.stdout + stale.stderr)
+        self.assertIn("CFG_TEST_BASELINE_FAIL stale row", stale.stdout)
+        self.assertIn("baseline=1 sites=0 new=0 baseline_growth=0 baseline_stale=1", stale.stdout)
+
+        self.snapshot()
+        cleaned = self.run_gate()
+        self.assertEqual(cleaned.returncode, 0, cleaned.stdout + cleaned.stderr)
+        self.commit_base()
+
+        self.write("src/dep.rs", "fn old() {}\nfn new() { #[cfg(test)] probe(); }\n")
+        restored = self.run_gate()
+        self.assertEqual(restored.returncode, 1, restored.stdout + restored.stderr)
+        self.assertIn("CFG_TEST_IN_CRATE src/dep.rs:2 cfg-test-statement\n", restored.stdout)
+
+        self.snapshot()
+        growth = self.run_gate()
+        self.assertEqual(growth.returncode, 1, growth.stdout + growth.stderr)
+        self.assertIn("CFG_TEST_BASELINE_FAIL added row", growth.stdout)
 
     def test_allow_comment_must_be_in_base_as_an_allowance(self):
         ordinary = "#[cfg(test)]\nfn ordinary() {}\n"

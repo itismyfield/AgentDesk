@@ -72,6 +72,8 @@
 ["src/services/claude_compact_context.rs", "cfg-test-item", "# [ cfg ( test ) ] fn reset_for_test ( )", "site", 1]
 ["src/services/claude_compact_context.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) fn state_test_guard ( ) - > std : : sync : : MutexGuard < ' static , ( ) >", "site", 1]
 ["src/services/claude_compact_context.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) static STATE_TEST_LOCK : Mutex < ( ) > = Mutex : : new ( ( ) ) ;", "site", 1]
+["src/services/claude_tui/activity/poll.rs", "cfg-test-item", "# [ cfg ( any ( test , not ( feature = \"test-support\" ) ) ) ] const READ_EVERY : Duration = Duration : : from_secs ( 1 ) ;", "site", 1]
+["src/services/claude_tui/activity/poll.rs", "cfg-test-item", "# [ cfg ( any ( test , not ( feature = \"test-support\" ) ) ) ] use std : : time : : Duration ;", "site", 1]
 ["src/services/claude_tui/busy_inject.rs", "cfg-test-item", "# [ cfg ( all ( test , unix ) ) ] pub ( crate ) fn transcript_carries ( path : & Path , offset : u64 , nonce : & str ) - > bool", "site", 1]
 ["src/services/claude_tui/busy_inject.rs", "cfg-test-item", "# [ cfg ( all ( test , unix ) ) ] use submit : : { inject_gated , inject_listed }", "site", 1]
 ["src/services/claude_tui/busy_inject.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) use submit : : inject ;", "site", 1]
