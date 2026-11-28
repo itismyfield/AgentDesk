@@ -62,16 +62,17 @@ pub(super) fn merge_stream_response_progress(
     before: (&str, usize),
     local: (&str, usize),
     durable: (&str, usize),
-) -> Option<(String, usize)> {
+) -> Option<(String, usize, &'static str)> {
     let (local_body, local_offset) = local;
     let (durable_body, durable_offset) = durable;
     if local == before {
-        return Some((durable_body.to_string(), durable_offset));
+        return Some((durable_body.to_string(), durable_offset, "before_eq_local"));
     }
     if durable == before {
-        return Some((local_body.to_string(), local_offset));
+        return Some((local_body.to_string(), local_offset, "before_eq_durable"));
     }
     merge_forward_response_progress((durable_body, durable_offset), (local_body, local_offset))
+        .map(|(body, offset)| (body, offset, "prefix_merge"))
 }
 
 pub(super) fn merge_forward_response_progress(

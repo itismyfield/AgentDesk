@@ -1,6 +1,12 @@
 use super::stamp_merge::{apply_local_change_if_durable_unchanged, merge_stream_response_progress};
 use super::*;
-use crate::services::discord::inflight::store::persist_under_lock_with_snapshot;
+use crate::services::discord::inflight::store::{
+    StreamResponseOffsetInputs, persist_stream_merge_under_lock,
+};
+
+#[cfg(test)]
+#[path = "stream_loop_patch/response_offset_tests.rs"]
+mod response_offset_tests;
 
 /// Exact durable relay-authority projection used by the stream loop's
 /// lock-held visible-mutation fence.  A non-bridge projection can be a valid
@@ -255,14 +261,16 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         (updated.current_msg_id, updated.current_msg_len) = local_current_message;
     }
 
-    let Some((merged_response, merged_response_offset)) = merge_stream_response_progress(
-        (
-            &persisted_baseline.full_response,
-            persisted_baseline.response_sent_offset,
-        ),
-        (&state.full_response, state.response_sent_offset),
-        (&on_disk.full_response, on_disk.response_sent_offset),
-    ) else {
+    let Some((merged_response, merged_response_offset, merge_branch)) =
+        merge_stream_response_progress(
+            (
+                &persisted_baseline.full_response,
+                persisted_baseline.response_sent_offset,
+            ),
+            (&state.full_response, state.response_sent_offset),
+            (&on_disk.full_response, on_disk.response_sent_offset),
+        )
+    else {
         tracing::warn!(
             provider = %provider.as_str(),
             channel_id = state.channel_id,
@@ -385,20 +393,14 @@ fn save_stream_tick_state_preserving_current_message_races_in_root_with_mode(
         }
     }
     updated.ensure_finalizer_turn_id();
-    if !validate_inflight_state_for_save(
-        root,
-        &path,
-        &updated,
-        "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
-    ) {
-        return GuardedSaveOutcome::AuthorityPinned;
-    }
-    match persist_under_lock_with_snapshot(
-        root,
-        &path,
-        &updated,
-        "src/services/discord/inflight/save_store/identity_gate/stream_loop_patch.rs:save_stream_tick_state_preserving_current_message_races_in_root",
-    ) {
+    let offset_inputs = StreamResponseOffsetInputs {
+        entrypoint: caller,
+        merge_branch,
+        before: persisted_baseline,
+        local: state,
+        durable: &on_disk,
+    };
+    match persist_stream_merge_under_lock(root, &path, &updated, offset_inputs) {
         Ok(Some(persisted)) => {
             // #5981: this write can be the first to land the native SID on the
             // durable row. Carry the allocation witness with it so the dormant

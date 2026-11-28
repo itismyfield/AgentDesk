@@ -2119,6 +2119,8 @@ src/
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_restart_tests.rs
 │   │   │   │   │   │   └── stamp_guard.rs
+│   │   │   │   │   ├── stream_loop_patch/
+│   │   │   │   │   │   └── response_offset_tests.rs
 │   │   │   │   │   ├── bridge_entry.rs
 │   │   │   │   │   ├── captured_nonce.rs
 │   │   │   │   │   ├── completion_preserve.rs
@@ -2143,6 +2145,8 @@ src/
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
 │   │   │   │   └── flake_isolation_4422.rs
+│   │   │   ├── store/
+│   │   │   │   └── response_offset_observation.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
 │   │   │   ├── circuit_evidence_tests.rs
