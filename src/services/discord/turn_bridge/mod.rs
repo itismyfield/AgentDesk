@@ -24,7 +24,7 @@ pub(in crate::services::discord) mod recovery_text;
 pub(crate) mod replay_policy;
 mod response_delivery;
 pub(super) use response_delivery::stream_body_ownership_peek;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use response_delivery::{
     STREAM_TEST_EVENTS, record_stream_test_event,
 };

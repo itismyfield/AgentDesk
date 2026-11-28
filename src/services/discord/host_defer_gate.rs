@@ -316,6 +316,27 @@ pub(crate) async fn configured_refusal(
         .tmux_refusal()
 }
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+/// Maps `channel` to `channel_name` in the runtime's session table.
+pub(crate) async fn map_channel(shared: &SharedData, channel: ChannelId, channel_name: &str) {
+    let session = super::DiscordSession {
+        session_id: None,
+        memento_context_loaded: false,
+        memento_reflected: false,
+        current_path: None,
+        history: Vec::new(),
+        pending_uploads: Vec::new(),
+        cleared: false,
+        channel_id: Some(channel.get()),
+        channel_name: Some(channel_name.to_string()),
+        category_name: None,
+        last_active: tokio::time::Instant::now(),
+        worktree: None,
+        born_generation: shared.restart.current_generation,
+    };
+    shared.core.lock().await.sessions.insert(channel, session);
+}
+
 #[cfg(all(test, unix))]
 #[path = "host_defer_gate_tests.rs"]
 pub(crate) mod tests;

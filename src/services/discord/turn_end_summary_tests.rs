@@ -1,3 +1,4 @@
+pub(in crate::services::discord) use super::row;
 use super::*;
 use crate::services::discord::gateway::GatewayFuture;
 use crate::services::discord::serenity::MessageId;
@@ -113,17 +114,6 @@ impl TurnGateway for Gateway {
     fn bot_owner_provider(&self) -> Option<ProviderKind> {
         Some(ProviderKind::Claude)
     }
-}
-
-pub(in crate::services::discord) fn row(channel: u64, user: u64, nonce: &str) -> InflightTurnState {
-    serde_json::from_value(serde_json::json!({
-        "version":9,"provider":"claude","channel_id":channel,"channel_name":"summary-test",
-        "request_owner_user_id":1,"user_msg_id":user,"current_msg_id":100,"current_msg_len":6,
-        "user_text":"question","source":"text","session_id":null,"tmux_session_name":null,
-        "output_path":null,"input_fifo_path":null,"last_offset":20,"turn_start_offset":10,
-        "full_response":"answer","response_sent_offset":6,"started_at":"unknown","updated_at":"unknown",
-        "turn_nonce":nonce,"runtime_kind":"claude_tui"
-    })).unwrap()
 }
 
 fn summary(channel: u64, user: u64, nonce: &str) -> LiveSummary {

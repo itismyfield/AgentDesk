@@ -1,11 +1,6 @@
 use serde_json::Value;
-use sqlx::PgPool;
 
 use super::*;
-use crate::db::dispatched_session_canonical_identity::{
-    CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
-};
-use crate::db::dispatched_sessions::HookSessionUpsert;
 use crate::db::dispatched_sessions::hosted_execution::HostedState;
 use crate::db::dispatched_sessions::hosted_execution::test_support::{
     TOKEN, future_schema, owner, pending, record, wire,
@@ -13,6 +8,7 @@ use crate::db::dispatched_sessions::hosted_execution::test_support::{
 use crate::services::session_host::HostedRuntimeLocator;
 
 use super::log_tests::WarningSink;
+use super::seed_fixture::{seed_session_row, seed_session_row_keyed};
 
 #[tokio::test(flavor = "current_thread")]
 async fn keyed_guard_warning_rearms_after_successful_clear_pg() {
@@ -54,72 +50,6 @@ async fn keyed_guard_warning_rearms_after_successful_clear_pg() {
     assert!(matches!(missing(), KeyedTeardown::RowMissing));
     assert_eq!(sink.count(), 2, "a new refusal after success must warn");
     db.drop().await;
-}
-
-/// Seeds the sessions row `claude/<token>/mac-mini:<name>` for `channel_id`;
-/// `raw` is its hosted record, `None` for SQL NULL. Returns the row's key.
-pub(in crate::services::discord) async fn seed_session_row(
-    pool: &PgPool,
-    name: &str,
-    channel_id: u64,
-    raw: Option<Value>,
-) -> String {
-    let key = format!("claude/{TOKEN}/mac-mini:{name}");
-    seed_session_row_keyed(pool, &key, channel_id, raw).await;
-    key
-}
-
-/// [`seed_session_row`] under a key the caller built.
-pub(in crate::services::discord) async fn seed_session_row_keyed(
-    pool: &PgPool,
-    key: &str,
-    channel_id: u64,
-    raw: Option<Value>,
-) {
-    seed_session_row_hashed(pool, key, channel_id, TOKEN, raw).await;
-}
-
-/// [`seed_session_row_keyed`] with the channel identity of bot hash `hash`.
-pub(in crate::services::discord) async fn seed_session_row_hashed(
-    pool: &PgPool,
-    key: &str,
-    channel_id: u64,
-    hash: &str,
-    raw: Option<Value>,
-) {
-    let channel = channel_id.to_string();
-    let params = HookSessionUpsert {
-        session_key: key,
-        instance_id: Some("test-node"),
-        agent_id: None,
-        provider: "claude",
-        status: "idle",
-        session_info: None,
-        model: None,
-        tokens: None,
-        cwd: None,
-        active_dispatch_id: None,
-        thread_channel_id: None,
-        channel_id: Some(&channel),
-        claude_session_id: None,
-        raw_provider_session_id: None,
-        turn_start_nonce: None,
-        dispatched_origin: false,
-    };
-    let identity = CanonicalSessionIdentity {
-        kind: SessionIdentityKind::DiscordChannel,
-        discord_token_hash: hash,
-        channel_id: &channel,
-    };
-    upsert_hook_session_with_identity_pg(pool, params, Some(identity))
-        .await
-        .unwrap();
-    sqlx::query("UPDATE sessions SET hosted_execution = $2 WHERE session_key = $1")
-        .bind(key)
-        .bind(raw)
-        .execute(pool)
-        .await
-        .unwrap();
 }
 
 fn inflight_row(channel_id: u64, tmux: &str, host_kind: HostKind) -> InflightTurnState {

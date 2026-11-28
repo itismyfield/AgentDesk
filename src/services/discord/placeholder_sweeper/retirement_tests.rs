@@ -131,8 +131,9 @@ async fn tick_retries_5xx_and_then_edits_the_legacy_placeholder() {
 #[tokio::test]
 async fn tick_dead_pane_reclaims_only_legacy_turn_and_requests_tmux_kill_pg() {
     use crate::services::discord::host_teardown_gate::test_support::{
-        Stored, busy_turn, channel_key, seed as seed_host, shared_on,
+        Stored, busy_turn, channel_key, seed as seed_host,
     };
+    use crate::services::discord::test_fixtures::shared_on;
     use crate::services::provider::cancel_token_cleanup::executor::{
         TmuxCleanupIntent, take_requested_intents_for_test,
     };

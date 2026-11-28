@@ -24,7 +24,7 @@ pub(in crate::services::discord) use backstop::{
     idle_queue_backstop_delay_for_tests, idle_queue_backstop_fires_for_tests,
 };
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[path = "queue_io/cancel_reclaim_support_test.rs"]
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
@@ -445,7 +445,7 @@ pub(super) fn schedule_post_enqueue_idle_queue_kick(
             )
             .await;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         cancel_backstop_test_support::post_enqueue_snapshot_finished(
             channel_id,
             snapshot.intervention_queue.len(),

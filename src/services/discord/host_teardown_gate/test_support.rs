@@ -9,7 +9,10 @@ use crate::db::dispatched_sessions::hosted_execution::HostedState;
 use crate::db::dispatched_sessions::hosted_execution::test_support::{
     future_schema, owner, record, wire,
 };
+#[cfg(test)]
 use crate::services::discord::health::HealthRegistry;
+#[cfg(test)]
+pub(crate) use crate::services::discord::test_fixtures::shared_on;
 use crate::services::discord::{SharedData, inflight};
 use crate::services::provider::cancel_token_cleanup::authority::TmuxBinding;
 use crate::services::provider::{CancelToken, ProviderKind};
@@ -92,15 +95,8 @@ impl Stored {
     ];
 }
 
-/// A claude runtime on `pool`.
-pub(crate) async fn shared_on(pool: &PgPool) -> Arc<SharedData> {
-    let shared =
-        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    shared.settings.write().await.provider = ProviderKind::Claude;
-    shared
-}
-
 /// [`shared_on`], registered for the registry-keyed callers.
+#[cfg(test)]
 pub(crate) async fn runtime(pool: &PgPool) -> (Arc<SharedData>, Arc<HealthRegistry>) {
     let shared = shared_on(pool).await;
     let registry = Arc::new(HealthRegistry::new());
@@ -250,6 +246,7 @@ pub(crate) fn inflight_needing_backfill(channel_id: ChannelId) -> std::path::Pat
 
 /// Makes `shared` run `tmux_name` on `channel_id` (watcher, session, with `busy` a turn); with
 /// `hosted`, the channel's row under the runtime's hash is a bound Herdr record for that name.
+#[cfg(test)]
 pub(crate) async fn running_session(
     shared: &SharedData,
     pool: &PgPool,

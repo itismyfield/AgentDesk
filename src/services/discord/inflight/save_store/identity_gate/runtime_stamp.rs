@@ -182,12 +182,12 @@ fn persist_terminal_range(
     let (result, canonical, session) = frame;
     let (range, generation, source_file_identity) = source;
     let canonical = canonical.display().to_string();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let crash_after_admission = std::env::var("ADK_7453_CRASH_CHANNEL")
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
         == Some(fresh.channel_id);
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if crash_after_admission {
         assert_eq!(
             (local.full_response.len(), local.response_sent_offset),
@@ -205,7 +205,7 @@ fn persist_terminal_range(
         &fresh,
         can_deliver_directly,
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::discord::turn_bridge::record_stream_test_event(
         fresh.channel_id,
         format!("admission-peek={body_ownership:?}"),
@@ -270,7 +270,7 @@ fn persist_terminal_range(
     local.tui_terminal_generation_mtime_ns = persisted.tui_terminal_generation_mtime_ns;
     local.last_offset = persisted.last_offset;
     local.save_generation = persisted.save_generation;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::discord::turn_bridge::record_stream_test_event(
         persisted.channel_id,
         format!(
@@ -278,7 +278,7 @@ fn persist_terminal_range(
             persisted.full_response, persisted.response_sent_offset
         ),
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if crash_after_admission {
         std::process::exit(73);
     }

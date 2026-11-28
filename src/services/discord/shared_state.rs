@@ -94,7 +94,7 @@ impl SharedData {
     pub(in crate::services::discord) fn serenity_http_or_token_fallback(
         &self,
     ) -> Option<Arc<serenity::http::Http>> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(http) = test_rest::current() {
             return Some(http);
         }
@@ -109,7 +109,7 @@ impl SharedData {
 }
 
 /// Lets a test stand a recording Discord REST client in for the runtime caches on its thread.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) mod test_rest {
     use super::serenity;
     use std::cell::RefCell;

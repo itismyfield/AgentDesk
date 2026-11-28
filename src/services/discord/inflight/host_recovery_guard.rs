@@ -298,9 +298,13 @@ fn resolve_lookup(
     (verdict, is_tmux)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[path = "host_recovery_seed_fixture_tests.rs"]
+pub(super) mod seed_fixture;
+
 #[cfg(test)]
 #[path = "host_recovery_guard_keyed_tests.rs"]
-pub(super) mod keyed_tests;
+mod keyed_tests;
 
 #[cfg(test)]
 #[path = "host_recovery_guard_log_tests.rs"]

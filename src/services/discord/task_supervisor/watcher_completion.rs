@@ -19,12 +19,12 @@ static RECORDS: LazyLock<Mutex<HashMap<usize, Record>>> =
 fn key(cancel: &Arc<AtomicBool>) -> usize {
     Arc::as_ptr(cancel) as usize
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub struct Ticket {
     _cancel: Arc<AtomicBool>,
     receiver: watch::Receiver<Outcome>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl Ticket {
     /// Observation only: abort, cleanup panic or duplicate identity are Unknown.
     /// Unknown may precede cleanup; it never certifies task or delivery completion.
@@ -45,7 +45,7 @@ impl Ticket {
 /// This observes one registration, not all tasks sharing an Arc. After its record
 /// is removed, a third registration may complete while a duplicate still lives.
 /// Retirement consumers must separately establish unique spawn incarnation.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn observe(cancel: &Arc<AtomicBool>) -> Option<Ticket> {
     let records = RECORDS.lock().unwrap_or_else(|e| e.into_inner());
     records.get(&key(cancel)).map(|r| Ticket {

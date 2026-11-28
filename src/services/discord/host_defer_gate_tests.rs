@@ -7,12 +7,13 @@ use std::sync::Arc;
 use poise::serenity_prelude::ChannelId;
 use sqlx::PgPool;
 
+pub(crate) use super::map_channel;
 use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, pending, wire};
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::test_support::{
     Stored, channel_key, seed, shared_on,
 };
-use crate::services::discord::{DiscordSession, SharedData, inflight};
+use crate::services::discord::{SharedData, inflight};
 use crate::services::provider::ProviderKind;
 
 /// What the stored rows say about one session, as a host-checked caller reads them.
@@ -82,26 +83,6 @@ pub(crate) async fn with_second_bot(
         .await;
     registry.register("claude".to_string(), second).await;
     (shared, registry)
-}
-
-/// Maps `channel` to `channel_name` in the runtime's session table.
-pub(crate) async fn map_channel(shared: &SharedData, channel: ChannelId, channel_name: &str) {
-    let session = DiscordSession {
-        session_id: None,
-        memento_context_loaded: false,
-        memento_reflected: false,
-        current_path: None,
-        history: Vec::new(),
-        pending_uploads: Vec::new(),
-        cleared: false,
-        channel_id: Some(channel.get()),
-        channel_name: Some(channel_name.to_string()),
-        category_name: None,
-        last_active: tokio::time::Instant::now(),
-        worktree: None,
-        born_generation: shared.restart.current_generation,
-    };
-    shared.core.lock().await.sessions.insert(channel, session);
 }
 
 /// PATH-first tmux logging each call: no session exists, `list-sessions` prints the

@@ -544,6 +544,7 @@ impl Fixture {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn compact_summary_preserves_the_manifests_real_input_and_body() {
     let root = tempfile::tempdir().unwrap();
@@ -570,6 +571,7 @@ async fn compact_summary_preserves_the_manifests_real_input_and_body() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() {
     for (index, provider) in [ProviderKind::Claude, ProviderKind::Codex]
@@ -641,6 +643,7 @@ async fn i7441b_local_native_receipts_require_whole_episode_and_exact_payload() 
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
     let root = tempfile::tempdir().unwrap();
@@ -751,6 +754,7 @@ async fn i7441b_source_prefix_and_deadline_budgets_fail_closed_pg() {
     db.drop().await;
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg() {
     use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, run};
@@ -956,6 +960,7 @@ async fn i7441b_pg_only_runner_receipt_is_read_without_repairing_local_ledger_pg
     db.drop().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
     let root = tempfile::tempdir().unwrap();
@@ -992,6 +997,7 @@ async fn i7441b_multichunk_tail_proof_does_not_require_consumed_prefix() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     use crate::services::discord::krx_tui_o_test_host::repost_probe::{Fake, run};
@@ -1101,6 +1107,7 @@ async fn i7441b_mixed_local_and_pg_receipts_cover_all_pieces_pg() {
     db.drop().await;
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
     let root = tempfile::tempdir().unwrap();
@@ -1200,6 +1207,7 @@ async fn i7441b_read_only_ledger_torn_tail_wrong_sources_and_old_versions() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_native_piece_budget_is_not_success() {
     let root = tempfile::tempdir().unwrap();
@@ -1222,6 +1230,7 @@ async fn i7441b_native_piece_budget_is_not_success() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_aborted_or_changed_native_episode_cannot_complete_an_input() {
     for (index, kind) in ["turn_aborted", "task_started"].into_iter().enumerate() {
@@ -1252,6 +1261,7 @@ async fn i7441b_aborted_or_changed_native_episode_cannot_complete_an_input() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_prefix_suffix_budget_boundary_is_exact() {
     let root = tempfile::tempdir().unwrap();
@@ -1344,6 +1354,7 @@ async fn i7441b_prefix_suffix_budget_boundary_is_exact() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
     let root = tempfile::tempdir().unwrap();
@@ -1414,6 +1425,7 @@ async fn i7441b_local_snapshot_reuses_mtime_and_refreshes_changed_ledger() {
     ));
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn i7441c2_terminal_manifest_cost_at_operational_size() {
     let root = tempfile::tempdir().unwrap();
@@ -1453,6 +1465,7 @@ async fn i7441c2_terminal_manifest_cost_at_operational_size() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
     let root = tempfile::tempdir().unwrap();
@@ -1497,6 +1510,7 @@ async fn i7441c2_frame_read_bound_and_expired_deadline_are_exact() {
     }
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn i7441c2_prefix_edit_keeps_the_input_prefix_contract_strict() {
     use std::io::{Seek, SeekFrom, Write};
@@ -1528,6 +1542,7 @@ async fn i7441c2_prefix_edit_keeps_the_input_prefix_contract_strict() {
     assert!(frame.prefix.starts_with("terminal-frame-v1:"));
 }
 
+#[cfg(test)]
 fn fixture_local(f: &Fixture) -> Option<delivery_evidence::LocalEvidence> {
     let plan = f.plan();
     delivery_evidence::local(
@@ -1542,6 +1557,7 @@ fn fixture_local(f: &Fixture) -> Option<delivery_evidence::LocalEvidence> {
     )
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441c3_streaming_reader_legacy_limits_and_latest_attempt() {
     use std::io::Write;
@@ -1678,6 +1694,7 @@ async fn i7441c3_streaming_reader_legacy_limits_and_latest_attempt() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441c3_streaming_reader_append_snapshot_and_replacement() {
     use std::io::Write;
@@ -1724,6 +1741,7 @@ async fn i7441c3_streaming_reader_append_snapshot_and_replacement() {
     );
 }
 
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn i7441r_oversized_or_malformed_source_records_fail_closed() {
     use std::io::Write;
@@ -1769,6 +1787,7 @@ async fn i7441r_oversized_or_malformed_source_records_fail_closed() {
 
 /// A body re-read proves only the bytes and file it began with: a truncate or a path swap mid-read
 /// leaves no proof even when the records read so far composed the body.
+#[cfg(test)]
 #[test]
 fn body_reread_rejects_a_file_changed_mid_read() {
     let dir = tempfile::tempdir().unwrap();
@@ -1826,6 +1845,7 @@ fn body_reread_rejects_a_file_changed_mid_read() {
 /// A reboot renumbers the transcript volume's dev while the writer keeps the source it stored, so
 /// the terminal manifest finds that source by path and inode; a file replaced at the path is not it.
 #[cfg(unix)]
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn renumbered_source_keeps_its_terminal_manifest_but_a_replacement_does_not() {
     use crate::services::tui_o::shadow::capture::{file_identity, renumber};
@@ -1865,6 +1885,7 @@ async fn renumbered_source_keeps_its_terminal_manifest_but_a_replacement_does_no
 /// Like the writer, the observer never guesses between two stored variants of one file, even when
 /// the live stat matches one of them exactly; the same stored source listed twice is still found.
 #[cfg(unix)]
+#[cfg(test)]
 #[tokio::test(flavor = "current_thread")]
 async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does() {
     use crate::services::tui_o::shadow::capture::{file_identity, renumber};
@@ -1921,6 +1942,7 @@ async fn stored_variants_of_one_file_find_no_source_but_a_repeated_source_does()
     }
 }
 
+#[cfg(test)]
 #[tokio::test]
 async fn i7441d5_durable_post_confirmation_rejects_foreign_or_changed_identity() {
     let root = tempfile::tempdir().unwrap();

@@ -6,7 +6,7 @@ use super::*;
 pub(in crate::services) struct BackstopSlot {
     pub(in crate::services) wake: tokio::sync::Notify,
     pub(super) pending_request: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     request_acks: std::sync::Mutex<cancel_backstop_test_support::DeferredRequestAcks>,
 }
 
@@ -15,7 +15,7 @@ impl BackstopSlot {
         Self {
             wake: tokio::sync::Notify::new(),
             pending_request: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             request_acks: Default::default(),
         }
     }
@@ -30,7 +30,7 @@ impl BackstopSlot {
 
     /// Whether a schedule coalesced into this slot since the last call.
     fn consume_requests(&self) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let mut acks = self.request_acks.lock().unwrap();
             let requested = self
@@ -40,12 +40,12 @@ impl BackstopSlot {
             acks.evaluating.extend(pending);
             requested
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         self.pending_request
             .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn request_observed(&self, channel: ChannelId, wake_existing: bool) {
         let mut acks = self.request_acks.lock().unwrap();
         acks.pending
@@ -55,14 +55,14 @@ impl BackstopSlot {
         self.request(wake_existing);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn observe_initial_request(&self, channel: ChannelId) {
         self.request_acks.lock().unwrap().evaluating.extend(
             cancel_backstop_test_support::deferred_request_started(channel),
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn complete_requests(&self) {
         let evaluating = std::mem::take(&mut self.request_acks.lock().unwrap().evaluating);
         for ack in evaluating {
@@ -574,7 +574,7 @@ async fn run_slow_idle_queue_backstop_loop(
             wait_for_trigger,
         )
         .await;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             slot.complete_requests();
             cancel_backstop_test_support::completed_cycle(channel_id);
@@ -792,11 +792,11 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 ) {
     let slot = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             entry
                 .get()
                 .request_observed(channel_id, profile.wakes_existing_task());
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             entry.get().request(profile.wakes_existing_task());
             tracing::debug!(
                 provider = provider.as_str(),
@@ -824,7 +824,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         slot: slot.clone(),
         active: true,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     slot.observe_initial_request(channel_id);
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
         // An owner takes the scheduling event as one direct wake, with no presleep or backstop.
@@ -846,7 +846,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             loop {
                 wake_coalesced(&shared, channel_id, slot.consume_requests());
                 if backlog_guard.release() {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     slot.complete_requests();
                     return;
                 }
@@ -856,7 +856,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let _ =
             kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
                 .await;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         slot.complete_requests();
         run_slow_idle_queue_backstop_loop(
             &shared,

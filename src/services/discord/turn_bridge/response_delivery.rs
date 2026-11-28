@@ -5,11 +5,11 @@
 
 use super::*;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) static STREAM_TEST_EVENTS: std::sync::Mutex<Vec<(u64, String)>> =
     std::sync::Mutex::new(Vec::new());
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn record_stream_test_event(
     channel: u64,
     event: impl Into<String>,

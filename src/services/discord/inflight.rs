@@ -20,8 +20,8 @@ pub(in crate::services::discord) use herdr_turn_evidence::{
 mod host_locator;
 pub(in crate::services::discord) use host_locator::PersistedHostLocator;
 mod host_recovery_guard;
-#[cfg(test)]
-pub(in crate::services::discord) use host_recovery_guard::keyed_tests::{
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use host_recovery_guard::seed_fixture::{
     seed_session_row, seed_session_row_hashed, seed_session_row_keyed,
 };
 pub(in crate::services::discord) use host_recovery_guard::{
