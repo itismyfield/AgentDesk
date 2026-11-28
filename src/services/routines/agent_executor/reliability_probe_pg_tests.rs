@@ -210,18 +210,24 @@ async fn fresh_probe_failure_stands_only_for_a_found_legacy_row_pg() {
     for (label, provider, name, channel, liveness, fails) in cases {
         let _pane = PaneLivenessOverrideGuard::set(&probe_session(provider, name), liveness);
         let run = probe_run(provider, name, channel);
-        let failure = registered.fresh_provider_session_failure(&run).await;
+        let failure = registered
+            .fresh_provider_session_failure_for_test(&run)
+            .await;
         assert_eq!(failure.is_some(), fails, "{label}: {failure:?}");
     }
     let _pane = PaneLivenessOverrideGuard::set(&probe_session("claude", "w2b legacy"), dead);
     let run = probe_run("claude", "w2b legacy", text(1));
-    let unregistered = executor(None).fresh_provider_session_failure(&run).await;
+    let unregistered = executor(None)
+        .fresh_provider_session_failure_for_test(&run)
+        .await;
     assert_eq!(
         unregistered, None,
         "no registered hash is not a legacy answer"
     );
     pool.close().await;
-    let failed = registered.fresh_provider_session_failure(&run).await;
+    let failed = registered
+        .fresh_provider_session_failure_for_test(&run)
+        .await;
     assert_eq!(failed, None, "a failed lookup is not a legacy answer");
     db.drop().await;
 }

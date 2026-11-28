@@ -5,8 +5,8 @@ use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::routines::agent_executor::owner_hook_tests::{
     LEGACY_TEARDOWNS, OWNER, ReservedStart, STARTS,
 };
+use crate::services::routines::agent_executor::test_access;
 use crate::services::routines::agent_executor::*;
-use crate::services::routines::agent_executor::{attempts_include_fallback, owner_input};
 use crate::services::routines::store::{NewRoutine, RoutineStore, RunningAgentRoutineRun};
 use chrono::{DateTime, Duration, Utc};
 use serde_json::{Value, json};
@@ -146,7 +146,7 @@ async fn scenario(retry: bool, fallback: bool) {
             .await
             .unwrap();
         assert!(
-            attempts_include_fallback(&attempts),
+            test_access::attempts_include_fallback(&attempts),
             "owner attempts must preserve fallback metadata"
         );
         assert_eq!(
@@ -276,8 +276,8 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         assert_eq!(repaired.result_json.as_ref().unwrap()["status"],"accepted");
         let renewed:bool=sqlx::query_scalar("SELECT lease_expires_at>NOW() FROM routine_runs WHERE id=$1").bind(&run.run_id).fetch_one(&pool).await.unwrap();assert!(renewed);
         restarted.v2_arm_head_for_tests("actual-attempt").await.unwrap();
-        assert!(!owner_input::custody::bind_observer(&store,&repaired,&restarted,"wrong-attempt",None).await.unwrap_or(false));
-        assert!(owner_input::custody::bind_observer(&store,&repaired,&restarted,"actual-attempt",None).await.unwrap());
+        assert!(!test_access::bind_observer(&store,&repaired,&restarted,"wrong-attempt",None).await.unwrap_or(false));
+        assert!(test_access::bind_observer(&store,&repaired,&restarted,"actual-attempt",None).await.unwrap());
         assert!(executor.poll_agent_runs(&store,10,false).await.unwrap().is_empty(),"pre-bind completion cannot settle the actual attempt");
         sqlx::query("UPDATE session_transcripts SET assistant_message='actual observed answer',created_at=NOW() WHERE turn_id=$1").bind(&turn).execute(&pool).await.unwrap();
         let completed=executor.poll_agent_runs(&store,10,false).await.unwrap();assert_eq!(completed.len(),1);assert_eq!(completed[0].status,"succeeded");

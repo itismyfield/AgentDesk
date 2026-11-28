@@ -5,13 +5,17 @@ use crate::services::engine_runtime::health_port::published_runtime_registry;
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::{HeadlessTurnStartOutcome, HeadlessTurnStartStatus};
 
-#[derive(Debug)]
-pub(crate) enum AgentTurnStartDisposition {
-    Started,
-    Accepted,
-    Pending,
-    Consumed(String),
-    SnapshotInvalid(String),
+pub(super) use disposition::AgentTurnStartDisposition;
+
+mod disposition {
+    #[derive(Debug)]
+    pub(crate) enum AgentTurnStartDisposition {
+        Started,
+        Accepted,
+        Pending,
+        Consumed(String),
+        SnapshotInvalid(String),
+    }
 }
 
 pub(super) fn start_disposition(
@@ -230,7 +234,7 @@ pub(super) async fn owned(
     Ok(Some(started))
 }
 
-pub(crate) async fn start_owned(
+pub(super) async fn start_owned(
     pool: &PgPool,
     fire: &ClaimedFire,
     handle: &ChannelMailboxHandle,
@@ -303,7 +307,7 @@ pub(crate) async fn start_owned(
     Ok(disposition)
 }
 
-pub(crate) async fn bind_observer(
+pub(super) async fn bind_observer(
     connection: &mut sqlx::PgConnection,
     delivery: &RunningAgentDelivery,
     handle: &ChannelMailboxHandle,
@@ -348,7 +352,7 @@ pub(crate) async fn bind_observer(
     Ok(updated.rows_affected() == 1)
 }
 
-pub(crate) async fn close_start_rejected(
+pub(super) async fn close_start_rejected(
     pool: &PgPool,
     delivery: &RunningAgentDelivery,
     reason: &str,
@@ -397,3 +401,45 @@ pub(crate) async fn close_start_rejected(
 
 #[cfg(any(test, feature = "test-support"))]
 tokio::task_local! { pub(crate) static REJECTION_TEST: (PgPool,tokio::sync::mpsc::UnboundedSender<bool>); }
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) use super::disposition::AgentTurnStartDisposition;
+    #[cfg(unix)]
+    use super::{ChannelMailboxHandle, ClaimedFire, PgPool, RunningAgentDelivery};
+    #[cfg(unix)]
+    pub(crate) use super::{OWNER, REJECTION_TEST};
+    #[cfg(unix)]
+    use crate::services::turn_orchestrator::PendingQueueItem;
+
+    #[cfg(unix)]
+    pub(crate) async fn start_owned(
+        pool: &PgPool,
+        fire: &ClaimedFire,
+        handle: &ChannelMailboxHandle,
+        turn_id: &str,
+        input: (PendingQueueItem, String, serde_json::Value),
+    ) -> anyhow::Result<AgentTurnStartDisposition> {
+        super::start_owned(pool, fire, handle, turn_id, input).await
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn bind_observer(
+        connection: &mut sqlx::PgConnection,
+        delivery: &RunningAgentDelivery,
+        handle: &ChannelMailboxHandle,
+        attempt: &str,
+        source: Option<serde_json::Value>,
+    ) -> anyhow::Result<bool> {
+        super::bind_observer(connection, delivery, handle, attempt, source).await
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn close_start_rejected(
+        pool: &PgPool,
+        delivery: &RunningAgentDelivery,
+        reason: &str,
+    ) -> anyhow::Result<()> {
+        super::close_start_rejected(pool, delivery, reason).await
+    }
+}

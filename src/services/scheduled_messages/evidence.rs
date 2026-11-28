@@ -6,10 +6,14 @@ use crate::db::scheduled_messages as db;
 #[cfg(test)]
 use crate::db::session_transcripts::SessionTranscriptEvent;
 
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum TurnEvidence {
-    Delivered,
-    TerminalFailure(String),
+pub(super) use outcome::TurnEvidence;
+
+mod outcome {
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) enum TurnEvidence {
+        Delivered,
+        TerminalFailure(String),
+    }
 }
 
 #[cfg(test)]
@@ -53,7 +57,7 @@ fn outcome_evidence(outcome: ScheduledTurnOutcome) -> TurnEvidence {
 /// `empty_response` terminal quality event proves the turn died without output.
 /// The launch-commit lower bound includes evidence emitted before the later
 /// runtime acknowledgement while excluding unrelated stale evidence.
-pub(crate) async fn find_turn_delivery_evidence(
+pub(super) async fn find_turn_delivery_evidence(
     pool: &PgPool,
     delivery_id: &str,
     turn_id: &str,
@@ -161,5 +165,20 @@ pub(super) async fn poll_running_agent_deliveries(
             tracing::warn!("[smsg] agent delivery poll failed: {error}");
             false
         }
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) use super::outcome::TurnEvidence;
+    use super::{DateTime, PgPool, Utc};
+
+    pub(crate) async fn find_turn_delivery_evidence(
+        pool: &PgPool,
+        delivery_id: &str,
+        turn_id: &str,
+        launch_committed_at: DateTime<Utc>,
+    ) -> Result<Option<TurnEvidence>, sqlx::Error> {
+        super::find_turn_delivery_evidence(pool, delivery_id, turn_id, launch_committed_at).await
     }
 }

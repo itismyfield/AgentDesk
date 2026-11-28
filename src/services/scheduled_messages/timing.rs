@@ -8,8 +8,13 @@ use crate::services::scheduling::next_due_after_anchor;
 /// A fire slot is retried this many times after interruptions before the
 /// definition is failed outright. The delivery retry_count counts re-arms of
 /// the same fire slot.
-pub(crate) const MAX_FIRE_RETRIES: i32 = 3;
+pub(super) const MAX_FIRE_RETRIES: i32 = 3;
 const FIRE_RETRY_BACKOFF_SECS: [i64; 3] = [60, 300, 900];
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) const MAX_FIRE_RETRIES: i32 = super::MAX_FIRE_RETRIES;
+}
 
 /// A live future slot (manual trigger-now case) resumes as-is. Otherwise the
 /// next occurrence is calculated from the shared schedule grammar.

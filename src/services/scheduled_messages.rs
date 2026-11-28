@@ -16,16 +16,16 @@ use sqlx::{PgPool, Postgres, Transaction};
 use std::sync::Arc;
 
 pub(crate) mod context_snapshot;
-pub(crate) mod evidence;
-pub(crate) mod owner_input;
+mod evidence;
+mod owner_input;
 use owner_input::AgentTurnStartDisposition;
 #[cfg(test)]
 use owner_input::start_disposition;
 mod external_delivery;
 pub(crate) mod provider_targets;
-pub(crate) mod push_handoff;
+mod push_handoff;
 use push_handoff::fire_push;
-pub(crate) mod timing;
+mod timing;
 pub(crate) mod turn_completion;
 
 #[cfg(test)]
@@ -89,7 +89,7 @@ pub async fn scheduled_message_loop<R: HeadlessTurnPort>(
 
 /// One scheduler pass: lease recovery, due-claim + fire, agent-turn polling.
 /// Returns true when any row moved (drives the adaptive backoff).
-pub(crate) async fn tick_once<R: HeadlessTurnPort>(
+async fn tick_once<R: HeadlessTurnPort>(
     pool: &PgPool,
     health_registry: Option<&R>,
     claim_owner: &str,
@@ -287,7 +287,7 @@ pub(crate) fn is_runtime_unavailable_message(message: &str) -> bool {
 /// Mirrors `RoutineAgentExecutor::start_turn` minus routine-thread routing:
 /// the turn runs directly in the target channel (or the agent's primary
 /// channel when no target was pinned).
-pub(crate) async fn start_agent_turn<R: HeadlessTurnPort>(
+async fn start_agent_turn<R: HeadlessTurnPort>(
     pool: &PgPool,
     health_registry: &R,
     fire: &ClaimedFire,
@@ -476,7 +476,7 @@ pub(crate) fn build_agent_prompt(message: &ScheduledMessageRow) -> String {
 
 /// Check one running agent delivery for completion evidence. Returns true
 /// when the delivery transitioned.
-pub(crate) async fn poll_agent_delivery(pool: &PgPool, delivery: RunningAgentDelivery) -> bool {
+async fn poll_agent_delivery(pool: &PgPool, delivery: RunningAgentDelivery) -> bool {
     let Some(turn_id) = delivery.turn_id.as_deref() else {
         // Unreachable: the listing query only returns rows with a recorded
         // turn_id. Never interrupt here — a missing turn id means the start
@@ -571,7 +571,7 @@ async fn enqueue_raw_fallback_on_tx(
 /// A timeout without terminal evidence deliberately fails closed without a
 /// fallback: the headless turn may still relay a late answer, so staging raw
 /// content at that boundary could deliver both messages to the user.
-pub(crate) async fn resolve_agent_delivery(
+async fn resolve_agent_delivery(
     pool: &PgPool,
     delivery: &RunningAgentDelivery,
     allow_timeout: bool,
@@ -899,6 +899,44 @@ async fn interrupt_delivery(
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) mod start_target_hook_tests;
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) use super::evidence::test_access::{TurnEvidence, find_turn_delivery_evidence};
+    pub(crate) use super::owner_input::test_access as owner_input;
+    pub(crate) use super::push_handoff::test_access as push_handoff;
+    pub(crate) use super::timing::test_access::MAX_FIRE_RETRIES;
+    use super::{ClaimedFire, HeadlessTurnPort, PgPool, RunningAgentDelivery};
+
+    pub(crate) async fn tick_once<R: HeadlessTurnPort>(
+        pool: &PgPool,
+        health_registry: Option<&R>,
+        claim_owner: &str,
+    ) -> bool {
+        super::tick_once(pool, health_registry, claim_owner).await
+    }
+
+    pub(crate) async fn start_agent_turn<R: HeadlessTurnPort>(
+        pool: &PgPool,
+        health_registry: &R,
+        fire: &ClaimedFire,
+    ) -> anyhow::Result<owner_input::AgentTurnStartDisposition> {
+        super::start_agent_turn(pool, health_registry, fire).await
+    }
+
+    #[cfg(unix)]
+    pub(crate) async fn poll_agent_delivery(pool: &PgPool, delivery: RunningAgentDelivery) -> bool {
+        super::poll_agent_delivery(pool, delivery).await
+    }
+
+    pub(crate) async fn resolve_agent_delivery(
+        pool: &PgPool,
+        delivery: &RunningAgentDelivery,
+        allow_timeout: bool,
+    ) -> bool {
+        super::resolve_agent_delivery(pool, delivery, allow_timeout).await
+    }
+}
 
 #[cfg(test)]
 mod tests {

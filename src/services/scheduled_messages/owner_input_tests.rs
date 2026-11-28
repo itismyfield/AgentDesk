@@ -10,7 +10,10 @@ use crate::services::discord::runtime_store::discord_pending_queue_root;
 use crate::services::discord::{SharedData, shared_data_without_policy_for_tests};
 use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
 use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
-use crate::services::scheduled_messages::owner_input::AgentTurnStartDisposition;
+use crate::services::scheduled_messages::test_access::{
+    owner_input::{self, AgentTurnStartDisposition},
+    poll_agent_delivery,
+};
 use crate::services::turn_orchestrator::ChannelMailboxHandle;
 use crate::services::turn_orchestrator::ChannelMailboxRegistry;
 use poise::serenity_prelude::ChannelId;

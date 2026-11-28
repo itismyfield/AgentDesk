@@ -143,7 +143,7 @@ async fn owner_review_p2_completion_before_bind_is_preserved_pg() {
             .is_empty()
     );
     assert!(
-        owner_input::custody::bind_observer(&store, &run, &handle, "fast-attempt", None)
+        test_access::bind_observer(&store, &run, &handle, "fast-attempt", None)
             .await
             .unwrap()
     );
@@ -181,7 +181,7 @@ async fn owner_review_p2_armed_timeout_waits_for_settlement_pg() {
     let (db, pool, store, executor, run, handle) = accepted_fixture().await;
     handle.v2_arm_head_for_tests("slow-attempt").await.unwrap();
     assert!(
-        owner_input::custody::bind_observer(&store, &run, &handle, "slow-attempt", None)
+        test_access::bind_observer(&store, &run, &handle, "slow-attempt", None)
             .await
             .unwrap()
     );
@@ -635,7 +635,10 @@ async fn settlement_boundary(
         .execute(&pool)
         .await
         .unwrap();
-        store.record_late_owner_completions().await.unwrap();
+        store
+            .record_late_owner_completions_for_test()
+            .await
+            .unwrap();
         let (closed, evidence): (String, Option<String>) = sqlx::query_as(
             "SELECT status,result_json#>>'{late_completion,kind}' FROM routine_runs WHERE id=$1",
         )

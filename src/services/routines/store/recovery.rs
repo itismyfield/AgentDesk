@@ -95,8 +95,13 @@ impl RoutineStore {
         .await?)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) async fn record_late_owner_completions_for_test(&self) -> Result<()> {
+        self.record_late_owner_completions().await
+    }
+
     /// Late evidence annotates the exact closed run without changing its terminal outcome.
-    pub(crate) async fn record_late_owner_completions(&self) -> Result<()> {
+    pub(in crate::services::routines) async fn record_late_owner_completions(&self) -> Result<()> {
         sqlx::query(
             "WITH evidence AS (
                 SELECT rr.id, observed.created_at, observed.kind

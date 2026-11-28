@@ -5,7 +5,7 @@ mod execution;
 mod launch;
 pub(crate) use launch::RoutineLaunchRuntime;
 use launch::RoutineTurnLaunch;
-pub(crate) mod owner_input;
+mod owner_input;
 use owner_input::AgentStartDisposition;
 mod owned_session;
 pub(crate) mod reliability;
@@ -1599,7 +1599,7 @@ fn current_attempt_kind_from_result(result_json: Option<&Value>) -> Option<&str>
         .filter(|value| !value.is_empty())
 }
 
-pub(crate) fn attempts_include_fallback(attempts: &Value) -> bool {
+fn attempts_include_fallback(attempts: &Value) -> bool {
     attempts
         .as_array()
         .map(|items| {
@@ -1609,6 +1609,15 @@ pub(crate) fn attempts_include_fallback(attempts: &Value) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) use super::owner_input::test_access::bind_observer;
+
+    pub(crate) fn attempts_include_fallback(attempts: &serde_json::Value) -> bool {
+        super::attempts_include_fallback(attempts)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

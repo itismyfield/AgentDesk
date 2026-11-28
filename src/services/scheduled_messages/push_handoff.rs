@@ -1,7 +1,6 @@
 //! Atomic Discord + external-provider handoff for one scheduled push fire.
 
 use chrono::{DateTime, Duration, Utc};
-use thiserror::Error;
 
 use crate::db::scheduled_messages as db;
 use crate::db::scheduled_messages::ClaimedFire;
@@ -27,18 +26,24 @@ fn render_discord_content(content: &str, user_ids: &[String]) -> String {
     format!("{mentions}\n{content}")
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PushHandoffOutcome {
-    Committed,
-    Canceled,
-}
+pub(super) use outcome::{PushHandoffError, PushHandoffOutcome};
 
-#[derive(Debug, Error)]
-pub(crate) enum PushHandoffError {
-    #[error("scheduled push target is invalid: {0}")]
-    Invalid(&'static str),
-    #[error("scheduled push handoff failed: {0}")]
-    Transient(#[source] anyhow::Error),
+mod outcome {
+    use thiserror::Error;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub(crate) enum PushHandoffOutcome {
+        Committed,
+        Canceled,
+    }
+
+    #[derive(Debug, Error)]
+    pub(crate) enum PushHandoffError {
+        #[error("scheduled push target is invalid: {0}")]
+        Invalid(&'static str),
+        #[error("scheduled push handoff failed: {0}")]
+        Transient(#[source] anyhow::Error),
+    }
 }
 
 pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: DateTime<Utc>) {
@@ -60,7 +65,7 @@ pub(super) async fn fire_push(pool: &sqlx::PgPool, fire: &ClaimedFire, now: Date
     }
 }
 
-pub(crate) async fn commit(
+pub(super) async fn commit(
     pool: &sqlx::PgPool,
     fire: &ClaimedFire,
     now: DateTime<Utc>,
@@ -193,6 +198,20 @@ fn map_external_error(error: ExternalHandoffError) -> PushHandoffError {
             PushHandoffError::Invalid("stored provider target plan is invalid")
         }
         ExternalHandoffError::Database(error) => transient(error),
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    pub(crate) use super::outcome::{PushHandoffError, PushHandoffOutcome};
+    use super::{ClaimedFire, DateTime, Utc};
+
+    pub(crate) async fn commit(
+        pool: &sqlx::PgPool,
+        fire: &ClaimedFire,
+        now: DateTime<Utc>,
+    ) -> Result<PushHandoffOutcome, PushHandoffError> {
+        super::commit(pool, fire, now).await
     }
 }
 

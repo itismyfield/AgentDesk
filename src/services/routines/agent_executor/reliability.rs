@@ -217,6 +217,14 @@ impl RoutineAgentExecutor {
         })?;
         Ok(settled_terminal_turn_error(run, row, Utc::now()))
     }
+    #[cfg(all(unix, any(test, feature = "test-support")))]
+    pub(crate) async fn fresh_provider_session_failure_for_test(
+        &self,
+        run: &RunningAgentRoutineRun,
+    ) -> Option<String> {
+        self.fresh_provider_session_failure(run).await
+    }
+
     /// A fresh managed-tmux turn that lost its pane cannot produce a
     /// transcript or terminal quality event. Detect that state before the
     /// routine's long completion timeout so the existing cleanup and
@@ -224,7 +232,7 @@ impl RoutineAgentExecutor {
     /// ignored by `probe_tmux_session_pane_liveness` callers: only a definitive
     /// dead/absent result is actionable. A failure the probe finds stands only
     /// when the host guard admits the session's sessions row; otherwise the timeout decides.
-    pub(crate) async fn fresh_provider_session_failure(
+    pub(super) async fn fresh_provider_session_failure(
         &self,
         run: &RunningAgentRoutineRun,
     ) -> Option<String> {

@@ -138,7 +138,7 @@ impl RoutineAgentExecutor {
     }
 }
 
-pub(crate) mod custody {
+pub(super) mod custody {
     use super::*;
     use crate::services::engine_runtime::health_port::owner_input::{
         OwnerInput, owner_input_actor,
@@ -370,7 +370,7 @@ pub(crate) mod custody {
             .map_err(anyhow::Error::msg)
     }
 
-    pub(crate) async fn bind_observer(
+    pub(in crate::services::routines::agent_executor) async fn bind_observer(
         store: &RoutineStore,
         run: &RunningAgentRoutineRun,
         handle: &ChannelMailboxHandle,
@@ -395,6 +395,22 @@ pub(crate) mod custody {
         store
             .project_agent_input(&run.run_id, turn_id, &input.ticket, &result)
             .await
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod test_access {
+    use super::*;
+    use crate::services::turn_orchestrator::ChannelMailboxHandle;
+
+    pub(crate) async fn bind_observer(
+        store: &RoutineStore,
+        run: &RunningAgentRoutineRun,
+        handle: &ChannelMailboxHandle,
+        attempt: &str,
+        source: Option<Value>,
+    ) -> Result<bool> {
+        custody::bind_observer(store, run, handle, attempt, source).await
     }
 }
 
