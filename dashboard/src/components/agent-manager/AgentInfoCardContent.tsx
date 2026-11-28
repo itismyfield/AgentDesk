@@ -7,6 +7,7 @@ import AgentPersona from "../AgentPersona";
 import * as api from "../../api";
 import { catalogLabel, useProviderCatalog } from "../../api/providers";
 import { useKanban } from "../../contexts/KanbanContext";
+import { isThreadSession } from "../../contexts/session-overlay";
 import { Button } from "../../kit/free/button-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { TextField } from "../../kit/free/text-field-clean";
@@ -91,7 +92,7 @@ export function AgentInfoCardContent({
   const isMobile = useIsMobile();
   const ownShared = useAgentDetailShared(!pageShared);
   const shared = pageShared ?? ownShared;
-  const { sessions, skills, retrySessions, retrySkills } = useAgentDetailData(agent.id);
+  const { sessions, skills, retrySessions, retrySkills } = useAgentDetailData(agent.id, shared.bindings);
   const root = useRef<HTMLDivElement>(null);
   const [opened, setOpened] = useState<Set<FoldKey>>(() => new Set());
   const fold = (key: FoldKey): DetailFold => {
@@ -193,14 +194,6 @@ export function AgentInfoCardContent({
   const live = sessions?.live ?? [];
   const workingSessions = live.filter(isTurnSession);
   const connections = fold("connections");
-  // Routes and live session threads only, once both are read, and only while the section shows.
-  const channelInfo = useDiscordChannels(
-    connections.open && shared.bindings !== undefined && sessions !== undefined
-      ? [...bindings.flatMap((binding) => [binding.channelId, binding.counterModelChannelId]), ...live.map((session) => session.thread_channel_id)]
-      : null,
-  );
-  const resolveChannel = (channelId: string | null | undefined) => (isDiscordSnowflake(channelId) ? channelInfo[channelId] ?? null : null);
-  const resolveParent = (info: api.DiscordChannelInfo | null | undefined) => (isDiscordSnowflake(info?.parent_id) ? channelInfo[info.parent_id] ?? null : null);
 
   const cronFold = fold("cron");
   const activityFold = fold("activity");
@@ -224,13 +217,74 @@ export function AgentInfoCardContent({
   }, [agent.id, state, agent.status]);
 
   // Phones read no turns (as home); a caller that already polls the list's working agents hands its map over.
-  const working = state ? state === "working" : agent.status === "working";
+  const working = Boolean(state === "working" || agent.status === "working" || workingSessions.length > 0);
+  const effectiveState: HomeAgentState | undefined = workingSessions.length > 0 ? "working" : state;
   const ownTurns = useAgentTurns(turns || isMobile || !working ? [] : [agent.id]);
   const liveTurn = (turns ?? ownTurns).get(agent.id);
+  const canStopTurn = Boolean(
+    agent.status === "working"
+      || (liveTurn && liveTurn.status !== "idle")
+      || workingSessions.some((s) => !s.inferred_linked_agent),
+  );
   const summary = getAgentWorkSummary(agent, { linkedSessions: workingSessions });
   const rawMonitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
   const activeProvider = resolveActiveAgentProvider(agent, workingSessions, rawMonitor?.role ?? liveTurn?.provider);
   const monitor = rawMonitor ? { ...rawMonitor, role: activeProvider } : null;
+  const candidateNowSessions = useMemo(() => {
+    const rank = (status: DispatchedSession["status"]) =>
+      status === "turn_active" || status === "working"
+        ? 0
+        : status === "awaiting_user" || status === "awaiting_bg"
+          ? 1
+          : 2;
+    return live
+      .filter(
+        (s) =>
+          Boolean(s.session_key)
+          && (s.status === "turn_active"
+            || s.status === "working"
+            || s.status === "awaiting_bg"
+            || s.status === "awaiting_user"
+            || isThreadSession(s)),
+      )
+      .sort((left, right) => {
+        const diff = rank(left.status) - rank(right.status);
+        if (diff !== 0) return diff;
+        const leftTs = coerceTimestampMs(left.last_seen_at) ?? coerceTimestampMs(left.connected_at) ?? 0;
+        const rightTs = coerceTimestampMs(right.last_seen_at) ?? coerceTimestampMs(right.connected_at) ?? 0;
+        return rightTs - leftTs;
+      });
+  }, [live]);
+  const nowSessions = useMemo(() => {
+    if (
+      candidateNowSessions.length === 1
+      && monitor !== null
+      && !isThreadSession(candidateNowSessions[0])
+      && Boolean(liveTurn?.session_key && candidateNowSessions[0].session_key === liveTurn.session_key)
+    ) {
+      return [];
+    }
+    return candidateNowSessions;
+  }, [candidateNowSessions, monitor, liveTurn?.session_key]);
+  const nowChannelIds = useMemo(
+    () => nowSessions.map((s) => s.thread_channel_id ?? s.resolved_thread_channel_id ?? s.thread_id),
+    [nowSessions],
+  );
+  const connectionChannelIds =
+    connections.open && shared.bindings !== undefined && sessions !== undefined
+      ? [
+          ...bindings.flatMap((binding) => [binding.channelId, binding.counterModelChannelId]),
+          ...live.map((session) => session.thread_channel_id ?? session.resolved_thread_channel_id ?? session.thread_id),
+        ]
+      : [];
+  const channelInfo = useDiscordChannels(
+    connectionChannelIds.length > 0 || nowChannelIds.length > 0
+      ? [...connectionChannelIds, ...nowChannelIds]
+      : null,
+  );
+  const resolveChannel = (channelId: string | null | undefined) => (isDiscordSnowflake(channelId) ? channelInfo[channelId] ?? null : null);
+  const resolveParent = (info: api.DiscordChannelInfo | null | undefined) => (isDiscordSnowflake(info?.parent_id) ? channelInfo[info.parent_id] ?? null : null);
+
   const cacheNow = useNow(activeProvider === "claude" ? 5_000 : 60_000);
   const promptCache = useMemo(() => {
     const latestSessionMs = live
@@ -272,7 +326,7 @@ export function AgentInfoCardContent({
   return (
     <div ref={root} className="flex min-w-0 flex-col [overflow-wrap:anywhere] [word-break:keep-all]">
       <div className="flex min-w-0 items-start gap-3 pb-4">
-        <AgentPersona agent={agent} size={44} animated />
+        <AgentPersona agent={agent} state={working ? "working" : undefined} size={44} animated />
         <div className="min-w-0 flex-1">
           <h2 id={titleId} tabIndex={-1} className="m-0 text-base font-semibold leading-6 text-(--fg) outline-none">
             {primaryName}
@@ -322,15 +376,18 @@ export function AgentInfoCardContent({
 
       <AgentNowSection
         agent={agent}
-        state={state}
+        state={effectiveState}
         tr={tr}
         isKo={isKo}
         summary={summary}
         monitor={monitor}
         steps={monitorSteps}
+        nowSessions={nowSessions}
+        resolveChannel={resolveChannel}
+        resolveParent={resolveParent}
         promptCache={promptCache}
         onOpenLog={openTurns}
-        onStopTurn={working ? () => setConfirmStopOpen(true) : undefined}
+        onStopTurn={working && canStopTurn ? () => setConfirmStopOpen(true) : undefined}
         stoppingTurn={stoppingTurn}
         stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}

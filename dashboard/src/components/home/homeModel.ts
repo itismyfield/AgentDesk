@@ -15,6 +15,7 @@ import {
   type LoopFinding,
 } from "../../lib/agentObservability";
 import { aggregateDegradedReasons } from "../../lib/healthReasons";
+import { withInferredLinkedAgents } from "../../contexts/session-overlay";
 import type { Agent, DispatchedSession, KanbanCard } from "../../types";
 import { parseChannelNameFromSessionKey } from "../agent-manager/discord-routing";
 import { cardTitle, coerceTimestampMs, isOpenKanbanCard } from "../agent-manager/kanban-utils";
@@ -137,9 +138,10 @@ function compareHomeAgents(left: HomeAgent, right: HomeAgent): number {
 
 /** One state per agent, sorted working -> background/stalled -> recent activity -> name. */
 export function classifyAgents(agents: Agent[], sessions: DispatchedSession[], sessionsFailed: boolean): HomeAgent[] {
+  const normalizedSessions = withInferredLinkedAgents(sessions);
   const byAgent = new Map<string, DispatchedSession[]>();
   const unlinkedById = new Map<string, DispatchedSession>();
-  for (const session of sessions) {
+  for (const session of normalizedSessions) {
     if (session.linked_agent_id) {
       byAgent.set(session.linked_agent_id, [...(byAgent.get(session.linked_agent_id) ?? []), session]);
     } else if (session.status !== "disconnected") {
@@ -203,8 +205,9 @@ export function buildHomeAgents(
   sessionsFailed: boolean,
   now = Date.now(),
 ): HomeAgent[] {
+  const normalizedSessions = withInferredLinkedAgents(sessions);
   const realAgents = agents.filter((agent) => !agent.id.startsWith("dispatched:") && (!isTestAgent(agent) || agent.status === "working"));
-  const unlinkedAgents: Agent[] = sessions
+  const unlinkedAgents: Agent[] = normalizedSessions
     .filter((session) => {
       if (session.linked_agent_id || session.status === "disconnected") return false;
       const activeOrWaiting = TURN_STATUSES.has(session.status) || session.status === "awaiting_bg" || session.status === "awaiting_user";
@@ -230,7 +233,7 @@ export function buildHomeAgents(
       };
     });
 
-  const combined = classifyAgents([...realAgents, ...unlinkedAgents], sessions, sessionsFailed);
+  const combined = classifyAgents([...realAgents, ...unlinkedAgents], normalizedSessions, sessionsFailed);
   return combined.map((entry) => {
     if (!entry.unlinkedSession) return entry;
     const stalled = isStaleUnlinkedSession(entry.unlinkedSession, now);
@@ -272,6 +275,7 @@ export interface HomeTurn {
   started_at: string | null;
   updated_at: string | null;
   provider: string | null;
+  session_key?: string | null;
   current_tool_line: string | null;
   tool_events?: {
     kind: string;
@@ -394,9 +398,10 @@ export function buildRunningNowTasks({
   tr: Tr;
   isKo: boolean;
 }): RunningNowTask[] {
+  const normalizedSessions = withInferredLinkedAgents(sessions);
   const realEntries = classifyAgents(
     agents.filter((agent) => !agent.id.startsWith("dispatched:") && (!isTestAgent(agent) || agent.status === "working")),
-    sessions,
+    normalizedSessions,
     sessionsFailed,
   );
   const tasks: RunningNowTask[] = [];
@@ -415,7 +420,7 @@ export function buildRunningNowTasks({
     });
   }
 
-  for (const session of sessions) {
+  for (const session of normalizedSessions) {
     if (session.linked_agent_id || session.status === "disconnected") continue;
     const isRunning = TURN_STATUSES.has(session.status);
     const isWaiting = session.status === "awaiting_bg" || session.status === "awaiting_user";
