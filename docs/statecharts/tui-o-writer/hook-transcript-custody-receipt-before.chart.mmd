@@ -1,0 +1,57 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: progress
+    lg1: waiting
+    lg2: Breaks OneCompletionEffect in some cases
+    lg3: Path to the ChannelEventuallyReady or EligibleEventuallySettles or OneCompletionEffect bug
+    lg4: Repeats forever, so ChannelEventuallyReady or EligibleEventuallySettles breaks
+  }
+  class lg0 blue
+  class lg1 yellow
+  class lg2 mayBreak
+  class lg3 bugPath
+  class lg4 repeats
+  s0: N1 종료됨, 종료 기록 전 (N1 closer 있음, 다른 source 복구 실패, membership receipt 없음)
+  s1: N1 종료됨, 종료 기록 전 (N1 closer 있음, 다른 source 복구 실패)
+  s2: N1 종료됨, 종료 기록 전 (N1 closer 있음, 다른 source 복구 실패, writer 멈춤, membership receipt 없음)
+  s3: 결과 저장됨, 본문 읽기 대기
+  s4: N1 종료 기록됨, 원본 범위 확인 중 (N1 closer 있음, 다른 source 복구 실패, writer 멈춤, membership receipt 없음)
+  s5: 본문 처리 끝, 정리 대기
+  s6: N1 종료 기록됨, 원본 범위 확정 (N1 closer 있음, 다른 source 복구 실패, writer 멈춤, membership receipt 없음)
+  s7: 결과 저장됨, 본문 읽기 대기, 완료 부작용 이미 실행
+  s8: N1 종료 기록됨, 원본 범위 확정 (N1 closer 있음, N2 입력 있음, 다른 source 복구 실패, writer 멈춤, membership receipt 없음)
+  [*] --> s0
+  s0 --> s1: writer가 membership receipt를 durable하게 남김
+  s0 --> s2: source 하나의 복구가 실패해 writer가 멈춤
+  s1 --> s3: N1 결과를 원본 ticket에 기록함
+  s2 --> s4: 후속 N2가 뜸
+  s3 --> s5: 봉인된 본문을 읽어 완료를 기록함
+  s4 --> s6: finalizer가 종료 길이까지 N1 source를 읽음
+  s5 --> s7: 정리가 미뤄져 완료 기록이 다시 대기로 돌아감
+  s6 --> s8: N2에 입력이 들어와 파일 승인이 생김
+  s7 --> s5: 봉인된 본문을 읽어 완료를 기록함
+  s8 --> s8: N2 턴이 채널 행을 차지함 or N2가 idle이 됨
+  classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
+  class s0 yellow
+  class s0 bugPath
+  class s1 yellow
+  class s1 bugPath
+  class s2 yellow
+  class s2 bugPath
+  class s3 blue
+  class s3 bugPath
+  class s4 blue
+  class s4 bugPath
+  class s5 blue
+  class s5 mayBreak
+  class s5 bugPath
+  class s6 blue
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s8 repeats

@@ -1,0 +1,42 @@
+---
+title: "재시작 뒤 원본 ticket 정산과 채널 문"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: open
+    lg1: progress
+  }
+  class lg0 teal
+  class lg1 blue
+  s0: 결과 저장됨, 본문 읽기 대기 (파일 바뀜)
+  s1: 결과 저장됨, 본문 읽기 대기 (파일 없음)
+  s2: 결과 저장됨, 본문 읽기 대기 (파일 잠시 없음)
+  s3: 결과 저장됨, 본문 읽기 대기
+  s4: 본문 처리 끝, 정리 대기 (파일 바뀜)
+  s5: 본문 처리 끝, 정리 대기 (파일 없음)
+  s6: 본문 처리 끝, 정리 대기 (파일 잠시 없음)
+  s7: 본문 처리 끝, 정리 대기
+  s8: 채널 열림: 결과와 완료 기록 뒤 정리
+  [*] --> s0
+  [*] --> s1
+  [*] --> s2
+  [*] --> s3
+  s0 --> s4: 본문을 읽을 수 없어 완료 기록을 건너뜀
+  s1 --> s5: 본문을 읽을 수 없어 완료 기록을 건너뜀
+  s2 --> s3: transcript가 다시 보임
+  s2 --> s6: 본문을 읽을 수 없어 완료 기록을 건너뜀
+  s3 --> s7: 봉인된 본문을 읽어 완료를 기록함
+  s4 --> s8: 원본 행을 정리함
+  s5 --> s8: 원본 행을 정리함
+  s6 --> s7: transcript가 다시 보임
+  s6 --> s8: 원본 행을 정리함
+  s7 --> s8: 원본 행을 정리함
+  class s0 blue
+  class s1 blue
+  class s2 blue
+  class s3 blue
+  class s4 blue
+  class s5 blue
+  class s6 blue
+  class s7 blue
+  class s8 teal
