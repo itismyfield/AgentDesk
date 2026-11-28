@@ -1,0 +1,2 @@
+key: 760-session-rotation
+| `session-rotation` Claude 전사 크기 세션 회전: 인수인계 요청→본문 저장→유휴 배리어→/exit→새 UUID→seed (#8472 design-2) | `5f0f2803e8` | D1Held: design-1 원문에서 배리어 뒤 포기가 입력을 안고 영구 보류(W_HeldWithInput·W_HeldNoSession·W_StopPermitLost 도달). Before: 수리 6개를 모두 끈 design-2 모델이 래치 선소진·제3 UUID 수락·Legacy 출력 절단·예약 유실·턴 절단·seed 전 입력·배리어 영구 보류(BarrierReleases·QueuedLeaves) RED. 수리 하나씩 끈 변형 6종 기대 RED | Fixed GREEN(규칙 11개+liveness 3개, crash·외부 kill 1회), Small GREEN, 도달성 증인 3 cfg. 13 cfg. [보고서](session-rotation/session-rotation.report.md) |
