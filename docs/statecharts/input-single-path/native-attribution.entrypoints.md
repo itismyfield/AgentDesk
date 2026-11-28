@@ -547,9 +547,9 @@ main `984d802d9f`에서 아래 4개 시험 파일이 삭제됐다. 이 파일의
 | `src/services/discord/queue_dispatch/kickoff.rs:361` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch/kickoff.rs:367` | `kickoff_idle_queues` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_dispatch/kickoff.rs:380` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:402` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:423` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
-| `src/services/discord/queue_dispatch/kickoff.rs:435` | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs` (기준 402행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs` (기준 423행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
+| `src/services/discord/queue_dispatch/kickoff.rs` (기준 435행) | `kickoff_idle_queues_with_deps` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:319` | `schedule_race_loss_requeue_post_enqueue_idle_recheck` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:379` | `schedule_writer_ready_queue_kick` | Kick(wake/event/queue admission, 같은 head 재검증) |
 | `src/services/discord/queue_io.rs:506` | `kick_queue_channel_if_context_available` | Kick(wake/event/queue admission, 같은 head 재검증) |
