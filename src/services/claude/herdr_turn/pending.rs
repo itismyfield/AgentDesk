@@ -13,11 +13,12 @@ pub(super) fn pending_source(
     use crate::domain::retry_wait::RetryCause as Cause;
     let nonce = &record.execution_nonce;
     let adopted = record.location.is_none() && record.expected.is_none();
-    let retained = "retired the missing execution; retained input needs its own disposition";
+    let retired =
+        || retry_probe::attach_refused(turn, nonce, "retired the missing execution before attach");
     if adopted {
         match unplaced_resolved(turn, runtime, ports, record)? {
             Resolution::Retired => return launched_source(turn, runtime, ports),
-            Resolution::RetiredWithEvidence => return Err(retained.into()),
+            Resolution::RetiredWithEvidence => return Err(retired()),
             _ => {}
         }
     }
@@ -35,7 +36,7 @@ pub(super) fn pending_source(
             if let Err(gap) = never_attached::probe_again(turn, runtime, ports) {
                 match unplaced_resolved(turn, runtime, ports, record) {
                     Ok(Resolution::Retired) => return launched_source(turn, runtime, ports),
-                    Ok(Resolution::RetiredWithEvidence) => return Err(retained.into()),
+                    Ok(Resolution::RetiredWithEvidence) => return Err(retired()),
                     Ok(Resolution::Adopted) => {}
                     Ok(Resolution::Held(_)) | Err(_) => {
                         let detail = never_attached::refusal(turn, record, &session_id, Err(gap));
@@ -54,7 +55,7 @@ pub(super) fn pending_source(
             && unplaced_resolved(turn, runtime, ports, record)
                 == Ok(Resolution::RetiredWithEvidence)
         {
-            return Err(retained.into());
+            return Err(retired());
         }
         let (cause, detail) = match adopted {
             true => (
@@ -86,9 +87,9 @@ pub(super) fn pending_source(
     }
     attach(turn, runtime, ports, nonce, &session_id).map_err(|error| {
         if unplaced_resolved(turn, runtime, ports, record) == Ok(Resolution::RetiredWithEvidence) {
-            retained.into()
+            retired()
         } else {
-            error
+            retry_probe::attach_refused(turn, nonce, &error)
         }
     })
 }

@@ -42,7 +42,9 @@ VARIABLES entry, proof, cache, restarted, sinceRestart, restored,
           \* design w3 (review-design-s2-2 P1 1,2)
           ran, closed, succ, archived, hitLive,
           \* design w4 (review-design-s2-3 P1 1)
-          gone, gen, goneGen, lostSucc
+          gone, gen, goneGen, lostSucc,
+          \* provider execution evidence and owner attach wait are independent of the first key.
+          evidenced, attachWait
 
 vars == <<entry, proof, cache, restarted, sinceRestart, restored,
           restartHost, tmuxOp, relaunch, consent, sync>>
@@ -50,7 +52,7 @@ s2vars == <<exec, made, tabs, tmuxs, inq, submits, oready, late, epoch, restarts
             judged, unsent, receipt>>
 w2vars == <<reserved, hkey, boot, other, v2, rst>>
 w3vars == <<ran, closed, succ, archived, hitLive>>
-w4vars == <<gone, gen, goneGen, lostSucc>>
+w4vars == <<gone, gen, goneGen, lostSucc, evidenced, attachWait>>
 allvars == <<vars, s2vars, w2vars, w3vars, w4vars>>
 
 Threads == {"LiveTmux", "DeadTmux", "ProbeFail", "HerdrBound", "Unresolved", "SlotGc", "LegacyKey"}
@@ -128,11 +130,12 @@ SyncOutcome == CASE cache = "Herdr" -> "HerdrPath"
 
 \* ---- S2 placement section: definitions used by Init ----
 ReplacedEntries == {"LegacyReplaced", "LegacyLiveReplacement", "UserDefaultReplaced"}
+AttachEntries == {"LostBeforeKey", "LostBeforeKeyKnownNotSent", "LostBeforeKeyUnread"}
 S2Entries == {"NewThread", "FreshAfterKill", "ResumeTmux", "TmuxParentThread",
               "LiveTmuxNoSel", "SelUnknown", "RetiredNative",
               "RetryNew", "DispatchNew", "StaleBound", "RestartVacant",
               "LostCommand", "LostCommandHeld", "SlotSuccessor",
-              "LostAfterKey", "LostCommandShellUsed"} \union ReplacedEntries
+              "LostAfterKey", "LostCommandShellUsed"} \union ReplacedEntries \union AttachEntries
 HerdrParentS2 == S2Entries \ {"TmuxParentThread"}
 S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDead"
                       [] entry = "LiveTmuxNoSel" -> "Tmux"
@@ -172,6 +175,7 @@ S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDe
           /\ gone = (entry \in ReplacedEntries)
           /\ gen = IF gone THEN 1 ELSE 0
           /\ goneGen = gen /\ lostSucc = FALSE
+          /\ evidenced = FALSE /\ attachWait = "None"
 
 Init == /\ entry \in Entries
         /\ proof \in {"Ok", "Pending"}
@@ -303,7 +307,7 @@ S2Like == Mode \in {"S2", "MutS2NoPermit", "MutS2NoBootResolve", "MutS2NoRelease
                     "MutW1BootGateBlocks", "MutW1RestartNoSeed",
                     "MutW3NoPlacedResidue", "MutW3ResidueByAbsence", "MutW3NoPristine",
                     "MutW3ArchiveAfterRelease", "MutW4PendingEarlyReturn", "MutW4MissingNoCas",
-                    "MutW4UnreadAsMissing", "MutW4MissingResubmits"}
+                    "MutW4UnreadAsMissing", "MutW4MissingResubmits", "MutAttachOpaque"}
 Selector == entry = "ResumeTmux"
 HerdrExec == {"Pending", "Placed", "Bound"}
 FreshStart == {"None", "LegacyDead", "Retired", "Gone"}
@@ -342,6 +346,7 @@ Released == {"LegacyDead", "Retired", "Gone"}
 \* owner's WRITER_HELD hold (provider_dispatch/owner_input.rs:192-224) in every mode.
 Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in S2Entries /\ inq = "Queued"
           /\ (exec \in FreshStart \/ LiveTmuxSeenDead) /\ ~rst
+          /\ (entry \in AttachEntries /\ gen > 0 => attachWait = "Released")
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ ~late)
           /\ ~(LaunchHost = "Herdr" /\ ~oready /\ late /\ SuccessorWithoutPermit)
           /\ IF LaunchHost = "Tmux"
@@ -361,6 +366,7 @@ Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in
           \* saturate at 3 to keep relaunch loops finite; contract paths use at most 2.
           /\ gen' = IF exec' = "Pending" /\ gen < 3 THEN gen + 1 ELSE gen
           /\ gone' = FALSE /\ UNCHANGED <<goneGen, lostSucc>>
+          /\ evidenced' = FALSE /\ attachWait' = "None"
 \* writer/host/first_init.rs:282 activate_owner: an ordinary adoption's writer becomes ready.
 OrdinaryReady == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHANGED w2vars /\ entry \in HerdrParentS2 /\ ~late /\ ~oready
                  /\ oready' = TRUE
@@ -428,6 +434,8 @@ Rejudge == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHANGE
 \* (P1-2: an exact retry has no owner hook, herdr_turn.rs:764-773, ingress.rs:415-417).
 ReserveRequired == S2Like /\ ~(Mode = "MutW1RetrySkipsReserve" /\ entry = "RetryNew")
 Reserve == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ ReserveRequired /\ exec = "Placed" /\ inq = "Queued" /\ ~reserved
+           /\ ~(entry \in AttachEntries /\ gen = 1)
+           /\ (entry = "LostAfterKey" /\ gen = 1 => evidenced)
            /\ reserved' = TRUE
            /\ UNCHANGED <<s2vars, hkey, boot, other, v2, rst>>
 \* claude/herdr_turn/first_input.rs:269-333: the first input once. MutW1BindFirst is design w1's
@@ -550,15 +558,35 @@ ResidueClose == /\ UNCHANGED vars /\ S2Like /\ Mode # "MutW3NoPlacedResidue"
                                [] OTHER -> "Pristine"
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
                                slot, judged, unsent, receipt>>
-                /\ UNCHANGED w2vars /\ UNCHANGED <<ran, succ, archived, hitLive, gen, lostSucc>>
+                /\ UNCHANGED w2vars /\ UNCHANGED <<ran, succ, archived, hitLive, gen, lostSucc, evidenced, attachWait>>
+\* expected records provider evidence. hkey records a key for the owner's input.
+RecordAttachEvidence ==
+    /\ entry \in AttachEntries \union {"LostAfterKey"}
+    /\ exec = "Placed" /\ ran /\ ~gone /\ ~evidenced
+    /\ evidenced' = TRUE
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, attachWait>>
 \* The recorded pane goes away by itself, once: before any key (LostCommand) or after the first key
 \* (LostAfterKey, the payload may have been delivered).
 PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
-                /\ entry \in {"LostCommand", "LostAfterKey"} /\ exec = "Placed" /\ ~gone /\ gen = 1
-                /\ (entry = "LostAfterKey" => hkey)
+                /\ entry \in {"LostCommand", "LostAfterKey"} \union AttachEntries
+                /\ exec = "Placed" /\ ~gone /\ gen = 1
+                /\ (entry = "LostAfterKey" => evidenced /\ hkey)
+                /\ (entry \in AttachEntries => evidenced /\ ~hkey)
                 /\ gone' = TRUE /\ goneGen' = gen /\ tabs' = tabs - 1
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
-                               slot, judged, unsent, receipt, gen, lostSucc>>
+                               slot, judged, unsent, receipt, gen, lostSucc, evidenced, attachWait>>
+EvidencedPaneVanishes == entry \in AttachEntries /\ PaneVanishes
+\* The owner's exact unreserved claim distinguishes unread disposition from a safe successor.
+AttachDisposition == CASE hkey \/ receipt = "Unconfirmed" -> "Unconfirmed"
+                       [] entry = "LostBeforeKeyUnread" -> "Unread"
+                       [] entry = "LostBeforeKeyKnownNotSent" -> "KnownNotSent"
+                       [] inq = "Queued" /\ ~reserved -> "Unattempted"
+                       [] OTHER -> "Unread"
+WaitForAttach ==
+    /\ entry \in AttachEntries /\ exec = "Placed" /\ evidenced /\ gone /\ attachWait = "None"
+    /\ attachWait' = IF AttachDisposition \in {"Unattempted", "KnownNotSent"}
+                     THEN "Waiting" ELSE "Held"
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
 \* The placed resolver needs Missing on a single witness. LegacyDedicated uses
 \* fresh E7 Off. UserDefault matches the nonce's stored grant before reading.
 \* Missing permits no replay of a submitted input.
@@ -569,12 +597,19 @@ MissingRetireOk == CASE Mode = "MutW4MissingNoCas" -> goneGen > 0 /\ exec \in He
 PlacedMissingRetire ==
     /\ UNCHANGED vars /\ S2Like /\ Mode \notin {"MutW3NoPlacedResidue", "MutW4PendingEarlyReturn"}
     /\ (epoch = restarts2 \/ BootResolves) /\ MissingRetireOk
+    /\ (entry \in AttachEntries => attachWait \in {"Waiting", "Held"})
     /\ exec' = "Retired" /\ unsent' = ~hkey /\ judged' = "None"
     /\ inq' = IF Mode = "MutW4MissingResubmits" /\ inq = "Submitted" THEN "Queued" ELSE inq
     /\ ran' = TRUE /\ reserved' = FALSE /\ hkey' = FALSE
     /\ lostSucc' = (lostSucc \/ (goneGen > 0 /\ goneGen # gen))
+    /\ attachWait' = IF Mode = "MutAttachOpaque" /\ attachWait = "Waiting"
+                     THEN "Spent" ELSE attachWait
     /\ UNCHANGED <<made, tabs, tmuxs, submits, oready, late, epoch, restarts2, idle, slot, receipt>>
-    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive, gone, gen, goneGen>>
+    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive, gone, gen, goneGen, evidenced>>
+ReleaseAttachWait ==
+    /\ exec = "Retired" /\ evidenced /\ attachWait = "Waiting" /\ goneGen = gen
+    /\ attachWait' = "Released"
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
 \* w3 (P1-2): after the slot map moved on, the same thread ID still takes work: a dispatch that
 \* reuses the card's active_thread_id (intake_turn/adk_thread.rs:154-205, unarchived by
 \* router/thread_binding.rs:77-110) or a direct Discord message starts a successor there.
@@ -597,6 +632,7 @@ NextS2 == Launch \/ OrdinaryReady \/ GateRefused \/ ReadRecovers \/ ReadRefused 
           \/ Restart2 \/ Idle \/ ReleaseIdle \/ Gc \/ SlotReset \/ DispatchReset \/ BootNoGate
           \/ BootRetireDead \/ RelayRetire \/ OtherServe \/ CmdRestartVacant
           \/ ResidueClose \/ PaneVanishes \/ PlacedMissingRetire \/ Successor \/ ArchiveThread
+          \/ RecordAttachEvidence \/ WaitForAttach \/ ReleaseAttachWait
 SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(Launch) /\ WF_allvars(OrdinaryReady) /\ WF_allvars(ReadRecovers)
           /\ WF_allvars(Create) /\ WF_allvars(Resolve) /\ WF_allvars(Bind)
@@ -606,13 +642,15 @@ SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(BootRetireDead) /\ WF_allvars(RelayRetire) /\ WF_allvars(OtherServe)
           /\ WF_allvars(CmdRestartVacant) /\ WF_allvars(ResidueClose)
           /\ WF_allvars(PlacedMissingRetire)
+          /\ WF_allvars(RecordAttachEvidence) /\ WF_allvars(EvidencedPaneVanishes)
+          /\ WF_allvars(WaitForAttach) /\ WF_allvars(ReleaseAttachWait)
 
 \* A new execution under a Herdr parent is Herdr: no tmux session, after restart, thread_gc and
 \* slot reset included (every relaunch goes through Launch).
 NewThreadFollowsParent == (entry \in {"NewThread", "FreshAfterKill", "RetryNew", "DispatchNew",
                                      "RestartVacant", "LostCommand", "LostCommandHeld",
                                      "SlotSuccessor", "LostAfterKey", "LostCommandShellUsed"}
-                          \/ entry \in ReplacedEntries) => tmuxs = 0
+                          \/ entry \in ReplacedEntries \union AttachEntries) => tmuxs = 0
 ExistingTmuxStaysTmux == entry = "ResumeTmux" => tabs = 0 /\ exec \notin HerdrExec
 TmuxParentStaysTmux == entry = "TmuxParentThread" => tabs = 0 /\ exec \notin HerdrExec
 NoInputRefused == inq # "Refused"
@@ -644,4 +682,6 @@ ArchiveSparesLive == ~hitLive
 \* w4: a Missing retire ends only the generation whose pane it saw gone.
 RetireOwnGeneration == ~lostSucc
 UserDefaultReplacementHeld == entry = "UserDefaultReplaced" => exec = "Placed" /\ submits = 0
+OwnerStartBudgetPreserved == attachWait # "Spent"
+UnknownAttachHeld == entry = "LostBeforeKeyUnread" => gen <= 1 /\ submits = 0
 =============================================================================

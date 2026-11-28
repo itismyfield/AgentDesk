@@ -58,6 +58,26 @@ impl Owner {
         self.enter_retry_wait(front, cause, now).map(Some)
     }
 
+    /// A retired attach can start fresh only for the same unreserved original after its wait.
+    #[cfg(unix)]
+    pub(crate) fn resume_retired_attach(
+        &self,
+        (front, number): (&Front, u64),
+        nonce: &str,
+    ) -> Result<bool, String> {
+        if self.pending.is_some()
+            || number != self.claim_number
+            || !self.claimed(front.1.message_id, front)
+        {
+            return Err("NotSent(\"owner_disposition_unavailable\")".into());
+        }
+        Ok(self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
+            !wait.armed
+                && holds(wait, front)
+                && matches!(&wait.cause, RetryCause::PendingAttach { nonce: retired } if retired == nonce)
+        }))
+    }
+
     #[cfg(unix)]
     fn enter_retry_wait(
         &mut self,

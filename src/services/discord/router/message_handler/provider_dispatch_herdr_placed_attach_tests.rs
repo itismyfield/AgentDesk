@@ -202,6 +202,15 @@ fn assert_wait(intake: &Intake, front: &OwnerFront, nonce: &str) {
     assert_eq!(state["items"], json!([front.1]));
     assert_eq!(state["retained_inputs"], json!([]));
     assert!(state["head_injection"].is_null());
+    let original = front.1.clone();
+    let failures =
+        intake
+            .runtime
+            .block_on(intake.mailbox.v2_request(move |slot| {
+                Ok(slot.as_ref().unwrap().start_failures_for_test(&original))
+            }))
+            .unwrap();
+    assert_eq!(failures, 0, "the pane loss does not spend a start failure");
 }
 
 fn placed_attach(lose_before_attach: bool) {
@@ -288,6 +297,12 @@ fn placed_attach(lose_before_attach: bool) {
             .block_on(super::wait_for_idle_turn_to_unwind(&intake));
         assert_eq!(fx.row(), Some(HostedState::Retired));
         assert_wait(&intake, &front, &nonce);
+        assert!(
+            snapshot(&intake)["retry"]["wait"]["wait_seq"]
+                .as_u64()
+                .unwrap()
+                > first_state["retry"]["wait"]["wait_seq"].as_u64().unwrap()
+        );
         assert_eq!(
             first_state["retry"]["wait"]["cause"],
             json!({"kind":"pending_attach","nonce":nonce})
@@ -306,10 +321,12 @@ fn placed_attach(lose_before_attach: bool) {
         );
         let sends = fx.rig.sends();
         assert_eq!(sends.len(), after_command + 3);
-        assert!(sends[after_command + 1]["text"]
-            .as_str()
-            .unwrap()
-            .contains(INPUT));
+        assert!(
+            sends[after_command + 1]["text"]
+                .as_str()
+                .unwrap()
+                .contains(INPUT)
+        );
         assert_eq!(sends[after_command + 2]["keys"], json!(["enter"]));
         let state = snapshot(&intake);
         assert_eq!(state["items"], json!([]));

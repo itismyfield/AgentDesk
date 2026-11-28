@@ -1424,7 +1424,7 @@ pub(super) fn take(turn: &StreamingTurn<'_>) -> Option<Taken> {
 /// The owner's front handoff, from its arguments alone: the drive hears `settled` once the input
 /// settled, while this thread runs on with the AI turn.
 pub(super) fn execute_front(
-    turn: StreamingTurn<'_>,
+    mut turn: StreamingTurn<'_>,
     sender: std::sync::mpsc::Sender<crate::services::agent_protocol::StreamMessage>,
     claim: FrontClaim,
     owner: Registration,
@@ -1437,6 +1437,9 @@ pub(super) fn execute_front(
     let reply = reply_once(Some(settled));
     let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim)
         .with_recovery(owner.recovery.clone());
+    if !turn.force_fresh {
+        turn.force_fresh = failure.resume_retired_attach(&turn)?;
+    }
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();

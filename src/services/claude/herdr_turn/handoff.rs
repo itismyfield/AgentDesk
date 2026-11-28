@@ -173,7 +173,9 @@ pub(super) fn launched_source(
             .block_on(provider_resume_fence::release_pg(turn.pool, &captured))
             .map_err(|error| launch_error("release_resume_fence", error))?;
     }
-    attach(turn, runtime, ports, &nonce, &session_id).map_err(|e| launch_error("attach", e))
+    attach(turn, runtime, ports, &nonce, &session_id).map_err(|error| {
+        super::retry_probe::attach_refused(turn, &nonce, &launch_error("attach", error))
+    })
 }
 
 fn current_session(

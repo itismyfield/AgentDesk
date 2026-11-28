@@ -412,14 +412,18 @@ impl Failure {
             .cancelled
             .load(std::sync::atomic::Ordering::Acquire)
             || turn.cancel.native_stop.receipt_sink().stopped_before_key();
-        let unsent = !self.recovery.repaired() && !bound && error.starts_with("NotSent(");
+        let cause = RetryWaitCause::from_refusal(&error);
+        let unsent = !bound
+            && error.starts_with("NotSent(")
+            && (!self.recovery.repaired()
+                || matches!(cause, Some(RetryWaitCause::PendingAttach { .. })));
         if self.herdr_seed_stopped(&turn.cancel) {
             return Err(error);
         }
         // A refusal typed by a cause a later look may clear waits; it counts no failed start.
         if unsent
             && !stopped
-            && let Some(cause) = RetryWaitCause::from_refusal(&error)
+            && let Some(cause) = cause
         {
             self.wait_for_retry(turn.channel_id, cause, read);
         }
@@ -449,6 +453,31 @@ impl Failure {
     }
 }
 impl Failure {
+    /// An exact retired attach lets its waiting original start without the ended native binding.
+    pub(super) fn resume_retired_attach(&self, turn: &StreamingTurn<'_>) -> Result<bool, String> {
+        use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
+        let TurnHost::Herdr(plan) = turn.host else {
+            return Ok(false);
+        };
+        let Some(HostedRecord::Known(record)) = plan.row.as_ref().map(|row| &row.record) else {
+            return Ok(false);
+        };
+        if *turn.provider != ProviderKind::Claude || record.state != HostedState::Retired {
+            return Ok(false);
+        }
+        let (front, number, nonce) = (
+            self.front.clone(),
+            self.number,
+            record.execution_nonce.clone(),
+        );
+        let resume = self.mailbox.v2_request(move |slot| {
+            slot.as_ref()
+                .ok_or("NotSent(\"owner_disposition_unavailable\")")?
+                .resume_retired_attach((&front, number), &nonce)
+        });
+        tokio::runtime::Handle::current().block_on(resume)
+    }
+
     /// A Herdr user stop before the reserve cancels the claimed restart greeting instead of its
     /// retry or failure; another front, or no stop, keeps its failure path.
     fn herdr_seed_stopped(&self, cancel: &crate::services::provider::CancelToken) -> bool {

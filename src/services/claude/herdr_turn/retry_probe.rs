@@ -28,6 +28,18 @@ pub(super) fn refused(
     armed(turn, session_id, cause.refusal(detail))
 }
 
+/// Attach happens before reserving the input. A provider's start does not clear its failed attach.
+pub(super) fn attach_refused(turn: &HerdrTurn<'_>, nonce: &str, detail: &str) -> String {
+    refused(
+        turn,
+        "",
+        Cause::PendingAttach {
+            nonce: nonce.into(),
+        },
+        detail,
+    )
+}
+
 /// Leaves the read of the cause `error` names, if it names one, for the owner's wait.
 pub(super) fn armed(turn: &HerdrTurn<'_>, session_id: &str, error: String) -> String {
     if let Some(cause) = Cause::from_refusal(&error) {
@@ -91,6 +103,7 @@ pub(crate) fn read(
         let cleared = match &cause {
             Cause::PendingUnplaced { .. } => other || record.state == HostedState::Retired,
             Cause::PendingUnproven { .. } => other || ended || record.expected.is_some(),
+            Cause::PendingAttach { .. } => other || ended,
             _ => {
                 let logical = owner.logical_key.as_str();
                 other || ended || start_logged(channel, logical, nonce, &session)

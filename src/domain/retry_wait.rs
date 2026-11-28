@@ -10,6 +10,7 @@ pub enum RetryCause {
     PendingUnplaced { nonce: String },
     PendingUnstarted { nonce: String },
     PendingUnproven { nonce: String },
+    PendingAttach { nonce: String },
     OwnLaunchTimeout { nonce: String },
     RootRecoveryHeld,
 }
@@ -21,6 +22,7 @@ impl RetryCause {
             Self::PendingUnplaced { nonce } => Some((nonce, "unplaced")),
             Self::PendingUnstarted { nonce } => Some((nonce, "unstarted")),
             Self::PendingUnproven { nonce } => Some((nonce, "unproven")),
+            Self::PendingAttach { nonce } => Some((nonce, "attach")),
             Self::OwnLaunchTimeout { nonce } => Some((nonce, "own_timeout")),
             Self::RootRecoveryHeld => None,
         }
@@ -51,6 +53,7 @@ impl RetryCause {
             "unplaced" => Some(Self::PendingUnplaced { nonce }),
             "unstarted" => Some(Self::PendingUnstarted { nonce }),
             "unproven" => Some(Self::PendingUnproven { nonce }),
+            "attach" => Some(Self::PendingAttach { nonce }),
             "own_timeout" => Some(Self::OwnLaunchTimeout { nonce }),
             _ => None,
         }
