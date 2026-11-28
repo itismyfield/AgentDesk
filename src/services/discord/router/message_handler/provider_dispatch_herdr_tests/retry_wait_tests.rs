@@ -98,6 +98,125 @@ fn started_unproven_wait_does_not_wake_until_evidence_or_due_pg() {
     assert_eq!(read(), Screen::Ready, "its evidence landed");
 }
 
+#[test]
+fn s2b1_retired_resume_released_nonce_causes_pg() {
+    use crate::services::turn_orchestrator::{
+        PendingQueueItem,
+        queued_head::v2::{Owner, Ticket, source_admission::Custody},
+    };
+
+    let fx = Fixture::new("late-start-retired", None);
+    let launcher = Arc::new(Launcher::default());
+    let nonce = never_attached(&fx, &launcher);
+    let started = fx.start_provider(&launcher, false).unwrap();
+    let _runtime = fx.rt.enter();
+    let queue_root = discord::runtime_store::discord_pending_queue_root().unwrap();
+    std::fs::create_dir_all(&queue_root).unwrap();
+    let queues = tempfile::tempdir_in(queue_root).unwrap();
+    let original: PendingQueueItem = serde_json::from_value(json!({
+        "author_id":7, "channel_id":CHANNEL, "message_id":7_200_000_000_000_111_001_u64,
+        "source_message_ids":[7_200_000_000_000_111_001_u64], "queued_generation":1, "text":"first input"
+    }))
+    .unwrap();
+    let causes = [
+        RetryWaitCause::PendingUnstarted {
+            nonce: nonce.clone(),
+        },
+        RetryWaitCause::OwnLaunchTimeout {
+            nonce: nonce.clone(),
+        },
+        RetryWaitCause::PendingUnproven {
+            nonce: nonce.clone(),
+        },
+        RetryWaitCause::PendingUnplaced {
+            nonce: nonce.clone(),
+        },
+    ];
+    let waits = causes
+        .into_iter()
+        .enumerate()
+        .map(|(index, cause)| {
+            let mut owner =
+                Owner::adopt(queues.path().join(format!("{index}.json")), "retry".into()).unwrap();
+            let ticket = Ticket::new("late-start").unwrap();
+            Custody::with_ticket(&original, ticket)
+                .advance(&mut owner)
+                .unwrap();
+            let front = owner.front().unwrap();
+            assert!(front.0.is_some());
+            assert!(owner.grant_front(&front).unwrap());
+            owner.claim_turn(original.message_id, &front).unwrap();
+            let claim = owner.claim_number();
+            let wait = owner
+                .enter_retry_wait_claimed((&front, claim), cause.clone(), 0)
+                .unwrap()
+                .unwrap();
+            let mut read = herdr_turn::retry_probe::read_for_test(
+                fx.pool.clone(),
+                fx.owner.clone(),
+                CHANNEL,
+                started.session.clone(),
+                cause.clone(),
+            );
+            assert_ne!(read(), Screen::Ready, "{cause:?}");
+            (cause, owner, front, wait, read)
+        })
+        .collect::<Vec<_>>();
+
+    let mut hooks = fx.ingress.state.subscribe();
+    assert_eq!(
+        started.hook(
+            &fx,
+            "SessionStart",
+            &json!({
+                "session_id":started.session,"transcript_path":started.path,"source":"startup"
+            })
+        ),
+        202
+    );
+    let hook = hooks
+        .try_recv()
+        .expect("the late start reached the receiver");
+    assert_eq!(
+        hook.kind,
+        crate::services::claude_tui::hook_server::HookEventKind::SessionStart
+    );
+    assert_eq!(hook.session_id, started.session);
+    let HostedRecord::Known(mut row) = fx.record() else {
+        panic!("late SessionStart needs its Pending execution");
+    };
+    assert_eq!(row.state, HostedState::Pending);
+    assert_eq!(row.execution_nonce, nonce);
+    row.state = HostedState::Retired;
+    fx.store(&row);
+    let resumed = waits
+        .into_iter()
+        .map(|(cause, mut owner, original_front, wait, mut read)| {
+            assert_eq!(read(), Screen::Ready, "{cause:?}");
+            assert!(owner.release_retry_wait(original.message_id, wait).unwrap());
+            let front = owner.front().unwrap();
+            assert_eq!(front.0, original_front.0);
+            assert_eq!(front.1.message_id, original_front.1.message_id);
+            assert_eq!(
+                front.1.queued_generation,
+                original_front.1.queued_generation
+            );
+            assert!(owner.grant_front(&front).unwrap());
+            owner.claim_turn(original.message_id, &front).unwrap();
+            let claim = (&front, owner.claim_number());
+            assert_eq!(
+                owner.resume_retired_attach(claim, "another-execution"),
+                Ok(false)
+            );
+            (cause, owner.resume_retired_attach(claim, &nonce))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        resumed.iter().all(|(_, resume)| *resume == Ok(true)),
+        "{resumed:?}"
+    );
+}
+
 /// Rewrites the row with `moved` as its evidence lands: the row moved on between the probe's write
 /// and the turn's read of it.
 fn move_on_at_evidence(fx: &Fixture, moved: &str) {

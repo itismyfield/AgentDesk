@@ -251,6 +251,37 @@ fn an_unmatched_reserved_unit_returns_to_its_single_originals() {
     }
 }
 
+#[cfg(unix)]
+#[test]
+fn s2b1_retired_resume_unmatched_reserved_unit_preserves_its_ticket() {
+    let _root = TestRuntimeRootGuard::new();
+    let channel = 19;
+    let mut before = owner(channel);
+    let original = admit(&mut before, 1, "front");
+    admit(&mut before, 2, "follower");
+    let front = before.front().unwrap();
+    let mut reserved = attempt("reserved-before-restart");
+    reserved.target.host = "herdr".into();
+    let nonce = reserved.target.execution_nonce.clone();
+    before.reserve_unit(reserved, named).unwrap();
+    drop(before);
+
+    let mut disk: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(path(channel)).unwrap()).unwrap();
+    disk["items"][1]["created_at_wall_time_ms"] = json!(123);
+    std::fs::write(path(channel), disk.to_string()).unwrap();
+    let mut restored = owner(channel);
+    let claimed = restored.front().unwrap();
+    assert!(is_front(&claimed, &front));
+    assert_eq!(claimed.0, front.0);
+    assert!(restored.grant_front(&claimed).unwrap());
+    restored.claim_turn(original.message_id, &claimed).unwrap();
+    let claim = (&claimed, restored.claim_number());
+    assert_eq!(restored.resume_retired_attach(claim, &nonce), Ok(true));
+    assert_eq!(restored.resume_retired_attach(claim, "other"), Ok(false));
+    assert_eq!(restored.start_failures_for_test(&original), 0);
+}
+
 /// Members the queue lost come back from the reserved unit, so no original is dropped.
 #[test]
 fn a_reserved_unit_missing_from_the_queue_comes_back_whole() {

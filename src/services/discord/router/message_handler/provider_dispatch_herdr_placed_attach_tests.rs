@@ -21,8 +21,15 @@ struct KeyReply {
 #[derive(Clone, Copy)]
 enum PaneLoss {
     BeforeAttach,
-    BeforeKey { requeue: bool },
+    BeforeKey(PreKeyRecovery),
     AfterKey,
+}
+
+#[derive(Clone, Copy)]
+enum PreKeyRecovery {
+    Hold,
+    Requeue,
+    Restart,
 }
 
 fn start(
@@ -318,7 +325,7 @@ fn placed_attach(loss: PaneLoss) {
     let (sent, key_seen) = mpsc::channel();
     let (release, reply) = mpsc::channel();
     let (capture_ready, resume_capture) = match loss {
-        PaneLoss::BeforeKey { .. } => {
+        PaneLoss::BeforeKey(_) => {
             let (entered, ready) = mpsc::channel();
             let (resume, continued) = mpsc::channel();
             let continued = Mutex::new(Some(continued));
@@ -409,7 +416,7 @@ fn placed_attach(loss: PaneLoss) {
                 after_command,
             );
         }
-        PaneLoss::BeforeKey { requeue } => {
+        PaneLoss::BeforeKey(recovery) => {
             crate::test_support::wait::recv_within(&capture_ready.unwrap(), LIMIT);
             let state = snapshot(&intake);
             assert_eq!(
@@ -419,6 +426,7 @@ fn placed_attach(loss: PaneLoss) {
             assert_eq!(state["head_injection"]["original"], json!(front.1));
             assert_eq!(fx.row(), Some(HostedState::Pending));
             assert_eq!(fx.rig.sends().len(), after_command);
+            let head = state["head_injection"].clone();
             fx.rig.show_panes(&[]);
             fx.rig.exists(20, false);
             resume_capture.unwrap().send(()).unwrap();
@@ -431,8 +439,17 @@ fn placed_attach(loss: PaneLoss) {
             assert_eq!(state["items"], json!([front.1]));
             assert_eq!(state["retained_inputs"], json!([]));
             assert!(state["retry"]["wait"].is_null());
-            if requeue {
-                retain_and_requeue(&fx, &intake, &front, &nonce, &started);
+            match recovery {
+                PreKeyRecovery::Hold => {}
+                PreKeyRecovery::Requeue => {
+                    retain_and_requeue(&fx, &intake, &front, &nonce, &started);
+                }
+                PreKeyRecovery::Restart => {
+                    restore_reserved(&intake, &front, head);
+                    let restored = snapshot(&intake);
+                    assert!(restored["head_injection"].is_null());
+                    assert_eq!(restored["items"], json!([front.1]));
+                }
             }
             periodic_retire(&fx, &intake);
             assert!(snapshot(&intake)["retry"]["wait"].is_null());
@@ -485,6 +502,43 @@ fn placed_attach(loss: PaneLoss) {
     }
     drop(intake);
     drop(original_runtime);
+}
+
+fn restore_reserved(intake: &Intake, front: &OwnerFront, head: Value) {
+    let mut attempt = head["attempt"].clone();
+    assert_eq!(attempt["source"]["kind"], "pre_source");
+    attempt["nonce"] = json!(uuid());
+    let attempt = serde_json::from_value(attempt).unwrap();
+    let payload = serde_json::from_value(head["payload"].clone()).unwrap();
+    let channel = ChannelId::new(CHANNEL);
+    let persistence =
+        discord::queue_persistence_context(&intake.shared, &ProviderKind::Claude, channel);
+    intake.runtime.block_on(async {
+        let granted = tick_and_grant_on_mailbox(&intake.mailbox, front.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let claim = drive::claim_turn(&intake.mailbox, front.1.message_id, &granted)
+            .await
+            .unwrap()
+            .unwrap();
+        intake
+            .mailbox
+            .v2_request(move |slot| {
+                let owner = slot.as_mut().unwrap();
+                owner.reserve_claimed((claim.front(), claim.number()), attempt, payload)?;
+                assert_eq!(owner.json()?["head_injection"]["phase"], "reserved");
+                slot.take();
+                Ok(())
+            })
+            .await
+            .unwrap();
+        intake
+            .mailbox
+            .v2_ensure_channel(&persistence, channel)
+            .await
+            .unwrap();
+    });
 }
 
 fn periodic_retire(fx: &Fixture, intake: &Intake) {
@@ -617,10 +671,15 @@ fn s2b1_placed_attach_missing_after_key_does_not_resubmit_pg() {
 
 #[test]
 fn s2b1_placed_attach_missing_after_reserve_retries_same_ticket_pg() {
-    placed_attach(PaneLoss::BeforeKey { requeue: false });
+    placed_attach(PaneLoss::BeforeKey(PreKeyRecovery::Hold));
 }
 
 #[test]
 fn s2b1_placed_attach_missing_known_not_sent_requeues_same_ticket_pg() {
-    placed_attach(PaneLoss::BeforeKey { requeue: true });
+    placed_attach(PaneLoss::BeforeKey(PreKeyRecovery::Requeue));
+}
+
+#[test]
+fn s2b1_retired_resume_restored_reserved_owner_starts_fresh_pg() {
+    placed_attach(PaneLoss::BeforeKey(PreKeyRecovery::Restart));
 }
