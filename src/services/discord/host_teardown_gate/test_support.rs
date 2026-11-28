@@ -214,6 +214,12 @@ pub(crate) fn stop_recorded(channel_id: ChannelId) -> bool {
     crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id).is_some()
 }
 
+#[cfg(unix)]
+pub(crate) fn stop_generation(channel_id: ChannelId) -> Option<i64> {
+    crate::services::discord::tmux::recent_turn_stop_for_channel(channel_id)?
+        .stop_generation_mtime_ns
+}
+
 /// A busy mailbox turn on `channel_id` whose token holds no tmux binding and which stores no
 /// inflight row: the shape of a process-backend turn.
 pub(crate) async fn nameless_turn(shared: &SharedData, channel_id: ChannelId) -> Arc<CancelToken> {

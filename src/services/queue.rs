@@ -7,10 +7,10 @@ use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::domain::session_identity::tmux_name_from_session_key;
 use crate::error::{AppError as ServiceError, AppResult as ServiceResult, ErrorCode};
-use crate::services::engine_runtime::health_port::QueueCancelPort;
+use crate::services::engine_runtime::health_port::{QueueCancelPort, TurnStopPort};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
-    ForceKillRow, LifecycleStopPort, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
+    ForceKillRow, TurnLifecycleTarget, force_kill_turn_without_cancel_event,
     stop_turn_preserving_queue_without_cancel_event,
 };
 use poise::serenity_prelude::ChannelId;
@@ -34,18 +34,18 @@ pub(crate) use cancel_effects::settle_v2_drops;
 /// terminate.
 #[cfg(unix)]
 pub(crate) trait CancelRegistry:
-    LifecycleStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
+    TurnStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
 {
 }
 #[cfg(unix)]
 impl<T> CancelRegistry for T where
-    T: LifecycleStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
+    T: TurnStopPort + QueueCancelPort + crate::services::turn_orchestrator::HttpTerminate
 {
 }
 #[cfg(not(unix))]
-pub(crate) trait CancelRegistry: LifecycleStopPort + QueueCancelPort {}
+pub(crate) trait CancelRegistry: TurnStopPort + QueueCancelPort {}
 #[cfg(not(unix))]
-impl<T: LifecycleStopPort + QueueCancelPort> CancelRegistry for T {}
+impl<T: TurnStopPort + QueueCancelPort> CancelRegistry for T {}
 
 #[derive(Clone)]
 pub struct QueueService {
