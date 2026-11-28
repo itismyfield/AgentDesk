@@ -53,13 +53,16 @@ async fn watcher_complete(
 async fn machine_front(
     shared: &Arc<SharedData>,
     channel: ChannelId,
-    root: &Path,
 ) -> (Arc<Drive>, Front, Arc<AtomicUsize>) {
     let mailbox = shared.mailbox(channel);
     let id = channel.get();
     let message = id + 2;
+    let runtime = inflight::inflight_runtime_root().unwrap();
     mailbox
-        .v2_adopt(root.join(format!("front-{id}.json")), format!("owner-{id}"))
+        .v2_adopt(
+            runtime.join(format!("front-{id}.json")),
+            format!("owner-{id}"),
+        )
         .await
         .unwrap();
     let input = serde_json::from_value(serde_json::json!({
@@ -148,7 +151,7 @@ async fn terminal_orders(closer: &str, disposition: Disposition, receipt: &str, 
         barrier_receipt(&f);
         let mut events = subscribe_turn_completion_events(&shared);
         let mut capture = SupplyCapture::new(&f, &root.path().join(format!("store-{id}")), true);
-        let (drive, front, deliveries) = machine_front(&shared, key.channel_id, root.path()).await;
+        let (drive, front, deliveries) = machine_front(&shared, key.channel_id).await;
 
         remove_projection(&row);
         let claim = || Some(SyntheticClaimSnapshot::from_row(&row));
@@ -256,7 +259,7 @@ async fn owner_start_wait_site_handoff_describes_the_active_token() {
         }
     }
 
-    let root = crate::config::TestRuntimeRootGuard::new();
+    let _root = crate::config::TestRuntimeRootGuard::new();
     let shared = b2b_shared(None);
     let channel = ChannelId::new(845_706_106);
     let mailbox = shared.mailbox(channel);
@@ -270,7 +273,7 @@ async fn owner_start_wait_site_handoff_describes_the_active_token() {
             serenity::model::id::MessageId::new(42),
         )
         .await;
-    let (drive, front, deliveries) = machine_front(&shared, channel, root.path()).await;
+    let (drive, front, deliveries) = machine_front(&shared, channel).await;
 
     let log = Log::default();
     let writer = log.clone();
