@@ -25,6 +25,7 @@ mod orphan_sweep;
 mod api;
 mod apply;
 mod injected;
+mod intake_sweep;
 pub(in crate::services::discord) use api::*;
 mod queue_repair;
 mod reaction_set;
@@ -32,6 +33,7 @@ mod resolution;
 mod store;
 // The TUI-direct prompt anchor `⏳ → ✅` completers the relay and the watcher call.
 pub(in crate::services::discord) mod anchor_completion;
+pub(in crate::services::discord) use intake_sweep::sweep_orphan_intake_reactions;
 pub(in crate::services::discord) use orphan_sweep::sweep_orphan_tui_anchor_reactions;
 
 const TURN_VIEW_REACTIONS: [char; 7] = ['📬', '📥', '🔄', '⏳', '✅', '⚠', '🛑'];

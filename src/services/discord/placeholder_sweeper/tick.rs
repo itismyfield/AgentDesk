@@ -89,9 +89,10 @@ pub(super) async fn run_placeholder_sweeper_tick(
     let drained_abort_markers =
         super::super::tui_direct_abort_marker::sweep_expired(shared, provider).await;
     // #4278 orphan-`⏳` sweep (mechanism: turn_view_reconciler::orphan_sweep).
-    let swept_orphan_anchors =
-        super::super::turn_view_reconciler::sweep_orphan_tui_anchor_reactions(shared, provider)
-            .await;
+    // The intake pass sweeps a user message's `⏳` left after its turn ended.
+    use super::super::turn_view_reconciler as view;
+    let swept_orphan_anchors = view::sweep_orphan_tui_anchor_reactions(shared, provider).await
+        + view::sweep_orphan_intake_reactions(shared, provider).await;
     // #3859: finalize placeholders stranded by a failure-path inflight
     // eviction (turn-task Drop / heartbeat-gap sweeper). Each durable
     // abandon-request is edited to its terminal "중단됨" card BY MESSAGE

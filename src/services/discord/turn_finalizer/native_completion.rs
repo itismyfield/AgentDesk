@@ -18,8 +18,8 @@ tokio::task_local! {
         (std::path::PathBuf, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
 
-/// Records an executed primary's completion once its result is durable and before its row CAS.
-/// A missing or replaced row, or an unreadable run, ends the step without records.
+/// Records an executed primary's completion once its result is durable and before its row CAS;
+/// a cancelled one only settles its input view. A missing or replaced row ends the step.
 pub(in crate::services::discord::turn_finalizer) async fn record(
     shared: &Arc<SharedData>,
     settlement: &Settlement,
@@ -31,7 +31,11 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
     let (Some(source), Some(captured)) = (evidence.ticket.source.as_ref(), captured) else {
         return;
     };
-    if evidence.ticket.owning_episode.is_none() || evidence.disposition != Disposition::Executed {
+    let marks_input = matches!(
+        evidence.disposition,
+        Disposition::Executed | Disposition::Cancelled
+    );
+    if evidence.ticket.owning_episode.is_none() || !marks_input {
         return;
     }
     #[cfg(test)]
@@ -52,7 +56,7 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
         || !settlement
             .outcome
             .as_ref()
-            .is_some_and(|saved| saved.disposition == Disposition::Executed)
+            .is_some_and(|saved| saved.disposition == evidence.disposition)
     {
         return;
     }
@@ -71,6 +75,10 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
     {
         return;
     }
+    mark_input(shared, &row, &evidence.disposition).await;
+    if evidence.disposition != Disposition::Executed {
+        return;
+    }
     match read_run(evidence, source) {
         Ok((body, events)) => write(shared, &row, &source.session_id, &body, &events, actor).await,
         Err(error) => tracing::warn!(
@@ -79,6 +87,35 @@ pub(in crate::services::discord::turn_finalizer) async fn record(
             %error,
             "native completion run unreadable; its records are skipped"
         ),
+    }
+}
+
+/// The bridge leaves a native turn's input view untouched, so its proven end settles the `⏳` here.
+async fn mark_input(shared: &Arc<SharedData>, row: &InflightTurnState, disposition: &Disposition) {
+    use crate::services::discord::turn_view_reconciler as view;
+    let (channel, message) = (
+        ChannelId::new(row.channel_id),
+        MessageId::new(row.user_msg_id),
+    );
+    let generation = row.born_generation;
+    if *disposition == Disposition::Executed {
+        view::note_intake_turn_completed_via_shared(
+            shared,
+            channel,
+            message,
+            generation,
+            "native_done",
+        )
+        .await;
+    } else {
+        view::note_intake_turn_stopped_via_shared(
+            shared,
+            channel,
+            message,
+            generation,
+            "native_stop",
+        )
+        .await;
     }
 }
 

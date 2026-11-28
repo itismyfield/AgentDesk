@@ -553,3 +553,52 @@ fn native_8261_completion_stores_the_run_session_as_channel_selector_pg() {
         fixture.close().await;
     });
 }
+
+/// A native turn's proven end settles its input's `⏳`: done when executed, stopped when cancelled.
+#[tokio::test]
+async fn native_completion_settles_the_input_hourglass() {
+    use crate::services::discord::turn_view_reconciler::note_intake_turn_started;
+    for (offset, disposition, wanted) in [
+        (0, Disposition::Executed, '✅'),
+        (2, Disposition::Cancelled, '🛑'),
+    ] {
+        let runtime = TestRuntimeRootGuard::new();
+        let root = runtime.path().join("runtime");
+        std::fs::create_dir_all(&root).unwrap();
+        let f = Fixture::at(
+            root.join("frames.json"),
+            1_430_000_000_000_008_486 + offset,
+            true,
+        );
+        let (shared, row) = (b2b_shared(None), b2b_row(&f));
+        let (channel, generation) = (ChannelId::new(row.channel_id), row.born_generation);
+        let user = poise::serenity_prelude::MessageId::new(row.user_msg_id);
+        let http = Arc::new(poise::serenity_prelude::Http::new("test-token"));
+        assert!(note_intake_turn_started(&shared, &http, channel, user, generation, "start").await);
+        let key = TurnKey::new(channel, row.user_msg_id, generation)
+            .with_episode_nonce(row.turn_nonce.as_deref());
+        let evidence = proof(&f, Some("own answer"), disposition);
+        record(
+            &shared,
+            &durable(&f, &evidence),
+            &evidence,
+            key,
+            Some(&row),
+            None,
+        )
+        .await;
+        let mut visible = std::collections::BTreeSet::new();
+        for op in shared.turn_view_reconciler.ops() {
+            match (op.target.message_id == user, op.add) {
+                (true, true) => visible.insert(op.emoji),
+                (true, false) => visible.remove(&op.emoji),
+                _ => false,
+            };
+        }
+        assert_eq!(
+            visible.into_iter().collect::<Vec<_>>(),
+            [wanted],
+            "{offset}"
+        );
+    }
+}

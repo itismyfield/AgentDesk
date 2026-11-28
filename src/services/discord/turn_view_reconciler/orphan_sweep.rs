@@ -185,11 +185,14 @@ pub(in crate::services::discord) async fn sweep_orphan_tui_anchors_with_probes(
     cleared
 }
 
-fn is_pending_tui_anchor(record: &PersistedTargetState, provider: &str) -> bool {
+fn is_pending_target(
+    record: &PersistedTargetState,
+    provider: &str,
+    kind: TurnViewTargetKind,
+) -> bool {
     record.version == PERSISTED_STATE_VERSION
         && record.provider == provider
-        && TurnViewTargetKind::from_str(&record.kind)
-            == Some(TurnViewTargetKind::TuiDirectBotAnchor)
+        && TurnViewTargetKind::from_str(&record.kind) == Some(kind)
         && TurnViewState::from_str(&record.applied) == Some(TurnViewState::Pending)
 }
 
@@ -203,12 +206,22 @@ impl TurnViewReconciler {
         shared: &SharedData,
         now: SystemTime,
     ) -> Vec<PendingAnchorCandidate> {
+        self.persisted_pending_targets(shared, now, TurnViewTargetKind::TuiDirectBotAnchor)
+    }
+
+    /// Persisted `⏳` targets of one kind for this runtime's provider; read-only.
+    pub(super) fn persisted_pending_targets(
+        &self,
+        shared: &SharedData,
+        now: SystemTime,
+        kind: TurnViewTargetKind,
+    ) -> Vec<PendingAnchorCandidate> {
         let Some(root) =
             crate::services::discord::runtime_store::discord_turn_view_reconciler_root()
         else {
             return Vec::new();
         };
-        let dir = root.join(TurnViewTargetKind::TuiDirectBotAnchor.as_str());
+        let dir = root.join(kind.as_str());
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return Vec::new();
         };
@@ -224,7 +237,7 @@ impl TurnViewReconciler {
             let Ok(record) = serde_json::from_str::<PersistedTargetState>(&text) else {
                 continue;
             };
-            if !is_pending_tui_anchor(&record, shared.provider.as_str()) {
+            if !is_pending_target(&record, shared.provider.as_str(), kind) {
                 continue;
             }
             let attached_age = entry
@@ -265,6 +278,19 @@ impl TurnViewReconciler {
         source: &'static str,
     ) -> bool {
         let target = TurnViewTarget::tui_direct_bot_anchor(channel_id, message_id);
+        self.clear_orphan_pending(shared, target, holds_before_removal, source)
+            .await
+    }
+
+    /// Removes a stranded `⏳` of any target kind under its lock, after a fresh hold re-check.
+    pub(super) async fn clear_orphan_pending(
+        &self,
+        shared: &SharedData,
+        target: TurnViewTarget,
+        holds_before_removal: &(dyn Fn(u64, u64) -> bool + Send + Sync),
+        source: &'static str,
+    ) -> bool {
+        let (channel_id, message_id) = (target.channel_id, target.message_id);
         let target_lock = self.target_lock(target);
         let _guard = target_lock.lock().await;
         let current = self
