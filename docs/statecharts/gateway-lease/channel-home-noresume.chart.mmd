@@ -1,0 +1,73 @@
+---
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
+---
+stateDiagram-v2
+  state "Legend" as legend {
+    lg0: Unmanaged
+    lg1: Gateway
+    lg2: Moving
+    lg3: Path to the Completes bug
+    lg4: Repeats forever, so Completes breaks
+  }
+  class lg0 tan
+  class lg1 blue
+  class lg2 pink
+  class lg3 bugPath
+  class lg4 repeats
+  s0: No owner row, the gateway serves (no node set)
+  s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
+  s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
+  s3: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
+  s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway
+  s5: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
+  s6: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
+  s7: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, idle session on the gateway
+  s8: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, idle session on the gateway, a second input waits behind it [1 input left unanswered]
+  s9: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home asked to end, idle session on the gateway, a second input waits behind it [1 input left unanswered]
+  s10: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, old home ended, the gateway cleared its session, a second input waits behind it [1 input left unanswered]
+  s11: Home is the gateway (set to the designated node, 1 file edit so far), the gateway cleared its session, a second input waits on a cancelled cleanup, 1 notice waiting in the outbox [1 input left unanswered]
+  s12: Home is the gateway (set to the designated node, 1 file edit so far), a second input waits on a cancelled cleanup, 1 notice waiting in the outbox [1 input left unanswered]
+  s13: Home is the gateway (set to the designated node, 1 file edit so far), a second input waits on a cancelled cleanup [1 input left unanswered]
+  [*] --> s0
+  s0 --> s1: an operator edits one node's config file
+  s1 --> s2: you send a message
+  s2 --> s3: the gateway starts the turn itself
+  s3 --> s4: the hub copies its setting to the database
+  s4 --> s5: the answer reaches Discord
+  s5 --> s6: you send a message
+  s6 --> s7: the gateway puts the input into shared custody
+  s7 --> s7: a node reads the owner row again
+  s7 --> s8: you send another message while one is held
+  s8 --> s9: the old home is asked to end its session
+  s9 --> s10: the old home answers the request
+  s10 --> s11: you cancel the held input with /cancel-queued
+  s11 --> s12: the home opens a new generation for its next session
+  s12 --> s13: the notice reaches Discord
+  class s0 tan
+  class s0 bugPath
+  class s1 tan
+  class s1 bugPath
+  class s2 tan
+  class s2 bugPath
+  class s3 tan
+  class s3 bugPath
+  class s4 tan
+  class s4 bugPath
+  class s5 tan
+  class s5 bugPath
+  class s6 tan
+  class s6 bugPath
+  class s7 blue
+  class s7 bugPath
+  class s8 blue
+  class s8 bugPath
+  class s9 pink
+  class s9 bugPath
+  class s10 pink
+  class s10 bugPath
+  class s11 blue
+  class s11 bugPath
+  class s12 blue
+  class s12 bugPath
+  class s13 blue
+  class s13 repeats

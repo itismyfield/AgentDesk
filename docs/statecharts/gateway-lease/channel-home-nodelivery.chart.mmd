@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -20,9 +20,10 @@ stateDiagram-v2
   s3: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway
   s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input is kept for the designated node
   s5: Home is the designated node (set to the designated node, 1 file edit so far), an input is handed to the designated node
-  s6: Home is the designated node (set to the designated node, 1 file edit so far), turn runs on the designated node
-  s7: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), turn runs on the designated node
-  s8: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), turn runs on the designated node (old session), the designated node keeps an older tenure's binding log [noticed with no notice sent]
+  s6: Home is the designated node (set to the designated node, 1 file edit so far), the designated node's worker claimed an input that has not begun
+  s7: Home is the designated node (set to the designated node, 1 file edit so far), turn runs on the designated node
+  s8: Home is the designated node (set to the designated node, 1 file edit so far, designated node down), turn runs on the designated node
+  s9: Home is the gateway (set to the designated node, 1 file edit so far, designated node down), turn runs on the designated node (old session), the designated node keeps an older tenure's binding log [noticed with no notice sent]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: the hub copies its setting to the database
@@ -30,10 +31,11 @@ stateDiagram-v2
   s3 --> s4: the gateway puts the input into shared custody
   s4 --> s5: the input is handed to the node that owns the channel
   s5 --> s5: a node reads the owner row again
-  s5 --> s6: the home starts the turn
-  s6 --> s7: the designated node stops
-  s7 --> s7: the designated node's heartbeat expires
-  s7 --> s8: the gateway moves the channel off the offline home and reserves a notice
+  s5 --> s6: the home's worker claims the input
+  s6 --> s7: the input begins in a session of the current generation
+  s7 --> s8: the designated node stops
+  s8 --> s8: the designated node's heartbeat expires
+  s8 --> s9: the gateway moves the channel off the offline home and reserves a notice
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -51,6 +53,8 @@ stateDiagram-v2
   class s6 bugPath
   class s7 teal
   class s7 bugPath
-  class s8 blue
-  class s8 breaks
+  class s8 teal
   class s8 bugPath
+  class s9 blue
+  class s9 breaks
+  class s9 bugPath

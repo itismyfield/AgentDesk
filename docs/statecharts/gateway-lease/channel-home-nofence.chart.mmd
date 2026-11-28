@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -25,16 +25,18 @@ stateDiagram-v2
   s4: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
   s5: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
   s6: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
-  s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
-  s8: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
-  s9: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
-  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
-  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
-  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node
-  s13: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
-  s14: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
-  s15: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the designated node (old session) and the gateway, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
-  s16: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log [two effects for one input]
+  s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), the designated node's worker claimed an input that has not begun
+  s8: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
+  s9: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
+  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
+  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
+  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
+  s13: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node
+  s14: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
+  s15: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
+  s16: Home is the gateway (set to the gateway, 2 file edits so far), the gateway's worker claimed an input that has not begun, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
+  s17: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log [two effects for one input]
+  s18: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the designated node (old session) and the gateway, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: the hub copies its setting to the database
@@ -43,17 +45,19 @@ stateDiagram-v2
   s4 --> s5: the gateway puts the input into shared custody
   s5 --> s6: the input is handed to the node that owns the channel
   s6 --> s6: a node reads the owner row again
-  s6 --> s7: the home starts the turn
-  s7 --> s8: the hub copies its setting to the database
-  s8 --> s9: you send a message
-  s9 --> s10: the gateway puts the input into shared custody
-  s10 --> s11: the old home is asked to end its session
-  s11 --> s12: the request's deadline passes without an answer
-  s12 --> s13: the owner row moves to the new home
-  s13 --> s13: a node reads the owner row again
-  s13 --> s14: the answer reaches Discord
-  s13 --> s15: the home starts the turn
-  s14 --> s16: the notice reaches Discord
+  s6 --> s7: the home's worker claims the input
+  s7 --> s8: the input begins in a session of the current generation
+  s8 --> s9: the hub copies its setting to the database
+  s9 --> s10: you send a message
+  s10 --> s11: the gateway puts the input into shared custody
+  s11 --> s12: the old home is asked to end its session
+  s12 --> s13: the request's deadline passes without an answer
+  s13 --> s14: the owner row moves to the new home
+  s14 --> s14: a node reads the owner row again
+  s14 --> s15: the answer reaches Discord
+  s14 --> s16: the home's worker claims the input
+  s15 --> s17: the notice reaches Discord
+  s16 --> s18: the input begins in a session of the current generation
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
@@ -78,19 +82,23 @@ stateDiagram-v2
   class s9 bugPath
   class s10 teal
   class s10 bugPath
-  class s11 pink
+  class s11 teal
   class s11 bugPath
   class s12 pink
   class s12 bugPath
-  class s13 blue
-  class s13 mayBreak
+  class s13 pink
   class s13 bugPath
   class s14 blue
-  class s14 breaks
+  class s14 mayBreak
   class s14 bugPath
   class s15 blue
   class s15 breaks
   class s15 bugPath
   class s16 blue
-  class s16 breaks
   class s16 bugPath
+  class s17 blue
+  class s17 breaks
+  class s17 bugPath
+  class s18 blue
+  class s18 breaks
+  class s18 bugPath

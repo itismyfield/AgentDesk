@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -19,7 +19,8 @@ stateDiagram-v2
   s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input is kept for the designated node
   s5: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input is kept for the designated node, the waiting input was cleared
   s6: Home is the designated node (set to the designated node, 1 file edit so far), an input is handed to the designated node, the waiting input was cleared
-  s7: Home is the designated node (set to the designated node, 1 file edit so far), turn runs on the designated node [a cleared input ran]
+  s7: Home is the designated node (set to the designated node, 1 file edit so far), the designated node's worker claimed an input that has not begun, the waiting input was cleared
+  s8: Home is the designated node (set to the designated node, 1 file edit so far), turn runs on the designated node [a cleared input ran]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: the hub copies its setting to the database
@@ -28,7 +29,8 @@ stateDiagram-v2
   s4 --> s5: you run /clear at the gateway
   s5 --> s6: the input is handed to the node that owns the channel
   s6 --> s6: a node reads the owner row again
-  s6 --> s7: the home starts the turn
+  s6 --> s7: the home's worker claims the input
+  s7 --> s8: the input begins in a session of the current generation
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -45,5 +47,7 @@ stateDiagram-v2
   class s6 teal
   class s6 bugPath
   class s7 teal
-  class s7 breaks
   class s7 bugPath
+  class s8 teal
+  class s8 breaks
+  class s8 bugPath

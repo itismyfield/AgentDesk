@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -15,10 +15,10 @@ stateDiagram-v2
   class lg3 bugPath
   class lg4 repeats
   s0: No owner row, the gateway serves (no node set)
-  s1: No owner row, the gateway serves (no node set), an input waits at the gateway
+  s1: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far)
   s2: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), an input waits at the gateway
   s3: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the gateway
-  s4: No owner row, the gateway serves (no node set, the hub's file says otherwise, 1 file edit so far), idle session on the gateway
+  s4: No owner row, the gateway serves (set to the designated node, 1 file edit so far), turn runs on the gateway
   s5: No owner row, the gateway serves (set to the designated node, 1 file edit so far), idle session on the gateway
   s6: No owner row, the gateway serves (set to the designated node, 1 file edit so far), an input waits at the gateway, idle session on the gateway
   s7: Home is the gateway (set to the designated node, 1 file edit so far), an input is kept for the designated node, idle session on the gateway
@@ -26,17 +26,17 @@ stateDiagram-v2
   s9: Home is the gateway (set to the designated node, 1 file edit so far), the gateway cleared its session, 1 notice waiting in the outbox
   s10: Home is the gateway (set to the designated node, 1 file edit so far), the gateway cleared its session
   [*] --> s0
-  s0 --> s1: you send a message
-  s1 --> s2: an operator edits one node's config file
+  s0 --> s1: an operator edits one node's config file
+  s1 --> s2: you send a message
   s2 --> s3: the gateway starts the turn itself
-  s3 --> s4: the answer reaches Discord
-  s4 --> s5: the hub copies its setting to the database
+  s3 --> s4: the hub copies its setting to the database
+  s4 --> s5: the answer reaches Discord
   s5 --> s6: you send a message
   s6 --> s7: the gateway puts the input into shared custody
   s7 --> s8: the old home is asked to end its session
   s8 --> s9: you run /clear at the gateway
+  s9 --> s9: the request's deadline passes without an answer
   s9 --> s10: the notice reaches Discord
-  s10 --> s10: the old home answers the request
   class s0 tan
   class s0 bugPath
   class s1 tan
@@ -58,5 +58,4 @@ stateDiagram-v2
   class s9 blue
   class s9 bugPath
   class s10 blue
-  class s10 bugPath
   class s10 repeats

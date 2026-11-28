@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -21,12 +21,13 @@ stateDiagram-v2
   s4: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input waits at the gateway
   s5: No owner row, the gateway serves (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
   s6: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
-  s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
-  s8: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
-  s9: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
-  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
-  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
-  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended, the designated node cleared its session, 1 notice waiting in the outbox [busy turn cut]
+  s7: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), the designated node's worker claimed an input that has not begun
+  s8: Home is the designated node (set to the designated node, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node
+  s9: Home is the designated node (set to the gateway, 2 file edits so far), turn runs on the designated node
+  s10: Home is the designated node (set to the gateway, 2 file edits so far), an input waits at the gateway, turn runs on the designated node
+  s11: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, turn runs on the designated node
+  s12: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node
+  s13: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended, the designated node cleared its session, 1 notice waiting in the outbox [busy turn cut]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: the hub copies its setting to the database
@@ -35,12 +36,13 @@ stateDiagram-v2
   s4 --> s5: the gateway puts the input into shared custody
   s5 --> s6: the input is handed to the node that owns the channel
   s6 --> s6: a node reads the owner row again
-  s6 --> s7: the home starts the turn
-  s7 --> s8: the hub copies its setting to the database
-  s8 --> s9: you send a message
-  s9 --> s10: the gateway puts the input into shared custody
-  s10 --> s11: the old home is asked to end its session
-  s11 --> s12: the old home answers the request
+  s6 --> s7: the home's worker claims the input
+  s7 --> s8: the input begins in a session of the current generation
+  s8 --> s9: the hub copies its setting to the database
+  s9 --> s10: you send a message
+  s10 --> s11: the gateway puts the input into shared custody
+  s11 --> s12: the old home is asked to end its session
+  s12 --> s13: the old home answers the request
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -64,8 +66,10 @@ stateDiagram-v2
   class s9 bugPath
   class s10 teal
   class s10 bugPath
-  class s11 pink
+  class s11 teal
   class s11 bugPath
   class s12 pink
-  class s12 breaks
   class s12 bugPath
+  class s13 pink
+  class s13 breaks
+  class s13 bugPath

@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -33,7 +33,8 @@ stateDiagram-v2
   s14: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home asked to end
   s15: Home is the designated node (set to the gateway, 2 file edits so far), an input is kept for the gateway, old home ended
   s16: Home is the gateway (set to the gateway, 2 file edits so far), an input is handed to the gateway
-  s17: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the gateway [writes from an old store]
+  s17: Home is the gateway (set to the gateway, 2 file edits so far), the gateway's worker claimed an input that has not begun
+  s18: Home is the gateway (set to the gateway, 2 file edits so far), turn runs on the gateway [writes from an old store]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s1 --> s2: you send a message
@@ -52,7 +53,8 @@ stateDiagram-v2
   s13 --> s14: the old home is asked to end its session
   s14 --> s15: the old home answers the request
   s15 --> s16: the owner row moves to the new home
-  s16 --> s17: the home starts the turn
+  s16 --> s17: the home's worker claims the input
+  s17 --> s18: the input begins in a session of the current generation
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   class s0 tan
   class s0 bugPath
@@ -89,5 +91,7 @@ stateDiagram-v2
   class s16 blue
   class s16 bugPath
   class s17 blue
-  class s17 breaks
   class s17 bugPath
+  class s18 blue
+  class s18 breaks
+  class s18 bugPath

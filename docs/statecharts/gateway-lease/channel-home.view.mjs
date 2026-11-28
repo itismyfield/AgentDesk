@@ -1,7 +1,7 @@
 // Reader's words for ChannelHome.tla: one O channel whose execution node is set per channel.
 // "Designated node" is the node the setting names; "gateway" is the node that holds the Discord
 // gateway lease and runs the channel when the designated node cannot.
-export const title = "One O channel with a per-channel execution node, issue 8486 (revision 4)";
+export const title = "One O channel with a per-channel execution node, issue 8486 (revision 5)";
 
 const node = (n) => (n === "D" ? "the designated node" : "the gateway");
 
@@ -23,6 +23,7 @@ const input = (v) => {
     return `, an input is kept for ${node(v.tgt)}${asked}`;
   }
   if (v.q === "admitted") return `, an input is handed to ${node(v.tgt)}`;
+  if (v.q === "claimed") return `, ${node(v.tgt)}'s worker claimed an input that has not begun`;
   return "";
 };
 
@@ -46,6 +47,12 @@ const lifecycle = (v) => {
   const residue = ["D", "G"].filter((n) => v.res[n] === "old");
   if (residue.length) parts.push(`, ${residue.map(node).join(" and ")} keeps an older tenure's binding log`);
   if (v.qclr) parts.push(", the waiting input was cleared");
+  if (v.q2 !== 0) parts.push(v.q2park ? ", a second input waits on a cancelled cleanup" : ", a second input waits behind it");
+  if (v.fresh) parts.push(", the owner row asks for a fresh session");
+  const cleared = ["D", "G"].filter((n) => v.cleared[n] && v.sess[n] === "idle");
+  if (cleared.length) parts.push(`, ${cleared.map(node).join(" and ")} keeps a session the user cleared`);
+  const unsealed = ["D", "G"].filter((n) => v.unsealed[n]);
+  if (unsealed.length) parts.push(`, ${unsealed.map(node).join(" and ")} owes an unsealed announcement`);
   const pending = Object.entries(v.note).filter(([, reserved]) => reserved).length;
   if (pending) parts.push(`, ${pending} notice${pending > 1 ? "s" : ""} waiting in the outbox`);
   return parts.join("");
@@ -102,12 +109,19 @@ const labels = {
   Respond: "the old home answers the request",
   Expire: "the request's deadline passes without an answer",
   Transfer: "the owner row moves to the new home",
-  Start: "the home starts the turn",
   Post: "the answer reaches Discord",
   Withheld: "the turn ends and its answer is withheld",
   Refresh: "a node reads the owner row again",
   StaleEnd: "the old home ends its idle session",
   Clear: "you run /clear at the gateway",
+  CancelHead: "you cancel the held input with /cancel-queued",
+  Arrive2: "you send another message while one is held",
+  Promote2: "the next waiting input becomes the head and is planned",
+  Claim: "the home's worker claims the input",
+  Begin: "the input begins in a session of the current generation",
+  Seal: "the live session's next record seals the announcement",
+  EndSettle: "the writer closes the ended session's announcement with its recorded end",
+  FreshEnd: "the home honours the fresh-session mark and ends its idle session",
   Renew: "the home opens a new generation for its next session",
   RecordChild: "the designated node records the thread",
   DropAdmitted: "the input leaves custody with no turn",

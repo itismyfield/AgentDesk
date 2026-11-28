@@ -1,5 +1,5 @@
 ---
-title: "One O channel with a per-channel execution node, issue 8486 (revision 4)"
+title: "One O channel with a per-channel execution node, issue 8486 (revision 5)"
 ---
 stateDiagram-v2
   state "Legend" as legend {
@@ -32,17 +32,20 @@ stateDiagram-v2
   s11: No owner row, the gateway serves (no node set, the hub's file says otherwise, 2 file edits so far), an input is kept for the designated node
   s12: Home is the designated node (no node set, the hub's file says otherwise, 1 file edit so far), an input is handed to the designated node
   s13: Home is the designated node (no node set, the hub's file says otherwise, 2 file edits so far), an input is handed to the designated node
-  s14: Home is the designated node (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the designated node [an input ran on the wrong node]
-  s15: Home is the designated node (no node set, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node [an input ran on the wrong node]
-  s16: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), turn runs on the designated node [an input ran on the wrong node]
-  s17: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input waits at the gateway, turn runs on the designated node [an input ran on the wrong node]
-  s18: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, turn runs on the designated node [an input ran on the wrong node]
-  s19: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node [an input ran on the wrong node]
-  s20: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node [an input ran on the wrong node]
-  s21: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
-  s22: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
-  s23: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), turn runs on the designated node (old session) and the gateway, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
-  s24: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log [an input ran on the wrong node, two effects for one input]
+  s14: Home is the designated node (no node set, the hub's file says otherwise, 1 file edit so far), the designated node's worker claimed an input that has not begun
+  s15: Home is the designated node (no node set, the hub's file says otherwise, 1 file edit so far), turn runs on the designated node [an input ran on the wrong node]
+  s16: Home is the designated node (no node set, the hub's file says otherwise, 2 file edits so far), the designated node's worker claimed an input that has not begun
+  s17: Home is the designated node (no node set, the hub's file says otherwise, 2 file edits so far), turn runs on the designated node [an input ran on the wrong node]
+  s18: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), turn runs on the designated node [an input ran on the wrong node]
+  s19: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input waits at the gateway, turn runs on the designated node [an input ran on the wrong node]
+  s20: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, turn runs on the designated node [an input ran on the wrong node]
+  s21: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, old home asked to end, turn runs on the designated node [an input ran on the wrong node]
+  s22: Home is the designated node (no node set, the hub's file says otherwise, 3 file edits so far), an input is kept for the gateway, old home did not answer, turn runs on the designated node [an input ran on the wrong node]
+  s23: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
+  s24: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
+  s25: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), the gateway's worker claimed an input that has not begun, turn runs on the designated node (old session), the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
+  s26: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), an input is handed to the gateway, idle session on the designated node, the designated node keeps an older tenure's binding log [an input ran on the wrong node, two effects for one input]
+  s27: Home is the gateway (no node set, the hub's file says otherwise, 3 file edits so far), turn runs on the designated node (old session) and the gateway, the designated node keeps an older tenure's binding log, 1 notice waiting in the outbox [an input ran on the wrong node]
   [*] --> s0
   s0 --> s1: an operator edits one node's config file
   s0 --> s2: an operator edits one node's config file
@@ -59,18 +62,21 @@ stateDiagram-v2
   s11 --> s13: the input is handed to the node that owns the channel
   s12 --> s12: a node reads the owner row again
   s13 --> s13: a node reads the owner row again
-  s12 --> s14: the home starts the turn
-  s13 --> s15: the home starts the turn
-  s15 --> s16: an operator edits one node's config file
-  s16 --> s17: you send a message
-  s17 --> s18: the gateway puts the input into shared custody
-  s18 --> s19: the old home is asked to end its session
-  s19 --> s20: the request's deadline passes without an answer
-  s20 --> s21: the owner row moves to the new home
-  s21 --> s21: a node reads the owner row again
-  s21 --> s22: the answer reaches Discord
-  s21 --> s23: the home starts the turn
-  s22 --> s24: the notice reaches Discord
+  s12 --> s14: the home's worker claims the input
+  s13 --> s16: the home's worker claims the input
+  s14 --> s15: the input begins in a session of the current generation
+  s16 --> s17: the input begins in a session of the current generation
+  s17 --> s18: an operator edits one node's config file
+  s18 --> s19: you send a message
+  s19 --> s20: the gateway puts the input into shared custody
+  s20 --> s21: the old home is asked to end its session
+  s21 --> s22: the request's deadline passes without an answer
+  s22 --> s23: the owner row moves to the new home
+  s23 --> s23: a node reads the owner row again
+  s23 --> s24: the answer reaches Discord
+  s23 --> s25: the home's worker claims the input
+  s24 --> s26: the notice reaches Discord
+  s25 --> s27: the input begins in a session of the current generation
   classDef breaks fill:#ffecee,stroke:#e72e3b,stroke-width:2.5px,color:#cd2834
   classDef mayBreak fill:#fff3e6,stroke:#e8730c,stroke-width:2.5px,color:#b85a06
   class s0 tan
@@ -103,9 +109,9 @@ stateDiagram-v2
   class s13 teal
   class s13 bugPath
   class s14 teal
-  class s14 breaks
   class s14 bugPath
   class s15 teal
+  class s15 breaks
   class s15 bugPath
   class s16 teal
   class s16 bugPath
@@ -113,19 +119,25 @@ stateDiagram-v2
   class s17 bugPath
   class s18 teal
   class s18 bugPath
-  class s19 pink
+  class s19 teal
   class s19 bugPath
-  class s20 pink
+  class s20 teal
   class s20 bugPath
-  class s21 blue
-  class s21 mayBreak
+  class s21 pink
   class s21 bugPath
-  class s22 blue
-  class s22 breaks
+  class s22 pink
   class s22 bugPath
   class s23 blue
-  class s23 breaks
+  class s23 mayBreak
   class s23 bugPath
   class s24 blue
   class s24 breaks
   class s24 bugPath
+  class s25 blue
+  class s25 bugPath
+  class s26 blue
+  class s26 breaks
+  class s26 bugPath
+  class s27 blue
+  class s27 breaks
+  class s27 bugPath
