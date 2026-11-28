@@ -4,6 +4,14 @@ use super::super::*;
 
 pub(super) type GuardedSaveOutcome = crate::services::discord::inflight::GuardedSaveOutcome;
 
+pub(super) fn dirty_flush_entrypoint(o_keeps_body: bool) -> &'static str {
+    if o_keeps_body {
+        "turn_bridge::stream_tick::dirty_flush_o_cut"
+    } else {
+        "turn_bridge::stream_tick::dirty_flush"
+    }
+}
+
 pub(in crate::services::discord::turn_bridge) struct StreamTickCandidateSaveContext<
     'a,
     G: TurnGateway + ?Sized,
