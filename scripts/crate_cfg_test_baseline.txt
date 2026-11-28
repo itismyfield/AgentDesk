@@ -272,7 +272,6 @@
 ["src/services/session_host/herdr/policy/peer.rs", "cfg-test-statement", "# [ cfg ( test ) ] loaded_image : : after_image_for_test ( ) ;", "site", 1]
 ["src/services/session_host/herdr_host.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) fn with_restore_reader ( self , read_restore : fn ( & T , & HerdrEndpoint ) - > RestoreResume , ) - > Self", "site", 1]
 ["src/services/session_host/herdr_registry.rs", "cfg-not-test", "# [ cfg ( not ( test ) ) ] use std : : sync : : OnceLock ;", "site", 1]
-["src/services/session_host/host_decision.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) fn forced_probes ( name : & str ) - > usize", "site", 1]
 ["src/services/session_host/submit.rs", "cfg-test-item", "# [ cfg ( test ) ] impl Drop for SubmitSpy", "site", 1]
 ["src/services/session_host/submit.rs", "cfg-test-item", "# [ cfg ( test ) ] impl SubmitSpy", "site", 1]
 ["src/services/session_host/submit.rs", "cfg-test-item", "# [ cfg ( test ) ] pub ( crate ) struct SubmitSpy ( Option < usize > )", "site", 1]

@@ -26,7 +26,7 @@ else:
 
 
 BASELINE = "scripts/crate_cfg_test_baseline.txt"
-INITIAL_BASELINE_SHA256 = "9076d8a1f7b2aa2fd4d93dd93b0817b88dae200a4fefb615f6a926dad9ed6a1b"
+INITIAL_BASELINE_SHA256 = "5dab568d5e1a05bd95f936d5d92bb00b500487daae2f2bb4cb031fde701bff0e"
 ALLOW = "// cfg-test-in-crate: allow "
 CLOSER = {"(": ")", "[": "]", "{": "}"}
 CANDIDATE = re.compile(
