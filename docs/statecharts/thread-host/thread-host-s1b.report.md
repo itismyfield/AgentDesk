@@ -310,14 +310,14 @@ The isolated `LegacyLiveReplacement` entry retains A's pane in the total. The sh
 
 ### Owner wait after an evidenced attach fails
 
-`evidenced` models the provider evidence stored in `record.expected`. `hkey` tracks the owner's first input key. The attach cases begin with a placed provider. After evidence and pane loss, the same unattempted or KnownNotSent original waits through the exact Missing retire. Only that wait releases it to a successor. Unknown disposition stays held. The existing after-key case also records provider evidence and checks single submission.
+`evidenced` models the provider evidence in `record.expected`. `hkey` tracks the owner's first key. The placed pane can vanish before attach or after the owner reserves its first input. Physical Missing retirement can finish before or after the owner records its disposition.
 
 | Config | Expected contract |
 | --- | --- |
-| `S2AttachWait` | `FirstInputResolves` with the start-failure budget untouched |
-| `S2AttachUnread` | `UnknownAttachHeld`, zero submissions |
-| `MutAttachOpaque` | `OwnerStartBudgetPreserved` and `FirstInputResolves` break |
+| `S2AttachWait` | An unattempted original reaches its successor even if Missing retirement precedes recording the wait. |
+| `S2AttachReserved` | Reserve, pane loss, exact no-key settlement and KnownNotSent requeue preserve the original across either order of retirement and settlement. |
+| `S2AttachUnread` | The execution reaches Retired while the original stays held with zero submissions. |
+| `MutAttachOpaque` | The opaque attach refusal breaks `OwnerStartBudgetPreserved` and `FirstInputResolves`. |
+| `MutAttachMissingUnsent` | Dropping the requeued original's no-key proof breaks `FirstInputResolves`. |
 
-The physical Missing rules and exact retirement CAS stay in the placed resolver. The typed wait lives in the owner and is keyed by the queue ticket, original and retired nonce.
-
-Removing the UserDefault witness guard in an isolated run produced `UserDefaultReplacementHeld` RED at `PlacedMissingRetire` (954 states). This models the startup-proof exception in `session_host/herdr/policy/permit.rs:176–189`. Listing failure and a witness change during the read still produce no confirmed Missing. PG tests cover the real snapshot, the expected field, stale CAS, and Retired after the first key.
+The physical Missing witness and CAS stay in the placed resolver. The owner holds the exact ticket, original and retired nonce.

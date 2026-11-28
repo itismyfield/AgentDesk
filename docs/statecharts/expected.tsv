@@ -2064,6 +2064,7 @@ thread-host/ThreadHostS1bAfterS1b.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bBeforeAll.cfg	ThreadHostS1b	HerdrInputUnderConsent,HerdrNoTmuxOp,RefusalKeepsLivePane,RestoredBeforeRead,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bBeforeNoProbe.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bBeforeS1b.cfg	ThreadHostS1b	UnknownRunsNoHost	-
+thread-host/ThreadHostS1bMutAttachMissingUnsent.cfg	ThreadHostS1b	-	FirstInputResolves
 thread-host/ThreadHostS1bMutAttachOpaque.cfg	ThreadHostS1b	OwnerStartBudgetPreserved	FirstInputResolves
 thread-host/ThreadHostS1bMutCacheOnly.cfg	ThreadHostS1b	HerdrInputUnderConsent,LiveTmuxRelaunchApplies,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bMutConsentAlways.cfg	ThreadHostS1b	S1bChildInputKeepsMain,TmuxInputNotConsentHeld	-
@@ -2104,6 +2105,7 @@ thread-host/ThreadHostS1bRev4All.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,Resto
 thread-host/ThreadHostS1bRev4S1b.cfg	ThreadHostS1b	LiveTmuxRelaunchApplies,S1bChildInputKeepsMain,SlotRotationProceeds,TmuxInputNotConsentHeld,TmuxThreadNoHerdrOp,TmuxThreadTmuxOpsAdmitted,UnknownRunsNoHost	-
 thread-host/ThreadHostS1bS1bFirstAll.cfg	ThreadHostS1b	RestoredBeforeRead,SlotRotationProceeds	-
 thread-host/ThreadHostS1bS2All.cfg	ThreadHostS1b	-	-
+thread-host/ThreadHostS1bS2AttachReserved.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2AttachUnread.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2AttachWait.cfg	ThreadHostS1b	-	-
 thread-host/ThreadHostS1bS2ExecAll.cfg	ThreadHostS1b	-	-

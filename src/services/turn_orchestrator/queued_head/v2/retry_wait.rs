@@ -10,6 +10,11 @@ const MAX_WAIT_MS: u64 = 300_000;
 #[cfg(unix)]
 pub(super) use super::super::v2_types::retry_wait::RetryCause;
 pub(super) use super::super::v2_types::retry_wait::RetryWait;
+use super::super::v2_types::retry_wait::UnsentExecution;
+
+fn ticket_receipt(receipt: &str) -> Option<(&str, &str)> {
+    receipt.strip_prefix("tk:")?.rsplit_once(':')
+}
 
 /// Whether `wait` is the wait of exactly this front: its slot's ticket and original.
 fn holds(wait: &RetryWait, front: &Front) -> bool {
@@ -58,7 +63,7 @@ impl Owner {
         self.enter_retry_wait(front, cause, now).map(Some)
     }
 
-    /// A retired attach can start fresh only for the same unreserved original after its wait.
+    /// A retired attach can start fresh for the exact original with proof it has no key there.
     #[cfg(unix)]
     pub(crate) fn resume_retired_attach(
         &self,
@@ -71,11 +76,12 @@ impl Owner {
         {
             return Err("NotSent(\"owner_disposition_unavailable\")".into());
         }
-        Ok(self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
+        let waited = self.snapshot.retry.wait.as_ref().is_some_and(|wait| {
             !wait.armed
                 && holds(wait, front)
                 && matches!(&wait.cause, RetryCause::PendingAttach { nonce: retired } if retired == nonce)
-        }))
+        });
+        Ok(waited || self.snapshot.has_unsent_execution(front, nonce))
     }
 
     #[cfg(unix)]
@@ -193,17 +199,61 @@ impl Owner {
 impl SnapshotV2 {
     /// The ticket bound to the queue front's slot; a migrated or partly admitted front has none.
     pub(super) fn front_ticket(&self) -> Option<String> {
-        let item = self.queued_digest(0)?;
+        self.ticket_at(0)
+    }
+
+    fn ticket_at(&self, at: usize) -> Option<String> {
+        let item = self.queued_digest(at)?;
         self.admission_binds.iter().find_map(|b| match &b.at {
-            BindAt::Queued { index: 0, item: at } if *at == item => Some(
-                b.receipt
-                    .strip_prefix("tk:")?
-                    .rsplit_once(':')?
-                    .0
-                    .to_string(),
-            ),
+            BindAt::Queued { index, item: bound } if *index == at && *bound == item => {
+                ticket_receipt(&b.receipt).map(|(ticket, _)| ticket.to_owned())
+            }
             _ => None,
         })
+    }
+
+    /// The caller settled this exact attempt as unsent and is returning its members to the queue.
+    pub(super) fn remember_unsent_execution(&mut self, input: &InputAttempt) {
+        let Some(attempt) = input.attempt.as_ref().filter(|attempt| {
+            attempt.provider == "claude"
+                && attempt.target.host == "herdr"
+                && !attempt.target.execution_nonce.is_empty()
+                && matches!(&attempt.source, AttemptSource::PreSource { .. })
+        }) else {
+            return;
+        };
+        for item in input.members() {
+            let front = refused::refused_member(item);
+            let ticket = self.admission_binds.iter().find_map(|bind| {
+                let BindAt::Attempt {
+                    identity,
+                    attempt: bound,
+                } = &bind.at
+                else {
+                    return None;
+                };
+                let (ticket, fingerprint) = ticket_receipt(&bind.receipt)?;
+                (bound == attempt
+                    && *identity == front.identity
+                    && fingerprint == front.fingerprint)
+                    .then(|| ticket.to_owned())
+            });
+            self.retry.unsent.retain(|proof| proof.front != front);
+            self.retry.unsent.push(UnsentExecution {
+                ticket,
+                front,
+                nonce: attempt.target.execution_nonce.clone(),
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    fn has_unsent_execution(&self, front: &Front, nonce: &str) -> bool {
+        let original = refused::refused_member(&front.1);
+        self.retry
+            .unsent
+            .iter()
+            .any(|proof| proof.nonce == nonce && proof.ticket == front.0 && proof.front == original)
     }
 
     /// Consumes the armed wait's due once it passed: one more attempt, and the front may start.
@@ -227,5 +277,30 @@ impl SnapshotV2 {
         if !kept {
             self.retry.wait = None;
         }
+        self.prune_unsent_executions();
+    }
+
+    /// A new reserve, removal or ticket change consumes the queued original's proof.
+    fn prune_unsent_executions(&mut self) {
+        if self.retry.unsent.is_empty() {
+            return;
+        }
+        let mut proofs = std::mem::take(&mut self.retry.unsent);
+        let active = self
+            .head_injection
+            .as_ref()
+            .map_or(0, |head| head.members().count());
+        proofs.retain(|proof| {
+            self.items
+                .iter()
+                .enumerate()
+                .skip(active)
+                .any(|(index, item)| {
+                    sources::identity(item) == proof.front.identity
+                        && refused::refused_member(item) == proof.front
+                        && self.ticket_at(index) == proof.ticket
+                })
+        });
+        self.retry.unsent = proofs;
     }
 }

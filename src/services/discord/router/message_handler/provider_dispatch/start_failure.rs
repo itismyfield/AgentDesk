@@ -453,7 +453,7 @@ impl Failure {
     }
 }
 impl Failure {
-    /// An exact retired attach lets its waiting original start without the ended native binding.
+    /// The owner may start fresh for the exact retired execution when its original has no key.
     pub(super) fn resume_retired_attach(&self, turn: &StreamingTurn<'_>) -> Result<bool, String> {
         use crate::db::dispatched_sessions::hosted_execution::{HostedRecord, HostedState};
         let TurnHost::Herdr(plan) = turn.host else {
@@ -475,7 +475,9 @@ impl Failure {
                 .ok_or("NotSent(\"owner_disposition_unavailable\")")?
                 .resume_retired_attach((&front, number), &nonce)
         });
-        tokio::runtime::Handle::current().block_on(resume)
+        tokio::runtime::Handle::current()
+            .block_on(resume)
+            .map_err(|_| "NotSent(\"owner_disposition_unavailable\")".into())
     }
 
     /// A Herdr user stop before the reserve cancels the claimed restart greeting instead of its

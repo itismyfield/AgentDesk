@@ -130,7 +130,8 @@ SyncOutcome == CASE cache = "Herdr" -> "HerdrPath"
 
 \* ---- S2 placement section: definitions used by Init ----
 ReplacedEntries == {"LegacyReplaced", "LegacyLiveReplacement", "UserDefaultReplaced"}
-AttachEntries == {"LostBeforeKey", "LostBeforeKeyKnownNotSent", "LostBeforeKeyUnread"}
+AttachEntries == {"LostBeforeKey", "LostBeforeKeyRetiredFirst", "LostAfterReserve", "LostBeforeKeyUnread"}
+ReserveLoss == entry = "LostAfterReserve" /\ gen = 1
 S2Entries == {"NewThread", "FreshAfterKill", "ResumeTmux", "TmuxParentThread",
               "LiveTmuxNoSel", "SelUnknown", "RetiredNative",
               "RetryNew", "DispatchNew", "StaleBound", "RestartVacant",
@@ -308,7 +309,8 @@ S2Like == Mode \in {"S2", "MutS2NoPermit", "MutS2NoBootResolve", "MutS2NoRelease
                     "MutW1BootGateBlocks", "MutW1RestartNoSeed",
                     "MutW3NoPlacedResidue", "MutW3ResidueByAbsence", "MutW3NoPristine",
                     "MutW3ArchiveAfterRelease", "MutW4PendingEarlyReturn", "MutW4MissingNoCas",
-                    "MutW4UnreadAsMissing", "MutW4MissingResubmits", "MutAttachOpaque"}
+                    "MutW4UnreadAsMissing", "MutW4MissingResubmits", "MutAttachOpaque",
+                    "MutAttachMissingUnsent"}
 Selector == entry = "ResumeTmux"
 HerdrExec == {"Pending", "Placed", "Bound"}
 FreshStart == {"None", "LegacyDead", "Retired", "Gone"}
@@ -435,7 +437,7 @@ Rejudge == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHANGE
 \* (P1-2: an exact retry has no owner hook, herdr_turn.rs:764-773, ingress.rs:415-417).
 ReserveRequired == S2Like /\ ~(Mode = "MutW1RetrySkipsReserve" /\ entry = "RetryNew")
 Reserve == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ ReserveRequired /\ exec = "Placed" /\ inq = "Queued" /\ ~reserved
-           /\ ~(entry \in AttachEntries /\ gen = 1)
+           /\ (entry \in AttachEntries /\ gen = 1 => ReserveLoss /\ evidenced /\ ~gone)
            /\ (entry = "LostAfterKey" /\ gen = 1 => evidenced)
            /\ reserved' = TRUE
            /\ UNCHANGED <<s2vars, hkey, boot, other, v2, rst>>
@@ -443,6 +445,7 @@ Reserve == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ ReserveR
 \* order (Bound before the first key). A replayed input (MutS2ReplayResubmit) keys a Bound pane.
 SubmitHerdr == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars
                /\ IF Mode = "MutW1BindFirst" THEN exec = "Bound" ELSE exec \in {"Placed", "Bound"}
+               /\ ~ReserveLoss
                \* attach needs the pane's own logged start (claude/herdr_turn/pending.rs:40).
                /\ inq = "Queued" /\ (ReserveRequired => reserved) /\ ran /\ ~gone
                /\ inq' = "Submitted" /\ submits' = submits + 1 /\ receipt' = "Sent" /\ hkey' = TRUE
@@ -573,21 +576,34 @@ PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
                 /\ exec = "Placed" /\ ~gone /\ gen = 1
                 /\ (entry = "LostAfterKey" => evidenced /\ hkey)
                 /\ (entry \in AttachEntries => evidenced /\ ~hkey)
+                /\ (ReserveLoss => reserved)
                 /\ gone' = TRUE /\ goneGen' = gen /\ tabs' = tabs - 1
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
                                slot, judged, unsent, receipt, gen, lostSucc, evidenced, attachWait>>
 EvidencedPaneVanishes == entry \in AttachEntries /\ PaneVanishes
-\* The owner's exact unreserved claim distinguishes unread disposition from a safe successor.
-AttachDisposition == CASE hkey \/ receipt = "Unconfirmed" -> "Unconfirmed"
-                       [] entry = "LostBeforeKeyUnread" -> "Unread"
-                       [] entry = "LostBeforeKeyKnownNotSent" -> "KnownNotSent"
-                       [] inq = "Queued" /\ ~reserved -> "Unattempted"
-                       [] OTHER -> "Unread"
+\* An attach refusal records the unattempted claim, even when recovery retired it first.
 WaitForAttach ==
-    /\ entry \in AttachEntries /\ exec = "Placed" /\ evidenced /\ gone /\ attachWait = "None"
-    /\ attachWait' = IF AttachDisposition \in {"Unattempted", "KnownNotSent"}
-                     THEN "Waiting" ELSE "Held"
+    /\ entry \in AttachEntries /\ entry # "LostAfterReserve"
+    /\ exec \in {"Placed", "Retired"} /\ evidenced /\ gone /\ attachWait = "None"
+    /\ (entry = "LostBeforeKeyRetiredFirst" => exec = "Retired")
+    /\ inq = "Queued" /\ ~reserved /\ ~hkey
+    /\ attachWait' = IF entry = "LostBeforeKeyUnread" THEN "Held" ELSE "Waiting"
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
+\* Only a no-key settlement of the reserved original enters KnownNotSent.
+SettleAttachUnsent ==
+    /\ ReserveLoss /\ exec \in {"Placed", "Retired"} /\ gone /\ evidenced
+    /\ reserved /\ ~hkey /\ inq = "Queued" /\ attachWait = "None"
+    /\ reserved' = FALSE /\ inq' = "Retained" /\ attachWait' = "KnownNotSent"
+    /\ UNCHANGED <<vars, w3vars, hkey, boot, other, v2, rst,
+                   exec, made, tabs, tmuxs, submits, oready, late, epoch, restarts2, idle,
+                   slot, judged, unsent, receipt, gone, gen, goneGen, lostSucc, evidenced>>
+RequeueAttachUnsent ==
+    /\ attachWait = "KnownNotSent" /\ inq = "Retained"
+    /\ inq' = "Queued"
+    /\ attachWait' = IF Mode = "MutAttachMissingUnsent" THEN "None" ELSE "ProvenUnsent"
+    /\ UNCHANGED <<vars, w2vars, w3vars, exec, made, tabs, tmuxs, submits, oready, late,
+                   epoch, restarts2, idle, slot, judged, unsent, receipt,
+                   gone, gen, goneGen, lostSucc, evidenced>>
 \* The placed resolver needs Missing on a single witness. LegacyDedicated uses
 \* fresh E7 Off. UserDefault matches the nonce's stored grant before reading.
 \* Missing permits no replay of a submitted input.
@@ -598,18 +614,17 @@ MissingRetireOk == CASE Mode = "MutW4MissingNoCas" -> goneGen > 0 /\ exec \in He
 PlacedMissingRetire ==
     /\ UNCHANGED vars /\ S2Like /\ Mode \notin {"MutW3NoPlacedResidue", "MutW4PendingEarlyReturn"}
     /\ (epoch = restarts2 \/ BootResolves) /\ MissingRetireOk
-    /\ (entry \in AttachEntries => attachWait \in {"Waiting", "Held"})
-    /\ exec' = "Retired" /\ unsent' = ~hkey /\ judged' = "None"
+    /\ exec' = "Retired" /\ unsent' = IF entry \in AttachEntries THEN unsent ELSE ~hkey
+    /\ judged' = "None"
     /\ inq' = IF Mode = "MutW4MissingResubmits" /\ inq = "Submitted" THEN "Queued" ELSE inq
-    /\ ran' = TRUE /\ reserved' = FALSE /\ hkey' = FALSE
+    /\ ran' = TRUE /\ reserved' = IF ReserveLoss THEN reserved ELSE FALSE
+    /\ hkey' = FALSE
     /\ lostSucc' = (lostSucc \/ (goneGen > 0 /\ goneGen # gen))
-    /\ attachWait' = IF Mode = "MutAttachOpaque" /\ attachWait = "Waiting"
-                     THEN "Spent" ELSE attachWait
     /\ UNCHANGED <<made, tabs, tmuxs, submits, oready, late, epoch, restarts2, idle, slot, receipt>>
-    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive, gone, gen, goneGen, evidenced>>
+    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive, gone, gen, goneGen, evidenced, attachWait>>
 ReleaseAttachWait ==
-    /\ exec = "Retired" /\ evidenced /\ attachWait = "Waiting" /\ goneGen = gen
-    /\ attachWait' = "Released"
+    /\ exec = "Retired" /\ evidenced /\ attachWait \in {"Waiting", "ProvenUnsent"} /\ goneGen = gen
+    /\ attachWait' = IF Mode = "MutAttachOpaque" /\ attachWait = "Waiting" THEN "Spent" ELSE "Released"
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
 \* w3 (P1-2): after the slot map moved on, the same thread ID still takes work: a dispatch that
 \* reuses the card's active_thread_id (intake_turn/adk_thread.rs:154-205, unarchived by
@@ -634,6 +649,7 @@ NextS2 == Launch \/ OrdinaryReady \/ GateRefused \/ ReadRecovers \/ ReadRefused 
           \/ BootRetireDead \/ RelayRetire \/ OtherServe \/ CmdRestartVacant
           \/ ResidueClose \/ PaneVanishes \/ PlacedMissingRetire \/ Successor \/ ArchiveThread
           \/ RecordAttachEvidence \/ WaitForAttach \/ ReleaseAttachWait
+          \/ SettleAttachUnsent \/ RequeueAttachUnsent
 SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(Launch) /\ WF_allvars(OrdinaryReady) /\ WF_allvars(ReadRecovers)
           /\ WF_allvars(Create) /\ WF_allvars(Resolve) /\ WF_allvars(Bind)
@@ -645,6 +661,7 @@ SpecS2 == Init /\ [][NextS2]_allvars
           /\ WF_allvars(PlacedMissingRetire)
           /\ WF_allvars(RecordAttachEvidence) /\ WF_allvars(EvidencedPaneVanishes)
           /\ WF_allvars(WaitForAttach) /\ WF_allvars(ReleaseAttachWait)
+          /\ WF_allvars(SettleAttachUnsent) /\ WF_allvars(RequeueAttachUnsent)
 
 \* A new execution under a Herdr parent is Herdr: no tmux session, after restart, thread_gc and
 \* slot reset included (every relaunch goes through Launch).
@@ -685,4 +702,5 @@ RetireOwnGeneration == ~lostSucc
 UserDefaultReplacementHeld == entry = "UserDefaultReplaced" => exec = "Placed" /\ submits = 0
 OwnerStartBudgetPreserved == attachWait # "Spent"
 UnknownAttachHeld == entry = "LostBeforeKeyUnread" => gen <= 1 /\ submits = 0
+UnknownAttachRetires == <>(exec = "Retired" /\ attachWait = "Held")
 =============================================================================

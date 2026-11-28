@@ -188,6 +188,7 @@ impl Owner {
             let cause = crate::services::claude_tui::input::PreparationHold::IDLE_EVIDENCE_PENDING;
             next.remember_readiness_hold(head.members(), cause, now);
         }
+        next.remember_unsent_execution(&head);
         let attempt = &key.attempt;
         (next.admission_binds)
             .retain(|b| !matches!(&b.at, BindAt::Attempt { attempt: a, .. } if a == attempt));
@@ -387,6 +388,7 @@ impl SnapshotV2 {
                 continue;
             }
             let entry = self.retained_inputs.remove(index);
+            self.remember_unsent_execution(&entry.input);
             let mut tail = self.items.split_off(slot);
             for member in &members {
                 let id = sources::identity(member);

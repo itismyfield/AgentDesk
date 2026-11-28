@@ -15,6 +15,14 @@ pub(crate) struct RetryWait {
     pub(crate) armed: bool,
 }
 
+/// The exact queued original whose first payload was proven unsent on one execution.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct UnsentExecution {
+    pub(crate) ticket: Option<String>,
+    pub(crate) front: RefusedMember,
+    pub(crate) nonce: String,
+}
+
 /// The current wait and the last wait number issued; a number is never issued twice.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Waits {
@@ -22,10 +30,12 @@ pub(crate) struct Waits {
     pub(crate) wait: Option<RetryWait>,
     #[serde(default)]
     pub(crate) seq: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unsent: Vec<UnsentExecution>,
 }
 
 impl Waits {
     pub(crate) fn is_unused(&self) -> bool {
-        self.wait.is_none() && self.seq == 0
+        self.wait.is_none() && self.seq == 0 && self.unsent.is_empty()
     }
 }
