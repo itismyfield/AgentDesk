@@ -1,6 +1,6 @@
 //! Isolated real watcher entry cases, retaining raw observations through task completion.
 use crate::services::discord::InflightTurnState;
-use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture::InstallFixture;
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture::InstallFixture;
 use crate::services::discord::health::test_support::{
     MockDiscord, seed_backfill_row, tree_fingerprint,
 };

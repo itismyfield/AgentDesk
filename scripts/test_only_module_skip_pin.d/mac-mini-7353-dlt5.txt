@@ -1,0 +1,4 @@
+resolver | src/services/discord/dl_tmux_watcher_test_host.rs
+resolver | src/services/discord/dl_tmux_watcher_unix_test_host.rs
+resolver | src/services/discord/watchers/lifecycle/restore_hook_test_support.rs
+resolver | src/services/discord/watchers/lifecycle/watcher_install_process_test_support.rs

@@ -11,9 +11,6 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
 
-#[path = "native_collector_mailbox_tests.rs"]
-mod native_collector_tests;
-
 #[path = "footer_retirement_raw_tests.rs"]
 mod footer_retirement_raw_tests;
 

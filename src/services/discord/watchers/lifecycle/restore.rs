@@ -663,7 +663,10 @@ async fn restore_selected_tmux_watchers(
 
         shared.record_tmux_watcher_reconnect(pw.channel_id);
         #[cfg(all(unix, any(test, feature = "test-support")))]
-        super::restore_hook_tests::record_reader_start(pw.channel_id.get(), pw.initial_offset);
+        super::restore_hook_test_support::record_reader_start(
+            pw.channel_id.get(),
+            pw.initial_offset,
+        );
         super::super::super::task_supervisor::spawn_observed_tmux_watcher(
             "watchers_lifecycle_tmux_output_watcher_with_restore",
             shared.clone(),

@@ -1,6 +1,6 @@
 //! Legacy restore effects are observed through the public entry in a child with fake tmux.
 use crate::db::auto_queue::test_support::TestPostgresDb;
-use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture::{
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture::{
     InstallFixture, fixture_with_pool,
 };
 use crate::services::discord::health::test_support;

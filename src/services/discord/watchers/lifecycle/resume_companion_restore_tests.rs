@@ -1,6 +1,6 @@
 //! The public boot restore must really reserve and start the proven Codex watcher.
 
-use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture as install_http;
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture as install_http;
 use crate::services::discord::router::message_handler::codex_resume_companion_queue_tests::{
     Fixture, ID,
 };

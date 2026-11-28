@@ -1,6 +1,6 @@
 use super::super::complete_force_clean_watcher_recovery;
 use super::*;
-use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture::{
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture::{
     InstallFixture, fixture, observe,
 };
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;

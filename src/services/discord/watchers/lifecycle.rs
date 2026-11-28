@@ -1,10 +1,10 @@
 use super::*;
 
 #[cfg(all(unix, any(test, feature = "test-support")))]
-#[path = "lifecycle/restore_hook_tests.rs"]
-mod restore_hook_tests;
+#[path = "lifecycle/restore_hook_test_support.rs"]
+mod restore_hook_test_support;
 #[cfg(all(unix, any(test, feature = "test-support")))]
-pub(in crate::services::discord) use restore_hook_tests::ReaderStartObservation;
+pub(in crate::services::discord) use restore_hook_test_support::ReaderStartObservation;
 
 #[path = "lifecycle/activity.rs"]
 mod activity;
@@ -104,7 +104,7 @@ pub(in crate::services::discord) use self::claims::{
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;
 #[cfg(test)]
-#[path = "lifecycle/watcher_install_process_tests.rs"]
+#[path = "lifecycle/watcher_install_process_test_support.rs"]
 pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]

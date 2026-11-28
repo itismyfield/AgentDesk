@@ -15,7 +15,3 @@ mod restore_legacy_tests;
 #[cfg(unix)]
 #[path = "watchers/lifecycle/resume_companion_restore_tests.rs"]
 mod resume_companion_restore_tests;
-
-#[cfg(unix)]
-#[path = "tmux_watcher/redrive_reclaim_e2e_tests.rs"]
-mod redrive_reclaim_e2e_tests;

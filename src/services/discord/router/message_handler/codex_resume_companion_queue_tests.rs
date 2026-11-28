@@ -13,7 +13,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, observe_binding_hook,
 };
 use crate::services::discord;
-use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture as install_http;
+use crate::services::discord::dl_tmux_watcher_test_host::watcher_install_fixture as install_http;
 use crate::services::discord::tmux::watcher_install_fixture as install;
 use crate::services::discord::turn_presence::activity::{Activity, tests as presence};
 use crate::services::tmux_common as tc;
