@@ -176,7 +176,7 @@ impl Fake {
         lock(&self.kicks).iter().map(|k| k.1.as_secs()).collect()
     }
 
-    fn notices(&self) -> Vec<(u64, String)> {
+    pub(in crate::services::discord) fn notices(&self) -> Vec<(u64, String)> {
         let notices = lock(&self.notices);
         notices
             .iter()

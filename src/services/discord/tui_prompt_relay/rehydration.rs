@@ -315,7 +315,7 @@ fn wake_attached_observer(
         tmux.to_owned(),
         channel,
         binding,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         crate::services::tui_prompt_dedupe::binding_events::test_root(),
     )
 }
@@ -335,7 +335,7 @@ pub(crate) fn observer_binding_published(
     {
         published();
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let binding_root = crate::services::tui_prompt_dedupe::binding_events::test_root();
     let Some(registry) = crate::services::discord::health::runtime_registry::runtime_registry()
     else {
@@ -369,7 +369,7 @@ pub(crate) fn observer_binding_published(
         let shared = registry.shared_for_provider_on_channel(&provider, ChannelId::new(channel)).await;
         if let Some(shared) = shared
             && let Some(wake) = wake_observed_source(&shared, &provider, tmux, channel, binding,
-                #[cfg(test)] binding_root,
+                #[cfg(any(test, feature = "test-support"))] binding_root,
             )
         {
             let _ = wake.await;
@@ -384,7 +384,7 @@ fn wake_observed_source(
     tmux: String,
     channel: u64,
     binding: crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
-    #[cfg(test)] binding_root: Option<std::path::PathBuf>,
+    #[cfg(any(test, feature = "test-support"))] binding_root: Option<std::path::PathBuf>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if binding.session_id.as_deref().is_none_or(str::is_empty)
         || std::fs::metadata(&binding.output_path).is_err()
@@ -426,7 +426,7 @@ fn wake_observed_source(
             channel,
             &tmux,
             &binding,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             binding_root,
         )
         .await;
