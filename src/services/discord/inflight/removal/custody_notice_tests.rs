@@ -2,7 +2,7 @@
 //! row in a real PostgreSQL message_outbox.
 
 use super::custody_notice::{enqueue_custody_notices, notices};
-use super::nondestructive_loader_tests::{CLAUDE, Env, G, row};
+use super::nondestructive_loader_tests::{row, Env, CLAUDE, G};
 use super::*;
 use crate::dispatch::test_support::DispatchPostgresTestDb;
 use crate::services::message_outbox::delivery_bot_for_target_session;
@@ -157,6 +157,49 @@ fn warnings<T>(run: impl FnOnce() -> T) -> (T, String) {
     let out = tracing::subscriber::with_default(subscriber, run);
     let text = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     (out, text)
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn completed_turn_with_only_native_input_custody_enqueues_nothing_pg() {
+    use crate::db::turns::TerminalOutcome;
+    use crate::services::discord::receipt_settle;
+    use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
+
+    let (env, db, pool) = harness("completed turn with native input custody")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let runtime = env.dir().with_file_name("runtime-fixture");
+    let state = row(701, None);
+    let fixture = Fixture::at(runtime.join("fixture-history.json"), state.channel_id, true);
+    let record = fixture
+        .history
+        .native_boot_record("native-fixture", &fixture.ticket)
+        .unwrap();
+    assert!(record.settlement.outcome.is_none());
+    assert!(!record.settlement.cleanup_complete);
+    super::boot_custody::persist_native_boot_record(&runtime, &record).unwrap();
+    assert!(
+        receipt_settle::record(
+            Some(&pool),
+            &state,
+            TerminalOutcome::Completed,
+            chrono::Utc::now()
+        )
+        .await
+    );
+
+    let custody = runtime.join("discord_custody").join("claude");
+    let before = snapshot(&custody);
+    assert!(before
+        .iter()
+        .any(|(path, _)| path.ends_with("0-native_input.json")));
+    let enqueued = enqueue_custody_notices(&custody, &CLAUDE, Some(&pool)).await;
+    let notices = rows(&pool).await;
+    finish(db, pool).await;
+    assert_eq!(enqueued, 0);
+    assert!(notices.is_empty());
+    assert_eq!(snapshot(&custody), before);
 }
 
 // Contract: a TUI-direct turn in custody is one notify-bot row for its channel naming the episode,
