@@ -152,7 +152,6 @@ impl std::ops::DerefMut for SharedData {
 /// Test accessors for callers outside `services`.
 #[cfg(test)]
 impl SharedData {
-    #[cfg(unix)]
     pub(crate) fn set_token_hash_for_test(&mut self, hash: &str) {
         self.token_hash = hash.to_string();
     }

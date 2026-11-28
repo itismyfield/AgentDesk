@@ -59,7 +59,9 @@ async fn queue_truth_disk_stat_error_is_unmeasured() {
     let _root = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
     let mut shared = crate::services::discord::make_shared_data_for_tests();
     // An embedded NUL makes metadata lookup fail on every platform.
-    Arc::get_mut(&mut shared).unwrap().token_hash = "invalid\0path".to_string();
+    Arc::get_mut(&mut shared)
+        .unwrap()
+        .set_token_hash_for_test("invalid\0path");
     let registry = crate::services::discord::health::HealthRegistry::new();
     registry.register("claude".into(), shared.clone()).await;
     let (mailboxes, token) = shared.queue_fixture_parts();

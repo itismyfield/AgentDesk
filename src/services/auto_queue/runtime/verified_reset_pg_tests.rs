@@ -5,7 +5,6 @@ use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard;
 use crate::services::discord::health::routine_ports::build_routine_session_controller;
 use crate::services::discord::health::{HealthRegistry, slot_row_host_refusal};
-use crate::services::provider::ProviderKind;
 use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::routines::session_control::{
     RoutineSessionCommand, seed_started_control_session, test_support::routine_with_thread,
@@ -31,8 +30,7 @@ impl Fixture {
     fn new(channel: u64) -> Self {
         let env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
         let dedupe_lock = dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        let (root, env) =
-            dedupe::binding_context::test_support::fixture_after_shared_test_env_lock();
+        let (root, env) = dedupe::binding_context::fixture_after_shared_test_env_lock();
         dedupe::reset_state_for_tests();
         dedupe::binding_events::set_test_root(Some(root.path()));
         let tmux = format!(
@@ -80,7 +78,7 @@ impl Fixture {
     async fn shared(&self, pool: &sqlx::PgPool) -> (Arc<SharedData>, Arc<HealthRegistry>, String) {
         let shared =
             crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-        shared.settings.write().await.provider = ProviderKind::Codex;
+        admin_host_guard::verified_reset_tests::use_codex_settings_for_reset(&shared).await;
         let name = self.tmux.strip_prefix("AgentDesk-codex-").unwrap();
         let upload = self
             .root
@@ -97,7 +95,7 @@ impl Fixture {
         .await;
         let key = format!(
             "codex/{}/{}:{}",
-            shared.token_hash,
+            shared.token_hash_for_test(),
             crate::services::platform::hostname_short(),
             self.tmux
         );
@@ -122,7 +120,7 @@ impl Fixture {
         };
         let identity = crate::db::dispatched_session_canonical_identity::CanonicalSessionIdentity {
             kind: crate::db::dispatched_session_canonical_identity::SessionIdentityKind::DiscordChannel,
-            discord_token_hash: &shared.token_hash, channel_id: &channel,
+            discord_token_hash: shared.token_hash_for_test(), channel_id: &channel,
         };
         crate::db::dispatched_session_canonical_identity::upsert_hook_session_with_identity_pg(
             pool,
@@ -142,11 +140,7 @@ impl Fixture {
                 ),
             )
             .unwrap();
-        shared.overrides.session_reset_pending.insert(self.channel);
-        shared
-            .overrides
-            .codex_goals_session_reset_pending
-            .insert(self.channel);
+        admin_host_guard::verified_reset_tests::mark_verified_reset_pending(&shared, self.channel);
         (shared, registry, key)
     }
 
@@ -170,7 +164,7 @@ impl Fixture {
             self.root
                 .path()
                 .join("runtime/discord_pending_queue/codex")
-                .join(&shared.token_hash)
+                .join(shared.token_hash_for_test())
                 .join(format!("{}.json", self.channel.get())),
         )
         .unwrap()
@@ -186,18 +180,7 @@ impl Fixture {
             admin_host_guard::verified_reset_tests::pending_dispatch_bytes(shared, self.channel),
             *self.pending_dispatch.get().unwrap()
         );
-        assert!(
-            shared
-                .overrides
-                .session_reset_pending
-                .contains(&self.channel)
-        );
-        assert!(
-            shared
-                .overrides
-                .codex_goals_session_reset_pending
-                .contains(&self.channel)
-        );
+        admin_host_guard::verified_reset_tests::assert_verified_reset_pending(shared, self.channel);
         let upload = self
             .root
             .path()
