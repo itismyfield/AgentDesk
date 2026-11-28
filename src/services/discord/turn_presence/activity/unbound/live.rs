@@ -1075,7 +1075,7 @@ pub(in crate::services::discord::turn_presence::activity) mod tests;
 pub(in crate::services::discord) mod live_snapshot_hook_test_support;
 
 #[cfg(test)]
-#[path = "live_fixture_tests.rs"]
+#[path = "live_fixture_test_support.rs"]
 pub(in crate::services::discord) mod fixture_tests;
 
 impl super::super::Reading {
