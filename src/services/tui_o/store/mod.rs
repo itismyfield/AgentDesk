@@ -507,6 +507,11 @@ impl ChannelStore {
         &self.ledger
     }
 
+    #[cfg(not(unix))]
+    pub(crate) fn codex_end_path(&self) -> Option<PathBuf> {
+        None
+    }
+
     /// The I/O error that made the store refuse writes, if any.
     pub fn io_failure(&self) -> Option<io::ErrorKind> {
         self.failed
