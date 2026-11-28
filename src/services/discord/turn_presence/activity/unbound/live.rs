@@ -370,7 +370,7 @@ impl Snapshot {
         .await
         .map_err(|e| e.to_string())??;
         #[cfg(any(test, feature = "test-support"))]
-        live_snapshot_hook_tests::after_files(channel.get()).await;
+        live_snapshot_hook_test_support::after_files(channel.get()).await;
         let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
         let canonical_target = if files.binding_only()
             && local_registration(&config, channel.get(), provider)
@@ -753,7 +753,7 @@ impl Snapshot {
         }
         #[cfg(any(test, feature = "test-support"))]
         if matches!(comparison, inflight_identity::Comparison::Inflight) {
-            live_snapshot_hook_tests::after_files(self.channel.get()).await;
+            live_snapshot_hook_test_support::after_files(self.channel.get()).await;
         }
         // Re-read files after the last DB/inventory await; final publication has no await.
         let mut files = Files::collect(
@@ -946,8 +946,8 @@ mod ownership;
 #[path = "live_publication.rs"]
 mod publication;
 #[cfg(any(test, feature = "test-support"))]
-#[path = "publication_hook_tests.rs"]
-pub(in crate::services::discord) mod publication_hook_tests;
+#[path = "publication_hook_test_support.rs"]
+pub(in crate::services::discord) mod publication_hook_test_support;
 
 pub(in crate::services::discord) async fn read(
     shared: &Arc<SharedData>,
@@ -1071,8 +1071,8 @@ async fn collect(
 pub(in crate::services::discord::turn_presence::activity) mod tests;
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "live_snapshot_hook_tests.rs"]
-pub(in crate::services::discord) mod live_snapshot_hook_tests;
+#[path = "live_snapshot_hook_test_support.rs"]
+pub(in crate::services::discord) mod live_snapshot_hook_test_support;
 
 #[cfg(test)]
 #[path = "live_fixture_tests.rs"]
