@@ -1,3 +1,4 @@
+#[cfg(unix)]
 #[tokio::test(flavor = "current_thread")]
 async fn context_followup_chunks_p2_allowed_mentions_preserve_users() {
     use crate::services::discord::admin_host_guard::tests::Recorder;

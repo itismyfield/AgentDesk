@@ -1,14 +1,15 @@
-use crate::services::agent_protocol::TaskNotificationKind;
-use crate::services::discord::task_notification_delivery::{
-    TaskNotificationContext,
-    inline_contract_tests::{
-        CHANNEL, Transport, assert_inline, clients, database, deliver, snapshot,
-    },
-};
-use crate::services::session_backend::StreamLineState;
-
+#[cfg(unix)]
 #[tokio::test]
 async fn monitor_auto_turn_stream_context_uses_provider_inline_once_pg() {
+    use crate::services::agent_protocol::TaskNotificationKind;
+    use crate::services::discord::task_notification_delivery::{
+        TaskNotificationContext,
+        inline_contract_tests::{
+            CHANNEL, Transport, assert_inline, clients, database, deliver, snapshot,
+        },
+    };
+    use crate::services::session_backend::StreamLineState;
+
     let (database, pool) = database("MonitorAutoTurn actual stream context entrypoint").await;
     let context = |summary| {
         TaskNotificationContext::from_stream_json(

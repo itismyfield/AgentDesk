@@ -358,7 +358,7 @@ async fn restitution_preserves_typed_refusals_and_legacy_results() {
         [(Closed, 3, 3), (Unreachable, 1, 1), (Closed, 2, 3)]
     {
         let mut attempts = 0;
-        let result = super::try_restitution(&shared, channel, |_| {
+        let result = discord::mailbox_finish::try_restitution(&shared, channel, |_| {
             attempts += 1;
             std::future::ready(if attempts <= failures {
                 Err(refusal)
@@ -374,7 +374,7 @@ async fn restitution_preserves_typed_refusals_and_legacy_results() {
             assert_eq!(fields(result.unwrap()), fields(payload.clone()));
         }
     }
-    let success = super::restitution(&shared, channel, |_| {
+    let success = discord::mailbox_finish::restitution(&shared, channel, |_| {
         std::future::ready(Ok(payload.clone()))
     })
     .await;

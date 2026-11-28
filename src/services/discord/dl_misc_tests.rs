@@ -37,7 +37,6 @@ mod tmux_restart_handoff_mailbox_tests;
 #[path = "tui_direct_abort_marker/retirement_census_tests.rs"]
 mod abort_marker_retirement_census_tests;
 
-#[cfg(unix)]
 #[path = "formatting/context_followup_tests.rs"]
 mod context_followup_tests;
 
@@ -47,6 +46,5 @@ mod promote_dispatch_tests;
 #[path = "session_runtime/resume_launch_binding_tests.rs"]
 mod resume_launch_binding_tests;
 
-#[cfg(unix)]
 #[path = "task_notification_delivery/stream_context_tests.rs"]
 mod task_notification_stream_context_tests;
