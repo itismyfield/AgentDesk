@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -7,12 +8,10 @@ use axum::routing::patch;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
-use crate::config::TestEnvVarGuard;
-
 pub(super) struct ArchiveFixture {
     patches: Arc<Mutex<Vec<u64>>>,
     server: tokio::task::JoinHandle<()>,
-    _base: TestEnvVarGuard,
+    address: SocketAddr,
 }
 
 impl ArchiveFixture {
@@ -42,17 +41,17 @@ impl ArchiveFixture {
             ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let base = TestEnvVarGuard::set_value_after_shared_test_env_lock(
-            "AGENTDESK_DISCORD_API_BASE_URL",
-            base.as_ref(),
-        );
+        let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
         Self {
             patches,
             server,
-            _base: base,
+            address,
         }
+    }
+
+    pub(super) fn address(&self) -> SocketAddr {
+        self.address
     }
 
     pub(super) fn take_patches(&self) -> Vec<u64> {
