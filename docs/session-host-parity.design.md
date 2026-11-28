@@ -376,7 +376,7 @@ src/services/discord/commands/text_commands/clear_refusal_reply_tests.rs:14:use 
 src/services/discord/commands/tmux_recreate.rs:91:    let refusal = crate::services::discord::admin_host_guard::managed_reset_refusal;
 src/services/discord/commands/tui_passthrough.rs:128:    if crate::config::session_hosts::herdr_endpoint(channel_id.get()).is_some() {
 src/services/discord/commands/tui_passthrough.rs:176:    let refusal = super::super::admin_host_guard::channel_refusal;
-src/services/discord/formatting/context_followup_tests.rs:4:        use crate::services::discord::admin_host_guard::tests::Recorder;
+src/services/discord/session_relay_sink/tests/idle_replace_tests.rs:74:        use crate::services::discord::admin_host_guard::tests::Recorder;
 src/services/discord/health/recovery.rs:7:use crate::services::discord::admin_host_guard::ManagedReset;
 src/services/discord/health/recovery.rs:267:    let refusal = discord::admin_host_guard::managed_reset_refusal;
 src/services/discord/health/recovery.rs:273:    discord::admin_host_guard::run_before_verified_clear_recheck_for_tests(channel_id.get());

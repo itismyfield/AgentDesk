@@ -195,13 +195,13 @@ impl TurnViewReconciler {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(route) = self.test_reaction_route.get() {
             return match route {
-                reaction_hook_tests::Route::Record(_) => {
+                reaction_hook_test_support::Route::Record(_) => {
                     tokio::task::yield_now().await;
                     self.record_reaction_op(target, emoji, add, identity);
                     TurnViewDelivery::Delivered
                 }
-                reaction_hook_tests::Route::Http(_) => {
-                    reaction_hook_tests::deliver_http(route.http(), target, emoji, add).await
+                reaction_hook_test_support::Route::Http(_) => {
+                    reaction_hook_test_support::deliver_http(route.http(), target, emoji, add).await
                 }
             };
         }
@@ -247,7 +247,7 @@ impl TurnViewReconciler {
                 let http = shared
                     .serenity_http_or_token_fallback()
                     .expect("HTTP reaction tests must install a local REST client");
-                return reaction_hook_tests::deliver_http(&http, target, emoji, add).await;
+                return reaction_hook_test_support::deliver_http(&http, target, emoji, add).await;
             }
             let _ = (shared, source);
             tokio::task::yield_now().await;

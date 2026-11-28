@@ -317,5 +317,5 @@ pub(crate) async fn configured_refusal(
 }
 
 #[cfg(all(test, unix))]
-#[path = "host_defer_gate_fixture_tests.rs"]
+#[path = "host_defer_gate_fixture_test_support.rs"]
 pub(crate) mod tests;

@@ -28,7 +28,7 @@ mod injected;
 pub(in crate::services::discord) use api::*;
 mod queue_repair;
 #[cfg(any(test, feature = "test-support"))]
-mod reaction_hook_tests;
+mod reaction_hook_test_support;
 mod reaction_set;
 mod resolution;
 mod store;
@@ -364,7 +364,7 @@ pub(in crate::services::discord) struct TurnViewReconciler {
     #[cfg(test)]
     test_http_reactions: std::sync::atomic::AtomicBool,
     #[cfg(any(test, feature = "test-support"))]
-    test_reaction_route: std::sync::OnceLock<reaction_hook_tests::Route>,
+    test_reaction_route: std::sync::OnceLock<reaction_hook_test_support::Route>,
     #[cfg(any(test, feature = "test-support"))]
     ops: Arc<std::sync::Mutex<Vec<TestReactionOp>>>,
     #[cfg(test)]
@@ -910,7 +910,7 @@ impl TurnViewReconciler {
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(in crate::services::discord) use reaction_hook_tests::TestReactionOp;
+pub(in crate::services::discord) use reaction_hook_test_support::TestReactionOp;
 
 #[cfg(test)]
 impl TurnViewReconciler {
