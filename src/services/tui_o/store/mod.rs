@@ -21,6 +21,7 @@ pub mod spool;
 pub mod thread_children;
 pub mod tool_card_switch;
 pub(crate) mod wake;
+pub use wake::wake as wake_writer;
 
 #[cfg(all(test, unix))]
 mod input_notice_store_tests;

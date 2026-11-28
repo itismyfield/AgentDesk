@@ -86,7 +86,7 @@ fn lane(channel: u64) -> Arc<Lane> {
 
 /// Starts the channel's drive unless one runs; a running drive looks at the front once more.
 pub(crate) fn wake(drive: Arc<Drive>) {
-    crate::services::tui_o::store::wake::wake(drive.channel);
+    crate::services::tui_o::store::wake_writer(drive.channel);
     let lane = lane(drive.channel);
     lane.again.store(true, Ordering::SeqCst);
     if !lane.running.swap(true, Ordering::SeqCst) {

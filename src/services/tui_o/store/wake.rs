@@ -8,7 +8,7 @@ type Listeners = HashMap<u64, Vec<Weak<Notify>>>;
 static LISTENERS: LazyLock<Mutex<Listeners>> = LazyLock::new(Mutex::default);
 
 /// Called after a producer publishes work; each active run has its own stored permit.
-pub(crate) fn wake(channel: u64) {
+pub fn wake(channel: u64) {
     let listeners = LISTENERS.lock().unwrap_or_else(|error| error.into_inner());
     if let Some(runs) = listeners.get(&channel) {
         for notify in runs.iter().filter_map(Weak::upgrade) {
