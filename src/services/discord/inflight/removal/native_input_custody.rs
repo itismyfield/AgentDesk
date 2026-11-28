@@ -79,6 +79,7 @@ fn persist_locked(
             None,
         )],
         runtime_store::process_generation_binding().generation,
+        Preservation::InProcess,
     )
     .map(|()| true)
 }

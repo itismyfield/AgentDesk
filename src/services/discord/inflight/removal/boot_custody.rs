@@ -1,6 +1,7 @@
 //! Boot custody: before the boot reaper may unlink anything, copy into `discord_custody` what
 //! each row, pending-start record and TUI-direct turn holds that no earlier boot preserved.
 
+use super::custody_notice::Preservation;
 use super::*;
 use crate::services::discord::runtime_store;
 use crate::services::discord::runtime_store::durable_publish::FlushStatus;
@@ -80,7 +81,9 @@ fn preserve(inflight_root: &Path, provider: &ProviderKind) {
     let boot_generation = runtime_store::process_generation_binding().generation;
     for (digest, (key, items)) in episodes {
         let dir = custody.join(digest);
-        if let Err(error) = preserve_episode(&root, &dir, key, items, boot_generation) {
+        if let Err(error) =
+            preserve_episode(&root, &dir, key, items, boot_generation, Preservation::Boot)
+        {
             let dir = dir.display();
             tracing::warn!(provider = provider.as_str(), %dir, %error, "boot custody copy failed");
         }
@@ -95,6 +98,7 @@ fn preserve_episode(
     key: Value,
     items: Vec<Item>,
     boot: u64,
+    preservation: Preservation,
 ) -> Result<(), String> {
     let context = AtomicWriteContext::new("discord_custody").durable_root(root);
     let marker = dir.join("episode.json");
@@ -142,7 +146,7 @@ fn preserve_episode(
     if !entries.is_empty() {
         let now = chrono::Utc::now().to_rfc3339();
         let manifest = json!({ "boot_generation": boot, "preserved_at": now,
-            "complete": complete, "entries": entries });
+            "complete": complete, "entries": entries, "preservation": preservation });
         runtime_store::critical_publish(&manifest_path, &manifest.to_string(), context)?;
     }
     match complete {
@@ -179,8 +183,7 @@ fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
     let mut revisions = Vec::new();
     for entry in fs::read_dir(dir).map_err(|error| error.to_string())? {
         let name = entry.map_err(|error| error.to_string())?.file_name();
-        let name = name.to_str().and_then(|name| name.strip_prefix("rev-"));
-        revisions.extend(name.and_then(|index| index.parse::<u32>().ok()));
+        revisions.extend(revision_index(&name));
     }
     revisions.sort_unstable();
     let mut held = Held::default();
@@ -200,6 +203,10 @@ fn held_copies(dir: &Path) -> Result<(PathBuf, Held), String> {
     }
     let next = revisions.last().map_or(0, |last| last + 1);
     Ok((dir.join(format!("rev-{next:04}")), held))
+}
+
+pub(super) fn revision_index(name: &std::ffi::OsStr) -> Option<u32> {
+    name.to_str()?.strip_prefix("rev-")?.parse().ok()
 }
 
 pub(super) fn sha(bytes: &[u8]) -> String {
@@ -466,6 +473,7 @@ pub(super) fn preserve_native_before_boot_reap(
             key,
             vec![Item("native_input", source.clone(), Ok(bytes), None, None)],
             boot,
+            Preservation::Boot,
         )?;
     }
     Ok(true)

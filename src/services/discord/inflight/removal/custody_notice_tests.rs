@@ -2,7 +2,7 @@
 //! row in a real PostgreSQL message_outbox.
 
 use super::custody_notice::{enqueue_custody_notices, notices};
-use super::nondestructive_loader_tests::{row, Env, CLAUDE, G};
+use super::nondestructive_loader_tests::{CLAUDE, Env, G, row};
 use super::*;
 use crate::dispatch::test_support::DispatchPostgresTestDb;
 use crate::services::message_outbox::delivery_bot_for_target_session;
@@ -191,14 +191,134 @@ async fn completed_turn_with_only_native_input_custody_enqueues_nothing_pg() {
 
     let custody = runtime.join("discord_custody").join("claude");
     let before = snapshot(&custody);
-    assert!(before
-        .iter()
-        .any(|(path, _)| path.ends_with("0-native_input.json")));
+    let filename = "0-native_input.json";
+    assert!(before.iter().any(|(path, _)| path.ends_with(filename)));
     let enqueued = enqueue_custody_notices(&custody, &CLAUDE, Some(&pool)).await;
     let notices = rows(&pool).await;
     finish(db, pool).await;
     assert_eq!(enqueued, 0);
     assert!(notices.is_empty());
+    assert_eq!(snapshot(&custody), before);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn output_custody_respects_preservation_origin_and_delivery_pg() {
+    use crate::db::turns::TerminalOutcome;
+    use crate::services::discord::receipt_settle::record;
+    use crate::services::message_outbox::{OutboxMessage, enqueue_outbox_pg_with_exact_origin};
+
+    let (env, db, pool) = harness("output custody origin and delivery").await.unwrap();
+    let boot = tui_direct(&env, 711, true);
+    let live = tui_direct(&env, 721, true);
+    let mut committed = tui_direct(&env, 731, true);
+    committed.terminal_delivery_committed = true;
+    env.seed(&committed, 0);
+    let sent = tui_direct(&env, 741, true);
+
+    super::boot_custody::preserve_before_boot_reap(&env.dir(), &CLAUDE);
+    for dir in episode_dirs(&env) {
+        let marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.join("episode.json")).unwrap()).unwrap();
+        if marker["episode"]["channel_id"] == live.channel_id {
+            let path = dir.join("rev-0000/manifest.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            manifest["preservation"] = json!("in_process");
+            fs::write(path, manifest.to_string()).unwrap();
+        }
+    }
+    let now = chrono::Utc::now();
+    assert!(record(Some(&pool), &boot, TerminalOutcome::Completed, now).await);
+    for state in [&sent, &boot] {
+        let message = OutboxMessage {
+            target: &format!("channel:{}", state.channel_id),
+            content: "fixture body",
+            bot: "claude",
+            source: "headless_turn",
+            reason_code: Some("headless.delivery"),
+            session_key: None,
+        };
+        enqueue_outbox_pg_with_exact_origin(
+            &pool,
+            message,
+            &format!("headless-fixture-{}", state.channel_id),
+            None,
+            None,
+            None,
+            sent.turn_nonce.as_deref(),
+        )
+        .await
+        .unwrap();
+    }
+    settle(&pool, "sent").await;
+    let other = env.dir().with_file_name("reader-fixture");
+    fs::rename(custody(&env), &other).unwrap();
+    let before = snapshot(&other);
+    let enqueued = enqueue_custody_notices(&other, &CLAUDE, Some(&pool)).await;
+    let notices = rows(&pool).await;
+    finish(db, pool).await;
+    assert_eq!(enqueued, 2);
+    for (state, first_line) in [
+        (
+            boot,
+            "⚠️ 재시작으로 이 턴 출력 일부가 전달되지 않았을 수 있음.",
+        ),
+        (live, "⚠️ 이 턴 출력 일부가 전달되지 않았을 수 있음."),
+    ] {
+        let target = format!("channel:{}", state.channel_id);
+        let notice = notices.iter().find(|row| row.0 == target).unwrap();
+        assert_eq!(notice.5.lines().next(), Some(first_line));
+    }
+    assert_eq!(notices.len(), 2);
+    assert_eq!(snapshot(&other), before);
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "current_thread")]
+async fn native_input_only_needs_not_sent_for_an_input_notice_pg() {
+    use crate::services::tui_input::human_frame::history::v2::native_support::Fixture;
+
+    let (env, db, pool) = harness("native custody input notice")
+        .await
+        .expect("mandatory PostgreSQL fixture");
+    let runtime = env.dir().with_file_name("runtime-fixture");
+    for (channel, not_sent) in [(751, false), (761, true)] {
+        let fixture = Fixture::at(
+            runtime.join(format!("history-{channel}.json")),
+            channel,
+            true,
+        );
+        if not_sent {
+            fixture
+                .history
+                .native_not_sent_blocking("native-fixture", &fixture.ticket)
+                .unwrap();
+        }
+        let record = fixture
+            .history
+            .native_boot_record("native-fixture", &fixture.ticket)
+            .unwrap();
+        super::boot_custody::persist_native_boot_record(&runtime, &record).unwrap();
+    }
+    let custody = runtime.join("discord_custody").join("claude");
+    for (path, bytes) in snapshot(&custody) {
+        if path.ends_with("manifest.json") {
+            let mut manifest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            manifest.as_object_mut().unwrap().remove("preservation");
+            fs::write(path, manifest.to_string()).unwrap();
+        }
+    }
+    let before = snapshot(&custody);
+    let enqueued = enqueue_custody_notices(&custody, &CLAUDE, Some(&pool)).await;
+    let notices = rows(&pool).await;
+    finish(db, pool).await;
+    assert_eq!(enqueued, 1);
+    let [notice] = notices.try_into().unwrap();
+    assert_eq!(notice.0, "channel:761");
+    assert_eq!(
+        notice.5.lines().next(),
+        Some("⚠️ 이 턴의 입력이 전달되지 않았습니다.")
+    );
     assert_eq!(snapshot(&custody), before);
 }
 
