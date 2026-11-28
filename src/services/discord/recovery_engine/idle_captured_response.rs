@@ -3,6 +3,8 @@ use super::*;
 #[cfg(unix)]
 use crate::services::cluster::stream_relay::SourceFileIdentity;
 use crate::services::discord::CapturedReadyDeliveryCommit;
+#[cfg(unix)]
+use crate::services::discord::relay_health::retry_delay::relay_recovery_retry_delay_secs;
 
 #[cfg(unix)]
 #[derive(PartialEq, Eq)]
@@ -44,8 +46,7 @@ pub(in crate::services::discord) async fn recover_idle_partial_response(
     let Some(provider) = row.provider_kind() else {
         return false;
     };
-    let retry_delay =
-        super::super::health::relay_recovery_retry_delay_secs(row.recovery_relay_attempts);
+    let retry_delay = relay_recovery_retry_delay_secs(row.recovery_relay_attempts);
     if retry_delay > 0
         && inflight::parse_updated_at_unix(&row.updated_at).is_none_or(|updated| {
             chrono::Utc::now()

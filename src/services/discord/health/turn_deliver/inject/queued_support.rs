@@ -4,16 +4,13 @@ use std::sync::Arc;
 
 use super::queued_provider::QueuedProvider;
 use super::{
-    HumanInputRequest, InjectAttempt, Target, binding_key, busy_turn, channel_name, herdr,
-    live_tui_session, observe, row_key, turn_mode_tmux,
+    HumanInputRequest, Target, binding_key, busy_turn, channel_name, herdr, live_tui_session,
+    observe, row_key, turn_mode_tmux,
 };
 use crate::services::agent_protocol::RuntimeHandoffKind;
 use crate::services::discord::SharedData;
+pub(super) use crate::services::discord::queue_io::human_input::{HEAD_UNKNOWN, RECONCILED};
 
-/// The head was left Unknown by an earlier attempt; nothing types it again.
-pub(super) const HEAD_UNKNOWN: &str = "queued_head_unknown";
-/// The Unknown head was consumed on transcript proof alone; nothing was typed for it.
-pub(super) const RECONCILED: &str = "queued_head_reconciled";
 /// The paste could not be named in its transcript before it started, so it was not typed.
 pub(super) const ATTEMPT_UNNAMED: &str = "queued_paste_unnamed";
 
@@ -63,21 +60,4 @@ async fn same_herdr_execution(
     let channel = request.channel_id.get();
     let now = herdr::bound_pane(shared, &request.provider, channel, &target.session).await;
     now.as_ref() == Some(pane)
-}
-
-impl InjectAttempt {
-    /// `(outcome, reason, head_state)` of a finished attempt: `terminal`, or `queued` for a
-    /// handed-back NotSent, only where the actor committed it; otherwise unknown or unavailable.
-    pub(crate) fn queued_report(&self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Injected { .. } => ("injected", "", "terminal"),
-            Self::NotSent(RECONCILED) => ("reconciled", RECONCILED, "terminal"),
-            Self::NotSent(veto) => ("not_sent", veto, "unavailable"),
-            Self::HandbackFailed(HEAD_UNKNOWN) => ("blocked", HEAD_UNKNOWN, "unknown"),
-            Self::HandbackFailed(detail) => ("blocked", detail, "unavailable"),
-            Self::Unconfirmed { detail, .. } => ("unconfirmed", detail, "unknown"),
-            Self::HandedBack { veto, .. } => ("not_sent", veto, "queued"),
-            Self::OwnerFailed { .. } => ("unconfirmed", "owner_failed", "unavailable"),
-        }
-    }
 }

@@ -60,7 +60,7 @@ pub(crate) async fn run_orphan_token_auto_heal_pass_for_tests(
     let tick = tick_mailboxes::TickMailboxes::enumerate(provider, runtimes.to_vec()).await;
     relay_auto_heal::run_orphan_token_auto_heal_pass(registry, provider, &tick).await
 }
-pub(in crate::services::discord) use relay_auto_heal::relay_recovery_retry_delay_secs;
+pub(in crate::services::discord) use super::relay_health::retry_delay::relay_recovery_retry_delay_secs;
 mod relay_dead_reattach;
 mod relay_progress;
 mod routine_process;
@@ -140,7 +140,6 @@ pub(crate) use presence_unknown::attach_turn_presence_unknown;
 pub(crate) use transcript_binding_stall::attach_o_stall_reasons;
 #[cfg(all(test, unix))]
 pub(crate) use transcript_binding_stall::o_verdict_for_tests;
-#[cfg(unix)]
 pub(in crate::services::discord) use turn_deliver::CodexLedger;
 pub(crate) use turn_deliver::decision_target;
 #[cfg(all(test, unix))]

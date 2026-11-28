@@ -5,7 +5,7 @@ use super::{Completion, Leaf, codex_waits, refused};
 use crate::services::claude_tui::busy_inject::Screen;
 use crate::services::claude_tui::{busy_inject, owner_input};
 use crate::services::codex_tui::busy_inject as codex_inject;
-use crate::services::discord::health::CodexLedger;
+use crate::services::discord::queue_io::human_input::CodexLedger;
 use crate::services::session_host::HerdrTarget;
 
 /// One input as main's Codex busy transaction takes it, whichever host the pane runs on.

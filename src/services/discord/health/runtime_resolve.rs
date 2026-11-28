@@ -41,17 +41,9 @@ pub(crate) async fn resolve_utility_bot_http(
     registry: &(impl RuntimeHealth + ?Sized),
     role: UtilityBotRole,
 ) -> Result<Arc<serenity::Http>, (&'static str, String)> {
-    match registry.utility_bot_http_clone(role).await {
-        Some(http) => Ok(http),
-        None => Err((
-            "503 Service Unavailable",
-            format!(
-                r#"{{"ok":false,"error":"{} bot not configured (missing {})"}}"#,
-                role.alias(),
-                role.credential_label()
-            ),
-        )),
-    }
+    use crate::services::discord::outbound::bot_http;
+
+    bot_http::resolve_utility_bot_http(role, registry.utility_bot_http_clone(role)).await
 }
 
 fn bot_names_match(registered: &str, requested: &str) -> bool {

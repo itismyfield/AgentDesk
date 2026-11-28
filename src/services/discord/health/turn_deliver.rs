@@ -22,6 +22,8 @@ use serenity::{ChannelId, UserId};
 use super::HealthRegistry;
 use super::runtime_resolve::resolve_direct_channel_shared;
 use crate::domain::human_input::{ExternalHold, HumanInputDelivery, HumanInputError};
+pub(in crate::services::discord) use crate::services::discord::queue_io::human_input::CodexLedger;
+pub use crate::services::discord::queue_io::human_input::HumanInputRequest;
 use crate::services::discord::{SharedData, router};
 use crate::services::imsg_reply::agy_input::{self, ADMITTED_DELIVERY};
 use crate::services::imsg_reply::{self, ReplyObligation, episode};
@@ -29,22 +31,10 @@ use crate::services::provider::ProviderKind;
 use crate::services::turn_orchestrator::{
     Intervention, InterventionMode, SourceMessageQueuedGeneration,
 };
-#[cfg(unix)]
-pub(in crate::services::discord) use inject::CodexLedger;
 use inject::InjectMode;
 pub(crate) use inject::{
     InjectAttempt, Origin as InjectOrigin, SOURCE_OWNED, attempt as inject_human_input,
 };
-
-pub struct HumanInputRequest {
-    pub channel_id: ChannelId,
-    pub provider: ProviderKind,
-    pub text: String,
-    pub author_id: u64,
-    pub source: String,
-    pub metadata: Option<serde_json::Value>,
-    pub channel_name_hint: Option<String>,
-}
 
 /// Stricter than Discord intake auth: an explicit owner is required and
 /// `allow_all_users` is never honored for remote input.
@@ -372,7 +362,7 @@ impl DeliveryPorts for LivePorts {
 
     async fn enqueue(&self) -> Result<String, String> {
         let request = &self.request;
-        let (intervention, turn_id) = request.queue_entry(self.reply.as_ref());
+        let (intervention, turn_id) = queue_entry(request, self.reply.as_ref());
         // The GUID names its queue entry before the entry exists.
         let agy = ADMITTED_DELIVERY.try_with(Clone::clone).ok();
         if let Some(reply) = self
@@ -480,40 +470,41 @@ impl LivePorts {
     }
 }
 
-impl HumanInputRequest {
-    /// The queue entry this input becomes, under a fresh headless message id, and its turn id.
-    fn queue_entry(&self, reply: Option<&ReplyObligation>) -> (Intervention, String) {
-        let reservation = router::reserve_headless_turn();
-        let message_id = reservation.user_msg_id();
-        let generation = crate::services::discord::runtime_store::process_generation();
-        let mut source = SourceMessageQueuedGeneration::user_instruction(message_id, generation);
-        source.origin_id = self
-            .metadata
-            .as_ref()
-            .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(str::to_owned);
-        if ADMITTED_DELIVERY.try_with(|_| ()).is_ok() {
-            source.origin = Some(agy_input::QUEUED_ORIGIN.into());
-        }
-        let intervention = Intervention {
-            author_id: UserId::new(self.author_id),
-            author_is_bot: false,
-            message_id,
-            queued_generation: generation,
-            source_message_ids: vec![message_id],
-            source_message_queued_generations: vec![source],
-            source_text_segments: Vec::new(),
-            text: self.text.clone(),
-            mode: InterventionMode::Soft,
-            created_at: Instant::now(),
-            reply_context: reply.map(ReplyObligation::contract),
-            has_reply_boundary: false,
-            merge_consecutive: false,
-            pending_uploads: Vec::new(),
-        };
-        (intervention, reservation.turn_id(self.channel_id))
+/// The queue entry this input becomes, under a fresh headless message id, and its turn id.
+fn queue_entry(
+    request: &HumanInputRequest,
+    reply: Option<&ReplyObligation>,
+) -> (Intervention, String) {
+    let reservation = router::reserve_headless_turn();
+    let message_id = reservation.user_msg_id();
+    let generation = crate::services::discord::runtime_store::process_generation();
+    let mut source = SourceMessageQueuedGeneration::user_instruction(message_id, generation);
+    source.origin_id = request
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.pointer("/human_input/origin_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    if ADMITTED_DELIVERY.try_with(|_| ()).is_ok() {
+        source.origin = Some(agy_input::QUEUED_ORIGIN.into());
     }
+    let intervention = Intervention {
+        author_id: UserId::new(request.author_id),
+        author_is_bot: false,
+        message_id,
+        queued_generation: generation,
+        source_message_ids: vec![message_id],
+        source_message_queued_generations: vec![source],
+        source_text_segments: Vec::new(),
+        text: request.text.clone(),
+        mode: InterventionMode::Soft,
+        created_at: Instant::now(),
+        reply_context: reply.map(ReplyObligation::contract),
+        has_reply_boundary: false,
+        merge_consecutive: false,
+        pending_uploads: Vec::new(),
+    };
+    (intervention, reservation.turn_id(request.channel_id))
 }
 
 pub async fn deliver_human_input(

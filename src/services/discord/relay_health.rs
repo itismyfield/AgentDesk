@@ -7,6 +7,7 @@
 use serde::Serialize;
 
 mod frontier;
+pub(in crate::services::discord) mod retry_delay;
 pub(in crate::services::discord) use frontier::{RelayFrontierMutationGuard, RelayFrontierToken};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
