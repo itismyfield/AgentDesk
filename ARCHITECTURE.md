@@ -2359,7 +2359,7 @@ src/
 │   │   │   ├── input_effect_tests.rs
 │   │   │   ├── ke_retry_sweep_tests.rs
 │   │   │   ├── kickoff.rs
-│   │   │   └── owner_race_hook_tests.rs
+│   │   │   └── owner_race_hook_test_support.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
 │   │   │   │   ├── queued.rs
@@ -3746,7 +3746,7 @@ src/
 │   │   │   │   │   ├── cross_runtime_owner_e2e_tests.rs
 │   │   │   │   │   ├── cross_runtime_owners.rs
 │   │   │   │   │   ├── cross_runtime_owners_tests.rs
-│   │   │   │   │   ├── dormancy_hook_tests.rs
+│   │   │   │   │   ├── dormancy_hook_test_support.rs
 │   │   │   │   │   ├── dormancy_tests.rs
 │   │   │   │   │   ├── effect_read_defer_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
@@ -3764,18 +3764,18 @@ src/
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
 │   │   │   │   │   ├── live.rs
-│   │   │   │   │   ├── live_fixture_tests.rs
+│   │   │   │   │   ├── live_fixture_test_support.rs
 │   │   │   │   │   ├── live_owner_nonce_tests.rs
 │   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_ownership.rs
 │   │   │   │   │   ├── live_publication.rs
 │   │   │   │   │   ├── live_review_tests.rs
-│   │   │   │   │   ├── live_snapshot_hook_tests.rs
+│   │   │   │   │   ├── live_snapshot_hook_test_support.rs
 │   │   │   │   │   ├── live_snapshot_tests.rs
 │   │   │   │   │   ├── live_tests.rs
 │   │   │   │   │   ├── midread_owner_tests.rs
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
-│   │   │   │   │   ├── publication_hook_tests.rs
+│   │   │   │   │   ├── publication_hook_test_support.rs
 │   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
 │   │   │   │   │   ├── retired_unplaced_tests.rs
@@ -3810,16 +3810,16 @@ src/
 │   │   │   │   ├── local_control_tests.rs
 │   │   │   │   └── native_input_tests.rs
 │   │   │   ├── activity.rs
-│   │   │   ├── activity_fixture_tests.rs
+│   │   │   ├── activity_fixture_test_support.rs
 │   │   │   ├── activity_notice_tests.rs
-│   │   │   ├── activity_observation_hook_tests.rs
+│   │   │   ├── activity_observation_hook_test_support.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_notice.rs
 │   │   │   ├── operator_notice_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
-│   │   │   ├── supervisor_fixture_tests.rs
+│   │   │   ├── supervisor_fixture_test_support.rs
 │   │   │   ├── supervisor_injected_tests.rs
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
@@ -3903,10 +3903,10 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
-│   │   ├── dl_turn_bridge_tests.rs
-│   │   ├── dl_turn_bridge_unix_tests.rs
-│   │   ├── dl_turn_presence_tests.rs
-│   │   ├── dl_turn_presence_unix_tests.rs
+│   │   ├── dl_turn_bridge_test_host.rs
+│   │   ├── dl_turn_bridge_unix_test_host.rs
+│   │   ├── dl_turn_presence_test_host.rs
+│   │   ├── dl_turn_presence_unix_test_host.rs
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
 │   │   ├── footer_retirement.rs
