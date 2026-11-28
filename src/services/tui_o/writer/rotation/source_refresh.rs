@@ -40,6 +40,7 @@ impl<B: BindingEvents> Sources<B> {
             return Ok(());
         };
         self.guard_selected_reference(store, &old)?;
+        let anchors = self.reply_anchors();
         let Some(reader) = self.readers.iter_mut().find(|reader| reader.source == old) else {
             return Err(halt("source refresh reader missing"));
         };
@@ -54,6 +55,13 @@ impl<B: BindingEvents> Sources<B> {
             .map_err(halted("source refresh rotation"))?;
         if let Some(native) = &mut self.native {
             native.end(&old);
+        }
+        if let Some(anchors) = anchors {
+            let bindings = store
+                .anchor_bindings()
+                .map_err(StoreError::from)
+                .map_err(halted("source refresh anchors"))?;
+            anchors.rekey(&old, new, bindings);
         }
         let (old_key, new_key) = (source_key(&old), source_key(new));
         if let Some(lineage) = self.lineage.remove(&old_key) {

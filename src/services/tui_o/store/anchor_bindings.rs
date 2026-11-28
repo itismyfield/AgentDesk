@@ -10,7 +10,7 @@ use super::ChannelStore;
 use crate::domain::file_sync::fsync_parent_dir;
 use crate::services::tui_o::shadow::SourceId;
 
-const FILE: &str = "anchor_bindings.jsonl";
+pub(super) const FILE: &str = "anchor_bindings.jsonl";
 
 /// A run's fixed anchor and the joined inputs already marked.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,6 +42,11 @@ impl ChannelStore {
     }
 
     pub(crate) fn record_anchor(&self, binding: &AnchorBinding) -> io::Result<()> {
+        let _publication =
+            super::source_refresh::snapshot(&self.dir).map_err(|error| match error {
+                super::StoreError::Io(error) => error,
+                other => io::Error::other(format!("{other:?}")),
+            })?;
         let path = self.dir.join(FILE);
         let created = !path.exists();
         let mut line = serde_json::to_vec(binding).map_err(io::Error::other)?;

@@ -147,6 +147,20 @@ impl Anchors {
         }
     }
 
+    pub(crate) fn rekey(&self, old: &SourceId, new: &SourceId, bindings: Vec<AnchorBinding>) {
+        let mut state = self.state();
+        state.views.remove(old);
+        state
+            .pins
+            .retain(|(source, _), _| source != old && source != new);
+        for binding in bindings
+            .into_iter()
+            .filter(|binding| &binding.source == new)
+        {
+            state.pins.insert((new.clone(), binding.run_start), binding);
+        }
+    }
+
     pub(crate) fn resolve(&self, coord: &Coord) -> Reply {
         let state = self.state();
         let Some(view) = state.views.get(&coord.source) else {

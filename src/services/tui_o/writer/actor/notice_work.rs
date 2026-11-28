@@ -2,6 +2,7 @@
 
 use super::super::input_notices::admission::{NoticeRefusal, admit_notice};
 use super::super::pieces::PieceWork;
+use super::super::reply_anchor::ReplyRef;
 use super::*;
 use crate::services::tui_o::shadow::{CapturedRecord, SourceId, UnitKind};
 use crate::services::tui_o::store::ledger::input_notices::{
@@ -221,10 +222,15 @@ impl<P: DiscordPort, L: DeliveryLease, A: AlarmSink, B: BindingEvents> Actor<P, 
         };
         if !refreshed.is_empty() {
             for piece in self.owed.iter_mut().filter_map(|item| match item {
-                Derived::Piece(piece) => piece.notice_origin.as_mut(),
+                Derived::Piece(piece) => Some(piece),
                 _ => None,
             }) {
-                remap(&mut piece.record.source);
+                if let Some(origin) = &mut piece.notice_origin {
+                    remap(&mut origin.record.source);
+                }
+                if let Some(ReplyRef::At(coord)) = &mut piece.reply {
+                    remap(&mut coord.source);
+                }
             }
             self.writer.notice_owners = Default::default();
             self.writer.notice_cache = Default::default();

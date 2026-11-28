@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::anchor_bindings::FILE as ANCHOR_BINDINGS_FILE;
 use super::rotation::{BOUNDARY_FILE, Rotation};
 use super::spool::{self, source_key};
 use super::{
@@ -24,6 +25,8 @@ struct Intent {
     old: String,
     new: String,
     segments: Vec<u64>,
+    #[serde(default)]
+    anchor_bindings: bool,
 }
 
 impl Intent {
@@ -48,6 +51,11 @@ impl Intent {
                 self.spool_paths(dir, &self.old)
                     .zip(self.spool_paths(dir, &self.new)),
             )
+            // Appending keeps every stage index from older intents stable.
+            .chain(self.anchor_bindings.then(|| {
+                let path = dir.join(ANCHOR_BINDINGS_FILE);
+                (path.clone(), path)
+            }))
     }
 }
 
@@ -165,6 +173,29 @@ fn project_line(
     Ok(())
 }
 
+fn project_anchors(
+    output: &mut impl Write,
+    path: &Path,
+    (old, new): (&Value, &Value),
+) -> Result<(), StoreError> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        if line.last() == Some(&b'\n')
+            && let Ok(mut binding) = serde_json::from_slice::<Value>(&line)
+            && binding.get("source") == Some(old)
+        {
+            binding["source"].clone_from(new);
+            serde_json::to_writer(&mut *output, &binding)?;
+            output.write_all(b"\n")?;
+        } else {
+            output.write_all(&line)?;
+        }
+        line.clear();
+    }
+    Ok(())
+}
+
 fn remap_rotation(
     mut rotation: Rotation,
     old: &SourceId,
@@ -226,13 +257,14 @@ impl ChannelStore {
                 return Err(damage("cannot refresh a retired cursor"));
             }
             cursor.source = new.clone();
+            let dir = &store.dir;
+            let _publication = durable::LockedFile::lock(File::open(dir)?)?;
             let intent = Intent {
                 old: old_key,
                 new: new_key,
                 segments: spool.segment_starts().collect(),
+                anchor_bindings: dir.join(ANCHOR_BINDINGS_FILE).try_exists()?,
             };
-            let dir = &store.dir;
-            let _publication = durable::LockedFile::lock(File::open(dir)?)?;
             let stage = dir.join(STAGE);
             durable::ensure_dir(&stage)?;
             durable::sweep_tmp(&stage)?;
@@ -267,6 +299,9 @@ impl ChannelStore {
                         }
                     }
                     3 => serde_json::to_writer(&mut output, &cursor)?,
+                    _ if source.ends_with(ANCHOR_BINDINGS_FILE) => {
+                        project_anchors(&mut output, &source, (&from, &to))?;
+                    }
                     _ => {
                         let mut reader = BufReader::new(File::open(source)?);
                         let mut header = Vec::new();
