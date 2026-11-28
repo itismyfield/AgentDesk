@@ -1,7 +1,9 @@
 //! An evidenced Pending launch can lose its pane before its owner ever reserves the input.
 use super::*;
 use crate::services::discord::queue_io::cancel_backstop_test_support::set_owner_wake_for_tests;
+use crate::services::discord::queue_io::input_owner::drive;
 use crate::services::herdr_launch::unplaced::QUIET;
+use std::sync::mpsc;
 
 struct WakeGuard;
 
@@ -9,6 +11,11 @@ impl Drop for WakeGuard {
     fn drop(&mut self) {
         set_owner_wake_for_tests(ChannelId::new(CHANNEL), None);
     }
+}
+
+struct KeyReply {
+    sent: mpsc::Sender<()>,
+    reply: mpsc::Receiver<()>,
 }
 
 fn start(
@@ -55,14 +62,21 @@ fn launch(
     front: OwnerFront,
     prior: (&str, &str),
     lose_before_attach: bool,
+    mut key_reply: Option<KeyReply>,
 ) -> (std::thread::JoinHandle<Result<(), String>>, String, Started) {
-    let (command, command_seen) = std::sync::mpsc::channel();
-    let (allow_evidence, allowed) = std::sync::mpsc::channel();
+    let (command, command_seen) = mpsc::channel();
+    let (allow_evidence, allowed) = mpsc::channel();
+    if key_reply.is_some() {
+        fx.rig.answer_sends_then_leave_unanswered(2);
+    }
     let mut command = Some(command);
-    fx.rig.on_send(move |_| {
+    fx.rig.on_send(move |params| {
         if let Some(command) = command.take() {
             command.send(()).unwrap();
             crate::test_support::wait::recv_within(&allowed, LIMIT);
+        } else if let Some(key) = key_reply.take_if(|_| params["keys"] == json!(["enter"])) {
+            key.sent.send(()).unwrap();
+            crate::test_support::wait::recv_within(&key.reply, LIMIT);
         }
     });
     let mut events = fx.ingress.state.subscribe();
@@ -160,11 +174,7 @@ fn tick_and_grant(intake: &Intake, original: &OwnerFront) -> Option<OwnerFront> 
         .runtime
         .block_on(intake.mailbox.v2_request(move |slot| {
             let owner = slot.as_mut().unwrap();
-            let snapshot = owner.json()?;
-            if let Some(due) = snapshot["retry"]["wait"]["due_at_ms"]
-                .as_u64()
-                .or_else(|| snapshot["head_injection"]["confirmation_deadline_ms"].as_u64())
-            {
+            if let Some(due) = owner.settle_due() {
                 owner.tick(due)?;
             }
             let front = owner.front();
@@ -248,7 +258,20 @@ fn placed_attach(lose_before_attach: bool) {
     };
     old.state = HostedState::Retired;
     fx.store(&old);
-    seed_resume_cursor(fx._root.path(), &previous);
+    fx.rt.block_on(async {
+        let id: i64 = sqlx::query_scalar("SELECT id FROM sessions WHERE channel_id=$1")
+            .bind(CHANNEL.to_string())
+            .fetch_one(&fx.pool)
+            .await
+            .unwrap();
+        assert!(
+            crate::db::dispatched_sessions::provider_resume_fence::set_for_execution_pg(
+                &fx.pool, id, &old,
+            )
+            .await
+            .unwrap()
+        );
+    });
     fx.rig.answer(
         "ping",
         json!({"type":"pong","version":"0.9.3","protocol":22}),
@@ -270,12 +293,26 @@ fn placed_attach(lose_before_attach: bool) {
     });
     assert!(front.0.is_some());
     let before = fx.rig.sends().len();
+    let (sent, key_seen) = mpsc::channel();
+    let (release, reply) = mpsc::channel();
     let (first, nonce, started) = launch(
         &fx,
         &intake,
         front.clone(),
         (&old_nonce, &previous.session),
         lose_before_attach,
+        (!lose_before_attach).then_some(KeyReply { sent, reply }),
+    );
+    assert_ne!(started.session, previous.session);
+    assert!(
+        fx.rt
+            .block_on(
+                crate::db::dispatched_sessions::provider_resume_fence::load_for_owner_pg(
+                    &fx.pool, &old.owner,
+                )
+            )
+            .unwrap()
+            .is_none()
     );
     let after_command = before + 1;
     if lose_before_attach {
@@ -311,8 +348,9 @@ fn placed_attach(lose_before_attach: bool) {
 
         let retry = tick_and_grant(&intake, &front).unwrap();
         let (successor, new_nonce, new) =
-            launch(&fx, &intake, retry, (&nonce, &started.session), false);
+            launch(&fx, &intake, retry, (&nonce, &started.session), false, None);
         assert_ne!(new_nonce, nonce);
+        assert_ne!(new.session, started.session);
         fx.finished.store(false, Ordering::SeqCst);
         fx.answer_after(&new, after_command + 1);
         assert_eq!(
@@ -332,21 +370,15 @@ fn placed_attach(lose_before_attach: bool) {
         assert_eq!(state["items"], json!([]));
         assert_eq!(state["retained_inputs"], json!([]));
     } else {
-        assert!(wait_for(&fx.finished, "the owner's first key", || fx
-            .rig
-            .sends()
-            .len()
-            == after_command + 2));
+        crate::test_support::wait::recv_within(&key_seen, LIMIT);
+        assert_eq!(fx.rig.sends().len(), after_command + 2);
         assert_eq!(fx.row(), Some(HostedState::Pending));
         let state = snapshot(&intake);
         assert_eq!(state["head_injection"]["phase"], "may_have_sent", "{state}");
         fx.rig.show_panes(&[]);
         fx.rig.exists(20, false);
-        intake.runtime.block_on(async {
-            let cancel = intake.mailbox.cancel_token().await.unwrap().unwrap();
-            cancel.cancelled.store(true, Ordering::SeqCst);
-        });
-        let _ = crate::test_support::wait::join_within(first, LIMIT);
+        release.send(()).unwrap();
+        assert!(crate::test_support::wait::join_within(first, LIMIT).is_err());
         intake
             .runtime
             .block_on(super::wait_for_idle_turn_to_unwind(&intake));
@@ -362,6 +394,26 @@ fn placed_attach(lose_before_attach: bool) {
         drop(_runtime);
         assert_eq!(fx.row(), Some(HostedState::Retired));
         assert!(tick_and_grant(&intake, &front).is_none());
+        let state = snapshot(&intake);
+        assert_eq!(state["retained_inputs"][0]["reason"]["kind"], "unconfirmed");
+        assert_eq!(
+            state["retained_inputs"][0]["input"]["original"],
+            json!(front.1)
+        );
+        let mut owner_drive = super::source_retry_drive(&intake);
+        let (done, complete) = tokio::sync::mpsc::unbounded_channel();
+        Arc::get_mut(&mut owner_drive).unwrap().settled = Some(Arc::new(move || {
+            let _ = done.send(());
+            Box::pin(async {})
+        }));
+        intake.runtime.block_on(async {
+            let mut complete = complete;
+            drive::wake(owner_drive);
+            tokio::time::timeout(LIMIT, complete.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        });
         assert_eq!(fx.rig.sends().len(), after_command + 2);
     }
     drop(intake);
