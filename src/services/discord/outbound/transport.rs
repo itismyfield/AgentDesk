@@ -18,7 +18,7 @@ use crate::domain::outbound::port::{
 };
 use crate::domain::outbound::result::DeliveryResult;
 use crate::services::discord::SharedData;
-use crate::services::dispatches::http_outbound::HttpOutbound;
+use crate::services::dispatches::http_outbound::{Edit, HttpOutbound};
 
 pub(crate) async fn post_serenity_message_with_nonce(
     http: &Arc<serenity::Http>,
@@ -300,6 +300,14 @@ pub(super) fn engine_http_deliver(
             .await
     })
 }
+
+pub(super) const ENGINE_HTTP_EDIT: Edit = |conn, channel_id, message_id, content| {
+    Box::pin(async move {
+        HttpOutboundClient::new(conn.client, conn.token, conn.discord_api_base)
+            .edit_message(channel_id, message_id, content)
+            .await
+    })
+};
 
 impl DiscordOutboundClient for HttpOutboundClient {
     async fn post_message(
