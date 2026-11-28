@@ -807,7 +807,9 @@ impl Drop for InventoryPause {
 }
 
 async fn hosted_row_during_publication_inventory(kind: Changed, id: u64) {
-    use crate::db::dispatched_sessions::hosted_execution::test_support::record;
+    use crate::db::dispatched_sessions::hosted_execution::{
+        HostedOwner, HostedState, test_support::record,
+    };
     use crate::services::discord::{mailbox_snapshot, mailbox_take_next_automatic_intervention};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
     use poise::serenity_prelude::{MessageId, UserId};

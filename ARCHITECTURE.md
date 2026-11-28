@@ -2048,10 +2048,7 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
-│   │   │   ├── root_replaced.rs
-│   │   │   ├── root_replaced_hook_tests.rs
-│   │   │   ├── route_fixture_tests.rs
-│   │   │   └── terminate_hook_tests.rs
+│   │   │   └── root_replaced.rs
 │   │   ├── host_key_derivation/
 │   │   │   ├── ke_session_tests.rs
 │   │   │   └── ke_tests.rs
@@ -2388,8 +2385,6 @@ src/
 │   │   │   │   ├── admission.rs
 │   │   │   │   ├── admission_tests.rs
 │   │   │   │   ├── claude_handoff.rs
-│   │   │   │   ├── claude_handoff_hook_tests.rs
-│   │   │   │   ├── claude_handoff_tests.rs
 │   │   │   │   ├── closed.rs
 │   │   │   │   ├── closed_tests.rs
 │   │   │   │   ├── cold.rs
@@ -2402,7 +2397,6 @@ src/
 │   │   │   │   ├── effort_continue_tests.rs
 │   │   │   │   ├── held_watch.rs
 │   │   │   │   ├── ingress.rs
-│   │   │   │   ├── ingress_hook_tests.rs
 │   │   │   │   ├── ingress_tests.rs
 │   │   │   │   ├── mod.rs
 │   │   │   │   ├── native_intent_tests.rs
@@ -2427,20 +2421,17 @@ src/
 │   │   │   │   └── tests.rs
 │   │   │   ├── auto_queue_eligibility.rs
 │   │   │   ├── backstop.rs
-│   │   │   ├── backstop_hook_tests.rs
 │   │   │   ├── cancel_backstop_tests.rs
 │   │   │   ├── cancel_reclaim_support_test.rs
 │   │   │   ├── decision_drain.rs
 │   │   │   ├── decision_drain_tests.rs
 │   │   │   ├── held_sources.rs
 │   │   │   ├── human_input.rs
-│   │   │   ├── idle_queue_kick_hook_tests.rs
 │   │   │   ├── idle_queue_tests.rs
 │   │   │   ├── ledger_settlement_tests.rs
 │   │   │   ├── owned_backstop_tests.rs
 │   │   │   ├── queued_head_auto_tests.rs
 │   │   │   ├── queued_head_inject.rs
-│   │   │   ├── queued_head_inject_hook_tests.rs
 │   │   │   ├── queued_head_inject_tests.rs
 │   │   │   ├── queued_head_mend_tests.rs
 │   │   │   ├── queued_head_owner_entry_tests.rs
@@ -3724,7 +3715,6 @@ src/
 │   │   │   ├── native_binding.rs
 │   │   │   ├── native_binding_tests.rs
 │   │   │   ├── native_completion.rs
-│   │   │   ├── native_completion_hook_tests.rs
 │   │   │   ├── native_completion_tests.rs
 │   │   │   ├── native_completion_work_tests.rs
 │   │   │   ├── native_input_tests.rs
@@ -3732,7 +3722,6 @@ src/
 │   │   │   ├── native_memo_port_tests.rs
 │   │   │   ├── native_policy.rs
 │   │   │   ├── native_prepare.rs
-│   │   │   ├── native_read_hook_tests.rs
 │   │   │   ├── native_receipt_tests.rs
 │   │   │   ├── native_restore.rs
 │   │   │   ├── native_restore_gc_tests.rs
@@ -3914,12 +3903,8 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
-│   │   ├── dl_herdr_terminate_tests.rs
-│   │   ├── dl_herdr_terminate_unix_tests.rs
 │   │   ├── dl_turn_bridge_tests.rs
 │   │   ├── dl_turn_bridge_unix_tests.rs
-│   │   ├── dl_turn_finalizer_tests.rs
-│   │   ├── dl_turn_finalizer_unix_tests.rs
 │   │   ├── dl_turn_presence_tests.rs
 │   │   ├── dl_turn_presence_unix_tests.rs
 │   │   ├── e2e_control.rs
