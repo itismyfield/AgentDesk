@@ -7,7 +7,7 @@ mod streaming_session_banner;
 pub(super) use streaming_session_banner::*;
 
 #[cfg(unix)]
-pub(in crate::services::discord) async fn commit_watcher_direct_terminal_session_idle(
+pub(super) async fn commit_watcher_direct_terminal_session_idle(
     shared: &std::sync::Arc<SharedData>,
     provider: &ProviderKind,
     channel_id: serenity::ChannelId,

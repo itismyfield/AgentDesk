@@ -84,13 +84,13 @@ pub(in crate::services::discord) struct RenderSeedState {
     pub(in crate::services::discord) response_sent_offset: usize,
     pub(in crate::services::discord) watcher_streaming_rollover_frozen_msg_ids:
         Vec<serenity::MessageId>,
-    pub(in crate::services::discord) completion_footer_terminal_target:
+    pub(in crate::services::discord::tmux::tmux_watcher) completion_footer_terminal_target:
         Option<WatcherCompletionFooterTerminalTarget>,
 }
 
 #[derive(Clone)]
-pub(in crate::services::discord::tmux::tmux_watcher) struct ActiveReadState {
-    pub(in crate::services::discord::tmux::tmux_watcher) last_output_at: tokio::time::Instant,
+pub(in crate::services::discord) struct ActiveReadState {
+    pub(in crate::services::discord) last_output_at: tokio::time::Instant,
     pub(in crate::services::discord::tmux::tmux_watcher) tmux_death_observed: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) ready_for_input_failure_notice:
         Option<String>,
@@ -167,7 +167,7 @@ pub(in crate::services::discord) struct CollectedTurnStream {
     pub(in crate::services::discord) assistant_text_seen: bool,
     pub(in crate::services::discord) fresh_assistant_text_seen: bool,
     pub(in crate::services::discord::tmux::tmux_watcher) was_paused: bool,
-    pub(in crate::services::discord::tmux::tmux_watcher) active_read_state: Option<ActiveReadState>,
+    pub(in crate::services::discord) active_read_state: Option<ActiveReadState>,
     pub(in crate::services::discord::tmux::tmux_watcher) soft_terminal_seen_at:
         Option<tokio::time::Instant>,
     pub(in crate::services::discord::tmux::tmux_watcher) auto_compaction_lifecycle_attempted: bool,

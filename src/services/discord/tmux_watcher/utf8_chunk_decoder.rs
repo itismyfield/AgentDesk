@@ -359,7 +359,7 @@ impl Utf8ChunkDecoder {
         }
     }
 
-    pub(super) fn has_pending(&self) -> bool {
+    pub(in crate::services::discord) fn has_pending(&self) -> bool {
         !self.pending.is_empty()
     }
 

@@ -56,7 +56,7 @@ async fn a_read_error_fallback_replaces_the_paused_t0_watcher_with_a_fresh_one()
             h.row().is_none(),
             "case {case}: the watcher ended T0 itself"
         );
-        let incumbent = h.watcher.as_ref().unwrap().cancel.clone();
+        let incumbent = h.watcher_cancel_token();
 
         // T1's turn start pauses the attached watcher before its provider input (watchdog.rs).
         let handle = h.shared.tmux_watchers.get(&h.channel).unwrap();

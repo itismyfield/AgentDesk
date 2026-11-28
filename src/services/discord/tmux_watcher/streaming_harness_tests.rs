@@ -295,6 +295,10 @@ pub(in crate::services::discord) struct Harness {
 }
 
 impl Harness {
+    pub(in crate::services::discord) fn watcher_cancel_token(&self) -> Arc<AtomicBool> {
+        self.watcher.as_ref().unwrap().cancel.clone()
+    }
+
     /// A watcher-less channel over `seed`, with the pane busy.
     pub(in crate::services::discord) async fn new(case: u64, seed: &str) -> Self {
         Self::on(case, seed, None).await
