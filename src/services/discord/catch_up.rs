@@ -57,6 +57,7 @@ fn catch_up_intervention_text(text: &str, author_is_bot: bool) -> String {
 }
 
 mod api;
+mod checkpoint_retention;
 mod classification;
 mod clock;
 pub(in crate::services::discord) mod consumed_commands;
@@ -69,6 +70,7 @@ mod phase2;
 mod phase2_sweep;
 pub(in crate::services::discord) mod retry_state;
 mod scan_progress;
+use checkpoint_retention::prune_stale_checkpoint_files;
 mod settled_frontier;
 mod settled_ledger_consult;
 
@@ -270,34 +272,6 @@ fn collect_catch_up_channel_candidates(
     }
 
     candidates
-}
-
-fn prune_stale_checkpoint_files(dir: &Path, max_checkpoint_age: std::time::Duration) -> usize {
-    let mut pruned = 0usize;
-    if let Ok(prune_entries) = fs::read_dir(dir) {
-        for entry in prune_entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|extension| extension.to_str()) != Some("txt") {
-                continue;
-            }
-            let Ok(meta) = path.metadata() else {
-                continue;
-            };
-            if !meta.is_file() {
-                continue;
-            }
-            let Ok(modified) = meta.modified() else {
-                continue;
-            };
-            if modified.elapsed().unwrap_or_default() <= max_checkpoint_age {
-                continue;
-            }
-            if fs::remove_file(&path).is_ok() {
-                pruned += 1;
-            }
-        }
-    }
-    pruned
 }
 
 /// #1227: page size for catch-up REST fetch. Bumped from 10 → 50 because the
