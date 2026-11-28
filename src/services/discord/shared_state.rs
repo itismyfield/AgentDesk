@@ -110,7 +110,7 @@ impl SharedData {
 
 /// Lets a test stand a recording Discord REST client in for the runtime caches on its thread.
 #[cfg(any(test, feature = "test-support"))]
-#[path = "shared_state_rest_hook_tests.rs"]
+#[path = "shared_state_rest_hook_test_support.rs"]
 mod shared_state_rest_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) mod test_rest {

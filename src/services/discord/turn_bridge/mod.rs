@@ -982,11 +982,11 @@ pub(in crate::services::discord) mod cancel_backstop_test_support;
 #[cfg(test)]
 pub(in crate::services::discord) use terminal_outcome_delivery::custody_test_adapter;
 #[cfg(all(any(test, feature = "test-support"), unix))]
-mod resume_pin_hook_tests;
+mod resume_pin_hook_test_support;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(in crate::services::discord) mod resume_pin_tests {
     pub(in crate::services::discord) mod probes {
-        pub(in crate::services::discord) use super::super::resume_pin_hook_tests::{
+        pub(in crate::services::discord) use super::super::resume_pin_hook_test_support::{
             BRIDGE_CAPTURE_PROBE, BRIDGE_COMPLETION_PROBE, WRONG_CAPTURE_CHANNEL,
         };
     }
@@ -994,10 +994,10 @@ pub(in crate::services::discord) mod resume_pin_tests {
     pub(in crate::services::discord) use self::probes::{
         BRIDGE_CAPTURE_PROBE, BRIDGE_COMPLETION_PROBE,
     };
-    pub(in crate::services::discord) use super::resume_pin_hook_tests::completion_postlude_fixture;
+    pub(in crate::services::discord) use super::resume_pin_hook_test_support::completion_postlude_fixture;
     #[cfg(test)]
-    pub(in crate::services::discord) use super::resume_pin_hook_tests::resume_incident_watcher;
-    pub(super) use super::resume_pin_hook_tests::{
+    pub(in crate::services::discord) use super::resume_pin_hook_test_support::resume_incident_watcher;
+    pub(super) use super::resume_pin_hook_test_support::{
         after_bridge_capture, capture_channel, observe_bridge_completion,
     };
 }

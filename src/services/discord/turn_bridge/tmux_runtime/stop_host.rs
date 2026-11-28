@@ -261,5 +261,5 @@ pub(super) fn not_sent() -> ProviderTurnInterruptOutcome {
 }
 
 #[cfg(test)]
-#[path = "stop_host_fixture_tests.rs"]
+#[path = "stop_host_fixture_test_support.rs"]
 pub(in crate::services::discord) mod tests;

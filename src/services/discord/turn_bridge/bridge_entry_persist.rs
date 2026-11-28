@@ -1534,5 +1534,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "entry_abort_fixture_tests.rs"]
+#[path = "entry_abort_fixture_test_support.rs"]
 pub(in crate::services::discord) mod entry_abort_mailbox_tests;

@@ -635,7 +635,7 @@ async fn herdr_cold_case(
     cold: Cold,
 ) -> (BridgeCompletionSignal, bool, bool, usize) {
     use crate::db::dispatched_sessions::hosted_execution::HostedOwner;
-    use crate::services::discord::dl_turn_bridge_tests::before_start_stop_tests::actual_fresh_exit;
+    use crate::services::discord::dl_turn_bridge_test_host::before_start_stop_tests::actual_fresh_exit;
     use crate::services::provider::cancel_token_claude_interrupt::HerdrSubmission;
     use std::sync::atomic::Ordering;
     let mut shared = discord::make_shared_data_for_tests();

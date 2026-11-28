@@ -117,7 +117,7 @@ fn gateway_session_ready(shared: &SharedData) -> bool {
 
 /// Lets a test report a live gateway session on its thread.
 #[cfg(all(any(test, feature = "test-support"), unix))]
-#[path = "runtime_handoff_loop/gateway_ready_hook_tests.rs"]
+#[path = "runtime_handoff_loop/gateway_ready_hook_test_support.rs"]
 mod gateway_ready_hook_tests;
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub(in crate::services::discord) mod test_gateway {
@@ -969,7 +969,7 @@ pub(super) async fn handle_runtime_handoff_loop_message(
 }
 
 #[cfg(all(test, unix))]
-#[path = "runtime_handoff_loop/codex_replacement_fixture_tests.rs"]
+#[path = "runtime_handoff_loop/codex_replacement_fixture_test_support.rs"]
 mod codex_replacement_fixture_tests;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use codex_replacement_fixture_tests::adopt_codex_replacement_for_test;

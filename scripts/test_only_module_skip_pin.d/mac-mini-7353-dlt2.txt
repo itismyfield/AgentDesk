@@ -1,0 +1,10 @@
+resolver | src/services/discord/queue_dispatch/owner_race_hook_test_support.rs
+resolver | src/services/discord/shared_state_rest_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/before_start_stop_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/entry_abort_fixture_test_support.rs
+resolver | src/services/discord/turn_bridge/panel_mode_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/resume_pin_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/runtime_handoff_loop/codex_replacement_fixture_test_support.rs
+resolver | src/services/discord/turn_bridge/runtime_handoff_loop/gateway_ready_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/tmux_runtime/session_stop_hook_test_support.rs
+resolver | src/services/discord/turn_bridge/tmux_runtime/stop_host_fixture_test_support.rs

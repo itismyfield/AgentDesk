@@ -9,7 +9,7 @@ use crate::services::discord::shared_state::{PortFuture, QueuedAdmission, Queued
 pub(in crate::services::discord) mod cancel_backstop_test_support;
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "owner_race_hook_tests.rs"]
+#[path = "owner_race_hook_test_support.rs"]
 mod owner_race_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use owner_race_hook_tests::{

@@ -26,7 +26,7 @@ import rust_test_sources  # noqa: E402
 
 # Classifier false positives: exact test ID -> reason. An entry the classifier no longer reports is stale.
 EXEMPT = {
-    "services::discord::dl_turn_bridge_unix_tests::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof":
+    "services::discord::dl_turn_bridge_unix_test_host::resume_pin_tests::c1_actual_postlude_resume_pin_runtime_proof":
         "#5707: passes response=None; the shared fixture never creates or connects PostgreSQL",
     "server::worker_registry::leader_takeover_tests::worker_profile_starts_local_workers_without_spawning_leader_waiters":
         "the lazy pool is never queried; leader workers are rejected and only the DB-free WsBatchFlusher starts",

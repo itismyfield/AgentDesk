@@ -26,7 +26,7 @@ pub(super) fn bridge_single_message_panel_footer_enabled() -> bool {
     )
 }
 #[cfg(any(test, feature = "test-support"))]
-#[path = "panel_mode_hook_tests.rs"]
+#[path = "panel_mode_hook_test_support.rs"]
 mod panel_mode_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use panel_mode_hook_tests::SEPARATE_PANEL_FOR_TESTS;

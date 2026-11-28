@@ -173,7 +173,7 @@ fn observe(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-#[path = "session_stop_hook_tests.rs"]
+#[path = "session_stop_hook_test_support.rs"]
 mod session_stop_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use session_stop_hook_tests::TestBindingRoot;

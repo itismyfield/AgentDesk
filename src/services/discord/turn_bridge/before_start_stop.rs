@@ -385,7 +385,7 @@ pub(in crate::services::discord) fn policy_intent(
 /// Test seams at each step of `consume`: a per-thread observer, a policy-submit count, and a
 /// child-process stop named by `STOP_AT`.
 #[cfg(any(test, feature = "test-support"))]
-#[path = "before_start_stop_hook_tests.rs"]
+#[path = "before_start_stop_hook_test_support.rs"]
 mod before_start_stop_hook_tests;
 #[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) mod test_hooks {

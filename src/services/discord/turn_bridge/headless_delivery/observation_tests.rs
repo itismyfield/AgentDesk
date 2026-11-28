@@ -1,7 +1,11 @@
 use super::*;
 use crate::server::outbox_worker::{drain_message_outbox_once, origin_fixture::Discord};
 use crate::services::cluster::intake_router_hook::owner_record::output;
+use crate::services::discord::make_shared_data_for_tests;
 use crate::services::discord::outbound::raw_output::tests as recording;
+use crate::services::discord::turn_bridge::stream_tick::rollover_guard::{
+    GuardedRolloverEditOutcome, guarded_bridge_rollover_edit,
+};
 use crate::services::legacy_body_census::request_context::census_scope;
 use crate::services::message_outbox;
 use serde_json::{Value, json};
@@ -676,4 +680,131 @@ async fn w17_direct_fallback_keeps_runtime_mode_while_journal_is_blocked() {
         assert_eq!(rows.last().unwrap()["census"]["reason"], "NO_CLAIM");
     }
     assert_eq!(records(&log).len(), 6);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn blocked_rollover_records_only_the_safe_replacement() {
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    use observation::{CHANNEL, Mock};
+    if observation::isolated(
+        concat!(
+            module_path!(),
+            "::blocked_rollover_records_only_the_safe_replacement"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let journal = observation::journal().await;
+    let mock = Mock::start(vec![observation::message(9905)]).await;
+    let shared = crate::services::discord::make_shared_data_for_tests();
+    let gateway =
+        crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway(
+            std::sync::Arc::new(observation::client(&mock)),
+            shared,
+        );
+    let blocked =
+        "prefix [SYSTEM NOTIFICATION - NOT USER INPUT] <output-file>/private/x</output-file>";
+    assert_eq!(
+        guarded_bridge_rollover_edit(
+            gateway.as_ref(),
+            &ProviderKind::Claude,
+            ChannelId::new(CHANNEL),
+            MessageId::new(9905),
+            blocked,
+            blocked,
+            None
+        )
+        .await
+        .unwrap(),
+        GuardedRolloverEditOutcome::Blocked
+    );
+    assert_eq!(mock.requests().len(), 1);
+    observation::flushed().await;
+    let recorded: Vec<serde_json::Value> = std::fs::read_to_string(journal)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(recorded.len(), 2);
+    for event in recorded {
+        assert_eq!(event["census"]["site"], "W14c");
+        assert_eq!(event["census"]["output_class"], "LegacyBody");
+        assert_eq!(event["census"]["reason"], "NO_CLAIM");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn terminal_body_delivery_keeps_its_site_without_waiting_for_journal() {
+    use crate::services::discord::outbound::raw_output::tests as observation;
+    use observation::{CHANNEL, Mock, reply};
+    if observation::isolated(
+        concat!(
+            module_path!(),
+            "::terminal_body_delivery_keeps_its_site_without_waiting_for_journal"
+        )
+        .trim_start_matches("agentdesk::"),
+    ) {
+        return;
+    }
+    let log = observation::journal().await;
+    let mock = Mock::start(vec![
+        observation::message(9901),
+        reply("204 No Content", &[], ""),
+    ])
+    .await;
+    let shared = make_shared_data_for_tests();
+    let gateway =
+        crate::services::discord::tui_prompt_relay::bridge_gateway::terminal_notice_test_gateway(
+            Arc::new(observation::client(&mock)),
+            shared.clone(),
+        );
+    let lock = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(log.parent().unwrap().join("writer.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let delivery = crate::services::discord::turn_bridge::terminal_delivery::send_ordered_long_terminal_response(
+        &shared,
+        gateway.as_ref(),
+        &ProviderKind::Claude,
+        ChannelId::new(CHANNEL),
+        MessageId::new(9900),
+        None,
+        "provider answer",
+        None,
+        None,
+        None,
+    );
+    tokio::pin!(delivery);
+    let before = tokio::time::timeout(std::time::Duration::from_millis(1500), &mut delivery).await;
+    let completed = before.is_ok();
+    let wire = mock.requests().len();
+    drop(lock);
+    let result = match before {
+        Ok(result) => result,
+        Err(_) => delivery.await,
+    };
+    assert!(result.is_ok());
+    assert!(
+        completed && wire == 2,
+        "observation delayed delivery: completed={completed}, wire={wire}"
+    );
+    observation::flushed().await;
+    let rows: Vec<serde_json::Value> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .filter(|row: &serde_json::Value| row["kind"] == "target")
+        .collect();
+    assert_eq!(
+        rows.len(),
+        2,
+        "one POST begin/result; cleanup DELETE is excluded"
+    );
+    for row in rows {
+        assert_eq!(row["census"]["site"], "W10d");
+    }
 }

@@ -384,7 +384,7 @@ S14d부터 DB 함수는 완료 직전 지점에서 멈추고(`PreparedCompletion
 |`src/services/discord/tmux_watcher/o_evidence_tests.rs:1798`|i7353-d1314-calls.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/tmux_watcher/o_evidence_tests.rs:1800`|dto.git-grep.txt|`headless_restart_frame`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/durable_outbox.rs:262`|dto.git-grep.txt|`output_origin_delayed_producer_consumer_restore_and_old_format_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
-|`src/services/discord/turn_bridge/headless_delivery/durable_outbox_tests.rs`|dto.git-grep.txt|`output_origin_delayed_producer_consumer_restore_and_old_format_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
+|`src/services/discord/turn_bridge/headless_delivery/production_seam_tests.rs`|dto.git-grep.txt|`output_origin_delayed_producer_consumer_restore_and_old_format_pg`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/observation_tests.rs:27`|i7353-d1314-calls.txt|`enqueue`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/observation_tests.rs:29`|dto.git-grep.txt|`enqueue`|fixture가 pool API에 위임; fixture 자체 관측 없음|
 |`src/services/discord/turn_bridge/headless_delivery/observation_tests.rs:88`|i7353-d1314-calls.txt|`registered_agent_labels_do_not_certify_absent_body_metadata`|fixture가 pool API에 위임; fixture 자체 관측 없음|
