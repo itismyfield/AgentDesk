@@ -352,8 +352,8 @@ impl Owner {
 
     /// Rebuilds a reserved unit whose write permit is not handed over yet over the current front,
     /// keeping originals, tickets and order; the old key can no longer arm, so it never writes.
-    #[cfg(test)]
-    pub(crate) fn reprepare(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reprepare(
         &mut self,
         key: &AttemptRef,
         nonce: String,

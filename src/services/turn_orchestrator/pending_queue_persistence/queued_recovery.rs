@@ -168,7 +168,7 @@ pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> Snapsho
         }
     };
     for entry in entries {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let entry = scan_fault::take(&dir, scan_fault::Point::Entry).map_or(entry, Err);
         let entry = match entry {
             Ok(entry) => entry,
@@ -212,7 +212,7 @@ pub(crate) fn read_catalog(provider: &ProviderKind, token_hash: &str) -> Snapsho
 }
 
 fn read_queue_dir(dir: &super::Path) -> io::Result<fs::ReadDir> {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(error) = scan_fault::take(dir, scan_fault::Point::ReadDir) {
         return Err(error);
     }
@@ -233,7 +233,7 @@ pub(super) fn report_scan_errors(provider: &ProviderKind, errors: &[String]) {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod scan_fault {
     use std::cell::RefCell;
     use std::io;
@@ -250,12 +250,15 @@ mod scan_fault {
         static ARMED: RefCell<Option<Fault>> = const { RefCell::new(None) };
     }
 
+    #[cfg(test)]
     pub(super) struct Guard(Option<Fault>);
 
+    #[cfg(test)]
     pub(super) fn arm(dir: &Path, point: Point, kind: io::ErrorKind) -> Guard {
         Guard(ARMED.with(|armed| armed.replace(Some((dir.to_owned(), point, kind)))))
     }
 
+    #[cfg(test)]
     impl Drop for Guard {
         fn drop(&mut self) {
             ARMED.with(|armed| armed.replace(self.0.take()));

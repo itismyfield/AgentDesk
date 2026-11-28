@@ -9,7 +9,7 @@ pub(crate) fn hydrate_pending_queue_into_state(
     restored_override: Option<ChannelId>,
 ) -> HydratePendingQueueResult {
     // A V2 owner holds the queue: what a V1 read found (a foreign writer's file) is never hydrated.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(queue_len_after) = state.v2_len() {
         return HydratePendingQueueResult {
             queue_len_after,
