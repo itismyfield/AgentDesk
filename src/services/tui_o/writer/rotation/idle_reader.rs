@@ -109,8 +109,7 @@ impl<B: BindingEvents> Sources<B> {
         }) {
             return true;
         }
-        if self.provider == ShadowProvider::Codex && next.proof.is_none() && self.replaced.is_none()
-        {
+        if self.replaced.is_none() {
             return true;
         }
         let quiet = reader.quiet.is_none_or(|(_, at)| now - at >= RETIRE_QUIET);
