@@ -728,7 +728,7 @@ fn rehydrate_claude_tui_pane_inner(
 /// One Codex discovery pass: Herdr reconnect, then owner repair and binding of live tmux panes.
 #[cfg(unix)]
 pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
-    let tmux_admitted = evict_dead_orphaned_codex_tui_mirrors(shared);
+    let mut tmux_admitted = evict_dead_orphaned_codex_tui_mirrors(shared);
     // Codex Herdr rows, read whether or not tmux answers; off Herdr this reads nothing.
     super::super::recovery_engine::herdr_reader::reconnect_restarted_herdr_with_shared(
         shared,
@@ -741,27 +741,28 @@ pub(super) fn rehydrate_existing_codex_tui_bindings(shared: &Arc<SharedData>) {
             return;
         }
     };
-    sessions.retain(|name| {
-        tmux_session_is_codex_tui(name)
-            && tmux_admitted.get(name).copied().unwrap_or_else(|| {
+    for name in &sessions {
+        if tmux_session_is_codex_tui(name) {
+            tmux_admitted.entry(name.clone()).or_insert_with(|| {
                 let channel = resolve_rehydrated_tmux_channel_id(&ProviderKind::Codex, name)
                     .or_else(|| {
                         crate::services::tui_prompt_dedupe::codex_verified_discovered_channel(name)
                     });
                 host_admits(shared, &ProviderKind::Codex, name, channel).is_tmux()
-            })
-    });
+            });
+        }
+    }
     sessions.sort_by(|left, right| {
         codex_tui_launch_modified_since(right)
             .cmp(&codex_tui_launch_modified_since(left))
             .then_with(|| left.cmp(right))
     });
 
-    let rehydrate_plan = codex_tui_rehydrate_plan(&sessions);
+    let rehydrate_plan = codex_tui_rehydrate_plan(&sessions, &tmux_admitted);
     let mut claimed_rollout_paths = claimed_codex_tui_rollout_paths();
 
     for tmux_session_name in sessions {
-        if !tmux_session_is_codex_tui(&tmux_session_name) {
+        if tmux_admitted.get(&tmux_session_name) != Some(&true) {
             continue;
         }
 
@@ -1025,13 +1026,17 @@ struct CodexTuiRehydrateObservation {
 }
 
 #[cfg(unix)]
-fn codex_tui_rehydrate_observations(sessions: &[String]) -> Vec<CodexTuiRehydrateObservation> {
+fn codex_tui_rehydrate_observations(
+    sessions: &[String],
+    tmux_admitted: &HashMap<String, bool>,
+) -> Vec<CodexTuiRehydrateObservation> {
     let mut observations = Vec::new();
     for tmux_session_name in sessions {
-        if !tmux_session_is_codex_tui(tmux_session_name) {
+        let Some(&admitted) = tmux_admitted.get(tmux_session_name) else {
             continue;
-        }
-        let live_pane = codex_pass_pane_is_live(tmux_session_name);
+        };
+        // Keep the rollout marker's claim even when the host defers the pane probe.
+        let live_pane = admitted && codex_pass_pane_is_live(tmux_session_name);
         let canonical_cwd = live_pane
             .then(|| crate::services::session_host::TmuxHost.pane_current_path(tmux_session_name))
             .flatten()
@@ -1057,8 +1062,14 @@ fn codex_tui_rehydrate_observations(sessions: &[String]) -> Vec<CodexTuiRehydrat
 }
 
 #[cfg(unix)]
-fn codex_tui_rehydrate_plan(sessions: &[String]) -> CodexTuiRehydratePlan {
-    codex_tui_rehydrate_plan_from_observations(codex_tui_rehydrate_observations(sessions))
+fn codex_tui_rehydrate_plan(
+    sessions: &[String],
+    tmux_admitted: &HashMap<String, bool>,
+) -> CodexTuiRehydratePlan {
+    codex_tui_rehydrate_plan_from_observations(codex_tui_rehydrate_observations(
+        sessions,
+        tmux_admitted,
+    ))
 }
 
 #[cfg(unix)]
@@ -1432,14 +1443,18 @@ mod tests {
     #[test]
     fn codex_tui_rehydrate_plan_reserves_marker_paths_before_markerless_fallback() {
         let marker_path = "/tmp/agentdesk-marker-backed-rollout.jsonl";
-        let plan = codex_tui_rehydrate_plan_from_observations(vec![
-            codex_tui_observation("AgentDesk-codex-markerless", Some("/repo"), None, None),
-            codex_tui_observation(
+        let host_deferred = CodexTuiRehydrateObservation {
+            live_pane: false,
+            ..codex_tui_observation(
                 "AgentDesk-codex-marker-backed",
-                Some("/repo"),
+                None,
                 None,
                 Some(marker_path),
-            ),
+            )
+        };
+        let plan = codex_tui_rehydrate_plan_from_observations(vec![
+            codex_tui_observation("AgentDesk-codex-markerless", Some("/repo"), None, None),
+            host_deferred,
         ]);
 
         assert!(
