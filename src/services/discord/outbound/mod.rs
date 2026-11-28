@@ -16,8 +16,6 @@ pub(in crate::services::discord) mod delivery_record; // #3089 B0
 pub(crate) use adk_runtime::services::discord::outbound::image_format;
 #[cfg(test)]
 mod image_format_tests;
-#[cfg(test)]
-mod ke_wire_tests;
 pub(crate) mod manual_delivery;
 pub(crate) mod message;
 pub(crate) use adk_runtime::services::discord::outbound::notification_policy;

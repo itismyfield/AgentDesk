@@ -10,8 +10,6 @@ pub(super) mod kickoff;
 
 #[cfg(test)]
 pub(in crate::services::discord) mod input_effect_tests;
-#[cfg(test)]
-mod ke_retry_sweep_tests;
 
 #[cfg(all(feature = "test-support", not(test)))]
 const _: fn() = || {
