@@ -198,6 +198,10 @@ mod dl_herdr_terminate_tests;
 #[cfg(all(test, unix))]
 mod dl_herdr_terminate_unix_tests;
 #[cfg(test)]
+mod dl_misc_tests;
+#[cfg(all(test, unix))]
+mod dl_misc_unix_tests;
+#[cfg(test)]
 mod dl_recovery_engine_tests;
 #[cfg(all(test, unix))]
 mod dl_recovery_engine_unix_tests;
