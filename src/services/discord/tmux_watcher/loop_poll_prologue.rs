@@ -433,16 +433,18 @@ pub(super) async fn poll_watcher_output_or_continue(
             .restored_turn
             .as_ref()
             .and_then(|turn| (turn.current_msg_id.get() != 0).then_some(turn.current_msg_id));
-        let reacquired = reacquire_watcher_inflight_for_active_stream(
-            watcher_provider,
-            channel_id,
-            tmux_session_name,
-            output_path,
-            data_start_offset,
-            restored_panel,
-            restored_placeholder,
-            restored_injected_prompt_message_id,
-        );
+        let reacquired = reacquire_under_transition(&shared, channel_id, || {
+            reacquire_watcher_inflight_for_active_stream(
+                watcher_provider,
+                channel_id,
+                tmux_session_name,
+                output_path,
+                data_start_offset,
+                restored_panel,
+                restored_placeholder,
+                restored_injected_prompt_message_id,
+            )
+        });
         if reacquired && !active_stream_inflight_reacquire_logged {
             let ts = chrono::Local::now().format("%H:%M:%S");
             tracing::warn!(

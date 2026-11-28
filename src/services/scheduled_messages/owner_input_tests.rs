@@ -5,6 +5,7 @@ use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::health::runtime_registry::RestoreRuntimeRegistry;
+use crate::services::discord::queue_io::input_owner::cold::v2_cold_observed;
 use crate::services::discord::runtime_store::discord_pending_queue_root;
 use crate::services::discord::{SharedData, shared_data_without_policy_for_tests};
 use crate::services::engine_runtime::health_port::OwnerInputRuntimePort;
@@ -196,8 +197,7 @@ pub(crate) async fn retry_leaf(
         *submitted_ticket.lock().unwrap() = Some(submitted);
         Ok::<(), String>(())
     };
-    let (identity, outcome) = mailbox
-        .v2_cold_observed(1, Arc::new(|| 1), leaf)
+    let (identity, outcome) = v2_cold_observed(&mailbox, 1, Arc::new(|| 1), leaf)
         .await
         .unwrap();
     assert_eq!(outcome.result, Ok(()));
@@ -251,9 +251,7 @@ async fn bootstrap_held_by_modal<T>(
             crate::services::claude_tui::owner_input::vetoed("Modal");
             Ok::<(), String>(())
         };
-        owner
-            .v2_cold_observed(0, std::sync::Arc::new(|| 0), effect)
-            .await
+        v2_cold_observed(&owner, 0, std::sync::Arc::new(|| 0), effect).await
     });
     if in_window.await.is_err() {
         panic!("cold: {:?}", cold.await.unwrap().map(|r| r.0));

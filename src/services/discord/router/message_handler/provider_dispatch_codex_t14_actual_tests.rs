@@ -39,7 +39,7 @@ fn codex_actual_client_and_executor_keep_one_live_execution_pg() {
         .with_ansi(false)
         .try_init();
     let _env = crate::config::test_env_lock::acquire_shared_test_env_lock();
-    let _endpoint_lock = crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+    let _endpoint_lock = crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
     let _dedupe = dedupe::TEST_LOCK

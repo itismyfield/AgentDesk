@@ -19,7 +19,7 @@ struct SyncState {
     managed_allow: BTreeMap<String, BTreeSet<String>>,
 }
 
-pub(crate) fn sync(config: &Config) -> Result<(), String> {
+pub fn sync(config: &Config) -> Result<(), String> {
     let home = current_home_dir().ok_or("Antigravity home unavailable")?;
     let root = crate::config::runtime_root().ok_or("AGENTDESK_ROOT_DIR is unavailable")?;
     let state_path = crate::runtime_layout::config_dir(&root).join(STATE_FILE);

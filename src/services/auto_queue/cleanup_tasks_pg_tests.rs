@@ -8,6 +8,7 @@ mod pg_tests {
         clear_sessions_for_dispatches_pg, end_run_with_pg,
     };
     use crate::services::auto_queue::cleanup_tasks::*;
+    use crate::services::discord::health::slot_row_host_refusal;
     use sqlx::PgPool;
 
     const SLOT_THREAD_ID: &str = "7142";
@@ -411,7 +412,7 @@ mod pg_tests {
         );
 
         // --- restart ---------------------------------------------------------
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay pending cleanup tasks"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.drained, 1);
@@ -462,7 +463,13 @@ mod pg_tests {
             .await
             .expect("hide sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(
             !outcome.completed,
             "a failed session clear must not report the task as finished"
@@ -520,7 +527,7 @@ mod pg_tests {
         // sweep must decline to pick the row up. Without this the queue would
         // spin on a failing row at full tick rate and keep its head-of-line
         // position against everything queued behind it.
-        let backed_off = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let backed_off = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay while backing off"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
@@ -535,7 +542,7 @@ mod pg_tests {
         );
 
         wind_back_next_attempt(&pool).await;
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay pending cleanup tasks"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
@@ -573,8 +580,13 @@ mod pg_tests {
         .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         let registry = std::sync::Arc::new(crate::services::discord::health::HealthRegistry::new());
-        let outcome =
-            drain_run_cleanup_task_by_id_pg(Some(registry), &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            Some(registry),
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
 
         assert!(outcome.completed, "drain must finish: {outcome:?}");
         assert_eq!(
@@ -651,7 +663,7 @@ mod pg_tests {
         .await
         .expect("persist released slot on the pending task"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay pending cleanup tasks"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.completed, 1);
@@ -761,9 +773,14 @@ mod pg_tests {
         assert_eq!(cancelled.dispatch_ids, vec![dispatch_id.clone()]);
         assert_eq!(dispatch_status(&pool, &dispatch_id).await, "cancelled");
         assert!(
-            drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id)
-                .await
-                .completed
+            drain_run_cleanup_task_by_id_pg(
+                slot_row_host_refusal,
+                None,
+                &pool,
+                cancelled.cleanup_task_id
+            )
+            .await
+            .completed
         );
         assert_eq!(slot_assignment(&pool).await, None);
         assert_eq!(provider_session_ids(&pool).await, vec![None]);
@@ -801,7 +818,13 @@ mod pg_tests {
         .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         arm_released_slots_persist_failure(&pool).await;
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(
             !outcome.completed,
             "a drain whose slot bookkeeping failed must not report success: {outcome:?}"
@@ -833,7 +856,7 @@ mod pg_tests {
 
         // Discriminator 2 — the retry converges completely, and `completed`
         // means what it says.
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay pending cleanup tasks"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.drained, 1);
@@ -915,9 +938,14 @@ mod pg_tests {
 
         // Prove the attribution: only the full drain (step 4 included) clears it.
         assert!(
-            drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id)
-                .await
-                .completed
+            drain_run_cleanup_task_by_id_pg(
+                slot_row_host_refusal,
+                None,
+                &pool,
+                cancelled.cleanup_task_id
+            )
+            .await
+            .completed
         );
         assert_eq!(provider_session_ids(&pool).await, vec![None]);
         pool.close().await;
@@ -969,8 +997,13 @@ mod pg_tests {
             )
             .await;
 
-        let outcome =
-            drain_run_cleanup_task_by_id_pg(Some(registry), &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            Some(registry),
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(outcome.completed, "drain must finish: {outcome:?}");
         assert_eq!(outcome.slot_cleanup.released_slots, 1);
 
@@ -1023,7 +1056,7 @@ mod pg_tests {
         .await
         .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay pending cleanup tasks"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
@@ -1042,7 +1075,7 @@ mod pg_tests {
         );
 
         // And once parked it is out of the way for good.
-        let after = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let after = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after dead-lettering"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(after, RunCleanupReplayStats::default());
@@ -1086,7 +1119,13 @@ mod pg_tests {
             .execute(&pool)
             .await
             .expect("hide sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(!outcome.completed);
         sqlx::query("ALTER TABLE sessions_hidden RENAME TO sessions")
             .execute(&pool)
@@ -1106,15 +1145,20 @@ mod pg_tests {
         // backoff wound back — otherwise they would block the queue forever.
         wind_back_next_attempt(&pool).await;
         assert_eq!(
-            replay_pending_run_cleanup_tasks_pg(None, &pool)
+            replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
                 .await
                 .expect("replay after dead-lettering"), // agentdesk-audit: allow-unwrap — production entrypoint assertion
             RunCleanupReplayStats::default()
         );
         assert!(
-            !drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id)
-                .await
-                .completed,
+            !drain_run_cleanup_task_by_id_pg(
+                slot_row_host_refusal,
+                None,
+                &pool,
+                cancelled.cleanup_task_id
+            )
+            .await
+            .completed,
             "a dead-lettered task must never be reported as completed"
         );
         assert_eq!(
@@ -1156,7 +1200,7 @@ mod pg_tests {
         .await
         .expect("simulate a competing claim"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay while the row is claimed"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
@@ -1165,7 +1209,13 @@ mod pg_tests {
             "the sweep must not touch a row another drainer owns"
         );
 
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(
             !outcome.completed,
             "a row we could not claim is still owed, so it must not be reported \
@@ -1190,7 +1240,7 @@ mod pg_tests {
         .await
         .expect("expire the competing claim"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let recovered = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let recovered = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after the lease expired"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(recovered.completed, 1);
@@ -1282,7 +1332,7 @@ mod pg_tests {
             .await
             .expect("hide sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay onto the attempt cap"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
@@ -1337,7 +1387,7 @@ mod pg_tests {
         // The two axes are genuinely different measurements. A later sweep finds
         // nothing to do (no new transition) while the backlog is unchanged.
         wind_back_next_attempt(&pool).await;
-        let quiet = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let quiet = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after the row was parked"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(
@@ -1421,7 +1471,13 @@ mod pg_tests {
 
         let emits_before = emit_probe::emit_count(&dispatch_id);
         arm_emit_remark_trap(&pool).await;
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         disarm_emit_remark_trap(&pool).await;
 
         assert_eq!(
@@ -1523,7 +1579,13 @@ mod pg_tests {
         .await
         .expect("arm emit mark trap"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
         assert!(
             !outcome.completed,
             "a drain that could not durably record its emits must not report success"
@@ -1575,7 +1637,7 @@ mod pg_tests {
         // `>= 1`: emit-then-mark would have emitted during the failed attempt as
         // well, so the total would be two.
         wind_back_next_attempt(&pool).await;
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after the mark trap was removed"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.completed, 1);
@@ -1626,7 +1688,13 @@ mod pg_tests {
         .expect("cancel run-owned dispatches"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
         arm_cleanup_task_delete_failure(&pool).await;
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, cancelled.cleanup_task_id).await;
+        let outcome = drain_run_cleanup_task_by_id_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            cancelled.cleanup_task_id,
+        )
+        .await;
 
         assert!(
             !outcome.completed,
@@ -1663,7 +1731,7 @@ mod pg_tests {
         // Once the write works again the row retires and stops being replayed.
         disarm_cleanup_task_delete_failure(&pool).await;
         wind_back_next_attempt(&pool).await;
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after the delete trap was removed"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.completed, 1);
@@ -1702,7 +1770,7 @@ mod pg_tests {
         .expect("seed undecodable cleanup task"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
 
         arm_dead_letter_write_failure(&pool).await;
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay while the park write fails"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
@@ -1730,7 +1798,7 @@ mod pg_tests {
         // With the write restored the row parks for good and is counted once.
         disarm_dead_letter_write_failure(&pool).await;
         wind_back_next_attempt(&pool).await;
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after the park write recovered"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.dead_lettered, 1);
@@ -1766,7 +1834,7 @@ mod pg_tests {
             .expect("hide sessions table"); // agentdesk-audit: allow-unwrap — test-only PostgreSQL fixture
         arm_attempt_record_failure(&pool).await;
 
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay while the attempt bookkeeping fails"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
 
@@ -1797,7 +1865,7 @@ mod pg_tests {
         // a failure there also strands the claim. That is the lease's job — model
         // its expiry rather than pretending the row is immediately drainable.
         assert!(
-            !replay_pending_run_cleanup_tasks_pg(None, &pool)
+            !replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
                 .await
                 .expect("replay while the stranded claim is still inside its lease") // agentdesk-audit: allow-unwrap — production entrypoint assertion
                 .touched(),
@@ -1814,7 +1882,7 @@ mod pg_tests {
 
         // The row is not lost: the next sweep re-derives the same work and, with
         // both injections gone, converges.
-        let stats = replay_pending_run_cleanup_tasks_pg(None, &pool)
+        let stats = replay_pending_run_cleanup_tasks_pg(slot_row_host_refusal, None, &pool)
             .await
             .expect("replay after both injections were removed"); // agentdesk-audit: allow-unwrap — production entrypoint assertion
         assert_eq!(stats.completed, 1);
@@ -1856,9 +1924,15 @@ mod pg_tests {
         .await
         .expect("install cleanup-row retention trigger");
 
-        cancel_selected_runs_with_pg(None, &pool, std::slice::from_ref(&run_id), "test_cancel")
-            .await
-            .expect("cancel NULL-generation card run");
+        cancel_selected_runs_with_pg(
+            slot_row_host_refusal,
+            None,
+            &pool,
+            std::slice::from_ref(&run_id),
+            "test_cancel",
+        )
+        .await
+        .expect("cancel NULL-generation card run");
 
         let card: (String, Option<String>) =
             sqlx::query_as("SELECT status, latest_dispatch_id FROM kanban_cards WHERE id = $1")
@@ -1997,6 +2071,7 @@ mod pg_tests {
         let cancel_run_id = run_id.clone();
         let cancel_task = tokio::spawn(async move {
             cancel_selected_runs_with_pg(
+                slot_row_host_refusal,
                 None,
                 &cancel_pool,
                 &[cancel_run_id],
@@ -2034,6 +2109,7 @@ mod pg_tests {
         let engine = crate::engine::PolicyEngine::new_with_pg(
             &crate::config::Config::default(),
             Some(pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
         )
         .expect("create NULL ABA transition engine");
         let transition_engine = engine.clone();
@@ -2145,6 +2221,7 @@ mod pg_tests {
         .expect("install in-tx rollback failure trigger");
 
         let error = cancel_selected_runs_with_pg(
+            slot_row_host_refusal,
             None,
             &pool,
             std::slice::from_ref(&run_id),
@@ -2268,7 +2345,9 @@ mod pg_tests {
         assert_eq!(initial_review_notes, Some("some notes".to_string()));
 
         // P1-A: end_run_with_pg should NOT roll back cards
-        end_run_with_pg(None, &pool, run_id).await.expect("end run");
+        end_run_with_pg(slot_row_host_refusal, None, &pool, run_id)
+            .await
+            .expect("end run");
 
         // After end: verify card state is UNCHANGED
         let (final_status, final_review_round, final_review_notes): (String, i64, Option<String>) =
@@ -2369,7 +2448,8 @@ mod pg_tests {
         .await
         .expect("inject forbidden NULL-generation rollback");
 
-        let outcome = drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+        let outcome =
+            drain_run_cleanup_task_by_id_pg(slot_row_host_refusal, None, &pool, task_id).await;
         assert!(outcome.completed, "mixed row must complete");
         assert!(
             outcome
@@ -2526,7 +2606,7 @@ mod pg_tests {
         assert_eq!(review_round_before, 1);
 
         // P1-A: Drain the cleanup task. Generation mismatch should cause skip.
-        drain_run_cleanup_task_by_id_pg(None, &pool, task_id).await;
+        drain_run_cleanup_task_by_id_pg(slot_row_host_refusal, None, &pool, task_id).await;
 
         // After drain: card should be UNCHANGED (skipped due to generation mismatch)
         let (status_after, review_round_after): (String, i64) =

@@ -11,20 +11,20 @@ type Samples = Arc<Mutex<Stats>>;
 static WATCHED: LazyLock<Mutex<HashMap<Identity, Samples>>> = LazyLock::new(Default::default);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Stats {
+pub struct Stats {
     pub read_calls: u64,
     pub read_bytes: u64,
     pub advance_commits: u64,
     pub events: Vec<(&'static str, u64, u64)>,
 }
 
-pub(crate) struct Watch {
+pub struct Watch {
     identity: Identity,
     samples: Samples,
 }
 
 impl Watch {
-    pub(crate) fn start(path: &Path) -> Self {
+    pub fn start(path: &Path) -> Self {
         let metadata = std::fs::metadata(path).unwrap();
         let identity = (metadata.dev(), metadata.ino());
         let samples = Arc::new(Mutex::new(Stats::default()));
@@ -38,7 +38,7 @@ impl Watch {
         Self { identity, samples }
     }
 
-    pub(crate) fn stats(&self) -> Stats {
+    pub fn stats(&self) -> Stats {
         self.samples.lock().unwrap().clone()
     }
 }

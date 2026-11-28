@@ -600,10 +600,7 @@ mod herdr {
     use crate::services::claude::herdr_turn::{self, AttachRequest, HerdrTurn, HerdrTurnPorts};
     use crate::services::claude_tui::hook_server::{HookEvent, subscribe_hook_events};
     use crate::services::codex::herdr_turn::{CodexHerdrPorts, CodexHerdrTurn};
-    use crate::services::discord::recovery_engine::host_reconcile::{
-        HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
-        reconcile_hosted_session_pg,
-    };
+    use crate::services::discord::recovery_engine::host_reconcile::reconcile_hosted_session_pg;
     use crate::services::discord::session_transition::UnplacedLease;
     use crate::services::discord::tui_prompt_relay::herdr_source::{
         HerdrSourceAttach, attach_launched_codex_herdr_source, attach_launched_herdr_source,
@@ -611,6 +608,9 @@ mod herdr {
     use crate::services::herdr_launch::{HerdrLaunchHost, OwnerPort};
     use crate::services::provider::ProviderKind;
     use crate::services::session_host::HerdrTarget;
+    use crate::services::session_host::{
+        HerdrEndpointId, HerdrExecutionReader, HerdrPaneEvidence, HerdrPaneReading,
+    };
     use crate::services::tui_prompt_dedupe::binding_events::SourceId;
     use crate::services::turn_host::HerdrTurnPlan;
 

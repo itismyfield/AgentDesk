@@ -1,4 +1,3 @@
-// Kit provenance: itismyfield/agentdesk-ui-kit@0cc7c65ef8
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { BarChart3, Check, ChevronDown, CircleSlash, Clock3, Eye, Inbox, Square, SquareCheck, X } from 'lucide-react';
@@ -65,6 +64,7 @@ export interface BreakdownChartProps {
   defaultSlice?: string;
   /** null or an empty string selects the unsegmented view. */
   defaultSegment?: string | null;
+  /** Visible and spoken UI strings; missing keys keep the Korean defaults. */
   labels?: Partial<BreakdownChartLabels>;
   className?: string;
   style?: CSSProperties;
@@ -99,7 +99,7 @@ function segmentHeights(amounts: number[], height: number) {
   return sizes;
 }
 
-function Picker({ label, value, options, onChange, disabled, unconfiguredValue, closePicker }: { label: string; value: string; options: { id: string; label: string }[]; onChange: (value: string) => void; disabled: boolean; unconfiguredValue: string; closePicker: (label: string) => string }) {
+function Picker({ label, value, options, onChange, disabled, unconfiguredLabel, closeLabel }: { label: string; value: string; options: { id: string; label: string }[]; onChange: (value: string) => void; disabled: boolean; unconfiguredLabel: string; closeLabel: (label: string) => string }) {
   const id = useId(), trigger = useRef<HTMLButtonElement>(null), panel = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false), [mobile, setMobile] = useState(false);
   const [themeStyle, setThemeStyle] = useState<CSSProperties>({});
@@ -157,12 +157,12 @@ function Picker({ label, value, options, onChange, disabled, unconfiguredValue, 
   return <div className="aui-breakdown-chart-picker">
     <span id={id + '-label'} title={label}>{label}</span>
     <button ref={trigger} data-hit-slop="5" className="aui-breakdown-chart-picker-button" type="button" aria-labelledby={id + '-label ' + id + '-value'} aria-haspopup="listbox" aria-controls={open ? id + '-panel' : undefined} aria-expanded={open} disabled={disabled} onClick={() => setOpen(!open)}>
-      <span id={id + '-value'} dir="auto" title={options.find(option => option.id === value)?.label ?? value}>{(options.find(option => option.id === value)?.label ?? value) || unconfiguredValue}</span><ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
+      <span id={id + '-value'} dir="auto" title={options.find(option => option.id === value)?.label ?? value}>{(options.find(option => option.id === value)?.label ?? value) || unconfiguredLabel}</span><ChevronDown size={14} strokeWidth={1.5} aria-hidden="true" />
     </button>
     {open && createPortal(<div className={'aui-breakdown-chart aui-breakdown-chart-overlay' + (mobile ? ' aui-breakdown-chart-overlay-mobile' : '')} style={themeStyle} onKeyDown={keyDown}>
       {mobile && <div className="aui-breakdown-chart-backdrop" onClick={() => close(true)} />}
       <div id={id + '-panel'} ref={panel} className="aui-breakdown-chart-menu" role={mobile ? 'dialog' : undefined} aria-modal={mobile || undefined} aria-labelledby={mobile ? id + '-sheet' : undefined} style={mobile ? undefined : position}>
-        {mobile && <header className="aui-breakdown-chart-sheet-heading"><strong id={id + '-sheet'}>{label}</strong><button type="button" aria-label={closePicker(label)} onClick={() => close(true)}><X size={18} aria-hidden="true" /></button></header>}
+        {mobile && <header className="aui-breakdown-chart-sheet-heading"><strong id={id + '-sheet'}>{label}</strong><button type="button" aria-label={closeLabel(label)} onClick={() => close(true)}><X size={18} aria-hidden="true" /></button></header>}
         <div className="aui-breakdown-chart-list" role="listbox" aria-labelledby={id + '-label'}>{options.map(option => <button type="button" role="option" aria-selected={value === option.id} className="aui-breakdown-chart-option" key={option.id} title={option.label} onClick={() => { onChange(option.id); close(true); }}><span dir="auto">{option.label}</span>{value === option.id && <Check size={14} strokeWidth={1.5} aria-hidden="true" />}</button>)}</div>
       </div>
     </div>, document.body)}
@@ -175,10 +175,10 @@ export function BreakdownChart(props: BreakdownChartProps) {
   return <BreakdownChartBody {...props} />;
 }
 
-function BreakdownChartBody({ records, dimensions, measures, title: titleProp, defaultMeasure, defaultSlice, defaultSegment, labels, className = '', style }: BreakdownChartProps) {
-  const id = useId(), tableContent = useRef<HTMLDivElement>(null);
-  const text: BreakdownChartLabels = { ...breakdownChartDefaultLabels, ...labels };
+function BreakdownChartBody({ records, dimensions, measures, title: titleProp, defaultMeasure, defaultSlice, defaultSegment, labels: labelInput, className = '', style }: BreakdownChartProps) {
+  const text: BreakdownChartLabels = { ...breakdownChartDefaultLabels, ...labelInput };
   const title = titleProp ?? text.title;
+  const id = useId(), tableContent = useRef<HTMLDivElement>(null);
   const card = useRef<HTMLDivElement>(null), plot = useRef<HTMLDivElement>(null), tip = useRef<HTMLDivElement>(null);
   const [measureId, setMeasureId] = useState(defaultMeasure ?? measures[0]?.id ?? '');
   const [sliceId, setSliceId] = useState(defaultSlice ?? dimensions[0]?.id ?? '');
@@ -285,9 +285,9 @@ function BreakdownChartBody({ records, dimensions, measures, title: titleProp, d
       <header className="aui-breakdown-chart-heading"><h2 id={id + '-title'} title={title} dir="auto">{title}</h2><span><strong>{format(total)}</strong> {measure?.unit ?? ''}</span></header>
       <div className="aui-breakdown-chart-card" ref={card}>
         <div className="aui-breakdown-chart-pickers">
-          <Picker label={text.measurePicker} value={measure?.id ?? ''} options={measures} onChange={setMeasureId} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
-          <Picker label={text.slicePicker} value={slice?.id ?? ''} options={dimensions} onChange={next => { setSliceId(next); if (next === segment?.id) { setSegmentId(''); setExcluded([]); } }} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
-          <Picker label={text.segmentPicker} value={segment?.id ?? ''} options={[{ id: '', label: text.noSegment }, ...dimensions.filter(value => value.id !== slice?.id)]} onChange={next => { if (next !== (segment?.id ?? '')) { setSegmentId(next); setExcluded([]); } }} disabled={!configured} unconfiguredValue={text.unconfiguredValue} closePicker={text.closePicker} />
+          <Picker label={text.measurePicker} value={measure?.id ?? ''} options={measures} onChange={setMeasureId} disabled={!configured} unconfiguredLabel={text.unconfiguredValue} closeLabel={text.closePicker} />
+          <Picker label={text.slicePicker} value={slice?.id ?? ''} options={dimensions} onChange={next => { setSliceId(next); if (next === segment?.id) { setSegmentId(''); setExcluded([]); } }} disabled={!configured} unconfiguredLabel={text.unconfiguredValue} closeLabel={text.closePicker} />
+          <Picker label={text.segmentPicker} value={segment?.id ?? ''} options={[{ id: '', label: text.noSegment }, ...dimensions.filter(value => value.id !== slice?.id)]} onChange={next => { if (next !== (segment?.id ?? '')) { setSegmentId(next); setExcluded([]); } }} disabled={!configured} unconfiguredLabel={text.unconfiguredValue} closeLabel={text.closePicker} />
         </div>
         {!configured ? <div className="aui-breakdown-chart-empty" role="status"><BarChart3 size={28} aria-hidden="true" /><strong>{text.emptySetupTitle}</strong><p>{text.emptySetupBody}</p></div> : rows.length ? <>
           {!records.length && <p className="aui-breakdown-chart-zero-note">{text.zeroRecordsNote}</p>}
@@ -360,7 +360,7 @@ const styles = `
 .aui-breakdown-chart-option > span, .aui-breakdown-chart-name { min-width:0; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .aui-breakdown-chart-option[aria-selected="true"] { color:var(--aui-breakdown-chart-accent); font-weight:500; }
 .aui-breakdown-chart-option:hover, .aui-breakdown-chart-option:focus { background:var(--aui-breakdown-chart-option-hover); outline:none!important; }
-.aui-breakdown-chart-chart { position:relative; margin:22px 18px 12px; padding-right:30px; }
+.aui-breakdown-chart-chart { position:relative; margin:22px 18px 12px; padding-right:36px; }
 .aui-breakdown-chart-scroll { overflow-x:auto; overscroll-behavior-x:contain; scrollbar-width:thin; touch-action:pan-x pan-y; padding:4px; margin:-4px; }
 .aui-breakdown-chart-plot { position:relative; }
 .aui-breakdown-chart-grid { position:absolute; top:0; width:100%; height:200px; pointer-events:none; }
@@ -374,7 +374,7 @@ const styles = `
 .aui-breakdown-chart-segment { flex:none; width:100%; min-height:2px; transition:height 520ms var(--aui-breakdown-chart-ease),background-color 300ms ease; }
 .aui-breakdown-chart-empty-bar { position:absolute; top:0; left:50%; translate:-50% 0; width:min(10px,100%); background:var(--aui-breakdown-chart-empty); opacity:0; transition:opacity 180ms ease,bottom 520ms var(--aui-breakdown-chart-ease); }
 .aui-breakdown-chart-bar-button[data-active="true"] .aui-breakdown-chart-empty-bar { opacity:1; }
-.aui-breakdown-chart-ticks { position:absolute; top:0; right:0; width:26px; height:200px; color:var(--aui-breakdown-chart-muted); font-size:11px; line-height:16px; }
+.aui-breakdown-chart-ticks { position:absolute; top:0; right:0; width:26px; height:200px; color:var(--aui-breakdown-chart-muted); font-size:11px; line-height:16px; pointer-events:none; }
 .aui-breakdown-chart-ticks > span { position:absolute; right:0; white-space:nowrap; }
 .aui-breakdown-chart-axis { display:flex; gap:4px; margin-top:8px; height:24px; color:var(--aui-breakdown-chart-muted); font-size:11px; }
 .aui-breakdown-chart-axis > div { position:relative; flex:1 0 44px; min-width:44px; text-align:center; }
@@ -440,6 +440,9 @@ const styles = `
  .aui-breakdown-chart-mobile-row dt { display:flex; align-items:center; gap:6px; min-width:0; }
  .aui-breakdown-chart-mobile-row dd { flex:none; margin:0; }
  .aui-breakdown-chart-footer { flex-wrap:wrap; }
+}
+@container (max-width:380px) {
+ .aui-breakdown-chart-mobile-row dl { grid-template-columns:minmax(0,1fr); }
 }
 @media (pointer:coarse) and (min-width:900px) { .aui-breakdown-chart-picker-button { position:relative; z-index:2; min-width:44px; } .aui-breakdown-chart-picker-button::before { content:''; position:absolute; inset:-7px 0; } .aui-breakdown-chart-option { min-width:44px; min-height:44px; } .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; margin-block:-8px; } }
 @media (max-width:899.98px) { .aui-breakdown-chart-picker-button, .aui-breakdown-chart-option, .aui-breakdown-chart-legend button, .aui-breakdown-chart-restore { min-width:44px; min-height:44px; } .aui-breakdown-chart-picker-button { font-size:16px!important; } .aui-breakdown-chart-table th, .aui-breakdown-chart-table td { height:44px; padding-block:12px; } }

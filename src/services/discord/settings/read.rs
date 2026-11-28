@@ -1,4 +1,5 @@
 use super::*;
+use crate::utils::discord::discord_token_hash;
 
 #[derive(Clone, Debug, Default)]
 struct LegacyBotSettingsEntry {

@@ -178,7 +178,7 @@ async fn exact_receipt_settles_while_native_invalid_snapshot_stays_cached() {
         actor
             .writer_for_test()
             .notice_owners_for_test()
-            .decision(&origin, "stale", &frame),
+            .decision_for_test(&origin, "stale", &frame),
         Decision::Owned,
         "the exact proof precedes unavailable native census"
     );
@@ -321,7 +321,10 @@ async fn history_parse_reuse_obeys_raw_size_gate_and_rewrite() {
         forget(&path);
         BUILDS.with(|count| count.set(0));
         let first = Batch::prepare(actor.writer_mut_for_test().store());
-        assert_eq!(first.decision(&origin, "direct", &frame), Decision::Unowned);
+        assert_eq!(
+            first.decision_for_test(&origin, "direct", &frame),
+            Decision::Unowned
+        );
         let cached = usize::from(bytes <= LIMIT);
         assert_eq!(
             BUILDS.with(|count| count.get()),
@@ -330,7 +333,7 @@ async fn history_parse_reuse_obeys_raw_size_gate_and_rewrite() {
         );
         let second = Batch::prepare(actor.writer_mut_for_test().store());
         assert_eq!(
-            second.decision(&origin, "direct", &frame),
+            second.decision_for_test(&origin, "direct", &frame),
             Decision::Unowned
         );
         assert_eq!(
@@ -344,7 +347,7 @@ async fn history_parse_reuse_obeys_raw_size_gate_and_rewrite() {
             std::fs::write(&path, raw).unwrap();
             let changed = Batch::prepare(actor.writer_mut_for_test().store());
             assert_eq!(
-                changed.decision(&origin, "direct", &frame),
+                changed.decision_for_test(&origin, "direct", &frame),
                 Decision::Unowned
             );
             assert_eq!(

@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { CompanySettings, DashboardStats, WSEvent } from "../types";
 import { I18nProvider, LANGUAGE_STORAGE_KEY, type UiLanguage } from "../i18n";
 import { writeLocalStorageValue } from "../lib/useLocalStorage";
@@ -87,8 +87,13 @@ export function SettingsProvider({ initialSettings, initialStats, initialStatsPe
   const locale = settings.language;
   const tr = useCallback((ko: string, en: string) => (settings.language === "ko" ? ko : en), [settings.language]);
 
+  const contextValue = useMemo<SettingsContextValue>(
+    () => ({ settings, setSettings, stats, initialStatsPending, refreshStats, refreshingStats, isKo, locale, tr }),
+    [settings, setSettings, stats, initialStatsPending, refreshStats, refreshingStats, isKo, locale, tr],
+  );
+
   return (
-    <SettingsContext.Provider value={{ settings, setSettings, stats, initialStatsPending, refreshStats, refreshingStats, isKo, locale, tr }}>
+    <SettingsContext.Provider value={contextValue}>
       <I18nProvider language={settings.language}>{children}</I18nProvider>
     </SettingsContext.Provider>
   );

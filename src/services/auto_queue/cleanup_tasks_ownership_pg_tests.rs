@@ -1,6 +1,7 @@
 use super::{ReleasedSlot, slot_taken_by_foreign_run_pg};
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::auto_queue::runtime::clear_slot_threads_for_runs_pg;
+use crate::services::discord::health::slot_row_host_refusal;
 
 #[tokio::test]
 async fn slot_cleanup_preserves_successor_session_after_ownership_probe_pg() {
@@ -64,9 +65,16 @@ async fn slot_cleanup_preserves_successor_session_after_ownership_probe_pg() {
     .execute(&pool)
     .await
     .expect("successor establishes its session"); // agentdesk-audit: allow-unwrap — test fixture
-    let cleared = clear_slot_threads_for_runs_pg(None, &pool, &slot.agent_id, 7, &run_ids)
-        .await
-        .expect("foreign ownership is a successful skip"); // agentdesk-audit: allow-unwrap — test assertion
+    let cleared = clear_slot_threads_for_runs_pg(
+        slot_row_host_refusal,
+        None,
+        &pool,
+        &slot.agent_id,
+        7,
+        &run_ids,
+    )
+    .await
+    .expect("foreign ownership is a successful skip"); // agentdesk-audit: allow-unwrap — test assertion
     let session: Option<String> = sqlx::query_scalar(
         "SELECT claude_session_id FROM sessions WHERE thread_channel_id = '7522201'",
     )
@@ -86,9 +94,16 @@ async fn slot_cleanup_preserves_successor_session_after_ownership_probe_pg() {
         .await
         .expect("restore eligible slot ownership"); // agentdesk-audit: allow-unwrap — test fixture
         assert_eq!(
-            clear_slot_threads_for_runs_pg(None, &pool, &slot.agent_id, 7, &run_ids)
-                .await
-                .expect("clear released or task-owned slot"), // agentdesk-audit: allow-unwrap — test assertion
+            clear_slot_threads_for_runs_pg(
+                slot_row_host_refusal,
+                None,
+                &pool,
+                &slot.agent_id,
+                7,
+                &run_ids,
+            )
+            .await
+            .expect("clear released or task-owned slot"), // agentdesk-audit: allow-unwrap — test assertion
             1,
             "owner {owner:?} must remain eligible"
         );

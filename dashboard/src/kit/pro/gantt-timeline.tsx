@@ -228,7 +228,7 @@ const GANTT_STYLES = `
 :where(.aui-gantt-timeline-root) button, :where(.aui-gantt-timeline-root) input { font:inherit; color:inherit; }
 .aui-gantt-timeline-card { flex:1; min-width:0; background:var(--gt-card); border:1px solid var(--gt-line); border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
 .aui-gantt-timeline-toolbar { padding:8px 14px 10px; border-bottom:1px solid var(--gt-line-soft); display:flex; align-items:center; justify-content:space-between; gap:8px; flex-wrap:wrap; flex-shrink:0; }
-.aui-gantt-timeline-tool-left, .aui-gantt-timeline-tool-right { display:flex; align-items:center; gap:8px; min-width:0; }
+.aui-gantt-timeline-tool-left, .aui-gantt-timeline-tool-right { display:flex; align-items:center; gap:8px; min-width:0; flex-wrap:wrap; }
 .aui-gantt-timeline-filter-box { position:relative; width:196px; min-height:32px; padding:0 8px 0 10px; border-radius:8px; border:1px solid var(--gt-line); background:var(--gt-card); display:flex; align-items:center; gap:6px; min-width:0; }
 .aui-gantt-timeline-filter-box input { flex:1; min-width:0; min-height:30px; border:0; outline:none; background:transparent; font-size:12.5px; }
 .aui-gantt-timeline-btn-outline { position:relative; min-height:32px; padding:0 12px; border-radius:8px; border:1px solid var(--gt-line); background:var(--gt-card); color:var(--gt-fg); font-size:12.5px; font-weight:500; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; flex-shrink:0; cursor:pointer; }
@@ -261,15 +261,18 @@ const GANTT_STYLES = `
 .aui-gantt-timeline-row-track { position:relative; height:calc(var(--gt-row-h,36px) - 1px); flex-shrink:0; }
 .aui-gantt-timeline-lane-summary { position:absolute; top:calc((var(--gt-row-h,36px) - 4px) / 2); height:4px; border-radius:999px; background:var(--gt-lane-track); overflow:hidden; }
 .aui-gantt-timeline-lane-summary > div { height:100%; border-radius:999px; background:var(--gt-lane-fill); }
-.aui-gantt-timeline-lane-summary.is-folded { top:calc((var(--gt-row-h,36px) - 16px) / 2); height:16px; border-radius:5px; border:1px solid var(--gt-line); padding:0; display:flex; align-items:center; cursor:pointer; z-index:3; }
-.aui-gantt-timeline-lane-summary.is-folded > div { position:absolute; inset:0 auto 0 0; border-radius:4px 0 0 4px; background:var(--gt-fill-teal); }
+.aui-gantt-timeline-lane-summary.is-folded { top:calc((var(--gt-row-h,36px) - 16px) / 2); height:16px; border-radius:5px; border:1px solid var(--gt-line); padding:0; display:flex; align-items:center; cursor:pointer; overflow:visible; z-index:3; }
+.aui-gantt-timeline-lane-summary-clip { position:absolute; inset:0; overflow:hidden; border-radius:4px; pointer-events:none; }
+.aui-gantt-timeline-lane-summary-clip > div { position:absolute; inset:0 auto 0 0; border-radius:4px 0 0 4px; background:var(--gt-fill-teal); }
 .aui-gantt-timeline-lane-summary-pct { position:relative; z-index:1; margin-left:auto; padding:0 6px; font-size:10.5px; font-weight:600; color:var(--gt-fg); font-variant-numeric:tabular-nums; white-space:nowrap; }
-.aui-gantt-timeline-bar { position:absolute; top:calc((var(--gt-row-h,36px) - 22px) / 2); height:22px; border-radius:6px; border:1px solid transparent; padding:0 8px; display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:11.5px; font-weight:500; cursor:pointer; overflow:hidden; z-index:3; }
+.aui-gantt-timeline-bar { position:absolute; top:calc((var(--gt-row-h,36px) - 22px) / 2); height:22px; border-radius:6px; border:1px solid transparent; padding:0 8px; display:flex; align-items:center; justify-content:space-between; gap:6px; font-size:11.5px; font-weight:500; cursor:pointer; overflow:visible; z-index:3; }
 .aui-gantt-timeline-bar:focus-visible, .aui-gantt-timeline-lane-btn:focus-visible, .aui-gantt-timeline-lane-summary.is-folded:focus-visible { outline:2px solid var(--gt-fg); outline-offset:1px; }
+.aui-gantt-timeline-bar-clip { position:absolute; inset:0; overflow:hidden; border-radius:5px; pointer-events:none; }
 .aui-gantt-timeline-bar-fill { position:absolute; inset:0 auto 0 0; border-radius:5px 0 0 5px; pointer-events:none; }
 .aui-gantt-timeline-bar-label { position:relative; z-index:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .aui-gantt-timeline-bar-pct { position:relative; z-index:1; flex-shrink:0; white-space:nowrap; margin-left:auto; font-size:11px; opacity:.82; font-variant-numeric:tabular-nums; }
 .aui-gantt-timeline-ms-node { position:absolute; top:calc((var(--gt-row-h,36px) - 24px) / 2); height:24px; transform:translateX(-7px); border:0; background:transparent; display:inline-flex; align-items:center; gap:6px; padding:0 4px; font-size:12px; font-weight:500; color:var(--gt-fg); cursor:pointer; white-space:nowrap; z-index:3; }
+.aui-gantt-timeline-sort-btn { background:none; border:0; padding:0; cursor:pointer; font-weight:500; display:inline-flex; align-items:center; gap:4px; }
 .aui-gantt-timeline-badge { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:11.5px; font-weight:500; white-space:nowrap; }
 .aui-gantt-timeline-badge.is-ok { background:rgba(16,185,129,.12); color:#059669; }
 .aui-gantt-timeline-badge.is-done { background:var(--gt-subtle); color:var(--gt-fg-dim); }
@@ -289,7 +292,7 @@ const GANTT_STYLES = `
 .aui-gantt-timeline-root.is-phone .aui-gantt-timeline-filter-box { flex:1; width:auto; }
 .aui-gantt-timeline-root.is-phone .aui-gantt-timeline-seg { flex:1; }
 .aui-gantt-timeline-root.is-phone .aui-gantt-timeline-seg button { flex:1; }
-@media (pointer: coarse), (max-width: 899px) { .aui-gantt-timeline-root input { font-size:16px !important; } .aui-gantt-timeline-btn-outline, .aui-gantt-timeline-filter-box, .aui-gantt-timeline-seg { min-height:44px; } .aui-gantt-timeline-seg button { min-height:38px; } }
+@media (pointer: coarse), (max-width: 899px) { .aui-gantt-timeline-root input { font-size:16px !important; } .aui-gantt-timeline-btn-outline, .aui-gantt-timeline-filter-box, .aui-gantt-timeline-seg { min-height:44px; } .aui-gantt-timeline-seg button, .aui-gantt-timeline-sort-btn { min-height:44px; min-width:44px; } .aui-gantt-timeline-lane-summary.is-folded::after { content:''; position:absolute; inset:-14px; } .aui-gantt-timeline-bar::after { content:''; position:absolute; inset:-11px; } .aui-gantt-timeline-ms-node::after { content:''; position:absolute; inset:-10px; } }
 @media (prefers-reduced-motion: reduce) { .aui-gantt-timeline-root * { transition:none !important; animation:none !important; } }
 `;
 
@@ -304,6 +307,7 @@ export function GanttTimeline({
   const rootRef = useRef<HTMLDivElement>(null);
   const barRefs = useRef<Map<string, HTMLButtonElement>>(new Map());
   const [frameWidth, setFrameWidth] = useState(1440);
+  const [isCoarse, setIsCoarse] = useState(false);
   useEffect(() => {
     const el = rootRef.current;
     if (!el) return;
@@ -314,8 +318,16 @@ export function GanttTimeline({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+    const mq = window.matchMedia('(pointer: coarse)');
+    const sync = () => setIsCoarse(mq.matches);
+    sync();
+    mq.addEventListener?.('change', sync);
+    return () => mq.removeEventListener?.('change', sync);
+  }, []);
 
-  const isMobileShell = frameWidth < 900;
+  const isMobileShell = frameWidth < 900 || isCoarse;
   const isPhone = frameWidth < 600;
   const rowH = isMobileShell ? 44 : 36;
   const activeTasks = empty ? [] : (propTasks ?? DEFAULT_TASKS);
@@ -450,7 +462,7 @@ export function GanttTimeline({
               <button type="button" aria-pressed={view === 'timeline'} className={view === 'timeline' ? 'is-active' : ''} onClick={() => setView('timeline')}>{L.viewTimeline}</button>
               <button type="button" aria-pressed={view === 'list'} className={view === 'list' ? 'is-active' : ''} onClick={() => setView('list')}>{L.viewList}</button>
             </div>
-            {view === 'timeline' && !isPhone && (
+            {view === 'timeline' && (
               <div className="aui-gantt-timeline-seg" role="group" aria-label="Zoom">
                 {(axisMode === 'wave' ? (['month', 'week', 'day'] as const) : (['day', 'week', 'month'] as const)).map((z) => (
                   <button key={z} type="button" aria-pressed={zoom === z} className={zoom === z ? 'is-active' : ''} onClick={() => setZoom(z)}>
@@ -472,10 +484,10 @@ export function GanttTimeline({
               <thead>
                 <tr>
                   <th aria-sort={sortCol === 'name' ? (sortAsc ? 'ascending' : 'descending') : 'none'}>
-                    <button type="button" style={{ background: 'none', border: 0, cursor: 'pointer', fontWeight: 500 }} onClick={() => { setSortCol('name'); setSortAsc(sortCol === 'name' ? !sortAsc : true); }}>{L.colTask}</button>
+                    <button type="button" className="aui-gantt-timeline-sort-btn" onClick={() => { setSortCol('name'); setSortAsc(sortCol === 'name' ? !sortAsc : true); }}>{L.colTask}</button>
                   </th>
                   <th aria-sort={sortCol === 'start' ? (sortAsc ? 'ascending' : 'descending') : 'none'}>
-                    <button type="button" style={{ background: 'none', border: 0, cursor: 'pointer', fontWeight: 500 }} onClick={() => { setSortCol('start'); setSortAsc(sortCol === 'start' ? !sortAsc : true); }}>
+                    <button type="button" className="aui-gantt-timeline-sort-btn" onClick={() => { setSortCol('start'); setSortAsc(sortCol === 'start' ? !sortAsc : true); }}>
                       {axisMode === 'wave' ? L.colWave : L.colStart} {sortCol === 'start' ? (sortAsc ? '↑' : '↓') : ''}
                     </button>
                   </th>
@@ -486,12 +498,13 @@ export function GanttTimeline({
               </thead>
               <tbody>
                 {lanes.map((lane) => {
+                  const listColCount = 3 + (axisMode === 'calendar' ? 1 : 0) + (frameWidth >= 600 ? 1 : 0);
                   const sorted = [...lane.tasks].sort((a, b) => {
                     const cmp = sortCol === 'name' ? a.name.localeCompare(b.name) : axisMode === 'wave' ? (waveData.waves.get(a.id)?.start ?? 1) - (waveData.waves.get(b.id)?.start ?? 1) : parseDay(taskStart(a)) - parseDay(taskStart(b));
                     return sortAsc ? cmp : -cmp;
                   });
                   return [
-                    <tr key={`lane-${lane.id}`} className="is-lane"><td colSpan={5}>{lane.name} <span style={{ color: 'var(--gt-fg-muted)', fontWeight: 400 }}>{lane.tasks.length}</span></td></tr>,
+                    <tr key={`lane-${lane.id}`} className="is-lane"><td colSpan={listColCount}>{lane.name} <span style={{ color: 'var(--gt-fg-muted)', fontWeight: 400 }}>{lane.tasks.length}</span></td></tr>,
                     ...sorted.map((t) => {
                       const st = deriveTaskStatus(t, byId, today, axisMode, waveData);
                       const tm = t.team ? teamMap.get(t.team) : teams[0];
@@ -570,7 +583,7 @@ export function GanttTimeline({
                         </div>
                         <div className="aui-gantt-timeline-row-track" style={{ width: timelineWidth }}>
                           {laneW > 0 && (isFolded
-                            ? <button type="button" className="aui-gantt-timeline-lane-summary is-folded" aria-label={`${row.lane.name}, ${lanePct}%`} style={{ left: laneLeft, width: laneW }} onClick={() => toggleLane(row.lane.id)}><div style={{ width: `${lanePct}%` }} /><span className="aui-gantt-timeline-lane-summary-pct">{lanePct}%</span></button>
+                            ? <button type="button" data-hit-slop="14" className="aui-gantt-timeline-lane-summary is-folded" aria-label={`${row.lane.name}, ${lanePct}%`} style={{ left: laneLeft, width: laneW }} onClick={() => toggleLane(row.lane.id)}><span className="aui-gantt-timeline-lane-summary-clip"><div style={{ width: `${lanePct}%` }} /></span><span className="aui-gantt-timeline-lane-summary-pct">{lanePct}%</span></button>
                             : <div className="aui-gantt-timeline-lane-summary" style={{ left: laneLeft, width: laneW }}><div style={{ width: `${lanePct}%` }} /></div>)}
                         </div>
                       </div>
@@ -591,12 +604,12 @@ export function GanttTimeline({
                       </div>
                       <div className="aui-gantt-timeline-row-track" style={{ width: timelineWidth }}>
                         {task.milestone ? (
-                          <button ref={(el) => { if (el) barRefs.current.set(task.id, el); else barRefs.current.delete(task.id); }} type="button" data-task-id={task.id} aria-pressed={selectedTaskId === task.id} aria-current={selectedTaskId === task.id || undefined} aria-label={`${task.name}, ${geom.startLabel}`} tabIndex={activeTabStopId === task.id ? 0 : -1} className="aui-gantt-timeline-ms-node" style={{ left: geom.startX + Math.round((axisMode === 'wave' ? wavePx : dayPx) * 0.5) }} onClick={() => selectTask(task.id)} onKeyDown={(e) => handleBarKeyDown(e, task)}>
+                          <button ref={(el) => { if (el) barRefs.current.set(task.id, el); else barRefs.current.delete(task.id); }} type="button" data-task-id={task.id} data-hit-slop="10" aria-pressed={selectedTaskId === task.id} aria-current={selectedTaskId === task.id || undefined} aria-label={`${task.name}, ${geom.startLabel}`} tabIndex={activeTabStopId === task.id ? 0 : -1} className="aui-gantt-timeline-ms-node" style={{ left: geom.startX + Math.round((axisMode === 'wave' ? wavePx : dayPx) * 0.5) }} onClick={() => selectTask(task.id)} onKeyDown={(e) => handleBarKeyDown(e, task)}>
                             <span style={{ color: TONE_ICON[toneKey], fontSize: 13 }}>◆</span><span>{task.name}</span>
                           </button>
                         ) : (
-                          <button ref={(el) => { if (el) barRefs.current.set(task.id, el); else barRefs.current.delete(task.id); }} type="button" data-task-id={task.id} aria-pressed={selectedTaskId === task.id} aria-current={selectedTaskId === task.id || undefined} aria-label={`${task.name}, ${geom.rangeAria}, ${pct}% done`} tabIndex={activeTabStopId === task.id ? 0 : -1} className="aui-gantt-timeline-bar" style={{ left: geom.startX, width: geom.barW, background: `var(--gt-track-${toneKey})`, borderColor: st === 'conflict' ? 'var(--gt-conflict)' : `var(--gt-bdr-${toneKey})` }} onClick={() => selectTask(task.id)} onKeyDown={(e) => handleBarKeyDown(e, task)}>
-                            <span className="aui-gantt-timeline-bar-fill" style={{ width: `${pct}%`, background: `var(--gt-fill-${toneKey})` }} />
+                          <button ref={(el) => { if (el) barRefs.current.set(task.id, el); else barRefs.current.delete(task.id); }} type="button" data-task-id={task.id} data-hit-slop="11" aria-pressed={selectedTaskId === task.id} aria-current={selectedTaskId === task.id || undefined} aria-label={`${task.name}, ${geom.rangeAria}, ${pct}% done`} tabIndex={activeTabStopId === task.id ? 0 : -1} className="aui-gantt-timeline-bar" style={{ left: geom.startX, width: geom.barW, background: `var(--gt-track-${toneKey})`, borderColor: st === 'conflict' ? 'var(--gt-conflict)' : `var(--gt-bdr-${toneKey})` }} onClick={() => selectTask(task.id)} onKeyDown={(e) => handleBarKeyDown(e, task)}>
+                            <span className="aui-gantt-timeline-bar-clip"><span className="aui-gantt-timeline-bar-fill" style={{ width: `${pct}%`, background: `var(--gt-fill-${toneKey})` }} /></span>
                             {geom.barW >= 86 && <span className="aui-gantt-timeline-bar-label">{task.name}</span>}
                             <span className="aui-gantt-timeline-bar-pct">{pct}%</span>
                           </button>

@@ -29,10 +29,10 @@ use session_lifecycle::execute_streaming_local_tmux;
 
 use crate::services::agent_protocol::{StreamMessage, is_valid_session_id};
 use crate::services::claude;
-use crate::services::discord::restart_report::{
+use crate::services::process::{kill_child_tree, shell_escape};
+use crate::services::provider::restart_report_env::{
     RESTART_REPORT_CHANNEL_ENV, RESTART_REPORT_PROVIDER_ENV,
 };
-use crate::services::process::{kill_child_tree, shell_escape};
 use crate::services::provider::{
     CancelToken, FollowupResult, ProviderKind, ReadOutputResult, SessionProbe, cancel_requested,
     register_child_pid, tmux_followup_fallback_after_read_error,

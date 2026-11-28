@@ -1,5 +1,5 @@
 use super::*;
-use crate::services::auto_queue::runtime::slot_runtime_health;
+use crate::services::engine_runtime::health_port::slot_runtime_health;
 
 /// (thread_group, priority_rank, batch_phase) per card in order. A requested
 /// `thread_group` keeps its lane; other cards get new lanes after the requested ones.
@@ -259,6 +259,7 @@ pub async fn generate(
                 .map(|(run_id, _)| run_id.clone())
                 .collect();
             if let Err(error) = cancel_selected_runs_with_pg(
+                state.engine.slot_row_guard(),
                 slot_runtime_health(state.health_registry.clone()),
                 pool,
                 &target_run_ids,

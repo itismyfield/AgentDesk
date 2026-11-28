@@ -19,6 +19,7 @@ use anyhow::Result;
 use rquickjs::{Context, Function, Persistent, Runtime};
 
 use crate::config::Config;
+use crate::services::engine_runtime::health_port::SlotRowGuard;
 
 use hooks::Hook;
 use loader::PolicyStore;
@@ -245,6 +246,7 @@ impl Drop for PolicyEngineActor {
 #[derive(Clone)]
 struct PolicyEngineRuntimeDeps {
     pg_pool: Option<sqlx::PgPool>,
+    slot_row_guard: SlotRowGuard,
 }
 
 /// Thread-safe handle to the policy engine. Cheap to clone.
@@ -276,12 +278,13 @@ pub struct PolicyInfo {
 
 impl PolicyEngine {
     /// Create a new policy engine, initializing QuickJS and loading policies.
-    // reason: non-PG constructor consumed only by cross-module test setups
-    // (server route tests build engines via new_with_pg); kept as the public
-    // no-runtime-deps entry point.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(config: &Config) -> Result<Self> {
-        Self::new_with_pg_and_label(config, None, "main")
+        Self::new_with_pg(
+            config,
+            None,
+            crate::services::discord::health::slot_row_host_refusal,
+        )
     }
 
     /// Create a dedicated policy engine for the tick loop (#747).
@@ -293,21 +296,31 @@ impl PolicyEngine {
     ///
     /// Both engines load the same policies directory (so any policy that
     /// registers `onTick*` hooks is executed by this engine).
-    pub fn new_for_tick(config: &Config, pg_pool: Option<sqlx::PgPool>) -> Result<Self> {
-        Self::new_with_pg_and_label(config, pg_pool, "tick")
+    pub(crate) fn new_for_tick(
+        config: &Config,
+        pg_pool: Option<sqlx::PgPool>,
+        slot_row_guard: SlotRowGuard,
+    ) -> Result<Self> {
+        Self::new_with_pg_and_label(config, pg_pool, slot_row_guard, "tick")
     }
 
-    pub fn new_with_pg(config: &Config, pg_pool: Option<sqlx::PgPool>) -> Result<Self> {
-        Self::new_with_pg_and_label(config, pg_pool, "main")
+    pub(crate) fn new_with_pg(
+        config: &Config,
+        pg_pool: Option<sqlx::PgPool>,
+        slot_row_guard: SlotRowGuard,
+    ) -> Result<Self> {
+        Self::new_with_pg_and_label(config, pg_pool, slot_row_guard, "main")
     }
 
     fn new_with_pg_and_label(
         config: &Config,
         pg_pool: Option<sqlx::PgPool>,
+        slot_row_guard: SlotRowGuard,
         label: &'static str,
     ) -> Result<Self> {
         let runtime_deps = Arc::new(PolicyEngineRuntimeDeps {
             pg_pool: pg_pool.clone(),
+            slot_row_guard,
         });
         Self::new_with_runtime_deps(config, runtime_deps, label)
     }
@@ -456,6 +469,10 @@ impl PolicyEngine {
 
     pub(crate) fn pg_pool(&self) -> Option<&sqlx::PgPool> {
         self.runtime_deps.pg_pool.as_ref()
+    }
+
+    pub(crate) fn slot_row_guard(&self) -> SlotRowGuard {
+        self.runtime_deps.slot_row_guard
     }
 
     fn roundtrip<T>(&self, command: impl FnOnce(mpsc::Sender<T>) -> EngineCommand) -> Result<T> {
@@ -1136,32 +1153,30 @@ mod runtime_policy_tests {
     use super::*;
 
     fn test_config() -> Config {
-        Config {
-            policies: crate::config::PoliciesConfig {
-                dir: std::path::PathBuf::from("/nonexistent"),
-                hot_reload: false,
-                ..crate::config::PoliciesConfig::default()
-            },
-            ..Config::default()
-        }
+        let mut config = Config::default();
+        config.policies = crate::config::PoliciesConfig {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
+        };
+        config
     }
 
     fn test_config_with_dir(dir: &std::path::Path) -> Config {
-        Config {
-            policies: crate::config::PoliciesConfig {
-                dir: dir.to_path_buf(),
-                hot_reload: false,
-                ..crate::config::PoliciesConfig::default()
-            },
-            ..Config::default()
-        }
+        let mut config = Config::default();
+        config.policies = crate::config::PoliciesConfig {
+            dir: dir.to_path_buf(),
+            hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
+        };
+        config
     }
 
     #[test]
     fn policy_runtime_memory_limit_rejects_large_allocation() {
         let mut config = test_config();
         config.policies.memory_limit_bytes = 8 * 1024 * 1024;
-        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+        let engine = PolicyEngine::new(&config).unwrap();
 
         let allocation_failed: bool = engine
             .eval_js("try { new ArrayBuffer(64 * 1024 * 1024); false } catch (e) { true }")
@@ -1193,7 +1208,7 @@ mod runtime_policy_tests {
 
         let mut config = test_config_with_dir(dir.path());
         config.policies.hook_timeout_ms = 100;
-        let engine = PolicyEngine::new_with_pg(&config, None).unwrap();
+        let engine = PolicyEngine::new(&config).unwrap();
 
         let start = std::time::Instant::now();
         engine

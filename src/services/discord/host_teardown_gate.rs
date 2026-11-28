@@ -14,7 +14,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedLookupKey, load_hosted_execution_pg,
 };
 use crate::services::provider::ProviderKind;
-pub(crate) use crate::services::session_host::ChannelTeardown;
+use crate::services::session_host::ChannelTeardown;
 use crate::services::session_host::HostLiveness;
 
 /// The gate for `tmux_name` under `provider`'s runtime on `channel_id`, read as stored.

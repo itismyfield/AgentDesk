@@ -273,14 +273,17 @@ fn activate_raw(pg_pool: Option<&PgPool>, bridge: &BridgeHandle, body_json: &str
         })
         .to_string();
     };
+    let row_guard = engine.slot_row_guard();
     match crate::utils::async_bridge::block_on_pg_result(
         pool,
         {
             let body = body;
             let engine = engine.clone();
             move |_bridge_pool| async move {
-                match crate::services::auto_queue::route::activate_with_bridge_pg(engine, body)
-                    .await
+                match crate::services::auto_queue::route::activate_with_bridge_pg(
+                    engine, row_guard, body,
+                )
+                .await
                 {
                     Ok((_status, response)) => Ok(response.0.to_string()),
                     Err(error) => Ok(error.to_json_value().to_string()),

@@ -13,7 +13,7 @@ struct State {
 
 /// Historical startup evidence and reusable current validation have different lifetimes.
 #[derive(Default)]
-pub(crate) struct ProofCache {
+pub struct ProofCache {
     state: Mutex<State>,
 }
 
@@ -26,7 +26,7 @@ impl ProofCache {
         Ok(state.startup.get(witness).cloned())
     }
 
-    pub(crate) async fn next_restart(
+    pub async fn next_restart(
         &self,
         source: Arc<dyn PeerSource>,
         checker: &dyn ConfigChecker,
@@ -108,7 +108,7 @@ impl ProofCache {
 }
 
 /// `[session] resume_agents_on_restore = false`, written out; anything else may resume.
-pub(crate) fn explicit_false(bytes: &[u8]) -> Result<(), Unverified> {
+pub fn explicit_false(bytes: &[u8]) -> Result<(), Unverified> {
     let text = std::str::from_utf8(bytes).map_err(|_| Unverified::ConfigInvalid)?;
     let document = text
         .parse::<toml_edit::DocumentMut>()

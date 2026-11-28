@@ -97,13 +97,13 @@ pub fn extract_claude_transcript_user_prompt(json: &Value) -> Option<String> {
     extract_claude_transcript_user_prompt_with_entry_id(json).map(|(prompt, _)| prompt)
 }
 
-pub(crate) fn is_claude_compact_summary(json: &Value) -> bool {
+pub fn is_claude_compact_summary(json: &Value) -> bool {
     json.get("isCompactSummary").and_then(Value::as_bool) == Some(true)
 }
 
 /// A scheduled-task fire's own row marks, which the hook and the writer both read. `turnOrigin`
 /// belongs to the whole turn, so a typed input and a compact summary of that turn carry it too.
-pub(crate) fn carries_scheduled_fire_marks(json: &Value) -> bool {
+pub fn carries_scheduled_fire_marks(json: &Value) -> bool {
     !is_claude_compact_summary(json)
         && (json.get("scheduledTaskId").is_some_and(Value::is_string)
             || matches!(
@@ -160,13 +160,32 @@ pub fn extract_claude_transcript_user_prompt_with_entry_id(
     Some((prompt, entry_id))
 }
 
-/// What the tui_o writer announces off a native row: a typed input, or with the flag set a
-/// scheduled fire's own row. The idle scanner keeps to the shared extraction, which drops it.
-pub(crate) fn extract_claude_writer_input_with_entry_id(
-    json: &Value,
-) -> Option<(String, Option<String>, bool)> {
-    if let Some((prompt, entry_id)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
-        return Some((prompt, entry_id, false));
+pub(crate) struct ClaudeWriterInput {
+    pub(crate) prompt: String,
+    pub(crate) uuid: Option<String>,
+    pub(crate) command_row_uuid: Option<String>,
+    pub(crate) scheduled: bool,
+}
+
+pub(crate) fn may_be_claude_queued_command(raw: &[u8]) -> bool {
+    let token = b"\"queued_command\"";
+    raw.windows(token.len()).any(|window| window == token)
+}
+
+/// A native input the writer can announce. Idle scanning still uses the user-only extractor.
+pub(crate) fn extract_claude_writer_input_with_entry_id(json: &Value) -> Option<ClaudeWriterInput> {
+    match json["type"].as_str() {
+        Some("attachment") => return claude_queued_command_input(json),
+        Some("queue-operation") => return claude_absorbed_input(json),
+        _ => {}
+    }
+    if let Some((prompt, uuid)) = extract_claude_transcript_user_prompt_with_entry_id(json) {
+        return Some(ClaudeWriterInput {
+            prompt,
+            uuid,
+            command_row_uuid: None,
+            scheduled: false,
+        });
     }
     // The shared extraction drops every `isMeta` row; the writer takes back only a fire's own.
     let scheduled_fire = json.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -183,8 +202,70 @@ pub(crate) fn extract_claude_writer_input_with_entry_id(
         return None;
     }
     let prompt = reject_synthetic_claude_user_prompt(extract_message_content_text(message)?)?;
-    let entry_id = extract_claude_transcript_entry_id(json, message);
-    Some((prompt, entry_id, true))
+    Some(ClaudeWriterInput {
+        prompt,
+        uuid: extract_claude_transcript_entry_id(json, message),
+        command_row_uuid: None,
+        scheduled: true,
+    })
+}
+
+fn claude_queued_command_input(json: &Value) -> Option<ClaudeWriterInput> {
+    let command = json.get("attachment")?;
+    if command["type"] != "queued_command"
+        || command["commandMode"] != "prompt"
+        || command["origin"]["kind"] != "human"
+        || !claude_notice_row(json)
+    {
+        return None;
+    }
+    let uuid = command["source_uuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let row = json["uuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let prompt = reject_synthetic_claude_user_prompt(extract_content_text(&command["prompt"])?)?;
+    Some(ClaudeWriterInput {
+        prompt,
+        // The queue's command UUID names the input. The attachment UUID names its receipt row.
+        uuid: Some(uuid.into()),
+        command_row_uuid: Some(row.into()),
+        scheduled: false,
+    })
+}
+
+fn claude_notice_row(json: &Value) -> bool {
+    json["isMeta"] != true
+        && json["isSidechain"] != true
+        && !crate::services::tui_o::shadow::identity::record_is_compact_summary(json)
+}
+
+pub(crate) fn is_claude_absorbed_remove(json: &Value) -> bool {
+    json["type"] == "queue-operation"
+        && json["operation"] == "remove"
+        && json["reason"] == "absorbed_mid_turn"
+}
+
+fn claude_absorbed_input(json: &Value) -> Option<ClaudeWriterInput> {
+    if !is_claude_absorbed_remove(json) || !claude_notice_row(json) {
+        return None;
+    }
+    let uuid = json["commandUuid"]
+        .as_str()
+        .filter(|id| !id.is_empty() && *id == id.trim())?;
+    let prompt = reject_synthetic_claude_user_prompt(extract_content_text(&json["content"])?)?;
+    if starts_with_xmlish_tag(&prompt, "event")
+        || starts_with_xmlish_tag(&prompt, "cross-session-message")
+    {
+        return None;
+    }
+    Some(ClaudeWriterInput {
+        prompt,
+        uuid: Some(uuid.into()),
+        command_row_uuid: None,
+        scheduled: false,
+    })
 }
 
 /// #3540: pull the stable entry identity for a Claude transcript `user` entry.
@@ -348,10 +429,7 @@ pub enum PromptObservation {
     Ignored,
 }
 
-pub(crate) fn resolve_tmux_session_name(
-    provider: &str,
-    provider_session_id: &str,
-) -> Option<String> {
+pub fn resolve_tmux_session_name(provider: &str, provider_session_id: &str) -> Option<String> {
     let mut state = STATE.lock().unwrap_or_else(|error| error.into_inner());
     state.purge_expired();
     state
@@ -384,17 +462,17 @@ pub(super) fn open_native_turn(
 }
 
 /// A row now answers the native turn `prompt` opened.
-pub(crate) fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
+pub fn adopt_native_turn(prompt: &ObservedTuiPrompt) {
     settle_native_turn(prompt, Some(NativeTurnOwner::Answer));
 }
 
 /// The deferred start worker of `anchor` takes over the native turn `prompt` opened.
-pub(crate) fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
+pub fn hand_native_turn_to_worker(prompt: &ObservedTuiPrompt, anchor: u64) {
     settle_native_turn(prompt, Some(NativeTurnOwner::Worker(anchor)));
 }
 
 /// The relay of `prompt` ended with no owner: its own unowned slot goes, a newer one stays.
-pub(crate) fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
+pub fn withdraw_unowned_native_turn(prompt: &ObservedTuiPrompt) {
     settle_native_turn(prompt, None);
 }
 
@@ -425,7 +503,7 @@ fn settle_native_turn(prompt: &ObservedTuiPrompt, owner: Option<NativeTurnOwner>
 
 /// The deferred start worker of `anchor` ended: a claimed row keeps its turn, any other exit drops
 /// it so a later steer of that turn is relayed as its own input.
-pub(crate) fn settle_worker_native_turn(
+pub fn settle_worker_native_turn(
     provider: &str,
     tmux_session_name: &str,
     anchor: u64,
@@ -639,7 +717,7 @@ pub(super) fn decide_observation(
         }
         #[cfg(test)]
         if observation.may_park {
-            super::handoff::tests::before_parking_commit(&candidates[0]);
+            super::handoff::test_support::before_parking_commit(&candidates[0]);
         }
         if observation.may_park
             && state.park_handoff_observation(
@@ -687,7 +765,7 @@ pub(super) fn decide_observation(
         return Decision::LeaseOnly;
     }
     #[cfg(test)]
-    super::handoff::tests::before_owning_commit(&candidates[0]);
+    super::handoff::test_support::before_owning_commit(&candidates[0]);
     if local_only {
         return Decision::Own {
             lease: EXTERNAL_INPUT_RELAY_LEASE_GENERATION_UNRECORDED,
@@ -761,16 +839,16 @@ fn record_local_only_entry_id(prompt: &ObservedTuiPrompt) {
 }
 
 /// Mark a local-only entry as replayed after its Discord session note was accepted.
-pub(crate) fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
+pub fn record_local_only_entry_id_after_note_delivery(prompt: &ObservedTuiPrompt) {
     record_local_only_entry_id(prompt);
 }
 
 /// Seal a local-only transcript half collapsed into an already-rendered note.
-pub(crate) fn seal_deduped_local_only_entry_id(prompt: &ObservedTuiPrompt) {
+pub fn seal_deduped_local_only_entry_id(prompt: &ObservedTuiPrompt) {
     record_local_only_entry_id(prompt);
 }
 
-pub(crate) fn prompts_match(expected: &str, observed: &str) -> bool {
+pub fn prompts_match(expected: &str, observed: &str) -> bool {
     let expected_trimmed = normalize_line_endings(expected).trim().to_string();
     let observed_trimmed = normalize_line_endings(observed).trim().to_string();
     if expected_trimmed == observed_trimmed {
@@ -863,7 +941,11 @@ pub(super) fn normalize_provider(provider: &str) -> String {
 }
 
 fn extract_message_content_text(payload: &Value) -> Option<String> {
-    match payload.get("content")? {
+    extract_content_text(payload.get("content")?)
+}
+
+fn extract_content_text(content: &Value) -> Option<String> {
+    match content {
         Value::String(text) => non_empty(text),
         Value::Array(items) => {
             let mut parts = Vec::new();

@@ -17,7 +17,7 @@ mod native_work;
 #[path = "provider_dispatch_herdr_http_start_tests/thread_ingress_tests.rs"]
 mod thread_ingress;
 
-async fn app(fx: &Fixture, intake: &Intake) -> Router {
+pub(super) async fn app(fx: &Fixture, intake: &Intake) -> Router {
     let exists: bool =
         sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM agents WHERE id='busy-entry')")
             .fetch_one(&fx.pool)
@@ -71,7 +71,7 @@ async fn call(app: &Router, endpoint: &str, origin: &str) -> (StatusCode, Value)
     call_source(app, endpoint, origin, "imessage").await
 }
 
-async fn call_source(
+pub(super) async fn call_source(
     app: &Router,
     endpoint: &str,
     origin: &str,

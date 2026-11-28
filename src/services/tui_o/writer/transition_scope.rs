@@ -19,12 +19,12 @@ const CODEX_PREFIX: &str = "hrot-scope-v2:";
 
 /// SHA-256 of one scope's canonical bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ScopeDigest([u8; 32], u8);
+pub struct ScopeDigest([u8; 32], u8);
 
 impl ScopeDigest {
     /// A digest as this version shows it; another version or length is refused, never guessed.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn parse(shown: &str) -> Result<Self, String> {
+    pub fn parse(shown: &str) -> Result<Self, String> {
         let (hex, version) = shown
             .strip_prefix(PREFIX)
             .map(|hex| (hex, 1))
@@ -56,7 +56,7 @@ impl Serialize for ScopeDigest {
 /// One hop of the scope: its resolved seq and pane, the old source and the one it moved to. The
 /// spool key only names the old source for display; the digest takes the source itself.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct ScopeHop {
+pub struct ScopeHop {
     pub key: String,
     pub seq: u64,
     pub pane: Option<String>,
@@ -66,7 +66,7 @@ pub(crate) struct ScopeHop {
 
 /// The hops a request covers in canonical order, and their digest; the list is only shown.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct ScopeApproval {
+pub struct ScopeApproval {
     pub digest: ScopeDigest,
     pub hops: Vec<ScopeHop>,
 }

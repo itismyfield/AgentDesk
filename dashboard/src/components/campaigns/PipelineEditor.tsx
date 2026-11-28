@@ -81,8 +81,8 @@ function ConditionRow({ value, fields, busy, onChange, onRemove, tr }: {
 }
 
 /** One way out of the chosen state: where it goes, its priority, its conditions (all must hold), a retry budget and an approval gate. */
-function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark, busy, update, onFind, tr }: {
-  transition: PipelineTransition; draft: PipelineDefinition; graph: PipelineGraph; fields: PipelineFieldSpec[]; flagged: boolean; fresh: boolean; mark: string | null; busy: boolean; update: Update; onFind: Find; tr: Tr;
+function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark, busy, update, onFind, onInsertBetween, tr }: {
+  transition: PipelineTransition; draft: PipelineDefinition; graph: PipelineGraph; fields: PipelineFieldSpec[]; flagged: boolean; fresh: boolean; mark: string | null; busy: boolean; update: Update; onFind: Find; onInsertBetween?: Find; tr: Tr;
 }) {
   const pin = graph.pins.get(transition.from)?.find((value) => value.id === transition.id);
   const list = comparisons(transition.condition);
@@ -111,6 +111,21 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
       </span></Field>
       <Field label={tr("우선순위", "Priority")}><input type="number" min={0} step={1} className={FIELD} disabled={busy} value={transition.priority} onChange={(event) => patch({ priority: whole(event.target.value) })} /></Field>
     </div>
+    {transition.to && transition.to !== transition.from && onInsertBetween && (
+      <div>
+        <Button
+          variant="ghost"
+          size="sm"
+          icon={<Plus aria-hidden />}
+          disabled={busy}
+          data-testid={`inspector-insert-between-${transition.id}`}
+          className="max-[899px]:!min-h-11 [@media(pointer:coarse)]:!min-h-11"
+          onClick={(event) => onInsertBetween(transition, event.currentTarget)}
+        >
+          {tr("사이에 상태 끼워 넣기", "Insert state between")}
+        </Button>
+      </div>
+    )}
     <fieldset className="m-0 grid gap-2 border-0 p-0">
       <legend className="mb-1.5 p-0 text-[13px] text-[var(--fg-muted)]">{tr("조건 (모두 맞아야 해요)", "Conditions (all must hold)")}</legend>
       <ul className="m-0 grid list-none gap-2.5 p-0">{list.map((value, index) => <ConditionRow key={index} value={value} fields={fields} busy={busy} tr={tr}
@@ -133,8 +148,8 @@ function TransitionForm({ transition, draft, graph, fields, flagged, fresh, mark
 }
 
 /** The chosen state's fields and its ways out, all editable; deleting it takes the transitions from and to it. */
-function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoose, onFind, tr }: {
-  state: PipelineState; draft: PipelineDefinition; graph: PipelineGraph; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update; onChoose: (id: string | null) => void; onFind: Find; tr: Tr;
+function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoose, onFind, onInsertBetween, tr }: {
+  state: PipelineState; draft: PipelineDefinition; graph: PipelineGraph; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update; onChoose: (id: string | null) => void; onFind: Find; onInsertBetween?: Find; tr: Tr;
 }) {
   const [confirming, setConfirming] = useState(false);
   // A way out just added takes the focus, which also scrolls it into view.
@@ -179,7 +194,7 @@ function StateForm({ state, draft, graph, flagged, changes, busy, update, onChoo
       {vocab?.fields === null && <Desc className="text-[var(--err)]">{tr("조건 어휘를 불러오지 못했어요. 지금 조건만 고칠 수 있어요.", "Could not load the condition vocabulary. Only the current fields are offered.")}</Desc>}
       {outgoing.length > 0 && <ul aria-label={tr("나가는 전환", "Transitions out")} className="m-0 grid list-none gap-2.5 p-0">{outgoing.map((transition) =>
         <TransitionForm key={transition.id} transition={transition} draft={draft} graph={graph} fields={vocab?.fields ?? []} flagged={flagged.has(transition.id)} fresh={transition.id === added} busy={busy}
-          mark={changes?.transitions.added.includes(transition.id) ? tr("새로", "New") : changes?.transitions.changed.includes(transition.id) ? tr("바뀜", "Changed") : null} update={update} onFind={onFind} tr={tr} />)}</ul>}
+          mark={changes?.transitions.added.includes(transition.id) ? tr("새로", "New") : changes?.transitions.changed.includes(transition.id) ? tr("바뀜", "Changed") : null} update={update} onFind={onFind} onInsertBetween={onInsertBetween} tr={tr} />)}</ul>}
       {!state.kind.startsWith("end_") && <div><Button variant="secondary" size="sm" icon={<Plus aria-hidden />} disabled={busy}
         onClick={() => { const [next, id] = addTransition(draft, state.id); update(() => next); setAdded(id); }}>{tr("나가는 전환 추가", "Add a way out")}</Button></div>}
     </InspSection>
@@ -223,14 +238,14 @@ export function PipelineChecks({ checks, graphs, onPick, tr }: { checks: Checks 
 }
 
 /** The inspector column while editing: the chosen state's form, or what a save does. */
-export default function PipelineEditPanel({ graph, draft, revision, chosen, flagged, changes, busy, update, onChoose, onFind, tr }: {
+export default function PipelineEditPanel({ graph, draft, revision, chosen, flagged, changes, busy, update, onChoose, onFind, onInsertBetween, tr }: {
   graph: PipelineGraph; draft: PipelineDefinition; revision: number; chosen: string | null; flagged: ReadonlySet<string>; changes: DraftChanges | null; busy: boolean; update: Update;
-  onChoose: (id: string | null) => void; onFind: Find; tr: Tr;
+  onChoose: (id: string | null) => void; onFind: Find; onInsertBetween?: Find; tr: Tr;
 }) {
   const state = draft.states.find((value) => value.id === chosen);
   return <aside aria-label={tr("파이프라인 편집", "Pipeline editor")} className="flex min-h-0 flex-col border-l border-[var(--line-soft)] bg-[var(--bg-1)]">
     <div className="min-h-0 flex-1 overflow-y-auto">
-      {state ? <StateForm key={state.id} state={state} draft={draft} graph={graph} flagged={flagged} changes={changes} busy={busy} update={update} onChoose={onChoose} onFind={onFind} tr={tr} /> : <>
+      {state ? <StateForm key={state.id} state={state} draft={draft} graph={graph} flagged={flagged} changes={changes} busy={busy} update={update} onChoose={onChoose} onFind={onFind} onInsertBetween={onInsertBetween} tr={tr} /> : <>
         <InspSection className="border-t-0 gap-1">
           <Cap>{tr("편집 중", "Editing")}</Cap>
           <Num className="text-sm text-[var(--fg)]">{tr(`상태 ${draft.states.length} · 전환 ${draft.transitions.length}`, `${draft.states.length} states · ${draft.transitions.length} transitions`)}</Num>

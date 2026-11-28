@@ -40,7 +40,7 @@ export function SkillUsageCard({
   const noDescription = t(msg("설명 없음", "No description"));
   const hasRows = rows.length > 0 || byAgentRows.length > 0;
   const inRouter = useInRouterContext();
-  const catalogLinkClass = "text-xs font-medium text-[var(--accent)] hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)]";
+  const catalogLinkClass = "inline-flex min-h-11 items-center rounded-[var(--r-sm)] px-2 -my-2 text-xs font-medium text-[var(--accent)] hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--accent)] sm:pointer-fine:min-h-7 sm:pointer-fine:my-0 sm:pointer-fine:px-1";
   const catalogLabel = t(msg("전체 스킬 카탈로그", "Full skill catalog", "全スキルカタログ", "全部技能目录"));
 
   return (

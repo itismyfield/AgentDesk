@@ -99,7 +99,7 @@ impl Probe {
     }
 }
 
-pub(crate) fn checkpoint(expected: &[(&'static str, &OsStr)]) {
+pub fn checkpoint(expected: &[(&'static str, &OsStr)]) {
     checkpoint_values(
         &expected
             .iter()
@@ -108,11 +108,11 @@ pub(crate) fn checkpoint(expected: &[(&'static str, &OsStr)]) {
     );
 }
 
-pub(crate) fn checkpoint_changes(changes: &[(&'static str, Option<&OsStr>)]) {
+pub fn checkpoint_changes(changes: &[(&'static str, Option<&OsStr>)]) {
     checkpoint_inner(changes, true);
 }
 
-pub(crate) fn checkpoint_values(expected: &[(&'static str, Option<&OsStr>)]) {
+pub fn checkpoint_values(expected: &[(&'static str, Option<&OsStr>)]) {
     checkpoint_inner(expected, false);
 }
 
@@ -164,7 +164,7 @@ impl Drop for ReapChild {
     }
 }
 
-pub(crate) fn assert_restores_after_panic(
+pub fn assert_restores_after_panic(
     test_name: &'static str,
     keys: &[&'static str],
     prior_present: bool,
@@ -174,11 +174,11 @@ pub(crate) fn assert_restores_after_panic(
     assert_restores(test_name, keys, prior_present, exercise, &[Mode::Panic]);
 }
 
-pub(crate) fn assert_root_restored(prior_present: bool, exercise: impl FnOnce()) {
+pub fn assert_root_restored(prior_present: bool, exercise: impl FnOnce()) {
     assert_restores_on_return_and_panic(&["AGENTDESK_ROOT_DIR"], prior_present, exercise);
 }
 
-pub(crate) fn assert_restores_on_return_and_panic(
+pub fn assert_restores_on_return_and_panic(
     keys: &[&'static str],
     prior_present: bool,
     exercise: impl FnOnce(),

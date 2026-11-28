@@ -6,8 +6,8 @@ use std::time::Duration;
 use serde_json::Value;
 use tower::ServiceExt;
 
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::services::discord::health::HealthRegistry;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
 async fn detail_body(app: &axum::Router) -> Value {
     let mut request = axum::http::Request::builder()

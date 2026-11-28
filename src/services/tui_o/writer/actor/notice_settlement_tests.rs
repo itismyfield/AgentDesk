@@ -484,10 +484,7 @@ async fn retained_356_record_fixture_settles_311_and_stops_repeated_heavy_work()
             end: start + raw.len() as u64,
             line: raw[..raw.len() - 1].to_vec(),
         };
-        let origin = actor
-            .sources_for_test()
-            .notice_origin(&c.source, &record)
-            .unwrap();
+        let origin = actor.notice_origin_for_test(&c.source, &record).unwrap();
         actor
             .writer_mut_for_test()
             .record_for_test(LedgerEntry::InputNotice {
@@ -527,7 +524,7 @@ async fn retained_356_record_fixture_settles_311_and_stops_repeated_heavy_work()
         state
             .evidence
             .iter()
-            .filter(|(id, e)| !state.terminal(ledger, id, e))
+            .filter(|(id, e)| !state.terminal_for_test(ledger, id, e))
             .count(),
         45
     );

@@ -195,7 +195,7 @@ fn legacy_auth_paths_reexport_the_same_items() {
         crate::services::provider_auth_profile::queries::provider_auth_catalog;
     assert!(std::ptr::fn_addr_eq(
         read,
-        provider_auth_catalog as fn() -> _
+        crate::services::discord::org_schema::provider_auth_catalog as fn() -> _
     ));
     let value: crate::domain::provider_auth_profile::ProviderAuthOverlay =
         crate::services::provider_auth_profile::ProviderAuthOverlay::default_for(

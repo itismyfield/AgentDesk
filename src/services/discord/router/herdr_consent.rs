@@ -118,7 +118,7 @@ async fn run(
         owner: &mut owner,
         cards: &mut cards,
         custody: &mut sink,
-        boot: &startup::BOOT,
+        boot: &crate::services::session_host::policy::consent::boot_recovery::PROCESS,
     }
     .handle(event, prepared)
     .await

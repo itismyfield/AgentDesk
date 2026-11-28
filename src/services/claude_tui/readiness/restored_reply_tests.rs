@@ -1,11 +1,16 @@
 #![cfg(unix)]
 use super::*;
+use crate::services::tui_prompt_dedupe::binding_events;
+#[cfg(test)]
 use crate::services::tui_prompt_dedupe::binding_events::{
-    self, BindingCause, CauseSource, HookSignal, Proposal, SourceId,
+    BindingCause, CauseSource, HookSignal, Proposal, SourceId,
 };
+#[cfg(test)]
 use crate::services::tui_turn_state::idle_compaction_tests::{end_turn, tail};
+#[cfg(test)]
 use std::os::unix::fs::MetadataExt;
 
+#[cfg(test)]
 fn completed(r: &Rig, at: DateTime<Utc>) {
     let mut reply = end_turn();
     reply["timestamp"] = json!(at);
@@ -34,6 +39,7 @@ impl Drop for Pinned {
         binding_events::set_test_root(self.previous_root.as_deref());
     }
 }
+#[cfg(test)]
 fn pinned() -> Pinned {
     let r = Rig::launched(Some(8_222_001), Utc::now());
     let previous_root = binding_events::test_root();
@@ -72,9 +78,11 @@ fn pinned() -> Pinned {
         previous_root,
     }
 }
+#[cfg(test)]
 fn candidate(r: &Rig) -> Option<Proof> {
     observe_restored_reply(&r.session, Some(&r.path))
 }
+#[cfg(test)]
 fn save_context(r: &Rig) {
     let path = crate::services::tui_prompt_dedupe::binding_context::context_path(
         "claude",
@@ -84,6 +92,7 @@ fn save_context(r: &Rig) {
     fs::write(path, serde_json::to_vec(&r.ctx).unwrap()).unwrap();
 }
 
+#[cfg(test)]
 fn repin(r: &Rig, native: &str, path: &Path) {
     let text = path.to_str().unwrap();
     let hook = HookSignal::from_payload(

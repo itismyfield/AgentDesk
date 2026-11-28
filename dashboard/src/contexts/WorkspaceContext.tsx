@@ -12,28 +12,26 @@ import type { Agent, Department, DispatchedSession, WSEvent } from "../types";
 import * as api from "../api/client";
 import { localeName, useI18n, type UiLanguage } from "../i18n";
 import { pollWhileVisible } from "../lib/pollWhileVisible";
-import { applySessionOverlay, deriveDispatchedAsAgents, mergeAgentStatus } from "./session-overlay";
+import { applySessionOverlay, mergeAgentStatus } from "./session-overlay";
 
 interface WorkspaceContextValue {
   /** Agents with live session state folded into `status`. */
   agents: Agent[];
-  departments: Department[];
   sessions: DispatchedSession[];
   setSessions: React.Dispatch<React.SetStateAction<DispatchedSession[]>>;
   /** The first session list failed to load; sessions seen since then still count. */
   sessionsFailed: boolean;
   visibleDispatchedSessions: DispatchedSession[];
-  /** `agents` plus unlinked dispatched sessions shown as pseudo-agents. */
+  /** Live session-aware agent roster. */
   agentsWithDispatched: Agent[];
   refreshAgents: () => void;
-  refreshDepartments: () => void;
 }
 
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 
 interface WorkspaceProviderProps {
   initialAgents: Agent[];
-  initialDepartments: Department[];
+  initialDepartments?: Department[];
   initialSessions?: DispatchedSession[] | null;
   pushNotification: (msg: string, level: "info" | "success" | "warning" | "error") => void;
   language?: string | null;
@@ -42,14 +40,12 @@ interface WorkspaceProviderProps {
 
 export function WorkspaceProvider({
   initialAgents,
-  initialDepartments,
   initialSessions,
   pushNotification,
   language,
   children,
 }: WorkspaceProviderProps) {
   const [agents, setAgents] = useState<Agent[]>(initialAgents);
-  const [departments, setDepartments] = useState<Department[]>(initialDepartments);
   const [sessions, setSessions] = useState<DispatchedSession[]>(initialSessions ?? []);
   const [sessionsFailed, setSessionsFailed] = useState(initialSessions === null);
   const seededSessionsRef = useRef(initialSessions !== undefined);
@@ -79,9 +75,6 @@ export function WorkspaceProvider({
 
   const refreshAgents = useCallback(() => {
     api.getAgents().then(setAgents).catch(() => {});
-  }, []);
-  const refreshDepartments = useCallback(() => {
-    api.getDepartments().then(setDepartments).catch(() => {});
   }, []);
 
   const pushNotificationRef = useRef(pushNotification);
@@ -176,25 +169,22 @@ export function WorkspaceProvider({
     () => sessions.filter((s) => s.status !== "disconnected" && !s.linked_agent_id),
     [sessions],
   );
-  const agentsWithDispatched = useMemo(
-    () => [...sessionAwareAgents, ...deriveDispatchedAsAgents(sessions)],
-    [sessionAwareAgents, sessions],
+
+  const contextValue = useMemo<WorkspaceContextValue>(
+    () => ({
+      agents: sessionAwareAgents,
+      sessions,
+      setSessions,
+      sessionsFailed,
+      visibleDispatchedSessions,
+      agentsWithDispatched: sessionAwareAgents,
+      refreshAgents,
+    }),
+    [sessionAwareAgents, sessions, sessionsFailed, visibleDispatchedSessions, refreshAgents],
   );
 
   return (
-    <WorkspaceContext.Provider
-      value={{
-        agents: sessionAwareAgents,
-        departments,
-        sessions,
-        setSessions,
-        sessionsFailed,
-        visibleDispatchedSessions,
-        agentsWithDispatched,
-        refreshAgents,
-        refreshDepartments,
-      }}
-    >
+    <WorkspaceContext.Provider value={contextValue}>
       {children}
     </WorkspaceContext.Provider>
   );

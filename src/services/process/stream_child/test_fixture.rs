@@ -6,15 +6,15 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-pub(crate) struct ProviderFixture {
+pub struct ProviderFixture {
     dir: tempfile::TempDir,
-    pub(crate) cli: PathBuf,
+    pub cli: PathBuf,
     parent_group: i32,
     cleanup: mpsc::Receiver<(u32, ProcessIdentity)>,
     stop_owner_probe: mpsc::Sender<()>,
     delay: Option<super::stream_queue::test_delay::Guard>,
 }
-pub(crate) const CASES: [&str; 6] = [
+pub const CASES: [&str; 6] = [
     "error",
     "normal",
     "continuous",
@@ -23,7 +23,7 @@ pub(crate) const CASES: [&str; 6] = [
     "quiet",
 ];
 impl ProviderFixture {
-    pub(crate) fn new(provider: &str, mode: &str) -> Self {
+    pub fn new(provider: &str, mode: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let cli = dir.path().join("provider");
         let progress = match provider {
@@ -99,10 +99,10 @@ sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
             delay: (mode == "delayed_normal").then(super::stream_queue::test_delay::arm),
         }
     }
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         self.dir.path()
     }
-    pub(crate) fn run_with_cancel_after_accept<T>(
+    pub fn run_with_cancel_after_accept<T>(
         &self,
         token: Arc<CancelToken>,
         run: impl FnOnce() -> T,
@@ -130,7 +130,7 @@ sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
         );
         result
     }
-    pub(crate) fn resolution(&self) -> crate::services::platform::BinaryResolution {
+    pub fn resolution(&self) -> crate::services::platform::BinaryResolution {
         crate::services::platform::BinaryResolution {
             requested_binary: self.cli.display().to_string(),
             resolved_path: Some(self.cli.display().to_string()),
@@ -141,7 +141,7 @@ sys.exit(0 if mode in ('normal', 'quiet', 'delayed_normal') else 7)
             exec_path: None,
         }
     }
-    pub(crate) fn verify_return(&self, mode: &str) {
+    pub fn verify_return(&self, mode: &str) {
         assert!(
             self.path().join("ready").is_file()
                 && self.path().join("owner-ack").is_file()

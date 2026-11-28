@@ -490,8 +490,12 @@ mod memento_feedback_stats_pg_tests {
         let mut config = crate::config::Config::default();
         config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
         config.policies.hot_reload = false;
-        let engine =
-            crate::engine::PolicyEngine::new_with_pg(&config, Some(pg_pool.clone())).unwrap();
+        let engine = crate::engine::PolicyEngine::new_with_pg(
+            &config,
+            Some(pg_pool.clone()),
+            crate::services::discord::health::slot_row_host_refusal,
+        )
+        .unwrap();
         let tx = crate::eventbus::new_broadcast();
         let buf = crate::eventbus::spawn_batch_flusher(tx.clone());
         AppState {

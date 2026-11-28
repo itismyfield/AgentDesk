@@ -12,9 +12,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::tests::{Driver, mailbox, parked_runtime, parked_turn, read_failures, reasons};
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::pg_wire_proxy::PgWireProxy;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::host_teardown_gate::test_support::nameless_turn;
-use crate::services::health_diagnostics::pg_wire_proxy::PgWireProxy;
 
 const RTT: Duration = Duration::from_millis(300);
 const BUDGET: Duration = Duration::from_secs(2);

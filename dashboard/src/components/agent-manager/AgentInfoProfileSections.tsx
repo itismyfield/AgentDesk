@@ -1,6 +1,7 @@
 import { useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Square } from "lucide-react";
 import type { AgentWarning } from "../../agent-insights";
+import { formatLoopSummary, formatPromptCacheLabel, type PromptCacheStatus } from "../../lib/agentObservability";
 import { Button } from "../../kit/free/button-clean";
 import { AgentMonitor, type AgentMonitorStep } from "../../kit/pro/agent-monitor";
 import type { Agent, Department } from "../../types";
@@ -47,10 +48,10 @@ export function ClampedText({ text, tr }: { text: string; tr: Translator }) {
 
 /** "Now": live turn state, kit `AgentMonitor` with tool `steps` and `onCancel -> POST /api/agents/{id}/turn/stop`. */
 export function AgentNowSection({
-  agent, state, tr, isKo, summary, monitor, steps, onOpenLog, onStopTurn, stoppingTurn, stopFeedback, reasons, warnings,
+  agent, state, tr, isKo, summary, monitor, steps, promptCache, onOpenLog, onStopTurn, stoppingTurn, stopFeedback, reasons, warnings,
 }: {
   agent: Agent; state?: HomeAgentState; tr: Translator; isKo: boolean; summary: string | null;
-  monitor: MonitorView | null; steps?: AgentMonitorStep[]; onOpenLog: () => void;
+  monitor: MonitorView | null; steps?: AgentMonitorStep[]; promptCache?: PromptCacheStatus | null; onOpenLog: () => void;
   onStopTurn?: () => void; stoppingTurn?: boolean; stopFeedback?: { ok: boolean; text: string } | null;
   reasons: AttentionReason[]; warnings: AgentWarning[];
 }) {
@@ -102,9 +103,27 @@ export function AgentNowSection({
           style={{ width: "100%" }}
         />
       ) : null}
+      {monitor?.loop ? (
+        <SectionWell className="flex flex-col gap-1" data-testid="agent-now-loop">
+          <span className="flex flex-wrap items-center gap-1.5 text-xs">
+            <Chip tone={monitor.loop.pattern === "contract" ? "err" : "warn"}>{tr("루프 의심", "Looping")}</Chip>
+            <span className="font-medium text-(--fg)">{formatLoopSummary(monitor.loop, tr)}</span>
+          </span>
+          {monitor.loop.evidence.length > 0 ? (
+            <Cap className="truncate font-mono" title={monitor.loop.evidence.join(" → ")}>
+              {monitor.loop.evidence.slice(-3).join(" → ")}
+            </Cap>
+          ) : null}
+        </SectionWell>
+      ) : null}
       {stopFeedback ? <Cap role="status" className={stopFeedback.ok ? "text-(--ok)" : "text-(--warn)"} data-testid="agent-stop-feedback">{stopFeedback.text}</Cap> : null}
       <div className="flex flex-wrap items-center gap-1.5">
         <Chip className="tabular-nums">{tr(`완료 ${agent.stats_tasks_done.toLocaleString()}건`, `${agent.stats_tasks_done.toLocaleString()} done`)}</Chip>
+        {promptCache && promptCache.phase !== "cold" ? (
+          <Chip tone={promptCache.phase === "expiring" ? "warn" : "info"} className="tabular-nums" data-testid="agent-now-cache">
+            {formatPromptCacheLabel(promptCache, tr)}
+          </Chip>
+        ) : null}
         {warnings.map((warning) => <Chip key={warning.code} tone={WARNING_TONE[warning.severity]} dot>{isKo ? warning.ko : warning.en}</Chip>)}
       </div>
     </AgentDetailSection>

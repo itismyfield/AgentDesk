@@ -6,6 +6,8 @@ use crate::services::claude::herdr_turn::{
     Attached, HerdrTurn, not_held, submit_for_test, submit_owned_for_test,
 };
 use crate::services::claude_tui::guarded_outcome::SubmissionError;
+use crate::services::discord::health::turn_deliver::inject::first_input::pg_tests::v2_cold_fixture;
+use crate::services::discord::health::turn_deliver::inject::first_input::v2_cold_bootstrap;
 use crate::services::herdr_launch::HerdrLaunchEndpoint;
 use crate::services::session_host::HerdrTarget;
 use crate::services::session_host::herdr_endpoints;
@@ -125,7 +127,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
     let (tx, rx) = std::sync::mpsc::channel();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let mailbox = registry.handle(poise::serenity_prelude::ChannelId::new(727398));
-    runtime.block_on(mailbox.v2_cold_fixture(root.path().join("herdr-owner.json"),serde_json::json!({"nonce":"claude-herdr-scope","provider":"claude","target":{"host":"herdr","owner":logical,"root":"test","execution_nonce":NONCE},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727398)).unwrap();
+    runtime.block_on(v2_cold_fixture(&mailbox, root.path().join("herdr-owner.json"),serde_json::json!({"nonce":"claude-herdr-scope","provider":"claude","target":{"host":"herdr","owner":logical,"root":"test","execution_nonce":NONCE},"source":{"kind":"pre_source","expected_session_id":null,"expected_transcript":null,"binding_watermark":null}}),prompt.into(),727398)).unwrap();
     let socket = rig.socket().display().to_string();
     let commit_path = crate::config::runtime_root()
         .unwrap()
@@ -133,8 +135,11 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
     let effect_mailbox = mailbox.clone();
     let install_worker = rig.thread_installer(NODE, KEY, rig.socket(), SESSION);
     let (_, result) = runtime
-        .block_on(
-            mailbox.v2_cold_bootstrap(1, std::sync::Arc::new(|| 10000), move |frame| {
+        .block_on(v2_cold_bootstrap(
+            &mailbox,
+            1,
+            std::sync::Arc::new(|| 10000),
+            move |frame| {
                 assert!(
                     crate::services::tui_input::human_frame::history::v2::scoped_source().is_some(),
                     "actual Claude Herdr submit requires exact source scope"
@@ -144,7 +149,7 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     "actual Claude Herdr submit requires owner scope"
                 );
                 use crate::services::claude_tui::host_input::{HerdrInput, InputTransport};
-                let mut preparation = HerdrInput::new(attached.target_for_test());
+                let mut preparation = HerdrInput::new_for_test(attached.target_for_test());
                 InputTransport::load_buffer(&mut preparation, "memory-only", "not submitted")
                     .unwrap();
                 drop(preparation);
@@ -177,8 +182,10 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     cancel: None,
                 };
                 let _launching =
-                    crate::services::herdr_launch::clear_epoch::Launching::enter(&turn.owner)
-                        .unwrap();
+                    crate::services::herdr_launch::clear_epoch::Launching::enter_for_test(
+                        &turn.owner,
+                    )
+                    .unwrap();
                 let _clear = clear_first.then(|| {
                     crate::services::herdr_launch::clear_epoch::begin_clear(
                         &turn.owner.provider,
@@ -190,9 +197,9 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                 let _check = clear_checked.then(|| {
                     let saved = saved_clear.clone();
                     let owner = turn.owner.clone();
-                    crate::services::herdr_launch::clear_epoch::tests::watch(
+                    crate::services::herdr_launch::clear_epoch::test_support::watch(
                         &turn.owner,
-                        crate::services::herdr_launch::clear_epoch::tests::Point::Checked,
+                        crate::services::herdr_launch::clear_epoch::test_support::Point::Checked,
                         move || {
                             *saved.lock().unwrap() =
                                 Some(crate::services::herdr_launch::clear_epoch::begin_clear(
@@ -262,8 +269,8 @@ fn run_case(refuse_commit: bool, clear_first: bool, worker_clear: bool, clear_ch
                     }
                     result
                 }
-            }),
-        )
+            },
+        ))
         .unwrap();
     let owner_snapshot = runtime
         .block_on(mailbox.v2_request(|s| s.as_ref().unwrap().json()))

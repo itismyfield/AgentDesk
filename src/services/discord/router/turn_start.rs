@@ -565,7 +565,8 @@ pub(crate) fn load_session_runtime_state(
     channel_id: ChannelId,
 ) -> Option<(Option<String>, bool, String)> {
     sessions.get_mut(&channel_id).and_then(|session| {
-        let current_path = session.validated_path(channel_id)?;
+        let current_path =
+            crate::services::discord::session_runtime::validated_path(session, channel_id)?;
         Some((
             session.session_id.clone(),
             session.memento_context_loaded,
@@ -583,6 +584,11 @@ pub(crate) struct IntakeRuntimeTransition {
 impl IntakeRuntimeTransition {
     pub(in crate::services::discord) fn session_was_cleared(&self, taken_cleared: bool) -> bool {
         taken_cleared || self.recovered_fresh
+    }
+
+    /// The held channel lock, lent to a recovery that must not block its own intake.
+    pub(in crate::services::discord) fn guard(&self) -> &tokio::sync::OwnedMutexGuard<()> {
+        &self._guard
     }
 
     pub(crate) async fn complete_mailbox_claim<T>(self, claim: impl Future<Output = T>) -> T {

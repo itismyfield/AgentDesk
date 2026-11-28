@@ -2,6 +2,7 @@ import { useCallback, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { CheckCircle2, Info, TriangleAlert, XCircle } from "lucide-react";
 import { Toaster, toast } from "sonner";
+import { useI18n } from "../i18n";
 
 export interface Notification {
   id: string;
@@ -112,6 +113,7 @@ interface ToastOverlayProps {
 }
 
 export function ToastOverlay({ notifications: _notifications, onDismiss: _onDismiss }: ToastOverlayProps) {
+  const { t } = useI18n();
   return (
     <Toaster
       className="!z-[110]"
@@ -127,14 +129,19 @@ export function ToastOverlay({ notifications: _notifications, onDismiss: _onDism
         right: "0.75rem",
       }}
       toastOptions={{
-        closeButtonAriaLabel: "Dismiss notification",
+        closeButtonAriaLabel: t({
+          ko: "알림 닫기",
+          en: "Dismiss notification",
+          ja: "通知を閉じる",
+          zh: "关闭通知",
+        }),
         classNames: {
           toast: "agentdesk-toast !min-h-16 !pr-16",
           title: "agentdesk-toast-title",
           closeButton: "agentdesk-toast-close !top-2 !right-2 !left-auto !m-0 !h-11 !w-11 !transform-none",
         },
       }}
-      containerAriaLabel="Notifications"
+      containerAriaLabel={t({ ko: "알림", en: "Notifications", ja: "通知", zh: "通知" })}
     />
   );
 }

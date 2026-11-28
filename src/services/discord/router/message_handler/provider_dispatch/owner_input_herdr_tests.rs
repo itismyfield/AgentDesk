@@ -787,7 +787,7 @@ fn write_herdr_between(
                 scope::bind_writer(&physical)?;
                 pane.pin(Mutation::Input)
                     .map_err(|refusal| format!("{refusal:?}"))?;
-                match pane.send_paste(logical) {
+                match pane.send_paste_for_test(logical) {
                     Ok(HostMutation::Confirmed) => Ok(()),
                     other => Err(format!("{other:?}")),
                 }
@@ -909,7 +909,7 @@ fn owned_herdr_ready_before_content_pins_the_bound_pane() {
         scope::ready_payload().map_err(|refusal| SubmissionError::from(format!("{refusal:?}")))?;
         pane.pin(Mutation::Input)
             .map_err(|refusal| SubmissionError::from(format!("{refusal:?}")))?;
-        match pane.send_paste(&frame) {
+        match pane.send_paste_for_test(&frame) {
             Ok(HostMutation::Confirmed) => Ok(()),
             other => Err(format!("{other:?}").into()),
         }

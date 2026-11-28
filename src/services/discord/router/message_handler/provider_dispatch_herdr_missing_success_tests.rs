@@ -35,35 +35,7 @@ fn a_missing_idle_front_launches_a_fresh_execution_and_delivers_once_pg() {
             .session_id = None;
         intake.front().await
     });
-    // The initial answer was delivered before O adopted this fixture; its resume needs that cursor.
-    {
-        use crate::services::tui_o::store::spool::{Cursor, source_key};
-        use sha2::{Digest, Sha256};
-        let source = source_id_for(&previous.session, &previous.path).unwrap();
-        let bytes = std::fs::read(&previous.path).unwrap();
-        let cursor = Cursor {
-            source: source.clone(),
-            captured_through: bytes.len() as u64,
-            prefix_hash: hex::encode(Sha256::digest(&bytes)),
-            retired: false,
-            transition_cleanup: None,
-        };
-        let directory = crate::config::runtime_root()
-            .unwrap()
-            .join("o_store")
-            .join(CHANNEL.to_string())
-            .join("cursor");
-        std::fs::create_dir_all(&directory).unwrap();
-        std::fs::write(
-            directory.join(format!("{}.json", source_key(&source))),
-            serde_json::to_vec(&cursor).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            crate::services::claude::session_handoff::o_reads(CHANNEL, &source),
-            Ok(true)
-        );
-    }
+    seed_resume_cursor(fx._root.path(), &previous);
     let before = fx.rig.sends().len();
     let (command_sent, command_seen) = std::sync::mpsc::channel();
     let (continue_create, create_ready) = std::sync::mpsc::channel();

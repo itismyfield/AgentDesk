@@ -252,13 +252,11 @@ mod tests {
     };
 
     fn test_engine() -> PolicyEngine {
-        let config = Config {
-            policies: crate::config::PoliciesConfig {
-                dir: std::path::PathBuf::from("/nonexistent"),
-                hot_reload: false,
-                ..crate::config::PoliciesConfig::default()
-            },
-            ..Config::default()
+        let mut config = Config::default();
+        config.policies = crate::config::PoliciesConfig {
+            dir: std::path::PathBuf::from("/nonexistent"),
+            hot_reload: false,
+            ..crate::config::PoliciesConfig::default()
         };
         PolicyEngine::new(&config).unwrap()
     }

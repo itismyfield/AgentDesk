@@ -3,7 +3,7 @@
 use crate::domain::outbound::outbox::source::{is_allowed_static_source, is_static_notice_kind};
 use crate::services::discord::org_schema;
 
-pub(crate) const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
+pub const IMESSAGE_INPUT_NOTICE_SOURCE: &str = "imessage_input_notice";
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SendCallerClass {
@@ -59,7 +59,7 @@ fn config_knows_agent(role_id: &str) -> Option<bool> {
 }
 
 /// The runtime config answers when it is loaded; the org schema answers only without one.
-pub(crate) fn is_known_agent(role_id: &str) -> bool {
+pub fn is_known_agent(role_id: &str) -> bool {
     if let Some(known) = config_knows_agent(role_id) {
         return known;
     }

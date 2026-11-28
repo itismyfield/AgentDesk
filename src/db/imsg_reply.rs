@@ -101,7 +101,7 @@ pub struct ActionAck<'a> {
     pub receipt: Option<Value>,
 }
 
-pub(crate) struct AdmissionIdentity<'a> {
+pub struct AdmissionIdentity<'a> {
     pub origin_id: &'a str,
     pub agent_id: &'a str,
     pub channel_id: &'a str,
@@ -109,7 +109,7 @@ pub(crate) struct AdmissionIdentity<'a> {
     pub request_hash: &'a str,
 }
 
-pub(crate) struct AdmissionSettlement<'a> {
+pub struct AdmissionSettlement<'a> {
     pub admission: &'a str,
     pub kind: Option<&'a str>,
     pub result: &'a Value,
@@ -127,7 +127,7 @@ pub async fn read_obligation(
         .await
 }
 
-pub(crate) async fn read_agy_binding(
+pub async fn read_agy_binding(
     pool: &PgPool,
     channel: u64,
     message: u64,
@@ -158,7 +158,7 @@ pub async fn read_action(pool: &PgPool, id: Uuid) -> Result<Option<Action>, sqlx
 }
 
 /// Only the inserted GUID owner may perform delivery; duplicates require a fresh read.
-pub(crate) async fn reserve_admission(
+pub async fn reserve_admission(
     pool: &PgPool,
     identity: &AdmissionIdentity<'_>,
 ) -> Result<bool, sqlx::Error> {
@@ -166,7 +166,7 @@ pub(crate) async fn reserve_admission(
 }
 
 /// Storage source determines reply authority from the same commit as origin reservation.
-pub(crate) async fn reserve_admission_for_source(
+pub async fn reserve_admission_for_source(
     pool: &PgPool,
     identity: &AdmissionIdentity<'_>,
     source: &str,
@@ -190,7 +190,7 @@ pub(crate) async fn reserve_admission_for_source(
 }
 
 /// Settlement changes admission metadata without reopening a resolution recorded by an early ACK.
-pub(crate) async fn settle_admission(
+pub async fn settle_admission(
     pool: &PgPool,
     origin_id: &str,
     settlement: &AdmissionSettlement<'_>,
@@ -221,7 +221,7 @@ pub(crate) async fn settle_admission(
 
 /// Before a start or busy paste: the delivering admission names its episode candidate, once.
 /// Each guarded UPDATE autocommits, so `true` means exactly one committed row.
-pub(crate) async fn bind_episode(
+pub async fn bind_episode(
     pool: &PgPool,
     origin_id: &str,
     episode: &str,
@@ -242,7 +242,7 @@ pub(crate) async fn bind_episode(
 }
 
 /// Before a queue write: the delivering admission names the queue entry it becomes.
-pub(crate) async fn bind_queued(
+pub async fn bind_queued(
     pool: &PgPool,
     origin_id: &str,
     queued_message_id: &str,
@@ -260,7 +260,7 @@ pub(crate) async fn bind_queued(
 }
 
 /// A start refused before any effect gives its candidate up, so no turn ever claims it.
-pub(crate) async fn release_episode(
+pub async fn release_episode(
     pool: &PgPool,
     origin_id: &str,
     episode: &str,
@@ -279,7 +279,7 @@ pub(crate) async fn release_episode(
 
 /// A paste the pane refused leaves its busy episode: the GUID waits as queue entry `queued`, and
 /// no end of that episode can count for it. The nonce stays for diagnosis.
-pub(crate) async fn hand_back_busy(
+pub async fn hand_back_busy(
     pool: &PgPool,
     origin_id: &str,
     (episode, nonce): (&str, &str),

@@ -2,7 +2,7 @@ use super::*;
 use std::cell::RefCell;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Stage {
+pub enum Stage {
     Open,
     Metadata,
     Read,
@@ -19,7 +19,7 @@ thread_local! {
     static NEXT: RefCell<Option<Hook>> = const { RefCell::new(None) };
 }
 
-pub(crate) struct Injection;
+pub struct Injection;
 
 impl Drop for Injection {
     fn drop(&mut self) {
@@ -27,7 +27,7 @@ impl Drop for Injection {
     }
 }
 
-pub(crate) fn fail_once(stage: Stage) -> Injection {
+pub fn fail_once(stage: Stage) -> Injection {
     NEXT.with(|next| assert!(next.replace(Some(Hook::Fail(stage))).is_none()));
     Injection
 }
@@ -66,6 +66,7 @@ pub(super) fn point(stage: Stage, _path: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 mod unix {
     use super::*;
     use crate::services::tui_o::shadow::capture::file_identity;

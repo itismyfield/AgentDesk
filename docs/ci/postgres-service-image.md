@@ -26,10 +26,11 @@ above, so the PR workflow adds one exact proof lane on the floor version:
 - Job `pg15_owner_proof` (`PostgreSQL 15 owner proof`) overrides
   `POSTGRES_SERVICE_IMAGE` to `postgres:15` at job level and fails unless
   `SHOW server_version_num` reports a `15xxxx` server.
-- It runs only the ids in `scripts/ci/pg15_required_ids.txt` with `--exact`
-  through `scripts/run_test_lane.py --expected-ids`, so a missing, extra,
-  ignored or unexecuted id, or an empty list, is red. The first id applies every
-  migration on PostgreSQL 15.
+- It runs only the ids in `scripts/ci/pg15_required_ids.txt` (root lib) and
+  `scripts/ci/pg15_required_runtime_ids.txt` (`-p adk-runtime`) with `--exact`,
+  one `scripts/run_test_lane.py --expected-ids` lane per lib binary, so a
+  missing, extra, ignored or unexecuted id, or an empty list, is red. The
+  runtime id applies every migration on PostgreSQL 15.
 - Its `needs` and `if` match `test_fast` (`pg_db` or the full-run kill switch),
   and the required `Fast targeted tests (ubuntu-latest)` context mirrors its
   result with the same `pg_db` filter. Branch protection is unchanged.

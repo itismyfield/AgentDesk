@@ -54,7 +54,7 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
         fixture::launch(CHANNEL, &source),
         channel.cursor(&source).unwrap(),
     );
-    a.request(Operation::Prepare(SubmitFloor::NativeFloor(Box::new(
+    a.request_for_test(Operation::Prepare(SubmitFloor::NativeFloor(Box::new(
         floor.clone(),
     ))))
     .await
@@ -62,7 +62,7 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
     let span = fixture::terminal(&floor);
     // Keep A's delivered reply unconsumed across the recovery of the same hosting claim.
     let delayed = a
-        .request(Operation::Close(Box::new(span.clone())))
+        .request_for_test(Operation::Close(Box::new(span.clone())))
         .await
         .unwrap();
     let generation = handles[0].generation();
@@ -77,7 +77,7 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
         Some(1),
     );
     assert!(
-        a.request(Operation::Prepare(SubmitFloor::NativeFloor(Box::new(next))))
+        a.request_for_test(Operation::Prepare(SubmitFloor::NativeFloor(Box::new(next))))
             .await
             .is_err()
     );
@@ -103,11 +103,11 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
         span.episode.turn_nonce.clone(),
     )));
     let issued = AtomicUsize::new(0);
-    let result = ready.with_closed_reply(CHANNEL, delayed, |closed| {
+    let result = ready.with_closed_reply_for_test(CHANNEL, delayed, |closed| {
         issued.fetch_add(1, Ordering::SeqCst);
         admission::issue_for_tests(
-            closed.span().execution.clone(),
-            closed.span().episode.clone(),
+            closed.span_for_test().execution.clone(),
+            closed.span_for_test().episode.clone(),
             &token,
         )
     });
@@ -121,15 +121,15 @@ async fn s2a_same_claim_restart_rejects_delayed_close_reply_before_issue_and_att
         "issuance and its token attach were never called"
     );
     let current = b
-        .request(Operation::Close(Box::new(span.clone())))
+        .request_for_test(Operation::Close(Box::new(span.clone())))
         .await
         .unwrap();
     let record = ready
-        .with_closed_reply(CHANNEL, current, |closed| {
+        .with_closed_reply_for_test(CHANNEL, current, |closed| {
             issued.fetch_add(1, Ordering::SeqCst);
             admission::issue_for_tests(
-                closed.span().execution.clone(),
-                closed.span().episode.clone(),
+                closed.span_for_test().execution.clone(),
+                closed.span_for_test().episode.clone(),
                 &token,
             )
         })
@@ -198,9 +198,9 @@ async fn s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit() 
     let launch = fixture::launch(CHANNEL, &source);
     let floor = fixture::native_floor(launch.clone(), harness.channel().cursor(&source).unwrap());
     let delayed = a
-        .request(Operation::Capture(Box::new((
+        .request_for_test(Operation::Capture(Box::new((
             launch.clone(),
-            floor.execution().clone(),
+            floor.execution_for_test().clone(),
         ))))
         .await
         .unwrap();
@@ -215,9 +215,9 @@ async fn s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit() 
     next_launch.episode.user_message_id += 1;
     next_launch.episode.turn_nonce = "successor-turn".into();
     assert!(
-        a.request(Operation::Capture(Box::new((
+        a.request_for_test(Operation::Capture(Box::new((
             next_launch,
-            floor.execution().clone()
+            floor.execution_for_test().clone()
         ))))
         .await
         .is_err()
@@ -247,16 +247,22 @@ async fn s2b1a_same_claim_restart_rejects_delayed_typed_prepare_before_submit() 
     );
     assert_eq!(submits.load(Ordering::SeqCst), 0);
     let current = b
-        .request(Operation::Capture(Box::new((
+        .request_for_test(Operation::Capture(Box::new((
             launch,
-            floor.execution().clone(),
+            floor.execution_for_test().clone(),
         ))))
         .await
         .unwrap();
     ready
         .with_prepared_reply(CHANNEL, current, |prepared| {
-            assert_eq!(prepared.floor().execution(), floor.execution());
-            assert_eq!(prepared.floor().checkpoint(), floor.checkpoint());
+            assert_eq!(
+                prepared.floor_for_test().execution_for_test(),
+                floor.execution_for_test()
+            );
+            assert_eq!(
+                prepared.floor_for_test().checkpoint_for_test(),
+                floor.checkpoint_for_test()
+            );
             submits.fetch_add(1, Ordering::SeqCst);
         })
         .unwrap();
@@ -347,7 +353,7 @@ async fn actual_driver_case(mode: &'static str) {
         crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock("TMPDIR", &temp_parent);
     let _dedupe_lock = ActualDriverIsolation {
         _state: dedupe::TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner()),
-        _endpoint: crate::services::claude_tui::hook_server::tests::ENDPOINT_TEST_LOCK
+        _endpoint: crate::services::claude_tui::hook_server::ENDPOINT_TEST_LOCK
             .lock()
             .unwrap_or_else(|p| p.into_inner()),
     };
@@ -443,7 +449,7 @@ async fn actual_driver_case(mode: &'static str) {
     .unwrap();
     dedupe::register_tmux_channel(tmux, channel);
     dedupe::binding_events::set_test_root(Some(harness._runtime.path()));
-    let fake = crate::services::provider_teardown::tests::test_support::FakeTmux::install(tmux);
+    let fake = crate::services::provider_teardown::test_support::FakeTmux::install(tmux);
     let _binary = crate::config::TestEnvVarGuard::set_path_after_shared_test_env_lock(
         "AGENTDESK_CODEX_PATH",
         &binary,

@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::message_split::discord_message_units;
 
 #[test]
 fn retired_snapshots_preserve_legacy_body_and_rollover_bytes() {

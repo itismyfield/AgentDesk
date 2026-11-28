@@ -249,8 +249,12 @@ async fn build_app_state(with_health_registry: bool) -> Result<AppState, String>
     // The engine drop path is now leak-safe regardless, but keeping this off
     // for the CLI removes an entire class of teardown-ordering hazards.
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, pg_pool.clone())
-        .map_err(|e| format!("init policy engine: {e}"))?;
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        pg_pool.clone(),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .map_err(|e| format!("init policy engine: {e}"))?;
     let broadcast_tx = crate::server::ws::new_broadcast();
     let batch_buffer = crate::server::ws::spawn_batch_flusher(broadcast_tx.clone());
 

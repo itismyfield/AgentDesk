@@ -1,7 +1,7 @@
 use sqlx::PgPool;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum SessionOwnerResolution {
+pub enum SessionOwnerResolution {
     NoOwner,
     LiveLocal {
         instance_id: String,
@@ -28,7 +28,7 @@ pub(crate) enum SessionOwnerResolution {
 /// Session heartbeats are deliberately not used as a lease: an idle tmux may
 /// be healthy without emitting output. Foreign-owner liveness comes from the
 /// existing worker-node heartbeat and provider-specific intake capability.
-pub(crate) async fn resolve_session_owner(
+pub async fn resolve_session_owner(
     pool: &PgPool,
     provider: &str,
     channel_id: &str,

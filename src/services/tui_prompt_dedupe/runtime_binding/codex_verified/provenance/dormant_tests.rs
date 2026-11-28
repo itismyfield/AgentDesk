@@ -5,9 +5,8 @@ use crate::services::tui_o::shadow::SourceId;
 use crate::services::tui_o::shadow::capture::{file_identity, renumber};
 use crate::services::tui_o::store::spool::{Cursor, source_key};
 use crate::services::tui_o::store::{Initialized, OStore, StoreConfig, fault};
-use crate::services::tui_o::writer::owed::tests::{
-    Bindings, Collector, Port, Writer, kept, owed_writer,
-};
+use crate::services::tui_o::writer::owed::test_support::{Bindings, Port, Writer, owed_writer};
+use crate::services::tui_o::writer::owed::tests::{Collector, kept};
 use crate::services::tui_o::writer::owed::{OwedLog, reevaluate};
 use crate::services::tui_o::writer::pieces::Derived;
 use sha2::{Digest, Sha256};

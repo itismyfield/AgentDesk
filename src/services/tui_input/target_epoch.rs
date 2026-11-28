@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub(crate) struct PaneEpoch {
+pub struct PaneEpoch {
     pub host: String,
     pub endpoint: String,
     pub owner: String,

@@ -24,7 +24,7 @@ pub use resolve::{
     RATE_LIMIT_STALE_SEC, Resolved, RowSetting, RuntimeSetting, SettingSource, max_entry_retries,
     policy_kv_rows, policy_value, resolve_row, resolve_with_kv, runtime_config_field,
 };
-pub(crate) use runtime_config_put::is_runtime_config_key;
+pub use runtime_config_put::is_runtime_config_key;
 use runtime_config_put::{runtime_config_keys, with_explicit_runtime_config_keys};
 
 const RETIRED_SETTINGS_JSON_KEYS: &[&str] = &[
@@ -64,7 +64,7 @@ const RETIRED_CONFIG_KEYS: &[&str] = &[
 pub(crate) const RETIRED_CONFIG_KEY_PREFIXES: &[&str] =
     &["merge_strategy_mode:card:", "escalation_thread:"];
 
-pub(crate) const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExplicitKeys";
+pub const RUNTIME_CONFIG_EXPLICIT_KEYS_META: &str = "__runtimeConfigExplicitKeys";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum KvSeedAction {
@@ -809,12 +809,14 @@ fn seeded_runtime_config_map(
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
+#[cfg(any(test, feature = "test-support"))]
+pub mod tests {
+    #[cfg(test)]
     use super::*;
+    #[cfg(test)]
     use serde_json::json;
 
-    pub(crate) struct TestDatabase {
+    pub struct TestDatabase {
         _lifecycle: crate::db::postgres::PostgresTestLifecycleGuard,
         admin_url: String,
         database_name: String,
@@ -822,7 +824,7 @@ pub(crate) mod tests {
     }
 
     impl TestDatabase {
-        pub(crate) async fn create() -> Self {
+        pub async fn create() -> Self {
             crate::db::postgres::postgres_test_database_url_base().expect(
                 "POSTGRES_TEST_DATABASE_URL_BASE required for settings runtime-config PG tests",
             ); // agentdesk-audit: allow-unwrap — test-only fixture: a missing or unreachable PostgreSQL fails the test instead of passing silently
@@ -855,7 +857,7 @@ pub(crate) mod tests {
             }
         }
 
-        pub(crate) async fn connect(&self) -> sqlx::PgPool {
+        pub async fn connect(&self) -> sqlx::PgPool {
             let pool = crate::db::postgres::connect_test_pool(
                 &self.database_url,
                 "settings runtime-config pg tests",
@@ -875,7 +877,7 @@ pub(crate) mod tests {
             pool
         }
 
-        pub(crate) async fn drop(self) {
+        pub async fn drop(self) {
             crate::db::postgres::drop_test_database(
                 &self.admin_url,
                 &self.database_name,
@@ -886,6 +888,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn upsert_test_kv(pool: &sqlx::PgPool, key: &str, value: &str) {
         sqlx::query(
             "INSERT INTO kv_meta (key, value, expires_at)
@@ -899,12 +902,14 @@ pub(crate) mod tests {
         .unwrap_or_else(|error| panic!("upsert test kv_meta {key}: {error}"));
     }
 
+    #[cfg(test)]
     async fn seed_runtime_scalar_mirrors(pool: &sqlx::PgPool) {
         for key in runtime_config_keys() {
             upsert_test_kv(pool, key, &format!("legacy-{key}")).await;
         }
     }
 
+    #[cfg(test)]
     async fn assert_runtime_blob_and_no_mirrors(pool: &sqlx::PgPool, expected: &Value) {
         let blob = sqlx::query_scalar::<_, String>(
             "SELECT value FROM kv_meta WHERE key = 'runtime-config'",

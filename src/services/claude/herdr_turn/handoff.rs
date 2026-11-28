@@ -46,7 +46,7 @@ fn resumed_session(
 
 /// The launch and attach of a turn's source, for tests outside this module.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn launched_source_for_test(
+pub fn launched_source_for_test(
     turn: &HerdrTurn<'_>,
     runtime: &Handle,
     ports: &dyn HerdrTurnPorts,

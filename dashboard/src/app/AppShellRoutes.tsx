@@ -1,7 +1,7 @@
 import { lazy } from "react";
 import { Navigate, Route, Routes } from "react-router";
 
-import type { Agent, CompanySettings, DashboardStats, Department, DispatchedSession } from "../types";
+import type { Agent, CompanySettings, DashboardStats, DispatchedSession } from "../types";
 import type { Notification } from "../components/NotificationCenter";
 import type { AgentManagerTab } from "../components/agent-manager/useAgentManagerController";
 import { APP_ROUTES, DEFAULT_ROUTE_PATH, LEGACY_ROUTE_REDIRECTS } from "./routes";
@@ -11,7 +11,6 @@ export interface AppShellRoutesContext {
   agents: Agent[];
   agentsPageTab: AgentManagerTab;
   agentsWithDispatched: Agent[];
-  departments: Department[];
   handleSettingsSave: (patch: Record<string, unknown>) => Promise<void>;
   isKo: boolean;
   isMobileViewport: boolean;
@@ -28,7 +27,6 @@ export interface AppShellRoutesContext {
   /** Wall-clock ms timestamp of the most recent WS event, or null pre-first. */
   wsLastEventTs: number | null;
   refreshAgents: () => void;
-  refreshDepartments: () => void;
 }
 
 const StatsPageView = lazy(() => import("../components/StatsPageView"));
@@ -42,7 +40,6 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
   const {
     agents,
     agentsWithDispatched,
-    departments,
     handleSettingsSave,
     isKo,
     isMobileViewport,
@@ -53,18 +50,14 @@ export default function AppShellRoutes({ ctx }: { ctx: AppShellRoutesContext }) 
     settings,
     stats,
     visibleDispatchedSessions,
-    wsConnected,
     refreshAgents,
-    refreshDepartments,
   } = ctx;
 
   const agentManager = (autoOpenCreate: boolean) => (
     <AgentManagerView
       agents={agents}
-      departments={departments}
       language={settings.language}
       onAgentsChange={refreshAgents}
-      onDepartmentsChange={refreshDepartments}
       sessions={visibleDispatchedSessions}
       onTabChange={setAgentsPageTab}
       autoOpenCreate={autoOpenCreate}

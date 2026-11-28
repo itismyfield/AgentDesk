@@ -27,8 +27,7 @@ pub(in crate::services::discord) async fn enqueue(
     } else {
         "⏳ 입력창 내용을 안전하게 보관하거나 화면 상태를 확인할 수 없어 메시지가 대기 중입니다. 기존 세션은 유지하며, 입력 가능한 상태가 되면 자동으로 이어갑니다."
     };
-    let content =
-        crate::services::discord::dispatch_policy::prepend_operational_alert_origin(content);
+    let content = crate::domain::outbound::alert_origin::prepend_operational_alert_origin(content);
     let result =
         crate::services::message_outbox::enqueue_outbox_pg_returning_id_with_persistent_dedupe(
             pool,

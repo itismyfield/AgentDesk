@@ -431,7 +431,7 @@ async fn reprove_codex_rollout_cases(tmux_probe: &std::path::Path) {
 #[tokio::test(flavor = "current_thread")]
 async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{
         TOKEN, future_schema, owner, record, wire,
     };
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -690,7 +690,7 @@ async fn seed_host_row(
     dispatch: &str,
 ) -> String {
     use crate::db::dispatched_sessions::hosted_execution::HostedState::*;
-    use crate::db::dispatched_sessions::hosted_execution::tests::*;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::*;
     let owner = owner(ch);
     let raw = match host {
         "pending" => Some(wire(&record(&owner, "n1", Pending))),
@@ -997,7 +997,12 @@ async fn backlog_revert_refuses_the_card_when_any_session_host_is_unconfirmed_pg
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let revert = |card: String| {
         let (state, source) = (state.clone(), "test:host-guard");
@@ -1222,7 +1227,12 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let (shared, registry) = host::runtime(&pool).await;
     state.health_registry = Some(registry);
@@ -1285,7 +1295,9 @@ async fn backlog_revert_refuses_a_card_whose_kill_the_runtime_keeps_pg() {
 /// refuses before the durable rebind; once a runtime takes the channel the same row resumes.
 #[test]
 fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
+    use crate::services::discord::health::resume_ports;
     use crate::services::discord::host_teardown_gate::test_support as host;
+    use crate::services::provider::ProviderKind;
     use crate::services::session_resume::{
         ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
         perform_resume_rebind,
@@ -1324,12 +1336,19 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
                 exec(&pool, sql, &[Some(key.as_str()), cwd]).await;
                 tmux.start(&name);
                 let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
-                let claude = Some(crate::services::provider::ProviderKind::Claude);
+                assert_eq!(
+                    registry
+                        .shared_for_provider_on_channel(&ProviderKind::Claude, channel)
+                        .await
+                        .is_some(),
+                    taken,
+                    "{condition:?}: runtime handle availability"
+                );
                 let resume = perform_resume_rebind(
                     &pool,
-                    Some(&registry),
+                    resume_ports(Some(&registry)),
                     &key,
-                    claude,
+                    Some(ProviderKind::Claude),
                     Some(channel),
                     &name,
                     &opts,
@@ -1374,12 +1393,11 @@ fn resume_refuses_a_session_whose_teardown_the_runtime_keeps_pg() {
         let before = snapshot(&pool, "sessions", "session_key", &[&key]).await;
         let configured = [(channel.get(), "mac-mini")];
         let _hosts = crate::config::session_hosts::force_for_test(Some("mac-mini"), &configured);
-        let claude = Some(crate::services::provider::ProviderKind::Claude);
         let resume = perform_resume_rebind(
             &pool,
-            Some(&registry),
+            resume_ports(Some(&registry)),
             &key,
-            claude,
+            Some(ProviderKind::Claude),
             Some(channel),
             name,
             &opts,
@@ -1597,7 +1615,12 @@ async fn backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg() {
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     state.config = Arc::new(config);
     let (shared, registry) = host::runtime(&pool).await;
     state.health_registry = Some(registry);
@@ -1641,6 +1664,7 @@ async fn backlog_revert_refuses_a_card_whose_runtime_runs_another_session_pg() {
 /// durable rebind and touches neither session.
 #[test]
 fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
+    use crate::services::discord::health::resume_ports;
     use crate::services::discord::host_teardown_gate::test_support as host;
     use crate::services::session_resume::{
         ResumePreviousOptions, ResumeRebindError, catalog::scope_claude_home_for_tests,
@@ -1687,7 +1711,7 @@ fn resume_refuses_a_session_whose_runtime_runs_another_session_pg() {
                 let claude = Some(crate::services::provider::ProviderKind::Claude);
                 let resume = perform_resume_rebind(
                     &pool,
-                    Some(&registry),
+                    resume_ports(Some(&registry)),
                     &key,
                     claude,
                     Some(channel),
@@ -1752,9 +1776,15 @@ async fn routine_teardown_of_a_thread_running_another_session_disconnects_nothin
                                    $3::jsonb)";
                 let thread = thread.to_string();
                 let own = matches!(moved, Moved::OwnRow).then(|| {
-                    use crate::db::dispatched_sessions::hosted_execution::{HostedState, tests};
-                    let bound = tests::record(&tests::owner(&thread), "n1", HostedState::Bound);
-                    tests::wire(&bound).to_string()
+                    use crate::db::dispatched_sessions::hosted_execution::{
+                        HostedState, test_support,
+                    };
+                    let bound = test_support::record(
+                        &test_support::owner(&thread),
+                        "n1",
+                        HostedState::Bound,
+                    );
+                    test_support::wire(&bound).to_string()
                 });
                 let args = [Some(key.as_str()), Some(thread.as_str()), own.as_deref()];
                 exec(&pool, sql, &args).await;
@@ -1881,7 +1911,7 @@ async fn force_kill_of_a_channelless_row_leaves_a_runtime_holding_its_name_pg() 
 #[tokio::test(flavor = "current_thread")]
 async fn selector_clears_keep_configured_and_hosted_rows_pg() {
     use crate::db::dispatched_sessions::hosted_execution::HostedState;
-    use crate::db::dispatched_sessions::hosted_execution::tests::{owner, record, wire};
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{owner, record, wire};
     let pg_db = TestPostgresDb::create().await;
     let pool = pg_db.connect_and_migrate().await;
     let (configured, sid) = ("1479671301387069100", "stale-p9b1-selector");
@@ -1984,7 +2014,12 @@ async fn fenced_late_hook_skips_the_status_change_hook_pg() {
     let mut config = crate::config::Config::default();
     config.policies.dir = dir.path().to_path_buf();
     let mut state = test_state(pool.clone());
-    state.engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone())).unwrap();
+    state.engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .unwrap();
     let read = "SELECT status || '/' || active_turn_nonce || '/'
                   || (last_heartbeat < NOW() - INTERVAL '30 minutes')::TEXT
                 FROM sessions WHERE session_key = $1";

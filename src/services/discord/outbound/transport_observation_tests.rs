@@ -127,8 +127,8 @@ async fn common_http_client_preserves_errors_retries_and_unknown_destinations() 
     ) {
         return;
     }
+    use crate::domain::outbound::port::DispatchMessagePostErrorKind;
     use crate::services::discord::outbound::{DiscordOutboundClient, HttpOutboundClient};
-    use crate::services::dispatches::discord_delivery::DispatchMessagePostErrorKind;
     let log = journal().await;
     for (case, replies, wire, expected, status) in [
         (

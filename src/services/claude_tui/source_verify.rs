@@ -78,7 +78,7 @@ impl ClaudeHookSource {
 
 /// A pane's Claude sessions in its current execution, as the binding log's records moved it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct SourceHistory {
+pub struct SourceHistory {
     pub current: Option<Visit>,
     pub awaiting: Option<Visit>,
     pub left: BTreeMap<String, Left>,
@@ -88,7 +88,7 @@ pub(crate) struct SourceHistory {
 
 /// `since`: publish time of the hook that moved the pane here, if a hook did; `seen`: the record's.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Visit {
+pub struct Visit {
     pub session: String,
     pub pin: Option<SourceId>,
     /// Commit time of the record that pinned `pin`.
@@ -99,7 +99,7 @@ pub(crate) struct Visit {
 
 /// A session the pane moved on from: its pin then, and the time of the record that moved it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Left {
+pub struct Left {
     pub pin: Option<SourceId>,
     /// Commit time of the record that pinned `pin`.
     pub pinned_at: Option<DateTime<Utc>>,
@@ -143,7 +143,7 @@ impl ClaudeSource {
 
 /// First line of an opened transcript.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum FirstRecord {
+pub enum FirstRecord {
     /// Empty file, or its first line is still being written.
     NotWritten,
     Session(String),
@@ -153,7 +153,7 @@ pub(crate) enum FirstRecord {
 
 /// What opening the payload's `transcript_path` found.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum OpenedTranscript {
+pub enum OpenedTranscript {
     Missing,
     Opened {
         file: SourceFileIdentity,
@@ -162,7 +162,7 @@ pub(crate) enum OpenedTranscript {
 }
 
 /// Opens `path` once and reads its (dev, ino) and first record from that same descriptor.
-pub(crate) fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
+pub fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -188,7 +188,7 @@ pub(crate) fn observe_transcript(path: &Path) -> io::Result<OpenedTranscript> {
 }
 
 /// One look at a source's transcript: a check's descriptor, a stat, or an identity already checked.
-pub(crate) enum Observation<'a> {
+pub enum Observation<'a> {
     /// `observe_transcript`: identity and first record read from one descriptor.
     Opened(Result<&'a OpenedTranscript, &'a io::Error>),
     /// Only the (dev, ino) a stat of the path found; the first record is not read.
@@ -199,7 +199,7 @@ pub(crate) enum Observation<'a> {
 
 /// What an observation proves once the pane's pin judges it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PinJudgment {
+pub enum PinJudgment {
     /// The pinned file itself, or an unpinned source's first verification: bind this identity.
     Verified(SourceId),
     /// A stat of a source no pin holds: logged as the stat finds it, not verified.
@@ -222,7 +222,7 @@ pub(crate) enum PinJudgment {
 /// The one rule every hook, restore and registration of a Claude source goes through: a pin on
 /// `session`'s `path` admits only its own file, and without one only a verified first record binds.
 /// `pinned_at` is when the pin was committed; a reboot may renumber only an earlier boot's pin.
-pub(crate) fn judge_pin(
+pub fn judge_pin(
     pin: Option<&SourceId>,
     pinned_at: Option<DateTime<Utc>>,
     session: &str,
@@ -310,7 +310,7 @@ pub(crate) enum SourceVerdict {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SourceRejection {
+pub enum SourceRejection {
     InvalidSessionId,
     /// The path is not `<projects root>/<project>/<session_id>.jsonl`.
     NotTopLevelTranscript,
@@ -459,7 +459,7 @@ pub(crate) fn normalize_payload_path(root: &Path, payload: &Path) -> PathBuf {
     }
 }
 
-pub(crate) fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
+pub fn is_top_level_transcript(root: &Path, path: &Path, session_id: &str) -> bool {
     let file_name = format!("{session_id}.jsonl");
     let Ok(rest) = path.strip_prefix(root) else {
         return false;

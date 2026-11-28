@@ -21,7 +21,7 @@ impl std::fmt::Display for QueuedTransitionBusyHandoff {
 }
 impl std::error::Error for QueuedTransitionBusyHandoff {}
 
-pub(crate) use crate::services::cluster::intake_router_hook::owner_record::custody as routed;
+use crate::services::cluster::intake_router_hook::owner_record::custody as routed;
 
 mod attachment;
 mod boot_custody;
@@ -42,7 +42,8 @@ mod skill;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use attachment::{prepare_admitted_live_attachments, resolve_attachment_admission};
+pub(in crate::services::discord::router) use attachment::prepare_admitted_live_attachments;
+pub(crate) use attachment::resolve_attachment_admission;
 pub(in crate::services::discord) use boot_custody::{WRITER_HELD, writer_boot_held};
 use notice::notify_blocked_intake;
 pub(in crate::services::discord::router) use queued::hand_back_race_lost;
@@ -275,7 +276,7 @@ pub(crate) async fn admit_text_intake(
         let ctx = replay_admission::ReplayAdmissionContext::production(
             pool,
             &instance,
-            replay_admission::incarnation(),
+            crate::domain::process_incarnation::incarnation(),
         )
         .for_channel(&channel_id);
         // Consume every absorbed source before routing or attachment effects; mixed items stay intact.

@@ -133,7 +133,7 @@ EXPECTED = {
 
 RETAIN_ARGUMENTS = {
     "router/message_handler/intake_turn/adk_thread.rs": [
-        "|parent,thread|{letremove=*thread==self.target&&Some(*parent)!=self.parent;ifremove{replaced.push(*parent);}!remove}",
+        "|parent,thread|{letremove=*thread==route.target&&Some(*parent)!=route.parent;ifremove{replaced.push(*parent);}!remove}",
     ],
     "turn_finalizer/cleanup.rs": [
         "|parent,thread|{letremove=*thread==channel_id;ifremove{parents.push(*parent);}!remove}",
@@ -218,7 +218,7 @@ class Census(unittest.TestCase):
         # target is admitted and bootstrapped, and intake publishes it only once the claim succeeded.
         writes = [m.start() for m in re.finditer(r"thread_parents\.insert\(", compact)]
         self.assertEqual(len(writes), 1)
-        self.assertLess(compact.index("fnpublish(&self,shared:&Arc<SharedData>,provider:&ProviderKind)"), writes[0])
+        self.assertLess(compact.index("fnpublish(route:&Route,shared:&Arc<SharedData>,provider:&ProviderKind)"), writes[0])
         # A replaced parent edge is released with its queue kick, like every other edge removal.
         kick = compact.index("cleanup::kickoff_thread_parents_after_finalize(shared,provider,replaced);")
         self.assertLess(writes[0], kick)
@@ -232,8 +232,8 @@ class Census(unittest.TestCase):
             self.assertLess(bootstrap, inserts[index])
         root = re.sub(r"\s+", "", self.sources[D + "router/message_handler/intake_turn.rs"])
         claim = root.index(".complete_mailbox_claim(")
-        self.assertEqual(root.count("route.publish(shared,&provider);"), 1)
-        self.assertLess(claim, root.index("ifstarted{route.publish(shared,&provider);}"))
+        self.assertEqual(root.count("adk_thread::publish(&route,shared,&provider);"), 1)
+        self.assertLess(claim, root.index("ifstarted{adk_thread::publish(&route,shared,&provider);}"))
         body = root.index("pub(super)asyncfnhandle_text_message(")
         redirect = root.index("adk_thread::redirect_dispatch(", body)
         self.assertIn("letIntakeRequest{intake_outbox_id,channel_id,", root[body:redirect])

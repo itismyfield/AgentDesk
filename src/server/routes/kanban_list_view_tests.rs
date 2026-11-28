@@ -19,7 +19,7 @@ fn app(pool: sqlx::PgPool) -> (axum::Router, tempfile::TempDir) {
     config.server.auth_token = Some(TOKEN.into());
     std::fs::create_dir_all(&config.policies.dir).unwrap();
     let state = AppState {
-        engine: crate::engine::PolicyEngine::new_with_pg(&config, None).unwrap(),
+        engine: crate::engine::PolicyEngine::new(&config).unwrap(),
         config: Arc::new(config),
         pg_pool: Some(pool),
         broadcast_tx: crate::eventbus::new_broadcast(),

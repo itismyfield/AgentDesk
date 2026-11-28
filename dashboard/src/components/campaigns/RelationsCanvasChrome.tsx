@@ -12,10 +12,11 @@ export const FAR = 1 / 0.75;
 /** Below 100%, the factor that keeps canvas words and lines at their own size on screen; 1 from 100% up. */
 export const useLegible = () => useStore((state) => Math.max(1, 1 / state.transform[2]));
 
-/** The key at the canvas's bottom left: a dependency line, a cycle line and a cable tie. */
-export function RelationsLegend({ className = "", tr, ...rest }: HTMLAttributes<HTMLDivElement> & { tr: Tr }) {
+/** The key at the canvas's bottom left: a dependency line, optional critical path, a cycle line and a cable tie. */
+export function RelationsLegend({ className = "", showCritical = false, tr, ...rest }: HTMLAttributes<HTMLDivElement> & { showCritical?: boolean; tr: Tr }) {
   return <div {...rest} className={`${FLOAT} bottom-4 left-4 flex flex-wrap items-center gap-x-3.5 gap-y-1 px-3 py-2 text-xs text-[var(--fg-muted)] max-sm:top-3 max-sm:bottom-auto max-sm:left-3 max-sm:max-w-[calc(100%-1.5rem)] max-sm:px-2.5 max-sm:py-1.5 ${className}`}>
     <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t border-[var(--fg-muted)]" />{tr("선행", "Dependency")}</span>
+    {showCritical && <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-[var(--accent)]" />{tr("크리티컬 패스", "Critical path")}</span>}
     <span className="flex items-center gap-1.5"><i aria-hidden className="w-5 border-t-2 border-dashed border-[var(--err)]" />{tr("순환 오류", "Cycle")}</span>
     <span className="flex items-center gap-1.5"><i aria-hidden className="size-2.5 rounded-full border-2 border-[var(--fg-muted)]" /><span>{tr("케이블타이", "Cable tie")}<span className="max-sm:hidden">{tr(" · 실행에는 영향 없음", " · no effect on runs")}</span></span></span>
   </div>;
@@ -31,7 +32,7 @@ export function ZoomTools({ flow, fit = { padding: 0.08, minZoom: 0.1, maxZoom: 
 
 /** `count` rides the line as a small round badge; `cycle` is the loop's label; `error` draws it red and dashed; `faint`
  * dims a line that leaves the scope; `dim` dims unrelated lines when inspecting a causal path. */
-export type LineData = { count?: number; cycle?: string; error: boolean; loopY?: number; faint?: boolean; dim?: boolean; active?: boolean };
+export type LineData = { count?: number; cycle?: string; error: boolean; loopY?: number; faint?: boolean; dim?: boolean; active?: boolean; critical?: boolean };
 const TURN = 40;
 /** Half the gap between two columns of groups. */
 const GAP_HALF = 32;
@@ -47,13 +48,13 @@ function nearTarget(sx: number, sy: number, tx: number, ty: number): [number, nu
 
 /** A view-only curve from a 다음 pin to a 선행 pin; its badge and line keep their size on screen when zoomed out. */
 export function RelationsLine({ id, sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition, markerEnd, data }: EdgeProps) {
-  const { count, cycle, error, loopY, faint, dim, active } = data as LineData;
+  const { count, cycle, error, loopY, faint, dim, active, critical } = data as LineData;
   const scale = useLegible();
-  const [curve, midX, midY] = getBezierPath({ sourceX, sourceY, sourcePosition, targetX, targetY, targetPosition });
+  const [curve, midX, midY] = getBezierPath({ sourceX, sourceY, targetX, targetY, sourcePosition, targetPosition });
   const [path, x, y] = loopY === undefined ? [curve, ...targetX - sourceX > 2 * GAP_HALF ? nearTarget(sourceX, sourceY, targetX, targetY) : [midX, midY]]
     : [`M${sourceX},${sourceY} C${sourceX + TURN},${sourceY} ${sourceX + TURN},${loopY} ${sourceX},${loopY} L${targetX},${loopY} C${targetX - TURN},${loopY} ${targetX - TURN},${targetY} ${targetX},${targetY}`, (sourceX + targetX) / 2, loopY];
-  const width = (active && !error ? 2.25 : 1.75) * Math.min(scale, 2.5);
-  const stroke = error ? "var(--err)" : active ? "var(--info)" : "var(--fg-muted)";
+  const width = (!error && critical ? 2.35 : active && !error ? 2.25 : 1.75) * Math.min(scale, 2.5);
+  const stroke = error ? "var(--err)" : critical ? "var(--accent)" : active ? "var(--info)" : "var(--fg-muted)";
   return <>
     <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke, strokeWidth: width, strokeLinecap: "round", strokeDasharray: error ? `${3 * width} ${2.5 * width}` : undefined, opacity: dim ? GRAPH_DIM_OPACITY : faint ? 0.5 : undefined }} />
     {(count !== undefined || cycle) && <EdgeLabelRenderer>

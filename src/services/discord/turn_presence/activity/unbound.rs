@@ -5,11 +5,9 @@ use crate::config::{Config, session_hosts::ChannelEndpoint};
 use crate::db::dispatched_sessions::hosted_execution::{
     HostedLookup, HostedObservation, HostedOwner, HostedRecord, HostedState,
 };
-use crate::services::discord::{
-    adk_session,
-    inflight::{InflightTurnState, marker_witness, with_inflight_row},
-    settings::RegisteredChannelBinding,
-};
+use crate::services::channel_roles::RegisteredChannelBinding;
+use crate::services::discord::adk_session;
+use crate::services::discord::inflight::{InflightTurnState, marker_witness, with_inflight_row};
 use crate::services::platform::tmux::session_inventory::Inventory;
 use crate::services::provider::ProviderKind;
 use crate::services::provider_hosting::channel_effective_tui_request;

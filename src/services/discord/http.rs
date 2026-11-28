@@ -108,9 +108,7 @@ fn channel_message_builder(
 /// (`<@requester>` — prompt-too-long, escalation) keep working. Tightening the
 /// residual agent-echoed user-ping case is deferred to the relay-content path
 /// in the delivery-lease consolidation (it must not break directed pings).
-pub(crate) use crate::services::message_outbox::mentions::relay_allowed_mentions;
-
-pub(crate) use crate::services::message_outbox::mentions::relay_message_payload;
+use crate::services::message_outbox::mentions::relay_allowed_mentions;
 
 pub(in crate::services::discord) async fn send_channel_message(
     http: &serenity::Http,
@@ -352,12 +350,13 @@ mod tests {
         DISCORD_CONTENT_HARD_CAP_UNITS, DISCORD_CONTENT_LIMIT_ERROR,
         DISCORD_EMPTY_MESSAGE_SENTINEL, channel_edit_builder, channel_message_builder,
         discord_content_or_zwsp, edit_channel_message, edit_channel_message_with_components,
-        is_unknown_required_reference_response, relay_allowed_mentions, send_channel_message,
+        is_unknown_required_reference_response, send_channel_message,
         send_channel_message_with_components, send_channel_message_with_nonce,
         send_channel_message_with_reference, send_channel_message_with_reference_and_nonce,
     };
     use crate::services::discord::DISCORD_MSG_LIMIT;
     use crate::services::discord::formatting::{discord_message_units, needs_multiple_messages};
+    use crate::services::message_outbox::mentions::relay_allowed_mentions;
     use poise::serenity_prelude::{
         ChannelId, CreateActionRow, CreateButton, EditMessage, HttpBuilder, MessageId,
     };

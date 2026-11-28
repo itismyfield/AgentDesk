@@ -23,7 +23,7 @@ use crate::services::tui_o::writer::deliver::POST_TIMEOUT;
 
 /// What the channel's writer lends a re-post turn. The original path, Auto and an operator
 /// resume all go through the same writer, so one channel has one open Prepared at a time.
-pub(crate) trait RepostWriter {
+pub trait RepostWriter {
     /// The channel's delivery lease; dropping it releases the lease.
     type Lease: Send + 'static;
     /// Settles an open Prepared of the channel; `false` while one is still open.
@@ -34,6 +34,10 @@ pub(crate) trait RepostWriter {
         &self,
         _key: &PieceKey,
     ) -> Option<crate::services::cluster::intake_router_hook::owner_record::output::Artifact> {
+        None
+    }
+    /// The anchor the piece's earlier serial replied to; a re-post replies to the same one.
+    fn reply_to(&self, _key: &PieceKey) -> Option<u64> {
         None
     }
 
@@ -52,7 +56,7 @@ pub(crate) trait RepostWriter {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum GuardReason {
+pub enum GuardReason {
     Writer(String),
     LeaseBusy,
     NoGateway,
@@ -61,7 +65,7 @@ pub(crate) enum GuardReason {
 
 /// What a turn may do next. `Granted` is the only one that sends, and only through `start`.
 #[derive(Debug)]
-pub(crate) enum Admission<L> {
+pub enum Admission<L> {
     Granted {
         permit: DispatchPermit,
         lease: L,
@@ -80,7 +84,7 @@ pub(crate) enum Admission<L> {
 /// The right to send one spent slot once. It owns the grant, so neither a re-read row nor a
 /// copy can make another; only the runner builds it from a committed grant.
 #[derive(Debug)]
-pub(crate) struct DispatchPermit {
+pub struct DispatchPermit {
     grant: SlotGrant,
     payload: String,
     /// The wire deadline, counted from before the grant was asked.
@@ -100,8 +104,18 @@ impl DispatchPermit {
         self.grant.key()
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn slot_for_test(&self) -> u8 {
+        self.slot()
+    }
+
     pub(crate) fn slot(&self) -> u8 {
         self.grant.slot()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn payload_for_test(&self) -> &str {
+        self.payload()
     }
 
     pub(crate) fn payload(&self) -> &str {
@@ -110,7 +124,7 @@ impl DispatchPermit {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DispatchEnd {
+pub enum DispatchEnd {
     /// The gate was not owned at admission: no Prepared and no request. The slot stays spent.
     NotAdmitted,
     /// Withdrawn before any request; no Prepared unless the writer took one.
@@ -139,7 +153,7 @@ impl<F: Future> Future for CountedRequest<F> {
 }
 
 /// A started dispatch. Dropping it stops only the wait: the task still ends the request.
-pub(crate) struct Started {
+pub struct Started {
     grant: SlotGrant,
     envelope: Option<RepostEnvelope>,
     run: Run,
@@ -156,7 +170,7 @@ fn withdrawn(permit: DispatchPermit, reason: &str) -> Started {
 
 /// Under the gate: rechecks, appends the Prepared and polls the request once. The rest of the
 /// request, its 429 waits and its timeout run in one task that holds the lease until it ends.
-pub(crate) async fn start<W: RepostWriter>(
+pub async fn start<W: RepostWriter>(
     writer: &mut W,
     permit: DispatchPermit,
     lease: W::Lease,
@@ -171,6 +185,7 @@ pub(crate) async fn start<W: RepostWriter>(
     let channel = permit.key().unit().channel_id;
     let mut envelope = RepostEnvelope::additional(channel, permit.payload.clone(), ids);
     envelope.output_origin = writer.output_origin(permit.key());
+    envelope.reply_to = writer.reply_to(permit.key());
     {
         use crate::services::discord::outbound::notification_policy as policy;
         envelope.silent =
@@ -234,7 +249,7 @@ pub(crate) async fn start<W: RepostWriter>(
 impl Started {
     /// Waits for the request, records it with the writer and settles the slot in PostgreSQL. A
     /// response that kept the marker also becomes the piece's receipt.
-    pub(crate) async fn finish<W: RepostWriter>(
+    pub async fn finish<W: RepostWriter>(
         self,
         writer: &mut W,
         pool: &PgPool,

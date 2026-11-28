@@ -885,7 +885,7 @@ fn insert_if_absent(fields: &mut Map<String, Value>, key: &str, value: Option<&s
 
 /// Emit scenarios upper-crate stress tests drive (KRX-TS); the unit tests below wrap them.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) mod test_support;
+pub mod test_support;
 
 #[cfg(test)]
 pub(crate) mod tests {

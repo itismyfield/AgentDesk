@@ -1211,7 +1211,7 @@ fn test_only_files(files: &BTreeMap<std::path::PathBuf, String>) -> BTreeSet<std
 
 /// Production text of every non-test `src/**/*.rs`, keyed by repo-relative path.
 fn production_sources() -> BTreeMap<String, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(crate::runtime_layout::REPO_ROOT);
     let mut stack = vec![root.join("src")];
     let mut files = BTreeMap::new();
     while let Some(dir) = stack.pop() {

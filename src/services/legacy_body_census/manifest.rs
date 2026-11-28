@@ -221,7 +221,7 @@ pub(super) fn inspect_with_evidence(
         "error":if pending.is_some() { Value::Null } else { json!("manifest_invalid") }})
 }
 
-#[cfg(all(any(test, feature = "test-support"), unix))]
+#[cfg(all(test, unix))]
 pub(crate) fn packaged_for_test(
     root: &std::path::Path,
     raw: &str,
@@ -231,12 +231,12 @@ pub(crate) fn packaged_for_test(
     packaged(root, raw, binary, head)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn inspect_for_test(raw: &str) -> Value {
     inspect(raw)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn inspect_with_evidence_for_test(
     raw: &str,
     proof: Option<&Value>,

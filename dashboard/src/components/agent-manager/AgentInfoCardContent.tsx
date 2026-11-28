@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { getAgentWarnings, getAgentWorkSummary } from "../../agent-insights";
-import type { Agent, Department, DispatchedSession } from "../../types";
+import type { Agent, DispatchedSession } from "../../types";
 import { localeName } from "../../i18n";
 import { getProviderMeta } from "../../app/providerTheme";
 import AgentPersona from "../AgentPersona";
@@ -10,7 +10,10 @@ import { useKanban } from "../../contexts/KanbanContext";
 import { Button } from "../../kit/free/button-clean";
 import { AlertDialog } from "../../kit/free/dialog-clean";
 import { TextField } from "../../kit/free/text-field-clean";
+import { computePromptCacheStatus } from "../../lib/agentObservability";
+import { useNow } from "../../lib/useNow";
 import { useIsMobile } from "../common/overlay/useBreakpoint";
+import { coerceTimestampMs } from "./kanban-utils";
 import { buildTodoItems, monitorView, type HomeAgentState, type HomeTurn } from "../home/homeModel";
 import { useAgentTurns } from "../home/useHomeData";
 import type { Translator } from "./types";
@@ -58,7 +61,6 @@ interface AgentInfoCardContentProps {
   isKo: boolean;
   locale: string;
   tr: Translator;
-  departments: Department[];
   onAgentUpdated?: () => void;
   /** Buttons on the right of the title row (edit, menu, close). */
   actions?: ReactNode;
@@ -79,7 +81,6 @@ export function AgentInfoCardContent({
   isKo,
   locale,
   tr,
-  departments,
   onAgentUpdated,
   actions,
   titleId,
@@ -108,8 +109,6 @@ export function AgentInfoCardContent({
   const [editingAlias, setEditingAlias] = useState(false);
   const [aliasValue, setAliasValue] = useState(agent.alias ?? "");
   const [savingAlias, setSavingAlias] = useState(false);
-  const [selectedDeptId, setSelectedDeptId] = useState(agent.department_id ?? "");
-  const [savingDept, setSavingDept] = useState(false);
   const configuredProvider = (agent.cli_provider || (agent as { provider?: string }).provider)?.trim() || "claude";
   const [selectedProvider, setSelectedProvider] = useState<string>(configuredProvider);
   const providerCatalog = useProviderCatalog(selectedProvider);
@@ -121,9 +120,8 @@ export function AgentInfoCardContent({
   useEffect(() => {
     setAliasValue(agent.alias ?? "");
     setEditingAlias(false);
-    setSelectedDeptId(agent.department_id ?? "");
     setSelectedProvider((agent.cli_provider || (agent as { provider?: string }).provider)?.trim() || "claude");
-  }, [agent, agent.alias, agent.department_id, agent.cli_provider, agent.id]);
+  }, [agent, agent.alias, agent.cli_provider, agent.id]);
 
   // An override belongs to one Provider, so another Provider (switched here or in the edit form) shows the primary account.
   useEffect(() => {
@@ -147,22 +145,6 @@ export function AgentInfoCardContent({
       console.error("Alias save failed:", e);
     } finally {
       setSavingAlias(false);
-    }
-  };
-
-  const saveDepartment = async (nextDeptId: string) => {
-    const previousDeptId = selectedDeptId;
-    if ((nextDeptId || "") === previousDeptId) return;
-    setSelectedDeptId(nextDeptId);
-    setSavingDept(true);
-    try {
-      await api.updateAgent(agent.id, { department_id: nextDeptId || null });
-      onAgentUpdated?.();
-    } catch (e) {
-      setSelectedDeptId(previousDeptId);
-      console.error("Department save failed:", e);
-    } finally {
-      setSavingDept(false);
     }
   };
 
@@ -249,6 +231,16 @@ export function AgentInfoCardContent({
   const rawMonitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
   const activeProvider = resolveActiveAgentProvider(agent, workingSessions, rawMonitor?.role ?? liveTurn?.provider);
   const monitor = rawMonitor ? { ...rawMonitor, role: activeProvider } : null;
+  const cacheNow = useNow(activeProvider === "claude" ? 5_000 : 60_000);
+  const promptCache = useMemo(() => {
+    const latestSessionMs = live
+      .map((s) => coerceTimestampMs(s.last_seen_at) ?? coerceTimestampMs(s.connected_at))
+      .filter((t): t is number => t !== null && t > 0)
+      .reduce<number | null>((acc, cur) => (acc === null || cur > acc ? cur : acc), null);
+    const turnUpdatedMs = coerceTimestampMs(liveTurn?.updated_at);
+    const lastActivityMs = turnUpdatedMs && latestSessionMs ? Math.max(turnUpdatedMs, latestSessionMs) : turnUpdatedMs ?? latestSessionMs;
+    return computePromptCacheStatus({ provider: activeProvider, lastActivityMs, isWorking: working, nowMs: cacheNow });
+  }, [activeProvider, live, liveTurn?.updated_at, working, cacheNow]);
   const monitorSteps = useMemo(() => turnMonitorSteps(liveTurn, tr), [liveTurn, tr]);
   const confirmStopTurn = async () => {
     setStoppingTurn(true);
@@ -336,12 +328,13 @@ export function AgentInfoCardContent({
         summary={summary}
         monitor={monitor}
         steps={monitorSteps}
+        promptCache={promptCache}
         onOpenLog={openTurns}
         onStopTurn={working ? () => setConfirmStopOpen(true) : undefined}
         stoppingTurn={stoppingTurn}
         stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}
-        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions }).filter((warning) => warning.code !== "unassigned")}
+        warnings={getAgentWarnings(agent, { hasDiscordBindings: shared.bindings ? bindings.length > 0 : undefined, linkedSessions: workingSessions })}
       />
       <AlertDialog
         open={confirmStopOpen}
@@ -356,13 +349,8 @@ export function AgentInfoCardContent({
 
       <AgentRunSettingsSection
         tr={tr}
-        locale={locale}
         fold={fold("run")}
         summary={getProviderMeta(selectedProvider).label}
-        departments={departments}
-        selectedDeptId={selectedDeptId}
-        savingDept={savingDept}
-        onSaveDepartment={(nextDeptId) => void saveDepartment(nextDeptId)}
         selectedProvider={selectedProvider}
         providerOptions={providerCatalog.selectableIds}
         providerLabels={Object.fromEntries(providerCatalog.selectableIds.map((id) => [id, catalogLabel(providerCatalog.entries, id)]))}

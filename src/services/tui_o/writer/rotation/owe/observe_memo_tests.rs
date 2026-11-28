@@ -224,6 +224,8 @@ fn a_reopened_or_replaced_source_never_answers_from_an_older_memo() {
         let snapshot = Snapshot {
             generation: 1,
             registrations: f.history.native_classification_registrations().unwrap(),
+            registry_revisions: Vec::new(),
+            has_open_barrier: false,
         };
         let native = native.as_ref().unwrap();
         let observed = native.observe(channel, source, &origin, snapshot, None);

@@ -134,8 +134,12 @@ async fn scope_direct_implementation_is_created_and_linked_despite_a_slow_origin
     assert_eq!(config.policies.hook_timeout_ms, 5_000);
     config.policies.dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("policies");
     config.policies.hot_reload = false;
-    let engine = crate::engine::PolicyEngine::new_with_pg(&config, Some(pool.clone()))
-        .expect("create policy engine");
+    let engine = crate::engine::PolicyEngine::new_with_pg(
+        &config,
+        Some(pool.clone()),
+        crate::services::discord::health::slot_row_host_refusal,
+    )
+    .expect("create policy engine");
     let hook_engine = engine.clone();
     tokio::task::spawn_blocking(move || {
         crate::kanban::fire_event_hooks_with_backends(

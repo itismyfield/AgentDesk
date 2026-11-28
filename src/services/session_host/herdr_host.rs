@@ -16,7 +16,7 @@ use super::traits::InteractiveSessionHost;
 
 /// Herdr pane host over an injected transport. It exists only with a
 /// validated endpoint; nothing in production constructs one yet.
-pub(crate) struct HerdrHost<T: HerdrTransport> {
+pub struct HerdrHost<T: HerdrTransport> {
     endpoint: HerdrEndpoint,
     transport: T,
     next_id: AtomicU64,
@@ -57,6 +57,11 @@ fn refused(op: &'static str) -> Result<HostMutation, HostError> {
 }
 
 impl<T: HerdrTransport> HerdrHost<T> {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(endpoint: HerdrEndpoint, transport: T) -> Self {
+        Self::new(endpoint, transport)
+    }
+
     pub(crate) fn new(endpoint: HerdrEndpoint, transport: T) -> Self {
         Self {
             endpoint,
@@ -131,6 +136,15 @@ impl<T: HerdrTransport> HerdrHost<T> {
         contract::mutation_result(&call, outcome, pane)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_paste_for_test(
+        &self,
+        session: HostSessionRef<'_>,
+        text: &str,
+    ) -> Result<HostMutation, HostError> {
+        self.send_paste(session, text)
+    }
+
     /// Prompt text as one bracketed paste, as tmux `paste-buffer -p` delivers it; Herdr
     /// does not bracket `send_text` itself. A body holding the end marker is refused.
     pub(crate) fn send_paste(
@@ -147,6 +161,15 @@ impl<T: HerdrTransport> HerdrHost<T> {
         let text = format!("{PASTE_START}{text}{PASTE_END}");
         let pane_id = pane.to_string();
         self.mutate_content(pane, HerdrRequest::PaneSendText { pane_id, text })
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_line_for_test(
+        &self,
+        session: HostSessionRef<'_>,
+        text: &str,
+    ) -> Result<HostMutation, HostError> {
+        self.send_line(session, text)
     }
 
     /// One line and Enter in a single input, so the text never lands without its Enter.

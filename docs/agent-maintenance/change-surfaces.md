@@ -2485,6 +2485,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/codex.rs`
 - `src/services/codex_tmux_wrapper.rs`
 - `src/services/codex_tui/input.rs`
+- `src/services/discord/health.rs`
 - `src/services/discord/health/snapshot.rs`
 - `src/services/discord/health/turn_deliver/inject.rs`
 - `src/services/discord/outbound/turn_output_controller.rs`
@@ -2517,6 +2518,7 @@ Measured giant paths (planning metadata remains manual):
 - `src/services/routines/store.rs`
 - `src/services/session_host/herdr_gate.rs`
 - `src/services/tmux_common.rs`
+- `src/services/tui_o/writer/input_facts/native.rs`
 - `src/services/tui_prompt_dedupe/binding_events.rs`
 - `src/services/tui_prompt_dedupe/runtime_binding/codex_cursor.rs`
 - `src/services/turn_orchestrator.rs`

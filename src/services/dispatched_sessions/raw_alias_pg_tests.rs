@@ -72,7 +72,7 @@ async fn raw_alias_resume_tears_down_current_session_pg() {
     let context = crate::services::session_forwarding::ForwardCallerContext::from(&state);
     let resume = crate::services::session_resume::dispatch_resume_previous(
         &rig.pool,
-        Some(&rig.registry),
+        crate::services::discord::health::resume_ports(Some(&rig.registry)),
         &context,
         None,
         &rig.old,

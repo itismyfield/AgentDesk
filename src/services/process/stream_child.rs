@@ -1,4 +1,4 @@
-pub(crate) mod stream_queue;
+pub mod stream_queue;
 
 use std::io;
 use std::process::{Child, ExitStatus};
@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 
 use crate::services::provider::{CancelToken, CancelWatchdog, cancel_requested};
 
-pub(crate) const EXIT_POLL: Duration = Duration::from_millis(100);
+pub const EXIT_POLL: Duration = Duration::from_millis(100);
 const EXIT_DRAIN: Duration = Duration::from_secs(1);
 
-pub(crate) struct StreamChild {
+pub struct StreamChild {
     pid: u32,
     #[cfg(unix)]
     owned_group: bool,
@@ -21,13 +21,13 @@ pub(crate) struct StreamChild {
 }
 
 impl StreamChild {
-    pub(crate) fn new(
+    pub fn new(
         child: &Child,
         token: Option<Arc<CancelToken>>,
         watchdog: Option<CancelWatchdog>,
     ) -> Self {
         let pid = child.id();
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         stream_queue::test_delay::register_pid(pid);
         Self {
             pid,
@@ -104,13 +104,13 @@ impl StreamChild {
         }
         if self.status.is_some() {
             self.exited_at = Some(Instant::now());
-            #[cfg(all(test, unix))]
+            #[cfg(all(any(test, feature = "test-support"), unix))]
             stream_queue::test_delay::after_exit();
         }
         Ok(())
     }
 
-    pub(crate) fn observe_and_seal<T>(
+    pub fn observe_and_seal<T>(
         &mut self,
         child: &mut Child,
         output: &stream_queue::Receiver<T>,
@@ -122,7 +122,7 @@ impl StreamChild {
         Ok(())
     }
 
-    pub(crate) fn terminate(&mut self, child: &mut Child) {
+    pub fn terminate(&mut self, child: &mut Child) {
         if self.observe_exit(child).is_err() {
             return;
         }
@@ -134,7 +134,7 @@ impl StreamChild {
         }
     }
 
-    pub(crate) fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
+    pub fn wait(&mut self, child: &mut Child) -> io::Result<ExitStatus> {
         loop {
             self.observe_exit(child)?;
             if let Some(status) = self.status {
@@ -148,7 +148,7 @@ impl StreamChild {
     }
 }
 
-pub(crate) fn spawn_reader<T: Send + 'static>(
+pub fn spawn_reader<T: Send + 'static>(
     read: impl FnOnce() -> T + Send + 'static,
 ) -> mpsc::Receiver<T> {
     let (tx, rx) = mpsc::channel();
@@ -159,9 +159,9 @@ pub(crate) fn spawn_reader<T: Send + 'static>(
 }
 
 // Called only after child exit/termination; escaped descendants cannot hold up finalization.
-pub(crate) fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
+pub fn finish_reader<T: Default>(rx: &mpsc::Receiver<T>) -> T {
     rx.recv_timeout(EXIT_DRAIN).unwrap_or_default()
 }
 
 #[cfg(all(any(test, feature = "test-support"), unix))]
-pub(crate) mod test_fixture;
+pub mod test_fixture;

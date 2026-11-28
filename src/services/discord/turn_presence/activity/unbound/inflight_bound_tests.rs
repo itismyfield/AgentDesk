@@ -3,7 +3,7 @@ use super::*;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::turn_presence::activity::tests::{log_turn_source, settled_reason};
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
-use crate::services::platform::tmux::session_inventory::tests::ChannelCommand;
+use crate::services::platform::tmux::session_inventory::test_support::ChannelCommand;
 use std::io::Write;
 use std::sync::atomic::AtomicUsize;
 

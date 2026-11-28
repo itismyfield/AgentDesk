@@ -242,12 +242,12 @@ pub(super) fn lock_writer(root: &Path) -> std::io::Result<File> {
     Ok(file)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn append_line_for_test(file: &mut impl Write, record: &Value) -> std::io::Result<()> {
     append_line(file, record)
 }
 
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub(crate) fn prepare_with_sync_for_test(
     root: &Path,
     boot: &Boot,

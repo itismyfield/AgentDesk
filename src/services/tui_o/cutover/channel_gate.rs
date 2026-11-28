@@ -10,7 +10,7 @@ use crate::services::tui_o::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum IdentityError {
+pub enum IdentityError {
     #[error("writer boot snapshot is unavailable")]
     MissingSnapshot,
     #[error("Discord destination channel is unknown")]
@@ -50,7 +50,7 @@ struct Evidence<'a> {
 /// The raw claim behind [`claim_then_send`]: a pending adoption is released to Legacy, whose send
 /// stays counted until the answer's guard drops. Callers outside it are pinned in the census.
 #[track_caller]
-pub(crate) fn o_owns_tui_output_for_channel_reserving(
+pub fn o_owns_tui_output_for_channel_reserving(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<BodyClaimed, IdentityError> {
@@ -65,7 +65,7 @@ pub(crate) fn o_owns_tui_output_for_channel_reserving(
 
 /// Test builds: the raw claim's answer alone, its send counted as finished at once.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_owns_tui_output_for_channel(
+pub fn o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
@@ -73,7 +73,7 @@ pub(crate) fn o_owns_tui_output_for_channel(
 }
 
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn o_owns_tui_output_for_channel_tmux(
+pub fn o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
@@ -83,7 +83,7 @@ pub(crate) fn o_owns_tui_output_for_channel_tmux(
 }
 
 /// For diagnostics and lifecycle checks that send no body: a pending adoption stays pending.
-pub(crate) fn peek_o_owns_tui_output_for_channel(
+pub fn peek_o_owns_tui_output_for_channel(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
@@ -92,7 +92,7 @@ pub(crate) fn peek_o_owns_tui_output_for_channel(
 
 /// Observe capture eligibility without raising a writer alarm when no body is offered.
 #[cfg(unix)]
-pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
+pub fn peek_o_owns_tui_output_for_channel_quiet(
     channel_id: u64,
     kind: Option<RuntimeHandoffKind>,
 ) -> Result<bool, IdentityError> {
@@ -109,7 +109,7 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_quiet(
     .map(|peeked| peeked.owned)
 }
 
-pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
+pub fn peek_o_owns_tui_output_for_channel_tmux(
     channel_id: u64,
     session: Option<&str>,
 ) -> Result<bool, IdentityError> {
@@ -118,7 +118,7 @@ pub(crate) fn peek_o_owns_tui_output_for_channel_tmux(
 
 /// Where a Legacy body goes, with how the destination's runtime kind is found.
 #[derive(Clone, Copy)]
-pub(crate) struct BodyClaim<'a> {
+pub struct BodyClaim<'a> {
     channel_id: u64,
     kind: KindOf<'a>,
     direct: bool,
@@ -136,7 +136,7 @@ enum KindOf<'a> {
 
 impl<'a> BodyClaim<'a> {
     #[track_caller]
-    pub(crate) fn new(channel_id: u64, kind: Option<RuntimeHandoffKind>) -> Self {
+    pub fn new(channel_id: u64, kind: Option<RuntimeHandoffKind>) -> Self {
         let kind = KindOf::Known(kind);
         Self {
             channel_id,
@@ -150,7 +150,7 @@ impl<'a> BodyClaim<'a> {
     }
 
     #[track_caller]
-    pub(crate) fn tmux(channel_id: u64, session: Option<&'a str>) -> Self {
+    pub fn tmux(channel_id: u64, session: Option<&'a str>) -> Self {
         let kind = KindOf::Tmux(session);
         Self {
             channel_id,
@@ -163,14 +163,14 @@ impl<'a> BodyClaim<'a> {
         }
     }
 
-    pub(crate) fn for_turn(self, nonce: Option<&str>) -> Self {
+    pub fn for_turn(self, nonce: Option<&str>) -> Self {
         Self {
             nonce: nonce.map(channel_policy::first_nonce_id),
             ..self
         }
     }
 
-    pub(crate) fn for_source(self, path: Option<&str>) -> Self {
+    pub fn for_source(self, path: Option<&str>) -> Self {
         Self {
             source: path.map(channel_policy::first_nonce_id),
             ..self
@@ -178,22 +178,22 @@ impl<'a> BodyClaim<'a> {
     }
 
     /// Pin a row's reserved launch before dropping the row used to create this offer.
-    pub(crate) fn for_tmux_session(self, session: Option<&str>) -> Self {
+    pub fn for_tmux_session(self, session: Option<&str>) -> Self {
         let reserved = session
             .is_some_and(|session| super::claude_thread::holds_tmux_body(self.channel_id, session));
         Self { reserved, ..self }
     }
 
-    pub(crate) fn peek(self) -> Result<bool, IdentityError> {
+    pub fn peek(self) -> Result<bool, IdentityError> {
         self.judge(Use::Peek).map(|claimed| claimed.owned)
     }
 
-    pub(crate) fn peek_o_owns_tui_output_for_channel(self) -> Result<bool, IdentityError> {
+    pub fn peek_o_owns_tui_output_for_channel(self) -> Result<bool, IdentityError> {
         self.peek()
     }
 
     /// A caller without a direct gateway; see [`o_keeps_body`].
-    pub(crate) fn direct(self, direct: bool) -> Self {
+    pub fn direct(self, direct: bool) -> Self {
         Self { direct, ..self }
     }
 
@@ -229,7 +229,7 @@ impl<'a> BodyClaim<'a> {
 
 /// An owned channel's body is O's whatever the caller's gateway. A caller without a direct one
 /// alarms the channel when this process's writer is not taking it, as that body waits for O.
-pub(crate) fn o_keeps_body(channel_id: u64, owned: bool, direct: bool) -> bool {
+pub fn o_keeps_body(channel_id: u64, owned: bool, direct: bool) -> bool {
     if owned && !direct && !super::intake_route::accepts(channel_id) {
         let detail = "writer is not taking a body from a caller without a direct gateway".into();
         let alarm = WriterAlarm::Halted { detail };
@@ -240,7 +240,7 @@ pub(crate) fn o_keeps_body(channel_id: u64, owned: bool, direct: bool) -> bool {
 
 /// What became of a body offered to [`claim_then_send`].
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum BodySend<T> {
+pub enum BodySend<T> {
     /// O owns the channel, so nothing was sent.
     OwnedByO,
     Sent(T),
@@ -248,7 +248,7 @@ pub(crate) enum BodySend<T> {
 
 impl<T> BodySend<Result<T, String>> {
     /// The send's own result, with O owning the channel or a held identity as a failed send.
-    pub(crate) fn flatten(sent: Result<Self, IdentityError>) -> Result<T, String> {
+    pub fn flatten(sent: Result<Self, IdentityError>) -> Result<T, String> {
         match sent {
             Ok(Self::Sent(result)) => result,
             Ok(Self::OwnedByO) => Err("O owns this channel's body".to_string()),
@@ -260,7 +260,7 @@ impl<T> BodySend<Result<T, String>> {
 /// The one place a Legacy body ends a pending adoption: claim, then send at once unless O owns
 /// the channel. Callers settle guards and no-ops on a peek first; `None` sends without a claim.
 /// The claimed send stays counted until `send` completes.
-pub(crate) async fn claim_then_send<T, F: std::future::Future<Output = T>>(
+pub async fn claim_then_send<T, F: std::future::Future<Output = T>>(
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
 ) -> Result<BodySend<T>, IdentityError> {
@@ -288,7 +288,7 @@ pub(crate) async fn claim_then_send_held<T, F: std::future::Future<Output = T>>(
 }
 
 #[derive(Clone, Copy, serde::Serialize)]
-pub(crate) enum BodySite {
+pub enum BodySite {
     #[serde(rename = "W01")]
     WatcherTerminal,
     #[serde(rename = "W01a")]
@@ -370,7 +370,7 @@ pub(crate) enum BodySite {
 }
 
 /// Observation remains separate from a Legacy send guard, including unclaimed transports.
-pub(crate) struct BodyTransport {
+pub struct BodyTransport {
     _send: Option<LegacySend>,
     tag: Option<Value>,
 }
@@ -390,13 +390,13 @@ impl BodyTransport {
     }
 
     /// The holder's report of how far its claimed send got; an unclaimed transport has none.
-    pub(crate) fn reached(&self, stage: SendStage) {
+    pub fn reached(&self, stage: SendStage) {
         if let Some(send) = &self._send {
             send.reached(stage);
         }
     }
 
-    pub(crate) async fn run<T>(&self, next: impl std::future::Future<Output = T>) -> T {
+    pub async fn run<T>(&self, next: impl std::future::Future<Output = T>) -> T {
         if self.tag.is_some() {
             census_scope(self.tag.clone(), next).await
         } else {
@@ -405,7 +405,7 @@ impl BodyTransport {
     }
 }
 
-pub(crate) async fn claim_then_send_at<T, F: std::future::Future<Output = T>>(
+pub async fn claim_then_send_at<T, F: std::future::Future<Output = T>>(
     site: BodySite,
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
@@ -415,7 +415,7 @@ pub(crate) async fn claim_then_send_at<T, F: std::future::Future<Output = T>>(
     Ok(sent)
 }
 
-pub(crate) async fn claim_then_send_held_at<T, F: std::future::Future<Output = T>>(
+pub async fn claim_then_send_held_at<T, F: std::future::Future<Output = T>>(
     site: BodySite,
     claim: Option<BodyClaim<'_>>,
     send: impl FnOnce() -> F,
@@ -447,7 +447,7 @@ fn reserve_body(claim: Option<BodyClaim<'_>>) -> Result<BodyClaimed, IdentityErr
 
 /// For a stuck report: the Legacy send counters and oldest open send of the adoption a body
 /// claim on `channel_id` counts against; none when no adoption is selected for it.
-pub(crate) fn legacy_sends_report(channel_id: u64) -> Option<String> {
+pub fn legacy_sends_report(channel_id: u64) -> Option<String> {
     super::test_override::with_channels(|snapshot| {
         let snapshot = snapshot?;
         let candidate = snapshot
@@ -464,7 +464,7 @@ static CLAIMS: std::sync::Mutex<Vec<(u64, bool)>> = std::sync::Mutex::new(Vec::n
 
 /// The body claims judged for `channel` so far, true where O took the body.
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) fn claims_judged(channel: u64) -> Vec<bool> {
+pub fn claims_judged(channel: u64) -> Vec<bool> {
     let claims = CLAIMS
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -502,11 +502,7 @@ fn decide_from(
     let evaluate = |snapshot: Option<&BootChannels>| {
         decide_with_snapshot(snapshot, channel_id, usage, origin, evidence, resolve_kind)
     };
-    #[cfg(test)]
-    let result = super::test_override::with_channels(evaluate);
-    #[cfg(not(test))]
-    let result = evaluate(channel_policy::boot());
-    result.map_err(|error| error.hold(channel_id))
+    super::test_override::with_channels(evaluate).map_err(|error| error.hold(channel_id))
 }
 
 impl IdentityError {

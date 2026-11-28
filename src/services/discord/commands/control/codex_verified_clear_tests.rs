@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::TestEnvVarGuard;
 use crate::services::discord::{mailbox_try_start_turn, make_shared_data_for_tests};
-use crate::services::provider_teardown::tests::test_support::FakeTmux;
+use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_o::{
     shadow::{ShadowProvider, UnitKey, UnitKind},
     store::{Initialized, OStore, StoreConfig, ledger::LedgerEntry},

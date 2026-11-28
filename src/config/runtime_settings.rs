@@ -140,7 +140,7 @@ impl RuntimeSettingsConfig {
             && !self.reset_overrides_on_restart
     }
 
-    pub(crate) fn intake_delivery_sweep_settings(&self) -> (u64, u64, i64) {
+    pub fn intake_delivery_sweep_settings(&self) -> (u64, u64, i64) {
         (
             self.intake_delivery_sweep_dispatched_cutoff_secs
                 .unwrap_or(1800)
