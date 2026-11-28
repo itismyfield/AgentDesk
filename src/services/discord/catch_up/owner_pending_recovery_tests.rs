@@ -401,6 +401,132 @@ async fn catch_up_frontier_stops_before_the_first_input_the_v2_file_still_owes()
     );
 }
 
+fn write_v2_retained_unsent<const Q: usize>(
+    fx: &Fixture,
+    channel: ChannelId,
+    held: MessageId,
+    queued: [MessageId; Q],
+    notice: (&str, bool),
+) -> std::path::PathBuf {
+    use serde_json::json;
+    let path = write_v2_file(fx, channel, queued, [held], []);
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let entry = &mut state["retained_inputs"][0];
+    entry["input"]["phase"] = json!("reserved");
+    entry["reason"] = json!({"kind":"rejected","reason":"start_rejected: fixture"});
+    entry["disposition"] = json!("known_not_sent");
+    entry["notice"] = json!({"kind":notice.0,"enqueued":notice.1});
+    std::fs::write(&path, state.to_string()).unwrap();
+    path
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_frontier_passes_retained_input_after_resend_notice() {
+    use crate::services::discord::catch_up::scan_progress::{self, Origin};
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_467_001);
+    let (before, held, reply) = (id(1, 600), id(2, 450), id(3, 100));
+    fx.seed_checkpoint(channel, before);
+    scan_progress::advance(
+        &fx.provider,
+        channel,
+        before.get(),
+        Origin::ObservedFrontier,
+    );
+    let path = write_v2_retained_unsent(&fx, channel, held, [], ("retained_retry_required", true));
+    let saved = std::fs::read(&path).unwrap();
+    let history = vec![human(channel, held), own_reply(channel, reply)];
+    let api = StrictApi::new(&fx.shared).with_history(channel, history);
+    fx.sweep(&api).await;
+
+    assert_phase1_read(&api, after(before), &[held, reply]);
+    assert_eq!(
+        scan_progress::read(&fx.provider, channel),
+        Some(reply.get())
+    );
+    assert_eq!(fx.surfaces(channel), (Some(reply.get()), Some(reply.get())));
+    assert_eq!(std::fs::read(path).unwrap(), saved);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_frontier_keeps_owed_retained_input_open() {
+    use crate::services::discord::catch_up::scan_progress::{self, Origin};
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_467_002);
+    let (before, held, reply) = (id(1, 600), id(2, 150), id(3, 100));
+    fx.seed_checkpoint(channel, before);
+    scan_progress::advance(
+        &fx.provider,
+        channel,
+        before.get(),
+        Origin::ObservedFrontier,
+    );
+    let versions = [
+        (("retained_retry_required", false), false),
+        (("cleared", true), false),
+        (("retained_retry_required", true), true),
+    ];
+    for (notice, queued) in versions {
+        if queued {
+            write_v2_retained_unsent(&fx, channel, held, [held], notice);
+        } else {
+            write_v2_retained_unsent(&fx, channel, held, [], notice);
+        }
+        let history = vec![human(channel, held), own_reply(channel, reply)];
+        let api = StrictApi::new(&fx.shared).with_history(channel, history);
+        fx.sweep(&api).await;
+
+        assert_phase1_read(&api, after(before), &[held, reply]);
+        assert_eq!(
+            scan_progress::read(&fx.provider, channel),
+            Some(before.get()),
+            "{notice:?}"
+        );
+        assert!(api.enqueue_log().is_empty(), "{notice:?}");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn catch_up_does_not_reinject_told_retained_input_at_300_seconds() {
+    use crate::services::discord::catch_up::clock::CatchUpClock;
+    use crate::services::discord::catch_up::scan_progress::{self, Origin};
+
+    struct At(chrono::DateTime<chrono::Utc>, Instant);
+    impl CatchUpClock for At {
+        fn sample(&self) -> (chrono::DateTime<chrono::Utc>, Instant) {
+            (self.0, self.1)
+        }
+    }
+
+    let fx = Fixture::new().await;
+    let channel = ChannelId::new(8_467_003);
+    let (before, held) = (id(1, 600), id(2, 300));
+    fx.seed_checkpoint(channel, before);
+    scan_progress::advance(
+        &fx.provider,
+        channel,
+        before.get(),
+        Origin::ObservedFrontier,
+    );
+    let path = write_v2_retained_unsent(&fx, channel, held, [], ("retained_retry_required", true));
+    let saved = std::fs::read(&path).unwrap();
+    let clock = At(
+        *held.created_at() + chrono::Duration::seconds(300),
+        Instant::now(),
+    );
+    let api = StrictApi::new(&fx.shared).with_history(channel, vec![human(channel, held)]);
+    run_catch_up_sweep(CatchUpDeps::new(&api, &fx.shared, &fx.provider).with_clock(&clock)).await;
+
+    assert_phase1_read(&api, after(before), &[held]);
+    assert!(
+        api.enqueue_log().is_empty(),
+        "no attempt to reinject the input"
+    );
+    assert_eq!(scan_progress::read(&fx.provider, channel), Some(held.get()));
+    assert_eq!(std::fs::read(path).unwrap(), saved);
+}
+
 /// The owner's retention of a terminal identity, as `tick` drops it.
 const TERMINAL_RETENTION_MS: u64 = 86_400_000;
 

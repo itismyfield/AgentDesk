@@ -19,6 +19,7 @@ use std::sync::{Arc, Mutex};
 mod attached;
 #[path = "owner_input_herdr_busy_operation_tests.rs"]
 mod busy_operation;
+pub(in super::super) use busy_operation::{ObservedRegistration, live_source};
 #[path = "owner_input_herdr_pending_tests.rs"]
 mod pending;
 #[path = "owner_input_herdr_seed_tests.rs"]
@@ -44,22 +45,22 @@ fn codex_ready() -> Value {
 
 /// An owner over a real Herdr rig whose provider runs `execution` under the logical session
 /// `logical`, with one admitted original on `channel`.
-struct HerdrOwner {
-    rig: HerdrRig,
-    runtime: tokio::runtime::Runtime,
+pub(in super::super) struct HerdrOwner {
+    pub(in super::super) rig: HerdrRig,
+    pub(in super::super) runtime: tokio::runtime::Runtime,
     _registry: ChannelMailboxRegistry,
-    mailbox: ChannelMailboxHandle,
+    pub(in super::super) mailbox: ChannelMailboxHandle,
     ticket: AdmissionTicket,
-    original: PendingQueueItem,
-    channel: u64,
-    logical: String,
+    pub(in super::super) original: PendingQueueItem,
+    pub(in super::super) channel: u64,
+    pub(in super::super) logical: String,
     execution: String,
     context: std::path::PathBuf,
-    _dir: tempfile::TempDir,
+    pub(in super::super) _dir: tempfile::TempDir,
 }
 
 impl HerdrOwner {
-    fn start(provider: &str, channel: u64) -> Self {
+    pub(in super::super) fn start(provider: &str, channel: u64) -> Self {
         Self::start_with(provider, channel, PROMPT)
     }
 
@@ -119,7 +120,7 @@ impl HerdrOwner {
     }
 
     /// The recorded execution of the rig's pane, `state` as the turn host read it.
-    fn record(&self, provider: &str, state: HostedState) -> HostedExecution {
+    pub(in super::super) fn record(&self, provider: &str, state: HostedState) -> HostedExecution {
         let owner = HostedOwner {
             provider: provider.into(),
             discord_token_hash: "owned-herdr".into(),
@@ -321,7 +322,7 @@ impl HerdrOwner {
         }
     }
 
-    fn endpoint(&self) -> HerdrLaunchEndpoint {
+    pub(in super::super) fn endpoint(&self) -> HerdrLaunchEndpoint {
         HerdrLaunchEndpoint {
             execution_node: NODE.into(),
             config_key: KEY.into(),
