@@ -76,6 +76,12 @@ pub(super) fn claude_tui_session_is_dead_orphaned(
     )
 }
 
+#[cfg(all(test, unix))]
+thread_local! {
+    pub(super) static AFTER_DEAD_PANE_SAMPLE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// #3105 (codex P2): pure, testable core of the dead/orphaned pane decision (the
 /// caller short-circuits on a live watcher handle first). Conservative so a LIVE
 /// session is NEVER classified dead from a flake: (1) ANY of up to `samples`
@@ -96,6 +102,10 @@ pub(super) fn pane_is_confirmed_dead_orphaned(
             // Any live observation across the window means the session is alive
             // (or recovered from a flake): never evict.
             return false;
+        }
+        #[cfg(test)]
+        if let Some(after_sample) = AFTER_DEAD_PANE_SAMPLE.with_borrow_mut(Option::take) {
+            after_sample();
         }
         if sample + 1 < samples {
             if let Some(delay) = inter_probe_delay {

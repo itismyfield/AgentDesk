@@ -17,6 +17,7 @@ use crate::services::herdr_launch::{
     HerdrLaunchEndpoint, HerdrLaunchHost, HerdrLaunchOutcome, launch_herdr_session,
     unset_herdr_env_before_exec,
 };
+use crate::services::provider::ProviderKind;
 use crate::services::session_host::HerdrPaneEvidence;
 use crate::services::session_host::{EvidenceGap, RestoreResume, ServerWitness};
 use crate::services::session_host::{HerdrMismatch, HerdrUnknown};
@@ -140,6 +141,204 @@ fn claude_herdr_launch_source_survives_two_mirror_passes_pg() {
     assert!(tmux.take_calls().iter().all(|call| !call.contains(logical)));
 }
 
+#[test]
+fn claude_mirror_pass_defers_after_first_sample_when_herdr_launches_pg() {
+    mirror_pass_with_concurrent_herdr_launch(ProviderKind::Claude);
+}
+
+#[test]
+fn codex_mirror_pass_defers_after_first_sample_when_herdr_launches_pg() {
+    mirror_pass_with_concurrent_herdr_launch(ProviderKind::Codex);
+}
+
+fn mirror_pass_with_concurrent_herdr_launch(provider: ProviderKind) {
+    use super::super::rehydration;
+    use crate::services::agent_protocol::RuntimeHandoffKind;
+    use crate::services::discord::host_defer_gate::tests::ScriptedTmux;
+    use std::sync::mpsc::channel;
+    use std::time::Duration;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let mut herdr = Herdr::with_provider("mirror-race", rt, &provider);
+    let name = herdr.logical().to_owned();
+    let tmux = ScriptedTmux::install();
+    tmux.list(&[&name]);
+    let runtime_kind = match provider {
+        ProviderKind::Claude => RuntimeHandoffKind::ClaudeTui,
+        ProviderKind::Codex => RuntimeHandoffKind::CodexTui,
+        _ => unreachable!(),
+    };
+    crate::services::tmux_common::write_tmux_runtime_kind_marker(&name, runtime_kind).unwrap();
+    let binding = |id: &str, path: PathBuf, last_offset| TuiRuntimeBinding {
+        runtime_kind,
+        session_id: Some(id.to_owned()),
+        output_path: path.to_str().unwrap().to_owned(),
+        input_fifo_path: None,
+        relay_output_path: None,
+        last_offset,
+        relay_last_offset: None,
+    };
+    let old_session = uuid();
+    register_tmux_runtime_binding(
+        &name,
+        binding(&old_session, herdr.ingress.transcript(&old_session), 0),
+    );
+    dedupe::register_tmux_channel(&name, herdr.channel);
+    let mut shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(herdr.pool.clone()));
+    Arc::get_mut(&mut shared).unwrap().token_hash = herdr.owner.discord_token_hash.clone();
+    let channel_id = serenity::all::ChannelId::new(herdr.channel);
+    shared
+        .tmux_watchers
+        .restore_owner_channel_for_tmux_session(&name, channel_id);
+    let (sampled, wait_for_sample) = channel();
+    let (resume, wait_for_launch) = channel();
+    let events = binding_events::test_root();
+    let pass = herdr.rt.spawn_blocking({
+        let shared = shared.clone();
+        let provider = provider.clone();
+        move || {
+            binding_events::set_test_root(events.as_deref());
+            rehydration::AFTER_DEAD_PANE_SAMPLE.with_borrow_mut(|hook| {
+                *hook = Some(Box::new(move || {
+                    sampled.send(()).unwrap();
+                    wait_for_launch
+                        .recv_timeout(Duration::from_secs(20))
+                        .unwrap();
+                }));
+            });
+            match provider {
+                ProviderKind::Claude => {
+                    rehydration::rehydrate_existing_claude_tui_bindings(&shared)
+                }
+                ProviderKind::Codex => rehydration::rehydrate_existing_codex_tui_bindings(&shared),
+                _ => unreachable!(),
+            }
+            binding_events::set_test_root(None);
+        }
+    });
+    wait_for_sample
+        .recv_timeout(Duration::from_secs(20))
+        .unwrap();
+    let first = tmux.take_calls();
+    assert_eq!(first.iter().filter(|call| call.contains(&name)).count(), 1);
+
+    let session = uuid();
+    let nonce = herdr.launch(&session);
+    assert!(matches!(
+        crate::services::tmux_common::host_marker::read_host_kind_marker(&name),
+        crate::services::tmux_common::host_marker::HostKindMarker::Known(
+            crate::services::session_host::HostKind::Herdr
+        )
+    ));
+    let path = herdr.ingress.transcript(&session);
+    let before = binding(&session, path, 1);
+    assert!(std::fs::metadata(&before.output_path).unwrap().len() > before.last_offset);
+    if provider == ProviderKind::Claude {
+        assert!(matches!(
+            herdr.launched(&nonce, &session, &herdr.pane(&nonce, |_| {})),
+            HerdrSourceAttach::Published { bound: true, .. }
+        ));
+    }
+    register_tmux_runtime_binding(&name, before.clone());
+    assert_eq!(herdr.bound(), Some(before.clone()));
+    tmux.take_calls();
+    resume.send(()).unwrap();
+    herdr.rt.block_on(pass).unwrap();
+
+    let calls = tmux.take_calls();
+    assert!(
+        calls.iter().all(|call| !call.contains(&name)),
+        "targeted tmux calls after the Herdr marker: {calls:?}"
+    );
+    assert_eq!(herdr.bound(), Some(before));
+    assert_eq!(
+        dedupe::owner_channel_for_tmux_session(&name),
+        Some(herdr.channel)
+    );
+    assert_eq!(
+        shared.tmux_watchers.owner_channel_for_tmux_session(&name),
+        Some(channel_id)
+    );
+}
+
+#[test]
+fn herdr_mirror_evicts_a_prior_tmux_nonce_but_keeps_the_current_herdr_nonce_pg() {
+    use super::super::rehydration::evict_dead_orphaned_claude_tui_mirrors;
+    use crate::db::dispatched_sessions::hosted_execution::test_support::{record, wire};
+    use crate::services::discord::host_defer_gate::tests::ScriptedTmux;
+    use crate::services::tmux_common::spawn_markers::stamp_spawn_markers;
+
+    for same_nonce in [false, true] {
+        let herdr = Herdr::new(if same_nonce {
+            "current-nonce"
+        } else {
+            "prior-nonce"
+        });
+        let tmux = ScriptedTmux::install();
+        let name = herdr.logical();
+        let tmux_nonce = stamp_spawn_markers(name, None).unwrap();
+        let session = uuid();
+        let path = herdr.ingress.transcript(&session);
+        dedupe::register_tmux_channel(name, herdr.channel);
+        register_tmux_runtime_binding(
+            name,
+            crate::services::claude_tui::hook_server::observation_ingress::tests::claude(
+                &path, &session,
+            ),
+        );
+        let before = herdr.bound().unwrap();
+        let log = herdr.log();
+        let event = log.last().unwrap();
+        assert_eq!(event.execution_nonce.as_deref(), Some(tmux_nonce.as_str()));
+        assert_eq!(source_of(event).unwrap().session_id, session);
+        assert!(dedupe::herdr_listing(name).is_none());
+        let herdr_nonce = if same_nonce { tmux_nonce } else { uuid() };
+        herdr
+            .rt
+            .block_on(
+                sqlx::query("UPDATE sessions SET hosted_execution = $1 WHERE channel_id = $2")
+                    .bind(wire(&record(
+                        &herdr.owner,
+                        &herdr_nonce,
+                        HostedState::Bound,
+                    )))
+                    .bind(CHANNEL)
+                    .execute(&herdr.pool),
+            )
+            .unwrap();
+
+        let mut shared = crate::services::discord::make_shared_data_for_tests_with_storage(Some(
+            herdr.pool.clone(),
+        ));
+        Arc::get_mut(&mut shared).unwrap().token_hash = herdr.owner.discord_token_hash.clone();
+        let events = binding_events::test_root();
+        herdr.rt.block_on(async {
+            tokio::task::spawn_blocking(move || {
+                binding_events::set_test_root(events.as_deref());
+                evict_dead_orphaned_claude_tui_mirrors(&shared);
+                binding_events::set_test_root(None);
+            })
+            .await
+            .unwrap();
+        });
+
+        assert_eq!(
+            herdr.bound(),
+            same_nonce.then_some(before),
+            "same_nonce={same_nonce}"
+        );
+        assert_eq!(
+            dedupe::owner_channel_for_tmux_session(name),
+            same_nonce.then_some(herdr.channel)
+        );
+        assert!(tmux.take_calls().iter().all(|call| !call.contains(name)));
+    }
+}
+
 impl Herdr {
     pub(crate) fn new(tag: &str) -> Self {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -150,25 +349,31 @@ impl Herdr {
     }
 
     fn with_runtime(tag: &str, rt: tokio::runtime::Runtime) -> Self {
+        Self::with_provider(tag, rt, &ProviderKind::Claude)
+    }
+
+    fn with_provider(tag: &str, rt: tokio::runtime::Runtime, provider: &ProviderKind) -> Self {
         // The root guard takes the shared env lock before the receiver takes the dedupe lock.
         let root = crate::config::TestRuntimeRootGuard::with_isolated_config();
         let ingress = Ingress::new();
         let mut owner = owner(CHANNEL);
-        owner.logical_key = format!("AgentDesk-claude-p7s-{tag}");
+        owner.provider = provider.as_str().to_owned();
+        owner.logical_key = format!("AgentDesk-{provider}-p7s-{tag}", provider = owner.provider);
         let (db, pool) = rt.block_on(async {
             let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
             let pool = db.connect_and_migrate().await;
             sqlx::query(
                 "INSERT INTO sessions (session_key, provider, status, identity_kind,
                                        discord_token_hash, channel_id, hosted_execution)
-                 VALUES ($1, 'claude', 'idle', 'discord_channel', $2, $3, NULL)",
+                 VALUES ($1, $4, 'idle', 'discord_channel', $2, $3, NULL)",
             )
             .bind(format!(
-                "claude/{}/test-node:{}",
-                owner.discord_token_hash, owner.logical_key
+                "{}/{}/test-node:{}",
+                owner.provider, owner.discord_token_hash, owner.logical_key
             ))
             .bind(&owner.discord_token_hash)
             .bind(CHANNEL)
+            .bind(&owner.provider)
             .execute(&pool)
             .await
             .unwrap();
@@ -193,6 +398,8 @@ impl Herdr {
     /// Launches `session` through the production Herdr launch, with the Claude TUI's own
     /// settings and script preparation; returns the execution nonce.
     pub(crate) fn launch(&mut self, session: &str) -> String {
+        let mut evidence = expected("unused", 100);
+        evidence.binding_provider.clone_from(&self.owner.provider);
         self.launch_on(
             session,
             HerdrLaunchEndpoint {
@@ -203,7 +410,7 @@ impl Herdr {
             },
             Launcher {
                 pane_id: PANE,
-                evidence: expected("unused", 100),
+                evidence,
             },
             None,
         )
@@ -220,6 +427,12 @@ impl Herdr {
         let dir = self.ingress.path("cwd").with_extension("");
         std::fs::create_dir_all(&dir).unwrap();
         let prepare = |prepared: &PreparedIncarnation| -> Result<HerdrLaunchCommand, String> {
+            if self.owner.provider == ProviderKind::Codex.as_str() {
+                return Ok(HerdrLaunchCommand {
+                    cwd: dir.clone(),
+                    command: "true".into(),
+                });
+            }
             let config = crate::services::claude_tui::session::ClaudeTuiLaunchConfig {
                 tmux_session_name: prepared.context.tmux_session.clone(),
                 working_dir: dir.clone(),
