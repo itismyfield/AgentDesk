@@ -1,5 +1,6 @@
 use super::*;
 use crate::services::discord::turn_presence::activity::tests::NoticeReaderProbe;
+use adk_runtime::services::tui_o::turn_mode::TestConfirmation;
 
 fn install_reader(fake: &Arc<Fake>, reader: &Arc<NoticeReaderProbe>) {
     let reader = reader.clone();
