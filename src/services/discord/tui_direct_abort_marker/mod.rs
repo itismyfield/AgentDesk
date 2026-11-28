@@ -238,8 +238,9 @@ pub(in crate::services::discord) use store::{
     set_test_root_override,
 };
 pub(in crate::services::discord) use store::{
-    CommitTombstone, delete, gc_expired_commit_tombstones, load_all, load_for_channel, record,
-    record_commit_tombstone_with_offset, record_commit_tombstone_with_offsets, try_claim_marker,
+    CommitTombstone, delete, gc_expired_commit_tombstones, holds_for_retention, load_all,
+    load_for_channel, record, record_commit_tombstone_with_offset,
+    record_commit_tombstone_with_offsets, try_claim_marker,
 };
 #[cfg(test)]
 use store::{root, tombstone_root};

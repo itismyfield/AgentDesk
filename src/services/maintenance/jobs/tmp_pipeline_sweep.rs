@@ -11,6 +11,10 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 
+#[cfg(unix)]
+mod cgb2;
+mod runtime_results;
+
 use super::worktree_orphan_sweep::{
     collect_live_tmux_pane_paths, has_live_tmux_owner, remove_orphan_worktree,
 };
@@ -99,6 +103,19 @@ pub(crate) fn should_remove(candidate: bool, stale: bool, has_live_owner: bool) 
 /// Sweep stale, unowned pipeline directories from the direct children of
 /// `config.tmp_root`. A failed tmux query leaves every directory untouched.
 pub async fn run(config: Config) -> Result<()> {
+    let dry_run = config.dry_run;
+    #[cfg(unix)]
+    let tmp_root = config.tmp_root.clone();
+    tokio::task::spawn_blocking(move || {
+        if !dry_run && let Some(root) = crate::config::runtime_root() {
+            runtime_results::sweep(&root, SystemTime::now());
+        }
+        #[cfg(unix)]
+        if let Err(error) = cgb2::sweep(&tmp_root, dry_run) {
+            tracing::warn!(%error, "cgb2 retention stopped on filesystem error");
+        }
+    })
+    .await?;
     let report = run_inner(&config).await?;
     tracing::info!(
         target: "maintenance",
@@ -326,6 +343,15 @@ fn bounded_recursive_last_activity_with_limits(
     max_depth: usize,
     max_entries: usize,
 ) -> std::io::Result<ActivityWalk> {
+    bounded_recursive_last_activity_with_probe(dir, max_depth, max_entries, |_, _| true)
+}
+
+fn bounded_recursive_last_activity_with_probe(
+    dir: &Path,
+    max_depth: usize,
+    max_entries: usize,
+    may_remove: impl Fn(&Path, &std::fs::Metadata) -> bool,
+) -> std::io::Result<ActivityWalk> {
     let mut latest = std::fs::symlink_metadata(dir)?.modified()?;
     let mut pending = vec![(dir.to_path_buf(), 0usize)];
     let mut visited_entries = 0usize;
@@ -366,6 +392,12 @@ fn bounded_recursive_last_activity_with_limits(
                     continue;
                 }
             };
+            if !may_remove(&entry.path(), &metadata) {
+                return Ok(ActivityWalk {
+                    last_activity: SystemTime::now(),
+                    traversal_errors,
+                });
+            }
             let modified = match metadata.modified() {
                 Ok(modified) => modified,
                 Err(_) => {
@@ -417,6 +449,123 @@ mod tests {
         is_stale, is_sweep_candidate, should_remove, tmp_root_within_allowed_base,
     };
     use crate::services::maintenance::jobs::worktree_orphan_sweep::has_live_tmux_owner;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_hygiene_tmp_sweep_keeps_fresh_resources_and_live_sockets() {
+        use std::os::unix::net::UnixListener;
+
+        let temp = tempfile::tempdir_in("/tmp").unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", runtime.path());
+        let sockets = temp
+            .path()
+            .join(format!("tmux-{}", unsafe { libc::geteuid() }));
+        fs::create_dir(&sockets).unwrap();
+        fs::set_permissions(
+            &sockets,
+            std::os::unix::fs::PermissionsExt::from_mode(0o700),
+        )
+        .unwrap();
+        let stale = sockets.join("cgb2-1");
+        let live = sockets.join("cgb2-2");
+        let fresh = sockets.join("cgb2-3");
+        drop(UnixListener::bind(&stale).unwrap());
+        let listener = UnixListener::bind(&live).unwrap();
+        drop(UnixListener::bind(&fresh).unwrap());
+        let old = SystemTime::now() - Duration::from_secs(25 * 60 * 60);
+        set_mtime_nofollow(&stale, old);
+        set_mtime_nofollow(&live, old);
+        let stale_dir = temp.path().join("cgb2-fixture");
+        let live_dir = temp.path().join("cgb2-live-fixture");
+        let fresh_dir = temp.path().join("cgb2-recent");
+        for dir in [&stale_dir, &live_dir] {
+            fs::create_dir(dir).unwrap();
+            fs::write(dir.join("receiver.py"), "").unwrap();
+            set_mtime(dir.join("receiver.py"), old);
+        }
+        let nested = live_dir.join(sockets.file_name().unwrap());
+        fs::create_dir(&nested).unwrap();
+        fs::set_permissions(&nested, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        let nested_socket = nested.join("cgb2-4");
+        let nested_listener = UnixListener::bind(&nested_socket).unwrap();
+        set_mtime_nofollow(&nested_socket, old);
+        for path in [&stale_dir, &live_dir, &nested] {
+            set_mtime(path, old);
+        }
+        fs::create_dir(&fresh_dir).unwrap();
+
+        super::run(super::Config {
+            tmp_root: temp.path().into(),
+            ..super::Config::default_runtime()
+        })
+        .await
+        .unwrap();
+
+        assert!(live.exists() && fresh.exists() && fresh_dir.exists() && nested_socket.exists());
+        assert!(!stale.exists() && !stale_dir.exists());
+        drop((listener, nested_listener, guard));
+    }
+
+    #[tokio::test]
+    async fn runtime_hygiene_daily_maintenance_prunes_old_result_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("runtime");
+        let guard = crate::config::TestEnvVarGuard::set_path("AGENTDESK_ROOT_DIR", temp.path());
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("dcserver.pid"), "42").unwrap();
+        let boot = crate::runtime_layout::boot_id::current_boot_id_at(temp.path()).unwrap();
+        let old = SystemTime::now() - Duration::from_secs(8 * 24 * 60 * 60);
+        let mut paths = Vec::new();
+        for name in [
+            "self_hosted_deploy/deploy-release-test.log",
+            "self_hosted_deploy/deploy-release-test.sh",
+            "review_passed/0123456",
+            "doctor/startup/41-1.json",
+            "doctor/startup/41-1.lock",
+            "review_passed/abcdef0",
+        ] {
+            let path = root.join(name);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, "").unwrap();
+            if !name.ends_with("abcdef0") {
+                set_mtime(&path, old);
+            }
+            paths.push(path);
+        }
+        let locked = root.join("doctor/startup/43-1.lock");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&locked)
+            .unwrap();
+        lock.lock().unwrap();
+        set_mtime(&locked, old);
+        let current = root.join(format!("doctor/startup/{boot}.json"));
+        fs::write(&current, "{}").unwrap();
+        set_mtime(&current, old);
+
+        let current_lock = current.with_extension("lock");
+        let producer_lock = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&current_lock)
+            .unwrap();
+        set_mtime(&current_lock, old);
+
+        super::run(super::Config {
+            tmp_root: temp.path().into(),
+            ..super::Config::default_runtime()
+        })
+        .await
+        .unwrap();
+
+        assert_eq!((current.exists(), current_lock.exists()), (true, true));
+        assert!(paths[5].exists() && locked.exists());
+        assert!(paths[..5].iter().all(|path| !path.exists()));
+        drop((producer_lock, lock, guard));
+    }
 
     fn prefixes() -> Vec<String> {
         APPROVED_NAME_PREFIXES
@@ -606,7 +755,7 @@ mod tests {
         let now = SystemTime::now();
         let old = now.checked_sub(Duration::from_secs(2 * 60 * 60)).unwrap();
         set_mtime(&candidate, old);
-        set_symlink_mtime(candidate.join("linked-target"), old);
+        set_mtime_nofollow(candidate.join("linked-target"), old);
         set_mtime(&recent_file, now);
 
         let activity = bounded_recursive_last_activity(&candidate).unwrap();
@@ -622,7 +771,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn set_symlink_mtime(path: impl AsRef<Path>, modified: SystemTime) {
+    fn set_mtime_nofollow(path: impl AsRef<Path>, modified: SystemTime) {
         let modified = FileTime::from_system_time(modified);
         filetime::set_symlink_file_times(path, modified, modified).unwrap();
     }

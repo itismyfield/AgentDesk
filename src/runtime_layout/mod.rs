@@ -285,10 +285,6 @@ pub fn shared_agent_knowledge_path(root: &Path) -> PathBuf {
     resolve_memory_path(root, &load_memory_backend(root).file.sak_path)
 }
 
-pub fn long_term_memory_root(root: &Path) -> PathBuf {
-    resolve_memory_path(root, &load_memory_backend(root).file.ltm_root)
-}
-
 pub fn ensure_runtime_layout(root: &Path) -> Result<LayoutReport, String> {
     fs::create_dir_all(root).map_err(|e| format!("Failed to create '{}': {e}", root.display()))?;
 
@@ -679,11 +675,26 @@ fn remove_link_or_path(path: &Path) -> Result<(), String> {
     }
 }
 
+/// Accept the lowercase hexadecimal Git object names used by review markers.
+pub fn is_valid_commit_sha(commit: &str) -> bool {
+    let len = commit.len();
+    (7..=64).contains(&len)
+        && commit
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
 fn remove_file_idempotent(path: &Path) -> Result<(), String> {
+    remove_file_if_present(path)
+        .map(|_| ())
+        .map_err(|error| format!("Failed to remove '{}': {error}", path.display()))
+}
+
+pub fn remove_file_if_present(path: &Path) -> std::io::Result<bool> {
     match fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
@@ -699,10 +710,16 @@ fn remove_dir_idempotent(path: &Path) -> Result<(), String> {
 }
 
 fn remove_dir_all_idempotent(path: &Path) -> Result<(), String> {
+    remove_dir_all_if_present(path)
+        .map(|_| ())
+        .map_err(|error| format!("Failed to remove '{}': {error}", path.display()))
+}
+
+pub fn remove_dir_all_if_present(path: &Path) -> std::io::Result<bool> {
     match fs::remove_dir_all(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Failed to remove '{}': {error}", path.display())),
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 
