@@ -221,6 +221,11 @@ export function AgentInfoCardContent({
   const effectiveState: HomeAgentState | undefined = workingSessions.length > 0 ? "working" : state;
   const ownTurns = useAgentTurns(turns || isMobile || !working ? [] : [agent.id]);
   const liveTurn = (turns ?? ownTurns).get(agent.id);
+  const canStopTurn = Boolean(
+    agent.status === "working"
+      || (liveTurn && liveTurn.status !== "idle")
+      || workingSessions.some((s) => !s.inferred_linked_agent),
+  );
   const summary = getAgentWorkSummary(agent, { linkedSessions: workingSessions });
   const rawMonitor = isMobile ? null : monitorView(liveTurn, { agent, state: working ? "working" : "resting", info: summary, seenAt: null }, tr);
   const activeProvider = resolveActiveAgentProvider(agent, workingSessions, rawMonitor?.role ?? liveTurn?.provider);
@@ -382,7 +387,7 @@ export function AgentInfoCardContent({
         resolveParent={resolveParent}
         promptCache={promptCache}
         onOpenLog={openTurns}
-        onStopTurn={working ? () => setConfirmStopOpen(true) : undefined}
+        onStopTurn={working && canStopTurn ? () => setConfirmStopOpen(true) : undefined}
         stoppingTurn={stoppingTurn}
         stopFeedback={stopFeedback}
         reasons={pageReasons ?? ownReasons}

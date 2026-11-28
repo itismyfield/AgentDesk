@@ -3,90 +3,64 @@ import * as api from "../../api";
 import type { AgentSkill, DiscordBinding } from "../../api/client";
 import { ApiRequestError } from "../../api/httpClient";
 import { getProviderAuthProfiles } from "../../api/providers";
-import { withInferredLinkedAgents } from "../../contexts/session-overlay";
+import { mergeRawSessions, withInferredLinkedAgents, type RawSessionInput } from "../../contexts/session-overlay";
+import { pollWhileVisible } from "../../lib/pollWhileVisible";
 import type { DispatchedSession, WSEvent } from "../../types";
 import type { ProviderAuthProfilesResponse } from "../settings/SettingsProvidersModel";
 import { splitLinkedSessions } from "./AgentInfoCardModel";
 import { isDiscordSnowflake } from "./discord-routing";
-import { coerceTimestampMs } from "./kanban-utils";
 
 /** A read still in flight (undefined), failed (null) or done. */
 export type Read<T> = T | null | undefined;
 
 const settle = <T,>(promise: Promise<T>, set: (value: T | null) => void) => promise.then(set, () => set(null));
 
-interface RawSessionState {
+const DETAIL_SESSION_POLL_MS = 30_000;
+
+interface RestSessionSnapshot {
   agentSessions: DispatchedSession[];
   globalSessions: DispatchedSession[];
-  wsKeys: Set<string>;
 }
 
-const sessionIdentityKey = (session: Pick<DispatchedSession, "id" | "session_key">): string =>
-  session.session_key?.trim() || (session.id != null ? String(session.id).trim() : "");
+interface WsOverlayEntry {
+  seq: number;
+  eventType: "dispatched_session_new" | "dispatched_session_update" | "dispatched_session_disconnect";
+  id: string | null;
+  sessionKey: string | null;
+  session?: DispatchedSession;
+}
 
-function sameSession(
-  left: Pick<DispatchedSession, "id" | "session_key">,
-  right: { id?: string | number | null; session_key?: string | null },
+const trimOrNull = (value: unknown): string | null => {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+};
+
+function matchesSessionTarget(
+  left: { id?: unknown; session_key?: string | null },
+  right: { id?: unknown; session_key?: string | null },
 ): boolean {
-  const leftKey = left.session_key?.trim();
-  const rightKey = right.session_key?.trim();
+  const leftKey = trimOrNull(left.session_key);
+  const rightKey = trimOrNull(right.session_key);
   if (leftKey && rightKey && leftKey === rightKey) return true;
-  const leftId = left.id != null ? String(left.id).trim() : "";
-  const rightId = right.id != null ? String(right.id).trim() : "";
+  const leftId = trimOrNull(left.id);
+  const rightId = trimOrNull(right.id);
   return Boolean(leftId && rightId && leftId === rightId);
 }
 
-function mergeSessionPair(base: DispatchedSession, patch: Partial<DispatchedSession>): DispatchedSession {
-  const next: DispatchedSession = { ...base };
-  for (const [key, value] of Object.entries(patch) as Array<[keyof DispatchedSession, unknown]>) {
-    if (value !== undefined && (value !== null || next[key] == null || key === "session_info" || key === "active_dispatch_id")) {
-      (next as unknown as Record<string, unknown>)[key] = value;
+function resolveOverlayMapKey(
+  overlay: Map<string, WsOverlayEntry>,
+  target: { id?: unknown; session_key?: string | null },
+): string | null {
+  for (const [key, entry] of overlay.entries()) {
+    if (matchesSessionTarget({ id: entry.id, session_key: entry.sessionKey }, target)) {
+      return key;
     }
   }
-  next.id = String(patch.id ?? base.id);
-  return next;
-}
-
-function applySessionWsEvent(state: RawSessionState, event: WSEvent): RawSessionState {
-  if (event.type === "dispatched_session_new" || event.type === "dispatched_session_update") {
-    const raw = event.payload as DispatchedSession | undefined;
-    if (!raw || (raw.id == null && !raw.session_key)) return state;
-    const incoming: DispatchedSession = { ...raw, id: String(raw.id ?? raw.session_key) };
-    const wsKeys = new Set(state.wsKeys);
-    const key = sessionIdentityKey(incoming);
-    if (key) wsKeys.add(key);
-    let matchedGlobal = false;
-    const nextGlobal = state.globalSessions.map((entry) => {
-      if (!sameSession(entry, incoming)) return entry;
-      matchedGlobal = true;
-      return mergeSessionPair(entry, incoming);
-    });
-    const nextAgent = state.agentSessions.map((entry) =>
-      sameSession(entry, incoming) ? mergeSessionPair(entry, incoming) : entry,
-    );
-    return {
-      agentSessions: nextAgent,
-      globalSessions: matchedGlobal ? nextGlobal : [incoming, ...nextGlobal],
-      wsKeys,
-    };
-  }
-  if (event.type === "dispatched_session_disconnect") {
-    const payload = event.payload as { id?: string | number; session_key?: string } | undefined;
-    if (!payload) return state;
-    const wsKeys = new Set(state.wsKeys);
-    const disconnectIfMatch = (entry: DispatchedSession): DispatchedSession => {
-      if (!sameSession(entry, payload)) return entry;
-      const key = sessionIdentityKey(entry);
-      if (key) wsKeys.add(key);
-      return { ...entry, status: "disconnected" as const };
-    };
-    return {
-      agentSessions: state.agentSessions.map(disconnectIfMatch),
-      globalSessions: state.globalSessions.map(disconnectIfMatch),
-      wsKeys,
-    };
-  }
-  return state;
+  return trimOrNull(target.session_key) ?? trimOrNull(target.id);
 }
 
 /** What every agent's detail shares: all Discord routes, Provider accounts and 30-day skill calls. */
@@ -144,61 +118,124 @@ function resolveGlobalSessionsReader(): typeof api.getDispatchedSessions | null 
   }
 }
 
-/** The agent's own reads when its detail opens: sessions (explicit + inferred thread sessions, live WS-synced) and skills. */
+/** The agent's own reads when its detail opens: sessions (raw merge -> thread inference -> owner filter, WS + poll/focus synced) and skills. */
 export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBinding[]>) {
-  const [rawSessions, setRawSessions] = useState<Read<RawSessionState>>();
+  const [restSnapshot, setRestSnapshot] = useState<Read<RestSessionSnapshot>>();
+  const [overlayTick, setOverlayTick] = useState(0);
   const [skills, setSkills] = useState<Read<{ skills: AgentSkill[]; sharedSkills: AgentSkill[] }>>();
   const [sessNonce, setSessNonce] = useState(0);
   const [skillNonce, setSkillNonce] = useState(0);
-  const bufferedWsEvents = useRef<WSEvent[]>([]);
+
+  const wsOverlayRef = useRef<Map<string, WsOverlayEntry>>(new Map());
+  const mutationSeqRef = useRef(0);
+  const requestSeqRef = useRef(0);
+  const appliedRequestSeqRef = useRef(0);
+  const prevAgentIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let active = true;
-    bufferedWsEvents.current = [];
-    setRawSessions(undefined);
-    const readGlobal = resolveGlobalSessionsReader();
-    const globalRead = readGlobal
-      ? readGlobal(true, { suppressErrorToast: true })
-      : Promise.resolve([] as DispatchedSession[]);
-    void Promise.allSettled([api.getAgentDispatchedSessions(agentId), globalRead]).then(([agentRes, globalRes]) => {
-      if (!active) return;
-      if (agentRes.status === "rejected" && (!readGlobal || globalRes.status === "rejected")) {
-        setRawSessions(null);
-        return;
+    if (prevAgentIdRef.current !== agentId) {
+      prevAgentIdRef.current = agentId;
+      wsOverlayRef.current.clear();
+    }
+    appliedRequestSeqRef.current = requestSeqRef.current;
+
+    const loadSessions = (background: boolean) => {
+      const requestSeq = ++requestSeqRef.current;
+      const fetchStartSeq = mutationSeqRef.current;
+      if (!background) {
+        setRestSnapshot(undefined);
       }
-      let next: RawSessionState = {
-        agentSessions: agentRes.status === "fulfilled" ? agentRes.value : [],
-        globalSessions: globalRes.status === "fulfilled" ? globalRes.value : [],
-        wsKeys: new Set<string>(),
-      };
-      for (const event of bufferedWsEvents.current) {
-        next = applySessionWsEvent(next, event);
+      const readGlobal = resolveGlobalSessionsReader();
+      const globalRead = readGlobal
+        ? readGlobal(true, { suppressErrorToast: true, maxRetries: 0 })
+        : Promise.resolve([] as DispatchedSession[]);
+
+      void Promise.allSettled([api.getAgentDispatchedSessions(agentId), globalRead]).then(([agentRes, globalRes]) => {
+        if (!active || requestSeq < appliedRequestSeqRef.current) return;
+        if (background) {
+          if (agentRes.status !== "fulfilled" || globalRes.status !== "fulfilled") return;
+        } else if (agentRes.status === "rejected" && (!readGlobal || globalRes.status === "rejected")) {
+          appliedRequestSeqRef.current = requestSeq;
+          setRestSnapshot(null);
+          return;
+        }
+
+        appliedRequestSeqRef.current = requestSeq;
+        for (const [key, entry] of wsOverlayRef.current.entries()) {
+          if (entry.seq <= fetchStartSeq) {
+            wsOverlayRef.current.delete(key);
+          }
+        }
+        setRestSnapshot({
+          agentSessions: agentRes.status === "fulfilled" ? agentRes.value : [],
+          globalSessions: globalRes.status === "fulfilled" ? globalRes.value : [],
+        });
+      });
+    };
+
+    loadSessions(false);
+    const stopPoll = pollWhileVisible(() => loadSessions(true), DETAIL_SESSION_POLL_MS);
+    const onFocus = () => loadSessions(true);
+    if (typeof window !== "undefined") {
+      window.addEventListener("focus", onFocus);
+    }
+    return () => {
+      active = false;
+      stopPoll();
+      if (typeof window !== "undefined") {
+        window.removeEventListener("focus", onFocus);
       }
-      bufferedWsEvents.current = [];
-      setRawSessions(next);
-    });
-    return () => { active = false; };
+    };
   }, [agentId, sessNonce]);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
     const onWs = (e: Event) => {
       const detail = (e as CustomEvent<WSEvent>).detail;
-      if (
-        !detail
-        || (detail.type !== "dispatched_session_new"
-          && detail.type !== "dispatched_session_update"
-          && detail.type !== "dispatched_session_disconnect")
-      ) {
+      if (!detail) return;
+      if (detail.type === "dispatched_session_new" || detail.type === "dispatched_session_update") {
+        const raw = detail.payload as DispatchedSession | undefined;
+        if (!raw || (raw.id == null && !raw.session_key)) return;
+        const key = resolveOverlayMapKey(wsOverlayRef.current, raw);
+        if (!key) return;
+        const seq = ++mutationSeqRef.current;
+        const prev = wsOverlayRef.current.get(key)?.session;
+        const incoming: RawSessionInput = {
+          ...raw,
+          id: trimOrNull(raw.id) ?? prev?.id ?? key,
+          inferred_linked_agent: false,
+          __authoritySeq: seq,
+        };
+        const mergedSession = prev
+          ? mergeRawSessions([{ ...prev, inferred_linked_agent: false, __authoritySeq: 0 }, incoming])[0]
+          : mergeRawSessions([incoming])[0];
+        wsOverlayRef.current.set(key, {
+          seq,
+          eventType: detail.type,
+          id: trimOrNull(mergedSession.id),
+          sessionKey: trimOrNull(mergedSession.session_key),
+          session: mergedSession,
+        });
+        setOverlayTick((n) => n + 1);
         return;
       }
-      setRawSessions((current) => {
-        if (!current) {
-          if (current === undefined) bufferedWsEvents.current.push(detail);
-          return current;
-        }
-        return applySessionWsEvent(current, detail);
-      });
+      if (detail.type === "dispatched_session_disconnect") {
+        const payload = detail.payload as { id?: string | number; session_key?: string } | undefined;
+        if (!payload || (payload.id == null && !payload.session_key)) return;
+        const key = resolveOverlayMapKey(wsOverlayRef.current, payload);
+        if (!key) return;
+        const seq = ++mutationSeqRef.current;
+        const prev = wsOverlayRef.current.get(key);
+        wsOverlayRef.current.set(key, {
+          seq,
+          eventType: "dispatched_session_disconnect",
+          id: trimOrNull(payload.id) ?? prev?.id ?? null,
+          sessionKey: trimOrNull(payload.session_key) ?? prev?.sessionKey ?? null,
+          session: prev?.session ? { ...prev.session, status: "disconnected" } : undefined,
+        });
+        setOverlayTick((n) => n + 1);
+      }
     };
     window.addEventListener("pcd-ws-event", onWs);
     return () => window.removeEventListener("pcd-ws-event", onWs);
@@ -212,49 +249,56 @@ export function useAgentDetailData(agentId: string, bindings?: Read<DiscordBindi
   }, [agentId, skillNonce]);
 
   const sessions = useMemo(() => {
-    if (rawSessions === undefined) return undefined;
-    if (rawSessions === null) return null;
-    const normalizedAgent = rawSessions.agentSessions.map((s) => ({
-      ...s,
-      id: String(s.id ?? s.session_key ?? ""),
-      linked_agent_id: s.linked_agent_id ?? s.agent_id ?? agentId,
-    }));
-    const normalizedGlobal = rawSessions.globalSessions.map((s) => ({
-      ...s,
-      id: String(s.id ?? s.session_key ?? ""),
-    }));
-    const inferredAll = withInferredLinkedAgents([...normalizedAgent, ...normalizedGlobal], bindings ?? null);
-    const agentSlice = inferredAll.slice(0, normalizedAgent.length);
-    const globalSlice = inferredAll.slice(normalizedAgent.length);
+    void overlayTick;
+    if (restSnapshot === undefined) return undefined;
+    if (restSnapshot === null) return null;
 
-    const byKey = new Map<string, DispatchedSession>();
-    for (const session of agentSlice) {
-      const key = sessionIdentityKey(session);
-      if (key) byKey.set(key, session);
+    const rawAgent: RawSessionInput[] = restSnapshot.agentSessions.map((s) => {
+      const hasOwnerField = s.linked_agent_id !== undefined || s.agent_id !== undefined;
+      const explicitOwner = hasOwnerField
+        ? (trimOrNull(s.linked_agent_id) ?? trimOrNull(s.agent_id))
+        : agentId;
+      return {
+        ...s,
+        id: trimOrNull(s.id) ?? trimOrNull(s.session_key) ?? "",
+        linked_agent_id: explicitOwner,
+        inferred_linked_agent: false,
+        __authoritySeq: 0,
+      };
+    });
+
+    const rawGlobal: RawSessionInput[] = restSnapshot.globalSessions.map((s) => ({
+      ...s,
+      id: trimOrNull(s.id) ?? trimOrNull(s.session_key) ?? "",
+      inferred_linked_agent: false,
+      __authoritySeq: 0,
+    }));
+
+    const overlayEntries = Array.from(wsOverlayRef.current.values()).sort((a, b) => a.seq - b.seq);
+    const wsUpserts: RawSessionInput[] = overlayEntries
+      .filter((entry) => entry.session !== undefined)
+      .map((entry) => ({
+        ...entry.session!,
+        inferred_linked_agent: false,
+        __authoritySeq: entry.seq,
+      }));
+
+    let mergedRaw = mergeRawSessions([...rawAgent, ...rawGlobal, ...wsUpserts]);
+
+    const disconnects = overlayEntries.filter((entry) => entry.eventType === "dispatched_session_disconnect");
+    if (disconnects.length > 0) {
+      mergedRaw = mergedRaw.map((session) => {
+        const hit = disconnects.some((disc) =>
+          matchesSessionTarget(session, { id: disc.id, session_key: disc.sessionKey }),
+        );
+        return hit ? { ...session, status: "disconnected" as const } : session;
+      });
     }
-    for (const session of globalSlice) {
-      const owner = session.linked_agent_id ?? session.agent_id ?? null;
-      if (owner !== agentId) continue;
-      const key = sessionIdentityKey(session);
-      if (!key) continue;
-      const existing = byKey.get(key);
-      if (!existing) {
-        byKey.set(key, session);
-        continue;
-      }
-      const isWsFresh = rawSessions.wsKeys.has(key);
-      const existingTs =
-        coerceTimestampMs(existing.last_seen_at ?? (existing as { last_heartbeat?: string | null }).last_heartbeat)
-        ?? coerceTimestampMs(existing.connected_at)
-        ?? 0;
-      const globalTs =
-        coerceTimestampMs(session.last_seen_at ?? (session as { last_heartbeat?: string | null }).last_heartbeat)
-        ?? coerceTimestampMs(session.connected_at)
-        ?? 0;
-      byKey.set(key, isWsFresh || globalTs >= existingTs ? mergeSessionPair(existing, session) : mergeSessionPair(session, existing));
-    }
-    return splitLinkedSessions(Array.from(byKey.values()));
-  }, [rawSessions, agentId, bindings]);
+
+    const projected = withInferredLinkedAgents(mergedRaw, bindings ?? null);
+    const owned = projected.filter((session) => session.linked_agent_id === agentId);
+    return splitLinkedSessions(owned);
+  }, [restSnapshot, overlayTick, agentId, bindings]);
 
   const retrySessions = useCallback(() => setSessNonce((n) => n + 1), []);
   const retrySkills = useCallback(() => setSkillNonce((n) => n + 1), []);

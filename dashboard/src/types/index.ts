@@ -355,6 +355,7 @@ export interface DispatchedSession {
   department_id: string | null;
   linked_agent_id: string | null;
   agent_id?: string | null;
+  inferred_linked_agent?: boolean;
   provider: CliProvider;
   model: string | null;
   status: DispatchedSessionStatus;

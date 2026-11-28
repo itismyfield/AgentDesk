@@ -11,6 +11,7 @@ import {
   buildEffectiveSessionAgentMap,
   extractParentChannelSlugFromThreadSessionKey,
   isThreadSession,
+  mergeRawSessions,
   stripThreadSuffixFromSessionKey,
   withInferredLinkedAgents,
 } from "../src/contexts/session-overlay";
@@ -57,19 +58,37 @@ const ko = (k: string, _en?: string) => k;
 const en = (_k: string, e: string) => e;
 const NOW = Date.now();
 
-const AGENT_ADK: Agent = {
-  id: "project-agentdesk",
-  name: "AgentDesk",
-  name_ko: "AgentDesk",
+const AGENT_ALPHA: Agent = {
+  id: "agent-alpha",
+  name: "Alpha Agent",
+  name_ko: "알파 에이전트",
   department_id: null,
   cli_provider: "claude",
   avatar_emoji: "🤖",
   personality: null,
   status: "idle",
-  stats_tasks_done: 24,
-  stats_tokens: 5000,
+  stats_tasks_done: 14,
+  stats_tokens: 2400,
   created_at: NOW - 86_400_000,
 };
+
+const AGENT_BETA: Agent = {
+  id: "agent-beta",
+  name: "Beta Agent",
+  name_ko: "베타 에이전트",
+  department_id: null,
+  cli_provider: "codex",
+  avatar_emoji: "🛠️",
+  personality: null,
+  status: "idle",
+  stats_tasks_done: 8,
+  stats_tokens: 1200,
+  created_at: NOW - 86_400_000,
+};
+
+const ALPHA_MAIN_KEY = "claude/discord_fixture01/fixture-host-a:AgentDesk-claude-alpha-chan";
+const ALPHA_THREAD_KEY = "claude/discord_fixture01/fixture-host-a:AgentDesk-claude-alpha-chan-t1000000000000000002";
+const ALPHA_SECOND_THREAD_KEY = "codex/discord_fixture01/fixture-host-a:AgentDesk-codex-alpha-chan-t1000000000000000003";
 
 function makeSession(overrides: Partial<DispatchedSession> & Pick<DispatchedSession, "id" | "session_key">): DispatchedSession {
   return {
@@ -87,6 +106,16 @@ function makeSession(overrides: Partial<DispatchedSession> & Pick<DispatchedSess
     thread_channel_id: null,
     ...overrides,
   };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 let root: Root;
@@ -135,29 +164,28 @@ afterEach(() => {
 
 describe("Agent Detail duplicate avatar removal & Discord thread session surfacing", () => {
   it("renders [data-bot-avatar] only ONCE in the 44px header and hides .aui-agent-monitor-mark inside AgentMonitor", async () => {
-    const mainKey = "claude/discord_1/MacBook-Pro-14:AgentDesk-claude-adk-cc";
     const mainSession = makeSession({
       id: "sess-main",
-      session_key: mainKey,
-      linked_agent_id: "project-agentdesk",
+      session_key: ALPHA_MAIN_KEY,
+      linked_agent_id: "agent-alpha",
       status: "turn_active",
-      session_info: "cargo test 실행 중",
+      session_info: "Synthetic main turn summary",
     });
-    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([mainSession]);
-    vi.mocked(api.getDispatchedSessions).mockResolvedValueOnce([mainSession]);
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValue([mainSession]);
+    vi.mocked(api.getDispatchedSessions).mockResolvedValue([mainSession]);
 
     const turns = new Map<string, HomeTurn>([
       [
-        "project-agentdesk",
+        "agent-alpha",
         {
           status: "working",
-          session_key: mainKey,
+          session_key: ALPHA_MAIN_KEY,
           started_at: new Date(NOW - 12_000).toISOString(),
           updated_at: new Date(NOW - 1_000).toISOString(),
           provider: "claude",
-          current_tool_line: "Bash: cargo test",
+          current_tool_line: "Bash: npm test",
           tool_events: [
-            { kind: "tool", status: "running", tool_name: "Bash", summary: "Run tests", line: "cargo test" },
+            { kind: "tool", status: "running", tool_name: "Bash", summary: "Run unit suite", line: "npm test" },
           ],
         },
       ],
@@ -167,7 +195,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
       root.render(
         <MemoryRouter>
           <AgentInfoCardContent
-            agent={{ ...AGENT_ADK, status: "working" }}
+            agent={{ ...AGENT_ALPHA, status: "working" }}
             state="working"
             isKo
             locale="ko"
@@ -192,99 +220,320 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     expect(container.querySelector('[data-testid="agent-now-sessions"]')).toBeNull();
   });
 
-  it("infers parent agent for unlinked Discord thread sessions across session-overlay and homeModel without orphan pseudo-agents", () => {
+  it("infers parent agent for unlinked Discord thread sessions with namespace-aware slug isolation and no orphan pseudo-agents", () => {
     const mainSession = makeSession({
       id: "s-main",
-      session_key: "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc",
-      linked_agent_id: "project-agentdesk",
+      session_key: ALPHA_MAIN_KEY,
+      linked_agent_id: "agent-alpha",
       status: "idle",
       last_seen_at: NOW - 120_000,
     });
     const threadSession = makeSession({
       id: "s-thread",
-      session_key: "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc-t1570308839910412348",
+      session_key: ALPHA_THREAD_KEY,
       linked_agent_id: null,
-      thread_channel_id: "1570308839910412348",
+      thread_channel_id: "1000000000000000002",
       status: "turn_active",
-      session_info: "지금 줄서있는 빌드/ci는 이제 없어?",
+      session_info: "Synthetic thread task summary",
       last_seen_at: NOW - 2_000,
     });
 
     expect(isThreadSession(mainSession)).toBe(false);
     expect(isThreadSession(threadSession)).toBe(true);
     expect(
-      stripThreadSuffixFromSessionKey(`${threadSession.session_key}:child:toolu_01Alpha`),
-    ).toBe("claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc");
+      stripThreadSuffixFromSessionKey(`${threadSession.session_key}:child:toolu_01Fixture`),
+    ).toBe(ALPHA_MAIN_KEY);
     expect(
-      extractParentChannelSlugFromThreadSessionKey(`${threadSession.session_key}:child:toolu_01Alpha`),
-    ).toBe("adk-cc");
+      extractParentChannelSlugFromThreadSessionKey(`${threadSession.session_key}:child:toolu_01Fixture`),
+    ).toBe("alpha-chan");
     expect(extractParentChannelSlugFromThreadSessionKey(mainSession.session_key)).toBeNull();
 
     const agentMap = buildEffectiveSessionAgentMap([mainSession, threadSession]);
-    expect(agentMap.get("s-thread")).toBe("project-agentdesk");
+    expect(agentMap.get("s-thread")).toBe("agent-alpha");
+
+    // Namespace-aware slug isolation (P2-1): same channel slug in two distinct namespaces maps to each namespace's own agent
+    const nsBetaMain = makeSession({
+      id: "s-beta-main",
+      session_key: "claude/discord_fixture02/fixture-host-b:AgentDesk-claude-shared-chan",
+      linked_agent_id: "agent-beta",
+      status: "idle",
+    });
+    const nsAlphaMain = makeSession({
+      id: "s-alpha-shared",
+      session_key: "claude/discord_fixture01/fixture-host-a:AgentDesk-claude-shared-chan",
+      linked_agent_id: "agent-alpha",
+      status: "idle",
+    });
+    const nsBetaThreadDiffHostKey = makeSession({
+      id: "s-beta-thread",
+      session_key: "claude/discord_fixture02/fixture-host-b:tmux:AgentDesk-claude-shared-chan-t1000000000000000005",
+      linked_agent_id: null,
+      thread_channel_id: "1000000000000000005",
+      status: "turn_active",
+    });
+    const nsThirdUnknownThread = makeSession({
+      id: "s-third-thread",
+      session_key: "claude/discord_fixture03/fixture-host-c:AgentDesk-claude-shared-chan-t1000000000000000006",
+      linked_agent_id: null,
+      thread_channel_id: "1000000000000000006",
+      status: "turn_active",
+    });
+    const nsMap = buildEffectiveSessionAgentMap([
+      nsAlphaMain,
+      nsBetaMain,
+      nsBetaThreadDiffHostKey,
+      nsThirdUnknownThread,
+    ]);
+    expect(nsMap.get("s-beta-thread")).toBe("agent-beta");
+    expect(nsMap.get("s-third-thread")).toBeUndefined();
 
     // Binding hint fallback when sibling parent session is absent
     const fromBinding = withInferredLinkedAgents([threadSession], [
-      { agentId: "project-agentdesk", channelId: "1490000000000000001", channelName: "#adk-cc" },
+      { agentId: "agent-alpha", channelId: "1000000000000000001", channelName: "#alpha-chan" },
     ]);
-    expect(fromBinding[0].linked_agent_id).toBe("project-agentdesk");
+    expect(fromBinding[0].linked_agent_id).toBe("agent-alpha");
+    expect(fromBinding[0].inferred_linked_agent).toBe(true);
 
-    const overlaid = applySessionOverlay([AGENT_ADK], [mainSession, threadSession]);
+    const overlaid = applySessionOverlay([AGENT_ALPHA], [mainSession, threadSession]);
     expect(overlaid[0]).toMatchObject({
-      id: "project-agentdesk",
+      id: "agent-alpha",
       status: "working",
       agentdesk_working_count: 1,
-      session_info: "지금 줄서있는 빌드/ci는 이제 없어?",
-      current_thread_channel_id: "1570308839910412348",
+      session_info: "Synthetic thread task summary",
+      current_thread_channel_id: "1000000000000000002",
       activity_source: "agentdesk",
     });
 
-    const classified = classifyAgents([AGENT_ADK], [mainSession, threadSession], false);
+    const classified = classifyAgents([AGENT_ALPHA], [mainSession, threadSession], false);
     expect(classified).toHaveLength(1);
     expect(classified[0].state).toBe("working");
-    expect(classified[0].info).toBe("지금 줄서있는 빌드/ci는 이제 없어?");
+    expect(classified[0].info).toBe("Synthetic thread task summary");
 
-    const homeRoster = buildHomeAgents([AGENT_ADK], [mainSession, threadSession], false, NOW);
-    expect(homeRoster.map((entry) => entry.agent.id)).toEqual(["project-agentdesk"]);
+    const homeRoster = buildHomeAgents([AGENT_ALPHA], [mainSession, threadSession], false, NOW);
+    expect(homeRoster.map((entry) => entry.agent.id)).toEqual(["agent-alpha"]);
     expect(homeRoster[0].state).toBe("working");
     expect(homeRoster.some((entry) => entry.agent.id.startsWith("dispatched:"))).toBe(false);
   });
 
+  it("[P1-1 + P2-2] preserves explicit linked_agent_id over parent-inferred attribution regardless of order and re-filters live on WS reassignment", async () => {
+    const parentAlpha = makeSession({
+      id: "p-alpha",
+      session_key: ALPHA_MAIN_KEY,
+      linked_agent_id: "agent-alpha",
+      status: "idle",
+      last_seen_at: NOW - 30_000,
+    });
+    const explicitCopy = makeSession({
+      id: "shared-thread-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: "agent-beta",
+      thread_channel_id: "1000000000000000002",
+      status: "turn_active",
+      session_info: "Explicit beta assignment",
+      last_seen_at: NOW - 10_000,
+    });
+    const unlinkedNewerCopy = makeSession({
+      id: "shared-thread-1-alias",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: null,
+      thread_channel_id: "1000000000000000002",
+      status: "turn_active",
+      session_info: "Fresher runtime summary",
+      last_seen_at: NOW - 1_000,
+    });
+
+    // Order 1: [explicitFirst, unlinkedSecond]
+    const forward = withInferredLinkedAgents([parentAlpha, explicitCopy, unlinkedNewerCopy]);
+    // Order 2: [unlinkedFirst, explicitSecond]
+    const reverse = withInferredLinkedAgents([parentAlpha, unlinkedNewerCopy, explicitCopy]);
+
+    // Unified by session_key (no duplicate rows) and explicit "agent-beta" wins in BOTH orders!
+    expect(forward).toHaveLength(2);
+    expect(reverse).toHaveLength(2);
+    const resolvedForward = forward.find((s) => s.session_key === ALPHA_THREAD_KEY)!;
+    const resolvedReverse = reverse.find((s) => s.session_key === ALPHA_THREAD_KEY)!;
+    expect(resolvedForward.linked_agent_id).toBe("agent-beta");
+    expect(resolvedForward.inferred_linked_agent).toBe(false);
+    expect(resolvedForward.session_info).toBe("Fresher runtime summary");
+    expect(resolvedReverse.linked_agent_id).toBe("agent-beta");
+    expect(resolvedReverse.inferred_linked_agent).toBe(false);
+    expect(resolvedReverse.session_info).toBe("Fresher runtime summary");
+    expect(mergeRawSessions([explicitCopy, unlinkedNewerCopy])).toHaveLength(1);
+    expect(mergeRawSessions([unlinkedNewerCopy, explicitCopy])).toHaveLength(1);
+
+    // Live WS reassignment A -> B across open AgentInfoCardContent views
+    const movingSession = makeSession({
+      id: "move-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: "agent-alpha",
+      thread_channel_id: "1000000000000000002",
+      status: "turn_active",
+      session_info: "Initially assigned to alpha",
+      last_seen_at: NOW - 5_000,
+    });
+
+    vi.mocked(api.getAgentDispatchedSessions).mockImplementation(async (agentId: string) =>
+      agentId === "agent-alpha" ? [movingSession] : [],
+    );
+    vi.mocked(api.getDispatchedSessions).mockResolvedValue([movingSession]);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <div>
+            <div data-testid="alpha-detail">
+              <AgentInfoCardContent agent={AGENT_ALPHA} isKo={false} locale="en" tr={en} />
+            </div>
+            <div data-testid="beta-detail">
+              <AgentInfoCardContent agent={AGENT_BETA} isKo={false} locale="en" tr={en} />
+            </div>
+          </div>
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+    await flush();
+
+    const alphaPane = container.querySelector<HTMLElement>('[data-testid="alpha-detail"]')!;
+    const betaPane = container.querySelector<HTMLElement>('[data-testid="beta-detail"]')!;
+    expect(alphaPane.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(1);
+    expect(betaPane.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(0);
+
+    // Emit WS update reassigning movingSession from agent-alpha to agent-beta
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("pcd-ws-event", {
+          detail: {
+            type: "dispatched_session_update",
+            payload: {
+              ...movingSession,
+              linked_agent_id: "agent-beta",
+              session_info: "Reassigned to beta",
+              last_seen_at: NOW,
+            },
+          },
+        }),
+      );
+    });
+    await flush();
+
+    expect(alphaPane.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(0);
+    expect(betaPane.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(1);
+    expect(betaPane.textContent).toContain("Reassigned to beta");
+  });
+
+  it("[P1-2] reconciles silent server thread_gc deletions on focus/poll without clobbering concurrent in-flight WS events", async () => {
+    const gcThreadSession = makeSession({
+      id: "gc-thread-1",
+      session_key: ALPHA_THREAD_KEY,
+      linked_agent_id: "agent-alpha",
+      thread_channel_id: "1000000000000000002",
+      status: "idle",
+      session_info: "Idle thread before GC",
+    });
+
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([gcThreadSession]);
+    vi.mocked(api.getDispatchedSessions).mockResolvedValueOnce([gcThreadSession]);
+
+    act(() => {
+      root.render(
+        <MemoryRouter>
+          <AgentInfoCardContent agent={AGENT_ALPHA} isKo={false} locale="en" tr={en} />
+        </MemoryRouter>,
+      );
+    });
+    await flush();
+    await flush();
+
+    expect(container.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(1);
+
+    // Simulate silent server thread_gc deletion (both endpoints now return []) and focus refresh
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([]);
+    vi.mocked(api.getDispatchedSessions).mockResolvedValueOnce([]);
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    await flush();
+    await flush();
+
+    expect(container.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(0);
+
+    // Now test in-flight REST vs concurrent WS race:
+    // Start a slow REST refresh on focus, emit a WS dispatched_session_new while pending, then resolve stale REST []
+    const slowAgentFetch = createDeferred<DispatchedSession[]>();
+    const slowGlobalFetch = createDeferred<DispatchedSession[]>();
+    vi.mocked(api.getAgentDispatchedSessions).mockReturnValueOnce(slowAgentFetch.promise);
+    vi.mocked(api.getDispatchedSessions).mockReturnValueOnce(slowGlobalFetch.promise);
+
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+
+    const concurrentWsSession = makeSession({
+      id: "ws-inflight-1",
+      session_key: ALPHA_SECOND_THREAD_KEY,
+      linked_agent_id: "agent-alpha",
+      provider: "codex",
+      thread_channel_id: "1000000000000000003",
+      status: "turn_active",
+      session_info: "Arrived via WS during slow REST",
+      last_seen_at: NOW + 5_000,
+    });
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("pcd-ws-event", {
+          detail: { type: "dispatched_session_new", payload: concurrentWsSession },
+        }),
+      );
+    });
+    await flush();
+    expect(container.querySelectorAll('[data-testid="agent-now-session-row"]')).toHaveLength(1);
+
+    // Resolve the older in-flight REST call with stale empty snapshot -> concurrent WS session MUST survive!
+    await act(async () => {
+      slowAgentFetch.resolve([]);
+      slowGlobalFetch.resolve([]);
+    });
+    await flush();
+
+    const survivingRows = container.querySelectorAll('[data-testid="agent-now-session-row"]');
+    expect(survivingRows).toHaveLength(1);
+    expect(survivingRows[0].textContent).toContain("Arrived via WS during slow REST");
+  });
+
   it("surfaces unlinked Discord thread sessions in AgentNowSection ('지금') and updates live on pcd-ws-event without reopening", async () => {
-    const mainKey = "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc";
     const mainSession = makeSession({
       id: "10",
-      session_key: mainKey,
-      linked_agent_id: "project-agentdesk",
+      session_key: ALPHA_MAIN_KEY,
+      linked_agent_id: "agent-alpha",
       status: "turn_active",
-      session_info: "메인 채널 점검 중",
+      session_info: "Synthetic main channel check",
       last_seen_at: NOW - 10_000,
     });
     const threadSession = makeSession({
       id: "11",
-      session_key: "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc-t1570308839910412348",
+      session_key: ALPHA_THREAD_KEY,
       linked_agent_id: null,
-      thread_channel_id: "1570308839910412348",
+      thread_channel_id: "1000000000000000002",
       status: "idle",
-      session_info: "초기 스레드 대기 질문",
+      session_info: "Initial synthetic thread prompt",
       last_seen_at: NOW - 5_000,
     });
 
-    // /api/agents/{id}/dispatched-sessions only returns explicitly linked mainSession;
-    // /api/dispatched-sessions?includeMerged=1 includes the unlinked thread session!
-    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([mainSession]);
-    vi.mocked(api.getDispatchedSessions).mockResolvedValueOnce([mainSession, threadSession]);
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValue([mainSession]);
+    vi.mocked(api.getDispatchedSessions).mockResolvedValue([mainSession, threadSession]);
 
     const turns = new Map<string, HomeTurn>([
       [
-        "project-agentdesk",
+        "agent-alpha",
         {
           status: "working",
-          session_key: mainKey,
+          session_key: ALPHA_MAIN_KEY,
           started_at: new Date(NOW - 20_000).toISOString(),
           updated_at: new Date(NOW - 2_000).toISOString(),
           provider: "claude",
-          current_tool_line: "Read: src/main.rs",
+          current_tool_line: "Read: README.md",
         },
       ],
     ]);
@@ -293,7 +542,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
       root.render(
         <MemoryRouter>
           <AgentInfoCardContent
-            agent={{ ...AGENT_ADK, status: "working" }}
+            agent={{ ...AGENT_ALPHA, status: "working" }}
             state="working"
             isKo
             locale="ko"
@@ -312,14 +561,14 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
 
     const rows = nowList.querySelectorAll<HTMLElement>('[data-testid="agent-now-session-row"]');
     expect(rows).toHaveLength(2);
-    const threadRow = Array.from(rows).find((row) => row.textContent?.includes("1570308839910412348"))!;
+    const threadRow = Array.from(rows).find((row) => row.textContent?.includes("1000000000000000002"))!;
     expect(threadRow).toBeDefined();
-    expect(threadRow.textContent).toContain("#adk-cc-t1570308839910412348");
+    expect(threadRow.textContent).toContain("#alpha-chan-t1000000000000000002");
     expect(threadRow.textContent).toContain("스레드");
     expect(threadRow.textContent).toContain("스레드 대기");
-    expect(threadRow.textContent).toContain("초기 스레드 대기 질문");
+    expect(threadRow.textContent).toContain("Initial synthetic thread prompt");
 
-    // Live WS update flips the unlinked thread session to turn_active without reopening the modal
+    // Live WS update flips the unlinked thread session to turn_active without reopening
     act(() => {
       window.dispatchEvent(
         new CustomEvent("pcd-ws-event", {
@@ -328,7 +577,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
             payload: {
               ...threadSession,
               status: "turn_active",
-              session_info: "스레드 작업 진행 중",
+              session_info: "Updated synthetic thread step",
               last_seen_at: NOW,
             },
           },
@@ -339,20 +588,20 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
 
     const updatedThreadRow = Array.from(
       container.querySelectorAll<HTMLElement>('[data-testid="agent-now-session-row"]'),
-    ).find((row) => row.textContent?.includes("1570308839910412348"))!;
+    ).find((row) => row.textContent?.includes("1000000000000000002"))!;
     expect(updatedThreadRow).toBeDefined();
     expect(updatedThreadRow.textContent).toContain("작업 중");
-    expect(updatedThreadRow.textContent).toContain("스레드 작업 진행 중");
+    expect(updatedThreadRow.textContent).toContain("Updated synthetic thread step");
 
     // Live WS new thread session appears immediately via parent channel inference
     const secondThread = makeSession({
       id: "12",
-      session_key: "codex/discord_123/MacBook-Pro-14:AgentDesk-codex-adk-cc-t1570308839910499999",
+      session_key: ALPHA_SECOND_THREAD_KEY,
       linked_agent_id: null,
       provider: "codex",
-      thread_channel_id: "1570308839910499999",
+      thread_channel_id: "1000000000000000003",
       status: "awaiting_user",
-      session_info: "사용자 응답 대기 중",
+      session_info: "Synthetic awaiting input state",
       last_seen_at: NOW + 1_000,
     });
     act(() => {
@@ -378,31 +627,31 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     expect(container.querySelector('[data-testid="agent-now-sessions"]')?.textContent).toContain("진행·스레드 세션 2");
   });
 
-  it("resolves thread channel info in 'Now' even when Connections is folded on mobile and marks stale-idle agent working", async () => {
+  it("[P2-3] resolves thread channel info on mobile while Connections is folded and hides Stop Turn when only inferred unlinked thread sessions run", async () => {
     setViewport(true);
     const mainSession = makeSession({
       id: "20",
-      session_key: "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc",
-      linked_agent_id: "project-agentdesk",
+      session_key: ALPHA_MAIN_KEY,
+      linked_agent_id: "agent-alpha",
       status: "idle",
     });
     const threadSession = makeSession({
       id: "21",
-      session_key: "claude/discord_123/MacBook-Pro-14:AgentDesk-claude-adk-cc-t1570308839910412348",
+      session_key: ALPHA_THREAD_KEY,
       linked_agent_id: null,
-      thread_channel_id: "1570308839910412348",
+      thread_channel_id: "1000000000000000002",
       status: "turn_active",
-      session_info: "Thread prompt running",
+      session_info: "Synthetic thread task summary",
     });
 
-    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValueOnce([mainSession]);
-    vi.mocked(api.getDispatchedSessions).mockResolvedValueOnce([mainSession, threadSession]);
+    vi.mocked(api.getAgentDispatchedSessions).mockResolvedValue([mainSession]);
+    vi.mocked(api.getDispatchedSessions).mockResolvedValue([mainSession, threadSession]);
     vi.mocked(api.getDiscordChannelInfo).mockImplementation(async (id: string) => {
-      if (id === "1570308839910412348") {
-        return { id, name: "CI queue check thread", guild_id: "1490141479707086938", parent_id: "1490145076658307999" };
+      if (id === "1000000000000000002") {
+        return { id, name: "Synthetic thread title", guild_id: "1000000000000000099", parent_id: "1000000000000000001" };
       }
-      if (id === "1490145076658307999") {
-        return { id, name: "adk-cc", guild_id: "1490141479707086938", parent_id: null };
+      if (id === "1000000000000000001") {
+        return { id, name: "alpha-chan", guild_id: "1000000000000000099", parent_id: null };
       }
       return null as never;
     });
@@ -411,7 +660,7 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
       root.render(
         <MemoryRouter>
           <AgentInfoCardContent
-            agent={AGENT_ADK}
+            agent={AGENT_ALPHA}
             isKo={false}
             locale="en"
             tr={en}
@@ -426,12 +675,13 @@ describe("Agent Detail duplicate avatar removal & Discord thread session surfaci
     // Connections is folded on mobile, yet thread channel title + parent resolved in Now!
     const nowList = container.querySelector<HTMLElement>('[data-testid="agent-now-sessions"]')!;
     expect(nowList).not.toBeNull();
-    expect(nowList.textContent).toContain("CI queue check thread · #adk-cc");
+    expect(nowList.textContent).toContain("Synthetic thread title · #alpha-chan");
     expect(nowList.textContent).toContain("Thread");
     expect(nowList.textContent).toContain("Working");
-    expect(nowList.textContent).toContain("Thread prompt running");
-    // Stale idle agent snapshot flipped to Working because workingSessions.length > 0
+    expect(nowList.textContent).toContain("Synthetic thread task summary");
+    // Stale idle agent snapshot flipped to Working because workingSessions.length > 0,
+    // while Stop Turn stays hidden because the only working session is frontend-inferred (s.agent_id IS NULL in DB).
     expect(container.querySelector('[data-testid="agent-detail-now"] dd')?.textContent).toContain("Working");
-    expect(container.querySelector('[data-testid="agent-stop-turn"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="agent-stop-turn"]')).toBeNull();
   });
 });
