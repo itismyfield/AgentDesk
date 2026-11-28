@@ -22,7 +22,7 @@ use crate::services::tui_o::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Origin {
+pub(in crate::services::discord) enum Origin {
     Core,
     Fallback,
     Binding(u64),
@@ -30,21 +30,21 @@ enum Origin {
     Inflight,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Candidate {
-    name: String,
-    origin: Origin,
+pub(in crate::services::discord) struct Candidate {
+    pub(in crate::services::discord) name: String,
+    pub(in crate::services::discord) origin: Origin,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct Candidates {
+pub(in crate::services::discord) struct Candidates {
     channel: u64,
     provider: ProviderKind,
-    current: Option<String>,
-    names: Vec<Candidate>,
-    conflict: bool,
-    inflight: bool,
+    pub(in crate::services::discord) current: Option<String>,
+    pub(in crate::services::discord) names: Vec<Candidate>,
+    pub(in crate::services::discord) conflict: bool,
+    pub(in crate::services::discord) inflight: bool,
 }
 
-pub(super) fn observe_candidates(
+pub(in crate::services::discord) fn observe_candidates(
     channel: u64,
     provider: &ProviderKind,
     core: Option<&str>,
@@ -71,8 +71,8 @@ fn unbound_candidates(
     events: Result<Vec<BindingEvent>, String>,
     inflight: &Result<Option<InflightTurnState>, String>,
 ) -> Result<Candidates, String> {
-    #[cfg(test)]
-    dormancy_tests::reached(channel);
+    #[cfg(any(test, feature = "test-support"))]
+    dormancy_hook_tests::reached(channel, dormancy_hook_tests::Site::Collect);
     let events = events?;
     let row = inflight.as_ref().map_err(Clone::clone)?;
     let shadow = match provider {
@@ -151,18 +151,18 @@ fn unbound_candidates(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Scope {
+pub(in crate::services::discord) enum Scope {
     LocalInventory,
     LocalNameless,
     HerdrFirstCreate,
     HerdrRetired,
     Hold(&'static str),
 }
-struct HostScope {
+pub(in crate::services::discord) struct HostScope {
     channel: u64,
     provider: ProviderKind,
     name: String,
-    result: Scope,
+    pub(in crate::services::discord) result: Scope,
 }
 struct HostReads<'a> {
     channel: u64,
@@ -195,8 +195,8 @@ fn host_scope(reads: HostReads<'_>) -> HostScope {
     }
 }
 fn host_scope_result(reads: HostReads<'_>) -> Scope {
-    #[cfg(test)]
-    dormancy_tests::reached(reads.channel);
+    #[cfg(any(test, feature = "test-support"))]
+    dormancy_hook_tests::reached(reads.channel, dormancy_hook_tests::Site::Scope);
     let hold = Scope::Hold;
     let (Ok(mut evidence), Ok(row)) = (reads.evidence, reads.inflight.as_ref()) else {
         return hold("probe_failed");
@@ -389,17 +389,17 @@ fn herdr_record_at(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Absence {
+pub(in crate::services::discord) enum Absence {
     LocalInventory,
     HerdrFirstCreate,
     HerdrRetired,
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Verdict {
+pub(in crate::services::discord) enum Verdict {
     Absent(Absence),
     Hold(&'static str),
 }
-fn decide_unbound(
+pub(in crate::services::discord) fn decide_unbound(
     candidates: Result<Candidates, String>,
     scope: HostScope,
     inventory: &Inventory,
@@ -408,8 +408,8 @@ fn decide_unbound(
     let Ok(candidates) = candidates else {
         return Verdict::Hold("probe_failed");
     };
-    #[cfg(test)]
-    dormancy_tests::reached(candidates.channel);
+    #[cfg(any(test, feature = "test-support"))]
+    dormancy_hook_tests::reached(candidates.channel, dormancy_hook_tests::Site::Verdict);
     if candidates.conflict {
         return Verdict::Hold("candidate_conflict");
     }
@@ -532,15 +532,15 @@ fn local_registration(config: &Config, channel: u64, provider: &ProviderKind) ->
         && crate::config::session_hosts::herdr_endpoint(channel).is_none()
 }
 
-#[cfg(test)]
-mod dormancy_tests;
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod dormancy_hook_tests;
 #[cfg(test)]
 #[path = "unbound/unit_tests.rs"]
 mod tests;
 
 mod binding_metadata;
-mod cross_runtime_owners;
+pub(in crate::services::discord) mod cross_runtime_owners;
 pub(super) mod herdr_bound;
 pub(super) mod hold_leaf;
-pub(super) mod live;
-mod routine_owner;
+pub(in crate::services::discord) mod live;
+pub(in crate::services::discord) mod routine_owner;

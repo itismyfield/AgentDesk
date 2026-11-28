@@ -1,55 +1,15 @@
 //! Registered runtime ownership through the real Codex restore producer and live readings.
+
 use super::*;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+use crate::services::discord::turn_presence::activity::unbound::live::publication_hook_tests::{
+    install_publication_hook, is_installed,
+};
 use crate::services::discord::turn_presence::activity::{activity_now, reading_now};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-
-type PublicationCallback = Box<dyn FnOnce() + Send>;
-struct PublicationHook {
-    channel: u64,
-    nth: usize,
-    seen: usize,
-    callback: PublicationCallback,
-}
-static PUBLICATION_HOOKS: std::sync::Mutex<Vec<PublicationHook>> =
-    std::sync::Mutex::new(Vec::new());
-
-pub(super) fn before_publication(channel: u64) {
-    let callback = {
-        let mut hooks = PUBLICATION_HOOKS.lock().unwrap();
-        hooks
-            .iter_mut()
-            .find(|hook| hook.channel == channel)
-            .and_then(|hook| {
-                hook.seen += 1;
-                (hook.seen == hook.nth).then_some(())
-            })
-            .map(|()| {
-                let at = hooks
-                    .iter()
-                    .position(|hook| hook.channel == channel)
-                    .unwrap();
-                hooks.remove(at).callback
-            })
-    };
-    if let Some(callback) = callback {
-        callback();
-    }
-}
-
-fn install_publication_hook(channel: u64, nth: usize, callback: PublicationCallback) {
-    let mut hooks = PUBLICATION_HOOKS.lock().unwrap();
-    assert!(!hooks.iter().any(|hook| hook.channel == channel));
-    hooks.push(PublicationHook {
-        channel,
-        nth,
-        seen: 0,
-        callback,
-    });
-}
 
 pub(super) fn isolated(test: &str) -> bool {
     const CHILD: &str = "ADK_A2_OWNER_TEST_CHILD";
@@ -639,13 +599,7 @@ async fn a2_final_publication_rejects_unrelated_owner_epoch_change_pg() {
         "the last preflight hook was not reached"
     );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
-    assert!(
-        !PUBLICATION_HOOKS
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|hook| hook.channel == fixture.rig.channel.get())
-    );
+    assert!(!is_installed(fixture.rig.channel.get()));
 }
 
 #[path = "clear_owner_race_tests.rs"]

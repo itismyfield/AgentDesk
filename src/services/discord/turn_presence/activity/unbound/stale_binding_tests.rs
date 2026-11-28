@@ -1,14 +1,31 @@
 //! Restored binding-only state reads durable identity without starting or clearing a session.
-use super::*;
+use crate::config::Config;
 use crate::db::auto_queue::test_support::TestPostgresDb;
+use crate::db::dispatched_session_canonical_identity::{
+    CanonicalSessionIdentity, SessionIdentityKind,
+};
+use crate::db::dispatched_sessions::hosted_execution::{
+    HostedLookup, HostedLookupKey, HostedOwner, HostedState, load_hosted_execution_pg,
+};
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::turn_presence::activity::tests::BindingRoot;
+use crate::services::discord::turn_presence::activity::unbound::live::{
+    Stamp, marker_path, read, registrations,
+};
+use crate::services::discord::turn_presence::activity::{
+    Activity, Observed, Watch, lock, observed,
+};
+use crate::services::discord::{SharedData, adk_session, inflight, runtime_store};
 use crate::services::platform::tmux::session_inventory::test_support::{
     ChannelCommand, ChannelProbeTrace,
 };
+use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::binding_events as p5;
+use poise::serenity_prelude::ChannelId;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 struct RecoveryFixture {
     shared: Arc<SharedData>,

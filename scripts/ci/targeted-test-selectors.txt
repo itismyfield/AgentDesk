@@ -68,19 +68,19 @@ services::tui_o::writer::binding::terminal_tests::
 services::tui_o::writer::adoption::terminal_tests::
 services::discord::krx_tui_o_test_host::executed_resume::resume_companion_live_era_advances_past_exact_terminals_and_restarts_without_repost
 services::discord::krx_tui_o_test_host::host_start::first_init::
-services::discord::turn_presence::activity::tests::codex_historical_terminals_remain_closed_in_next_incarnation
-services::discord::turn_presence::activity::tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
+services::discord::dl_turn_presence_unix_tests::activity_tests::codex_historical_terminals_remain_closed_in_next_incarnation
+services::discord::dl_turn_presence_unix_tests::activity_tests::codex_unterminated_historical_pending_keeps_next_incarnation_queue_held
 services::tui_o::writer::tests::actor::rotation::retire_tests::codex_end_proof_tests::
 services::tui_o::store::codex_end::tests::
 services::discord::commands::control::clear_teardown::codex_end_tests::successor_tests::
 
 [High-risk recovery: Scheduled binding presence regressions]
-=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_binding_opens_turn_start_pg
-=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_inventory_with_primary_binding_opens_turn_start_pg
-=services::discord::turn_presence::activity::unbound::live::owner_tests::completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_binding_pg
-=services::discord::turn_presence::activity::unbound::live::owner_tests::live_primary_without_watcher_stays_unknown_pg
-=services::discord::turn_presence::activity::unbound::live::owner_tests::scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
-=services::discord::turn_presence::activity::unbound::live::owner_tests::scheduled_binding_with_inflight_stays_held_pg
+=services::discord::dl_turn_presence_tests::owner_tests::completed_scheduled_binding_opens_turn_start_pg
+=services::discord::dl_turn_presence_tests::owner_tests::completed_scheduled_inventory_with_primary_binding_opens_turn_start_pg
+=services::discord::dl_turn_presence_tests::owner_tests::completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_binding_pg
+=services::discord::dl_turn_presence_tests::owner_tests::live_primary_without_watcher_stays_unknown_pg
+=services::discord::dl_turn_presence_tests::owner_tests::scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
+=services::discord::dl_turn_presence_tests::owner_tests::scheduled_binding_with_inflight_stays_held_pg
 
 [Fast targeted tests: Footer-only marker regressions]
 task_notification

@@ -7,13 +7,13 @@ use crate::services::discord::{SharedData, tmux_watcher_registry::TmuxWatcherReg
 use crate::services::provider::ProviderKind;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WatcherEvidence {
+pub(in crate::services::discord) struct WatcherEvidence {
     pub local: BTreeMap<String, Option<u64>>,
     pub registered: Vec<BTreeMap<String, Option<u64>>>,
 }
 
 impl WatcherEvidence {
-    pub(super) fn capture(
+    pub(in crate::services::discord) fn capture(
         _guard: &TmuxWatcherRegistryGuard,
         shared: &Arc<SharedData>,
         entries: &[(String, Arc<SharedData>)],
@@ -47,13 +47,13 @@ impl WatcherEvidence {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct OwnerEvidence {
+pub(in crate::services::discord) struct OwnerEvidence {
     pub watchers: WatcherEvidence,
     pub routines: Result<RoutineEvidence, String>,
 }
 
 impl OwnerEvidence {
-    pub(super) async fn collect(
+    pub(in crate::services::discord) async fn collect(
         watchers: WatcherEvidence,
         pool: &sqlx::PgPool,
         entries: &[(String, Arc<SharedData>)],
@@ -82,7 +82,10 @@ impl OwnerEvidence {
         Ok(Self { watchers, routines })
     }
 
-    pub(super) fn effective_owners(&self, target: u64) -> BTreeMap<String, Option<u64>> {
+    pub(in crate::services::discord) fn effective_owners(
+        &self,
+        target: u64,
+    ) -> BTreeMap<String, Option<u64>> {
         self.watchers
             .local
             .iter()
@@ -108,7 +111,7 @@ impl OwnerEvidence {
                 .is_ok_and(|proof| proof.self_claim(name, target))
     }
 
-    pub(super) fn local_conflict(&self, name: &str) -> bool {
+    pub(in crate::services::discord) fn local_conflict(&self, name: &str) -> bool {
         let Some(local) = self.watchers.local.get(name).copied().flatten() else {
             return false;
         };
@@ -151,7 +154,3 @@ impl OwnerEvidence {
         channels.first().copied()
     }
 }
-
-#[cfg(test)]
-#[path = "cross_runtime_owners_tests.rs"]
-mod tests;

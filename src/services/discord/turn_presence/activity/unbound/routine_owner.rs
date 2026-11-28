@@ -11,7 +11,7 @@ pub(super) struct ReceiptRuntime {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ReceiptRow {
+pub(in crate::services::discord) struct ReceiptRow {
     pub id: String,
     pub turn_id: Option<String>,
     pub channel_id: Option<String>,
@@ -27,7 +27,7 @@ impl ReceiptRow {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct KeyReceipts {
+pub(in crate::services::discord) struct KeyReceipts {
     pub name: String,
     pub rows: Vec<ReceiptRow>,
 }
@@ -46,7 +46,7 @@ impl KeyReceipts {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct RoutineEvidence {
+pub(in crate::services::discord) struct RoutineEvidence {
     /// Empty row vectors preserve that an exact registered key was queried and had no receipt.
     pub keys: BTreeMap<String, KeyReceipts>,
 }

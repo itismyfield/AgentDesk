@@ -7,7 +7,7 @@ use crate::services::discord::runtime_store;
 use crate::services::discord::turn_presence::activity::notice_identity::ExecutionIdentity;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) struct Scope {
+pub(in crate::services::discord) struct Scope {
     pub root: Option<PathBuf>,
     pub provider: String,
     pub token_hash: String,

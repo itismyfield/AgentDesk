@@ -494,6 +494,16 @@ async fn a2_closed_bound_read_survives_clear_until_watcher_release_pg() {
     }
     let fixture = Fixture::connect_and_migrate_fixture(69_184_113, ProviderKind::Claude).await;
     fixture.produce_owners();
+    use futures::FutureExt as _;
+    assert!(
+        crate::services::discord::queue_dispatch::kickoff::owner_race_pause(
+            fixture.rig.channel,
+            "watcher_before_release"
+        )
+        .now_or_never()
+        .is_some(),
+        "no owner race pause is installed"
+    );
     let (before, release) = install_owner_race_pause(fixture.rig.channel, "watcher_before_release");
     let watcher = fixture.attach_old_watcher().await;
     until(async || fixture.observed().await.reason == "closed").await;

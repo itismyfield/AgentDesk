@@ -1,5 +1,4 @@
 //! A fresh routine's actual starter receipt, through ownership publication and reset/start.
-use super::super::review_tests::Rig;
 use super::*;
 use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::discord::router::message_handler::{
@@ -7,6 +6,7 @@ use crate::services::discord::router::message_handler::{
 };
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
 use crate::services::discord::turn_bridge::resume_pin_tests::BRIDGE_COMPLETION_PROBE;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
 use crate::services::routines::store::{NewRoutine, NextDueAtUpdate, RoutineStore};
 use crate::services::turn_lifecycle::{TurnLifecycleTarget, force_kill_turn};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,10 +119,19 @@ async fn owned(pool: &sqlx::PgPool, run: &str) -> Option<String> {
 #[tokio::test(flavor = "current_thread")]
 async fn routine_receipt_survives_reset_and_starts_one_provider_turn_pg() {
     const CHILD: &str = "ADK_RECEIPT_E2E_CHILD";
-    const TEST: &str = "services::discord::turn_presence::activity::unbound::live::owner_tests::receipt_tests::routine_receipt_survives_reset_and_starts_one_provider_turn_pg";
+    const TEST: &str = concat!(
+        module_path!(),
+        "::routine_receipt_survives_reset_and_starts_one_provider_turn_pg"
+    );
     if std::env::var_os(CHILD).is_none() {
         let result = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .args([
+                "--exact",
+                TEST.strip_prefix(concat!(env!("CARGO_CRATE_NAME"), "::"))
+                    .unwrap_or(TEST),
+                "--nocapture",
+                "--test-threads=1",
+            ])
             .env(CHILD, "1")
             .env(
                 crate::services::tui_o::cutover::test_override::CHANNELS_ENV,

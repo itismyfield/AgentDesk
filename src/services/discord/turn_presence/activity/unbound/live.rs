@@ -15,19 +15,19 @@ use poise::serenity_prelude::ChannelId;
 use std::sync::{Arc, Mutex, Weak};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct LocalTrace {
-    marker: HostKindMarker,
-    runtime: Result<Option<RuntimeHandoffKind>, String>,
-    process: Option<u32>,
+pub(in crate::services::discord) struct LocalTrace {
+    pub(in crate::services::discord) marker: HostKindMarker,
+    pub(in crate::services::discord) runtime: Result<Option<RuntimeHandoffKind>, String>,
+    pub(in crate::services::discord) process: Option<u32>,
 }
-fn marker_path(name: &str, extension: &str) -> std::path::PathBuf {
+pub(in crate::services::discord) fn marker_path(name: &str, extension: &str) -> std::path::PathBuf {
     let legacy = std::path::PathBuf::from(tmux_common::legacy_tmp_session_path(name, extension));
     match (tmux_common::persistent_sessions_dir(), legacy.file_name()) {
         (Some(dir), Some(filename)) => dir.join(filename),
         _ => legacy,
     }
 }
-fn local_trace(name: &str) -> LocalTrace {
+pub(in crate::services::discord) fn local_trace(name: &str) -> LocalTrace {
     let runtime = {
         let extension = tmux_common::TMUX_RUNTIME_KIND_TEMP_EXT;
         let canonical = marker_path(name, extension);
@@ -71,7 +71,8 @@ fn read_optional(path: Option<std::path::PathBuf>) -> Result<Option<Vec<u8>>, St
     }
 }
 // Preserve registration precedence without config hardening or recovery-catalog mutation.
-fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
+pub(in crate::services::discord) fn registrations() -> Result<Vec<RegisteredChannelBinding>, String>
+{
     let mut bindings = BTreeMap::new();
     if let Some(bytes) = read_optional(runtime_store::org_schema_path())? {
         let text = std::str::from_utf8(&bytes).map_err(|e| e.to_string())?;
@@ -157,17 +158,17 @@ fn registrations() -> Result<Vec<RegisteredChannelBinding>, String> {
     Ok(bindings.into_values().collect())
 }
 #[derive(Clone)]
-struct Files {
+pub(in crate::services::discord) struct Files {
     fallback: Vec<RegisteredChannelBinding>,
     bindings: Vec<BindingEvent>,
     metadata: binding_metadata::Snapshot,
-    candidates: Result<Candidates, String>,
-    row: Result<Option<InflightTurnState>, String>,
-    row_identity: String,
+    pub(in crate::services::discord) candidates: Result<Candidates, String>,
+    pub(in crate::services::discord) row: Result<Option<InflightTurnState>, String>,
+    pub(in crate::services::discord) row_identity: String,
     seq: u64,
     seq_watch: tokio::sync::watch::Receiver<u64>,
-    traces: BTreeMap<String, LocalTrace>,
-    recovered: Option<String>,
+    pub(in crate::services::discord) traces: BTreeMap<String, LocalTrace>,
+    pub(in crate::services::discord) recovered: Option<String>,
 }
 impl Files {
     fn collect(
@@ -237,7 +238,7 @@ impl Files {
             .insert(proof.name.clone(), local_trace(&proof.name));
         Ok(())
     }
-    fn same(&self, other: &Self) -> bool {
+    pub(in crate::services::discord) fn same(&self, other: &Self) -> bool {
         self.fallback == other.fallback
             && self.bindings == other.bindings
             && self.metadata == other.metadata
@@ -325,25 +326,25 @@ impl CoreExecutionBasis {
     }
 }
 #[derive(Clone)]
-struct Snapshot {
+pub(in crate::services::discord) struct Snapshot {
     shared: Weak<SharedData>,
     provider: ProviderKind,
     channel: ChannelId,
-    basis: Option<String>,
+    pub(in crate::services::discord) basis: Option<String>,
     core_basis: CoreExecutionBasis,
     runtime_root: Option<std::path::PathBuf>,
     config: Arc<Config>,
-    files: Files,
-    exact: HostedLookup,
-    canonical: HostedLookup,
+    pub(in crate::services::discord) files: Files,
+    pub(in crate::services::discord) exact: HostedLookup,
+    pub(in crate::services::discord) canonical: HostedLookup,
     legacy_absence: Option<Result<Box<legacy_divergence::Proof>, String>>,
     canonical_target: Option<Result<canonical_target::CanonicalTarget, String>>,
-    owners: BTreeMap<String, Option<u64>>,
-    ownership: Option<ownership::OwnerInputs>,
+    pub(in crate::services::discord) owners: BTreeMap<String, Option<u64>>,
+    pub(in crate::services::discord) ownership: Option<ownership::OwnerInputs>,
     ports: Arc<LivePorts>,
 }
 impl Snapshot {
-    async fn collect(
+    pub(in crate::services::discord) async fn collect(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
@@ -368,8 +369,8 @@ impl Snapshot {
         })
         .await
         .map_err(|e| e.to_string())??;
-        #[cfg(test)]
-        review_tests::after_files(channel.get()).await;
+        #[cfg(any(test, feature = "test-support"))]
+        live_snapshot_hook_tests::after_files(channel.get()).await;
         let pool = shared.pg_pool.as_ref().ok_or("database unavailable")?;
         let canonical_target = if files.binding_only()
             && local_registration(&config, channel.get(), provider)
@@ -450,7 +451,7 @@ impl Snapshot {
             ports,
         })
     }
-    async fn collect_pair(
+    pub(in crate::services::discord) async fn collect_pair(
         shared: &Arc<SharedData>,
         provider: &ProviderKind,
         channel: ChannelId,
@@ -494,7 +495,7 @@ impl Snapshot {
         after.ownership = Some(next);
         Ok((before, inventory, after))
     }
-    fn same_inputs(&self, other: &Self) -> bool {
+    pub(in crate::services::discord) fn same_inputs(&self, other: &Self) -> bool {
         self.runtime_root == other.runtime_root
             && self.basis == other.basis
             && Arc::ptr_eq(&self.config, &other.config)
@@ -509,7 +510,7 @@ impl Snapshot {
                 _ => false,
             }
     }
-    fn same_inflight_inputs(
+    pub(in crate::services::discord) fn same_inflight_inputs(
         &self,
         other: &Self,
         phase: &'static str,
@@ -559,7 +560,11 @@ impl Snapshot {
         }
         inflight_identity::compare(&self.files, &other.files, phase)
     }
-    fn verdict(&self, shared: &SharedData, inventory: &Inventory) -> Verdict {
+    pub(in crate::services::discord) fn verdict(
+        &self,
+        shared: &SharedData,
+        inventory: &Inventory,
+    ) -> Verdict {
         let mut candidates = self.files.candidates.clone();
         let mut inventory = inventory.clone();
         if matches!(self.scope(shared).result, Scope::LocalInventory)
@@ -622,7 +627,7 @@ impl Snapshot {
             verdict
         }
     }
-    fn effective_owners(&self) -> BTreeMap<String, Option<u64>> {
+    pub(in crate::services::discord) fn effective_owners(&self) -> BTreeMap<String, Option<u64>> {
         self.owners.clone()
     }
     fn memory_current(&self) -> bool {
@@ -746,9 +751,9 @@ impl Snapshot {
                 field: "inventory.namespace",
             });
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if matches!(comparison, inflight_identity::Comparison::Inflight) {
-            review_tests::after_files(self.channel.get()).await;
+            live_snapshot_hook_tests::after_files(self.channel.get()).await;
         }
         // Re-read files after the last DB/inventory await; final publication has no await.
         let mut files = Files::collect(
@@ -820,7 +825,7 @@ impl Snapshot {
         }
         notice
     }
-    fn scope(&self, shared: &SharedData) -> HostScope {
+    pub(in crate::services::discord) fn scope(&self, shared: &SharedData) -> HostScope {
         let candidates = self.files.candidates.as_ref().ok();
         let name = candidates.and_then(|c| c.current.as_deref());
         let hold = |reason| HostScope {
@@ -911,7 +916,7 @@ impl Snapshot {
     }
 }
 
-pub(in crate::services::discord::turn_presence::activity) struct Stamp {
+pub(in crate::services::discord) struct Stamp {
     shared: Weak<SharedData>,
     channel: ChannelId,
     basis: Option<String>,
@@ -919,30 +924,32 @@ pub(in crate::services::discord::turn_presence::activity) struct Stamp {
     runtime_root: Option<std::path::PathBuf>,
     generation: u64,
     revision: u64,
-    snapshot: Option<Snapshot>,
-    namespace: Option<Observation>,
+    pub(in crate::services::discord) snapshot: Option<Snapshot>,
+    pub(in crate::services::discord) namespace: Option<Observation>,
     superseded: bool,
-    pub(in crate::services::discord::turn_presence::activity) notice:
-        super::super::notice_identity::NoticeObservation,
+    pub(in crate::services::discord) notice: super::super::notice_identity::NoticeObservation,
 }
 #[path = "canonical_target.rs"]
 mod canonical_target;
 #[path = "completed_scheduled.rs"]
 mod completed_scheduled;
 #[path = "inflight_bound.rs"]
-pub(in crate::services::discord::turn_presence::activity) mod inflight_bound;
+pub(in crate::services::discord) mod inflight_bound;
 #[path = "inflight_diagnostics.rs"]
-mod inflight_diagnostics;
+pub(in crate::services::discord) mod inflight_diagnostics;
 #[path = "inflight_identity.rs"]
-mod inflight_identity;
+pub(in crate::services::discord) mod inflight_identity;
 #[path = "legacy_divergence.rs"]
 mod legacy_divergence;
 #[path = "live_ownership.rs"]
 mod ownership;
 #[path = "live_publication.rs"]
 mod publication;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "publication_hook_tests.rs"]
+pub(in crate::services::discord) mod publication_hook_tests;
 
-pub(in crate::services::discord::turn_presence::activity) async fn read(
+pub(in crate::services::discord) async fn read(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
@@ -967,7 +974,7 @@ pub(in crate::services::discord::turn_presence::activity) async fn read(
         .get(&channel)
         .and_then(|s| s.channel_name.clone());
     let ports = Arc::new(LivePorts {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let result = collect(shared, provider, channel, ports).await;
@@ -1063,21 +1070,13 @@ async fn collect(
 #[path = "live_tests.rs"]
 pub(in crate::services::discord::turn_presence::activity) mod tests;
 
-#[cfg(test)]
-#[path = "live_review_tests.rs"]
-pub(super) mod review_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[path = "live_snapshot_hook_tests.rs"]
+pub(in crate::services::discord) mod live_snapshot_hook_tests;
 
 #[cfg(test)]
-#[path = "live_owner_tests.rs"]
-mod owner_tests;
-
-#[cfg(test)]
-#[path = "stale_binding_tests.rs"]
-mod stale_binding_tests;
-
-#[cfg(test)]
-#[path = "legacy_divergence_tests.rs"]
-mod legacy_divergence_tests;
+#[path = "live_fixture_tests.rs"]
+pub(in crate::services::discord) mod fixture_tests;
 
 impl super::super::Reading {
     /// Only a revalidated local Legacy absence releases queue admission, never teardown.

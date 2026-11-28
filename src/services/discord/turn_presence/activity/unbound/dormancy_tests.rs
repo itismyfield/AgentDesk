@@ -1,43 +1,17 @@
-use super::*;
+use crate::services::discord::turn_presence::activity::unbound::dormancy_hook_tests::{
+    Site, Trace,
+};
+use crate::services::discord::turn_presence::activity::unbound::{
+    live::fixture_tests::Rig, observe_candidates,
+};
 use crate::services::discord::{
-    health::{self as turn_deliver, HealthRegistry, HumanInputRequest},
+    health::{self as turn_deliver, HealthRegistry},
+    queue_io::human_input::HumanInputRequest,
     turn_presence::{activity, supervisor},
 };
+use crate::services::provider::ProviderKind;
+use crate::services::tui_o::shadow::ShadowProvider;
 use poise::serenity_prelude::ChannelId;
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
-};
-
-static TRACE: std::sync::LazyLock<std::sync::Mutex<BTreeMap<u64, Arc<AtomicUsize>>>> =
-    std::sync::LazyLock::new(Default::default);
-pub(super) fn reached(channel: u64) {
-    if let Some(count) = TRACE.lock().unwrap().get(&channel) {
-        count.fetch_add(1, Ordering::SeqCst);
-    }
-}
-struct Trace(u64, Arc<AtomicUsize>);
-impl Trace {
-    fn new(channel: u64) -> Self {
-        let count = Arc::new(AtomicUsize::new(0));
-        assert!(
-            TRACE
-                .lock()
-                .unwrap()
-                .insert(channel, count.clone())
-                .is_none()
-        );
-        Self(channel, count)
-    }
-    fn calls(&self) -> usize {
-        self.1.load(Ordering::SeqCst)
-    }
-}
-impl Drop for Trace {
-    fn drop(&mut self) {
-        TRACE.lock().unwrap().remove(&self.0);
-    }
-}
 
 #[tokio::test(flavor = "current_thread")]
 async fn activation_candidates_counter_crosses_the_blocking_worker() {
@@ -68,7 +42,7 @@ async fn activation_candidates_counter_crosses_the_blocking_worker() {
     .unwrap();
     assert!(candidates.current.is_some());
     assert_eq!(
-        observer.calls(),
+        observer.calls(Site::Collect),
         1,
         "worker collection was invisible to its positive counter"
     );
@@ -78,7 +52,7 @@ async fn activation_candidates_counter_crosses_the_blocking_worker() {
 async fn u_active_entrypoints_collect_real_unbound_evidence_pg() {
     use crate::services::platform::tmux::session_inventory::test_support::ChannelProbeTrace;
     const CHANNEL: u64 = 69_180_099;
-    let rig = super::live::review_tests::Rig::new(CHANNEL, false, false).await;
+    let rig = Rig::new(CHANNEL, false, false).await;
     let shared = rig.shared.clone();
     let provider = ProviderKind::Claude;
     let channel = ChannelId::new(CHANNEL);
@@ -100,10 +74,9 @@ async fn u_active_entrypoints_collect_real_unbound_evidence_pg() {
             .reason,
         "no_session"
     );
-    assert!(
-        observer.calls() > 0,
-        "actual adapter never collected candidates"
-    );
+    for site in [Site::Collect, Site::Scope, Site::Verdict] {
+        assert!(observer.calls(site) > 0, "actual adapter missed {site:?}");
+    }
     assert!(
         inventory.calls() > 0,
         "worker inventory had no positive witness"

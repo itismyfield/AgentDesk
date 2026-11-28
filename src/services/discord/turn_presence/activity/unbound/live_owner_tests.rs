@@ -1,16 +1,30 @@
 //! A session-less turn-mode channel on a host that also runs unrelated tmux sessions.
-use super::review_tests::Rig;
-use super::*;
+
+use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
+use crate::domain::human_input::HumanInputDelivery;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::{
-    HealthRegistry, HumanInputDelivery, HumanInputRequest, deliver_human_input,
-    external_turn_hold_for_start, start_without_gateway,
+    HealthRegistry, deliver_human_input, external_turn_hold_for_start, start_without_gateway,
 };
+use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::queue_io::human_input::HumanInputRequest;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
+use crate::services::discord::turn_presence::activity::unbound::live::{
+    Snapshot, Stamp, marker_path, read,
+};
+use crate::services::discord::turn_presence::activity::unbound::{Origin, Scope};
+use crate::services::discord::turn_presence::activity::{
+    Activity, LivePorts, Observed, Watch, lock, observed,
+};
+use crate::services::discord::{SharedData, adk_session, inflight};
 use crate::services::platform::tmux::session_inventory::{EmptyReason, Inventory};
+use crate::services::provider::ProviderKind;
 use crate::services::tui_o::turn_mode::TestConfirmation;
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueuePersistenceContext};
+use poise::serenity_prelude::ChannelId;
 use poise::serenity_prelude::{MessageId, UserId};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 const MANUAL: &str = "claude";
 const ROUTINE: &str = "AgentDesk-claude-routine-brief---counsel";
@@ -411,7 +425,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
         .execute(pool).await.unwrap();
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "a launching recurrence cannot inherit its prior completion"
     );
     sqlx::query("DELETE FROM scheduled_message_deliveries WHERE id = 'next-delivery'")
@@ -426,7 +440,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
             );
         assert_eq!(
             hold().await,
-            Some(crate::services::discord::health::ExternalHold::Unknown),
+            Some(crate::domain::human_input::ExternalHold::Unknown),
             "a failed inventory is not absence"
         );
     }
@@ -442,7 +456,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     );
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "unfinished delivery"
     );
     sqlx::query("UPDATE scheduled_message_deliveries SET turn_outcome = 'delivered', turn_outcome_at = NOW()")
@@ -455,7 +469,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     .unwrap();
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "unreadable completion evidence"
     );
     sqlx::query(
@@ -470,7 +484,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
         .unwrap();
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "an unnamed launch binding of another transcript"
     );
     sqlx::query("UPDATE turns SET session_id = 'parent' WHERE turn_id = 'scheduled-turn'")
@@ -481,7 +495,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     std::fs::write(marker_path(&name, "spawn_nonce"), "successor").unwrap();
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "same-name successor without its binding"
     );
     std::fs::write(marker_path(&name, "spawn_nonce"), "old").unwrap();
@@ -490,7 +504,7 @@ async fn scheduled_binding_requires_terminal_evidence_and_current_incarnation_pg
     host.start(&next_name);
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "new scheduled message cannot inherit the old completion"
     );
 }
@@ -561,7 +575,7 @@ async fn live_primary_without_watcher_stays_unknown_pg() {
     assert_eq!(
         external_turn_hold_for_start(Some(&registry), &ProviderKind::Claude, rig.channel.get())
             .await,
-        Some(crate::services::discord::health::ExternalHold::Unknown)
+        Some(crate::domain::human_input::ExternalHold::Unknown)
     );
 }
 
@@ -667,7 +681,7 @@ async fn completed_scheduled_inventory_resolves_other_channels_and_pins_foreign_
     assert!(stamp.publish(&watch, || ()).await.is_none());
     assert_eq!(
         hold().await,
-        Some(crate::services::discord::health::ExternalHold::Unknown),
+        Some(crate::domain::human_input::ExternalHold::Unknown),
         "Pending inherited an earlier scheduled completion"
     );
 }
@@ -945,7 +959,3 @@ mod receipt_tests;
 
 #[path = "cross_runtime_owner_e2e_tests.rs"]
 mod cross_runtime_owner_e2e_tests;
-
-pub(super) fn before_owner_publication(channel: u64) {
-    cross_runtime_owner_e2e_tests::before_publication(channel);
-}

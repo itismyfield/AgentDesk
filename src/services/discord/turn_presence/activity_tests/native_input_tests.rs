@@ -84,7 +84,7 @@ fn native_8148_b2_worker_effect_poll_and_rebuild_share_stamped_candidates() {
 
 #[test]
 fn native_8148_2a_rebuild_does_not_open_history_lock() {
-    use crate::test_support::wait::{WAIT_CAP, join_within, recv_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, join_within, recv_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let path = runtime.path().join("runtime/injected_frames.json");
     let f = Fixture::at(path.clone(), CHANNEL, false);

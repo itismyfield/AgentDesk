@@ -52,7 +52,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
     // Cleanup: release this watcher's registry slot.
     // #243: When a watcher is cancelled (replaced by a new watcher or shutdown),
     // the replacement already occupies the slot — removing would delete the new entry.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::discord::queue_dispatch::kickoff::owner_race_pause(
         channel_id,
         "watcher_before_release",
@@ -64,7 +64,7 @@ pub(super) async fn run_post_stream_exit(ctx: PostStreamExitContext) {
         &tmux_session_name,
         &cancel,
     );
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     crate::services::discord::queue_dispatch::kickoff::owner_race_pause(
         channel_id,
         "watcher_after_release",

@@ -4,12 +4,12 @@ use super::inflight_diagnostics::Rejection;
 use super::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::services::discord::turn_presence::activity) enum Kind {
+pub(in crate::services::discord) enum Kind {
     Projection,
     LegacyStrict,
 }
 
-pub(super) fn compare(
+pub(in crate::services::discord) fn compare(
     before: &Files,
     after: &Files,
     phase: &'static str,

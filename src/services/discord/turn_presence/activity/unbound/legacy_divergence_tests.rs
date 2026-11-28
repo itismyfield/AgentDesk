@@ -1,10 +1,17 @@
-use super::review_tests::Rig;
-use super::*;
 use crate::db::dispatched_session_canonical_identity::upsert_legacy_hook_session_pg;
 use crate::db::dispatched_sessions::HookSessionUpsert;
+use crate::db::dispatched_sessions::hosted_execution::{HostedLookup, HostedRecord};
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
+use crate::services::discord::inflight::InflightTurnState;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
+use crate::services::discord::turn_presence::activity::unbound::live::{Stamp, marker_path, read};
+use crate::services::discord::turn_presence::activity::{Activity, Observed, Watch, observed};
+use crate::services::discord::{adk_session, inflight};
 use crate::services::platform::tmux::session_inventory::test_support::ChannelCommand;
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::ChannelId;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 pub(super) struct LegacyFixture {
     pub(super) rig: Rig,

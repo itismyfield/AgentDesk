@@ -2,13 +2,13 @@
 use super::inflight_diagnostics::{self as diagnostics, Rejection};
 use super::*;
 
-pub(in crate::services::discord::turn_presence::activity) struct Admission {
+pub(in crate::services::discord) struct Admission {
     pub(in crate::services::discord::turn_presence::activity) name: String,
     snapshot: Snapshot,
     namespace: Observation,
 }
 impl Admission {
-    pub(in crate::services::discord::turn_presence::activity) async fn current(
+    pub(in crate::services::discord) async fn current(
         &self,
     ) -> Result<(inflight_identity::Kind, Vec<&'static str>), Rejection> {
         Box::pin(self.snapshot.revalidate_inflight(&self.namespace)).await
@@ -102,7 +102,7 @@ async fn collect(
     channel: ChannelId,
 ) -> Result<(Admission, inflight_identity::Kind, Vec<&'static str>), Rejection> {
     let ports = Arc::new(LivePorts {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let (snapshot, namespace, next) = Snapshot::collect_pair(shared, provider, channel, ports)
@@ -124,7 +124,11 @@ async fn collect(
 
 impl Snapshot {
     #[cfg(test)]
-    fn inflight_session(&self, shared: &SharedData, inventory: &Inventory) -> Option<String> {
+    pub(in crate::services::discord) fn inflight_session(
+        &self,
+        shared: &SharedData,
+        inventory: &Inventory,
+    ) -> Option<String> {
         self.inflight_session_checked(shared, inventory).ok()
     }
     fn inflight_session_checked(
@@ -191,7 +195,3 @@ impl Snapshot {
         Ok(name.to_owned())
     }
 }
-
-#[cfg(test)]
-#[path = "inflight_bound_tests.rs"]
-mod tests;

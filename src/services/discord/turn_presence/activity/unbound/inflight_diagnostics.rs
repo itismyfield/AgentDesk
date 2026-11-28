@@ -4,7 +4,7 @@ use super::*;
 use std::sync::LazyLock;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::services::discord::turn_presence::activity) enum Rejection {
+pub(in crate::services::discord) enum Rejection {
     ReadFailed {
         phase: &'static str,
         field: &'static str,

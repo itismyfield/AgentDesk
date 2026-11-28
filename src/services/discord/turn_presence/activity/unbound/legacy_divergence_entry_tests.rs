@@ -1,8 +1,9 @@
 use super::LegacyFixture;
+use crate::domain::human_input::HumanInputDelivery;
 use crate::services::discord::health::{
-    HealthRegistry, HumanInputDelivery, HumanInputRequest, deliver_human_input,
-    external_turn_hold_for_start, start_without_gateway,
+    HealthRegistry, deliver_human_input, external_turn_hold_for_start, start_without_gateway,
 };
+use crate::services::discord::queue_io::human_input::HumanInputRequest;
 use crate::services::discord::router::message_handler::{
     INPUT_EFFECT_PROBE, InputEffectProbe, input_result_for_tests,
 };

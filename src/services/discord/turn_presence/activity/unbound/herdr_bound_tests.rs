@@ -5,7 +5,7 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::discord::turn_presence::activity::tests::{
     bind_turn_mode_transcript, settled_reason,
 };
-use crate::services::discord::turn_presence::activity::unbound::live::review_tests::Rig;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
 use crate::services::discord::{mailbox_snapshot, mailbox_take_next_automatic_intervention};
 use crate::services::tui_prompt_dedupe::{admit_herdr_execution, withhold_herdr_execution};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};

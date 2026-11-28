@@ -17,27 +17,29 @@ use super::activity::{Activity, Reading, reading_now};
 use crate::services::discord::SharedData;
 use crate::services::provider::ProviderKind;
 
-const TICK: Duration = Duration::from_secs(3);
-const TYPING_EVERY: Duration = Duration::from_secs(6);
+pub(in crate::services::discord) const TICK: Duration = Duration::from_secs(3);
+pub(in crate::services::discord) const TYPING_EVERY: Duration = Duration::from_secs(6);
 const TYPING_RETRY: Duration = Duration::from_secs(30);
-const NOTICE_EVERY: Duration = Duration::from_secs(30 * 60);
+pub(in crate::services::discord) const NOTICE_EVERY: Duration = Duration::from_secs(30 * 60);
 const WAKE_EVERY: Duration = Duration::from_secs(30);
 /// Wakes on the same queue head before the supervisor asks why it does not move.
 const HELD_AFTER_WAKES: u32 = 2;
 const HELD_NOTICE_AFTER: Duration = Duration::from_secs(120);
 
 /// Channels each provider runtime confirmed into turn mode.
-static REGISTERED: LazyLock<Mutex<HashMap<String, BTreeSet<u64>>>> =
-    LazyLock::new(Default::default);
+pub(in crate::services::discord) static REGISTERED: LazyLock<
+    Mutex<HashMap<String, BTreeSet<u64>>>,
+> = LazyLock::new(Default::default);
 /// What each supervised channel last published, for the turn endpoint.
-static PRESENCE: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Presence>>>>> =
-    LazyLock::new(Default::default);
+pub(in crate::services::discord) static PRESENCE: LazyLock<
+    Mutex<HashMap<u64, Arc<Mutex<Presence>>>>,
+> = LazyLock::new(Default::default);
 static STARTED: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
 
-struct Started(String);
+pub(in crate::services::discord) struct Started(String);
 
 impl Started {
-    fn new(provider: &ProviderKind) -> Self {
+    pub(in crate::services::discord) fn new(provider: &ProviderKind) -> Self {
         let provider = provider.as_str().to_string();
         *lock(&STARTED).entry(provider.clone()).or_default() += 1;
         Self(provider)
@@ -59,7 +61,7 @@ impl Drop for Started {
 static PROCESS_STARTED: LazyLock<DateTime<Utc>> = LazyLock::new(Utc::now);
 
 #[path = "unknown_notice_store.rs"]
-mod notice_store;
+pub(in crate::services::discord) mod notice_store;
 #[path = "unknown_notice.rs"]
 mod notices;
 #[cfg(unix)]
@@ -88,7 +90,7 @@ pub(crate) fn unknown_snapshots() -> Vec<UnknownSnapshot> {
     notices::snapshots()
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(in crate::services::discord) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -102,7 +104,7 @@ pub(in crate::services::discord) fn register(provider: &ProviderKind, channels: 
     set.extend(channels.iter().copied().filter(|&channel| channel != 0));
 }
 
-fn registered(provider: &ProviderKind) -> Vec<u64> {
+pub(in crate::services::discord) fn registered(provider: &ProviderKind) -> Vec<u64> {
     let registered = lock(&REGISTERED);
     let set = registered.get(provider.as_str());
     let turns = crate::services::tui_o::turn_mode::transcript_turns;
@@ -137,7 +139,7 @@ pub(in crate::services::discord) async fn observe_source_busy(
     channel: u64,
     tmux: &str,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
-    #[cfg(test)] root: Option<std::path::PathBuf>,
+    #[cfg(any(test, feature = "test-support"))] root: Option<std::path::PathBuf>,
 ) -> Option<bool> {
     if !observes(provider, channel) {
         return None;
@@ -154,7 +156,7 @@ pub(in crate::services::discord) async fn observe_source_busy(
         channel,
         tmux,
         binding,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         root,
         |reading| {
             actions = apply(
@@ -184,7 +186,7 @@ pub(crate) fn status(channel: u64) -> Option<serde_json::Value> {
 }
 
 #[derive(Debug)]
-struct Presence {
+pub(in crate::services::discord) struct Presence {
     activity: Activity,
     reason: &'static str,
     observed_at: Option<DateTime<Utc>>,
@@ -193,13 +195,13 @@ struct Presence {
     activity_since: DateTime<Utc>,
     /// Moves on every activity transition; a send from an older generation counts nothing.
     generation: u64,
-    next_typing_at: Option<Instant>,
+    pub(in crate::services::discord) next_typing_at: Option<Instant>,
     sending: Option<AbortHandle>,
     sent_ok_total: u64,
     late_ok_total: u64,
     last_ok_at: Option<DateTime<Utc>>,
     last_error: Option<String>,
-    last_notice_at: Option<Instant>,
+    pub(in crate::services::discord) last_notice_at: Option<Instant>,
     notice: Option<Arc<notices::Owner>>,
     kickoffs_total: u64,
     last_kick_at: Option<Instant>,
@@ -211,7 +213,7 @@ struct Presence {
 }
 
 impl Presence {
-    fn new() -> Self {
+    pub(in crate::services::discord) fn new() -> Self {
         Self {
             activity: Activity::Unknown,
             reason: "not_observed",
@@ -237,7 +239,7 @@ impl Presence {
         }
     }
 
-    fn json(&self) -> serde_json::Value {
+    pub(in crate::services::discord) fn json(&self) -> serde_json::Value {
         let held = self.queue_held.as_ref();
         serde_json::json!({
             "activity": name(self.activity),
@@ -271,7 +273,7 @@ impl Presence {
 
 /// What a published observation asks the supervisor to do after releasing its locks.
 #[derive(Debug, PartialEq, Eq)]
-enum Action {
+pub(in crate::services::discord) enum Action {
     Typing(u64),
     Kickoff,
     /// The idle transition of a channel whose input owner holds the queue wakes that owner.
@@ -283,7 +285,9 @@ enum Action {
 
 /// Everything the supervisor reads or sends outside its own state; tests script it.
 #[async_trait]
-trait Effects: Send + Sync + 'static {
+pub(in crate::services::discord) trait Effects:
+    Send + Sync + 'static
+{
     fn channels(&self) -> Vec<u64>;
     /// Whether an effect point is reading the channel; a read now would supersede it.
     fn effect_read_pending(&self, _channel: u64) -> bool {
@@ -311,13 +315,13 @@ trait Effects: Send + Sync + 'static {
     async fn inject_target(&self, channel: u64) -> Option<(String, String)>;
 }
 
-struct Supervisor<E: Effects> {
+pub(in crate::services::discord) struct Supervisor<E: Effects> {
     effects: Arc<E>,
     channels: HashMap<u64, Arc<Mutex<Presence>>>,
 }
 
 impl<E: Effects> Supervisor<E> {
-    fn new(effects: Arc<E>) -> Self {
+    pub(in crate::services::discord) fn new(effects: Arc<E>) -> Self {
         Self {
             effects,
             channels: HashMap::new(),
@@ -399,7 +403,7 @@ impl<E: Effects> Supervisor<E> {
         }
     }
 
-    fn presence(&mut self, channel: u64) -> Arc<Mutex<Presence>> {
+    pub(in crate::services::discord) fn presence(&mut self, channel: u64) -> Arc<Mutex<Presence>> {
         let presence = self.channels.entry(channel).or_insert_with(|| {
             let mut state = Presence::new();
             state.notice = Some(notices::Owner::get(self.effects.notice_scope(channel)));
@@ -420,7 +424,7 @@ impl<E: Effects> Supervisor<E> {
         self.channels.values().filter_map(due).min()
     }
 
-    async fn tick(&self, now: Instant) {
+    pub(in crate::services::discord) async fn tick(&self, now: Instant) {
         for channel in self.effects.channels() {
             let Some(presence) = self.channels.get(&channel).cloned() else {
                 continue;
@@ -609,7 +613,7 @@ fn name(activity: Activity) -> String {
 }
 
 /// Applies one published observation and returns what to do outside the locks.
-fn apply(
+pub(in crate::services::discord) fn apply(
     presence: &mut Presence,
     channel: u64,
     now: Instant,
@@ -713,7 +717,7 @@ fn wake(
 }
 
 /// Counts a send only for the generation that started it while the channel still reads busy.
-fn typed(
+pub(in crate::services::discord) fn typed(
     presence: &mut Presence,
     channel: u64,
     generation: u64,
@@ -807,9 +811,9 @@ async fn waiting_input(
     )
 }
 
-struct LiveEffects {
-    shared: Arc<SharedData>,
-    provider: ProviderKind,
+pub(in crate::services::discord) struct LiveEffects {
+    pub(in crate::services::discord) shared: Arc<SharedData>,
+    pub(in crate::services::discord) provider: ProviderKind,
 }
 
 #[async_trait]
@@ -931,5 +935,5 @@ impl Effects for LiveEffects {
 }
 
 #[cfg(test)]
-#[path = "supervisor_tests.rs"]
+#[path = "supervisor_fixture_tests.rs"]
 pub(in crate::services::discord) mod tests;

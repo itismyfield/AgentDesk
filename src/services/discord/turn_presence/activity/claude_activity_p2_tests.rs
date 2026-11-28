@@ -166,8 +166,9 @@ async fn contended_collector_publication_yields_to_busy_source_then_recovers() {
     });
     let timely = result.recv_timeout(Duration::from_secs(2));
     release.send(timely.is_ok()).unwrap();
-    let owner_result = crate::test_support::wait::join_within(owner, Duration::from_secs(5));
-    crate::test_support::wait::join_within(publisher, Duration::from_secs(5));
+    let owner_result =
+        adk_test_support::test_support::wait::join_within(owner, Duration::from_secs(5));
+    adk_test_support::test_support::wait::join_within(publisher, Duration::from_secs(5));
     match previous {
         Some(old) => {
             lock(&WATCHES).insert(channel, old);

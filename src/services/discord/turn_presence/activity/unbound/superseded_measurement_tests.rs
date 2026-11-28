@@ -1,8 +1,14 @@
-use super::*;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::settled_owner_observation;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
+use crate::services::discord::turn_presence::activity::{Activity, Watch, lock, observed};
 use crate::services::discord::turn_presence::activity::{Reading, reading_now};
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::ChannelId;
+use std::collections::BTreeMap;
 use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 fn isolated(test: &str) -> bool {

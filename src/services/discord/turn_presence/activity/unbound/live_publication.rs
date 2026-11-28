@@ -2,7 +2,7 @@
 use super::*;
 
 impl Stamp {
-    pub(in crate::services::discord::turn_presence::activity) async fn publish<R>(
+    pub(in crate::services::discord) async fn publish<R>(
         &self,
         watch: &Mutex<Watch>,
         publish: impl FnOnce() -> R,
@@ -13,7 +13,7 @@ impl Stamp {
                 return None;
             }
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         crate::services::discord::queue_dispatch::kickoff::owner_race_pause(
             self.channel,
             "activity_before_final_publication",
@@ -43,8 +43,8 @@ impl Stamp {
         {
             return None;
         }
-        #[cfg(test)]
-        owner_tests::before_owner_publication(self.channel.get());
+        #[cfg(any(test, feature = "test-support"))]
+        publication_hook_tests::before_publication(self.channel.get());
         let shared = self.shared.upgrade()?;
         let apply = || -> Result<Option<R>, &'static str> {
             let guard = watch.try_lock().map_err(|_| "watch_busy")?;

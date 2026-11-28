@@ -91,7 +91,7 @@ impl TailMeta {
                 || matches!(self.codex, CodexBoundary::Closed { .. }))
     }
 }
-pub(super) struct TailReader {
+pub(in crate::services::discord) struct TailReader {
     pub(super) facts: InputFacts,
     meta: TailMeta,
     remaining: u64,
@@ -195,7 +195,7 @@ pub(super) fn enabled() -> bool {
     *ENABLED.get_or_init(|| crate::utils::env_flag("ADK_TURN_PRESENCE_TAIL", true))
 }
 pub(super) fn limits(channel: u64) -> Limits {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     if let Some(limits) = overrides::limits_for(channel) {
         return limits;
     }
@@ -206,16 +206,16 @@ pub(super) fn limits(channel: u64) -> Limits {
 #[path = "tail_tests.rs"]
 pub(super) mod tests;
 
-#[cfg(test)]
-pub(super) mod overrides {
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) mod overrides {
     use super::*;
     static LIMITS: LazyLock<Mutex<HashMap<u64, Limits>>> = LazyLock::new(Default::default);
     pub(super) fn limits_for(channel: u64) -> Option<Limits> {
         lock(&LIMITS).get(&channel).copied()
     }
-    pub(in crate::services::discord::turn_presence::activity) struct Guard(u64);
+    pub(in crate::services::discord) struct Guard(u64);
     impl Guard {
-        pub(in crate::services::discord::turn_presence::activity) fn new(
+        pub(in crate::services::discord) fn new(
             channel: u64,
             full: u64,
             tail: u64,

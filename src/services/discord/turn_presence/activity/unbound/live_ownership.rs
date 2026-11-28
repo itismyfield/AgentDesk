@@ -77,7 +77,7 @@ impl Membership {
 }
 
 #[derive(Clone)]
-pub(super) struct OwnerInputs {
+pub(in crate::services::discord) struct OwnerInputs {
     shared: Weak<SharedData>,
     membership: Membership,
     epoch: u64,
@@ -253,7 +253,7 @@ impl OwnerInputs {
         }
     }
 
-    pub(super) fn local_conflict(&self, name: &str) -> bool {
+    pub(in crate::services::discord) fn local_conflict(&self, name: &str) -> bool {
         self.evidence.local_conflict(name)
     }
 
@@ -261,7 +261,10 @@ impl OwnerInputs {
         matches!(self.nonces.get(name), Some(Ok(Some(bytes))) if bytes == nonce.as_bytes())
     }
 
-    pub(super) fn with_current<R>(&self, publish: impl FnOnce() -> R) -> Result<R, &'static str> {
+    pub(in crate::services::discord) fn with_current<R>(
+        &self,
+        publish: impl FnOnce() -> R,
+    ) -> Result<R, &'static str> {
         let shared = self.shared.upgrade().ok_or("membership")?;
         if !self.membership.current_registry(&shared) {
             return Err("membership");
@@ -297,7 +300,7 @@ impl OwnerInputs {
         self.with_current(|| ()).map_err(rejected).is_ok()
     }
 
-    pub(super) fn files_current(&self) -> bool {
+    pub(in crate::services::discord) fn files_current(&self) -> bool {
         self.files_changed_field().is_none()
     }
 

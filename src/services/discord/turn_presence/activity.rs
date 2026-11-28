@@ -17,7 +17,7 @@ use crate::services::tui_o::shadow::{ShadowProvider, SourceBinding};
 use crate::services::tui_o::writer::adoption::{Hold, logged};
 use crate::services::tui_o::writer::binding::{BindingEvent, BindingEvents, ChannelBindingLog};
 use crate::services::tui_o::writer::input_facts::{InputFacts, Resume, TurnState};
-mod claude_activity;
+pub(in crate::services::discord) mod claude_activity;
 
 pub(in crate::services::discord) mod notice_identity;
 use notice_identity::{NoticeObservation, progress};
@@ -25,11 +25,11 @@ mod effort_restart;
 pub(in crate::services::discord) mod native_input;
 
 /// New bytes one effect-point poll may read before it answers `catching_up`.
-const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
+pub(in crate::services::discord) const CHUNK_BUDGET: u64 = 4 * 1024 * 1024;
 /// Cold sources above this boundary use bounded observation when enabled.
-const MAX_TRANSCRIPT_BYTES: u64 = 256 * 1024 * 1024;
+pub(in crate::services::discord) const MAX_TRANSCRIPT_BYTES: u64 = 256 * 1024 * 1024;
 /// An open turn quiet this long needs current provider activity to supplement its transcript.
-const STALE_OPEN_AFTER: Duration = Duration::from_secs(600);
+pub(in crate::services::discord) const STALE_OPEN_AFTER: Duration = Duration::from_secs(600);
 const UNREADABLE_RETRY_AFTER: Duration = Duration::from_secs(30);
 /// A worker poll this large either completes a record or stops at a trailing partial line.
 const WORKER_BUDGET: u64 = MAX_PARTIAL_BYTES as u64 + 1;
@@ -47,28 +47,31 @@ pub(in crate::services::discord) struct Observed {
     pub reason: &'static str,
 }
 
-const fn observed(activity: Activity, reason: &'static str) -> Observed {
+pub(in crate::services::discord) const fn observed(
+    activity: Activity,
+    reason: &'static str,
+) -> Observed {
     Observed { activity, reason }
 }
 
 /// Which tmux session the channel's watcher names, or the one a start would create.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Target {
+pub(in crate::services::discord) enum Target {
     Bound(String),
-    #[cfg(all(test, unix))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     Unbound(Option<String>),
 }
 
 /// A rebuild is valid only for the provider, session and binding seq it read.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Key {
+pub(in crate::services::discord) struct Key {
     channel: u64,
     provider: ShadowProvider,
     session: String,
     seq: u64,
 }
 
-enum Outcome {
+pub(in crate::services::discord) enum Outcome {
     Rebuilding,
     Source {
         facts: Box<InputFacts>,
@@ -84,12 +87,12 @@ enum Outcome {
     TooLarge,
 }
 
-struct Watch {
-    key: Option<Key>,
-    generation: u64,
+pub(in crate::services::discord) struct Watch {
+    pub(in crate::services::discord) key: Option<Key>,
+    pub(in crate::services::discord) generation: u64,
     /// Moves whenever an effect-point poll reads new records, halts or finds bytes left unread.
-    revision: u64,
-    outcome: Outcome,
+    pub(in crate::services::discord) revision: u64,
+    pub(in crate::services::discord) outcome: Outcome,
     notice: NoticeObservation,
     through: u64,
     grew_at: Instant,
@@ -111,10 +114,12 @@ impl Default for Watch {
     }
 }
 
-type Job = Box<dyn FnOnce() + Send>;
+pub(in crate::services::discord) type Job = Box<dyn FnOnce() + Send>;
 
 /// Everything the probe reads outside its own state; tests script it.
-trait Ports: Send + Sync + 'static {
+pub(in crate::services::discord) trait Ports:
+    Send + Sync + 'static
+{
     fn binding_seq(&self, channel: u64) -> Result<u64, String>;
     fn binding_events(
         &self,
@@ -122,7 +127,7 @@ trait Ports: Send + Sync + 'static {
         provider: ShadowProvider,
     ) -> Result<Vec<BindingEvent>, String>;
     /// Present unless tmux confirms the session is missing.
-    #[cfg(all(test, unix))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     fn session_present(&self, session: &str) -> bool;
     fn final_ready(&self, session: &str) -> bool;
     fn claude_busy(&self, session: &str) -> claude_activity::Busy;
@@ -140,9 +145,10 @@ trait Ports: Send + Sync + 'static {
     }
 }
 
-static WATCHES: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Watch>>>>> = LazyLock::new(Default::default);
+pub(in crate::services::discord) static WATCHES: LazyLock<Mutex<HashMap<u64, Arc<Mutex<Watch>>>>> =
+    LazyLock::new(Default::default);
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(in crate::services::discord) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -163,12 +169,12 @@ pub(in crate::services::discord) async fn activity_now(
 
 /// What a judgment was made on, so a later publisher can tell whether it still holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Stamp {
-    key: Key,
-    generation: u64,
-    revision: u64,
+pub(in crate::services::discord) struct Stamp {
+    pub(in crate::services::discord) key: Key,
+    pub(in crate::services::discord) generation: u64,
+    pub(in crate::services::discord) revision: u64,
     activity: Option<crate::services::claude_tui::activity::Snapshot>,
-    source: Option<String>,
+    pub(in crate::services::discord) source: Option<String>,
     notice: NoticeObservation,
     closed: Result<ClosedBoundary, NoBoundary>,
 }
@@ -180,12 +186,12 @@ pub(in crate::services::discord) use closed_boundary::{ClosedBoundary, NoBoundar
 pub(in crate::services::discord) struct Reading {
     pub observed: Observed,
     notice: NoticeObservation,
-    stamp: Option<Stamp>,
-    watch: Option<Arc<Mutex<Watch>>>,
+    pub(in crate::services::discord) stamp: Option<Stamp>,
+    pub(in crate::services::discord) watch: Option<Arc<Mutex<Watch>>>,
     #[cfg(unix)]
-    unbound: Option<unbound::live::Stamp>,
+    pub(in crate::services::discord) unbound: Option<unbound::live::Stamp>,
     #[cfg(unix)]
-    admission: Option<unbound::live::inflight_bound::Admission>,
+    pub(in crate::services::discord) admission: Option<unbound::live::inflight_bound::Admission>,
 }
 
 impl Reading {
@@ -193,7 +199,7 @@ impl Reading {
         self.notice.clone()
     }
 
-    fn bound(
+    pub(in crate::services::discord) fn bound(
         observed: Observed,
         stamp: Option<Stamp>,
         watch: Option<Arc<Mutex<Watch>>>,
@@ -354,7 +360,7 @@ impl Reading {
     }
 }
 
-type Answer = (Observed, Option<Stamp>);
+pub(in crate::services::discord) type Answer = (Observed, Option<Stamp>);
 
 /// The answer and the state it was decided on, read under the same lock.
 fn at(guard: &Watch, answer: Observed) -> Answer {
@@ -387,7 +393,7 @@ pub(super) fn with_busy_source(
     channel: u64,
     tmux: &str,
     binding: &crate::services::tui_prompt_dedupe::TuiRuntimeBinding,
-    #[cfg(test)] root: Option<std::path::PathBuf>,
+    #[cfg(any(test, feature = "test-support"))] root: Option<std::path::PathBuf>,
     publish: impl FnOnce(&Reading),
 ) -> Option<bool> {
     let shadow = match provider {
@@ -409,7 +415,7 @@ pub(super) fn with_busy_source(
             return None;
         }
         let ports = LivePorts {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             root,
         };
         let seq = ports.binding_seq(channel).ok()?;
@@ -545,25 +551,25 @@ async fn read_now(
     };
     let label = match &target {
         Target::Bound(label) => label.clone(),
-        #[cfg(all(test, unix))]
+        #[cfg(all(unix, any(test, feature = "test-support")))]
         Target::Unbound(label) => label.clone().unwrap_or_default(),
     };
     let watch = lock(&WATCHES).entry(channel.get()).or_default().clone();
     let ports: Arc<dyn Ports> = Arc::new(LivePorts {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         root: crate::services::tui_prompt_dedupe::binding_events::test_root(),
     });
     let held = watch.clone();
     let judged = tokio::task::spawn_blocking(move || {
-        #[cfg(all(test, unix))]
+        #[cfg(all(unix, any(test, feature = "test-support")))]
         crate::services::tui_o::shadow::capture::io_trace::take();
         let answer = if host_checked {
             judge_presence(&held, &ports, shadow, channel.get(), target)
         } else {
             judge(&held, &ports, shadow, channel.get(), target)
         };
-        #[cfg(all(test, unix))]
-        tests::record_io(
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        observation_hook_tests::record_io(
             channel.get(),
             "effect",
             crate::services::tui_o::shadow::capture::io_trace::take(),
@@ -580,7 +586,7 @@ async fn read_now(
     }
 }
 
-fn judge(
+pub(in crate::services::discord) fn judge(
     watch: &Arc<Mutex<Watch>>,
     ports: &Arc<dyn Ports>,
     provider: ShadowProvider,
@@ -598,16 +604,16 @@ fn judge_with_policy(
     target: Target,
     strict: bool,
 ) -> Answer {
-    #[cfg(not(all(test, unix)))]
+    #[cfg(not(all(unix, any(test, feature = "test-support"))))]
     let Target::Bound(session) = target;
-    #[cfg(all(test, unix))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     let session = match target {
         Target::Bound(session) => session,
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         Target::Unbound(Some(session)) if ports.session_present(&session) => {
             return (observed(Activity::Unknown, "watcher_unbound"), None);
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         Target::Unbound(_) => {
             return (
                 observed(Activity::Unknown, "session_identity_unresolved"),
@@ -746,7 +752,7 @@ fn judge_with_policy(
     }
 }
 
-fn judge_presence(
+pub(in crate::services::discord) fn judge_presence(
     watch: &Arc<Mutex<Watch>>,
     ports: &Arc<dyn Ports>,
     provider: ShadowProvider,
@@ -842,13 +848,13 @@ fn rebuild(
     drop(guard);
     let (worker, worker_ports, failed) = (watch.clone(), ports.clone(), key.clone());
     let spawned = ports.spawn(Box::new(move || {
-        #[cfg(all(test, unix))]
+        #[cfg(all(unix, any(test, feature = "test-support")))]
         let stage = if resume.is_some() {
             "resume"
         } else {
             "initial"
         };
-        #[cfg(all(test, unix))]
+        #[cfg(all(unix, any(test, feature = "test-support")))]
         crate::services::tui_o::shadow::capture::io_trace::take();
         let (outcome, grown) = match resume {
             Some(Reload::Proof(outcome)) => effort_restart::refresh(outcome, worker_ports.as_ref(), &key),
@@ -866,8 +872,8 @@ fn rebuild(
                 mode = "full", start = 0, through = facts.observation_progress().0,
                 size = ?facts.source_len(), "activity rebuild complete");
         }
-        #[cfg(all(test, unix))]
-        tests::record_io(
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        observation_hook_tests::record_io(
             channel,
             stage,
             crate::services::tui_o::shadow::capture::io_trace::take(),
@@ -1010,20 +1016,20 @@ fn read_from(
     (Outcome::Source { facts, from_start }, grown)
 }
 
-struct LivePorts {
-    #[cfg(test)]
-    root: Option<std::path::PathBuf>,
+pub(in crate::services::discord) struct LivePorts {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::services::discord) root: Option<std::path::PathBuf>,
 }
 
 impl LivePorts {
-    #[cfg(not(test))]
-    fn scoped<R>(&self, read: impl FnOnce() -> R) -> R {
+    #[cfg(not(any(test, feature = "test-support")))]
+    pub(in crate::services::discord) fn scoped<R>(&self, read: impl FnOnce() -> R) -> R {
         read()
     }
 
     /// Test binding logs live under a per-thread root, so each read re-enters it.
-    #[cfg(test)]
-    fn scoped<R>(&self, read: impl FnOnce() -> R) -> R {
+    #[cfg(any(test, feature = "test-support"))]
+    pub(in crate::services::discord) fn scoped<R>(&self, read: impl FnOnce() -> R) -> R {
         use crate::services::tui_prompt_dedupe::binding_events as p5;
         let saved = p5::test_root();
         p5::set_test_root(self.root.as_deref());
@@ -1077,15 +1083,15 @@ impl Ports for LivePorts {
         self.scoped(|| log.binding_events_since(channel, 0))
     }
 
-    #[cfg(all(test, unix))]
+    #[cfg(all(unix, any(test, feature = "test-support")))]
     fn session_present(&self, session: &str) -> bool {
         use crate::services::platform::tmux::{SessionPresence, session_presence};
         session_presence(session) != SessionPresence::Missing
     }
 
     fn final_ready(&self, session: &str) -> bool {
-        #[cfg(all(test, unix))]
-        if tests::pane_ready_for_tests(session) {
+        #[cfg(all(unix, any(test, feature = "test-support")))]
+        if observation_hook_tests::pane_ready_for_tests(session) {
             return true;
         }
         self.scoped(|| claude_activity::ready(session))
@@ -1096,7 +1102,7 @@ impl Ports for LivePorts {
     }
 
     fn spawn(&self, job: Job) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         let job: Job = {
             let ports = LivePorts {
                 root: self.root.clone(),
@@ -1113,8 +1119,12 @@ impl Ports for LivePorts {
     }
 }
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+#[path = "activity_observation_hook_tests.rs"]
+pub(in crate::services::discord) mod observation_hook_tests;
+
 #[cfg(all(test, unix))]
-#[path = "activity_tests.rs"]
+#[path = "activity_fixture_tests.rs"]
 pub(in crate::services::discord) mod tests;
 
 #[cfg(all(test, unix))]
@@ -1122,9 +1132,9 @@ pub(in crate::services::discord) mod tests;
 mod notice_tests;
 
 pub(in crate::services::discord) mod effect_reads;
-mod tail;
+pub(in crate::services::discord) mod tail;
 #[cfg(unix)]
-mod unbound;
+pub(in crate::services::discord) mod unbound;
 
 #[cfg(all(test, unix))]
 #[path = "activity/effort_restart_baseline_tests.rs"]

@@ -13,7 +13,7 @@ pub(super) fn busy_source_permitted() -> bool {
         .is_none_or(|hook| hook())
 }
 
-pub(super) struct Busy {
+pub(in crate::services::discord) struct Busy {
     active: bool,
     token: Option<Snapshot>,
 }

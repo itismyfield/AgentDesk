@@ -1,10 +1,23 @@
-use super::super::review_tests::{PAUSES, Pause, PauseGuard, Rig};
-use super::*;
+use crate::db::dispatched_sessions::hosted_execution::HostedLookup;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::inflight::InflightTurnState;
 use crate::services::discord::turn_presence::activity::tests::{log_turn_source, settled_reason};
+use crate::services::discord::turn_presence::activity::unbound::Verdict;
+use crate::services::discord::turn_presence::activity::unbound::live::fixture_tests::Rig;
+use crate::services::discord::turn_presence::activity::unbound::live::live_snapshot_hook_tests::{
+    PAUSES, Pause, PauseGuard,
+};
+use crate::services::discord::turn_presence::activity::unbound::live::{
+    Snapshot, inflight_diagnostics, inflight_identity, marker_path,
+};
+use crate::services::discord::turn_presence::activity::{Activity, LivePorts, lock, observed};
 use crate::services::discord::turn_presence::supervisor::tests::LiveSupervisor;
+use crate::services::discord::{SharedData, adk_session, inflight};
 use crate::services::platform::tmux::session_inventory::test_support::ChannelCommand;
+use crate::services::provider::ProviderKind;
+use poise::serenity_prelude::ChannelId;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
