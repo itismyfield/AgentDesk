@@ -354,6 +354,15 @@ input-single-path/ClaudeReadinessDualInvalid.cfg	ClaudeReadiness	-	-
 input-single-path/ClaudeReadinessDualRecovery.cfg	ClaudeReadiness	-	-
 input-single-path/ClaudeReadinessDualStaleLedger.cfg	ClaudeReadiness	-	-
 input-single-path/ClaudeReadinessDualValid.cfg	ClaudeReadiness	-	-
+input-single-path/CodexHerdrBusySourceFixAnyHostHerdr.cfg	CodexHerdrBusySource	-	-
+input-single-path/CodexHerdrBusySourceFixAnyHostTmux.cfg	CodexHerdrBusySource	NoForeignSourceKey	-
+input-single-path/CodexHerdrBusySourceFixHerdrHerdr.cfg	CodexHerdrBusySource	-	-
+input-single-path/CodexHerdrBusySourceFixHerdrTmux.cfg	CodexHerdrBusySource	-	-
+input-single-path/CodexHerdrBusySourceFixHerdrUnknown.cfg	CodexHerdrBusySource	-	-
+input-single-path/CodexHerdrBusySourceFixHerdrUnverified.cfg	CodexHerdrBusySource	-	-
+input-single-path/CodexHerdrBusySourceMutNoBoundGate.cfg	CodexHerdrBusySource	NoForeignSourceKey	-
+input-single-path/CodexHerdrBusySourceMutUnknownBusy.cfg	CodexHerdrBusySource	NoKeyWithoutKnownBusy	UnverifiedRefused
+input-single-path/CodexHerdrBusySourceNowHerdr.cfg	CodexHerdrBusySource	-	HerdrProvenInjected
 input-single-path/CodexReadyAfterArchivedSilentTurn.cfg	CodexReadiness	CodexNoRunningKill	-
 input-single-path/CodexReadyAfterArchivedSilentTurnRecordFirst.cfg	CodexReadiness	CodexNoRunningKill	-
 input-single-path/CodexReadyAfterBlockedPrompt.cfg	CodexReadiness	-	-
