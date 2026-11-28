@@ -14,7 +14,10 @@ use crate::{
                 Fault, Owner,
                 rotation::{Handoff, HandoffError, sha256},
             },
-            v2_types::rotation::{RotationIntent, Ticket},
+            v2_types::{
+                previous_v2,
+                rotation::{RotationIntent, Ticket},
+            },
         },
     },
 };
@@ -450,10 +453,3 @@ fn rotation_previous_owner_reader_discards_optional_field() {
     std::fs::write(&path, old_bytes).unwrap();
     assert!(owner(&path).snapshot.rotation.is_none());
 }
-
-use crate::services::turn_orchestrator::{
-    pending_queue_persistence::PendingQueueItem,
-    queued_head::{HeadPhase, QueueIdentity},
-};
-#[path = "../turn_orchestrator/queued_head/v2/owner_tests/fixtures/previous_v2_reader.rs"]
-mod previous_v2;

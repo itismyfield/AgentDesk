@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) mod cold_source;
 pub(crate) mod effort_restart;
+#[cfg(test)]
+#[path = "v2/owner_tests/fixtures/previous_v2_reader.rs"]
+pub(crate) mod previous_v2;
 pub(crate) mod retry_wait;
 pub(crate) mod rotation;
 
