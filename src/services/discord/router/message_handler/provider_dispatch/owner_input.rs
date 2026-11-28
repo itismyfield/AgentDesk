@@ -1437,18 +1437,24 @@ pub(super) fn execute_front(
     let reply = reply_once(Some(settled));
     let failure = super::start_failure::Failure::claimed(&owner.mailbox, &claim)
         .with_recovery(owner.recovery.clone());
-    if !turn.force_fresh {
-        turn.force_fresh = failure.resume_retired_attach(&turn)?;
-    }
+    let resume = if turn.force_fresh {
+        Ok(())
+    } else {
+        failure
+            .resume_retired_attach(&turn)
+            .map(|force_fresh| turn.force_fresh = force_fresh)
+    };
     let watch =
         crate::services::discord::inflight::row_removed::watch(turn.provider, turn.channel_id);
     let context = turn.clone();
-    let inside = failure.guard_reply(reply.clone());
-    let result = match take_owned(&turn, Some(claim), owner, inside) {
-        Some(Taken::Done(result)) => result,
-        Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
-        None => Err("NotSent(\"not_owned\")".into()),
-    };
+    let result = resume.and_then(|()| {
+        let inside = failure.guard_reply(reply.clone());
+        match take_owned(&turn, Some(claim), owner, inside) {
+            Some(Taken::Done(result)) => result,
+            Some(Taken::Launch(guard)) => guard.finish(super::drive(turn, sender)),
+            None => Err("NotSent(\"not_owned\")".into()),
+        }
+    });
     let result = failure.finish(&context, watch, result);
     reply(&result);
     result

@@ -44,7 +44,7 @@ VARIABLES entry, proof, cache, restarted, sinceRestart, restored,
           \* design w4 (review-design-s2-3 P1 1)
           gone, gen, goneGen, lostSucc,
           \* provider execution evidence and owner attach wait are independent of the first key.
-          evidenced, attachWait
+          evidenced, attachWait, settledAnswers
 
 vars == <<entry, proof, cache, restarted, sinceRestart, restored,
           restartHost, tmuxOp, relaunch, consent, sync>>
@@ -52,7 +52,7 @@ s2vars == <<exec, made, tabs, tmuxs, inq, submits, oready, late, epoch, restarts
             judged, unsent, receipt>>
 w2vars == <<reserved, hkey, boot, other, v2, rst>>
 w3vars == <<ran, closed, succ, archived, hitLive>>
-w4vars == <<gone, gen, goneGen, lostSucc, evidenced, attachWait>>
+w4vars == <<gone, gen, goneGen, lostSucc, evidenced, attachWait, settledAnswers>>
 allvars == <<vars, s2vars, w2vars, w3vars, w4vars>>
 
 Threads == {"LiveTmux", "DeadTmux", "ProbeFail", "HerdrBound", "Unresolved", "SlotGc", "LegacyKey"}
@@ -177,7 +177,7 @@ S2Init == /\ exec = CASE entry \in {"FreshAfterKill", "ResumeTmux"} -> "LegacyDe
           /\ gen = IF gone \/ entry \in AttachEntries THEN 1 ELSE 0
           /\ goneGen = IF gone THEN gen ELSE 0
           /\ lostSucc = FALSE
-          /\ evidenced = FALSE /\ attachWait = "None"
+          /\ evidenced = FALSE /\ attachWait = "None" /\ settledAnswers = 0
 
 Init == /\ entry \in Entries
         /\ proof \in {"Ok", "Pending"}
@@ -310,7 +310,7 @@ S2Like == Mode \in {"S2", "MutS2NoPermit", "MutS2NoBootResolve", "MutS2NoRelease
                     "MutW3NoPlacedResidue", "MutW3ResidueByAbsence", "MutW3NoPristine",
                     "MutW3ArchiveAfterRelease", "MutW4PendingEarlyReturn", "MutW4MissingNoCas",
                     "MutW4UnreadAsMissing", "MutW4MissingResubmits", "MutAttachOpaque",
-                    "MutAttachMissingUnsent"}
+                    "MutAttachMissingUnsent", "MutAttachEarlyDispositionReturn"}
 Selector == entry = "ResumeTmux"
 HerdrExec == {"Pending", "Placed", "Bound"}
 FreshStart == {"None", "LegacyDead", "Retired", "Gone"}
@@ -368,7 +368,7 @@ Launch == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w2vars /\ entry \in
           \* w4: each Herdr Pending is a new execution nonce (herdr_launch.rs:550). Generations
           \* saturate at 3 to keep relaunch loops finite; contract paths use at most 2.
           /\ gen' = IF exec' = "Pending" /\ gen < 3 THEN gen + 1 ELSE gen
-          /\ gone' = FALSE /\ UNCHANGED <<goneGen, lostSucc>>
+          /\ gone' = FALSE /\ UNCHANGED <<goneGen, lostSucc, settledAnswers>>
           /\ evidenced' = FALSE /\ attachWait' = "None"
 \* writer/host/first_init.rs:282 activate_owner: an ordinary adoption's writer becomes ready.
 OrdinaryReady == /\ UNCHANGED vars /\ UNCHANGED w3vars /\ UNCHANGED w4vars /\ UNCHANGED w2vars /\ entry \in HerdrParentS2 /\ ~late /\ ~oready
@@ -562,13 +562,14 @@ ResidueClose == /\ UNCHANGED vars /\ S2Like /\ Mode # "MutW3NoPlacedResidue"
                                [] OTHER -> "Pristine"
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
                                slot, judged, unsent, receipt>>
-                /\ UNCHANGED w2vars /\ UNCHANGED <<ran, succ, archived, hitLive, gen, lostSucc, evidenced, attachWait>>
+                /\ UNCHANGED w2vars
+                /\ UNCHANGED <<ran, succ, archived, hitLive, gen, lostSucc, evidenced, attachWait, settledAnswers>>
 \* expected records provider evidence. hkey records a key for the owner's input.
 RecordAttachEvidence ==
     /\ entry \in AttachEntries \union {"LostAfterKey"}
     /\ exec = "Placed" /\ ran /\ ~gone /\ ~evidenced
     /\ evidenced' = TRUE
-    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, attachWait>>
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, attachWait, settledAnswers>>
 \* The recorded pane goes away by itself, once: before any key (LostCommand) or after the first key
 \* (LostAfterKey, the payload may have been delivered).
 PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
@@ -579,15 +580,17 @@ PaneVanishes == /\ UNCHANGED vars /\ UNCHANGED w2vars /\ UNCHANGED w3vars
                 /\ (ReserveLoss => reserved)
                 /\ gone' = TRUE /\ goneGen' = gen /\ tabs' = tabs - 1
                 /\ UNCHANGED <<exec, made, tmuxs, inq, submits, oready, late, epoch, restarts2, idle,
-                               slot, judged, unsent, receipt, gen, lostSucc, evidenced, attachWait>>
+                               slot, judged, unsent, receipt, gen, lostSucc, evidenced, attachWait, settledAnswers>>
 EvidencedPaneVanishes == entry \in AttachEntries /\ PaneVanishes
 \* An attach refusal records the unattempted claim, even when recovery retired it first.
 WaitForAttach ==
     /\ entry \in AttachEntries /\ entry # "LostAfterReserve"
     /\ exec \in {"Placed", "Retired"} /\ evidenced /\ gone /\ attachWait = "None"
-    /\ (entry = "LostBeforeKeyRetiredFirst" => exec = "Retired")
+    /\ (entry \in {"LostBeforeKeyRetiredFirst", "LostBeforeKeyUnread"} => exec = "Retired")
     /\ inq = "Queued" /\ ~reserved /\ ~hkey
     /\ attachWait' = IF entry = "LostBeforeKeyUnread" THEN "Held" ELSE "Waiting"
+    /\ settledAnswers' = IF entry = "LostBeforeKeyUnread" /\ Mode # "MutAttachEarlyDispositionReturn"
+                         THEN settledAnswers + 1 ELSE settledAnswers
     /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
 \* Only a no-key settlement of the reserved original enters KnownNotSent.
 SettleAttachUnsent ==
@@ -596,14 +599,14 @@ SettleAttachUnsent ==
     /\ reserved' = FALSE /\ inq' = "Retained" /\ attachWait' = "KnownNotSent"
     /\ UNCHANGED <<vars, w3vars, hkey, boot, other, v2, rst,
                    exec, made, tabs, tmuxs, submits, oready, late, epoch, restarts2, idle,
-                   slot, judged, unsent, receipt, gone, gen, goneGen, lostSucc, evidenced>>
+                   slot, judged, unsent, receipt, gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
 RequeueAttachUnsent ==
     /\ attachWait = "KnownNotSent" /\ inq = "Retained"
     /\ inq' = "Queued"
     /\ attachWait' = IF Mode = "MutAttachMissingUnsent" THEN "None" ELSE "ProvenUnsent"
     /\ UNCHANGED <<vars, w2vars, w3vars, exec, made, tabs, tmuxs, submits, oready, late,
                    epoch, restarts2, idle, slot, judged, unsent, receipt,
-                   gone, gen, goneGen, lostSucc, evidenced>>
+                   gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
 \* The placed resolver needs Missing on a single witness. LegacyDedicated uses
 \* fresh E7 Off. UserDefault matches the nonce's stored grant before reading.
 \* Missing permits no replay of a submitted input.
@@ -621,11 +624,12 @@ PlacedMissingRetire ==
     /\ hkey' = FALSE
     /\ lostSucc' = (lostSucc \/ (goneGen > 0 /\ goneGen # gen))
     /\ UNCHANGED <<made, tabs, tmuxs, submits, oready, late, epoch, restarts2, idle, slot, receipt>>
-    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive, gone, gen, goneGen, evidenced, attachWait>>
+    /\ UNCHANGED <<boot, other, v2, rst, closed, succ, archived, hitLive,
+                   gone, gen, goneGen, evidenced, attachWait, settledAnswers>>
 ReleaseAttachWait ==
     /\ exec = "Retired" /\ evidenced /\ attachWait \in {"Waiting", "ProvenUnsent"} /\ goneGen = gen
     /\ attachWait' = IF Mode = "MutAttachOpaque" /\ attachWait = "Waiting" THEN "Spent" ELSE "Released"
-    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced>>
+    /\ UNCHANGED <<vars, s2vars, w2vars, w3vars, gone, gen, goneGen, lostSucc, evidenced, settledAnswers>>
 \* w3 (P1-2): after the slot map moved on, the same thread ID still takes work: a dispatch that
 \* reuses the card's active_thread_id (intake_turn/adk_thread.rs:154-205, unarchived by
 \* router/thread_binding.rs:77-110) or a direct Discord message starts a successor there.
@@ -702,5 +706,7 @@ RetireOwnGeneration == ~lostSucc
 UserDefaultReplacementHeld == entry = "UserDefaultReplaced" => exec = "Placed" /\ submits = 0
 OwnerStartBudgetPreserved == attachWait # "Spent"
 UnknownAttachHeld == entry = "LostBeforeKeyUnread" => gen <= 1 /\ submits = 0
+UnknownAttachAnsweredOnce == entry = "LostBeforeKeyUnread" =>
+    settledAnswers = (IF attachWait = "Held" THEN 1 ELSE 0)
 UnknownAttachRetires == <>(exec = "Retired" /\ attachWait = "Held")
 =============================================================================

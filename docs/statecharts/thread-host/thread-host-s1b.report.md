@@ -316,7 +316,8 @@ The isolated `LegacyLiveReplacement` entry retains A's pane in the total. The sh
 | --- | --- |
 | `S2AttachWait` | An unattempted original reaches its successor even if Missing retirement precedes recording the wait. |
 | `S2AttachReserved` | Reserve, pane loss, exact no-key settlement and KnownNotSent requeue preserve the original across either order of retirement and settlement. |
-| `S2AttachUnread` | The execution reaches Retired while the original stays held with zero submissions. |
+| `S2AttachUnread` | The execution reaches Retired. An unread owner disposition holds the original with zero submissions and answers settled exactly once. |
+| `MutAttachEarlyDispositionReturn` | Returning early drops the settled answer and breaks `UnknownAttachAnsweredOnce`. |
 | `MutAttachOpaque` | The opaque attach refusal breaks `OwnerStartBudgetPreserved` and `FirstInputResolves`. |
 | `MutAttachMissingUnsent` | Dropping the requeued original's no-key proof breaks `FirstInputResolves`. |
 
