@@ -289,8 +289,12 @@ fn codex_item(item: &Value, item_type: &str) -> Option<RecordFact> {
             let texts: Vec<&str> = parts.filter_map(|part| str_at(part, "text")).collect();
             return Some(RecordFact::Prompt(false, texts.join("\n")));
         }
-        // Reasoning, other roles, inter-agent traffic and the session's tool list are not output.
-        ("message" | "reasoning" | "agent_message" | "additional_tools", _) => return None,
+        // Reasoning, other roles, inter-agent traffic, the session's tool list and harness
+        // configuration changes such as reasoning effort are not output.
+        (
+            "message" | "reasoning" | "agent_message" | "additional_tools" | "configuration_update",
+            _,
+        ) => return None,
         ("function_call" | "custom_tool_call" | "tool_search_call", _) => (
             UnitKind::Tool,
             tool_call(item, &["arguments", "input", "action"]),
@@ -549,6 +553,14 @@ mod tests {
         let blocked = RecordFact::Blocked("unsupported response_item definitely_unknown".into());
         let unknown = classify(ShadowProvider::Codex, &item("definitely_unknown"));
         assert_eq!(unknown, [blocked]);
+    }
+
+    /// A rollout's configuration update, with placeholder values, carries no answer text.
+    #[test]
+    fn codex_configuration_update_yields_nothing() {
+        let line = r#"{"timestamp":"<ts>","ordinal":0,"type":"response_item","payload":{"type":"configuration_update","reasoning":{"effort":"<effort>"}},"metadata":{"history_sequence":0,"sampled_through_sequence":0,"client_authored":false,"harness_authored_configuration":true}}"#;
+        let record = serde_json::from_str(line).unwrap();
+        assert_eq!(super::classify(ShadowProvider::Codex, &record), []);
     }
 
     #[test]

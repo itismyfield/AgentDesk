@@ -12,12 +12,15 @@ mod guides;
 mod inventory;
 mod taxonomy;
 
+#[cfg(test)]
+mod snapshot_tests;
+
 use guides::{api_friction_markers_body, card_lifecycle_ops_body, guide_index};
 use inventory::{EndpointDoc, all_endpoints};
 use taxonomy::{
-    CANONICAL_CATEGORIES, GROUP_NAMES, canonical_category, categories_for_group,
-    category_description, category_summaries, category_to_group, effective_category,
-    group_description, is_canonical_category, subcategory_summaries,
+    GROUP_NAMES, canonical_category, categories_for_group, category_description,
+    category_summaries, category_to_group, effective_category, group_description,
+    is_canonical_category, subcategory_summaries,
 };
 
 // Keep coverage constants visible at `crate::server::routes::docs::*` while
@@ -39,7 +42,7 @@ pub async fn api_help() -> (StatusCode, Json<Value>) {
     (
         StatusCode::OK,
         Json(json!({
-            "categories": category_summaries(&endpoints),
+            "categories": category_summaries(endpoints),
             "endpoints": endpoints,
         })),
     )
@@ -77,8 +80,8 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
         .filter(|value| !value.is_empty())
     {
         let category = canonical_category(category);
-        let matching: Vec<EndpointDoc> = endpoints
-            .into_iter()
+        let matching: Vec<&EndpointDoc> = endpoints
+            .iter()
             .filter(|endpoint| effective_category(endpoint) == category)
             .collect();
         if matching.is_empty() {
@@ -102,7 +105,7 @@ pub async fn api_docs(Query(query): Query<ApiDocsQuery>) -> (StatusCode, Json<Va
     let groups: Vec<Value> = GROUP_NAMES
         .iter()
         .map(|group| {
-            let categories: Vec<&'static str> = categories_for_group(&endpoints, group)
+            let categories: Vec<&str> = categories_for_group(endpoints, group)
                 .into_iter()
                 .map(|(name, _)| name)
                 .collect();
@@ -146,23 +149,18 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
 
     let endpoints = all_endpoints();
 
-    if let Some(body) = group_response::resolve(&endpoints, segment, flat) {
+    if let Some(body) = group_response::resolve(endpoints, segment, flat) {
         return (StatusCode::OK, HeaderMap::new(), body);
     }
 
     // Backward compat: legacy flat category route.
-    let canonical: Option<&'static str> = if is_canonical_category(segment) {
-        // The CANONICAL_CATEGORIES array stores &'static str literals so we can
-        // recover a 'static lifetime by matching against the constant list.
-        CANONICAL_CATEGORIES
-            .iter()
-            .copied()
-            .find(|candidate| *candidate == segment)
+    let canonical = if is_canonical_category(segment) {
+        Some(segment)
     } else {
         endpoints
             .iter()
-            .find(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
-            .map(|endpoint| endpoint.category)
+            .find(|endpoint| endpoint.subcategory.as_deref() == Some(segment))
+            .map(|endpoint| endpoint.category.as_str())
     };
 
     let Some(canonical) = canonical else {
@@ -174,14 +172,14 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
     };
 
     let legacy_drilldown = segment != canonical;
-    let matching: Vec<EndpointDoc> = if legacy_drilldown {
+    let matching: Vec<&EndpointDoc> = if legacy_drilldown {
         endpoints
-            .into_iter()
-            .filter(|endpoint| endpoint.subcategory.is_some_and(|sub| sub == segment))
+            .iter()
+            .filter(|endpoint| endpoint.subcategory.as_deref() == Some(segment))
             .collect()
     } else {
         endpoints
-            .into_iter()
+            .iter()
             .filter(|endpoint| endpoint.category == canonical)
             .collect()
     };
@@ -241,7 +239,7 @@ fn resolve_docs_segment(segment: &str, flat: bool) -> (StatusCode, HeaderMap, Va
                          deprecation — no endpoint is going away.",
             },
             "canonical_path": canonical_path,
-            "subcategories": subcategory_summaries(&matching, canonical),
+            "subcategories": subcategory_summaries(matching.iter().copied(), canonical),
             "endpoints": matching,
         }),
     )
@@ -303,10 +301,9 @@ pub async fn api_docs_group_category(
     }
 
     let endpoints = all_endpoints();
-    let mut matching: Vec<EndpointDoc> = endpoints
+    let mut matching: Vec<&EndpointDoc> = endpoints
         .iter()
         .filter(|endpoint| effective_category(endpoint) == category.as_str())
-        .cloned()
         .collect();
 
     // A canonical legacy category can be an aggregate whose endpoints all use
@@ -314,7 +311,7 @@ pub async fn api_docs_group_category(
     // child-category result whenever it exists, and only then use the aggregate.
     if matching.is_empty() && is_canonical_category(&category) {
         matching = endpoints
-            .into_iter()
+            .iter()
             .filter(|endpoint| endpoint.category == category.as_str())
             .collect();
     }
@@ -352,6 +349,7 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    use super::taxonomy::CANONICAL_CATEGORIES;
     use super::*;
 
     pub(super) fn docs_router() -> Router {
@@ -473,7 +471,7 @@ mod tests {
                     panic!("{method} {path} must include a partial-success example")
                 });
             assert_eq!(partial.status, Some(200));
-            assert_eq!(partial.scenario, Some("partial_success"));
+            assert_eq!(partial.scenario.as_deref(), Some("partial_success"));
             assert_eq!(partial.response["assignment"]["ok"], true);
             assert_eq!(partial.response["transition"]["ok"], false);
             assert_eq!(
@@ -520,8 +518,8 @@ mod tests {
             .expect("PATCH dispatch docs must include status body param");
         assert_eq!(status.location, "body");
         assert_eq!(
-            status.enum_values.as_deref(),
-            Some(&["pending", "dispatched", "completed", "cancelled", "failed"][..])
+            status.enum_values.as_deref().expect("status enum values"),
+            ["pending", "dispatched", "completed", "cancelled", "failed"]
         );
         let response = &patch
             .example
@@ -702,7 +700,7 @@ mod tests {
         let expected_pairs: BTreeSet<(String, String)> = GROUP_NAMES
             .iter()
             .flat_map(|group| {
-                categories_for_group(&endpoints, group)
+                categories_for_group(endpoints, group)
                     .into_iter()
                     .map(|(category, _)| ((*group).to_owned(), category.to_owned()))
             })
@@ -813,7 +811,11 @@ mod tests {
         let legacy_segments: BTreeSet<&str> = CANONICAL_CATEGORIES
             .iter()
             .copied()
-            .chain(endpoints.iter().filter_map(|endpoint| endpoint.subcategory))
+            .chain(
+                endpoints
+                    .iter()
+                    .filter_map(|endpoint| endpoint.subcategory.as_deref()),
+            )
             .filter(|segment| !GROUP_NAMES.contains(segment))
             .collect();
         let mut unresolved_legacy_canonical_paths = Vec::new();
@@ -1138,11 +1140,12 @@ mod tests {
             .as_ref()
             .expect("send docs must include an example")
             .request["body"];
-        assert_eq!(example_body["target"], "channel:1473922824350601297");
+        assert_eq!(example_body["target"], "channel:example-id-19d-03");
         assert_eq!(example_body["content"], "hello");
         assert_eq!(example_body["source"], "operator");
         assert!(
             send.curl_example
+                .as_deref()
                 .expect("send docs must include a curl example")
                 .contains("X-AgentDesk-Source: cli")
         );
