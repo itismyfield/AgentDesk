@@ -541,6 +541,9 @@ pub(super) fn append_terminal(started: &Started, message: &str) {
 #[path = "provider_dispatch_herdr_missing_success_tests.rs"]
 mod success;
 
+#[path = "provider_dispatch_herdr_placed_attach_tests.rs"]
+mod placed_attach;
+
 #[path = "provider_dispatch_herdr_missing_race_tests.rs"]
 mod capture_race;
 
