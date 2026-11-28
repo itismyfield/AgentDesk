@@ -19,7 +19,7 @@ fn failed(id: &str, reason: &str) -> Value {
     json!({"host":id,"errors":[reason]})
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     static TEST_INPUT: (session_forwarding::ForwardCallerContext, Value, i64);
 }
@@ -31,7 +31,7 @@ pub(super) async fn observation(store: &RoutineStore) -> Value {
     let context =
         session_forwarding::ForwardCallerContext::from_live_globals(Some(store.pool().clone()));
     let identity = census::detail_json();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let (context, identity) = TEST_INPUT
         .try_with(|(context, identity, _)| (context.clone(), identity.clone()))
         .unwrap_or((context, identity));
@@ -39,7 +39,7 @@ pub(super) async fn observation(store: &RoutineStore) -> Value {
         .await
         .unwrap_or_else(|_| HOSTS.map(|id| failed(id, "TICK_TIMEOUT")));
     let now = chrono::Utc::now().timestamp_millis();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let now = TEST_INPUT.try_with(|(_, _, now)| *now).unwrap_or(now);
     let report = census::evaluate(
         HOSTS,
@@ -86,7 +86,7 @@ async fn fetch(
             return Err("HOST_REGISTRY_INVALID");
         }
         let origin = node["api_base_url"].as_str().ok_or("HOST_ORIGIN_MISSING")?;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         let loopback = TEST_INPUT
             .try_with(|_| {
                 origin
@@ -104,7 +104,7 @@ async fn fetch(
             &node["capabilities"],
         )
         .await;
-        #[cfg(all(test, unix))]
+        #[cfg(all(any(test, feature = "test-support"), unix))]
         drop(loopback);
         let target = target.map_err(|_| "HOST_TRUST_REJECTED")?;
         let request = session_forwarding::trusted_request(

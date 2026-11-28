@@ -82,9 +82,9 @@ struct SharedRoutineLoaderState {
     scripts: RoutineScriptStore,
     failed_scripts: Mutex<HashMap<PathBuf, RoutineScriptFailure>>,
     load_gate: Mutex<()>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     evaluation_attempts: std::sync::atomic::AtomicUsize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     load_error_emissions: std::sync::atomic::AtomicUsize,
 }
 
@@ -94,9 +94,9 @@ impl SharedRoutineLoaderState {
             scripts: Arc::new(Mutex::new(HashMap::new())),
             failed_scripts: Mutex::new(HashMap::new()),
             load_gate: Mutex::new(()),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             evaluation_attempts: std::sync::atomic::AtomicUsize::new(0),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             load_error_emissions: std::sync::atomic::AtomicUsize::new(0),
         }
     }
@@ -177,14 +177,14 @@ pub struct RoutineTickAgent {
 /// process lifetime.
 pub struct RoutineScriptLoader {
     state: Arc<SharedRoutineLoaderState>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     source_read_hook: Mutex<Option<Arc<dyn Fn(&Path) + Send + Sync>>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     source_reader: Mutex<Option<Arc<dyn Fn(&Path) -> std::io::Result<String> + Send + Sync>>>,
 }
 
 impl RoutineScriptLoader {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new() -> Result<Self> {
         Ok(Self::with_state(Arc::new(SharedRoutineLoaderState::new())))
     }
@@ -205,14 +205,14 @@ impl RoutineScriptLoader {
     fn with_state(state: Arc<SharedRoutineLoaderState>) -> Self {
         Self {
             state,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             source_read_hook: Mutex::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             source_reader: Mutex::new(None),
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn load_script(&self, root: &Path, path: &Path) -> Result<String> {
         self.state
             .evaluation_attempts
@@ -328,7 +328,7 @@ impl RoutineScriptLoader {
                     break;
                 }
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 let source_result = if let Some(reader) = self
                     .source_reader
                     .lock()
@@ -339,7 +339,7 @@ impl RoutineScriptLoader {
                 } else {
                     std::fs::read_to_string(&candidate.path)
                 };
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-support")))]
                 let source_result = std::fs::read_to_string(&candidate.path);
                 let source = match source_result {
                     Ok(source) => source,
@@ -347,7 +347,7 @@ impl RoutineScriptLoader {
                         let now = Instant::now();
                         if self.should_retry_candidate(&candidate_key, None, now, has_existing) {
                             let retry_delay = self.record_failure(&candidate_key, None, now);
-                            #[cfg(test)]
+                            #[cfg(any(test, feature = "test-support"))]
                             self.state
                                 .load_error_emissions
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -377,7 +377,7 @@ impl RoutineScriptLoader {
                     break;
                 }
                 let source_version = full_source_version(&source);
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 if let Some(hook) = self
                     .source_read_hook
                     .lock()
@@ -399,7 +399,7 @@ impl RoutineScriptLoader {
                     continue;
                 }
 
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 self.state
                     .evaluation_attempts
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -428,7 +428,7 @@ impl RoutineScriptLoader {
                     Err(e) => {
                         let retry_delay =
                             self.record_failure(&candidate_key, Some(source_version.clone()), now);
-                        #[cfg(test)]
+                        #[cfg(any(test, feature = "test-support"))]
                         self.state
                             .load_error_emissions
                             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -651,7 +651,7 @@ pub fn unregistered_routine_script_refs(
         .collect()
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub fn load_single_routine_script(root: &Path, path: &Path) -> Result<LoadedRoutineScript> {
     let source = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("read routine script {}: {e}", path.display()))?;

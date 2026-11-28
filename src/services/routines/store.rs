@@ -3037,7 +3037,7 @@ impl RoutineStore {
         Ok(result.rows_affected() == 1)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub async fn update_discord_thread_id(
         &self,
         routine_id: &str,
