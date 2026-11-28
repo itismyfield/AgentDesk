@@ -2048,7 +2048,10 @@ src/
 │   │   │   ├── restart_recovery.rs
 │   │   │   ├── restart_recovery_tests.rs
 │   │   │   ├── retired_wake.rs
-│   │   │   └── root_replaced.rs
+│   │   │   ├── root_replaced.rs
+│   │   │   ├── root_replaced_hook_tests.rs
+│   │   │   ├── route_fixture_tests.rs
+│   │   │   └── terminate_hook_tests.rs
 │   │   ├── host_key_derivation/
 │   │   │   ├── ke_session_tests.rs
 │   │   │   └── ke_tests.rs
@@ -2088,6 +2091,7 @@ src/
 │   │   │   ├── o_seed_observation/
 │   │   │   │   └── terminal_barrier_test.rs
 │   │   │   ├── rebind_reap/
+│   │   │   │   ├── boot_reconcile_tests.rs
 │   │   │   │   └── tests.rs
 │   │   │   ├── removal/
 │   │   │   │   ├── custody_notice/
@@ -2114,6 +2118,7 @@ src/
 │   │   │   │   │   │   ├── before_start_stop_admission.rs
 │   │   │   │   │   │   ├── before_start_stop_admission_tests.rs
 │   │   │   │   │   │   ├── captured_terminal_admission.rs
+│   │   │   │   │   │   ├── claude_terminal_fixture_tests.rs
 │   │   │   │   │   │   ├── claude_terminal_tests.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission.rs
 │   │   │   │   │   │   ├── herdr_terminal_admission_tests.rs
@@ -2133,6 +2138,8 @@ src/
 │   │   │   │   ├── coordinate_merge_tests.rs
 │   │   │   │   ├── coordinate_replay.rs
 │   │   │   │   ├── coordinate_replay_tests.rs
+│   │   │   │   ├── create_monotonic_fixture_tests.rs
+│   │   │   │   ├── create_monotonic_host_tests.rs
 │   │   │   │   ├── create_monotonic_observer.rs
 │   │   │   │   ├── delivery_rewind.rs
 │   │   │   │   ├── durable_writers_tests.rs
@@ -2142,7 +2149,8 @@ src/
 │   │   │   │   └── rebind_adoption.rs
 │   │   │   ├── stall_recovery_tests/
 │   │   │   │   ├── flake_isolation_4361.rs
-│   │   │   │   └── flake_isolation_4422.rs
+│   │   │   │   ├── flake_isolation_4422.rs
+│   │   │   │   └── synthetic_carry_forward_reclaim_tests.rs
 │   │   │   ├── anchor_repost.rs
 │   │   │   ├── budget.rs
 │   │   │   ├── circuit_evidence_tests.rs
@@ -2180,6 +2188,8 @@ src/
 │   │   │   ├── runtime_view.rs
 │   │   │   ├── save_store.rs
 │   │   │   ├── store.rs
+│   │   │   ├── synthetic_carry_forward_fixture_tests.rs
+│   │   │   ├── synthetic_carry_forward_tests.rs
 │   │   │   ├── synthetic_claim.rs
 │   │   │   ├── terminal_delivery_evidence_loss.rs
 │   │   │   ├── terminal_receipt_stamp.rs
@@ -2226,6 +2236,7 @@ src/
 │   │   │   │   ├── rollout.rs
 │   │   │   │   └── store.rs
 │   │   │   ├── manual_delivery/
+│   │   │   │   ├── api_contract_tests.rs
 │   │   │   │   ├── compatibility_tests.rs
 │   │   │   │   ├── discord_units_tests.rs
 │   │   │   │   ├── headless_nonce.rs
@@ -2256,6 +2267,7 @@ src/
 │   │   │   ├── delivery.rs
 │   │   │   ├── delivery_frontier_probe.rs
 │   │   │   ├── delivery_record.rs
+│   │   │   ├── handle_send_contract_tests.rs
 │   │   │   ├── image_format.rs
 │   │   │   ├── image_format_tests.rs
 │   │   │   ├── ke_wire_tests.rs
@@ -2282,6 +2294,7 @@ src/
 │   │   │   ├── result.rs
 │   │   │   ├── send_api.rs
 │   │   │   ├── send_gate.rs
+│   │   │   ├── send_gate_host_tests.rs
 │   │   │   ├── send_target.rs
 │   │   │   ├── send_to_agent.rs
 │   │   │   ├── serenity_reference.rs
@@ -2334,7 +2347,8 @@ src/
 │   │   │   ├── panel_shape.rs
 │   │   │   ├── rebind_resume_tests.rs
 │   │   │   ├── retirement_tests.rs
-│   │   │   └── tick.rs
+│   │   │   ├── tick.rs
+│   │   │   └── tick_tests.rs
 │   │   ├── prompt_builder/
 │   │   │   ├── audit/
 │   │   │   │   └── mod.rs
@@ -2358,7 +2372,8 @@ src/
 │   │   │   ├── cancel_backstop_race_support_tests.rs
 │   │   │   ├── input_effect_tests.rs
 │   │   │   ├── ke_retry_sweep_tests.rs
-│   │   │   └── kickoff.rs
+│   │   │   ├── kickoff.rs
+│   │   │   └── owner_race_hook_tests.rs
 │   │   ├── queue_io/
 │   │   │   ├── decision_drain/
 │   │   │   │   ├── queued.rs
@@ -2469,6 +2484,7 @@ src/
 │   │   │   ├── producer_resume/
 │   │   │   │   ├── custody.rs
 │   │   │   │   ├── entry_tests.rs
+│   │   │   │   ├── producer_resume_hook_tests.rs
 │   │   │   │   ├── proof.rs
 │   │   │   │   ├── proof_tests.rs
 │   │   │   │   ├── witness.rs
@@ -2485,6 +2501,8 @@ src/
 │   │   │   │   ├── kickoff_identity.rs
 │   │   │   │   ├── kickoff_identity_tests.rs
 │   │   │   │   ├── output_paths.rs
+│   │   │   │   ├── ready_without_output_fixture_tests.rs
+│   │   │   │   ├── ready_without_output_rehydration_tests.rs
 │   │   │   │   ├── ready_without_output_tests.rs
 │   │   │   │   ├── replay_decision.rs
 │   │   │   │   ├── replay_hold.rs
@@ -2508,6 +2526,7 @@ src/
 │   │   │   ├── herdr_row_end.rs
 │   │   │   ├── herdr_row_end_gate_tests.rs
 │   │   │   ├── herdr_row_end_guard_tests.rs
+│   │   │   ├── herdr_row_end_hook_tests.rs
 │   │   │   ├── herdr_row_end_live.rs
 │   │   │   ├── herdr_row_end_rig_tests.rs
 │   │   │   ├── herdr_row_end_settle_tests.rs
@@ -2523,6 +2542,7 @@ src/
 │   │   │   ├── legacy_restart_replay_tests.rs
 │   │   │   ├── manual_rebind_output_path.rs
 │   │   │   ├── manual_rebind_override.rs
+│   │   │   ├── o_aged_settlement_tests.rs
 │   │   │   ├── o_cut_recorder.rs
 │   │   │   ├── o_recovery_cut_tests.rs
 │   │   │   ├── o_settlement_tests.rs
@@ -2543,6 +2563,7 @@ src/
 │   │   │   ├── terminal_text_idempotency.rs
 │   │   │   ├── terminal_watcher.rs
 │   │   │   ├── tmux_probe.rs
+│   │   │   ├── tmux_probe_reader_hook_tests.rs
 │   │   │   ├── turn_mode_restart_tests.rs
 │   │   │   └── turn_summary_recovery_tests.rs
 │   │   ├── recovery_paths/
@@ -3745,6 +3766,7 @@ src/
 │   │   │   │   │   ├── cross_runtime_owner_e2e_tests.rs
 │   │   │   │   │   ├── cross_runtime_owners.rs
 │   │   │   │   │   ├── cross_runtime_owners_tests.rs
+│   │   │   │   │   ├── dormancy_hook_tests.rs
 │   │   │   │   │   ├── dormancy_tests.rs
 │   │   │   │   │   ├── effect_read_defer_tests.rs
 │   │   │   │   │   ├── herdr_bound.rs
@@ -3762,15 +3784,18 @@ src/
 │   │   │   │   │   ├── legacy_divergence_entry_tests.rs
 │   │   │   │   │   ├── legacy_divergence_tests.rs
 │   │   │   │   │   ├── live.rs
+│   │   │   │   │   ├── live_fixture_tests.rs
 │   │   │   │   │   ├── live_owner_nonce_tests.rs
 │   │   │   │   │   ├── live_owner_tests.rs
 │   │   │   │   │   ├── live_ownership.rs
 │   │   │   │   │   ├── live_publication.rs
 │   │   │   │   │   ├── live_review_tests.rs
+│   │   │   │   │   ├── live_snapshot_hook_tests.rs
 │   │   │   │   │   ├── live_snapshot_tests.rs
 │   │   │   │   │   ├── live_tests.rs
 │   │   │   │   │   ├── midread_owner_tests.rs
 │   │   │   │   │   ├── newlive_ownership_file_tests.rs
+│   │   │   │   │   ├── publication_hook_tests.rs
 │   │   │   │   │   ├── receipt_tests.rs
 │   │   │   │   │   ├── retired_codex_runtime_marker_tests.rs
 │   │   │   │   │   ├── retired_unplaced_tests.rs
@@ -3805,13 +3830,16 @@ src/
 │   │   │   │   ├── local_control_tests.rs
 │   │   │   │   └── native_input_tests.rs
 │   │   │   ├── activity.rs
+│   │   │   ├── activity_fixture_tests.rs
 │   │   │   ├── activity_notice_tests.rs
+│   │   │   ├── activity_observation_hook_tests.rs
 │   │   │   ├── activity_tests.rs
 │   │   │   ├── mod.rs
 │   │   │   ├── operator_notice.rs
 │   │   │   ├── operator_notice_tests.rs
 │   │   │   ├── supervisor.rs
 │   │   │   ├── supervisor_deadline_tests.rs
+│   │   │   ├── supervisor_fixture_tests.rs
 │   │   │   ├── supervisor_injected_tests.rs
 │   │   │   ├── supervisor_notice_tests.rs
 │   │   │   ├── supervisor_reader_notice_tests.rs
@@ -3895,6 +3923,18 @@ src/
 │   │   ├── destructive_cancel_gate.rs
 │   │   ├── discord_io.rs
 │   │   ├── dispatch_policy.rs
+│   │   ├── dl_herdr_terminate_tests.rs
+│   │   ├── dl_herdr_terminate_unix_tests.rs
+│   │   ├── dl_recovery_engine_tests.rs
+│   │   ├── dl_recovery_engine_unix_tests.rs
+│   │   ├── dl_tmux_watcher_tests.rs
+│   │   ├── dl_tmux_watcher_unix_tests.rs
+│   │   ├── dl_turn_bridge_tests.rs
+│   │   ├── dl_turn_bridge_unix_tests.rs
+│   │   ├── dl_turn_finalizer_tests.rs
+│   │   ├── dl_turn_finalizer_unix_tests.rs
+│   │   ├── dl_turn_presence_tests.rs
+│   │   ├── dl_turn_presence_unix_tests.rs
 │   │   ├── e2e_control.rs
 │   │   ├── execution_identity.rs
 │   │   ├── footer_retirement.rs
