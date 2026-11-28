@@ -148,6 +148,28 @@ test("onTick5min settles a slow G query before idle-kill can issue a POST", () =
   assert.equal(state.httpPosts.length, 0);
 });
 
+for (const skipO of [false, true]) {
+  test(`onTick5min handles the cutoff ${skipO ? "before" : "after"} O completes`, () => {
+    let sections = 0;
+    const { policy, state } = loadPolicy("policies/timeouts.js", {
+      config: { server_port: 8791 },
+      withWorkDeadline(_reserveMs, work) {
+        if (++sections !== 4) return work();
+        if (!skipO) work();
+        return true;
+      }
+    });
+
+    policy.onTick5min({});
+
+    assert.equal(sections, 4);
+    assert.equal(state.queries.filter(({ sql }) => sql.includes("idle_cursor_at")).length, skipO ? 0 : 1);
+    assert.deepEqual(state.logs.warn, skipO
+      ? ["[idle-kill] kill-tmux deadline reached; remaining=unknown"]
+      : []);
+  });
+}
+
 test("idle-kill advances past a repeatedly timed-out POST and rechecks it on the next sweep", () => {
   const rows = orderedRows([idleRow("slow"), idleRow("ready")]);
   const { policy, state } = loadPolicy("policies/timeouts.js", {

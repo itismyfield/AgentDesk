@@ -317,6 +317,7 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
         ctx.with(|ctx| {
             ctx.eval::<(), _>(r#"
                 var warnings = [], gQueries = 0, slowG = true, ownerGets = 0, killPosts = 0;
+                var resumedSections = 0;
                 var agentdesk = {
                     log: {warn: function(line) { warnings.push(line); }, debug: function() {}},
                     config: {get: function(key) { return key === "server_port" ? 8791 : 45; }},
@@ -342,6 +343,11 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
             "#).unwrap();
             super::super::db_ops::register_db_ops(&ctx, Some(policy_pool.clone())).unwrap();
             ctx.eval::<(), _>(r#"
+                var withWorkDeadline = agentdesk.db.withWorkDeadline;
+                agentdesk.db.withWorkDeadline = function(reserve, work) {
+                    var cutoffAfterO = !slowG && ++resumedSections === 4;
+                    return withWorkDeadline(reserve, work) || cutoffAfterO;
+                };
                 var query = agentdesk.db.query;
                 agentdesk.db.query = function(sql, params, reserve) {
                     if (sql.indexOf("FROM task_dispatches WHERE status IN") >= 0) {
@@ -361,8 +367,8 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
         let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("policies/timeouts.js");
         let policy = load_single_policy(&ctx, &file).unwrap();
         ctx.with(|ctx| {
-            let tick = || {
-                let _armed = ArmedDeadline::new(&slot, Duration::from_millis(900));
+            let tick = |budget| {
+                let _armed = ArmedDeadline::new(&slot, budget);
                 let function = policy.hooks[&Hook::OnTick5min]
                     .clone()
                     .restore(&ctx)
@@ -373,7 +379,7 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
                 assert!(crate::utils::bridge_deadline::current_work_deadline().is_none());
             };
 
-            tick();
+            tick(Duration::from_millis(900));
             assert_eq!(ctx.eval::<i32, _>("gQueries").unwrap(), 1);
             assert_eq!(ctx.eval::<i32, _>("ownerGets + killPosts").unwrap(), 0);
             assert_eq!(
@@ -382,8 +388,9 @@ async fn tick5min_reserves_idle_settlement_during_slow_g_pg() {
             );
 
             ctx.eval::<(), _>("slowG = false;").unwrap();
-            tick();
+            tick(Duration::from_secs(5));
             assert_eq!(ctx.eval::<i32, _>("gQueries").unwrap(), 2);
+            assert_eq!(ctx.eval::<i32, _>("resumedSections").unwrap(), 4);
             assert_eq!(ctx.eval::<i32, _>("killPosts").unwrap(), 1);
             assert_eq!(ctx.eval::<i32, _>("warnings.length").unwrap(), 1);
         });
