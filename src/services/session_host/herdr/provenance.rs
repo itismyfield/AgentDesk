@@ -263,7 +263,7 @@ pub(crate) fn process_parent(pid: u32) -> Result<u32, RestoreUnverified> {
     Ok(bsd_info(pid)?.pbi_ppid)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[cfg(any(test, feature = "test-support"))]
 pub fn process_start_for_test(pid: u32) -> Result<ProcessStart, RestoreUnverified> {
     process_start(pid)
@@ -380,7 +380,7 @@ pub(crate) fn process_argv(pid: u32) -> Result<Vec<String>, RestoreUnverified> {
     linux_environ(&raw)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 #[cfg(any(test, feature = "test-support"))]
 pub fn process_exec_path_for_test(pid: u32) -> Option<String> {
     process_exec_path(pid)
