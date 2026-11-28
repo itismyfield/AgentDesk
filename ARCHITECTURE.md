@@ -565,7 +565,8 @@ src/
 │   │   │   ├── host_repair_tests.rs
 │   │   │   └── key_promotion_tests.rs
 │   │   ├── turn_ops/
-│   │   │   └── handoff_port.rs
+│   │   │   ├── handoff_port.rs
+│   │   │   └── test_support.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -595,6 +596,7 @@ src/
 │   │   ├── runtime_ops.rs
 │   │   ├── timeouts_ops.rs
 │   │   ├── turn_ops.rs
+│   │   ├── turn_ops_root_tests.rs
 │   │   ├── unsent_notify_ops.rs
 │   │   └── unsent_notify_tests.rs
 │   ├── hooks.rs
@@ -1019,7 +1021,9 @@ src/
 │   │   │   └── terminalize_tx.rs
 │   │   ├── runtime/
 │   │   │   ├── clear_slot_sessions_pg_tests.rs
+│   │   │   ├── slot_reset_archive_fixture.rs
 │   │   │   ├── slot_reset_host_pg_tests.rs
+│   │   │   ├── test_support.rs
 │   │   │   ├── verified_clear_probe_tests.rs
 │   │   │   └── verified_reset_pg_tests.rs
 │   │   ├── transactions/
@@ -4095,6 +4099,8 @@ src/
 │   │   │   ├── owner_tests.rs
 │   │   │   ├── thread_reuse.rs
 │   │   │   └── transport.rs
+│   │   ├── wait_queue/
+│   │   │   └── test_support.rs
 │   │   ├── cluster_hooks.rs
 │   │   ├── command_bot_launch.rs
 │   │   ├── dtos.rs
@@ -4472,7 +4478,8 @@ src/
 │   │   │   └── formatting.rs
 │   │   ├── session_control/
 │   │   │   ├── persistent_target.rs
-│   │   │   └── provider_choice_tests.rs
+│   │   │   ├── provider_choice_tests.rs
+│   │   │   └── test_support.rs
 │   │   ├── store/
 │   │   │   ├── agent_start.rs
 │   │   │   ├── execution_modes.rs
@@ -5379,6 +5386,7 @@ src/
 │   │   └── tool_open.rs
 │   ├── turn_lifecycle/
 │   │   ├── host_guard_tests.rs
+│   │   ├── policy_observability_root_tests.rs
 │   │   ├── queue_truth_tests.rs
 │   │   └── stop_result.rs
 │   ├── turn_orchestrator/
@@ -5454,6 +5462,7 @@ src/
 │   │   │   ├── mend.rs
 │   │   │   ├── mend_tests.rs
 │   │   │   ├── prefix.rs
+│   │   │   ├── root_test_support.rs
 │   │   │   ├── snapshot.rs
 │   │   │   ├── v2.rs
 │   │   │   └── v2_types.rs
@@ -5492,6 +5501,7 @@ src/
 │   │   ├── queue_enqueue.rs
 │   │   ├── queued_head.rs
 │   │   ├── queued_head_prefix_tests.rs
+│   │   ├── queued_head_root_tests.rs
 │   │   ├── queued_head_s2a_tests.rs
 │   │   ├── queued_head_tests.rs
 │   │   ├── recovery_kickoff.rs
@@ -5684,6 +5694,7 @@ src/
 ├── eventbus.rs
 ├── high_risk_recovery.rs
 ├── intake_consent_authority.rs
+├── ke_assembly_tests.rs
 ├── ke_routines_tests.rs
 ├── krx_claude_tests.rs
 ├── krx_config_tests.rs
@@ -5756,6 +5767,7 @@ This table is generated from the current `src/` root and fails CI when a new top
 | `src/eventbus.rs` | In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow. |
 | `src/high_risk_recovery.rs` | PG-only high-risk recovery tests for boot reconciliation and review refire paths. |
 | `src/intake_consent_authority.rs` | Owns the opaque before-effects consent proof and mounts the service issuer gated by worker-private scope keys. |
+| `src/ke_assembly_tests.rs` | Mounts KE assembly tests that use the root Discord registry and runtime fixtures. |
 | `src/ke_routines_tests.rs` | Test-only host that declares KE routine and scheduled-message tests calling root-crate items. |
 | `src/krx_claude_tests.rs` | Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate. |
 | `src/krx_config_tests.rs` | Test-only host that declares KRX config/services tests calling root-crate items, so they leave the KRX crate. |

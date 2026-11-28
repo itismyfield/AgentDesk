@@ -106,6 +106,7 @@ TOP_LEVEL_MODULE_PURPOSES = {
     "eventbus.rs": "In-process broadcast event bus (history/replay/batching) shared by the WS server layer and background services without a service→server backflow.",
     "github/": "GitHub sync, issue triage, and Definition-of-Done mirroring.",
     "high_risk_recovery.rs": "PG-only high-risk recovery tests for boot reconciliation and review refire paths.",
+    "ke_assembly_tests.rs": "Mounts KE assembly tests that use the root Discord registry and runtime fixtures.",
     "ke_routines_tests.rs": "Test-only host that declares KE routine and scheduled-message tests calling root-crate items.",
     "krx_claude_tests.rs": "Test-only host that declares KRX claude tests calling root-crate items, so they leave the KRX crate.",
     "krx_claude_tests/": "Test files moved out of KRX claude modules because they call root-crate items.",
