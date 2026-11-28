@@ -1,4 +1,17 @@
-use super::*;
+use crate::services::discord::turn_finalizer::{
+    CompletionAdmissionPlan, FinalizeContext, FinalizeOutcome, TerminalEvent, TurnKey, actor_state,
+    actor_state::LedgerEntry,
+    terminal_handler::{NativeAdmission, NativeCleanup, NativePrepared},
+};
+use crate::services::discord::{SharedData, inflight::RelayOwnerKind};
+use crate::services::provider::{CancelToken, ProviderKind};
+use poise::serenity_prelude::ChannelId;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::oneshot;
+use tokio::time::Instant;
+
 use crate::services::tui_input::human_frame::history::v2::{
     native::Disposition, native_support::Fixture,
 };
@@ -213,11 +226,11 @@ async fn b2b_submit(
     work: NativeCleanup,
     history: &crate::services::tui_input::human_frame::history::v2::Registry,
 ) -> Result<bool, String> {
-    crate::test_support::wait::await_within(
+    adk_test_support::test_support::wait::await_within(
         shared
             .turn_finalizer
             .submit_native(work, history.clone(), shared.clone()),
-        crate::test_support::wait::WAIT_CAP,
+        adk_test_support::test_support::wait::WAIT_CAP,
     )
     .await
 }
@@ -280,10 +293,10 @@ fn b2b_batch(f: &Fixture) -> Observation {
     }
 }
 
-fn b2b_row(f: &Fixture) -> super::super::super::inflight::InflightTurnState {
+fn b2b_row(f: &Fixture) -> crate::services::discord::inflight::InflightTurnState {
     let episode = f.ticket.owning_episode.as_ref().unwrap();
     let source = f.ticket.source.as_ref().unwrap();
-    let mut row = super::super::super::inflight::InflightTurnState::new(
+    let mut row = crate::services::discord::inflight::InflightTurnState::new(
         ProviderKind::Claude,
         f.ticket.channel_id,
         None,
@@ -300,9 +313,12 @@ fn b2b_row(f: &Fixture) -> super::super::super::inflight::InflightTurnState {
     row.turn_nonce = Some(episode.turn_nonce.clone());
     row.born_generation = episode.generation;
     row.hosted_execution_nonce = Some("incarnation-1".into());
-    super::super::super::inflight::save_inflight_state(&row).unwrap();
-    super::super::super::inflight::load_inflight_state(&ProviderKind::Claude, f.ticket.channel_id)
-        .unwrap()
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
+    crate::services::discord::inflight::load_inflight_state(
+        &ProviderKind::Claude,
+        f.ticket.channel_id,
+    )
+    .unwrap()
 }
 
 async fn b2b_active(f: &Fixture, shared: &Arc<SharedData>) -> (TurnKey, Arc<CancelToken>) {
@@ -333,7 +349,7 @@ async fn b2b_active(f: &Fixture, shared: &Arc<SharedData>) -> (TurnKey, Arc<Canc
 
 #[tokio::test]
 async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_early_wake() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     std::fs::create_dir_all(runtime.path().join("runtime")).unwrap();
@@ -349,7 +365,7 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
     );
     let bytes = std::fs::read(&path).unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     let prepared = NativePrepared::capture(
         &f.history,
         "native-fixture",
@@ -413,12 +429,12 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
     assert_eq!(std::fs::read(&path).unwrap(), b"{corrupt row");
     std::fs::write(&path, bytes).unwrap();
     // Replay a crash after the exact lease step, before its row and wake steps.
-    let released = crate::test_support::wait::await_within(
-        super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+    let released = adk_test_support::test_support::wait::await_within(
+        crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
             &shared, &ProviderKind::Claude, key.channel_id,
             serenity::model::id::MessageId::new(key.user_msg_id),
             actor.turn_nonce().map(str::to_owned), cleanup.started_before, Some(actor.clone()),
-        ), crate::test_support::wait::WAIT_CAP,
+        ), adk_test_support::test_support::wait::WAIT_CAP,
     ).await;
     assert!(
         released
@@ -428,12 +444,10 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
     );
     assert!(released.persistence_error.is_none());
     actor.mark_completion_cleanup();
-    assert!(super::super::super::saturating_decrement_global_active(
-        &shared
-    ));
+    assert!(crate::services::discord::saturating_decrement_global_active(&shared));
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
     assert!(
-        super::super::episode::claim_normal_episode(
+        crate::services::discord::turn_finalizer::episode::claim_normal_episode(
             &shared,
             &ProviderKind::Claude,
             key,
@@ -473,7 +487,7 @@ async fn native_8148_b2b_cleanup_retries_row_error_without_second_release_or_ear
 
 #[tokio::test]
 async fn native_8148_b2b_same_nonce_successor_actor_and_row_are_preserved() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     std::fs::create_dir_all(runtime.path().join("runtime")).unwrap();
@@ -561,15 +575,17 @@ async fn native_8148_b2b_follower_withdrawal_outbox_retry_and_full_ticket_dedupe
         let parent = Fixture::at(dir.path().join("parent.json"), 8148913, true);
         let (key, parent_actor) = b2b_active(&parent, &shared).await;
         b2b_row(&parent);
-        let root = super::super::super::inflight::inflight_runtime_root().unwrap();
-        let path = super::super::super::inflight::inflight_state_path(
+        let root = crate::services::discord::inflight::inflight_runtime_root().unwrap();
+        let path = crate::services::discord::inflight::inflight_state_path(
             &root,
             &ProviderKind::Claude,
             key.channel_id.get(),
         );
         let before = std::fs::read(&path).unwrap();
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         for n in 0..2 {
             let f = Fixture::at(
                 dir.path().join(format!("follower-{n}.json")),
@@ -662,7 +678,7 @@ async fn native_8148_b2b_follower_withdrawal_outbox_retry_and_full_ticket_dedupe
 
 #[tokio::test]
 async fn native_8148_b2b_row_replacement_and_cutoff_keep_cleanup_debt() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     std::fs::create_dir_all(runtime.path().join("runtime")).unwrap();
@@ -708,7 +724,9 @@ async fn native_8148_b2b_row_replacement_and_cutoff_keep_cleanup_debt() {
         }
         let bytes = std::fs::read(&path).unwrap();
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         assert!(!b2b_submit(&shared, cleanup, &f.history).await.unwrap());
         assert_eq!(std::fs::read(&path).unwrap(), bytes);
         assert!(
@@ -929,7 +947,7 @@ async fn native_8148_2a_receipt_version_rejects_old_candidate_and_transaction() 
 
 #[test]
 fn native_8148_b2b2_runtime_witness_rejects_nonce_aba_under_row_lock() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(runtime.path().join("runtime/frames.json"), 8148964, true);
     let captured = b2b_row(&f);
@@ -954,8 +972,8 @@ fn native_8148_b2b2_runtime_witness_rejects_nonce_aba_under_row_lock() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_b2b2_registered_scope_rejects_legacy_completion_and_body() {
-    use super::super::super::{inflight, turn_bridge::native_input};
-    use super::super::native_prepare::Handle;
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use crate::services::discord::{inflight, turn_bridge::native_input};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(runtime.path().join("runtime/frames.json"), 8148965, true);
     let shared = b2b_shared(None);
@@ -970,7 +988,7 @@ async fn native_8148_b2b2_registered_scope_rejects_legacy_completion_and_body() 
     shared.turn_finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::Watcher,
+        crate::services::discord::inflight::RelayOwnerKind::Watcher,
         &shared,
     );
     let prepared = Handle::prepare(
@@ -1047,9 +1065,10 @@ async fn native_8148_b2b2_registered_scope_rejects_legacy_completion_and_body() 
 
 #[test]
 fn native_8148_b2b2_native_admission_waits_for_input_not_delivery() {
-    let mut admission = super::super::completion_admission::CompletionAdmission::new(
-        CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
-    );
+    let mut admission =
+        crate::services::discord::turn_finalizer::completion_admission::CompletionAdmission::new(
+            CompletionAdmissionPlan::AfterTerminalProjectionAndDispositionSettled,
+        );
     admission.native_input = Some(false);
     admission.note_mailbox_released();
     admission.note_terminal_projection_settled(true);
@@ -1139,7 +1158,7 @@ async fn s2_withdraw(f: &Fixture, shared: &Arc<SharedData>) -> NativeCleanup {
 
 #[tokio::test]
 async fn native_8148_s2_row_start_and_offset_guard_keep_owned_lease() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     for (n, field) in ["started_at", "turn_start_offset"].into_iter().enumerate() {
         let f = Fixture::at(
@@ -1254,7 +1273,7 @@ async fn native_8148_s2_bound_ticket_rejects_episode_extra_and_source_without_wr
 
 #[tokio::test]
 async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
-    use super::super::super::{inflight, runtime_store};
+    use crate::services::discord::{inflight, runtime_store};
     use crate::services::turn_orchestrator::{Intervention, InterventionMode};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(
@@ -1264,7 +1283,7 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
     );
     let shared = b2b_shared(None);
     let (key, actor, cleanup) = s2_primary(&f, &shared).await;
-    let persistence = super::super::super::queue_persistence_context(
+    let persistence = crate::services::discord::queue_persistence_context(
         &shared,
         &ProviderKind::Claude,
         key.channel_id,
@@ -1307,7 +1326,7 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
     );
     let before = std::fs::read(&row).unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     assert!(
         !b2b_submit(&shared, cleanup.clone(), &f.history)
             .await
@@ -1346,7 +1365,7 @@ async fn native_8148_s2_persistence_error_keeps_row_and_wake_debt() {
 
 #[tokio::test]
 async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
-    use super::super::super::inflight;
+    use crate::services::discord::inflight;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     for (n, (successor_lease, missing_row, reuse_actor)) in [
         (false, false, false),
@@ -1370,7 +1389,7 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
         );
         let released = shared
             .mailbox(key.channel_id)
-            .finish_turn(super::super::super::queue_persistence_context(
+            .finish_turn(crate::services::discord::queue_persistence_context(
                 &shared,
                 &ProviderKind::Claude,
                 key.channel_id,
@@ -1421,7 +1440,9 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
             std::fs::remove_file(&path).unwrap();
         }
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         let active = shared
             .restart
             .global_active
@@ -1481,14 +1502,15 @@ async fn native_8148_s2_transfer_closes_debt_without_successor_row_or_wake() {
 #[tokio::test]
 async fn native_8148_s2_panic_payload_is_contained_and_native_actor_still_replies() {
     for owned in [false, true] {
-        let result: Result<(), String> = super::super::actor_state::contain_panic(async move {
-            if owned {
-                std::panic::panic_any(String::from("native-owned-payload"));
-            } else {
-                panic!("native-borrowed-payload");
-            }
-        })
-        .await;
+        let result: Result<(), String> =
+            crate::services::discord::turn_finalizer::actor_state::contain_panic(async move {
+                if owned {
+                    std::panic::panic_any(String::from("native-owned-payload"));
+                } else {
+                    panic!("native-borrowed-payload");
+                }
+            })
+            .await;
         assert_eq!(
             result.unwrap_err(),
             if owned {
@@ -1579,7 +1601,7 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
         .register_start(key, ProviderKind::Claude, RelayOwnerKind::None, &shared);
     let actor = CancelToken::new();
     assert!(
-        !crate::test_support::wait::await_within(
+        !adk_test_support::test_support::wait::await_within(
             shared.turn_finalizer.native_scope(key, &actor),
             std::time::Duration::from_millis(500)
         )
@@ -1591,9 +1613,12 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
         after_start.is_pending(),
         "Start must be answered while PG submit is pending, got {after_start:?}"
     );
-    let error = crate::test_support::wait::await_within(submit, std::time::Duration::from_secs(5))
-        .await
-        .unwrap_err();
+    let error = adk_test_support::test_support::wait::await_within(
+        submit,
+        std::time::Duration::from_secs(5),
+    )
+    .await
+    .unwrap_err();
     tokio::time::resume();
     assert_eq!(error, "native withdrawal outbox timed out");
     let pending = f
@@ -1610,8 +1635,8 @@ async fn native_8148_s2_blocked_pg_does_not_hold_finalizer_actor() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_p2_transfer_ledger_settlement_is_a_neutral_bridge_exit() {
-    use super::super::super::{inflight, turn_bridge::native_input};
-    use super::super::native_prepare::Handle;
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use crate::services::discord::{inflight, turn_bridge::native_input};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(runtime.path().join("runtime/frames.json"), 81489951, true);
     let shared = b2b_shared(None);
@@ -1620,7 +1645,7 @@ async fn native_8148_p2_transfer_ledger_settlement_is_a_neutral_bridge_exit() {
     shared.turn_finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         &shared,
     );
     let handle = Handle::prepare(
@@ -1683,7 +1708,7 @@ async fn native_8148_p2_transfer_ledger_settlement_is_a_neutral_bridge_exit() {
     let bytes = serde_json::to_vec(&next).unwrap();
     std::fs::write(&path, &bytes).unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     assert!(b2b_submit(&shared, cleanup, &f.history).await.unwrap());
     assert!(!actor.is_completion_cleanup());
     assert_eq!(
@@ -1741,7 +1766,7 @@ async fn control_next_head(
 ) {
     use crate::services::discord::queue_io::input_owner::drive::{self, Drive, Front};
     use crate::services::turn_orchestrator::PendingQueueItem;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use serde_json::json;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -1803,8 +1828,8 @@ async fn control_next_head(
 }
 
 async fn control_case(kind: &str) {
-    use super::super::native_prepare::Handle;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     if kind == "cancel" {
         let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
@@ -1843,7 +1868,7 @@ async fn control_case(kind: &str) {
     shared.turn_finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         &shared,
     );
     if kind == "clear" {
@@ -1884,15 +1909,15 @@ async fn control_case(kind: &str) {
     .await
     .unwrap();
     if kind == "clear" {
-        let row_path = super::super::super::inflight::inflight_state_path(
-            &super::super::super::inflight::inflight_runtime_root().unwrap(),
+        let row_path = crate::services::discord::inflight::inflight_state_path(
+            &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
             &ProviderKind::Claude,
             channel,
         );
         let row_before = std::fs::read(&row_path).unwrap();
         let before =
             std::fs::read(runtime.path().join(format!("runtime/next-{channel}.json"))).unwrap();
-        let rejected = super::super::super::mailbox_clear_channel(
+        let rejected = crate::services::discord::mailbox_clear_channel(
             &shared,
             &ProviderKind::Claude,
             key.channel_id,
@@ -1924,20 +1949,20 @@ async fn control_case(kind: &str) {
         .note_native_any_key("native-fixture", &f.ticket)
         .unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     match kind {
         "cancel" | "terminate" => {
             let event = if kind == "cancel" {
-                super::super::TerminalEvent::Cancel
+                crate::services::discord::turn_finalizer::TerminalEvent::Cancel
             } else {
-                super::super::TerminalEvent::HostTerminated
+                crate::services::discord::turn_finalizer::TerminalEvent::HostTerminated
             };
             let result = await_within(
                 shared.turn_finalizer.submit_terminal(
                     key,
                     ProviderKind::Claude,
                     event,
-                    super::super::FinalizeContext::host_terminated(),
+                    crate::services::discord::turn_finalizer::FinalizeContext::host_terminated(),
                     shared.clone(),
                 ),
                 WAIT_CAP,
@@ -1945,12 +1970,12 @@ async fn control_case(kind: &str) {
             .await;
             assert!(matches!(
                 result,
-                super::super::FinalizeOutcome::Finalized { .. }
+                crate::services::discord::turn_finalizer::FinalizeOutcome::Finalized { .. }
             ));
         }
         "clear" => {
             let result = await_within(
-                super::super::super::mailbox_clear_channel(
+                crate::services::discord::mailbox_clear_channel(
                     &shared,
                     &ProviderKind::Claude,
                     key.channel_id,
@@ -1963,12 +1988,12 @@ async fn control_case(kind: &str) {
         }
         "stop" => {
             let result = await_within(
-                super::super::super::mailbox_finish::mailbox_finish_stopped_turn(
+                crate::services::discord::mailbox_finish::mailbox_finish_stopped_turn(
                     &shared,
                     &ProviderKind::Claude,
                     key.channel_id,
                     Some(&actor),
-                    super::super::super::mailbox_finish::MailboxLookup::Peek,
+                    crate::services::discord::mailbox_finish::MailboxLookup::Peek,
                 ),
                 WAIT_CAP,
             )
@@ -2012,7 +2037,7 @@ async fn control_case(kind: &str) {
             .is_none()
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             channel
         )
@@ -2058,7 +2083,7 @@ async fn control_case(kind: &str) {
     await_within(async {
         loop {
             let event = events.recv().await.unwrap();
-            if event.phase == super::super::super::turn_completion_events::TurnCompletionPhase::QueueEligible { break; }
+            if event.phase == crate::services::discord::turn_completion_events::TurnCompletionPhase::QueueEligible { break; }
         }
     }, WAIT_CAP).await;
     control_next_head(shared.mailbox(key.channel_id), channel, runtime.path()).await;
@@ -2084,8 +2109,8 @@ async fn native_8148_control_stop_lease_row_and_head_progress() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() {
-    use super::super::native_prepare::Handle;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(runtime.path().join("runtime/refusal.json"), 81489720, true);
     let shared = b2b_shared(None);
@@ -2094,7 +2119,7 @@ async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() 
     shared.turn_finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         &shared,
     );
     let custody = await_within(
@@ -2187,7 +2212,11 @@ async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() 
     )
     .await;
     let result = await_within(
-        super::super::super::mailbox_clear_channel(&shared, &ProviderKind::Claude, key.channel_id),
+        crate::services::discord::mailbox_clear_channel(
+            &shared,
+            &ProviderKind::Claude,
+            key.channel_id,
+        ),
         WAIT_CAP,
     )
     .await;
@@ -2203,7 +2232,7 @@ async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() 
             .unwrap(),
         &successor
     ));
-    let after = super::super::super::inflight::load_inflight_state_read_only(
+    let after = crate::services::discord::inflight::load_inflight_state_read_only(
         &ProviderKind::Claude,
         row.channel_id,
     )
@@ -2225,8 +2254,8 @@ async fn native_8148_control_failed_admission_and_successor_preserve_all_axes() 
 
 #[tokio::test]
 async fn native_8148_control_native_result_and_control_outcome_have_one_winner() {
-    use super::super::native_prepare::Handle;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     let runtime = crate::config::TestRuntimeRootGuard::new();
     for native_first in [true, false] {
         let f = Fixture::at(
@@ -2242,7 +2271,7 @@ async fn native_8148_control_native_result_and_control_outcome_have_one_winner()
         shared.turn_finalizer.register_start(
             key,
             ProviderKind::Claude,
-            super::super::RelayOwnerKind::None,
+            crate::services::discord::inflight::RelayOwnerKind::None,
             &shared,
         );
         let custody = await_within(
@@ -2288,8 +2317,8 @@ async fn native_8148_control_native_result_and_control_outcome_have_one_winner()
                 shared.turn_finalizer.submit_terminal(
                     key,
                     ProviderKind::Claude,
-                    super::super::TerminalEvent::Cancel,
-                    super::super::FinalizeContext::host_terminated(),
+                    crate::services::discord::turn_finalizer::TerminalEvent::Cancel,
+                    crate::services::discord::turn_finalizer::FinalizeContext::host_terminated(),
                     shared.clone(),
                 ),
                 WAIT_CAP,
@@ -2302,8 +2331,8 @@ async fn native_8148_control_native_result_and_control_outcome_have_one_winner()
                 shared.turn_finalizer.submit_terminal(
                     key,
                     ProviderKind::Claude,
-                    super::super::TerminalEvent::Cancel,
-                    super::super::FinalizeContext::host_terminated(),
+                    crate::services::discord::turn_finalizer::TerminalEvent::Cancel,
+                    crate::services::discord::turn_finalizer::FinalizeContext::host_terminated(),
                     shared.clone(),
                 ),
                 WAIT_CAP,
@@ -2373,18 +2402,18 @@ fn review_soft_input(id: u64) -> crate::services::turn_orchestrator::Interventio
 
 #[tokio::test]
 async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
-    use super::super::super::{inflight, turn_completion_events};
+    use crate::services::discord::{inflight, turn_completion_events};
     use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use std::sync::atomic::Ordering;
     let _root = crate::config::TestRuntimeRootGuard::new();
     for capture_only in [false, true] {
         let channel = ChannelId::new(81489850 + u64::from(capture_only));
         let shared = b2b_shared(None);
         let provider = ProviderKind::Antigravity;
-        let finish_context = super::super::FinalizeContext {
+        let finish_context = crate::services::discord::turn_finalizer::FinalizeContext {
             clear_inflight: true,
-            ..super::super::FinalizeContext::bridge()
+            ..crate::services::discord::turn_finalizer::FinalizeContext::bridge()
         };
         let actor = Arc::new(CancelToken::from_persisted_turn_nonce(Some(
             "v1-exact".into(),
@@ -2416,7 +2445,8 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
         row.turn_nonce = Some("v1-exact".into());
         row.born_generation = 1;
         inflight::save_inflight_state(&row).unwrap();
-        let context = super::super::super::queue_persistence_context(&shared, &provider, channel);
+        let context =
+            crate::services::discord::queue_persistence_context(&shared, &provider, channel);
         assert!(
             shared
                 .mailbox(channel)
@@ -2429,7 +2459,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
         fail_queue_saves(channel, 1);
         if capture_only {
             let captured = await_within(
-                super::super::episode::claim_normal_episode(
+                crate::services::discord::turn_finalizer::episode::claim_normal_episode(
                     &shared,
                     &provider,
                     key,
@@ -2451,20 +2481,21 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
             assert!(captured.finish.persistence_error.is_some());
             let snapshot = captured.snapshot;
             let finish = captured.finish;
-            let result = super::super::finalize::do_finalize_with_release(
-                key,
-                provider,
-                &super::super::TerminalEvent::Complete,
-                finish_context,
-                snapshot.as_ref(),
-                &shared,
-                Some(finish),
-                false,
-            )
-            .await;
+            let result =
+                crate::services::discord::turn_finalizer::finalize::do_finalize_with_release(
+                    key,
+                    provider,
+                    &crate::services::discord::turn_finalizer::TerminalEvent::Complete,
+                    finish_context,
+                    snapshot.as_ref(),
+                    &shared,
+                    Some(finish),
+                    false,
+                )
+                .await;
             assert!(matches!(
                 result,
-                super::super::FinalizeOutcome::Finalized {
+                crate::services::discord::turn_finalizer::FinalizeOutcome::Finalized {
                     removed_token: Some(_),
                     ..
                 }
@@ -2475,26 +2506,26 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
                 LedgerEntry::registered(
                     key,
                     provider.clone(),
-                    super::super::RelayOwnerKind::None,
+                    crate::services::discord::inflight::RelayOwnerKind::None,
                     None,
-                    super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+                    crate::services::discord::turn_finalizer::completion_admission::CompletionAdmissionPlan::Immediate,
                     None,
                 ),
             )]);
             let mut pending = HashMap::new();
-            let evidence = || super::super::episode::TerminalEvidence {
+            let evidence = || crate::services::discord::turn_finalizer::episode::TerminalEvidence {
                 episode_captured: true,
                 turn_nonce: Some("v1-exact".into()),
                 claim_snapshot: None,
                 probed_tmux_session: None,
             };
             let result = await_within(
-                super::handle_terminal(
+                crate::services::discord::turn_finalizer::terminal_handler::handle_terminal(
                     &mut ledger,
                     &mut pending,
                     key,
                     provider.clone(),
-                    super::super::TerminalEvent::Complete,
+                    crate::services::discord::turn_finalizer::TerminalEvent::Complete,
                     finish_context,
                     evidence(),
                     &shared,
@@ -2504,7 +2535,7 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
             .await;
             assert!(matches!(
                 result,
-                super::super::FinalizeOutcome::Finalized {
+                crate::services::discord::turn_finalizer::FinalizeOutcome::Finalized {
                     removed_token: Some(_),
                     ..
                 }
@@ -2519,22 +2550,28 @@ async fn native_8148_review_v1_partial_release_keeps_terminal_accounting() {
                 eligible += usize::from(event.queue_is_eligible());
             }
             assert_eq!((released, eligible), (1, 1));
-            let duplicate = super::handle_terminal(
+            let duplicate =
+                crate::services::discord::turn_finalizer::terminal_handler::handle_terminal(
+                    &mut ledger,
+                    &mut pending,
+                    key,
+                    provider,
+                    crate::services::discord::turn_finalizer::TerminalEvent::Complete,
+                    finish_context,
+                    evidence(),
+                    &shared,
+                )
+                .await;
+            assert!(matches!(
+                duplicate,
+                crate::services::discord::turn_finalizer::FinalizeOutcome::AlreadyFinalized
+            ));
+            crate::services::discord::turn_finalizer::reconcile::reconcile(
                 &mut ledger,
                 &mut pending,
-                key,
-                provider,
-                super::super::TerminalEvent::Complete,
-                finish_context,
-                evidence(),
                 &shared,
             )
             .await;
-            assert!(matches!(
-                duplicate,
-                super::super::FinalizeOutcome::AlreadyFinalized
-            ));
-            super::super::reconcile::reconcile(&mut ledger, &mut pending, &shared).await;
             assert!(events.try_recv().is_err());
         }
         assert_eq!(queue_save_faults(channel, true), 0);
@@ -2576,7 +2613,7 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
     .unwrap();
     prepared.install_control(&f.history, &shared).await.unwrap();
     prepared.any_key(&f.history).unwrap();
-    let context = super::super::super::queue_persistence_context(
+    let context = crate::services::discord::queue_persistence_context(
         &shared,
         &ProviderKind::Claude,
         key.channel_id,
@@ -2599,17 +2636,20 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
     let mut entry = LedgerEntry::registered(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         None,
-        super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+        crate::services::discord::turn_finalizer::completion_admission::CompletionAdmissionPlan::Immediate,
         None,
     );
     entry.completion_admission.native_input = Some(false);
     entry.native_inputs.insert("partial".into(), prepared);
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     fail_queue_saves(key.channel_id, 1);
-    super::native_policy::reconcile(&mut entry, &shared).await;
+    crate::services::discord::turn_finalizer::terminal_handler::native_policy::reconcile(
+        &mut entry, &shared,
+    )
+    .await;
     assert_eq!(queue_save_faults(key.channel_id, true), 0);
     assert!(
         shared
@@ -2627,7 +2667,10 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
             .cleanup_complete
     );
     assert!(events.try_recv().is_err());
-    super::native_policy::reconcile(&mut entry, &shared).await;
+    crate::services::discord::turn_finalizer::terminal_handler::native_policy::reconcile(
+        &mut entry, &shared,
+    )
+    .await;
     assert!(
         f.history
             .native_settlement("native-fixture", &f.ticket)
@@ -2635,7 +2678,10 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
             .cleanup_complete
     );
     assert!(events.try_recv().unwrap().queue_is_eligible());
-    super::native_policy::reconcile(&mut entry, &shared).await;
+    crate::services::discord::turn_finalizer::terminal_handler::native_policy::reconcile(
+        &mut entry, &shared,
+    )
+    .await;
     assert!(events.try_recv().is_err());
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
     assert!(!actor.is_completion_cleanup());
@@ -2643,9 +2689,9 @@ async fn native_8148_review_control_partial_release_debits_before_retry() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
-    use super::super::native_prepare::Handle;
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
     use crate::services::turn_orchestrator::test_support::{fail_queue_saves, queue_save_faults};
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let f = Fixture::at(
@@ -2660,7 +2706,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
     finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         &shared,
     );
     let handle = await_within(
@@ -2679,7 +2725,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
     f.history
         .note_native_any_key("native-fixture", &f.ticket)
         .unwrap();
-    let context = super::super::super::queue_persistence_context(
+    let context = crate::services::discord::queue_persistence_context(
         &shared,
         &ProviderKind::Claude,
         key.channel_id,
@@ -2692,7 +2738,7 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
             .enqueued
     );
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     fail_queue_saves(key.channel_id, 1);
     f.history
         .try_native_control(
@@ -2764,8 +2810,8 @@ async fn native_8148_partial_retry_crosses_registration_and_actor_reconcile() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adoption() {
-    use super::super::native_prepare::Handle;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use crate::services::discord::turn_finalizer::native_prepare::Handle;
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use futures::FutureExt;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     for (adopted_first, read_only) in [(false, false), (true, false), (true, true)] {
@@ -2778,7 +2824,7 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
         shared.turn_finalizer.register_start(
             key,
             ProviderKind::Claude,
-            super::super::RelayOwnerKind::None,
+            crate::services::discord::inflight::RelayOwnerKind::None,
             &shared,
         );
         let custody = await_within(
@@ -2893,8 +2939,8 @@ async fn native_8148_merge_real_custody_refuses_clear_before_and_after_v2_adopti
 
 #[tokio::test]
 async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() {
-    use super::super::{actor_state, native_prepare};
     use crate::db::auto_queue::test_support::TestPostgresDb;
+    use crate::services::discord::turn_finalizer::{actor_state, native_prepare};
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
@@ -2913,24 +2959,26 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
         let mut ledger = HashMap::new();
         let mut pending = HashMap::new();
         let mut cached = None;
-        let start = |owner| super::super::FinalizeMsg::Start {
+        let start = |owner| {
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::Start {
             key,
             provider: ProviderKind::Claude,
             relay_owner: owner,
             recovery_lease: None,
             completion_admission_plan:
-                super::super::completion_admission::CompletionAdmissionPlan::Immediate,
+                crate::services::discord::turn_finalizer::completion_admission::CompletionAdmissionPlan::Immediate,
             shared: Arc::downgrade(&shared),
+        }
         };
         actor_state::handle_start(
-            start(super::super::RelayOwnerKind::None),
+            start(crate::services::discord::inflight::RelayOwnerKind::None),
             &mut ledger,
             &mut pending,
             &mut cached,
         );
         let (ack, rx) = oneshot::channel();
         native_prepare::handle(
-            super::super::FinalizeMsg::NativeRegister {
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::NativeRegister {
                 key,
                 actor: Some(actor.clone()),
                 history: f.history.clone(),
@@ -2945,7 +2993,7 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
         let input = rx.await.unwrap().unwrap();
         let (ack, rx) = oneshot::channel();
         native_prepare::handle(
-            super::super::FinalizeMsg::NativeKeyed {
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::NativeKeyed {
                 key,
                 input,
                 keyed: true,
@@ -2958,7 +3006,7 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
         .await;
         rx.await.unwrap().unwrap();
         actor_state::handle_start(
-            start(super::super::RelayOwnerKind::Watcher),
+            start(crate::services::discord::inflight::RelayOwnerKind::Watcher),
             &mut ledger,
             &mut pending,
             &mut cached,
@@ -2972,7 +3020,7 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
             entry.terminal_deadline = Some(due);
         }
         assert!(
-            super::super::watcher_backstop::watcher_backstop_turn_is_terminal(
+            crate::services::discord::turn_finalizer::watcher_backstop::watcher_backstop_turn_is_terminal(
                 &shared,
                 key,
                 &ProviderKind::Claude,
@@ -2980,8 +3028,15 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
             )
         );
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
-        super::super::reconcile::reconcile(&mut ledger, &mut pending, &shared).await;
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
+        crate::services::discord::turn_finalizer::reconcile::reconcile(
+            &mut ledger,
+            &mut pending,
+            &shared,
+        )
+        .await;
         let settlement = f
             .history
             .native_settlement("native-fixture", &f.ticket)
@@ -2993,14 +3048,14 @@ async fn native_8148_supply_backstop_keeps_keyed_input_after_watcher_start_pg() 
         assert!(!settlement.cleanup_complete);
         assert_eq!(
             ledger[&key.exact_key()].phase,
-            super::super::actor_state::Phase::Pending
+            crate::services::discord::turn_finalizer::actor_state::Phase::Pending
         );
         let current = shared.mailbox(key.channel_id).snapshot().await;
         assert!(Arc::ptr_eq(current.cancel_token.as_ref().unwrap(), &actor));
         assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
         assert_eq!(
             serde_json::to_value(
-                super::super::super::inflight::load_inflight_state_read_only(
+                crate::services::discord::inflight::load_inflight_state_read_only(
                     &ProviderKind::Claude,
                     key.channel_id.get()
                 )
@@ -3164,7 +3219,7 @@ impl SupplyCapture {
             .capture(&mut self.writer, &mut self.deriver, &mut self.owed)
             .unwrap();
         self.sources.tend(&mut self.writer).unwrap();
-        let port = super::native_supply::port(
+        let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
             self.writer.channel(),
             shared.clone(),
             self.bindings.clone(),
@@ -3182,44 +3237,54 @@ async fn supply_register(
     shared.turn_finalizer.register_start(
         key,
         ProviderKind::Claude,
-        super::super::RelayOwnerKind::None,
+        crate::services::discord::inflight::RelayOwnerKind::None,
         shared,
     );
     let (ack, rx) = oneshot::channel();
     shared
         .turn_finalizer
         .tx
-        .send(super::super::FinalizeMsg::NativeRegister {
-            key,
-            actor,
-            history: f.history.clone(),
-            namespace: "native-fixture".into(),
-            ticket: Box::new(f.ticket.clone()),
-            shared: shared.clone(),
-            ack,
-        })
+        .send(
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::NativeRegister {
+                key,
+                actor,
+                history: f.history.clone(),
+                namespace: "native-fixture".into(),
+                ticket: Box::new(f.ticket.clone()),
+                shared: shared.clone(),
+                ack,
+            },
+        )
         .unwrap();
-    let input = crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
-        .await
-        .unwrap()
-        .unwrap();
+    let input = adk_test_support::test_support::wait::await_within(
+        rx,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let (ack, rx) = oneshot::channel();
     shared
         .turn_finalizer
         .tx
-        .send(super::super::FinalizeMsg::NativeKeyed {
-            key,
-            input,
-            keyed: true,
-            history: f.history.clone(),
-            shared: shared.clone(),
-            ack,
-        })
+        .send(
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::NativeKeyed {
+                key,
+                input,
+                keyed: true,
+                history: f.history.clone(),
+                shared: shared.clone(),
+                ack,
+            },
+        )
         .unwrap();
-    crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
-        .await
-        .unwrap()
-        .unwrap();
+    adk_test_support::test_support::wait::await_within(
+        rx,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap()
+    .unwrap();
 }
 
 fn supply_rows(f: &Fixture, withdraw: bool, strict: bool) -> u64 {
@@ -3295,7 +3360,7 @@ async fn native_8148_supply_same_o_capture_late_receipt_closes_once_before_forei
     let projection_io = io_trace::take();
     assert_eq!(baseline_io, projection_io);
     println!("NATIVE_PREFIX_IO baseline={baseline_io:?} projection={projection_io:?}");
-    let port = super::native_supply::port(
+    let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
         f.ticket.channel_id,
         shared.clone(),
         capture.bindings.clone(),
@@ -3321,7 +3386,7 @@ async fn native_8148_supply_same_o_capture_late_receipt_closes_once_before_forei
         Some(true)
     );
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     capture.sources.offer_native(&port).await;
     let settlement = f
         .history
@@ -3346,7 +3411,7 @@ async fn native_8148_supply_same_o_capture_late_receipt_closes_once_before_forei
             .is_none()
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             key.channel_id.get()
         )
@@ -3543,9 +3608,9 @@ impl crate::services::tui_o::writer::actor::native_input::EvidencePort for Pause
                     .unwrap()
                     .send(())
                     .unwrap();
-                crate::test_support::wait::await_within(
+                adk_test_support::test_support::wait::await_within(
                     resume,
-                    crate::test_support::wait::WAIT_CAP,
+                    adk_test_support::test_support::wait::WAIT_CAP,
                 )
                 .await
                 .map_err(|e| e.to_string())?;
@@ -3558,7 +3623,7 @@ impl crate::services::tui_o::writer::actor::native_input::EvidencePort for Pause
 #[tokio::test]
 async fn native_8148_supply_late_offer_preserves_control_results_and_successors_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
@@ -3600,7 +3665,7 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
         }
         let mut capture =
             SupplyCapture::new(&f, &runtime.path().join(format!("race-store-{i}")), true);
-        let port = super::native_supply::port(
+        let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
             f.ticket.channel_id,
             shared.clone(),
             capture.bindings.clone(),
@@ -3625,11 +3690,12 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
                         key,
                         ProviderKind::Claude,
                         if kind == "cancel" {
-                            super::super::TerminalEvent::Cancel
+                            crate::services::discord::turn_finalizer::TerminalEvent::Cancel
                         } else {
-                            super::super::TerminalEvent::HostTerminated
+                            crate::services::discord::turn_finalizer::TerminalEvent::HostTerminated
                         },
-                        super::super::FinalizeContext::host_terminated(),
+                        crate::services::discord::turn_finalizer::FinalizeContext::host_terminated(
+                        ),
                         shared.clone(),
                     ),
                     WAIT_CAP,
@@ -3639,7 +3705,7 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
             "clear" => {
                 assert!(
                     await_within(
-                        super::super::super::mailbox_clear_channel(
+                        crate::services::discord::mailbox_clear_channel(
                             &shared,
                             &ProviderKind::Claude,
                             key.channel_id
@@ -3654,12 +3720,12 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
             "stop" => {
                 assert!(matches!(
                     await_within(
-                        super::super::super::mailbox_finish::mailbox_finish_stopped_turn(
+                        crate::services::discord::mailbox_finish::mailbox_finish_stopped_turn(
                             &shared,
                             &ProviderKind::Claude,
                             key.channel_id,
                             Some(&actor),
-                            super::super::super::mailbox_finish::MailboxLookup::Peek
+                            crate::services::discord::mailbox_finish::MailboxLookup::Peek
                         ),
                         WAIT_CAP
                     )
@@ -3739,18 +3805,20 @@ async fn native_8148_supply_late_offer_preserves_control_results_and_successors_
         next.finalizer_turn_id = next.user_msg_id;
         next.turn_nonce = successor.turn_nonce().map(str::to_owned);
         next.hosted_execution_nonce = Some("successor-runtime".into());
-        super::super::super::inflight::save_inflight_state(&next).unwrap();
+        crate::services::discord::inflight::save_inflight_state(&next).unwrap();
         shared.restart.global_active.store(1, Ordering::SeqCst);
-        let path = super::super::super::inflight::inflight_state_path(
-            &super::super::super::inflight::inflight_runtime_root().unwrap(),
+        let path = crate::services::discord::inflight::inflight_state_path(
+            &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
             &ProviderKind::Claude,
             key.channel_id.get(),
         );
         let before = std::fs::read(&path).unwrap();
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         resume.send(()).unwrap();
-        crate::test_support::wait::await_within(offer, WAIT_CAP)
+        adk_test_support::test_support::wait::await_within(offer, WAIT_CAP)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), before, "{kind}");
@@ -3844,7 +3912,9 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
             .unwrap()
             .restart
             .current_generation = 2;
-        let boot = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
+        let boot =
+            crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
+                .unwrap();
         boot.restore(&shared).await.unwrap();
         let mut capture = SupplyCapture::new(
             &f,
@@ -3861,7 +3931,7 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
             assert!(stored.outcome.is_none());
             assert!(!stored.cleanup_complete);
             assert!(
-                super::super::super::inflight::load_inflight_state_read_only(
+                crate::services::discord::inflight::load_inflight_state_read_only(
                     &ProviderKind::Claude,
                     row.channel_id
                 )
@@ -3889,7 +3959,7 @@ async fn native_8148_supply_old_boot_debt_uses_original_generation_and_saved_res
         );
         assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
         assert!(
-            super::super::super::inflight::load_inflight_state_read_only(
+            crate::services::discord::inflight::load_inflight_state_read_only(
                 &ProviderKind::Claude,
                 row.channel_id
             )
@@ -4002,8 +4072,8 @@ async fn supply_busy_followers(seed_receipt: bool) {
         let shared = b2b_shared(Some(pool.clone()));
         let (parent_key, parent_actor) = b2b_active(&parent, &shared).await;
         let row = b2b_row(&parent);
-        let path = super::super::super::inflight::inflight_state_path(
-            &super::super::super::inflight::inflight_runtime_root().unwrap(),
+        let path = crate::services::discord::inflight::inflight_state_path(
+            &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
             &ProviderKind::Claude,
             channel,
         );
@@ -4033,7 +4103,9 @@ async fn supply_busy_followers(seed_receipt: bool) {
             true,
         );
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         capture.poll(&shared).await;
         capture.poll(&shared).await;
         let result = f
@@ -4122,7 +4194,7 @@ async fn supply_resume_binding_receipt(
     let mut shared = b2b_shared(Some(pool.clone()));
     let mut row = b2b_row(&f);
     row.hosted_execution_nonce = Some(execution.into());
-    super::super::super::inflight::save_inflight_state(&row).unwrap();
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
     if boot {
         f.history
             .note_native_any_key("native-fixture", &f.ticket)
@@ -4131,7 +4203,7 @@ async fn supply_resume_binding_receipt(
             .unwrap()
             .restart
             .current_generation = 2;
-        super::super::native_prepare::BootInputs::prepare(&root, 2)
+        crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
             .unwrap()
             .restore(&shared)
             .await
@@ -4187,7 +4259,7 @@ async fn supply_resume_binding_receipt(
     assert!(settled.cleanup_complete);
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             f.ticket.channel_id
         )
@@ -4254,7 +4326,7 @@ async fn native_8148_resume_coexisting_boot_and_live_use_their_own_bindings_pg()
         .unwrap()
         .restart
         .current_generation = 2;
-    super::super::native_prepare::BootInputs::prepare(&root, 2)
+    crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
         .unwrap()
         .restore(&shared)
         .await
@@ -4321,7 +4393,7 @@ async fn native_8148_resume_coexisting_boot_and_live_use_their_own_bindings_pg()
     let (key, actor) = b2b_active(&current, &shared).await;
     let mut row = b2b_row(&current);
     row.hosted_execution_nonce = Some("incarnation-2".into());
-    super::super::super::inflight::save_inflight_state(&row).unwrap();
+    crate::services::discord::inflight::save_inflight_state(&row).unwrap();
     supply_register(&current, &shared, key, Some(actor)).await;
     let mut capture = SupplyCapture::new(&old, &runtime.path().join("coexisting-store"), true);
     {
@@ -4335,7 +4407,7 @@ async fn native_8148_resume_coexisting_boot_and_live_use_their_own_bindings_pg()
         events.push(resumed);
     }
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     capture.poll(&shared).await;
     capture.poll(&shared).await;
     for input in [&old, &current] {
@@ -4347,7 +4419,13 @@ async fn native_8148_resume_coexisting_boot_and_live_use_their_own_bindings_pg()
         assert!(result.cleanup_complete);
     }
     assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 0);
-    assert!(super::super::native_prepare::boot_ready(&shared, key.channel_id).await);
+    assert!(
+        crate::services::discord::turn_finalizer::native_prepare::boot_ready(
+            &shared,
+            key.channel_id
+        )
+        .await
+    );
     let mut wakes = 0;
     while let Ok(event) = events.try_recv() {
         wakes += usize::from(event.queue_is_eligible());
@@ -4415,7 +4493,7 @@ async fn native_8148_barrier_live_idle_after_neutral_bridge_releases_once_pg() {
             &shared,
         );
     assert!(
-        super::super::super::turn_bridge::native_input::neutral_exit(
+        crate::services::discord::turn_bridge::native_input::neutral_exit(
             &shared,
             &ProviderKind::Claude,
             &row,
@@ -4425,7 +4503,7 @@ async fn native_8148_barrier_live_idle_after_neutral_bridge_releases_once_pg() {
     );
     barrier_receipt(&f);
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     let mut capture = SupplyCapture::new(&f, &runtime.path().join("abstain-store"), true);
     capture.poll(&shared).await;
     let held = f
@@ -4478,7 +4556,7 @@ async fn native_8148_barrier_live_idle_after_neutral_bridge_releases_once_pg() {
             .is_none()
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             key.channel_id.get()
         )
@@ -4510,7 +4588,7 @@ async fn native_8148_barrier_live_idle_after_neutral_bridge_releases_once_pg() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_8148_barrier_released_token_retries_exact_row_without_finalize_pg() {
     use crate::db::auto_queue::test_support::TestPostgresDb;
-    use crate::test_support::wait::{WAIT_CAP, await_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
     use std::sync::atomic::Ordering;
     let runtime = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
@@ -4529,7 +4607,7 @@ async fn native_8148_barrier_released_token_retries_exact_row_without_finalize_p
     let capture = SupplyCapture::new(&f, &runtime.path().join("abstain-retry-store"), true);
     let held_pg = pool.acquire().await.unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     let task = tokio::spawn({
         let shared = shared.clone();
         async move {
@@ -4558,8 +4636,8 @@ async fn native_8148_barrier_released_token_retries_exact_row_without_finalize_p
             .await
             .unwrap()
     );
-    let row_path = super::super::super::inflight::inflight_state_path(
-        &super::super::super::inflight::inflight_runtime_root().unwrap(),
+    let row_path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
         &ProviderKind::Claude,
         key.channel_id.get(),
     );
@@ -4654,9 +4732,11 @@ async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() 
         .barriers
         .remove(0);
     f.history.record_native_barrier(&proof).unwrap();
-    let boot = super::super::native_prepare::BootInputs::prepare(&root, 2).unwrap();
-    let row_path = super::super::super::inflight::inflight_state_path(
-        &super::super::super::inflight::inflight_runtime_root().unwrap(),
+    let boot =
+        crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
+            .unwrap();
+    let row_path = crate::services::discord::inflight::inflight_state_path(
+        &crate::services::discord::inflight::inflight_runtime_root().unwrap(),
         &ProviderKind::Claude,
         f.ticket.channel_id,
     );
@@ -4691,7 +4771,9 @@ async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() 
     capture.bindings.notice.send_replace(2);
     capture.sources.follow(&mut capture.writer).unwrap();
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&restored);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+            &restored,
+        );
     capture.poll(&restored).await;
     assert!(
         restored
@@ -4717,7 +4799,7 @@ async fn native_8148_barrier_boot_none_outcome_uses_current_execution_idle_pg() 
     );
     assert!(!row_path.exists());
     assert_eq!(row.born_generation, 1);
-    super::super::native_prepare::BootInputs::prepare(&root, 2)
+    crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(&root, 2)
         .unwrap()
         .restore(&restored)
         .await
@@ -4776,15 +4858,19 @@ async fn barrier_epoch_case(stale_binding: bool) {
     shared
         .turn_finalizer
         .tx
-        .send(super::super::FinalizeMsg::NativeInputs {
-            channel: key.channel_id,
-            ack,
-        })
+        .send(
+            crate::services::discord::turn_finalizer::actor_state::FinalizeMsg::NativeInputs {
+                channel: key.channel_id,
+                ack,
+            },
+        )
         .unwrap();
-    let (inputs, _) =
-        crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
-            .await
-            .unwrap();
+    let (inputs, _) = adk_test_support::test_support::wait::await_within(
+        rx,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await
+    .unwrap();
     let prepared_before = inputs
         .iter()
         .find(|p| p.ticket.key == f.ticket.key)
@@ -4848,8 +4934,8 @@ async fn barrier_epoch_case(stale_binding: bool) {
         execution_nonce: "incarnation-1".into(),
     };
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
-    let port = super::native_supply::port(
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
+    let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
         f.ticket.channel_id,
         shared.clone(),
         capture.bindings.clone(),
@@ -4891,7 +4977,7 @@ async fn barrier_epoch_case(stale_binding: bool) {
         assert_eq!(shared.restart.global_active.load(Ordering::SeqCst), 1);
         assert_eq!(
             serde_json::to_value(
-                super::super::super::inflight::load_inflight_state_read_only(
+                crate::services::discord::inflight::load_inflight_state_read_only(
                     &ProviderKind::Claude,
                     key.channel_id.get()
                 )
@@ -4937,30 +5023,30 @@ async fn barrier_epoch_case(stale_binding: bool) {
     );
     assert!(futures::poll!(pending.as_mut()).is_pending());
     assert!(
-        crate::test_support::wait::await_within(
+        adk_test_support::test_support::wait::await_within(
             shared.turn_finalizer.native_scope(key, &actor),
-            crate::test_support::wait::WAIT_CAP
+            adk_test_support::test_support::wait::WAIT_CAP
         )
         .await
         .unwrap()
     );
     assert!(futures::poll!(pending.as_mut()).is_pending());
-    crate::test_support::wait::await_within(
+    adk_test_support::test_support::wait::await_within(
         shared.mailbox(key.channel_id).snapshot(),
-        crate::test_support::wait::WAIT_CAP,
+        adk_test_support::test_support::wait::WAIT_CAP,
     )
     .await;
     assert!(futures::poll!(pending.as_mut()).is_pending());
     assert!(
-        crate::test_support::wait::await_within(
+        adk_test_support::test_support::wait::await_within(
             shared.turn_finalizer.native_scope(key, &actor),
-            crate::test_support::wait::WAIT_CAP
+            adk_test_support::test_support::wait::WAIT_CAP
         )
         .await
         .unwrap()
     );
     let mailbox = shared.mailbox(key.channel_id);
-    let old = super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+    let old = crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
         &shared, &ProviderKind::Claude, key.channel_id, key.user_msg_id.into(), actor.turn_nonce().map(str::to_owned),
         std::time::Instant::now(), Some(actor.clone())).await;
     assert!(old.removed_token.is_some());
@@ -4972,17 +5058,20 @@ async fn barrier_epoch_case(stale_binding: bool) {
         )
         .await;
     shared.restart.global_active.store(1, Ordering::SeqCst);
-    let refused = super::super::super::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
+    let refused = crate::services::discord::mailbox_finish::mailbox_finish_turn_if_matches_episode_started_before_with_actor_without_completion(
         &shared, &ProviderKind::Claude, key.channel_id, key.user_msg_id.into(), actor.turn_nonce().map(str::to_owned),
         prepared_before, Some(actor.clone())).await;
     assert!(
         refused.removed_token.is_none(),
         "the original native cutoff must protect the new epoch"
     );
-    let result =
-        crate::test_support::wait::await_within(pending, crate::test_support::wait::WAIT_CAP).await;
+    let result = adk_test_support::test_support::wait::await_within(
+        pending,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    )
+    .await;
     let actual = mailbox.snapshot().await;
-    let row_after = super::super::super::inflight::load_inflight_state_read_only(
+    let row_after = crate::services::discord::inflight::load_inflight_state_read_only(
         &ProviderKind::Claude,
         key.channel_id.get(),
     );
@@ -5053,7 +5142,9 @@ async fn native_8148_barrier_full_tail_keeps_capture_through_pg() {
         supply_register(&f, &shared, key, Some(actor.clone())).await;
         barrier_receipt(&f);
         let mut events =
-            super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+            crate::services::discord::turn_completion_events::subscribe_turn_completion_events(
+                &shared,
+            );
         let mut capture =
             SupplyCapture::new(&f, &runtime.path().join(format!("tail-store-{n}")), true);
         capture.poll(&shared).await;
@@ -5082,7 +5173,7 @@ async fn native_8148_barrier_full_tail_keeps_capture_through_pg() {
                 .is_none()
         );
         assert!(
-            super::super::super::inflight::load_inflight_state_read_only(
+            crate::services::discord::inflight::load_inflight_state_read_only(
                 &ProviderKind::Claude,
                 key.channel_id.get()
             )
@@ -5235,7 +5326,11 @@ async fn native_8148_barrier_ambiguous_follower_supply_rechecks_before_marker_pg
                 Some(true)
             );
             let port =
-                super::native_supply::port(channel, shared.clone(), capture.bindings.clone());
+                crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
+                    channel,
+                    shared.clone(),
+                    capture.bindings.clone(),
+                );
             let origin = NoticeOrigin {
                 record: crate::services::tui_o::shadow::SourceRange {
                     source: binding.source.clone(),
@@ -5367,7 +5462,7 @@ async fn native_8148_receipt_actual_o_capture_settles_without_fixture_receipt_pg
     let projection_io = io_trace::take();
     assert_eq!(baseline_io, projection_io);
     println!("NATIVE_PREFIX_IO baseline={baseline_io:?} projection={projection_io:?}");
-    let port = super::native_supply::port(
+    let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
         f.ticket.channel_id,
         shared.clone(),
         capture.bindings.clone(),
@@ -5384,7 +5479,7 @@ async fn native_8148_receipt_actual_o_capture_settles_without_fixture_receipt_pg
     );
     supply_register(&f, &shared, key, Some(actor.clone())).await;
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     capture.sources.offer_native(&port).await;
     let settlement = f
         .history
@@ -5409,7 +5504,7 @@ async fn native_8148_receipt_actual_o_capture_settles_without_fixture_receipt_pg
             .is_none()
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             key.channel_id.get()
         )
@@ -5492,11 +5587,14 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
             .unwrap()
             .restart
             .current_generation = 2;
-        super::super::native_prepare::BootInputs::prepare(&runtime.path().join("runtime"), 2)
-            .unwrap()
-            .restore(&shared)
-            .await
-            .unwrap();
+        crate::services::discord::turn_finalizer::native_prepare::BootInputs::prepare(
+            &runtime.path().join("runtime"),
+            2,
+        )
+        .unwrap()
+        .restore(&shared)
+        .await
+        .unwrap();
         None
     } else {
         let (key, actor) = b2b_active(&f, &shared).await;
@@ -5505,13 +5603,13 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
         Some(actor)
     };
     let mut capture = SupplyCapture::new(&f, &runtime.path().join("unconfirmed-store"), true);
-    let port = super::native_supply::port(
+    let port = crate::services::discord::turn_finalizer::terminal_handler::native_supply::port(
         f.ticket.channel_id,
         shared.clone(),
         capture.bindings.clone(),
     );
     let mut events =
-        super::super::super::turn_completion_events::subscribe_turn_completion_events(&shared);
+        crate::services::discord::turn_completion_events::subscribe_turn_completion_events(&shared);
     {
         let _fault = Watch::new(
             path.parent().unwrap(),
@@ -5544,7 +5642,7 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
                 if boot { 0 } else { 1 }
             );
             assert!(
-                super::super::super::inflight::load_inflight_state_read_only(
+                crate::services::discord::inflight::load_inflight_state_read_only(
                     &ProviderKind::Claude,
                     channel.get()
                 )
@@ -5561,7 +5659,9 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
     }
     {
         use crate::services::discord::runtime_store::durable_publish::flush_probe::Gate;
-        use crate::test_support::wait::{WAIT_CAP, await_within, join_within, recv_within};
+        use adk_test_support::test_support::wait::{
+            WAIT_CAP, await_within, join_within, recv_within,
+        };
         use futures::FutureExt;
         let gate = Arc::new(Gate::default());
         let _fault = Watch::new(
@@ -5644,7 +5744,7 @@ async fn receipt_visible_unconfirmed(strict: bool, boot: bool) {
             .is_none()
     );
     assert!(
-        super::super::super::inflight::load_inflight_state_read_only(
+        crate::services::discord::inflight::load_inflight_state_read_only(
             &ProviderKind::Claude,
             channel.get()
         )

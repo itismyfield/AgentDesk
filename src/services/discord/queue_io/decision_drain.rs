@@ -69,9 +69,9 @@ pub(crate) fn note_open() {
     OPEN.store(true, Ordering::Relaxed);
 }
 
-const INTERRUPTED: &str = "interrupted_before_delivery";
+pub(in crate::services::discord) const INTERRUPTED: &str = "interrupted_before_delivery";
 #[cfg(unix)]
-const CLOSED: &str = "NotSent(\"decision_closed\")";
+pub(in crate::services::discord) const CLOSED: &str = "NotSent(\"decision_closed\")";
 #[cfg(unix)]
 const UNAPPROVED: &str = "NotSent(\"decision_not_approved\")";
 
@@ -118,7 +118,7 @@ async fn refuse_unapproved(mailbox: &ChannelMailboxHandle, front: &Front) -> Res
 }
 
 /// The message id the event's original is admitted under on its channel.
-fn message_of(channel: u64, origin: &str) -> u64 {
+pub(in crate::services::discord) fn message_of(channel: u64, origin: &str) -> u64 {
     let metadata = serde_json::json!({"human_input": {"origin_id": origin}});
     InputOrigin::decision_identity(channel, Some(SOURCE), Some(&metadata)).map_or(0, |id| id.0)
 }
@@ -187,7 +187,7 @@ async fn end_abandoned(
 
 /// Ends an event as failed: the closing fence first, then exactly its original leaves the
 /// owner, then the end is recorded. A crash in between leaves the fence for the next settlement.
-async fn fail(
+pub(in crate::services::discord) async fn fail(
     pool: &PgPool,
     mailbox: Option<&ChannelMailboxHandle>,
     row: &Unsettled,
@@ -225,7 +225,7 @@ pub(crate) async fn close_admitted(
 }
 
 /// Settles one event under this process's own run.
-async fn settle(
+pub(in crate::services::discord) async fn settle(
     pool: &PgPool,
     mailbox: Option<&ChannelMailboxHandle>,
     row: &Unsettled,
@@ -426,7 +426,7 @@ pub(crate) async fn settle_channel(
 
 /// Settles, without a second write, every row whose holder's run is over for this node's run
 /// started at `boot`; a waiting original keeps waiting under its ticket.
-async fn recover_before(
+pub(in crate::services::discord) async fn recover_before(
     pool: &PgPool,
     boot: chrono::DateTime<chrono::Utc>,
     mailbox_of: impl Fn(u64) -> Option<ChannelMailboxHandle>,
@@ -466,7 +466,3 @@ fn global_mailbox(channel: u64) -> Option<ChannelMailboxHandle> {
     let channel = poise::serenity_prelude::ChannelId::new(channel.max(1));
     ChannelMailboxRegistry::global_handle(channel)
 }
-
-#[cfg(test)]
-#[path = "decision_drain_tests.rs"]
-mod tests;

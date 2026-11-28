@@ -1,3 +1,7 @@
+#[cfg(any(test, feature = "test-support"))]
+#[path = "backstop_hook_tests.rs"]
+pub(in crate::services::discord) mod hook_tests;
+
 use super::auto_queue_eligibility::{QueuedReach, queued_reach};
 use super::*;
 
@@ -5,8 +9,8 @@ use super::*;
 #[derive(Default)]
 pub(in crate::services) struct BackstopSlot {
     pub(in crate::services) wake: tokio::sync::Notify,
-    pub(super) pending_request: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
+    pub(in crate::services::discord) pending_request: std::sync::atomic::AtomicBool,
+    #[cfg(any(test, feature = "test-support"))]
     request_acks: std::sync::Mutex<cancel_backstop_test_support::DeferredRequestAcks>,
 }
 
@@ -15,7 +19,7 @@ impl BackstopSlot {
         Self {
             wake: tokio::sync::Notify::new(),
             pending_request: std::sync::atomic::AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             request_acks: Default::default(),
         }
     }
@@ -30,7 +34,7 @@ impl BackstopSlot {
 
     /// Whether a schedule coalesced into this slot since the last call.
     fn consume_requests(&self) -> bool {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             let mut acks = self.request_acks.lock().unwrap();
             let requested = self
@@ -40,12 +44,12 @@ impl BackstopSlot {
             acks.evaluating.extend(pending);
             requested
         }
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "test-support")))]
         self.pending_request
             .swap(false, std::sync::atomic::Ordering::AcqRel)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn request_observed(&self, channel: ChannelId, wake_existing: bool) {
         let mut acks = self.request_acks.lock().unwrap();
         acks.pending
@@ -55,14 +59,14 @@ impl BackstopSlot {
         self.request(wake_existing);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn observe_initial_request(&self, channel: ChannelId) {
         self.request_acks.lock().unwrap().evaluating.extend(
             cancel_backstop_test_support::deferred_request_started(channel),
         );
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     fn complete_requests(&self) {
         let evaluating = std::mem::take(&mut self.request_acks.lock().unwrap().evaluating);
         for ack in evaluating {
@@ -83,8 +87,8 @@ struct IdleQueueBackstopRearm {
     backlog_units: usize,
 }
 
-pub(super) const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY: std::time::Duration =
-    std::time::Duration::from_secs(2);
+pub(in crate::services::discord) const DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY:
+    std::time::Duration = std::time::Duration::from_secs(2);
 pub(in crate::services::discord) const DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY: std::time::Duration =
     std::time::Duration::from_secs(60);
 const IDLE_QUEUE_BACKSTOP_WARN_TARGET: &str = "agentdesk::discord::idle_queue_backstop";
@@ -156,7 +160,7 @@ fn idle_queue_snapshot_has_raw_rearm_backlog(
 impl Drop for DeferredHookBacklogGuard {
     fn drop(&mut self) {
         if self.active {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             cancel_backstop_test_support::set_backstop_waiting(self.channel_id, false);
             self.shared
                 .restart
@@ -434,31 +438,12 @@ fn wake_coalesced(shared: &Arc<SharedData>, channel_id: ChannelId, coalesced: bo
 async fn owner_took(shared: &Arc<SharedData>, channel_id: ChannelId, slot: &BackstopSlot) -> bool {
     let coalesced = slot.consume_requests();
     let owned = owned(shared, channel_id).await;
-    #[cfg(test)]
-    owner_answered_for_tests(channel_id, owned).await;
+    #[cfg(any(test, feature = "test-support"))]
+    hook_tests::owner_answered_for_tests(channel_id, owned).await;
     if owned {
         wake_coalesced(shared, channel_id, coalesced);
     }
     owned
-}
-
-/// Runs in a slow cycle between the owner check's answer and the cycle acting on it.
-#[cfg(test)]
-type OwnerAnsweredHook = Arc<
-    dyn Fn(bool) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
->;
-#[cfg(test)]
-static OWNER_ANSWERED_HOOKS: std::sync::LazyLock<dashmap::DashMap<ChannelId, OwnerAnsweredHook>> =
-    std::sync::LazyLock::new(Default::default);
-
-#[cfg(test)]
-async fn owner_answered_for_tests(channel_id: ChannelId, owned: bool) {
-    let hook = OWNER_ANSWERED_HOOKS
-        .get(&channel_id)
-        .map(|hook| hook.clone());
-    if let Some(hook) = hook {
-        hook(owned).await;
-    }
 }
 
 async fn run_single_slow_idle_queue_backstop(
@@ -470,13 +455,13 @@ async fn run_single_slow_idle_queue_backstop(
     wait_for_trigger: bool,
 ) -> Option<IdleQueueBackstopRearm> {
     let timed_out = if wait_for_trigger {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         cancel_backstop_test_support::set_backstop_waiting(channel_id, true);
         let timed_out = tokio::select! {
             _ = tokio::time::sleep(DEFERRED_IDLE_QUEUE_BACKSTOP_DELAY) => true,
             _ = slot.wake.notified() => false,
         };
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         cancel_backstop_test_support::set_backstop_waiting(channel_id, false);
         timed_out
     } else {
@@ -526,13 +511,13 @@ async fn run_single_slow_idle_queue_backstop(
         if may_kick {
             let kickoff =
                 kick_idle_queue_channel_if_context_available(shared, provider, channel_id, reason);
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             let _ = queue_dispatch::kickoff::cancel_backstop_test_support::with_origin(
                 "idle_queue_backstop",
                 kickoff,
             )
             .await;
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             let _ = kickoff.await;
         }
     }
@@ -574,7 +559,7 @@ async fn run_slow_idle_queue_backstop_loop(
             wait_for_trigger,
         )
         .await;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         {
             slot.complete_requests();
             cancel_backstop_test_support::completed_cycle(channel_id);
@@ -588,7 +573,7 @@ async fn run_slow_idle_queue_backstop_loop(
             wait_for_trigger = true;
             continue;
         }
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         cancel_backstop_test_support::pause_before_shutdown(channel_id).await;
         if backlog_guard.release() {
             break;
@@ -682,7 +667,7 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
         let _ =
             reconcile_all_ready_idle_queues(&shared, &provider, "turn_completion_listener_start")
                 .await;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         for (channel_id, _) in shared.mailboxes.snapshot_all().await {
             cancel_backstop_test_support::set_listener_ready(channel_id);
         }
@@ -719,7 +704,7 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
                         "turn_completion_event",
                     )
                     .await;
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     cancel_backstop_test_support::listener_event_completed(event.channel_id);
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
@@ -769,10 +754,6 @@ pub(in crate::services::discord) fn spawn_turn_completion_idle_queue_listener(
     });
 }
 
-#[cfg(all(test, unix))]
-#[path = "owned_backstop_tests.rs"]
-mod owned_backstop_tests;
-
 #[cfg(test)]
 pub(in crate::services::discord) fn idle_queue_backstop_fires_for_tests() -> usize {
     IDLE_QUEUE_BACKSTOP_FIRES_FOR_TESTS.load(std::sync::atomic::Ordering::Relaxed)
@@ -792,11 +773,11 @@ fn schedule_deferred_idle_queue_kickoff_inner(
 ) {
     let slot = match shared.restart.deferred_hook_channels.entry(channel_id) {
         dashmap::mapref::entry::Entry::Occupied(entry) => {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             entry
                 .get()
                 .request_observed(channel_id, profile.wakes_existing_task());
-            #[cfg(not(test))]
+            #[cfg(not(any(test, feature = "test-support")))]
             entry.get().request(profile.wakes_existing_task());
             tracing::debug!(
                 provider = provider.as_str(),
@@ -824,7 +805,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         slot: slot.clone(),
         active: true,
     };
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     slot.observe_initial_request(channel_id);
     super::task_supervisor::spawn_observed("deferred_idle_queue_kickoff", async move {
         // An owner takes the scheduling event as one direct wake, with no presleep or backstop.
@@ -846,7 +827,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
             loop {
                 wake_coalesced(&shared, channel_id, slot.consume_requests());
                 if backlog_guard.release() {
-                    #[cfg(test)]
+                    #[cfg(any(test, feature = "test-support"))]
                     slot.complete_requests();
                     return;
                 }
@@ -856,7 +837,7 @@ fn schedule_deferred_idle_queue_kickoff_inner(
         let _ =
             kick_idle_queue_channel_if_context_available(&shared, &provider, channel_id, reason)
                 .await;
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         slot.complete_requests();
         run_slow_idle_queue_backstop_loop(
             &shared,

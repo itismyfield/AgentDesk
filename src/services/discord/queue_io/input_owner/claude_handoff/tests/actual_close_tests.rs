@@ -28,17 +28,7 @@ async fn f3_a_changed_pin_holds_the_original_without_launching_or_closing_a_peer
     let key = format!("claude/{}/test-node:{logical}", shared.token_hash);
     let row = seeded(&pool, &key, &shared.token_hash, channel.get(), None).await;
     assert!(matches!(row.record, HostedRecord::Legacy));
-    FORCED.lock().unwrap().insert(
-        channel.get(),
-        Forced {
-            key,
-            row,
-            attempts: 0,
-            done: None,
-            real_close: true,
-        },
-    );
-    let forced = Guard(channel.get());
+    let forced = install_forced(channel.get(), key, row, true, None);
     let mailbox = shared.mailbox(channel);
     let persistence = QueuePersistenceContext::new(&ProviderKind::Claude, &shared.token_hash, None);
     let (path, namespace) =

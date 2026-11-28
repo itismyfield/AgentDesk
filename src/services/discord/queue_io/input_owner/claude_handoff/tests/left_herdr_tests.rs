@@ -5,7 +5,7 @@ use crate::services::discord::queue_io::input_owner::drive::{Drive, Handoff};
 use serde_json::Value;
 
 pub(super) struct Rig {
-    pub(super) shared: Shared,
+    pub(super) shared: Arc<crate::services::discord::SharedData>,
     pub(super) mailbox: ChannelMailboxHandle,
     pub(super) channel: Channel,
     pub(super) started: Arc<Mutex<Vec<u64>>>,

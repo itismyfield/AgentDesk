@@ -130,11 +130,7 @@ impl Fixture {
     }
 
     fn rows(&self) -> Vec<queue_io::queued_head_inject::AttemptRow> {
-        let rows = ATTEMPT_ROWS.lock().unwrap();
-        let mine = rows
-            .iter()
-            .filter(|row| row.channel_id == self.channel.get());
-        mine.cloned().collect()
+        self.probe.rows()
     }
 
     /// The foreground turn still holds the channel and no queued turn was started in its place.
@@ -325,12 +321,7 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
         RetryClass::Parked
     );
     // Admission may offer a Ready input before its HTTP echo finishes; parking starts this window.
-    let offers_at_park = OFFERED_HEADS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|id| **id == p)
-        .count();
+    let offers_at_park = fixture.probe.offers().iter().filter(|id| **id == p).count();
     drop(transition);
     quiet().await;
     let parked = payloads(items(fixture.disk()));
@@ -374,12 +365,7 @@ async fn s3_a_parked_input_is_kept_and_passed_by_the_ready_inputs_behind_it_pg()
         (p, "P spent its retries")
     );
     assert_eq!(
-        OFFERED_HEADS
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|id| **id == p)
-            .count(),
+        fixture.probe.offers().iter().filter(|id| **id == p).count(),
         offers_at_park,
         "a parked input is not offered again"
     );
@@ -415,19 +401,9 @@ async fn s3_a_slow_check_overlapping_a_reserved_owner_types_the_input_once_pg() 
     fixture.enqueue("B behind raced H").await;
     reached(&at_reserved).await;
     assert_eq!(fixture.disk()["head_injection"]["phase"], "reserved");
-    let offered = OFFERED_HEADS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|id| **id == h)
-        .count();
+    let offered = fixture.probe.offers().iter().filter(|id| **id == h).count();
     fixture.slow_check().await;
-    let again = OFFERED_HEADS
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|id| **id == h)
-        .count();
+    let again = fixture.probe.offers().iter().filter(|id| **id == h).count();
     assert!(again > offered, "the slow check did offer the same input");
     assert_eq!(
         fixture.pane.tmux_calls(),
@@ -521,11 +497,7 @@ async fn s3_a_closed_gate_changes_nothing_at_any_automatic_entry_point_pg() {
         assert!(fixture.rows().is_empty(), "{case}");
         let ids: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();
         assert!(
-            !OFFERED_HEADS
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|id| ids.contains(id)),
+            !fixture.probe.offers().iter().any(|id| ids.contains(id)),
             "{case}"
         );
         if !queued_open || mode == "off" {
@@ -679,7 +651,7 @@ async fn s3_an_attempt_row_never_reports_a_delivery_the_actor_did_not_commit_pg(
     let core = raced.shared.core.lock().await;
     let attempt = raced.spawn_kick();
     until("the attempt chose H", || {
-        OFFERED_HEADS.lock().unwrap().contains(&h.message_id)
+        raced.probe.offers().contains(&h.message_id)
     })
     .await;
     let mailbox = raced.shared.mailbox(raced.channel);
@@ -812,7 +784,7 @@ async fn s3_an_untypable_first_ready_input_is_neither_pasted_nor_passed_pg() {
         assert_eq!(fixture.pane.tmux_calls(), 0, "{shape}: nothing was pasted");
         assert!(fixture.receipts().is_empty(), "{shape}");
         assert!(
-            !OFFERED_HEADS.lock().unwrap().contains(&b),
+            !fixture.probe.offers().contains(&b),
             "{shape}: B never passed H"
         );
         let after: Vec<MessageId> = fixture.queue().await.iter().map(|i| i.message_id).collect();

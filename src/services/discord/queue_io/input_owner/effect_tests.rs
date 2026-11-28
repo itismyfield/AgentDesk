@@ -103,7 +103,8 @@ fn cold_claude_first_prompt_is_one_owner_attempt() {
 
 /// A scripted busy Claude pane with `composer` typed in it and `chip` shown in its box instead.
 fn drafted_pane(composer: &str, chip: Option<&str>) -> tempfile::TempDir {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/busy-inject-tmp");
+    let root =
+        std::path::Path::new(crate::runtime_layout::REPO_ROOT).join("target/busy-inject-tmp");
     std::fs::create_dir_all(&root).unwrap();
     let dir = tempfile::tempdir_in(root).unwrap();
     let path = |name: &str| dir.path().join(name);

@@ -4,8 +4,12 @@ use std::sync::atomic::Ordering;
 
 use serenity::model::id::{ChannelId, MessageId, UserId};
 
-use super::*;
+use crate::services::discord::SharedData;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::turn_finalizer::{
+    FinalizeContext, FinalizeOutcome, SyntheticClaimSnapshot, TerminalEvent, TurnKey,
+    finalize::do_finalize, handle_idle_queue_guard_skip, reconcile,
+};
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode};
 
@@ -104,7 +108,7 @@ async fn seed_owner(
         let tmp = tempfile::tempdir().unwrap();
         let _tmux = crate::services::discord::zombie_foreground_release::tests::fixtures::missing_tmux_fixture(&tmp);
         assert_eq!(
-            crate::services::discord::zombie_foreground_release::tui_structurally_idle(
+            crate::services::discord::host_liveness::tui_structurally_idle(
                 &ProviderKind::Claude,
                 &token
             ),
@@ -157,8 +161,7 @@ async fn kickoff_guard_skip_preserves_queue_and_arms_recovery() {
         seed_active_with_queue(&shared, channel_id, active_user_msg_id, queued_user_msg_id).await;
 
         let snapshot = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
-        super::handle_idle_queue_guard_skip(&shared, &ProviderKind::Claude, channel_id, &snapshot)
-            .await;
+        handle_idle_queue_guard_skip(&shared, &ProviderKind::Claude, channel_id, &snapshot).await;
 
         let after = crate::services::discord::mailbox_snapshot(&shared, channel_id).await;
         assert_eq!(

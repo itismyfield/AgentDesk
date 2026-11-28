@@ -1,4 +1,4 @@
-use super::super::native_supply::native_completion::{RECORD_REGISTRY_LOCK, record};
+use crate::services::discord::turn_finalizer::terminal_handler::native_supply::native_completion::{hook_tests::RECORD_REGISTRY_LOCK, record};
 use super::*;
 use crate::config::TestRuntimeRootGuard;
 use crate::db::auto_queue::test_support::TestPostgresDb;

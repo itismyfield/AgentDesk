@@ -225,7 +225,7 @@ async fn reconcile_guarded_finish_residues(shared: &Arc<SharedData>) {
 /// liveness so a paused-live turn is deferred, never over-finalized), and
 /// garbage-collects `Finalized` entries past their TTL so the ledger stays
 /// bounded.
-pub(super) async fn reconcile(
+pub(in crate::services::discord) async fn reconcile(
     ledger: &mut HashMap<LedgerKey, LedgerEntry>,
     pending_admission: &mut HashMap<LedgerKey, PendingCompletionAdmission>,
     shared: &Arc<SharedData>,

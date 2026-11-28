@@ -867,11 +867,13 @@ async fn actual_o_recovery(boot: bool) {
                 ack,
             })
             .unwrap();
-        let input =
-            crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
-                .await
-                .unwrap()
-                .unwrap();
+        let input = adk_test_support::test_support::wait::await_within(
+            rx,
+            adk_test_support::test_support::wait::WAIT_CAP,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let (ack, rx) = oneshot::channel();
         shared
             .turn_finalizer
@@ -885,10 +887,13 @@ async fn actual_o_recovery(boot: bool) {
                 ack,
             })
             .unwrap();
-        crate::test_support::wait::await_within(rx, crate::test_support::wait::WAIT_CAP)
-            .await
-            .unwrap()
-            .unwrap();
+        adk_test_support::test_support::wait::await_within(
+            rx,
+            adk_test_support::test_support::wait::WAIT_CAP,
+        )
+        .await
+        .unwrap()
+        .unwrap();
     }
     // This new runtime has no queue owner, producer or RuntimeReady; its normal O poll must recover.
     assert!(

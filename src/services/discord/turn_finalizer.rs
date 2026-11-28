@@ -35,22 +35,22 @@ use super::SharedData;
 // #3041 P1-0: dormant lease types for the *Delivery messages below (mod.rs §2-§3).
 use super::{DeliveryLeaseCell, DeliveryLeaseKey, LeaseHolder, LeaseOutcome};
 
-mod actor_state;
+pub(in crate::services::discord) mod actor_state;
 #[cfg(unix)]
 pub(in crate::services::discord) mod native_prepare;
 use actor_state::{panic_payload_summary, resolve_ledger_key};
 pub(in crate::services::discord) mod cleanup;
-mod completion_admission;
+pub(in crate::services::discord) mod completion_admission;
 mod completion_admission_actor;
 pub(in crate::services::discord) mod completion_signal;
 mod delivery_lease;
-mod episode;
-mod finalize;
+pub(in crate::services::discord) mod episode;
+pub(in crate::services::discord) mod finalize;
 mod finalize_context;
 mod guarded_finish_residue;
-mod reconcile;
-mod terminal_handler;
-mod watcher_backstop;
+pub(in crate::services::discord) mod reconcile;
+pub(in crate::services::discord) mod terminal_handler;
+pub(in crate::services::discord) mod watcher_backstop;
 
 pub(in crate::services::discord) use cleanup::SyntheticClaimSnapshot;
 // #3479 r9: completion-signal enum + pure derivation extracted; re-exported so
@@ -340,7 +340,7 @@ pub(in crate::services::discord) enum PolicyCloseOutcome {
 /// owning task drains the `mpsc`; all public methods are cheap
 /// submit-or-await wrappers.
 pub(in crate::services::discord) struct TurnFinalizer {
-    tx: mpsc::UnboundedSender<FinalizeMsg>,
+    pub(in crate::services::discord) tx: mpsc::UnboundedSender<FinalizeMsg>,
     guarded_finish_residues: guarded_finish_residue::GuardedFinishResidues,
 }
 

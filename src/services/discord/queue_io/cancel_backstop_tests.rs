@@ -3,7 +3,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
 
-use super::*;
+use crate::services::discord::queue_io::backstop::DEFERRED_IDLE_QUEUE_KICKOFF_INITIAL_DELAY;
+use crate::services::discord::queue_io::*;
+use crate::services::discord::{
+    IdleQueueKickoffChannelOutcome, SharedData, increment_global_active,
+    make_shared_data_for_tests, queue_persistence_context,
+};
+use crate::services::provider::ProviderKind;
+
 use crate::services::discord::health::{HealthRegistry, schedule_pending_queue_drain_after_cancel};
 use crate::services::discord::inflight::{
     InflightTurnState, inflight_runtime_root, inflight_state_path, save_inflight_state,
@@ -165,8 +172,8 @@ async fn cancelled_anchor_is_rechecked_on_later_slow_backstop_cycle() {
     );
 }
 
-use super::cancel_backstop_test_support as support;
 use crate::services::discord::inflight::RelayOwnerKind;
+use crate::services::discord::queue_io::cancel_backstop_test_support as support;
 use crate::services::discord::turn_finalizer::{GuardedFinishResidue, TurnKey};
 use crate::services::discord::zombie_foreground_release::cancel_backstop_test_support as release_support;
 use std::time::Duration;

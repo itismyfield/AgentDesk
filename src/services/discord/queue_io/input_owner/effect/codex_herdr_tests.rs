@@ -95,7 +95,7 @@ impl Pane {
         };
         let dir = tempfile::tempdir().unwrap();
         let rollout = dir.path().join("rollout.jsonl");
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let fixture = Path::new(crate::runtime_layout::REPO_ROOT)
             .join("tests/fixtures/codex_busy_inject/model_turn.jsonl");
         let records: String = std::fs::read_to_string(fixture)
             .unwrap()
