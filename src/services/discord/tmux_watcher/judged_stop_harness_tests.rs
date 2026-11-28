@@ -1,7 +1,11 @@
 //! A preserve stop of a streaming turn whose host marker cannot be read, through the real
 //! watcher loop: the stop is kept before any write, so the watcher still delivers the tail.
 
-use super::*;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, Harness, isolated_in_module, said, stop, user,
+};
+use poise::serenity_prelude as serenity;
+use std::sync::{Arc, atomic::Ordering};
 
 const T0: &str = "ADK-P6ASB T0 delivered before the watcher attached";
 const HEAD: &str = "ADK-P6ASB T1 head streamed before the stop";
@@ -12,7 +16,7 @@ const TAIL: &str = "ADK-P6ASB T1 tail written after the stop was kept";
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_kept_stop_leaves_the_watcher_to_deliver_the_tail_once() {
     let test = "a_kept_stop_leaves_the_watcher_to_deliver_the_tail_once";
-    if !isolated_in("judged_stop_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let seed = format!("{}{}{}", user("T0"), said(T0), stop());

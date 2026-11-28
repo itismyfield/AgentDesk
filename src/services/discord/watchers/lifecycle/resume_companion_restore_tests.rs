@@ -1,16 +1,22 @@
 //! The public boot restore must really reserve and start the proven Codex watcher.
 
-use super::*;
+use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture as install_http;
 use crate::services::discord::router::message_handler::codex_resume_companion_queue_tests::{
     Fixture, ID,
 };
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
 use crate::services::discord::tmux::watcher_install_fixture as install;
+use crate::services::discord::tmux::watcher_lifecycle::codex_restore;
+use crate::services::discord::tmux::{ReaderStartObservation, restore_tmux_watchers};
 use crate::services::discord::turn_presence::activity::Activity;
+use crate::services::provider::ProviderKind;
 use crate::services::provider::ProviderRuntimeExt;
 use crate::services::tui_prompt_dedupe as dedupe;
+use poise::serenity_prelude::ChannelId;
 use serde_json::json;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::Ordering;
+use std::time::Duration;
 
 /// Its own pipe keeps this fixture-owned process alive with `codex resume UUID` in argv.
 /// Both Linux /proc and macOS ps therefore exercise the real process-argument reader.
@@ -50,16 +56,18 @@ fn runtime() -> tokio::runtime::Runtime {
         .unwrap()
 }
 
-async fn assert_attached(fixture: &Fixture, submitted: &Scope, expected_offset: u64) {
+async fn assert_attached(
+    fixture: &Fixture,
+    submitted: &Scope,
+    reader: &ReaderStartObservation,
+    expected_offset: u64,
+) {
     assert_eq!(
         submitted.submissions(),
         1,
         "actual boot entry must submit one supervised watcher"
     );
-    assert_eq!(
-        install::reader_start(fixture.channel().get()),
-        Some(expected_offset)
-    );
+    assert_eq!(reader.offset(), Some(expected_offset));
     let binding = fixture
         .shared()
         .tmux_watchers
@@ -162,8 +170,9 @@ async fn boot_native(channel: u64, metadata_only: bool, partial: bool, drain: bo
         "fixture must expose the exact complete-record boundary"
     );
     let submitted = Scope::new(fixture.shared());
+    let reader = ReaderStartObservation::install(fixture.channel().get());
     restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
-    assert_attached(&fixture, &submitted, checkpoint).await;
+    assert_attached(&fixture, &submitted, &reader, checkpoint).await;
     assert_eq!(fixture.queue_identity().await, before);
     restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
     assert_eq!(
@@ -171,10 +180,7 @@ async fn boot_native(channel: u64, metadata_only: bool, partial: bool, drain: bo
         1,
         "boot restore must reuse the live exact source"
     );
-    assert_eq!(
-        install::reader_start(fixture.channel().get()),
-        Some(checkpoint)
-    );
+    assert_eq!(reader.offset(), Some(checkpoint));
     if drain {
         fixture.admit_once().await;
     }
@@ -242,9 +248,10 @@ fn resume_companion_cold_proof_without_candidate_does_not_claim() {
         assert!(std::path::Path::new(&fixture.install.output).is_file());
         assert_eq!(fixture.fold().verified, Some(proof));
         let submitted = Scope::new(fixture.shared());
+        let reader = ReaderStartObservation::install(fixture.channel().get());
         restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
         assert_eq!(submitted.submissions(), 0);
-        assert_eq!(install::reader_start(fixture.channel().get()), None);
+        assert_eq!(reader.offset(), None);
         assert!(
             fixture
                 .shared()
@@ -284,9 +291,10 @@ fn resume_companion_restore_rejects_unlinked_wrapper_namespace() {
         let native = std::fs::read(&fixture.native).unwrap();
         let before = fixture.queue_identity().await;
         let submitted = Scope::new(fixture.shared());
+        let reader = ReaderStartObservation::install(fixture.channel().get());
         restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
         assert_eq!(submitted.submissions(), 0);
-        assert_eq!(install::reader_start(fixture.channel().get()), None);
+        assert_eq!(reader.offset(), None);
         assert!(
             fixture
                 .shared()
@@ -367,9 +375,10 @@ async fn assert_restore_skips(fixture: &Fixture) {
     let runtime = dedupe::peek_tmux_runtime_binding(&fixture.install.session);
     let before = fixture.queue_identity().await;
     let submitted = Scope::new(fixture.shared());
+    let reader = ReaderStartObservation::install(fixture.channel().get());
     restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
     assert_eq!(submitted.submissions(), 0);
-    assert_eq!(install::reader_start(fixture.channel().get()), None);
+    assert_eq!(reader.offset(), None);
     assert!(
         fixture
             .shared()
@@ -404,8 +413,9 @@ fn rehydrated_idle_codex_restore_binds_watcher_and_settles_idle() {
         )
         .unwrap();
         let submitted = Scope::new(fixture.shared());
+        let reader = ReaderStartObservation::install(fixture.channel().get());
         restore_tmux_watchers(&fixture.install.http, fixture.shared()).await;
-        assert_attached(&fixture, &submitted, checkpoint).await;
+        assert_attached(&fixture, &submitted, &reader, checkpoint).await;
         fixture.assert_activity(Activity::Idle, "closed").await;
         assert_eq!(submitted.cancel_and_join_all().await.len(), 1);
     });
@@ -433,11 +443,11 @@ fn legacy_rollout(id: &str) -> std::path::PathBuf {
 async fn legacy_idle(
     channel: u64,
 ) -> (
-    install::InstallFixture,
+    install_http::InstallFixture,
     crate::services::discord::health::test_support::MockDiscord,
     std::path::PathBuf,
 ) {
-    let (fixture, discord) = install::fixture(ProviderKind::Codex, channel).await;
+    let (fixture, discord) = install_http::fixture(ProviderKind::Codex, channel).await;
     let native = legacy_rollout(ID);
     std::fs::remove_file(&fixture.output).unwrap();
     dedupe::register_tmux_runtime_binding(
@@ -690,7 +700,7 @@ async fn wait_for(what: &str, mut done: impl FnMut() -> bool, trace: impl Fn() -
 /// A legacy turn-mode Codex channel after restart: idle pane, rollout marker from its last
 /// turn, no wrapper output, and one input queued before boot.
 struct LegacyQueued {
-    install: install::InstallFixture,
+    install: install_http::InstallFixture,
     native: std::path::PathBuf,
     _discord: crate::services::discord::health::test_support::MockDiscord,
     _confirmation: crate::services::tui_o::turn_mode::TestConfirmation,
@@ -720,7 +730,7 @@ impl LegacyQueued {
         crate::services::provider_hosting::install_provider_hosting_config(&config);
         crate::config_live_reload::install(config);
         dedupe::reset_state_for_tests();
-        let (install, discord) = install::fixture(ProviderKind::Codex, channel).await;
+        let (install, discord) = install_http::fixture(ProviderKind::Codex, channel).await;
         // Boot resolves a legacy pane's channel from the runtime config file.
         let config_file = crate::runtime_layout::config_file_path(&install::root());
         std::fs::create_dir_all(config_file.parent().unwrap()).unwrap();
@@ -968,7 +978,7 @@ fn rehydrated_idle_codex_boot_kickoff_submits_queued_head_once_and_drains() {
         let http = discord.http.clone();
         let kick_shared = shared.clone();
         let kickoff = tokio::spawn(async move {
-            let deps = crate::services::discord::router::IntakeDeps {
+            let deps = crate::services::discord::queue_io::transport::IntakeDeps {
                 http: &http,
                 cache: None,
                 ctx_for_chained_dispatch: None,

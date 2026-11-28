@@ -1,9 +1,22 @@
 //! #5704: a TUI-direct synthetic turn claimed while the watcher waits on the
 //! terminal relay ack is invisible to the pre-relay snapshot. The terminal commit
 //! that clears its row must release its exact mailbox episode in the same pass.
-use super::*;
+use crate::services::discord::tmux::tmux_watcher::TuiCompletionGateOutcome;
+use crate::services::discord::tmux::tmux_watcher::commit_decisions::mark_watcher_terminal_delivery_committed;
+use crate::services::discord::tmux::tmux_watcher::terminal_commit_epilogue::*;
+use crate::services::discord::tmux::tmux_watcher::turn_identity::{
+    committed_anchor_cleanup_is_stale_for_newer_turn, committed_completion_is_stale_for_newer_turn,
+};
+use crate::services::discord::tmux::{HostSnapshot, WatchHost};
+use crate::services::discord::{InflightTurnState, SharedData, TmuxRelayCoord};
+use crate::services::provider::ProviderKind;
 use crate::services::tui_prompt_dedupe::{
     ExternalInputRelayLease, ExternalInputRelayOwner, TuiRuntimeBinding,
+};
+use poise::serenity_prelude::{self as serenity, MessageId};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 const WATCHER_SESSION: &str = "synthetic-mailbox-release-5704";

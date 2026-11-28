@@ -1,4 +1,3 @@
-use super::super::*;
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::db::dispatched_session_canonical_identity::{
     CanonicalSessionIdentity, SessionIdentityKind, upsert_hook_session_with_identity_pg,
@@ -10,18 +9,23 @@ use crate::db::dispatched_sessions::hosted_execution::{
 use crate::services::agent_protocol::{RuntimeHandoffKind, StreamMessage};
 use crate::services::codex::actual_submit_tests as submit;
 use crate::services::discord;
+use crate::services::discord::SharedData;
 use crate::services::discord::admin_host_guard::tests::Recorder;
 use crate::services::discord::health::{self, HealthRegistry};
 use crate::services::discord::inflight::{self, InflightTurnIdentity, InflightTurnState};
 use crate::services::discord::shared_state::test_rest;
 use crate::services::discord::task_supervisor::{watcher_completion, watcher_spawn_observation};
+use crate::services::discord::tmux::tmux_watcher::tmux_output_watcher_with_restore;
+use crate::services::discord::tmux::{HostSnapshot, WatchHost};
 use crate::services::discord::turn_bridge::{
     BridgeCompletionSignal, TurnBridgeContext, resume_pin_tests, spawn_turn_bridge,
 };
 use crate::services::discord::turn_presence::activity::{self, Activity};
 use crate::services::provider::CancelToken;
+use crate::services::provider::ProviderKind;
 use crate::services::provider_teardown::test_support::FakeTmux;
 use crate::services::tui_prompt_dedupe::{self as dedupe, binding_events as p5};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId, UserId};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -785,23 +789,33 @@ async fn codex_host_gate_rechecks_a_replacement_completed_inside_the_probe() {
     let shared = crate::services::discord::make_shared_data_for_tests();
     let host = HostSnapshot::new(WatchHost::Legacy);
     let observed =
-        super::host_gate::host_alive(&shared, TMUX, ChannelId::new(CHANNEL), &host, async {
-            let replacement = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
-                .unwrap()
-                .unwrap();
-            tokio::task::yield_now().await;
-            replacement.complete_for_test();
-            false
-        })
+        crate::services::discord::tmux::tmux_watcher::post_stream_exit::host_gate::host_alive(
+            &shared,
+            TMUX,
+            ChannelId::new(CHANNEL),
+            &host,
+            async {
+                let replacement = Replacement::begin_for_test(Some(CHANNEL), TMUX, Some(&token))
+                    .unwrap()
+                    .unwrap();
+                tokio::task::yield_now().await;
+                replacement.complete_for_test();
+                false
+            },
+        )
         .await;
     assert!(
         observed,
         "a negative probe spanning kill/create must be retried"
     );
     assert!(
-        !super::host_gate::host_alive(&shared, TMUX, ChannelId::new(CHANNEL), &host, async {
-            false
-        },)
+        !crate::services::discord::tmux::tmux_watcher::post_stream_exit::host_gate::host_alive(
+            &shared,
+            TMUX,
+            ChannelId::new(CHANNEL),
+            &host,
+            async { false },
+        )
         .await,
         "a subsequent negative probe is a real death"
     );

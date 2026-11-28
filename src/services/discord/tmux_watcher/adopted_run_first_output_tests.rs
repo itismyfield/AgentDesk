@@ -1,9 +1,13 @@
 //! A read-error fallback replaces the turn-start-paused watcher that relayed T0, so the fresh
 //! successor never ends T1 at its first output as T0's continuation.
 
-use super::*;
 use crate::services::discord::inflight::TurnSource;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, Harness, cancel_for_test, isolated_in_module, said, stop, user,
+};
 use crate::services::discord::tui_prompt_relay::relay_e2e::discord_mock;
+use poise::serenity_prelude as serenity;
+use std::sync::{Arc, atomic::Ordering};
 
 const T0: &str = "I7527 T0 delivered before the watcher started";
 const T0_BODY: &str = "I7527 T0 answer the watcher relays itself";
@@ -21,7 +25,7 @@ fn frames_from(h: &Harness, start: u64) -> Vec<(u64, u64, String)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_read_error_fallback_replaces_the_paused_t0_watcher_with_a_fresh_one() {
     let test = "a_read_error_fallback_replaces_the_paused_t0_watcher_with_a_fresh_one";
-    if !isolated_in("adopted_run_first_output_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     for (case, mid_run) in [(91, false), (92, true)] {

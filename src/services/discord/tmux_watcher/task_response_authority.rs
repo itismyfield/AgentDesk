@@ -20,7 +20,7 @@ struct PreparedWatcherTaskResponse {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum PrepareWatcherTaskResponseError {
+pub(in crate::services::discord) enum PrepareWatcherTaskResponseError {
     #[error("{0}")]
     Transient(String),
     #[error("{0}")]
@@ -231,7 +231,7 @@ pub(super) async fn promote_delegated_task_card(
     result.map(|_| ())
 }
 
-async fn watcher_card_clients(
+pub(in crate::services::discord) async fn watcher_card_clients(
     provider_http: &Arc<serenity::Http>,
     shared: &Arc<SharedData>,
     provider: &ProviderKind,

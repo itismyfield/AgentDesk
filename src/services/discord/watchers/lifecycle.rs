@@ -1,5 +1,11 @@
 use super::*;
 
+#[cfg(all(unix, any(test, feature = "test-support")))]
+#[path = "lifecycle/restore_hook_tests.rs"]
+mod restore_hook_tests;
+#[cfg(all(unix, any(test, feature = "test-support")))]
+pub(in crate::services::discord) use restore_hook_tests::ReaderStartObservation;
+
 #[path = "lifecycle/activity.rs"]
 mod activity;
 pub(super) use self::activity::maybe_refresh_watcher_activity_heartbeat;
@@ -10,7 +16,7 @@ pub(in crate::services::discord) use self::activity::{
 };
 
 #[path = "codex_tui_restore.rs"]
-mod codex_restore;
+pub(in crate::services::discord) mod codex_restore;
 #[cfg(all(test, unix))]
 pub(crate) use codex_restore::commit_codex_watcher_restore_for_tests;
 #[cfg(all(test, unix))]
@@ -95,21 +101,10 @@ pub(in crate::services::discord) use self::claims::{
 };
 
 #[cfg(test)]
-pub(in crate::services::discord) use watcher_install_fixture::InstallFixture;
-
-#[cfg(all(test, unix))]
-#[path = "lifecycle/restore_legacy_tests.rs"]
-mod restore_legacy_tests;
-
-#[cfg(all(test, unix))]
-#[path = "lifecycle/resume_companion_restore_tests.rs"]
-mod resume_companion_restore_tests;
-
-#[cfg(test)]
 #[path = "lifecycle/n4d2_boundary_tests.rs"]
 mod n4d2_boundary_tests;
 #[cfg(test)]
-#[path = "lifecycle/watcher_install_fixture_tests.rs"]
+#[path = "lifecycle/watcher_install_process_tests.rs"]
 pub(in crate::services::discord) mod watcher_install_fixture;
 
 #[path = "lifecycle/restore.rs"]

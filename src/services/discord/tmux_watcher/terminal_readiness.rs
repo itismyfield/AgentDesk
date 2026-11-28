@@ -172,7 +172,7 @@ pub(super) fn watcher_wait_inflight_retry_plan() -> WatcherTerminalRelayPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct WatcherRewindAttemptKey {
+pub(in crate::services::discord) struct WatcherRewindAttemptKey {
     // The rewind cap state is task-local in the watcher loop, so watcher
     // instance IDs are reborn with the state and cannot discriminate production
     // equality. Per-turn separation comes from turn_data_start_offset because

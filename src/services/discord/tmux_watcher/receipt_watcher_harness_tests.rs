@@ -1,8 +1,13 @@
 //! A watcher ending a managed execution on the real loop commits its receipt before the row
 //! goes; a watcher cancelled for a replacement hands the turn over and records nothing.
 
-use super::*;
+use crate::services::discord::InflightTurnState;
 use crate::services::discord::inflight::TurnSource;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, Harness, field, isolated_in_module, said, stop, user,
+};
+use poise::serenity_prelude::{self as serenity, ChannelId, MessageId};
+use std::sync::{Arc, atomic::Ordering};
 
 const T0: &str = "I7340 T0 delivered before the watcher started";
 const BODY: &str = "I7340 answer the restored watcher relays";
@@ -13,7 +18,7 @@ async fn i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg()
     use crate::services::discord::inflight::herdr_turn_evidence_tests::HELD;
 
     let test = "i8432_herdr_soft_terminal_submits_and_releases_the_handed_off_turn_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -194,7 +199,7 @@ async fn receipt(
 async fn a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_the_row_goes_pg() {
     let test =
         "a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_the_row_goes_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -248,7 +253,7 @@ async fn a_replaced_watcher_records_nothing_and_the_ending_one_commits_before_th
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_watcher_ending_whose_receipt_cannot_commit_keeps_the_row_marked() {
     let test = "a_watcher_ending_whose_receipt_cannot_commit_keeps_the_row_marked";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let blocked = sqlx::postgres::PgPoolOptions::new()
@@ -360,7 +365,7 @@ async fn stop_recorded(h: &Harness) -> Option<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() {
     let test = "a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -393,7 +398,7 @@ async fn a_stopped_pane_death_ends_cancelled_and_a_rebind_row_ends_nothing_pg() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
     let test = "a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -468,7 +473,7 @@ async fn a_reused_watcher_ends_the_next_stopped_turn_cancelled_pg() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_before_the_first_byte_ends_the_execution_cancelled_pg() {
     let test = "a_stop_before_the_first_byte_ends_the_execution_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -532,7 +537,7 @@ async fn zero_byte_turn(case: u64, pool: &sqlx::PgPool) -> (Harness, InflightTur
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg() {
     let test = "a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -594,7 +599,7 @@ async fn a_stop_released_by_its_bridge_before_the_pane_dies_stays_cancelled_pg()
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_hand_over_stop_records_no_receipt_pg() {
     let test = "a_hand_over_stop_records_no_receipt_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -639,7 +644,7 @@ async fn start_live_turn(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg() {
     let test = "a_prior_turns_stop_leaves_the_next_turns_pane_death_failed_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
@@ -744,7 +749,7 @@ async fn herdr_ending(
 async fn a_herdr_ending_without_its_own_end_issues_no_receipt_pg() {
     use crate::services::discord::inflight::herdr_turn_evidence_tests::{HELD, OWN};
     let test = "a_herdr_ending_without_its_own_end_issues_no_receipt_pg";
-    if !isolated_in("receipt_watcher_harness_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;

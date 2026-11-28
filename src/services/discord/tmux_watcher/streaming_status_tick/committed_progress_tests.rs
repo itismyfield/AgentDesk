@@ -11,16 +11,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tracing_subscriber::fmt::MakeWriter;
 
-#[path = "native_collector_tests.rs"]
-mod native_collector_tests;
-
 #[path = "footer_retirement_raw_tests.rs"]
 mod footer_retirement_raw_tests;
 
 const WARN_EVENT: &str = "watcher_stream_progress_terminal_rejected";
 const PANEL_CHILD_ENV: &str = "AGENTDESK_5191_PANEL_FIXTURE_CHILD";
 const COMMITTED_BODY: &str = "완료된 응답 A";
-const TRAILING_BODY: &str = "후속 응답 B를 표시합니다.";
+pub(in crate::services::discord) const TRAILING_BODY: &str = "후속 응답 B를 표시합니다.";
 const PANEL_MSG: u64 = 5_191_700;
 const PLACEHOLDER_MSG: u64 = 5_191_002;
 const SERVER_MSG: u64 = 5_191_999;
@@ -53,9 +50,9 @@ impl<'a> MakeWriter<'a> for CapturingWriter {
     fn make_writer(&'a self) -> Self::Writer { self.clone() }
 }
 
-struct RootGuard {
+pub(in crate::services::discord) struct RootGuard {
     previous: Option<std::ffi::OsString>,
-    root: tempfile::TempDir,
+    pub(in crate::services::discord) root: tempfile::TempDir,
 }
 
 #[rustfmt::skip]
@@ -68,7 +65,8 @@ impl Drop for RootGuard {
     }
 }
 
-fn isolate_root() -> (std::sync::MutexGuard<'static, ()>, RootGuard) {
+pub(in crate::services::discord) fn isolate_root() -> (std::sync::MutexGuard<'static, ()>, RootGuard)
+{
     let env_lock = crate::config::shared_test_env_lock();
     let lock = env_lock.lock().unwrap_or_else(|poison| poison.into_inner());
     let root = tempfile::tempdir().expect("runtime root");
@@ -81,7 +79,7 @@ fn isolate_root() -> (std::sync::MutexGuard<'static, ()>, RootGuard) {
 /// `block_on` — not merely around future construction — and return the `#5191`
 /// rejection lines it observed.
 #[rustfmt::skip]
-fn capture_warns(body: impl std::future::Future<Output = ()>) -> Vec<String> {
+pub(in crate::services::discord) fn capture_warns(body: impl std::future::Future<Output = ()>) -> Vec<String> {
     let buffer = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt().with_max_level(tracing::Level::WARN)
         .with_ansi(false).without_time()
@@ -95,17 +93,17 @@ fn capture_warns(body: impl std::future::Future<Output = ()>) -> Vec<String> {
         .lines().filter(|line| line.contains(WARN_EVENT)).map(str::to_owned).collect()
 }
 
-struct Fixture {
-    provider: ProviderKind,
-    channel: ChannelId,
-    tmux: String,
-    output_path: String,
-    identity: InflightTurnIdentity,
-    nonce: Option<String>,
+pub(in crate::services::discord) struct Fixture {
+    pub(in crate::services::discord) provider: ProviderKind,
+    pub(in crate::services::discord) channel: ChannelId,
+    pub(in crate::services::discord) tmux: String,
+    pub(in crate::services::discord) output_path: String,
+    pub(in crate::services::discord) identity: InflightTurnIdentity,
+    pub(in crate::services::discord) nonce: Option<String>,
 }
 
 impl Fixture {
-    fn path(&self) -> std::path::PathBuf {
+    pub(in crate::services::discord) fn path(&self) -> std::path::PathBuf {
         inflight_runtime_root()
             .expect("inflight root")
             .join(self.provider.as_str())
@@ -154,15 +152,15 @@ fn wrapper_patch(fx: &Fixture, identity: Option<&InflightTurnIdentity>,
     )
 }
 
-struct Recorder {
-    fail_next_post: Arc<AtomicBool>,
-    calls: Arc<Mutex<Vec<(String, String)>>>,
-    bodies: Arc<Mutex<Vec<String>>>,
-    visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
-    terminal_gate: Arc<tokio::sync::Notify>,
+pub(in crate::services::discord) struct Recorder {
+    pub(in crate::services::discord) fail_next_post: Arc<AtomicBool>,
+    pub(in crate::services::discord) calls: Arc<Mutex<Vec<(String, String)>>>,
+    pub(in crate::services::discord) bodies: Arc<Mutex<Vec<String>>>,
+    pub(in crate::services::discord) visible: Arc<Mutex<std::collections::BTreeMap<u64, String>>>,
+    pub(in crate::services::discord) terminal_gate: Arc<tokio::sync::Notify>,
     /// When set, every content-bearing request is checked against the watched adoption on arrival.
     check: Arc<std::sync::OnceLock<crate::services::tui_o::channel_policy::BodyCheck>>,
-    http: Arc<serenity::Http>,
+    pub(in crate::services::discord) http: Arc<serenity::Http>,
     server: tokio::task::AbortHandle,
 }
 
@@ -173,7 +171,7 @@ impl Drop for Recorder {
 }
 impl Recorder {
     #[rustfmt::skip]
-    fn seen(&self, method: &str) -> Vec<String> {
+    pub(in crate::services::discord) fn seen(&self, method: &str) -> Vec<String> {
         let calls = self.calls.lock().unwrap();
         calls.iter().filter(|(m, _)| m == method).map(|(_, uri)| uri.clone()).collect()
     }
@@ -189,7 +187,7 @@ async fn recorder(channel: ChannelId, delete_ok: bool) -> Recorder {
 }
 
 #[rustfmt::skip]
-async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) -> Recorder {
+pub(in crate::services::discord) async fn recorder_for_cycle(channel: ChannelId, delete_ok: bool, cycle: bool) -> Recorder {
     use axum::body::Bytes;
     use axum::http::{Method, StatusCode, Uri};
     use axum::response::IntoResponse;
@@ -389,6 +387,30 @@ fn seed_bridge_frontier(shared: &Arc<SharedData>, fx: &Fixture, end: u64) {
         Some((0, end)),
         "cleanup fixture must see its durable frontier before the tick"
     );
+}
+
+pub(in crate::services::discord) fn seed_recovered_row(
+    root: &std::path::Path,
+    case: u64,
+) -> (Fixture, InflightTurnState) {
+    let mut fx = seed_row(root, case, false, false);
+    let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
+    std::fs::remove_file(fx.path()).unwrap();
+    fx.provider = ProviderKind::Codex;
+    row.provider = fx.provider.as_str().to_owned();
+    fx.tmux = format!("native-5927-{}", uuid::Uuid::new_v4().simple());
+    row.tmux_session_name = Some(fx.tmux.clone());
+    row.current_msg_id = 0;
+    row.current_msg_len = 3;
+    row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
+    row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
+    row.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay);
+    row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
+    row.turn_nonce = Some("recovered-original-5833".into());
+    row.injected_prompt_message_id = Some(row.user_msg_id);
+    save_inflight_state(&row).unwrap();
+    fx.identity = InflightTurnIdentity::from_state(&row);
+    (fx, row)
 }
 
 #[test]
@@ -877,7 +899,7 @@ fn recovered_session_bound_codex_stream_tick_reaches_http() {
     let _boot = crate::services::tui_o::cutover::test_override::force_channels(&[]);
     let (_lock, guard) = isolate_root();
     capture_warns(async {
-        let (fx, _) = native_collector_tests::seed_recovered_row(guard.root.path(), 5833);
+        let (fx, _) = seed_recovered_row(guard.root.path(), 5833);
         let before = fx.row_bytes();
         let shared = crate::services::discord::make_shared_data_for_tests();
         let rec = recorder(fx.channel, true).await;

@@ -13,6 +13,7 @@ use crate::services::claude_tui::hook_server::observation_ingress::{
     IngressOutcome, observe_binding_hook,
 };
 use crate::services::discord;
+use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture as install_http;
 use crate::services::discord::tmux::watcher_install_fixture as install;
 use crate::services::discord::turn_presence::activity::{Activity, tests as presence};
 use crate::services::tmux_common as tc;
@@ -35,7 +36,7 @@ pub(in crate::services::discord) const ID: &str = "019e660d-4859-7522-9cee-8ba7c
 const PROMPT: &str = "preserve the queued instruction\n한글";
 
 pub(in crate::services::discord) struct Fixture {
-    pub install: discord::tmux::InstallFixture,
+    pub install: install_http::InstallFixture,
     pub native: PathBuf,
     pub context: BindingContext,
     pub pending: [u64; 2],
@@ -68,7 +69,7 @@ impl Fixture {
         let database = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
         let pool = database.connect_and_migrate().await;
         let (install, discord) =
-            install::fixture_with_pool(ProviderKind::Codex, channel, Some(pool)).await;
+            install_http::fixture_with_pool(ProviderKind::Codex, channel, Some(pool)).await;
         seed_legacy_session(&install).await;
         std::fs::write(
             install::root().join("tmux-sessions"),
@@ -468,7 +469,7 @@ impl Fixture {
     }
 }
 
-async fn seed_legacy_session(install: &discord::tmux::InstallFixture) {
+async fn seed_legacy_session(install: &install_http::InstallFixture) {
     let pool = install.shared.pg_pool.as_ref().unwrap();
     let channel = install.channel.to_string();
     let key = discord::adk_session::build_namespaced_session_key(

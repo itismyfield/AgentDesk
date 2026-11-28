@@ -28,7 +28,7 @@ print('canonical_retired_condition_unchanged=true')
 print('activation_ready=false')
 "#;
     let output = std::process::Command::new("python3")
-        .args(["-c", script, env!("CARGO_MANIFEST_DIR")])
+        .args(["-c", script, crate::runtime_layout::REPO_ROOT])
         .output()
         .unwrap();
     assert!(

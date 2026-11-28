@@ -1,11 +1,15 @@
 use super::o_seed_install_tests as seed_cases;
-use super::*;
 use crate::services::discord::inflight::load_inflight_state_read_only_result;
+use crate::services::discord::outbound::delivery_record as dr;
+use crate::services::discord::tmux::tmux_watcher::cancel_handoff;
+use crate::services::discord::tmux::tmux_watcher::tests::streaming_harness_tests::{
+    CLAUDE, isolated_in_module, said,
+};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn rowless_legacy_capsule_keeps_partial_utf8_and_source_authority() {
     let test = "rowless_legacy_capsule_keeps_partial_utf8_and_source_authority";
-    if !isolated_in("o_capsule_origin_tests", test, &[]) {
+    if !isolated_in_module(module_path!(), test, &[]) {
         return;
     }
     let _env_lock = crate::config::test_env_lock::acquire_shared_test_env_lock();

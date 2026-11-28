@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 
 #[path = "loop_poll_prologue/types.rs"]
 mod types;
+pub(in crate::services::discord) use types::WatcherSourceAuthority;
 pub(super) use types::*;
 
 pub(super) async fn poll_watcher_output_or_continue(

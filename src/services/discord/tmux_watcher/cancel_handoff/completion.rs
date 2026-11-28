@@ -51,7 +51,7 @@ pub(in crate::services::discord) async fn capture_actors(
     (completion_actor, summary_actor)
 }
 
-pub(in crate::services::discord::tmux::tmux_watcher) async fn finish_after_receipt(
+pub(in crate::services::discord) async fn finish_after_receipt(
     shared: &Arc<SharedData>,
     channel: ChannelId,
     provider: &ProviderKind,

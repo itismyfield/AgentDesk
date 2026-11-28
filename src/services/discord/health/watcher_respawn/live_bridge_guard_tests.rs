@@ -1,7 +1,10 @@
 use super::super::complete_force_clean_watcher_recovery;
 use super::*;
+use crate::services::discord::dl_tmux_watcher_tests::watcher_install_fixture::{
+    InstallFixture, fixture, observe,
+};
 use crate::services::discord::task_supervisor::watcher_spawn_observation::Scope;
-use crate::services::discord::tmux::{InstallFixture, watcher_install_fixture as support};
+use crate::services::discord::tmux::watcher_install_fixture as support;
 use poise::serenity_prelude::{MessageId, UserId};
 
 fn run<F: std::future::Future<Output = ()>>(
@@ -18,7 +21,7 @@ fn run<F: std::future::Future<Output = ()>>(
         .build()
         .unwrap()
         .block_on(async {
-            let (fixture, _discord) = support::fixture(ProviderKind::Claude, channel).await;
+            let (fixture, _discord) = fixture(ProviderKind::Claude, channel).await;
             check(fixture).await;
         });
 }
@@ -75,7 +78,7 @@ fn legacy_retry_rebinds_an_old_format_row_and_keeps_legacy_call_column() {
                 &fx.http,
             ));
             let (row, bytes) = old_row(&fx);
-            let observed = support::observe(&fx);
+            let observed = observe(&fx);
             WATCHER_ABSENCE.insert(
                 WatcherAbsenceKey::new(&fx.provider, fx.channel),
                 WatcherAbsenceState::newly_absent(10),
@@ -151,7 +154,7 @@ fn legacy_public_force_clean_keeps_mailbox_release_and_rebind() {
                 Some(9001),
             );
             snapshot.mailbox_active_turn_nonce = mailbox.active_turn_nonce.clone();
-            let observed = support::observe(&fx);
+            let observed = observe(&fx);
             let scope = Scope::new(&fx.shared);
             complete_force_clean_watcher_recovery(
                 &fx.registry,

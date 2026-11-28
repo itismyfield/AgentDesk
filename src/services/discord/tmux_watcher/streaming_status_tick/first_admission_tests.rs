@@ -1,7 +1,7 @@
 use super::*;
 use crate::services::tui_o::channel_policy::{Adoption, BootChannels};
 use crate::services::tui_o::cutover::test_override;
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 #[test]
 fn a_streaming_tick_waits_only_for_its_captured_turn_and_source() {

@@ -234,16 +234,16 @@ mod source_epoch_read_tests {
 }
 
 #[derive(Debug, Default, Clone)]
-pub(super) struct Utf8ChunkDecoder {
+pub(in crate::services::discord) struct Utf8ChunkDecoder {
     pending: Vec<u8>,
     pending_start_offset: Option<u64>,
     pending_source: Option<super::loop_poll_prologue::WatcherSourceAuthority>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub(super) struct DecodedUtf8Chunk {
-    pub(super) start_offset: Option<u64>,
-    pub(super) text: String,
+pub(in crate::services::discord) struct DecodedUtf8Chunk {
+    pub(in crate::services::discord) start_offset: Option<u64>,
+    pub(in crate::services::discord) text: String,
     pub(super) mixed_read_provenance: bool,
 }
 
@@ -281,7 +281,7 @@ impl Utf8ChunkDecoder {
     /// forwarded `source_span` off the file. A read that does not continue the
     /// tail drops it; a continuing read (#5833 cancelled-turn resume), an empty
     /// read, and any read into a non-empty buffer keep the ordinary carry.
-    pub(super) fn decode_source_for_buffer(
+    pub(in crate::services::discord) fn decode_source_for_buffer(
         &mut self,
         chunk: &[u8],
         offset: u64,

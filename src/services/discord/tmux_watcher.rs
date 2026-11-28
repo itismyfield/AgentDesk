@@ -44,7 +44,7 @@ mod prompt_observe;
 use self::prompt_observe::*;
 
 #[path = "tmux_watcher/turn_identity.rs"]
-mod turn_identity;
+pub(in crate::services::discord) mod turn_identity;
 
 pub(in crate::services::discord) use self::turn_identity::emit_explicit_inflight_cleanup_signal;
 use self::turn_identity::*;
@@ -55,7 +55,7 @@ mod completion_gate;
 use self::completion_gate::*;
 
 #[path = "tmux_watcher/commit_decisions.rs"]
-mod commit_decisions;
+pub(in crate::services::discord) mod commit_decisions;
 
 use self::commit_decisions::*;
 
@@ -63,7 +63,7 @@ use self::commit_decisions::*;
 mod controller_heartbeat;
 
 #[path = "tmux_watcher/placeholder_reclaim.rs"]
-mod placeholder_reclaim;
+pub(in crate::services::discord) mod placeholder_reclaim;
 
 #[path = "tmux_watcher/single_message_footer.rs"]
 mod single_message_footer;
@@ -76,7 +76,7 @@ pub(in crate::services::discord) mod completion_producer;
 mod single_message_footer_tests;
 
 #[path = "tmux_watcher/terminal_send.rs"]
-mod terminal_send;
+pub(in crate::services::discord) mod terminal_send;
 
 #[path = "tmux_watcher/terminal_delivery_types.rs"]
 mod terminal_delivery_types;
@@ -91,7 +91,7 @@ mod terminal_direct_fallback;
 mod o_delegated_arm;
 
 #[path = "tmux_watcher/task_response_authority.rs"]
-mod task_response_authority;
+pub(in crate::services::discord) mod task_response_authority;
 
 #[path = "tmux_watcher/discrete_trigger_marker.rs"]
 mod discrete_trigger_marker;
@@ -125,10 +125,10 @@ use self::provider_session_persistence::persist_watcher_provider_session_id;
 // terminal-resend / emission-slot-guard half. Items are `pub(super)` there and
 // re-imported here so the watcher loop's call sites stay byte-identical.
 #[path = "tmux_watcher/supervisor_relay.rs"]
-mod supervisor_relay;
+pub(in crate::services::discord) mod supervisor_relay;
 
 #[path = "tmux_watcher/session_bound_ack.rs"]
-mod session_bound_ack;
+pub(in crate::services::discord) mod session_bound_ack;
 
 // #3479 Phase-1 rank-2: two more cohesive PURE clusters extracted to sibling
 // submodules (pure move, zero logic change). `utf8_chunk_decoder` holds the
@@ -146,7 +146,7 @@ mod path_b_record;
 pub(in crate::services::discord) use path_b_record::{WatcherDispatch, finalize_dispatch};
 
 #[path = "tmux_watcher/utf8_chunk_decoder.rs"]
-mod utf8_chunk_decoder;
+pub(in crate::services::discord) mod utf8_chunk_decoder;
 
 #[path = "tmux_watcher/jsonl_rotation.rs"]
 mod jsonl_rotation;
@@ -158,7 +158,7 @@ pub(in crate::services::discord) mod loop_poll_prologue;
 mod stall_exit;
 
 #[path = "tmux_watcher/streaming_status_tick.rs"]
-mod streaming_status_tick;
+pub(in crate::services::discord) mod streaming_status_tick;
 
 #[path = "tmux_watcher/no_result_exits.rs"]
 mod no_result_exits;
@@ -169,22 +169,22 @@ pub(in crate::services::discord) use no_result_exits::exercise_fresh_idle_with_r
 mod terminal_abort_exits;
 
 #[path = "tmux_watcher/pre_emit_guard.rs"]
-mod pre_emit_guard;
+pub(in crate::services::discord) mod pre_emit_guard;
 
 #[path = "tmux_watcher/terminal_preflight.rs"]
 mod terminal_preflight;
 
 #[path = "tmux_watcher/terminal_relay_plan.rs"]
-mod terminal_relay_plan;
+pub(in crate::services::discord) mod terminal_relay_plan;
 
 #[path = "tmux_watcher/terminal_commit_epilogue.rs"]
-mod terminal_commit_epilogue;
+pub(in crate::services::discord) mod terminal_commit_epilogue;
 
 #[path = "tmux_watcher/turn_stream_collector.rs"]
-mod turn_stream_collector;
+pub(in crate::services::discord) mod turn_stream_collector;
 
 #[path = "tmux_watcher/post_stream_exit.rs"]
-mod post_stream_exit;
+pub(in crate::services::discord) mod post_stream_exit;
 
 #[path = "tmux_watcher/terminal_token_update.rs"]
 mod terminal_token_update;
@@ -2523,7 +2523,7 @@ pub(in crate::services::discord) async fn tmux_output_watcher_with_restore(
 
 #[cfg(test)]
 #[path = "tmux_watcher/tests.rs"]
-mod tests;
+pub(in crate::services::discord) mod tests;
 #[cfg(all(test, unix))]
 pub(in crate::services::discord) use self::tests::streaming_harness_tests::cancel_for_test;
 

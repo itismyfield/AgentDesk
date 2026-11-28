@@ -424,10 +424,10 @@ impl Drop for Custody {
 
 #[cfg(test)]
 #[path = "cancel_handoff/interrupted_adoption_tests.rs"]
-pub(super) mod interrupted_adoption_tests;
+pub(in crate::services::discord) mod interrupted_adoption_tests;
 
 #[path = "cancel_handoff/completion.rs"]
-pub(super) mod completion;
+pub(in crate::services::discord) mod completion;
 
 /// A retained original episode still owes preview/actor settlement after the
 /// sink commits. Do not let the rowless watermark shortcut bypass that epilogue.

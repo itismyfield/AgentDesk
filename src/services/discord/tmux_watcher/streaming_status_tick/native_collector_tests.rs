@@ -1,34 +1,23 @@
 //! Native collector -> sink -> receipt -> preview test: synthetic JSONL and local HTTP only.
-use super::*;
+use crate::services::discord::tmux::tmux_watcher::streaming_status_tick::committed_progress_tests::{TRAILING_BODY, capture_warns, isolate_root, recorder_for_cycle, seed_recovered_row};
+use crate::services::discord::inflight::{InflightTurnIdentity, load_inflight_state, save_inflight_state};
+use crate::services::discord::tmux::tmux_watcher::turn_stream_collector::*;
+use crate::services::discord::tmux::{HostSnapshot, WatchHost};
+use poise::serenity_prelude as serenity;
+use crate::services::provider::ProviderKind;
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::time::Duration;
+use crate::services::discord::tmux::tmux_watcher::utf8_chunk_decoder::Utf8ChunkDecoder;
+use crate::services::discord::tmux::tmux_watcher::loop_poll_prologue::WatcherSourceAuthority;
+use crate::services::discord::tmux::tmux_watcher::{cancel_handoff, terminal_send};
+use crate::services::discord::tmux::tmux_watcher::pre_emit_guard::*;
+use crate::services::discord::tmux::tmux_watcher::terminal_relay_plan::*;
+use crate::services::discord::tmux::tmux_watcher::turn_identity::watcher_soft_terminal_has_turn_authority;
 use crate::services::cluster::relay_producer_registry::RelayProducerRegistry;
 use crate::services::cluster::session_matcher::MatchedChannel;
 use crate::services::cluster::stream_relay::{SourceFileIdentity, spawn_stream_relay};
 use crate::services::discord::delivery_lease_cell::source_epoch_observer as observer;
 use std::sync::atomic::{AtomicI64, AtomicU64};
-
-pub(super) fn seed_recovered_row(
-    root: &std::path::Path,
-    case: u64,
-) -> (Fixture, InflightTurnState) {
-    let mut fx = seed_row(root, case, false, false);
-    let mut row = load_inflight_state(&fx.provider, fx.channel.get()).unwrap();
-    std::fs::remove_file(fx.path()).unwrap();
-    fx.provider = ProviderKind::Codex;
-    row.provider = fx.provider.as_str().to_owned();
-    fx.tmux = format!("native-5927-{}", uuid::Uuid::new_v4().simple());
-    row.tmux_session_name = Some(fx.tmux.clone());
-    row.current_msg_id = 0;
-    row.current_msg_len = 3;
-    row.turn_source = crate::services::discord::inflight::TurnSource::ExternalInput;
-    row.runtime_kind = Some(crate::services::agent_protocol::RuntimeHandoffKind::CodexTui);
-    row.set_relay_owner_kind(crate::services::discord::inflight::RelayOwnerKind::SessionBoundRelay);
-    row.set_restart_mode(crate::services::discord::InflightRestartMode::DrainRestart);
-    row.turn_nonce = Some("recovered-original-5833".into());
-    row.injected_prompt_message_id = Some(row.user_msg_id);
-    save_inflight_state(&row).unwrap();
-    fx.identity = InflightTurnIdentity::from_state(&row);
-    (fx, row)
-}
 
 #[test]
 fn recovered_native_preview_terminal_has_one_visible_copy() {

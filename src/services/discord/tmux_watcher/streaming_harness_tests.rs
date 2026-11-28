@@ -25,39 +25,20 @@ mod o_delegated_watcher_tests;
 mod post_stream_exit_host_tests;
 
 #[cfg(test)]
-#[path = "judged_stop_harness_tests.rs"]
-mod judged_stop_harness_tests;
-
-#[cfg(test)]
 #[path = "herdr_entry_host_tests.rs"]
 mod herdr_entry_host_tests;
 
 #[path = "n1a_turn_mode_tests.rs"]
 mod n1a_turn_mode_tests;
 
-#[path = "o_seed_install_tests.rs"]
-mod o_seed_install_tests;
-
-#[path = "o_capsule_origin_tests.rs"]
-mod o_capsule_origin_tests;
-
-#[path = "read_source_switch_tests.rs"]
-mod read_source_switch_tests;
-
 #[path = "scheduled_watcher_harness_tests.rs"]
 mod scheduled_watcher_harness_tests;
-
-#[path = "receipt_watcher_harness_tests.rs"]
-mod receipt_watcher_harness_tests;
-
-#[path = "adopted_run_first_output_tests.rs"]
-mod adopted_run_first_output_tests;
 
 #[path = "o_tail_owned_close_tests.rs"]
 mod o_tail_owned_close_tests;
 
 const CHILD: &str = "ADK_STREAMING_HARNESS_CHILD";
-const CLAUDE: ProviderKind = ProviderKind::Claude;
+pub(in crate::services::discord) const CLAUDE: ProviderKind = ProviderKind::Claude;
 static LOG: Mutex<Vec<u8>> = Mutex::new(Vec::new());
 
 // `$1` after global flags. Builtins only: a failed read or an unknown state is recorded,
@@ -99,6 +80,15 @@ pub(super) fn isolated(test: &str) -> bool {
 
 /// `isolated` for a test in the sibling module `submodule`, with extra child env.
 pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) -> bool {
+    let module = format!("{}::{submodule}", module_path!());
+    isolated_in_module(&module, test, envs)
+}
+
+pub(in crate::services::discord) fn isolated_in_module(
+    module: &str,
+    test: &str,
+    envs: &[(&str, &str)],
+) -> bool {
     if std::env::var_os(CHILD).is_some() {
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
@@ -122,8 +112,8 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
     let dir = root.path().display().to_string();
     std::fs::write(&tmux, FAKE_TMUX.replace("ROOT", &dir)).unwrap();
     std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let module = module_path!().split_once("::").unwrap().1;
-    let exact = format!("{module}::{submodule}::{test}");
+    let module = module.split_once("::").unwrap().1;
+    let exact = format!("{module}::{test}");
     let out = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", &exact, "--nocapture"])
         // The empty writer list unless the case names its own; later envs win.
@@ -151,24 +141,24 @@ pub(super) fn isolated_in(submodule: &str, test: &str, envs: &[(&str, &str)]) ->
 }
 
 /// The value of `name=` in a captured log line, unquoted.
-pub(super) fn field(line: &str, name: &str) -> Option<String> {
+pub(in crate::services::discord) fn field(line: &str, name: &str) -> Option<String> {
     let at = line.find(&format!(" {name}="))? + name.len() + 2;
     let value = line[at..].split(' ').next()?;
     Some(value.trim_matches('"').to_owned())
 }
 
-pub(super) fn user(text: &str) -> String {
+pub(in crate::services::discord) fn user(text: &str) -> String {
     let line = serde_json::json!({"type": "user", "message": {"role": "user", "content": text}});
     format!("{line}\n")
 }
 
-pub(super) fn said(text: &str) -> String {
+pub(in crate::services::discord) fn said(text: &str) -> String {
     let line = serde_json::json!({"type": "assistant", "message": {"role": "assistant",
         "content": [{"type": "text", "text": text}]}});
     format!("{line}\n")
 }
 
-pub(super) fn stop() -> String {
+pub(in crate::services::discord) fn stop() -> String {
     let line = serde_json::json!({"type": "system", "subtype": "stop_hook_summary"});
     format!("{line}\n")
 }
@@ -279,26 +269,26 @@ struct Controls {
 
 /// What a scenario leaves behind, recorded as the main baseline a fix compares against.
 #[derive(Debug, Default, PartialEq, Eq)]
-pub(super) struct Observed {
+pub(in crate::services::discord) struct Observed {
     /// `(data_start_offset, current_offset, route)` of every terminal relay frame.
-    pub(super) frames: Vec<(u64, u64, String)>,
+    pub(in crate::services::discord) frames: Vec<(u64, u64, String)>,
     /// Post ordinals of the messages that end up showing each body.
-    pub(super) copies: Vec<Vec<u64>>,
+    pub(in crate::services::discord) copies: Vec<Vec<u64>>,
     /// Bytes of bodies no message shows at the end.
-    pub(super) missing_bytes: usize,
+    pub(in crate::services::discord) missing_bytes: usize,
     /// Bodies some message showed that none shows at the end.
-    pub(super) overwritten: usize,
+    pub(in crate::services::discord) overwritten: usize,
     /// Durable delivered frontier range.
-    pub(super) frontier: Option<(u64, u64)>,
+    pub(in crate::services::discord) frontier: Option<(u64, u64)>,
     /// Surviving row: `(turn_start_offset, terminal_delivery_committed)`.
-    pub(super) row: Option<(u64, bool)>,
+    pub(in crate::services::discord) row: Option<(u64, bool)>,
 }
 
-pub(super) struct Harness {
-    pub(super) shared: Arc<SharedData>,
-    pub(super) channel: ChannelId,
-    pub(super) tmux: String,
-    pub(super) path: String,
+pub(in crate::services::discord) struct Harness {
+    pub(in crate::services::discord) shared: Arc<SharedData>,
+    pub(in crate::services::discord) channel: ChannelId,
+    pub(in crate::services::discord) tmux: String,
+    pub(in crate::services::discord) path: String,
     http: Arc<serenity::Http>,
     discord: Arc<Mutex<Discord>>,
     watcher: Option<Controls>,
@@ -306,12 +296,16 @@ pub(super) struct Harness {
 
 impl Harness {
     /// A watcher-less channel over `seed`, with the pane busy.
-    pub(super) async fn new(case: u64, seed: &str) -> Self {
+    pub(in crate::services::discord) async fn new(case: u64, seed: &str) -> Self {
         Self::on(case, seed, None).await
     }
 
     /// [`Harness::new`] on a runtime whose stored rows live in `pool`.
-    pub(super) async fn on(case: u64, seed: &str, pool: Option<sqlx::PgPool>) -> Self {
+    pub(in crate::services::discord) async fn on(
+        case: u64,
+        seed: &str,
+        pool: Option<sqlx::PgPool>,
+    ) -> Self {
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
         let channel = ChannelId::new(6_284_100 + case);
         let tmux = CLAUDE.build_tmux_session_name(&format!("i6284-harness-{case}"));
@@ -362,7 +356,7 @@ impl Harness {
     }
 
     /// Sets the fake pane and checks the production tmux adapter now reports it.
-    pub(super) fn pane(&self, state: &str) {
+    pub(in crate::services::discord) fn pane(&self, state: &str) {
         // Renamed into place so a concurrent fake `tmux` never reads a torn state.
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
         std::fs::write(format!("{root}/pane.next"), format!("{state}\n")).unwrap();
@@ -379,7 +373,7 @@ impl Harness {
     }
 
     /// Records `[start, end)` as durably delivered, as a committing relay would.
-    pub(super) fn commit(&self, start: u64, end: u64) {
+    pub(in crate::services::discord) fn commit(&self, start: u64, end: u64) {
         let commit = dr::DeliveredCommit {
             range: (start, end),
             generation_mtime_ns: dr::current_generation_mtime_ns(&self.tmux),
@@ -393,7 +387,7 @@ impl Harness {
     }
 
     /// Re-acquires a watcher-owned row starting at `start`, as the watcher itself does.
-    pub(super) fn row_at(&self, start: u64) -> InflightTurnState {
+    pub(in crate::services::discord) fn row_at(&self, start: u64) -> InflightTurnState {
         let (channel, tmux, path) = (self.channel, &self.tmux, &self.path);
         let saved = reacquire_watcher_inflight_for_active_stream(
             &CLAUDE, channel, tmux, path, start, None, None, None,
@@ -402,22 +396,26 @@ impl Harness {
         self.row().unwrap()
     }
 
-    pub(super) fn save(&self, row: &InflightTurnState) {
+    pub(in crate::services::discord) fn save(&self, row: &InflightTurnState) {
         save_inflight_state(row).unwrap();
     }
 
-    pub(super) fn row(&self) -> Option<InflightTurnState> {
+    pub(in crate::services::discord) fn row(&self) -> Option<InflightTurnState> {
         load_inflight_state(&CLAUDE, self.channel.get())
     }
 
     /// Registers and starts a watcher at `offset`; a running one is cancelled first,
     /// which hands its turn over through cancellation custody.
-    pub(super) fn spawn(&mut self, offset: u64) {
+    pub(in crate::services::discord) fn spawn(&mut self, offset: u64) {
         self.spawn_restoring(offset, None);
     }
 
     /// [`Harness::spawn`] seeded with `restored`, as a restart restores a watcher from its row.
-    pub(super) fn spawn_restoring(&mut self, offset: u64, restored: Option<RestoredWatcherTurn>) {
+    pub(in crate::services::discord) fn spawn_restoring(
+        &mut self,
+        offset: u64,
+        restored: Option<RestoredWatcherTurn>,
+    ) {
         self.cancel();
         let cancel = Arc::new(AtomicBool::new(false));
         let resume = Arc::new(Mutex::new(None));
@@ -464,11 +462,11 @@ impl Harness {
     }
 
     /// Enqueues a resume the way a redrive nudge does; the watcher consumes it at its next poll.
-    pub(super) fn resume(&self, offset: u64) {
+    pub(in crate::services::discord) fn resume(&self, offset: u64) {
         *self.watcher.as_ref().unwrap().resume.lock().unwrap() = Some(offset);
     }
 
-    pub(super) fn append(&self, bytes: &[u8]) {
+    pub(in crate::services::discord) fn append(&self, bytes: &[u8]) {
         use std::io::Write;
         let mut file = std::fs::File::options()
             .append(true)
@@ -477,19 +475,19 @@ impl Harness {
         file.write_all(bytes).unwrap();
     }
 
-    pub(super) fn len(&self) -> u64 {
+    pub(in crate::services::discord) fn len(&self) -> u64 {
         std::fs::metadata(&self.path).unwrap().len()
     }
 
     /// Cancels the running watcher, if any.
-    pub(super) fn cancel(&self) {
+    pub(in crate::services::discord) fn cancel(&self) {
         if let Some(watcher) = self.watcher.as_ref() {
             cancel_for_test(&watcher.cancel, Ordering::Release);
         }
     }
 
     /// `kill-session` calls the fake `tmux` received for this session.
-    pub(super) fn kills(&self) -> usize {
+    pub(in crate::services::discord) fn kills(&self) -> usize {
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
         let kills = std::fs::read_to_string(format!("{root}/tmux-kills")).unwrap_or_default();
         kills
@@ -499,7 +497,7 @@ impl Harness {
     }
 
     /// Fake `tmux` calls naming this session since the last take, oldest first.
-    pub(super) fn take_tmux_calls(&self) -> Vec<String> {
+    pub(in crate::services::discord) fn take_tmux_calls(&self) -> Vec<String> {
         let root = std::env::var("AGENTDESK_ROOT_DIR").unwrap();
         let log = format!("{root}/tmux-calls");
         let calls = std::fs::read_to_string(&log).unwrap_or_default();
@@ -511,25 +509,25 @@ impl Harness {
             .collect()
     }
 
-    pub(super) fn watcher_finished(&self) -> bool {
+    pub(in crate::services::discord) fn watcher_finished(&self) -> bool {
         self.watcher.as_ref().is_some_and(|w| w.task.is_finished())
     }
 
     /// Waits for the watcher to end and fails on a panic or a cancelled task.
-    pub(super) async fn exited(&mut self, what: &str) {
+    pub(in crate::services::discord) async fn exited(&mut self, what: &str) {
         self.until(what, Self::watcher_finished).await;
         let task = self.watcher.take().unwrap().task;
         task.await
             .unwrap_or_else(|e| panic!("watcher task {what}: {e}"));
     }
 
-    pub(super) fn showing(&self, text: &str) -> bool {
+    pub(in crate::services::discord) fn showing(&self, text: &str) -> bool {
         let discord = self.discord.lock().unwrap();
         discord.visible.values().any(|c| c.contains(text))
     }
 
     /// Captured lines containing `needle`, across every harness in this child.
-    pub(super) fn logged(needle: &str) -> Vec<String> {
+    pub(in crate::services::discord) fn logged(needle: &str) -> Vec<String> {
         let log = String::from_utf8_lossy(&LOG.lock().unwrap()).into_owned();
         log.lines()
             .filter(|line| line.contains(needle))
@@ -538,20 +536,20 @@ impl Harness {
     }
 
     /// Captured lines for this channel containing `needle`.
-    pub(super) fn events(&self, needle: &str) -> Vec<String> {
+    pub(in crate::services::discord) fn events(&self, needle: &str) -> Vec<String> {
         let channel = format!(" channel_id={} ", self.channel.get());
         let lines = Self::logged(needle).into_iter();
         lines.filter(|line| line.contains(&channel)).collect()
     }
 
     /// Soft terminals this channel dropped with no committed owner for their bytes.
-    pub(super) fn unowned_drops(&self) -> u64 {
+    pub(in crate::services::discord) fn unowned_drops(&self) -> u64 {
         let rows = crate::services::observability::metrics::snapshot().into_iter();
         let rows = rows.filter(|row| row.channel_id == self.channel.get());
         rows.map(|row| row.relay_terminal_authority_denied).sum()
     }
 
-    pub(super) fn frames(&self) -> Vec<(u64, u64, String)> {
+    pub(in crate::services::discord) fn frames(&self) -> Vec<(u64, u64, String)> {
         let tmux = format!("tmux_session={}", self.tmux);
         Self::logged("relay flight recorder")
             .iter()
@@ -566,7 +564,11 @@ impl Harness {
             .collect()
     }
 
-    pub(super) async fn until(&self, what: &str, done: impl Fn(&Self) -> bool) {
+    pub(in crate::services::discord) async fn until(
+        &self,
+        what: &str,
+        done: impl Fn(&Self) -> bool,
+    ) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
         while !done(self) {
             if tokio::time::Instant::now() >= deadline {
@@ -592,7 +594,7 @@ impl Harness {
 
     /// Waits until the watcher has read through everything appended so far and has come back
     /// to its poll loop after handling that read, then for quiet.
-    pub(super) async fn drained(&self, what: &str) -> u64 {
+    pub(in crate::services::discord) async fn drained(&self, what: &str) -> u64 {
         let end = self.len();
         self.until(what, |h| h.read_ends().iter().any(|&read| read >= end))
             .await;
@@ -604,12 +606,12 @@ impl Harness {
         end
     }
 
-    pub(super) fn heartbeat(&self) -> i64 {
+    pub(in crate::services::discord) fn heartbeat(&self) -> i64 {
         self.watcher.as_ref().unwrap().beat.load(Ordering::Acquire)
     }
 
     /// Waits until neither Discord nor the relay plan has moved for two seconds.
-    pub(super) async fn settle(&self) {
+    pub(in crate::services::discord) async fn settle(&self) {
         let mut last = (usize::MAX, usize::MAX);
         let mut quiet = 0;
         for _ in 0..150 {
@@ -624,7 +626,7 @@ impl Harness {
         panic!("watcher never went quiet: frames={:?}", self.frames());
     }
 
-    pub(super) fn observe(&self, bodies: &[&str]) -> Observed {
+    pub(in crate::services::discord) fn observe(&self, bodies: &[&str]) -> Observed {
         let (channel, tmux, len) = (self.channel, &self.tmux, Some(self.len()));
         let frontier = delivered_frontier_current_generation(&CLAUDE, channel, tmux, len);
         let row = self.row().map(|row| {
