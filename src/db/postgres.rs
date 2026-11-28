@@ -358,6 +358,7 @@ pub async fn connect_for_startup(config: &Config) -> Result<Option<PgPool>, Stri
     Ok(pool)
 }
 
+#[cfg(all(any(test, feature = "test-support"), unix))]
 pub async fn connect_and_migrate(config: &Config) -> Result<Option<PgPool>, String> {
     let Some(pool) = connect(config).await? else {
         return Ok(None);

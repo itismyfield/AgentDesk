@@ -478,6 +478,11 @@ if run_check guards "Input thread mapping census"; then
 "$PYTHON" scripts/test_input_mapping_census.py
 fi
 
+if run_check census "Dependency crate test-only cfg ratchet"; then
+"$PYTHON" scripts/check_crate_cfg_test.py
+"$PYTHON" -m unittest tests.test_crate_cfg_test
+fi
+
 if run_check census "TUI O writer census: Legacy send sites and cutover gates"; then
 # Pins every Discord send site's census row and every O cutover gate by exact
 # per-file count; the script docstring declares its lexical limits.

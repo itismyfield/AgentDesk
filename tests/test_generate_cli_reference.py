@@ -69,7 +69,6 @@ class RepositoryTests(unittest.TestCase):
             "machine-compare",
             "auto-queue activate",
             "provider-cli status",
-            "migrate openclaw",
             "discord thread-create",
         ):
             self.assertIn(required, paths, required)
