@@ -14,6 +14,7 @@ use crate::services::memory::TokenUsage;
 use crate::services::provider::{CancelToken, ProviderKind};
 use crate::services::tui_prompt_dedupe::{self, TuiRuntimeBinding};
 use poise::serenity_prelude::{ChannelId, MessageId, UserId};
+use std::io::Write as _;
 use std::sync::Arc;
 
 const JOB: &str = "toolu_ordered_job";

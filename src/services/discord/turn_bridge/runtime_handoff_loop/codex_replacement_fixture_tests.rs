@@ -38,7 +38,7 @@ pub(in crate::services::discord) async fn adopt_codex_replacement_for_test(
     assert_eq!(before.turn_nonce, state.turn_nonce);
 
     let _rest = test_rest::install(http);
-    let _gateway = super::super::test_gateway::connect();
+    let _gateway = super::test_gateway::connect();
     let mut dirty = false;
     let observed = dispatch_process_handoff(
         shared,

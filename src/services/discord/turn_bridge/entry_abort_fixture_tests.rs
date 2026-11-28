@@ -11,7 +11,7 @@ use poise::serenity_prelude::ChannelId;
 #[cfg(unix)]
 use poise::serenity_prelude::MessageId;
 #[cfg(unix)]
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 pub(in crate::services::discord) fn seed_context(
     seed: &str,

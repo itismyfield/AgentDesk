@@ -15,7 +15,7 @@ use crate::services::discord::turn_bridge::tmux_runtime::stop_host::{
     StopTarget, interrupt_unhosted,
 };
 use crate::services::discord::turn_bridge::tmux_runtime::{
-    bind_cancel_token_tmux_runtime, stop_active_turn_on,
+    bind_cancel_token_tmux_runtime, stop_active_turn, stop_active_turn_on,
 };
 use crate::services::provider::cancel_token_cleanup::executor::{
     TmuxCleanupIntent, pid_kill_dispatches_for_test, take_requested_intents_for_test,
@@ -72,13 +72,8 @@ fn a_stop_on_another_host_reaches_no_tmux_signal_or_kill() {
                             );
                             take_requested_intents_for_test();
 
-                            let recorded = super::super::stop_active_turn(
-                                provider,
-                                &token,
-                                policy,
-                                "explicit_stop",
-                            )
-                            .await;
+                            let recorded =
+                                stop_active_turn(provider, &token, policy, "explicit_stop").await;
 
                             let case = format!("{server:?} {host:?} {provider:?} {policy:?}");
                             assert!(!recorded, "{case}");
@@ -111,13 +106,7 @@ fn a_stop_on_another_host_reaches_no_tmux_signal_or_kill() {
                 mark(&name, Mark::Absent);
                 let token = bound_token(&ProviderKind::Codex, &name);
                 let policy = TmuxCleanupPolicy::PreserveSession;
-                super::super::stop_active_turn(
-                    &ProviderKind::Codex,
-                    &token,
-                    policy,
-                    "explicit_stop",
-                )
-                .await;
+                stop_active_turn(&ProviderKind::Codex, &token, policy, "explicit_stop").await;
                 let calls = fx.take_calls();
                 assert!(
                     calls.iter().any(|call| call.starts_with("send-keys")),
