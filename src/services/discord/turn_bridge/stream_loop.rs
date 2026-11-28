@@ -18,7 +18,7 @@ use tool_arms::{
     stop_on_tool_authority_loss,
 };
 mod content_arms;
-pub(super) mod exit_reconcile;
+pub(in crate::services::discord) mod exit_reconcile;
 mod expected_identity;
 #[cfg(test)]
 #[path = "stream_loop/expected_identity_tests.rs"]

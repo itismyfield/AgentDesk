@@ -37,7 +37,7 @@ pub(in crate::services::discord) use adk_runtime::services::discord::turn_bridge
 
 pub(in crate::services::discord) mod native_input;
 mod status_panel;
-mod stream_loop;
+pub(in crate::services::discord) mod stream_loop;
 #[cfg(test)]
 pub(crate) use stream_loop::types::terminal_prepare_test::{
     TERMINAL_PREPARE_TEST_HOOK, TerminalPrepareTestHook,

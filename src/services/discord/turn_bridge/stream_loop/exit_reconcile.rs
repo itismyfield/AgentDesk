@@ -38,7 +38,7 @@ pub(in crate::services::discord::turn_bridge) fn held_before_submit(
 /// A Herdr turn whose input may have been submitted, or that took a user stop, ends only on its
 /// provider's admitted terminal; EOF, a dead pane or a disconnect leave the turn, row and slot held.
 /// The one exception is a sealed before-start proof, which the bridge settles as a policy close.
-pub(in crate::services::discord::turn_bridge) fn herdr_exit_decision(
+pub(in crate::services::discord) fn herdr_exit_decision(
     token: &crate::services::provider::CancelToken,
     cancelled: bool,
     terminal_admitted: bool,

@@ -8,7 +8,7 @@ pub(in crate::services::discord) struct StreamMessageReceiverAdapter {
 }
 
 impl StreamMessageReceiverAdapter {
-    pub(super) async fn recv(&mut self) -> Option<StreamMessage> {
+    pub(in crate::services::discord) async fn recv(&mut self) -> Option<StreamMessage> {
         self.rx.recv().await
     }
 
