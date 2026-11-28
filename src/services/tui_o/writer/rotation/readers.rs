@@ -188,9 +188,7 @@ impl<B: BindingEvents> Sources<B> {
             if (cursor.retired || self.reader_config.is_some()) && ended {
                 self.pend_at_end(&key, cursor.captured_through);
             }
-            if cursor.retired {
-                reader.capture = None;
-            }
+            reader.capture = reader.capture.filter(|_| !cursor.retired);
             self.readers.push(reader);
         }
         self.restore_legacy_hops(writer)?;
