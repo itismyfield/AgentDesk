@@ -1,5 +1,7 @@
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::reserve_headless_agent_turn;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
+use crate::services::engine_runtime::health_port::owner_input::OwnerInput;
 use crate::services::routines::agent_executor::owner_hook_tests::{
     LEGACY_TEARDOWNS, OWNER, ReservedStart, STARTS,
 };
@@ -47,6 +49,7 @@ async fn owner() -> (
     crate::services::turn_orchestrator::ChannelMailboxHandle,
     std::path::PathBuf,
 ) {
+    crate::services::discord::health::runtime_registry::install_owner_actor();
     let registry = crate::services::turn_orchestrator::ChannelMailboxRegistry::default();
     let handle = registry.handle(poise::serenity_prelude::ChannelId::new(7272));
     let path = crate::services::discord::runtime_store::discord_pending_queue_root()
@@ -86,7 +89,7 @@ async fn scenario(retry: bool, fallback: bool) {
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
     let run_id = claimed.run_id.clone();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1);
     let mut steps = VecDeque::new();
     if fallback {
         steps.push_back(false);
@@ -174,7 +177,6 @@ async fn accepted_retry_fallback_does_not_complete_or_readmit_pg() {
 
 #[tokio::test]
 async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg() {
-    use crate::services::turn_orchestrator::ChannelMailboxHandle;
     let _root = crate::config::TestRuntimeRootGuard::new();
     let (handle, path) = owner().await;
     let db = TestPostgresDb::create().await;
@@ -200,7 +202,7 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         .await
         .unwrap();
     let claimed = store.claim_due_runs(1).await.unwrap().pop().unwrap();
-    let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 60);
+    let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 60);
     // The owner commit succeeds while the accepted PG projection is rejected.
     sqlx::query("CREATE FUNCTION reject_accepted() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.result_json->>'status'='accepted' THEN RAISE EXCEPTION 'projection fault'; END IF; RETURN NEW; END $$").execute(&pool).await.unwrap();
     sqlx::query("CREATE TRIGGER reject_accepted BEFORE UPDATE ON routine_runs FOR EACH ROW EXECUTE FUNCTION reject_accepted()").execute(&pool).await.unwrap();
@@ -232,10 +234,8 @@ async fn custody_projection_cut_and_stale_completion_stay_on_the_same_ticket_pg(
         .pop()
         .unwrap();
     assert_eq!(run.result_json.as_ref().unwrap()["status"], "input_pending");
-    let saved = ChannelMailboxHandle::restore_owner_input(
-        run.result_json.as_ref().unwrap()["owner_input"].clone(),
-    )
-    .unwrap();
+    let saved =
+        OwnerInput::restore(run.result_json.as_ref().unwrap()["owner_input"].clone()).unwrap();
     let turn = run.turn_id.clone().unwrap();
     let original = serde_json::from_value(saved.original.clone()).unwrap();
     let restarted = crate::services::turn_orchestrator::ChannelMailboxRegistry::default()

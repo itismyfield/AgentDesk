@@ -3,7 +3,8 @@
 use crate::db::session_transcripts::capture_channel_clear_fence_for_test as capture_channel_clear_fence;
 use crate::db::session_transcripts::clear_fence_pg_tests::{channel_pairs, create_pool, entry};
 use crate::db::session_transcripts::*;
-use crate::services::routines::{RoutineAgentExecutor, RoutineStore};
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
+use crate::services::routines::RoutineStore;
 use sqlx::PgPool;
 use std::sync::Arc;
 
@@ -33,7 +34,7 @@ async fn sa2_own_clear_and_midturn_clear_pg() {
     for response in ["오늘 브리핑입니다", "NO_REPLY"] {
         let (db, pool) = create_pool().await;
         let store = sa2_routine_store(&pool).await;
-        let executor = RoutineAgentExecutor::new(Arc::new(pool.clone()), None, 1800);
+        let executor = build_routine_agent_executor(Arc::new(pool.clone()), None, 1800);
         sa2_mark(&store, "run", "200", Some("200")).await;
         record_channel_clear_boundary(Some(&pool), "200")
             .await

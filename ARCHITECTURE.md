@@ -518,6 +518,7 @@ src/
 │   │   └── naming.rs
 │   ├── tool_summary/
 │   │   └── code_mode.rs
+│   ├── agent_handoff.rs
 │   ├── atomic_write.rs
 │   ├── auto_queue_log.rs
 │   ├── automation_contract.rs
@@ -563,6 +564,8 @@ src/
 │   │   │   ├── host_repair.rs
 │   │   │   ├── host_repair_tests.rs
 │   │   │   └── key_promotion_tests.rs
+│   │   ├── turn_ops/
+│   │   │   └── handoff_port.rs
 │   │   ├── agent_ops.rs
 │   │   ├── auto_queue_ops.rs
 │   │   ├── cards_ops.rs
@@ -946,6 +949,7 @@ src/
 │   ├── rate_limit_sync.rs
 │   ├── resource_locks.rs
 │   ├── routine_script_audit.rs
+│   ├── routine_services.rs
 │   ├── startup_preflight.rs
 │   ├── state.rs
 │   ├── task_dispatch_claims.rs
@@ -1637,7 +1641,8 @@ src/
 │   │   ├── adk_session/
 │   │   │   └── host_label_tests.rs
 │   │   ├── agent_handoff/
-│   │   │   └── accepted_tests.rs
+│   │   │   ├── accepted_tests.rs
+│   │   │   └── js_handoff.rs
 │   │   ├── busy_followup_retry_store/
 │   │   │   ├── draft_release_watch.rs
 │   │   │   ├── hold_release_tests.rs
@@ -2011,8 +2016,10 @@ src/
 │   │   │   ├── relay_auto_heal.rs
 │   │   │   ├── relay_dead_reattach.rs
 │   │   │   ├── relay_progress.rs
+│   │   │   ├── routine_ports.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── routine_reset.rs
+│   │   │   ├── runtime_registry.rs
 │   │   │   ├── runtime_resolve.rs
 │   │   │   ├── session_enrichment.rs
 │   │   │   ├── snapshot.rs
@@ -4109,7 +4116,9 @@ src/
 │   │   ├── health_port/
 │   │   │   ├── app_health.rs
 │   │   │   ├── headless_turn.rs
+│   │   │   ├── owner_input.rs
 │   │   │   ├── queue_cancel.rs
+│   │   │   ├── registry.rs
 │   │   │   ├── resume_runtime.rs
 │   │   │   ├── routine_process.rs
 │   │   │   ├── slot_reset.rs
@@ -4447,6 +4456,7 @@ src/
 │   │   │   ├── start_deferral.rs
 │   │   │   └── surface.rs
 │   │   ├── discord_log/
+│   │   │   ├── bot_http_tests.rs
 │   │   │   ├── census.rs
 │   │   │   ├── failure_alert.rs
 │   │   │   └── presentation.rs
@@ -4473,6 +4483,7 @@ src/
 │   │   ├── action.rs
 │   │   ├── agent_executor.rs
 │   │   ├── discord_log.rs
+│   │   ├── discord_port.rs
 │   │   ├── execution_mode.rs
 │   │   ├── execution_mode_pg_tests.rs
 │   │   ├── failure_escalation_pg_tests.rs

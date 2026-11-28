@@ -1,6 +1,37 @@
 //! Reservation, durable attempt metadata, and provider launch for agent-backed routines.
 use super::*;
+use crate::services::engine_runtime::health_port::{
+    HeadlessDmTurnStart, HeadlessTurnPort, HeadlessTurnReservationView, HeadlessTurnStart,
+};
 use crate::services::routines::provider_choice::AgentProviderChannels;
+use futures::future::BoxFuture;
+
+pub(crate) trait RoutineLaunchRuntime: HeadlessTurnPort {
+    fn provider_registered<'a>(&'a self, provider: &'a ProviderKind) -> BoxFuture<'a, bool>;
+}
+
+// Keep the reservation type with the runtime for the duration of a launch.
+pub(super) trait RoutineTurnLaunch: Send + Sync {
+    fn start<'a>(
+        &'a self,
+        executor: &'a RoutineAgentExecutor,
+        store: &'a RoutineStore,
+        start: start_deferral::PendingAgentStart<'a>,
+        bot_http: &'a dyn RoutineBotHttpPort,
+    ) -> BoxFuture<'a, Result<StartedAgentTurn>>;
+}
+
+impl<R: RoutineLaunchRuntime> RoutineTurnLaunch for R {
+    fn start<'a>(
+        &'a self,
+        executor: &'a RoutineAgentExecutor,
+        store: &'a RoutineStore,
+        start: start_deferral::PendingAgentStart<'a>,
+        bot_http: &'a dyn RoutineBotHttpPort,
+    ) -> BoxFuture<'a, Result<StartedAgentTurn>> {
+        Box::pin(executor.start_turn_on(self, store, start, bot_http))
+    }
+}
 
 impl RoutineAgentExecutor {
     pub(super) async fn start_turn(
@@ -12,6 +43,23 @@ impl RoutineAgentExecutor {
         if let Some(result) = super::owner_hook_tests::scripted_start(self, store, &start).await {
             return result;
         }
+        let (Some(launch), Some(bot_http)) =
+            (self.launch.as_deref(), self.ports.bot_http.as_deref())
+        else {
+            return Err(anyhow!(
+                "routine agent action requires discord runtime health registry"
+            ));
+        };
+        launch.start(self, store, start, bot_http).await
+    }
+
+    async fn start_turn_on(
+        &self,
+        runtime: &impl RoutineLaunchRuntime,
+        store: &RoutineStore,
+        start: start_deferral::PendingAgentStart<'_>,
+        bot_http: &dyn RoutineBotHttpPort,
+    ) -> Result<StartedAgentTurn> {
         let start_deferral::PendingAgentStart {
             claimed,
             agent_id,
@@ -22,12 +70,6 @@ impl RoutineAgentExecutor {
             next_due_at,
             execution_mode,
         } = start;
-        let Some(registry) = self.health_registry.as_deref() else {
-            return Err(anyhow!(
-                "routine agent action requires discord runtime health registry"
-            ));
-        };
-
         // The claim pins the explicit choice; an override never falls back to another provider.
         let choice = store.run_provider_choice(&claimed.run_id).await?;
         let route = AgentProviderChannels::load(&self.pool, agent_id)
@@ -40,7 +82,7 @@ impl RoutineAgentExecutor {
             false => execution_mode.for_provider(&provider),
         };
         execution_mode.ensure_provider(&provider)?;
-        start_deferral::ensure_provider_registered(registry, &provider).await?;
+        start_deferral::ensure_provider_registered(runtime, &provider).await?;
         let primary_channel = route.channel.clone();
         let Some(channel_id_num) =
             crate::services::dispatches::outbox_route::resolve_channel_alias_pub(&primary_channel)
@@ -65,10 +107,10 @@ impl RoutineAgentExecutor {
                 channel_id,
                 None,
                 bot,
-                registry.reserve_headless_agent_turn(channel_id),
+                runtime.reserve_headless_agent_turn(channel_id),
             )
         } else if let Some(dm_user_id_num) = dm_user_id_num {
-            let (dm_channel_id, reservation) = registry
+            let (dm_channel_id, reservation) = runtime
                 .reserve_headless_agent_turn_in_dm(channel_id, dm_user_id_num, &provider)
                 .await
                 .map_err(|error| {
@@ -79,7 +121,7 @@ impl RoutineAgentExecutor {
             let routine_channel = self
                 .resolve_or_create_routine_thread(
                     store,
-                    registry,
+                    bot_http,
                     claimed,
                     agent_id,
                     provider.as_str(),
@@ -114,7 +156,7 @@ impl RoutineAgentExecutor {
                 turn_channel_id,
                 discord_thread_id,
                 delivery_bot,
-                registry.reserve_headless_agent_turn(turn_channel_id),
+                runtime.reserve_headless_agent_turn(turn_channel_id),
             )
         };
         let turn_id = reservation.turn_id().to_string();
@@ -207,7 +249,7 @@ impl RoutineAgentExecutor {
                 metadata,
                 tmux_session_label,
             };
-            registry
+            runtime
                 .start_reserved_headless_agent_turn_in_dm(start, reservation)
                 .await
         } else {
@@ -223,7 +265,7 @@ impl RoutineAgentExecutor {
                 channel_name_hint,
                 tmux_session_label,
             };
-            registry
+            runtime
                 .start_reserved_headless_agent_turn_with_owner_channel(start, reservation)
                 .await
         }

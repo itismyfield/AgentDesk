@@ -160,9 +160,10 @@ fn routine_model_reaches_native_cli_ahead_of_channel_model_and_unset_inherits_pg
 }
 #[tokio::test(flavor = "current_thread")]
 async fn routine_lifecycle_thread_uses_the_selected_provider_parent_pg() {
+    use crate::services::discord::health::routine_ports::build_routine_discord_logger;
+    use crate::services::routines::RoutineLifecycleEvent;
     use crate::services::routines::provider_choice::ProviderChoice;
     use crate::services::routines::store::{NewRoutine, RoutineStore};
-    use crate::services::routines::{RoutineDiscordLogger, RoutineLifecycleEvent};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let db = TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
@@ -220,8 +221,7 @@ async fn routine_lifecycle_thread_uses_the_selected_provider_parent_pg() {
         )
         .await
         .unwrap();
-    let logger =
-        RoutineDiscordLogger::new_with_health_registry(Arc::new(pool.clone()), Some(registry));
+    let logger = build_routine_discord_logger(Arc::new(pool.clone()), Some(registry));
     let status = logger
         .log_routine_event_with_store(&store, &routine, RoutineLifecycleEvent::Attached)
         .await;

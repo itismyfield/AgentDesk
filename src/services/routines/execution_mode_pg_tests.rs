@@ -8,11 +8,12 @@ use sqlx::PgPool;
 
 use crate::db::auto_queue::test_support::TestPostgresDb;
 use crate::services::discord::health::HealthRegistry;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 use crate::services::routines::execution_mode::{
     ExecutionDefinition, RoutineExecutionMode, is_definition_constraint_violation,
 };
 use crate::services::routines::store::{NewRoutine, RoutinePatch, RoutineStore};
-use crate::services::routines::{RoutineAgentExecutor, RoutineScriptLoader, run_due_tick};
+use crate::services::routines::{RoutineScriptLoader, run_due_tick};
 
 fn store(pool: &PgPool) -> RoutineStore {
     RoutineStore::new_with_timezone_and_checkpoint_limit(
@@ -215,7 +216,7 @@ async fn explicit_mode_refuses_dynamic_dm_while_legacy_null_mode_keeps_it_pg() {
         .await
         .unwrap();
     // No provider is registered, so an admitted agent start defers instead of launching.
-    let executor = RoutineAgentExecutor::new(
+    let executor = build_routine_agent_executor(
         Arc::new(pool.clone()),
         Some(Arc::new(HealthRegistry::new())),
         60,

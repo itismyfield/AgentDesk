@@ -14,11 +14,10 @@ use crate::db::dispatched_sessions::{
     load_session_rebind_context_pg, rebind_session_provider_by_id_pg,
 };
 use crate::domain::session_identity::tmux_name_from_session_key;
-use crate::services::engine_runtime::health_port::{ResumePorts, ResumeRuntimePort};
+use crate::services::engine_runtime::health_port::{ResumePorts, ResumeRuntimePort, TurnStopPort};
 use crate::services::provider::ProviderKind;
 use crate::services::turn_lifecycle::{
-    ForceKillRow, LifecycleStopPort, TurnLifecycleTarget, force_kill_turn_with_verdict,
-    force_kill_verdict,
+    ForceKillRow, TurnLifecycleTarget, force_kill_turn_with_verdict, force_kill_verdict,
 };
 use poise::serenity_prelude::ChannelId;
 
@@ -182,7 +181,7 @@ impl ResumeRebindOutcome {
 /// run the local rebind. HTTP callers pass the incoming headers so forwarded
 /// requests are fenced against both the expected and current database owner;
 /// in-process callers pass `None` and can originate (but never receive) forwarding.
-pub(crate) async fn dispatch_resume_previous<R: ResumeRuntimePort + LifecycleStopPort>(
+pub(crate) async fn dispatch_resume_previous<R: ResumeRuntimePort + TurnStopPort>(
     pool: &PgPool,
     ports: ResumePorts<'_, R>,
     forward_context: &crate::services::session_forwarding::ForwardCallerContext,
@@ -293,7 +292,7 @@ pub(crate) async fn dispatch_resume_previous<R: ResumeRuntimePort + LifecycleSto
 /// off here. `provider` is `None` only for unparseable session keys — in that
 /// case tmux teardown and the in-memory mirror are skipped but the DB rebind
 /// still runs.
-pub(crate) async fn perform_resume_rebind<R: ResumeRuntimePort + LifecycleStopPort>(
+pub(crate) async fn perform_resume_rebind<R: ResumeRuntimePort + TurnStopPort>(
     pool: &PgPool,
     ports: ResumePorts<'_, R>,
     session_key: &str,

@@ -1,7 +1,9 @@
 //! Routine thread creation against a Discord that answers creates as told: a create nobody
 //! confirmed is repeated neither by the run nor by the log of its failure.
 use super::*;
-use crate::services::routines::RoutineDiscordLogger;
+use crate::services::discord::health::routine_ports::{
+    build_routine_agent_executor, build_routine_discord_logger,
+};
 use poise::serenity_prelude as serenity;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -148,8 +150,8 @@ async fn a_thread_create_nobody_confirmed_is_repeated_by_neither_the_run_nor_its
             let registry = Arc::new(HealthRegistry::new());
             registry.register("claude".to_string(), shared).await;
             registry.register_http("claude".to_string(), http).await;
-            let executor = RoutineAgentExecutor::new(pool.clone(), Some(registry.clone()), 60);
-            let logger = RoutineDiscordLogger::new_with_health_registry(pool, Some(registry));
+            let executor = build_routine_agent_executor(pool.clone(), Some(registry.clone()), 60);
+            let logger = build_routine_discord_logger(pool, Some(registry));
             (executor.with_headless_fresh_agents(true), logger)
         }
     };

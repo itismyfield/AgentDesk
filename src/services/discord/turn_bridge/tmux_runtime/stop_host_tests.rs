@@ -955,18 +955,20 @@ async fn runtime_kept(
 // slot clear the safety filter let through; a legacy session clears and kills as in main.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_runtime_clear_refuses_another_hosts_session_before_any_change_pg() {
+    use crate::services::discord::health::routine_ports::build_routine_session_controller;
     use crate::services::discord::health::slot_row_host_refusal;
     use crate::services::discord::host_defer_gate::tests::{Case, postgres};
     use crate::services::discord::host_teardown_gate::test_support::{
         Stored, busy_turn, channel_key, runtime, seed,
     };
     use crate::services::routines::session_control::{
-        RoutineSessionCommand::Reset, RoutineSessionController, seed_started_control_session,
+        RoutineSessionCommand::Reset, seed_started_control_session,
     };
     let fx = Fixture::new();
     let (db, pool) = postgres().await;
     let (shared, registry) = runtime(&pool).await;
-    let controller = RoutineSessionController::new(Arc::new(pool.clone()), Some(registry.clone()));
+    let controller =
+        build_routine_session_controller(Arc::new(pool.clone()), Some(registry.clone()));
     for (n, case) in Case::ALL.into_iter().enumerate() {
         let channel = ChannelId::new(1_479_671_302_534_000 + n as u64);
         let (agent, channel_name) = (format!("agent-p6ao-{n}"), format!("p6ao-reset-{n}"));

@@ -1,5 +1,6 @@
 //! Recorder boundaries and the exact ownership token carried across boot recovery.
 use super::*;
+use crate::services::discord::health::routine_ports::build_routine_agent_executor;
 
 const THREAD: &str = "7157";
 const TMUX: &str = "AgentDesk-claude-receipt-boot-target";
@@ -25,7 +26,7 @@ impl Fixture {
         Self {
             db,
             store: RoutineStore::new_with_timezone_and_checkpoint_limit(pool.clone(), "UTC", 4096),
-            executor: RoutineAgentExecutor::new(pool.clone(), None, 30),
+            executor: build_routine_agent_executor(pool.clone(), None, 30),
             pool,
             claimed: ClaimedRoutineRun {
                 run_id: "receipt-run".into(),

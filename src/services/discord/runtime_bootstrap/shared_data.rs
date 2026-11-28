@@ -64,7 +64,7 @@ pub(super) fn run_bot_build_shared_data(
         pg_pool,
         engine,
     } = services;
-    crate::engine::ops::turn_ops::set_global_health_registry(&health_registry);
+    crate::services::discord::health::runtime_registry::publish_runtime_registry(&health_registry);
     let ProcessLifecycleCounters {
         global_active,
         global_finalizing,
@@ -272,6 +272,50 @@ pub(super) fn run_bot_build_shared_data(
 }
 
 #[cfg(test)]
+pub(crate) fn shared_data_without_policy_for_tests(
+    registry: &Arc<health::HealthRegistry>,
+    pg_pool: Option<sqlx::PgPool>,
+    #[cfg(unix)] owner_wake: Option<fn(&Arc<SharedData>, ChannelId)>,
+) -> Arc<SharedData> {
+    let shared = run_bot_build_shared_data(
+        DiscordBotSettings::default(),
+        &ProviderKind::Claude,
+        RuntimeServices {
+            initial_skills: Vec::new(),
+            token_hash: "registry-bootstrap".to_owned(),
+            api_port: 9,
+            health_registry: registry.clone(),
+            pg_pool,
+            engine: None,
+        },
+        ProcessLifecycleCounters {
+            global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
+        },
+        UiFeatureFlags {
+            two_message_panel_enabled: false,
+        },
+        RestoredSessionState {
+            model_overrides: &[],
+            node_overrides: &[],
+            fast_mode_channels: &[],
+            fast_mode_reset_entries: &[],
+            fast_mode_reset_channels: &[],
+            codex_goals_channels: &[],
+            codex_goals_reset_channels: &[],
+        },
+    );
+    #[cfg(unix)]
+    let mut shared = shared;
+    #[cfg(unix)]
+    if let Some(wake) = owner_wake {
+        Arc::get_mut(&mut shared).unwrap().router_ports.owner_wake = wake;
+    }
+    shared
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -283,7 +327,7 @@ mod tests {
                 .0
                 .take()
                 .unwrap_or_else(|| Arc::new(health::HealthRegistry::new()));
-            crate::engine::ops::turn_ops::set_global_health_registry(&restored);
+            crate::services::discord::health::runtime_registry::publish_runtime_registry(&restored);
             runtime_store::set_process_generation_for_tests(None);
         }
     }
@@ -291,7 +335,8 @@ mod tests {
     #[test]
     fn shared_data_publishes_runtime_registry_without_policy_engine() {
         let _root = crate::config::TestRuntimeRootGuard::new();
-        let _restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let _restore =
+            RestoreRegistry(crate::services::discord::health::runtime_registry::runtime_registry());
         let registry = Arc::new(health::HealthRegistry::new());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -299,38 +344,15 @@ mod tests {
             .unwrap();
         let _entered = runtime.enter();
         let allocations = EngineRuntime::record_allocations_for_tests();
-        let shared = run_bot_build_shared_data(
-            DiscordBotSettings::default(),
-            &ProviderKind::Claude,
-            RuntimeServices {
-                initial_skills: Vec::new(),
-                token_hash: "registry-bootstrap".to_owned(),
-                api_port: 9,
-                health_registry: registry.clone(),
-                pg_pool: None,
-                engine: None,
-            },
-            ProcessLifecycleCounters {
-                global_active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                global_finalizing: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                shutdown_remaining: Arc::new(std::sync::atomic::AtomicUsize::new(1)),
-            },
-            UiFeatureFlags {
-                two_message_panel_enabled: false,
-            },
-            RestoredSessionState {
-                model_overrides: &[],
-                node_overrides: &[],
-                fast_mode_channels: &[],
-                fast_mode_reset_entries: &[],
-                fast_mode_reset_channels: &[],
-                codex_goals_channels: &[],
-                codex_goals_reset_channels: &[],
-            },
+        let shared = shared_data_without_policy_for_tests(
+            &registry,
+            None,
+            #[cfg(unix)]
+            None,
         );
         assert_original_engine_allocation(allocations, &shared);
         assert!(shared.policy.engine.is_none());
-        let published = crate::engine::ops::turn_ops::health_registry()
+        let published = crate::services::discord::health::runtime_registry::runtime_registry()
             .expect("runtime registry must be published without a policy engine");
         assert!(Arc::ptr_eq(&published, &registry));
         let shared_registry = shared
@@ -338,6 +360,23 @@ mod tests {
             .upgrade()
             .expect("caller retains its registry while the runtime lives");
         assert!(Arc::ptr_eq(&shared_registry, &registry));
+        use crate::services::engine_runtime::health_port::{
+            RuntimeRegistryPort, published_runtime_registry,
+        };
+        let port = published_runtime_registry().expect("KE must see the published runtime");
+        let expected: Arc<dyn RuntimeRegistryPort> = registry.clone();
+        assert!(Arc::ptr_eq(&port, &expected));
+
+        let replacement = Arc::new(health::HealthRegistry::new());
+        crate::services::discord::health::runtime_registry::publish_runtime_registry(&replacement);
+        let replacement_port: Arc<dyn RuntimeRegistryPort> = replacement.clone();
+        assert!(Arc::ptr_eq(
+            &published_runtime_registry().unwrap(),
+            &replacement_port,
+        ));
+        drop(replacement_port);
+        drop(replacement);
+        assert!(published_runtime_registry().is_none());
     }
 
     fn assert_original_engine_allocation(
@@ -447,7 +486,8 @@ mod tests {
     #[tokio::test]
     async fn engine_runtime_both_constructors_preserve_pool_and_policy_pg() {
         let root = crate::config::TestRuntimeRootGuard::new();
-        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let restore =
+            RestoreRegistry(crate::services::discord::health::runtime_registry::runtime_registry());
         let Some(base) = crate::db::postgres::postgres_test_database_url_base() else {
             eprintln!("SKIP: PostgreSQL fixture is not configured");
             return;
@@ -571,7 +611,8 @@ mod tests {
     #[tokio::test]
     async fn core_and_mailboxes_keep_the_same_lock_values_and_actor() {
         let root = crate::config::TestRuntimeRootGuard::new();
-        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let restore =
+            RestoreRegistry(crate::services::discord::health::runtime_registry::runtime_registry());
         let shared = make_shared_data_for_tests_with_storage(None);
         assert_engine_runtime_identity(&shared);
         assert!(shared.engine.core.lock().await.sessions.is_empty());
@@ -637,7 +678,8 @@ mod tests {
     #[tokio::test]
     async fn mailboxes_keep_one_registry_and_the_live_actor() {
         let root = crate::config::TestRuntimeRootGuard::new();
-        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let restore =
+            RestoreRegistry(crate::services::discord::health::runtime_registry::runtime_registry());
         let shared = make_shared_data_for_tests_with_storage(None);
         assert!(std::ptr::eq(&shared.mailboxes, &shared.engine.mailboxes));
         assert!(shared.engine.mailboxes.snapshot_all().await.is_empty());
@@ -666,7 +708,8 @@ mod tests {
     #[tokio::test]
     async fn watcher_registry_and_lease_keep_one_engine_identity() {
         let root = crate::config::TestRuntimeRootGuard::new();
-        let restore = RestoreRegistry(crate::engine::ops::turn_ops::health_registry());
+        let restore =
+            RestoreRegistry(crate::services::discord::health::runtime_registry::runtime_registry());
         let shared = make_shared_data_for_tests_with_storage(None);
         assert_engine_runtime_identity(&shared);
         let registry: &crate::services::engine_runtime::relay_state::RegistryState =

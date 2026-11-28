@@ -11,6 +11,7 @@ pub mod action;
 /// so there are zero side effects for non-PG deployments.
 pub mod agent_executor;
 pub mod discord_log;
+pub(crate) mod discord_port;
 pub mod execution_mode;
 pub mod fresh_session_reaper;
 mod legacy_body_census;
