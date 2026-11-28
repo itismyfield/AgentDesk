@@ -5,7 +5,7 @@ use crate::services::codex_tui::canary::CANARY_CHANNEL;
 
 /// Without a core session intake can only auto-start, and an unusable workspace would consume the
 /// input with an error reply. Not cached, so a config reload is picked up on the next kick.
-pub(super) async fn parked(
+pub(in crate::services::discord) async fn parked(
     shared: &Arc<SharedData>,
     provider: &ProviderKind,
     channel: ChannelId,
@@ -22,7 +22,3 @@ pub(super) async fn parked(
     }
     false
 }
-
-#[cfg(test)]
-#[path = "canary_workspace_tests.rs"]
-mod tests;

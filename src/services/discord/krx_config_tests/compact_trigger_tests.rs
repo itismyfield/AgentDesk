@@ -132,7 +132,10 @@ fn queued_worker_revalidates_live_turn_authority_after_composer_barrier() {
                 worker
             },
         );
-        crate::test_support::wait::join_within(worker, crate::test_support::wait::WAIT_CAP);
+        adk_test_support::test_support::wait::join_within(
+            worker,
+            adk_test_support::test_support::wait::WAIT_CAP,
+        );
 
         assert_eq!(
             outcome_rx.recv_timeout(LIVENESS).unwrap(),

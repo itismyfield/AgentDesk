@@ -1867,7 +1867,7 @@ mod watcher_stream_progress_tests {
         );
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     #[test]
     fn stream_tool_hold_witness_restores_env_after_panic_present() {
@@ -2118,7 +2118,7 @@ mod streaming_rollover_frozen_prefix_persistence_tests {
             "the persisted frozen-prefix set is monotonic (union, no dup)"
         );
     }
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     #[test]
     fn frozen_prefix_persistence_restores_env_after_panic_present() {

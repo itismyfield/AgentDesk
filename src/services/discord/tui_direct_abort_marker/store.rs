@@ -30,7 +30,7 @@ pub(in crate::services::discord) fn set_test_root_override(path: Option<std::pat
     TEST_ROOT_OVERRIDE.with(|cell| *cell.borrow_mut() = path);
 }
 
-pub(super) fn root() -> Option<std::path::PathBuf> {
+pub(in crate::services::discord) fn root() -> Option<std::path::PathBuf> {
     #[cfg(test)]
     if let Some(base) = TEST_ROOT_OVERRIDE.with(|cell| cell.borrow().clone()) {
         return Some(base.join("discord_tui_direct_abort_marker"));
@@ -230,7 +230,7 @@ pub(in crate::services::discord) fn record_commit_tombstone_with_offsets(
     );
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) fn record_commit_tombstone_at(
     now_ms: u64,
     provider: &str,
@@ -239,13 +239,15 @@ pub(in crate::services::discord) fn record_commit_tombstone_at(
     committed_user_msg_id: u64,
     committed_started_at: &str,
 ) {
-    record_commit_tombstone_at_with_offset(
+    record_commit_tombstone_at_with_offsets(
         now_ms,
         provider,
         tmux_session_name,
         channel_id,
         committed_user_msg_id,
         committed_started_at,
+        None,
+        false,
         None,
     );
 }

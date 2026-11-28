@@ -299,7 +299,7 @@ async fn archived_takeover_confirms_after_restart_and_releases_its_queued_input_
     use crate::services::tui_o::{channel_policy, cutover};
     use crate::services::turn_orchestrator::{ChannelMailboxRegistry, PendingQueueItem};
 
-    crate::test_support::wait::await_within(async {
+    adk_test_support::test_support::wait::await_within(async {
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 64_700_306;
     let source = open_rollout(_root.path(), channel);
@@ -356,7 +356,7 @@ async fn archived_takeover_confirms_after_restart_and_releases_its_queued_input_
     assert!(matches!(admission::exact_turn(&mailbox, &ticket, &item).await.unwrap(), admission::TurnBind::Settled(_)));
     assert_eq!(confirm_current(channel, &selecting(channel)), Confirmation::Confirmed);
     assert_eq!(*seen.lock().unwrap(), ["waiting input"]);
-    }, crate::test_support::wait::WAIT_CAP).await;
+    }, adk_test_support::test_support::wait::WAIT_CAP).await;
 }
 
 #[cfg(unix)]

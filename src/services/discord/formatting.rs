@@ -11,7 +11,7 @@ use super::{
     response_sanitizer::subagent_notification_card,
 };
 
-type Error = Box<dyn std::error::Error + Send + Sync>;
+pub(super) type Error = Box<dyn std::error::Error + Send + Sync>;
 type Context<'a> = poise::Context<'a, super::Data, Error>;
 const STREAMING_PLACEHOLDER_MARGIN: usize = 10;
 const THINKING_STATUS_MAX_BYTES: usize = 600;
@@ -240,7 +240,7 @@ pub(super) use {
 };
 
 #[path = "formatting/delivery.rs"]
-mod delivery;
+pub(super) mod delivery;
 
 use self::delivery::send_channel_message_with_optional_reference;
 pub(super) use self::delivery::{

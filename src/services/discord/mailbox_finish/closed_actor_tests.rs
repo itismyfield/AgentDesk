@@ -386,10 +386,13 @@ async fn restitution_preserves_typed_refusals_and_legacy_results() {
         ),
         (Unreachable, None),
     ] {
-        let legacy = super::legacy_restitution_refusal(refusal);
+        let legacy = crate::services::discord::mailbox_finish::legacy_restitution_refusal(refusal);
         assert_eq!(fields(legacy), (0, 0, None, error.clone()));
         let legacy =
-            super::restitution(&shared, channel, |_| std::future::ready(Err(refusal))).await;
+            crate::services::discord::mailbox_finish::restitution(&shared, channel, |_| {
+                std::future::ready(Err(refusal))
+            })
+            .await;
         assert_eq!(fields(legacy), (0, 0, None, error));
     }
 }

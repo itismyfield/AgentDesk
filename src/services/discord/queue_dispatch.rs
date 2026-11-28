@@ -5,7 +5,7 @@ use crate::services::turn_orchestrator::{QueueIdentity, TakeHeadCondition};
 
 pub(super) mod busy_followup_retry;
 #[cfg(unix)]
-mod canary_workspace;
+pub(super) mod canary_workspace;
 pub(super) mod kickoff;
 
 #[cfg(test)]

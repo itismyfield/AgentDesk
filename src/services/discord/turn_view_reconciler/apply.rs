@@ -192,6 +192,19 @@ impl TurnViewReconciler {
                 || QUEUE_EXIT_FEEDBACK_REACTIONS.contains(&emoji)
                 || INJECTION_REACTIONS.contains(&emoji)
         );
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(route) = self.test_reaction_route.get() {
+            return match route {
+                reaction_hook_tests::Route::Record { .. } => {
+                    tokio::task::yield_now().await;
+                    self.record_reaction_op(target, emoji, add, identity);
+                    TurnViewDelivery::Delivered
+                }
+                reaction_hook_tests::Route::Http(http) => {
+                    reaction_hook_tests::deliver_http(http, target, emoji, add).await
+                }
+            };
+        }
         #[cfg(not(test))]
         {
             let result = if add {
@@ -234,27 +247,7 @@ impl TurnViewReconciler {
                 let http = shared
                     .serenity_http_or_token_fallback()
                     .expect("HTTP reaction tests must install a local REST client");
-                let reaction = serenity::ReactionType::Unicode(emoji.to_string());
-                let result = if add {
-                    target
-                        .channel_id
-                        .create_reaction(&http, target.message_id, reaction)
-                        .await
-                } else {
-                    target
-                        .channel_id
-                        .delete_reaction(&http, target.message_id, None, reaction)
-                        .await
-                };
-                return match result {
-                    Ok(()) => TurnViewDelivery::Delivered,
-                    Err(serenity::Error::Http(error)) => {
-                        TurnViewDelivery::from_reaction_error_status(
-                            error.status_code().map(|status| status.as_u16()),
-                        )
-                    }
-                    Err(_) => TurnViewDelivery::Failed,
-                };
+                return reaction_hook_tests::deliver_http(&http, target, emoji, add).await;
             }
             let _ = (shared, source);
             tokio::task::yield_now().await;
@@ -264,15 +257,7 @@ impl TurnViewReconciler {
                 .expect("turn view test delivery lock")
                 .pop_front()
                 .unwrap_or(TurnViewDelivery::Delivered);
-            self.ops
-                .lock()
-                .expect("turn view test op lock")
-                .push(TestReactionOp {
-                    target,
-                    emoji,
-                    add,
-                    identity: identity.label.clone(),
-                });
+            self.record_reaction_op(target, emoji, add, identity);
             delivery
         }
         #[cfg(not(test))]

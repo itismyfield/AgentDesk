@@ -272,7 +272,7 @@ agents:
         f(&root);
     }
 
-    use crate::test_env_panic_probe::{assert_root_restored, checkpoint};
+    use crate::config::test_env::panic_probe::{assert_root_restored, checkpoint};
 
     fn exercise_validation_runtime_root() {
         with_temp_root(|root| checkpoint(&[("AGENTDESK_ROOT_DIR", root.as_os_str())]))

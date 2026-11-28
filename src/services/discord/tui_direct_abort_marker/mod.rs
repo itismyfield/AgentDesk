@@ -153,7 +153,7 @@ pub(super) struct AbortedAnchorMarker {
 }
 
 impl AbortedAnchorMarker {
-    fn file_stem(&self) -> String {
+    pub(in crate::services::discord) fn file_stem(&self) -> String {
         format!(
             "{}_{}_{}",
             self.provider, self.channel_id, self.anchor_message_id
@@ -232,19 +232,20 @@ pub(in crate::services::discord) use drain::{
 };
 use store::reload;
 #[cfg(test)]
+use store::tombstone_root;
+#[cfg(test)]
 pub(in crate::services::discord) use store::{
-    COMMIT_TOMBSTONE_RETENTION_MS, load_commit_tombstones, record_commit_tombstone_at,
-    record_commit_tombstone_at_with_offset, record_commit_tombstone_at_with_offsets,
-    set_test_root_override,
+    COMMIT_TOMBSTONE_RETENTION_MS, load_commit_tombstones, record_commit_tombstone_at_with_offset,
+    record_commit_tombstone_at_with_offsets, set_test_root_override,
 };
 pub(in crate::services::discord) use store::{
     CommitTombstone, delete, gc_expired_commit_tombstones, load_all, load_for_channel, record,
     record_commit_tombstone_with_offset, record_commit_tombstone_with_offsets, try_claim_marker,
 };
-#[cfg(test)]
-use store::{root, tombstone_root};
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use store::{record_commit_tombstone_at, root};
 pub(in crate::services::discord) use sweep::sweep_expired;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(in crate::services::discord) use sweep::sweep_expired_with_applier;
 pub(in crate::services::discord) use tombstone::{
     cover_from_commit_tombstone, post_abort_commit_tombstone, record_for_abort,
@@ -786,12 +787,9 @@ pub(super) fn shared_reaction_applier(shared: Arc<SharedData>) -> ReactionApplie
 // Reconcilers
 // ---------------------------------------------------------------------------
 
-fn now_ms() -> u64 {
+pub(super) fn now_ms() -> u64 {
     chrono::Utc::now().timestamp_millis().max(0) as u64
 }
-
-#[cfg(test)]
-mod retirement_census_tests;
 
 #[cfg(test)]
 mod warning_tests;

@@ -10,6 +10,9 @@ use axum::response::IntoResponse;
 use poise::serenity_prelude::{Http, HttpBuilder};
 
 use crate::services::discord::inflight::InflightTurnState;
+pub(in crate::services::discord) use crate::services::discord::test_fixtures::{
+    TestOverrideGuard, age_file, fingerprint,
+};
 
 /// Status and JSON body for one request; `None` falls back to 204 for DELETE and an
 /// empty-content message otherwise.
@@ -189,20 +192,6 @@ pub(in crate::services::discord) fn seed_backfill_row(state: &InflightTurnState)
     path
 }
 
-/// Moves a file's mtime into the past so any rewrite is visible as an mtime change.
-pub(in crate::services::discord) fn age_file(path: &Path, secs: i64) {
-    let at = chrono::Utc::now().timestamp() - secs;
-    filetime::set_file_mtime(path, filetime::FileTime::from_unix_time(at, 0)).unwrap();
-}
-
-/// Bytes and mtime of a durable record; `None` when it does not exist.
-pub(in crate::services::discord) fn fingerprint(
-    path: &Path,
-) -> Option<(Vec<u8>, std::time::SystemTime)> {
-    let bytes = std::fs::read(path).ok()?;
-    Some((bytes, std::fs::metadata(path).ok()?.modified().ok()?))
-}
-
 /// Fingerprints of every file under `dir`, keyed by path.
 pub(in crate::services::discord) fn tree_fingerprint(
     dir: &Path,
@@ -223,40 +212,6 @@ pub(in crate::services::discord) fn tree_fingerprint(
         }
     }
     out
-}
-
-#[cfg(test)]
-pub(in crate::services::discord) struct TestOverrideGuard<T: Copy + 'static> {
-    cell: &'static std::sync::Mutex<Option<T>>,
-    previous: Option<T>,
-}
-
-#[cfg(test)]
-impl<T: Copy + 'static> TestOverrideGuard<T> {
-    pub(in crate::services::discord) fn current(cell: &std::sync::Mutex<Option<T>>) -> Option<T> {
-        *cell.lock().unwrap_or_else(|poison| poison.into_inner())
-    }
-
-    pub(in crate::services::discord) fn replace(
-        cell: &'static std::sync::Mutex<Option<T>>,
-        value: T,
-    ) -> Self {
-        let previous = cell
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .replace(value);
-        Self { cell, previous }
-    }
-}
-
-#[cfg(test)]
-impl<T: Copy + 'static> Drop for TestOverrideGuard<T> {
-    fn drop(&mut self) {
-        *self
-            .cell
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
-    }
 }
 
 /// Test entry points install the runtime ports they reach: the Codex row reader, the custody

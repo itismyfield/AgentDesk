@@ -1,7 +1,7 @@
 use crate::dispatch::test_support::DispatchPostgresTestDb;
 use crate::services::legacy_body_census::request_context::census_scope;
 use crate::services::message_outbox::{OutboxEnqueueError, OutboxMessage, enqueue_outbox_pg_on_tx};
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 use serde_json::{Value, json};
 use sqlx::PgPool;
 

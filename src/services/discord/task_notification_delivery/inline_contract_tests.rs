@@ -52,13 +52,13 @@ async fn reconciliation_guard_only_accepts_started_posts_pg() {
     database.drop().await;
 }
 
-const CHANNEL: u64 = 72_280_100;
+pub(in crate::services::discord) const CHANNEL: u64 = 72_280_100;
 const LEGACY_MESSAGE: u64 = 72_280_900;
 const LEGACY_CONTENT: &str =
     "📋 Task event\n**Monitor event: \"coord events\"**\n\n> old event\n\n-# task monitor";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct WireCall {
+pub(in crate::services::discord) struct WireCall {
     bot: String,
     content: String,
     nonce: String,
@@ -66,7 +66,7 @@ struct WireCall {
 }
 
 #[derive(Default)]
-struct Transport {
+pub(in crate::services::discord) struct Transport {
     posts: Mutex<Vec<WireCall>>,
     edits: Mutex<Vec<WireCall>>,
     reconciles: Mutex<Vec<(String, String, String)>>,
@@ -84,14 +84,14 @@ impl Transport {
         );
     }
 
-    fn counts(&self) -> (usize, usize) {
+    pub(in crate::services::discord) fn counts(&self) -> (usize, usize) {
         (
             self.posts.lock().unwrap().len(),
             self.edits.lock().unwrap().len(),
         )
     }
 
-    fn latest(&self) -> WireCall {
+    pub(in crate::services::discord) fn latest(&self) -> WireCall {
         self.edits
             .lock()
             .unwrap()
@@ -190,7 +190,9 @@ impl TaskCardTransport for Transport {
     }
 }
 
-async fn database(label: &str) -> (DispatchPostgresTestDb, PgPool) {
+pub(in crate::services::discord) async fn database(
+    label: &str,
+) -> (DispatchPostgresTestDb, PgPool) {
     let database = DispatchPostgresTestDb::try_create("adk_inline_tc", label)
         .await
         .expect("inline contract tests require an isolated PostgreSQL fixture; never skip");
@@ -198,7 +200,7 @@ async fn database(label: &str) -> (DispatchPostgresTestDb, PgPool) {
     (database, pool)
 }
 
-fn clients(provider: &str) -> CardDeliveryClients {
+pub(in crate::services::discord) fn clients(provider: &str) -> CardDeliveryClients {
     CardDeliveryClients::new([
         CardBot::new(
             "notify",
@@ -242,7 +244,12 @@ fn monitor(source: Option<&str>, number: usize) -> TaskCardEvent {
     )
 }
 
-fn assert_inline(call: &WireCall, provider: &str, icon: &str, text: &str) {
+pub(in crate::services::discord) fn assert_inline(
+    call: &WireCall,
+    provider: &str,
+    icon: &str,
+    text: &str,
+) {
     assert_eq!(call.bot, provider_bot_key(provider));
     assert!(call.message_id > 0);
     assert!(call.nonce.len() <= 25);
@@ -269,7 +276,11 @@ fn assert_notify_body_card(call: &WireCall, snippets: &[&str]) {
     }
 }
 
-async fn deliver(pool: &PgPool, transport: &Transport, event: &TaskCardEvent) -> CardEnsureOutcome {
+pub(in crate::services::discord) async fn deliver(
+    pool: &PgPool,
+    transport: &Transport,
+    event: &TaskCardEvent,
+) -> CardEnsureOutcome {
     ensure_card(
         Some(pool),
         &clients(&event.scope.provider),
@@ -282,17 +293,20 @@ async fn deliver(pool: &PgPool, transport: &Transport, event: &TaskCardEvent) ->
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct Snapshot {
+pub(in crate::services::discord) struct Snapshot {
     bot: String,
     nonce: String,
     message: Option<i64>,
     revision: i32,
-    count: i64,
-    content: String,
+    pub(in crate::services::discord) count: i64,
+    pub(in crate::services::discord) content: String,
     hash: String,
 }
 
-async fn snapshot(pool: &PgPool, event: &TaskCardEvent) -> Snapshot {
+pub(in crate::services::discord) async fn snapshot(
+    pool: &PgPool,
+    event: &TaskCardEvent,
+) -> Snapshot {
     let row = sqlx::query(
         "SELECT bot_key, discord_nonce, discord_message_id, revision, update_count,
                 rendered_content, content_hash
@@ -1113,87 +1127,5 @@ async fn legacy_source_free_old_renderer_replay_survives_new_provider_revision_p
     assert_eq!(restarted.bot_key, "notify");
     assert_eq!(replay_transport.counts(), (0, 0));
     assert_eq!(snapshot(&pool, &next).await, after);
-    database.drop().await;
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn monitor_auto_turn_stream_context_uses_provider_inline_once_pg() {
-    let (database, pool) = database("MonitorAutoTurn actual stream context entrypoint").await;
-    let context = |summary| {
-        TaskNotificationContext::from_stream_json(
-            &serde_json::json!({
-                "type": "system",
-                "subtype": "task_notification",
-                "task_notification_kind": "monitor_auto_turn",
-                "task_id": "monitor-auto-turn",
-                "summary": summary,
-            }),
-            &StreamLineState::new(),
-        )
-        .expect("the actual stream entrypoint must recognize a status-free MonitorAutoTurn")
-    };
-    let prior_context = context("before stream promotion");
-    let context = context("heartbeat event");
-    assert_eq!(
-        context.routing_kind(),
-        TaskNotificationKind::MonitorAutoTurn
-    );
-    let prior_event = prior_context.to_event(CHANNEL, "claude", "inline-contract-session");
-    let event = context.to_event(CHANNEL, "claude", "inline-contract-session");
-    let transport = Transport::default();
-    let first = deliver(&pool, &transport, &prior_event).await;
-    let before = snapshot(&pool, &event).await;
-    assert_eq!(before.count, 1);
-    assert_inline(
-        &transport.latest(),
-        "claude",
-        "📡",
-        "before stream promotion",
-    );
-
-    let shared =
-        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
-    let promoted = crate::services::discord::session_relay_sink::task_notification_context::confirm_task_context_card(
-        Some(&shared),
-        &clients("claude"),
-        &transport,
-        &shared.ui.placeholder_live_events,
-        CHANNEL,
-        "claude",
-        "inline-contract-session",
-        Some(&context),
-    )
-    .await
-    .expect("the actual stream gate must confirm the current Monitor card")
-    .expect("the Monitor context must resolve a card");
-    assert_eq!(promoted.message_id, first.message_id);
-    assert_eq!(promoted.bot_key, "provider:claude");
-    assert_eq!(
-        transport.counts(),
-        (1, 0),
-        "stream Promotion must not count or publish an unobserved Monitor event"
-    );
-    assert_eq!(
-        snapshot(&pool, &event).await,
-        before,
-        "stream Promotion must preserve the last observed Monitor payload and count"
-    );
-
-    let observed = deliver(&pool, &transport, &event).await;
-    assert_eq!(observed.message_id, first.message_id);
-    assert_eq!(transport.counts(), (1, 1));
-    assert_inline(&transport.latest(), "claude", "📡", "heartbeat event");
-    let after = snapshot(&pool, &event).await;
-    assert_eq!(
-        after.count, 2,
-        "only the subsequent TUI Observation increments the Monitor count"
-    );
-    assert!(after.content.ends_with(" · 2회"));
-    let replay = deliver(&pool, &transport, &event).await;
-    assert_eq!(replay.message_id, first.message_id);
-    assert_eq!(transport.counts(), (1, 1));
-    assert_eq!(snapshot(&pool, &event).await, after);
-    drop(shared);
     database.drop().await;
 }

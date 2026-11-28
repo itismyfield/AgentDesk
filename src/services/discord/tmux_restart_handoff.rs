@@ -910,9 +910,5 @@ mod o_cut_tests {
 }
 
 #[cfg(test)]
-#[path = "tmux_restart_handoff_mailbox_tests.rs"]
-mod mailbox_tests;
-
-#[cfg(test)]
 #[path = "tmux_restart_handoff_retirement_await_tests.rs"]
 mod retirement_await_tests;

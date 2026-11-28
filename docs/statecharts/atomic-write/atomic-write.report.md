@@ -44,7 +44,7 @@
 | `src/services/discord/status_panel_singleton_store.rs:94` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/terminal_delivery_custody.rs:258` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord/terminal_delivery_custody.rs:348` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
-| `src/services/discord/turn_view_reconciler/store.rs:368` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
+| `src/services/discord/turn_view_reconciler/store.rs:390` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/discord_config_audit/bot_settings.rs:249` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |
 | `src/services/legacy_body_census/history.rs:217` | legacy 제외; consumer 전환 없음 |
 | `src/services/mcp_config.rs:166` | 기존 관측 함수 호출; 이번 consumer 전환 없음 |

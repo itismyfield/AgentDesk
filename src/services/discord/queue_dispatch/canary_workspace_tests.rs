@@ -1,8 +1,10 @@
 //! The canary without a core session keeps its queued input while its workspace is unusable.
 
-use super::*;
+use crate::services::codex_tui::canary::CANARY_CHANNEL;
 use crate::services::codex_tui::canary::CANARY_TMUX;
 use crate::services::discord::commands::control::codex_clear_relaunch_tests::CanaryFixture;
+use crate::services::discord::queue_dispatch::canary_workspace::parked;
+use crate::services::discord::{Arc, ChannelId, MessageId, ProviderKind, UserId};
 use crate::services::turn_orchestrator::{Intervention, InterventionMode, QueueIdentity};
 
 const ORIGINAL_MESSAGE: u64 = 1_561_159_600_206_516_285;
@@ -85,8 +87,11 @@ async fn canary_without_core_session_and_unresolved_workspace_parks_original_pg(
     crate::services::tmux_common::cleanup_session_temp_files(CANARY_TMUX);
     std::fs::write(fixture.history(), b"").unwrap();
     assert!(!crate::services::tui_prompt_dedupe::codex_verified_requires_proof(CANARY_TMUX));
-    let persistence =
-        super::super::queue_persistence_context(&fixture.shared, &ProviderKind::Codex, channel);
+    let persistence = crate::services::discord::queue_dispatch::queue_persistence_context(
+        &fixture.shared,
+        &ProviderKind::Codex,
+        channel,
+    );
     let queued = fixture
         .shared
         .mailbox(channel)
@@ -97,7 +102,7 @@ async fn canary_without_core_session_and_unresolved_workspace_parks_original_pg(
     // The workspace directory disappears from config; intake could only answer with an error.
     break_workspace(&fixture);
     api.take();
-    let deps = crate::services::discord::router::IntakeDeps {
+    let deps = crate::services::discord::queue_io::transport::IntakeDeps {
         http: &api.http,
         cache: None,
         ctx_for_chained_dispatch: None,
@@ -105,7 +110,11 @@ async fn canary_without_core_session_and_unresolved_workspace_parks_original_pg(
         token: "e51-isolated-test-bot",
     };
     assert_eq!(
-        super::super::kickoff::kickoff_idle_queues_with_deps(&deps, &ProviderKind::Codex).await,
+        crate::services::discord::queue_dispatch::kickoff::kickoff_idle_queues_with_deps(
+            &deps,
+            &ProviderKind::Codex
+        )
+        .await,
         0
     );
     let retained = fixture.shared.mailbox(channel).snapshot().await;

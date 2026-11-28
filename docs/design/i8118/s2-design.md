@@ -486,7 +486,7 @@ record_thread_child의 조건 하나만 넓혀서는 해결되지 않는다. 세
 
 headless 진입도 판정 전에 checked 관계를 확보한다. 현재 headless_turn.rs:86–87의 부모 조회는 기록까지 보장하지 않는다. 실패와 NotThread를 구별하는 기존 session_runtime/channel_routing.rs:296–303 의미를 사용한다.
 
-E39 bootstrap은 유지한다. session_runtime.rs:487–638은 tmux spawn이 아니라 메모리 세션, 안정적 child 이름, worktree·cwd 준비다. 부모 Herdr라는 이유로 건너뛰면 자식의 작업 디렉터리 격리를 잃는다. 기존 관계 기록 호출만 개선된 recorder를 사용한다.
+E39 bootstrap은 유지한다. session_runtime.rs:407–558은 tmux spawn이 아니라 메모리 세션, 안정적 child 이름, worktree·cwd 준비다. 부모 Herdr라는 이유로 건너뛰면 자식의 작업 디렉터리 격리를 잃는다. 기존 관계 기록 호출만 개선된 recorder를 사용한다.
 
 Q15. dispatch redirect에서 부모 ID 판정을 바꾸는가?
 
@@ -609,7 +609,7 @@ E32~E64 — 동의·관계·명령
 | E36 | busy_inject.rs:86–92 | 남김. 보수적 제외와 owner/큐 drain 유지 |
 | E37 | busy_inject.rs:103–109 | 바꿈, 조회 연결만. provider를 구별하는 next 판정 |
 | E38 | busy_retry.rs:251,269 | 남김. 받은 queue/owner 계약 유지 |
-| E39 | session_runtime.rs:487–638 | 남김. child 메모리 세션·worktree·cwd 준비 보존 |
+| E39 | session_runtime.rs:407–558 | 남김. child 메모리 세션·worktree·cwd 준비 보존 |
 | E40 | checked relation 기록 호출들 | 바꿈(공통). O candidate와 무관하게 관계 기록 |
 | E41 | children.rs:476, cutover.rs:276, surface_policy.rs | 바꿈. relation accessor 사용, 기존 callback 경계 유지 |
 | E42 | provider_hosting.rs:247 | 남김. 확인된 정책 채널 소비 |

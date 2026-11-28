@@ -20,7 +20,7 @@ pub(in crate::services::discord) mod background_child_completion;
 #[cfg(test)]
 mod footer_retirement_tests;
 #[cfg(test)]
-mod inline_contract_tests;
+pub(super) mod inline_contract_tests;
 #[cfg(test)]
 mod tests;
 

@@ -73,7 +73,10 @@ fn an_owner_input_whose_idle_transcript_moved_once_ends_refused_without_a_key() 
     let result = runtime
         .block_on(effect::run(&mailbox, std::sync::Arc::new(|| 10_000), leaf))
         .unwrap();
-    crate::test_support::wait::join_within(moved, crate::test_support::wait::WAIT_CAP);
+    adk_test_support::test_support::wait::join_within(
+        moved,
+        adk_test_support::test_support::wait::WAIT_CAP,
+    );
     assert!(
         matches!(&result, effect::Completion::NotSent(reason) if reason.contains("unproven")),
         "{result:?}"

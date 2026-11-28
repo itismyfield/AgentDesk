@@ -3,12 +3,14 @@ use std::os::unix::fs::PermissionsExt;
 
 use poise::serenity_prelude::{ChannelId, MessageId};
 
-use super::{cleanup_expired_sessions, mark_session_disconnected_for_idle_cleanup};
 use crate::db::dispatched_sessions::hosted_execution::test_support::{
     future_schema, owner, record, wire,
 };
 use crate::db::dispatched_sessions::hosted_execution::{HostedOwner, HostedState};
 use crate::services::discord::relay_recovery::tests::orphan_token_finish::queued;
+use crate::services::discord::session_idle_cleanup::{
+    cleanup_expired_sessions, mark_session_disconnected_for_idle_cleanup,
+};
 use crate::services::discord::{
     DiscordSession, SESSION_MAX_IDLE, adk_session, mailbox_finish_turn,
 };
@@ -99,7 +101,8 @@ async fn idle_cleanup_expires_only_legacy_tmux_sessions_pg() {
     );
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let token = shared.token_hash.clone();
     let provider = ProviderKind::Claude;
     let tmux = |n: &str| provider.build_tmux_session_name(&format!("idle-guard-{n}"));
@@ -270,7 +273,8 @@ async fn idle_cleanup_keeps_a_configured_channel_and_its_returned_input_pg() {
     );
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let token = shared.token_hash.clone();
     let provider = ProviderKind::Claude;
     let tmux = |n: &str| provider.build_tmux_session_name(&format!("idle-herdr-{n}"));
@@ -335,7 +339,8 @@ async fn idle_cleanup_keeps_session_reactivated_during_probe_pg() {
     );
     let db = crate::db::auto_queue::test_support::TestPostgresDb::create().await;
     let pool = db.connect_and_migrate().await;
-    let shared = super::super::make_shared_data_for_tests_with_storage(Some(pool.clone()));
+    let shared =
+        crate::services::discord::make_shared_data_for_tests_with_storage(Some(pool.clone()));
     let (token, provider) = (shared.token_hash.clone(), ProviderKind::Claude);
     let mut armed = Vec::new();
     for (n, name) in ["idle-race-gone", "idle-race-revived"]

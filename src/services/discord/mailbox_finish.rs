@@ -465,9 +465,6 @@ pub(super) fn legacy_restitution_refusal(refusal: MailboxRefusal) -> HydratePend
 }
 
 #[cfg(test)]
-mod closed_actor_tests;
-
-#[cfg(test)]
 mod relay_state_contract_refs {
     #[test]
     fn contract_symbols_exist() {

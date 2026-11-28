@@ -27,6 +27,8 @@ mod apply;
 mod injected;
 pub(in crate::services::discord) use api::*;
 mod queue_repair;
+#[cfg(any(test, feature = "test-support"))]
+mod reaction_hook_tests;
 mod reaction_set;
 mod resolution;
 mod store;
@@ -361,7 +363,9 @@ pub(in crate::services::discord) struct TurnViewReconciler {
     recently_finalized: std::sync::Mutex<RecentlyFinalizedTargets>,
     #[cfg(test)]
     test_http_reactions: std::sync::atomic::AtomicBool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
+    test_reaction_route: std::sync::OnceLock<reaction_hook_tests::Route>,
+    #[cfg(any(test, feature = "test-support"))]
     ops: Arc<std::sync::Mutex<Vec<TestReactionOp>>>,
     #[cfg(test)]
     test_deliveries: Arc<std::sync::Mutex<std::collections::VecDeque<TurnViewDelivery>>>,
@@ -905,24 +909,14 @@ impl TurnViewReconciler {
     }
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::services::discord) struct TestReactionOp {
-    pub(in crate::services::discord) target: TurnViewTarget,
-    pub(in crate::services::discord) emoji: char,
-    pub(in crate::services::discord) add: bool,
-    pub(in crate::services::discord) identity: String,
-}
+#[cfg(any(test, feature = "test-support"))]
+pub(in crate::services::discord) use reaction_hook_tests::TestReactionOp;
 
 #[cfg(test)]
 impl TurnViewReconciler {
     /// Opt only this reconciler into real REST requests against a test HTTP client.
     pub(in crate::services::discord) fn enable_test_http_reactions(&self) {
         self.test_http_reactions.store(true, Ordering::Relaxed);
-    }
-
-    pub(in crate::services::discord) fn ops(&self) -> Vec<TestReactionOp> {
-        self.ops.lock().expect("turn view test op lock").clone()
     }
 
     pub(in crate::services::discord) fn with_test_deliveries(

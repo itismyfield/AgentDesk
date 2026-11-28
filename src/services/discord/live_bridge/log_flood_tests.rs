@@ -136,7 +136,7 @@ async fn deferred_summaries_cover_exact_ten_minute_boundaries_and_reset_counts()
 
 #[tokio::test]
 async fn concurrent_deferred_observers_emit_one_first_line_without_changing_results() {
-    use crate::test_support::wait::{WAIT_CAP, join_within};
+    use adk_test_support::test_support::wait::{WAIT_CAP, join_within};
     let _root = crate::config::TestRuntimeRootGuard::new();
     let channel = 799_300_005;
     let token = Arc::new(CancelToken::new());

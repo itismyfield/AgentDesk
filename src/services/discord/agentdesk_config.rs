@@ -765,7 +765,7 @@ mod worktree_isolation_policy_tests {
 
     #[test]
     fn temp_root_panic_restores_present_environment() {
-        crate::test_env_panic_probe::assert_restores_after_panic(
+        crate::config::test_env::panic_probe::assert_restores_after_panic(
             concat!(
                 module_path!(),
                 "::temp_root_panic_restores_present_environment"
@@ -774,7 +774,7 @@ mod worktree_isolation_policy_tests {
             true,
             || {
                 with_temp_root(|temp| {
-                    crate::test_env_panic_probe::checkpoint(&[(
+                    crate::config::test_env::panic_probe::checkpoint(&[(
                         "AGENTDESK_ROOT_DIR",
                         temp.path().join(".adk").as_os_str(),
                     )]);
@@ -785,7 +785,7 @@ mod worktree_isolation_policy_tests {
 
     #[test]
     fn temp_root_panic_restores_absent_environment() {
-        crate::test_env_panic_probe::assert_restores_after_panic(
+        crate::config::test_env::panic_probe::assert_restores_after_panic(
             concat!(
                 module_path!(),
                 "::temp_root_panic_restores_absent_environment"
@@ -794,7 +794,7 @@ mod worktree_isolation_policy_tests {
             false,
             || {
                 with_temp_root(|temp| {
-                    crate::test_env_panic_probe::checkpoint(&[(
+                    crate::config::test_env::panic_probe::checkpoint(&[(
                         "AGENTDESK_ROOT_DIR",
                         temp.path().join(".adk").as_os_str(),
                     )]);

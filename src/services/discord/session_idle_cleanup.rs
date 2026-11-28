@@ -42,7 +42,7 @@ pub(in crate::services::discord) async fn maybe_cleanup_sessions(shared: &Arc<Sh
     cleanup_expired_sessions(shared).await;
 }
 
-async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
+pub(in crate::services::discord) async fn cleanup_expired_sessions(shared: &Arc<SharedData>) {
     struct ExpiredSessionCleanup {
         channel_id: ChannelId,
         channel_name: Option<String>,
@@ -239,9 +239,6 @@ pub(in crate::services::discord) async fn mark_session_disconnected_for_idle_cle
 }
 
 // Unix-gated: the test installs a fake `tmux` on PATH, which needs `PermissionsExt`.
-#[cfg(all(test, unix))]
-#[path = "session_idle_cleanup_tests.rs"]
-mod tests;
 
 // Old cards keep their captured-id delete and pointer CAS until the next user turn.
 const IDLE_RECAP_CLEAR_BUTTON_PREFIX: &str = "idle_recap:clear:";

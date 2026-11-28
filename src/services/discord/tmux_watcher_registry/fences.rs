@@ -59,7 +59,7 @@ pub(in crate::services::discord) fn execution_identity_mode() -> ExecutionIdenti
 
 #[cfg(test)]
 pub(in crate::services::discord) type ExecutionIdentityModeGuard =
-    crate::services::discord::health::test_support::TestOverrideGuard<ExecutionIdentityMode>;
+    crate::services::discord::test_fixtures::TestOverrideGuard<ExecutionIdentityMode>;
 
 /// Override [`execution_identity_mode`] for the lifetime of the returned guard.
 /// Process-global, so callers must already hold whichever test lock serializes

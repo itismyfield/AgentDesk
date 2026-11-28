@@ -256,12 +256,12 @@ with os.fdopen(fd) as stream:
         config.policies.hot_reload = false;
         config.policies.dir = self.root.path().join("policies");
         std::fs::create_dir_all(&config.policies.dir).unwrap();
-        let broadcast = crate::server::ws::new_broadcast();
+        let broadcast = crate::eventbus::new_broadcast();
         crate::app_state::AppState {
             pg_pool: Some(self.pool.clone()),
             engine: crate::engine::PolicyEngine::new(&config).unwrap(),
             config: Arc::new(config),
-            batch_buffer: crate::server::ws::spawn_batch_flusher(broadcast.clone()),
+            batch_buffer: crate::eventbus::spawn_batch_flusher(broadcast.clone()),
             broadcast_tx: broadcast,
             health_registry: Some(self.registry.clone()),
             cluster_instance_id: None,

@@ -93,6 +93,20 @@ impl TurnViewReconciler {
         identity: TurnViewIdentity,
         source: &'static str,
     ) -> Option<ResolvedIdentity> {
+        #[cfg(all(not(test), feature = "test-support"))]
+        if let Some(route) = self.test_reaction_route.get() {
+            let kind = match identity {
+                TurnViewIdentity::IntakeHttp(_) | TurnViewIdentity::IntakeShared => {
+                    TurnViewTargetKind::IntakeUserMessage
+                }
+                TurnViewIdentity::ProviderBot => TurnViewTargetKind::TuiDirectBotAnchor,
+            };
+            return Some(ResolvedIdentity {
+                label: kind.identity_label().to_string(),
+                token_hash: Some(shared.token_hash.clone()),
+                http: route.http().clone(),
+            });
+        }
         #[cfg(test)]
         let _ = (shared, target_kind, source);
         match identity {
@@ -185,6 +199,14 @@ impl TurnViewReconciler {
         shared: &SharedData,
         source: &'static str,
     ) -> Option<ResolvedIdentity> {
+        #[cfg(all(not(test), feature = "test-support"))]
+        if let Some(route) = self.test_reaction_route.get() {
+            return Some(ResolvedIdentity {
+                label: record.identity_label.clone(),
+                token_hash: record.token_hash.clone(),
+                http: route.http().clone(),
+            });
+        }
         #[cfg(not(test))]
         {
             let http = match record.token_hash.as_deref() {

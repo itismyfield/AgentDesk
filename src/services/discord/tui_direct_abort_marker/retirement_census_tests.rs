@@ -1,5 +1,6 @@
-use super::*;
-use crate::services::discord::health::test_support::{MockDiscord, age_file, fingerprint};
+use crate::services::discord::health::test_support::MockDiscord;
+use crate::services::discord::test_fixtures::{age_file, fingerprint};
+use crate::services::discord::tui_direct_abort_marker::*;
 
 async fn assert_legacy_marker_consumed(covered: bool) {
     let _lock = crate::config::test_env_lock::acquire_shared_test_env_lock();
@@ -9,12 +10,13 @@ async fn assert_legacy_marker_consumed(covered: bool) {
         temp.path(),
     );
     let shared = crate::services::discord::make_shared_data_for_tests();
-    shared.turn_view_reconciler.enable_test_http_reactions();
     let discord = MockDiscord::start_with(std::sync::Arc::new(|method, _| {
         (method == axum::http::Method::PUT).then_some((204, serde_json::Value::Null))
     }))
     .await;
-    let _http = crate::services::discord::shared_state::test_rest::install(discord.http.clone());
+    shared
+        .turn_view_reconciler
+        .use_test_reaction_http(discord.http.clone());
     let legacy = if covered {
         6_325_507_002
     } else {

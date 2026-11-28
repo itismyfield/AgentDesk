@@ -76,15 +76,16 @@ async fn watcher_death_handoff_releases_only_the_relinquished_turn_token() {
                 .unwrap();
 
             let recorder = start(channel).await;
-            let handled = super::start_restart_handoff_from_state(
-                channel_id,
-                &recorder.http,
-                &shared,
-                &provider,
-                state,
-                "",
-            )
-            .await;
+            let handled =
+                crate::services::discord::tmux_restart_handoff::start_restart_handoff_from_state(
+                    channel_id,
+                    &recorder.http,
+                    &shared,
+                    &provider,
+                    state,
+                    "",
+                )
+                .await;
 
             assert!(handled, "channel {channel}");
             assert!(
@@ -134,14 +135,15 @@ async fn rowless_watcher_death_wakes_the_v2_owner_waiting_input_once() {
             support::set_owner_wake_for_tests(channel_id, Some(Arc::new(|| {})));
             let completion = support::KickoffCompletion::install(channel_id);
             v2_attempted_front(&shared, &ProviderKind::Codex, channel_id, waiting).await;
-            let resume = super::resume_aborted_restart_turn(
-                channel_id,
-                &http,
-                &shared,
-                &ProviderKind::Codex,
-                session,
-                "",
-            );
+            let resume =
+                crate::services::discord::tmux_restart_handoff::resume_aborted_restart_turn(
+                    channel_id,
+                    &http,
+                    &shared,
+                    &ProviderKind::Codex,
+                    session,
+                    "",
+                );
             assert!(!resume.await);
             completion
                 .processed(0, std::time::Duration::from_secs(5))
@@ -189,7 +191,7 @@ async fn watcher_death_commits_the_dead_turn_origin_as_failed_pg() {
         let recorder = start(channel).await;
         let channel_id = ChannelId::new(channel);
         assert!(
-            super::start_restart_handoff_from_state(
+            crate::services::discord::tmux_restart_handoff::start_restart_handoff_from_state(
                 channel_id,
                 &recorder.http,
                 &shared,
@@ -275,7 +277,7 @@ async fn watcher_death_leaves_a_carried_retry_its_own_terminal_pg() {
             }
             let (http, row) = (&recorder.http, state.clone());
             assert!(
-                super::start_restart_handoff_from_state(
+                crate::services::discord::tmux_restart_handoff::start_restart_handoff_from_state(
                     channel_id, http, &shared, &provider, row, ""
                 )
                 .await

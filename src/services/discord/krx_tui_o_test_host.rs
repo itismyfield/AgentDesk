@@ -12,9 +12,6 @@ pub(crate) mod admission_tests;
 #[path = "../tui_o/writer/canary_policy_tests.rs"]
 mod canary_policy;
 #[cfg(test)]
-#[path = "../tui_o/exact_pg_tests.rs"]
-mod exact_pg;
-#[cfg(test)]
 #[cfg(unix)]
 #[path = "../tui_o/writer/executed_resume_tests.rs"]
 mod executed_resume;

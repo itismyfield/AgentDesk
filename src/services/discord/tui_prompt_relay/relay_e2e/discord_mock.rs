@@ -13,13 +13,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use poise::serenity_prelude as serenity;
 use serde_json::{Value, json};
-use serenity::cache::Cache;
 use serenity::{ChannelId, MessageId, UserId};
 use tokio::sync::Notify;
 
+pub(in crate::services::discord) use crate::services::discord::test_fixtures::{
+    BOT_ID, discord_user_json, gateway_context_for_test as serenity_context_over,
+};
+
 pub(in crate::services::discord) const CHANNEL_ID: u64 = 940_487_400_000_001;
 pub(in crate::services::discord) const USER_ID: u64 = 940_487_400_000_002;
-pub(in crate::services::discord) const BOT_ID: u64 = 940_487_400_000_003;
 const FIRST_RESPONSE_MESSAGE_ID: u64 = 940_487_400_000_021;
 
 /// Minted message id to `(reply_to, latest content)`.
@@ -275,31 +277,6 @@ pub(in crate::services::discord::tui_prompt_relay) struct HistoryQuery {
     pub(in crate::services::discord::tui_prompt_relay) limit: Option<usize>,
     pub(in crate::services::discord::tui_prompt_relay) before: Option<u64>,
     pub(in crate::services::discord::tui_prompt_relay) after: Option<u64>,
-}
-
-pub(in crate::services::discord) fn discord_user_json(id: u64, name: &str, bot: bool) -> Value {
-    json!({
-        "id": id.to_string(),
-        "username": name,
-        "discriminator": "0",
-        "global_name": null,
-        "avatar": null,
-        "bot": bot,
-        "system": false,
-        "mfa_enabled": false,
-        "banner": null,
-        "accent_color": null,
-        "locale": null,
-        "verified": null,
-        "email": null,
-        "flags": 0,
-        "premium_type": 0,
-        "public_flags": 0,
-        "member": null,
-        "primary_guild": null,
-        "avatar_decoration_data": null,
-        "collectibles": null
-    })
 }
 
 fn private_channel_json() -> Value {
@@ -811,13 +788,6 @@ pub(in crate::services::discord) async fn start(
     )
 }
 
-struct NoopFramework;
-
-#[async_trait::async_trait]
-impl serenity::framework::Framework for NoopFramework {
-    async fn dispatch(&self, _ctx: serenity::Context, _event: serenity::FullEvent) {}
-}
-
 pub(in crate::services::discord) async fn serenity_context(
     proxy: String,
     gateway_url: String,
@@ -829,75 +799,6 @@ pub(in crate::services::discord) async fn serenity_context(
             .build(),
     );
     serenity_context_over(http, gateway_url).await
-}
-
-/// A real context whose REST calls go through `http` and whose shard dials `gateway_url`.
-pub(in crate::services::discord) async fn serenity_context_over(
-    http: Arc<serenity::Http>,
-    gateway_url: String,
-) -> serenity::Context {
-    let cache = Arc::new(Cache::new());
-    let mut ready: serenity::ReadyEvent = serde_json::from_value(json!({
-        "v": 10,
-        "user": discord_user_json(BOT_ID, "queue-bot", true),
-        "guilds": [],
-        "session_id": "queue-wake-e2e",
-        "resume_gateway_url": gateway_url,
-        "shard": [0, 1],
-        "application": {"id": BOT_ID.to_string(), "flags": 0}
-    }))
-    .expect("ready fixture");
-    cache.update(&mut ready);
-
-    let data = Arc::new(tokio::sync::RwLock::new(serenity::prelude::TypeMap::new()));
-    let ws_url = Arc::new(tokio::sync::Mutex::new(gateway_url));
-    let framework: Arc<dyn serenity::framework::Framework> = Arc::new(NoopFramework);
-    let (manager, _manager_result) =
-        serenity::gateway::ShardManager::new(serenity::gateway::ShardManagerOptions {
-            data: data.clone(),
-            event_handlers: vec![],
-            raw_event_handlers: vec![],
-            framework: Arc::new(std::sync::OnceLock::from(framework)),
-            shard_index: 0,
-            shard_init: 0,
-            shard_total: 1,
-            ws_url: ws_url.clone(),
-            cache: cache.clone(),
-            http: http.clone(),
-            intents: serenity::GatewayIntents::DIRECT_MESSAGES
-                | serenity::GatewayIntents::MESSAGE_CONTENT,
-            presence: None,
-        });
-    let shard = serenity::gateway::Shard::new(
-        ws_url,
-        "test-token",
-        serenity::model::gateway::ShardInfo {
-            id: serenity::ShardId(0),
-            total: 1,
-        },
-        serenity::GatewayIntents::DIRECT_MESSAGES | serenity::GatewayIntents::MESSAGE_CONTENT,
-        None,
-    )
-    .await
-    .expect("test shard");
-    let runner = serenity::gateway::ShardRunner::new(serenity::gateway::ShardRunnerOptions {
-        data: data.clone(),
-        event_handlers: vec![],
-        raw_event_handlers: vec![],
-        framework: Some(Arc::new(NoopFramework)),
-        manager,
-        shard,
-        cache: cache.clone(),
-        http: http.clone(),
-    });
-
-    serenity::Context {
-        data,
-        shard: serenity::ShardMessenger::new(&runner),
-        shard_id: serenity::ShardId(0),
-        http,
-        cache,
-    }
 }
 
 /// An inbound user message on the fixture's private channel.

@@ -5,7 +5,7 @@ use crate::services::tui_o::cutover::BodySend;
 use crate::services::tui_prompt_dedupe::{
     self as dedupe, TuiRuntimeBinding, binding_context::PreparedIncarnation,
 };
-use crate::test_support::wait::{WAIT_CAP, await_within};
+use adk_test_support::test_support::wait::{WAIT_CAP, await_within};
 
 async fn scenario(
     boundary: Option<Step>,
