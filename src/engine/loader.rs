@@ -953,9 +953,9 @@ pub(crate) fn install_policy_interrupt_handler(
     })));
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const HOT_RELOAD_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "test-support")))]
 const HOT_RELOAD_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 const HOT_RELOAD_SHUTDOWN_JOIN_POLL: Duration = Duration::from_millis(25);
 

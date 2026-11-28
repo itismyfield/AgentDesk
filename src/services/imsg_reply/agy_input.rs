@@ -27,7 +27,7 @@ pub(crate) struct WriterGate {
     pub(crate) ready: Option<WriterSelection>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl WriterGate {
     pub(crate) fn ready(writer: WriterSelection) -> Self {
         Self {
@@ -44,7 +44,7 @@ impl WriterGate {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 tokio::task_local! {
     pub(crate) static SELECTED_WRITER: WriterGate;
 }
@@ -53,9 +53,9 @@ pub(crate) fn selected(provider: &ProviderKind, destination: u64) -> Option<Writ
     if *provider != ProviderKind::Antigravity || destination == 0 {
         return None;
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let writer = SELECTED_WRITER.try_with(Clone::clone).ok();
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-support")))]
     // The cutover supplies a verified writer generation here.
     let writer: Option<WriterGate> = None;
     writer.filter(|gate| gate.destination == destination)
