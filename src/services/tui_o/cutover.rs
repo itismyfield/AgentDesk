@@ -434,9 +434,8 @@ fn claim_for_placement(channel: Option<u64>) -> Result<(), String> {
     })
 }
 
-/// Whether a placement on `channel` waits for its O home: this node is Foreign and either holds
-/// no execution for the selected channel or PG names the home as its execution owner.
-/// Read-only, unlike [`claim_for_placement`].
+/// A Foreign node's placement on a selected channel waits for its O home when it holds no
+/// execution there or PG names the home as the owner. Read-only, unlike [`claim_for_placement`].
 pub fn placement_waits_for_home(channel: u64) -> bool {
     test_override::with_channels(|snapshot| {
         let Some(snapshot) = snapshot.filter(|s| !s.channels().is_empty()) else {

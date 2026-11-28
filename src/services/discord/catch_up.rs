@@ -1555,9 +1555,8 @@ mod catch_up_recovery_tests {
         );
     }
 
-    /// A Foreign node held the first input of an O thread the home never recorded, storing
-    /// nothing: the home's catch-up reads that thread under its selected parent and enqueues the
-    /// input exactly once.
+    /// An O thread's first input that a Foreign node held unstored: the home's catch-up reads the
+    /// thread under its selected parent and enqueues the input exactly once.
     #[tokio::test(flavor = "current_thread")]
     async fn home_catch_up_recovers_an_unrecorded_o_thread_once() {
         use crate::services::tui_o::{channel_policy::BootChannels, cutover::test_override};

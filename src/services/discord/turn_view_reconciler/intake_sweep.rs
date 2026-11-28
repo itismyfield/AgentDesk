@@ -1,6 +1,5 @@
-//! Sweeps a user message's `⏳` that no live turn holds any more. Holds are judged per message
-//! across the provider: a busy channel nearly always has a later turn in flight, and a thread
-//! turn's row lives in its execution thread while the `⏳` stays on the original message.
+//! Sweeps a user message's `⏳` that no live turn holds. Holds match the message across the
+//! provider: a thread turn's row lives in its execution thread, not under the original message.
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
