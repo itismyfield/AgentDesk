@@ -238,6 +238,7 @@ impl<T: HerdrTransport> InteractiveSessionHost for HerdrHost<T> {
     // Supported operations, not admission: no production path selects Herdr.
     fn capabilities(&self) -> HostCapabilities {
         HostCapabilities {
+            idle_cleanup: false,
             send_text: true,
             send_keys: true,
             interrupt: true,

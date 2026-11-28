@@ -462,6 +462,9 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
         "unknown",
         "json-null",
         "traced",
+        "alias-traced",
+        "process",
+        "unreadable-marker",
         "probefail",
     ];
     for (index, n) in names.into_iter().enumerate() {
@@ -490,6 +493,72 @@ async fn kill_tmux_route_checks_the_host_before_any_probe_or_write_pg() {
     }
     let marker = crate::services::tmux_common::session_temp_path(&tmux("traced"), "host_kind");
     std::fs::write(marker, "herdr").unwrap();
+    sqlx::query(
+        "INSERT INTO session_key_aliases (session_key, session_id)
+         SELECT $1, id FROM sessions WHERE session_key = $2",
+    )
+    .bind(key("old-locator"))
+    .bind(key("alias-traced"))
+    .execute(&pool)
+    .await
+    .unwrap();
+    let marker = |n| crate::services::tmux_common::session_temp_path(&tmux(n), "host_kind");
+    std::fs::write(marker("old-locator"), "herdr").unwrap();
+    std::fs::write(marker("process"), "process").unwrap();
+    std::fs::create_dir(marker("unreadable-marker")).unwrap();
+
+    let Json(candidates) = super::idle_cleanup_candidates(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(
+            serde_json::from_value(serde_json::json!({
+                "keys": names.iter().map(|name| key(name)).collect::<Vec<_>>(),
+            }))
+            .unwrap(),
+        ),
+    )
+    .await
+    .unwrap();
+    let candidates = serde_json::to_value(candidates).unwrap();
+    for n in names {
+        let decision = &candidates["decisions"][key(n)];
+        assert_eq!(
+            decision["supported"],
+            matches!(n, "legacy" | "probefail"),
+            "{n}: {decision}"
+        );
+        if matches!(
+            n,
+            "pending" | "bound" | "retired" | "traced" | "alias-traced"
+        ) {
+            assert_eq!(
+                decision["reason"], "herdr_idle_cleanup_requires_core",
+                "{n}"
+            );
+        }
+    }
+    let mut forwarded = axum::http::HeaderMap::new();
+    forwarded.insert(
+        "x-agentdesk-forwarded-by",
+        "candidate-reader".parse().unwrap(),
+    );
+    forwarded.insert("x-agentdesk-session-owner", "old-owner".parse().unwrap());
+    let mut receiver = state.clone();
+    receiver.cluster_instance_id = Some("different-owner".into());
+    let Json(refused) = super::idle_cleanup_candidates(
+        State(receiver),
+        forwarded,
+        Json(serde_json::from_value(serde_json::json!({"keys": [key("legacy")]})).unwrap()),
+    )
+    .await
+    .unwrap();
+    let refused = serde_json::to_value(refused).unwrap();
+    assert_eq!(refused["decisions"][key("legacy")]["supported"], false);
+    assert_eq!(
+        refused["decisions"][key("legacy")]["reason"],
+        "session_forward_owner_conflict"
+    );
+    assert!(!tmux_probe.path().join("calls").exists());
     let row = |n: &str| {
         let pool = pool.clone();
         let key = key(n);

@@ -129,6 +129,18 @@ pub async fn force_kill_session(
     .await
 }
 
+/// Read-only capability check for a bounded idle-cleanup page.
+pub(crate) async fn idle_cleanup_candidates(
+    state: State<AppState>,
+    headers: HeaderMap,
+    page: Json<crate::services::dispatched_sessions::CandidatePage>,
+) -> Result<
+    Json<crate::services::dispatched_sessions::CandidateReply>,
+    (StatusCode, Json<serde_json::Value>),
+> {
+    crate::services::dispatched_sessions::idle_cleanup_candidates(state, headers, page).await
+}
+
 /// POST /api/sessions/{session_key}/kill-tmux
 pub async fn kill_tmux_session(
     State(state): State<AppState>,

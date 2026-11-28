@@ -4068,6 +4068,7 @@ src/
 │   │   ├── herdr_probe_tests.rs
 │   │   ├── hook.rs
 │   │   ├── hosted_cleanup.rs
+│   │   ├── idle_candidates.rs
 │   │   ├── listing.rs
 │   │   ├── listing_tests.rs
 │   │   ├── output.rs
@@ -4631,6 +4632,7 @@ src/
 │   │   ├── herdr_terminate_real_tests.rs
 │   │   ├── host_decision.rs
 │   │   ├── host_decision_tests.rs
+│   │   ├── idle_cleanup.rs
 │   │   ├── legacy_collapse.rs
 │   │   ├── model.rs
 │   │   ├── operation_policy.rs

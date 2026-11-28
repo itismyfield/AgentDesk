@@ -19,6 +19,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+mod idle_candidates;
+pub(crate) use idle_candidates::{CandidatePage, CandidateReply, idle_cleanup_candidates};
+
 #[path = "dispatched_sessions/canonical_identity.rs"]
 mod canonical_identity;
 pub(crate) mod hosted_cleanup;

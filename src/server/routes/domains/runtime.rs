@@ -85,6 +85,10 @@ pub(crate) fn router(state: AppState) -> ApiRouter {
                 post(dispatched_sessions::kill_tmux_session),
             )
             .route(
+                "/sessions/idle-cleanup-candidates",
+                post(dispatched_sessions::idle_cleanup_candidates),
+            )
+            .route(
                 "/sessions/{session_key}/reconcile-stale-turn",
                 post(dispatched_sessions::reconcile_stale_turn),
             )

@@ -12,20 +12,86 @@ use crate::db::dispatched_sessions::hosted_execution::{
 };
 use crate::domain::host_observation::{HostKind, HostKindMarker};
 use crate::domain::session_identity::tmux_name_from_session_key;
+use crate::services::session_host::{herdr_endpoints, host_for};
 use crate::services::tmux_common::host_marker::read_host_kind_marker;
 
 /// Legacy rows also require every locator's marker to be absent or tmux.
 pub(crate) fn cleanup_row_deletable(row: &CleanupRow) -> bool {
-    row.record_deletable()
-        && (!row.is_legacy()
-            || row.locator_keys().all(|key| {
-                tmux_name_from_session_key(key).is_none_or(|name| {
-                    matches!(
-                        read_host_kind_marker(&name),
-                        HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
-                    )
+    row.record_deletable() && (!row.is_legacy() || first_non_tmux_marker(row).is_none())
+}
+
+fn first_non_tmux_marker(row: &CleanupRow) -> Option<HostKindMarker> {
+    row.locator_keys()
+        .filter_map(tmux_name_from_session_key)
+        .map(|name| read_host_kind_marker(&name))
+        .find(|marker| {
+            !matches!(
+                marker,
+                HostKindMarker::Absent | HostKindMarker::Known(HostKind::Tmux)
+            )
+        })
+}
+
+pub(crate) fn idle_cleanup_support(row: &CleanupRow) -> Result<(), CleanupHostRefusal> {
+    if row
+        .session_key
+        .as_deref()
+        .and_then(tmux_name_from_session_key)
+        .is_none()
+    {
+        return Err(CleanupHostRefusal::NotLegacyTmux);
+    }
+    let support = match row.hosted_record() {
+        Ok(HostedRecord::Legacy) => match first_non_tmux_marker(row) {
+            None => {
+                let process = row
+                    .locator_keys()
+                    .filter_map(tmux_name_from_session_key)
+                    .any(|name| {
+                        crate::services::session_backend::process_session_pid(&name).is_some()
+                    });
+                host_for(if process {
+                    HostKind::Process
+                } else {
+                    HostKind::Tmux
                 })
-            }))
+                .idle_cleanup_support()
+            }
+            Some(HostKindMarker::Known(HostKind::Herdr)) => {
+                herdr_endpoints().idle_cleanup_support(None)
+            }
+            Some(HostKindMarker::Known(HostKind::Process)) => {
+                host_for(HostKind::Process).idle_cleanup_support()
+            }
+            Some(_) => return Err(CleanupHostRefusal::NotLegacyTmux),
+        },
+        Ok(HostedRecord::Known(record)) => herdr_endpoints().idle_cleanup_support(Some(&record)),
+        Ok(HostedRecord::Unknown(_)) => return Err(CleanupHostRefusal::NotLegacyTmux),
+        Err(_) => return Err(CleanupHostRefusal::RowConflict),
+    };
+    support.map_err(CleanupHostRefusal::Unsupported)
+}
+
+pub(crate) async fn confirm_idle_cleanup_key_pg(
+    pool: &PgPool,
+    session_key: &str,
+) -> Result<(), CleanupHostRefusal> {
+    let found = match load_hosted_execution_pg(pool, HostedLookupKey::SessionKey(session_key)).await
+    {
+        HostedLookup::Found(found) => found,
+        HostedLookup::Missing => return Err(CleanupHostRefusal::RowMissing),
+        HostedLookup::Unknown(_) => return Err(CleanupHostRefusal::LookupFailed),
+        HostedLookup::Conflict(_) => return Err(CleanupHostRefusal::RowConflict),
+    };
+    let row = load_cleanup_row_pg(pool, found.session_id())
+        .await
+        .map_err(|_| CleanupHostRefusal::LookupFailed)?
+        .ok_or(CleanupHostRefusal::RowMissing)?;
+    idle_cleanup_support(&row)?;
+    if found.record != HostedRecord::Legacy {
+        return Err(CleanupHostRefusal::NotLegacyTmux);
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +102,7 @@ pub(crate) enum CleanupHostRefusal {
     RowConflict,
     /// A hosted record of any state, an unreadable one, or a non-tmux host marker.
     NotLegacyTmux,
+    Unsupported(&'static str),
 }
 
 impl CleanupHostRefusal {
@@ -44,7 +111,14 @@ impl CleanupHostRefusal {
             Self::RowMissing => "host_row_missing",
             Self::LookupFailed => "host_lookup_failed",
             Self::RowConflict => "host_row_conflict",
-            Self::NotLegacyTmux => "host_not_legacy_tmux",
+            Self::NotLegacyTmux | Self::Unsupported(_) => "host_not_legacy_tmux",
+        }
+    }
+
+    pub(crate) fn candidate_reason(self) -> &'static str {
+        match self {
+            Self::Unsupported(reason) => reason,
+            other => other.reason(),
         }
     }
 }

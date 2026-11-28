@@ -13,20 +13,37 @@ function idleRow(name) {
   };
 }
 
-test("idle-kill tick selects legacy tmux behind a full batch of older hosted Herdr rows", () => {
-  const legacy = idleRow("legacy");
-  const hosted = Array.from({ length: 50 }, (_, index) => ({
-    ...idleRow("herdr-" + index),
-    hosted_execution: { location: { host: "herdr" } },
-    last_seen_at: "2000-01-01 00:00:00"
+function orderedRows(rows) {
+  return rows.map((row, index) => ({
+    ...row, idle_cursor_at: row.last_seen_at, idle_cursor_id: String(index + 1)
   }));
+}
+
+function readPage(rows, sql, params) {
+  if (!sql.includes("INTERVAL '6 hours'")) return [];
+  if (sql.startsWith("SELECT DISTINCT s.instance_id")) return [{ instance_id: null }];
+  const selected = sql.includes("s.hosted_execution IS NULL") ? rows.filter((row) => !row.hosted_execution) : rows;
+  const after = sql.includes("::bigint") ? Number(params.at(-1)) : 0;
+  const limit = Number(sql.match(/LIMIT (\d+)$/)[1]);
+  return selected.filter((row) => Number(row.idle_cursor_id) > after).slice(0, limit);
+}
+
+test("idle-kill tick selects legacy tmux beyond older hosted and marker-only Herdr pages", () => {
+  const legacy = idleRow("legacy");
+  const hosted = Array.from({ length: 18 }, (_, index) => ({
+    ...idleRow("herdr-" + index), hosted_execution: { location: { host: "herdr" } }
+  }));
+  const markers = Array.from({ length: 52 }, (_, index) => idleRow("marker-" + index));
+  const rows = orderedRows([...markers, ...hosted, legacy]);
   const { policy, state } = loadPolicy("policies/timeouts.js", {
     config: { server_port: 8791 },
-    dbQuery(sql) {
-      if (!sql.includes("INTERVAL '6 hours'")) return [];
-      const rows = sql.includes("AND s.hosted_execution IS NULL ") ? [legacy] : [...hosted, legacy];
-      if (sql.startsWith("SELECT DISTINCT s.instance_id")) return [{ instance_id: null }];
-      return rows.slice(0, 50);
+    dbQuery(sql, params) {
+      return readPage(rows, sql, params);
+    },
+    idleCleanupCandidates({ keys }) {
+      return { decisions: Object.fromEntries(keys.map((key) => [key, key === legacy.session_key
+        ? { supported: true }
+        : { supported: false, reason: "herdr_idle_cleanup_requires_core" }])) };
     },
     httpPost(url) {
       if (url.includes("-herdr-")) {
@@ -42,10 +59,60 @@ test("idle-kill tick selects legacy tmux behind a full batch of older hosted Her
   assert.deepEqual(state.httpPosts.map(({ url }) => url), [
     `http://127.0.0.1:8791/api/sessions/${encodeURIComponent(legacy.session_key)}/kill-tmux`
   ]);
-  const queries = state.queries.map(({ sql }) => sql).filter((sql) => sql.includes("INTERVAL '6 hours'"));
-  assert.equal(queries.length, 2);
-  assert.match(queries[0], /^SELECT DISTINCT s\.instance_id .*AND s\.hosted_execution IS NULL /);
-  assert.match(queries[1], /AND s\.hosted_execution IS NULL .*ORDER BY latest\.last_seen_at ASC LIMIT 50$/);
+  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys.length), [64, 7]);
+  assert.ok(state.logs.debug.some((line) => line.includes("herdr_idle_cleanup_requires_core")));
+});
+
+test("idle-kill resumes after the last classified page when the next page times out", () => {
+  const legacy = idleRow("legacy");
+  const rows = orderedRows([
+    ...Array.from({ length: 64 }, (_, index) => idleRow("marker-" + index)), legacy
+  ]);
+  let pages = 0;
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql, params) { return readPage(rows, sql, params); },
+    idleCleanupCandidates({ keys }) {
+      pages++;
+      if (pages === 1) return { decisions: {} };
+      if (pages === 2) return { error: "bridge deadline passed before http.post started" };
+      return { decisions: { [keys[0]]: { supported: true } } };
+    },
+    httpPost() { return { ok: true, tmux_killed: true }; }
+  });
+
+  policy.onTick5min({});
+  assert.equal(state.httpPosts.length, 0);
+  assert.deepEqual(state.logs.warn.filter((line) => line.includes("deadline reached")), [
+    "[idle-kill] kill-tmux deadline reached; remaining=1"
+  ]);
+  assert.equal(state.logs.error.length, 0);
+  policy.onTick5min({});
+
+  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys.length), [64, 1, 1]);
+  assert.equal(state.httpPosts.length, 1);
+  assert.match(state.httpPosts[0].url, /-legacy\/kill-tmux$/);
+});
+
+test("idle-kill caps supported candidates at 50 across read pages", () => {
+  const rows = orderedRows(Array.from({ length: 120 }, (_, index) => idleRow(String(index))));
+  const { policy, state } = loadPolicy("policies/timeouts.js", {
+    config: { server_port: 8791 },
+    dbQuery(sql, params) { return readPage(rows, sql, params); },
+    idleCleanupCandidates({ keys }) {
+      return { decisions: Object.fromEntries(keys.map((key) => [key, {
+        supported: Number(key.split("-").at(-1)) >= 15
+      }])) };
+    },
+    httpPost() { return { ok: true, tmux_was_alive: false }; }
+  });
+
+  policy.onTick5min({});
+
+  assert.deepEqual(state.idleCleanupChecks.map(({ keys }) => keys.length), [64, 56]);
+  assert.equal(state.httpPosts.length, 50);
+  assert.match(state.httpPosts[0].url, /-15\/kill-tmux$/);
+  assert.match(state.httpPosts.at(-1).url, /-64\/kill-tmux$/);
 });
 
 for (const error of [
@@ -57,7 +124,7 @@ for (const error of [
     const { policy, state } = loadPolicy("policies/timeouts.js", {
       config: { server_port: 8791 },
       dbQuery(sql) {
-        return sql.endsWith("LIMIT 50") && sql.includes("INTERVAL '6 hours'")
+        return sql.startsWith("SELECT s.session_key") && sql.includes("INTERVAL '6 hours'")
           ? [1, 2, 3, 4, 5].map((index) => idleRow("deadline-" + index))
           : [];
       },

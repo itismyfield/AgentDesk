@@ -36,7 +36,7 @@ fn unrecoverable() -> Result<std::path::PathBuf, Option<serde_json::Value>> {
 }
 
 /// Why idle cleanup kept the session, plus an operator diagnostic when transcript recovery ran.
-pub(crate) type IdlePreserved = (&'static str, Option<serde_json::Value>);
+pub(crate) type IdlePreserved = crate::services::session_host::IdleCleanupPreserved;
 
 /// Keep the final provider probe and kill under the same source authority used
 /// by runtime rebinding, so a replacement binding cannot race an idle decision.
@@ -50,12 +50,13 @@ pub(crate) fn kill_proven_idle_provider_session(
     if claude_idle::applies(tmux_session_name) {
         return Err(claude_idle::preserved(tmux_session_name));
     }
-    crate::services::tmux_common::with_tmux_source_authority(tmux_session_name, |authority| {
-        provider_session_is_proven_idle_under_authority(authority, recover_codex).map(|()| {
-            crate::services::session_host::TmuxHost
-                .kill_output_timeout(tmux_session_name, reason, std::time::Duration::from_secs(2))
-                .is_ok_and(|output| output.status.success())
-        })
+    use crate::services::session_host::{HostKind, IdleCleanupRequest, host_for};
+    host_for(HostKind::Tmux).cleanup_idle(IdleCleanupRequest {
+        session_name: tmux_session_name,
+        reason,
+        prove_idle: Box::new(|authority| {
+            provider_session_is_proven_idle_under_authority(authority, recover_codex)
+        }),
     })
 }
 

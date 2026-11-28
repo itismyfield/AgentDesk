@@ -1,5 +1,6 @@
 module.exports = function attachIdleKill(timeouts, helpers) {
   var loadOwnerGuard = require("./idle-kill-owners")();
+  var scanAfter = null;
   var sendDeadlockAlert = helpers.sendDeadlockAlert;
   var MAX_DISPATCH_RETRIES = helpers.MAX_DISPATCH_RETRIES;
   var getTimeoutInterval = helpers.getTimeoutInterval;
@@ -60,8 +61,6 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         "WHERE status = 'idle' " +
         "AND provider IN ('claude', 'codex', 'qwen') " +
         "AND active_dispatch_id IS NULL " +
-        // SQL NULL is the legacy record; kill-tmux also checks owner-local markers.
-        "AND s.hosted_execution IS NULL " +
         mainChannelSqlGuard +
         "AND latest.last_seen_at < NOW() - INTERVAL '6 hours' ";
       // Exclude unavailable owners before LIMIT so an offline node's backlog
@@ -74,21 +73,24 @@ module.exports = function attachIdleKill(timeouts, helpers) {
         ? "AND (NULLIF(BTRIM(s.instance_id), '') IS NULL OR BTRIM(s.instance_id) NOT IN (" +
           excludedOwners.map(function() { return "?"; }).join(", ") + ")) "
         : "";
-      var idleSessions = agentdesk.db.query(
-        "SELECT s.session_key, s.agent_id, s.provider, s.instance_id, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at " +
-        idleFromWhere + ownerSqlGuard + "ORDER BY latest.last_seen_at ASC LIMIT 50",
-        excludedOwners
-      );
-
-      // Defense-in-depth: client-side filter catches anything the SQL guard
-      // missed (e.g. helper logic evolves with new session_key shapes).
-      function isMainChannelSession(s) {
-        return !s.thread_channel_id
-          && !parseSessionThreadId(s.session_key, s.provider);
+      function readPage() {
+        var after = scanAfter ? "AND (latest.last_seen_at, s.id) > (?::text::timestamptz, ?::text::bigint) " : "";
+        return agentdesk.db.query(
+          "SELECT s.session_key, s.agent_id, s.provider, s.instance_id, s.active_dispatch_id, s.thread_channel_id, latest.last_seen_at, " +
+          "latest.last_seen_at::text AS idle_cursor_at, s.id::text AS idle_cursor_id " +
+          idleFromWhere + ownerSqlGuard + after + "ORDER BY latest.last_seen_at ASC, s.id ASC LIMIT 64",
+          scanAfter ? excludedOwners.concat(scanAfter) : excludedOwners
+        );
       }
-      idleSessions = idleSessions.filter(function(s) {
-        return isMainChannelSession(s) && ownerEligible(s.instance_id);
-      });
+
+      function isDeadline(error) {
+        return typeof error === "string" &&
+          /^(bridge deadline (passed|exceeded)|response deadline exceeded|connect deadline exceeded)\b/.test(error);
+      }
+
+      function logDeadline(remaining) {
+        agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + remaining);
+      }
 
       function formatIdleDuration(idleMin) {
         if (idleMin >= 60 * 24) {
@@ -101,19 +103,34 @@ module.exports = function attachIdleKill(timeouts, helpers) {
       }
 
       var now = Date.now();
-      var processed = {};
+      var processed = Object.create(null);
+      var checkedCount = 0;
+      var killedCount = 0;
+      var loggedApiFailure = false;
 
-      function killTmuxIdleSessions(sessions, minimumIdleMinutes, reasonLabel, maxKills) {
-        var killedCount = 0;
-        var loggedApiFailure = false;
+      function killTmuxIdleSessions(sessions, decisions, minimumIdleMinutes, reasonLabel, maxKills) {
+        var remaining = Math.min(50 - checkedCount, sessions.filter(function(s) {
+          var decision = decisions[s.session_key];
+          return decision && decision.supported === true;
+        }).length);
         for (var i = 0; i < sessions.length; i++) {
           if (killedCount >= maxKills) {
             agentdesk.log.info("[idle-kill] Reached max " + maxKills + " kills for this category. Breaking early.");
-            break;
+            return false;
           }
+          if (checkedCount >= 50) return false;
 
           var s = sessions[i];
+          var previous = scanAfter;
+          scanAfter = [s.idle_cursor_at, s.idle_cursor_id];
+          var decision = decisions[s.session_key];
+          if (!decision || decision.supported !== true) {
+            if (decision) agentdesk.log.debug("[idle-kill] preserved " + s.session_key + ": " + decision.reason);
+            continue;
+          }
+          remaining--;
           if (!s.session_key || processed[s.session_key]) continue;
+          checkedCount++;
           processed[s.session_key] = true;
 
           var lastSeenMs = s.last_seen_at ? new Date(s.last_seen_at).getTime() : NaN;
@@ -134,11 +151,10 @@ module.exports = function attachIdleKill(timeouts, helpers) {
             continue;
           }
 
-          var error = killResp && killResp.error;
-          if (typeof error === "string" &&
-              /^(bridge deadline passed|response deadline exceeded|connect deadline exceeded)\b/.test(error)) {
-            agentdesk.log.warn("[idle-kill] kill-tmux deadline reached; remaining=" + (sessions.length - i - 1));
-            break;
+          if (killResp && isDeadline(killResp.error)) {
+            scanAfter = previous;
+            logDeadline(remaining);
+            return false;
           }
 
           // A host-guard refusal (Herdr or unresolved host) keeps the session and is not a failure.
@@ -219,8 +235,41 @@ module.exports = function attachIdleKill(timeouts, helpers) {
           var agentContext = resolveSessionAgentContext(s, agents);
           agentdesk.log.info("[timeouts] idle kill: " + (agentContext.agent_id || "unknown") + " idle=" + idleMin + "m reason=" + reasonLabel);
         }
+        return true;
       }
 
-      killTmuxIdleSessions(idleSessions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3);
+      for (;;) {
+        var page;
+        try {
+          page = readPage();
+        } catch (error) {
+          if (!isDeadline(error.message)) throw error;
+          logDeadline("unknown");
+          return;
+        }
+        var keys = page.filter(function(s) {
+          return s.session_key && !s.thread_channel_id &&
+            !parseSessionThreadId(s.session_key, s.provider) && ownerEligible(s.instance_id);
+        }).map(function(s) { return s.session_key; });
+        var decisions = Object.create(null);
+        if (keys.length) {
+          var candidates = agentdesk.http.post("http://127.0.0.1:" + apiPort +
+            "/api/sessions/idle-cleanup-candidates", { keys: keys });
+          if (candidates && isDeadline(candidates.error)) {
+            logDeadline(keys.length);
+            return;
+          }
+          if (!candidates || !candidates.decisions) {
+            agentdesk.log.warn("[idle-kill] cleanup candidate check failed: " + JSON.stringify(candidates));
+            return;
+          }
+          decisions = candidates.decisions;
+        }
+        if (!killTmuxIdleSessions(page, decisions, 360, "idle 6시간 경과 (active_dispatch_id 없음)", 3)) return;
+        if (page.length < 64) {
+          scanAfter = null;
+          return;
+        }
+      }
     };
 };

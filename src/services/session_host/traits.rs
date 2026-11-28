@@ -20,6 +20,19 @@ pub trait InteractiveSessionHost: Send + Sync {
     }
     fn kind(&self) -> HostKind;
     fn capabilities(&self) -> HostCapabilities;
+    fn idle_cleanup_support(&self) -> Result<(), &'static str> {
+        super::idle_cleanup::support(self.kind(), self.capabilities())
+    }
+    /// Closes only the proved idle execution; a new input after proof must veto the close.
+    /// Repeating a close for the same execution must not close again.
+    fn cleanup_idle(
+        &self,
+        request: super::IdleCleanupRequest<'_>,
+    ) -> Result<bool, super::IdleCleanupPreserved> {
+        self.idle_cleanup_support()
+            .map_err(|reason| (reason, None))?;
+        super::idle_cleanup::cleanup(self.kind(), request)
+    }
     fn presence(&self, session: HostSessionRef<'_>) -> HostPresence;
     fn liveness(&self, session: HostSessionRef<'_>) -> HostLiveness;
     fn send_text(&self, session: HostSessionRef<'_>, text: &str)

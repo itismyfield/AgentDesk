@@ -639,15 +639,19 @@ impl CleanupRow {
         })
     }
 
+    pub fn hosted_record(&self) -> Result<HostedRecord, SessionIdentityConflictKind> {
+        let record = HostedRecord::decode(self.raw.as_ref());
+        if let HostedRecord::Known(known) = &record
+            && !owner_matches_row(&known.owner, &self.identity)
+        {
+            return Err(SessionIdentityConflictKind::OwnershipMismatch);
+        }
+        Ok(record)
+    }
+
     /// Payload and canonical row ownership only; the service judges Legacy markers.
     pub fn record_deletable(&self) -> bool {
-        let record = HostedRecord::decode(self.raw.as_ref());
-        record.deletable()
-            && match &record {
-                HostedRecord::Legacy => true,
-                HostedRecord::Known(known) => owner_matches_row(&known.owner, &self.identity),
-                HostedRecord::Unknown(_) => false,
-            }
+        self.hosted_record().is_ok_and(|record| record.deletable())
     }
 
     pub fn is_legacy(&self) -> bool {
@@ -744,6 +748,27 @@ pub async fn load_cleanup_row_pg<'e>(
         .map(CleanupRow::read)
         .transpose()
         .map_err(|error| format!("decode session hosted execution: {error}"))
+}
+
+pub async fn load_idle_cleanup_rows_pg(
+    pool: &PgPool,
+    keys: &[String],
+) -> Result<Vec<(CleanupRow, Option<String>)>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT s.id, s.session_key, s.provider, s.identity_kind, s.discord_token_hash,
+                s.channel_id, s.hosted_execution, s.instance_id AS owner,
+                ARRAY(SELECT a.session_key FROM session_key_aliases a
+                      WHERE a.session_id = s.id ORDER BY a.session_key) AS aliases
+         FROM sessions s WHERE s.session_key = ANY($1)
+           AND NOT EXISTS (SELECT 1 FROM session_key_aliases a
+                           WHERE a.session_key = s.session_key AND a.session_id <> s.id)",
+    )
+    .bind(keys)
+    .fetch_all(pool)
+    .await?;
+    rows.iter()
+        .map(|row| Ok((CleanupRow::read(row)?, row.try_get("owner")?)))
+        .collect()
 }
 
 /// Resolve an explicit delete locator without taking its mutation lock.

@@ -205,6 +205,7 @@ impl InteractiveSessionHost for TmuxHost {
 
     fn capabilities(&self) -> HostCapabilities {
         HostCapabilities {
+            idle_cleanup: true,
             send_text: true,
             send_keys: true,
             interrupt: true,

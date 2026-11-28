@@ -171,6 +171,7 @@ function createAgentdeskMock(options) {
     runtimeSignals: [],
     orphanMaintenanceCalls: 0,
     httpPosts: [],
+    idleCleanupChecks: [],
     httpGets: [],
     deadlockAlerts: [],
     escalations: [],
@@ -405,6 +406,12 @@ function createAgentdeskMock(options) {
         return { cluster: { local_instance_id: null, configured_forward_owner_ids: [], lease_ttl_secs: 30 }, nodes: [] };
       },
       post(url, body) {
+        if (url.endsWith("/api/sessions/idle-cleanup-candidates")) {
+          state.idleCleanupChecks.push(clone(body));
+          return clone(settings.idleCleanupCandidates
+            ? settings.idleCleanupCandidates(body, state)
+            : { decisions: Object.fromEntries(body.keys.map((key) => [key, { supported: true }])) });
+        }
         state.httpPosts.push({ url, body: clone(body || null) });
         if (typeof settings.httpPost === "function") {
           return clone(settings.httpPost(url, body, state));

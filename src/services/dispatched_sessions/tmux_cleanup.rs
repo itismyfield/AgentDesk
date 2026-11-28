@@ -106,7 +106,7 @@ pub(crate) async fn kill_tmux_session_impl(
         (provider.as_ref().map(|provider| provider.as_str())).or(session_provider.as_deref());
 
     // The owner checks the host before its first probe or write, whatever the reason.
-    let host = crate::services::tmux_turn_liveness::cleanup_host::confirm_legacy_tmux_key_pg(
+    let host = crate::services::tmux_turn_liveness::cleanup_host::confirm_idle_cleanup_key_pg(
         pool,
         session_key,
     )

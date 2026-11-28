@@ -14,7 +14,7 @@ use super::herdr::model::{HerdrCall, HerdrEndpoint};
 use super::herdr::observe::RestoreUnverified;
 use super::herdr::policy::permit::ExistingMutationEvidence;
 use super::herdr_gate::{HerdrPaneView, HerdrTarget};
-use super::herdr_host::HerdrHost;
+use super::herdr_host::{HerdrHost, UnconfiguredHerdrHost};
 use super::model::{
     HostCapabilities, HostError, HostKind, HostLiveness, HostMutation, HostPresence, HostRefusal,
     HostSessionRef,
@@ -312,6 +312,28 @@ impl HerdrRegistry {
             [only] => Some(&only.host),
             _ => None,
         }
+    }
+
+    pub fn idle_cleanup_support(
+        &self,
+        stored: Option<&HostedExecution>,
+    ) -> Result<(), &'static str> {
+        stored
+            .and_then(|stored| self.host_for_execution(stored))
+            .unwrap_or(&UnconfiguredHerdrHost)
+            .idle_cleanup_support()
+    }
+
+    fn host_for_execution(&self, stored: &HostedExecution) -> Option<&dyn InteractiveSessionHost> {
+        let location = stored.location.as_ref()?;
+        self.endpoints.iter().find_map(|entry| {
+            let endpoint = &entry.endpoint;
+            (endpoint.config_key() == location.endpoint_config_key
+                && endpoint.execution_node() == location.execution_node
+                && endpoint.socket_path() == std::path::Path::new(&location.socket_addr)
+                && endpoint.herdr_session() == location.named_session)
+                .then_some(&entry.host as &dyn InteractiveSessionHost)
+        })
     }
 
     #[cfg(unix)]

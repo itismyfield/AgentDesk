@@ -123,6 +123,7 @@ pub enum HostError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct HostCapabilities {
+    pub idle_cleanup: bool,
     pub send_text: bool,
     pub send_keys: bool,
     pub interrupt: bool,

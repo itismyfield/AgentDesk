@@ -29,6 +29,7 @@ pub mod herdr_gate;
 pub mod herdr_host;
 pub mod herdr_registry;
 pub mod host_decision;
+mod idle_cleanup;
 pub mod surface_policy;
 pub mod thread_host;
 #[cfg(all(any(test, feature = "test-support"), unix))]
@@ -81,6 +82,7 @@ pub mod herdr_registry_for_test {
 }
 #[cfg(all(any(test, feature = "test-support"), unix))]
 pub use herdr_host::HerdrHost;
+pub use idle_cleanup::{IdleCleanupPreserved, IdleCleanupRequest};
 
 pub use herdr::contract::ServerWitness;
 // Dedicated Herdr config upkeep: the boot pass, the 30-second task, doctor and health.
